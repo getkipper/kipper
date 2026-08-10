@@ -143,7 +143,7 @@ func (f *Freshness) probe(ctx context.Context) {
 	}
 	for i := range f.canaries {
 		if !observed[i] {
-			log.Printf("authz: freshness probe wrote canary %T %s but the informer cache never showed it — watch pipeline unhealthy", f.canaries[i].template, f.canaries[i].key)
+			log.Printf("authz: freshness probe wrote canary %T %s but the informer cache never showed it: the watch pipeline is unhealthy", f.canaries[i].template, f.canaries[i].key)
 		}
 	}
 }
@@ -161,7 +161,7 @@ func (f *Freshness) writeCanary(ctx context.Context, t canaryTarget, value strin
 				// bound. Nothing recreates it, so name the recovery: authz has
 				// no create permission on the canary types by design (it is the
 				// key validator).
-				log.Printf("authz: freshness probe: canary %T %s is missing — it may have been deleted; re-apply deploy/authz.yaml to restore it", t.template, t.key)
+				log.Printf("authz: freshness probe: canary %T %s is missing: it may have been deleted; re-apply deploy/authz.yaml to restore it", t.template, t.key)
 			} else {
 				log.Printf("authz: freshness probe: reading canary %T %s: %v", t.template, t.key, err)
 			}

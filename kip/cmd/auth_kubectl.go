@@ -79,7 +79,7 @@ func runAuthKubectlToken(cmd *cobra.Command, args []string) error {
 	}
 	creds := store.Credential(cluster.Domain)
 	if creds == nil {
-		return fmt.Errorf("not authenticated — run: kip auth login")
+		return fmt.Errorf("not authenticated. Run: kip auth login")
 	}
 
 	out, err := json.Marshal(execCredential{
@@ -108,7 +108,7 @@ func runAuthKubectlToken(cmd *cobra.Command, args []string) error {
 // Refusing names the file that needs regenerating instead.
 func clusterForKubectlToken(domain string) (*config.Cluster, error) {
 	if domain == "" {
-		return nil, fmt.Errorf("this kubeconfig does not say which cluster it authenticates to — regenerate it with: kip auth kubeconfig")
+		return nil, fmt.Errorf("this kubeconfig does not say which cluster it authenticates to. Regenerate it with: kip auth kubeconfig")
 	}
 
 	cfg, err := config.Load()
@@ -118,7 +118,7 @@ func clusterForKubectlToken(domain string) (*config.Cluster, error) {
 
 	cluster := cfg.GetClusterByDomain(domain)
 	if cluster == nil {
-		return nil, fmt.Errorf("no cluster for domain %q in ~/.kip/config.yaml — add it with: kip cluster add <file>", domain)
+		return nil, fmt.Errorf("no cluster for domain %q in ~/.kip/config.yaml. Add it with: kip cluster add <file>", domain)
 	}
 	return cluster, nil
 }

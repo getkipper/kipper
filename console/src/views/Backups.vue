@@ -21,7 +21,7 @@ const namespaceOptions = computed(() => {
   for (const p of allProjects.value) {
     for (const env of p.environments) {
       options.push({
-        label: `${p.display_name || p.name} — ${env.name}`,
+        label: `${p.display_name || p.name}, ${env.name}`,
         value: env.namespace,
       })
     }

@@ -29,7 +29,7 @@ func (s *Store) consumeBootstrapCode(ctx context.Context, email, presented strin
 	secret, err := s.Client.CoreV1().Secrets(factorNamespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return fmt.Errorf("no enrollment code found — ask a host operator to run: kip 2fa bootstrap %s", email)
+			return fmt.Errorf("no enrollment code found. Ask a host operator to run: kip 2fa bootstrap %s", email)
 		}
 		return fmt.Errorf("reading enrollment code: %w", err)
 	}
@@ -38,7 +38,7 @@ func (s *Store) consumeBootstrapCode(ctx context.Context, email, presented strin
 	expiresRaw := string(secret.Data["expires"])
 	expires, parseErr := time.Parse(time.RFC3339, expiresRaw)
 	if stored == "" || parseErr != nil || time.Now().After(expires) {
-		return fmt.Errorf("the enrollment code has expired — ask a host operator to issue a new one")
+		return fmt.Errorf("the enrollment code has expired. Ask a host operator to issue a new one")
 	}
 	if subtle.ConstantTimeCompare([]byte(stored), []byte(strings.TrimSpace(presented))) != 1 {
 		return fmt.Errorf("invalid enrollment code")

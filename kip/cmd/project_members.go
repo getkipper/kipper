@@ -141,7 +141,7 @@ func runProjectMembersAdd(cmd *cobra.Command, args []string) error {
 	if !known {
 		return fmt.Errorf(
 			"no account exists for %s\n"+
-				"  if they have an invite, they need to accept it first — the account is created then\n"+
+				"  if they have an invite, they need to accept it first: the account is created then\n"+
 				"  to invite them:            kip user invite --email %s --role viewer\n"+
 				"  if they already sign in through an identity provider: kip user role %s viewer",
 			email, email, email)

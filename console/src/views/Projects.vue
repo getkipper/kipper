@@ -193,7 +193,7 @@ function handlePromote(appName: string, from: string, to: string) {
       promoting.value = true
       try {
         await promoteApp(selectedProject.value!.name, appName, from, to)
-        toast.success(`${appName} promoted to ${to} — initialising...`)
+        toast.success(`${appName} promoted to ${to}: initialising...`)
         activeEnv.value = to
         // Refresh immediately and again after pods have time to start
         await refreshAfterPromotion()
@@ -218,7 +218,7 @@ function handlePromoteAll(from: string, to: string) {
       promoting.value = true
       try {
         await promoteAll(selectedProject.value!.name, from, to)
-        toast.success(`All apps promoted to ${to} — initialising...`)
+        toast.success(`All apps promoted to ${to}: initialising...`)
         activeEnv.value = to
         await refreshAfterPromotion()
       } catch {
@@ -365,7 +365,7 @@ async function handleAddEnv(project: Project) {
       if (c.functions) parts.push(`${c.functions} function${c.functions === 1 ? '' : 's'}`)
       if (c.jobs) parts.push(`${c.jobs} job${c.jobs === 1 ? '' : 's'}`)
       if (c.secrets) parts.push(`${c.secrets} secret${c.secrets === 1 ? '' : 's'}`)
-      const summary = parts.length ? ` — copied ${parts.join(', ')} from ${choice.source}` : ''
+      const summary = parts.length ? `: copied ${parts.join(', ')} from ${choice.source}` : ''
       toast.success(`Environment ${envName} added${summary}`)
       if (c.warnings) {
         for (const w of c.warnings) toast.info(w)
@@ -405,7 +405,7 @@ function handleRemoveEnv(project: Project, env: Environment) {
       try {
         const next = project.environments.filter(e => e.name !== env.name).map(e => e.name)
         if (next.length === 0) {
-          toast.error('A project must keep at least one environment — delete the project instead')
+          toast.error('A project must keep at least one environment. Delete the project instead')
           return
         }
         await updateProjectEnvironments(project.name, next)
@@ -604,7 +604,7 @@ function statusColor(status: string): string {
                     :disabled="savingEnv || project.environments.length === 0"
                     class="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-900 focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
                   >
-                    <option value="">Blank — start empty</option>
+                    <option value="">Blank. Start empty</option>
                     <optgroup v-if="project.environments.length" label="Copy as-is">
                       <option v-for="env in project.environments" :key="`asis-${env.name}`" :value="env.name">
                         from {{ env.name }}

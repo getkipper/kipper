@@ -28,8 +28,8 @@ problems and leaves all resource values alone.
 
 Examples:
   kip platform tuning show
-  kip platform tuning expert   # hands off — no automatic resource changes
-  kip platform tuning auto     # default — resources adjust automatically`,
+  kip platform tuning expert   # hands off, no automatic resource changes
+  kip platform tuning auto     # default, resources adjust automatically`,
 }
 
 var platformTuningShowCmd = &cobra.Command{

@@ -141,7 +141,7 @@ spec:
 ```
 
 Or from the CLI. On an app that already exists this is a configuration change, not a deployment, and
-nothing restarts — the route's Ingress and middlewares are rebuilt in place:
+nothing restarts. The route's Ingress and middlewares are rebuilt in place:
 
 ```bash
 kip app update shop --redirect-from www.example.com
@@ -152,7 +152,7 @@ hostnames. Pass the flag with no value to remove them all.
 
 ::: warning If you apply this project from a manifest, add the redirects to it
 `kip apply` replaces an app's whole spec, so the next apply of a `kipper.yaml` that does not mention
-`redirectFrom` removes the redirect domains — the same as for any other field you leave out. Either
+`redirectFrom` removes the redirect domains, the same as for any other field you leave out. Either
 add them to the manifest, or run `kip export --project <project> --environment <env> -o <file>`
 afterwards, which captures the live state including the redirects.
 ::: The same list can be set when the app is first

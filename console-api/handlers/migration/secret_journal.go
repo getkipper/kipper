@@ -186,7 +186,7 @@ func (h *Handler) journalExistingSecret(ctx context.Context, sessionID string, e
 	// forever. Persistence failure stops the overwrite outright.
 	session, ok := h.Sessions.Get(sessionID)
 	if !ok {
-		return fmt.Errorf("unknown migration session — refusing to overwrite %s/%s without a recoverable record", existing.Namespace, existing.Name)
+		return fmt.Errorf("unknown migration session: refusing to overwrite %s/%s without a recoverable record", existing.Namespace, existing.Name)
 	}
 	session.RecordJournaledSecret(existing.Namespace, existing.Name)
 	if err := h.Sessions.SaveDurable(session); err != nil {
@@ -241,7 +241,7 @@ func (h *Handler) journalExistingSecret(ctx context.Context, sessionID string, e
 func (h *Handler) restoreJournaledSecrets(ctx context.Context, sessionID string) (int, []string) {
 	session, ok := h.Sessions.Get(sessionID)
 	if !ok {
-		return 0, []string{"unknown migration session — cannot identify which secrets to roll back"}
+		return 0, []string{"unknown migration session: cannot identify which secrets to roll back"}
 	}
 
 	restored := 0
@@ -435,7 +435,7 @@ func (h *Handler) CommitHandler(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) dropJournaledSecrets(ctx context.Context, sessionID string) []string {
 	session, ok := h.Sessions.Get(sessionID)
 	if !ok {
-		return []string{"unknown migration session — cannot identify which rollback copies to clear"}
+		return []string{"unknown migration session: cannot identify which rollback copies to clear"}
 	}
 	var failures []string
 	for ns, names := range session.JournaledSecretsSnapshot() {

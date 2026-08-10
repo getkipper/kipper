@@ -142,7 +142,7 @@ func init() {
 
 	serviceBindCmd.Flags().String("project", "default", "project namespace")
 	serviceBindCmd.Flags().String("environment", "", "target environment")
-	serviceBindCmd.Flags().String("prefix", "", "env var prefix (e.g. DB_, REDIS_) — auto-detected from service type if omitted")
+	serviceBindCmd.Flags().String("prefix", "", "env var prefix (e.g. DB_, REDIS_), auto-detected from service type if omitted")
 	serviceBindCmd.Flags().String("database", "", "custom database name (auto-derived for database services if omitted)")
 
 	serviceUnbindCmd.Flags().String("project", "default", "project namespace")

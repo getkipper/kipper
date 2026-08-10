@@ -259,7 +259,7 @@ type BackupStatus struct {
 // a broken sibling, and restore/list/show all agree).
 func (s *BackupStatus) Restorable() string {
 	if s.Primary == nil {
-		return "primary backup missing — namespace data was not preserved"
+		return "primary backup missing: namespace data was not preserved"
 	}
 	if s.Primary.Phase != "Completed" {
 		return fmt.Sprintf("primary in phase %s", s.Primary.Phase)
@@ -275,7 +275,7 @@ func (s *BackupStatus) Restorable() string {
 			return "config sibling " + reason
 		}
 	} else if s.ExpectsSibling {
-		return "config sibling expected but missing — cluster Secret + HelmCharts will not be restored"
+		return "config sibling expected but missing: cluster Secret + HelmCharts will not be restored"
 	}
 	return ""
 }
@@ -1435,7 +1435,7 @@ func (i *Installer) CreateRestore(ctx context.Context, backupName string) (*Back
 		return primary, fmt.Errorf("primary restore for %q succeeded but the cross-namespace sibling restore failed: %w; "+
 			"chat history and model cache are intact, but kip's AI client config and HelmChart records are missing. "+
 			"Recover with: kip ai uninstall && kip ai restore --name %s. "+
-			"Do NOT run 'kip ai install' to repair — it regenerates LibreChat credentials and would break access to the restored chat data",
+			"Do NOT run 'kip ai install' to repair: it regenerates LibreChat credentials and would break access to the restored chat data",
 			backupName, err, backupName)
 	}
 	primary.Errors += sibling.Errors

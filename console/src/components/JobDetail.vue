@@ -60,7 +60,7 @@ async function handleTrigger() {
   triggering.value = true
   try {
     await triggerJob(props.jobName)
-    toast.success(`${props.jobName} triggered — running now`)
+    toast.success(`${props.jobName} triggered, running now`)
     emit('refresh')
     await loadHistory()
   } catch {
@@ -96,7 +96,7 @@ async function saveJobResources() {
       memory_limit: jobMemoryLimit.value,
       cpu_limit: jobCPULimit.value,
     })
-    toast.success('Resources updated — next job run will use new limits')
+    toast.success('Resources updated: next job run will use new limits')
   } catch {
     toast.error('Failed to update resources')
   } finally {

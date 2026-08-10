@@ -113,7 +113,7 @@ powers and act only where you added them.
 
 Invite first, and add them once they have accepted. Membership is recorded as an address and
 nothing later checks that it belongs to anyone, so both the console and the CLI refuse an address
-with no account behind it — otherwise a typo becomes a member who can never sign in, looks correct
+with no account behind it. Otherwise a typo becomes a member who can never sign in, looks correct
 in `members list`, and counts as an owner in the rule that keeps a project from being left
 ownerless.
 
@@ -127,7 +127,7 @@ kip project members remove acme-shop typo@acme.com
 
 The rule only ever refused one order of doing it. `kip project members remove --force` removes a
 last owner outright, leaving the project with none, and a cluster admin can do the same from the
-console — use those when the phantom should go before a replacement is chosen.
+console. Use those when the phantom should go before a replacement is chosen.
 
 ## Creating projects
 

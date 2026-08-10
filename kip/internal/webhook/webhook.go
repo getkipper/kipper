@@ -74,14 +74,14 @@ func GetToken(ctx context.Context, client kubernetes.Interface, namespace, appNa
 	secret, err := client.CoreV1().Secrets(namespace).Get(ctx, appName+webhookSecretName, metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return "", fmt.Errorf("no webhook configured for %s — run 'kip app webhook enable %s'", appName, appName)
+			return "", fmt.Errorf("no webhook configured for %s. Run 'kip app webhook enable %s'", appName, appName)
 		}
 		return "", fmt.Errorf("getting webhook secret: %w", err)
 	}
 
 	token, ok := secret.Data[secretKeyField]
 	if !ok {
-		return "", fmt.Errorf("webhook secret is corrupt — re-run 'kip app webhook enable %s'", appName)
+		return "", fmt.Errorf("webhook secret is corrupt. Re-run 'kip app webhook enable %s'", appName)
 	}
 
 	return string(token), nil

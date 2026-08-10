@@ -71,7 +71,7 @@ func authRejectedError(ctx context.Context, cluster *config.Cluster) error {
 func authRejectedMessage(cliVer, serverVer string) string {
 	if serverVer != "" && serverVer != cliVer {
 		return fmt.Sprintf("console-api rejected your credentials (HTTP 401), but your session is "+
-			"not expired, so kip auth login alone may not fix it. Versions — kip: %s, "+
+			"not expired, so kip auth login alone may not fix it. Versions, kip: %s, "+
 			"console-api: %s. A CLI/cluster version mismatch or a change to the cluster's login "+
 			"are the usual causes; update kip if it is behind the cluster, otherwise run: "+
 			"kip auth login", cliVer, serverVer)

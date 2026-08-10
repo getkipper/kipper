@@ -255,7 +255,7 @@ func finishPendingRelease(token string, cluster *config.Cluster, d uninstallDeps
 		// costs an explicit `kip cluster remove` when there really is nothing
 		// there.
 		d.say("  !   No gateway credential could be read for %s, so its name stays registered.\n", cluster.Domain)
-		d.say("      Re-run this command first — a config that could not be opened may hold it still.\n")
+		d.say("      Re-run this command first: a config that could not be opened may hold it still.\n")
 		d.say("      If a re-run finds nothing either, `kip cluster remove %s` forgets the cluster.\n", cluster.Name)
 		return uninstallOutcome{}
 	}

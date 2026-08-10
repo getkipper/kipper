@@ -393,7 +393,7 @@ function objectName(key: string): string {
 }
 
 function formatSize(bytes: number): string {
-  if (bytes === 0) return '-'
+  if (bytes === 0) return '—'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
   const i = Math.floor(Math.log(bytes) / Math.log(1024))
   const value = bytes / Math.pow(1024, i)
@@ -401,7 +401,7 @@ function formatSize(bytes: number): string {
 }
 
 function formatDate(iso: string): string {
-  if (!iso) return '-'
+  if (!iso) return '—'
   return formatDateTime(iso)
 }
 
@@ -504,7 +504,7 @@ async function togglePublic(obj: StorageObject) {
     } else {
       const resp = await makePublic(selectedService.value, selectedNamespace.value, selectedBucket.value, obj.key)
       await navigator.clipboard.writeText(resp.url)
-      toast.success('Made public — URL copied to clipboard')
+      toast.success('Made public: URL copied to clipboard')
     }
     await loadObjects()
   } catch {

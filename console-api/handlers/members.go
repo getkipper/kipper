@@ -84,7 +84,7 @@ func (m *Members) Set(w http.ResponseWriter, r *http.Request) {
 	// A member must have a console account to sign in; project membership does
 	// not create one. Onboard new people through an invite instead.
 	if m.RoleStore.GetRole(req.Email) == "" {
-		respondError(w, http.StatusBadRequest, "no account exists for that email — invite the user first")
+		respondError(w, http.StatusBadRequest, "no account exists for that email: invite the user first")
 		return
 	}
 

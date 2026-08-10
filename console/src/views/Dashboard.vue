@@ -507,7 +507,7 @@ onUnmounted(() => {
         />
         <p class="mt-2 text-xs text-slate-400 dark:text-slate-500">
           {{ usageHistory.node.history[usageHistory.node.history.length - 1].cpu_millis }}m
-          of {{ usageHistory.node.allocatable_cpu_millis }}m — last hour
+          of {{ usageHistory.node.allocatable_cpu_millis }}m, last hour
         </p>
       </div>
     </div>

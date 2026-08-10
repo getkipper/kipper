@@ -76,7 +76,7 @@ func (rg *RouteGroups) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if host == "" {
-		respondError(w, http.StatusBadRequest, "could not determine hostname — provide one explicitly or configure CLUSTER_DOMAIN")
+		respondError(w, http.StatusBadRequest, "could not determine hostname: provide one explicitly or configure CLUSTER_DOMAIN")
 		return
 	}
 

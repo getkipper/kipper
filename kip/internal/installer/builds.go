@@ -177,16 +177,16 @@ func sealBuildEgress(client *ssh.Client) string {
 	out, err := client.Run("kubectl get namespace " + buildNamespace + " --ignore-not-found -o name")
 	switch {
 	case err != nil:
-		return fmt.Sprintf(" — and whether build egress in %s is still open could not be determined (%v); check it by hand", buildNamespace, err)
+		return fmt.Sprintf(": and whether build egress in %s is still open could not be determined (%v); check it by hand", buildNamespace, err)
 	case strings.TrimSpace(out) == "":
 		// No build namespace, so there is no policy to close and nothing can run.
 		return ""
 	}
 	applyCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", buildEgressSealManifest)
 	if _, err := client.Run(applyCmd); err != nil {
-		return fmt.Sprintf(" — and the existing build egress policy could NOT be closed (%v), so builds in %s are running unconstrained until this is resolved", err, buildNamespace)
+		return fmt.Sprintf(": and the existing build egress policy could NOT be closed (%v), so builds in %s are running unconstrained until this is resolved", err, buildNamespace)
 	}
-	return fmt.Sprintf(" — build egress in %s has been closed until this is resolved, so builds will fail", buildNamespace)
+	return fmt.Sprintf(": build egress in %s has been closed until this is resolved, so builds will fail", buildNamespace)
 }
 
 // buildEgressSealManifest replaces the egress policy with a default-deny that

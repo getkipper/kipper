@@ -66,7 +66,7 @@ type Grant struct {
 
 // ErrGrantLimit is returned when a service already carries its maximum
 // number of live grants.
-var ErrGrantLimit = fmt.Errorf("share: service already has %d active links — revoke one first", MaxGrantsPerService)
+var ErrGrantLimit = fmt.Errorf("share: service already has %d active links: revoke one first", MaxGrantsPerService)
 
 // ErrGrantNotFound is returned when a revoke names a grant that does not
 // exist (or belongs to a different service). It is distinct from a

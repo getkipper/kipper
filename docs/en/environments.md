@@ -36,7 +36,7 @@ The Project CR is the source of truth. Deleting it cascades to all namespaces an
 `kip project create myapp` without `--environments` creates one called `default`, and a `default`
 environment is the one case where the namespace is not suffixed: apps land in `myapp`, not
 `myapp-default`. The same is true of the console's New project screen. That is why the simple case
-reads as "just a project" with no environment in sight — there is one, it is called `default`, and
+reads as "just a project" with no environment in sight. There is one, it is called `default`, and
 it shares the project's name.
 
 Adding a second environment starts suffixing: `kip project add-env myapp prod` gives you
@@ -276,7 +276,7 @@ Promotion records are stored as annotations on the app in the target environment
 - `kipper.run/promoted-at`: timestamp
 
 The image itself is not recorded separately, because it is the app's own
-`spec.image` — `kip app list` shows it in the IMAGE column, and `kip export`
+`spec.image`. `kip app list` shows it in the IMAGE column, and `kip export`
 writes it into the manifest.
 
 ## Database strategy

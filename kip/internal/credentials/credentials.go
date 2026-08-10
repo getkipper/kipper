@@ -122,7 +122,7 @@ type AmbiguousError struct {
 }
 
 func (e *AmbiguousError) Error() string {
-	return fmt.Sprintf("credential %q exists in multiple stores (%v) — specify --type", e.Name, e.Types)
+	return fmt.Sprintf("credential %q exists in multiple stores (%v): specify --type", e.Name, e.Types)
 }
 
 func typesOf(cs []Credential) []Type {

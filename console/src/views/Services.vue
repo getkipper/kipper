@@ -71,7 +71,7 @@ const namespaceOptions = computed(() => {
   ]
   for (const p of allProjects.value) {
     for (const env of p.environments) {
-      options.push({ label: `${p.display_name || p.name} — ${env.name}`, value: env.namespace })
+      options.push({ label: `${p.display_name || p.name}, ${env.name}`, value: env.namespace })
     }
   }
   return options
@@ -446,7 +446,7 @@ async function saveSvcResources() {
     }
 
     // Timeout — still not ready after 2 minutes
-    toast.error('Service is still restarting — check the dashboard')
+    toast.error('Service is still restarting. Check the dashboard')
     svcRolloutPhase.value = 'idle'
   } catch {
     toast.error('Failed to update resources')

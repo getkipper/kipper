@@ -9,10 +9,10 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "kip",
-	Short: "Kipper CLI — production Kubernetes for startups",
+	Short: "Kipper CLI: production Kubernetes for startups",
 	Long: `Kipper gives small teams a production-ready Kubernetes cluster on any
-Linux root server — with a web console, automatic SSL, and one-command
-app deployments — without requiring Kubernetes expertise.`,
+Linux root server, with a web console, automatic SSL, and one-command
+app deployments, without requiring Kubernetes expertise.`,
 }
 
 func init() {

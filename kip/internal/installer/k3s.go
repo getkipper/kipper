@@ -394,7 +394,7 @@ func warnUnreachableResolvers(unreachable, all []string) {
 		fmt.Printf("  ⚠  DNS resolver %s did not accept a TCP connection on port 53 from the server\n", r)
 	}
 	if len(unreachable) > 0 && len(unreachable) == len(all) {
-		fmt.Printf("  ⚠  no configured DNS resolver accepted a TCP connection on port 53 — external DNS is likely broken in the cluster. Check that the server allows outbound port 53, or pass --dns-resolver with a resolver your network can reach\n")
+		fmt.Printf("  ⚠  no configured DNS resolver accepted a TCP connection on port 53, external DNS is likely broken in the cluster. Check that the server allows outbound port 53, or pass --dns-resolver with a resolver your network can reach\n")
 	}
 }
 
@@ -437,7 +437,7 @@ func ResolvConfPath() string {
 func CheckResolvConf(body string) ([]string, error) {
 	resolvers := rawResolvConfNameservers(body)
 	if len(resolvers) == 0 {
-		return nil, fmt.Errorf("no nameserver entries — the cluster has no external DNS")
+		return nil, fmt.Errorf("no nameserver entries: the cluster has no external DNS")
 	}
 	if len(resolvers) > maxDNSResolvers {
 		return resolvers, fmt.Errorf("too many DNS resolvers (%d): at most %d are allowed", len(resolvers), maxDNSResolvers)

@@ -140,7 +140,7 @@ func rateLimitKey(r *http.Request) (string, error) {
 		now := time.Now().Unix()
 		if last := unmeasuredLogged.Load(); now-last > int64(unmeasuredLogInterval.Seconds()) &&
 			unmeasuredLogged.CompareAndSwap(last, now) {
-			log.Printf("no client address on an API request: %s is missing or unparseable, so these requests share one rate-limit bucket — check the reverse proxy in front of the gateway", clientIPHeader)
+			log.Printf("no client address on an API request: %s is missing or unparseable, so these requests share one rate-limit bucket. Check the reverse proxy in front of the gateway", clientIPHeader)
 		}
 		return "", nil
 	}
@@ -208,7 +208,7 @@ func main() {
 	if enforceProof {
 		log.Printf("proof-before-route ENABLED: only clusters that have proven control will route")
 	} else {
-		log.Printf("proof-before-route DISABLED by KIPPER_PROOF_BEFORE_ROUTE (transition mode): recording proofs, routing unchanged — an unproven registration routes to whatever address it named")
+		log.Printf("proof-before-route DISABLED by KIPPER_PROOF_BEFORE_ROUTE (transition mode): recording proofs, routing unchanged. An unproven registration routes to whatever address it named")
 	}
 
 	// Data-plane budgets. The API limiter below cannot cover proxied traffic:

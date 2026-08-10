@@ -121,9 +121,9 @@ function formatExpiry(iso: string): string {
 }
 
 const roles = [
-  { value: 'admin', label: 'Admin', description: 'Full access — manage users, settings, backups' },
+  { value: 'admin', label: 'Admin', description: 'Full access: manage users, settings, backups' },
   { value: 'deployer', label: 'Deployer', description: 'Deploy, scale, manage apps and services' },
-  { value: 'viewer', label: 'Viewer', description: 'Read-only — view apps, logs, routes' },
+  { value: 'viewer', label: 'Viewer', description: 'Read-only: view apps, logs, routes' },
 ]
 
 onMounted(async () => {
@@ -340,7 +340,7 @@ function roleColor(role: string): string {
         <div>
           <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Add to project</label>
           <select v-model="inviteProject" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50">
-            <option value="">No project — cluster access only</option>
+            <option value="">No project: cluster access only</option>
             <option v-for="p in projects" :key="p.name" :value="p.name">{{ p.display_name || p.name }}</option>
           </select>
         </div>
@@ -388,7 +388,7 @@ function roleColor(role: string): string {
 
       <div v-else class="space-y-3">
         <NoticeCallout tone="warning" class="p-3">
-          <p class="mb-2 text-xs font-medium text-amber-700 dark:text-orange-300">Copy this link before closing — it won't be shown again</p>
+          <p class="mb-2 text-xs font-medium text-amber-700 dark:text-orange-300">Copy this link before closing. It won't be shown again</p>
           <div class="flex items-center gap-2 rounded-md border border-slate-200 bg-white p-2 dark:border-slate-700 dark:bg-slate-800">
             <input
               :value="inviteURL"
@@ -494,7 +494,7 @@ function roleColor(role: string): string {
 
         <!-- Password display (after create or reset) -->
         <NoticeCallout v-if="showPasswordFor === user.email" tone="warning" class="mt-3 p-3">
-          <p class="mb-2 text-xs font-medium text-amber-700 dark:text-orange-300">Share this password — it won't be shown again</p>
+          <p class="mb-2 text-xs font-medium text-amber-700 dark:text-orange-300">Share this password. It won't be shown again</p>
           <div class="flex items-center gap-2">
             <code class="flex-1 rounded bg-white px-2 py-1 font-mono text-sm text-slate-900 dark:bg-slate-800 dark:text-slate-50">{{ displayPassword }}</code>
             <button @click="copyPassword" class="rounded-md bg-kipper-600 px-3 py-1 text-xs font-medium text-white hover:bg-kipper-700">

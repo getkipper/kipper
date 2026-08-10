@@ -26,7 +26,7 @@ var appLinksCmd = &cobra.Command{
 A link has to be several things at once: the other project has to have agreed,
 the target has to exist and serve a port, the allowance has to be in place, and
 the address has to have reached the running pods. This reports each of those,
-then tries the connection itself from inside the calling pod — the only place
+then tries the connection itself from inside the calling pod. The only place
 the allowance applies, and so the only place worth testing from.`,
 	Args: cobra.RangeArgs(0, 1),
 	RunE: runAppLinks,
@@ -197,7 +197,7 @@ func printLinkReport(r linkReport) {
 	case r.targetNS == "":
 		fmt.Printf("       allowance    none\n")
 	default:
-		fmt.Printf("       allowance    none — nothing opens a path to %s\n", r.targetNS)
+		fmt.Printf("       allowance    none: nothing opens a path to %s\n", r.targetNS)
 	}
 	fmt.Printf("       address      %s\n",
 		either(r.addressInPod, "in the running pod", "not in the running pod yet"))
@@ -241,7 +241,7 @@ func probeFromPod(ctx context.Context, k8sClient *k8s.Client, ns, pod, container
 		}
 		return probeResult(c.name, errText == "", host, port, pod)
 	}
-	return fmt.Sprintf("could not be tried — %s has no tool to open a connection with, so this says nothing either way", container)
+	return fmt.Sprintf("could not be tried: %s has no tool to open a connection with, so this says nothing either way", container)
 }
 
 // execInPod runs a command in a pod and returns its output and any error text.
@@ -329,7 +329,7 @@ func toolMissing(output string) bool {
 // probeResult is what one attempt proved.
 func probeResult(tool string, connected bool, host string, port int64, pod string) string {
 	if connected {
-		return fmt.Sprintf("reachable — %s connected to %s:%d from %s", tool, host, port, pod)
+		return fmt.Sprintf("reachable: %s connected to %s:%d from %s", tool, host, port, pod)
 	}
-	return fmt.Sprintf("refused or blocked — %s could not reach %s:%d from %s", tool, host, port, pod)
+	return fmt.Sprintf("refused or blocked: %s could not reach %s:%d from %s", tool, host, port, pod)
 }

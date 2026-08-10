@@ -35,7 +35,7 @@ var credentialsGetCmd = &cobra.Command{
 	Long: `Print the plaintext value of a single credential.
 
 By name, this reads the global credential store. With --app, it reads the
-git token an application uses to clone its source repository — that token
+git token an application uses to clone its source repository. That token
 lives in a Secret in the app's own namespace and does not appear in the
 global store or in 'credentials list'.
 

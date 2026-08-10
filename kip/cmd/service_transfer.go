@@ -230,7 +230,7 @@ func resolveTransferTarget(ctx context.Context, name, namespace string, database
 		return nil, err
 	}
 	if !service.TransferSupported(conn.Type) {
-		return nil, fmt.Errorf("service %q is type %q — import/export supports mongodb, postgres, and mysql", name, conn.Type)
+		return nil, fmt.Errorf("service %q is type %q. Import/export supports mongodb, postgres, and mysql", name, conn.Type)
 	}
 	if *database == "" {
 		*database = conn.Database

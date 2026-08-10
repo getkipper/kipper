@@ -143,7 +143,7 @@ function close() {
           <p class="font-medium dark:text-orange-300">Namespace unknown.</p>
           <p class="mt-0.5 text-xs dark:text-slate-400">
             <template v-if="scope === 'platform'">
-              No platform config entry for <span class="font-mono dark:text-slate-300">{{ name }}</span> — the slider table doesn't know where this component's pods live.
+              No platform config entry for <span class="font-mono dark:text-slate-300">{{ name }}</span>. The slider table doesn't know where this component's pods live.
             </template>
             <template v-else>
               Open this page from the {{ scope }} list so the namespace is set on the URL (<span class="font-mono dark:text-slate-300">?ns=...</span>).
@@ -167,7 +167,7 @@ function close() {
 
     <div v-else>
       <p v-if="!metricsAvailable" class="mb-3 text-xs text-amber-700 dark:text-amber-400">
-        metrics-server hasn't returned data yet — gauges may show 0% until the next scrape.
+        metrics-server hasn't returned data yet: gauges may show 0% until the next scrape.
       </p>
       <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         <div

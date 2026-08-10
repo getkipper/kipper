@@ -78,7 +78,7 @@ jobs:
 ### The route block
 
 `route` is the largest block an app can carry. Every field is optional, and the manifest is the only
-place several of them can be set at all — `kip app deploy` covers `host`, `group`, `path`,
+place several of them can be set at all. `kip app deploy` covers `host`, `group`, `path`,
 `redirectFrom`, `rateLimit` and `noSecurityHeaders`, and the rest are manifest or console.
 
 | Field | What it does |
@@ -151,7 +151,7 @@ kip apply -f kipper.yaml
 
 Kipper creates the Project CR and namespaces if they don't exist, then creates or updates the corresponding Custom Resources. For apps, services, volumes, functions and jobs, the update replaces the live spec, so the manifest is the desired state and a field you leave out is removed.
 
-If you know `kubectl`, note that this is closer to `kubectl replace` than to `kubectl apply`. `kubectl apply` merges against a record of what it last applied, so a field set some other way and never named in your YAML survives. `kip apply` writes the spec wholesale, so it does not: anything the manifest does not carry is gone, whether or not the manifest ever carried it. `terraform apply` is the nearer comparison — the config is the whole desired state and drift is reverted.
+If you know `kubectl`, note that this is closer to `kubectl replace` than to `kubectl apply`. `kubectl apply` merges against a record of what it last applied, so a field set some other way and never named in your YAML survives. `kip apply` writes the spec wholesale, so it does not: anything the manifest does not carry is gone, whether or not the manifest ever carried it. `terraform apply` is the nearer comparison: the config is the whole desired state and drift is reverted.
 
 The practical consequence is that a change made with `kip app update`, `kip app env set` or the console does not survive the next apply unless the manifest knows about it. `kip export` is the way to fold live state back in rather than transcribing it.
 
@@ -284,8 +284,8 @@ Only ordinary configuration is printed with its value: the image, replicas, the
 route's hostname, resource requests and limits, autoscaling, the schedule, and
 the like. A route's path is withheld along with the rest, because an unguessable
 prefix is a normal way to protect a webhook. Everything else is named and its
-value withheld, because a spec carries the operator's own text — an environment
-variable, a build argument, a command line, a function's source — and any of it
+value withheld, because a spec carries the operator's own text (an environment
+variable, a build argument, a command line, a function's source) and any of it
 can hold a token. This output ends up in terminal scrollback and, from a CI job,
 in durable logs. The path tells you which field is affected, which is the part
 you need. A git URL is the one thing shown in part: it keeps its host and

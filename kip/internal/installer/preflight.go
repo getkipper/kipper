@@ -60,10 +60,10 @@ func RunPreflightChecks(sys SystemInfo) (*PreflightResult, error) {
 	switch pickProfile(sys.RAMMB) {
 	case ProfileNano:
 		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("RAM is below 4GB (%dMB available) — the 'nano' profile will be selected: monitoring (Prometheus, Loki, Grafana) is disabled by default and headroom for apps is very tight. Best for demos and dev; production workloads need 8GB or more.", sys.RAMMB))
+			fmt.Sprintf("RAM is below 4GB (%dMB available): the 'nano' profile will be selected: monitoring (Prometheus, Loki, Grafana) is disabled by default and headroom for apps is very tight. Best for demos and dev; production workloads need 8GB or more.", sys.RAMMB))
 	case ProfileSmall:
 		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("RAM is below recommended 8GB (%dMB available) — the 'small' profile will be selected: monitoring runs with tight limits. Disable it with 'kip platform disable prometheus' and 'kip platform disable loki' after install if you need more room for apps.", sys.RAMMB))
+			fmt.Sprintf("RAM is below recommended 8GB (%dMB available): the 'small' profile will be selected: monitoring runs with tight limits. Disable it with 'kip platform disable prometheus' and 'kip platform disable loki' after install if you need more room for apps.", sys.RAMMB))
 	}
 
 	return result, nil

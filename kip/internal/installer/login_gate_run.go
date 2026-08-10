@@ -60,7 +60,7 @@ func RunLoginGate(ctx context.Context, deps LoginGateDeps, domain string) GateRe
 		return GateResult{
 			AuthMode:      "oidc",
 			VerifiedEmail: email,
-			Message:       fmt.Sprintf("kubectl authenticates as %s — the admin certificate never left the server (break-glass: ssh, then sudo k3s kubectl)", email),
+			Message:       fmt.Sprintf("kubectl authenticates as %s: the admin certificate never left the server (break-glass: ssh, then sudo k3s kubectl)", email),
 		}
 	case ProofPassNonAdmin:
 		return GateResult{
@@ -81,7 +81,7 @@ func RunLoginGate(ctx context.Context, deps LoginGateDeps, domain string) GateRe
 		// shared certificate.
 		return GateResult{
 			AuthMode: "deferred",
-			Message:  fmt.Sprintf("Sign-in did not verify against this cluster (%s). Your kubeconfig stays credential-free. Diagnose with: kip auth verify — or ssh to the server and run 'sudo k3s kubectl', or re-install with --admin-kubeconfig.", detail),
+			Message:  fmt.Sprintf("Sign-in did not verify against this cluster (%s). Your kubeconfig stays credential-free. Diagnose with: kip auth verify. Or ssh to the server and run 'sudo k3s kubectl', or re-install with --admin-kubeconfig.", detail),
 		}
 	}
 }

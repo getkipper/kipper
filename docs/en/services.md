@@ -229,7 +229,7 @@ kip service share --rotate-key
 
 ### Ingress controller selector
 
-The UI port is locked down with a NetworkPolicy that only lets the cluster's ingress controller talk to it. By default Kipper expects a stock Traefik install — pods labelled `app.kubernetes.io/name: traefik`, in any namespace. If your cluster ships Traefik under a non-standard label, or runs a different ingress controller (Nginx, HAProxy), create a ConfigMap to override:
+The UI port is locked down with a NetworkPolicy that only lets the cluster's ingress controller talk to it. By default Kipper expects a stock Traefik install: pods labelled `app.kubernetes.io/name: traefik`, in any namespace. If your cluster ships Traefik under a non-standard label, or runs a different ingress controller (Nginx, HAProxy), create a ConfigMap to override:
 
 ```yaml
 apiVersion: v1
@@ -247,7 +247,7 @@ data:
   namespace: traefik
 ```
 
-Apply with `kubectl apply -f` and the next reconcile of any service-UI NetworkPolicy picks it up — no console-api restart, no Kipper rebuild. If the ConfigMap is missing the defaults apply, so existing clusters keep working unchanged.
+Apply with `kubectl apply -f` and the next reconcile of any service-UI NetworkPolicy picks it up, with no console-api restart and no Kipper rebuild. If the ConfigMap is missing the defaults apply, so existing clusters keep working unchanged.
 
 ## Connecting from your machine
 
@@ -360,7 +360,7 @@ store, and keep anything sensitive in a database that does authenticate.
 | `AMQP_PASSWORD` | `a1b2c3d4e5f6...` |
 | `AMQP_VHOST` | `orders` (the binding's vhost, or `/` if you took the default) |
 
-Like databases for postgres/mysql, a RabbitMQ binding can either share the default vhost `/` with every other app or create its own. Pass `--database <name>` to `kip service bind` to provision a per-binding vhost — Kipper runs `rabbitmqctl add_vhost` on the running pod and grants the kipper user full access to it. Leave the flag off to share `/`.
+Like databases for postgres/mysql, a RabbitMQ binding can either share the default vhost `/` with every other app or create its own. Pass `--database <name>` to `kip service bind` to provision a per-binding vhost. Kipper runs `rabbitmqctl add_vhost` on the running pod and grants the kipper user full access to it. Leave the flag off to share `/`.
 
 In the console, the bind picker lists every existing vhost on the service (the default `/` is tagged) and also offers a Create new field. Picking an existing vhost reuses it; creating a new one is what most apps want.
 

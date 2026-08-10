@@ -603,7 +603,7 @@ function pkOf(rowIdx: number): Record<string, unknown> | null {
 async function saveEdits() {
   if (!browseData.value || !selectedRelation.value) return
   if (browseData.value.structure.primary_key.length === 0) {
-    toast.error('Table has no primary key — cannot save edits via PK. Use the SQL tab.')
+    toast.error('Table has no primary key: cannot save edits via PK. Use the SQL tab.')
     return
   }
   // Group edits by row.
@@ -895,7 +895,7 @@ function removeSnippet(s: DBSnippet) {
 
 async function saveCurrentAsSnippet() {
   if (!sqlText.value.trim()) {
-    toast.error('Editor is empty — write a query first')
+    toast.error('Editor is empty. Write a query first')
     return
   }
   if (!newSnippetName.value.trim()) {
@@ -1150,7 +1150,7 @@ async function applyCreateTable() {
     return
   }
   if (tableName.length < 2) {
-    toast.error('Table name looks too short — finish typing then try again')
+    toast.error('Table name looks too short: finish typing then try again')
     return
   }
   const cols = newTableCols.value
@@ -1650,7 +1650,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                     <button
                       class="w-full flex items-center gap-1 px-3 py-1 text-left hover:bg-kipper-50 dark:hover:bg-slate-800"
                       :class="selectedRelation?.schema === sch.name && selectedRelation?.name === rel.name ? 'bg-kipper-100 dark:bg-kipper-900/30' : ''"
-                      :title="`Click to browse rows — double-click to insert name into SQL editor`"
+                      :title="`Click to browse rows: double-click to insert name into SQL editor`"
                       @click="openInBrowse(sch.name, rel.name)"
                       @dblclick="insertRelation(sch.name, rel.name)"
                     >
@@ -1810,7 +1810,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
               <AlertTriangle class="inline w-4 h-4 mr-1 dark:text-rose-300" /> {{ browseError }}
             </div>
             <div v-if="browseData && browseData.structure.primary_key.length === 0" class="px-4 py-2 text-xs text-amber-700 dark:text-slate-300 bg-amber-50 dark:bg-slate-900 border-b border-amber-200 dark:border-slate-800 dark:shadow-[inset_3px_0_0_theme(colors.orange.300)]">
-              This table has no primary key — inline edits and deletes are disabled. Use the SQL tab to modify rows.
+              This table has no primary key: inline edits and deletes are disabled. Use the SQL tab to modify rows.
             </div>
 
             <!-- Grid -->
@@ -2302,10 +2302,10 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                       <option value="">+ Add column</option>
                       <option v-for="c in availableIndexColumns" :key="c.name" :value="c.name">{{ c.name }} ({{ c.type }})</option>
                     </select>
-                    <span v-else-if="!newIndex.columns.length" class="text-xs text-slate-400">No columns available — open a table first.</span>
+                    <span v-else-if="!newIndex.columns.length" class="text-xs text-slate-400">No columns available. Open a table first.</span>
                   </div>
                   <p v-if="newIndex.columns.length > 1" class="mt-1 text-[10px] text-slate-500">
-                    Order matters — Postgres uses the leftmost prefix of a multi-column index for query planning.
+                    Order matters: Postgres uses the leftmost prefix of a multi-column index for query planning.
                   </p>
                 </div>
                 <div class="md:col-span-2">
@@ -2499,7 +2499,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
               <input v-model="noLimit" type="checkbox" class="accent-kipper-600" />
               No auto-limit
             </label>
-            <span class="ml-auto text-xs text-slate-500 whitespace-nowrap" title="Run statement at cursor: ⌘/Ctrl + Enter — Run all: ⌘/Ctrl + Shift + Enter">⌘/Ctrl + Enter</span>
+            <span class="ml-auto text-xs text-slate-500 whitespace-nowrap" title="Run statement at cursor: ⌘/Ctrl + Enter: Run all: ⌘/Ctrl + Shift + Enter">⌘/Ctrl + Enter</span>
           </div>
 
           <!-- Save snippet inline form -->

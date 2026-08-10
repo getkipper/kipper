@@ -26,7 +26,7 @@ during that upload window deletes the source PVCs before Velero is
 done copying them, leaving you with an unrestorable snapshot. After
 uninstall, 'kip ai restore --name <name>' recreates the bundle from
 the snapshot. Do not run 'kip ai install' between uninstall and
-restore — restore brings everything back on its own and refuses if
+restore, restore brings everything back on its own and refuses if
 the namespace already exists.
 
 Example:

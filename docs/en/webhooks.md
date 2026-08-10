@@ -83,7 +83,7 @@ deploy:
 
 A Kipper webhook works alongside a git-source app, not as an alternative to it. With `--image` apps the webhook payload usually carries `"image": "..."` so Kipper just rolls out the new tag. With `--git` apps you can either let Kipper notice changes itself, or POST `"commit": "..."` from your CI to fire a rebuild from the configured git source.
 
-One caveat: if you wire your git provider's own webhook (GitHub/GitLab pointing directly at Kipper) **and** point your CI at the Kipper webhook URL, the same `git push` fires twice — once via the provider, once via CI. Kipper serialises Build CRs per app so they don't race, but you'll see two builds in deploy history. Pick one trigger source.
+One caveat: if you wire your git provider's own webhook (GitHub/GitLab pointing directly at Kipper) **and** point your CI at the Kipper webhook URL, the same `git push` fires twice, once via the provider, once via CI. Kipper serialises Build CRs per app so they don't race, but you'll see two builds in deploy history. Pick one trigger source.
 
 ## Webhook request format
 

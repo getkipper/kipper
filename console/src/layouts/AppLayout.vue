@@ -264,7 +264,7 @@ function handleLogout() {
       </div>
 
       <!-- Main content. Routes can opt out of the centred-with-padding
-           wrapper by setting `meta.fullBleed: true` — useful for full-
+           wrapper by setting `meta.fullBleed: true`, useful for full-
            viewport surfaces like the database console where the editor,
            schema sidebar, and AI panel need every pixel of horizontal
            space. -->

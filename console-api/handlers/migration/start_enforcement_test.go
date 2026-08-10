@@ -42,7 +42,8 @@ func TestStartRefusedWithoutPlanReceipt(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "review the plan") {
+	// Case-insensitive: the sentence the message opens with is not the point,
+	if !strings.Contains(strings.ToLower(rec.Body.String()), "review the plan") {
 		t.Fatalf("refusal must point at the plan, got: %s", rec.Body.String())
 	}
 }

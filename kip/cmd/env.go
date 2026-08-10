@@ -226,7 +226,7 @@ func workloadGVR(kind secretname.Kind) schema.GroupVersionResource {
 func applyConfigChange(cmd *cobra.Command, ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, kind secretname.Kind, ns, name string) error {
 	if restart, _ := cmd.Flags().GetBool("restart"); restart {
 		if err := restartWorkload(ctx, clientset, dyn, kind, ns, name); err != nil {
-			return fmt.Errorf("the change was saved, but the restart failed so running pods still use the old values — %s: %w",
+			return fmt.Errorf("the change was saved, but the restart failed so running pods still use the old values, %s: %w",
 				howToRestart(kind, name), err)
 		}
 		return nil

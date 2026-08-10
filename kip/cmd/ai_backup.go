@@ -63,7 +63,7 @@ var aiBackupDeleteCmd = &cobra.Command{
 Velero Backup CRs. The command starts the deletion, watches for up
 to 60 seconds for an immediate validation failure (broken object
 storage, BackupStorageLocation issue), then exits. Velero finishes
-freeing the Kopia repo data in the background — multi-gigabyte
+freeing the Kopia repo data in the background, multi-gigabyte
 snapshots can take several minutes after the command returns. Use
 'kip ai backup list' to confirm the Backup CRs disappear, or pass
 --wait to block until they do.`,
@@ -168,7 +168,7 @@ func runAIBackupShow(cmd *cobra.Command, _ []string) error {
 		// now means the sibling was lost (failed delete, manual
 		// kubectl delete, etc.). The snapshot is no longer fully
 		// restorable.
-		fmt.Println("  Sibling: missing (expected — config Secret + HelmCharts will not be restored)")
+		fmt.Println("  Sibling: missing (expected: config Secret + HelmCharts will not be restored)")
 	default:
 		fmt.Println("  Sibling: none (no cross-namespace AI artefacts at backup time)")
 	}

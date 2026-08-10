@@ -63,8 +63,8 @@ Denials carry CORS headers, so a browser client can read the body and `Retry-Aft
 
 On an allowed request, the gate adds two headers identifying the caller before it reaches your app:
 
-- `X-Kipper-Key-Prefix` — the key's stable public handle, for example `ab12cd34`. Use this as the consumer identifier in your own logs and per-tenant logic.
-- `X-Kipper-Key-Name` — the display name you gave the key, when it has one.
+- `X-Kipper-Key-Prefix` is the key's stable public handle, for example `ab12cd34`. Use this as the consumer identifier in your own logs and per-tenant logic.
+- `X-Kipper-Key-Name` is the display name you gave the key, when it has one.
 
 Any copies of these headers a client sends are stripped before the gate sets its own, so your backend can trust them. The secret half of the key is never forwarded.
 

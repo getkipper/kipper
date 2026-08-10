@@ -106,7 +106,7 @@ func runAuthStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n  Cluster: %s\n", cluster.Domain)
 	fmt.Printf("  Email:   %s\n", creds.Email)
 	if tokenErr != nil {
-		fmt.Printf("  Status:  expired — run: kip auth login\n")
+		fmt.Printf("  Status:  expired. Run: kip auth login\n")
 	} else {
 		fmt.Printf("  Status:  authenticated\n")
 	}

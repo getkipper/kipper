@@ -130,7 +130,7 @@ func (gc *GitCredentials) Remove(w http.ResponseWriter, r *http.Request) {
 	// Check if any apps reference this credential
 	appCount := gc.countAppsUsingCredential(ctx, name)
 	if appCount > 0 {
-		respondError(w, http.StatusConflict, fmt.Sprintf("credential %q is used by %d app(s) — remove the credential from those apps first", name, appCount))
+		respondError(w, http.StatusConflict, fmt.Sprintf("credential %q is used by %d app(s). Remove the credential from those apps first", name, appCount))
 		return
 	}
 

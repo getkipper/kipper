@@ -212,7 +212,7 @@ async function toggleEnabled() {
     <div v-if="component.enabled" class="mt-5">
       <NoticeCallout v-if="!config" tone="warning" class="mb-2 flex items-start gap-2 p-2 text-xs text-amber-800 dark:text-slate-300">
         <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0 dark:text-orange-300" />
-        <span>Selector unknown for this component — gauge will show no data. Slider still writes through.</span>
+        <span>Selector unknown for this component: gauge will show no data. Slider still writes through.</span>
       </NoticeCallout>
       <div v-else-if="usage.data.value && !metricsKnown" class="mb-2 text-xs text-slate-500 dark:text-slate-400">
         Waiting for metrics-server… gauge shows the limit; usage will populate shortly.

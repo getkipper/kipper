@@ -13,7 +13,7 @@ var clusterHardenCmd = &cobra.Command{
 	Use:   "harden",
 	Short: "Apply host hardening and firewall to an existing cluster",
 	Long: `Audit the cluster's host for surplus services and an existing firewall,
-then apply Kipper's hardening defaults. Idempotent — safe to re-run.
+then apply Kipper's hardening defaults. Idempotent, safe to re-run.
 
 Mirrors the hardening that 'kip install' applies on fresh installs, so
 existing clusters can be brought up to current defaults without reinstall.

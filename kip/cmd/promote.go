@@ -20,7 +20,7 @@ var promoteCmd = &cobra.Command{
 	Use:   "promote [app-name]",
 	Short: "Promote an app from one environment to the next",
 	Long: `Copies the image tag from the source environment to the target
-environment. Only the image is promoted — secrets and environment
+environment. Only the image is promoted, secrets and environment
 variables are environment-specific and not copied.
 
 The app must already exist in the target environment. Create it there

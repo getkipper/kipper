@@ -203,7 +203,7 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 	if environment != "" {
 		clientset := k8sClient.Clientset()
 		if _, err := clientset.CoreV1().Namespaces().Get(context.Background(), namespace, metav1.GetOptions{}); err != nil {
-			return fmt.Errorf("environment %q not found for project %q (namespace %s does not exist — create the project first with: kip project create %s --environments %s,...)", environment, project, namespace, project, environment)
+			return fmt.Errorf("environment %q not found for project %q (namespace %s does not exist. Create the project first with: kip project create %s --environments %s,...)", environment, project, namespace, project, environment)
 		}
 	}
 
@@ -413,7 +413,7 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 	// during a credential rotation.
 	if appExisted && len(secrets) > 0 {
 		if restartErr := restartWorkload(ctx, k8sClient.Clientset(), k8sClient.Dynamic(), secretname.KindApp, namespace, name); restartErr != nil {
-			return fmt.Errorf("secrets stored, but the app restart failed so running pods still use the old values — run 'kip app restart %s': %w", name, restartErr)
+			return fmt.Errorf("secrets stored, but the app restart failed so running pods still use the old values. Run 'kip app restart %s': %w", name, restartErr)
 		}
 	}
 
@@ -552,7 +552,7 @@ func runAppUpdate(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if image == "" && profile == "" && !redirectSet {
-		return fmt.Errorf("nothing to update — pass --image, --profile, --redirect-from, or a combination")
+		return fmt.Errorf("nothing to update. Pass --image, --profile, --redirect-from, or a combination")
 	}
 
 	ns, k8sClient, err := resolveAppNamespace(cmd, appName)
@@ -570,7 +570,7 @@ func runAppUpdate(cmd *cobra.Command, args []string) error {
 		if err := d.UpdateProfile(ctx, ns, appName, profile); err != nil {
 			return err
 		}
-		fmt.Printf("\n  ✔  Resource profile set to %s — rollout in progress\n", profile)
+		fmt.Printf("\n  ✔  Resource profile set to %s: rollout in progress\n", profile)
 	}
 
 	if redirectSet {
@@ -578,9 +578,9 @@ func runAppUpdate(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		if len(redirectFrom) == 0 {
-			fmt.Printf("\n  ✔  Redirect domains cleared — no restart, the route is rebuilt in place\n")
+			fmt.Printf("\n  ✔  Redirect domains cleared. No restart: the route is rebuilt in place\n")
 		} else {
-			fmt.Printf("\n  ✔  Redirecting %s — no restart, the route is rebuilt in place\n", strings.Join(redirectFrom, ", "))
+			fmt.Printf("\n  ✔  Redirecting %s. No restart: the route is rebuilt in place\n", strings.Join(redirectFrom, ", "))
 			fmt.Printf("     Each needs its own A record pointing at this cluster.\n")
 		}
 	}
@@ -591,7 +591,7 @@ func runAppUpdate(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		_ = webhook.RecordDeploy(ctx, k8sClient.Dynamic(), ns, appName, image, "", "manual")
-		fmt.Printf("  ✔  Image updated — rollout in progress\n")
+		fmt.Printf("  ✔  Image updated: rollout in progress\n")
 	}
 	fmt.Println()
 
@@ -675,7 +675,7 @@ func runAppRebuild(cmd *cobra.Command, args []string) error {
 
 	gitSpec, found, _ := unstructured.NestedMap(appObj.Object, "spec", "git")
 	if !found || gitSpec == nil {
-		return fmt.Errorf("app %q has no git source configured — deploy with --git first", appName)
+		return fmt.Errorf("app %q has no git source configured: deploy with --git first", appName)
 	}
 
 	// Get auth token
@@ -875,7 +875,7 @@ func cleanupDeploySecrets(ctx context.Context, clientset kubernetes.Interface, d
 		if err != nil {
 			// The conservative keep is right when the check itself failed,
 			// but silence would leave a plaintext Secret nobody knows about.
-			fmt.Printf("  ⚠  Could not confirm whether app %s exists (%v); its stored secrets were kept — remove %s by hand if the deploy never went through\n", name, err, secretname.Secrets(secretname.KindApp, name))
+			fmt.Printf("  ⚠  Could not confirm whether app %s exists (%v); its stored secrets were kept. Remove %s by hand if the deploy never went through\n", name, err, secretname.Secrets(secretname.KindApp, name))
 		}
 		return
 	}
@@ -888,7 +888,7 @@ func cleanupDeploySecrets(ctx context.Context, clientset kubernetes.Interface, d
 	}
 	for _, sec := range toDelete {
 		if err := clientset.CoreV1().Secrets(namespace).Delete(ctx, sec, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
-			fmt.Fprintf(os.Stderr, "  ⚠  the deploy failed and the %s Secret it created could not be removed: %v — delete it manually: kubectl delete secret %s -n %s\n", sec, err, sec, namespace)
+			fmt.Fprintf(os.Stderr, "  ⚠  the deploy failed and the %s Secret it created could not be removed: %v. Delete it manually: kubectl delete secret %s -n %s\n", sec, err, sec, namespace)
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "  Removed Secret %s created by this failed deploy so no credentials are left behind.\n", sec)
@@ -916,7 +916,7 @@ type ambiguousWorkloadError struct {
 }
 
 func (e *ambiguousWorkloadError) Error() string {
-	return fmt.Sprintf("%s %q exists in %d namespaces (%s) — name the one you mean with --project, plus --environment if the project has environments",
+	return fmt.Sprintf("%s %q exists in %d namespaces (%s): name the one you mean with --project, plus --environment if the project has environments",
 		e.kind, e.name, len(e.namespaces), strings.Join(e.namespaces, ", "))
 }
 

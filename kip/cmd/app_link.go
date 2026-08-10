@@ -28,7 +28,7 @@ The target may live in another project, written as "project/app":
 
 A cross-project link also opens the egress the calling app needs to reach it.
 Workloads are otherwise confined to their own project, so without a link there
-is no path between two projects at all — not by service name, not by pod, and
+is no path between two projects at all, not by service name, not by pod, and
 not through a public route. The allowance names both apps and the single port
 the target's pods listen on, and it goes when the link or the calling app does.
 
@@ -164,7 +164,7 @@ func runAppLink(cmd *cobra.Command, args []string) error {
 	if isPublic {
 		host, _, _ := unstructured.NestedString(targetObj.Object, "spec", "route", "host")
 		if host == "" {
-			return fmt.Errorf("target app %q has no public route — create one first or remove --public", target)
+			return fmt.Errorf("target app %q has no public route. Create one first or remove --public", target)
 		}
 		routePath, _, _ := unstructured.NestedString(targetObj.Object, "spec", "route", "path")
 		if routePath == "/" {
@@ -221,7 +221,7 @@ func runAppLink(cmd *cobra.Command, args []string) error {
 	case isPublic:
 		fmt.Printf("\n     A public URL is for code running in a browser. A server-side call to it\n")
 		fmt.Printf("     leaves the cluster and comes back through the gateway, which the workload\n")
-		fmt.Printf("     egress policy blocks — drop --public for the internal address.\n")
+		fmt.Printf("     egress policy blocks. Drop --public for the internal address.\n")
 	case targetNS != ns && !consented:
 		fmt.Printf("\n     No traffic is allowed yet: %s has not agreed to be linked to.\n", targetProject)
 		fmt.Printf("     Someone who owns it runs:\n")

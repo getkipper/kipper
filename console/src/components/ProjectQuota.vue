@@ -56,10 +56,10 @@ function tierRank(tier: string): number {
 }
 
 function tierLabel(tier: string): string {
-  if (tier === '') return 'No tier — cluster-wide limits only'
+  if (tier === '') return 'No tier: cluster-wide limits only'
   const dims = quota.value?.tiers[tier]
   if (!dims) return tier
-  return `${tier} — ${dims.cpu_request} CPU / ${dims.memory_request} memory`
+  return `${tier}: ${dims.cpu_request} CPU / ${dims.memory_request} memory`
 }
 
 // parseQuantity converts a Kubernetes quantity string into a plain number

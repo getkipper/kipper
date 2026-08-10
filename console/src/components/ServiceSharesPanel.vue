@@ -72,7 +72,7 @@ async function copy(text: string) {
     await navigator.clipboard.writeText(text)
     toast.success('Link copied to clipboard')
   } catch {
-    toast.error('Could not copy — select the link and copy it manually')
+    toast.error('Could not copy: select the link and copy it manually')
   }
 }
 
@@ -200,7 +200,7 @@ onMounted(load)
         class="mt-4 rounded-lg border border-kipper-200 bg-kipper-50 p-3 dark:border-kipper-900 dark:bg-kipper-950/40"
       >
         <p class="text-xs font-medium text-kipper-800 dark:text-kipper-300">
-          Copy this link now — it carries the token and won't be shown again.
+          Copy this link now: it carries the token and won't be shown again.
         </p>
         <div class="mt-2 flex items-center gap-2">
           <code class="flex-1 truncate rounded bg-white px-2 py-1.5 font-mono text-xs text-slate-700 dark:bg-slate-900 dark:text-slate-200">{{ minted.url }}</code>

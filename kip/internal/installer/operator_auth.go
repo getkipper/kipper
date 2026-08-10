@@ -373,7 +373,7 @@ func shellQuote(s string) string {
 // or the ingress is simply not up yet.
 func listenerDiagnosis(client *ssh.Client) string {
 	if _, err := client.Run("curl -sS -o /dev/null -k --max-time 5 https://127.0.0.1/ 2>&1"); err != nil {
-		return "; nothing is answering https on this node, so the ingress controller is not running here — " +
+		return "; nothing is answering https on this node, so the ingress controller is not running here, " +
 			"check that Traefik is scheduled on the server node and Ready"
 	}
 	return ""

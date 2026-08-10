@@ -195,7 +195,7 @@ func (c *Copier) copyApps(ctx context.Context, opts Options) (int, []string, err
 		// connection that stopped working.
 		if len(dropped) > 0 {
 			warnings = append(warnings, fmt.Sprintf(
-				"%s no longer links to %s — a link outside this project's environment is not copied; re-link it if the new environment needs it",
+				"%s no longer links to %s: a link outside this project's environment is not copied; re-link it if the new environment needs it",
 				copied.Name, strings.Join(dropped, ", ")))
 		}
 		count++

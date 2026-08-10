@@ -386,7 +386,7 @@ func runFunctionLogs(cmd *cobra.Command, args []string) error {
 		LabelSelector: fmt.Sprintf("app=%s", name),
 	})
 	if err != nil || len(pods.Items) == 0 {
-		return fmt.Errorf("no running pods for function %q — it may be scaled to zero", name)
+		return fmt.Errorf("no running pods for function %q: it may be scaled to zero", name)
 	}
 
 	tailLines := int64(100)

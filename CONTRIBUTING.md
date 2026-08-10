@@ -2,7 +2,7 @@
 
 Thank you for your interest in contributing to Kipper!
 
-For the full contributing guide — including development setup, coding conventions, testing requirements, and PR guidelines — see the [Contributing documentation](docs/en/contributing.md).
+The full contributing guide covers development setup, coding conventions, testing requirements, and PR guidelines. See the [Contributing documentation](docs/en/contributing.md).
 
 ## Quick start
 

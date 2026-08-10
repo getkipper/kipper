@@ -29,9 +29,9 @@ var userAddCmd = &cobra.Command{
 	Long: `Creates a user in Dex and assigns a role.
 
 Roles:
-  admin    — full access
-  deployer — deploy, scale, manage apps and services
-  viewer   — read-only access
+  admin:    full access
+  deployer: deploy, scale, manage apps and services
+  viewer:   read-only access
 
 Examples:
   kip user add dev@example.com --role deployer

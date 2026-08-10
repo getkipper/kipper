@@ -28,7 +28,7 @@ var projectAllowLinksCmd = &cobra.Command{
 
 An app in the calling project can then reach a named app here directly over the
 cluster network. That path goes past the ingress, so anything enforced on a
-public route — an API key, forward auth, a rate limit — is not in the way of it.
+public route. An API key, forward auth, a rate limit, is not in the way of it.
 That is why the decision belongs to this project rather than the one asking.
 
 Without this, a link from the other side is recorded and no traffic is allowed.

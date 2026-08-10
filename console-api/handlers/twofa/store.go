@@ -134,10 +134,10 @@ func (s *Store) createPending(ctx context.Context, key string, f *factor) error 
 	existing, secret, err := s.get(ctx, key)
 	if err == nil {
 		if existing.State == factorStateActive {
-			return fmt.Errorf("a 2FA factor is already enrolled — use reset to rotate it")
+			return fmt.Errorf("a 2FA factor is already enrolled. Use reset to rotate it")
 		}
 		if time.Since(existing.CreatedAt) < pendingTTL {
-			return fmt.Errorf("an enrollment is already in progress — confirm it or retry after it expires")
+			return fmt.Errorf("an enrollment is already in progress. Confirm it or retry after it expires")
 		}
 		// Expired pending enrollment: replace it via CAS so two concurrent
 		// enrolls cannot both claim the slot.
@@ -163,7 +163,7 @@ func (s *Store) createPending(ctx context.Context, key string, f *factor) error 
 		Data: map[string][]byte{"factor": payload},
 	}, metav1.CreateOptions{})
 	if errors.IsAlreadyExists(err) {
-		return fmt.Errorf("an enrollment is already in progress — confirm it or retry after it expires")
+		return fmt.Errorf("an enrollment is already in progress. Confirm it or retry after it expires")
 	}
 	return err
 }
@@ -179,7 +179,7 @@ func (s *Store) update(ctx context.Context, secret *corev1.Secret, f *factor) er
 	secret.Data["factor"] = payload
 	_, err = s.Client.CoreV1().Secrets(factorNamespace).Update(ctx, secret, metav1.UpdateOptions{})
 	if errors.IsConflict(err) {
-		return fmt.Errorf("2FA state changed concurrently — try again")
+		return fmt.Errorf("2FA state changed concurrently. Try again")
 	}
 	return err
 }
@@ -191,7 +191,7 @@ func (s *Store) deletePending(ctx context.Context, key string, secret *corev1.Se
 		Preconditions: &metav1.Preconditions{UID: &secret.UID, ResourceVersion: &secret.ResourceVersion},
 	})
 	if errors.IsConflict(err) || errors.IsNotFound(err) {
-		return fmt.Errorf("2FA state changed concurrently — try again")
+		return fmt.Errorf("2FA state changed concurrently. Try again")
 	}
 	return err
 }
@@ -265,6 +265,6 @@ func MinFactorAge() time.Duration {
 // policy, but it must never be silent.
 func WarnIfWeakened() {
 	if MinFactorAge() < defaultMinAgeDays*24*time.Hour {
-		log.Printf("SECURITY twofa: %s lowers the migration factor-age gate below %d days — freshly enrolled factors can start migrations sooner", envMinAgeDays, defaultMinAgeDays)
+		log.Printf("SECURITY twofa: %s lowers the migration factor-age gate below %d days, freshly enrolled factors can start migrations sooner", envMinAgeDays, defaultMinAgeDays)
 	}
 }

@@ -222,7 +222,7 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 		// Causes are the initial sync still running, a wedged watch, or a
 		// deleted freshness canary. The probe logs name the specific one; a
 		// missing canary logs the re-apply-the-manifest recovery.
-		http.Error(w, "authz cache not fresh (initial sync, a wedged watch, or a missing freshness canary) — check authz logs", http.StatusServiceUnavailable)
+		http.Error(w, "authz cache not fresh (initial sync, a wedged watch, or a missing freshness canary). Check authz logs", http.StatusServiceUnavailable)
 		return
 	}
 	w.WriteHeader(http.StatusOK)

@@ -17,7 +17,7 @@ Migration is a console feature with visual progress. The flow:
 
 1. **Generate token** on the new cluster (target)
 2. **Paste token** on the old cluster (source), select projects
-3. **Review the plan** — what moves, what gets skipped, capacity numbers, conflicts
+3. **Review the plan**: what moves, what gets skipped, capacity numbers, conflicts
 4. **Start** by confirming with a code from your authenticator app
 5. **Watch progress** as data transfers automatically
 6. **Verify** apps on temporary URLs before touching DNS
@@ -181,7 +181,7 @@ Typical steps:
 
 The health check waits up to 10 minutes for the target's deployments to come up. A fresh server pulling large images can need longer; set `KIPPER_MIGRATION_HEALTH_TIMEOUT` (a duration like `20m`) on the source's console-api to extend it.
 
-A run that skipped data (an oversized database) finishes as **completed with skipped items**, and the completion screen repeats every skip. The skipped data lives only on the source until the manual steps are done — move it before decommissioning anything.
+A run that skipped data (an oversized database) finishes as **completed with skipped items**, and the completion screen repeats every skip. The skipped data lives only on the source until the manual steps are done, so move it before decommissioning anything.
 
 ### 7. Verify your apps
 

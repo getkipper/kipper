@@ -136,7 +136,7 @@ func topConsumers(podMetrics map[string][]podMetricsEntry) string {
 	if len(users) < limit {
 		limit = len(users)
 	}
-	out := " — top consumers: "
+	out := ". Top consumers: "
 	for i := 0; i < limit; i++ {
 		if i > 0 {
 			out += ", "

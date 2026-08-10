@@ -92,7 +92,7 @@ func claimGatewayName(gw registrar, store tokenStore, subdomain, host string) (c
 		// renewing someone's existing name confers no right to end it.
 		if created {
 			if relErr := gw.Deregister(token); relErr != nil {
-				return claim{}, fmt.Errorf("could not record the gateway credential for %s (%w), and could not release the name either (%v) — "+
+				return claim{}, fmt.Errorf("could not record the gateway credential for %s (%w), and could not release the name either (%v), "+
 					"it stays registered until the gateway's 30-day inactivity sweep frees it", reg.Domain, saveErr, relErr)
 			}
 			return claim{}, fmt.Errorf("could not record the gateway credential for %s: %w (the name was released, so re-running is safe)", reg.Domain, saveErr)

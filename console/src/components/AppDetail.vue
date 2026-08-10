@@ -436,7 +436,7 @@ async function handleBind() {
     await op.ready()
     if (!op.stillHere()) return
     await bindService(request)
-    toast.success(`Bound ${bound} — app restarting`)
+    toast.success(`Bound ${bound}: app restarting`)
     if (!onPanel()) return
     bindingService.value = ''
     bindingPrefix.value = ''
@@ -467,7 +467,7 @@ async function handleUnbind(serviceName: string) {
       app: props.appName,
       namespace: project.value,
     })
-    toast.success(`Unbound ${serviceName} — app restarting`)
+    toast.success(`Unbound ${serviceName}: app restarting`)
     if (!op.onPanel()) return
     if (!(await reloadEnvHoldingSlot(op)) && op.stillHere()) {
       toast.error('That worked, but the panel could not be refreshed. Reload before editing variables.')
@@ -518,7 +518,7 @@ async function handleLink() {
     await op.ready()
     if (!op.stillHere()) return
     const resp = await api.linkApp(target, props.appName, project.value, asPublic)
-    toast.success(`Linked ${resp.target} — ${resp.envVar} set`)
+    toast.success(`Linked ${resp.target}: ${resp.envVar} set`)
     if (!onPanel()) return
     linkingTarget.value = ''
     linkingPublic.value = false
@@ -738,7 +738,7 @@ async function fixEnvConflicts() {
     await api.removeEnvConflicts(project.value, props.appName)
     if (!current()) return
     envConflicts.value = []
-    toast.success('Direct env entries removed — envFrom will now take effect')
+    toast.success('Direct env entries removed: envFrom will now take effect')
   } catch {
     toast.error('Failed to remove direct env entries')
   } finally {
@@ -1523,7 +1523,7 @@ async function handleRestart() {
   restarting.value = true
   try {
     await api.restartApp(project.value, props.appName)
-    toast.success(`${restarted} is restarting — pods will be replaced with zero downtime`)
+    toast.success(`${restarted} is restarting: pods will be replaced with zero downtime`)
     if (!current()) return
     // The restart is rolling; clear the banner rather than re-checking, since
     // the old pods still linger mid-rollout and would keep it up. A later env
@@ -1546,7 +1546,7 @@ async function handleUpdateImage() {
   updatingImage.value = true
   try {
     await api.updateImage(project.value, props.appName, newImage.value)
-    toast.success(`${props.appName} image updated — rollout in progress`)
+    toast.success(`${props.appName} image updated, rollout in progress`)
     showImageForm.value = false
     newImage.value = ''
   } catch {
@@ -1792,7 +1792,7 @@ async function saveResources() {
           cpu_limit: cpuLimit.value,
         }
     await api.updateResources(project.value, props.appName, payload)
-    toast.success('Resources updated — pod will restart')
+    toast.success('Resources updated: pod will restart')
   } catch {
     toast.error('Failed to update resources')
   } finally {
@@ -1878,7 +1878,7 @@ async function applyMemoryLimit(bytes: number) {
     })
     memoryLimit.value = quantity
     if (!resourcesAdvanced.value) memoryRequest.value = quantity
-    toast.success(`Memory limit set to ${quantity} — pod will restart`)
+    toast.success(`Memory limit set to ${quantity}: pod will restart`)
     usage.refresh()
   } catch {
     toast.error('Failed to update memory limit')
@@ -1899,7 +1899,7 @@ async function applyCpuLimit(millis: number) {
     })
     cpuLimit.value = quantity
     if (!resourcesAdvanced.value) cpuRequest.value = quantity
-    toast.success(`CPU limit set to ${quantity} — pod will restart`)
+    toast.success(`CPU limit set to ${quantity}: pod will restart`)
     usage.refresh()
   } catch {
     toast.error('Failed to update CPU limit')
@@ -4066,7 +4066,7 @@ function openOptimise() {
               </button>
             </div>
             <p v-if="scaling" class="mt-2 text-xs text-slate-500 dark:text-slate-400">Scaling...</p>
-            <p v-if="autoscaleEnabled" class="mt-2 text-xs text-amber-600 dark:text-amber-400">Manual scaling disabled — autoscaling is active</p>
+            <p v-if="autoscaleEnabled" class="mt-2 text-xs text-amber-600 dark:text-amber-400">Manual scaling disabled, autoscaling is active</p>
           </div>
 
           <!-- Autoscaling -->

@@ -118,7 +118,7 @@ func certificateHealth(ctx context.Context, kubeClient kubernetes.Interface, nam
 		return RouteHealth{
 			IngressReady: true,
 			TLSReady:     false,
-			Message:      fmt.Sprintf("%s is reachable over HTTP only — no TLS configured.", host),
+			Message:      fmt.Sprintf("%s is reachable over HTTP only: no TLS configured.", host),
 		}
 	}
 

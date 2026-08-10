@@ -66,7 +66,7 @@ Examples:
 }
 
 func init() {
-	upgradeCmd.Flags().Bool("skip-system", false, "skip cluster system components (Traefik, Longhorn, KEDA, etc.) — upgrade only Kipper CRDs and console")
+	upgradeCmd.Flags().Bool("skip-system", false, "skip cluster system components (Traefik, Longhorn, KEDA, etc.). Upgrade only Kipper CRDs and console")
 	upgradeCmd.Flags().Bool("yes", false, "skip the confirmation prompt before upgrading system components")
 	upgradeCmd.Flags().String("ssh-key", "", "path to SSH private key for the host; needed by every upgrade, including --skip-system, because the cluster's trust material is reconciled over SSH (overrides cluster.ssh_key in config and KIP_SSH_KEY env)")
 	rootCmd.AddCommand(upgradeCmd)
@@ -790,7 +790,7 @@ func loadPlatformState(ctx context.Context, dyn dynamic.Interface) (installer.Pl
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return installer.PlatformState{}, fmt.Errorf(
-				"PlatformConfig %q not found — refusing to proceed with assumed defaults that could downsize Prometheus or Loki; run `kip install` to create it",
+				"PlatformConfig %q not found: refusing to proceed with assumed defaults that could downsize Prometheus or Loki; run `kip install` to create it",
 				"platform")
 		}
 		return installer.PlatformState{}, err
@@ -878,7 +878,7 @@ func runSystemUpgrade(host, explicitKey, fallbackKey, domain string, dnsResolver
 // the user at --yes — prompting in a script would silently hang.
 func confirmInteractive(prompt string) (bool, error) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return false, fmt.Errorf("stdin is not a terminal — pass --yes to confirm system upgrade non-interactively, or --skip-system")
+		return false, fmt.Errorf("stdin is not a terminal. Pass --yes to confirm system upgrade non-interactively, or --skip-system")
 	}
 	fmt.Print(prompt)
 	reader := bufio.NewReader(os.Stdin)

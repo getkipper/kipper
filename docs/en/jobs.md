@@ -71,6 +71,6 @@ Changes apply to the next job run. They do not affect any execution that is alre
 - **Scheduled jobs** create a `Job` CR with a cron schedule. The reconciler creates a Kubernetes CronJob that spawns a pod on each run.
 - The CLI and the web console write the same Job CRs, so a job created with `kip job schedule` shows up immediately in the Jobs view and vice versa. The CR is the source of truth.
 - A job's `env:` block is published as an immutable Secret named for a digest of its contents, `job-<name>-env-<digest>`, which its pods read through `envFrom`. The name carries the kind, so a job called `api` and an app called `api` in one project keep separate configuration.
-- A value may reference another by name, the same [`${NAME}` syntax apps use](/en/secrets#referencing-another-variable). A job binds no services, so its own `env:` block is all there is to reference — a `${DB_PASSWORD}` in a job reaches the process as written.
+- A value may reference another by name, the same [`${NAME}` syntax apps use](/en/secrets#referencing-another-variable). A job binds no services, so its own `env:` block is all there is to reference: a `${DB_PASSWORD}` in a job reaches the process as written.
 - A retry runs the environment its job started with. The pod template names one exact published Secret and a Kubernetes Job's template cannot be changed once created, so editing `env:` while a job is retrying has no effect on that run. The edit applies to the next one.
 - No additional infrastructure needed. Kubernetes handles the scheduling natively.

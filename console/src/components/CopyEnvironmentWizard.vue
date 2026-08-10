@@ -175,7 +175,7 @@ function applyProdDefaults() {
     const mem = editedMemoryLimit.value[app.name] ?? app.resources?.memoryLimit ?? ''
     if (mem) editedMemoryLimit.value[app.name] = bumpMemory(mem)
   }
-  toast.success('Prod defaults applied — review and adjust if needed')
+  toast.success('Prod defaults applied. Review and adjust if needed')
 }
 
 // bumpMemory multiplies a Kubernetes memory string (Mi, Gi) by ~1.5x,
@@ -304,7 +304,7 @@ async function submit() {
     if (c?.apps) parts.push(`${c.apps} app${c.apps === 1 ? '' : 's'}`)
     if (c?.services) parts.push(`${c.services} service${c.services === 1 ? '' : 's'}`)
     if (c?.secrets) parts.push(`${c.secrets} secret${c.secrets === 1 ? '' : 's'}`)
-    toast.success(`Environment ${resp.name} created${parts.length ? ` — copied ${parts.join(', ')}` : ''}`)
+    toast.success(`Environment ${resp.name} created${parts.length ? `, copied ${parts.join(', ')}` : ''}`)
     emit('created', { name: resp.name })
     emit('close')
   } catch (err) {
@@ -458,7 +458,7 @@ onMounted(() => {
         <p class="text-sm text-slate-600 dark:text-slate-400">
           Set the public hostname for each app on the new environment.
           Defaults use your cluster wildcard ({{ preview?.cluster_domain }}) so
-          they work immediately. Edit if you want a custom domain — you can
+          they work immediately. Edit if you want a custom domain. You can
           always change later via the route panel.
         </p>
         <div v-if="appsWithRoute.length === 0" class="rounded-lg border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500 dark:border-slate-700">
@@ -506,7 +506,7 @@ onMounted(() => {
             Each gets its own pod, PVC and credentials. Cross-service
             references that use the source namespace literally
             (<span class="font-mono">{{ preview.source_namespace }}</span>) are
-            auto-rewritten below — review the rows tagged
+            auto-rewritten below. Review the rows tagged
             <span class="rounded bg-sky-100 px-1 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">auto-updated</span>.
           </p>
         </div>

@@ -212,7 +212,7 @@ func (u *Users) Delete(w http.ResponseWriter, r *http.Request) {
 	// not the Dex subject) still targets them.
 	if u.UISessions != nil {
 		if err := u.UISessions.DeleteBySubject(ctx, email); err != nil {
-			respondError(w, http.StatusInternalServerError, "failed to revoke user sessions — no account state changed, retry")
+			respondError(w, http.StatusInternalServerError, "failed to revoke user sessions: no account state changed, retry")
 			return
 		}
 	}

@@ -161,7 +161,7 @@ func scanOrphanPVCs(ctx context.Context, c client.Client, recorder record.EventR
 
 func warnOrphan(recorder record.EventRecorder, obj client.Object, expectedKind string) {
 	msg := fmt.Sprintf(
-		"%s %q in namespace %q carries %s=%s but no owning %s CR exists — drift",
+		"%s %q in namespace %q carries %s=%s but no owning %s CR exists, which is drift",
 		obj.GetObjectKind().GroupVersionKind().Kind,
 		obj.GetName(),
 		obj.GetNamespace(),

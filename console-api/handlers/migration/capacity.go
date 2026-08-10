@@ -355,7 +355,7 @@ func (h *Handler) fetchTargetCapacity(token *Token, projects []string) (clusterC
 		// silently wave demand through a full cluster.
 		v, ok := resp[f.key].(float64)
 		if !ok {
-			return clusterCapacity{}, "", fmt.Errorf("target capacity response is missing %s — upgrade the target cluster", f.key)
+			return clusterCapacity{}, "", fmt.Errorf("target capacity response is missing %s. Upgrade the target cluster", f.key)
 		}
 		*f.dest = int64(v)
 	}

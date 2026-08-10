@@ -124,7 +124,7 @@ async function runTest() {
   try {
     const res = await runFunctionTest(namespace.value, fnName.value)
     lastTestJob.value = res.job_name
-    toast.success(`Test run started — job ${res.job_name}`)
+    toast.success(`Test run started: job ${res.job_name}`)
     // Open the Logs section if it isn't already, and refresh so the
     // user sees the new pod's output as soon as it boots.
     sectionOpen.value.logs = true
@@ -408,7 +408,7 @@ function scanCodeForImports() {
   if (added === 0 && skippedAsSibling > 0) {
     toast.info('All scanned imports already covered by existing entries')
   } else if (added === 0) {
-    toast.info('No new dependencies — code only uses already-listed packages')
+    toast.info('No new dependencies: code only uses already-listed packages')
   } else {
     toast.success(`Added ${added} dependenc${added === 1 ? 'y' : 'ies'} from code scan`)
   }
@@ -755,7 +755,7 @@ async function save() {
     ])
     secretsToSet.value = []
     secretKeys.value = await fetchFunctionSecretKeys(namespace.value, fnName.value)
-    toast.success('Function saved — controller is rolling out')
+    toast.success('Function saved: controller is rolling out')
   } catch {
     toast.error('Failed to save function')
   } finally {
@@ -837,7 +837,7 @@ function addDependencyFromAI(pkg: string) {
   }
   deps.value.push({ name: pkg, version: '*' })
   sectionOpen.value.deps = true
-  toast.success(`Added ${pkg} — set a version then Save & deploy`)
+  toast.success(`Added ${pkg}. Set a version then Save & deploy`)
 }
 </script>
 
@@ -1223,7 +1223,7 @@ function addDependencyFromAI(pkg: string) {
           <button class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800" @click="addSecretRow">
             <Plus class="w-4 h-4" /> Add secret
           </button>
-          <p class="text-xs text-slate-500">Secret values are write-only — they never round-trip through this UI.</p>
+          <p class="text-xs text-slate-500">Secret values are write-only. They never round-trip through this UI.</p>
         </div>
       </details>
 
@@ -1247,7 +1247,7 @@ function addDependencyFromAI(pkg: string) {
               <span class="font-mono font-semibold dark:text-slate-300">{{ conflict.keep }}</span>
               and
               <span class="font-mono font-semibold dark:text-slate-300">{{ conflict.drop }}</span>
-              install the same module — keep one. The
+              install the same module. Keep one. The
               <span class="font-mono dark:text-slate-300">{{ conflict.keep }}</span> variant is the safer pick on the slim runtime image.
             </div>
             <button
@@ -1316,7 +1316,7 @@ function addDependencyFromAI(pkg: string) {
 
           <div v-else class="space-y-3">
             <p class="text-xs text-slate-500 dark:text-slate-400">
-              Request is reserved on the node. Limit is the cap. Set request lower than limit for burstable workloads — useful when a function spikes during cold start (e.g. JVM JIT or a Python ML model loading) but idles afterwards.
+              Request is reserved on the node. Limit is the cap. Set request lower than limit for burstable workloads, useful when a function spikes during cold start (e.g. JVM JIT or a Python ML model loading) but idles afterwards.
             </p>
             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div>

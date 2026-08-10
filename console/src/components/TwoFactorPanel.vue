@@ -92,7 +92,7 @@ async function handleReset() {
     resetRecoveryCode.value = ''
     recoveryCodes.value = []
     await loadStatus()
-    toast.success('Factor reset — scan the new QR code and confirm')
+    toast.success('Factor reset: scan the new QR code and confirm')
   } catch (e: unknown) {
     toast.error(apiError(e, 'Reset failed'))
   } finally {
@@ -247,7 +247,7 @@ onMounted(loadStatus)
               {{ confirming ? 'Confirming...' : 'Confirm' }}
             </button>
           </div>
-          <p class="text-xs text-slate-400 dark:text-slate-500">The enrollment expires after 15 minutes, and a wrong code voids it — take the current code straight from the app.</p>
+          <p class="text-xs text-slate-400 dark:text-slate-500">The enrollment expires after 15 minutes, and a wrong code voids it, take the current code straight from the app.</p>
         </div>
       </div>
     </div>
@@ -256,7 +256,7 @@ onMounted(loadStatus)
     <div v-if="recoveryCodes.length > 0" class="mt-4 rounded-lg border border-kipper-200 bg-kipper-50 p-4 dark:border-kipper-800 dark:bg-kipper-950/30">
       <div class="mb-2 flex items-center gap-2">
         <KeyRound class="h-4 w-4 text-kipper-600 dark:text-kipper-400" :stroke-width="1.75" />
-        <p class="text-sm font-semibold text-slate-900 dark:text-slate-50">Recovery codes — save them now</p>
+        <p class="text-sm font-semibold text-slate-900 dark:text-slate-50">Recovery codes, save them now</p>
       </div>
       <p class="mb-3 text-xs text-slate-600 dark:text-slate-400">
         Each works once to replace the factor if the device is lost. They are shown only this once.

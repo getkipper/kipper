@@ -220,7 +220,7 @@ func RoleMiddleware(store *RoleStore) func(http.Handler) http.Handler {
 
 			role := store.GetRole(claims.Email)
 			if role == "" {
-				http.Error(w, "forbidden: no role assigned — contact your cluster admin", http.StatusForbidden)
+				http.Error(w, "forbidden: no role assigned. Contact your cluster admin", http.StatusForbidden)
 				return
 			}
 

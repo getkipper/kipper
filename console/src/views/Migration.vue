@@ -448,7 +448,7 @@ onUnmounted(() => {
     <!-- Migration plan: the mandatory report Start lives on -->
     <div v-if="phase === 'plan' && plan" class="relative">
       <!-- While the plan recomputes (e.g. after confirming an overwrite) the
-           old report stays mounted, so dim it and overlay a notice — otherwise
+           old report stays mounted, so dim it and overlay a notice: otherwise
            the previous blockers read as the new answer for a second or two. -->
       <div
         v-if="planning"
@@ -464,7 +464,7 @@ onUnmounted(() => {
       <div class="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
         <h3 class="text-sm font-semibold text-slate-900 dark:text-slate-50">Migration plan</h3>
         <p class="mt-2 text-sm text-slate-600 dark:text-slate-400">
-          You are sending <span class="font-semibold">{{ selectedProjects.join(', ') }}</span> — including databases, volumes, and secrets — to cluster
+          You are sending <span class="font-semibold">{{ selectedProjects.join(', ') }}</span>, including databases, volumes, and secrets, to cluster
           <span class="font-mono font-semibold text-slate-900 dark:text-slate-50">{{ plan.target_cluster }}</span>
           at <span class="font-mono">{{ plan.target_endpoint }}</span><template v-if="plan.target_version"> (Kipper {{ plan.target_version }})</template>.
         </p>
@@ -477,7 +477,7 @@ onUnmounted(() => {
       <NoticeCallout v-if="plan.blockers.length > 0" tone="danger" class="p-5">
         <div class="mb-2 flex items-center gap-2">
           <OctagonAlert class="h-4 w-4 text-red-600 dark:text-rose-300" :stroke-width="1.75" />
-          <h4 class="text-sm font-semibold text-red-800 dark:text-rose-300">Blockers — the migration cannot start</h4>
+          <h4 class="text-sm font-semibold text-red-800 dark:text-rose-300">Blockers. The migration cannot start</h4>
         </div>
         <ul class="space-y-1.5">
           <li v-for="b in plan.blockers" :key="b" class="text-sm text-red-700 dark:text-slate-400">{{ b }}</li>
@@ -588,7 +588,7 @@ onUnmounted(() => {
               <span class="text-sm font-medium text-slate-900 dark:text-slate-50">{{ item.name }}</span>
               <span class="ml-1.5 font-mono text-xs text-slate-500 dark:text-slate-400">{{ item.host }}</span>
               <p v-if="item.domain_class === 'platform'" class="text-xs text-slate-400">Stays on both. New cluster serves {{ item.target_url }}. The old URL keeps working until you decommission the old cluster.</p>
-              <p v-else-if="item.domain_class === 'gateway'" class="text-xs text-slate-400">Free kipper.run subdomain — the new cluster gets its own; re-register separately if you need the old one.</p>
+              <p v-else-if="item.domain_class === 'gateway'" class="text-xs text-slate-400">Free kipper.run subdomain. The new cluster gets its own; re-register separately if you need the old one.</p>
               <p v-else-if="keepDomains.has(domainKey(item))" class="text-xs text-slate-400">Kept on the old cluster. The new cluster serves {{ item.target_url }}.</p>
               <p v-else class="text-xs text-slate-400">Moves to the new cluster. Live once you repoint its DNS; the new cluster issues the certificate then.</p>
             </div>
@@ -817,7 +817,7 @@ onUnmounted(() => {
             :disabled="cutoverTotp.length !== 6"
             class="rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-kipper-700 disabled:opacity-40"
           >
-            Everything looks good — apply custom domains
+            Everything looks good: apply custom domains
           </button>
         </div>
       </div>
@@ -836,7 +836,7 @@ onUnmounted(() => {
         </div>
         <p class="mb-4 text-sm text-slate-500 dark:text-slate-400">
           <span v-if="domains.every(d => d.resolved)">All domains point at the new cluster. Migration complete.</span>
-          <span v-else>Point each record below at the new server at your DNS provider. Take your time — press "Check again" once you've made the changes. Certificates are issued once DNS lands.</span>
+          <span v-else>Point each record below at the new server at your DNS provider. Take your time, press "Check again" once you've made the changes. Certificates are issued once DNS lands.</span>
         </p>
         <div class="space-y-2">
           <div v-for="d in domains" :key="d.domain" class="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 px-4 py-3 dark:border-slate-700 dark:bg-slate-800">

@@ -19,11 +19,11 @@ kip install --host <ip> [flags]
 | `--org` | No | — | Organisation short code (e.g. `acme`), used as namespace prefix |
 | `--org-display-name` | No | — | Human-readable organisation name (e.g. `Acme Inc`) |
 | `--harden` | No | `true` | Disable surplus host services exposed on public interfaces (e.g. `rpcbind`). Pass `--harden=false` only when you manage host security yourself |
-| `--admin-kubeconfig` | No | `false` | Write the shared k3s admin certificate to this machine instead of a per-operator OIDC kubeconfig. The certificate is unattributed and revocable only by rotating the cluster CA — a CI escape hatch, not the everyday path |
+| `--admin-kubeconfig` | No | `false` | Write the shared k3s admin certificate to this machine instead of a per-operator OIDC kubeconfig. The certificate is unattributed and revocable only by rotating the cluster CA. A CI escape hatch, not the everyday path |
 | `--no-login` | No | `false` | Skip the inline browser sign-in during install. The machine ends up with a credential-free kubeconfig; the first operator runs `kip auth login && kip auth verify` afterwards |
 | `--firewall` | No | `true` | Install and configure UFW with k3s-correct rules. Skipped automatically if another firewall is already active. Pass `--firewall=false` only when you manage host security yourself |
 | `--no-ssh-rate-limit` | No | `false` | Open the SSH port outright instead of rate-limiting it. See below |
-| `--dns-resolver` | No | `1.1.1.1`, `8.8.8.8`, `9.9.9.9` | Upstream DNS resolver CoreDNS forwards external queries to. Repeatable, up to three IPv4 addresses (the resolv.conf nameserver limit; the cluster pod network is IPv4-only). Kipper forwards to reliable public resolvers instead of the host's `/etc/resolv.conf`, which varies by provider and can carry unreachable or rate-limited entries that break cluster DNS. The default sends your workloads' external DNS lookups to Cloudflare, Google, and Quad9. On private, split-horizon, or data-residency-sensitive networks, set your own resolvers (e.g. `--dns-resolver 10.0.0.53`) — this is also how clusters resolve internal or corporate names. During install, Kipper checks each resolver is reachable from the server on port 53 and warns about any that are not |
+| `--dns-resolver` | No | `1.1.1.1`, `8.8.8.8`, `9.9.9.9` | Upstream DNS resolver CoreDNS forwards external queries to. Repeatable, up to three IPv4 addresses (the resolv.conf nameserver limit; the cluster pod network is IPv4-only). Kipper forwards to reliable public resolvers instead of the host's `/etc/resolv.conf`, which varies by provider and can carry unreachable or rate-limited entries that break cluster DNS. The default sends your workloads' external DNS lookups to Cloudflare, Google, and Quad9. On private, split-horizon, or data-residency-sensitive networks, set your own resolvers (e.g. `--dns-resolver 10.0.0.53`), which is also how clusters resolve internal or corporate names. During install, Kipper checks each resolver is reachable from the server on port 53 and warns about any that are not |
 | `--trusted-proxy` | No | — | IP or CIDR whose `X-Forwarded-*` headers Traefik honours. Repeatable. Set it when an external load balancer or proxy sits in front of the cluster, so apps and logs see real client addresses instead of the balancer's. The kipper.run gateway is trusted automatically; with no proxy in front, leave it unset and forwarded headers are ignored |
 | `--backup-storage-bucket` | No | — | S3-compatible bucket name for Velero backups. When set, backups live off-cluster and survive a wipe. See [External backup storage](#external-backup-storage) below |
 | `--backup-storage-region` | If bucket set | — | AWS region or provider equivalent. Use the actual region for AWS S3, `auto` for Cloudflare R2, whatever your provider expects elsewhere |
@@ -35,7 +35,7 @@ kip install --host <ip> [flags]
 
 The firewall Kipper installs rate-limits SSH: six connections in thirty seconds from one address, then that address is dropped for a while. A brute-force sweep looks exactly like that and a person never does, so this costs you nothing and keeps the noise off your server.
 
-It matters more than it sounds. A server on a public IP gets scanned constantly, and OpenSSH starts refusing *new* connections once ten unauthenticated ones are in flight — including yours. One of our own installs failed halfway through for exactly that reason, while six bots were working through passwords on port 22.
+It matters more than it sounds. A server on a public IP gets scanned constantly, and OpenSSH starts refusing *new* connections once ten unauthenticated ones are in flight, including yours. One of our own installs failed halfway through for exactly that reason, while six bots were working through passwords on port 22.
 
 Turn it off with `--no-ssh-rate-limit` if your legitimate traffic can look like a burst:
 
@@ -53,7 +53,7 @@ You can change your mind later:
 kip cluster harden --no-ssh-rate-limit
 ```
 
-Kipper also skips the rate limit on its own when it cannot share one connection for the whole install — on a machine where it cannot write to your home directory, for instance. Rate-limiting a port it then needs hundreds of connections through would lock it out of your half-built server.
+Kipper also skips the rate limit on its own when it cannot share one connection for the whole install, on a machine where it cannot write to your home directory for instance. Rate-limiting a port it then needs hundreds of connections through would lock it out of your half-built server.
 
 ## What it installs
 
@@ -415,11 +415,11 @@ By default a fresh install writes a **credential-free** kubeconfig: it carries t
   ✔  kubectl authenticates as admin@shop.kipper.run — the admin certificate never left the server (break-glass: ssh, then sudo k3s kubectl)
 ```
 
-Headless installs (CI, no terminal, or `--no-login`) finish credential-free without the sign-in; the first operator runs `kip auth login && kip auth verify`. The admin certificate reaches your machine only when you ask for it with `--admin-kubeconfig`, when an interactive install fails partway (so you can inspect the half-built cluster), or when sign-in genuinely fails to authorize against the cluster — each case says so loudly.
+Headless installs (CI, no terminal, or `--no-login`) finish credential-free without the sign-in; the first operator runs `kip auth login && kip auth verify`. The admin certificate reaches your machine only when you ask for it with `--admin-kubeconfig`, when an interactive install fails partway (so you can inspect the half-built cluster), or when sign-in genuinely fails to authorize against the cluster. Each case says so loudly.
 
 ## kip auth verify
 
-Proves your OIDC identity authenticates and authorizes against the cluster — the same check the installer runs inline. Run it after a headless install, or any time you want to confirm the login path works end to end.
+Proves your OIDC identity authenticates and authorizes against the cluster, the same check the installer runs inline. Run it after a headless install, or any time you want to confirm the login path works end to end.
 
 ```bash
 kip auth verify
@@ -835,7 +835,7 @@ kip user import dex-snapshot.yaml --restart-dex    # also roll Dex so the new co
 
 Merges the `staticPasswords` and `connectors` blocks from a captured `dex-config` snapshot into the live `dex/dex-config` ConfigMap. The snapshot can be either a full ConfigMap manifest (`kubectl get cm dex-config -n dex -o yaml`) or the raw Dex config YAML directly.
 
-Existing entries on the live side always win on conflicts, so the install admin cannot get overwritten with stale snapshot data. Use this after a Velero restore that brought a pre-rename `dex-config` across — without it, production users live in the snapshot but the new install only knows about the bootstrap admin.
+Existing entries on the live side always win on conflicts, so the install admin cannot get overwritten with stale snapshot data. Use this after a Velero restore that brought a pre-rename `dex-config` across. Without it, production users live in the snapshot but the new install only knows about the bootstrap admin.
 
 Pass `--restart-dex` to roll the Dex Deployment automatically. Without it, run `kubectl -n dex rollout restart deploy/dex` once the import finishes.
 
@@ -856,7 +856,7 @@ Pass `--restart-dex` to roll the Dex Deployment automatically. Without it, run `
 
 Every invite is for one named person. An invite without an address would be a
 link granting its role to whoever opened it, under whatever identity they typed,
-so the address is required. It does not need mail configured — the command
+so the address is required. It does not need mail configured, because the command
 prints the link either way, and you can send it however you like.
 
 `--role` is the role across the whole cluster. To give someone access to one project instead, invite
@@ -875,7 +875,7 @@ See [Team Access](/en/team-access) for full documentation.
 
 ## kip 2fa
 
-Manage two-factor authentication for console users. Destructive operations — starting a cluster migration and applying its cutover — require a TOTP code on top of the admin login, and enrolling a factor requires a one-time code that only these host-level commands can issue.
+Manage two-factor authentication for console users. Destructive operations, meaning starting a cluster migration and applying its cutover, require a TOTP code on top of the admin login, and enrolling a factor requires a one-time code that only these host-level commands can issue.
 
 ```bash
 kip 2fa bootstrap admin@example.com    # issue a one-time enrollment code
@@ -1094,7 +1094,7 @@ kip init --blueprint nodejs -o kipper.yaml
 Upgrades the cluster to the versions pinned in this kip build. Three things happen, in order:
 
 1. **Kipper CRDs** are updated (so newer console features that need new CRD fields work).
-2. **Console and console-api** are restarted to pull the latest images. console-api also gets the pod security settings this kip build ships — non-root, no privilege escalation, dropped capabilities, a read-only root filesystem — so a cluster installed a while ago ends up with the same posture as a fresh install. Anything you added to the Deployment by hand, such as an extra volume, is kept. Each component is then waited for: kip only moves on once the new pods are actually running, and stops with the reason if one of them cannot start. That matters because a rollout keeps the previous pod serving while the new one fails, so without the wait a broken upgrade looks exactly like a working one.
+2. **Console and console-api** are restarted to pull the latest images. console-api also gets the pod security settings this kip build ships (non-root, no privilege escalation, dropped capabilities, a read-only root filesystem), so a cluster installed a while ago ends up with the same posture as a fresh install. Anything you added to the Deployment by hand, such as an extra volume, is kept. Each component is then waited for: kip only moves on once the new pods are actually running, and stops with the reason if one of them cannot start. That matters because a rollout keeps the previous pod serving while the new one fails, so without the wait a broken upgrade looks exactly like a working one.
 3. **Cluster system components** (Traefik, Longhorn, KEDA, Loki, Prometheus, Grafana, Velero, Zot, security middleware) are reconciled. Each chart is re-applied at the version pinned in kip, and helm-controller upgrades it in place.
 
 On a cluster that uses a `*.kipper.run` name, the upgrade also records that name and the address the cluster registers with on the ClusterIdentity, which is where the console reads them from when it renews the registration. It keeps the address already recorded rather than replacing it, and tells you when the cluster answers somewhere else: a server that has genuinely moved needs a fresh registration, because the gateway ties a name to one address. A cluster that has never registered is left alone and told so, since only you know whether it should hold a kipper.run name.

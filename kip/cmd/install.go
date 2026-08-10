@@ -38,7 +38,7 @@ func init() {
 	installCmd.Flags().String("org", "", "organisation short code (e.g. acme)")
 	installCmd.Flags().String("org-display-name", "", "organisation display name (e.g. Acme Inc)")
 	installCmd.Flags().Bool("harden", true, "disable surplus host services exposed on public interfaces (e.g. rpcbind)")
-	installCmd.Flags().Bool("admin-kubeconfig", false, "write the shared k3s admin certificate to this machine instead of a per-operator OIDC kubeconfig; CI escape hatch — the certificate is unattributed and revocable only by rotation")
+	installCmd.Flags().Bool("admin-kubeconfig", false, "write the shared k3s admin certificate to this machine instead of a per-operator OIDC kubeconfig; CI escape hatch. The certificate is unattributed and revocable only by rotation")
 	installCmd.Flags().Bool("no-login", false, "skip the inline sign-in; run kip auth login && kip auth verify later")
 	installCmd.Flags().Bool("firewall", true, "install and configure UFW with a k3s-correct ruleset (skipped if another firewall is detected)")
 	installCmd.Flags().Bool("no-ssh-rate-limit", false, "open the SSH port outright instead of limiting it to six connections per thirty seconds per source; set this for CI, or when several operators share one NAT address")

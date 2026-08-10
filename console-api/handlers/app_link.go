@@ -141,12 +141,12 @@ func (a *Apps) Link(w http.ResponseWriter, r *http.Request) {
 		// left for the reconciler to derive) still yields a usable public URL
 		// instead of reading as "no route".
 		if targetCR.Spec.Route == nil {
-			respondError(w, http.StatusBadRequest, fmt.Sprintf("target app %q has no public route — create one first", req.Target))
+			respondError(w, http.StatusBadRequest, fmt.Sprintf("target app %q has no public route. Create one first", req.Target))
 			return
 		}
 		host := a.resolveRouteHost(ctx, ns, req.Target, targetCR.Spec.Route.Host)
 		if host == "" {
-			respondError(w, http.StatusBadRequest, fmt.Sprintf("target app %q has no public route — create one first", req.Target))
+			respondError(w, http.StatusBadRequest, fmt.Sprintf("target app %q has no public route. Create one first", req.Target))
 			return
 		}
 		path := targetCR.Spec.Route.Path

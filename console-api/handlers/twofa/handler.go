@@ -72,7 +72,7 @@ func (h *Handler) EnrollHandler(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if !h.limiter.allowed("bootstrap/" + key) {
-		respondError(w, http.StatusTooManyRequests, "too many failed attempts — wait a few minutes")
+		respondError(w, http.StatusTooManyRequests, "too many failed attempts. Wait a few minutes")
 		return
 	}
 	if err := h.Store.consumeBootstrapCode(ctx, claims.Email, req.BootstrapCode); err != nil {
@@ -151,11 +151,11 @@ func (h *Handler) ConfirmHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if f.State != factorStatePending {
-		respondError(w, http.StatusConflict, "the factor is already active — use reset to rotate it")
+		respondError(w, http.StatusConflict, "the factor is already active. Use reset to rotate it")
 		return
 	}
 	if time.Since(f.CreatedAt) > pendingTTL {
-		respondError(w, http.StatusGone, "the enrollment has expired — start again")
+		respondError(w, http.StatusGone, "the enrollment has expired. Start again")
 		return
 	}
 
@@ -171,9 +171,9 @@ func (h *Handler) ConfirmHandler(w http.ResponseWriter, r *http.Request) {
 		h.emit(ctx, security.Event{
 			Kind:    "twofa_confirm_failed",
 			User:    claims.Email,
-			Summary: fmt.Sprintf("2FA confirmation failed for %s — the pending enrollment was voided", claims.Email),
+			Summary: fmt.Sprintf("2FA confirmation failed for %s: the pending enrollment was voided", claims.Email),
 		})
-		respondError(w, http.StatusForbidden, "wrong code — the enrollment is void, start again with a new code from the host")
+		respondError(w, http.StatusForbidden, "wrong code: the enrollment is void, start again with a new code from the host")
 		return
 	}
 	h.limiter.reset(key)
@@ -198,10 +198,10 @@ func (h *Handler) ConfirmHandler(w http.ResponseWriter, r *http.Request) {
 	h.emit(ctx, security.Event{
 		Kind:    "twofa_enrolled",
 		User:    claims.Email,
-		Summary: fmt.Sprintf("2FA factor enrolled for %s — if this was not them, their account is compromised", claims.Email),
+		Summary: fmt.Sprintf("2FA factor enrolled for %s: if this was not them, their account is compromised", claims.Email),
 		Fields: []security.Field{
 			{Key: "migration_eligible_at", Value: eligibleAt.Format(time.RFC3339)},
-			{Key: "action_if_unexpected", Value: "this factor can start a cluster migration once eligible — reset it and the account credentials now"},
+			{Key: "action_if_unexpected", Value: "this factor can start a cluster migration once eligible: reset it and the account credentials now"},
 		},
 	})
 
@@ -293,12 +293,12 @@ func (h *Handler) ResetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if f.State != factorStateActive {
-		respondError(w, http.StatusConflict, "no active factor to reset — confirm or restart the pending enrollment")
+		respondError(w, http.StatusConflict, "no active factor to reset. Confirm or restart the pending enrollment")
 		return
 	}
 
 	if !h.limiter.allowed(key) {
-		respondError(w, http.StatusTooManyRequests, "too many failed attempts — wait a few minutes")
+		respondError(w, http.StatusTooManyRequests, "too many failed attempts. Wait a few minutes")
 		return
 	}
 
@@ -350,7 +350,7 @@ func (h *Handler) ResetHandler(w http.ResponseWriter, r *http.Request) {
 	h.emit(ctx, security.Event{
 		Kind:    "twofa_reset",
 		User:    claims.Email,
-		Summary: fmt.Sprintf("2FA factor reset for %s — the old factor and recovery codes are void", claims.Email),
+		Summary: fmt.Sprintf("2FA factor reset for %s: the old factor and recovery codes are void", claims.Email),
 		Fields: []security.Field{
 			{Key: "via_recovery_code", Value: fmt.Sprintf("%t", usedRecovery)},
 		},
@@ -416,12 +416,12 @@ func (h *Handler) VerifyStepUp(ctx context.Context, claims *middleware.Claims, c
 		f, secret, err := h.Store.get(ctx, key)
 		if err != nil {
 			if errors.IsNotFound(err) {
-				return ErrFactorNotEligible{msg: "no 2FA factor enrolled — enroll one in Settings first"}
+				return ErrFactorNotEligible{msg: "no 2FA factor enrolled: enroll one in Settings first"}
 			}
 			return fmt.Errorf("reading 2FA factor: %w", err)
 		}
 		if f.State != factorStateActive {
-			return ErrFactorNotEligible{msg: "the 2FA enrollment is unconfirmed — finish it in Settings first"}
+			return ErrFactorNotEligible{msg: "the 2FA enrollment is unconfirmed: finish it in Settings first"}
 		}
 		minAge := MinFactorAge()
 		if eligibleAt := f.EnrolledAt.Add(minAge); time.Now().Before(eligibleAt) {
@@ -434,12 +434,12 @@ func (h *Handler) VerifyStepUp(ctx context.Context, claims *middleware.Claims, c
 				},
 			})
 			return ErrFactorNotEligible{msg: fmt.Sprintf(
-				"the 2FA factor is too new for this operation — it becomes eligible on %s (host operators can adjust %s)",
+				"the 2FA factor is too new for this operation: it becomes eligible on %s (host operators can adjust %s)",
 				eligibleAt.Format("2 January 2006 15:04 MST"), envMinAgeDays)}
 		}
 
 		if !h.limiter.allowed(key) {
-			return ErrFactorNotEligible{msg: "too many failed attempts — wait a few minutes"}
+			return ErrFactorNotEligible{msg: "too many failed attempts. Wait a few minutes"}
 		}
 		counter, ok := matchCode(f.Secret, code, time.Now(), f.LastCounter)
 		if !ok {
@@ -462,7 +462,7 @@ func (h *Handler) VerifyStepUp(ctx context.Context, claims *middleware.Claims, c
 		h.limiter.reset(key)
 		return nil
 	}
-	return fmt.Errorf("2FA state changed concurrently — try again")
+	return fmt.Errorf("2FA state changed concurrently. Try again")
 }
 
 func respondJSON(w http.ResponseWriter, status int, data interface{}) {

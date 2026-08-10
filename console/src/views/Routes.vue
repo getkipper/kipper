@@ -108,7 +108,7 @@ async function saveForm() {
         host: formHost.value || undefined,
         mappings: validMappings,
       })
-      toast.success(`Route group created — ${resp.url}`)
+      toast.success(`Route group created, ${resp.url}`)
     }
     showForm.value = false
     await loadRoutes()

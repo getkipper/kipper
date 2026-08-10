@@ -127,7 +127,7 @@ func main() {
 	// Refuse to serve without project enforcement wired — fail closed rather
 	// than let the in-handler helpers skip their checks.
 	if !handlers.ProjectResolverWired() {
-		log.Fatal("project access resolver not wired — refusing to start")
+		log.Fatal("project access resolver not wired: refusing to start")
 	}
 
 	port := os.Getenv("PORT")

@@ -110,7 +110,7 @@ func ValidateToken(ctx context.Context, client kubernetes.Interface, secret stri
 	k8sSecret, err := client.CoreV1().Secrets(tokenSecretNamespace).Get(ctx, tokenSecretName, metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return fmt.Errorf("no migration token configured — generate one first")
+			return fmt.Errorf("no migration token configured: generate one first")
 		}
 		return fmt.Errorf("reading migration token: %w", err)
 	}
@@ -123,7 +123,7 @@ func ValidateToken(ctx context.Context, client kubernetes.Interface, secret stri
 	// malformed secret. GenerateToken always writes 64 hex chars, so this is
 	// defence in depth.
 	if storedSecret == "" {
-		return fmt.Errorf("migration token is not usable — generate a new one")
+		return fmt.Errorf("migration token is not usable: generate a new one")
 	}
 
 	expires, err := time.Parse(time.RFC3339, expiresStr)
@@ -132,7 +132,7 @@ func ValidateToken(ctx context.Context, client kubernetes.Interface, secret stri
 	}
 
 	if time.Now().After(expires) {
-		return fmt.Errorf("migration token has expired — generate a new one")
+		return fmt.Errorf("migration token has expired: generate a new one")
 	}
 
 	if subtle.ConstantTimeCompare([]byte(storedSecret), []byte(secret)) != 1 {
@@ -188,11 +188,11 @@ func DecodeToken(tokenStr string) (*Token, error) {
 		return nil, fmt.Errorf("migration token carries an invalid endpoint")
 	}
 	if u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
-		return nil, fmt.Errorf("migration token endpoint must use https — plaintext transport would expose every transferred secret")
+		return nil, fmt.Errorf("migration token endpoint must use https: plaintext transport would expose every transferred secret")
 	}
 
 	if time.Now().After(token.Expires) {
-		return nil, fmt.Errorf("migration token has expired — generate a new one on the target cluster")
+		return nil, fmt.Errorf("migration token has expired: generate a new one on the target cluster")
 	}
 
 	// The base domain drives the coexist URLs and the env/secret rewrite, and an
@@ -200,7 +200,7 @@ func DecodeToken(tokenStr string) (*Token, error) {
 	// freshly generated token always carries it, so require a canonical value
 	// rather than tolerate an "older target".
 	if !looksLikeDomain(token.BaseDomain) {
-		return nil, fmt.Errorf("migration token is missing a valid target base domain — generate a new one on the target cluster")
+		return nil, fmt.Errorf("migration token is missing a valid target base domain: generate a new one on the target cluster")
 	}
 
 	return &token, nil

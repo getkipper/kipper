@@ -335,7 +335,7 @@ func (s CAState) Anomalies() []string {
 	}
 	for _, fingerprint := range s.surplusAnchorAuthorities() {
 		out = append(out, fmt.Sprintf(
-			"the API server is anchored on an authority this cluster does not hold (%s); if that is one you replaced, it can still sign logins — narrow the anchor to the authorities above and run 'kip cluster auth sync'",
+			"the API server is anchored on an authority this cluster does not hold (%s); if that is one you replaced, it can still sign logins, narrow the anchor to the authorities above and run 'kip cluster auth sync'",
 			fingerprint))
 	}
 	// A cutover rewrites the same authentication config, so the two operations

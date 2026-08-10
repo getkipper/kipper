@@ -268,7 +268,7 @@ func (f *Files) Content(w http.ResponseWriter, r *http.Request) {
 
 	size, err := strconv.ParseInt(strings.TrimSpace(sizeOutput), 10, 64)
 	if err == nil && size > maxFileSize {
-		respondError(w, http.StatusRequestEntityTooLarge, "file exceeds 1MB limit — use download instead")
+		respondError(w, http.StatusRequestEntityTooLarge, "file exceeds 1MB limit. Use download instead")
 		return
 	}
 

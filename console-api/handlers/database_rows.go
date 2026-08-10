@@ -335,7 +335,7 @@ func (d *Database) UpdateRow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(structure.PrimaryKey) == 0 {
-		respondError(w, http.StatusBadRequest, "table has no primary key — cannot update by PK")
+		respondError(w, http.StatusBadRequest, "table has no primary key: cannot update by PK")
 		return
 	}
 	pkSet := map[string]bool{}
@@ -428,7 +428,7 @@ func (d *Database) DeleteRows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(structure.PrimaryKey) == 0 {
-		respondError(w, http.StatusBadRequest, "table has no primary key — cannot delete by PK")
+		respondError(w, http.StatusBadRequest, "table has no primary key: cannot delete by PK")
 		return
 	}
 

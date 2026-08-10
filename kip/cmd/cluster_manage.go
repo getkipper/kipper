@@ -205,7 +205,7 @@ func runClusterEnv(_ *cobra.Command, args []string) error {
 
 	ns, ok := namespaces[component]
 	if !ok {
-		return fmt.Errorf("unknown component %q — valid options: console, console-api, dex, traefik", component)
+		return fmt.Errorf("unknown component %q: valid options: console, console-api, dex, traefik", component)
 	}
 
 	_, k8sClient, err := loadCurrentCluster()
@@ -226,7 +226,7 @@ func runClusterEnv(_ *cobra.Command, args []string) error {
 	for _, pair := range args[1:] {
 		parts := strings.SplitN(pair, "=", 2)
 		if len(parts) != 2 {
-			return fmt.Errorf("invalid env var %q — expected KEY=VALUE format", pair)
+			return fmt.Errorf("invalid env var %q: expected KEY=VALUE format", pair)
 		}
 		key, value := parts[0], parts[1]
 
@@ -246,7 +246,7 @@ func runClusterEnv(_ *cobra.Command, args []string) error {
 		if component == "console-api" && cascadesToAllApps(key) {
 			fmt.Printf("\n  ⚠  %s is read by the App controller. When console-api restarts,\n", key)
 			fmt.Printf("     every App in the cluster will roll its pods to pick up the new value.\n")
-			fmt.Printf("     For JVM apps with low CPU limits this can cause prolonged JIT throttling —\n")
+			fmt.Printf("     For JVM apps with low CPU limits this can cause prolonged JIT throttling -\n")
 			fmt.Printf("     consider switching them to the 'jvm' profile (burstable CPU) first.\n\n")
 		}
 	}
@@ -320,7 +320,7 @@ func runClusterExport(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("reading kubeconfig: %w", err)
 	}
 
-	fmt.Printf("# Kipper cluster export — share this file with team members\n")
+	fmt.Printf("# Kipper cluster export: share this file with team members\n")
 	fmt.Printf("# Import with: kip cluster add <file>\n")
 	fmt.Printf("name: %s\n", cluster.Name)
 	fmt.Printf("provider: %s\n", cluster.Provider)
@@ -361,7 +361,7 @@ func rejectEmbeddedCredential(kubeconfig []byte) error {
 		if len(ai.ClientCertificateData) > 0 || ai.ClientCertificate != "" ||
 			len(ai.ClientKeyData) > 0 || ai.ClientKey != "" ||
 			ai.Token != "" || ai.TokenFile != "" {
-			return fmt.Errorf("refusing to import kubeconfig: user %q carries an embedded credential (client certificate/key or token). Kipper uses per-operator OIDC login — import a credential-free export, then run `kip auth login` against the cluster", name)
+			return fmt.Errorf("refusing to import kubeconfig: user %q carries an embedded credential (client certificate/key or token). Kipper uses per-operator OIDC login. Import a credential-free export, then run `kip auth login` against the cluster", name)
 		}
 	}
 	return nil
@@ -484,7 +484,7 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	if name == "" || host == "" {
-		return fmt.Errorf("invalid export file — missing name or host")
+		return fmt.Errorf("invalid export file: missing name or host")
 	}
 
 	kubeconfigB64 := strings.Join(kubeconfigLines, "")
@@ -700,7 +700,7 @@ func renameKubeconfigFile(oldPath, newName, domain string) (string, error) {
 		// not record, and committing the rename either way leaves the entry
 		// naming a file that is not there. Say so and change nothing.
 		return oldPath, fmt.Errorf("%s is missing and %s already exists but does not identify itself as %s. "+
-			"If %s is this cluster's — a kubeconfig from before the exec pin, or one an interrupted rename moved — "+
+			"If %s is this cluster's: a kubeconfig from before the exec pin, or one an interrupted rename moved, "+
 			"move it back to %s and re-run. If it belongs to something else, move it out of the way first",
 			oldPath, newPath, domain, newPath, oldPath)
 	}

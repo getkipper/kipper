@@ -105,22 +105,22 @@ async function addFiles(files: FileList | File[]) {
   for (const file of list) {
     const ext = fileExtension(file.name)
     if (!ALLOWED_EXTENSIONS.has(ext)) {
-      toast.error(`${file.name} — file type not supported (text source files only)`)
+      toast.error(`${file.name}: file type not supported (text source files only)`)
       continue
     }
     if (file.size > MAX_FILE_BYTES) {
-      toast.error(`${file.name} — too large (max ${MAX_FILE_BYTES / 1024}KB per file)`)
+      toast.error(`${file.name}: too large (max ${MAX_FILE_BYTES / 1024}KB per file)`)
       continue
     }
     if (totalAttachmentBytes.value + file.size > MAX_TOTAL_BYTES) {
-      toast.error(`${file.name} — total attachment size would exceed ${MAX_TOTAL_BYTES / 1024}KB`)
+      toast.error(`${file.name}: total attachment size would exceed ${MAX_TOTAL_BYTES / 1024}KB`)
       continue
     }
     try {
       const content = await readFileAsText(file)
       pendingAttachments.value.push({ name: file.name, size: file.size, content })
     } catch {
-      toast.error(`${file.name} — could not be read`)
+      toast.error(`${file.name}: could not be read`)
     }
   }
   if (fileInputEl.value) fileInputEl.value.value = ''
@@ -439,7 +439,7 @@ watch(() => props.code, () => {
                 v-for="(a, ai) in msg.attachments"
                 :key="ai"
                 class="inline-flex items-center gap-1 rounded-md bg-white/15 px-1.5 py-0.5 text-[10px] font-medium"
-                :title="`${a.name} — ${formatBytes(a.size)}`"
+                :title="`${a.name}, ${formatBytes(a.size)}`"
               >
                 <FileText class="h-2.5 w-2.5" />
                 {{ a.name }}
@@ -477,7 +477,7 @@ watch(() => props.code, () => {
                 :key="pkg"
                 @click="addDependency(pkg)"
                 class="inline-flex items-center gap-1 rounded-md bg-amber-500/15 px-2 py-1 text-[10px] font-medium text-amber-400 transition-colors hover:bg-amber-500/25"
-                :title="`Add ${pkg} to dependencies — the runtime will install it on next deploy`"
+                :title="`Add ${pkg} to dependencies: the runtime will install it on next deploy`"
               >
                 + {{ pkg }}
               </button>

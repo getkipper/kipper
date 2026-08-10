@@ -348,9 +348,9 @@ Your app never sees the authentication. Traefik handles it at the ingress level.
 
 ## Step-up 2FA for destructive operations
 
-Cluster migration — the operation that copies every secret and database to another cluster — requires a TOTP code from an enrolled authenticator app on top of the admin login, and the factor must be at least 7 days old. Enrollment itself needs a one-time code issued from the cluster host with `kip 2fa bootstrap`, so a stolen console login can never enroll its own device. Every migration event and every 2FA change alerts all admins out-of-band.
+Cluster migration, the operation that copies every secret and database to another cluster, requires a TOTP code from an enrolled authenticator app on top of the admin login, and the factor must be at least 7 days old. Enrollment itself needs a one-time code issued from the cluster host with `kip 2fa bootstrap`, so a stolen console login can never enroll its own device. Every migration event and every 2FA change alerts all admins out-of-band.
 
-The gate protects against a compromised console identity, not against a compromised server or kubeconfig — someone with root on the node or the cluster-admin kubeconfig bypasses the console entirely. Harden the host and guard the kubeconfig accordingly. The full model, including the host-pinned notification channels and the outbound-migration kill switch, is in [Cluster Migration → Security model](/en/migration#security-model).
+The gate protects against a compromised console identity, not against a compromised server or kubeconfig. Someone with root on the node or the cluster-admin kubeconfig bypasses the console entirely. Harden the host and guard the kubeconfig accordingly. The full model, including the host-pinned notification channels and the outbound-migration kill switch, is in [Cluster Migration → Security model](/en/migration#security-model).
 
 ## Your responsibilities
 

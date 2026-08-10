@@ -241,7 +241,7 @@ func getPlatformConfig(ctx context.Context, dyn dynamic.Interface) (*unstructure
 	pc, err := dyn.Resource(platformGVR).Get(ctx, platformConfigName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("PlatformConfig %q not found — run 'kip install' or upgrade an older cluster", platformConfigName)
+			return nil, fmt.Errorf("PlatformConfig %q not found. Run 'kip install' or upgrade an older cluster", platformConfigName)
 		}
 		return nil, fmt.Errorf("reading PlatformConfig: %w", err)
 	}

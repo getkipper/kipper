@@ -109,11 +109,11 @@ func (s *Shares) Create(w http.ResponseWriter, r *http.Request) {
 	// will be bound to, instead of predicting one and hoping.
 	var ing networkingv1.Ingress
 	if err := s.CRClient.Get(ctx, crclient.ObjectKey{Namespace: namespace, Name: name + "-ui"}, &ing); err != nil {
-		respondError(w, http.StatusConflict, "the service UI is not reconciled yet — try again shortly")
+		respondError(w, http.StatusConflict, "the service UI is not reconciled yet. Try again shortly")
 		return
 	}
 	if len(ing.Spec.Rules) == 0 || ing.Spec.Rules[0].Host != host {
-		respondError(w, http.StatusConflict, "the service UI hostname is not reconciled yet — try again shortly")
+		respondError(w, http.StatusConflict, "the service UI hostname is not reconciled yet. Try again shortly")
 		return
 	}
 
@@ -210,7 +210,7 @@ func (s *Shares) Revoke(w http.ResponseWriter, r *http.Request) {
 		// telling the caller it is gone.
 		log.Printf("security event: share link revoke FAILED service=%s/%s id=%s by=%s err=%v",
 			namespace, name, share.JTIPrefix(id), actorEmail(r), err)
-		respondError(w, http.StatusServiceUnavailable, "failed to revoke the share link — it may still be active, try again")
+		respondError(w, http.StatusServiceUnavailable, "failed to revoke the share link: it may still be active, try again")
 		return
 	}
 	log.Printf("security event: share link revoked service=%s/%s id=%s by=%s",

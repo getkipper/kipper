@@ -91,7 +91,7 @@ func (c *Claude) Chat(ctx context.Context, system string, messages []Message) (<
 				ch <- StreamChunk{Content: event.Delta.Text}
 			}
 			if event.Type == "message_delta" && event.Delta.StopReason == "max_tokens" {
-				ch <- StreamChunk{Content: "\n\n**Output truncated** — the response hit the token limit. Try a simpler prompt or break your request into smaller parts."}
+				ch <- StreamChunk{Content: "\n\n**Output truncated**: the response hit the token limit. Try a simpler prompt or break your request into smaller parts."}
 			}
 			if event.Type == "message_stop" {
 				ch <- StreamChunk{Done: true}

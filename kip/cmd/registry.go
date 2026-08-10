@@ -134,7 +134,7 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 	if len(allowProjects) > 0 {
 		fmt.Printf("  Allowed projects: %s\n\n", strings.Join(allowProjects, ", "))
 	} else {
-		fmt.Printf("  No project is allowed yet — grant one with:\n")
+		fmt.Printf("  No project is allowed yet: grant one with:\n")
 		fmt.Printf("    kip registry add --server %s --allow-project <project>\n\n", server)
 	}
 	return nil

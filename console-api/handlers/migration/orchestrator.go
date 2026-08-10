@@ -140,7 +140,7 @@ func (h *Handler) runMigration(session *Session, token *Token) {
 		Name:   "Waiting for verification",
 		Phase:  "verification",
 		Status: StepRunning,
-		Detail: "Apps are live on temporary URLs — verify and confirm domain cutover",
+		Detail: "Apps are live on temporary URLs. Verify and confirm domain cutover",
 	})
 	// The verifying state must survive a console-api restart: it carries the
 	// saved routes and target secret the cutover still needs.

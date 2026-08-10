@@ -76,7 +76,7 @@ const copied = ref(false)
 
 function copyAlerts() {
   const text = displayAlerts.value.map(a =>
-    `[${a.severity}] ${a.app} — ${a.action} (${a.reason}) ${a.time}`
+    `[${a.severity}] ${a.app}, ${a.action} (${a.reason}) ${a.time}`
   ).join('\n')
   navigator.clipboard.writeText(text)
   copied.value = true

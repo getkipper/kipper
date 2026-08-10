@@ -144,7 +144,7 @@ kip auth verify
 Do not start if the status reports anything under "Needs attention", or if it reports that a
 replacement is already part-way through. Both mean the cluster is in a state this procedure does not
 begin from. A half-finished earlier replacement is not an error and will not appear under "Needs
-attention" — it is reported as a phase, and you should finish it before starting another.
+attention". It is reported as a phase, and you should finish it before starting another.
 
 If the status tells you the domain check could not run, confirm it on the node before going any
 further. A domain change rewrites the same files this procedure does, and `kip` will refuse a domain
@@ -192,7 +192,7 @@ worked and is discovered to be empty at the one moment it is needed.
 Copy those somewhere off the node. They contain private keys, so put them where the old authority's
 key was supposed to be, which is nowhere casual.
 
-## Phase 1 — widen trust
+## Phase 1: widen trust
 
 The goal is an API server that trusts both the old and the new authority. Nothing is signed by the new
 one yet, so this phase cannot break anything.
@@ -330,7 +330,7 @@ kip auth verify
 
 If either fails, use the recovery at the end of this page.
 
-## Phase 2 — move the signature
+## Phase 2: move the signature
 
 The goal is a cluster serving a certificate the new authority signed. The old authority stays trusted
 throughout, so this phase is recoverable too.
@@ -444,20 +444,20 @@ The third line is the gate. It opens a real connection on the node and checks th
 comes back against the authority the cluster now says is active.
 
 If it shows ✗, read the `Resume at` line printed underneath it. Under this ordering the usual reason
-is that step 2.3 has not landed — the authority moved and the certificate has not followed — and the
+is that step 2.3 has not landed, so the authority moved and the certificate has not followed, and the
 status says so directly by resuming you at 2.3. If it resumes you at gate 2 instead, then 2.3 did land
 and the wire simply has not caught up: Traefik reloads on its own schedule, so wait a minute and check
 again before investigating.
 
 **Do not go to phase 3 until that line shows ✔.** If it shows `–`, your cluster has no
-gateway-fronted issuer and this gate cannot run at all — see "Does this apply to your cluster?" above
+gateway-fronted issuer and this gate cannot run at all. See "Does this apply to your cluster?" above
 before continuing. Confirm a login as well:
 
 ```bash
 kip auth verify
 ```
 
-## Phase 3 — narrow trust
+## Phase 3: narrow trust
 
 The old authority stops being trusted and is destroyed. This is the only irreversible part, and it is
 safe precisely because gate 2 proved the wire had already moved.
@@ -549,7 +549,7 @@ kip cluster ca status
 | What the status reports | Where you stopped | What to do |
 | --- | --- | --- |
 | part-way through (staged) | after 1.3, before the anchor was widened | resume at 1.4 |
-| part-way through (expanded), the API server has **not** loaded the anchor | after 1.4, before 1.5 | run 1.5 first — going on from here is what breaks logins |
+| part-way through (expanded), the API server has **not** loaded the anchor | after 1.4, before 1.5 | run 1.5 first, because going on from here is what breaks logins |
 | part-way through (expanded), the API server **has** loaded it | after gate 1 | resume at 2.2 (2.1 makes no cluster change, so redo it freely) |
 | part-way through (promoted), resume at 2.3 | after 2.2 | resume at 2.3 |
 | part-way through (promoted), resume at gate 2 | after 2.3 | confirm gate 2, then 3.1 |
@@ -558,7 +558,7 @@ kip cluster ca status
 ### Abandoning a replacement
 
 Up to the moment the authority is promoted at 2.2, nothing signs under the new authority and you can
-walk away from it. Remove both halves in one patch — removing one leaves half an authority behind,
+walk away from it. Remove both halves in one patch, because removing one leaves half an authority behind,
 which the status reports as material needing attention:
 
 ```bash
@@ -589,7 +589,7 @@ The recovery puts the authority and the certificate back from the decoded files 
 started. It patches rather than deletes, and it never touches the private key.
 
 Both of those matter. Deleting the certificate's Secret and recreating it leaves a gap in which
-Kipper notices there is no certificate and mints a fresh one — with a **new key**, which permanently
+Kipper notices there is no certificate and mints a fresh one with a **new key**, which permanently
 moves the fingerprint the gateway pins and takes the cluster off the gateway. And restoring the key
 from a backup has the same effect if the live key has moved on since. The key on the cluster is the
 one to keep; only the certificate and the authority go back.

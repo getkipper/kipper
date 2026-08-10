@@ -460,7 +460,7 @@ func installVeleroCredentials(client *ssh.Client, cfg *BackupStorageConfig, mini
 			return fmt.Errorf("checking for existing velero credentials: %w", err)
 		}
 		if strings.TrimSpace(out) == "" {
-			return fmt.Errorf("external backup storage configured but cloud-credentials Secret is missing from the velero namespace — reinstall with --backup-storage-credentials to bootstrap")
+			return fmt.Errorf("external backup storage configured but cloud-credentials Secret is missing from the velero namespace. Reinstall with --backup-storage-credentials to bootstrap")
 		}
 		return nil
 	}

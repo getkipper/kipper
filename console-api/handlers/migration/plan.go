@@ -98,12 +98,12 @@ type planResponse struct {
 // docs/en/migration.md. Nobody reads docs mid-migration, so the report
 // repeats it.
 var notMigratedList = []string{
-	"System components (Traefik, cert-manager, Longhorn, Dex) — they already exist on the target",
-	"User accounts (Dex) — the target starts with only its bootstrap admin; import them with kip user import",
-	"TLS certificates — cert-manager issues new ones on the target once DNS lands",
-	"Postgres globals — extra roles, role passwords, and ALTER DATABASE settings stay behind",
-	"Service share links — grants and signing key stay on the source; mint fresh links after cutover",
-	"Build history — git apps are rebuilt fresh on the target",
+	"System components (Traefik, cert-manager, Longhorn, Dex): they already exist on the target",
+	"User accounts (Dex): the target starts with only its bootstrap admin; import them with kip user import",
+	"TLS certificates: cert-manager issues new ones on the target once DNS lands",
+	"Postgres globals: extra roles, role passwords, and ALTER DATABASE settings stay behind",
+	"Service share links: grants and signing key stay on the source; mint fresh links after cutover",
+	"Build history: git apps are rebuilt fresh on the target",
 	"Pod logs",
 }
 
@@ -250,23 +250,23 @@ func (h *Handler) validateReceipt(id string, claims *middleware.Claims, token *T
 	defer h.receiptsMu.Unlock()
 	rc, ok := h.receipts[id]
 	if !ok {
-		return fmt.Errorf("no valid migration plan found — review the plan first")
+		return fmt.Errorf("no valid migration plan found. Review the plan first")
 	}
 	if time.Now().After(rc.ExpiresAt) {
 		delete(h.receipts, id)
-		return fmt.Errorf("the migration plan has expired — review a fresh plan")
+		return fmt.Errorf("the migration plan has expired. Review a fresh plan")
 	}
 	if rc.User != receiptUser(claims) {
-		return fmt.Errorf("the migration plan was issued to a different user — review the plan yourself")
+		return fmt.Errorf("the migration plan was issued to a different user. Review the plan yourself")
 	}
 	if rc.TokenFP != tokenFingerprint(token) {
-		return fmt.Errorf("the migration plan was issued for a different target token — review the plan again")
+		return fmt.Errorf("the migration plan was issued for a different target token. Review the plan again")
 	}
 	if rc.Projects != canonicalProjects(projects) {
-		return fmt.Errorf("the project selection changed since the plan — review the plan again")
+		return fmt.Errorf("the project selection changed since the plan. Review the plan again")
 	}
 	if rc.Overwrites != canonicalProjects(overwrites) {
-		return fmt.Errorf("the confirmed overwrites differ from the plan — review the plan again")
+		return fmt.Errorf("the confirmed overwrites differ from the plan. Review the plan again")
 	}
 	return nil
 }
@@ -284,7 +284,7 @@ func (h *Handler) consumeReceipt(id string) error {
 	h.receiptsMu.Lock()
 	defer h.receiptsMu.Unlock()
 	if _, ok := h.receipts[id]; !ok {
-		return fmt.Errorf("the migration plan was already used — review a fresh plan")
+		return fmt.Errorf("the migration plan was already used. Review a fresh plan")
 	}
 	delete(h.receipts, id)
 	return nil
@@ -325,7 +325,7 @@ func (h *Handler) buildPlan(ctx context.Context, claims *middleware.Claims, toke
 	// The digest still binds it, so a start cannot slip it past the plan.
 	if moveBaseDomain {
 		resp.Blockers = append(resp.Blockers,
-			"Moving the whole base domain (full-cluster adoption) is not available yet — leave it off.")
+			"Moving the whole base domain (full-cluster adoption) is not available yet. Leave it off.")
 	}
 	if h.Security != nil {
 		resp.OutOfBand = h.Security.OutOfBandConfigured(ctx)
@@ -354,7 +354,7 @@ func (h *Handler) buildPlan(ctx context.Context, claims *middleware.Claims, toke
 				"Starting a migration requires 2FA. Enroll a factor in Settings → Two-factor authentication (a host operator issues the enrollment code with: kip 2fa bootstrap <your email>).")
 		case !eligible:
 			resp.Blockers = append(resp.Blockers, fmt.Sprintf(
-				"Your 2FA factor is too new to authorise a migration — it becomes eligible on %s.",
+				"Your 2FA factor is too new to authorise a migration: it becomes eligible on %s.",
 				eligibleAt.Format("2 January 2006 15:04 MST")))
 		}
 	}
@@ -408,7 +408,7 @@ func (h *Handler) buildPlan(ctx context.Context, claims *middleware.Claims, toke
 						"Project %s already exists on the target and will be overwritten.", name))
 				} else {
 					resp.Blockers = append(resp.Blockers, fmt.Sprintf(
-						"Project %s already exists on the target — confirm the overwrite to proceed.", name))
+						"Project %s already exists on the target. Confirm the overwrite to proceed.", name))
 				}
 			}
 		}
@@ -604,7 +604,7 @@ func (h *Handler) planProject(ctx context.Context, project string, token *Token,
 	}
 	if len(runningApps) > 0 {
 		resp.Warnings = append(resp.Warnings, fmt.Sprintf(
-			"Source apps are still running (%s). Data is copied once per volume, so scale them to 0 before starting — writes after a transfer stay on this cluster.",
+			"Source apps are still running (%s). Data is copied once per volume, so scale them to 0 before starting, writes after a transfer stay on this cluster.",
 			strings.Join(runningApps, ", ")))
 	}
 	if cpu, memory := builder.ClusterBuildDefaults(); len(gitApps) > 0 && (cpu != "" || memory != "") {
@@ -670,7 +670,7 @@ func (h *Handler) planService(ctx context.Context, svc *kipperv1.Service, ns str
 	case needsManualDataTransfer(svc.Spec.Type):
 		resp.WillMigrate = append(resp.WillMigrate, planItem{
 			Kind: "service", Name: svc.Name, Namespace: ns, Status: "ok",
-			Detail: fmt.Sprintf("%s — storage moves as raw bytes; the service pauses during the transfer", svc.Spec.Type),
+			Detail: fmt.Sprintf("%s: storage moves as raw bytes; the service pauses during the transfer", svc.Spec.Type),
 		})
 	case hasExportableData(svc.Spec.Type):
 		size, err := h.estimateDatabaseSize(ctx, ns, svc.Name, svc.Spec.Type)
@@ -678,12 +678,12 @@ func (h *Handler) planService(ctx context.Context, svc *kipperv1.Service, ns str
 		case err != nil:
 			resp.WillMigrate = append(resp.WillMigrate, planItem{
 				Kind: "service", Name: svc.Name, Namespace: ns, Status: "warn",
-				Detail: fmt.Sprintf("%s — size could not be measured (%v); the transfer decides against the %dMB cap at run time", svc.Spec.Type, err, maxAutoTransferBytes/(1024*1024)),
+				Detail: fmt.Sprintf("%s: size could not be measured (%v); the transfer decides against the %dMB cap at run time", svc.Spec.Type, err, maxAutoTransferBytes/(1024*1024)),
 			})
 		case size > maxAutoTransferBytes:
 			resp.WillSkip = append(resp.WillSkip, planItem{
 				Kind: "service", Name: svc.Name, Namespace: ns, Status: "warn",
-				Detail: fmt.Sprintf("%s database is ~%dMB — over the %dMB automatic-transfer cap, data stays behind with manual steps", svc.Spec.Type, size/(1024*1024), maxAutoTransferBytes/(1024*1024)),
+				Detail: fmt.Sprintf("%s database is ~%dMB: over the %dMB automatic-transfer cap, data stays behind with manual steps", svc.Spec.Type, size/(1024*1024), maxAutoTransferBytes/(1024*1024)),
 			})
 		default:
 			resp.WillMigrate = append(resp.WillMigrate, planItem{
@@ -710,7 +710,7 @@ func (h *Handler) planVolumes(ctx context.Context, ns string, resp *planResponse
 	for i := range volumes {
 		vol := &volumes[i]
 		mounts := volumeMountSummary(vol)
-		detail := fmt.Sprintf("%s claimed — chunked transfer, resumes on failure", vol.Spec.Size)
+		detail := fmt.Sprintf("%s claimed: chunked transfer, resumes on failure", vol.Spec.Size)
 		if mounts != "" {
 			detail += ", mounted by " + mounts
 		}

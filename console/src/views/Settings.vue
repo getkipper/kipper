@@ -173,7 +173,7 @@ const model = ref('')
 const ollamaUrl = ref('')
 
 const providers = [
-  { value: '', label: 'None — AI features disabled' },
+  { value: '', label: 'None: AI features disabled' },
   { value: 'claude', label: 'Claude (Anthropic)' },
   { value: 'openai', label: 'OpenAI' },
   { value: 'ollama', label: 'Ollama (self-hosted)' },
@@ -394,7 +394,7 @@ async function saveConnector(type: string, enabled: boolean) {
       base_url: connBaseUrl.value,
       enabled,
     })
-    toast.success(`${type} ${enabled ? 'enabled' : 'disabled'} — Dex restarting`)
+    toast.success(`${type} ${enabled ? 'enabled' : 'disabled'}, Dex restarting`)
     editingConnector.value = ''
     await loadConnectors()
   } catch {

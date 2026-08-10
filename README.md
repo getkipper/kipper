@@ -109,4 +109,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, 
 
 Apache 2.0. See [LICENSE](LICENSE).
 
-Maintained by [Labb Consulting](https://labb.consulting). Built for everyone.
+Maintained by [Labb Consulting](https://labb-consulting.com). Built for everyone.

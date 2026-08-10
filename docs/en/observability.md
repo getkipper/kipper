@@ -274,7 +274,7 @@ Prometheus scrapes the reconcilers directly, and two alerts ship with the cluste
 
 Both name the controller, not the workload, because the metrics behind them are per-controller. Finding which workload is the next step rather than something the alert can tell you.
 
-Both evaluate in Prometheus and appear in Grafana under Alerting. Note that the stack ships with Alertmanager disabled, so nothing routes them onwards — no email, no Slack, no page. Until you enable it these are alerts you find by looking, which is worth knowing before you rely on them.
+Both evaluate in Prometheus and appear in Grafana under Alerting. Note that the stack ships with Alertmanager disabled, so nothing routes them onwards: no email, no Slack, no page. Until you enable it these are alerts you find by looking, which is worth knowing before you rely on them.
 
 To find which workloads are affected when one fires:
 

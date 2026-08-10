@@ -92,7 +92,7 @@ func (o *OpenAI) Chat(ctx context.Context, system string, messages []Message) (<
 				}
 				if event.Choices[0].FinishReason != nil {
 					if *event.Choices[0].FinishReason == "length" {
-						ch <- StreamChunk{Content: "\n\n**Output truncated** — the response hit the token limit. Try a simpler prompt or break your request into smaller parts."}
+						ch <- StreamChunk{Content: "\n\n**Output truncated**: the response hit the token limit. Try a simpler prompt or break your request into smaller parts."}
 					}
 					ch <- StreamChunk{Done: true}
 					return

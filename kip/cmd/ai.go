@@ -78,7 +78,7 @@ func runAIConfigure(cmd *cobra.Command, _ []string) error {
 		fmt.Println("  1) Claude (Anthropic)")
 		fmt.Println("  2) OpenAI")
 		fmt.Println("  3) Ollama (self-hosted)")
-		fmt.Println("  4) None — disable AI features")
+		fmt.Println("  4) None. Disable AI features")
 		fmt.Println()
 		fmt.Print("  Choose provider [1-4]: ")
 

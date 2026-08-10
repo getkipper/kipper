@@ -189,7 +189,7 @@ func (h *Handler) migrateDatabaseData(ctx context.Context, session *Session, tok
 		sizeMB := estimatedSize / (1024 * 1024)
 		session.UpdateStep(stepName, func(s *Step) {
 			s.Status = StepSkipped
-			s.Detail = fmt.Sprintf("Database is ~%d MB — too large for automatic transfer", sizeMB)
+			s.Detail = fmt.Sprintf("Database is ~%d MB: too large for automatic transfer", sizeMB)
 			s.ManualSteps = buildManualMigrationSteps(svc.Spec.Type, svc.Name, namespace)
 		})
 		return nil

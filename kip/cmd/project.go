@@ -418,7 +418,7 @@ func parseEnvCmdArgs(cluster *config.Cluster, args []string) (project, env strin
 		return args[0], args[1], nil
 	case 1:
 		if cluster.CurrentProject == "" {
-			return "", "", fmt.Errorf("no project specified — pass it as the first argument or run 'kip project use <name>' first")
+			return "", "", fmt.Errorf("no project specified. Pass it as the first argument or run 'kip project use <name>' first")
 		}
 		return cluster.CurrentProject, args[0], nil
 	}
@@ -527,7 +527,7 @@ func runProjectAddEnv(cmd *cobra.Command, args []string) error {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	fmt.Printf("  ⚠  Namespace %s not yet visible — controller may still be reconciling\n\n", expectedNs)
+	fmt.Printf("  ⚠  Namespace %s not yet visible: controller may still be reconciling\n\n", expectedNs)
 	return nil
 }
 
@@ -564,7 +564,7 @@ func runProjectRemoveEnv(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("environment %q not found in project %q (have: %s)", envName, projectName, strings.Join(envs, ", "))
 	}
 	if len(remaining) == 0 {
-		return fmt.Errorf("cannot remove the last environment — delete the project instead with 'kip project delete %s'", projectName)
+		return fmt.Errorf("cannot remove the last environment. Delete the project instead with 'kip project delete %s'", projectName)
 	}
 
 	ns := cluster.ResolveNamespace(projectName, envName)
@@ -603,7 +603,7 @@ func runProjectRemoveEnv(cmd *cobra.Command, args []string) error {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	fmt.Printf("  ⚠  Namespace %s still present — controller may still be tearing it down\n\n", ns)
+	fmt.Printf("  ⚠  Namespace %s still present: controller may still be tearing it down\n\n", ns)
 	return nil
 }
 
@@ -726,7 +726,7 @@ func addProjectEnvironment(ctx context.Context, dynClient dynamic.Interface, pro
 func setActiveProject(clusterName *string, project, environment string) error {
 	return config.Update(func(cfg *config.Config) error {
 		if cfg.CurrentCluster == "" {
-			return fmt.Errorf("no current cluster — run 'kip cluster use <name>' first")
+			return fmt.Errorf("no current cluster. Run 'kip cluster use <name>' first")
 		}
 		cluster := cfg.GetCluster(cfg.CurrentCluster)
 		if cluster == nil {

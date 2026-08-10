@@ -1208,7 +1208,7 @@ func (rc *ResourceController) evaluateAndAdjust(
 				Action:    "OOMKilled at memory cap",
 				From:      oldVal,
 				To:        oldVal,
-				Reason:    fmt.Sprintf("container was OOMKilled but already at cap (%s) — increase manually or check for memory leaks", newQty.String()),
+				Reason:    fmt.Sprintf("container was OOMKilled but already at cap (%s). Increase manually or check for memory leaks", newQty.String()),
 			})
 			return
 		}
@@ -1222,7 +1222,7 @@ func (rc *ResourceController) evaluateAndAdjust(
 			Action:    "doubled memory (OOMKilled)",
 			From:      oldVal,
 			To:        newQty.String(),
-			Reason:    "container was OOMKilled — doubling memory",
+			Reason:    "container was OOMKilled: doubling memory",
 		})
 		return
 	}
@@ -1547,7 +1547,7 @@ func (rc *ResourceController) maybeBumpForSaturation(
 		Action:    "increased CPU (saturated)",
 		From:      oldVal,
 		To:        newQty.String(),
-		Reason:    fmt.Sprintf("pod at %.0f%% of CPU limit — bypassing startup grace", usagePct),
+		Reason:    fmt.Sprintf("pod at %.0f%% of CPU limit, bypassing startup grace", usagePct),
 	}
 }
 
@@ -1725,7 +1725,7 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) ([]ResourceL
 					App:       pod.Labels["app"],
 					Namespace: pod.Namespace,
 					Action:    "ImagePullBackOff",
-					Reason:    fmt.Sprintf("container %q cannot pull image — registry credentials may be expired", cs.Name),
+					Reason:    fmt.Sprintf("container %q cannot pull image: registry credentials may be expired", cs.Name),
 				})
 			case "CrashLoopBackOff":
 				// The OOM path already bumps memory for OOM crash loops;
@@ -1787,7 +1787,7 @@ func (rc *ResourceController) checkNodeReady(nodes []corev1.Node) ([]ResourceLog
 			App:       "cluster",
 			Namespace: "system",
 			Action:    "node NotReady",
-			Reason:    fmt.Sprintf("node %q is not Ready — workloads on it may be disrupted", node.Name),
+			Reason:    fmt.Sprintf("node %q is not Ready: workloads on it may be disrupted", node.Name),
 			Severity:  "critical",
 		})
 	}
@@ -1836,7 +1836,7 @@ func (rc *ResourceController) checkFailedJobs(ctx context.Context) ([]ResourceLo
 			App:       job.Labels["app"],
 			Namespace: job.Namespace,
 			Action:    "job failed",
-			Reason:    fmt.Sprintf("job %q failed — check its logs", job.Name),
+			Reason:    fmt.Sprintf("job %q failed. Check its logs", job.Name),
 			Severity:  "warning",
 		})
 	}

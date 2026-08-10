@@ -76,7 +76,7 @@ kip app deploy \
 
 Secrets passed at deploy time are written before the app starts, so the first pod boot already sees them. A key set via `--secret` behaves exactly like one set with `kip app secret set` afterwards: masked in the console and CLI listings, kept out of `kip export`, with the previous value retained for `kip app secret rollback`. Passing the same key through both `--env` and `--secret` fails the deploy.
 
-Pick `--profile jvm` for Java, Spring, and other slow-boot runtimes: it gives the pod a high CPU ceiling for cold-start JIT compilation without reserving a full core permanently. `--profile` and `--cpu`/`--memory` are mutually exclusive — explicit values mean the `custom` profile, and switching an app to a named profile replaces them with the profile's defaults. See [Resource Management](/en/resource-management) for what each profile allocates.
+Pick `--profile jvm` for Java, Spring, and other slow-boot runtimes: it gives the pod a high CPU ceiling for cold-start JIT compilation without reserving a full core permanently. `--profile` and `--cpu`/`--memory` are mutually exclusive: explicit values mean the `custom` profile, and switching an app to a named profile replaces them with the profile's defaults. See [Resource Management](/en/resource-management) for what each profile allocates.
 
 ## From a Git repository
 
@@ -313,11 +313,11 @@ kip app link domain-service api-gateway
 ### Linking across projects
 
 Apps in different projects are isolated from each other by default. A workload can reach the internet
-and its own project, and nothing else on the cluster — not by service name, not by pod address, and
+and its own project, and nothing else on the cluster: not by service name, not by pod address, and
 not through a public route. That is what keeps one project's database out of another project's reach.
 
 It takes two steps, because it takes two projects. **The project being reached decides first**, since
-a link goes past the ingress and so past anything enforced on a public route — an API key, forward
+a link goes past the ingress and so past anything enforced on a public route: an API key, forward
 auth, a rate limit. The project asking cannot grant itself that.
 
 Whoever owns the target project allows the caller in:
@@ -363,7 +363,7 @@ address your app is currently given.
 
 You also need read access to the target's project. The CLI looks the target app up with your own
 credentials, so a project you cannot see reports the app as not found even after its owner has
-consented — ask them for a role in it, or have someone who holds one create the link.
+consented. Ask them for a role in it, or have someone who holds one create the link.
 
 Run it in the other order and the link is recorded but carries no traffic, and the command says so
 rather than leaving you to find out. It starts working the moment consent is granted.
@@ -394,8 +394,8 @@ The two port numbers differing is correct. The address names the port the target
 publishes, which is what your app dials; the allowance names the port its pods listen on, which is
 10000 higher whenever the target serves a public route and so runs the instance-id proxy.
 
-If your app's image carries no tool to open a connection with — a distroless image has no shell at
-all — the last line says the check could not be run rather than claiming the link is shut. Those
+If your app's image carries no tool to open a connection with, as a distroless image has no shell at
+all, the last line says the check could not be run rather than claiming the link is shut. Those
 are different answers and only one of them is worth acting on.
 
 See who may link to a project:
@@ -406,7 +406,7 @@ kip project links --project docuseal
 
 Withdraw it with `kip project allow-links hrportal --project docuseal --remove`. Each calling app is
 reconciled as the consent changes and loses the egress it was granted. If one of those notifications
-is dropped — a cache error at the wrong moment, a controller restart — the app is swept within thirty
+is dropped by a cache error at the wrong moment or a controller restart, the app is swept within thirty
 minutes and loses it then, so the outside edge of a withdrawal is half an hour rather than instant.
 
 Two environments of the same project reach each other without any of this. The project already owns

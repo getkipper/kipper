@@ -39,8 +39,8 @@ jobs:
     name: Test kip
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: 'stable'
           cache-dependency-path: |
@@ -64,8 +64,8 @@ jobs:
     name: Test console-api
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: 'stable'
           cache-dependency-path: |
@@ -78,8 +78,8 @@ jobs:
     name: Test gateway
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: 'stable'
           cache-dependency-path: gateway/go.sum
@@ -90,8 +90,8 @@ jobs:
     name: Test authz
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: 'stable'
           cache-dependency-path: |
@@ -105,8 +105,8 @@ jobs:
     name: Test sidecar
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: 'stable'
           cache-dependency-path: sidecar/go.mod
@@ -117,8 +117,8 @@ jobs:
     name: CRD vs Go-type drift
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: 'stable'
           cache-dependency-path: console-api/go.sum
@@ -225,8 +225,8 @@ jobs:
     name: DeepCopy vs Go-type drift
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: 'stable'
           cache-dependency-path: console-api/go.sum
@@ -255,8 +255,8 @@ jobs:
       matrix:
         module: [kip, controller, console-api, gateway, sidecar, kipper-poll, authz]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: 'stable'
       - name: Install goimports
@@ -298,12 +298,12 @@ jobs:
       matrix:
         module: [kip, controller, console-api, gateway, sidecar, kipper-poll, authz]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Pinned Go version (must match each module's `go` directive). The
       # tidy output is sensitive to the running toolchain — pinning keeps
       # CI deterministic. Bump this together with the per-module
       # directives if the project's Go floor moves.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.25.12'
       - name: Run go mod tidy
@@ -326,8 +326,8 @@ jobs:
     name: Test console (frontend)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: 'npm'
@@ -349,8 +349,8 @@ jobs:
       matrix:
         module: [kip, console-api, gateway, authz]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: 'stable'
       # Install golangci-lint from source so the binary is compiled with
@@ -374,8 +374,8 @@ jobs:
       matrix:
         module: [kip, console-api, gateway, authz, sidecar]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: 'stable'
       # Deliberately unpinned: govulncheck must track the latest vuln
@@ -388,11 +388,11 @@ jobs:
     name: License compliance
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: 'stable'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: 'npm'
@@ -413,13 +413,13 @@ jobs:
     name: Third-party notices drift
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Pinned Go version to keep the generated dependency list deterministic,
       # matching the go mod tidy drift gate.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.25.12'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: 'npm'

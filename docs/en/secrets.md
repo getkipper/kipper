@@ -290,7 +290,7 @@ Anything that replaces the pods anyway picks the new environment up on the way:
 a deploy, an image change, or a service credential rotating. So a restart is
 only needed when the environment is the only thing that changed.
 
-That also means env values show up in `kip export` output and in a committed `kipper.yaml`, and anyone with read access to App resources can see them. Keep sensitive values out of `kip app env set` and use `kip app secret set` instead, or reference a credential Kipper already injects — a `${DB_PASSWORD}` reference exports as a reference. Secrets stay in `app-<app>-secrets` and never touch the App resource or an export.
+That also means env values show up in `kip export` output and in a committed `kipper.yaml`, and anyone with read access to App resources can see them. Keep sensitive values out of `kip app env set` and use `kip app secret set` instead, or reference a credential Kipper already injects, since a `${DB_PASSWORD}` reference exports as a reference. Secrets stay in `app-<app>-secrets` and never touch the App resource or an export.
 
 A pod reads its environment and secrets once, at startup, so a running app keeps its current values until it restarts. Nothing restarts it for you. The web console saves the change and shows a "restart to apply" banner with a Restart button; `kip app env set` and `kip app secret set` save it and say the same thing in their output. Click Restart, run `kip app restart <app>`, or pass `--restart` to the command, when you are ready for the new values to take effect. A live service is never cycled without you asking.
 

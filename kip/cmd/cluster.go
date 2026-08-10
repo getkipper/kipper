@@ -40,7 +40,7 @@ func loadCurrentClusterConfig() (*config.Cluster, error) {
 
 	clusterName := resolveClusterName(cfg)
 	if clusterName == "" {
-		return nil, fmt.Errorf("no cluster configured — run 'kip install' first")
+		return nil, fmt.Errorf("no cluster configured. Run 'kip install' first")
 	}
 
 	cluster := findCluster(cfg, clusterName)

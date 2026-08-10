@@ -150,7 +150,7 @@ func startGatewayHeartbeat(ctx context.Context, client kubernetes.Interface, crC
 		// pin was never asserted, and it could never prove control. Say so
 		// whenever anything suggests this cluster is supposed to register.
 		if rawDomain != "" || host != "" || gatewayRegistrationExpected(ctx, crClient) {
-			log.Printf("gateway heartbeat NOT running: KIPPER_RUN_DOMAIN=%q CLUSTER_HOST=%q — both are required. "+
+			log.Printf("gateway heartbeat NOT running: KIPPER_RUN_DOMAIN=%q CLUSTER_HOST=%q. Both are required. "+
 				"Set spec.gateway.kipperRunDomain and spec.gateway.clusterHost on the ClusterIdentity (or run kip upgrade) "+
 				"or this cluster will never renew its kipper.run registration, assert its hop pin, or prove control of its IP",
 				rawDomain, host)

@@ -44,7 +44,7 @@ func (h *Handler) CutoverHandler(w http.ResponseWriter, r *http.Request) {
 	// verifier runs after every non-mutating check so a build-gate refusal
 	// or a target hiccup never burns a code.
 	if h.StepUp == nil {
-		respondError(w, http.StatusServiceUnavailable, "2FA verification is unavailable — cutover cannot proceed")
+		respondError(w, http.StatusServiceUnavailable, "2FA verification is unavailable: cutover cannot proceed")
 		return
 	}
 

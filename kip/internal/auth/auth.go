@@ -177,7 +177,7 @@ func (s *Store) Save() error {
 func (s *Store) Token(clusterID, dexHost string) (string, error) {
 	creds, ok := s.Clusters[clusterID]
 	if !ok {
-		return "", fmt.Errorf("not authenticated — run: kip auth login")
+		return "", fmt.Errorf("not authenticated. Run: kip auth login")
 	}
 
 	if time.Now().Before(creds.ExpiresAt) {
@@ -185,7 +185,7 @@ func (s *Store) Token(clusterID, dexHost string) (string, error) {
 	}
 
 	if creds.RefreshToken == "" {
-		return "", fmt.Errorf("session expired — run: kip auth login")
+		return "", fmt.Errorf("session expired. Run: kip auth login")
 	}
 
 	unlock, err := lockStore()
@@ -204,14 +204,14 @@ func (s *Store) Token(clusterID, dexHost string) (string, error) {
 	current, ok := fresh.Clusters[clusterID]
 	if !ok {
 		delete(s.Clusters, clusterID)
-		return "", fmt.Errorf("not authenticated — run: kip auth login")
+		return "", fmt.Errorf("not authenticated. Run: kip auth login")
 	}
 	if time.Now().Before(current.ExpiresAt) {
 		s.Clusters[clusterID] = current
 		return current.IDToken, nil
 	}
 	if current.RefreshToken == "" {
-		return "", fmt.Errorf("session expired — run: kip auth login")
+		return "", fmt.Errorf("session expired. Run: kip auth login")
 	}
 	creds = current
 
@@ -220,7 +220,7 @@ func (s *Store) Token(clusterID, dexHost string) (string, error) {
 	defer cancel()
 	newCreds, err := refreshToken(ctx, issuer, creds.RefreshToken)
 	if err != nil {
-		return "", fmt.Errorf("session expired — run: kip auth login")
+		return "", fmt.Errorf("session expired. Run: kip auth login")
 	}
 
 	fresh.Clusters[clusterID] = newCreds
@@ -311,7 +311,7 @@ func (l *loginAttempt) callbackHandler(codeCh chan<- string, errCh chan<- error)
 		if r.URL.Query().Get("state") != l.state {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			_, _ = fmt.Fprint(w, callbackPage("Authentication Failed", "The response did not match this login attempt.", true))
-			errCh <- fmt.Errorf("authentication failed: state mismatch — the callback did not originate from this login attempt")
+			errCh <- fmt.Errorf("authentication failed: state mismatch: the callback did not originate from this login attempt")
 			return
 		}
 		code := r.URL.Query().Get("code")
@@ -513,7 +513,7 @@ func callbackPage(title, message string, isError bool) string {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>%s — Kipper</title>
+  <title>%s, Kipper</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
   <style>

@@ -226,7 +226,7 @@ func (c uninstallCommand) releaseWithoutTheHost(cluster *config.Cluster, connect
 
 	say(c.Out, "\n  !   %v\n", connectErr)
 	say(c.Out, "      A credential for %s is recorded here, so its name can be handed back\n", cluster.Domain)
-	say(c.Out, "      without the server. Say yes only if the server is gone — a cluster that\n")
+	say(c.Out, "      without the server. Say yes only if the server is gone. A cluster that\n")
 	say(c.Out, "      is merely unreachable is still serving, and this would take it off the air.\n")
 	if proceed, _ := askToProceed(d, "Release the name without the host?"); !proceed {
 		return connectErr

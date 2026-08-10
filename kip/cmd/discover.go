@@ -31,7 +31,7 @@ that carry app.kubernetes.io/managed-by=kipper but are not owned by an
 App, Service, Function, or Volume CR.
 
 For each orphan found, kip discover prints a suggested kip command that
-will faithfully recreate it as a proper CR — preserving image, port,
+will faithfully recreate it as a proper CR, preserving image, port,
 resources, storage, env vars, and so on. Running the suggested command
 creates the CR; the controller adopts the existing workload to match,
 no deletion required. Edit the suggested command first if you want to

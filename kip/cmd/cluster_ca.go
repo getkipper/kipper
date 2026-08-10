@@ -46,7 +46,7 @@ var clusterCAStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show the certificate authority and whether everything agrees",
 	Long: `Reads the authority, the certificate the cluster serves, and what the API
-server trusts, then checks they agree — including one live check against the
+server trusts, then checks they agree, including one live check against the
 wire rather than trusting what is stored.
 
 Safe to run at any time, including while a replacement is part-way through and
@@ -71,7 +71,7 @@ This is the repair command. Run it when 'kip cluster ca status' reports that
 the API server has not loaded the anchor on disk.
 
 It cannot repair an anchor that names the wrong authority, because it adds
-nothing to that file — it only re-renders what is already there.`,
+nothing to that file. It only re-renders what is already there.`,
 	RunE: runClusterAuthSync,
 }
 
@@ -118,7 +118,7 @@ func runClusterCAStatus(cmd *cobra.Command, _ []string) error {
 // says whether they agree. An operator who reads nothing else should still be
 // able to tell whether this cluster needs them.
 func printCAStatus(clusterName string, s installer.CAStatus) {
-	fmt.Printf("\n  Certificate authority — %s\n\n", clusterName)
+	fmt.Printf("\n  Certificate authority: %s\n\n", clusterName)
 
 	fmt.Printf("    Authority        %s (%s), expires %s\n",
 		s.Authority.Subject, s.Authority.Fingerprint, expiryOf(s.Authority.Expires))
@@ -204,7 +204,7 @@ func printCAStatus(clusterName string, s installer.CAStatus) {
 		fmt.Printf("  %s\n", caDocsURL)
 	case !s.AnchorLoaded:
 		fmt.Printf("  The API server has not loaded the anchor on disk. It is still running the\n")
-		fmt.Printf("  config it had, so logins work for now — but this must be applied before\n")
+		fmt.Printf("  config it had, so logins work for now: but this must be applied before\n")
 		fmt.Printf("  anything else changes, or the cluster will serve a certificate the API\n")
 		fmt.Printf("  server has never been told to trust.\n")
 		fmt.Printf("  Apply it with:  %s\n", s.NextCommand())

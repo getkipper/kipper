@@ -94,7 +94,7 @@ async function submitMigration() {
       peer.namespace,
       props.serviceName,
     )
-    toast.success(`Migration started — copying ${props.serviceType} data from ${peer.namespace}`)
+    toast.success(`Migration started: copying ${props.serviceType} data from ${peer.namespace}`)
     status.value = { job_name: resp.job_name, phase: resp.phase }
     startPolling()
     cancelConfirm()

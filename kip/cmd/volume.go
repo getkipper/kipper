@@ -26,7 +26,7 @@ var volumeCreateCmd = &cobra.Command{
 	Use:   "create [name]",
 	Short: "Create a shared volume that can be mounted by multiple apps",
 	Long: `Create a shared persistent volume backed by Longhorn. The volume
-supports ReadWriteMany access — multiple pods can read and write to it
+supports ReadWriteMany access, multiple pods can read and write to it
 simultaneously. Useful for shared file storage, uploads, and legacy
 apps that need a shared filesystem.
 
@@ -107,7 +107,7 @@ func runVolumeCreate(cmd *cobra.Command, args []string) error {
 	project, environment := resolveProjectAndEnvironment(cmd, cluster)
 	ns := cluster.ResolveNamespace(project, environment)
 	if ns == "" {
-		return fmt.Errorf("no project context — set one with `kip project use <name>` or pass --project")
+		return fmt.Errorf("no project context. Set one with `kip project use <name>` or pass --project")
 	}
 
 	// The Volume CR is the model: the volume reconciler provisions the
@@ -196,7 +196,7 @@ func runVolumeDelete(cmd *cobra.Command, args []string) error {
 	project, environment := resolveProjectAndEnvironment(cmd, cluster)
 	ns := cluster.ResolveNamespace(project, environment)
 	if ns == "" {
-		return fmt.Errorf("no project context — set one with `kip project use <name>` or pass --project")
+		return fmt.Errorf("no project context. Set one with `kip project use <name>` or pass --project")
 	}
 
 	// Deleting the Volume CR cascades to the owned PVC and its data.
@@ -277,7 +277,7 @@ func mountVolume(ctx context.Context, dyn dynamic.Interface, ns, volumeName, app
 		vol, err := dyn.Resource(manifest.VolumeGVR).Namespace(ns).Get(ctx, volumeName, metav1.GetOptions{})
 		if err != nil {
 			if errors.IsNotFound(err) {
-				return fmt.Errorf("volume %q not found — create it first with: kip volume create %s", volumeName, volumeName)
+				return fmt.Errorf("volume %q not found. Create it first with: kip volume create %s", volumeName, volumeName)
 			}
 			return fmt.Errorf("getting volume: %w", err)
 		}

@@ -42,7 +42,7 @@ func (a *AIResources) Optimise(w http.ResponseWriter, r *http.Request) {
 
 	cfg, err := a.Settings.GetRaw(ctx)
 	if err != nil || cfg.Provider == "" {
-		respondError(w, http.StatusBadRequest, "AI not configured — go to Settings to add a provider")
+		respondError(w, http.StatusBadRequest, "AI not configured: go to Settings to add a provider")
 		return
 	}
 

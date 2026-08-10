@@ -42,7 +42,7 @@ func verifyIDToken(ctx context.Context, issuer, rawToken, expectedNonce string) 
 		return nil, fmt.Errorf("verifying id token: %w", err)
 	}
 	if expectedNonce != "" && idToken.Nonce != expectedNonce {
-		return nil, fmt.Errorf("nonce mismatch — the token does not belong to this login attempt")
+		return nil, fmt.Errorf("nonce mismatch: the token does not belong to this login attempt")
 	}
 	var claims struct {
 		Email string `json:"email"`

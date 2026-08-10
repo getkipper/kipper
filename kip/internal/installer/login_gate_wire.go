@@ -74,11 +74,11 @@ func VerifyOperatorIdentity(ctx context.Context, clusterID, dexHost, domain, ser
 	}
 	tok, err := store.Token(clusterID, dexHost)
 	if err != nil {
-		return ProofAuthnRejected, "", fmt.Errorf("not authenticated — run: kip auth login")
+		return ProofAuthnRejected, "", fmt.Errorf("not authenticated. Run: kip auth login")
 	}
 	creds := store.Credential(clusterID)
 	if creds == nil {
-		return ProofAuthnRejected, "", fmt.Errorf("not authenticated — run: kip auth login")
+		return ProofAuthnRejected, "", fmt.Errorf("not authenticated. Run: kip auth login")
 	}
 	cs, err := NewBearerClient(server, caData, tok)
 	if err != nil {
