@@ -410,9 +410,18 @@ kip node list
 
 By default a fresh install writes a **credential-free** kubeconfig: it carries the cluster address and CA, and a `kip auth kubectl-token` exec plugin that serves your own short-lived OIDC token. The shared k3s admin certificate never leaves the server. At a terminal the installer signs you in inline and proves your identity works against the API server before finishing.
 
+The admin account is printed first, because the sign-in asks for it.
+
 ```
+  Admin sign-in
+  Email:      admin@shop.kipper.run
+  Password:   02026a371f24a488a86e654cada6e1c6
+
+  Save these credentials now. They will not be shown again.
+  If lost, run: kip auth reset-password
+
   Sign in to finish setup (a browser will open; Ctrl+C to skip and finish later with: kip auth login)
-  ✔  kubectl authenticates as admin@shop.kipper.run — the admin certificate never left the server (break-glass: ssh, then sudo k3s kubectl)
+  kubectl authenticates as admin@shop.kipper.run: the admin certificate never left the server (break-glass: ssh, then sudo k3s kubectl)
 ```
 
 Headless installs (CI, no terminal, or `--no-login`) finish credential-free without the sign-in; the first operator runs `kip auth login && kip auth verify`. The admin certificate reaches your machine only when you ask for it with `--admin-kubeconfig`, when an interactive install fails partway (so you can inspect the half-built cluster), or when sign-in genuinely fails to authorize against the cluster. Each case says so loudly.
@@ -465,7 +474,7 @@ kip auth kubectl-token --cluster-domain shop.kipper.run
 
 `kip cluster use` still decides which cluster the rest of kip talks to. It has no say over kubectl.
 
-When the session has expired entirely it prints `session expired — run: kip auth login` on stderr, which kubectl surfaces verbatim. A kubeconfig written before this flag existed prints `this kubeconfig does not say which cluster it authenticates to — regenerate it with: kip auth kubeconfig`, and no token is issued until you do.
+When the session has expired entirely it prints `session expired. Run: kip auth login` on stderr, which kubectl surfaces verbatim. A kubeconfig written before this flag existed prints `this kubeconfig does not say which cluster it authenticates to. Regenerate it with: kip auth kubeconfig`, and no token is issued until you do.
 
 ## kip auth reset-password
 

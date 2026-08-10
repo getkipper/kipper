@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,26 +125,38 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		},
 	})
 
-	// Always print credentials if available — even if a later install step failed
-	if result != nil {
-		if installErr != nil {
-			fmt.Printf("\n  Install completed with errors (see above). Credentials saved:\n\n")
-		} else {
-			fmt.Printf("  Cluster ready.\n")
-		}
-		fmt.Printf("  Console:    %s\n", result.ConsoleURL)
-		fmt.Printf("  Kubeconfig: %s\n", result.KubeconfigPath)
-		if result.AdminPassword != "" {
-			fmt.Printf("  Admin:      admin@%s\n", result.Domain)
-			fmt.Printf("  Password:   %s\n", result.AdminPassword)
-			fmt.Println()
-			fmt.Printf("  Save these credentials now. They will not be shown again.\n")
-			fmt.Printf("  If lost, run: kip auth reset-password\n")
-		}
-		fmt.Println()
-	}
+	// Always print credentials if available, even if a later install step failed
+	printInstallSummary(os.Stdout, result, installErr)
 
 	return installErr
+}
+
+// printInstallSummary closes an install with where the cluster lives and, when
+// they have not already been disclosed, the credentials to reach it.
+//
+// The credentials are skipped when the install showed them itself, which the
+// interactive path does before its sign-in prompt. Printing them again here
+// would put the same password under a second "save these now" heading in one
+// run, and leave an operator wondering which of the two to keep.
+func printInstallSummary(out io.Writer, result *installer.Result, installErr error) {
+	if result == nil {
+		return
+	}
+	if installErr != nil {
+		_, _ = fmt.Fprintf(out, "\n  Install completed with errors (see above). Credentials saved:\n\n")
+	} else {
+		_, _ = fmt.Fprintf(out, "  Cluster ready.\n")
+	}
+	_, _ = fmt.Fprintf(out, "  Console:    %s\n", result.ConsoleURL)
+	_, _ = fmt.Fprintf(out, "  Kubeconfig: %s\n", result.KubeconfigPath)
+	if result.AdminPassword != "" && !result.CredentialsShown {
+		_, _ = fmt.Fprintf(out, "  Admin:      admin@%s\n", result.Domain)
+		_, _ = fmt.Fprintf(out, "  Password:   %s\n", result.AdminPassword)
+		_, _ = fmt.Fprintln(out)
+		_, _ = fmt.Fprintf(out, "  Save these credentials now. They will not be shown again.\n")
+		_, _ = fmt.Fprintf(out, "  If lost, run: kip auth reset-password\n")
+	}
+	_, _ = fmt.Fprintln(out)
 }
 
 // resolveBackupStorage builds an installer.BackupStorageConfig from the

@@ -95,22 +95,52 @@ You will see output like this:
   ✔  Setting up backup and restore (Velero)
   ...  Creating kipper-system namespace
   ✔  Creating kipper-system namespace
+  ...  Storing gateway credentials
+  ✔  Storing gateway credentials
+  ...  Minting the cluster certificate authority
+  ✔  Minting the cluster certificate authority
   ...  Installing container registry (Zot)
   ✔  Installing container registry (Zot)
   ...  Configuring identity provider
   ✔  Configuring identity provider
+  ...  Staging operator access
+  ✔  Staging operator access
+  ...  Enabling operator authentication
+  ✔  Enabling operator authentication
   ...  Deploying console
   ✔  Deploying console
+  ...  Recording serving identity
+  ✔  Recording serving identity
+  ...  Deploying API key service
+  ✔  Deploying API key service
+  ...  Isolating image builds
+  ✔  Isolating image builds
 
-  Cluster ready.
-  Console:    https://console--203-0-113-10.kipper.run
-  Kubeconfig: /Users/you/.kip/clusters/203-0-113-10.kipper.run.yaml
-  Admin:      admin@203-0-113-10.kipper.run
+  Admin sign-in
+  Email:      admin@203-0-113-10.kipper.run
   Password:   02026a371f24a488a86e654cada6e1c6
 
   Save these credentials now. They will not be shown again.
   If lost, run: kip auth reset-password
+
+  waiting for the identity provider to accept connections
+  Sign in to finish setup (a browser will open; Ctrl+C to skip and finish later with: kip auth login)
+  Opening browser for authentication...
+  kubectl authenticates as admin@203-0-113-10.kipper.run: the admin certificate never left the server (break-glass: ssh, then sudo k3s kubectl)
+
+  Cluster ready.
+  Console:    https://console--203-0-113-10.kipper.run
+  Kubeconfig: /Users/you/.kip/clusters/203-0-113-10.kipper.run.yaml
 ```
+
+The admin password is printed before the sign-in because the browser asks for
+it. Save it then: only its hash is stored, so `kip auth reset-password` is the
+only way back if you lose it.
+
+A browser opens on the last step. Sign in as the admin address above, and the
+installer confirms your identity works against the cluster before it finishes.
+Installs with no terminal, or with `--no-login`, skip that step and print the
+credentials at the end instead.
 
 ## Step 3: Verify the cluster
 
