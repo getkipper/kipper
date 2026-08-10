@@ -28,10 +28,14 @@ builds:
 
 # Single-file archive per platform — install.sh expects raw kip-<os>-<arch>
 # names, not tarballs, so we use the binary format with a stable name.
+#
+# No .exe in the template: the binary format already carries the binary's own
+# extension, so adding one produced kip-windows-amd64.exe.exe and left the
+# download getting-started.md names missing from the release.
 archives:
   - id: kip
     formats: [binary]
-    name_template: 'kip-{{ .Os }}-{{ .Arch }}{{ if eq .Os "windows" }}.exe{{ end }}'
+    name_template: 'kip-{{ .Os }}-{{ .Arch }}'
 
 checksum:
   name_template: checksums.txt
