@@ -1,0 +1,1049 @@
+package controllers
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
+	ctrl "sigs.k8s.io/controller-runtime"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/serviceui"
+	"github.com/getkipper/kipper/console-api/share"
+)
+
+// secretFromCluster reads the named secret back from the fake client
+// so assertions can inspect the post-reconcile state. The test only
+// uses string-valued fields, so the helper returns []byte → string
+// for readability.
+func secretFromCluster(t *testing.T, r *ServiceReconciler, name string) map[string]string {
+	t.Helper()
+	var s corev1.Secret
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: name}, &s))
+	out := map[string]string{}
+	for k, v := range s.Data {
+		out[k] = string(v)
+	}
+	return out
+}
+
+func bareService(svcType string) *kipperv1.Service {
+	return &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "ns"},
+		Spec:       kipperv1.ServiceSpec{Type: svcType},
+	}
+}
+
+func statefulSetContainer(t *testing.T, r *ServiceReconciler) corev1.Container {
+	t.Helper()
+	var sts appsv1.StatefulSet
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &sts))
+	require.NotEmpty(t, sts.Spec.Template.Spec.Containers)
+	return sts.Spec.Template.Spec.Containers[0]
+}
+
+// A service that pins no resources still gets a full set of requests and
+// limits from its type's profile, so every service pod is quota-eligible and
+// bounded. The StatefulSet also carries the profile label so the resource
+// controller's floor and nil-defaults stay in lockstep. Memory values track
+// profileResources(): database=1Gi, standard=128Mi, jvm=2Gi.
+func TestReconcileStatefulSet_DefaultsResourcesPerProfile(t *testing.T) {
+	cases := []struct {
+		svcType      string
+		wantProfile  string
+		wantMemLimit string
+	}{
+		{"postgres", "database", "1Gi"},
+		{"mysql", "database", "1Gi"},
+		{"mongodb", "database", "1Gi"},
+		{"redis", "standard", "128Mi"},
+		{"minio", "standard", "128Mi"},
+		{"rabbitmq", "standard", "128Mi"},
+		{"mailhog", "standard", "128Mi"},
+		{"opensearch", "jvm", "2Gi"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.svcType, func(t *testing.T) {
+			svc := bareService(tc.svcType)
+			r := &ServiceReconciler{
+				Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).Build(),
+				Scheme: testScheme(),
+			}
+			require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+			var sts appsv1.StatefulSet
+			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &sts))
+			require.NotEmpty(t, sts.Spec.Template.Spec.Containers)
+			res := sts.Spec.Template.Spec.Containers[0].Resources
+
+			assert.False(t, res.Requests.Cpu().IsZero(), "cpu request must be set")
+			assert.False(t, res.Requests.Memory().IsZero(), "memory request must be set")
+			assert.False(t, res.Limits.Cpu().IsZero(), "cpu limit must be set")
+			assert.Equal(t, tc.wantMemLimit, res.Limits.Memory().String(), "memory limit must match the type profile")
+			// The label must agree with the applied profile, or the resource
+			// controller can re-default the pod through a different preset.
+			assert.Equal(t, tc.wantProfile, sts.Labels["kipper.run/resource-profile"],
+				"resource-profile label must match the catalog profile")
+		})
+	}
+}
+
+// An explicit CR value overrides the profile default for that field only.
+func TestReconcileStatefulSet_ExplicitResourceOverridesProfile(t *testing.T) {
+	svc := bareService("postgres")
+	svc.Spec.Resources.MemoryLimit = "1Gi"
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).Build(),
+		Scheme: testScheme(),
+	}
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+	res := statefulSetContainer(t, r).Resources
+	assert.Equal(t, "1Gi", res.Limits.Memory().String(), "explicit memory limit wins")
+	assert.False(t, res.Requests.Cpu().IsZero(), "unspecified fields still fall back to the profile")
+}
+
+// A one-sided explicit override must mirror to the other side rather than
+// combine with the profile default, so a low memory limit can't end up below
+// the profile's higher request (which Kubernetes would reject).
+func TestReconcileStatefulSet_PartialOverrideMirrorsToStayValid(t *testing.T) {
+	svc := bareService("postgres") // database profile: 1Gi request, 1Gi limit
+	svc.Spec.Resources.MemoryLimit = "512Mi"
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).Build(),
+		Scheme: testScheme(),
+	}
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+	res := statefulSetContainer(t, r).Resources
+	memReq := res.Requests.Memory()
+	memLim := res.Limits.Memory()
+	assert.Equal(t, "512Mi", memLim.String(), "explicit memory limit is honoured")
+	assert.Equal(t, "512Mi", memReq.String(), "unset memory request mirrors the limit, not the 1Gi profile default")
+	assert.False(t, memReq.Cmp(*memLim) > 0, "request must not exceed limit")
+	// CPU, untouched by the CR, still comes from the profile.
+	assert.Equal(t, "500m", res.Requests.Cpu().String())
+	assert.Equal(t, "500m", res.Limits.Cpu().String())
+}
+
+// The resource controller's OOM bumps live on the StatefulSet, not the CR. A
+// reconcile of a resource-less service must keep those live values rather than
+// resetting them to the profile default.
+func TestReconcileStatefulSet_PreservesResourceControllerBumps(t *testing.T) {
+	svc := bareService("postgres")
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).Build(),
+		Scheme: testScheme(),
+	}
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+	// Simulate an OOM bump: the controller raised the memory limit on the
+	// running workload well above the profile default.
+	var sts appsv1.StatefulSet
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &sts))
+	sts.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = resource.MustParse("4Gi")
+	require.NoError(t, r.Update(context.Background(), &sts))
+
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+	res := statefulSetContainer(t, r).Resources
+	assert.Equal(t, "4Gi", res.Limits.Memory().String(), "reconcile must not stomp the controller's bump")
+}
+
+// Pinning one resource type must not reset the other. A memory bump on the
+// live workload has to survive even when the CR pins CPU, so preservation
+// works per resource type rather than only when the CR pins nothing at all.
+func TestReconcileStatefulSet_PartialOverrideKeepsUnpinnedBump(t *testing.T) {
+	svc := bareService("postgres")
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).Build(),
+		Scheme: testScheme(),
+	}
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+	// A VPA raised the memory limit on the running workload.
+	var sts appsv1.StatefulSet
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &sts))
+	sts.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = resource.MustParse("4Gi")
+	require.NoError(t, r.Update(context.Background(), &sts))
+
+	// The user later pins CPU only. Memory stays unpinned, so its live value
+	// must survive; CPU comes from the CR.
+	svc.Spec.Resources.CPULimit = "2"
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+	res := statefulSetContainer(t, r).Resources
+	assert.Equal(t, "4Gi", res.Limits.Memory().String(), "unpinned memory bump must survive a CPU-only override")
+	assert.Equal(t, "2", res.Limits.Cpu().String(), "pinned CPU limit must come from the CR")
+	assert.Equal(t, "2", res.Requests.Cpu().String(), "one-sided CPU limit mirrors to the request")
+}
+
+func TestEnsureCredentialDefaults_RabbitMQAddsVHOSTAndDropsNAME(t *testing.T) {
+	// Pre-existing rabbitmq secret in the old shape: NAME=app from
+	// when every authed service inherited the database template.
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "rabbit-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"HOST":     []byte("rabbit.ns.svc.cluster.local"),
+			"PORT":     []byte("5672"),
+			"USERNAME": []byte("kipper"),
+			"PASSWORD": []byte("secret"),
+			"NAME":     []byte("app"),
+		},
+	}
+	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
+	require.NoError(t, r.ensureCredentialDefaults(context.Background(), existing, "rabbitmq"))
+
+	got := secretFromCluster(t, r, "rabbit-credentials")
+	assert.Equal(t, "/", got["VHOST"], "VHOST should be added with the default vhost value")
+	_, hasName := got["NAME"]
+	assert.False(t, hasName, "NAME should be pruned from rabbitmq secrets — AMQP_NAME is meaningless")
+	assert.Equal(t, "rabbit.ns.svc.cluster.local", got["HOST"], "HOST must not be touched")
+	assert.Equal(t, "kipper", got["USERNAME"], "USERNAME must not be touched")
+}
+
+func TestEnsureCredentialDefaults_MinioDropsNAME(t *testing.T) {
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "obj-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"HOST":     []byte("obj.ns.svc.cluster.local"),
+			"PORT":     []byte("9000"),
+			"USERNAME": []byte("kipper"),
+			"PASSWORD": []byte("secret"),
+			"NAME":     []byte("app"),
+		},
+	}
+	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
+	require.NoError(t, r.ensureCredentialDefaults(context.Background(), existing, "minio"))
+
+	got := secretFromCluster(t, r, "obj-credentials")
+	_, hasName := got["NAME"]
+	assert.False(t, hasName, "NAME should be pruned from minio secrets — buckets are per-binding")
+	_, hasVHOST := got["VHOST"]
+	assert.False(t, hasVHOST, "minio has no VHOST concept")
+}
+
+// TestReconcileCredentialsSecret_MinioS3Shape locks the reconciler's
+// fresh-create output to the S3-native shape, matching what the kip CLI
+// path produces (see kip/internal/service TestAddMinIOCreatesResources)
+// so a MinIO made either way binds identically.
+func TestReconcileCredentialsSecret_MinioS3Shape(t *testing.T) {
+	svc := &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "storage", Namespace: "ns"},
+		Spec:       kipperv1.ServiceSpec{Type: "minio"},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).Build(),
+		Scheme: testScheme(),
+	}
+	require.NoError(t, r.reconcileCredentialsSecret(context.Background(), svc))
+
+	got := secretFromCluster(t, r, "storage-credentials")
+	assert.Equal(t, "http://storage.ns.svc.cluster.local:9000", got["ENDPOINT"])
+	assert.Equal(t, "kipper", got["ACCESS_KEY"])
+	assert.NotEmpty(t, got["SECRET_KEY"])
+	for _, k := range []string{"HOST", "PORT", "USERNAME", "PASSWORD", "NAME"} {
+		_, present := got[k]
+		assert.False(t, present, k+" must not appear on an S3 credentials secret")
+	}
+
+	// The MinIO server must take its root password from SECRET_KEY, not
+	// the generic PASSWORD key that no longer exists on the secret.
+	var rootPass *corev1.EnvVar
+	env := serviceCatalog("minio").envVars("storage")
+	for i := range env {
+		if env[i].Name == "MINIO_ROOT_PASSWORD" {
+			rootPass = &env[i]
+		}
+	}
+	require.NotNil(t, rootPass)
+	require.NotNil(t, rootPass.ValueFrom)
+	assert.Equal(t, "SECRET_KEY", rootPass.ValueFrom.SecretKeyRef.Key)
+	assert.Equal(t, "storage-credentials", rootPass.ValueFrom.SecretKeyRef.Name)
+}
+
+func TestEnsureCredentialDefaults_PostgresPreservesName(t *testing.T) {
+	// A postgres secret that the user has customised — NAME is the
+	// default database name and must not be touched.
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"HOST":     []byte("db.ns.svc.cluster.local"),
+			"PORT":     []byte("5432"),
+			"USERNAME": []byte("kipper"),
+			"PASSWORD": []byte("secret"),
+			"NAME":     []byte("custom_app"),
+		},
+	}
+	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
+	require.NoError(t, r.ensureCredentialDefaults(context.Background(), existing, "postgres"))
+
+	got := secretFromCluster(t, r, "db-credentials")
+	assert.Equal(t, "custom_app", got["NAME"], "existing custom database name must be preserved")
+}
+
+func TestEnsureCredentialDefaults_HandlesNilDataMap(t *testing.T) {
+	// A Secret created out of band (or fully drained) can have Data
+	// == nil. The reconciler must not panic on the assignment.
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "rabbit-credentials", Namespace: "ns"},
+		Data:       nil,
+	}
+	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
+	require.NoError(t, r.ensureCredentialDefaults(context.Background(), existing, "rabbitmq"))
+
+	got := secretFromCluster(t, r, "rabbit-credentials")
+	assert.Equal(t, "/", got["VHOST"], "VHOST default must be added even when Data starts nil")
+}
+
+// uiCatalogFixtureSvc returns a Service whose catalog entry the test
+// asserts has a UI block (mailhog at the time of writing). Using the
+// real catalog rather than mocking keeps the test honest about
+// catalog-driven behaviour — if we remove mailhog's UI block, the
+// test fails loudly, which is the right signal.
+func uiCatalogFixtureSvc() *kipperv1.Service {
+	return &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "mailhog", Namespace: "blog-test", UID: "test-uid"},
+		Spec:       kipperv1.ServiceSpec{Type: "mailhog"},
+	}
+}
+
+func TestReconcileUIIngress_CreatesIngressAndMiddleware(t *testing.T) {
+	svc := uiCatalogFixtureSvc()
+	r := &ServiceReconciler{
+		Client:              crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).Build(),
+		Scheme:              testScheme(),
+		Domain:              "example.com",
+		ConsoleAuthCheckURL: "https://console.example.com/api/v1/auth/check",
+	}
+	require.NoError(t, r.reconcileUIIngress(context.Background(), svc))
+
+	var ing networkingv1.Ingress
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: "mailhog-ui"}, &ing))
+	assert.Equal(t, "mailhog-blog-test.example.com", ing.Spec.Rules[0].Host, "hostname must be <svc>-<ns>.<cluster-domain>")
+	assert.Equal(t, "letsencrypt-prod", ing.Annotations["cert-manager.io/cluster-issuer"], "TLS must be requested via the prod ClusterIssuer")
+	assert.Contains(t, ing.Annotations["traefik.ingress.kubernetes.io/router.middlewares"], "mailhog-forward-auth@kubernetescrd",
+		"router must chain through the forwardAuth middleware so unauthenticated requests bounce to login")
+	assert.Equal(t, "ui", ing.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Port.Name)
+
+	mw := unstructuredMiddleware()
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: "mailhog-forward-auth"}, &mw))
+	fa := mw.Object["spec"].(map[string]interface{})["forwardAuth"].(map[string]interface{})
+	assert.Equal(t, "https://console.example.com/api/v1/auth/check", fa["address"], "forwardAuth must point at the console-api /auth/check endpoint")
+	assert.Equal(t, true, fa["trustForwardHeader"], "trustForwardHeader required so /auth/check can rebuild the original URL for the ?next= redirect")
+	assert.Equal(t, []interface{}{"__Host-kipper-ui-mailhog-blog-test"}, fa["addAuthCookiesToResponse"],
+		"Traefik must copy the re-minted per-host session cookie back to the browser")
+
+	// The middleware chain order is load-bearing: rate-limit throttles
+	// the public gate before any auth work, and cookie-strip runs after
+	// forwardAuth so the backend never receives the kipper auth or share
+	// cookies — the capability must not reach a possibly untrusted
+	// container.
+	chain := ing.Annotations["traefik.ingress.kubernetes.io/router.middlewares"]
+	assert.Equal(t,
+		"traefik-rate-limit@kubernetescrd,blog-test-mailhog-forward-auth@kubernetescrd,blog-test-mailhog-cookie-strip@kubernetescrd",
+		chain, "chain must run rate-limit → forwardAuth → cookie-strip, in that order")
+
+	strip := unstructuredMiddleware()
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: "mailhog-cookie-strip"}, &strip))
+	headers := strip.Object["spec"].(map[string]interface{})["headers"].(map[string]interface{})
+	custom := headers["customRequestHeaders"].(map[string]interface{})
+	assert.Equal(t, "", custom["Cookie"], "the backend must receive a blanked Cookie header")
+}
+
+func TestReconcileUIIngress_DeletesWhenUIRemoved(t *testing.T) {
+	// First reconcile creates the Ingress + Middleware; second
+	// reconcile with no Domain configured must tear them down so
+	// disabling UI access is reversible without orphans.
+	svc := uiCatalogFixtureSvc()
+	r := &ServiceReconciler{
+		Client:              crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).Build(),
+		Scheme:              testScheme(),
+		Domain:              "example.com",
+		ConsoleAuthCheckURL: "https://console.example.com/api/v1/auth/check",
+	}
+	require.NoError(t, r.reconcileUIIngress(context.Background(), svc))
+
+	// Drop Domain so the next reconcile takes the delete path.
+	r.Domain = ""
+	r.ConsoleAuthCheckURL = ""
+	require.NoError(t, r.reconcileUIIngress(context.Background(), svc))
+
+	var ing networkingv1.Ingress
+	err := r.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: "mailhog-ui"}, &ing)
+	assert.True(t, kerrors.IsNotFound(err), "Ingress must be deleted on the no-UI path")
+
+	mw := unstructuredMiddleware()
+	err = r.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: "mailhog-forward-auth"}, &mw)
+	assert.True(t, kerrors.IsNotFound(err), "Middleware must be deleted on the no-UI path")
+}
+
+func TestReconcileUIIngress_SkipsWithoutConsoleAuthURL(t *testing.T) {
+	// Misconfiguration guard: a cluster without CONSOLE_DOMAIN
+	// shouldn't end up with an Ingress that points at a broken
+	// forwardAuth — the UI would still be reachable, but auth
+	// would silently let everyone through.
+	svc := uiCatalogFixtureSvc()
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).Build(),
+		Scheme: testScheme(),
+		Domain: "example.com",
+		// ConsoleAuthCheckURL intentionally empty.
+	}
+	require.NoError(t, r.reconcileUIIngress(context.Background(), svc))
+
+	var ing networkingv1.Ingress
+	err := r.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: "mailhog-ui"}, &ing)
+	assert.True(t, kerrors.IsNotFound(err), "no Ingress without a working forwardAuth target")
+}
+
+func TestReconcileUINetworkPolicy_HonoursIngressControllerConfigMap(t *testing.T) {
+	// Operator overrides the defaults: different label, different
+	// value, and locks the policy to a specific namespace. The
+	// resulting NetworkPolicy must reflect every override exactly,
+	// so a chart upgrade that renames labels (or a swap to Nginx
+	// ingress) is a ConfigMap edit rather than a Kipper release.
+	svc := uiCatalogFixtureSvc()
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "ingress-controller", Namespace: "kipper-system"},
+		Data: map[string]string{
+			"labelKey":   "app.kubernetes.io/component",
+			"labelValue": "ingress-controller",
+			"namespace":  "nginx-ingress",
+		},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc, cm).Build(),
+		Scheme: testScheme(),
+	}
+	require.NoError(t, r.reconcileUINetworkPolicy(context.Background(), svc))
+
+	var np networkingv1.NetworkPolicy
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: "mailhog-ui-traffic"}, &np))
+	uiRule := np.Spec.Ingress[0]
+	require.Len(t, uiRule.From, 1)
+	assert.Equal(t, "ingress-controller", uiRule.From[0].PodSelector.MatchLabels["app.kubernetes.io/component"],
+		"podSelector must use the custom label key + value from the ConfigMap")
+	assert.Equal(t, "nginx-ingress", uiRule.From[0].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"],
+		"namespaceSelector must restrict to the override namespace when one is configured")
+}
+
+func TestReconcileUINetworkPolicy_PartialConfigMapKeepsDefaults(t *testing.T) {
+	// Only `namespace` is set; the label key/value should fall
+	// through to defaults. Lets operators tighten just one knob
+	// without re-specifying the rest.
+	svc := uiCatalogFixtureSvc()
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "ingress-controller", Namespace: "kipper-system"},
+		Data:       map[string]string{"namespace": "traefik"},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc, cm).Build(),
+		Scheme: testScheme(),
+	}
+	require.NoError(t, r.reconcileUINetworkPolicy(context.Background(), svc))
+
+	var np networkingv1.NetworkPolicy
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: "mailhog-ui-traffic"}, &np))
+	uiRule := np.Spec.Ingress[0]
+	assert.Equal(t, "traefik", uiRule.From[0].PodSelector.MatchLabels["app.kubernetes.io/name"],
+		"label defaults must apply when only namespace is overridden")
+	assert.Equal(t, "traefik", uiRule.From[0].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"])
+}
+
+func TestReconcileUINetworkPolicy_RestrictsToTraefikNamespace(t *testing.T) {
+	svc := uiCatalogFixtureSvc()
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).Build(),
+		Scheme: testScheme(),
+	}
+	require.NoError(t, r.reconcileUINetworkPolicy(context.Background(), svc))
+
+	var np networkingv1.NetworkPolicy
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: svc.Namespace, Name: "mailhog-ui-traffic"}, &np))
+	require.Len(t, np.Spec.Ingress, 2,
+		"two rules: UI port locked to Traefik, main service port open to all pods so SMTP / binding traffic isn't accidentally blocked")
+
+	// Rule 0: UI port restricted to Traefik pods (any namespace).
+	uiRule := np.Spec.Ingress[0]
+	require.Len(t, uiRule.From, 1)
+	require.NotNil(t, uiRule.From[0].PodSelector,
+		"UI rule must select Traefik by pod label so the policy works across k3s layouts (kube-system vs traefik namespace)")
+	assert.Equal(t, "traefik", uiRule.From[0].PodSelector.MatchLabels["app.kubernetes.io/name"])
+	assert.NotNil(t, uiRule.From[0].NamespaceSelector,
+		"empty NamespaceSelector required alongside PodSelector to match Traefik in any namespace")
+	require.Len(t, uiRule.Ports, 1)
+	assert.Equal(t, int32(8025), uiRule.Ports[0].Port.IntVal, "UI rule must target MailHog's UI port")
+
+	// Rule 1: main port unrestricted.
+	mainRule := np.Spec.Ingress[1]
+	assert.Empty(t, mainRule.From, "main port (SMTP for mailhog) must be reachable from any bound app pod")
+	require.Len(t, mainRule.Ports, 1)
+	assert.Equal(t, int32(1025), mainRule.Ports[0].Port.IntVal, "main rule must target the binding port")
+
+	assert.Equal(t, "mailhog", np.Spec.PodSelector.MatchLabels["app"], "podSelector must scope to the service's pod (app=<svc-name>)")
+}
+
+func unstructuredMiddleware() unstructured.Unstructured {
+	mw := unstructured.Unstructured{}
+	mw.SetGroupVersionKind(schema.GroupVersionKind{Group: "traefik.io", Version: "v1alpha1", Kind: "Middleware"})
+	return mw
+}
+
+func TestEnsureCredentialDefaults_NoChangesIsNoUpdate(t *testing.T) {
+	// Secret already matches the desired shape — the helper should
+	// not call Update (a no-op).
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "rabbit-credentials", Namespace: "ns", ResourceVersion: "1"},
+		Data: map[string][]byte{
+			"HOST":     []byte("rabbit.ns.svc.cluster.local"),
+			"PORT":     []byte("5672"),
+			"USERNAME": []byte("kipper"),
+			"PASSWORD": []byte("secret"),
+			"VHOST":    []byte("/"),
+		},
+	}
+	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
+	require.NoError(t, r.ensureCredentialDefaults(context.Background(), existing, "rabbitmq"))
+
+	got := secretFromCluster(t, r, "rabbit-credentials")
+	assert.Equal(t, "/", got["VHOST"])
+	_, hasName := got["NAME"]
+	assert.False(t, hasName)
+}
+
+// A live workload edited out-of-band to carry a request without its matching
+// limit must not be copied through verbatim: pairing only the request onto a
+// desired that still has a smaller limit yields request > limit, which the API
+// server rejects and wedges the reconcile. The pair is mirrored to stay valid.
+func TestPreserveUnpinnedResourcesKeepsPairCoherent(t *testing.T) {
+	desired := &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")},
+	}
+	live := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
+	}
+
+	preserveUnpinnedResources(desired, live, false, false)
+
+	req := desired.Requests[corev1.ResourceMemory]
+	lim := desired.Limits[corev1.ResourceMemory]
+	assert.False(t, req.Cmp(lim) > 0, "request %s must not exceed limit %s", req.String(), lim.String())
+	assert.Equal(t, "512Mi", req.String(), "live request must be preserved")
+}
+
+// TestServiceUICatalogConsistency: serviceui.Browseable and the
+// reconciler's catalog `ui` block are two views of one fact. A type
+// gaining a UI in one place but not the other would mint links for a
+// host that never routes, or route a host no one can share.
+func TestServiceUICatalogConsistency(t *testing.T) {
+	for _, svcType := range []string{"postgres", "mysql", "mongodb", "redis", "rabbitmq", "opensearch", "minio", "mailhog"} {
+		hasUI := serviceCatalog(svcType).ui != nil
+		if serviceui.Browseable(svcType) != hasUI {
+			t.Errorf("%s: serviceui.Browseable=%v but catalog ui block present=%v — keep them aligned",
+				svcType, serviceui.Browseable(svcType), hasUI)
+		}
+	}
+}
+
+// TestServiceDeletionRevokesShareLinks pins the finalizer half of the
+// share design: the grants die with the service, before the finalizer
+// releases, so delete+recreate can never resurrect an old link.
+func TestServiceDeletionRevokesShareLinks(t *testing.T) {
+	now := metav1.Now()
+	svc := &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "mailhog",
+			Namespace:         "supplemento-test",
+			UID:               "uid-mailhog-1",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{serviceFinalizer},
+		},
+		Spec: kipperv1.ServiceSpec{Type: "mailhog"},
+	}
+
+	grants := share.NewGrantStore(k8sfake.NewSimpleClientset())
+	g, err := share.NewGrant("uid-mailhog-1", "mailhog", "supplemento-test", "mailhog-supplemento-test.example.com", "", "admin@example.com", time.Hour, time.Now())
+	require.NoError(t, err)
+	require.NoError(t, grants.Create(context.Background(), g))
+
+	r := &ServiceReconciler{
+		Client:      crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).WithStatusSubresource(svc).Build(),
+		Scheme:      testScheme(),
+		ShareGrants: grants,
+	}
+
+	_, err = r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "mailhog", Namespace: "supplemento-test"},
+	})
+	require.NoError(t, err)
+
+	assert.Nil(t, grants.Get(context.Background(), g.JTI), "the service's grant must die with it")
+
+	var gone kipperv1.Service
+	err = r.Get(context.Background(), types.NamespacedName{Name: "mailhog", Namespace: "supplemento-test"}, &gone)
+	assert.True(t, kerrors.IsNotFound(err), "the finalizer should be released after grant cleanup")
+}
+
+// TestServiceDeletionFailsClosedWithoutGrantStore pins the fail-closed
+// side: a reconciler with no grant store must keep the finalizer and error
+// rather than release a deleting service with its links possibly intact.
+func TestServiceDeletionFailsClosedWithoutGrantStore(t *testing.T) {
+	now := metav1.Now()
+	svc := &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "mailhog",
+			Namespace:         "supplemento-test",
+			UID:               "uid-mailhog-1",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{serviceFinalizer},
+		},
+		Spec: kipperv1.ServiceSpec{Type: "mailhog"},
+	}
+
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(),
+		// ShareGrants deliberately nil.
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "mailhog", Namespace: "supplemento-test"},
+	})
+	require.Error(t, err, "deletion without a grant store must fail closed")
+
+	var still kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "mailhog", Namespace: "supplemento-test"}, &still))
+	assert.Contains(t, still.Finalizers, serviceFinalizer, "the finalizer must be retained so deletion retries")
+}
+
+// Nothing claims a credentials Secret on the strength of its name, its labels
+// or its keys any more. The reconciler either owns the object or refuses to run
+// the service against it, because an unowned Secret is refused by every binding
+// too, and starting the engine against one only moves the failure into somebody
+// else's application. Whoever put the object there says so by setting the
+// controller reference; the migration receiver does exactly that for the bytes
+// it writes.
+func TestReconcileCredentialsSecret_RefusesASecretItDoesNotOwn(t *testing.T) {
+	scheme := testScheme()
+	ctx := context.Background()
+	svc := &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "shop-test", UID: types.UID("uid-db")},
+		Spec:       kipperv1.ServiceSpec{Type: "postgres"},
+	}
+	controller := true
+	credentialData := map[string][]byte{
+		"HOST": []byte("db.shop-test.svc"), "PORT": []byte("5432"), "USERNAME": []byte("kipper"),
+		"PASSWORD": []byte("from-the-source-cluster"), "NAME": []byte("app"),
+	}
+
+	for _, tc := range []struct {
+		name   string
+		secret *corev1.Secret
+	}{
+		{
+			// The shape migration used to leave behind: correctly labelled,
+			// correctly shaped, and owned by nobody. It is now the receiver's
+			// job to have claimed this before the CR ever reconciles.
+			name: "no controller at all",
+			secret: &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+				Name: "db-credentials", Namespace: "shop-test",
+				Labels: map[string]string{
+					"app": "db", kipperLabel: kipperValue, "kipper.run/service-type": "postgres",
+				},
+			}, Data: credentialData},
+		},
+		{
+			name: "controlled by another service",
+			secret: &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+				Name: "db-credentials", Namespace: "shop-test",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: kipperv1.GroupVersion.String(), Kind: "Service",
+					Name: "billing", UID: types.UID("uid-billing"), Controller: &controller,
+				}},
+			}, Data: credentialData},
+		},
+		{
+			// A Velero restore's shape: the reference names this Service but the
+			// CR it was written against is gone. Repairing it used to be a race
+			// against garbage collection, which is not a thing to ship as a
+			// restore strategy, so the mismatch is reported instead.
+			name: "a stale owner UID",
+			secret: &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+				Name: "db-credentials", Namespace: "shop-test",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: kipperv1.GroupVersion.String(), Kind: "Service",
+					Name: "db", UID: types.UID("uid-db-before-the-restore"), Controller: &controller,
+				}},
+			}, Data: credentialData},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := tc.secret.DeepCopy()
+			c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(svc, tc.secret).Build()
+			r := &ServiceReconciler{Client: c, Scheme: scheme}
+
+			err := r.reconcileCredentialsSecret(ctx, svc)
+			require.Error(t, err, "the reconcile must fail rather than run the service against credentials it cannot vouch for")
+			assert.Contains(t, err.Error(), "db-credentials")
+
+			var got corev1.Secret
+			require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "db-credentials", Namespace: "shop-test"}, &got))
+			assert.Equal(t, before.OwnerReferences, got.OwnerReferences, "the object must be left exactly as it was found")
+			assert.Equal(t, before.Data, got.Data)
+		})
+	}
+}
+
+// A service's data outlives its credentials Secret: garbage collection removes
+// one whose owner UID stops resolving, which is what a Velero restore leaves,
+// and an operator can delete one by hand. Generating a replacement password is
+// silent and the engine never learns it, so the service comes back locked out of
+// its own database.
+func TestReconcileCredentialsSecret_RefusesToMintOverExistingData(t *testing.T) {
+	scheme := testScheme()
+	ctx := context.Background()
+	svc := &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "shop-test", UID: types.UID("uid-db")},
+		Spec:       kipperv1.ServiceSpec{Type: "postgres"},
+	}
+	restoredVolume := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data-db-0", Namespace: "shop-test"},
+	}
+
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(svc, restoredVolume).Build()
+	r := &ServiceReconciler{Client: c, Scheme: scheme}
+
+	err := r.reconcileCredentialsSecret(ctx, svc)
+	require.Error(t, err, "a service with data and no credentials must report the mismatch, not paper over it")
+	assert.Contains(t, err.Error(), "data-db-0")
+
+	var got corev1.Secret
+	assert.True(t, kerrors.IsNotFound(c.Get(ctx, types.NamespacedName{Name: "db-credentials", Namespace: "shop-test"}, &got)),
+		"no password may be generated against data that cannot be told about it")
+
+	// The control: the same service with no volume is a new service, and gets
+	// its credentials as usual.
+	fresh := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(svc.DeepCopy()).Build()
+	require.NoError(t, (&ServiceReconciler{Client: fresh, Scheme: scheme}).reconcileCredentialsSecret(ctx, svc))
+	require.NoError(t, fresh.Get(ctx, types.NamespacedName{Name: "db-credentials", Namespace: "shop-test"}, &got))
+	assert.NotEmpty(t, got.Data["PASSWORD"])
+}
+
+// A workload bound to a service that has gone fails reconcileBindingSecrets,
+// and because that is fail-closed the whole reconcile aborts — no image change,
+// no scale, no env update. The error tells the operator to unbind, and Unbind
+// resolves the service first, so by then it is the one thing that cannot be
+// done. The service therefore must not finish leaving until nothing is bound to
+// it, whichever way it was deleted: kip, the console, kubectl or a GitOps
+// prune all end here.
+func TestServiceFinalizer_ClearsBindingsBeforeReleasing(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Now()
+
+	svc := &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "db", Namespace: "shop-test",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{serviceFinalizer},
+		},
+		Spec: kipperv1.ServiceSpec{Type: "postgres"},
+	}
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "shop-test", UID: types.UID("uid-api")},
+		Spec: kipperv1.AppSpec{Image: "api:1", ServiceBindings: []kipperv1.ServiceBinding{
+			{Name: "db", Prefix: "DB_", Database: "api_db"},
+			{Name: "cache", Prefix: "REDIS_"},
+		}},
+	}
+	fn := &kipperv1.Function{
+		ObjectMeta: metav1.ObjectMeta{Name: "resize", Namespace: "shop-test"},
+		Spec:       kipperv1.FunctionSpec{ServiceBindings: []kipperv1.ServiceBinding{{Name: "db", Prefix: "DB_"}}},
+	}
+	controller := true
+	// As the render leaves it: owned by the workload that projected it.
+	derived := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: "db-app-api-credentials", Namespace: "shop-test",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: kipperv1.GroupVersion.String(), Kind: "App",
+			Name: "api", UID: types.UID("uid-api"), Controller: &controller,
+		}},
+	}}
+
+	c := crfake.NewClientBuilder().WithScheme(testScheme()).
+		WithObjects(svc, app, fn, derived).Build()
+	r := &ServiceReconciler{Client: c, Scheme: testScheme(), ShareGrants: share.NewGrantStore(k8sfake.NewClientset())}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "db", Namespace: "shop-test"}})
+	require.NoError(t, err)
+
+	var gotApp kipperv1.App
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "api", Namespace: "shop-test"}, &gotApp))
+	require.Len(t, gotApp.Spec.ServiceBindings, 1, "only the binding to the deleted service goes")
+	assert.Equal(t, "cache", gotApp.Spec.ServiceBindings[0].Name)
+
+	var gotFn kipperv1.Function
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "resize", Namespace: "shop-test"}, &gotFn))
+	assert.Empty(t, gotFn.Spec.ServiceBindings, "a Function's binding must go too")
+
+	// The projection outlives the service on purpose: a workload still serving
+	// from a retained revision reads it on every container restart. Its own
+	// reconcile retires it once nothing names it.
+	assert.NoError(t,
+		c.Get(ctx, types.NamespacedName{Name: "db-app-api-credentials", Namespace: "shop-test"}, &corev1.Secret{}),
+		"clearing the binding is this finalizer's job; retiring the projection is the workload's")
+
+}
+
+// Failing to unbind must keep the finalizer, so the service stays and the
+// deletion retries. Releasing it on a failed cleanup would strand exactly the
+// workloads this exists to protect, with the service gone and no way back.
+func TestServiceFinalizer_KeepsTheFinalizerWhenClearingFails(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Now()
+
+	svc := &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "db", Namespace: "shop-test",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{serviceFinalizer},
+		},
+		Spec: kipperv1.ServiceSpec{Type: "postgres"},
+	}
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "shop-test"},
+		Spec: kipperv1.AppSpec{Image: "api:1", ServiceBindings: []kipperv1.ServiceBinding{
+			{Name: "db", Prefix: "DB_", Database: "api_db"},
+		}},
+	}
+
+	c := crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc, app).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, cl crclient.WithWatch, obj crclient.Object, opts ...crclient.UpdateOption) error {
+				if _, isApp := obj.(*kipperv1.App); isApp {
+					return kerrors.NewInternalError(errors.New("etcd unavailable"))
+				}
+				return cl.Update(ctx, obj, opts...)
+			},
+		}).Build()
+	r := &ServiceReconciler{Client: c, Scheme: testScheme(), ShareGrants: share.NewGrantStore(k8sfake.NewClientset())}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "db", Namespace: "shop-test"}})
+	require.Error(t, err, "a cleanup that could not finish must be reported so the deletion retries")
+
+	var still kipperv1.Service
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "db", Namespace: "shop-test"}, &still))
+	assert.Contains(t, still.Finalizers, serviceFinalizer, "the finalizer must be held until the bindings are gone")
+}
+
+// Deleting a service must not delete a Secret its bindings never derived.
+//
+// A `database` on a service type with no logical namespace derives nothing —
+// redis has no databases to carve up — so that name belongs to whatever else is
+// sitting under it. The cleanup decided from the database field alone, and
+// moving it into the finalizer took that from a console-only mistake to one on
+// every deletion path.
+func TestServiceFinalizer_LeavesASecretItNeverDerived(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Now()
+
+	cache := &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cache", Namespace: "shop-test", UID: types.UID("uid-cache"),
+			DeletionTimestamp: &now,
+			Finalizers:        []string{serviceFinalizer},
+		},
+		Spec: kipperv1.ServiceSpec{Type: "redis"},
+	}
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "shop-test", UID: types.UID("uid-api")},
+		Spec: kipperv1.AppSpec{Image: "api:1", ServiceBindings: []kipperv1.ServiceBinding{
+			{Name: "cache", Prefix: "REDIS_", Database: "2"},
+		}},
+	}
+	// Somebody else's object at the name a derived Secret would have had.
+	bystander := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "cache-app-api-credentials", Namespace: "shop-test"},
+		Data:       map[string][]byte{"NOT": []byte("ours")},
+	}
+
+	c := crfake.NewClientBuilder().WithScheme(testScheme()).
+		WithObjects(cache, app, bystander).Build()
+	r := &ServiceReconciler{Client: c, Scheme: testScheme(), ShareGrants: share.NewGrantStore(k8sfake.NewClientset())}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "cache", Namespace: "shop-test"}})
+	require.NoError(t, err)
+
+	var survived corev1.Secret
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "cache-app-api-credentials", Namespace: "shop-test"}, &survived),
+		"redis has no logical namespace, so this binding derived nothing and the name is not the service's to delete")
+	assert.Equal(t, []byte("ours"), survived.Data["NOT"])
+
+	var gotApp kipperv1.App
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "api", Namespace: "shop-test"}, &gotApp))
+	assert.Empty(t, gotApp.Spec.ServiceBindings, "the binding still goes")
+}
+
+// A binding that does derive a Secret still only owns the one it rendered.
+// writeDerivedBindingSecret refuses to overwrite an object it does not own, so
+// a collision at that name survives the render — and must survive the deletion
+// too, or the service takes something with it that was never its projection.
+func TestServiceFinalizer_LeavesADerivedNameItDoesNotOwn(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Now()
+
+	db := &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "db", Namespace: "shop-test", UID: types.UID("uid-db"),
+			DeletionTimestamp: &now,
+			Finalizers:        []string{serviceFinalizer},
+		},
+		Spec: kipperv1.ServiceSpec{Type: "postgres"},
+	}
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "shop-test", UID: types.UID("uid-api")},
+		Spec: kipperv1.AppSpec{Image: "api:1", ServiceBindings: []kipperv1.ServiceBinding{
+			{Name: "db", Prefix: "DB_", Database: "api_db"},
+		}},
+	}
+	controller := true
+	// The shared credentials of a service that happens to be called
+	// db-app-api, sitting where this binding's projection would go.
+	collision := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "db-app-api-credentials", Namespace: "shop-test",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: kipperv1.GroupVersion.String(), Kind: "Service",
+				Name: "db-app-api", UID: types.UID("uid-db-app-api"), Controller: &controller,
+			}},
+		},
+		Data: map[string][]byte{"PASSWORD": []byte("someone-elses")},
+	}
+
+	c := crfake.NewClientBuilder().WithScheme(testScheme()).
+		WithObjects(db, app, collision).Build()
+	r := &ServiceReconciler{Client: c, Scheme: testScheme(), ShareGrants: share.NewGrantStore(k8sfake.NewClientset())}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "db", Namespace: "shop-test"}})
+	require.NoError(t, err)
+
+	var survived corev1.Secret
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "db-app-api-credentials", Namespace: "shop-test"}, &survived),
+		"a Secret this workload never owned is not its projection to delete")
+	assert.Equal(t, []byte("someone-elses"), survived.Data["PASSWORD"])
+}
+
+// TestReconcileCredentialsSecret_NoPasswordWithoutAuth pins the rule at the
+// point it decides what a bound workload receives.
+//
+// redis, opensearch and mailhog all start with authentication off, and every
+// one of them used to be minted with a generated PASSWORD anyway. That
+// password reached every bound workload, and redis does worse than ignore it:
+// it answers AUTH with an error when no password is set, so a connection
+// string built from ${REDIS_PASSWORD} fails and names the wrong cause.
+func TestReconcileCredentialsSecret_NoPasswordWithoutAuth(t *testing.T) {
+	for _, tc := range []struct {
+		svcType string
+		wantPw  bool
+	}{
+		{"redis", false},
+		{"opensearch", false},
+		{"mailhog", false},
+		{"postgres", true},
+		{"rabbitmq", true},
+	} {
+		t.Run(tc.svcType, func(t *testing.T) {
+			svc := &kipperv1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "ns", UID: "svc-uid"},
+				Spec:       kipperv1.ServiceSpec{Type: tc.svcType},
+			}
+			r := &ServiceReconciler{
+				Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).Build(),
+				Scheme: testScheme(),
+			}
+			require.NoError(t, r.reconcileCredentialsSecret(context.Background(), svc))
+
+			got := secretFromCluster(t, r, "svc-credentials")
+			assert.NotEmpty(t, got["HOST"], "every type carries HOST")
+			assert.NotEmpty(t, got["PORT"], "every type carries PORT")
+
+			_, hasPw := got["PASSWORD"]
+			_, hasUser := got["USERNAME"]
+			assert.Equal(t, tc.wantPw, hasPw, "PASSWORD presence follows whether the server authenticates")
+			assert.Equal(t, tc.wantPw, hasUser, "USERNAME travels with PASSWORD")
+		})
+	}
+}
+
+// TestEnsureCredentialDefaults_PrunesCredentialsWithoutAuth covers the Secrets
+// already on the three live clusters, which were minted before the rule.
+//
+// Pruning is safe in the direction that matters: none of these servers read the
+// password when they started, so removing it locks nothing out of its own data.
+func TestEnsureCredentialDefaults_PrunesCredentialsWithoutAuth(t *testing.T) {
+	for _, tc := range []struct {
+		svcType string
+		wantPw  bool
+	}{
+		{"redis", false},
+		{"opensearch", false},
+		{"mailhog", false},
+		{"postgres", true},
+	} {
+		t.Run(tc.svcType, func(t *testing.T) {
+			existing := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "cache-credentials", Namespace: "ns"},
+				Data: map[string][]byte{
+					"HOST":     []byte("cache.ns.svc.cluster.local"),
+					"PORT":     []byte("6379"),
+					"USERNAME": []byte("kipper"),
+					"PASSWORD": []byte("generated-and-never-accepted"),
+				},
+			}
+			r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
+			require.NoError(t, r.ensureCredentialDefaults(context.Background(), existing, tc.svcType))
+
+			got := secretFromCluster(t, r, "cache-credentials")
+			_, hasPw := got["PASSWORD"]
+			_, hasUser := got["USERNAME"]
+			assert.Equal(t, tc.wantPw, hasPw, "a stale PASSWORD is pruned where the server has no auth")
+			assert.Equal(t, tc.wantPw, hasUser, "so is the USERNAME beside it")
+			assert.Equal(t, "cache.ns.svc.cluster.local", got["HOST"], "HOST must survive the prune")
+			assert.Equal(t, "6379", got["PORT"], "PORT must survive the prune")
+		})
+	}
+}
+
+// TestEnsureCredentialDefaults_MinioKeepsItsOwnCredentials guards the edge the
+// prune could have taken with it: MinIO authenticates, but under
+// ACCESS_KEY/SECRET_KEY rather than USERNAME/PASSWORD.
+func TestEnsureCredentialDefaults_MinioKeepsItsOwnCredentials(t *testing.T) {
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "obj-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"ENDPOINT":   []byte("http://obj.ns.svc.cluster.local:9000"),
+			"ACCESS_KEY": []byte("kipper"),
+			"SECRET_KEY": []byte("secret"),
+		},
+	}
+	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
+	require.NoError(t, r.ensureCredentialDefaults(context.Background(), existing, "minio"))
+
+	got := secretFromCluster(t, r, "obj-credentials")
+	assert.Equal(t, "kipper", got["ACCESS_KEY"], "MinIO's access key is its username")
+	assert.Equal(t, "secret", got["SECRET_KEY"], "MinIO's secret key is its password")
+}

@@ -1,0 +1,1340 @@
+package migration
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"crypto/tls"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/gorilla/websocket"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/domain"
+	"github.com/getkipper/kipper/console-api/middleware"
+	"github.com/getkipper/kipper/console-api/security"
+)
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: middleware.CheckWebSocketOrigin,
+	// Echo the auth subprotocol the client offers alongside its JWT (see the
+	// ws package), so the handshake selects it rather than the token value.
+	Subprotocols: []string{"kipper.auth"},
+}
+
+// Handler manages cluster-to-cluster migration operations.
+type Handler struct {
+	Client     kubernetes.Interface
+	CRClient   crclient.Client
+	RESTConfig *rest.Config
+	Sessions   *SessionStore
+	Domain     string
+	// DatamoverImage is the kipper-datamover image both ends of a data
+	// transfer run, pinned per release.
+	DatamoverImage string
+	// Security delivers migration lifecycle events out-of-band. Optional:
+	// a nil notifier only drops the deliveries, never the operation.
+	Security *security.Notifier
+	// StepUp verifies a TOTP code before a destructive operation proceeds,
+	// wired from the twofa package. Migration start and cutover fail closed
+	// when it is unset.
+	StepUp func(ctx context.Context, claims *middleware.Claims, code, operation string) error
+	// StepUpStatus reports the caller's factor state for plan blockers:
+	// state ("absent", "pending", "active"), when it becomes eligible to
+	// authorise a migration, and whether it already is.
+	StepUpStatus func(ctx context.Context, claims *middleware.Claims) (state string, eligibleAt time.Time, eligible bool, err error)
+
+	// receipts holds the issued plan receipts. In-memory is enough: a
+	// console-api restart invalidates them, and reviewing a fresh plan after
+	// a restart is the safe direction.
+	receiptsMu sync.Mutex
+	receipts   map[string]planReceipt
+}
+
+// emitSecurityEvent forwards to the notifier when one is wired.
+func (h *Handler) emitSecurityEvent(ctx context.Context, e security.Event) {
+	if h.Security != nil {
+		h.Security.Emit(ctx, e)
+	}
+}
+
+// migrationBuildAnnotation records the commit tag of the build a migration
+// triggered for a git app on this cluster. The cutover build gate only
+// accepts a Succeeded build status carrying this commit — any other success
+// belongs to an earlier attempt's build.
+const migrationBuildAnnotation = "kipper.run/migration-build"
+
+// BuildVersion is the console-api build version, set from main at startup.
+// The accept handshake refuses migrations between different major versions,
+// since the two sides speak the same wire protocol only within a major.
+var BuildVersion = "dev"
+
+// majorVersion extracts the major version number from a semver-ish string
+// ("1.4.2", "v2.0.0"). Development builds ("dev") carry no version and
+// report ok=false, which skips the handshake check.
+func majorVersion(v string) (int, bool) {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	head, _, _ := strings.Cut(v, ".")
+	major, err := strconv.Atoi(head)
+	if err != nil {
+		return 0, false
+	}
+	return major, true
+}
+
+// --- Target-side endpoints (new cluster) ---
+
+// GenerateTokenHandler creates a migration token for this cluster.
+// POST /api/v1/migration/token
+func (h *Handler) GenerateTokenHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	// Honor admin overrides if set: each component can be moved to a
+	// custom hostname independently. Defaults follow the SubdomainFor
+	// convention when the override env var is unset.
+	apiEndpoint := "https://" + domain.ConsoleAPIHost(getEnvOrDefault("CONSOLE_API_DOMAIN", ""), h.Domain)
+	clusterDisplay := domain.ConsoleHost(getEnvOrDefault("CONSOLE_DOMAIN", ""), h.Domain)
+	tokenStr, err := GenerateToken(ctx, h.Client, apiEndpoint, clusterDisplay, h.Domain)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// A migration token authorises a source cluster to write projects,
+	// secrets, and data into this one — including confirmed overwrites of
+	// existing projects. Its generation is a security event of its own.
+	generatedBy := ""
+	if claims := middleware.UserFromContext(r.Context()); claims != nil {
+		generatedBy = claims.Email
+	}
+	h.emitSecurityEvent(r.Context(), security.Event{
+		Kind:    "migration_token_generated",
+		User:    generatedBy,
+		Summary: fmt.Sprintf("migration token generated by %s: this cluster can now accept an inbound migration", generatedBy),
+		Fields: []security.Field{
+			{Key: "valid_for", Value: tokenTTL.String()},
+		},
+	})
+
+	respondJSON(w, http.StatusOK, map[string]string{"token": tokenStr})
+}
+
+// AcceptHandler validates an incoming migration request from a source cluster.
+// POST /api/v1/migrate-target/accept
+func (h *Handler) AcceptHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Secret              string   `json:"secret"`
+		SourceCluster       string   `json:"source_cluster"`
+		SourceVersion       string   `json:"source_version,omitempty"`
+		Projects            []string `json:"projects"`
+		ConfirmedOverwrites []string `json:"confirmed_overwrites,omitempty"`
+		IdempotencyKey      string   `json:"idempotency_key,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	// A retried accept whose first attempt already consumed the token and
+	// published a session gets that session back instead of a refusal. The
+	// presented secret must still match the stored session's — the key alone
+	// authenticates nothing.
+	if req.IdempotencyKey != "" {
+		if existing := h.Sessions.FindByIdempotencyKey(req.IdempotencyKey); existing != nil &&
+			existing.Secret != "" && subtle.ConstantTimeCompare([]byte(existing.Secret), []byte(req.Secret)) == 1 {
+			respondJSON(w, http.StatusOK, map[string]interface{}{
+				"session_id":         existing.ID,
+				"target_version":     BuildVersion,
+				"target_base_domain": h.Domain,
+			})
+			return
+		}
+	}
+
+	if err := ValidateToken(ctx, h.Client, req.Secret); err != nil {
+		respondError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	// The migration protocol is only stable within a major version, so a
+	// mismatch is refused up front with a clear message instead of failing
+	// halfway through a transfer. Development builds skip the check.
+	if srcMajor, srcOK := majorVersion(req.SourceVersion); srcOK {
+		if tgtMajor, tgtOK := majorVersion(BuildVersion); tgtOK && srcMajor != tgtMajor {
+			respondError(w, http.StatusPreconditionFailed, fmt.Sprintf(
+				"version mismatch: source cluster runs %s, this cluster runs %s; upgrade the older cluster to the same major version first",
+				req.SourceVersion, BuildVersion))
+			return
+		}
+	}
+
+	// Check for project conflicts on this cluster
+	var projectList kipperv1.ProjectList
+	if err := h.CRClient.List(ctx, &projectList); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to list projects")
+		return
+	}
+
+	existingProjects := make(map[string]bool)
+	for _, p := range projectList.Items {
+		existingProjects[p.Name] = true
+	}
+
+	// Conflicts are reported before the token is consumed: the source retries
+	// the accept with the overwrites confirmed, and that retry must still be
+	// able to authenticate with the same single-use token.
+	confirmed := make(map[string]bool, len(req.ConfirmedOverwrites))
+	for _, name := range req.ConfirmedOverwrites {
+		confirmed[name] = true
+	}
+	var unconfirmed []string
+	for _, name := range req.Projects {
+		if existingProjects[name] && !confirmed[name] {
+			unconfirmed = append(unconfirmed, name)
+		}
+	}
+	if len(unconfirmed) > 0 {
+		respondJSON(w, http.StatusConflict, map[string]interface{}{
+			"conflicts": unconfirmed,
+			"message":   "projects already exist on target. Confirm overwrites to proceed",
+		})
+		return
+	}
+
+	// Generate session ID
+	idBytes := make([]byte, 16)
+	_, _ = rand.Read(idBytes)
+	sessionID := hex.EncodeToString(idBytes)
+
+	// Consume the token so it stays single-use: concurrent accepts race here
+	// and only the winner proceeds to publish a session.
+	if err := ConsumeToken(ctx, h.Client); err != nil {
+		respondError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	// Record the accepted session so the per-session receive endpoints can
+	// authenticate each write against the secret we just validated. The k8s
+	// token is now consumed, so the secret lives only here for the migration's
+	// lifetime. The expiry bounds the whole migration including the
+	// human-paced verification phase, so it aligns with sessionRetention
+	// rather than the much shorter token validity.
+	h.Sessions.Put(&Session{
+		ID:             sessionID,
+		SourceCluster:  req.SourceCluster,
+		Projects:       req.Projects,
+		Status:         SessionRunning,
+		StartedAt:      time.Now(),
+		Secret:         req.Secret,
+		ExpiresAt:      time.Now().Add(sessionRetention),
+		IdempotencyKey: req.IdempotencyKey,
+	})
+
+	// Mirror the source-side start alert for the inbound direction: this
+	// cluster is about to receive projects, databases, and secrets from the
+	// named source. The accept is token-authenticated, so no user identity
+	// exists here — the source_cluster value is self-reported by the caller.
+	h.emitSecurityEvent(r.Context(), security.Event{
+		Kind:    "migration_incoming",
+		Summary: fmt.Sprintf("incoming cluster migration accepted from %s", req.SourceCluster),
+		Fields: []security.Field{
+			{Key: "source_cluster", Value: req.SourceCluster},
+			{Key: "projects", Value: strings.Join(req.Projects, ", ")},
+			{Key: "session", Value: sessionID},
+		},
+	})
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"session_id":         sessionID,
+		"target_version":     BuildVersion,
+		"target_base_domain": h.Domain,
+	})
+}
+
+// RequireMigrationSecret authenticates a per-session target request. It rejects
+// the request unless the {session} path param names an accepted, unexpired
+// migration session and the X-Migration-Secret header matches that session's
+// secret. Without this, the receive endpoints accept unauthenticated cluster
+// writes from any caller.
+func (h *Handler) RequireMigrationSecret(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessionID := chi.URLParam(r, "session")
+		session, ok := h.Sessions.Get(sessionID)
+		if !ok {
+			respondError(w, http.StatusUnauthorized, "unknown migration session")
+			return
+		}
+		presented := r.Header.Get("X-Migration-Secret")
+		// Fail closed on an empty secret rather than relying on a non-empty
+		// stored secret: ConstantTimeCompare("", "") reports a match.
+		if session.Secret == "" || presented == "" ||
+			subtle.ConstantTimeCompare([]byte(session.Secret), []byte(presented)) != 1 {
+			respondError(w, http.StatusUnauthorized, "invalid migration secret")
+			return
+		}
+		// Expiry is checked only after the secret matched: eviction on an
+		// unauthenticated request would let anyone who learns a session ID
+		// delete a live session. A source-side session carries no expiry
+		// (zero time) and never expires here.
+		if !session.ExpiresAt.IsZero() && time.Now().After(session.ExpiresAt) {
+			h.Sessions.Delete(sessionID)
+			respondError(w, http.StatusUnauthorized, "migration session expired")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// projectAccepted reports whether the session's accept step included project.
+// The accept step on the target records exactly which projects the admin
+// agreed to receive, so a caller holding a valid migration secret can still
+// only reach those projects. Fails closed on an empty project or unknown
+// session.
+func (h *Handler) projectAccepted(sessionID, project string) bool {
+	if project == "" {
+		return false
+	}
+	session, ok := h.Sessions.Get(sessionID)
+	if !ok {
+		return false
+	}
+	for _, p := range session.Projects {
+		if p == project {
+			return true
+		}
+	}
+	return false
+}
+
+// namespaceInScope reports whether the target namespace belongs to a project
+// the migration was accepted for. A Kipper project owns one namespace per
+// environment, each tagged with the kipper.run/project label, so the namespace
+// is resolved to its project here rather than matched against project names.
+// Fails closed when the namespace is missing or carries no project label.
+func (h *Handler) namespaceInScope(ctx context.Context, sessionID, namespace string) bool {
+	if namespace == "" {
+		return false
+	}
+	ns, err := h.Client.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	return h.projectAccepted(sessionID, ns.Labels["kipper.run/project"])
+}
+
+// ReceiveResourceHandler receives a CRD resource (Project, App, Service, etc.)
+// from the source cluster and creates it on this cluster.
+// POST /api/v1/migration/{session}/resource
+func (h *Handler) ReceiveResourceHandler(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "session")
+
+	var req struct {
+		Kind        string                  `json:"kind"`
+		Name        string                  `json:"name"`
+		Namespace   string                  `json:"namespace,omitempty"`
+		Spec        map[string]interface{}  `json:"spec"`
+		Credentials *transferredCredentials `json:"credentials,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Credentials belong to a Service and nothing else. A sender of this build
+	// never attaches them to another kind, so one arriving elsewhere is a
+	// malformed request rather than something to ignore quietly.
+	if req.Credentials != nil && req.Kind != "Service" {
+		respondError(w, http.StatusBadRequest, fmt.Sprintf("credentials cannot accompany a %s", req.Kind))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	// A Project owns its namespaces, so its own name must be accepted; every
+	// other kind lands in a namespace that must resolve to an accepted project.
+	allowed := false
+	if req.Kind == "Project" {
+		allowed = h.projectAccepted(sessionID, req.Name)
+	} else {
+		allowed = h.namespaceInScope(ctx, sessionID, req.Namespace)
+	}
+	if !allowed {
+		respondError(w, http.StatusForbidden, "target project is outside this migration's accepted scope")
+		return
+	}
+
+	switch req.Kind {
+	case "Project":
+		if err := h.createProject(ctx, req.Name, req.Spec); err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("creating project: %v", err))
+			return
+		}
+	case "Service":
+		if req.Credentials == nil || len(req.Credentials.Data) == 0 {
+			respondError(w, http.StatusBadRequest, fmt.Sprintf("service %s arrived without its credentials", req.Name))
+			return
+		}
+		if err := h.createService(ctx, sessionID, req.Name, req.Namespace, req.Spec, req.Credentials); err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("creating service: %v", err))
+			return
+		}
+	case "App":
+		if err := h.createApp(ctx, req.Name, req.Namespace, req.Spec); err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("creating app: %v", err))
+			return
+		}
+	case "Function":
+		if err := h.createFunction(ctx, req.Name, req.Namespace, req.Spec); err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("creating function: %v", err))
+			return
+		}
+	case "Job":
+		if err := h.createJob(ctx, req.Name, req.Namespace, req.Spec); err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("creating job: %v", err))
+			return
+		}
+	case "Volume":
+		if err := h.createVolume(ctx, req.Name, req.Namespace, req.Spec); err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("creating volume: %v", err))
+			return
+		}
+	case "AppRouteUpdate":
+		if err := h.updateAppRoute(ctx, req.Name, req.Namespace, req.Spec); err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("updating app route: %v", err))
+			return
+		}
+	default:
+		respondError(w, http.StatusBadRequest, fmt.Sprintf("unsupported resource kind: %s", req.Kind))
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{
+		"status":  "created",
+		"session": sessionID,
+	})
+}
+
+// ReceiveSecretHandler receives a Kubernetes Secret from the source cluster.
+// POST /api/v1/migration/{session}/secret
+func (h *Handler) ReceiveSecretHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name      string            `json:"name"`
+		Namespace string            `json:"namespace"`
+		Type      string            `json:"type,omitempty"`
+		Labels    map[string]string `json:"labels,omitempty"`
+		Data      map[string]string `json:"data"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	if !h.namespaceInScope(ctx, chi.URLParam(r, "session"), req.Namespace) {
+		respondError(w, http.StatusForbidden, "target project is outside this migration's accepted scope")
+		return
+	}
+
+	// Preserve the original type: flattening everything except pull secrets
+	// to Opaque breaks TLS and basic-auth secrets on the target.
+	secretType := corev1.SecretTypeOpaque
+	if req.Type != "" {
+		secretType = corev1.SecretType(req.Type)
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      req.Name,
+			Namespace: req.Namespace,
+			Labels:    req.Labels,
+		},
+		Type: secretType,
+		Data: decodeSecretData(req.Data),
+	}
+
+	if _, err := h.applyTransferredSecret(ctx, chi.URLParam(r, "session"), secret); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "created"})
+}
+
+// decodeSecretData decodes a transferred Secret's base64 payload, keeping a
+// value that is not valid base64 as the raw string it arrived as.
+func decodeSecretData(data map[string]string) map[string][]byte {
+	out := make(map[string][]byte, len(data))
+	for k, v := range data {
+		decoded, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			out[k] = []byte(v)
+			continue
+		}
+		out[k] = decoded
+	}
+	return out
+}
+
+// applyTransferredSecret writes one Secret this migration is carrying, and
+// returns the object as it now stands so a caller can act on its
+// resourceVersion.
+//
+// Every Secret a run brings onto this cluster goes through here, whichever
+// endpoint carried it, because the journalling, the abort inventory and the
+// immutable-type replace all live in this one path. A second write path would
+// be a second set of those semantics, and the one that got them wrong would be
+// the one nobody was looking at.
+func (h *Handler) applyTransferredSecret(ctx context.Context, sessionID string, secret *corev1.Secret) (*corev1.Secret, error) {
+	created, err := h.Client.CoreV1().Secrets(secret.Namespace).Create(ctx, secret, metav1.CreateOptions{})
+	if err == nil {
+		// Only freshly created Secrets are recorded for abort cleanup:
+		// deleting a Secret that predated the transfer would reach beyond
+		// what this migration brought into existence.
+		if session, ok := h.Sessions.Get(sessionID); ok {
+			session.RecordSecret(secret.Namespace, secret.Name)
+			h.Sessions.Save(session)
+		}
+		return created, nil
+	}
+	if errors.IsAlreadyExists(err) {
+		existing, getErr := h.Client.CoreV1().Secrets(secret.Namespace).Get(ctx, secret.Name, metav1.GetOptions{})
+		if getErr != nil {
+			return nil, fmt.Errorf("updating secret: %w", getErr)
+		}
+		// This Secret predates the migration, so its current contents are the
+		// target's own. Journal them before overwriting: abort deletes what the
+		// run created, but without a copy it could never put back what the run
+		// replaced, leaving the target's apps on the source's credentials.
+		// Failing closed here is deliberate — overwriting with no way back is
+		// worse than refusing the transfer.
+		if jErr := h.journalExistingSecret(ctx, sessionID, existing); jErr != nil {
+			return nil, jErr
+		}
+		// A Secret's type is immutable, so a type change needs a
+		// delete-and-recreate; an in-place update would 422. The recreate
+		// carries the old annotations and owner references forward — a
+		// replace must not silently detach a controller-owned Secret — and
+		// retries briefly, since deletion is asynchronous and an immediate
+		// create can hit AlreadyExists.
+		if existing.Type != secret.Type {
+			secret.Annotations = existing.Annotations
+			secret.OwnerReferences = existing.OwnerReferences
+			// A restorable copy of the original, in case the recreate fails:
+			// deleting then failing to create would leave the target with no
+			// Secret at all.
+			restore := existing.DeepCopy()
+			restore.ResourceVersion = ""
+			restore.UID = ""
+			restore.CreationTimestamp = metav1.Time{}
+			if delErr := h.Client.CoreV1().Secrets(secret.Namespace).Delete(ctx, secret.Name, metav1.DeleteOptions{}); delErr != nil {
+				return nil, fmt.Errorf("replacing secret: %w", delErr)
+			}
+			var createErr error
+			var replaced *corev1.Secret
+			for attempt := 0; attempt < 10; attempt++ {
+				if replaced, createErr = h.Client.CoreV1().Secrets(secret.Namespace).Create(ctx, secret, metav1.CreateOptions{}); !errors.IsAlreadyExists(createErr) {
+					break
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+			if createErr != nil {
+				// Put the original back so the type change fails without
+				// destroying the Secret the target already had. A fresh
+				// context runs the restore even if the request's is already
+				// spent by the failed create attempts, and a restore failure
+				// is surfaced rather than hidden behind the create error.
+				restoreCtx, cancelRestore := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+				var restoreErr error
+				for attempt := 0; attempt < 10; attempt++ {
+					if _, restoreErr = h.Client.CoreV1().Secrets(secret.Namespace).Create(restoreCtx, restore, metav1.CreateOptions{}); restoreErr == nil || errors.IsAlreadyExists(restoreErr) {
+						break
+					}
+					time.Sleep(200 * time.Millisecond)
+				}
+				cancelRestore()
+				if restoreErr != nil && !errors.IsAlreadyExists(restoreErr) {
+					return nil, fmt.Errorf("replacing secret failed (%v) AND restoring the original failed (%v). Secret %s/%s may be missing", createErr, restoreErr, secret.Namespace, secret.Name)
+				}
+				return nil, fmt.Errorf("replacing secret: %w", createErr)
+			}
+			return replaced, nil
+		}
+		existing.Data = secret.Data
+		existing.Labels = secret.Labels
+		updated, updateErr := h.Client.CoreV1().Secrets(secret.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
+		if updateErr != nil {
+			return nil, fmt.Errorf("updating secret: %w", updateErr)
+		}
+		return updated, nil
+	}
+	return nil, fmt.Errorf("creating secret: %w", err)
+}
+
+// AbortHandler removes the Secrets this session created here that no
+// controller has adopted. The source calls it when a run fails or is
+// cancelled, so an abandoned migration does not strand plaintext credentials
+// in namespaces whose apps never arrived. Adopted Secrets stay: their
+// lifecycle belongs to the App or Function that owns them, and a retried
+// migration re-sends every secret regardless.
+// POST /api/v1/migrate-target/{session}/abort
+func (h *Handler) AbortHandler(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "session")
+	session, ok := h.Sessions.Get(sessionID)
+	if !ok {
+		respondError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	removed := 0
+	for ns, names := range session.ReceivedSecretsSnapshot() {
+		for _, name := range names {
+			secret, err := h.Client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				continue
+			}
+			if metav1.GetControllerOf(secret) != nil {
+				continue
+			}
+			if err := h.Client.CoreV1().Secrets(ns).Delete(ctx, name, metav1.DeleteOptions{}); err == nil {
+				removed++
+			}
+		}
+	}
+
+	// Put back every Secret this run overwrote. Deleting what the migration
+	// created is only half of an abort: a confirmed project overwrite replaces
+	// the target's own Secrets in place, so without this the target's apps keep
+	// running on the source's credentials after a migration that never landed.
+	restored, restoreFailures := h.restoreJournaledSecrets(ctx, sessionID)
+
+	// Reap any transfer receivers this session stood up, restarting the
+	// services they paused. Without this an abort would leave a target
+	// database/object store stopped until its 24h lease expires.
+	h.reapSessionTransfers(ctx, sessionID)
+
+	session.Finish(SessionCancelled, "")
+	h.Sessions.Save(session)
+
+	resp := map[string]interface{}{
+		"status":           "aborted",
+		"secrets_removed":  removed,
+		"secrets_restored": restored,
+	}
+	// A partial rollback must never read as a clean one: the operator has to
+	// know which credentials are still the source's.
+	if len(restoreFailures) > 0 {
+		resp["restore_failures"] = restoreFailures
+	}
+	respondJSON(w, http.StatusOK, resp)
+}
+
+// TargetAppsHandler reports the migrated apps as they exist on this cluster:
+// current phase, build progress, and the temporary URL from each app's
+// Ingress. The source cluster's verification screen proxies this, so the user
+// checks real target state rather than the source's mirror of it.
+// GET /api/v1/migrate-target/{session}/apps
+func (h *Handler) TargetAppsHandler(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "session")
+	session, ok := h.Sessions.Get(sessionID)
+	if !ok {
+		respondError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	type appState struct {
+		Name         string `json:"name"`
+		Namespace    string `json:"namespace"`
+		Status       string `json:"status"`
+		HasGit       bool   `json:"has_git"`
+		BuildPhase   string `json:"build_phase,omitempty"`
+		TemporaryURL string `json:"temporary_url,omitempty"`
+	}
+
+	// Enumeration failures must fail the request: the cutover build gate
+	// reads this inventory, and a partial 200 would read as "no pending
+	// builds" and wave a cutover through on an API hiccup.
+	var apps []appState
+	for _, project := range session.Projects {
+		namespaces, err := h.getProjectNamespaces(ctx, project)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("resolving namespaces for %s: %v", project, err))
+			return
+		}
+		for _, ns := range namespaces {
+			var appList kipperv1.AppList
+			if err := h.CRClient.List(ctx, &appList, crclient.InNamespace(ns)); err != nil {
+				respondError(w, http.StatusInternalServerError, fmt.Sprintf("listing apps in %s: %v", ns, err))
+				return
+			}
+			for _, app := range appList.Items {
+				state := appState{Name: app.Name, Namespace: ns, Status: "pending", HasGit: app.Spec.Git != nil}
+				if app.Status.Phase != "" {
+					state.Status = app.Status.Phase
+				}
+				if app.Status.Build != nil {
+					state.BuildPhase = app.Status.Build.Phase
+					// A status written by a different build than the one this
+					// migration triggered (an earlier attempt's Job reporting
+					// late) must not read as this rebuild's outcome.
+					if expect := app.Annotations[migrationBuildAnnotation]; expect != "" && app.Status.Build.Commit != expect {
+						state.BuildPhase = "Pending"
+					}
+				}
+				if ing, err := h.Client.NetworkingV1().Ingresses(ns).Get(ctx, app.Name, metav1.GetOptions{}); err == nil {
+					for _, rule := range ing.Spec.Rules {
+						if rule.Host != "" {
+							state.TemporaryURL = "https://" + rule.Host
+							break
+						}
+					}
+				}
+				apps = append(apps, state)
+			}
+		}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{"apps": apps})
+}
+
+// StatusHandler returns the status of resources on the target cluster for a migration.
+// GET /api/v1/migration/{session}/status
+func (h *Handler) StatusHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	namespace := r.URL.Query().Get("namespace")
+	if namespace == "" {
+		respondError(w, http.StatusBadRequest, "namespace query parameter required")
+		return
+	}
+
+	// Check namespace exists
+	_, err := h.Client.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	namespaceReady := err == nil
+
+	// A list that could not be read is not an empty list. Reporting ready over
+	// one would be the same mistake as counting only the workloads that exist:
+	// the caller cannot tell "nothing is wrong" from "nothing was seen".
+	statefulSets, err := h.Client.AppsV1().StatefulSets(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/managed-by=kipper",
+	})
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("reading statefulsets in %s: %v", namespace, err))
+		return
+	}
+	// Anything scaled to zero on purpose has no replica to wait for and counts
+	// as ready.
+	stsReady := true
+	for _, sts := range statefulSets.Items {
+		if sts.Spec.Replicas != nil && *sts.Spec.Replicas == 0 {
+			continue
+		}
+		if sts.Status.ReadyReplicas < 1 {
+			stsReady = false
+			break
+		}
+	}
+
+	deployments, err := h.Client.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/managed-by=kipper",
+	})
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("reading deployments in %s: %v", namespace, err))
+		return
+	}
+	deploymentsReady := true
+	for _, dep := range deployments.Items {
+		if dep.Spec.Replicas != nil && *dep.Spec.Replicas == 0 {
+			continue
+		}
+		if dep.Status.ReadyReplicas < 1 {
+			deploymentsReady = false
+			break
+		}
+	}
+
+	missing, err := h.workloadsWithNothingRunning(ctx, namespace, statefulSets, deployments)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"namespace_ready":    namespaceReady,
+		"statefulsets_ready": stsReady,
+		"deployments_ready":  deploymentsReady,
+		"missing_workloads":  missing,
+	})
+}
+
+// workloadsWithNothingRunning names the CRs on this cluster that have produced
+// no workload at all.
+//
+// Readiness alone answers the wrong question. Both loops above inspect the
+// workloads that exist, so a CR whose reconcile fails before it creates one is
+// invisible to them and the whole namespace reports healthy. That is exactly
+// what a refused service binding does: the App controller returns before it
+// writes its Deployment, and a migration that lost an app could report success.
+// Comparing against the CRs is what turns a missing workload into a failure.
+//
+// Apps map to a Deployment and Services to a StatefulSet, both by name.
+// Functions are left out because their mode decides what they produce, and a
+// guess here would report a healthy namespace as broken.
+func (h *Handler) workloadsWithNothingRunning(ctx context.Context, namespace string, statefulSets *appsv1.StatefulSetList, deployments *appsv1.DeploymentList) ([]string, error) {
+	running := make(map[string]bool, len(statefulSets.Items)+len(deployments.Items))
+	for _, sts := range statefulSets.Items {
+		running["Service/"+sts.Name] = true
+	}
+	for _, dep := range deployments.Items {
+		running["App/"+dep.Name] = true
+	}
+
+	var apps kipperv1.AppList
+	if err := h.CRClient.List(ctx, &apps, crclient.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("listing apps in %s: %w", namespace, err)
+	}
+	var services kipperv1.ServiceList
+	if err := h.CRClient.List(ctx, &services, crclient.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("listing services in %s: %w", namespace, err)
+	}
+
+	var missing []string
+	for _, app := range apps.Items {
+		if !running["App/"+app.Name] {
+			missing = append(missing, namespace+"/app/"+app.Name)
+		}
+	}
+	for _, svc := range services.Items {
+		if !running["Service/"+svc.Name] {
+			missing = append(missing, namespace+"/service/"+svc.Name)
+		}
+	}
+	return missing, nil
+}
+
+// --- Source-side endpoints (old cluster) ---
+
+// StartHandler initiates a migration from this cluster to a target.
+//
+// The checks run cheapest-and-least-destructive first: kill switch, request
+// shape, token decode, plan receipt, capacity — none of which consume
+// anything the operator cannot retry — and the TOTP claim goes last,
+// immediately before the accept call that spends the target's single-use
+// token. A precheck failure must never burn a code.
+// POST /api/v1/migration/start
+func (h *Handler) StartHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Token               string   `json:"token"`
+		Projects            []string `json:"projects"`
+		ConfirmedOverwrites []string `json:"confirmed_overwrites,omitempty"`
+		KeepDomains         []string `json:"keep_domains,omitempty"`
+		MoveBaseDomain      bool     `json:"move_base_domain,omitempty"`
+		TOTPCode            string   `json:"totp_code"`
+		PlanReceipt         string   `json:"plan_receipt"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// The kill switch is host policy and outranks everything in the request.
+	if outboundMigrationDisabled() {
+		respondError(w, http.StatusForbidden,
+			"outbound migration is disabled on this cluster (KIPPER_DISABLE_OUTBOUND_MIGRATION). A host operator can lift this")
+		return
+	}
+
+	if req.Token == "" || len(req.Projects) == 0 {
+		respondError(w, http.StatusBadRequest, "token and projects are required")
+		return
+	}
+
+	// Decode and validate the token
+	token, err := DecodeToken(req.Token)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// The plan receipt proves this exact user reviewed the report for this
+	// exact token, project set, and overwrite confirmations. Server-issued
+	// and single-use, so the mandatory plan screen cannot be skipped by
+	// calling the API directly. Validation here is read-only: a precheck
+	// failure below must leave the receipt intact for a retry.
+	claims := middleware.UserFromContext(r.Context())
+	if req.PlanReceipt == "" {
+		respondError(w, http.StatusForbidden, "a migration starts from its plan. Review the plan first")
+		return
+	}
+	if err := h.validateReceipt(req.PlanReceipt, claims, token, req.Projects, req.ConfirmedOverwrites); err != nil {
+		respondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	// Recompute the full report against live state — the same computation
+	// the plan endpoint ran. Any current blocker refuses the start, and a
+	// changed material digest means the operator approved a report that no
+	// longer describes what would happen.
+	precheckCtx, cancelPrecheck := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancelPrecheck()
+	current := h.buildPlan(precheckCtx, claims, token, req.Projects, req.ConfirmedOverwrites, req.KeepDomains, req.MoveBaseDomain)
+	if len(current.Blockers) > 0 {
+		respondError(w, http.StatusPreconditionFailed, strings.Join(current.Blockers, "; "))
+		return
+	}
+	// The recomputed digest binds the per-app dispositions and the Mode B flag,
+	// so a start request that tampers with keep/move choices no longer matches
+	// the reviewed plan and is refused here.
+	if planDigest(current) != h.receiptDigest(req.PlanReceipt) {
+		respondError(w, http.StatusConflict, "the migration plan changed since you reviewed it. Review the plan again")
+		return
+	}
+
+	// A missing verifier is a server wiring failure, checked while nothing
+	// has been consumed yet: a 503 must leave the reviewed plan intact.
+	if h.StepUp == nil {
+		respondError(w, http.StatusServiceUnavailable, "2FA verification is unavailable: migration cannot start")
+		return
+	}
+
+	// Every non-mutating check has passed; now the consuming steps run,
+	// cheapest-to-recover first: the receipt (single-use, review a new plan),
+	// then the TOTP counter (wait one step), then the target's token.
+	if err := h.consumeReceipt(req.PlanReceipt); err != nil {
+		respondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	// Step-up 2FA: the counter claim sits directly before the accept call.
+	if err := h.StepUp(r.Context(), claims, req.TOTPCode, "migration start"); err != nil {
+		respondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	// Connect to the target cluster and validate. The target decides about
+	// project conflicts: an accept with unconfirmed overwrites comes back as
+	// a 409 without consuming the token, so the confirmed retry below still
+	// authenticates. The idempotency key (the spent receipt ID) covers the
+	// ambiguous case where the target consumed the token but the response
+	// was lost: the retried accept finds the accepted session by key instead
+	// of failing on the consumed token.
+	acceptReq := map[string]interface{}{
+		"secret":               token.Secret,
+		"source_cluster":       h.Domain,
+		"source_version":       BuildVersion,
+		"projects":             req.Projects,
+		"confirmed_overwrites": req.ConfirmedOverwrites,
+		"idempotency_key":      req.PlanReceipt,
+	}
+	acceptStatus, acceptBody, err := h.callTargetRaw(token, "POST", "/api/v1/migrate-target/accept", acceptReq)
+	if err != nil {
+		// One retry, transport errors only: a definitive refusal must never
+		// be retried, but a lost response would otherwise strand a consumed
+		// token, a claimed code, and possibly an accepted session.
+		acceptStatus, acceptBody, err = h.callTargetRaw(token, "POST", "/api/v1/migrate-target/accept", acceptReq)
+	}
+	if err != nil {
+		respondError(w, http.StatusBadGateway, fmt.Sprintf("failed to connect to target cluster: %v", err))
+		return
+	}
+	if acceptStatus == http.StatusConflict {
+		var conflictResp map[string]interface{}
+		if err := json.Unmarshal(acceptBody, &conflictResp); err != nil {
+			respondError(w, http.StatusBadGateway, "target cluster returned an unreadable conflict response")
+			return
+		}
+		respondJSON(w, http.StatusConflict, conflictResp)
+		return
+	}
+	if acceptStatus != http.StatusOK {
+		respondError(w, http.StatusBadGateway, fmt.Sprintf("target refused the migration: %s", targetErrorMessage(acceptStatus, acceptBody)))
+		return
+	}
+
+	var acceptResp map[string]interface{}
+	if err := json.Unmarshal(acceptBody, &acceptResp); err != nil {
+		respondError(w, http.StatusBadGateway, "target cluster returned an unreadable accept response")
+		return
+	}
+	sessionID, _ := acceptResp["session_id"].(string)
+	if sessionID == "" {
+		respondError(w, http.StatusBadGateway, "target cluster returned invalid session")
+		return
+	}
+
+	// The authoritative target base domain is the one the target echoes here,
+	// not the attacker-authored token. It must be present and must match the
+	// token the plan was reviewed against: an empty echo or a mismatch means the
+	// token was tampered or the target's domain changed since the plan, so the
+	// consented coexist URLs no longer describe reality. Fail closed either way
+	// and make the operator re-plan. token.BaseDomain is already guaranteed
+	// non-empty by DecodeToken.
+	targetBase, _ := acceptResp["target_base_domain"].(string)
+	if targetBase == "" {
+		respondError(w, http.StatusBadGateway, "target cluster did not report its base domain: cannot classify domains safely. Review a new plan")
+		return
+	}
+	if domain.NormalizeHost(targetBase) != domain.NormalizeHost(token.BaseDomain) {
+		respondError(w, http.StatusBadGateway, fmt.Sprintf("target base domain %q does not match the reviewed plan (%q). Review a new plan", targetBase, token.BaseDomain))
+		return
+	}
+
+	// Create session
+	startedBy := ""
+	if claims != nil {
+		startedBy = claims.Email
+	}
+	keepDomains := make(map[string]bool, len(req.KeepDomains))
+	for _, k := range req.KeepDomains {
+		keepDomains[k] = true
+	}
+	session := &Session{
+		ID:               sessionID,
+		SourceCluster:    h.Domain,
+		TargetCluster:    token.Cluster,
+		TargetAPI:        token.Endpoint,
+		TargetBaseDomain: targetBase,
+		Projects:         req.Projects,
+		Status:           SessionRunning,
+		StartedAt:        time.Now(),
+		StartedBy:        startedBy,
+		SavedRoutes:      make(map[string]map[string]interface{}),
+		KeepDomains:      keepDomains,
+		MoveBaseDomain:   req.MoveBaseDomain,
+		// Retained so post-run cutover writes (sendToTargetDirect) still
+		// authenticate to the target after the token has been consumed.
+		Secret: token.Secret,
+	}
+	h.Sessions.Put(session)
+
+	// The migration is now irreversibly under way on the target (its token
+	// is consumed and a session accepted), so every admin hears about it —
+	// the target endpoint is the detail a colleague would recognise as wrong.
+	h.emitSecurityEvent(r.Context(), security.Event{
+		Kind:    "migration_started",
+		User:    startedBy,
+		Summary: fmt.Sprintf("cluster migration started by %s to %s", startedBy, token.Cluster),
+		Fields: []security.Field{
+			{Key: "target_cluster", Value: token.Cluster},
+			{Key: "target_endpoint", Value: token.Endpoint},
+			{Key: "projects", Value: strings.Join(req.Projects, ", ")},
+			{Key: "session", Value: sessionID},
+		},
+	})
+
+	// Start migration in background
+	go h.runMigration(session, token) //nolint:gosec // G118: the migration must outlive this request; cancelling it with the HTTP context would abort mid-transfer
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"session_id": sessionID,
+		"status":     "running",
+	})
+}
+
+// ProgressHandler upgrades to WebSocket and streams migration progress.
+// GET /api/v1/migration/{session}/progress
+// Also registered on the raw WebSocket mux (without Chi URL params).
+func (h *Handler) ProgressHandler(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "session")
+	if sessionID == "" {
+		// Fallback: parse from raw path /api/v1/migration/{session}/progress
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		// Expected: api/v1/migration/{session}/progress
+		if len(parts) >= 5 {
+			sessionID = parts[3]
+		}
+	}
+	session, ok := h.Sessions.Get(sessionID)
+	if !ok {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Send current state
+	for _, step := range session.StepsSnapshot() {
+		data, _ := json.Marshal(step)
+		_ = conn.WriteMessage(websocket.TextMessage, data)
+	}
+
+	// Subscribe to updates
+	ch := session.Subscribe()
+	defer session.Unsubscribe(ch)
+
+	for step := range ch {
+		data, _ := json.Marshal(step)
+		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			return
+		}
+
+		// Send session completion
+		view := session.View()
+		if view.Status == SessionCompleted || view.Status == SessionFailed || view.Status == SessionCancelled {
+			finalMsg, _ := json.Marshal(map[string]interface{}{
+				"type":   "session_end",
+				"status": view.Status,
+				"error":  view.Error,
+			})
+			_ = conn.WriteMessage(websocket.TextMessage, finalMsg)
+			return
+		}
+	}
+}
+
+// CancelHandler cancels a running migration.
+// POST /api/v1/migration/{session}/cancel
+func (h *Handler) CancelHandler(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "session")
+	session, ok := h.Sessions.Get(sessionID)
+	if !ok {
+		respondError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	session.Finish(SessionCancelled, "")
+	h.Sessions.Save(session)
+	// Aborts the in-flight dump or upload immediately; the transfer loop
+	// otherwise only notices at the next project boundary.
+	session.Cancel()
+
+	// Cancel stays instantly available as a safety valve, so the loud,
+	// attributed record here is what makes misuse visible after the fact.
+	cancelledBy := ""
+	if claims := middleware.UserFromContext(r.Context()); claims != nil {
+		cancelledBy = claims.Email
+	}
+	view := session.View()
+	h.emitSecurityEvent(r.Context(), security.Event{
+		Kind:    "migration_cancelled",
+		User:    cancelledBy,
+		Summary: fmt.Sprintf("cluster migration to %s cancelled by %s", view.TargetCluster, cancelledBy),
+		Fields: []security.Field{
+			{Key: "target_cluster", Value: view.TargetCluster},
+			{Key: "projects", Value: strings.Join(view.Projects, ", ")},
+			{Key: "session", Value: sessionID},
+		},
+	})
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+}
+
+// NotificationStatusHandler reports which security-notification channels
+// exist, so the migration start screen can warn when detection would degrade
+// to the console bell — a channel an attacker holding an admin session can
+// watch and race.
+// GET /api/v1/migration/notification-status
+func (h *Handler) NotificationStatusHandler(w http.ResponseWriter, r *http.Request) {
+	outOfBand := false
+	envPinned := false
+	if h.Security != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		outOfBand = h.Security.OutOfBandConfigured(ctx)
+		envPinned = h.Security.EnvPinnedConfigured()
+	}
+	respondJSON(w, http.StatusOK, map[string]bool{
+		"out_of_band": outOfBand,
+		"env_pinned":  envPinned,
+	})
+}
+
+// SessionHandler returns the current state of a migration session.
+// GET /api/v1/migration/{session}
+func (h *Handler) SessionHandler(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "session")
+	session, ok := h.Sessions.Get(sessionID)
+	if !ok {
+		respondError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, session.View())
+}
+
+// TargetProjectsHandler returns the list of projects on this cluster,
+// used by the source to detect conflicts.
+// GET /api/v1/migration/projects
+func (h *Handler) TargetProjectsHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	// Conflict detection runs before a session exists, so authenticate against
+	// the stored migration token rather than a session secret. Without this the
+	// endpoint leaks every project name to any unauthenticated caller.
+	if err := ValidateToken(ctx, h.Client, r.Header.Get("X-Migration-Secret")); err != nil {
+		respondError(w, http.StatusUnauthorized, "invalid migration secret")
+		return
+	}
+
+	var projectList kipperv1.ProjectList
+	if err := h.CRClient.List(ctx, &projectList); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to list projects")
+		return
+	}
+
+	type projectSummary struct {
+		Name         string `json:"name"`
+		DisplayName  string `json:"display_name,omitempty"`
+		Environments int    `json:"environments"`
+	}
+
+	projects := make([]projectSummary, 0, len(projectList.Items))
+	for _, p := range projectList.Items {
+		projects = append(projects, projectSummary{
+			Name:         p.Name,
+			DisplayName:  p.Spec.DisplayName,
+			Environments: len(p.Spec.Environments),
+		})
+	}
+
+	respondJSON(w, http.StatusOK, projects)
+}
+
+// --- Helpers ---
+
+func (h *Handler) callTarget(token *Token, method, path string, body interface{}) (map[string]interface{}, error) {
+	status, respBody, err := h.callTargetRaw(token, method, path, body)
+	if err != nil {
+		return nil, err
+	}
+	// Any 2xx is success. A resource-creating POST (standing up a transfer
+	// receiver) legitimately answers 201, so requiring exactly 200 would read
+	// a created receiver as a failure.
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("target returned %d: %s", status, string(respBody))
+	}
+
+	var result map[string]interface{}
+	// A 204 or an empty body is a valid success with nothing to parse.
+	if len(respBody) == 0 {
+		return map[string]interface{}{}, nil
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("parsing response: %w", err)
+	}
+	return result, nil
+}
+
+// callTargetRaw performs a JSON request against the target and returns the
+// raw status and body, for callers that handle non-200 statuses themselves.
+func (h *Handler) callTargetRaw(token *Token, method, path string, body interface{}) (int, []byte, error) {
+	return h.callTargetRawCtx(context.Background(), token, method, path, body)
+}
+
+// callTargetRawCtx is callTargetRaw bound to a context, so callers with a
+// deadline (teardown, cleanup) are not held for the client's whole timeout.
+func (h *Handler) callTargetRawCtx(ctx context.Context, token *Token, method, path string, body interface{}) (int, []byte, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return 0, nil, err
+		}
+		bodyReader = bytes.NewReader(data)
+	}
+
+	url := token.Endpoint + path
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Migration-Secret", token.Secret)
+
+	httpClient := &http.Client{
+		Timeout: 5 * time.Minute,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+		},
+		// The endpoint came out of an attacker-authorable token; following a
+		// redirect would re-send the migration secret to wherever it points.
+		CheckRedirect: refuseRedirect,
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("connecting to %s: %w", token.Endpoint, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, respBody, nil
+}
+
+// refuseRedirect fails any redirect from a migration endpoint: the secret in
+// the headers must only ever reach the address the token named.
+func refuseRedirect(req *http.Request, via []*http.Request) error {
+	return fmt.Errorf("migration endpoints must not redirect")
+}
+
+// targetErrorMessage extracts the target's error text from a JSON error
+// response, falling back to the raw body.
+func targetErrorMessage(status int, body []byte) string {
+	var parsed map[string]string
+	if err := json.Unmarshal(body, &parsed); err == nil && parsed["error"] != "" {
+		return parsed["error"]
+	}
+	return fmt.Sprintf("status %d: %s", status, string(body))
+}
+
+func (h *Handler) sendToTarget(token *Token, path string, body interface{}) error {
+	_, err := h.callTarget(token, "POST", path, body)
+	return err
+}
+
+func respondJSON(w http.ResponseWriter, status int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(data)
+}
+
+func respondError(w http.ResponseWriter, status int, message string) {
+	respondJSON(w, status, map[string]string{"error": message})
+}
+
+// getEnvOrDefault reads an environment variable with a fallback.
+func getEnvOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}

@@ -1,0 +1,152 @@
+package handlers
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"sort"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+)
+
+const lokiURL = "http://loki.monitoring.svc.cluster.local:3100"
+
+// Logs provides handlers for querying logs from Loki.
+type Logs struct{}
+
+type lokiQueryResponse struct {
+	Status string `json:"status"`
+	Data   struct {
+		ResultType string `json:"resultType"`
+		Result     []struct {
+			Stream map[string]string `json:"stream"`
+			Values [][]string        `json:"values"` // [timestamp_ns, line]
+		} `json:"result"`
+	} `json:"data"`
+}
+
+type logEntry struct {
+	Timestamp string `json:"timestamp"`
+	Line      string `json:"line"`
+	Pod       string `json:"pod"`
+}
+
+// Query returns logs from Loki for an app in a project namespace.
+// GET /api/v1/projects/{name}/apps/{app}/logs?search=&since=1h&limit=500
+func (l *Logs) Query(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "name")
+	app := chi.URLParam(r, "app")
+
+	search := r.URL.Query().Get("search")
+	since := r.URL.Query().Get("since")
+	limit := r.URL.Query().Get("limit")
+
+	if since == "" {
+		since = "1h"
+	}
+	if limit == "" {
+		limit = "500"
+	}
+
+	// Build LogQL query
+	query := fmt.Sprintf(`{namespace=%q, app=%q}`, project, app)
+	if search != "" {
+		query += fmt.Sprintf(` |= %q`, search)
+	}
+
+	// Parse since duration
+	duration, err := time.ParseDuration(since)
+	if err != nil {
+		duration = 1 * time.Hour
+	}
+	start := time.Now().Add(-duration)
+
+	// Query Loki
+	end := time.Now()
+	// Calculate a reasonable step based on the time range
+	step := duration / 1000
+	if step < time.Second {
+		step = time.Second
+	}
+
+	params := url.Values{
+		"query":     {query},
+		"start":     {fmt.Sprintf("%d", start.UnixNano())},
+		"end":       {fmt.Sprintf("%d", end.UnixNano())},
+		"limit":     {limit},
+		"direction": {"backward"},
+		"step":      {fmt.Sprintf("%d", int(step.Seconds()))},
+	}
+
+	lokiReqURL := fmt.Sprintf("%s/loki/api/v1/query_range?%s", lokiURL, params.Encode())
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(lokiReqURL) //nolint:gosec // internal cluster URL
+	if err != nil {
+		respondError(w, http.StatusBadGateway, fmt.Sprintf("failed to query Loki: %v", err))
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		respondError(w, http.StatusBadGateway, fmt.Sprintf("Loki returned %d: %s", resp.StatusCode, string(body)))
+		return
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		respondError(w, http.StatusBadGateway, "failed to read Loki response")
+		return
+	}
+
+	var lokiResp lokiQueryResponse
+	if err := json.Unmarshal(body, &lokiResp); err != nil {
+		respondError(w, http.StatusBadGateway, fmt.Sprintf("failed to parse Loki response: %v (body: %.200s)", err, string(body)))
+		return
+	}
+
+	if lokiResp.Status != "success" {
+		respondError(w, http.StatusBadGateway, fmt.Sprintf("Loki query failed: %s", lokiResp.Status))
+		return
+	}
+
+	// Flatten results into a simple list of log entries. Loki returns
+	// one stream per pod and within a stream the values are sorted —
+	// but concatenating streams puts pod-A's whole history before
+	// pod-B's, so when two pods overlap (e.g. an old failed test pod
+	// + a fresh successful one) the UI shows interleaved nonsense.
+	// Sort the merged list by timestamp ascending so the user reads
+	// logs top-to-bottom in real chronological order.
+	var entries []logEntry
+	for _, stream := range lokiResp.Data.Result {
+		pod := stream.Stream["pod"]
+		for _, val := range stream.Values {
+			if len(val) < 2 {
+				continue
+			}
+			entries = append(entries, logEntry{
+				Timestamp: val[0],
+				Line:      val[1],
+				Pod:       pod,
+			})
+		}
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		// Loki timestamps are nanoseconds since epoch as strings.
+		// Same-length numerics compare correctly lexicographically;
+		// they're always 19 digits during this century so this is
+		// safe and avoids parsing every timestamp.
+		return entries[i].Timestamp < entries[j].Timestamp
+	})
+
+	if entries == nil {
+		entries = []logEntry{}
+	}
+
+	respondJSON(w, http.StatusOK, entries)
+}

@@ -1,0 +1,253 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: datatransfers.kipper.run
+spec:
+  group: kipper.run
+  names:
+    kind: DataTransfer
+    listKind: DataTransferList
+    plural: datatransfers
+    singular: datatransfer
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.kind
+      name: Kind
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.completedChunks
+      name: Done
+      type: integer
+    - jsonPath: .status.totalChunks
+      name: Chunks
+      type: integer
+    - jsonPath: .status.attempt
+      name: Attempt
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: DataTransfer is the Schema for the datatransfers API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              DataTransferSpec defines one unit of migration data movement: a shared
+              volume, an in-cluster object-storage bucket, or a spooled database dump,
+              streamed from this cluster to a target cluster's import endpoint.
+            properties:
+              chunkSizeBytes:
+                default: 134217728
+                description: ChunkSizeBytes is the transfer chunk size.
+                format: int64
+                type: integer
+              concurrency:
+                default: 4
+                description: Concurrency is the number of parallel chunk uploads.
+                format: int32
+                type: integer
+              kind:
+                description: Kind selects the data source shape.
+                enum:
+                - volume
+                - servicePVC
+                - dbDump
+                type: string
+              maxAttempts:
+                default: 3
+                description: MaxAttempts bounds automatic retries of the whole transfer.
+                format: int32
+                type: integer
+              sessionID:
+                description: SessionID ties the transfer to a migration session.
+                type: string
+              source:
+                description: Source describes where the data comes from on this cluster.
+                properties:
+                  service:
+                    description: Service is the stateful Service CR name (kind=servicePVC,
+                      kind=dbDump).
+                    type: string
+                  volume:
+                    description: Volume is the Volume CR name (kind=volume).
+                    type: string
+                type: object
+              sourceReplicas:
+                description: |-
+                  SourceReplicas records the source service's replica count before a
+                  servicePVC transfer paused it, so recovery restores the same size.
+                format: int32
+                type: integer
+              target:
+                description: Target describes where the data lands on the target cluster.
+                properties:
+                  service:
+                    description: Service is the stateful Service CR name (kind=servicePVC,
+                      kind=dbDump).
+                    type: string
+                  volume:
+                    description: Volume is the Volume CR name (kind=volume).
+                    type: string
+                type: object
+              targetBaseURL:
+                description: |-
+                  TargetBaseURL is the target cluster's ingest base URL for this
+                  transfer (the console-api host with the transfer path prefix).
+                type: string
+            required:
+            - kind
+            - sessionID
+            - source
+            - target
+            - targetBaseURL
+            type: object
+          status:
+            description: |-
+              DataTransferStatus is the observed transfer state, updated by the
+              reconciler from the target ingest's progress endpoint. Mover retries
+              within a run resume from the completed-chunk state held on the target;
+              a console-api restart fails the owning migration session, whose sweep
+              then cleans this CR up and restarts any paused service.
+            properties:
+              attempt:
+                description: Attempt is the current attempt number, starting at 1.
+                format: int32
+                type: integer
+              bytesDone:
+                description: BytesDone counts bytes acknowledged by the target.
+                format: int64
+                type: integer
+              bytesResumed:
+                description: |-
+                  BytesResumed counts bytes skipped on retry because the target
+                  already held their chunks.
+                format: int64
+                type: integer
+              completedChunks:
+                format: int64
+                type: integer
+              conditions:
+                description: Conditions represent the latest available observations.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              filesVerified:
+                description: FilesVerified and VerifyMismatches summarise the finalize
+                  report.
+                format: int64
+                type: integer
+              lastError:
+                description: LastError is the most recent failure, cleared on progress.
+                type: string
+              lastSyncedAt:
+                description: |-
+                  LastSyncedAt records when the target last matched the source
+                  manifest. The future syncing phase gates cutover on this.
+                format: date-time
+                type: string
+              manifestDigest:
+                description: ManifestDigest is the sha256 of the transfer manifest.
+                type: string
+              phase:
+                description: Phase is the transfer lifecycle phase.
+                enum:
+                - Pending
+                - Transferring
+                - Verifying
+                - Completed
+                - Failed
+                type: string
+              totalBytes:
+                description: TotalBytes is the manifest's total payload size.
+                format: int64
+                type: integer
+              totalChunks:
+                description: TotalChunks and CompletedChunks track chunk progress.
+                format: int64
+                type: integer
+              verifyMismatches:
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

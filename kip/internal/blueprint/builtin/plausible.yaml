@@ -1,0 +1,42 @@
+name: plausible
+description: Plausible Analytics — privacy-friendly web analytics with PostgreSQL
+version: "1.0"
+parameters:
+  - name: projectName
+    description: Project name
+    required: true
+  - name: environment
+    description: Target environment
+    default: ""
+  - name: baseUrl
+    description: Public URL for Plausible (e.g. https://analytics.example.com)
+    required: true
+  - name: domain
+    description: Custom domain (leave empty for auto-generated kipper.run subdomain)
+    default: ""
+  - name: dbStorage
+    description: Database storage size
+    default: "5Gi"
+---
+project: "{{ .projectName }}"
+environment: "{{ .environment }}"
+
+apps:
+  plausible:
+    image: ghcr.io/plausible/community-edition:v2.1
+    port: 8000
+    env:
+      BASE_URL: "{{ .baseUrl }}"
+      DATABASE_URL: "postgres://kipper@db.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local:5432/app"
+      SECRET_KEY_BASE: "{{ generateSecret 32 }}"
+    serviceBindings:
+      - name: db
+        prefix: DB_
+    route:
+      host: "{{ .domain }}"
+      path: /
+
+services:
+  db:
+    type: postgres
+    storage: "{{ .dbStorage }}"

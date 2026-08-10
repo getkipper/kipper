@@ -1,0 +1,50 @@
+name: gitea
+description: Gitea self-hosted Git service with PostgreSQL
+version: "1.0"
+parameters:
+  - name: projectName
+    description: Project name
+    required: true
+  - name: environment
+    description: Target environment
+    default: ""
+  - name: domain
+    description: Custom domain (leave empty for auto-generated kipper.run subdomain)
+    default: ""
+  - name: dbStorage
+    description: Database storage size
+    default: "5Gi"
+  - name: repoStorage
+    description: Git repository storage size
+    default: "10Gi"
+---
+project: "{{ .projectName }}"
+environment: "{{ .environment }}"
+
+apps:
+  gitea:
+    image: gitea/gitea:1.22-rootless
+    port: 3000
+    env:
+      GITEA__database__DB_TYPE: postgres
+      GITEA__database__HOST: "db.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local:5432"
+      GITEA__database__NAME: app
+      GITEA__database__USER: kipper
+    serviceBindings:
+      - name: db
+        prefix: GITEA__database__
+    route:
+      host: "{{ .domain }}"
+      path: /
+
+services:
+  db:
+    type: postgres
+    storage: "{{ .dbStorage }}"
+
+volumes:
+  repos:
+    size: "{{ .repoStorage }}"
+    mounts:
+      - app: gitea
+        mountPath: /var/lib/gitea/repositories

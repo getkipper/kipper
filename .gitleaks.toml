@@ -1,0 +1,51 @@
+# gitleaks configuration for Kipper.
+#
+# The allowlist below exists so that a scan of this repository returns zero
+# findings, because "29 findings, all of them fine" is not a gate — a real
+# credential hides in a list like that, and nobody re-reads 29 lines every time.
+#
+# Everything here is a placeholder that documentation or a test needs to look
+# like a credential. The rule for adding an entry: the value must be provably
+# synthetic on its face — sequential or repeated hex, an all-zero identifier, an
+# obvious stand-in like `wrongsecret` — so that a reviewer can tell without
+# leaving the diff. A value that merely happens to be inactive does not qualify;
+# rotate it and scrub the history instead.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "gitleaks-allowlist-placeholder"
+description = "placeholder credentials in docs and tests"
+regex = '''$^'''
+
+[allowlist]
+description = "synthetic values in documentation examples and test fixtures"
+regexes = [
+  # Sequential or reversed hex runs — no real key looks like this.
+  '''0123456789abcdef''',
+  '''abcdef0123456789''',
+  '''fedcba9876543210''',
+  '''9876543210''',
+  '''a1b2c3d4e5f6''',
+  # Short sequential runs behind a provider prefix, in the redaction tests that
+  # prove kip strips a token out of a git URL before showing it.
+  '''glpat-0123456789''',
+  '''sk-0123456789''',
+  # Kipper API key shape used throughout the docs and the authz tests.
+  '''kip_ab12cd34_''',
+  # Slack's own documented placeholder webhook.
+  '''T00000000/B00000000/XXXXXXXXXXXXXXXXX''',
+  # Fixed example digests in the docs; they appear verbatim in prose that
+  # explains what a key looks like.
+  '''5b2bf14ef65250c82504a721c4353c2e''',
+  '''02026a371f24a488a86e654cada6e1c6''',
+  '''a3f8b2c4d5e6f7890123456789abcdef''',
+  '''9f2c1a7b40de''',
+]
+paths = [
+  # A *.kipper.run hostname in the RFC 5737 range, matched as a generic key.
+  '''controller/pkg/hostnames/hostnames_test\.go''',
+  # A localStorage key name, not a credential.
+  '''console/src/components/TwoFactorNudge\.vue''',
+]

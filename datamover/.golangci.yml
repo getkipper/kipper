@@ -1,0 +1,52 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - gosec           # security issues
+    - gocritic        # opinionated style and performance
+    - misspell        # common spelling mistakes
+    - unconvert       # unnecessary type conversions
+    - unparam         # unused function parameters
+    - nilerr          # returning nil after checking err != nil
+  # errcheck, govet, ineffassign, staticcheck, unused are enabled by default in v2.
+  settings:
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        # We intentionally pass Options / Config structs by value for clarity
+        # and immutability. In a CLI context the copy cost is negligible, and
+        # pointer params would introduce nil-check burden and lifetime questions.
+        - hugeParam
+        - rangeValCopy
+  exclusions:
+    paths:
+      - vendor
+    rules:
+      - linters: [gosec]
+        text: "G104"
+      - linters: [gosec]
+        text: "G107"
+      - linters: [gosec]
+        text: "G114"
+      - linters: [gosec]
+        text: "G304"
+      - linters: [gosec]
+        text: "G706"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/getkipper/kipper
+
+issues:
+  max-issues-per-linter: 20
+  max-same-issues: 5

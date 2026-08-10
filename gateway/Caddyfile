@@ -1,0 +1,20 @@
+*.kipper.run, kipper.run {
+	tls {
+		dns route53 {
+			access_key_id {env.AWS_ACCESS_KEY_ID}
+			secret_access_key {env.AWS_SECRET_ACCESS_KEY}
+			region {env.AWS_REGION}
+		}
+	}
+
+	reverse_proxy gateway:8080 {
+		# The gateway rate-limits per client IP and passes the client on to the
+		# cluster. It has no published port, so it only ever sees this proxy as
+		# the TCP peer, and it trusts exactly one header: X-Real-IP, overwritten
+		# here on every request. Dropping True-Client-IP is defence in depth —
+		# the gateway ignores it — so a future reader does not mistake it for a
+		# header anything downstream reads.
+		header_up X-Real-IP {remote_host}
+		header_up -True-Client-IP
+	}
+}

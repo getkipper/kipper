@@ -1,0 +1,42 @@
+name: medusa
+description: Medusa open source e-commerce platform with PostgreSQL and Redis
+version: "1.0"
+parameters:
+  - name: projectName
+    description: Project name
+    required: true
+  - name: environment
+    description: Target environment
+    default: ""
+  - name: domain
+    description: Custom domain (leave empty for auto-generated kipper.run subdomain)
+    default: ""
+  - name: dbStorage
+    description: Database storage size
+    default: "5Gi"
+---
+project: "{{ .projectName }}"
+environment: "{{ .environment }}"
+
+apps:
+  medusa:
+    image: medusajs/medusa:latest
+    port: 9000
+    env:
+      DATABASE_TYPE: postgres
+      REDIS_URL: "redis://redis.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local:6379"
+    serviceBindings:
+      - name: db
+        prefix: DB_
+    resources:
+      profile: standard
+    route:
+      host: "{{ .domain }}"
+      path: /
+
+services:
+  db:
+    type: postgres
+    storage: "{{ .dbStorage }}"
+  redis:
+    type: redis

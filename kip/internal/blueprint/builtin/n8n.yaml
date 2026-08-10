@@ -1,0 +1,44 @@
+name: n8n
+description: n8n workflow automation platform with PostgreSQL
+version: "1.0"
+parameters:
+  - name: projectName
+    description: Project name
+    required: true
+  - name: environment
+    description: Target environment
+    default: ""
+  - name: domain
+    description: Custom domain (leave empty for auto-generated kipper.run subdomain)
+    default: ""
+  - name: dbStorage
+    description: Database storage size
+    default: "5Gi"
+---
+project: "{{ .projectName }}"
+environment: "{{ .environment }}"
+
+apps:
+  n8n:
+    image: n8nio/n8n:latest
+    port: 5678
+    env:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: "db.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local"
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_USER: kipper
+      DB_POSTGRESDB_DATABASE: app
+      N8N_PORT: "5678"
+    serviceBindings:
+      - name: db
+        prefix: DB_POSTGRESDB_
+    resources:
+      profile: standard
+    route:
+      host: "{{ .domain }}"
+      path: /
+
+services:
+  db:
+    type: postgres
+    storage: "{{ .dbStorage }}"

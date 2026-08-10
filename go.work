@@ -1,0 +1,12 @@
+go 1.25.12
+
+use (
+	./authz
+	./console-api
+	./controller
+	./datamover
+	./gateway
+	./kip
+	./kipper-poll
+	./sidecar
+)

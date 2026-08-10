@@ -1,0 +1,430 @@
+name: CI
+
+# Runs on every push to `main` and `develop`, on pull requests to `main`, and
+# on demand.
+
+on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# One run per ref: a superseded run is cancelled rather than run to completion.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-kip:
+    name: Test kip
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache-dependency-path: |
+            kip/go.sum
+            controller/go.mod
+      - run: go test ./...
+        working-directory: kip
+      # Every platform .goreleaser.yml publishes. Nothing else cross-compiles
+      # until a release is tagged, so a platform-specific import breaks there
+      # rather than here.
+      - name: Cross-compile for every release target
+        working-directory: kip
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            echo "==> $target"
+            GOOS="${target%/*}" GOARCH="${target#*/}" go build -o /dev/null . || exit 1
+          done
+
+  test-console-api:
+    name: Test console-api
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache-dependency-path: |
+            console-api/go.sum
+            controller/go.mod
+      - run: go test ./...
+        working-directory: console-api
+
+  test-gateway:
+    name: Test gateway
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache-dependency-path: gateway/go.sum
+      - run: go test ./...
+        working-directory: gateway
+
+  test-authz:
+    name: Test authz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache-dependency-path: |
+            authz/go.sum
+            console-api/go.mod
+            controller/go.mod
+      - run: go test ./...
+        working-directory: authz
+
+  test-sidecar:
+    name: Test sidecar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache-dependency-path: sidecar/go.mod
+      - run: go test ./...
+        working-directory: sidecar
+
+  crd-drift:
+    name: CRD vs Go-type drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache-dependency-path: console-api/go.sum
+      # Pin to the same controller-gen version that produced the
+      # currently-committed CRDs (v0.20.1). Bump the pin and the CRDs
+      # together when the project upgrades controller-tools.
+      - name: Install controller-gen
+        run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1
+      - name: Regenerate CRDs to a temp dir
+        working-directory: console-api
+        run: |
+          mkdir -p /tmp/regenerated-crds
+          controller-gen crd paths=./api/... output:crd:dir=/tmp/regenerated-crds
+      # The same CRDs are embedded into kip via go:embed in two places:
+      # one for install (kip/internal/installer/crds) and one for the
+      # upgrade path (kip/cmd/crds). All three locations must match the
+      # controller-gen output or the CLI ships a different API surface
+      # than the controller reconciles against.
+      - name: Diff against committed CRDs (all three locations)
+        run: |
+          set -e
+          fail=0
+          # Locations that must match the regenerated CRDs byte-for-byte.
+          locations=(deploy/crds kip/internal/installer/crds kip/cmd/crds)
+          for f in /tmp/regenerated-crds/*.yaml; do
+            name=$(basename "$f")
+            for dir in "${locations[@]}"; do
+              committed="$dir/$name"
+              if [ ! -f "$committed" ]; then
+                echo "::error file=$committed::CRD missing — controller-gen produced $name but $committed is not committed"
+                fail=1
+                continue
+              fi
+              if ! diff -u "$committed" "$f"; then
+                echo "::error file=$committed::CRD is out of sync with the Go types"
+                fail=1
+              fi
+            done
+          done
+          # Also catch extra files in committed dirs that controller-gen no
+          # longer produces — that means a CRD was deleted from the Go types
+          # but stuck around in one of the embedded copies.
+          # deploy/crds/kustomization.yaml is not a CRD; it has its own
+          # drift check in the next step. Only deploy/crds may carry it —
+          # the kip dirs are go:embed'd and applied as CRDs, so a
+          # kustomization there would be fed to the API server.
+          for dir in "${locations[@]}"; do
+            for committed in "$dir"/*.yaml; do
+              name=$(basename "$committed")
+              if [ "$dir" = "deploy/crds" ] && [ "$name" = "kustomization.yaml" ]; then
+                continue
+              fi
+              if [ ! -f "/tmp/regenerated-crds/$name" ]; then
+                echo "::error file=$committed::stale CRD — not produced by controller-gen, should be removed"
+                fail=1
+              fi
+            done
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo ""
+            echo "Run this to regenerate + sync all three locations:"
+            echo "  cd console-api && controller-gen crd paths=./api/... output:crd:dir=../deploy/crds"
+            echo "  cp ../deploy/crds/kipper.run_*.yaml ../kip/internal/installer/crds/"
+            echo "  cp ../deploy/crds/kipper.run_*.yaml ../kip/cmd/crds/"
+            echo "  ../scripts/generate-crd-kustomization.sh"
+            exit 1
+          fi
+      # The kustomization is generated from the CRD files on disk, so a
+      # CRD added or removed from the Go types must also show up here.
+      # git status (not git diff) so an untracked or deleted generated
+      # file fails too — git diff ignores untracked paths.
+      - name: Check generated CRD kustomization
+        run: |
+          ./scripts/generate-crd-kustomization.sh
+          if [ -n "$(git status --porcelain -- deploy/crds/kustomization.yaml)" ]; then
+            git status --porcelain -- deploy/crds/kustomization.yaml
+            git diff -- deploy/crds/kustomization.yaml
+            echo "::error file=deploy/crds/kustomization.yaml::out of sync — run scripts/generate-crd-kustomization.sh and commit the result"
+            exit 1
+          fi
+      # deploy/ is a drift-gated reference set: everything in it must be
+      # provably in sync with what kip install ships. authz.yaml is gated
+      # by TestAuthzManifestMatchesDeploy, crds/ by the steps above. Any
+      # other entry would silently drift from the installer.
+      - name: Check deploy/ contains only gated content
+        run: |
+          unexpected=$(find deploy -mindepth 1 -maxdepth 1 ! -name 'crds' ! -name 'authz.yaml' ! -name 'README.md')
+          if [ -n "$unexpected" ]; then
+            echo "$unexpected"
+            echo "::error::ungated entry in deploy/ — everything in deploy/ needs a drift gate (see deploy/README.md)"
+            exit 1
+          fi
+          # Inside deploy/crds the drift steps above only cover kipper.run_*.yaml
+          # and kustomization.yaml; anything else (subdirectories, stray files)
+          # would ship ungated.
+          unexpected=$(find deploy/crds -mindepth 1 ! -name 'kipper.run_*.yaml' ! -name 'kustomization.yaml')
+          if [ -n "$unexpected" ]; then
+            echo "$unexpected"
+            echo "::error::ungated entry in deploy/crds/ — only controller-gen CRDs and the generated kustomization belong there"
+            exit 1
+          fi
+
+  deepcopy-drift:
+    name: DeepCopy vs Go-type drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache-dependency-path: console-api/go.sum
+      # Same controller-gen pin as crd-drift. Bump them together when
+      # the project upgrades controller-tools.
+      - name: Install controller-gen
+        run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1
+      - name: Regenerate deepcopy methods
+        working-directory: console-api
+        run: controller-gen object paths=./api/...
+      - name: Check for drift
+        run: |
+          if ! git diff --exit-code -- console-api/api/; then
+            echo ""
+            echo "::error::zz_generated.deepcopy.go is out of sync with the Go types"
+            echo "Run this to regenerate:"
+            echo "  cd console-api && controller-gen object paths=./api/..."
+            exit 1
+          fi
+
+  gofmt-drift:
+    name: gofmt / goimports drift (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [kip, controller, console-api, gateway, sidecar, kipper-poll, authz]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+      - name: Install goimports
+        run: go install golang.org/x/tools/cmd/goimports@latest
+      # Generated files (zz_generated*.go) are owned by their generator
+      # and intentionally skipped here — they have their own drift gates.
+      - name: Check gofmt
+        working-directory: ${{ matrix.module }}
+        run: |
+          files=$(find . -name '*.go' ! -name 'zz_generated*' ! -path './vendor/*')
+          out=$(echo "$files" | xargs -r gofmt -l)
+          if [ -n "$out" ]; then
+            echo "::error::These files are not gofmt-clean:"
+            echo "$out"
+            echo ""
+            echo "Run this to fix:"
+            echo "  cd ${{ matrix.module }} && gofmt -w ."
+            exit 1
+          fi
+      - name: Check goimports
+        working-directory: ${{ matrix.module }}
+        run: |
+          files=$(find . -name '*.go' ! -name 'zz_generated*' ! -path './vendor/*')
+          out=$(echo "$files" | xargs -r goimports -l -local github.com/getkipper/kipper)
+          if [ -n "$out" ]; then
+            echo "::error::These files have ungrouped or unsorted imports:"
+            echo "$out"
+            echo ""
+            echo "Run this to fix:"
+            echo "  cd ${{ matrix.module }} && goimports -w -local github.com/getkipper/kipper ."
+            exit 1
+          fi
+
+  gomod-tidy-drift:
+    name: go mod tidy drift (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [kip, controller, console-api, gateway, sidecar, kipper-poll, authz]
+    steps:
+      - uses: actions/checkout@v5
+      # Pinned Go version (must match each module's `go` directive). The
+      # tidy output is sensitive to the running toolchain — pinning keeps
+      # CI deterministic. Bump this together with the per-module
+      # directives if the project's Go floor moves.
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.12'
+      - name: Run go mod tidy
+        working-directory: ${{ matrix.module }}
+        env:
+          GOWORK: 'off'
+          GOTOOLCHAIN: 'local'
+        run: go mod tidy
+      - name: Check for drift
+        run: |
+          if ! git diff --exit-code -- ${{ matrix.module }}/go.mod ${{ matrix.module }}/go.sum; then
+            echo ""
+            echo "::error::go.mod or go.sum in ${{ matrix.module }} is out of date"
+            echo "Run this to fix:"
+            echo "  cd ${{ matrix.module }} && go mod tidy"
+            exit 1
+          fi
+
+  test-console:
+    name: Test console (frontend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: console/package-lock.json
+      - run: npm ci
+        working-directory: console
+      - run: npm run type-check
+        working-directory: console
+      - run: npm run lint
+        working-directory: console
+      - run: npm run test
+        working-directory: console
+
+  lint:
+    name: Lint (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [kip, console-api, gateway, authz]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+      # Install golangci-lint from source so the binary is compiled with
+      # the workflow's Go version. The released action ships a binary
+      # built with whichever Go was current at the action's release
+      # time, which can lag behind module go directives and trip a
+      # "language version is lower than the targeted Go version" error.
+      #
+      # Pinned so a new golangci-lint release can't turn a green pipeline
+      # red on an unrelated push. Bump deliberately, re-running the linter
+      # locally against the new version first.
+      - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+      - run: golangci-lint run ./...
+        working-directory: ${{ matrix.module }}
+
+  vuln:
+    name: Vulnerability scan (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [kip, console-api, gateway, authz, sidecar]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+      # Deliberately unpinned: govulncheck must track the latest vuln
+      # database so newly disclosed CVEs surface as soon as they land.
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...
+        working-directory: ${{ matrix.module }}
+
+  licenses:
+    name: License compliance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            console/package-lock.json
+            docs/package-lock.json
+            kipper-runtime-node/package-lock.json
+      # license-checker inspects node_modules, so install every npm workspace.
+      - run: npm ci
+        working-directory: console
+      - run: npm ci
+        working-directory: docs
+      - run: npm ci
+        working-directory: kipper-runtime-node
+      - run: python3 scripts/check-licenses.py
+
+  notices-drift:
+    name: Third-party notices drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Pinned Go version to keep the generated dependency list deterministic,
+      # matching the go mod tidy drift gate.
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            console/package-lock.json
+            kipper-runtime-node/package-lock.json
+      - run: npm ci
+        working-directory: console
+      - run: npm ci
+        working-directory: kipper-runtime-node
+      - name: Regenerate notices
+        env:
+          GOTOOLCHAIN: 'local'
+        run: python3 scripts/generate-notices.py
+      - name: Check for drift
+        run: |
+          if ! git diff --exit-code -- THIRD_PARTY_NOTICES.md; then
+            echo ""
+            echo "::error::THIRD_PARTY_NOTICES.md is out of date"
+            echo "Run this to fix:"
+            echo "  python3 scripts/generate-notices.py"
+            exit 1
+          fi
