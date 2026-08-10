@@ -1,28 +1,34 @@
 name: CI
 
-# This workflow does not run on a push to any branch. The gate is `act`, run
-# locally in Docker against the real workflow file rather than a copy of it —
-# see "Running the pipeline locally" in CLAUDE.md for the invocation, which
-# needs one job at a time on a developer machine.
+# Runs on every push to `main` and `develop`, and on pull requests to `main`.
 #
-# That gives a clean checkout on a case-sensitive Linux filesystem at the
-# runner's architecture, which is everything a native macOS run cannot check,
-# and it is the same 33 jobs. What it does not give is a record on the commit,
-# so the discipline it depends on is running it before every merge to `main`.
+# It did not run on push for most of this project's life, and the reason was
+# cost: 33 jobs bill about 50 minutes per run because every job rounds up to a
+# whole minute, and one July of pushing after each change ran 14,089 minutes
+# against a 2,000-minute allowance. The suite moved to `act`, run locally in
+# Docker against this file.
 #
-# The reason is cost. These 33 jobs bill about 50 minutes per run because every
-# job rounds up to a whole minute, and running them on each merge was the
-# largest line in the Actions bill. `build-images.yml` publishes on the merge
-# instead, and no longer waits on this workflow having run.
+# Going public ended that. Standard runners are free on a public repository:
+# measured over six runs on 10 August 2026, 0 seconds billable against 1,120
+# seconds of wall-clock. The trade the local gate bought no longer exists, and
+# what it cost was real — the suite only ran when somebody remembered to run
+# it, and nothing on the commit recorded whether they had.
 #
-# `pull_request` stays because it costs nothing while nobody opens one, and a
-# contributor's PR against `main` should still get the full suite once the repo
-# is public. Do not open a long-lived `develop` -> `main` PR: every push to
-# `develop` would then run all 33 jobs. Merge locally and push `main`.
+# `act` is still worth running before a push. It is faster feedback and it
+# catches a break before it leaves the machine. It is no longer the only gate,
+# which is the point: this one cannot be forgotten.
 #
-# `workflow_dispatch` runs it on demand — worth doing before a release, or to
-# check a local `act` verdict against a real runner.
+# If the repository ever goes private again, the bill returns immediately and
+# this trigger is the first thing to reconsider.
+
 on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
     branches: [main]
   workflow_dispatch:

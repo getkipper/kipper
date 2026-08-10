@@ -39,7 +39,7 @@ export default withMermaid(
       ['meta', { property: 'og:image', content: `${SITE_URL}/og-image.png` }],
       ['meta', { property: 'og:image:width', content: '1200' }],
       ['meta', { property: 'og:image:height', content: '630' }],
-      ['meta', { property: 'og:image:alt', content: `${SITE_TITLE} — ${SITE_DESCRIPTION}` }],
+      ['meta', { property: 'og:image:alt', content: `${SITE_TITLE}: ${SITE_DESCRIPTION}` }],
       ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
       ['meta', { name: 'twitter:title', content: SITE_TITLE }],
       ['meta', { name: 'twitter:description', content: SITE_DESCRIPTION }],
