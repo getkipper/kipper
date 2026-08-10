@@ -1,0 +1,75 @@
+version: 2
+
+project_name: kip
+
+before:
+  hooks:
+    - go work sync
+
+builds:
+  - id: kip
+    main: .
+    dir: kip
+    binary: kip
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+# Single-file archive per platform — install.sh expects raw kip-<os>-<arch>
+# names, not tarballs, so we use the binary format with a stable name.
+archives:
+  - id: kip
+    formats: [binary]
+    name_template: 'kip-{{ .Os }}-{{ .Arch }}{{ if eq .Os "windows" }}.exe{{ end }}'
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  name_template: 'Kipper {{.Tag}}'
+  draft: false
+  prerelease: auto
+  # Ship the licence and third-party notices as release assets. The archive
+  # format is a raw binary, so files travel alongside it rather than inside it.
+  extra_files:
+    - glob: ./LICENSE
+    - glob: ./THIRD_PARTY_NOTICES.md
+  header: |
+    ## Kipper {{.Tag}}
+
+    ### Install
+
+    ```bash
+    curl -sL https://getkipper.com/install | sh
+    ```
+
+    ### Manual download
+
+    | Platform | Binary |
+    |---|---|
+    | Linux x86_64 | kip-linux-amd64 |
+    | Linux ARM64 | kip-linux-arm64 |
+    | macOS Intel | kip-darwin-amd64 |
+    | macOS Apple Silicon | kip-darwin-arm64 |
+    | Windows x86_64 | kip-windows-amd64.exe |
+
+    Linux/macOS:
+
+    ```bash
+    chmod +x kip-*
+    sudo mv kip-* /usr/local/bin/kip
+    ```
+
+    Windows: download `kip-windows-amd64.exe`, rename to `kip.exe`, and add to your PATH.
+    `kip install` itself runs over SSH, so on Windows you need WSL or Git Bash.

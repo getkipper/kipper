@@ -1,0 +1,93 @@
+name: mattermost
+description: Mattermost open source team messaging with PostgreSQL
+version: "1.0"
+parameters:
+  - name: projectName
+    description: Project name
+    required: true
+  - name: environment
+    description: Target environment
+    default: ""
+  - name: domain
+    description: Public URL (e.g. https://chat.example.com)
+    required: true
+  - name: dbStorage
+    description: Database storage size
+    default: "10Gi"
+  - name: smtpHost
+    description: SMTP server hostname for email notifications. Leave empty to skip email setup.
+    default: ""
+  - name: smtpPort
+    description: SMTP server port
+    default: "587"
+  - name: smtpUsername
+    description: SMTP username
+    default: ""
+  - name: smtpPassword
+    description: SMTP password
+    default: ""
+  - name: smtpFrom
+    description: From address for notification emails (e.g. notifications@example.com)
+    default: ""
+  - name: smtpSecurity
+    description: SMTP connection security. One of STARTTLS, TLS, none.
+    default: "STARTTLS"
+  - name: pushNotificationServer
+    description: >-
+      Push proxy URL for mobile notifications. Leave empty to disable push.
+      Evaluation only: https://push-test.mattermost.com. Production push needs a
+      paid Mattermost plan and the enterprise-edition image.
+    default: ""
+---
+project: "{{ .projectName }}"
+environment: "{{ .environment }}"
+
+apps:
+  mattermost:
+    image: mattermost/mattermost-team-edition:11.7.2
+    port: 8065
+    env:
+      MM_SQLSETTINGS_DRIVERNAME: postgres
+      MM_SQLSETTINGS_DATASOURCE: "postgres://kipper@db.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local:5432/app?sslmode=disable"
+      MM_SERVICESETTINGS_SITEURL: "{{ .domain }}"
+{{- if .smtpHost }}
+      MM_EMAILSETTINGS_SMTPSERVER: "{{ .smtpHost }}"
+      MM_EMAILSETTINGS_SMTPPORT: "{{ .smtpPort }}"
+      MM_EMAILSETTINGS_CONNECTIONSECURITY: "{{ if eq .smtpSecurity "none" }}{{ else }}{{ .smtpSecurity }}{{ end }}"
+      MM_EMAILSETTINGS_ENABLESMTPAUTH: "{{ if .smtpUsername }}true{{ else }}false{{ end }}"
+      MM_EMAILSETTINGS_SENDEMAILNOTIFICATIONS: "true"
+{{- if .smtpUsername }}
+      MM_EMAILSETTINGS_SMTPUSERNAME: "{{ .smtpUsername }}"
+{{- end }}
+{{- if .smtpPassword }}
+      MM_EMAILSETTINGS_SMTPPASSWORD: "{{ .smtpPassword }}"
+{{- end }}
+{{- if .smtpFrom }}
+      MM_EMAILSETTINGS_FEEDBACKEMAIL: "{{ .smtpFrom }}"
+      MM_EMAILSETTINGS_REPLYTOADDRESS: "{{ .smtpFrom }}"
+{{- end }}
+{{- end }}
+{{- if .pushNotificationServer }}
+      MM_EMAILSETTINGS_SENDPUSHNOTIFICATIONS: "true"
+      MM_EMAILSETTINGS_PUSHNOTIFICATIONSERVER: "{{ .pushNotificationServer }}"
+{{- end }}
+    serviceBindings:
+      - name: db
+        prefix: DB_
+    resources:
+      profile: standard
+    route:
+      host: "{{ .domain }}"
+      path: /
+
+services:
+  db:
+    type: postgres
+    storage: "{{ .dbStorage }}"
+
+volumes:
+  data:
+    size: 10Gi
+    mounts:
+      - app: mattermost
+        mountPath: /mattermost/data

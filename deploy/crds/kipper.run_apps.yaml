@@ -1,0 +1,487 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: apps.kipper.run
+spec:
+  group: kipper.run
+  names:
+    kind: App
+    listKind: AppList
+    plural: apps
+    singular: app
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.image
+      name: Image
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: App is the Schema for the apps API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: AppSpec defines the desired state of a deployed application.
+            properties:
+              autoscale:
+                description: Autoscale configures horizontal pod autoscaling.
+                properties:
+                  cpuTarget:
+                    description: CPUTarget is the target CPU utilisation percentage.
+                    format: int32
+                    type: integer
+                  enabled:
+                    description: Enabled turns autoscaling on or off.
+                    type: boolean
+                  maxReplicas:
+                    description: MaxReplicas is the maximum number of replicas.
+                    format: int32
+                    type: integer
+                  memoryTarget:
+                    description: MemoryTarget is the target memory utilisation percentage.
+                    format: int32
+                    type: integer
+                  minReplicas:
+                    default: 1
+                    description: MinReplicas is the minimum number of replicas.
+                    format: int32
+                    type: integer
+                required:
+                - enabled
+                type: object
+              env:
+                additionalProperties:
+                  type: string
+                description: Env holds non-sensitive environment variables.
+                type: object
+              git:
+                description: |-
+                  Git configures source-based deployment from a Git repository.
+                  When set, builds are triggered by webhooks or manual rebuild commands.
+                properties:
+                  branch:
+                    default: main
+                    description: Branch is the branch to build from.
+                    type: string
+                  buildArgs:
+                    additionalProperties:
+                      type: string
+                    description: BuildArgs are additional build arguments passed to
+                      the Dockerfile.
+                    type: object
+                  buildResources:
+                    description: |-
+                      BuildResources overrides the CPU and memory the in-cluster build
+                      container may use, for apps whose build needs more than the cluster
+                      default (heavy SSR/bundler builds routinely need several GiB). Unset
+                      values fall back to the cluster default and then the built-in default.
+                    properties:
+                      cpu:
+                        description: CPU is the build container's CPU limit, e.g.
+                          "2".
+                        type: string
+                      memory:
+                        description: Memory is the build container's memory limit,
+                          e.g. "6Gi".
+                        type: string
+                    type: object
+                  context:
+                    default: .
+                    description: Context is the build context path relative to the
+                      repo root.
+                    type: string
+                  credentialsSecret:
+                    description: |-
+                      CredentialsSecret names the git credential the build uses. Either the
+                      app's own per-app Secret "<app-name>-git-credentials" in the app's
+                      namespace (a "token" key), or the name of a shared credential configured
+                      in kipper-system. A shared credential is only used when the app's project
+                      is on its allow-list and its host matches the git URL; any other name is
+                      rejected at build time.
+                    type: string
+                  dockerfilePath:
+                    default: Dockerfile
+                    description: DockerfilePath is the path to the Dockerfile relative
+                      to the repo root.
+                    type: string
+                  url:
+                    description: URL is the Git repository URL (HTTPS or SSH).
+                    type: string
+                required:
+                - url
+                type: object
+              image:
+                description: Image is the container image to deploy.
+                type: string
+              links:
+                description: |-
+                  Links are apps this app reaches. Each one is this app's declaration that
+                  it depends on another, and a link naming a namespace other than its own
+                  is what opens the egress the workload policy otherwise denies.
+
+                  Bounded because an App can be written straight to the API server: an
+                  unbounded list renders a policy the API server or the CNI may refuse, and
+                  a rejected update leaves the previous policy in place — so an allowance
+                  meant to be replaced would stay open.
+                items:
+                  description: |-
+                    AppLink is one app this app reaches.
+
+                    The namespace is recorded rather than the project because namespace naming
+                    depends on the operator's cluster configuration, which the reconciler cannot
+                    see. The CLI resolves a project and environment to a namespace and writes it
+                    here, so what the policy acts on is unambiguous.
+                  properties:
+                    app:
+                      description: App is the target app's name.
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    namespace:
+                      description: |-
+                        Namespace is where the target app runs. A link within this app's own
+                        namespace needs no egress allowance and produces no policy peer; it is
+                        still recorded, so this list is the app's dependencies rather than a
+                        by-product of one.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                  required:
+                  - app
+                  - namespace
+                  type: object
+                maxItems: 64
+                type: array
+              port:
+                description: Port is the container port the application listens on.
+                format: int32
+                type: integer
+              replicas:
+                default: 1
+                description: Replicas is the desired number of pod replicas.
+                format: int32
+                type: integer
+              resources:
+                description: Resources configures CPU and memory allocation.
+                properties:
+                  cpuLimit:
+                    description: CPULimit is the maximum CPU the container can use
+                      (e.g. "1000m").
+                    type: string
+                  cpuRequest:
+                    description: CPURequest is the CPU reserved on the node (e.g.
+                      "100m").
+                    type: string
+                  memoryLimit:
+                    description: MemoryLimit is the memory cap before the container
+                      is OOMKilled (e.g. "2Gi").
+                    type: string
+                  memoryRequest:
+                    description: MemoryRequest is the memory reserved on the node
+                      (e.g. "128Mi").
+                    type: string
+                  profile:
+                    default: standard
+                    description: Profile selects a predefined resource configuration.
+                    enum:
+                    - lightweight
+                    - standard
+                    - compute-heavy
+                    - memory-heavy
+                    - jvm
+                    - custom
+                    type: string
+                type: object
+              route:
+                description: Route configures external access to the application.
+                properties:
+                  basicAuth:
+                    description: |-
+                      BasicAuth enables HTTP basic authentication on this route.
+                      Credentials are stored in a Secret named {app}-basic-auth.
+                    type: boolean
+                  cspAllowlist:
+                    description: |-
+                      CSPAllowlist adds external domains to the Content Security Policy.
+                      These domains are added to style-src, font-src, script-src, and connect-src.
+                      Example: ["fonts.googleapis.com", "cdn.example.com"]
+                    items:
+                      type: string
+                    type: array
+                  group:
+                    description: Group is the route group name for grouping multiple
+                      apps under one domain.
+                    type: string
+                  host:
+                    description: Host is the fully qualified domain for custom domain
+                      routing.
+                    type: string
+                  noInstanceHeader:
+                    description: |-
+                      NoInstanceHeader disables the X-Instance-ID response header sidecar.
+                      When enabled (default), a lightweight reverse proxy sidecar is injected
+                      into app pods that adds an X-Instance-ID header identifying which pod
+                      served the request.
+                    type: boolean
+                  noSecurityHeaders:
+                    description: NoSecurityHeaders disables the default security response
+                      headers.
+                    type: boolean
+                  path:
+                    description: Path is the URL path prefix for path-based routing.
+                    type: string
+                  rateLimit:
+                    description: RateLimit sets the maximum requests per second (0
+                      = cluster default).
+                    type: integer
+                  redirectFrom:
+                    description: |-
+                      RedirectFrom lists additional hostnames that permanently redirect
+                      (301) to this route's canonical host, preserving path and query.
+                      Each hostname is claimed for this project like the route host; a
+                      hostname another project already serves is skipped and reported on
+                      the RouteReady condition. Hostnames under kipper.run are not
+                      supported.
+                    items:
+                      maxLength: 253
+                      type: string
+                    maxItems: 10
+                    type: array
+                  redirects:
+                    description: |-
+                      Redirects defines URL redirect rules for this app's route.
+                      Each rule creates a Traefik redirectRegex middleware.
+                    items:
+                      description: RedirectRule defines a URL redirect from a source
+                        pattern to a target.
+                      properties:
+                        permanent:
+                          description: Permanent uses 301 (true) instead of 302 (false).
+                          type: boolean
+                        source:
+                          description: Source is a regex pattern to match against
+                            the request URL.
+                          type: string
+                        target:
+                          description: Target is the destination URL or path. Supports
+                            regex group references ($1, $2).
+                          type: string
+                      required:
+                      - source
+                      - target
+                      type: object
+                    type: array
+                  requireApiKey:
+                    description: |-
+                      RequireAPIKey gates this route behind API key authentication: only
+                      requests carrying a valid X-API-Key for this app are served. When
+                      the authz service is unavailable the route fails closed.
+                    type: boolean
+                type: object
+              secretRefs:
+                description: SecretRefs lists the names of Secret keys to inject as
+                  environment variables.
+                items:
+                  type: string
+                type: array
+              serviceBindings:
+                description: ServiceBindings lists Service CRs whose credentials should
+                  be injected.
+                items:
+                  description: ServiceBinding defines a bound service with an optional
+                    env var prefix.
+                  properties:
+                    database:
+                      description: |-
+                        Database is the per-app database name created within the service.
+                        When set, a per-binding credentials secret is used with this database
+                        name instead of the shared service credentials.
+                      type: string
+                    name:
+                      description: Name is the Service CR name.
+                      type: string
+                    prefix:
+                      description: |-
+                        Prefix is prepended to credential env var names. The keys are
+                        service-type-specific: databases produce <PREFIX>HOST/PORT/USERNAME/
+                        PASSWORD, while MinIO (S3) produces <PREFIX>ENDPOINT/ACCESS_KEY/
+                        SECRET_KEY. If empty, defaults to a type-based prefix like DB_,
+                        REDIS_, S3_, etc.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              volumes:
+                description: Volumes lists volume mounts for this app.
+                items:
+                  description: AppVolumeMount defines a volume mount for the app container.
+                  properties:
+                    mountPath:
+                      description: MountPath is the path inside the container.
+                      type: string
+                    name:
+                      description: Name is the Volume CR name to mount.
+                      type: string
+                  required:
+                  - mountPath
+                  - name
+                  type: object
+                type: array
+            required:
+            - image
+            - port
+            type: object
+          status:
+            description: AppStatus defines the observed state of the application.
+            properties:
+              build:
+                description: Build holds the latest build information for Git-based
+                  apps.
+                properties:
+                  commit:
+                    description: Commit is the Git commit SHA that was built.
+                    type: string
+                  completedAt:
+                    description: CompletedAt is when the build completed.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message provides details on build failure.
+                    type: string
+                  phase:
+                    description: Phase is the current build state.
+                    enum:
+                    - Pending
+                    - Building
+                    - Succeeded
+                    - Failed
+                    type: string
+                  startedAt:
+                    description: StartedAt is when the build started.
+                    format: date-time
+                    type: string
+                type: object
+              conditions:
+                description: Conditions represent the latest available observations.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              image:
+                description: Image is the currently deployed image.
+                type: string
+              phase:
+                description: Phase represents the current lifecycle phase.
+                enum:
+                - Pending
+                - Running
+                - Failed
+                - Stopped
+                type: string
+              publishedEnv:
+                description: |-
+                  PublishedEnv is the environment generation the last successful pass
+                  published, which is the object a pod started now would read.
+
+                  The console compares it with the generation the pod template names to
+                  answer whether a restart would apply anything. Two names settle that; the
+                  timestamp comparison it replaced had to reason about when a stamp was
+                  written relative to when a kubelet started a container.
+                type: string
+              readyReplicas:
+                description: ReadyReplicas is the number of ready replicas.
+                format: int32
+                type: integer
+              replicas:
+                description: Replicas is the total number of desired replicas.
+                format: int32
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

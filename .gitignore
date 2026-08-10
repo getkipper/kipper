@@ -1,0 +1,65 @@
+# Binaries
+kip/kip
+controller/controller
+console-api/console-api
+authz/authz
+gateway/gateway
+sidecar/sidecar
+*.exe
+
+# Go
+*.test
+*.out
+
+# Node
+node_modules/
+dist/
+.vite/
+**/.vitepress/cache/
+**/.vitepress/dist/
+
+# Python (local scripts and virtualenvs)
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Cluster credential exports (kip cluster export)
+*.kip
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+
+# IDE / agent state — never committed
+.idea/
+.vscode/
+*.swp
+.claude/
+**/.claude/
+
+# Local working notes and agent guidance — kept out of the public repo
+PROGRESS.md
+PLAN.md
+TO-DOS.md
+ISSUES.md
+BACKLOG.md
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+codex-review.md
+codex-eod-review-*.md
+plans/
+features/
+docs/plans/
+kipper-poll/kipper-poll
+COMPARISON.md
+presentation/
+
+# Built binaries
+kip/kip
+kip/cmd/kip

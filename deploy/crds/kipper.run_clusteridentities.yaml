@@ -1,0 +1,483 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: clusteridentities.kipper.run
+spec:
+  group: kipper.run
+  names:
+    kind: ClusterIdentity
+    listKind: ClusterIdentityList
+    plural: clusteridentities
+    singular: clusteridentity
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.domain
+      name: Domain
+      type: string
+    - jsonPath: .status.transition.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ClusterIdentity is the Schema for the cluster serving-identity API. One
+          cluster-scoped instance named "cluster" owns the console, console-api, and
+          Dex hosts, the OIDC issuer, and gateway registration, and drives no-lockout
+          host changes through a phased transition.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ClusterIdentitySpec is the desired serving identity of the whole cluster: the
+              base domain, any per-service host overrides, gateway registration, and the
+              operator's approval for the one session-invalidating step of a host change.
+              A single cluster-scoped ClusterIdentity named "cluster" is the source of
+              truth; the reconciler ignores any other name.
+
+              The XValidation rule mirrors the gateway's full registrable-label contract for
+              *.kipper.run domains, so the constraint is enforced at the API boundary as well
+              as in the shared hostnames package: a single 1-63 char DNS label, with no "--"
+              (the derived-route separator) and not a reserved name. clusteridentity_cel_test.go
+              pins the "--" literal to hostnames.DerivedRouteSeparator and the reserved set to
+              hostnames.ReservedLabels so the CEL rule can never drift from the gateway.
+            properties:
+              ackSSOCallbacksFor:
+                description: |-
+                  AckSSOCallbacksFor records that the operator has updated (or will
+                  update) each SSO provider's OAuth callback URL for the Dex host named
+                  here. When a host change rehosts connectors, approval is refused until
+                  this names the pending transition's target Dex host, so a silent rehost
+                  cannot lock out SSO users. Naming the host binds the acknowledgement to
+                  one move: a later transition to a different Dex host always requires a
+                  fresh acknowledgement, no clearing step needed.
+                maxLength: 253
+                type: string
+              cutoverApproval:
+                description: |-
+                  CutoverApproval is the operator's signed go-ahead for the single
+                  session-invalidating step of a host change (the Dex issuer flip). The CLI
+                  writes hash(observedGeneration, from, to, targetIssuer, nonce) here after
+                  its external probes pass; the reconciler refuses to leave AwaitingApproval
+                  until this matches the pending transition. A stale or replayed approval
+                  never matches: the hash binds the transition's endpoints and its
+                  per-transition nonce, so editing the domain or a host override resets the
+                  nonce and voids a prior approval. Non-host edits (acknowledging SSO
+                  callbacks, adjusting the grace period) keep the same from/to and so keep a
+                  valid approval, since they do not change what is being cut over to.
+                type: string
+              domain:
+                description: |-
+                  Domain is the cluster's base identity: either a custom domain
+                  (example.com) or a single-label *.kipper.run domain
+                  (203-0-113-20.kipper.run). Service hosts are derived from it unless
+                  overridden below. The pattern validates each DNS label (1-63 chars, no
+                  leading/trailing hyphen, no empty labels); the *.kipper.run single-label
+                  and reserved-name rules are enforced by the XValidation rules above.
+                maxLength: 253
+                minLength: 1
+                pattern: ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
+                type: string
+              gateway:
+                description: |-
+                  Gateway configures registration with the *.kipper.run subdomain gateway.
+                  Omitted or Register=false for pure custom-domain clusters.
+                properties:
+                  clusterHost:
+                    description: |-
+                      ClusterHost is the public IP address the gateway routes to, and the value
+                      console-api serves as CLUSTER_HOST. An address, never a name: the gateway
+                      refuses to register anything that is not a public IP, so a hostname here
+                      would produce a heartbeat that can never succeed. The schema checks the
+                      syntax; kip additionally holds a value it records to the gateway's own
+                      routable-address policy (controller/pkg/pubip), which the schema cannot
+                      express. It lives on the CR because the reconciler patches the console-api
+                      env family on every identity change and can only preserve what the CR can
+                      express: with nowhere to carry the host, a host transition blanked it and
+                      silently stopped the heartbeat, the hop pin, and the registration proof.
+                    maxLength: 45
+                    type: string
+                    x-kubernetes-validations:
+                    - message: clusterHost must be an IP address; the gateway registers
+                        addresses, not names
+                      rule: self == '' || isIP(self)
+                  kipperRunDomain:
+                    description: |-
+                      KipperRunDomain is the gateway's base domain (kipper.run). Retained so the
+                      heartbeat can address the subdomain even after a custom-domain move
+                      overwrites Domain.
+                    maxLength: 253
+                    pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                    type: string
+                  register:
+                    default: true
+                    description: |-
+                      Register controls whether this cluster registers its subdomain with the
+                      gateway. Defaults to true; set false for pure custom-domain clusters. The
+                      default only applies when the gateway block is present: a nil gateway
+                      carries no defaulted register, so the reconciler treats a *.kipper.run
+                      domain with no gateway block as register=true (kipperRunDomain=kipper.run).
+                    type: boolean
+                type: object
+              hosts:
+                description: |-
+                  Hosts pins per-service hosts. An empty field is derived from Domain by
+                  convention; a non-empty field is a custom host used verbatim.
+                properties:
+                  console:
+                    description: Console is the web console host (e.g. console.example.com).
+                    maxLength: 253
+                    pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                    type: string
+                  consoleAPI:
+                    description: ConsoleAPI is the console backend API host.
+                    maxLength: 253
+                    pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                    type: string
+                  dex:
+                    description: Dex is the OIDC provider host.
+                    maxLength: 253
+                    pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                    type: string
+                type: object
+              keepOldHostsUntil:
+                description: |-
+                  KeepOldHostsUntil optionally delays contraction (pruning the old hosts)
+                  until this time, giving external clients a grace period after cutover.
+                format: date-time
+                type: string
+            required:
+            - domain
+            type: object
+            x-kubernetes-validations:
+            - message: a *.kipper.run cluster domain must be a single 1-63 char DNS
+                label, with no '--' (reserved for derived service routes) and not
+                a reserved name (console, console-api, dex, api, www, admin, kipper,
+                register, health)
+              rule: '!self.domain.endsWith(''.kipper.run'') || (self.domain.matches(''^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?[.]kipper[.]run$'')
+                && !self.domain.contains(''--'') && !(self.domain in [''console.kipper.run'',''console-api.kipper.run'',''dex.kipper.run'',''api.kipper.run'',''www.kipper.run'',''admin.kipper.run'',''kipper.kipper.run'',''register.kipper.run'',''health.kipper.run'']))'
+            - message: domain must not be the kipper.run apex; use a <label>.kipper.run
+                subdomain or a custom domain
+              rule: self.domain != 'kipper.run'
+          status:
+            description: |-
+              ClusterIdentityStatus is the observed serving identity and any in-flight host
+              transition. The reconciler is the sole writer of this subresource.
+            properties:
+              activeHosts:
+                description: |-
+                  ActiveHosts is the host set currently verified as serving, with the OIDC
+                  issuer it presents.
+                properties:
+                  console:
+                    description: Console is the resolved console host.
+                    type: string
+                  consoleAPI:
+                    description: ConsoleAPI is the resolved console-api host.
+                    type: string
+                  dex:
+                    description: Dex is the resolved Dex host.
+                    type: string
+                  issuer:
+                    description: Issuer is the OIDC issuer URL this host set presents
+                      (derived from Dex).
+                    type: string
+                type: object
+              conditions:
+                description: |-
+                  Conditions are the latest observations of serving state: IngressesReady,
+                  CertificatesReady, DNSReady, GatewayRouted, OIDCAligned, ExternalCallbacks,
+                  Ready.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastSteady:
+                description: |-
+                  LastSteady is the previous steady identity, used as the rollback target: a
+                  --rollback patches spec back to this.
+                properties:
+                  domain:
+                    description: Domain is the base domain of this steady identity.
+                    type: string
+                  hosts:
+                    description: Hosts are the per-service overrides of this steady
+                      identity.
+                    properties:
+                      console:
+                        description: Console is the web console host (e.g. console.example.com).
+                        maxLength: 253
+                        pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                        type: string
+                      consoleAPI:
+                        description: ConsoleAPI is the console backend API host.
+                        maxLength: 253
+                        pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                        type: string
+                      dex:
+                        description: Dex is the OIDC provider host.
+                        maxLength: 253
+                        pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                        type: string
+                    type: object
+                type: object
+              observedGeneration:
+                description: ObservedGeneration is the spec generation the reconciler
+                  last acted on.
+                format: int64
+                type: integer
+              steady:
+                description: |-
+                  Steady is the spec identity (domain plus host overrides) recorded while
+                  the cluster is steady. A transition snapshots it as its FromIdentity the
+                  moment it opens: once the domain edit lands, the previous spec is no
+                  longer readable anywhere else, and inferring it from a rendered hostname
+                  is ambiguous under host overrides.
+                properties:
+                  domain:
+                    description: Domain is the base domain of this steady identity.
+                    type: string
+                  hosts:
+                    description: Hosts are the per-service overrides of this steady
+                      identity.
+                    properties:
+                      console:
+                        description: Console is the web console host (e.g. console.example.com).
+                        maxLength: 253
+                        pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                        type: string
+                      consoleAPI:
+                        description: ConsoleAPI is the console backend API host.
+                        maxLength: 253
+                        pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                        type: string
+                      dex:
+                        description: Dex is the OIDC provider host.
+                        maxLength: 253
+                        pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                        type: string
+                    type: object
+                type: object
+              transition:
+                description: |-
+                  Transition is present only while a host change is in flight. It is written
+                  before each phase's mutations so progress survives a reconciler restart.
+                properties:
+                  cutoverStartedAt:
+                    description: |-
+                      CutoverStartedAt is set the moment the Dex issuer flip is durably written
+                      (the dex-config ConfigMap now holds the new issuer), not on entry to
+                      CuttingOver. It bounds the post-flip window: if the cutover has not verified
+                      within the deadline the reconciler auto-reverts to the previous identity
+                      rather than leaving Dex on the new issuer indefinitely (a stuck rollout, a
+                      deleted Deployment, or a persistently failing write). It stays nil while a
+                      pre-flip blocker is retried, so an unstarted flip never trips the deadline.
+                    format: date-time
+                    type: string
+                  from:
+                    description: |-
+                      From is the identity being moved away from (old issuer still valid until
+                      the flip).
+                    properties:
+                      console:
+                        description: Console is the resolved console host.
+                        type: string
+                      consoleAPI:
+                        description: ConsoleAPI is the resolved console-api host.
+                        type: string
+                      dex:
+                        description: Dex is the resolved Dex host.
+                        type: string
+                      issuer:
+                        description: Issuer is the OIDC issuer URL this host set presents
+                          (derived from Dex).
+                        type: string
+                    type: object
+                  fromIdentity:
+                    description: |-
+                      FromIdentity is the complete steady identity (spec.domain plus host
+                      overrides) being moved away from, snapshotted from status.steady when the
+                      transition opens. finishTransition records it as lastSteady, so a
+                      rollback restores the exact previous spec instead of a domain guessed
+                      from a rendered hostname. Renders for the Reverting and Degraded phases
+                      derive their spec-driven values (cluster domain, cookie scope, admin
+                      email) from it, so a revert restores the old identity coherently.
+                    properties:
+                      domain:
+                        description: Domain is the base domain of this steady identity.
+                        type: string
+                      hosts:
+                        description: Hosts are the per-service overrides of this steady
+                          identity.
+                        properties:
+                          console:
+                            description: Console is the web console host (e.g. console.example.com).
+                            maxLength: 253
+                            pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                            type: string
+                          consoleAPI:
+                            description: ConsoleAPI is the console backend API host.
+                            maxLength: 253
+                            pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                            type: string
+                          dex:
+                            description: Dex is the OIDC provider host.
+                            maxLength: 253
+                            pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                            type: string
+                        type: object
+                    type: object
+                  nonce:
+                    description: |-
+                      Nonce is a random value written when the transition is created. The
+                      cutover approval hash binds to it, so an approval can never be replayed
+                      against a later transition.
+                    type: string
+                  phase:
+                    description: |-
+                      Phase is the current stage of the transition. Steady state has no
+                      transition at all (this whole object is absent).
+                    enum:
+                    - DualServe
+                    - AwaitingApproval
+                    - CuttingOver
+                    - Verifying
+                    - Contracting
+                    - Reverting
+                    - Degraded
+                    type: string
+                  to:
+                    description: To is the identity being moved to.
+                    properties:
+                      console:
+                        description: Console is the resolved console host.
+                        type: string
+                      consoleAPI:
+                        description: ConsoleAPI is the resolved console-api host.
+                        type: string
+                      dex:
+                        description: Dex is the resolved Dex host.
+                        type: string
+                      issuer:
+                        description: Issuer is the OIDC issuer URL this host set presents
+                          (derived from Dex).
+                        type: string
+                    type: object
+                  toIdentity:
+                    description: |-
+                      ToIdentity is the spec identity this transition was opened toward,
+                      snapshotted when the transition opens. Post-flip renders and
+                      finishTransition read it instead of the live spec, so a spec edit that
+                      lands after the issuer flip can neither skew what the transition applies
+                      nor record a steady identity that was never made active.
+                    properties:
+                      domain:
+                        description: Domain is the base domain of this steady identity.
+                        type: string
+                      hosts:
+                        description: Hosts are the per-service overrides of this steady
+                          identity.
+                        properties:
+                          console:
+                            description: Console is the web console host (e.g. console.example.com).
+                            maxLength: 253
+                            pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                            type: string
+                          consoleAPI:
+                            description: ConsoleAPI is the console backend API host.
+                            maxLength: 253
+                            pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                            type: string
+                          dex:
+                            description: Dex is the OIDC provider host.
+                            maxLength: 253
+                            pattern: ^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$
+                            type: string
+                        type: object
+                    type: object
+                required:
+                - phase
+                type: object
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

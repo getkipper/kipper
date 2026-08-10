@@ -1,0 +1,49 @@
+name: wordpress
+description: WordPress blog with MySQL database and persistent uploads
+version: "1.0"
+parameters:
+  - name: projectName
+    description: Project name
+    required: true
+  - name: environment
+    description: Target environment (e.g. test, prod)
+    default: ""
+  - name: storageSize
+    description: Storage size for uploads
+    default: "5Gi"
+  - name: domain
+    description: Custom domain (leave empty for auto-generated kipper.run subdomain)
+    default: ""
+  - name: dbStorage
+    description: Database storage size
+    default: "5Gi"
+---
+project: "{{ .projectName }}"
+environment: "{{ .environment }}"
+
+apps:
+  wordpress:
+    image: wordpress:6-apache
+    port: 80
+    env:
+      WORDPRESS_DB_HOST: "db.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local"
+      WORDPRESS_DB_USER: kipper
+      WORDPRESS_DB_NAME: app
+    serviceBindings:
+      - name: db
+        prefix: WORDPRESS_DB_
+    route:
+      host: "{{ .domain }}"
+      path: /
+
+services:
+  db:
+    type: mysql
+    storage: "{{ .dbStorage }}"
+
+volumes:
+  uploads:
+    size: "{{ .storageSize }}"
+    mounts:
+      - app: wordpress
+        mountPath: /var/www/html/wp-content/uploads

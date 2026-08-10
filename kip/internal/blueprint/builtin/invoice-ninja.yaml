@@ -1,0 +1,51 @@
+name: invoice-ninja
+description: Invoice Ninja invoicing and billing platform with MySQL
+version: "1.0"
+parameters:
+  - name: projectName
+    description: Project name
+    required: true
+  - name: environment
+    description: Target environment
+    default: ""
+  - name: domain
+    description: Public URL (e.g. https://invoices.example.com)
+    required: true
+  - name: dbStorage
+    description: Database storage size
+    default: "5Gi"
+---
+project: "{{ .projectName }}"
+environment: "{{ .environment }}"
+
+apps:
+  invoice-ninja:
+    image: invoiceninja/invoiceninja:5
+    port: 9000
+    env:
+      APP_URL: "{{ .domain }}"
+      APP_KEY: "base64:{{ generateSecret 32 }}"
+      DB_HOST: "db.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local"
+      DB_PORT: "3306"
+      DB_USERNAME: kipper
+      DB_DATABASE: app
+    serviceBindings:
+      - name: db
+        prefix: DB_
+    resources:
+      profile: standard
+    route:
+      host: "{{ .domain }}"
+      path: /
+
+services:
+  db:
+    type: mysql
+    storage: "{{ .dbStorage }}"
+
+volumes:
+  storage:
+    size: 5Gi
+    mounts:
+      - app: invoice-ninja
+        mountPath: /var/app/public/storage
