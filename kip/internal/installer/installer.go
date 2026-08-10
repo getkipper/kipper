@@ -104,6 +104,11 @@ type Result struct {
 	// only via --admin-kubeconfig.
 	AuthMode      string
 	VerifiedEmail string
+	// CredentialsShown reports that the admin credentials were already printed,
+	// which the interactive path does before its sign-in prompt. The caller's
+	// closing summary reads it so one install does not disclose the same
+	// password twice under two different "save this now" headings.
+	CredentialsShown bool
 }
 
 // Run executes the full cluster installation sequence.
@@ -668,7 +673,13 @@ func Run(opts Options) (*Result, error) {
 	case KubeconfigExecInteractive:
 		result.AuthMode = "deferred"
 		if opts.LoginGate != nil && execServer != "" {
-			gate := opts.LoginGate(context.Background(), domainName, resolvedHosts.DexHost, execServer, execCA)
+			// Disclosed here rather than by the caller's closing summary: this
+			// is the only path that prompts for the password, and the summary
+			// does not run until the prompt has been answered or timed out.
+			gate := signInWithCredentials(os.Stdout, domainName, adminPassword, func() GateResult {
+				return opts.LoginGate(context.Background(), domainName, resolvedHosts.DexHost, execServer, execCA)
+			})
+			result.CredentialsShown = adminPassword != ""
 			result.AuthMode = gate.AuthMode
 			result.VerifiedEmail = gate.VerifiedEmail
 			// The gate never writes the admin certificate; whatever it decides,
