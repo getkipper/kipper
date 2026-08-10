@@ -1,35 +1,21 @@
 name: CI
 
-# This workflow does not run on a push to any branch. The gate is `act`, run
-# locally in Docker against the real workflow file rather than a copy of it —
-# see "Running the pipeline locally" in CLAUDE.md for the invocation, which
-# needs one job at a time on a developer machine.
-#
-# That gives a clean checkout on a case-sensitive Linux filesystem at the
-# runner's architecture, which is everything a native macOS run cannot check,
-# and it is the same 33 jobs. What it does not give is a record on the commit,
-# so the discipline it depends on is running it before every merge to `main`.
-#
-# The reason is cost. These 33 jobs bill about 50 minutes per run because every
-# job rounds up to a whole minute, and running them on each merge was the
-# largest line in the Actions bill. `build-images.yml` publishes on the merge
-# instead, and no longer waits on this workflow having run.
-#
-# `pull_request` stays because it costs nothing while nobody opens one, and a
-# contributor's PR against `main` should still get the full suite once the repo
-# is public. Do not open a long-lived `develop` -> `main` PR: every push to
-# `develop` would then run all 33 jobs. Merge locally and push `main`.
-#
-# `workflow_dispatch` runs it on demand — worth doing before a release, or to
-# check a local `act` verdict against a real runner.
+# Runs on every push to `main` and `develop`, on pull requests to `main`, and
+# on demand.
+
 on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
     branches: [main]
   workflow_dispatch:
 
-# One run per ref. Pushing three times in ten minutes used to run three full
-# pipelines to completion when only the last one's result is ever read; the
-# superseded ones are cancelled now.
+# One run per ref: a superseded run is cancelled rather than run to completion.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
