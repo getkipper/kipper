@@ -1,0 +1,95 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: usagerollups.kipper.run
+spec:
+  group: kipper.run
+  names:
+    kind: UsageRollup
+    listKind: UsageRollupList
+    plural: usagerollups
+    singular: usagerollup
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.keyPrefix
+      name: Key
+      type: string
+    - jsonPath: .spec.day
+      name: Day
+      type: string
+    - jsonPath: .spec.allowed
+      name: Allowed
+      type: integer
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: UsageRollup is the Schema for the usagerollups API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              UsageRollupSpec is one key's request counters for one calendar day.
+              Rollups are always daily; week and month quotas sum the days they cover.
+              Daily granularity keeps cardinality bounded (keys x retained days) while
+              staying fine-grained enough for any billing period.
+
+              Counters are cumulative. Authz replicas buffer increments in memory and
+              flush them in batches with optimistic concurrency, so totals are
+              eventually consistent, never per-request writes.
+            properties:
+              allowed:
+                description: |-
+                  Allowed counts requests that passed validation, rate, and quota.
+                  Never negative: the quota gate sums these, so a negative value
+                  would subtract usage.
+                format: int64
+                minimum: 0
+                type: integer
+              day:
+                description: Day is the calendar day in ISO form (2026-07-07), UTC.
+                pattern: ^\d{4}-\d{2}-\d{2}$
+                type: string
+              deniedQuota:
+                description: DeniedQuota counts requests rejected by the period quota.
+                format: int64
+                minimum: 0
+                type: integer
+              deniedRate:
+                description: DeniedRate counts requests rejected by the token bucket.
+                format: int64
+                minimum: 0
+                type: integer
+              keyPrefix:
+                description: |-
+                  KeyPrefix identifies the ApiKey (spec.prefix) these counters
+                  belong to.
+                pattern: ^[a-z0-9]{8}$
+                type: string
+            required:
+            - day
+            - keyPrefix
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources: {}

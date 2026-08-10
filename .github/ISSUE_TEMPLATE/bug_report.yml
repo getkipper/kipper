@@ -1,0 +1,43 @@
+name: Bug report
+description: Report something that isn't working
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting a bug. Fill in what you can, the reproduction steps matter most.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What went wrong, and what did you expect to happen instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The commands or actions that trigger the bug.
+      placeholder: |
+        1. Run `kip install --host 203.0.113.10 ...`
+        2. Open the console
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: kip-version
+    attributes:
+      label: kip version
+      description: Output of `kip version`.
+    validations:
+      required: false
+  - type: input
+    id: environment
+    attributes:
+      label: OS and architecture
+      placeholder: e.g. macOS 14 arm64, Ubuntu 24.04 amd64
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      description: Relevant error output. This is rendered as code, so no need for backticks.
+      render: shell

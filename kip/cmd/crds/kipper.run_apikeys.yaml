@@ -1,0 +1,117 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: apikeys.kipper.run
+spec:
+  group: kipper.run
+  names:
+    kind: ApiKey
+    listKind: ApiKeyList
+    plural: apikeys
+    singular: apikey
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.plan
+      name: Plan
+      type: string
+    - jsonPath: .spec.prefix
+      name: Prefix
+      type: string
+    - jsonPath: .spec.enabled
+      name: Enabled
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ApiKey is the Schema for the apikeys API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ApiKeySpec identifies one API key: who it belongs to, which plan
+              throttles it, and which apps it may call. The key's secret value is never
+              stored; only its SHA-256 digest is. The secret carries roughly 206 bits of
+              entropy (40 characters from a 36-symbol alphabet), so the plain digest
+              cannot be brute-forced and no separate HMAC secret is needed.
+            properties:
+              apps:
+                description: |-
+                  Apps lists the app names in this namespace the key may call. Empty
+                  means every key-gated app in the namespace.
+                items:
+                  maxLength: 63
+                  pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                  type: string
+                type: array
+              displayName:
+                description: |-
+                  DisplayName is the human-readable key name (e.g. the consumer it
+                  was issued to). It is forwarded as the X-Kipper-Key-Name header, so
+                  its length is capped here to bound the header size. authz refuses to
+                  forward a name carrying control bytes, so a direct CR write cannot
+                  break the route with one.
+                maxLength: 128
+                type: string
+              enabled:
+                default: true
+                description: |-
+                  Enabled gates the key: a disabled key is rejected without deleting
+                  its usage history.
+                type: boolean
+              expiresAt:
+                description: |-
+                  ExpiresAt is an optional instant after which the key is rejected on
+                  the same uniform 401 path as a disabled key. Empty means the key
+                  never expires.
+                format: date-time
+                type: string
+              hashSHA256:
+                description: HashSHA256 is the hex SHA-256 digest of the full issued
+                  key.
+                pattern: ^[a-f0-9]{64}$
+                type: string
+              plan:
+                description: |-
+                  Plan is the name of the UsagePlan in the same namespace that
+                  throttles this key.
+                type: string
+              prefix:
+                description: |-
+                  Prefix is the key's non-secret lookup handle (the part before the
+                  last underscore of the issued key). It routes validation to this CR
+                  without scanning all key hashes. Two keys must never share a prefix;
+                  authz denies a prefix that matches more than one CR.
+                pattern: ^[a-z0-9]{8}$
+                type: string
+            required:
+            - hashSHA256
+            - plan
+            - prefix
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources: {}

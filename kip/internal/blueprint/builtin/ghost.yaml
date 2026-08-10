@@ -1,0 +1,41 @@
+name: ghost
+description: Ghost publishing platform with MySQL database
+version: "1.0"
+parameters:
+  - name: projectName
+    description: Project name
+    required: true
+  - name: environment
+    description: Target environment
+    default: ""
+  - name: domain
+    description: Public URL for Ghost (e.g. https://blog.example.com)
+    default: "http://localhost:2368"
+  - name: dbStorage
+    description: Database storage size
+    default: "5Gi"
+---
+project: "{{ .projectName }}"
+environment: "{{ .environment }}"
+
+apps:
+  ghost:
+    image: ghost:5-alpine
+    port: 2368
+    env:
+      database__client: mysql
+      database__connection__host: "db.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local"
+      database__connection__user: kipper
+      database__connection__database: app
+      url: "{{ .domain }}"
+    serviceBindings:
+      - name: db
+        prefix: database__connection__
+    route:
+      host: "{{ .domain }}"
+      path: /
+
+services:
+  db:
+    type: mysql
+    storage: "{{ .dbStorage }}"

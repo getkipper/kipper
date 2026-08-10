@@ -1,0 +1,74 @@
+name: rocketchat
+description: Rocket.Chat team communication platform with MongoDB
+version: "1.0"
+parameters:
+  - name: projectName
+    description: Project name
+    required: true
+  - name: environment
+    description: Target environment
+    default: ""
+  - name: domain
+    description: Public URL (e.g. https://chat.example.com)
+    required: true
+  - name: dbStorage
+    description: Database storage size
+    default: "10Gi"
+  - name: smtpHost
+    description: SMTP server hostname for email notifications. Leave empty to skip email setup.
+    default: ""
+  - name: smtpPort
+    description: SMTP server port
+    default: "587"
+  - name: smtpUsername
+    description: SMTP username
+    default: ""
+  - name: smtpPassword
+    description: SMTP password
+    default: ""
+  - name: smtpFrom
+    description: From address for notification emails (e.g. notifications@example.com)
+    default: ""
+  - name: smtpSecurity
+    description: SMTP connection security. One of STARTTLS, TLS, none.
+    default: "STARTTLS"
+---
+project: "{{ .projectName }}"
+environment: "{{ .environment }}"
+
+apps:
+  rocketchat:
+    image: rocket.chat:8.4.3
+    port: 3000
+    env:
+      ROOT_URL: "{{ .domain }}"
+      MONGO_URL: "mongodb://kipper@mongodb.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local:27017/app"
+      MONGO_OPLOG_URL: "mongodb://kipper@mongodb.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local:27017/local"
+{{- if .smtpHost }}
+      OVERWRITE_SETTING_SMTP_Host: "{{ .smtpHost }}"
+      OVERWRITE_SETTING_SMTP_Port: "{{ .smtpPort }}"
+      OVERWRITE_SETTING_SMTP_Protocol: "{{ if eq .smtpSecurity "TLS" }}smtps{{ else }}smtp{{ end }}"
+      OVERWRITE_SETTING_SMTP_IgnoreTLS: "{{ if eq .smtpSecurity "STARTTLS" }}false{{ else }}true{{ end }}"
+{{- if .smtpUsername }}
+      OVERWRITE_SETTING_SMTP_Username: "{{ .smtpUsername }}"
+{{- end }}
+{{- if .smtpPassword }}
+      OVERWRITE_SETTING_SMTP_Password: "{{ .smtpPassword }}"
+{{- end }}
+{{- if .smtpFrom }}
+      OVERWRITE_SETTING_From_Email: "{{ .smtpFrom }}"
+{{- end }}
+{{- end }}
+    serviceBindings:
+      - name: mongodb
+        prefix: DB_
+    resources:
+      profile: standard
+    route:
+      host: "{{ .domain }}"
+      path: /
+
+services:
+  mongodb:
+    type: mongodb
+    storage: "{{ .dbStorage }}"

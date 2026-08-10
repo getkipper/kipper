@@ -1,0 +1,260 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: platformconfigs.kipper.run
+spec:
+  group: kipper.run
+  names:
+    kind: PlatformConfig
+    listKind: PlatformConfigList
+    plural: platformconfigs
+    singular: platformconfig
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.profile
+      name: Profile
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          PlatformConfig is the Schema for the platform configuration API. It controls
+          system component sizing and per-component enable/disable for Kipper's
+          platform layer.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              PlatformConfigSpec defines the desired state of system component sizing for
+              the Kipper platform layer (monitoring, storage, ingress, identity, registry).
+              A single cluster-scoped PlatformConfig named "platform" is the source of truth;
+              the reconciler ignores any other names.
+            properties:
+              components:
+                description: |-
+                  Components is the per-component override list. Anything not listed
+                  follows the active profile defaults; anything listed wins.
+                items:
+                  description: |-
+                    ComponentOverride captures user intent for a single system component.
+                    Empty fields fall back to the profile default; explicit values override.
+                  properties:
+                    cpuLimit:
+                      description: CPULimit overrides the profile's CPU limit (e.g.
+                        "1000m").
+                      type: string
+                    enabled:
+                      description: |-
+                        Enabled toggles the component on or off, overriding the profile.
+                        Nil means "use profile default", true forces on, false forces off.
+                        The pointer matters so a profile change does not silently flip a
+                        user's explicit disable back to enabled.
+                      type: boolean
+                    memoryLimit:
+                      description: MemoryLimit overrides the profile's memory limit
+                        (e.g. "2Gi").
+                      type: string
+                    name:
+                      description: |-
+                        Name identifies the component. Expected values: "prometheus", "loki",
+                        "grafana", "longhorn", "dex", "zot", "console", "console-api",
+                        "gateway", "traefik", "cert-manager". The reconciler validates the
+                        name against its known list and surfaces unknown names as a condition.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              profile:
+                description: |-
+                  Profile selects a sizing profile for system components. The installer
+                  picks one at install time based on node memory; users can change it
+                  later via the console or `kip platform profile set`.
+                enum:
+                - nano
+                - small
+                - medium
+                - large
+                - xlarge
+                type: string
+              telemetry:
+                description: |-
+                  Telemetry toggles cluster-wide telemetry collection that feeds the
+                  auto-bump growth decisions. Opt-in; default is the zero value
+                  (everything off).
+                properties:
+                  recordResourceAdjustments:
+                    description: |-
+                      RecordResourceAdjustments enables the cluster log of slider Apply
+                      events. When true, every successful resize via the console or CLI
+                      writes a cluster-scoped ResourceAdjustment CR. Defaults to false.
+                    type: boolean
+                type: object
+            required:
+            - profile
+            type: object
+          status:
+            description: |-
+              PlatformConfigStatus reflects the observed state of system components and
+              any auto-bumps the controller has performed.
+            properties:
+              components:
+                description: Components lists observed state per component.
+                items:
+                  description: ComponentStatus is the observed state of a single system
+                    component.
+                  properties:
+                    atCeiling:
+                      description: |-
+                        AtCeiling is true when the auto-bump has reached the per-component
+                        ceiling and cannot grow further without a manual decision.
+                      type: boolean
+                    currentCpuLimit:
+                      description: CurrentCPULimit is the CPU limit currently applied.
+                      type: string
+                    currentMemoryLimit:
+                      description: |-
+                        CurrentMemoryLimit is the memory limit currently applied to the
+                        workload, after profile defaults, user overrides, and auto-bumps.
+                      type: string
+                    lastBumpAt:
+                      description: LastBumpAt records the timestamp of the most recent
+                        auto-bump.
+                      format: date-time
+                      type: string
+                    lastBumpFrom:
+                      description: LastBumpFrom is the memory limit before the most
+                        recent auto-bump.
+                      type: string
+                    lastBumpReason:
+                      description: LastBumpReason explains why the controller bumped
+                        this component.
+                      type: string
+                    lastBumpTo:
+                      description: LastBumpTo is the memory limit after the most recent
+                        auto-bump.
+                      type: string
+                    name:
+                      description: Name identifies the component.
+                      type: string
+                    phase:
+                      description: Phase summarises the current state.
+                      enum:
+                      - Running
+                      - Pending
+                      - CrashLoopBackOff
+                      - OOMKilled
+                      - Disabled
+                      - Unknown
+                      type: string
+                    restartCount7d:
+                      description: |-
+                        RestartCount7d is the number of container restarts in the trailing
+                        7-day window.
+                      format: int32
+                      type: integer
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              conditions:
+                description: |-
+                  Conditions represents the latest available observations of the
+                  platform's state (e.g. Ready, Degraded, AtCeiling).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              profile:
+                description: Profile mirrors spec.profile so it is visible in `kubectl
+                  get`.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

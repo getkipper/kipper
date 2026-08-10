@@ -1,0 +1,280 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: projects.kipper.run
+spec:
+  group: kipper.run
+  names:
+    kind: Project
+    listKind: ProjectList
+    plural: projects
+    singular: project
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.displayName
+      name: Display Name
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.namespaces
+      name: Environments
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Project is the Schema for the projects API. It is cluster-scoped because
+          it manages namespaces across the cluster.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ProjectSpec defines the desired state of a project.
+
+              The XValidation rule caps the environment count. For tiered projects that
+              stops an owner multiplying the granted capacity (each namespace gets a full
+              tier-sized quota); for tierless projects, whose environments carry no quota
+              at all, it is the only synchronous brake on uncapped namespace fan-out.
+              Because it references oldSelf it is a transition rule, which the API server
+              evaluates only on update, not on create: an update may not grow the count
+              past the effective limit, but one that keeps or reduces the count is
+              allowed, so a forced tier downgrade leaves an over-limit project editable
+              instead of frozen. A create that exceeds the limit is not rejected here;
+              the reconciler is the backstop that caps namespace creation and flags the
+              project. The effective limit is maxEnvironments when set, otherwise the
+              tier default, with an absent tier meaning tierless. These literals must
+              match TierEnvLimit (a drift test asserts it).
+            properties:
+              allowLinksFrom:
+                description: |-
+                  AllowLinksFrom names the projects whose apps may link to apps in this
+                  project. It is this project's consent, given by whoever owns it.
+
+                  A link opens a direct route to a backend, past the ingress and so past
+                  every control attached to a public route: forward auth, API keys, rate
+                  limits. The calling side declaring it is not enough, because an app's own
+                  project cannot grant access to somebody else's. Without an entry here the
+                  link is recorded and no egress is opened.
+
+                  Bounded and validated because a Project can be written straight to the
+                  API server, and this list is an authorisation: an entry that is not a
+                  project name matches nothing, but it still has to be read and stored on
+                  every reconcile of every app that links here.
+                items:
+                  maxLength: 253
+                  minLength: 1
+                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                  type: string
+                maxItems: 256
+                type: array
+              displayName:
+                description: DisplayName is the human-readable project name.
+                type: string
+              environments:
+                default:
+                - name: test
+                description: Environments lists the environment stages for this project.
+                items:
+                  description: ProjectEnvironment defines a single environment stage.
+                  properties:
+                    name:
+                      description: Name is the environment name (e.g. test, acc, prod).
+                      type: string
+                    quota:
+                      description: |-
+                        Quota overrides the project tier's CPU/memory quota for this
+                        environment's namespace.
+                      properties:
+                        cpuLimit:
+                          description: CPULimit caps the sum of container CPU limits.
+                          type: string
+                        cpuRequest:
+                          description: CPURequest caps the sum of container CPU requests.
+                          type: string
+                        memoryLimit:
+                          description: MemoryLimit caps the sum of container memory
+                            limits.
+                          type: string
+                        memoryRequest:
+                          description: MemoryRequest caps the sum of container memory
+                            requests.
+                          type: string
+                      required:
+                      - cpuLimit
+                      - cpuRequest
+                      - memoryLimit
+                      - memoryRequest
+                      type: object
+                  required:
+                  - name
+                  type: object
+                type: array
+              maxEnvironments:
+                description: |-
+                  MaxEnvironments overrides the tier's default environment-count cap for
+                  this project. It is admin-set, since more environments means more total
+                  granted capacity. Unset means the tier default (TierEnvLimit) applies.
+                minimum: 1
+                type: integer
+              members:
+                description: |-
+                  Members lists the users with access to this project and their role
+                  within it. Cluster admins have access to every project regardless of
+                  this list.
+                items:
+                  description: ProjectMember grants a user a role within a project.
+                  properties:
+                    email:
+                      description: Email identifies the user, matching their Dex identity.
+                      type: string
+                    role:
+                      description: Role is the user's capability within this project.
+                      enum:
+                      - owner
+                      - deployer
+                      - viewer
+                      type: string
+                  required:
+                  - email
+                  - role
+                  type: object
+                type: array
+              sharedStorage:
+                description: SharedStorage configures a shared PVC across apps in
+                  each environment.
+                properties:
+                  enabled:
+                    description: Enabled turns shared storage on or off.
+                    type: boolean
+                  size:
+                    default: 5Gi
+                    description: Size is the PVC size (e.g. "5Gi").
+                    type: string
+                required:
+                - enabled
+                type: object
+              tier:
+                description: |-
+                  Tier selects the default CPU/memory quota applied to each of the
+                  project's environment namespaces. A tier is a capacity label, not a
+                  price. Individual environments can override it via their Quota field.
+                  Unset means tierless: the project's environments get no quota objects
+                  and only cluster-wide limits apply. Assigning a tier is the opt-in for
+                  managed per-environment capacity.
+                enum:
+                - small
+                - medium
+                - large
+                - ""
+                type: string
+            type: object
+            x-kubernetes-validations:
+            - message: environment count exceeds the project limit (6 without a tier;
+                small 4, medium 6, large 10); a cluster admin can raise it by setting
+                maxEnvironments, or assign a tier for managed capacity
+              rule: 'size(self.environments) <= (has(self.maxEnvironments) ? self.maxEnvironments
+                : (!has(self.tier) || size(self.tier) == 0 ? 6 : (self.tier == ''large''
+                ? 10 : (self.tier == ''medium'' ? 6 : 4)))) || size(self.environments)
+                <= size(oldSelf.environments)'
+          status:
+            description: ProjectStatus defines the observed state of the project.
+            properties:
+              conditions:
+                description: Conditions represent the latest available observations.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              namespaces:
+                description: Namespaces lists the Kubernetes namespaces created for
+                  this project.
+                items:
+                  type: string
+                type: array
+              phase:
+                description: Phase represents the current lifecycle phase.
+                enum:
+                - Active
+                - Terminating
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,43 @@
+name: calcom
+description: Cal.com open source scheduling platform with PostgreSQL
+version: "1.0"
+parameters:
+  - name: projectName
+    description: Project name
+    required: true
+  - name: environment
+    description: Target environment
+    default: ""
+  - name: domain
+    description: Public URL for Cal.com (e.g. https://cal.example.com)
+    required: true
+  - name: dbStorage
+    description: Database storage size
+    default: "5Gi"
+---
+project: "{{ .projectName }}"
+environment: "{{ .environment }}"
+
+apps:
+  calcom:
+    image: calcom/cal.com:latest
+    port: 3000
+    env:
+      NEXT_PUBLIC_WEBAPP_URL: "{{ .domain }}"
+      NEXTAUTH_URL: "{{ .domain }}"
+      NEXTAUTH_SECRET: "{{ generateSecret 32 }}"
+      CALENDSO_ENCRYPTION_KEY: "{{ generateSecret 16 }}"
+      DATABASE_URL: "postgres://kipper@db.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local:5432/app"
+    serviceBindings:
+      - name: db
+        prefix: DB_
+    resources:
+      profile: standard
+    route:
+      host: "{{ .domain }}"
+      path: /
+
+services:
+  db:
+    type: postgres
+    storage: "{{ .dbStorage }}"

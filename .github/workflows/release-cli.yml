@@ -1,0 +1,37 @@
+name: Release kip CLI
+
+# Triggered by pushing a version tag (e.g. git tag v0.1.0 && git push origin v0.1.0).
+# Builds kip binaries for all platforms via goreleaser and publishes them to
+# GitHub Releases. The install script at scripts/install.sh fetches from this
+# release endpoint, so binaries must land here for kip install to work.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

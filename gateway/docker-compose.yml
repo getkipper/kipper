@@ -1,0 +1,52 @@
+services:
+  gateway:
+    build: .
+    restart: unless-stopped
+    environment:
+      - BASE_DOMAIN=kipper.run
+      - PORT=8080
+      - DATA_PATH=/data/registry.json
+      # Proof-before-route is on by default. Set it to false only to run the
+      # transition mode described in main.go, where a fleet that has not yet
+      # proven possession keeps routing while it acquires proofs.
+      # - KIPPER_PROOF_BEFORE_ROUTE=false
+      #
+      # The posture endpoint (/status) is disabled until this is set. Monitoring
+      # reads it — see OPERATING.md for what to alert on.
+      - KIPPER_STATUS_TOKEN=${KIPPER_STATUS_TOKEN}
+    # Every proxied request holds two descriptors, one from the client and one
+    # to the cluster, so the 1024 the runtime hands out caps this process at a
+    # few hundred concurrent connections for the whole fleet. The figure also
+    # has to cover the keep-alive pools: see idlePerTransport in proxy.go, whose
+    # test asserts the two stay in proportion.
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    # Longer than the gateway's own drain (shutdownGrace in main.go), or the
+    # runtime SIGKILLs it mid-drain and the shutdown flush never runs.
+    stop_grace_period: 30s
+    volumes:
+      - gateway-data:/data
+
+  caddy:
+    build: ./caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - gateway
+
+volumes:
+  gateway-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,53 @@
+name: outline
+description: Outline team wiki and knowledge base with PostgreSQL, Redis, and S3 storage
+version: "1.0"
+parameters:
+  - name: projectName
+    description: Project name
+    required: true
+  - name: environment
+    description: Target environment
+    default: ""
+  - name: domain
+    description: Public URL for Outline (e.g. https://wiki.example.com)
+    required: true
+  - name: dbStorage
+    description: Database storage size
+    default: "5Gi"
+---
+project: "{{ .projectName }}"
+environment: "{{ .environment }}"
+
+apps:
+  outline:
+    image: outlinewiki/outline:latest
+    port: 3000
+    env:
+      NODE_ENV: production
+      URL: "{{ .domain }}"
+      SECRET_KEY: "{{ generateSecret 32 }}"
+      UTILS_SECRET: "{{ generateSecret 32 }}"
+      DATABASE_URL: "postgres://kipper@db.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local:5432/app"
+      REDIS_URL: "redis://redis.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local:6379"
+      AWS_S3_UPLOAD_BUCKET_NAME: uploads
+      AWS_S3_FORCE_PATH_STYLE: "true"
+      FILE_STORAGE: s3
+    serviceBindings:
+      - name: db
+        prefix: DB_
+      - name: minio
+        prefix: AWS_
+    resources:
+      profile: standard
+    route:
+      host: "{{ .domain }}"
+      path: /
+
+services:
+  db:
+    type: postgres
+    storage: "{{ .dbStorage }}"
+  redis:
+    type: redis
+  minio:
+    type: minio

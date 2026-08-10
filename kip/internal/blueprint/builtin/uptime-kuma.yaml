@@ -1,0 +1,36 @@
+name: uptime-kuma
+description: Uptime Kuma monitoring and status page
+version: "1.0"
+parameters:
+  - name: projectName
+    description: Project name
+    required: true
+  - name: environment
+    description: Target environment
+    default: ""
+  - name: domain
+    description: Custom domain (leave empty for auto-generated kipper.run subdomain)
+    default: ""
+  - name: storageSize
+    description: Data storage size
+    default: "1Gi"
+---
+project: "{{ .projectName }}"
+environment: "{{ .environment }}"
+
+apps:
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    port: 3001
+    resources:
+      profile: lightweight
+    route:
+      host: "{{ .domain }}"
+      path: /
+
+volumes:
+  data:
+    size: "{{ .storageSize }}"
+    mounts:
+      - app: uptime-kuma
+        mountPath: /app/data

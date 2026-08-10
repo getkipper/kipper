@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="24.4775mm" height="28.7201mm" viewBox="0 0 576.71 676.67" style="shape-rendering:geometricPrecision; text-rendering:geometricPrecision; image-rendering:optimizeQuality; fill-rule:evenodd; clip-rule:evenodd">
+ <defs>
+  <style type="text/css">
+   <![CDATA[
+    .fil1 {fill:#0EA5E9}
+    .fil4 {fill:#7DC3F5}
+    .fil0 {fill:#BDE4FF}
+    .fil3 {fill:white}
+    .fil2 {fill:white}
+   ]]>
+  </style>
+ </defs>
+ <g>
+  <path class="fil0" d="M106.36 445.6l106.58 0 87.72 -107.26 62.99 -76.32 -88.13 -106.77 -62.59 75.83 87.72 107.26 -105.76 0 -88.54 107.26z"/>
+  <path class="fil1" d="M106.36 231.07l-106.36 0 88.54 107.26 -88.54 107.26 106.36 0 88.54 -107.26 -88.54 -107.26z"/>
+  <path class="fil1" d="M296.34 0l-74.66 90.45 141.97 171.56 -62.99 76.32 62.99 76.32 -141.97 171.57 74.66 90.45c93.65,-112.68 187.1,-225.35 280.37,-338.34 -93.27,-112.98 -186.72,-225.66 -280.37,-338.34z"/>
+  <circle class="fil2" cx="440.9" cy="343.39" r="34.88"/>
+  <path class="fil3" d="M106.36 231.08l106.58 0 87.72 107.26 -105.76 0 -88.54 -107.26zm194.3 107.26l-87.72 107.26 62.59 75.82 88.13 -106.77 -62.99 -76.32z"/>
+  <path class="fil4" d="M286.59 534.83l-1.29 0 0 -1.56 1.29 1.56zm0 -392.99l-1.29 0 0 1.56 1.29 -1.56zm-180.99 89.23l107.33 0 62.59 -75.83 -107.33 0 -47.4 57.43 -15.19 18.4zm0 214.52l107.33 0 62.59 75.82 -107.33 0 -47.4 -57.43 -15.19 -18.39z"/>
+ </g>
+</svg>
