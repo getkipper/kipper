@@ -98,7 +98,17 @@ func (j *Jobs) Create(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
+	release, ok := reserveWorkloadName(ctx, w, j.CRClient, namespace, req.Name, "job")
+	if !ok {
+		return
+	}
+
 	if err := j.CRClient.Create(ctx, job); err != nil {
+		// See Apps.Create: AlreadyExists proves the workload is there, so the
+		// reservation just made is its own first claim and must stand.
+		if !errors.IsAlreadyExists(err) {
+			release()
+		}
 		if errors.IsAlreadyExists(err) {
 			respondError(w, http.StatusConflict, fmt.Sprintf("job %q already exists", req.Name))
 			return

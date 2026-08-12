@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/util/retry"
 
 	"github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/kip/internal/workload"
 )
 
 // AppGVR is the GroupVersionResource for Kipper App CRs.
@@ -75,15 +76,29 @@ type Deployer struct {
 // route.requireApiKey. Declarative replace (clearing an omitted field) is the
 // job of `kip apply`, not this command.
 func (d *Deployer) Deploy(ctx context.Context, opts Options) error {
+	release, err := workload.Reserve(ctx, d.Dynamic, opts.Namespace, opts.Name, "app")
+	if err != nil {
+		return err
+	}
+
 	apps := d.Dynamic.Resource(AppGVR).Namespace(opts.Namespace)
+
+	// Whether an app of this name turned out to exist. The retry below consumes
+	// the AlreadyExists that says so, and the error this returns is then the
+	// update's own, so the fact has to be carried: rolling the reservation back
+	// over an app that exists would free its name for another kind.
+	existed := false
 
 	// Retry on conflict: the reconciler bumps the App's resourceVersion
 	// (status, finalizers) between the read and the write, so re-fetch and
 	// re-merge rather than fail a valid redeploy.
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		existing, getErr := apps.Get(ctx, opts.Name, metav1.GetOptions{})
 		if getErr != nil && !errors.IsNotFound(getErr) {
 			return fmt.Errorf("getting existing app: %w", getErr)
+		}
+		if getErr == nil {
+			existed = true
 		}
 
 		if errors.IsNotFound(getErr) {
@@ -111,6 +126,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) error {
 			}
 			// Lost a create race: another writer created the app first.
 			// Fall through and update it instead.
+			existed = true
 			existing, getErr = apps.Get(ctx, opts.Name, metav1.GetOptions{})
 			if getErr != nil {
 				return fmt.Errorf("getting existing app: %w", getErr)
@@ -157,7 +173,15 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) error {
 			return fmt.Errorf("updating app: %w", err)
 		}
 		return nil
-	})
+	}); err != nil {
+		// See function.Create: a reservation backfilled for an app that exists
+		// must not be rolled back.
+		if !existed {
+			release()
+		}
+		return err
+	}
+	return nil
 }
 
 // buildSpec assembles the App spec the CLI wants to write. On create every

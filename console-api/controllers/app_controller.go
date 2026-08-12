@@ -34,6 +34,7 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
+	"github.com/getkipper/kipper/controller/pkg/workload"
 )
 
 const (
@@ -124,6 +125,23 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 		// is gone (reserveHost then takes it over — see host_reservation.go), so
 		// deleting a single app never frees its host for another project.
 		return ctrl.Result{}, r.removeFinalizer(ctx, &app)
+	}
+
+	// See the Function reconciler: a CR written straight to the API server never
+	// passed a reservation, and an App beside a Job shares no child to refuse.
+	if heldBy, claimErr := reconcileNameClaim(ctx, r.Client, r.hostReader(), r.Scheme, &app, "app"); claimErr != nil {
+		return ctrl.Result{}, claimErr
+	} else if heldBy != "" {
+		apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
+			Type:               kipperv1.ConditionChildrenAdopted,
+			Status:             metav1.ConditionFalse,
+			Reason:             "NameHeldByAnotherWorkload",
+			Message:            blockedMessage(app.Name, heldBy),
+			ObservedGeneration: app.Generation,
+		})
+		app.Status.Phase = "Failed"
+		r.writeStatusIfChanged(ctx, &app, statusAtEntry)
+		return ctrl.Result{}, workload.NameTakenError{Name: app.Name, Kind: heldBy}
 	}
 
 	// The egress this app's links need, reconciled before anything else this app

@@ -107,7 +107,7 @@ rules:
     verbs: ["get", "list"]
   # Kipper custom resources and their status subresources.
   - apiGroups: ["kipper.run"]
-    resources: ["apps", "services", "functions", "jobs", "volumes", "projects", "datatransfers"]
+    resources: ["apps", "services", "functions", "jobs", "volumes", "projects", "datatransfers", "workloadnames"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["kipper.run"]
     resources: ["apps/status", "services/status", "functions/status", "jobs/status", "volumes/status", "projects/status", "platformconfigs/status", "datatransfers/status"]

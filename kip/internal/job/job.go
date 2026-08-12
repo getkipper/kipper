@@ -21,6 +21,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/getkipper/kipper/kip/internal/manifest"
+	"github.com/getkipper/kipper/kip/internal/workload"
 )
 
 const (
@@ -66,8 +67,19 @@ func (m *Manager) Run(ctx context.Context, opts Options) (string, error) {
 		return "", fmt.Errorf("job manager is not configured with a dynamic client")
 	}
 	runName := opts.Name + "-" + time.Now().Format("20060102-150405")
+	// The timestamp makes a collision unlikely rather than impossible: a
+	// workload can be called reports-20260812-143000 like anything else, and
+	// this run's pods would then carry a label that workload's Service selects.
+	// A generated name is still a workload name.
+	release, err := workload.Reserve(ctx, m.Dynamic, opts.Namespace, runName, "job")
+	if err != nil {
+		return "", err
+	}
 	cr := buildJobCR(runName, opts.Namespace, "", opts.Image, opts.Command, opts.Name)
-	if err := m.applyCR(ctx, cr); err != nil {
+	if existed, err := m.applyCR(ctx, cr); err != nil {
+		if !existed {
+			release()
+		}
 		return "", err
 	}
 	return runName, nil
@@ -82,8 +94,20 @@ func (m *Manager) Schedule(ctx context.Context, opts Options) error {
 	if opts.Schedule == "" {
 		return fmt.Errorf("schedule is required for scheduled jobs")
 	}
+	release, err := workload.Reserve(ctx, m.Dynamic, opts.Namespace, opts.Name, "job")
+	if err != nil {
+		return err
+	}
 	cr := buildJobCR(opts.Name, opts.Namespace, opts.Schedule, opts.Image, opts.Command, opts.Name)
-	return m.applyCR(ctx, cr)
+	if existed, err := m.applyCR(ctx, cr); err != nil {
+		// See function.Create: a reservation backfilled for a job that exists
+		// must not be rolled back.
+		if !existed {
+			release()
+		}
+		return err
+	}
+	return nil
 }
 
 // List returns all jobs in a namespace by reading Job CRs.
@@ -142,23 +166,27 @@ func (m *Manager) Delete(ctx context.Context, namespace, name string) error {
 }
 
 // applyCR creates the CR or, if it already exists, updates it in place.
-func (m *Manager) applyCR(ctx context.Context, cr *unstructured.Unstructured) error {
+func (m *Manager) applyCR(ctx context.Context, cr *unstructured.Unstructured) (existed bool, err error) {
 	gvr := manifest.JobGVR
 	ns := cr.GetNamespace()
 	name := cr.GetName()
-	_, err := m.Dynamic.Resource(gvr).Namespace(ns).Create(ctx, cr, metav1.CreateOptions{})
+	_, err = m.Dynamic.Resource(gvr).Namespace(ns).Create(ctx, cr, metav1.CreateOptions{})
 	if errors.IsAlreadyExists(err) {
+		// Reported to the caller, because the update below consumes the error
+		// that says a job of this name exists and the caller must not roll its
+		// reservation back over one.
+		existed = true
 		existing, getErr := m.Dynamic.Resource(gvr).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
 		if getErr != nil {
-			return fmt.Errorf("getting existing job: %w", getErr)
+			return existed, fmt.Errorf("getting existing job: %w", getErr)
 		}
 		cr.SetResourceVersion(existing.GetResourceVersion())
 		_, err = m.Dynamic.Resource(gvr).Namespace(ns).Update(ctx, cr, metav1.UpdateOptions{})
 	}
 	if err != nil {
-		return fmt.Errorf("applying job CR: %w", err)
+		return existed, fmt.Errorf("applying job CR: %w", err)
 	}
-	return nil
+	return existed, nil
 }
 
 // buildJobCR maps Manager.Options to the JobSpec map. Must stay aligned

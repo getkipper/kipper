@@ -23,6 +23,7 @@ import (
 	"github.com/getkipper/kipper/console-api/controllers"
 	"github.com/getkipper/kipper/console-api/domain"
 	"github.com/getkipper/kipper/console-api/handlers/copyenv"
+	"github.com/getkipper/kipper/console-api/internal/workloadname"
 	"github.com/getkipper/kipper/console-api/middleware"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 )
@@ -373,6 +374,14 @@ func (p *Projects) Promote(w http.ResponseWriter, r *http.Request) {
 
 		sourceImage := sourceApp.Spec.Image
 
+		// A promotion creates the app in the target, so it reserves a name there
+		// like any other create and cannot report an app promoted into a
+		// collision it just made.
+		release, reserveErr := workloadname.Reserve(ctx, p.CRClient, toNs, appName, "app")
+		if reserveErr != nil {
+			continue
+		}
+
 		var targetApp kipperv1.App
 		err := p.CRClient.Get(ctx, crclient.ObjectKey{Namespace: toNs, Name: appName}, &targetApp)
 		if err != nil {
@@ -405,6 +414,11 @@ func (p *Projects) Promote(w http.ResponseWriter, r *http.Request) {
 			recordPromotionHistory(newApp.Annotations, sourceImage, req.From)
 
 			if err := p.CRClient.Create(ctx, newApp); err != nil {
+				// AlreadyExists proves the app is there, so the reservation is
+				// its own and stands.
+				if !errors.IsAlreadyExists(err) {
+					release()
+				}
 				continue
 			}
 

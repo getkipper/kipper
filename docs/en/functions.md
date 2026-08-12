@@ -166,11 +166,11 @@ The binding also accepts `--prefix` and `--database` overrides. The same `target
 
 Two key/value tables on the function form.
 
-**Environment variables** are non-sensitive configuration. Edit inline; persisted as a `Spec.Env` map on the Function CR. The reconciler resolves the whole environment and publishes it as one immutable Secret named for a digest of its contents, `function-<name>-env-<digest>`, which the Deployment, the cron CronJob and test runs all name in `EnvFrom`. The name carries the kind, so a function called `api` and an app called `api` in one project keep separate configuration.
+**Environment variables** are non-sensitive configuration. Edit inline; persisted as a `Spec.Env` map on the Function CR. The reconciler resolves the whole environment and publishes it as one immutable Secret named for a digest of its contents, `function-<name>-env-<digest>`, which the Deployment, the cron CronJob and test runs all name in `EnvFrom`. The name carries the kind, so a function and an app of one name keep separate configuration on a cluster old enough to hold both. New ones cannot be created, since [a name belongs to one workload kind](#names-are-shared-across-workload-kinds).
 
 A value may reference another by name, the same [`${NAME}` syntax apps use](/en/secrets#referencing-another-variable), so a function composes a connection string from a binding's credentials instead of carrying the password. One Secret serves the HTTP pod and every batch run, so `KIPPER_MODE` and `KIPPER_TRIGGER` are the two names a reference cannot resolve: they mean different things in each.
 
-**Secrets** are sensitive values (API keys, tokens, encrypted things). Values are write-only. Once stored they never round-trip back through the API. The list endpoint returns key names plus a `has_previous` flag so you can tell when a secret has been rotated. Stored in `function-<function>-secrets`, which the controller publishes into the function's environment. An app of the same name keeps its own `app-<app>-secrets`, so the two never cross.
+**Secrets** are sensitive values (API keys, tokens, encrypted things). Values are write-only. Once stored they never round-trip back through the API. The list endpoint returns key names plus a `has_previous` flag so you can tell when a secret has been rotated. Stored in `function-<function>-secrets`, which the controller publishes into the function's environment. An app of the same name, on a cluster old enough to have both, keeps its own `app-<app>-secrets`, so the two never cross.
 
 CLI parity:
 
@@ -236,6 +236,24 @@ https://fn-<name>--<cluster>.kipper.run
 ```
 
 URLs are unique within a cluster. Kipper rejects duplicate hostnames across all apps and functions.
+
+## Names are shared across workload kinds
+
+Within one environment, an app, a function and a job cannot share a name. All three run a workload named after themselves, and one workload can only belong to one owner, so the second one would never start.
+
+Kipper reserves the name when a workload is created. The reservation is a `WorkloadName` object in the environment's namespace, named after the workload, so exactly one of two workloads racing for a name gets it and the other is told who holds it. It is owned by the workload, so deleting the workload frees the name.
+
+Creating a function over a name an app or a job already holds is refused, from the CLI and the console alike, and the error says which kind is holding it:
+
+```
+the name "checkout" is already used by an app in this environment; an app, a function and a job cannot share a name
+```
+
+If a collision does reach the cluster anyway, the function that lost reports it instead of looking idle with a URL that 404s. `kip function list` and the console both show it as `failed`. The function's `ChildrenAdopted` condition carries the detail, naming the object and the kind that owns it.
+
+A cluster upgrading from a version before reservations can already contain a collision, with both workloads running. Kipper gives the name to the older one and stops the other, and it does not delete what that one already built: an upgrade that tore down a running workload would be worse than the collision it fixes. The stopped workload keeps serving until you delete or rename that workload, which its status says, so check for `failed` workloads after an upgrade.
+
+Each environment has its own namespace and its own names, so `checkout` in `shop-staging` and `checkout` in `shop-prod` are fine whether they are two environments of one project or two separate projects.
 
 ## Building from a Docker image
 

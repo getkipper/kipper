@@ -16,3 +16,4 @@ resources:
   - kipper.run_usageplans.yaml
   - kipper.run_usagerollups.yaml
   - kipper.run_volumes.yaml
+  - kipper.run_workloadnames.yaml

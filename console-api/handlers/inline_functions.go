@@ -163,7 +163,15 @@ func (f *InlineFunctions) Create(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
+	release, ok := reserveWorkloadName(ctx, w, f.CRClient, project, req.Name, "function")
+	if !ok {
+		return
+	}
+
 	if err := f.CRClient.Create(ctx, fn); err != nil {
+		if !errors.IsAlreadyExists(err) {
+			release()
+		}
 		if errors.IsAlreadyExists(err) {
 			// Update existing Function CR with new spec.
 			var existing kipperv1.Function

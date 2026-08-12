@@ -32,6 +32,7 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/domain"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
+	"github.com/getkipper/kipper/controller/pkg/workload"
 )
 
 // hasHTTPTrigger returns true when the function should have HTTP
@@ -149,7 +150,7 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_
 		}
 		return ctrl.Result{}, err
 	}
-
+	statusAtEntry := fn.Status.DeepCopy()
 	// Every failure below leaves the function part-reconciled, so it belongs on
 	// the object rather than only in a log line. The API server folds repeats of
 	// the same reason and message into one event with a count.
@@ -173,6 +174,25 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_
 		// deleting a single function never frees its host for another project.
 		controllerutil.RemoveFinalizer(&fn, functionFinalizer)
 		return ctrl.Result{}, r.Update(ctx, &fn)
+	}
+
+	// A CR written straight to the API server never passed a reservation, so
+	// this is where that collision is caught. Stopping is the point: an App and
+	// a Function contend on the Deployment further down, but an App and a Job do
+	// not, and nothing else would refuse them.
+	if heldBy, claimErr := reconcileNameClaim(ctx, r.Client, r.hostReader(), r.Scheme, &fn, "function"); claimErr != nil {
+		return ctrl.Result{}, claimErr
+	} else if heldBy != "" {
+		apimeta.SetStatusCondition(&fn.Status.Conditions, metav1.Condition{
+			Type:               kipperv1.ConditionChildrenAdopted,
+			Status:             metav1.ConditionFalse,
+			Reason:             "NameHeldByAnotherWorkload",
+			Message:            blockedMessage(fn.Name, heldBy),
+			ObservedGeneration: fn.Generation,
+		})
+		fn.Status.Phase = "Failed"
+		r.writeStatusIfChanged(ctx, &fn, statusAtEntry)
+		return ctrl.Result{}, workload.NameTakenError{Name: fn.Name, Kind: heldBy}
 	}
 
 	if !controllerutil.ContainsFinalizer(&fn, functionFinalizer) {
@@ -265,82 +285,36 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_
 		return ctrl.Result{}, fmt.Errorf("adopting writer secret: %w", err)
 	}
 
-	// HTTP path: Deployment + Service + KEDA HTTPScaledObject + Ingress.
-	// Cron-only functions skip all of this — they have no need for a
-	// long-lived Pod, an HTTP service, or external routing.
-	if hasHTTPTrigger(&fn) {
-		if err := r.reconcileDeployment(ctx, &fn, bindingHash, envSources, generation, rendered); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconciling deployment: %w", err)
-		}
-		if err := r.reconcileService(ctx, &fn); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconciling service: %w", err)
-		}
-		// HTTPScaledObject and Ingress are managed via unstructured client
-		// since KEDA types are not in our scheme.
-		if err := r.reconcileHTTPScaledObject(ctx, &fn); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconciling http scaled object: %w", err)
-		}
-		if err := r.reconcileIngress(ctx, &fn); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconciling ingress: %w", err)
-		}
-	} else if err := r.cleanupHTTPServing(ctx, &fn); err != nil {
-		// A function edited from HTTP to cron-only no longer serves a route.
-		// Without this its host claim and shared keda Ingress would leak,
-		// locking the host against other projects until an unrelated reconcile
-		// in the namespace happened to sweep it.
-		return ctrl.Result{}, fmt.Errorf("cleaning up http serving: %w", err)
+	if err := r.reconcileChildren(ctx, &fn, bindingHash, envSources, generation, rendered); err != nil {
+		// The pass stops here and everything after it is skipped, including the
+		// status write, so what stopped it has to go on the object. A function
+		// whose name another kind already owns is refused on every pass for
+		// ever, and reporting only into the log left it showing an empty phase
+		// (which reads as idle), an unrelated true condition, and a URL that
+		// 404s. The message names the object and its owner, which is the remedy.
+		apimeta.SetStatusCondition(&fn.Status.Conditions, metav1.Condition{
+			Type:               kipperv1.ConditionChildrenAdopted,
+			Status:             metav1.ConditionFalse,
+			Reason:             "ChildReconcileFailed",
+			Message:            err.Error(),
+			ObservedGeneration: fn.Generation,
+		})
+		fn.Status.Phase = "Failed"
+		// Before the status write, as the other refusal paths above do, so what
+		// the sweep learns lands with the refusal rather than in a copy this
+		// pass discards. A blocked function persists until someone renames it,
+		// so skipping the sweep would strand superseded env Secrets for as long.
+		r.sweepEnv(ctx, &fn, generation, keepProjections)
+		r.writeStatusIfChanged(ctx, &fn, statusAtEntry)
+		return ctrl.Result{}, err
 	}
-
-	// Event path: postgres, mysql, redis, minio triggers. The function
-	// gets a kipper-poll sidecar in its Pod (added during
-	// reconcileDeployment above) and a KEDA ScaledObject scales the
-	// Deployment based on the source. Postgres/MySQL also need a KEDA
-	// TriggerAuthentication referencing the bound Service's credentials.
-	if t := eventTrigger(&fn); t != nil {
-		if err := r.reconcileEventScaledObject(ctx, &fn, t); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconciling event scaled object: %w", err)
-		}
-		if t.Type == "postgres" || t.Type == "mysql" {
-			if err := r.reconcileTriggerAuth(ctx, &fn, t); err != nil {
-				return ctrl.Result{}, fmt.Errorf("reconciling trigger auth: %w", err)
-			}
-		}
-	} else {
-		// No event trigger — clean up any stale KEDA objects from a
-		// previous spec.
-		for _, stale := range []struct{ kind, name string }{
-			{"ScaledObject", fn.Name},
-			{"TriggerAuthentication", fn.Name + "-trigger-auth"},
-		} {
-			if err := r.deleteOwnedKEDAObject(ctx, &fn, stale.kind, stale.name); err != nil {
-				return ctrl.Result{}, fmt.Errorf("deleting stale %s: %w", stale.kind, err)
-			}
-		}
-	}
-
-	// Cron path: a CronJob runs the function image in batch mode on the
-	// configured schedule. Independent of the HTTP path — a function may
-	// have both, in which case both run.
-	if t := cronTrigger(&fn); t != nil {
-		if err := r.reconcileCronJob(ctx, &fn, t, envSources, generation); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconciling cron job: %w", err)
-		}
-	} else {
-		// No cron trigger on the spec — clean up any stale CronJob
-		// left behind from an earlier revision that did have one.
-		var stale batchv1.CronJob
-		err := r.Get(ctx, types.NamespacedName{Name: fn.Name + "-cron", Namespace: fn.Namespace}, &stale)
-		switch {
-		case errors.IsNotFound(err):
-			// Nothing left over.
-		case err != nil:
-			return ctrl.Result{}, fmt.Errorf("checking for stale cron job: %w", err)
-		case ownedByWorkload(&stale, functionOwner(&fn)):
-			if delErr := r.Delete(ctx, &stale); delErr != nil && !errors.IsNotFound(delErr) {
-				return ctrl.Result{}, fmt.Errorf("deleting stale cron job: %w", delErr)
-			}
-		}
-	}
+	apimeta.SetStatusCondition(&fn.Status.Conditions, metav1.Condition{
+		Type:               kipperv1.ConditionChildrenAdopted,
+		Status:             metav1.ConditionTrue,
+		Reason:             "AllChildrenAdopted",
+		Message:            "every child this workload owns reconciled",
+		ObservedGeneration: fn.Generation,
+	})
 
 	// Before the status write, so what the sweep learns about this workload's
 	// conversion is persisted rather than mutated into a copy the pass discards.
@@ -351,6 +325,108 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_
 	}
 
 	return ctrl.Result{RequeueAfter: retryIn}, nil
+}
+
+// reconcileChildren brings every object this function owns into line: the
+// serving path for an HTTP trigger, the KEDA objects for an event trigger, and
+// the CronJob for a cron one, each cleaning up what an earlier spec left behind.
+//
+// Any child that fails stops the pass, so the caller records why on the status
+// rather than only in the log.
+func (r *FunctionReconciler) reconcileChildren(ctx context.Context, fn *kipperv1.Function, bindingHash string, envSources []envSource, generation string, rendered renderedBindings) error {
+	// HTTP path: Deployment + Service + KEDA HTTPScaledObject + Ingress.
+	// Cron-only functions skip all of this — they have no need for a
+	// long-lived Pod, an HTTP service, or external routing.
+	if hasHTTPTrigger(fn) {
+		if err := r.reconcileDeployment(ctx, fn, bindingHash, envSources, generation, rendered); err != nil {
+			return fmt.Errorf("reconciling deployment: %w", err)
+		}
+		if err := r.reconcileService(ctx, fn); err != nil {
+			return fmt.Errorf("reconciling service: %w", err)
+		}
+		// HTTPScaledObject and Ingress are managed via unstructured client
+		// since KEDA types are not in our scheme.
+		if err := r.reconcileHTTPScaledObject(ctx, fn); err != nil {
+			return fmt.Errorf("reconciling http scaled object: %w", err)
+		}
+		if err := r.reconcileIngress(ctx, fn); err != nil {
+			return fmt.Errorf("reconciling ingress: %w", err)
+		}
+	} else if err := r.cleanupHTTPServing(ctx, fn); err != nil {
+		// A function edited from HTTP to cron-only no longer serves a route.
+		// Without this its host claim and shared keda Ingress would leak,
+		// locking the host against other projects until an unrelated reconcile
+		// in the namespace happened to sweep it.
+		return fmt.Errorf("cleaning up http serving: %w", err)
+	}
+
+	// Event path: postgres, mysql, redis, minio triggers. The function
+	// gets a kipper-poll sidecar in its Pod (added during
+	// reconcileDeployment above) and a KEDA ScaledObject scales the
+	// Deployment based on the source. Postgres/MySQL also need a KEDA
+	// TriggerAuthentication referencing the bound Service's credentials.
+	if t := eventTrigger(fn); t != nil {
+		if err := r.reconcileEventScaledObject(ctx, fn, t); err != nil {
+			return fmt.Errorf("reconciling event scaled object: %w", err)
+		}
+		if t.Type == "postgres" || t.Type == "mysql" {
+			if err := r.reconcileTriggerAuth(ctx, fn, t); err != nil {
+				return fmt.Errorf("reconciling trigger auth: %w", err)
+			}
+		}
+	} else {
+		// No event trigger — clean up any stale KEDA objects from a
+		// previous spec.
+		for _, stale := range []struct{ kind, name string }{
+			{"ScaledObject", fn.Name},
+			{"TriggerAuthentication", fn.Name + "-trigger-auth"},
+		} {
+			if err := r.deleteOwnedKEDAObject(ctx, fn, stale.kind, stale.name); err != nil {
+				return fmt.Errorf("deleting stale %s: %w", stale.kind, err)
+			}
+		}
+	}
+
+	// Cron path: a CronJob runs the function image in batch mode on the
+	// configured schedule. Independent of the HTTP path — a function may
+	// have both, in which case both run.
+	if t := cronTrigger(fn); t != nil {
+		if err := r.reconcileCronJob(ctx, fn, t, envSources, generation); err != nil {
+			return fmt.Errorf("reconciling cron job: %w", err)
+		}
+		return nil
+	}
+
+	// No cron trigger on the spec — clean up any stale CronJob left behind from
+	// an earlier revision that did have one.
+	var stale batchv1.CronJob
+	err := r.Get(ctx, types.NamespacedName{Name: fn.Name + "-cron", Namespace: fn.Namespace}, &stale)
+	switch {
+	case errors.IsNotFound(err):
+		// Nothing left over.
+	case err != nil:
+		return fmt.Errorf("checking for stale cron job: %w", err)
+	case ownedByWorkload(&stale, functionOwner(fn)):
+		if delErr := r.Delete(ctx, &stale); delErr != nil && !errors.IsNotFound(delErr) {
+			return fmt.Errorf("deleting stale cron job: %w", delErr)
+		}
+	}
+	return nil
+}
+
+// writeStatusIfChanged persists status only when this pass actually changed it.
+//
+// The controller watches Functions without a status-change predicate, so an
+// unconditional write on a permanently blocked function would enqueue itself
+// again on every pass and spin rather than back off. The App reconciler carries
+// the same guard for the same reason.
+func (r *FunctionReconciler) writeStatusIfChanged(ctx context.Context, fn *kipperv1.Function, before *kipperv1.FunctionStatus) {
+	if equality.Semantic.DeepEqual(before, &fn.Status) {
+		return
+	}
+	if err := r.Status().Update(ctx, fn); err != nil {
+		log.FromContext(ctx).Error(err, "recording reconcile status", "function", fn.Name, "namespace", fn.Namespace)
+	}
 }
 
 // sweepEnv retires what this function has moved off, and reports how long to
