@@ -4,14 +4,29 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"strings"
+	"io"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/bcrypt"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 
+	"github.com/getkipper/kipper/controller/pkg/dexcfg"
+	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/kip/internal/auth"
+)
+
+// Where Dex keeps the login config Kipper edits.
+const (
+	dexNamespace      = "dex"
+	dexConfigMapName  = "dex-config"
+	dexConfigKey      = "config.yaml"
+	dexDeploymentName = "dex"
 )
 
 var authCmd = &cobra.Command{
@@ -46,8 +61,12 @@ var authResetPasswordCmd = &cobra.Command{
 	Use:   "reset-password",
 	Short: "Reset the admin password",
 	Long: `Generates a new admin password, updates the Dex configuration,
-and restarts Dex. The new credentials are printed to the terminal.`,
-	RunE: runAuthResetPassword,
+prints the new credentials, and restarts Dex so they take effect.
+
+The credentials are printed as soon as Dex's configuration holds them, so a
+restart that fails still leaves a password you can read and use.`,
+	SilenceUsage: true,
+	RunE:         runAuthResetPassword,
 }
 
 func init() {
@@ -140,15 +159,32 @@ func runAuthLogout(cmd *cobra.Command, args []string) error {
 }
 
 func runAuthResetPassword(cmd *cobra.Command, args []string) error {
-	cluster, k8sClient, err := loadCurrentCluster()
+	_, k8sClient, err := loadCurrentCluster()
 	if err != nil {
 		return err
 	}
+	return resetAdminPassword(context.Background(), k8sClient.Clientset(), cmd.OutOrStdout())
+}
 
-	ctx := context.Background()
-	clientset := k8sClient.Clientset()
-
-	// Generate new password
+// resetAdminPassword generates a new admin password, writes its bcrypt hash to
+// the Dex config, discloses the credentials, and restarts Dex.
+//
+// The order is the contract. The ConfigMap write is the durable half of the
+// change, exactly as it is for the ClusterIdentity reconciler's writeDexConfig,
+// so the credentials are printed the moment it succeeds. The restart can fail
+// and still leave a truthful cluster: the password is set, the operator has read
+// it, and it takes effect the next time Dex restarts. Printing last is what
+// locked an operator out of a cluster whose restart lost a race. Disclosure is
+// the one step after the write that is not allowed to fail quietly, because a
+// live hash nobody has read is the same lockout by another route.
+//
+// The restart is a patch rather than a get-modify-update because the reconciler
+// rolls Dex too, via its own config-hash annotation. A patch carries no
+// resourceVersion, so that concurrent write cannot make this one fail. This
+// command stays independent of the reconciler because it is the break-glass
+// path and has to work on a cluster whose control plane is degraded; the
+// reconciler stamping its hash as well costs at most one extra rollout.
+func resetAdminPassword(ctx context.Context, clientset kubernetes.Interface, out io.Writer) error {
 	pwBytes := make([]byte, 16)
 	if _, err := rand.Read(pwBytes); err != nil {
 		return fmt.Errorf("generating password: %w", err)
@@ -160,66 +196,70 @@ func runAuthResetPassword(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("hashing password: %w", err)
 	}
 
-	// Update the Dex ConfigMap
-	cm, err := clientset.CoreV1().ConfigMaps("dex").Get(ctx, "dex-config", metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("reading dex config: %w", err)
-	}
-
-	config := cm.Data["config.yaml"]
-	if config == "" {
-		return fmt.Errorf("dex config.yaml not found in ConfigMap")
-	}
-
-	// Replace the hash line in the config, preserving original indentation
-	lines := strings.Split(config, "\n")
-	updated := false
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "hash:") {
-			indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
-			lines[i] = fmt.Sprintf(`%shash: %q`, indent, string(hash))
-			updated = true
-			break
+	configMaps := clientset.CoreV1().ConfigMaps(dexNamespace)
+	var email string
+	// The reconciler server-side applies this same ConfigMap, so an unretried
+	// get-modify-update loses the race whenever the two land together.
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cm, err := configMaps.Get(ctx, dexConfigMapName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("reading dex config: %w", err)
 		}
-	}
-
-	if !updated {
-		return fmt.Errorf("could not find password hash in dex config")
-	}
-
-	cm.Data["config.yaml"] = strings.Join(lines, "\n")
-	if _, err := clientset.CoreV1().ConfigMaps("dex").Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+		raw := cm.Data[dexConfigKey]
+		if raw == "" {
+			return fmt.Errorf("dex config.yaml not found in ConfigMap")
+		}
+		cfg, err := dexcfg.Load(raw)
+		if err != nil {
+			return err
+		}
+		// Read before the write, because a password nobody can name is no use:
+		// Dex matches a static password on its email, so an admin entry without
+		// one cannot be logged into whatever hash it carries.
+		configured, ok, err := cfg.AdminEmail()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("the admin entry in the %s ConfigMap has no email address, so it has no login to reset", dexConfigMapName)
+		}
+		if err := cfg.SetAdminHash(string(hash)); err != nil {
+			return err
+		}
+		updated, err := cfg.Marshal()
+		if err != nil {
+			return err
+		}
+		cm.Data[dexConfigKey] = updated
+		if _, err := configMaps.Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
+		email = configured
+		return nil
+	})
+	if err != nil {
 		return fmt.Errorf("updating dex config: %w", err)
 	}
 
-	// Restart Dex to pick up the new config
-	deploy, err := clientset.AppsV1().Deployments("dex").Get(ctx, "dex", metav1.GetOptions{})
+	// One write, and its failure is the operation failing. The hash is live from
+	// here on, so a disclosure that did not reach the operator locks them out
+	// just as thoroughly as the lost restart this command was fixed for. The
+	// password rides the error to give stderr a chance at what stdout dropped.
+	if _, err := fmt.Fprintf(out, "\n  Admin password reset.\n  Email:    %s\n  Password: %s\n\n", email, newPassword); err != nil {
+		return fmt.Errorf("the new password could not be displayed. it is set and it is %q: %w", newPassword, err)
+	}
+
+	patch, err := json.Marshal(map[string]any{
+		"spec": map[string]any{"template": map[string]any{"metadata": map[string]any{
+			"annotations": map[string]string{labels.AnnoRestartedAt: time.Now().Format(time.RFC3339Nano)},
+		}}},
+	})
 	if err != nil {
-		return fmt.Errorf("getting dex deployment: %w", err)
+		return fmt.Errorf("building the dex restart patch: %w", err)
 	}
-
-	if deploy.Spec.Template.Annotations == nil {
-		deploy.Spec.Template.Annotations = make(map[string]string)
+	if _, err := clientset.AppsV1().Deployments(dexNamespace).Patch(
+		ctx, dexDeploymentName, types.StrategicMergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("restarting dex: the password above is set and applies at the next dex restart: %w", err)
 	}
-	deploy.Spec.Template.Annotations["kipper.run/restartedAt"] = fmt.Sprintf("%d", metav1.Now().Unix())
-	if _, err := clientset.AppsV1().Deployments("dex").Update(ctx, deploy, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("restarting dex: %w", err)
-	}
-
-	// Find the admin email from the config
-	email := "admin@" + cluster.Domain
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "email:") {
-			email = strings.Trim(strings.TrimPrefix(trimmed, "email:"), ` "`)
-			break
-		}
-	}
-
-	fmt.Printf("\n  Admin password reset.\n")
-	fmt.Printf("  Email:    %s\n", email)
-	fmt.Printf("  Password: %s\n\n", newPassword)
-
 	return nil
 }

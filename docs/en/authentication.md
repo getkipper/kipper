@@ -85,4 +85,6 @@ kip auth reset-password
   Password: 5b2bf14ef6525...
 ```
 
-This generates a new password, updates the Dex configuration, and restarts Dex. The new credentials take effect immediately.
+This generates a new password, updates the Dex configuration, prints the credentials, and restarts Dex. Sign-in works once that restart completes, which normally takes a few seconds.
+
+The credentials are printed as soon as the Dex configuration holds them, which is before the restart. If the restart then fails, the command says so and the password it printed is still the right one: it applies the next time Dex starts.

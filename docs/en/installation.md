@@ -478,7 +478,7 @@ When the session has expired entirely it prints `session expired. Run: kip auth 
 
 ## kip auth reset-password
 
-Generates a new admin password, updates Dex, and displays the new credentials.
+Generates a new admin password, writes it to Dex, displays the new credentials, and restarts Dex.
 
 ```bash
 kip auth reset-password
