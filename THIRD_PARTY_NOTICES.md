@@ -6410,7 +6410,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
-### golang.org/x/crypto v0.51.0
+### golang.org/x/crypto v0.55.0
 
 ```
 Copyright 2009 The Go Authors.
@@ -6442,7 +6442,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### golang.org/x/mod v0.37.0
+### golang.org/x/mod v0.38.0
 
 ```
 Copyright 2009 The Go Authors.
@@ -6474,7 +6474,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### golang.org/x/net v0.55.0
+### golang.org/x/net v0.57.0
 
 ```
 Copyright 2009 The Go Authors.
@@ -6538,7 +6538,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### golang.org/x/sync v0.21.0
+### golang.org/x/sync v0.22.0
 
 ```
 Copyright 2009 The Go Authors.
@@ -6570,7 +6570,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### golang.org/x/sys v0.45.0
+### golang.org/x/sys v0.47.0
 
 ```
 Copyright 2009 The Go Authors.
@@ -6602,7 +6602,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### golang.org/x/term v0.43.0
+### golang.org/x/term v0.45.0
 
 ```
 Copyright 2009 The Go Authors.
@@ -6634,7 +6634,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### golang.org/x/text v0.39.0
+### golang.org/x/text v0.41.0
 
 ```
 Copyright 2009 The Go Authors.
