@@ -213,6 +213,129 @@ func TestSetAdminEmail_FailsClosed(t *testing.T) {
 	}
 }
 
+// A blank email is not a login: Dex matches a static password on its email, so
+// reporting one as present hands the caller an address nobody can sign in with.
+func TestAdminEmail_TreatsABlankAddressAsAbsent(t *testing.T) {
+	for name, raw := range map[string]string{
+		"empty string": "issuer: x\nstaticPasswords:\n- {email: \"\", hash: H, username: admin}\n",
+		"null":         "issuer: x\nstaticPasswords:\n- {email: , hash: H, username: admin}\n",
+		"whitespace":   "issuer: x\nstaticPasswords:\n- {email: \"   \", hash: H, username: admin}\n",
+		"no key":       "issuer: x\nstaticPasswords:\n- {hash: H, username: admin}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, err := Load(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			email, ok, err := c.AdminEmail()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok {
+				t.Fatalf("a %s email was reported as usable: %q", name, email)
+			}
+		})
+	}
+}
+
+// HasAdmin separates "no admin entry at all" from "an admin entry with nothing
+// to sign in as", which AdminEmail alone reports identically.
+func TestHasAdmin(t *testing.T) {
+	for name, tc := range map[string]struct {
+		raw  string
+		want bool
+	}{
+		"entry with an email": {"issuer: x\nstaticPasswords:\n- {email: a@b, hash: H, username: admin}\n", true},
+		"entry without one":   {"issuer: x\nstaticPasswords:\n- {hash: H, username: admin}\n", true},
+		"no static passwords": {"issuer: x\n", false},
+		"empty list":          {"issuer: x\nstaticPasswords: []\n", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, err := Load(tc.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := c.HasAdmin(); got != tc.want {
+				t.Fatalf("HasAdmin() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSetAdminHashPreservesEmailAndUsername(t *testing.T) {
+	c := load(t)
+	if err := c.SetAdminHash("$2y$10$NEWHASHVALUE"); err != nil {
+		t.Fatal(err)
+	}
+	m := asMap(t, c)
+	pw := m["staticPasswords"].([]any)[0].(map[string]any)
+	if pw["hash"] != "$2y$10$NEWHASHVALUE" {
+		t.Fatalf("hash = %v", pw["hash"])
+	}
+	if pw["email"] != "admin@old.kipper.run" {
+		t.Fatalf("email changed: %v", pw["email"])
+	}
+	if pw["username"] != "admin" {
+		t.Fatalf("username changed: %v", pw["username"])
+	}
+	if m["someFutureDexKnob"] != "keep-me" {
+		t.Fatalf("unmanaged field lost: %v", m["someFutureDexKnob"])
+	}
+}
+
+// The reason the command cannot keep replacing the first `hash:` line: with a
+// per-operator account listed first, that line belongs to somebody else.
+func TestSetAdminHash_PicksAdminAmongUsers(t *testing.T) {
+	c, err := Load(`issuer: x
+staticPasswords:
+- email: bob@old
+  hash: HASH_BOB
+  username: bob
+- email: admin@old
+  hash: HASH_ADMIN
+  username: admin
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetAdminHash("HASH_NEW"); err != nil {
+		t.Fatal(err)
+	}
+	m := asMap(t, c)
+	for _, p := range m["staticPasswords"].([]any) {
+		pm := p.(map[string]any)
+		switch pm["username"] {
+		case "admin":
+			if pm["hash"] != "HASH_NEW" || pm["email"] != "admin@old" {
+				t.Fatalf("admin entry wrong: %v", pm)
+			}
+		case "bob":
+			if pm["hash"] != "HASH_BOB" || pm["email"] != "bob@old" {
+				t.Fatalf("bob entry was disturbed: %v", pm)
+			}
+		}
+	}
+}
+
+func TestSetAdminHash_FailsClosed(t *testing.T) {
+	cases := map[string]string{
+		"no admin, multiple users": "issuer: x\nstaticPasswords:\n- {email: a, username: alice}\n- {email: b, username: bob}\n",
+		"duplicate admin":          "issuer: x\nstaticPasswords:\n- {email: a, username: admin}\n- {email: b, username: admin}\n",
+		"no static passwords":      "issuer: x\n",
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			c, err := Load(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.SetAdminHash("HASH_NEW"); err == nil {
+				t.Fatalf("expected fail-closed error for %q", name)
+			}
+		})
+	}
+}
+
 func TestLoad_FailsClosedOnMalformed(t *testing.T) {
 	cases := map[string]string{
 		"non-mapping root":        "- just\n- a\n- list\n",

@@ -411,6 +411,43 @@ func TestDashMigrationDoesNotChangeAdminEmail(t *testing.T) {
 	}
 }
 
+// The reconciler authorizes Objects.AdminEmail in kipper-users, so a live
+// config whose admin entry lost its email must come back with one rather than
+// with the empty string. The value is asserted rather than the rendered line,
+// because yaml.v3 keeps the quoting style the blank node had.
+func TestRenderRepairsABlankAdminEmail(t *testing.T) {
+	blank := strings.Replace(dexFixture, "email: admin@acme.kipper.run", `email: ""`, 1)
+
+	objs, err := Render(specFor(PhaseCuttingOver), Carry{ExistingDexConfig: blank})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if objs.AdminEmail != "admin@acme.kipper.run" {
+		t.Errorf("AdminEmail = %q, want admin@acme.kipper.run", objs.AdminEmail)
+	}
+	if strings.Contains(objs.DexConfigYAML, `email: ""`) {
+		t.Errorf("the blank admin email was left in the config:\n%s", objs.DexConfigYAML)
+	}
+	if !strings.Contains(objs.DexConfigYAML, "hash: HASH") {
+		t.Errorf("bcrypt hash must be preserved:\n%s", objs.DexConfigYAML)
+	}
+}
+
+// A config with no static passwords at all is not a damaged admin entry, and
+// rendering must not fail trying to repair one that was never there.
+func TestRenderAcceptsAConfigWithNoStaticPasswords(t *testing.T) {
+	none := "issuer: https://dex--acme.kipper.run/dex\n" +
+		"staticClients:\n- id: kipper-console\n  redirectURIs: [https://console--acme.kipper.run/callback]\n  secret: keep\n"
+
+	objs, err := Render(specFor(PhaseCuttingOver), Carry{ExistingDexConfig: none})
+	if err != nil {
+		t.Fatalf("render refused a connector-only config: %v", err)
+	}
+	if strings.Contains(objs.DexConfigYAML, "staticPasswords") {
+		t.Errorf("an admin entry was invented:\n%s", objs.DexConfigYAML)
+	}
+}
+
 // A base-domain move flips the admin email once the identity is new.
 func TestBaseDomainMoveRewritesAdminEmailAtCutover(t *testing.T) {
 	from := HostSet{Console: "console--acme.kipper.run", ConsoleAPI: "console-api--acme.kipper.run", Dex: "dex--acme.kipper.run"}

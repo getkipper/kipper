@@ -200,7 +200,14 @@ func (c *Config) RehostConnectors(issuer string) {
 }
 
 // AdminEmail returns the Kipper admin static-password email. ok is false when
-// there is no admin entry; err is set only when the entry is ambiguous.
+// there is nothing usable to sign in as, which covers a missing admin entry and
+// an entry whose email is absent or blank alike: Dex matches a static password
+// on its email, so an empty one is not a login and reporting it as present
+// hands the caller an address nobody can authenticate with. err is set only
+// when the entry is ambiguous.
+//
+// Callers that need to tell a damaged admin entry from no admin entry ask
+// HasAdmin.
 func (c *Config) AdminEmail() (email string, ok bool, err error) {
 	entry, err := adminPassword(c.root)
 	if err != nil {
@@ -209,10 +216,20 @@ func (c *Config) AdminEmail() (email string, ok bool, err error) {
 	if entry == nil {
 		return "", false, nil
 	}
-	if v := mapValue(entry, "email"); v != nil {
+	if v := mapValue(entry, "email"); v != nil && strings.TrimSpace(v.Value) != "" {
 		return v.Value, true, nil
 	}
 	return "", false, nil
+}
+
+// HasAdmin reports whether the config has an unambiguous admin static-password
+// entry, whatever state its fields are in. It answers the question AdminEmail
+// cannot: whether an empty result means the admin login needs repairing or
+// there is no admin login to repair. An ambiguous admin counts as none, because
+// that is what every writer here refuses to guess at.
+func (c *Config) HasAdmin() bool {
+	entry, err := adminPassword(c.root)
+	return err == nil && entry != nil
 }
 
 // SetAdminEmail rewrites the admin static-password email while preserving its
@@ -228,6 +245,21 @@ func (c *Config) SetAdminEmail(email string) error {
 		return fmt.Errorf("dex config has no admin static password")
 	}
 	setScalar(entry, "email", email)
+	return nil
+}
+
+// SetAdminHash rewrites the admin static-password bcrypt hash while preserving
+// its email and username. It fails closed if no unambiguous admin entry exists,
+// so a password reset can never land on a per-operator account.
+func (c *Config) SetAdminHash(hash string) error {
+	entry, err := adminPassword(c.root)
+	if err != nil {
+		return err
+	}
+	if entry == nil {
+		return fmt.Errorf("dex config has no admin static password")
+	}
+	setScalar(entry, "hash", hash)
 	return nil
 }
 

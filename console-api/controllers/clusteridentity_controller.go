@@ -451,6 +451,10 @@ func (r *ClusterIdentityReconciler) applyDexConfig(ctx context.Context, configYA
 // (no live config to merge) is a no-op so a first reconcile before Dex is
 // installed does not clear the config.
 //
+// It errors without writing when the live config has moved on from the
+// liveConfig the render was merged onto, leaving the newer config in place for
+// the next pass to render from.
+//
 // Outside a cutover (allowIssuerFlip=false) it refuses to change the OIDC issuer.
 // The issuer flip is the one session-invalidating change; routing it through the
 // CuttingOver phase is what bounds and gates it. So a steady, adoption, or
@@ -475,10 +479,43 @@ func (r *ClusterIdentityReconciler) writeDexConfig(ctx context.Context, configYA
 			return false, fmt.Errorf("refusing to change the Dex issuer outside a cutover: live=%q want=%q; a host change must go through the transition sequence", liveCfg.Issuer(), wantCfg.Issuer())
 		}
 	}
+	// configYAML was merged onto liveConfig, which this pass read before
+	// rendering, so applying it blind overwrites everything written in between.
+	// The write that must survive is `kip auth reset-password`: it puts a new
+	// admin hash in this ConfigMap and shows the operator the password, and a
+	// render carrying the previous hash would take the account back without ever
+	// conflicting, because a forced server-side apply always wins.
+	//
+	// The resourceVersion of that read is what actually stops it. Both reads go
+	// through the same informer cache, so a write that has not reached the cache
+	// yet is invisible to the content comparison below and the stale version is
+	// the only evidence left. The API server enforces it as an
+	// optimistic-concurrency precondition, which forced ownership does not
+	// override — that settles field ownership, a different layer. The content
+	// check earns its place on the reads where the cache has caught up, refusing
+	// without spending a write.
+	var live corev1.ConfigMap
+	err := r.Get(ctx, types.NamespacedName{Name: dexConfigMapName, Namespace: dexNamespace}, &live)
+	switch {
+	case apierrors.IsNotFound(err):
+		// Nothing to be stale against. Recreating from this render is right even
+		// when it is old, because a Dex with no config serves no logins at all,
+		// and the next pass corrects the content.
+		live = corev1.ConfigMap{}
+	case err != nil:
+		return false, fmt.Errorf("reading dex-config before writing it: %w", err)
+	case live.Data[dexConfigKey] != liveConfig:
+		return false, fmt.Errorf("dex-config changed while this pass rendered it; re-reading it on the next pass")
+	}
+
 	cm := &corev1.ConfigMap{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
-		ObjectMeta: metav1.ObjectMeta{Name: dexConfigMapName, Namespace: dexNamespace},
-		Data:       map[string]string{dexConfigKey: configYAML},
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            dexConfigMapName,
+			Namespace:       dexNamespace,
+			ResourceVersion: live.ResourceVersion,
+		},
+		Data: map[string]string{dexConfigKey: configYAML},
 	}
 	if err := r.serverSideApply(ctx, cm); err != nil {
 		return false, fmt.Errorf("applying dex-config: %w", err)

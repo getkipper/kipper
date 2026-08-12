@@ -268,10 +268,17 @@ func (s Spec) mergeDexConfig(existing string, r resolved) (yaml string, adminEma
 	// base-domain move (a dash migration keeps the same base label), and only
 	// once the identity has flipped, so the old email keeps working during
 	// dual-serve. The bcrypt hash is preserved by dexcfg.
+	//
+	// An entry whose email is missing or blank is repaired to the same address,
+	// because the reconciler authorizes whatever this returns in kipper-users
+	// and the empty string is not a login. HasAdmin is what keeps that from
+	// inventing an admin on a config that has no static passwords at all.
 	if wantEmail := "admin@" + s.Domain; identityIsNew(s) {
-		if cur, ok, aerr := cfg.AdminEmail(); aerr != nil {
+		cur, ok, aerr := cfg.AdminEmail()
+		if aerr != nil {
 			return "", "", aerr
-		} else if ok && cur != wantEmail {
+		}
+		if (!ok || cur != wantEmail) && cfg.HasAdmin() {
 			if err := cfg.SetAdminEmail(wantEmail); err != nil {
 				return "", "", err
 			}
