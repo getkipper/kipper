@@ -134,8 +134,36 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 		req.Replicas = 1
 	}
 
+	// Every rejection the request can earn on its own is decided here, before
+	// the name is reserved and before the git credential is written. A refusal
+	// after either leaves state behind from a create that did not happen.
+	if req.Git != nil {
+		if req.Git.URL == "" {
+			respondError(w, http.StatusBadRequest, "git url is required")
+			return
+		}
+		// Reject a URL the build could not host-bind a credential to (http,
+		// userinfo, fragment). A clean early error; the builder stays authoritative.
+		if _, err := giturl.CanonicalAuthority(req.Git.URL); err != nil {
+			respondError(w, http.StatusBadRequest, fmt.Sprintf("invalid git url: %v", err))
+			return
+		}
+	}
+	if req.Route != nil && len(req.Route.RedirectFrom) > kipperv1.MaxRedirectFromHosts {
+		respondError(w, http.StatusBadRequest, fmt.Sprintf("at most %d redirect domains are supported per route", kipperv1.MaxRedirectFromHosts))
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
+
+	// Ahead of the git-credentials Secret below, because that write outlives a
+	// refusal: a rejected create that had already stored a token would answer
+	// "not created" while leaving the credential in the namespace.
+	release, ok := reserveWorkloadName(ctx, w, a.CRClient, project, req.Name, "app")
+	if !ok {
+		return
+	}
 
 	// Mirror a single value to both request and limit so a single-field
 	// payload still produces Guaranteed QoS.
@@ -168,16 +196,6 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 
 	// Git source
 	if req.Git != nil {
-		if req.Git.URL == "" {
-			respondError(w, http.StatusBadRequest, "git url is required")
-			return
-		}
-		// Reject a URL the build could not host-bind a credential to (http,
-		// userinfo, fragment). A clean early error; the builder stays authoritative.
-		if _, err := giturl.CanonicalAuthority(req.Git.URL); err != nil {
-			respondError(w, http.StatusBadRequest, fmt.Sprintf("invalid git url: %v", err))
-			return
-		}
 		app.Spec.Git = &kipperv1.AppGitSource{
 			URL:            req.Git.URL,
 			Branch:         req.Git.Branch,
@@ -189,6 +207,7 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 		if req.Git.Token != "" {
 			secretName := req.Name + "-git-credentials"
 			if err := a.createGitCredentialsSecret(ctx, project, secretName, req.Name, req.Git.Token); err != nil {
+				release()
 				respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to store git credentials: %v", err))
 				return
 			}
@@ -198,10 +217,6 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 
 	// Route
 	if req.Route != nil {
-		if len(req.Route.RedirectFrom) > kipperv1.MaxRedirectFromHosts {
-			respondError(w, http.StatusBadRequest, fmt.Sprintf("at most %d redirect domains are supported per route", kipperv1.MaxRedirectFromHosts))
-			return
-		}
 		app.Spec.Route = &kipperv1.AppRoute{
 			Host:         req.Route.Host,
 			Path:         req.Route.Path,
@@ -210,6 +225,14 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := a.CRClient.Create(ctx, app); err != nil {
+		// AlreadyExists is not a create that wrote nothing: it proves the
+		// same-kind workload is there, and the reservation just made is that
+		// workload's own first claim. Releasing it would undo the backfill and
+		// leave an upgraded cluster's workload unreserved, since nothing else
+		// enqueues it.
+		if !errors.IsAlreadyExists(err) {
+			release()
+		}
 		if errors.IsAlreadyExists(err) {
 			respondError(w, http.StatusConflict, fmt.Sprintf("app %q already exists", req.Name))
 			return

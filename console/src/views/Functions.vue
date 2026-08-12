@@ -87,6 +87,7 @@ function statusColor(status: string): string {
     case 'running': return 'text-emerald-700 dark:text-emerald-400'
     case 'scaling': return 'text-amber-700 dark:text-amber-400'
     case 'idle': return 'text-kipper-700 dark:text-kipper-400'
+    case 'failed': return 'text-red-700 dark:text-red-400'
     default: return 'text-slate-500'
   }
 }
@@ -96,6 +97,7 @@ function statusDot(status: string): string {
     case 'running': return 'bg-emerald-500'
     case 'scaling': return 'bg-amber-500'
     case 'idle': return 'bg-kipper-500'
+    case 'failed': return 'bg-red-500'
     default: return 'bg-slate-400'
   }
 }

@@ -19,6 +19,7 @@ package copyenv
 
 import (
 	"context"
+	goerrors "errors"
 	"fmt"
 	"strings"
 
@@ -30,8 +31,10 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/domain"
+	"github.com/getkipper/kipper/console-api/internal/workloadname"
 	"github.com/getkipper/kipper/controller/pkg/applink"
 	"github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/controller/pkg/workload"
 )
 
 // Options controls what gets copied. Phase 1 honours Source/Target plus
@@ -137,17 +140,19 @@ func (c *Copier) Run(ctx context.Context, opts Options) (Summary, error) {
 	}
 	s.Volumes = volumes
 
-	functions, err := c.copyFunctions(ctx, opts)
+	functions, functionWarnings, err := c.copyFunctions(ctx, opts)
 	if err != nil {
 		return s, fmt.Errorf("copying functions: %w", err)
 	}
 	s.Functions = functions
+	s.Warnings = append(s.Warnings, functionWarnings...)
 
-	jobs, err := c.copyJobs(ctx, opts)
+	jobs, jobWarnings, err := c.copyJobs(ctx, opts)
 	if err != nil {
 		return s, fmt.Errorf("copying jobs: %w", err)
 	}
 	s.Jobs = jobs
+	s.Warnings = append(s.Warnings, jobWarnings...)
 
 	secrets, warnings, err := c.copySecrets(ctx, opts)
 	if err != nil {
@@ -184,7 +189,26 @@ func (c *Copier) copyApps(ctx context.Context, opts Options) (int, []string, err
 	var warnings []string
 	for i := range src.Items {
 		copied, dropped := newAppForTarget(&src.Items[i], opts)
+		// Skipped rather than fatal, because a copy is best-effort by contract
+		// and aborting here would leave the later steps (secrets among them)
+		// undone over one name.
+		release, err := workloadname.Reserve(ctx, c.CRClient, copied.Namespace, copied.Name, "app")
+		if err != nil {
+			// A name another kind holds is this copy's to skip. Anything else is
+			// the cluster failing to answer, which the run reports rather than
+			// turning into a workload quietly missing from the new environment.
+			if !nameTaken(err) {
+				return count, warnings, fmt.Errorf("reserving %s/%s: %w", copied.Namespace, copied.Name, err)
+			}
+			warnings = append(warnings, err.Error())
+			continue
+		}
 		if err := c.CRClient.Create(ctx, copied); err != nil {
+			// AlreadyExists means the target already has this workload, so the
+			// reservation just made is its own first claim and stands.
+			if !errors.IsAlreadyExists(err) {
+				release()
+			}
 			if errors.IsAlreadyExists(err) {
 				continue
 			}
@@ -359,13 +383,14 @@ func (c *Copier) copyVolumes(ctx context.Context, opts Options) (int, error) {
 	return count, nil
 }
 
-func (c *Copier) copyFunctions(ctx context.Context, opts Options) (int, error) {
+func (c *Copier) copyFunctions(ctx context.Context, opts Options) (int, []string, error) {
 	var src kipperv1.FunctionList
 	if err := c.CRClient.List(ctx, &src, crclient.InNamespace(opts.Source)); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
 	count := 0
+	var warnings []string
 	for i := range src.Items {
 		out := &kipperv1.Function{
 			ObjectMeta: metav1.ObjectMeta{
@@ -376,24 +401,39 @@ func (c *Copier) copyFunctions(ctx context.Context, opts Options) (int, error) {
 			},
 			Spec: *src.Items[i].Spec.DeepCopy(),
 		}
+		release, reserveErr := workloadname.Reserve(ctx, c.CRClient, out.Namespace, out.Name, "function")
+		if reserveErr != nil {
+			// See copyApps: a taken name is a skip with a warning, an unanswered
+			// cluster is an error.
+			if !nameTaken(reserveErr) {
+				return count, warnings, fmt.Errorf("reserving %s/%s: %w", out.Namespace, out.Name, reserveErr)
+			}
+			warnings = append(warnings, reserveErr.Error())
+			continue
+		}
 		if err := c.CRClient.Create(ctx, out); err != nil {
+			// See copyApps: AlreadyExists leaves the reservation standing.
+			if !errors.IsAlreadyExists(err) {
+				release()
+			}
 			if errors.IsAlreadyExists(err) {
 				continue
 			}
-			return count, fmt.Errorf("creating function %s/%s: %w", out.Namespace, out.Name, err)
+			return count, warnings, fmt.Errorf("creating function %s/%s: %w", out.Namespace, out.Name, err)
 		}
 		count++
 	}
-	return count, nil
+	return count, warnings, nil
 }
 
-func (c *Copier) copyJobs(ctx context.Context, opts Options) (int, error) {
+func (c *Copier) copyJobs(ctx context.Context, opts Options) (int, []string, error) {
 	var src kipperv1.JobList
 	if err := c.CRClient.List(ctx, &src, crclient.InNamespace(opts.Source)); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
 	count := 0
+	var warnings []string
 	for i := range src.Items {
 		out := &kipperv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
@@ -404,15 +444,29 @@ func (c *Copier) copyJobs(ctx context.Context, opts Options) (int, error) {
 			},
 			Spec: *src.Items[i].Spec.DeepCopy(),
 		}
+		release, reserveErr := workloadname.Reserve(ctx, c.CRClient, out.Namespace, out.Name, "job")
+		if reserveErr != nil {
+			// See copyApps: a taken name is a skip with a warning, an unanswered
+			// cluster is an error.
+			if !nameTaken(reserveErr) {
+				return count, warnings, fmt.Errorf("reserving %s/%s: %w", out.Namespace, out.Name, reserveErr)
+			}
+			warnings = append(warnings, reserveErr.Error())
+			continue
+		}
 		if err := c.CRClient.Create(ctx, out); err != nil {
+			// See copyApps: AlreadyExists leaves the reservation standing.
+			if !errors.IsAlreadyExists(err) {
+				release()
+			}
 			if errors.IsAlreadyExists(err) {
 				continue
 			}
-			return count, fmt.Errorf("creating job %s/%s: %w", out.Namespace, out.Name, err)
+			return count, warnings, fmt.Errorf("creating job %s/%s: %w", out.Namespace, out.Name, err)
 		}
 		count++
 	}
-	return count, nil
+	return count, warnings, nil
 }
 
 // copySecrets copies user-owned secrets. Skipped:
@@ -565,4 +619,11 @@ func rewriteLinksForTarget(app *kipperv1.App, opts Options) []string {
 		app.Spec.Links = kept
 	}
 	return dropped
+}
+
+// nameTaken reports whether err is another kind holding the name, rather than
+// the cluster failing to say who does.
+func nameTaken(err error) bool {
+	var taken workload.NameTakenError
+	return goerrors.As(err, &taken)
 }

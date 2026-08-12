@@ -15,6 +15,7 @@ import (
 
 	"github.com/getkipper/kipper/kip/internal/blueprint"
 	"github.com/getkipper/kipper/kip/internal/manifest"
+	"github.com/getkipper/kipper/kip/internal/workload"
 )
 
 var blueprintCmd = &cobra.Command{
@@ -179,7 +180,22 @@ func runBlueprintInstall(cmd *cobra.Command, args []string) error {
 		_, getErr := dynClient.Resource(res.GVR).Namespace(namespace).Get(ctx, resName, metav1.GetOptions{})
 		switch {
 		case errors.IsNotFound(getErr):
+			// A blueprint carries workload kinds like any other manifest, so it
+			// claims names the same way and has to obey the same rule.
+			release := func() {}
+			if wk := workloadKindOf(res.GVR); wk != "" {
+				var reserveErr error
+				release, reserveErr = workload.Reserve(ctx, dynClient, namespace, resName, wk)
+				if reserveErr != nil {
+					return reserveErr
+				}
+			}
 			if _, createErr := dynClient.Resource(res.GVR).Namespace(namespace).Create(ctx, res.Object, metav1.CreateOptions{}); createErr != nil {
+				// AlreadyExists proves the workload is there, so its reservation
+				// stands.
+				if !errors.IsAlreadyExists(createErr) {
+					release()
+				}
 				return fmt.Errorf("creating %s/%s: %w", kind, resName, createErr)
 			}
 			fmt.Printf("    ✔  %s/%s created\n", kind, resName)

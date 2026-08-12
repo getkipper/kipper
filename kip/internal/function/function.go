@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	"github.com/getkipper/kipper/kip/internal/manifest"
+	"github.com/getkipper/kipper/kip/internal/workload"
 )
 
 // TriggerType identifies what activates a function.
@@ -96,6 +97,10 @@ func (m *Manager) Create(ctx context.Context, opts Options) error {
 	if m.Dynamic == nil {
 		return fmt.Errorf("function manager is not configured with a dynamic client")
 	}
+	release, err := workload.Reserve(ctx, m.Dynamic, opts.Namespace, opts.Name, "function")
+	if err != nil {
+		return err
+	}
 
 	cr := &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -110,8 +115,15 @@ func (m *Manager) Create(ctx context.Context, opts Options) error {
 	}
 
 	gvr := manifest.FunctionGVR
-	_, err := m.Dynamic.Resource(gvr).Namespace(opts.Namespace).Create(ctx, cr, metav1.CreateOptions{})
+	// Whether a function of this name turned out to exist. The update below
+	// consumes the AlreadyExists that says so, and by the time this function
+	// returns the error is the update's own, so the fact has to be carried
+	// rather than re-read from the error: rolling the reservation back over a
+	// function that exists would free its name for another kind.
+	existed := false
+	_, err = m.Dynamic.Resource(gvr).Namespace(opts.Namespace).Create(ctx, cr, metav1.CreateOptions{})
 	if errors.IsAlreadyExists(err) {
+		existed = true
 		existing, getErr := m.Dynamic.Resource(gvr).Namespace(opts.Namespace).Get(ctx, opts.Name, metav1.GetOptions{})
 		if getErr != nil {
 			return fmt.Errorf("getting existing function: %w", getErr)
@@ -120,6 +132,9 @@ func (m *Manager) Create(ctx context.Context, opts Options) error {
 		_, err = m.Dynamic.Resource(gvr).Namespace(opts.Namespace).Update(ctx, cr, metav1.UpdateOptions{})
 	}
 	if err != nil {
+		if !existed {
+			release()
+		}
 		return fmt.Errorf("applying function CR: %w", err)
 	}
 	return nil

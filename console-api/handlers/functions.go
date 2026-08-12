@@ -179,7 +179,17 @@ func (f *Functions) Create(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
+	release, ok := reserveWorkloadName(ctx, w, f.CRClient, project, req.Name, "function")
+	if !ok {
+		return
+	}
+
 	if err := f.CRClient.Create(ctx, fn); err != nil {
+		// See Apps.Create: AlreadyExists proves the workload is there, so the
+		// reservation just made is its own first claim and must stand.
+		if !errors.IsAlreadyExists(err) {
+			release()
+		}
 		if errors.IsAlreadyExists(err) {
 			respondError(w, http.StatusConflict, fmt.Sprintf("function %q already exists", req.Name))
 			return

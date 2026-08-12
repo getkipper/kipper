@@ -7,7 +7,9 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -21,6 +23,7 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
+	"github.com/getkipper/kipper/controller/pkg/workload"
 )
 
 const jobFinalizer = "kipper.run/job-cleanup"
@@ -57,6 +60,7 @@ func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 		}
 		return ctrl.Result{}, err
 	}
+	statusAtEntry := job.Status.DeepCopy()
 
 	// Every failure below leaves the job part-reconciled, so it belongs on the
 	// object rather than only in a log line. The API server folds repeats of the
@@ -71,6 +75,25 @@ func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 		logger.Info("cleaning up job resources", "job", job.Name)
 		controllerutil.RemoveFinalizer(&job, jobFinalizer)
 		return ctrl.Result{}, r.Update(ctx, &job)
+	}
+
+	// See the Function reconciler. A Job matters most here: it shares no child
+	// object with an App, so nothing further down would ever refuse the pair,
+	// and its pods carry the label the App's Service selects.
+	if heldBy, claimErr := reconcileNameClaim(ctx, r.Client, r.hostReader(), r.Scheme, &job, "job"); claimErr != nil {
+		return ctrl.Result{}, claimErr
+	} else if heldBy != "" {
+		taken := workload.NameTakenError{Name: job.Name, Kind: heldBy}
+		apimeta.SetStatusCondition(&job.Status.Conditions, metav1.Condition{
+			Type:               kipperv1.ConditionChildrenAdopted,
+			Status:             metav1.ConditionFalse,
+			Reason:             "NameHeldByAnotherWorkload",
+			Message:            blockedMessage(job.Name, heldBy),
+			ObservedGeneration: job.Generation,
+		})
+		job.Status.Phase = "Failed"
+		r.writeStatusIfChanged(ctx, &job, statusAtEntry)
+		return ctrl.Result{}, taken
 	}
 
 	if !controllerutil.ContainsFinalizer(&job, jobFinalizer) {
@@ -103,6 +126,18 @@ func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 			return ctrl.Result{}, fmt.Errorf("reconciling one-off job: %w", err)
 		}
 	}
+
+	// Cleared on the way through, as the App and Function reconcilers do. A job
+	// whose collision was resolved by deleting the other workload would
+	// otherwise report a healthy phase beside a condition still saying another
+	// workload holds its name.
+	apimeta.SetStatusCondition(&job.Status.Conditions, metav1.Condition{
+		Type:               kipperv1.ConditionChildrenAdopted,
+		Status:             metav1.ConditionTrue,
+		Reason:             "AllChildrenAdopted",
+		Message:            "every child this workload owns reconciled",
+		ObservedGeneration: job.Generation,
+	})
 
 	// Before the status write, for the same reason the other two do it there.
 	retryIn := r.sweepEnv(ctx, &job, generation)
@@ -426,5 +461,20 @@ func pairOrDefault(req, lim, fallback string) (string, string) {
 		return req, req
 	default:
 		return req, lim
+	}
+}
+
+// writeStatusIfChanged persists status only when this pass actually changed it.
+//
+// The controller watches Jobs without a status-change predicate, so an
+// unconditional write on a permanently blocked job would enqueue itself again
+// on every pass and spin rather than back off. The App and Function reconcilers
+// carry the same guard for the same reason.
+func (r *JobReconciler) writeStatusIfChanged(ctx context.Context, job *kipperv1.Job, before *kipperv1.JobStatus) {
+	if equality.Semantic.DeepEqual(before, &job.Status) {
+		return
+	}
+	if err := r.Status().Update(ctx, job); err != nil {
+		log.FromContext(ctx).Error(err, "recording reconcile status", "job", job.Name, "namespace", job.Namespace)
 	}
 }

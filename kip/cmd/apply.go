@@ -18,6 +18,7 @@ import (
 
 	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/manifest"
+	"github.com/getkipper/kipper/kip/internal/workload"
 )
 
 var applyCmd = &cobra.Command{
@@ -470,9 +471,27 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 		if !errors.IsNotFound(getErr) {
 			return "", getErr
 		}
+		// A manifest can declare any kind, so this is the one create path that
+		// reaches all three workload kinds. Checking here rather than in each
+		// kind's own command is what keeps a manifest from doing what the
+		// commands refuse.
+		release := func() {}
+		if kind := workloadKindOf(res.GVR); kind != "" {
+			var reserveErr error
+			release, reserveErr = workload.Reserve(ctx, dyn, namespace, name, kind)
+			if reserveErr != nil {
+				return "", reserveErr
+			}
+		}
 		_, err := dyn.Resource(res.GVR).Namespace(namespace).Create(ctx, res.Object, metav1.CreateOptions{})
 		if err == nil {
 			return "created", nil
+		}
+		// AlreadyExists proves the workload is there, so the reservation just
+		// made is its own backfill and stands; the update below is what this
+		// call actually does.
+		if !errors.IsAlreadyExists(err) {
+			release()
 		}
 		if !errors.IsAlreadyExists(err) {
 			return "", err
@@ -612,4 +631,19 @@ func ensureProject(ctx context.Context, dynClient dynamic.Interface, m *manifest
 	fmt.Printf("  ✔  Project %s updated\n", project)
 
 	return nil
+}
+
+// workloadKindOf names the workload kind a GVR stores, or "" when the resource
+// is not one of the kinds that compete for a name.
+func workloadKindOf(gvr schema.GroupVersionResource) string {
+	switch gvr {
+	case manifest.AppGVR:
+		return "app"
+	case manifest.FunctionGVR:
+		return "function"
+	case manifest.JobGVR:
+		return "job"
+	default:
+		return ""
+	}
 }

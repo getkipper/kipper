@@ -266,12 +266,13 @@ after, and never a mixture of the two. When a service password rotates, the new
 password and the connection string you composed from it arrive together.
 
 The name carries the workload kind because Secret names are unique per namespace
-while workload names are unique only per kind. An app, a function and a job may
-all be called `api` in one project, so they publish under `app-api-env-…`,
-`function-api-env-…` and `job-api-env-…` and never read each other's
-environment. Their secrets carry the kind for the same reason, in
-`app-api-secrets` and `function-api-secrets`, so setting one workload's password
-leaves the other's alone.
+while the Kubernetes API indexes workload names per kind. Kipper reserves a
+workload name across all three kinds, so an app, a function and a job called
+`api` cannot coexist in one environment today. Clusters that predate that rule
+can still hold such a pair, and the kind-qualified names are what keep those
+apart: `app-api-env-…` beside `function-api-env-…`, and `app-api-secrets` beside
+`function-api-secrets`, so setting one workload's password leaves the other's
+alone. See [names are shared across workload kinds](/en/functions#names-are-shared-across-workload-kinds).
 
 From the application's perspective these are all standard environment variables.
 There is no difference at runtime.

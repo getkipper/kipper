@@ -52,7 +52,7 @@ rules:
     resources: ["ingresses"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["kipper.run"]
-    resources: ["apps", "services", "functions", "jobs", "volumes"]
+    resources: ["apps", "services", "functions", "jobs", "volumes", "workloadnames"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -75,7 +75,7 @@ rules:
     resources: ["ingresses"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["kipper.run"]
-    resources: ["apps", "services", "functions", "jobs", "volumes"]
+    resources: ["apps", "services", "functions", "jobs", "volumes", "workloadnames"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["apps"]
     resources: ["deployments/scale", "statefulsets/scale"]
@@ -104,7 +104,7 @@ rules:
     resources: ["ingresses"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["kipper.run"]
-    resources: ["apps", "services", "functions", "jobs", "volumes"]
+    resources: ["apps", "services", "functions", "jobs", "volumes", "workloadnames"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # resourceadjustments is deliberately absent although owners manage them
   # through the console: the CRD is cluster-scoped, and a namespaced
