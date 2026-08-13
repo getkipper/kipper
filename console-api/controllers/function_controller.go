@@ -35,15 +35,36 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/workload"
 )
 
-// hasHTTPTrigger returns true when the function should have HTTP
-// infrastructure (Deployment + Service + HTTPScaledObject + Ingress).
+// servesHTTP reports whether the function is invoked over HTTP, which is what
+// decides both halves of the serving path: the Ingress that publishes the host
+// and the HTTPScaledObject that puts it in the interceptor's routing table.
+// A function with no triggers at all defaults to HTTP.
+//
+// This is narrower than hasHTTPTrigger, which asks the separate question of
+// whether the function needs a long-lived Pod. An event-triggered function
+// needs one, since its poll sidecar runs there, and is still not reachable
+// from outside the cluster.
+func servesHTTP(fn *kipperv1.Function) bool {
+	if len(fn.Spec.Triggers) == 0 {
+		return true
+	}
+	for _, t := range fn.Spec.Triggers {
+		if t.Type == "http" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasHTTPTrigger returns true when the function needs a long-lived Pod, which
+// means a Deployment and a Service.
 //
 // Functions with no triggers default to HTTP for backward compatibility.
-// Cron is the only trigger type that does not require HTTP — every other
-// trigger (postgres, redis, mysql, mongodb, rabbitmq, opensearch, minio)
-// is event-polled by the kipper-poll sidecar and invokes the function
-// over HTTP. So HTTP infrastructure is needed unless every trigger is
-// explicitly cron.
+// Cron is the only trigger type that needs neither — every other trigger
+// (postgres, redis, mysql, mongodb, rabbitmq, opensearch, minio) is
+// event-polled by the kipper-poll sidecar, which reaches the function over
+// localhost inside the Pod. Whether that Pod is also published to the outside
+// is servesHTTP's question, not this one.
 func hasHTTPTrigger(fn *kipperv1.Function) bool {
 	if len(fn.Spec.Triggers) == 0 {
 		return true
@@ -344,6 +365,16 @@ func (r *FunctionReconciler) reconcileChildren(ctx context.Context, fn *kipperv1
 		if err := r.reconcileService(ctx, fn); err != nil {
 			return fmt.Errorf("reconciling service: %w", err)
 		}
+	}
+
+	// The route and the scaler are one unit. The Ingress points the host at the
+	// KEDA interceptor, and the HTTPScaledObject is what puts that host in the
+	// interceptor's routing table, so a host with only the first half gets a 404
+	// from the interceptor and no request can ever wake the Pod. They are
+	// decided by one rule for that reason: an earlier split between "any
+	// non-cron trigger" here and "a literal http trigger" in the scaler
+	// published every event-triggered function on a URL that could not work.
+	if servesHTTP(fn) {
 		// HTTPScaledObject and Ingress are managed via unstructured client
 		// since KEDA types are not in our scheme.
 		if err := r.reconcileHTTPScaledObject(ctx, fn); err != nil {
@@ -353,7 +384,7 @@ func (r *FunctionReconciler) reconcileChildren(ctx context.Context, fn *kipperv1
 			return fmt.Errorf("reconciling ingress: %w", err)
 		}
 	} else if err := r.cleanupHTTPServing(ctx, fn); err != nil {
-		// A function edited from HTTP to cron-only no longer serves a route.
+		// A function edited to cron-only or event-only no longer serves a route.
 		// Without this its host claim and shared keda Ingress would leak,
 		// locking the host against other projects until an unrelated reconcile
 		// in the namespace happened to sweep it.
@@ -1377,18 +1408,7 @@ func (r *FunctionReconciler) reconcileService(ctx context.Context, fn *kipperv1.
 }
 
 func (r *FunctionReconciler) reconcileHTTPScaledObject(ctx context.Context, fn *kipperv1.Function) error {
-	// Check if HTTP trigger is present
-	hasHTTP := false
-	for _, t := range fn.Spec.Triggers {
-		if t.Type == "http" {
-			hasHTTP = true
-			break
-		}
-	}
-	if !hasHTTP && len(fn.Spec.Triggers) == 0 {
-		hasHTTP = true // default to HTTP trigger
-	}
-	if !hasHTTP {
+	if !servesHTTP(fn) {
 		return nil
 	}
 
@@ -1487,7 +1507,10 @@ func (r *FunctionReconciler) deleteFunctionIngress(ctx context.Context, name, na
 		// Belongs to a same-named function in another namespace — leave it.
 		return nil
 	}
-	return r.Delete(ctx, &existing)
+	if err := r.Delete(ctx, &existing); err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // sharedNamespaceObjectBelongsTo answers the ownership question for the objects
@@ -1785,7 +1808,14 @@ func (r *FunctionReconciler) updateStatus(ctx context.Context, fn *kipperv1.Func
 	}
 
 	fn.Status.Replicas = deploy.Status.Replicas
-	fn.Status.Endpoint = "https://" + domain.SubdomainFor("fn-"+fn.Name, r.Domain)
+	// Only a function that serves HTTP has a route behind this host, so only it
+	// gets the URL. An event-triggered function is invoked by its poll sidecar
+	// and publishing an endpoint for it advertises a URL nothing answers.
+	if servesHTTP(fn) {
+		fn.Status.Endpoint = "https://" + domain.SubdomainFor("fn-"+fn.Name, r.Domain)
+	} else {
+		fn.Status.Endpoint = ""
+	}
 
 	switch {
 	case deploy.Status.AvailableReplicas > 0:
