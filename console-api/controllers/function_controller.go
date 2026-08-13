@@ -1585,9 +1585,9 @@ func (r *FunctionReconciler) cleanupSharedNamespaceObjects(ctx context.Context, 
 }
 
 // cleanupHTTPServing tears down the HTTP serving path for a function that no
-// longer has an HTTP trigger and releases its route claim. The Ingress and the
-// HTTPScaledObject are HTTP-only; the Deployment and Service are shared with the
-// event path, so they are left to the normal reconcile.
+// longer has an HTTP trigger, and keeps the project's claim on the route host.
+// The Ingress and the HTTPScaledObject are HTTP-only; the Deployment and Service
+// are shared with the event path, so they are left to the normal reconcile.
 func (r *FunctionReconciler) cleanupHTTPServing(ctx context.Context, fn *kipperv1.Function) error {
 	if err := r.deleteFunctionIngress(ctx, fn.Name, fn.Namespace); err != nil {
 		return fmt.Errorf("deleting function ingress: %w", err)

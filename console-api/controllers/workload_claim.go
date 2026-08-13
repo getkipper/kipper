@@ -11,7 +11,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/controller/pkg/workload"
@@ -46,7 +45,6 @@ import (
 // a Job do not contend on a child object, so nothing further down would refuse
 // them, and the App's Service selects `app=<name>`, which the Job's pods carry.
 func reconcileNameClaim(ctx context.Context, c client.Client, uncached client.Reader, scheme *runtime.Scheme, owner client.Object, kind string) (heldBy string, err error) {
-	logger := log.FromContext(ctx)
 	key := types.NamespacedName{Name: owner.GetName(), Namespace: owner.GetNamespace()}
 
 	var claim kipperv1.WorkloadName
@@ -126,9 +124,13 @@ func reconcileNameClaim(ctx context.Context, c client.Client, uncached client.Re
 	if metav1.IsControlledBy(&claim, owner) {
 		return "", nil
 	}
+	// Another controller already owns a claim of this kind and name, which a
+	// direct apply or a restore can leave behind. This workload does not hold
+	// its reservation, so it does not get to build children on the strength of
+	// one: if that other owner is later deleted, garbage collection takes the
+	// claim with it and frees the name under a live workload.
 	if err := controllerutil.SetControllerReference(owner, &claim, scheme); err != nil {
-		logger.Error(err, "adopting the name reservation", "workload", key.Name)
-		return "", nil
+		return "", fmt.Errorf("adopting the name reservation: %w", err)
 	}
 	// A failed adoption stops the pass. It is tempting to treat this as costing
 	// the reservation nothing but its garbage collection, and that is wrong in
