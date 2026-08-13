@@ -277,7 +277,8 @@ kip function create <name> --image <image> [flags]
 kip function create <name> --code-file <path> --runtime node|python [flags]
 
 # Manage
-kip function list
+kip function list                          # every project, plus functions with none
+kip function list --project blog           # one project
 kip function logs <name>
 kip function delete <name1> <name2> ...   # accepts multiple args
 

@@ -13,7 +13,9 @@ import (
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 
+	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/kip/internal/auth"
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/function"
@@ -328,27 +330,89 @@ func runFunctionList(cmd *cobra.Command, args []string) error {
 		return printFunctions(ctx, mgr, ns)
 	}
 
-	// List across all kipper namespaces
-	namespaces, err := k8sClient.Clientset().CoreV1().Namespaces().List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/managed-by=kipper",
-	})
+	namespaces, err := functionListNamespaces(ctx, k8sClient.Clientset())
 	if err != nil {
-		return fmt.Errorf("listing namespaces: %w", err)
+		return err
 	}
+	return printFunctionsAcross(ctx, mgr, namespaces)
+}
 
-	found := false
-	for _, ns := range namespaces.Items {
-		if err := printFunctions(ctx, mgr, ns.Name); err == nil {
-			found = true
+// namespacedFunction is a function and the namespace it was found in, so a
+// sweep can name where each one lives.
+type namespacedFunction struct {
+	namespace string
+	fn        function.Status
+}
+
+// collectFunctions reads every namespace and returns what it found, in the
+// order the namespaces were given.
+func collectFunctions(ctx context.Context, mgr *function.Manager, namespaces []string) ([]namespacedFunction, error) {
+	var out []namespacedFunction
+	for _, ns := range namespaces {
+		functions, err := mgr.List(ctx, ns)
+		if err != nil {
+			return nil, err
+		}
+		for _, fn := range functions {
+			out = append(out, namespacedFunction{namespace: ns, fn: fn})
 		}
 	}
+	return out, nil
+}
 
-	if !found {
-		// Try default namespace
-		return printFunctions(ctx, mgr, "default")
+// printFunctionsAcross prints one table for a sweep of several namespaces, and
+// one line when there is nothing anywhere.
+//
+// A message per empty namespace was readable while the sweep covered the one
+// namespace a project resolves to. Across a cluster it is a screen of "No
+// functions in ..." with the answer buried in it.
+func printFunctionsAcross(ctx context.Context, mgr *function.Manager, namespaces []string) error {
+	found, err := collectFunctions(ctx, mgr, namespaces)
+	if err != nil {
+		return err
+	}
+	if len(found) == 0 {
+		fmt.Printf("\n  No functions\n\n")
+		return nil
 	}
 
+	fmt.Printf("\n  %-20s %-25s %-10s %-32s %-10s\n", "PROJECT", "NAME", "TRIGGER", "IMAGE", "STATUS")
+	for _, f := range found {
+		fmt.Printf("  %-20s %-25s %-10s %-32s %-10s\n", f.namespace, f.fn.Name, f.fn.Trigger, f.fn.Image, f.fn.Status)
+	}
+	fmt.Println()
 	return nil
+}
+
+// functionListNamespaces returns the namespaces a bare `kip function list`
+// reads.
+//
+// Kipper's own namespaces carry its managed-by label, and default does not,
+// which is where `kip function create` puts a function given no --project. So
+// default is swept as well or that function is invisible to the command that
+// exists to find it. The old code meant to cover this with a fallback, but a
+// labelled namespace that merely happens to hold no functions counted as a
+// find, and an installed cluster always has one.
+func functionListNamespaces(ctx context.Context, clientset kubernetes.Interface) ([]string, error) {
+	namespaces, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
+		LabelSelector: labels.ManagedBy + "=" + labels.Kipper,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing namespaces: %w", err)
+	}
+
+	out := make([]string, 0, len(namespaces.Items)+1)
+	hasDefault := false
+	for _, ns := range namespaces.Items {
+		out = append(out, ns.Name)
+		if ns.Name == "default" {
+			hasDefault = true
+		}
+	}
+	if !hasDefault {
+		out = append(out, "default")
+	}
+	return out, nil
 }
 
 func printFunctions(ctx context.Context, mgr *function.Manager, namespace string) error {
