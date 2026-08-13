@@ -513,3 +513,41 @@ func TestBlockedMessage_SaysWhatKeepsRunning(t *testing.T) {
 	assert.Contains(t, msg, "keeps running",
 		"an operator upgrading into a live collision is not told their workload is still serving")
 }
+
+// A claim of the right kind can already be controlled by something else: a
+// direct apply or a restore leaves one behind, and controller-runtime refuses
+// to move a controller reference that names a different object. Treating that
+// refusal as a successful adoption let the workload build children while its
+// name reservation belonged to another owner. Deleting that owner would then
+// garbage-collect the claim and free the name under a workload still running
+// on it.
+func TestReconcileNameClaim_FailsClosedWhenAnotherOwnerHoldsTheClaim(t *testing.T) {
+	scheme := testScheme()
+	job := &kipperv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkout", Namespace: "default", UID: "job-uid"},
+		Spec:       kipperv1.JobSpec{Image: "checkout:v1", Schedule: "0 2 * * *"},
+	}
+	controller := true
+	claim := &kipperv1.WorkloadName{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "checkout", Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: kipperv1.GroupVersion.String(),
+				Kind:       "App",
+				Name:       "something-else",
+				UID:        "other-uid",
+				Controller: &controller,
+			}},
+		},
+		Spec: kipperv1.WorkloadNameSpec{Kind: "job"},
+	}
+
+	c := crfake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(job, claim).WithStatusSubresource(job).Build()
+	r := &JobReconciler{Client: c, Scheme: scheme}
+
+	_, err := reconcileNameClaim(context.Background(), r.Client, r.hostReader(), r.Scheme, job, "job")
+
+	require.Error(t, err,
+		"a workload that could not take ownership of its reservation went on to build children anyway")
+}

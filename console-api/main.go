@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -15,8 +16,11 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -860,6 +864,37 @@ func shareGrantStoreFor(cfg *rest.Config) *share.GrantStore {
 	return share.NewGrantStore(clientset)
 }
 
+// servesKind reports whether the API server serves a kind in a group version.
+//
+// A discovery error counts as absent. The cost of that is one controller sitting
+// out until the next restart; the cost of guessing the other way is the whole
+// manager failing to start on a cluster that genuinely lacks the CRD.
+func servesKind(dc discovery.ServerResourcesInterface, gv schema.GroupVersion, kind string) bool {
+	if dc == nil {
+		return false
+	}
+	list, err := dc.ServerResourcesForGroupVersion(gv.String())
+	if err != nil {
+		log.Printf("checking whether the cluster serves %s: %v", kind, err)
+		return false
+	}
+	return slices.ContainsFunc(list.APIResources, func(r metav1.APIResource) bool {
+		return r.Kind == kind
+	})
+}
+
+// discoveryFor returns the cluster's discovery client, or nil when one cannot be
+// built. A nil client reports every kind as absent, which is the same safe
+// direction servesKind takes for a failed lookup.
+func discoveryFor(cfg *rest.Config) discovery.ServerResourcesInterface {
+	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		log.Printf("building a discovery client: %v", err)
+		return nil
+	}
+	return dc
+}
+
 func startControllerManager(cfg *rest.Config) {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -915,6 +950,29 @@ func startControllerManager(cfg *rest.Config) {
 		{"ClusterIdentity", (&controllers.ClusterIdentityReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Metrics: controllers.NewAPIServerMetricsReader(kubernetes.NewForConfigOrDie(cfg))}).SetupWithManager},
 		{"DataTransfer", (&controllers.DataTransferReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), APIReader: mgr.GetAPIReader(), DatamoverImage: datamoverImage()}).SetupWithManager},
 	}
+
+	// A cluster that has not been upgraded yet runs this image without the CRDs
+	// that came with it: the Deployment pulls :latest on every restart, while the
+	// CRDs arrive only when `kip upgrade` applies them. Registering a watch for a
+	// kind the API server does not serve leaves that informer unable to sync, and
+	// a cache that never syncs makes mgr.Start give up and return, which stops
+	// every other reconciler with it. The pod stays Running and serving HTTP the
+	// whole time, so nothing deploys and nothing says why.
+	//
+	// Dropping the one controller keeps the others reconciling until the upgrade
+	// lands. A cluster with no WorkloadName CRD also has no reservations to
+	// reclaim, so the controller has nothing to do there in any case.
+	reconcilers = slices.DeleteFunc(reconcilers, func(rec struct {
+		name  string
+		setup func(ctrl.Manager) error
+	}) bool {
+		if rec.name != "WorkloadName" || servesKind(discoveryFor(cfg), kipperv1.GroupVersion, "WorkloadName") {
+			return false
+		}
+		log.Printf("the WorkloadName CRD is not installed; skipping its controller until `kip upgrade` applies it")
+		handlers.SetControllerRegistered(rec.name, false)
+		return true
+	})
 
 	// A single reconciler failing to register must not take down the rest.
 	// A partial controller set still reconciles most CRs, which is far better
