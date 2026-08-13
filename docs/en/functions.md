@@ -378,6 +378,10 @@ flowchart LR
 5. Your function processes the event and returns 200.
 6. When no events remain, KEDA scales back to 0.
 
+An event-triggered function has no public URL. The sidecar reaches your handler
+over `localhost` inside the pod, so nothing needs to be exposed. Give the
+function an `http` trigger as well if you want to call it from outside too.
+
 Your handler doesn't need to know about the data source, connection strings, or polling logic. It just receives events as HTTP requests:
 
 ```javascript
