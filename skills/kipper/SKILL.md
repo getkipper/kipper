@@ -93,7 +93,7 @@ Install a cluster on a fresh server over SSH:
 kip install --host 203.0.113.10 --ssh-key ~/.ssh/id_ed25519 --admin-email you@example.com
 ```
 
-**Pass `--host` as an IP address.** The free-subdomain path registers the value verbatim with the kipper.run gateway, which takes addresses only, so a hostname fails after preflight with `registering subdomain: gateway: ip must be a public address`. The message names neither the flag nor the hostname, so it reads as a server problem when it is an argument one. A hostname is fine only alongside `--domain <your-own-domain>`, which registers nothing.
+**`--host` takes an IP address or a hostname.** Pass whichever the operator gave you; there is no need to resolve a name first. From 0.11.1 `kip` resolves a hostname to the server's public IPv4 itself for the gateway registration, and keeps the name for SSH so `~/.ssh/config` aliases still apply. A name with no public IPv4 is refused immediately, before any connection, in a message naming `--host`. On 0.11.0 and earlier a hostname reaches the gateway unresolved and the install fails after preflight with `registering subdomain: gateway: ip must be a public address`, so pass an address on those versions.
 
 Prerequisites: Ubuntu 20.04/22.04/24.04/26.04 or Debian 11/12, root SSH access, ports 80/443/6443 open, an SSH key. Floor is 2 vCPU / 2 GB / 30 GB; 4 vCPU / 8 GB / 80 GB is a realistic minimum. Useful flags: `--domain`, `--org` / `--org-display-name` (namespace prefix), `--console-domain`, `--harden` (host hardening, default on), `--firewall` (UFW, default on), `--backup-storage-bucket/-endpoint/-region/-credentials` (external S3 for Velero). Full reference: https://getkipper.com/en/installation. Walkthrough: https://getkipper.com/en/getting-started.
 
