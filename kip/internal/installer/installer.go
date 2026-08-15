@@ -123,6 +123,16 @@ func Run(opts Options) (*Result, error) {
 		return nil, fmt.Errorf("install was invoked without a kip version, so the CRDs it writes could not be stamped")
 	}
 
+	// Canonicalise every hostname the operator typed before anything compares
+	// them. The gateway suffix test, the label rule and the CRD's lowercase
+	// pattern all work on the string, so LAB.KIPPER.RUN reaching them unchanged
+	// is read as a custom domain, registers nothing, and installs a cluster
+	// serving a name the gateway will not route.
+	opts.Domain = NormaliseDomain(opts.Domain)
+	opts.ConsoleDomain = NormaliseDomain(opts.ConsoleDomain)
+	opts.ConsoleAPIDomain = NormaliseDomain(opts.ConsoleAPIDomain)
+	opts.DexDomain = NormaliseDomain(opts.DexDomain)
+
 	// Reject an explicit --dns-resolver before any side effect (SSH,
 	// firewall, subdomain registration). The no-flag path is validated
 	// later, once domainName is known and any persisted list is inherited.
@@ -249,25 +259,33 @@ func Run(opts Options) (*Result, error) {
 		opts.ConsoleAPIDomain = adopted.ConsoleAPIHost
 		opts.DexDomain = adopted.DexHost
 		fmt.Printf("  ✔  Existing cluster: keeping its serving identity %s\n\n", domainName)
-	} else if domainName == "" {
-		// Derive a subdomain from the IP (replace dots with dashes)
-		subdomain := strings.ReplaceAll(opts.Host, ".", "-")
-		fmt.Printf("  Registering subdomain...\n")
-		claimed, claimErr := claimGatewayName(
-			domain.NewGatewayClient(opts.GatewayURL),
-			localTokenStore{},
-			subdomain, opts.Host)
-		if claimErr != nil {
-			return nil, claimErr
+	} else {
+		// Either no --domain, taking the label derived from the server's address,
+		// or a *.kipper.run --domain naming the label the operator chose. Both
+		// claim a name from the gateway, which owns that DNS. A custom domain
+		// claims nothing, because its DNS is the operator's.
+		subdomain, wantsGatewayName, labelErr := KipperRunLabelFor(opts.Domain, opts.Host)
+		if labelErr != nil {
+			return nil, labelErr
 		}
-		domainName = claimed.Domain
-		gatewayToken = claimed.Token
-		// Only a name this run brought into existence may be handed back if the
-		// install fails. A renewal means the registration predates this attempt,
-		// and a half-built cluster from an earlier one may still be serving on
-		// it — releasing that frees a name in use.
-		freshlyRegistered = claimed.Created
-		fmt.Printf("  ✔  Subdomain assigned: %s\n\n", domainName)
+		if wantsGatewayName {
+			fmt.Printf("  Registering subdomain...\n")
+			claimed, claimErr := claimGatewayName(
+				domain.NewGatewayClient(opts.GatewayURL),
+				localTokenStore{},
+				subdomain, opts.Host)
+			if claimErr != nil {
+				return nil, claimErr
+			}
+			domainName = claimed.Domain
+			gatewayToken = claimed.Token
+			// Only a name this run brought into existence may be handed back if
+			// the install fails. A renewal means the registration predates this
+			// attempt, and a half-built cluster from an earlier one may still be
+			// serving on it — releasing that frees a name in use.
+			freshlyRegistered = claimed.Created
+			fmt.Printf("  ✔  Subdomain assigned: %s\n\n", domainName)
+		}
 	}
 	// A re-run inherits per-cluster state from the local entry for this HOST.
 	// The host is the server's stable identity: the entry's Name may be a
@@ -330,17 +348,17 @@ func Run(opts Options) (*Result, error) {
 	}
 
 	// The registered *.kipper.run domain the gateway heartbeat keeps alive.
-	// A *.kipper.run install registers a subdomain (opts.Domain empty); a
+	// A *.kipper.run install registers a subdomain, whether the label was derived
+	// from the address (opts.Domain empty) or chosen by the operator; a
 	// custom-domain install has no gateway registration; an adopted identity
 	// keeps whatever registration its CR already records — after a custom-
 	// domain move that differs from the serving domain.
-	gatewayKipperRunDomain := ""
-	switch {
-	case existingIdentity != nil:
-		gatewayKipperRunDomain = existingIdentity.KipperRunDomain
-	case opts.Domain == "":
-		gatewayKipperRunDomain = domainName
-	}
+	//
+	// The condition tracks the claim above rather than restating it as
+	// "opts.Domain == "". Reading only the empty case is what left a chosen label
+	// with no gateway block: console-api got no KIPPER_RUN_DOMAIN, never
+	// heartbeated, and the cluster served a name the gateway would not route.
+	gatewayKipperRunDomain := gatewayRegistrationFor(existingIdentity, domainName)
 
 	// Install cluster components
 	type installStep struct {

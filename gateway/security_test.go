@@ -143,3 +143,75 @@ func TestIsPublicIP(t *testing.T) {
 		}
 	}
 }
+
+// A label shaped like an address belongs to that address. Without this, anyone
+// can hold the default name of a server they do not run: the operator who later
+// installs on 203.0.113.77 finds their name taken, and until they do, every link
+// under it points wherever the squatter chose. The name is only worth taking now
+// that a chosen label is a documented install option.
+func TestRegisterRefusesAnIPShapedLabelFromAnotherAddress(t *testing.T) {
+	handler := handleRegister(registry.New(), "kipper.run", neverObserve)
+
+	code, _ := postRegister(t, handler, `{"subdomain":"203-0-113-77","ip":"198.51.100.1"}`)
+	if code != http.StatusConflict {
+		t.Errorf("registering another server's default name: got %d, want 409", code)
+	}
+}
+
+func TestRegisterAllowsAnIPShapedLabelFromItsOwnAddress(t *testing.T) {
+	handler := handleRegister(registry.New(), "kipper.run", neverObserve)
+
+	code, resp := postRegister(t, handler, `{"subdomain":"203-0-113-77","ip":"203.0.113.77"}`)
+	if code != http.StatusCreated || resp.Token == "" {
+		t.Errorf("a server registering its own default name: got %d token=%q, want 201 with a token", code, resp.Token)
+	}
+}
+
+// The guard claims only labels that are somebody's default name. An ordinary
+// name that merely contains digits and hyphens stays registrable, or the guard
+// would quietly deny names it was never meant to cover.
+func TestRegisterAllowsLabelsThatOnlyLookNumeric(t *testing.T) {
+	handler := handleRegister(registry.New(), "kipper.run", neverObserve)
+
+	for _, body := range []string{
+		`{"subdomain":"999-0-0-1","ip":"198.51.100.1"}`,
+		`{"subdomain":"203-0-113","ip":"198.51.100.2"}`,
+		`{"subdomain":"12","ip":"198.51.100.3"}`,
+		`{"subdomain":"acme-2","ip":"198.51.100.4"}`,
+	} {
+		code, _ := postRegister(t, handler, body)
+		if code != http.StatusCreated {
+			t.Errorf("%s: got %d, want 201", body, code)
+		}
+	}
+}
+
+// registrableEntry is what startup re-applies to persisted state, so it has to
+// answer exactly as the registration guard would. A policy tightened in the
+// guard alone protects only names nobody has taken yet: a label reserved by a
+// later build keeps serving for as long as its holder renews it.
+func TestRegistrableEntryMatchesTheRegistrationGuard(t *testing.T) {
+	refused := map[string]struct{ subdomain, ip string }{
+		"a label reserved only by the newer policy": {"login", "203.0.113.1"},
+		"a long-standing reserved label":            {"console", "203.0.113.1"},
+		"a route-shadowing label":                   {"console--acme", "203.0.113.1"},
+		"another server's default name":             {"203-0-113-77", "198.51.100.9"},
+		"a malformed label":                         {"UPPER", "203.0.113.1"},
+	}
+	for why, e := range refused {
+		if registrableEntry(e.subdomain, e.ip) {
+			t.Errorf("registrableEntry(%q, %q) = true, want false (%s)", e.subdomain, e.ip, why)
+		}
+	}
+
+	kept := map[string]struct{ subdomain, ip string }{
+		"an ordinary name":              {"acme", "203.0.113.2"},
+		"a server's own default name":   {"203-0-113-78", "203.0.113.78"},
+		"a merely numeric-looking name": {"999-0-0-1", "198.51.100.4"},
+	}
+	for why, e := range kept {
+		if !registrableEntry(e.subdomain, e.ip) {
+			t.Errorf("registrableEntry(%q, %q) = false, want true (%s)", e.subdomain, e.ip, why)
+		}
+	}
+}

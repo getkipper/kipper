@@ -111,17 +111,22 @@ func (r *Registry) Prune(keep func(ip string) bool) int {
 	return removed
 }
 
-// PruneSubdomains drops every entry whose subdomain fails keep and returns how
-// many were removed. It re-applies the current label policy to state persisted
-// under an older, looser build, so a label that would shadow a per-cluster
-// derived service route can't survive a restart.
-func (r *Registry) PruneSubdomains(keep func(subdomain string) bool) int {
+// PruneEntries drops every entry whose subdomain and address fail keep, and
+// returns how many were removed.
+//
+// It takes both because a label's admissibility depends on both: a name spelling
+// an IP address is registrable by that address and no other, which Prune (which
+// sees only the address) cannot express. Startup is where a policy tightened
+// after a snapshot was written gets applied, so a rule added to the registration
+// guard alone would protect unused names while every name already taken under
+// the old rule kept serving.
+func (r *Registry) PruneEntries(keep func(subdomain, ip string) bool) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	removed := 0
 	for subdomain, entry := range r.entries {
-		if !keep(subdomain) {
+		if !keep(subdomain, entry.IP) {
 			delete(r.entries, subdomain)
 			delete(r.tokens, entry.Token)
 			removed++

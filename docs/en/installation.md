@@ -14,8 +14,8 @@ kip install --host <ip> [flags]
 |---|---|---|---|
 | `--host` | Yes | — | IP address or hostname of the target server |
 | `--ssh-key` | No | see below | Path to SSH private key. Saved to `~/.kip/config.yaml` so subsequent `kip` commands inherit it. If unset, `kip` reads `KIP_SSH_KEY`, then `cluster.ssh_key` from config; if still unset, ssh consults your ssh-agent and `~/.ssh/config` as normal |
-| `--domain` | No | `<ip>.kipper.run` | Custom domain for the cluster |
-| `--admin-email` | No | `admin@<domain>` | Email for Let's Encrypt certificates and the admin account. Defaults to `admin@<domain>` when `--domain` is set, otherwise `admin@kipper.local` |
+| `--domain` | No | `<ip>.kipper.run` | The name the cluster serves on. A `*.kipper.run` name (`lab.kipper.run`) is registered for you on the shared gateway; anything else is a domain whose DNS you run yourself. Omit it and the free name is derived from the server's address. See [choosing your own name](/en/domains#choosing-your-own-name) |
+| `--admin-email` | No | `admin@<domain>` | Email for Let's Encrypt certificates and the admin account. Defaults to `admin@<domain>` when `--domain` is a domain you run, otherwise `admin@kipper.local` |
 | `--org` | No | — | Organisation short code (e.g. `acme`), used as namespace prefix |
 | `--org-display-name` | No | — | Human-readable organisation name (e.g. `Acme Inc`) |
 | `--harden` | No | `true` | Disable surplus host services exposed on public interfaces (e.g. `rpcbind`). Pass `--harden=false` only when you manage host security yourself |
@@ -237,9 +237,9 @@ kip cluster uninstall storefront --ssh-key ~/.ssh/kipper_ed25519
 
 The command prompts you to type the cluster name to confirm, so you cannot tear down a cluster by reflex. Pass `--yes` only for automation.
 
-A cluster on a free `*.kipper.run` subdomain also hands that name back to the gateway, so the address can be claimed again. The name is released after the host is wiped, using a credential read from the cluster beforehand: the gateway will only release a name to whoever holds its token, and that token lives on the cluster the wipe destroys.
+A cluster on a free `*.kipper.run` subdomain also hands that name back to the gateway. The name is released after the host is wiped, using a credential read from the cluster beforehand: the gateway will only release a name to whoever holds its token, and that token lives on the cluster the wipe destroys. It stops serving straight away and stays reserved for you for 90 days, so links you published do not land on somebody else's cluster the moment you tear yours down. Keep the credential if you might want the name back within that window.
 
-If the cluster cannot be reached, kip falls back to a copy of that credential it keeps in `~/.kip/config.yaml`, recorded on an earlier command. When neither is available the command says so and asks whether to wipe anyway. Answering no is the safe choice: wiping leaves the name registered with nothing able to release it, and installing on that host again cannot serve on it. The gateway frees such a name on its own after 30 days without contact. `--yes` skips this question as well as the typed-name one, so scripted teardown consents to stranding a name it could not release.
+If the cluster cannot be reached, kip falls back to a copy of that credential it keeps in `~/.kip/config.yaml`, recorded on an earlier command. When neither is available the command says so and asks whether to wipe anyway. Answering no is the safe choice: wiping leaves the name registered with nothing able to release it, and installing on that host again cannot serve on it. Such a name stops serving after 30 days without contact and comes free 90 days after that, so waiting it out means waiting four months. `--yes` skips this question as well as the typed-name one, so scripted teardown consents to stranding a name it could not release.
 
 If the server itself cannot be reached, kip offers to hand the name back without it, provided a credential for that name is recorded locally. Say yes only when the server is really gone: a cluster that is merely unreachable is still serving, and releasing its name takes it off the air. `--yes` never takes this offer, because a script cannot tell those two apart.
 
