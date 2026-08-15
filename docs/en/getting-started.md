@@ -4,10 +4,16 @@ This guide walks you through installing Kipper on a fresh Linux server and deplo
 
 ## Prerequisites
 
-- A Linux server with root SSH access (Ubuntu 20.04, 22.04, 24.04, 26.04, or Debian 11, 12)
+- A Linux server with root SSH access (Ubuntu 20.04, 22.04, 24.04, 26.04, or Debian 11, 12). `kip` signs in as `root`, so if your provider gave you a `sudo` user instead, put your key on the root account before you start
 - 2 vCPU / 2 GB RAM / 30 GB free disk minimum to install (4 vCPU / 8 GB / 80 GB realistic floor for a usable cluster)
-- Ports 80, 443, and 6443 open
-- An SSH key on your local machine
+- Ports 80, 443, and 6443 allowed through your provider's firewall (see below). Leave the server's own firewall alone, Kipper sets that one up for you
+- An SSH key on your local machine. No key yet? `ssh-keygen -t ed25519` makes one, and most providers have a field for the public half when you create the server. For a server that already exists, `ssh-copy-id root@your-server` installs it
+
+::: tip Two firewalls, and only one of them is yours
+Your provider gives you a firewall in front of the server, called a security group, cloud firewall or network ACL depending on who you bought it from. That is the one the ports above refer to. Allow 80 and 443 so the world can reach your apps, and 6443 so you can reach the cluster with `kip` and `kubectl`. Nothing but your own machine needs 6443, so scope that rule to your address if your provider lets you.
+
+The firewall on the server is Kipper's job. `kip install` installs UFW and writes the ruleset k3s needs, which includes internal rules for metrics and monitoring that are easy to get wrong by hand. If it finds a firewall already running that it did not set up, it leaves your rules untouched and says so, and maintaining them becomes yours from then on. So resist the urge to SSH in and configure ufw first: that is exactly what makes Kipper skip its own rules.
+:::
 
 ::: tip Any Linux VPS will work, but pick a generous one
 Any cloud provider or hosting company that gives you a Linux VM with a public IP and root SSH access will work. The "minimum" line above is what the install command will accept; it isn't what makes Kipper pleasant to use. For a side-project box that will host an app or two, a database, and Kipper's own backups: pick **8 GB RAM, 4 vCPU, 80 GB SSD or larger**. If you're going to run the [AI Bundle](/en/ai), aim for **16 GB RAM, 4+ vCPU, 100+ GB SSD** at minimum. See [Installation → recommended sizing in practice](/en/installation#preflight-checks) for the full table.
