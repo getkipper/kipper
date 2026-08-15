@@ -443,3 +443,26 @@ func TestDomainMoveRefusesWhenTheGatewayIgnoresAStaleToken(t *testing.T) {
 		t.Error("a refused move must leave the stored credential untouched")
 	}
 }
+
+// DNS names are case-insensitive and may carry a trailing dot, so all of these
+// name the same host. A case-sensitive suffix test read LAB.KIPPER.RUN as a
+// custom domain: no gateway claim was made, and the move then died on the CRD's
+// lowercase pattern with a regex complaint instead of a useful answer.
+func TestIsKipperRunDomainIgnoresCaseAndTrailingDot(t *testing.T) {
+	for _, d := range []string{
+		"lab.kipper.run", "LAB.KIPPER.RUN", "Lab.Kipper.Run", "lab.kipper.run.",
+	} {
+		if !isKipperRunDomain(d) {
+			t.Errorf("isKipperRunDomain(%q) = false, want true", d)
+		}
+		if got := kipperRunLabel(d); got != "lab" {
+			t.Errorf("kipperRunLabel(%q) = %q, want lab", d, got)
+		}
+	}
+
+	for _, d := range []string{"kipper.example.com", "EXAMPLE.COM", "notkipper.run"} {
+		if isKipperRunDomain(d) {
+			t.Errorf("isKipperRunDomain(%q) = true, want false", d)
+		}
+	}
+}
