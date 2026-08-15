@@ -103,25 +103,32 @@ the process.
 
 ## Updating
 
-The compose file builds the gateway from its own checkout (`build: .`), so an update is a pull and a
-rebuild on the host. CI publishes a `kipper-gateway` image to ghcr on every merge to `main` and nothing
-here consumes it, so hunting for a newer tag will not find what is running.
+The gateway runs a published image, so an update is a pull and a recreate. CI builds
+`kipper-gateway` on every merge to `main`, which is what makes a new one available; merging is
+therefore the first half of a gateway deploy and this is the second.
 
 ```bash
-cd /opt/kipper/gateway
-git pull
-docker compose up -d --build gateway
+cd /opt/kipper-gateway
+docker compose pull gateway
+docker compose up -d gateway
 ```
 
 Naming the service leaves Caddy alone. Caddy holds the TLS certificates and terminates every connection,
-so rebuilding it interrupts live traffic when only the gateway changed.
+so restarting it interrupts live traffic when only the gateway changed.
+
+The compose file in this repository is the development one and builds the gateway from source
+(`build: .`). A deployment overrides that with an `image:` line, so `git pull` on the host changes
+nothing about which gateway runs. Caddy is the other way round: it builds locally from `./caddy` and
+bind-mounts its Caddyfile, so a Caddyfile change needs `docker compose restart caddy` rather than a
+pull. Its admin API is disabled in that build, which makes `caddy reload` adapt the config and then
+fail to apply it, silently.
 
 Three things to have right before running it:
 
 - **`KIPPER_STATUS_TOKEN` needs to be in the environment, or in a `.env` beside the compose file.**
   Compose interpolates it at `up` time and an unset variable becomes an empty one, which disables
   `/status` silently. The endpoint answers 404 from then on and monitoring goes quiet with it.
-- **The registry survives the rebuild.** It lives in the `gateway-data` volume mounted at `/data`, so
+- **The registry survives the update.** It lives in the `gateway-data` volume mounted at `/data`, so
   registrations, tokens and held names outlast the container. That volume is what to back up; the image
   holds nothing you need.
 - **Let it stop cleanly.** `up -d` sends SIGTERM and honours `stop_grace_period`, so the drain and the
