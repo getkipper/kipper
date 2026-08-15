@@ -256,3 +256,40 @@ func registrable(subdomain, ip string) bool {
 	return hostnames.ValidateClusterLabel(subdomain) == nil &&
 		(!hostnames.IPShapedLabel(subdomain) || subdomain == hostnames.LabelForIP(ip))
 }
+
+// A label that spells an address it no longer points at is reported rather than
+// dropped, because a moved cluster and a squatter look the same in persisted
+// state. The operator needs to see them; the gateway must not guess.
+func TestFlagEntriesReportsWithoutRemoving(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	now := time.Now().UTC().Format(time.RFC3339)
+	entry := func(sub, ip string) string {
+		return `{"subdomain":"` + sub + `","ip":"` + ip + `","token":"tok-` + sub +
+			`","created_at":"` + now + `","last_seen":"` + now + `"}`
+	}
+	snap := `{"entries":[` +
+		entry("203-0-113-10", "198.51.100.5") + `,` + // moved, or squatted: indistinguishable
+		entry("203-0-113-78", "203.0.113.78") + `,` +
+		entry("acme", "203.0.113.2") +
+		`]}`
+	if err := os.WriteFile(path, []byte(snap), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := New()
+	if err := r.LoadFrom(path); err != nil {
+		t.Fatal(err)
+	}
+	flagged := r.FlagEntries(func(subdomain, ip string) bool {
+		return hostnames.IPShapedLabel(subdomain) && subdomain != hostnames.LabelForIP(ip)
+	})
+	if len(flagged) != 1 || flagged[0] != "203-0-113-10" {
+		t.Errorf("flagged = %v, want [203-0-113-10]", flagged)
+	}
+	if r.Lookup("203-0-113-10") == nil {
+		t.Error("a flagged registration must keep serving; reporting is not removing")
+	}
+	if r.Count() != 3 {
+		t.Errorf("Count = %d, want 3; nothing may be removed by a report", r.Count())
+	}
+}
