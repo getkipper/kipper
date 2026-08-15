@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/getkipper/kipper/controller/pkg/hostnames"
 	"github.com/getkipper/kipper/gateway/internal/registry"
@@ -186,28 +187,18 @@ func TestRegisterAllowsLabelsThatOnlyLookNumeric(t *testing.T) {
 	}
 }
 
-// registrableEntry is what startup re-applies to persisted state. It carries the
-// label rule, so a name reserved by a later build stops serving on the next
-// restart rather than being protected only against new registrations.
-//
-// It deliberately does NOT carry the address guard. A label spelling an address
-// it no longer points at has two indistinguishable causes in persisted state: a
-// cluster that moved to a new server and kept its original name, and a squatter
-// who took someone else's default name before the guard existed. Dropping both
-// takes a live cluster off the air on a gateway restart; keeping both costs one
-// operator their default name, which they can work around by choosing another.
-// handleRegister stops new ones being created either way, so the ambiguity is
-// confined to entries written before that guard, and it shrinks to nothing.
-func TestRegistrableEntryAppliesTheLabelRule(t *testing.T) {
-	refused := map[string]struct{ subdomain, ip string }{
-		"a label reserved only by the newer policy": {"login", "203.0.113.1"},
-		"a long-standing reserved label":            {"console", "203.0.113.1"},
-		"a route-shadowing label":                   {"console--acme", "203.0.113.1"},
-		"a malformed label":                         {"UPPER", "203.0.113.1"},
+// The label rule startup re-applies, expressed through prunableEntry: a name
+// nothing ever served under and which the current policy refuses is released.
+func TestStartupPruneAppliesTheLabelRule(t *testing.T) {
+	refused := map[string]string{
+		"a label reserved only by the newer policy": "login",
+		"a long-standing reserved label":            "console",
+		"a route-shadowing label":                   "console--acme",
+		"a malformed label":                         "UPPER",
 	}
-	for why, e := range refused {
-		if registrableEntry(e.subdomain, e.ip) {
-			t.Errorf("registrableEntry(%q, %q) = true, want false (%s)", e.subdomain, e.ip, why)
+	for why, label := range refused {
+		if !prunableEntry(&registry.Entry{Subdomain: label, IP: "203.0.113.1"}) {
+			t.Errorf("prunableEntry(%q) = false, want true (%s)", label, why)
 		}
 	}
 
@@ -215,13 +206,89 @@ func TestRegistrableEntryAppliesTheLabelRule(t *testing.T) {
 		"an ordinary name":              {"acme", "203.0.113.2"},
 		"a server's own default name":   {"203-0-113-78", "203.0.113.78"},
 		"a merely numeric-looking name": {"999-0-0-1", "198.51.100.4"},
-		// The case this exists for: a cluster that moved servers keeps the name
-		// its links were published under, so its label stops matching its address.
+		// A cluster that moved servers keeps the name its links were published
+		// under, so its label stops matching its address. The address guard is
+		// reported rather than enforced here for exactly that reason.
 		"a cluster that moved to a new server": {"203-0-113-10", "198.51.100.5"},
 	}
 	for why, e := range kept {
-		if !registrableEntry(e.subdomain, e.ip) {
-			t.Errorf("registrableEntry(%q, %q) = false, want true (%s)", e.subdomain, e.ip, why)
+		if prunableEntry(&registry.Entry{Subdomain: e.subdomain, IP: e.ip}) {
+			t.Errorf("prunableEntry(%q, %q) = true, want false (%s)", e.subdomain, e.ip, why)
 		}
+	}
+}
+
+// Reserving a name must not evict a cluster already serving under it. Expanding
+// the reserved list is a rule for new claims; applying it retroactively to a live
+// registration deletes its token, takes it off the air on a restart it did not
+// ask for, and breaks the promise that a minor upgrade leaves a working cluster
+// working. A name nobody ever served is a different matter: nothing is running,
+// so the reservation takes effect.
+func TestStartupPruneSparesALabelThatHasServed(t *testing.T) {
+	served := &registry.Entry{Subdomain: "docs", IP: "203.0.113.1", FirstProvenAt: time.Now().Add(-72 * time.Hour)}
+	if prunableEntry(served) {
+		t.Error("a reserved-now label that has served must be kept, not deleted")
+	}
+	if !grandfatheredEntry(served) {
+		t.Error("it must be reported so an operator can deal with it deliberately")
+	}
+
+	neverServed := &registry.Entry{Subdomain: "docs", IP: "203.0.113.1"}
+	if !prunableEntry(neverServed) {
+		t.Error("a reserved-now label that never served must be released")
+	}
+
+	// An ordinary name is untouched either way.
+	fine := &registry.Entry{Subdomain: "acme", IP: "203.0.113.2", FirstProvenAt: time.Now()}
+	if prunableEntry(fine) || grandfatheredEntry(fine) {
+		t.Error("a registrable label must be neither pruned nor reported")
+	}
+
+	// A route-shadowing label is malformed rather than merely reserved, and could
+	// never have been claimed through a supported path.
+	shadow := &registry.Entry{Subdomain: "console--acme", IP: "203.0.113.3"}
+	if !prunableEntry(shadow) {
+		t.Error("a route-shadowing label must still be dropped")
+	}
+}
+
+// The reserved and address guards decide who may CREATE a name. Applied to an
+// authenticated renewal they starve a registration the gateway has already
+// decided to keep: startup grandfathers a proven cluster on a now-reserved label
+// and logs that a restart will not take it away, while every heartbeat gets a 409,
+// its proof lease dies within the week and the name lapses anyway. Same for a
+// cluster that moved servers keeping its address-derived name.
+func TestGuardsDoNotRefuseAnAuthenticatedRenewal(t *testing.T) {
+	reg := registry.New()
+	handler := handleRegister(reg, "kipper.run", neverObserve)
+
+	// A name that was registrable when it was claimed.
+	entry, _, err := reg.Register("203-0-113-77", "203.0.113.77", "")
+	if err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	// The server moves. Its label now spells an address it no longer points at,
+	// which is precisely the case startup reports and keeps.
+	body := `{"subdomain":"203-0-113-77","ip":"198.51.100.9","token":"` + entry.Token + `"}`
+	if code, _ := postRegister(t, handler, body); code == http.StatusConflict {
+		t.Error("an authenticated move of an address-derived name must not be refused")
+	}
+
+	// And a label the current policy reserves, held from before it was. Register
+	// is the registry API, which carries no reserved list, so this is exactly the
+	// state a grandfathered entry loads in.
+	held, _, err := reg.Register("docs", "203.0.113.5", "")
+	if err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	renewal := `{"subdomain":"docs","ip":"203.0.113.5","token":"` + held.Token + `"}`
+	if code, _ := postRegister(t, handler, renewal); code == http.StatusConflict {
+		t.Error("an authenticated renewal of a now-reserved label must not be refused")
+	}
+
+	// A stranger still cannot take either one.
+	if code, _ := postRegister(t, handler, `{"subdomain":"203-0-113-77","ip":"198.51.100.20"}`); code != http.StatusConflict {
+		t.Errorf("an anonymous claim of another server's name: got %d, want 409", code)
 	}
 }

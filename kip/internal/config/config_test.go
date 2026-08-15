@@ -321,3 +321,29 @@ func TestGetClusterByHost(t *testing.T) {
 
 	assert.Nil(t, cfg.GetClusterByHost("192.0.2.99"))
 }
+
+// One server has two spellings once --host accepts a hostname: the name and the
+// address it resolves to. A lookup that matches only the literal string treats
+// them as different servers, so a reinstall spelled the other way misses the
+// existing entry and loses its gateway token, DNS resolvers and trusted proxies.
+func TestGetClusterByHostMatchesEitherSpelling(t *testing.T) {
+	cfg := &Config{Clusters: []Cluster{
+		{Name: "lab.kipper.run", Host: "157.180.46.126", GatewayToken: "tok"},
+		{Name: "other", Host: "198.51.100.4"},
+	}}
+
+	if got := cfg.GetClusterByHost("157.180.46.126", "box.kipper.sh"); got == nil || got.Name != "lab.kipper.run" {
+		t.Errorf("the recorded spelling must match, got %v", got)
+	}
+	if got := cfg.GetClusterByHost("box.kipper.sh", "157.180.46.126"); got == nil || got.Name != "lab.kipper.run" {
+		t.Errorf("the resolved address must match an entry recorded under it, got %v", got)
+	}
+	if got := cfg.GetClusterByHost("nothing.example.com", "203.0.113.9"); got != nil {
+		t.Errorf("an unrelated server must not match, got %v", got)
+	}
+	// An empty alias must not match an entry that happens to have an empty host.
+	cfg.Clusters = append(cfg.Clusters, Cluster{Name: "hostless"})
+	if got := cfg.GetClusterByHost("box.kipper.sh", ""); got != nil {
+		t.Errorf("an empty alias must match nothing, got %v", got)
+	}
+}

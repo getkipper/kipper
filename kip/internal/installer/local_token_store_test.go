@@ -198,7 +198,7 @@ func TestClearTokenIfHeldLeavesACredentialItDoesNotOwn(t *testing.T) {
 		t.Fatalf("seeding: %v", err)
 	}
 
-	if err := clearTokenIfHeld("203.0.113.10", "tok-this-install-gave-back"); err != nil {
+	if err := clearTokenIfHeld("tok-this-install-gave-back"); err != nil {
 		t.Fatalf("an entry holding something else is not a failure: %v", err)
 	}
 
@@ -225,7 +225,7 @@ func TestClearTokenIfHeldClearsTheTokenItGaveBack(t *testing.T) {
 		t.Fatalf("seeding: %v", err)
 	}
 
-	if err := clearTokenIfHeld("203.0.113.10", "tok-gave-back"); err != nil {
+	if err := clearTokenIfHeld("tok-gave-back"); err != nil {
 		t.Fatalf("clearTokenIfHeld: %v", err)
 	}
 	cfg, _ = config.Load()

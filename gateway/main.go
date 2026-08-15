@@ -184,14 +184,19 @@ func main() {
 	// a label reserved by a later build, or one spelling somebody else's address,
 	// would keep serving for as long as its holder renewed it. Re-applied every
 	// startup and safe to run when nothing matches.
-	if dropped := reg.PruneEntries(registrableEntry); dropped > 0 {
-		log.Printf("dropped %d persisted registration(s) the current label policy refuses", dropped)
+	if dropped := reg.PruneEntries(prunableEntry); dropped > 0 {
+		log.Printf("dropped %d persisted registration(s) whose label the current policy refuses and which never served", dropped)
 		pruned = true
 	}
 	// Named, not acted on. Each of these is either a cluster that moved servers
 	// and kept its name, which must keep serving, or a label taken from another
 	// server before the registration guard existed, which an operator can release
 	// by hand. Only an operator can tell which.
+	if held := reg.FlagEntries(grandfatheredEntry); len(held) > 0 {
+		log.Printf("%d registration(s) hold a label the current policy would refuse and are kept because they have served: %s. "+
+			"Retire them by agreement with whoever runs them; a restart will not take them from you",
+			len(held), strings.Join(held, ", "))
+	}
 	if flagged := reg.FlagEntries(addressMismatch); len(flagged) > 0 {
 		log.Printf("%d registration(s) carry a label spelling an address they do not point at: %s. "+
 			"Each is a cluster that changed servers, or a name claimed from another server before this was refused. "+
@@ -544,7 +549,17 @@ func handleRegister(reg *registry.Registry, baseDomain string, observe observeFu
 			return
 		}
 
-		if hostnames.ReservedLabels[req.Subdomain] {
+		// Both guards below decide who may TAKE a name, so neither applies to
+		// whoever already holds it. Applied to an authenticated renewal they
+		// starve a registration the gateway has otherwise decided to keep: a
+		// cluster that moved servers keeps its address-derived name, and a label
+		// reserved after it was claimed is grandfathered at startup. Refusing
+		// their heartbeats kills the proof lease within the week and lapses the
+		// name anyway, by a slower route. The shape rules above stay
+		// unconditional, because nothing legitimate ever held those.
+		renewal := reg.HeldBy(req.Subdomain, req.Token)
+
+		if !renewal && hostnames.ReservedLabels[req.Subdomain] {
 			respondError(w, http.StatusConflict, "subdomain is reserved")
 			return
 		}
@@ -561,7 +576,7 @@ func handleRegister(reg *registry.Registry, baseDomain string, observe observeFu
 		// link under it points wherever the holder chose. Checked after the
 		// public-IP guard, so the address compared against is one the gateway
 		// would route to.
-		if hostnames.IPShapedLabel(req.Subdomain) && req.Subdomain != hostnames.LabelForIP(req.IP) {
+		if !renewal && hostnames.IPShapedLabel(req.Subdomain) && req.Subdomain != hostnames.LabelForIP(req.IP) {
 			respondError(w, http.StatusConflict,
 				"a subdomain that spells an IP address may only be registered by that address")
 			return
@@ -857,14 +872,31 @@ func boolEnvDefaultTrue(name string) bool {
 // which choosing another name resolves. New registrations cannot create either
 // case, so this is confined to entries written before the guard and shrinks to
 // nothing. addressMismatch names them in the log rather than acting on them.
-func registrableEntry(subdomain, ip string) bool {
-	return hostnames.ValidateClusterLabel(subdomain) == nil
+// prunableEntry reports whether a persisted registration should be dropped at
+// startup: its label fails the current rule AND nothing ever served under it.
+//
+// The second half is what keeps this from being a breaking migration. Expanding
+// the reserved list governs new claims; applying it to a name a cluster is
+// already serving would delete that registration and its token on a restart the
+// operator did not ask for, taking a working cluster off the air and leaving it
+// unable to authenticate a renewal. That is precisely what a minor upgrade must
+// not do. A label nothing ever served has no such cost, so the reservation takes
+// effect there, which is what stops a squatter keeping a newly reserved name.
+func prunableEntry(e *registry.Entry) bool {
+	return hostnames.ValidateClusterLabel(e.Subdomain) != nil && e.FirstProvenAt.IsZero()
+}
+
+// grandfatheredEntry reports a live registration the current label rule would
+// refuse. It keeps serving; naming it in the log is what lets an operator retire
+// it deliberately, by agreement with whoever runs it, rather than by restart.
+func grandfatheredEntry(e *registry.Entry) bool {
+	return hostnames.ValidateClusterLabel(e.Subdomain) != nil && !e.FirstProvenAt.IsZero()
 }
 
 // addressMismatch reports a label that spells an address other than the one it
 // points at. Reported, never acted on: see registrableEntry.
-func addressMismatch(subdomain, ip string) bool {
-	return hostnames.IPShapedLabel(subdomain) && subdomain != hostnames.LabelForIP(ip)
+func addressMismatch(e *registry.Entry) bool {
+	return hostnames.IPShapedLabel(e.Subdomain) && e.Subdomain != hostnames.LabelForIP(e.IP)
 }
 
 // isPublicIP reports whether s is an address the gateway may register and proxy
@@ -889,7 +921,15 @@ func handleDeregister(reg *registry.Registry, proxy *Proxy) http.HandlerFunc {
 		proxy.forgetCluster(subdomain)
 
 		if err := reg.SaveTo(dataPath); err != nil {
-			log.Printf("failed to persist registry: %v", err)
+			// Do not acknowledge a release that is not on disk. The caller reads
+			// 204 as "the name is gone" and deletes the only token that could
+			// release it again, while a restart before the next flush reloads the
+			// old registration and resumes routing to a wiped address. The entry
+			// is already out of memory and still marked dirty, so the periodic
+			// flush retries; the caller is told to as well.
+			log.Printf("failed to persist the release of %s: %v", subdomain, err)
+			respondError(w, http.StatusInternalServerError, "the release could not be recorded; retry")
+			return
 		}
 
 		w.WriteHeader(http.StatusNoContent)

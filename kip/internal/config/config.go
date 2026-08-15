@@ -286,10 +286,21 @@ func (c *Config) GetCluster(name string) *Cluster {
 // host is the stable identity of a server across renames and domain moves,
 // which is what a reinstall must key on: the entry's Name can be a short
 // alias and its Domain changes with 'kip cluster domain'.
-func (c *Config) GetClusterByHost(host string) *Cluster {
-	for i := range c.Clusters {
-		if c.Clusters[i].Host == host {
-			return &c.Clusters[i]
+// Since --host accepts a hostname as well as an address, one server has two
+// spellings and an entry is recorded under whichever the operator typed. Matching
+// only the literal string makes a reinstall spelled the other way look like a
+// different server: it misses the entry, so the gateway token, DNS resolvers and
+// trusted proxies are not inherited, and the install applies defaults to a live
+// cluster. Pass every spelling in hand; empty ones match nothing.
+func (c *Config) GetClusterByHost(spellings ...string) *Cluster {
+	for _, host := range spellings {
+		if host == "" {
+			continue
+		}
+		for i := range c.Clusters {
+			if c.Clusters[i].Host == host {
+				return &c.Clusters[i]
+			}
 		}
 	}
 	return nil

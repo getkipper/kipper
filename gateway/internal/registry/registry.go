@@ -119,13 +119,6 @@ type Entry struct {
 	// its name, and reading the mutable fields handed that name straight to the
 	// next caller.
 	FirstProvenAt time.Time `json:"first_proven_at,omitzero"`
-
-	// ReleasedAt records a deliberate release (a `kip cluster uninstall`). The
-	// registration stops routing from that moment, and holds its label as a
-	// tombstone from there rather than from wherever the inactivity clock would
-	// have put it. The token stays, because it is what lets the operator take
-	// the name back.
-	ReleasedAt time.Time `json:"released_at,omitzero"`
 }
 
 // Registry stores subdomain-to-IP mappings. In the MVP this is
@@ -275,8 +268,8 @@ func (r *Registry) Register(subdomain, ip, token string) (*Entry, Outcome, error
 		case !authorised:
 			return nil, Unauthenticated, fmt.Errorf("%w: %q", ErrSubdomainTaken, subdomain)
 		case existing.IP == ip:
-			// Clearing ReleasedAt is what revives a tombstoned label for the
-			// operator who released it. Only the token holder reaches here.
+			// Only the token holder reaches here, which is what makes this a
+			// revival of a lapsed label rather than a takeover of it.
 			if reviving {
 				// The label stopped serving, so whatever answers at this address
 				// now has to demonstrate control before traffic returns. Keeping
@@ -284,12 +277,10 @@ func (r *Registry) Register(subdomain, ip, token string) (*Entry, Outcome, error
 				// before the cluster went away.
 				r.clearProofLocked(existing)
 			}
-			existing.ReleasedAt = time.Time{}
 			existing.LastSeen = time.Now()
 			r.dirty = true
 			return existing, Renewed, nil
 		default:
-			existing.ReleasedAt = time.Time{}
 			existing.IP = ip
 			existing.LastSeen = time.Now()
 			r.clearPinLocked(existing)
@@ -346,14 +337,18 @@ func (r *Registry) clearProofLocked(entry *Entry) {
 	entry.ChallengeExpiry = time.Time{}
 }
 
-// Deregister stops a subdomain serving by its management token and returns the
+// Deregister removes a subdomain by its management token and returns the
 // subdomain, so callers can drop whatever per-registration state they hold
 // alongside the registry.
 //
-// A label that ever served is held as a tombstone rather than freed: the
-// operator's published links outlive their uninstall, and the same token takes
-// the name back. A label that never proved control is freed outright, so an
-// install that failed on the way up does not park a name nothing ever served.
+// A deliberate release frees the label outright, with no tombstone. The
+// tombstone exists for the accident — a cluster that went quiet and lapsed,
+// where nobody decided anything — and holding a released name for its previous
+// holder is worse than useless: `kip cluster uninstall` deletes the local entry
+// and its token, and the wiped cluster takes its copy with it, so the name would
+// be held for ninety days with nothing anywhere able to reclaim it. Releasing is
+// also how an operator rebuilds a box under the same name, which a hold would
+// block for a season.
 func (r *Registry) Deregister(token string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -363,24 +358,22 @@ func (r *Registry) Deregister(token string) (string, error) {
 		return "", fmt.Errorf("invalid token")
 	}
 
-	entry, ok := r.entries[subdomain]
-	if !ok || entry.FirstProvenAt.IsZero() {
-		delete(r.entries, subdomain)
-		delete(r.tokens, token)
-		r.dirty = true
-		return subdomain, nil
-	}
-
-	entry.ReleasedAt = time.Now()
-	// The pin stays. A rebuilt server serving a different key then fails the
-	// pinned handshake rather than being accepted through unpinned grace, and the
-	// heartbeat asserts the new fingerprint through a token-authenticated call.
-	// The proof lease is dropped by the revival instead, so nothing routes here
-	// until control of the address is demonstrated again.
-	entry.ChallengeNonce, entry.ChallengeExpiry = "", time.Time{}
+	delete(r.entries, subdomain)
+	delete(r.tokens, token)
 	r.dirty = true
 
 	return subdomain, nil
+}
+
+// HeldBy reports whether subdomain exists and token is its management token.
+// It is what separates a renewal from a claim, so the guards that decide who may
+// take a name are not applied to whoever already holds it.
+func (r *Registry) HeldBy(subdomain, token string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	entry, ok := r.entries[subdomain]
+	return ok && token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(entry.Token)) == 1
 }
 
 // Lookup returns a copy of the entry for a subdomain, or nil if not found.
@@ -422,13 +415,17 @@ func (r *Registry) isExpiredLocked(entry *Entry) bool {
 // actually began. Caller holds r.mu.
 func (r *Registry) lapsedAtLocked(entry *Entry) (time.Time, bool) {
 	now := time.Now()
-	if !entry.ReleasedAt.IsZero() {
-		return entry.ReleasedAt, true
-	}
 	if inactive := entry.LastSeen.Add(r.InactivityTTL); now.After(inactive) {
 		return inactive, true
 	}
-	if r.EnforceProof && !everProvenLocked(entry) {
+	// FirstProvenAt, not the current lease. A move and a revival both clear the
+	// lease on purpose, so reading it here made a cluster that had served for
+	// months lapse the instant it changed address: it could then get no challenge
+	// to re-prove with, and its tombstone clock, anchored at this CreatedAt+2h,
+	// was already spent, so the next sweep handed its name to the pool. The rule
+	// is meant to deny a squatter a label nothing ever served under, and that is
+	// exactly what FirstProvenAt records.
+	if r.EnforceProof && entry.FirstProvenAt.IsZero() {
 		if unproven := entry.CreatedAt.Add(unprovenReservationTTL); now.After(unproven) {
 			return unproven, true
 		}

@@ -25,6 +25,7 @@ import (
 	"github.com/getkipper/kipper/console-api/internal/gitcred"
 	"github.com/getkipper/kipper/console-api/internal/giturl"
 	"github.com/getkipper/kipper/console-api/internal/registrycred"
+	"github.com/getkipper/kipper/controller/pkg/labels"
 )
 
 // Default build container limits, used when an app sets no override and the
@@ -131,8 +132,8 @@ const (
 	// supply chain is fixed at publish time. v1.22.2 verified 2026-07-20 as
 	// the newest tag published to quay.io/skopeo/stable.
 	skopeoImage    = "quay.io/skopeo/stable:v1.22.2-immutable"
-	buildLabel     = "kipper.run/build"
-	appLabel       = "kipper.run/app"
+	buildLabel     = labels.Build
+	appLabel       = labels.AppRef
 	managedByLabel = "app.kubernetes.io/managed-by"
 	managedByValue = "kipper"
 	// projectLabel names the project a tenant namespace belongs to. It is
@@ -143,12 +144,12 @@ const (
 	// a build's objects carry the source (tenant) namespace and the App UID:
 	// the source-namespace label scopes lifecycle lookups to the right app,
 	// and the UID distinguishes a deleted-and-recreated App of the same name.
-	sourceNamespaceLabel = "kipper.run/source-namespace"
+	sourceNamespaceLabel = labels.SourceNamespace
 	appUIDLabel          = "kipper.run/app-uid"
 
 	// buildsNamespace is the installer-owned namespace all builds run in, away
 	// from any tenant-readable surface (see kip/internal/installer/builds.go).
-	buildsNamespace = "kipper-builds"
+	buildsNamespace = labels.BuildsNamespace
 	// buildsServiceAccount is the zero-permission identity build pods run as.
 	buildsServiceAccount = "kipper-builder"
 

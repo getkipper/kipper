@@ -19,7 +19,10 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+
 	"k8s.io/client-go/util/retry"
+
+	"github.com/getkipper/kipper/controller/pkg/labels"
 
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/kip/internal/auth"
@@ -728,10 +731,46 @@ func runAppRebuild(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// latestBuildPod returns the most recent build Pod for an app.
+//
+// Builds run in labels.BuildsNamespace, never beside the app they build, so the
+// app's own namespace is the wrong place to look: listing there finds nothing
+// however well the build went, and reported "no build found" for apps that had
+// built and were serving. The app's namespace still matters as a filter, since
+// two projects may each hold an app of the same name and their builds share one
+// namespace.
+func latestBuildPod(ctx context.Context, clientset kubernetes.Interface, appName, appNamespace string) (*corev1.Pod, error) {
+	selector := fmt.Sprintf("%s=%s,%s=%s,%s=%s",
+		labels.AppRef, appName,
+		labels.Build, labels.BuildTrue,
+		labels.SourceNamespace, appNamespace)
+
+	pods, err := clientset.CoreV1().Pods(labels.BuildsNamespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		// Distinct from an empty list. Reporting a refused or failed request as
+		// "no build found" sends the reader hunting for a build that may be
+		// running perfectly well.
+		return nil, fmt.Errorf("listing builds for %q in %s: %w", appName, labels.BuildsNamespace, err)
+	}
+	if len(pods.Items) == 0 {
+		return nil, fmt.Errorf("no build found for %q in project namespace %s. A build's pod is removed an hour after it finishes, "+
+			"so this is also what a build that completed a while ago looks like. Run 'kip app build %s' to start a new one",
+			appName, appNamespace, appName)
+	}
+
+	latest := pods.Items[0]
+	for _, p := range pods.Items[1:] {
+		if p.CreationTimestamp.After(latest.CreationTimestamp.Time) {
+			latest = p
+		}
+	}
+	return &latest, nil
+}
+
 func runAppBuildLogs(cmd *cobra.Command, args []string) error {
 	appName := args[0]
 
-	ns, k8sClient, err := resolveAppNamespace(cmd, appName)
+	appNamespace, k8sClient, err := resolveAppNamespace(cmd, appName)
 	if err != nil {
 		return err
 	}
@@ -739,20 +778,9 @@ func runAppBuildLogs(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	clientset := k8sClient.Clientset()
 
-	// Find the latest build pod
-	pods, err := clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("kipper.run/app=%s,kipper.run/build=true", appName),
-	})
-	if err != nil || len(pods.Items) == 0 {
-		return fmt.Errorf("no build found for %q", appName)
-	}
-
-	// Find the most recent pod
-	latest := pods.Items[0]
-	for _, p := range pods.Items[1:] {
-		if p.CreationTimestamp.After(latest.CreationTimestamp.Time) {
-			latest = p
-		}
+	latest, err := latestBuildPod(ctx, clientset, appName, appNamespace)
+	if err != nil {
+		return err
 	}
 
 	fmt.Printf("  Streaming build logs for %s (pod: %s)...\n\n", appName, latest.Name)
@@ -760,7 +788,7 @@ func runAppBuildLogs(cmd *cobra.Command, args []string) error {
 	// Stream all container logs (init + main)
 	for _, c := range append(latest.Spec.InitContainers, latest.Spec.Containers...) {
 		tailLines := int64(1000)
-		logReq := clientset.CoreV1().Pods(ns).GetLogs(latest.Name, &corev1.PodLogOptions{
+		logReq := clientset.CoreV1().Pods(labels.BuildsNamespace).GetLogs(latest.Name, &corev1.PodLogOptions{
 			Container: c.Name,
 			Follow:    true,
 			TailLines: &tailLines,

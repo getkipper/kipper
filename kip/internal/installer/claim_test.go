@@ -11,8 +11,9 @@ import (
 )
 
 type fakeRegistrar struct {
-	reg *domain.Registration
-	err error
+	gotIP string
+	reg   *domain.Registration
+	err   error
 	// accepts is the token this gateway recognises; anything else draws the
 	// tokenless, challengeless answer it gives a stranger.
 	accepts    string
@@ -26,8 +27,9 @@ func (f *fakeRegistrar) Deregister(token string) error {
 	return f.releaseErr
 }
 
-func (f *fakeRegistrar) Register(_, _, token string) (*domain.Registration, error) {
+func (f *fakeRegistrar) Register(_, ip, token string) (*domain.Registration, error) {
 	f.sawToken = token
+	f.gotIP = ip
 	if f.reg != nil && f.reg.Token == "" && token != "" && token == f.accepts {
 		// A renewal the gateway authorised: tokenless, but challenged.
 		withChallenge := *f.reg
@@ -39,18 +41,28 @@ func (f *fakeRegistrar) Register(_, _, token string) (*domain.Registration, erro
 
 type fakeStore struct {
 	known     string
+	knownHost string
 	saved     string
 	saveErr   error
 	savedFor  string
 	savedName string
+	savedHost string
+	askedHost string
 }
 
-func (s *fakeStore) tokenFor(string) string { return s.known }
+func (s *fakeStore) tokenFor(host string) string {
+	s.askedHost = host
+	if s.knownHost != "" && s.knownHost != host {
+		return ""
+	}
+	return s.known
+}
 func (s *fakeStore) save(host, clusterName, token string) error {
 	if s.saveErr != nil {
 		return s.saveErr
 	}
 	s.savedFor, s.savedName, s.saved = host, clusterName, token
+	s.savedHost = host
 	return nil
 }
 
@@ -60,7 +72,7 @@ func TestClaimRecordsTheTokenTheGatewayDisclosesOnce(t *testing.T) {
 	gw := &fakeRegistrar{reg: &domain.Registration{Domain: "203-0-113-10.kipper.run", Token: "tok-new"}}
 	store := &fakeStore{}
 
-	claim, err := claimGatewayName(gw, store, "203-0-113-10", "203.0.113.10")
+	claim, err := claimGatewayName(gw, store, "203-0-113-10", "203.0.113.10", "203.0.113.10")
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -87,7 +99,7 @@ func TestClaimRecordsTheTokenTheGatewayDisclosesOnce(t *testing.T) {
 func TestClaimRefusesANameItCannotProveItOwns(t *testing.T) {
 	gw := &fakeRegistrar{reg: &domain.Registration{Domain: "203-0-113-10.kipper.run"}}
 
-	_, err := claimGatewayName(gw, &fakeStore{}, "203-0-113-10", "203.0.113.10")
+	_, err := claimGatewayName(gw, &fakeStore{}, "203-0-113-10", "203.0.113.10", "203.0.113.10")
 	if err == nil {
 		t.Fatal("a registration without a token must fail the install, not build an unreachable cluster")
 	}
@@ -103,7 +115,7 @@ func TestClaimPresentsATokenItAlreadyHolds(t *testing.T) {
 	gw := &fakeRegistrar{reg: &domain.Registration{Domain: "203-0-113-10.kipper.run"}, accepts: "tok-held"}
 	store := &fakeStore{known: "tok-held"}
 
-	claim, err := claimGatewayName(gw, store, "203-0-113-10", "203.0.113.10")
+	claim, err := claimGatewayName(gw, store, "203-0-113-10", "203.0.113.10", "203.0.113.10")
 	if err != nil {
 		t.Fatalf("a retry holding the token must succeed: %v", err)
 	}
@@ -118,7 +130,7 @@ func TestClaimPresentsATokenItAlreadyHolds(t *testing.T) {
 func TestClaimSurfacesAGatewayFailure(t *testing.T) {
 	gw := &fakeRegistrar{err: errors.New("gateway: 503")}
 
-	if _, err := claimGatewayName(gw, &fakeStore{}, "203-0-113-10", "203.0.113.10"); err == nil {
+	if _, err := claimGatewayName(gw, &fakeStore{}, "203-0-113-10", "203.0.113.10", "203.0.113.10"); err == nil {
 		t.Fatal("a gateway that cannot be reached must fail the install")
 	}
 }
@@ -129,7 +141,7 @@ func TestClaimReportsWhenTheTokenCannotBeRecorded(t *testing.T) {
 	gw := &fakeRegistrar{reg: &domain.Registration{Domain: "203-0-113-10.kipper.run", Token: "tok-new"}}
 	store := &fakeStore{saveErr: errors.New("read-only file system")}
 
-	if _, err := claimGatewayName(gw, store, "203-0-113-10", "203.0.113.10"); err == nil {
+	if _, err := claimGatewayName(gw, store, "203-0-113-10", "203.0.113.10", "203.0.113.10"); err == nil {
 		t.Fatal("a token that could not be recorded must be reported, not assumed durable")
 	}
 }
@@ -142,7 +154,7 @@ func TestClaimReleasesAFreshNameItCannotRecord(t *testing.T) {
 	gw := &fakeRegistrar{reg: &domain.Registration{Domain: "203-0-113-10.kipper.run", Token: "tok-new"}}
 	store := &fakeStore{saveErr: errors.New("read-only file system")}
 
-	_, err := claimGatewayName(gw, store, "203-0-113-10", "203.0.113.10")
+	_, err := claimGatewayName(gw, store, "203-0-113-10", "203.0.113.10", "203.0.113.10")
 	if err == nil {
 		t.Fatal("an unrecordable claim must fail")
 	}
@@ -160,7 +172,7 @@ func TestClaimNeverReleasesANameItOnlyRenewed(t *testing.T) {
 	gw := &fakeRegistrar{reg: &domain.Registration{Domain: "203-0-113-10.kipper.run"}, accepts: "tok-held"}
 	store := &fakeStore{known: "tok-held", saveErr: errors.New("read-only file system")}
 
-	claimed, err := claimGatewayName(gw, store, "203-0-113-10", "203.0.113.10")
+	claimed, err := claimGatewayName(gw, store, "203-0-113-10", "203.0.113.10", "203.0.113.10")
 	if err != nil {
 		t.Fatalf("a renewal holds a token that is already durable: %v", err)
 	}
@@ -176,13 +188,13 @@ func TestClaimNeverReleasesANameItOnlyRenewed(t *testing.T) {
 // tell the difference.
 func TestClaimReportsWhetherItCreatedTheRegistration(t *testing.T) {
 	fresh := &fakeRegistrar{reg: &domain.Registration{Domain: "d", Token: "tok-new"}}
-	claimed, err := claimGatewayName(fresh, &fakeStore{}, "s", "203.0.113.10")
+	claimed, err := claimGatewayName(fresh, &fakeStore{}, "s", "203.0.113.10", "203.0.113.10")
 	if err != nil || !claimed.Created {
 		t.Errorf("a disclosed token means the gateway created it: %+v %v", claimed, err)
 	}
 
 	renewed := &fakeRegistrar{reg: &domain.Registration{Domain: "d"}, accepts: "tok-held"}
-	claimed2, err2 := claimGatewayName(renewed, &fakeStore{known: "tok-held"}, "s", "203.0.113.10")
+	claimed2, err2 := claimGatewayName(renewed, &fakeStore{known: "tok-held"}, "s", "203.0.113.10", "203.0.113.10")
 	if err2 != nil || claimed2.Created {
 		t.Errorf("no new token means a renewal: %+v %v", claimed2, err2)
 	}
@@ -199,7 +211,7 @@ func TestClaimRefusesAStaleTokenTheGatewayDidNotAccept(t *testing.T) {
 	gw := &fakeRegistrar{reg: &domain.Registration{Domain: "203-0-113-10.kipper.run"}}
 	store := &fakeStore{known: "tok-no-longer-valid"}
 
-	_, err := claimGatewayName(gw, store, "203-0-113-10", "203.0.113.10")
+	_, err := claimGatewayName(gw, store, "203-0-113-10", "203.0.113.10", "203.0.113.10")
 	if err == nil {
 		t.Fatal("a token the gateway did not accept must not pass as ownership")
 	}
@@ -457,5 +469,73 @@ func TestClaimsGatewayName(t *testing.T) {
 		if claimsGatewayName(d) {
 			t.Errorf("claimsGatewayName(%q) = true, want false", d)
 		}
+	}
+}
+
+// The gateway registers an address; the local config is keyed by whatever the
+// operator typed as --host. Since 0.11.1 those differ whenever --host is a
+// hostname, and conflating them wrote the token under the resolved IP while
+// every later lookup searched for the hostname. That left two entries for one
+// cluster, the token on the wrong one, and a re-run unable to prove its own name.
+func TestClaimRecordsTheTokenUnderTheHostTheOperatorGave(t *testing.T) {
+	store := &fakeStore{}
+	gw := &fakeRegistrar{reg: &domain.Registration{Domain: "lab.kipper.run", Token: "tok-new"}}
+
+	claimed, err := claimGatewayName(gw, store, "lab", "157.180.46.126", "box.kipper.sh")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if claimed.Domain != "lab.kipper.run" {
+		t.Errorf("domain = %q", claimed.Domain)
+	}
+	if gw.gotIP != "157.180.46.126" {
+		t.Errorf("gateway registered ip=%q, want the resolved address", gw.gotIP)
+	}
+	if store.savedHost != "box.kipper.sh" {
+		t.Errorf("token saved under host=%q, want box.kipper.sh so later lookups find it", store.savedHost)
+	}
+}
+
+// A re-run has to find the token it stored last time, or it registers anonymously
+// and the gateway refuses a name the operator already owns.
+func TestClaimReadsTheTokenUnderTheSameKey(t *testing.T) {
+	store := &fakeStore{known: "tok-held", knownHost: "box.kipper.sh"}
+	gw := &fakeRegistrar{reg: &domain.Registration{Domain: "lab.kipper.run", Challenge: "nonce"}, accepts: "tok-held"}
+
+	if _, err := claimGatewayName(gw, store, "lab", "157.180.46.126", "box.kipper.sh"); err != nil {
+		t.Fatalf("a re-run holding the token must succeed: %v", err)
+	}
+	if store.askedHost != "box.kipper.sh" {
+		t.Errorf("token looked up under host=%q, want box.kipper.sh", store.askedHost)
+	}
+}
+
+// The pre-flight check in cmd runs before --host is resolved, so it may hold a
+// hostname. Comparing an address-shaped label against the dashed form of a name
+// refused an operator asking for the derived name of the very server they gave.
+// The check applies once the address is known, in installer.Run.
+func TestAddressGuardWaitsForAResolvedHost(t *testing.T) {
+	if _, _, err := KipperRunLabelFor("157-180-46-126.kipper.run", "box.kipper.sh"); err != nil {
+		t.Errorf("an unresolved --host must not trigger the address guard: %v", err)
+	}
+	// With a real address it still bites.
+	if _, _, err := KipperRunLabelFor("157-180-46-126.kipper.run", "198.51.100.9"); err == nil {
+		t.Error("another server's derived name must still be refused once the address is known")
+	}
+	if _, _, err := KipperRunLabelFor("157-180-46-126.kipper.run", "157.180.46.126"); err != nil {
+		t.Errorf("a server's own derived name must be accepted: %v", err)
+	}
+}
+
+// A literal IPv6 --host used to pass the address branch and fail much later at
+// the gateway, which is the late, unnamed failure this resolution exists to
+// replace.
+func TestGatewayAddressForRefusesLiteralIPv6(t *testing.T) {
+	got, err := gatewayAddressFor("2a01:4f9:c013:a06e::1", nil)
+	if err == nil {
+		t.Fatalf("gatewayAddressFor = %q, want an error", got)
+	}
+	if !strings.Contains(err.Error(), "--host") {
+		t.Errorf("error does not name the flag: %v", err)
 	}
 }
