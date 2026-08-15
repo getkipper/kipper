@@ -2,9 +2,11 @@ package installer
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/getkipper/kipper/controller/pkg/hostnames"
 	"github.com/getkipper/kipper/kip/internal/domain"
 )
 
@@ -373,6 +375,87 @@ func TestNormaliseDomain(t *testing.T) {
 	for in, want := range cases {
 		if got := NormaliseDomain(in); got != want {
 			t.Errorf("NormaliseDomain(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// --- resolving --host to the address the gateway registers ---
+
+func TestGatewayAddressForAcceptsAPublicIP(t *testing.T) {
+	got, err := gatewayAddressFor("157.180.46.126", nil)
+	if err != nil || got != "157.180.46.126" {
+		t.Errorf("gatewayAddressFor = %q, %v; want the address unchanged", got, err)
+	}
+}
+
+// The gateway registers addresses, so a name has to become one first. Passing it
+// through unresolved is what failed an install after preflight with "ip must be a
+// public address", a message naming neither the flag nor the value.
+func TestGatewayAddressForResolvesAHostname(t *testing.T) {
+	lookup := func(host string) ([]string, error) {
+		if host != "box.kipper.sh" {
+			t.Fatalf("looked up %q", host)
+		}
+		return []string{"2a01:4f9:c013:a06e::1", "157.180.46.126"}, nil
+	}
+	got, err := gatewayAddressFor("box.kipper.sh", lookup)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "157.180.46.126" {
+		t.Errorf("gatewayAddressFor = %q, want the public IPv4", got)
+	}
+	// The label the cluster is named after has to come from the address, not the
+	// hostname, or the cluster is called box-kipper-sh.
+	if label := hostnames.LabelForIP(got); label != "157-180-46-126" {
+		t.Errorf("label = %q, want 157-180-46-126", label)
+	}
+}
+
+func TestGatewayAddressForRefusesWhatTheGatewayWould(t *testing.T) {
+	cases := map[string]struct {
+		host   string
+		lookup func(string) ([]string, error)
+	}{
+		"a private address": {"172.31.1.1", nil},
+		"loopback":          {"127.0.0.1", nil},
+		"a hostname resolving only to private addresses": {
+			"internal.example.com",
+			func(string) ([]string, error) { return []string{"10.0.0.4", "192.168.1.9"}, nil },
+		},
+		"a hostname resolving to nothing": {
+			"nowhere.invalid",
+			func(string) ([]string, error) { return nil, fmt.Errorf("no such host") },
+		},
+		"a hostname with only IPv6": {
+			"v6.example.com",
+			func(string) ([]string, error) { return []string{"2a01:4f9:c013:a06e::1"}, nil },
+		},
+	}
+	for why, c := range cases {
+		got, err := gatewayAddressFor(c.host, c.lookup)
+		if err == nil {
+			t.Errorf("gatewayAddressFor(%q) = %q, want an error (%s)", c.host, got, why)
+			continue
+		}
+		// The operator has to be able to act on it, which means naming the flag.
+		if !strings.Contains(err.Error(), "--host") {
+			t.Errorf("gatewayAddressFor(%q) error does not mention --host: %v", c.host, err)
+		}
+	}
+}
+
+// Only an install that registers a free name needs an address. A custom domain
+// registers nothing, so a hostname is fine there and must not be refused.
+func TestClaimsGatewayName(t *testing.T) {
+	for _, d := range []string{"", "lab.kipper.run", "LAB.KIPPER.RUN"} {
+		if !claimsGatewayName(d) {
+			t.Errorf("claimsGatewayName(%q) = false, want true", d)
+		}
+	}
+	for _, d := range []string{"kipper.example.com", "example.com", "kipper.run"} {
+		if claimsGatewayName(d) {
+			t.Errorf("claimsGatewayName(%q) = true, want false", d)
 		}
 	}
 }

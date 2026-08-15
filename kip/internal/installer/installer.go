@@ -151,6 +151,21 @@ func Run(opts Options) (*Result, error) {
 		}
 	}
 
+	// The address a gateway registration will name, settled before anything is
+	// touched. --host may be a hostname, which is what SSH wants, and the gateway
+	// takes addresses only. Resolving here keeps both true and fails a name that
+	// has no public address immediately, rather than after preflight with an error
+	// naming neither the flag nor the value. A custom domain registers nothing, so
+	// it keeps whatever was given.
+	clusterAddress := opts.Host
+	if claimsGatewayName(opts.Domain) {
+		resolved, err := GatewayAddressFor(opts.Host)
+		if err != nil {
+			return nil, err
+		}
+		clusterAddress = resolved
+	}
+
 	provider := &infra.BareMetalProvider{
 		Host:           opts.Host,
 		SSHKey:         opts.SSHKeyPath,
@@ -264,7 +279,7 @@ func Run(opts Options) (*Result, error) {
 		// or a *.kipper.run --domain naming the label the operator chose. Both
 		// claim a name from the gateway, which owns that DNS. A custom domain
 		// claims nothing, because its DNS is the operator's.
-		subdomain, wantsGatewayName, labelErr := KipperRunLabelFor(opts.Domain, opts.Host)
+		subdomain, wantsGatewayName, labelErr := KipperRunLabelFor(opts.Domain, clusterAddress)
 		if labelErr != nil {
 			return nil, labelErr
 		}
@@ -273,7 +288,7 @@ func Run(opts Options) (*Result, error) {
 			claimed, claimErr := claimGatewayName(
 				domain.NewGatewayClient(opts.GatewayURL),
 				localTokenStore{},
-				subdomain, opts.Host)
+				subdomain, clusterAddress)
 			if claimErr != nil {
 				return nil, claimErr
 			}
@@ -491,10 +506,10 @@ func Run(opts Options) (*Result, error) {
 			return InstallOperatorAuth(client, resolvedHosts.DexHost)
 		}},
 		{"Deploying console", func() error {
-			return DeployConsole(client, resolvedHosts.DexHost, resolvedHosts.ConsoleHost, resolvedHosts.ConsoleAPIHost, domainName, gatewayKipperRunDomain, opts.Host)
+			return DeployConsole(client, resolvedHosts.DexHost, resolvedHosts.ConsoleHost, resolvedHosts.ConsoleAPIHost, domainName, gatewayKipperRunDomain, clusterAddress)
 		}},
 		{"Recording serving identity", func() error {
-			return InstallClusterIdentity(client, domainName, opts.ConsoleDomain, opts.ConsoleAPIDomain, opts.DexDomain, gatewayKipperRunDomain, opts.Host)
+			return InstallClusterIdentity(client, domainName, opts.ConsoleDomain, opts.ConsoleAPIDomain, opts.DexDomain, gatewayKipperRunDomain, clusterAddress)
 		}},
 		{"Deploying API key service", func() error {
 			return InstallAuthz(client)

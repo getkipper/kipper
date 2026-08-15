@@ -2,9 +2,11 @@ package installer
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/getkipper/kipper/controller/pkg/hostnames"
+	"github.com/getkipper/kipper/controller/pkg/pubip"
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/domain"
 )
@@ -19,6 +21,62 @@ import (
 // unnormalised is read as a different host than the one meant.
 func NormaliseDomain(domain string) string {
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+}
+
+// claimsGatewayName reports whether an install with this --domain registers a
+// name with the kipper.run gateway. That is what makes --host need to be an
+// address: a custom domain registers nothing, so a hostname is fine there.
+func claimsGatewayName(domain string) bool {
+	d := NormaliseDomain(domain)
+	if d == hostnames.GatewayDomain {
+		return false
+	}
+	return d == "" || hostnames.IsKipperRun(d)
+}
+
+// GatewayAddressFor returns the public address a gateway registration will name
+// for a server reached at host, resolving a hostname to get there.
+//
+// The gateway registers addresses and refuses everything else, so --host given
+// as a name has to become one before the claim. Passing the name through is what
+// failed an install after preflight with "ip must be a public address", a message
+// naming neither the flag nor the value that caused it. Resolving here also fixes
+// the label: a free name is derived from the address, and deriving it from
+// box.kipper.sh would have called the cluster box-kipper-sh.
+func GatewayAddressFor(host string) (string, error) {
+	return gatewayAddressFor(host, net.LookupHost)
+}
+
+// gatewayAddressFor is GatewayAddressFor with the resolver injected, because the
+// answers that matter (a name with no public address, one with IPv6 only) cannot
+// be produced on demand from real DNS.
+func gatewayAddressFor(host string, lookup func(string) ([]string, error)) (string, error) {
+	if net.ParseIP(host) != nil {
+		if !pubip.IsPublic(host) {
+			return "", fmt.Errorf("--host %s is not a public address, and the kipper.run gateway registers only public addresses. "+
+				"Give the server's public IP, or install on a domain you control with --domain <your-domain>", host)
+		}
+		return host, nil
+	}
+
+	if lookup == nil {
+		lookup = net.LookupHost
+	}
+	addrs, err := lookup(host)
+	if err != nil {
+		return "", fmt.Errorf("--host %s could not be resolved to an address (%w), and the kipper.run gateway registers addresses. "+
+			"Give the server's public IP, or install on a domain you control with --domain <your-domain>", host, err)
+	}
+	for _, a := range addrs {
+		// IPv4 only: a free name is the address in dashed form, which has no
+		// IPv6 spelling that fits one DNS label.
+		if ip := net.ParseIP(a); ip != nil && ip.To4() != nil && pubip.IsPublic(a) {
+			return a, nil
+		}
+	}
+	return "", fmt.Errorf("--host %s resolves to no public IPv4 address (%s), and a free kipper.run name is derived from one. "+
+		"Give the server's public IP, or install on a domain you control with --domain <your-domain>",
+		host, strings.Join(addrs, ", "))
 }
 
 // KipperRunLabelFor returns the *.kipper.run label an install claims for a
