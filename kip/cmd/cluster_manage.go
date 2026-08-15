@@ -747,7 +747,11 @@ func runClusterDomain(cmd *cobra.Command, args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("requires a domain argument, or one of --sync, --rollback, --repair")
 	}
-	return runClusterDomainForward(cmd, args[0])
+	// Canonicalise once, here, so every step of the move sees the same spelling:
+	// the gateway suffix test, the label claimed from the gateway, and the spec
+	// patch, which the CRD accepts in lowercase only. Normalising further in
+	// would leave the patch carrying whatever was typed.
+	return runClusterDomainForward(cmd, installer.NormaliseDomain(args[0]))
 }
 
 // cascadesToAllApps reports whether the given env var on console-api will

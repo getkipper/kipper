@@ -15,6 +15,7 @@ import (
 	"github.com/getkipper/kipper/kip/internal/clusteridentity"
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/domain"
+	"github.com/getkipper/kipper/kip/internal/installer"
 )
 
 const (
@@ -35,13 +36,16 @@ const (
 )
 
 // isKipperRunDomain reports whether a domain is a *.kipper.run subdomain.
+// Canonicalised first, because DNS names are case-insensitive and may be written
+// fully qualified: LAB.KIPPER.RUN and lab.kipper.run. name the same host, and a
+// raw suffix test read both as custom domains and skipped the gateway claim.
 func isKipperRunDomain(d string) bool {
-	return strings.HasSuffix(d, ".kipper.run")
+	return strings.HasSuffix(installer.NormaliseDomain(d), ".kipper.run")
 }
 
 // kipperRunLabel returns the single label of a *.kipper.run domain.
 func kipperRunLabel(d string) string {
-	return strings.TrimSuffix(d, ".kipper.run")
+	return strings.TrimSuffix(installer.NormaliseDomain(d), ".kipper.run")
 }
 
 // beginGatewayMove claims the target *.kipper.run label for this cluster before
