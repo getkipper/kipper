@@ -1105,7 +1105,7 @@ func TestNeverProvenLabelEarnsNoTombstone(t *testing.T) {
 	}
 }
 
-func TestDeregisterTombstonesAProvenLabel(t *testing.T) {
+func TestDeregisterFreesTheLabelOutright(t *testing.T) {
 	r, token := proven(t)
 
 	if _, err := r.Deregister(token); err != nil {
@@ -1117,28 +1117,11 @@ func TestDeregisterTombstonesAProvenLabel(t *testing.T) {
 	if r.Count() != 0 {
 		t.Errorf("a released label must not count as a live registration, got %d", r.Count())
 	}
-	// The operator's links outlive their uninstall, so a deliberate release
-	// holds the name too.
-	if _, _, err := r.Register("lab", "203.0.113.99", ""); !errors.Is(err, ErrSubdomainTaken) {
-		t.Errorf("a stranger claiming a just-released label must be refused, got %v", err)
-	}
-	if _, _, err := r.Register("lab", "203.0.113.1", token); err != nil {
-		t.Errorf("the previous holder must be able to reclaim it: %v", err)
-	}
-}
-
-// An install that fails before its cluster ever proved control releases the name
-// on the way out. Holding that for the tombstone window would strand a name
-// nothing ever served.
-func TestDeregisterFreesANeverProvenLabel(t *testing.T) {
-	r := New()
-	entry, _, _ := r.Register("halfbuilt", "203.0.113.1", "")
-
-	if _, err := r.Deregister(entry.Token); err != nil {
-		t.Fatalf("deregistering: %v", err)
-	}
-	if _, _, err := r.Register("halfbuilt", "203.0.113.99", ""); err != nil {
-		t.Errorf("a never-proven released label must be free at once: %v", err)
+	// No tombstone on a deliberate release: uninstall deletes the local token and
+	// the wiped cluster takes its copy, so a hold would lock the name away from
+	// everyone including its owner.
+	if _, _, err := r.Register("lab", "203.0.113.99", ""); err != nil {
+		t.Errorf("a deliberately released label must be free at once: %v", err)
 	}
 }
 
@@ -1171,22 +1154,23 @@ func TestCountReportsLiveRegistrationsOnly(t *testing.T) {
 	}
 }
 
+// The tombstone covers the accident: a cluster that went quiet and lapsed. That
+// state has to survive a gateway restart, or a stranger takes the name on the
+// next boot.
 func TestTombstoneSurvivesRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "registry.json")
 	r, token := proven(t)
-	if _, err := r.Deregister(token); err != nil {
-		t.Fatal(err)
-	}
+	r.InactivityTTL = 1 * time.Millisecond
+	time.Sleep(5 * time.Millisecond)
 	if err := r.SaveTo(path); err != nil {
 		t.Fatal(err)
 	}
 
-	// A restart that forgot the tombstone would hand the name to the next
-	// caller, which is the whole failure being prevented.
 	r2 := New()
 	if err := r2.LoadFrom(path); err != nil {
 		t.Fatal(err)
 	}
+	r2.InactivityTTL = 1 * time.Millisecond
 	if _, _, err := r2.Register("lab", "203.0.113.99", ""); !errors.Is(err, ErrSubdomainTaken) {
 		t.Errorf("the tombstone must survive a restart, got %v", err)
 	}
@@ -1219,18 +1203,18 @@ func TestSummariesIgnoreTombstonedEntries(t *testing.T) {
 // heartbeat's whole design works to avoid.
 func TestProofIsRefusedForALapsedRegistration(t *testing.T) {
 	r, token := proven(t)
-	if _, err := r.Deregister(token); err != nil {
-		t.Fatal(err)
-	}
+	r.InactivityTTL = 1 * time.Millisecond
+	time.Sleep(5 * time.Millisecond)
 
 	if _, accepted, err := r.IssueChallenge("lab", token); accepted || err != nil {
-		t.Errorf("IssueChallenge on a released registration: accepted=%v err=%v, want refused", accepted, err)
+		t.Errorf("IssueChallenge on a lapsed registration: accepted=%v err=%v, want refused", accepted, err)
 	}
 	if r.RecordProof("lab", token, "any-nonce", testFPA, "kipper-hop-proof-v1") {
-		t.Error("RecordProof on a released registration must be refused")
+		t.Error("RecordProof on a lapsed registration must be refused")
 	}
 
 	// Coming back the proper way still works, and re-arms proof.
+	r.InactivityTTL = time.Hour
 	if _, _, err := r.Register("lab", "203.0.113.1", token); err != nil {
 		t.Fatalf("reviving: %v", err)
 	}
@@ -1281,13 +1265,16 @@ func TestRevivalReArmsProof(t *testing.T) {
 	if !r.Routable("lab") {
 		t.Fatal("a freshly proven entry must be routable")
 	}
-	if _, err := r.Deregister(token); err != nil {
-		t.Fatal(err)
-	}
+	r.InactivityTTL = 1 * time.Millisecond
+	time.Sleep(5 * time.Millisecond)
 
+	// Register while the entry is still lapsed, so the revival branch runs; the
+	// TTL goes back afterwards because Register refreshes LastSeen, which is what
+	// un-lapses it.
 	if _, _, err := r.Register("lab", "203.0.113.1", token); err != nil {
 		t.Fatalf("reviving: %v", err)
 	}
+	r.InactivityTTL = time.Hour
 	if r.Routable("lab") {
 		t.Error("a revived registration must not route until it proves control again")
 	}
@@ -1314,5 +1301,65 @@ func TestRenewingALiveRegistrationKeepsItsProof(t *testing.T) {
 	}
 	if !r.Routable("lab") {
 		t.Error("a routine renewal must leave a live cluster routable")
+	}
+}
+
+// Proof-before-route is ON in production, and every test above runs with the
+// New() default of off. That gap hid this: a move clears the proof by design, and
+// the unproven-reservation rule read the current lease, so a cluster that had
+// served for months was "lapsed" the instant it moved. Once IssueChallenge and
+// RecordProof learned to refuse a lapsed entry, that became a deadlock the
+// cluster can never leave, and the tombstone clock, anchored at CreatedAt+2h,
+// was already spent for anything older than 90 days, so Cleanup deleted the name
+// outright and handed it to the pool.
+func TestAProvenClusterCanMoveWhileEnforcing(t *testing.T) {
+	r, token := proven(t)
+	r.EnforceProof = true
+
+	// Age it the way a real cluster is aged: created long ago, serving all along.
+	r.mu.Lock()
+	r.entries["lab"].CreatedAt = time.Now().Add(-120 * 24 * time.Hour)
+	r.mu.Unlock()
+
+	if _, _, err := r.Register("lab", "203.0.113.2", token); err != nil {
+		t.Fatalf("the token holder must be able to move: %v", err)
+	}
+
+	// It must not read as lapsed, or nothing below can happen.
+	if r.Lookup("lab") == nil {
+		t.Fatal("a moved cluster that has served must not be treated as lapsed")
+	}
+	if removed := len(r.Cleanup()); removed != 0 {
+		t.Fatalf("cleanup deleted a moved cluster's registration, removed %d", removed)
+	}
+
+	// And it must be able to prove control of the new address.
+	nonce, accepted, err := r.IssueChallenge("lab", token)
+	if err != nil || !accepted {
+		t.Fatalf("a moved cluster must get a challenge to re-prove: accepted=%v err=%v", accepted, err)
+	}
+	if !r.RecordProof("lab", token, nonce, testFPA, "kipper-hop-proof-v1") {
+		t.Fatal("a moved cluster must be able to re-prove")
+	}
+	if !r.Routable("lab") {
+		t.Error("having re-proven, it must route again")
+	}
+}
+
+// The reservation still denies a squatter: nothing ever served under this label,
+// so it is released after the short window rather than held.
+func TestNeverServedLabelStillReleasedWhileEnforcing(t *testing.T) {
+	r := New()
+	r.EnforceProof = true
+	_, _, _ = r.Register("squat", "203.0.113.1", "")
+	r.mu.Lock()
+	r.entries["squat"].CreatedAt = time.Now().Add(-3 * time.Hour)
+	r.mu.Unlock()
+
+	if r.Lookup("squat") != nil {
+		t.Error("a never-served label past the reservation window must lapse")
+	}
+	if removed := len(r.Cleanup()); removed != 1 {
+		t.Errorf("it must be released, removed %d", removed)
 	}
 }

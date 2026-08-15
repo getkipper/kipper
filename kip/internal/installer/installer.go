@@ -157,13 +157,22 @@ func Run(opts Options) (*Result, error) {
 	// has no public address immediately, rather than after preflight with an error
 	// naming neither the flag nor the value. A custom domain registers nothing, so
 	// it keeps whatever was given.
+	// The failure is held rather than raised, because an empty --domain is also
+	// the natural re-run of an existing custom-domain cluster, which adopts its
+	// identity and never asks the gateway for anything. Failing here would refuse
+	// to reinstall a working cluster whose host has no public IPv4 — one behind a
+	// load balancer, which --trusted-proxy exists for. It is raised at the claim,
+	// which is the first point that genuinely needs an address and still ahead of
+	// any change to the server.
 	clusterAddress := opts.Host
+	var addressErr error
 	if claimsGatewayName(opts.Domain) {
 		resolved, err := GatewayAddressFor(opts.Host)
 		if err != nil {
-			return nil, err
+			addressErr = err
+		} else {
+			clusterAddress = resolved
 		}
-		clusterAddress = resolved
 	}
 
 	provider := &infra.BareMetalProvider{
@@ -284,11 +293,14 @@ func Run(opts Options) (*Result, error) {
 			return nil, labelErr
 		}
 		if wantsGatewayName {
+			if addressErr != nil {
+				return nil, addressErr
+			}
 			fmt.Printf("  Registering subdomain...\n")
 			claimed, claimErr := claimGatewayName(
 				domain.NewGatewayClient(opts.GatewayURL),
 				localTokenStore{},
-				subdomain, clusterAddress)
+				subdomain, clusterAddress, opts.Host)
 			if claimErr != nil {
 				return nil, claimErr
 			}
@@ -310,7 +322,7 @@ func Run(opts Options) (*Result, error) {
 	// reused when the result is persisted.
 	clusterEntryName := domainName
 	if cfg, err := config.Load(); err == nil {
-		if existing := cfg.GetClusterByHost(opts.Host); existing != nil {
+		if existing := cfg.GetClusterByHost(opts.Host, clusterAddress); existing != nil {
 			clusterEntryName = existing.Name
 			// A reinstall registers nothing with the gateway, so inherit the
 			// token mirror rather than clearing it.
@@ -534,14 +546,14 @@ func Run(opts Options) (*Result, error) {
 	// again, and a marker saying otherwise would send a later uninstall past the
 	// wipe. Clearing early costs at most a prompt: an uninstall that cannot
 	// reach the host still offers to hand the name back without it.
-	if err := ClearHostWipedMarker(opts.Host); err != nil {
+	if err := ClearHostWipedMarker(opts.Host, clusterAddress); err != nil {
 		// The last exit before the step loop, and the only one past the gateway
 		// claim, so it owns the tidying the loop's own failure handler would
 		// otherwise do: a name this run brought into existence goes back rather
 		// than sitting on a registration whose cluster was never built.
 		if freshlyRegistered && gatewayToken != "" {
 			if relErr := domain.NewGatewayClient(opts.GatewayURL).Deregister(gatewayToken); relErr == nil {
-				if clearErr := clearTokenIfHeld(opts.Host, gatewayToken); clearErr != nil {
+				if clearErr := clearTokenIfHeld(gatewayToken); clearErr != nil {
 					fmt.Printf("  !   Released %s, but its dead credential is still recorded locally (%v).\n", domainName, clearErr)
 					fmt.Printf("      A later command may read that as the name already being released.\n")
 				} else {
@@ -625,7 +637,7 @@ func Run(opts Options) (*Result, error) {
 					// dead credential and read the gateway's "not registered"
 					// as "already released", hiding a real registration made
 					// since.
-					if clearErr := clearTokenIfHeld(opts.Host, gatewayToken); clearErr != nil {
+					if clearErr := clearTokenIfHeld(gatewayToken); clearErr != nil {
 						fmt.Printf("  !   Released %s, but its dead credential is still recorded locally (%v).\n", domainName, clearErr)
 						fmt.Printf("      A later command may read that as the name already being released.\n")
 					} else {

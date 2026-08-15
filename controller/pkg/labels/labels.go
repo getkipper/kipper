@@ -91,7 +91,20 @@ const (
 
 	AnnoCommit        = "kipper.run/commit"
 	AnnoDeployHistory = "kipper.run/deploy-history"
+
+	// SourceNamespace records the namespace of the app a build was triggered
+	// for. Builds run in BuildsNamespace rather than beside their app, so this
+	// is what ties a build back to it, and what keeps two projects with an app
+	// of the same name apart.
+	SourceNamespace = "kipper.run/source-namespace"
 )
+
+// BuildsNamespace is where the build system runs every build, whatever
+// namespace the app itself lives in. Anything looking for a build Pod or Job
+// looks here: searching the app's own namespace finds nothing, which is what
+// made `kip app build-logs` report "no build found" for builds that had run
+// perfectly well.
+const BuildsNamespace = "kipper-builds"
 
 // Job labels.
 const (

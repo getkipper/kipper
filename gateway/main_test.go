@@ -852,3 +852,20 @@ func TestProofBeforeRouteDefaultsOn(t *testing.T) {
 		t.Error("an unset variable must leave enforcement on")
 	}
 }
+
+// TestMain gives the package a writable dataPath. Handlers persist the registry
+// after a change, and a release is no longer acknowledged unless that write
+// succeeded, so an unwritable default path turns those tests into 500s. It also
+// clears the "failed to persist registry" noise the suite used to print. Tests
+// that assert on the file's contents still point dataPath at their own scratch
+// copy.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "kipper-gateway-test")
+	if err != nil {
+		panic(err)
+	}
+	dataPath = filepath.Join(dir, "registry.json")
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}

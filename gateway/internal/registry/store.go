@@ -115,19 +115,19 @@ func (r *Registry) Prune(keep func(ip string) bool) int {
 // PruneEntries drops every entry whose subdomain and address fail keep, and
 // returns how many were removed.
 //
-// It takes both because a label's admissibility depends on both: a name spelling
-// an IP address is registrable by that address and no other, which Prune (which
-// sees only the address) cannot express. Startup is where a policy tightened
+// It takes the whole entry because admissibility depends on more than the label:
+// whether the name spells an address other than its own, and whether anything
+// ever served under it, both decide what may be done with it. Startup is where a policy tightened
 // after a snapshot was written gets applied, so a rule added to the registration
 // guard alone would protect unused names while every name already taken under
 // the old rule kept serving.
-func (r *Registry) PruneEntries(keep func(subdomain, ip string) bool) int {
+func (r *Registry) PruneEntries(drop func(*Entry) bool) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	removed := 0
 	for subdomain, entry := range r.entries {
-		if !keep(subdomain, entry.IP) {
+		if drop(entry) {
 			delete(r.entries, subdomain)
 			delete(r.tokens, entry.Token)
 			removed++
@@ -160,6 +160,18 @@ func (r *Registry) LoadFrom(path string) error {
 
 	for i := range snap.Entries {
 		entry := snap.Entries[i]
+		// FirstProvenAt arrived with the tombstone, so a registration persisted
+		// before it carries no value while its proof record shows the label
+		// served. Reading that as never-proven would free the name the moment it
+		// lapsed or was released, taking the tombstone away from exactly the
+		// oldest clusters. A proof already recorded is the evidence the field
+		// exists to hold, so adopt it.
+		// The condition mirrors everProvenLocked: a lease naming no key
+		// authorises nothing and must not buy a tombstone either, or a
+		// half-written proof record becomes a 90-day hold.
+		if entry.FirstProvenAt.IsZero() && !entry.ProvenAt.IsZero() && entry.ProofKeySPKI != "" {
+			entry.FirstProvenAt = entry.ProvenAt
+		}
 		r.entries[entry.Subdomain] = &entry
 		r.tokens[entry.Token] = entry.Subdomain
 	}
@@ -172,13 +184,13 @@ func (r *Registry) LoadFrom(path string) error {
 // must not act on by itself, where acting on a false positive costs more than
 // leaving it: the label-spells-another-address case cannot be told apart from a
 // cluster that moved servers and kept its name.
-func (r *Registry) FlagEntries(report func(subdomain, ip string) bool) []string {
+func (r *Registry) FlagEntries(report func(*Entry) bool) []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	var flagged []string
 	for subdomain, entry := range r.entries {
-		if report(subdomain, entry.IP) {
+		if report(entry) {
 			flagged = append(flagged, subdomain)
 		}
 	}

@@ -120,8 +120,9 @@ The compose file in this repository is the development one and builds the gatewa
 (`build: .`). A deployment overrides that with an `image:` line, so `git pull` on the host changes
 nothing about which gateway runs. Caddy is the other way round: it builds locally from `./caddy` and
 bind-mounts its Caddyfile, so a Caddyfile change needs `docker compose restart caddy` rather than a
-pull. Its admin API is disabled in that build, which makes `caddy reload` adapt the config and then
-fail to apply it, silently.
+pull. Restart it rather than reloading: `caddy reload` reaches Caddy over its admin API, and where that
+API is unavailable the command adapts the new config, fails to apply it, and says nothing, so the
+gateway keeps running the old one while everything looks fine.
 
 Three things to have right before running it:
 
@@ -134,12 +135,16 @@ Three things to have right before running it:
 - **Let it stop cleanly.** `up -d` sends SIGTERM and honours `stop_grace_period`, so the drain and the
   final flush both run, as above. `docker kill` loses whatever the registry had not yet written.
 
-Read the first lines it logs. Startup re-applies the current label policy to the persisted registry, so
-it reports every registration it dropped for failing that policy. It separately names any registration
-whose label spells an address it no longer points at, and those keep serving: each one is a cluster that
-moved to a new server and kept the name its links were published under, or a name claimed from another
-server back when that was allowed. Only an operator can tell those apart, so the gateway reports them
-instead of choosing.
+Read the first lines it logs. Startup re-applies the current label policy to the persisted registry and
+reports up to three things.
+
+It names any registration it dropped: a label the current policy refuses that nothing ever served under.
+It names any registration holding a label the policy would refuse which has served, and keeps it. A
+reservation added later governs new claims, so a cluster already running under such a name stays up;
+retire one by agreement with whoever runs it rather than by restarting the gateway. And it names any
+registration whose label spells an address it no longer points at, which also keeps serving: each is
+either a cluster that moved servers and kept the name its links were published under, or a name claimed
+from another server back when that was allowed, and only an operator can tell those apart.
 
 Then confirm it is up:
 

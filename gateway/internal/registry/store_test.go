@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -229,7 +230,7 @@ func TestPruneEntriesDropsWhatCurrentPolicyRefuses(t *testing.T) {
 	if err := r.LoadFrom(path); err != nil {
 		t.Fatal(err)
 	}
-	dropped := r.PruneEntries(registrable)
+	dropped := r.PruneEntries(dropUnregistrable)
 	if dropped != 3 {
 		t.Errorf("dropped %d, want 3 (reserved label, mismatched default name, route-shadowing label)", dropped)
 	}
@@ -251,10 +252,11 @@ func TestPruneEntriesDropsWhatCurrentPolicyRefuses(t *testing.T) {
 	}
 }
 
-// registrable mirrors the gateway's own admission rule for this test.
-func registrable(subdomain, ip string) bool {
-	return hostnames.ValidateClusterLabel(subdomain) == nil &&
-		(!hostnames.IPShapedLabel(subdomain) || subdomain == hostnames.LabelForIP(ip))
+// dropUnregistrable mirrors a startup policy for this test: drop what the label
+// rule refuses, or what spells an address other than its own.
+func dropUnregistrable(e *Entry) bool {
+	return hostnames.ValidateClusterLabel(e.Subdomain) != nil ||
+		(hostnames.IPShapedLabel(e.Subdomain) && e.Subdomain != hostnames.LabelForIP(e.IP))
 }
 
 // A label that spells an address it no longer points at is reported rather than
@@ -280,8 +282,8 @@ func TestFlagEntriesReportsWithoutRemoving(t *testing.T) {
 	if err := r.LoadFrom(path); err != nil {
 		t.Fatal(err)
 	}
-	flagged := r.FlagEntries(func(subdomain, ip string) bool {
-		return hostnames.IPShapedLabel(subdomain) && subdomain != hostnames.LabelForIP(ip)
+	flagged := r.FlagEntries(func(e *Entry) bool {
+		return hostnames.IPShapedLabel(e.Subdomain) && e.Subdomain != hostnames.LabelForIP(e.IP)
 	})
 	if len(flagged) != 1 || flagged[0] != "203-0-113-10" {
 		t.Errorf("flagged = %v, want [203-0-113-10]", flagged)
@@ -291,5 +293,41 @@ func TestFlagEntriesReportsWithoutRemoving(t *testing.T) {
 	}
 	if r.Count() != 3 {
 		t.Errorf("Count = %d, want 3; nothing may be removed by a report", r.Count())
+	}
+}
+
+// FirstProvenAt arrived with the tombstone, so every registration written before
+// it is missing the field while its proof record plainly shows the label served.
+// Read as never-proven, an uninstall frees the name at once instead of holding
+// it, which is the takeover the tombstone exists to prevent, aimed squarely at
+// the oldest and most established clusters.
+func TestLoadBackfillsFirstProvenFromAnExistingProof(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	proven := time.Now().Add(-72 * time.Hour).UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339)
+	snap := `{"entries":[
+		{"subdomain":"old","ip":"203.0.113.1","token":"tok-old","created_at":"` + proven +
+		`","last_seen":"` + now + `","proven_at":"` + proven + `","proof_key_spki":"` + testFPA + `"},
+		{"subdomain":"never","ip":"203.0.113.2","token":"tok-never","created_at":"` + proven +
+		`","last_seen":"` + now + `"}
+	]}`
+	if err := os.WriteFile(path, []byte(snap), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := New()
+	if err := r.LoadFrom(path); err != nil {
+		t.Fatal(err)
+	}
+
+	r.InactivityTTL = 1 * time.Millisecond
+	time.Sleep(5 * time.Millisecond)
+	if _, _, err := r.Register("old", "203.0.113.99", ""); !errors.Is(err, ErrSubdomainTaken) {
+		t.Errorf("a label that had served must keep its tombstone across the upgrade, got %v", err)
+	}
+
+	// A registration that genuinely never proved gains nothing from the backfill.
+	if _, _, err := r.Register("never", "203.0.113.98", ""); err != nil {
+		t.Errorf("a never-proven label must still be freed at once: %v", err)
 	}
 }

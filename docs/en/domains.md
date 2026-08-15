@@ -78,13 +78,13 @@ A wildcard DNS record (`*.kipper.run`) points all subdomains to the Kipper Gatew
 
 ### Subdomain expiry
 
-Free subdomains stop serving after 30 days of inactivity. A live cluster renews itself: the console API heartbeats daily, and running any `kip` command against the cluster renews it too.
+Free subdomains stop serving after 30 days of inactivity. A live cluster renews itself: its console API heartbeats to the gateway once a day, which is what keeps the name and the proof of control current.
 
 The name is not handed to anyone else at that point. It stays reserved for you for a further 90 days, and only your cluster's own gateway credential can bring it back, so a cluster that was off for a season finds its name waiting. Re-registering means re-running `kip install`, which is heavier than it sounds: see [re-running install](/en/installation#re-running-install) for what it costs on a cluster with console-created users.
 
 After those 90 days the name is free for anyone to register. This matters most if you chose your own name and published it, because links, bookmarks and sign-in URLs pointing at `lab.kipper.run` will reach whoever registers it next, over a valid certificate, with nothing for a visitor to notice. Keeping the cluster in normal use is what avoids all of this. If you are retiring a cluster whose name you published, move the links before the reservation runs out.
 
-`kip cluster uninstall` releases the name the same way, so a name you deliberately gave up is also held for 90 days before anyone else can take it.
+`kip cluster uninstall` is different: it frees the name straight away. The hold exists for the cluster that went quiet without anyone deciding to stop, where a name disappearing would be an accident. An uninstall is a decision, and the command deletes the credential that would reclaim the name anyway, so holding it would lock the name away from you as well as from everyone else. It also means you can rebuild a server under the same name whenever you like. If you published links under a name you are giving up, move them before you uninstall rather than after.
 
 ## Custom console domain
 

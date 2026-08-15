@@ -51,7 +51,15 @@ func GatewayAddressFor(host string) (string, error) {
 // answers that matter (a name with no public address, one with IPv6 only) cannot
 // be produced on demand from real DNS.
 func gatewayAddressFor(host string, lookup func(string) ([]string, error)) (string, error) {
-	if net.ParseIP(host) != nil {
+	if ip := net.ParseIP(host); ip != nil {
+		// IPv4 only, matching the resolved path below: a free name is the address
+		// in dashed form, which has no IPv6 spelling that fits one DNS label. A
+		// literal IPv6 here used to pass and fail at the gateway instead, with the
+		// late unnamed error this function exists to replace.
+		if ip.To4() == nil {
+			return "", fmt.Errorf("--host %s is an IPv6 address, and a free kipper.run name is derived from an IPv4 one. "+
+				"Give the server's public IPv4 address, or install on a domain you control with --domain <your-domain>", host)
+		}
 		if !pubip.IsPublic(host) {
 			return "", fmt.Errorf("--host %s is not a public address, and the kipper.run gateway registers only public addresses. "+
 				"Give the server's public IP, or install on a domain you control with --domain <your-domain>", host)
@@ -114,7 +122,13 @@ func KipperRunLabelFor(domain, host string) (string, bool, error) {
 	}
 	// The gateway refuses an address-shaped label from any other address. Saying
 	// so here names the server that owns it, which the gateway's answer cannot.
-	if hostnames.IPShapedLabel(label) && label != hostnames.LabelForIP(host) {
+	//
+	// Only when host is already an address. The pre-flight check in cmd runs
+	// before --host is resolved, and comparing a label against the dashed form of
+	// a hostname rejected an operator asking for their own server's derived name.
+	// installer.Run calls this again with the resolved address, which is where the
+	// check bites.
+	if net.ParseIP(host) != nil && hostnames.IPShapedLabel(label) && label != hostnames.LabelForIP(host) {
 		return "", false, fmt.Errorf("%s is the name reserved for the server at %s, so it cannot be registered for %s. Choose a different name",
 			domain, strings.ReplaceAll(label, "-", "."), host)
 	}
@@ -186,10 +200,17 @@ type claim struct {
 //     is in memory; and a claim that cannot be recorded is handed straight back,
 //     because failing with it unrecorded strands the name exactly as the wipe
 //     without a release used to.
-func claimGatewayName(gw registrar, store tokenStore, subdomain, host string) (claim, error) {
-	known := store.tokenFor(host)
+//
+// address is what the gateway registers and must be a public IP. hostKey is what
+// the operator gave as --host, and is the key every local lookup uses: the
+// cluster entry, the wiped marker, the token mirror. Since 0.11.1 those differ
+// whenever --host is a hostname, and using one for both wrote the token under the
+// resolved address while later lookups searched for the name, leaving two entries
+// for one cluster and a re-run that could not prove its own subdomain.
+func claimGatewayName(gw registrar, store tokenStore, subdomain, address, hostKey string) (claim, error) {
+	known := store.tokenFor(hostKey)
 
-	reg, err := gw.Register(subdomain, host, known)
+	reg, err := gw.Register(subdomain, address, known)
 	if err != nil {
 		return claim{}, fmt.Errorf("registering subdomain: %w", err)
 	}
@@ -217,7 +238,7 @@ func claimGatewayName(gw registrar, store tokenStore, subdomain, host string) (c
 		// retry holding everything it needs.
 		return claim{Domain: reg.Domain, Token: token, Created: created}, nil
 	}
-	if saveErr := store.save(host, reg.Domain, token); saveErr != nil {
+	if saveErr := store.save(hostKey, reg.Domain, token); saveErr != nil {
 		// Nothing durable holds this token, and returning now would leave the
 		// name claimed by a registration nobody can prove ownership of — the
 		// stranding this whole path exists to prevent. Give it back while it is
@@ -248,7 +269,7 @@ func claimGatewayName(gw registrar, store tokenStore, subdomain, host string) (c
 // ordering is about accuracy rather than safety now: an uninstall that cannot
 // reach a host offers to release its name anyway, so clearing the marker early
 // costs a prompt rather than the name.
-func ClearHostWipedMarker(host string) error {
+func ClearHostWipedMarker(spellings ...string) error {
 	return config.Update(func(cfg *config.Config) error {
 		// Every entry naming this host, not just the first. A config can hold
 		// more than one — an earlier install whose checkpoint could not read the
@@ -256,9 +277,12 @@ func ClearHostWipedMarker(host string) error {
 		// first leaves the marker set on a host that is about to go live again.
 		cleared := false
 		for i := range cfg.Clusters {
-			if cfg.Clusters[i].Host == host && cfg.Clusters[i].HostWiped {
-				cfg.Clusters[i].HostWiped = false
-				cleared = true
+			for _, host := range spellings {
+				if host != "" && cfg.Clusters[i].Host == host && cfg.Clusters[i].HostWiped {
+					cfg.Clusters[i].HostWiped = false
+					cleared = true
+					break
+				}
 			}
 		}
 		if !cleared {
@@ -277,14 +301,22 @@ func ClearHostWipedMarker(host string) error {
 // registration made since. Clearing unconditionally is the other half of that
 // mistake: by the time a failing install gets here another command may have put
 // a live credential in the same entry.
-func clearTokenIfHeld(host, token string) error {
+func clearTokenIfHeld(token string) error {
+	if token == "" {
+		return config.ErrNoChange
+	}
 	return config.Update(func(cfg *config.Config) error {
-		entry := cfg.GetClusterByHost(host)
-		if entry == nil || entry.GatewayToken != token {
-			return config.ErrNoChange
+		// Keyed on the credential rather than the host. A token is unique and has
+		// one spelling, where a host now has two (the name the operator typed and
+		// the address it resolves to); looking up by host left the dead token on
+		// disk whenever the install was spelled the other way.
+		for i := range cfg.Clusters {
+			if cfg.Clusters[i].GatewayToken == token {
+				cfg.Clusters[i].GatewayToken = ""
+				return nil
+			}
 		}
-		entry.GatewayToken = ""
-		return nil
+		return config.ErrNoChange
 	})
 }
 
