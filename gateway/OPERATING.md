@@ -100,3 +100,43 @@ The gateway drains in-flight requests for up to 20 seconds on SIGTERM, then flus
 `stop_grace_period` in `docker-compose.yml` must stay above that or the runtime kills it mid-drain and
 the flush is lost. Proxied WebSocket streams are hijacked connections: they are not drained and end with
 the process.
+
+## Updating
+
+The compose file builds the gateway from its own checkout (`build: .`), so an update is a pull and a
+rebuild on the host. CI publishes a `kipper-gateway` image to ghcr on every merge to `main` and nothing
+here consumes it, so hunting for a newer tag will not find what is running.
+
+```bash
+cd /opt/kipper/gateway
+git pull
+docker compose up -d --build gateway
+```
+
+Naming the service leaves Caddy alone. Caddy holds the TLS certificates and terminates every connection,
+so rebuilding it interrupts live traffic when only the gateway changed.
+
+Three things to have right before running it:
+
+- **`KIPPER_STATUS_TOKEN` needs to be in the environment, or in a `.env` beside the compose file.**
+  Compose interpolates it at `up` time and an unset variable becomes an empty one, which disables
+  `/status` silently. The endpoint answers 404 from then on and monitoring goes quiet with it.
+- **The registry survives the rebuild.** It lives in the `gateway-data` volume mounted at `/data`, so
+  registrations, tokens and held names outlast the container. That volume is what to back up; the image
+  holds nothing you need.
+- **Let it stop cleanly.** `up -d` sends SIGTERM and honours `stop_grace_period`, so the drain and the
+  final flush both run, as above. `docker kill` loses whatever the registry had not yet written.
+
+Read the first lines it logs. Startup re-applies the current label policy to the persisted registry, so
+it reports every registration it dropped for failing that policy. It separately names any registration
+whose label spells an address it no longer points at, and those keep serving: each one is a cluster that
+moved to a new server and kept the name its links were published under, or a name claimed from another
+server back when that was allowed. Only an operator can tell those apart, so the gateway reports them
+instead of choosing.
+
+Then confirm it is up:
+
+```bash
+curl -sf https://gateway.example.com/health
+curl -sf -H "Authorization: Bearer $KIPPER_STATUS_TOKEN" https://gateway.example.com/status
+```
