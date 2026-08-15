@@ -188,6 +188,16 @@ func main() {
 		log.Printf("dropped %d persisted registration(s) the current label policy refuses", dropped)
 		pruned = true
 	}
+	// Named, not acted on. Each of these is either a cluster that moved servers
+	// and kept its name, which must keep serving, or a label taken from another
+	// server before the registration guard existed, which an operator can release
+	// by hand. Only an operator can tell which.
+	if flagged := reg.FlagEntries(addressMismatch); len(flagged) > 0 {
+		log.Printf("%d registration(s) carry a label spelling an address they do not point at: %s. "+
+			"Each is a cluster that changed servers, or a name claimed from another server before this was refused. "+
+			"They keep serving; release one by hand if it is the latter",
+			len(flagged), strings.Join(flagged, ", "))
+	}
 	if pruned {
 		if err := reg.SaveTo(dataPath); err != nil {
 			log.Printf("failed to persist pruned registry: %v", err)
@@ -831,17 +841,30 @@ func boolEnvDefaultTrue(name string) bool {
 
 // noDerivedSeparator reports whether a subdomain is free of the derived-route
 // separator. A label containing it would shadow a per-cluster service route.
-// registrableEntry reports whether a persisted registration would still be
-// accepted today: its label must satisfy the shared rule (shape, no
-// derived-route separator, not reserved), and an address-shaped label must
-// belong to the address it names. It is the startup half of the guard
-// handleRegister applies to new requests, so the two cannot drift into a state
-// where the gateway refuses a name it is already serving.
+// registrableEntry reports whether a persisted registration still satisfies the
+// label rule: shape, no derived-route separator, not reserved. Startup is where
+// a rule tightened after a snapshot was written gets applied, so a name reserved
+// by a later build stops serving on the next restart instead of being protected
+// only against new registrations.
+//
+// The address guard handleRegister applies is left out here on purpose. In
+// persisted state a label spelling an address it no longer points at has two
+// causes that look identical: a cluster that moved to a new server and kept the
+// name its links were published under, and a squatter who took another server's
+// default name before the guard existed. Nothing recorded distinguishes them,
+// and the costs are not symmetric — dropping the entry takes a live cluster off
+// the air on a restart, while keeping it costs one operator their default name,
+// which choosing another name resolves. New registrations cannot create either
+// case, so this is confined to entries written before the guard and shrinks to
+// nothing. addressMismatch names them in the log rather than acting on them.
 func registrableEntry(subdomain, ip string) bool {
-	if err := hostnames.ValidateClusterLabel(subdomain); err != nil {
-		return false
-	}
-	return !hostnames.IPShapedLabel(subdomain) || subdomain == hostnames.LabelForIP(ip)
+	return hostnames.ValidateClusterLabel(subdomain) == nil
+}
+
+// addressMismatch reports a label that spells an address other than the one it
+// points at. Reported, never acted on: see registrableEntry.
+func addressMismatch(subdomain, ip string) bool {
+	return hostnames.IPShapedLabel(subdomain) && subdomain != hostnames.LabelForIP(ip)
 }
 
 // isPublicIP reports whether s is an address the gateway may register and proxy

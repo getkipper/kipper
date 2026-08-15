@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 // valueSnapshot is the on-disk format for the registry state. Entries are held
@@ -164,4 +165,23 @@ func (r *Registry) LoadFrom(path string) error {
 	}
 
 	return nil
+}
+
+// FlagEntries returns the subdomains matching report, sorted, without touching
+// the registry. It exists for policy the gateway wants an operator to see but
+// must not act on by itself, where acting on a false positive costs more than
+// leaving it: the label-spells-another-address case cannot be told apart from a
+// cluster that moved servers and kept its name.
+func (r *Registry) FlagEntries(report func(subdomain, ip string) bool) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var flagged []string
+	for subdomain, entry := range r.entries {
+		if report(subdomain, entry.IP) {
+			flagged = append(flagged, subdomain)
+		}
+	}
+	sort.Strings(flagged)
+	return flagged
 }

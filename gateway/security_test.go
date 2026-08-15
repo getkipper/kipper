@@ -186,16 +186,23 @@ func TestRegisterAllowsLabelsThatOnlyLookNumeric(t *testing.T) {
 	}
 }
 
-// registrableEntry is what startup re-applies to persisted state, so it has to
-// answer exactly as the registration guard would. A policy tightened in the
-// guard alone protects only names nobody has taken yet: a label reserved by a
-// later build keeps serving for as long as its holder renews it.
-func TestRegistrableEntryMatchesTheRegistrationGuard(t *testing.T) {
+// registrableEntry is what startup re-applies to persisted state. It carries the
+// label rule, so a name reserved by a later build stops serving on the next
+// restart rather than being protected only against new registrations.
+//
+// It deliberately does NOT carry the address guard. A label spelling an address
+// it no longer points at has two indistinguishable causes in persisted state: a
+// cluster that moved to a new server and kept its original name, and a squatter
+// who took someone else's default name before the guard existed. Dropping both
+// takes a live cluster off the air on a gateway restart; keeping both costs one
+// operator their default name, which they can work around by choosing another.
+// handleRegister stops new ones being created either way, so the ambiguity is
+// confined to entries written before that guard, and it shrinks to nothing.
+func TestRegistrableEntryAppliesTheLabelRule(t *testing.T) {
 	refused := map[string]struct{ subdomain, ip string }{
 		"a label reserved only by the newer policy": {"login", "203.0.113.1"},
 		"a long-standing reserved label":            {"console", "203.0.113.1"},
 		"a route-shadowing label":                   {"console--acme", "203.0.113.1"},
-		"another server's default name":             {"203-0-113-77", "198.51.100.9"},
 		"a malformed label":                         {"UPPER", "203.0.113.1"},
 	}
 	for why, e := range refused {
@@ -208,6 +215,9 @@ func TestRegistrableEntryMatchesTheRegistrationGuard(t *testing.T) {
 		"an ordinary name":              {"acme", "203.0.113.2"},
 		"a server's own default name":   {"203-0-113-78", "203.0.113.78"},
 		"a merely numeric-looking name": {"999-0-0-1", "198.51.100.4"},
+		// The case this exists for: a cluster that moved servers keeps the name
+		// its links were published under, so its label stops matching its address.
+		"a cluster that moved to a new server": {"203-0-113-10", "198.51.100.5"},
 	}
 	for why, e := range kept {
 		if !registrableEntry(e.subdomain, e.ip) {
