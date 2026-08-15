@@ -3,9 +3,10 @@ package registry
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/getkipper/kipper/controller/pkg/hostnames"
 )
 
 func TestSaveAndLoadRoundTrip(t *testing.T) {
@@ -61,65 +62,6 @@ func TestPruneDropsRejectedIPs(t *testing.T) {
 	// ping the entry back to life.
 	if err := r.Ping(stale.Token); err == nil {
 		t.Error("pruned entry's token should no longer be accepted")
-	}
-}
-
-func TestPruneSubdomainsDropsShadowingLabels(t *testing.T) {
-	r := New()
-	_, _, _ = r.Register("acme", "198.51.100.1", "")
-	// An older gateway build accepted a label with the derived-route separator;
-	// it would shadow console--acme etc., so a restart must drop it.
-	stale, _, _ := r.Register("console--acme", "203.0.113.7", "")
-
-	removed := r.PruneSubdomains(func(s string) bool { return !strings.Contains(s, "--") })
-	if removed != 1 {
-		t.Fatalf("expected 1 shadowing label pruned, got %d", removed)
-	}
-	if r.Lookup("console--acme") != nil {
-		t.Error("the shadowing label should be gone")
-	}
-	if r.Lookup("acme") == nil {
-		t.Error("the clean label should remain")
-	}
-	if err := r.Ping(stale.Token); err == nil {
-		t.Error("the pruned label's token should no longer be accepted")
-	}
-}
-
-func TestPruneSubdomainsPersistsAcrossReload(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "registry.json")
-
-	// Persist old-build state that contains a shadowing label.
-	old := New()
-	_, _, _ = old.Register("acme", "198.51.100.1", "")
-	_, _, _ = old.Register("console--acme", "203.0.113.7", "")
-	if err := old.SaveTo(path); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-
-	// Simulate startup: load, prune, persist the cleaned snapshot.
-	boot := New()
-	if err := boot.LoadFrom(path); err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if n := boot.PruneSubdomains(func(s string) bool { return !strings.Contains(s, "--") }); n != 1 {
-		t.Fatalf("expected 1 pruned, got %d", n)
-	}
-	if err := boot.SaveTo(path); err != nil {
-		t.Fatalf("re-save: %v", err)
-	}
-
-	// A later startup must not see the shadowing label on disk.
-	reloaded := New()
-	if err := reloaded.LoadFrom(path); err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	if reloaded.Lookup("console--acme") != nil {
-		t.Error("the shadowing label survived persistence")
-	}
-	if reloaded.Lookup("acme") == nil {
-		t.Error("the clean label was lost")
 	}
 }
 
@@ -259,4 +201,58 @@ func TestTokensSurviveRoundTrip(t *testing.T) {
 	if r2.Count() != 0 {
 		t.Error("expected 0 entries after deregister")
 	}
+}
+
+// Startup revalidation is where a policy tightened after a snapshot was written
+// gets applied. Without it the strongest new reservations protect only unused
+// names: an entry registered as "login" when that was allowed keeps serving
+// login.kipper.run, and every derived host under it, indefinitely.
+func TestPruneEntriesDropsWhatCurrentPolicyRefuses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	now := time.Now().UTC().Format(time.RFC3339)
+	entry := func(sub, ip string) string {
+		return `{"subdomain":"` + sub + `","ip":"` + ip + `","token":"tok-` + sub +
+			`","created_at":"` + now + `","last_seen":"` + now + `"}`
+	}
+	snap := `{"entries":[` +
+		entry("login", "203.0.113.1") + `,` + // reserved only by the newer policy
+		entry("203-0-113-77", "198.51.100.9") + `,` + // another server's default name
+		entry("203-0-113-78", "203.0.113.78") + `,` + // its own default name, legitimate
+		entry("console--acme", "203.0.113.3") + `,` + // would shadow a derived service route
+		entry("acme", "203.0.113.2") + // an ordinary name
+		`]}`
+	if err := os.WriteFile(path, []byte(snap), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := New()
+	if err := r.LoadFrom(path); err != nil {
+		t.Fatal(err)
+	}
+	dropped := r.PruneEntries(registrable)
+	if dropped != 3 {
+		t.Errorf("dropped %d, want 3 (reserved label, mismatched default name, route-shadowing label)", dropped)
+	}
+	for _, gone := range []string{"login", "203-0-113-77", "console--acme"} {
+		if r.Lookup(gone) != nil {
+			t.Errorf("%s must not survive startup revalidation", gone)
+		}
+	}
+	for _, kept := range []string{"203-0-113-78", "acme"} {
+		if r.Lookup(kept) == nil {
+			t.Errorf("%s is registrable under current policy and must survive", kept)
+		}
+	}
+
+	// The token index has to move with the entries, or a dropped registration's
+	// token still names a subdomain that is gone.
+	if err := r.Ping("tok-login"); err == nil {
+		t.Error("a dropped registration's token must no longer ping")
+	}
+}
+
+// registrable mirrors the gateway's own admission rule for this test.
+func registrable(subdomain, ip string) bool {
+	return hostnames.ValidateClusterLabel(subdomain) == nil &&
+		(!hostnames.IPShapedLabel(subdomain) || subdomain == hostnames.LabelForIP(ip))
 }

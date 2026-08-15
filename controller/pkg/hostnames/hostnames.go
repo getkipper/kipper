@@ -7,6 +7,7 @@ package hostnames
 
 import (
 	"fmt"
+	"net"
 	"regexp"
 	"strings"
 )
@@ -39,9 +40,55 @@ var LabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 // as a standalone cluster label, so nobody can squat a login or platform
 // hostname. Enforced by both the gateway registration guard and the
 // ClusterIdentity CRD validation.
+//
+// The rule for what belongs here: a name that, standing alone under the gateway
+// domain, reads as the platform's own rather than as somebody's cluster.
+// login.kipper.run and status.kipper.run read that way; acme.kipper.run and
+// lab.kipper.run do not, and stay registrable. Every entry costs an operator a
+// name they might legitimately want, which is what keeps the list to names that
+// meet the rule.
+//
+// The ClusterIdentity CRD carries the same list as a CEL literal, because a CEL
+// rule cannot call into Go. A lockstep test in console-api compares the two, so
+// an entry added here without the CRD regenerated fails the suite rather than
+// leaving the API server accepting what the gateway refuses.
 var ReservedLabels = map[string]bool{
+	// Platform surface.
 	"console": true, "console-api": true, "dex": true, "api": true,
 	"www": true, "admin": true, "kipper": true, "register": true, "health": true,
+	"status": true, "gateway": true,
+	// Identity and sign-in, where impersonation pays best.
+	"login": true, "logout": true, "auth": true, "sso": true,
+	"oauth": true, "oidc": true, "account": true, "accounts": true, "signup": true,
+	// Project presence, which a link is read against.
+	"docs": true, "support": true, "help": true, "security": true,
+	"billing": true, "blog": true,
+	// Mail and nameserver conventions. A registration only steers HTTP at the
+	// gateway, so holding one of these receives no mail and answers no query;
+	// what it buys is a hostname that looks like the platform's infrastructure.
+	"mail": true, "smtp": true, "mx": true, "ns1": true, "ns2": true, "webmail": true,
+}
+
+// LabelForIP returns the cluster label derived from a server's IPv4 address,
+// which is the default name a free-tier install claims. Dots become hyphens
+// because a *.kipper.run host is a single DNS label.
+func LabelForIP(ip string) string {
+	return strings.ReplaceAll(ip, ".", "-")
+}
+
+// IPShapedLabel reports whether a label is the dashed form of an IPv4 address.
+// Such a label is registrable only by the address it names: otherwise anyone
+// could hold the default name of a server they do not run, and pre-empt whoever
+// installs on that address later.
+//
+// The answer is decided by round-tripping through LabelForIP rather than by a
+// pattern, so the set this claims is exactly the set of default names and cannot
+// drift from them. A label no address renders to is an ordinary name, free for
+// anyone: 999-0-0-1 is nobody's default, so reserving it would cost a name and
+// buy nothing.
+func IPShapedLabel(label string) bool {
+	ip := net.ParseIP(strings.ReplaceAll(label, "-", "."))
+	return ip != nil && ip.To4() != nil && LabelForIP(ip.String()) == label
 }
 
 // ValidateClusterLabel reports why a label may not be registered as a cluster

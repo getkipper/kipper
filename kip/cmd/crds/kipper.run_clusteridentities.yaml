@@ -175,10 +175,10 @@ spec:
             x-kubernetes-validations:
             - message: a *.kipper.run cluster domain must be a single 1-63 char DNS
                 label, with no '--' (reserved for derived service routes) and not
-                a reserved name (console, console-api, dex, api, www, admin, kipper,
-                register, health)
+                a name reserved for the platform itself (console, login, status, docs
+                and the like)
               rule: '!self.domain.endsWith(''.kipper.run'') || (self.domain.matches(''^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?[.]kipper[.]run$'')
-                && !self.domain.contains(''--'') && !(self.domain in [''console.kipper.run'',''console-api.kipper.run'',''dex.kipper.run'',''api.kipper.run'',''www.kipper.run'',''admin.kipper.run'',''kipper.kipper.run'',''register.kipper.run'',''health.kipper.run'']))'
+                && !self.domain.contains(''--'') && !(self.domain in [''account.kipper.run'',''accounts.kipper.run'',''admin.kipper.run'',''api.kipper.run'',''auth.kipper.run'',''billing.kipper.run'',''blog.kipper.run'',''console-api.kipper.run'',''console.kipper.run'',''dex.kipper.run'',''docs.kipper.run'',''gateway.kipper.run'',''health.kipper.run'',''help.kipper.run'',''kipper.kipper.run'',''login.kipper.run'',''logout.kipper.run'',''mail.kipper.run'',''mx.kipper.run'',''ns1.kipper.run'',''ns2.kipper.run'',''oauth.kipper.run'',''oidc.kipper.run'',''register.kipper.run'',''security.kipper.run'',''signup.kipper.run'',''smtp.kipper.run'',''sso.kipper.run'',''status.kipper.run'',''support.kipper.run'',''webmail.kipper.run'',''www.kipper.run'']))'
             - message: domain must not be the kipper.run apex; use a <label>.kipper.run
                 subdomain or a custom domain
               rule: self.domain != 'kipper.run'

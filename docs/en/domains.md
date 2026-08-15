@@ -20,6 +20,42 @@ console--203-0-113-10.kipper.run
 
 All subdomains are single-level to work with the wildcard TLS certificate. App and service names are joined to the cluster name with a double dash, and cluster names themselves can never contain a double dash, so every URL maps to exactly one cluster.
 
+### Choosing your own name
+
+The address-derived name puts your server's IP in every URL the cluster serves, so anyone you send a link to can read it. Pick your own name instead by passing it to `--domain` at install time:
+
+```bash
+kip install --host 203.0.113.10 --domain lab.kipper.run
+```
+
+```
+  Registering subdomain...
+  ✔  Subdomain assigned: lab.kipper.run
+```
+
+`--domain` takes either kind of name. Anything ending in `.kipper.run` is a name Kipper registers for you on the shared gateway; anything else is a domain whose DNS you run yourself, and you point it at your server (see [custom domains](#custom-console-domain) below).
+
+The name has to be one DNS label, 1 to 63 characters, lowercase letters, digits and hyphens. Names that read as Kipper's own (`console`, `login`, `status`, `docs` and similar) are reserved, and a name spelling an IP address can only be registered by that address. Anything already taken is refused before the install touches your server, so you can try another name straight away.
+
+Your apps still hang off the cluster name with a double dash:
+
+```
+todo-app--lab.kipper.run
+console--lab.kipper.run
+```
+
+So `lab` is the cluster's name, not each app's. That is what keeps every hostname a single label under the wildcard certificate, and what guarantees two clusters can never claim the same URL. If you want `todo-app.example.com` instead, use a custom domain.
+
+### Changing the name later
+
+`kip cluster domain` moves an existing cluster to a different name, kipper.run or custom:
+
+```bash
+kip cluster domain lab.kipper.run
+```
+
+The old hosts keep serving until the cutover, and everyone signs in again once it completes, because the move takes the login issuer with it.
+
 ### How it works
 
 ```mermaid
@@ -42,7 +78,13 @@ A wildcard DNS record (`*.kipper.run`) points all subdomains to the Kipper Gatew
 
 ### Subdomain expiry
 
-Free subdomains expire after 30 days of inactivity. Running any `kip` command against the cluster automatically renews the registration. If a subdomain has already expired, re-registering it means re-running `kip install`, which is heavier than that sounds: see [re-running install](/en/installation#re-running-install) for what it costs on a cluster with console-created users. Keeping the cluster in normal use is what avoids needing it.
+Free subdomains stop serving after 30 days of inactivity. A live cluster renews itself: the console API heartbeats daily, and running any `kip` command against the cluster renews it too.
+
+The name is not handed to anyone else at that point. It stays reserved for you for a further 90 days, and only your cluster's own gateway credential can bring it back, so a cluster that was off for a season finds its name waiting. Re-registering means re-running `kip install`, which is heavier than it sounds: see [re-running install](/en/installation#re-running-install) for what it costs on a cluster with console-created users.
+
+After those 90 days the name is free for anyone to register. This matters most if you chose your own name and published it, because links, bookmarks and sign-in URLs pointing at `lab.kipper.run` will reach whoever registers it next, over a valid certificate, with nothing for a visitor to notice. Keeping the cluster in normal use is what avoids all of this. If you are retiring a cluster whose name you published, move the links before the reservation runs out.
+
+`kip cluster uninstall` releases the name the same way, so a name you deliberately gave up is also held for 90 days before anyone else can take it.
 
 ## Custom console domain
 

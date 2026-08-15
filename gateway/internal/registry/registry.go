@@ -40,6 +40,21 @@ const (
 	unprovenReservationTTL = 2 * time.Hour
 )
 
+// defaultTombstoneTTL is how long a lapsed label stays held for its previous
+// token holder after it stops routing, before anyone else may register it.
+//
+// A label does not become free the moment it stops serving. The gateway
+// terminates TLS for *.kipper.run with its own wildcard certificate, so a
+// stranger who picks up an abandoned name serves the previous operator's
+// published links, bookmarked console URL and OIDC issuer host behind a valid
+// padlock, with nothing for a visitor to notice. Claiming "lab" claims
+// console--lab, dex--lab and every app route with it.
+//
+// Ninety days past the thirty of inactivity covers an operator returning to a
+// cluster they left off for a season, and still returns an abandoned name
+// inside four months.
+const defaultTombstoneTTL = 90 * 24 * time.Hour
+
 // Entry represents a registered subdomain mapping.
 type Entry struct {
 	Subdomain string    `json:"subdomain"`
@@ -93,6 +108,24 @@ type Entry struct {
 	ProofProtocol   string    `json:"proof_protocol,omitempty"`
 	ChallengeNonce  string    `json:"challenge_nonce,omitempty"`
 	ChallengeExpiry time.Time `json:"challenge_expiry,omitzero"`
+
+	// FirstProvenAt is the durable fact that this label once served: the moment
+	// it completed its first proof. Nothing clears it, which is what separates it
+	// from ProvenAt and ProofKeySPKI beside it. Those carry the current
+	// authorisation and are cleared on a move on purpose, since nothing has
+	// demonstrated control at the new address yet. Tombstone eligibility asks a
+	// question about the past instead, so it reads this: a cluster that moved and
+	// then failed before proving the new address has still published links under
+	// its name, and reading the mutable fields handed that name straight to the
+	// next caller.
+	FirstProvenAt time.Time `json:"first_proven_at,omitzero"`
+
+	// ReleasedAt records a deliberate release (a `kip cluster uninstall`). The
+	// registration stops routing from that moment, and holds its label as a
+	// tombstone from there rather than from wherever the inactivity clock would
+	// have put it. The token stays, because it is what lets the operator take
+	// the name back.
+	ReleasedAt time.Time `json:"released_at,omitzero"`
 }
 
 // Registry stores subdomain-to-IP mappings. In the MVP this is
@@ -120,6 +153,10 @@ type Registry struct {
 	// before it expires. Default: 30 days.
 	InactivityTTL time.Duration
 
+	// TombstoneTTL is how long a lapsed label is held for its previous token
+	// holder before anyone else may register it. Default: 90 days.
+	TombstoneTTL time.Duration
+
 	// EnforceProof turns on the proof-before-route regime (B16): a never-proven
 	// registration is released after unprovenReservationTTL instead of held for
 	// the full InactivityTTL. It is the same cutover switch the proxy reads to
@@ -145,6 +182,7 @@ func New() *Registry {
 		entries:       make(map[string]*Entry),
 		tokens:        make(map[string]string),
 		InactivityTTL: 30 * 24 * time.Hour,
+		TombstoneTTL:  defaultTombstoneTTL,
 		newToken:      generateToken,
 		newNonce:      generateNonce,
 	}
@@ -217,18 +255,41 @@ func (r *Registry) Register(subdomain, ip, token string) (*Entry, Outcome, error
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if existing, ok := r.entries[subdomain]; ok && r.isReleasableLocked(existing) {
+		// The tombstone is spent. Drop it here rather than waiting for the next
+		// Cleanup, so the label is free to the caller asking for it now.
+		delete(r.tokens, existing.Token)
+		delete(r.entries, subdomain)
+	}
+
 	if existing, ok := r.entries[subdomain]; ok {
 		authorised := token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(existing.Token)) == 1
+		// Whether this call is reviving something that had stopped serving, read
+		// before anything below changes it. A revival re-arms proof; a renewal of
+		// a live registration must not, or the daily heartbeat would suspend the
+		// cluster it is keeping alive.
+		reviving := r.isExpiredLocked(existing)
 		switch {
 		case !authorised && existing.IP == ip:
 			return existing, Unauthenticated, nil
 		case !authorised:
 			return nil, Unauthenticated, fmt.Errorf("%w: %q", ErrSubdomainTaken, subdomain)
 		case existing.IP == ip:
+			// Clearing ReleasedAt is what revives a tombstoned label for the
+			// operator who released it. Only the token holder reaches here.
+			if reviving {
+				// The label stopped serving, so whatever answers at this address
+				// now has to demonstrate control before traffic returns. Keeping
+				// the old lease would route to it on the strength of a proof made
+				// before the cluster went away.
+				r.clearProofLocked(existing)
+			}
+			existing.ReleasedAt = time.Time{}
 			existing.LastSeen = time.Now()
 			r.dirty = true
 			return existing, Renewed, nil
 		default:
+			existing.ReleasedAt = time.Time{}
 			existing.IP = ip
 			existing.LastSeen = time.Now()
 			r.clearPinLocked(existing)
@@ -285,9 +346,14 @@ func (r *Registry) clearProofLocked(entry *Entry) {
 	entry.ChallengeExpiry = time.Time{}
 }
 
-// Deregister removes a subdomain by its management token and returns the
-// subdomain removed, so callers can drop whatever per-registration state they
-// hold alongside the registry.
+// Deregister stops a subdomain serving by its management token and returns the
+// subdomain, so callers can drop whatever per-registration state they hold
+// alongside the registry.
+//
+// A label that ever served is held as a tombstone rather than freed: the
+// operator's published links outlive their uninstall, and the same token takes
+// the name back. A label that never proved control is freed outright, so an
+// install that failed on the way up does not park a name nothing ever served.
 func (r *Registry) Deregister(token string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -297,8 +363,21 @@ func (r *Registry) Deregister(token string) (string, error) {
 		return "", fmt.Errorf("invalid token")
 	}
 
-	delete(r.entries, subdomain)
-	delete(r.tokens, token)
+	entry, ok := r.entries[subdomain]
+	if !ok || entry.FirstProvenAt.IsZero() {
+		delete(r.entries, subdomain)
+		delete(r.tokens, token)
+		r.dirty = true
+		return subdomain, nil
+	}
+
+	entry.ReleasedAt = time.Now()
+	// The pin stays. A rebuilt server serving a different key then fails the
+	// pinned handshake rather than being accepted through unpinned grace, and the
+	// heartbeat asserts the new fingerprint through a token-authenticated call.
+	// The proof lease is dropped by the revival instead, so nothing routes here
+	// until control of the address is demonstrated again.
+	entry.ChallengeNonce, entry.ChallengeExpiry = "", time.Time{}
 	r.dirty = true
 
 	return subdomain, nil
@@ -324,33 +403,86 @@ func (r *Registry) Lookup(subdomain string) *Entry {
 	return &snapshot
 }
 
-// isExpiredLocked reports whether an entry has aged out. Beyond the normal
-// inactivity TTL, a never-proven registration is released after the much
+// isExpiredLocked reports whether an entry has stopped serving. Beyond the
+// normal inactivity TTL, a never-proven registration is released after the much
 // shorter unprovenReservationTTL once EnforceProof is on, so a squatter cannot
-// hold a label for the full retention window without ever proving control.
-// Caller holds r.mu.
+// hold a label for the full retention window without ever proving control; and a
+// deliberate release stops serving the moment it is made.
+//
+// Expired means the registration carries no traffic. It does not mean the label
+// is available, which isReleasableLocked answers. Caller holds r.mu.
 func (r *Registry) isExpiredLocked(entry *Entry) bool {
-	now := time.Now()
-	if now.Sub(entry.LastSeen) > r.InactivityTTL {
-		return true
-	}
-	if r.EnforceProof && !everProvenLocked(entry) && now.Sub(entry.CreatedAt) > unprovenReservationTTL {
-		return true
-	}
-	return false
+	_, expired := r.lapsedAtLocked(entry)
+	return expired
 }
 
-// everProvenLocked reports whether the registration ever completed a proof that
+// lapsedAtLocked returns the moment an entry stopped serving, and whether it
+// has. The moment is derived rather than stamped, so a gateway that was down
+// when a registration aged out still measures the tombstone from when the lapse
+// actually began. Caller holds r.mu.
+func (r *Registry) lapsedAtLocked(entry *Entry) (time.Time, bool) {
+	now := time.Now()
+	if !entry.ReleasedAt.IsZero() {
+		return entry.ReleasedAt, true
+	}
+	if inactive := entry.LastSeen.Add(r.InactivityTTL); now.After(inactive) {
+		return inactive, true
+	}
+	if r.EnforceProof && !everProvenLocked(entry) {
+		if unproven := entry.CreatedAt.Add(unprovenReservationTTL); now.After(unproven) {
+			return unproven, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// isReleasableLocked reports whether a lapsed label may be handed to somebody
+// else. A label that stopped serving is held for its previous token holder
+// through TombstoneTTL first, because the operator's published links outlive
+// their cluster and a stranger inheriting them is invisible behind the gateway's
+// own certificate.
+//
+// A label that never served earns no tombstone and is free the moment it lapses.
+// That keeps unprovenReservationTTL doing its job: its whole purpose is denying
+// a squatter a label they never serve, and a tombstone laid on top would hand
+// back the window it was written to take away. Reading the registration's own
+// history rather than EnforceProof makes it hold in both regimes, which matters
+// while proof-before-route is still off.
+//
+// FirstProvenAt rather than the current lease, because a move clears the lease
+// by design: a cluster that moved and then failed before proving its new address
+// has still published links under its name. Caller holds r.mu.
+func (r *Registry) isReleasableLocked(entry *Entry) bool {
+	at, lapsed := r.lapsedAtLocked(entry)
+	if !lapsed {
+		return false
+	}
+	if entry.FirstProvenAt.IsZero() {
+		return true
+	}
+	return time.Since(at) > r.TombstoneTTL
+}
+
+// everProvenLocked reports whether the registration currently holds a proof that
 // can be attributed to a key. Every authorisation check reads a lease this way,
-// so the reservation release has to as well: a lease naming no key authorises
-// nothing, and must not buy a label the full retention window either. Nothing
-// clears ProofKeySPKI once set, so an entry never regresses to unproven and a
-// rotation cannot make a live cluster look like a squatter. Caller holds r.mu.
+// so the unproven-reservation release has to as well: a lease naming no key
+// authorises nothing, and must not buy a label the full retention window either.
+//
+// A rotation leaves both fields set, so it cannot make a live cluster look like
+// a squatter. A move clears them, which is the point: nothing has demonstrated
+// control at the new address yet, and the entry has the reservation window to do
+// so. Tombstone eligibility asks about the past instead and reads FirstProvenAt,
+// which a move leaves alone. Caller holds r.mu.
 func everProvenLocked(entry *Entry) bool {
 	return !entry.ProvenAt.IsZero() && entry.ProofKeySPKI != ""
 }
 
 // Ping renews a subdomain's last-seen timestamp.
+//
+// A registration that has already lapsed is refused rather than renewed. Coming
+// back from a tombstone goes through Register, which re-establishes the address
+// and re-arms the proof; a ping carries neither, so reviving on one would put a
+// label back in service without anything having demonstrated control of it.
 func (r *Registry) Ping(token string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -363,6 +495,9 @@ func (r *Registry) Ping(token string) error {
 	entry, ok := r.entries[subdomain]
 	if !ok {
 		return fmt.Errorf("subdomain not found")
+	}
+	if r.isExpiredLocked(entry) {
+		return fmt.Errorf("registration for %q has lapsed; re-register to bring it back", subdomain)
 	}
 
 	entry.LastSeen = time.Now()
@@ -381,7 +516,7 @@ func (r *Registry) Cleanup() []string {
 	var removed []string
 	now := time.Now()
 	for subdomain, entry := range r.entries {
-		if r.isExpiredLocked(entry) {
+		if r.isReleasableLocked(entry) {
 			delete(r.tokens, entry.Token)
 			delete(r.entries, subdomain)
 			removed = append(removed, subdomain)
@@ -399,11 +534,19 @@ func (r *Registry) Cleanup() []string {
 	return removed
 }
 
-// Count returns the number of active registrations.
+// Count returns the number of registrations currently serving. Tombstoned
+// labels are held rather than served, so counting them would overstate the fleet
+// wherever this is reported.
 func (r *Registry) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return len(r.entries)
+	live := 0
+	for _, entry := range r.entries {
+		if !r.isExpiredLocked(entry) {
+			live++
+		}
+	}
+	return live
 }
 
 func generateToken() (string, error) {
@@ -630,7 +773,11 @@ func (r *Registry) UnpinnedSummary() (count int, oldest time.Duration) {
 
 	now := time.Now()
 	for _, entry := range r.entries {
-		if now.Sub(entry.LastSeen) > r.InactivityTTL || entry.CertFingerprint != "" {
+		// isExpiredLocked rather than the inactivity clock alone, so a
+		// tombstoned label is left out. It carries no traffic and nothing can
+		// pin it, and counting one would hold the cutover audit's
+		// wait-for-zero open on a registration that is not serving.
+		if r.isExpiredLocked(entry) || entry.CertFingerprint != "" {
 			continue
 		}
 		count++
@@ -676,6 +823,13 @@ func (r *Registry) IssueChallenge(subdomain, token string) (string, bool, error)
 
 	entry, ok := r.entries[subdomain]
 	if !ok || !tokenMatches(entry, token) {
+		return "", false, nil
+	}
+	// Proof accrues to a registration that is serving. A lapsed or released one
+	// comes back through Register, which re-establishes the address the proof
+	// would be about; issuing here would let a cluster sign a challenge, be told
+	// it succeeded, and still carry no traffic.
+	if r.isExpiredLocked(entry) {
 		return "", false, nil
 	}
 	// Reuse an outstanding unexpired challenge instead of minting a new one on
@@ -729,6 +883,10 @@ func (r *Registry) RecordProof(subdomain, token, nonce, spki, protocol string) b
 	if !ok || !tokenMatches(entry, token) {
 		return false
 	}
+	// A lapsed registration accrues no proof; see IssueChallenge.
+	if r.isExpiredLocked(entry) {
+		return false
+	}
 	if entry.ChallengeNonce == "" || !nonceMatches(entry.ChallengeNonce, nonce) {
 		return false
 	}
@@ -736,6 +894,9 @@ func (r *Registry) RecordProof(subdomain, token, nonce, spki, protocol string) b
 		return false
 	}
 	now := time.Now()
+	if entry.FirstProvenAt.IsZero() {
+		entry.FirstProvenAt = now
+	}
 	entry.ProvenAt = now
 	entry.ProofExpiry = now.Add(proofLease)
 	entry.ProofKeySPKI = spki

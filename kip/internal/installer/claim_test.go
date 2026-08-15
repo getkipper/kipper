@@ -205,3 +205,174 @@ func TestClaimRefusesAStaleTokenTheGatewayDidNotAccept(t *testing.T) {
 		t.Errorf("the held token must still be presented, sent %q", gw.sawToken)
 	}
 }
+
+// --- choosing the *.kipper.run name ---
+
+func TestKipperRunLabelForDefaultsToTheServerAddress(t *testing.T) {
+	label, wanted, err := KipperRunLabelFor("", "203.0.113.10")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !wanted {
+		t.Error("an install with no --domain must claim a gateway name")
+	}
+	if label != "203-0-113-10" {
+		t.Errorf("label = %q, want the address-derived name", label)
+	}
+}
+
+func TestKipperRunLabelForTakesTheChosenLabel(t *testing.T) {
+	label, wanted, err := KipperRunLabelFor("lab.kipper.run", "203.0.113.10")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !wanted {
+		t.Error("a *.kipper.run --domain must claim a gateway name")
+	}
+	if label != "lab" {
+		t.Errorf("label = %q, want lab", label)
+	}
+}
+
+// A custom domain's DNS belongs to the operator, so nothing is claimed from the
+// gateway and no label rule applies to it.
+func TestKipperRunLabelForIgnoresACustomDomain(t *testing.T) {
+	label, wanted, err := KipperRunLabelFor("kipper.example.com", "203.0.113.10")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wanted {
+		t.Error("a custom domain must claim no gateway name")
+	}
+	if label != "" {
+		t.Errorf("label = %q, want empty", label)
+	}
+}
+
+// Every one of these is refused by the gateway. Catching them here is what keeps
+// the failure at flag-parse time rather than after an SSH connection.
+func TestKipperRunLabelForRefusesUnregistrableNames(t *testing.T) {
+	cases := map[string]string{
+		"console.kipper.run":      "reserved",
+		"login.kipper.run":        "reserved after the sweep",
+		"under_score.kipper.run":  "underscore is not a DNS label character",
+		"-lead.kipper.run":        "leading hyphen",
+		"a--b.kipper.run":         "carries the derived-route separator",
+		"deep.nested.kipper.run":  "more than one label",
+		"kipper.run":              "the apex itself",
+		"198-51-100-7.kipper.run": "another server's derived name",
+	}
+	for domain, why := range cases {
+		if _, _, err := KipperRunLabelFor(domain, "203.0.113.10"); err == nil {
+			t.Errorf("KipperRunLabelFor(%q) = nil error, want it refused (%s)", domain, why)
+		}
+	}
+}
+
+// A server asking for its own derived name is the default path spelled out, and
+// must not be caught by the guard that protects it.
+func TestKipperRunLabelForAllowsAServerItsOwnDerivedName(t *testing.T) {
+	label, _, err := KipperRunLabelFor("203-0-113-10.kipper.run", "203.0.113.10")
+	if err != nil {
+		t.Fatalf("a server naming its own derived label must be accepted: %v", err)
+	}
+	if label != "203-0-113-10" {
+		t.Errorf("label = %q, want 203-0-113-10", label)
+	}
+}
+
+// A chosen label has to reach the ClusterIdentity's gateway block, not just the
+// serving domain. Without the block console-api gets no KIPPER_RUN_DOMAIN, so it
+// never heartbeats: the registration ages out, the hop pin is never asserted,
+// and the cluster serves a name the gateway will not route to.
+func TestChosenLabelReachesTheGatewayBlock(t *testing.T) {
+	got := gatewayRegistrationFor(nil, "lab.kipper.run")
+	if got != "lab.kipper.run" {
+		t.Errorf("gatewayRegistrationFor = %q, want lab.kipper.run", got)
+	}
+
+	manifest := ClusterIdentityManifest("lab.kipper.run", "", "", "", got, "203.0.113.10")
+	for _, want := range []string{
+		"kipperRunDomain: lab.kipper.run",
+		"clusterHost: 203.0.113.10",
+		"register: true",
+	} {
+		if !strings.Contains(manifest, want) {
+			t.Errorf("manifest is missing %q:\n%s", want, manifest)
+		}
+	}
+}
+
+func TestDerivedLabelReachesTheGatewayBlock(t *testing.T) {
+	if got := gatewayRegistrationFor(nil, "203-0-113-10.kipper.run"); got != "203-0-113-10.kipper.run" {
+		t.Errorf("gatewayRegistrationFor = %q, want the derived name", got)
+	}
+}
+
+// A custom domain's DNS is the operator's, so the cluster registers nothing and
+// the manifest carries no gateway block at all.
+func TestCustomDomainRecordsNoGatewayRegistration(t *testing.T) {
+	got := gatewayRegistrationFor(nil, "kipper.example.com")
+	if got != "" {
+		t.Errorf("gatewayRegistrationFor = %q, want empty", got)
+	}
+	if manifest := ClusterIdentityManifest("kipper.example.com", "", "", "", got, "203.0.113.10"); strings.Contains(manifest, "gateway:") {
+		t.Errorf("a custom-domain install must write no gateway block:\n%s", manifest)
+	}
+}
+
+// After a custom-domain move the cluster serves example.com while its
+// registration is still the kipper.run name the heartbeat renews. A reinstall
+// must keep that, rather than deriving one from the domain it now serves.
+func TestAdoptedIdentityKeepsItsRecordedRegistration(t *testing.T) {
+	existing := &ExistingIdentity{Domain: "kipper.example.com", KipperRunDomain: "lab.kipper.run"}
+	if got := gatewayRegistrationFor(existing, "kipper.example.com"); got != "lab.kipper.run" {
+		t.Errorf("gatewayRegistrationFor = %q, want the recorded lab.kipper.run", got)
+	}
+}
+
+// DNS names are case-insensitive and may carry a trailing dot, so both spellings
+// name the same host. Classifying on the raw string sent LAB.KIPPER.RUN down the
+// custom-domain path: nothing was registered with the gateway, and cert-manager
+// then tried to issue for a host the gateway would never route an ACME challenge
+// to.
+func TestKipperRunLabelForNormalisesTheDomain(t *testing.T) {
+	for _, domain := range []string{
+		"LAB.KIPPER.RUN",
+		"Lab.Kipper.Run",
+		"lab.kipper.run.",
+		"  lab.kipper.run  ",
+	} {
+		label, wanted, err := KipperRunLabelFor(domain, "203.0.113.10")
+		if err != nil {
+			t.Errorf("KipperRunLabelFor(%q): unexpected error %v", domain, err)
+			continue
+		}
+		if !wanted {
+			t.Errorf("KipperRunLabelFor(%q) was read as a custom domain", domain)
+		}
+		if label != "lab" {
+			t.Errorf("KipperRunLabelFor(%q) = %q, want lab", domain, label)
+		}
+	}
+
+	// The apex is the apex however it is spelled.
+	if _, _, err := KipperRunLabelFor("KIPPER.RUN.", "203.0.113.10"); err == nil {
+		t.Error("the apex must be refused whatever its case")
+	}
+}
+
+func TestNormaliseDomain(t *testing.T) {
+	cases := map[string]string{
+		"LAB.KIPPER.RUN":  "lab.kipper.run",
+		"Example.COM.":    "example.com",
+		"  example.com  ": "example.com",
+		"example.com":     "example.com",
+		"":                "",
+	}
+	for in, want := range cases {
+		if got := NormaliseDomain(in); got != want {
+			t.Errorf("NormaliseDomain(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

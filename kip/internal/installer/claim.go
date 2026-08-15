@@ -2,10 +2,85 @@ package installer
 
 import (
 	"fmt"
+	"strings"
 
+	"github.com/getkipper/kipper/controller/pkg/hostnames"
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/domain"
 )
+
+// NormaliseDomain returns the canonical spelling of a domain the operator
+// typed: lowercase, no surrounding space, no trailing dot.
+//
+// DNS names are case-insensitive and may be written as a fully-qualified name
+// ending in a dot, so LAB.KIPPER.RUN and lab.kipper.run. name the same host.
+// Everything downstream compares them as strings — the gateway suffix test, the
+// label rule, the CRD's lowercase pattern — so a name that reaches them
+// unnormalised is read as a different host than the one meant.
+func NormaliseDomain(domain string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+}
+
+// KipperRunLabelFor returns the *.kipper.run label an install claims for a
+// server, and whether it claims one at all.
+//
+// An empty domain takes the label derived from the server's address, which is
+// the default every free-tier install has always used. A *.kipper.run domain
+// takes the operator's chosen label. Any other domain is a custom domain whose
+// DNS the operator controls, so nothing is claimed from the gateway and no label
+// rule applies.
+//
+// The chosen label is checked against the same rule the gateway enforces, and
+// against the guard protecting address-shaped names, so a name that could never
+// be registered fails before this machine has connected to anything.
+func KipperRunLabelFor(domain, host string) (string, bool, error) {
+	domain = NormaliseDomain(domain)
+	if domain == "" {
+		return hostnames.LabelForIP(host), true, nil
+	}
+	// The apex is checked ahead of the suffix test, which excludes it: IsKipperRun
+	// asks whether a host sits under the gateway domain, and the apex sits on it.
+	// Falling through would install a cluster claiming to serve every other
+	// tenant's hostname.
+	if domain == hostnames.GatewayDomain {
+		return "", false, fmt.Errorf("%s is the gateway's own domain; choose a name under it (--domain lab.%s) or a domain you control",
+			hostnames.GatewayDomain, hostnames.GatewayDomain)
+	}
+	if !hostnames.IsKipperRun(domain) {
+		return "", false, nil
+	}
+
+	label := strings.TrimSuffix(domain, "."+hostnames.GatewayDomain)
+	if err := hostnames.ValidateClusterLabel(label); err != nil {
+		return "", false, fmt.Errorf("%s cannot be registered: %w", domain, err)
+	}
+	// The gateway refuses an address-shaped label from any other address. Saying
+	// so here names the server that owns it, which the gateway's answer cannot.
+	if hostnames.IPShapedLabel(label) && label != hostnames.LabelForIP(host) {
+		return "", false, fmt.Errorf("%s is the name reserved for the server at %s, so it cannot be registered for %s. Choose a different name",
+			domain, strings.ReplaceAll(label, "-", "."), host)
+	}
+	return label, true, nil
+}
+
+// gatewayRegistrationFor returns the *.kipper.run domain a fresh install records
+// in the ClusterIdentity's gateway block, or empty when the cluster registers
+// nothing.
+//
+// It reads the serving domain rather than the --domain flag. Asking whether the
+// flag was empty is what left a chosen label with no gateway block: console-api
+// got no KIPPER_RUN_DOMAIN, never heartbeated, and the cluster served a name the
+// gateway would not route. An adopted identity keeps whatever its CR already
+// records, which after a custom-domain move differs from the serving domain.
+func gatewayRegistrationFor(existing *ExistingIdentity, domainName string) string {
+	if existing != nil {
+		return existing.KipperRunDomain
+	}
+	if hostnames.IsKipperRun(domainName) {
+		return domainName
+	}
+	return ""
+}
 
 // registrar claims and releases names with the gateway. Narrow so a test can
 // drive the answers that matter — a fresh creation, a renewal, and a name

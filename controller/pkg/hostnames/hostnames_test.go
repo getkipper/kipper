@@ -89,3 +89,79 @@ func TestValidateClusterLabel(t *testing.T) {
 		}
 	}
 }
+
+// The reserved list is what stops an operator registering a label that reads as
+// the platform's own. Its job is the same for every entry, so a spot check of
+// the categories is enough; the exhaustive comparison that matters is the
+// lockstep test against the CRD's copy of this list.
+func TestReservedLabelsCoverPlatformNames(t *testing.T) {
+	for _, l := range []string{
+		"console", "dex", "api", "admin",
+		"login", "logout", "auth", "sso", "oauth", "oidc",
+		"account", "accounts", "signup",
+		"status", "gateway", "docs", "support", "help", "security", "billing", "blog",
+		"mail", "smtp", "mx", "ns1", "ns2", "webmail",
+	} {
+		if !ReservedLabels[l] {
+			t.Errorf("ReservedLabels[%q] = false, want true", l)
+		}
+		if err := ValidateClusterLabel(l); err == nil {
+			t.Errorf("ValidateClusterLabel(%q) = nil, want it refused as reserved", l)
+		}
+	}
+
+	// Reserving costs an operator a name, so names that read as somebody's own
+	// cluster have to stay registrable.
+	for _, l := range []string{"acme", "prod", "staging", "lab", "test", "demo", "dev"} {
+		if ReservedLabels[l] {
+			t.Errorf("ReservedLabels[%q] = true, want it left registrable", l)
+		}
+	}
+}
+
+func TestLabelForIP(t *testing.T) {
+	cases := map[string]string{
+		"203.0.113.10": "203-0-113-10",
+		"198.51.100.1": "198-51-100-1",
+	}
+	for ip, want := range cases {
+		if got := LabelForIP(ip); got != want {
+			t.Errorf("LabelForIP(%q) = %q, want %q", ip, got, want)
+		}
+		// The default label every free-tier install has always used must remain
+		// registrable, or the derivation and the rule have drifted apart.
+		if err := ValidateClusterLabel(want); err != nil {
+			t.Errorf("ValidateClusterLabel(LabelForIP(%q)) = %v, want nil", ip, err)
+		}
+	}
+}
+
+func TestIPShapedLabel(t *testing.T) {
+	shaped := []string{"203-0-113-10", "1-2-3-4", "255-255-255-255"}
+	for _, l := range shaped {
+		if !IPShapedLabel(l) {
+			t.Errorf("IPShapedLabel(%q) = false, want true", l)
+		}
+	}
+
+	// Only a label that could be somebody's address is claimed by the guard.
+	// Anything else is an ordinary name and must stay freely registrable.
+	plain := []string{"acme", "lab", "203-0-113", "203-0-113-10-1", "999-0-0-1", "a-1-2-3", "203-0-113-x"}
+	for _, l := range plain {
+		if IPShapedLabel(l) {
+			t.Errorf("IPShapedLabel(%q) = true, want false", l)
+		}
+	}
+}
+
+// The guard the gateway applies is only sound if every address it accepts
+// renders to a label the guard then recognises. Drift either way opens a hole:
+// a shape LabelForIP produces but IPShapedLabel misses is a squattable default
+// name.
+func TestLabelForIPIsAlwaysIPShaped(t *testing.T) {
+	for _, ip := range []string{"203.0.113.10", "1.2.3.4", "255.255.255.255", "198.51.100.1"} {
+		if !IPShapedLabel(LabelForIP(ip)) {
+			t.Errorf("IPShapedLabel(LabelForIP(%q)) = false, want true", ip)
+		}
+	}
+}

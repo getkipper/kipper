@@ -178,12 +178,14 @@ func main() {
 		log.Printf("dropped %d persisted registration(s) with non-public IPs", dropped)
 		pruned = true
 	}
-	// A persisted label containing the derived-route separator would shadow a
-	// per-cluster service route (console--<label>). New registrations reject it,
-	// but an older build accepted it, so drop any that survive in the loaded
-	// state. Re-applied every startup and safe to run when nothing matches.
-	if dropped := reg.PruneSubdomains(noDerivedSeparator); dropped > 0 {
-		log.Printf("dropped %d persisted registration(s) with a %q label (route-shadowing)", dropped, derivedRouteSeparator)
+	// Re-apply the whole current admission rule to the loaded state, so a policy
+	// tightened since the snapshot was written takes effect on the names already
+	// in it. Registration-time enforcement alone would protect only unused names:
+	// a label reserved by a later build, or one spelling somebody else's address,
+	// would keep serving for as long as its holder renewed it. Re-applied every
+	// startup and safe to run when nothing matches.
+	if dropped := reg.PruneEntries(registrableEntry); dropped > 0 {
+		log.Printf("dropped %d persisted registration(s) the current label policy refuses", dropped)
 		pruned = true
 	}
 	if pruned {
@@ -542,6 +544,19 @@ func handleRegister(reg *registry.Registry, baseDomain string, observe observeFu
 			return
 		}
 
+		// A label shaped like an address belongs to that address. It is the name
+		// an install derives for a server by default, so letting anyone hold it
+		// means holding the default name of a machine they do not run: the
+		// operator who installs there later finds it taken, and until then every
+		// link under it points wherever the holder chose. Checked after the
+		// public-IP guard, so the address compared against is one the gateway
+		// would route to.
+		if hostnames.IPShapedLabel(req.Subdomain) && req.Subdomain != hostnames.LabelForIP(req.IP) {
+			respondError(w, http.StatusConflict,
+				"a subdomain that spells an IP address may only be registered by that address")
+			return
+		}
+
 		entry, outcome, err := reg.Register(req.Subdomain, req.IP, req.Token)
 		if err != nil {
 			if errors.Is(err, registry.ErrSubdomainTaken) {
@@ -816,8 +831,17 @@ func boolEnvDefaultTrue(name string) bool {
 
 // noDerivedSeparator reports whether a subdomain is free of the derived-route
 // separator. A label containing it would shadow a per-cluster service route.
-func noDerivedSeparator(subdomain string) bool {
-	return !strings.Contains(subdomain, derivedRouteSeparator)
+// registrableEntry reports whether a persisted registration would still be
+// accepted today: its label must satisfy the shared rule (shape, no
+// derived-route separator, not reserved), and an address-shaped label must
+// belong to the address it names. It is the startup half of the guard
+// handleRegister applies to new requests, so the two cannot drift into a state
+// where the gateway refuses a name it is already serving.
+func registrableEntry(subdomain, ip string) bool {
+	if err := hostnames.ValidateClusterLabel(subdomain); err != nil {
+		return false
+	}
+	return !hostnames.IPShapedLabel(subdomain) || subdomain == hostnames.LabelForIP(ip)
 }
 
 // isPublicIP reports whether s is an address the gateway may register and proxy

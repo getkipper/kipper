@@ -30,7 +30,7 @@ does not create buckets.`,
 
 func init() {
 	installCmd.Flags().String("host", "", "IP address or hostname of the target server")
-	installCmd.Flags().String("domain", "", "custom domain for the cluster")
+	installCmd.Flags().String("domain", "", "name the cluster serves on: a free name under kipper.run (lab.kipper.run), or a domain you control (example.com). Default: derived from the server's address")
 	installCmd.Flags().String("console-domain", "", "hostname to serve the web console on (default: console.<domain>)")
 	installCmd.Flags().String("console-api-domain", "", "hostname to serve the console API on (default: console-api.<domain>)")
 	installCmd.Flags().String("dex-domain", "", "hostname to serve Dex on (default: dex.<domain>)")
@@ -75,10 +75,27 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	dnsResolvers, _ := cmd.Flags().GetStringSlice("dns-resolver")
 	trustedProxies, _ := cmd.Flags().GetStringSlice("trusted-proxy")
 
+	// Canonicalise the name before anything reads it, so LAB.KIPPER.RUN and
+	// lab.kipper.run. take the same path as the host they name.
+	domain = installer.NormaliseDomain(domain)
+
+	// Decide the *.kipper.run name here so an unregistrable one fails now,
+	// before this machine has connected to anything. Whether the name is free is
+	// the gateway's to answer and is asked later, still ahead of the first change
+	// to the server.
+	_, wantsGatewayName, err := installer.KipperRunLabelFor(domain, host)
+	if err != nil {
+		return err
+	}
+
 	// When a custom domain is provided and the admin email was not
 	// explicitly set, derive a valid email from the domain. The
 	// default admin@kipper.local is rejected by Let's Encrypt.
-	if domain != "" && !cmd.Flags().Changed("admin-email") {
+	//
+	// A *.kipper.run domain is left alone: those hosts are served behind the
+	// gateway's own certificate and issue nothing through ACME, so both free-tier
+	// paths keep the same default whether or not the label was chosen.
+	if domain != "" && !wantsGatewayName && !cmd.Flags().Changed("admin-email") {
 		adminEmail = "admin@" + domain
 	}
 
