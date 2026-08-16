@@ -158,6 +158,10 @@ func (r *Registry) LoadFrom(path string) error {
 	r.entries = make(map[string]*Entry, len(snap.Entries))
 	r.tokens = make(map[string]string, len(snap.Entries))
 
+	// Only set when something was actually migrated, so an idle gateway does not
+	// rewrite its registry on every restart.
+	migrated := false
+
 	for i := range snap.Entries {
 		entry := snap.Entries[i]
 		// FirstProvenAt arrived with the tombstone, so a registration persisted
@@ -171,10 +175,17 @@ func (r *Registry) LoadFrom(path string) error {
 		// half-written proof record becomes a 90-day hold.
 		if entry.FirstProvenAt.IsZero() && !entry.ProvenAt.IsZero() && entry.ProofKeySPKI != "" {
 			entry.FirstProvenAt = entry.ProvenAt
+			// Mark it so the next flush records the migration. Left in memory it
+			// is re-derived on every boot, which holds only while ProvenAt is
+			// there to derive it from: a move clears ProvenAt, and an entry
+			// migrated but never written comes back from a restart as never
+			// served, losing the tombstone this exists to preserve.
+			migrated = true
 		}
 		r.entries[entry.Subdomain] = &entry
 		r.tokens[entry.Token] = entry.Subdomain
 	}
+	r.dirty = migrated
 
 	return nil
 }

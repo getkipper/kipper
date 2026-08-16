@@ -331,3 +331,56 @@ func TestLoadBackfillsFirstProvenFromAnExistingProof(t *testing.T) {
 		t.Errorf("a never-proven label must still be freed at once: %v", err)
 	}
 }
+
+// The backfill runs in memory, so until something else marks the registry dirty
+// the seeded field exists only until the process ends and is re-derived on the
+// next boot. That works while proven_at survives to re-derive it from, and stops
+// working the moment a move clears it: an entry whose proof was cleared before
+// any flush comes back as never-served, losing the tombstone the backfill exists
+// to preserve. Marking dirty makes the migration durable on the next flush.
+func TestBackfillMarksTheRegistryForPersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "registry.json")
+	proven := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339)
+	snap := `{"entries":[{"subdomain":"old","ip":"203.0.113.1","token":"tok","created_at":"` + proven +
+		`","last_seen":"` + now + `","proven_at":"` + proven + `","proof_key_spki":"` + testFPA + `"}]}`
+	if err := os.WriteFile(path, []byte(snap), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := New()
+	if err := r.LoadFrom(path); err != nil {
+		t.Fatal(err)
+	}
+
+	wrote, err := r.FlushIfDirty(path)
+	if err != nil {
+		t.Fatalf("flushing: %v", err)
+	}
+	if !wrote {
+		t.Fatal("a load that backfilled must leave the registry dirty, so the next flush records it")
+	}
+
+	// The seeded value is now on disk, so it survives without proven_at.
+	reloaded := New()
+	if err := reloaded.LoadFrom(path); err != nil {
+		t.Fatal(err)
+	}
+	reloaded.mu.RLock()
+	got := reloaded.entries["old"].FirstProvenAt
+	reloaded.mu.RUnlock()
+	if got.IsZero() {
+		t.Error("first_proven_at was not persisted")
+	}
+
+	// A load with nothing to backfill leaves it clean, so an idle gateway does not
+	// rewrite its registry on every restart.
+	clean := New()
+	if err := clean.LoadFrom(path); err != nil {
+		t.Fatal(err)
+	}
+	if wrote, err := clean.FlushIfDirty(filepath.Join(dir, "unwanted.json")); err != nil || wrote {
+		t.Errorf("a load with nothing to migrate must not mark the registry dirty (wrote=%v err=%v)", wrote, err)
+	}
+}
