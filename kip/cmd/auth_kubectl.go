@@ -9,7 +9,6 @@ import (
 
 	"github.com/getkipper/kipper/kip/internal/auth"
 	"github.com/getkipper/kipper/kip/internal/config"
-	"github.com/getkipper/kipper/kip/internal/installer"
 )
 
 var authKubectlTokenCmd = &cobra.Command{
@@ -121,35 +120,4 @@ func clusterForKubectlToken(domain string) (*config.Cluster, error) {
 		return nil, fmt.Errorf("no cluster for domain %q in ~/.kip/config.yaml. Add it with: kip cluster add <file>", domain)
 	}
 	return cluster, nil
-}
-
-var authKubeconfigCmd = &cobra.Command{
-	Use:   "kubeconfig",
-	Short: "Rewrite this cluster's kubeconfig to use your OIDC identity",
-	Long: `Replaces the cluster's stored kubeconfig with one that carries no
-credential at all: kubectl obtains short-lived tokens through
-"kip auth kubectl-token" from your logged-in session, so every action is
-attributed to you personally and access ends with your account.
-
-The shared admin certificate the previous kubeconfig carried stays on the
-server as the documented break-glass credential; this command removes it
-from this machine.`,
-	RunE: runAuthKubeconfig,
-}
-
-func runAuthKubeconfig(cmd *cobra.Command, args []string) error {
-	cluster, err := loadCurrentClusterConfig()
-	if err != nil {
-		return err
-	}
-
-	path, err := installer.RewriteKubeconfigToExec(cluster.Domain, cluster.Kubeconfig)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("\n  ✔  %s now authenticates as your OIDC identity\n", path)
-	fmt.Printf("     kubectl runs `kip auth kubectl-token` for short-lived tokens.\n")
-	fmt.Printf("     Not logged in yet? Run: kip auth login\n\n")
-	return nil
 }

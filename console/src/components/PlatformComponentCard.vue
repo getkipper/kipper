@@ -159,6 +159,18 @@ async function applyLimit(newLimit: number) {
   }
 }
 
+// Components that ride along with another chart, and always-on ones, have no
+// enable/disable of their own: the API rejects the update, so offering the
+// button only produces an error the operator can do nothing about.
+//
+// An API build that omits the field is treated as "cannot toggle" rather than
+// "can". That build already rejects the action, so trusting the absence would
+// keep showing the buttons this exists to remove, for the minutes a rollout has
+// the new console in front of the old API. Hiding prometheus and loki's real
+// toggles for that window costs an operator one retry; showing six invalid ones
+// costs them a 400 they can do nothing about.
+const canToggle = computed(() => props.component.toggleable === true)
+
 async function toggleEnabled() {
   message.value = ''
   messageKind.value = ''
@@ -258,6 +270,7 @@ async function toggleEnabled() {
     </div>
 
     <button
+      v-if="canToggle"
       type="button"
       :disabled="updating"
       class="mt-3 inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100"

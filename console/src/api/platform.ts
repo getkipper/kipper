@@ -17,6 +17,12 @@ export interface PlatformSummary {
 export interface PlatformComponent {
   name: string
   enabled: boolean
+  // Whether the component accepts enable/disable. Components that share a
+  // chart with another (grafana and kube-state-metrics ride with prometheus,
+  // promtail with loki) and always-on ones do not, and the API rejects the
+  // update. An API build old enough to omit the field rejects it too, so the
+  // card treats the absence as "no" rather than offering an action that fails.
+  toggleable?: boolean
   profile_memory_limit?: string
   override_memory_limit?: string
   current_memory_limit?: string

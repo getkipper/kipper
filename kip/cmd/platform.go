@@ -107,6 +107,11 @@ var restartTargets = map[string]struct {
 	"loki":        {"monitoring", "StatefulSet", "loki"},
 	"grafana":     {"monitoring", "Deployment", "kube-prometheus-stack-grafana"},
 	"promtail":    {"monitoring", "DaemonSet", "promtail"},
+	// The release names are fixed by the installer, so these workload names are
+	// stable across clusters; all three verified on two live clusters.
+	"kube-state-metrics": {"monitoring", "Deployment", "kube-prometheus-stack-kube-state-metrics"},
+	"keda":               {"keda", "Deployment", "keda-operator"},
+	"velero":             {"velero", "Deployment", "velero"},
 }
 
 var platformRestartCmd = &cobra.Command{
@@ -151,10 +156,11 @@ func runPlatformStatus(_ *cobra.Command, _ []string) error {
 
 	overrides := overridesFromSpec(pc)
 	statuses := statusesFromCR(pc)
+	enabled := enabledOverrides(overrides)
 	for _, name := range platform.SupportedComponents() {
 		cs := statuses[name]
 		ov := overrides[name]
-		fmt.Printf("    %-12s %s\n", name, componentLine(name, profile, cs, ov))
+		fmt.Printf("    %-18s %s\n", name, componentLine(name, profile, cs, ov, enabled))
 	}
 	fmt.Println()
 	return nil
@@ -301,6 +307,20 @@ func setComponentField(pc *unstructured.Unstructured, name, field string, value 
 	return unstructured.SetNestedSlice(pc.Object, raw, "spec", "components")
 }
 
+// enabledOverrides pulls the explicit enable/disable flags out of the override
+// set, in the shape platform.EffectiveEnabled reads: a component with no entry
+// is absent rather than false.
+func enabledOverrides(overrides map[string]map[string]interface{}) map[string]*bool {
+	out := map[string]*bool{}
+	for name, ov := range overrides {
+		if v, ok := ov["enabled"].(bool); ok {
+			flag := v
+			out[name] = &flag
+		}
+	}
+	return out
+}
+
 func overridesFromSpec(pc *unstructured.Unstructured) map[string]map[string]interface{} {
 	out := map[string]map[string]interface{}{}
 	raw, _, _ := unstructured.NestedSlice(pc.Object, "spec", "components")
@@ -331,7 +351,13 @@ func statusesFromCR(pc *unstructured.Unstructured) map[string]map[string]interfa
 	return out
 }
 
-func componentLine(name, profile string, status, override map[string]interface{}) string {
+// componentLine renders one component's row. enabled comes from the whole
+// override set rather than this component's own entry, because a component
+// that shares a chart runs or does not run with its sibling: grafana and
+// kube-state-metrics live in kube-prometheus-stack, so disabling prometheus
+// takes them with it, and a row reading "on" for a pod that is not deployed is
+// worse than no row at all.
+func componentLine(name, profile string, status, override map[string]interface{}, enabled map[string]*bool) string {
 	overrideLim, _ := override["memoryLimit"].(string)
 	def := platform.EffectiveLimit(name, profile, "")
 	current, _ := status["currentMemoryLimit"].(string)
@@ -339,14 +365,7 @@ func componentLine(name, profile string, status, override map[string]interface{}
 		current = def
 	}
 	enabledStr := "on"
-	if v, ok := override["enabled"].(bool); ok {
-		if !v {
-			enabledStr = "off"
-		}
-	} else if profile == platform.ProfileNano && nanoDisablesByDefault(name) {
-		// nano disables the monitoring stack by default; an explicit enable
-		// is the only way to flip it back on. Other charts (traefik, keda,
-		// velero) keep running on nano, so don't paint them as off.
+	if !platform.EffectiveEnabled(name, enabled, profile) {
 		enabledStr = "off"
 	}
 	out := fmt.Sprintf("%-9s limit %s", enabledStr, current)
@@ -451,19 +470,6 @@ func validateComponent(name string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown component %q (valid: %s)", name, strings.Join(platform.SupportedComponents(), ", "))
-}
-
-// nanoDisablesByDefault reports whether the named component is part of
-// the monitoring stack that nano installs skip. Keep in sync with the
-// reconciler: prom + grafana share kube-prometheus-stack, loki + promtail
-// move as one.
-func nanoDisablesByDefault(name string) bool {
-	switch name {
-	case platform.ComponentPrometheus, platform.ComponentGrafana,
-		platform.ComponentLoki, platform.ComponentPromtail:
-		return true
-	}
-	return false
 }
 
 // validateToggleComponent is the narrower check for enable/disable. The

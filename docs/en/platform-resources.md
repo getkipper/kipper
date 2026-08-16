@@ -30,6 +30,18 @@ A few invariants:
 - The bump never lowers a manual override. If you set Prometheus to 6 Gi yourself and it OOMs, Kipper leaves your value alone and reports the ceiling instead.
 - The auto-bump is recorded on the CR's status (`LastBumpAt`, `LastBumpFrom`, `LastBumpTo`, `LastBumpReason`), visible in the Platform section of the console.
 
+## Components sized for their peak, not their average
+
+Some components use far more memory for a moment than they do at rest, and the limit has to cover the moment.
+
+`kube-state-metrics` is the clearest case. It keeps every object it watches in memory, and an API server restart makes it re-list all of them at once, so its peak has little to do with the few tens of megabytes it sits at while nothing changes. Kipper gives it a 192 Mi limit against a 32 Mi request for that reason. A limit reserves nothing, so the headroom costs an idle cluster nothing and is there when the cluster needs it.
+
+It is resizable like everything else below, because the peak scales with how many objects a cluster holds:
+
+```bash
+kip platform resize kube-state-metrics --memory 384Mi
+```
+
 ## Manual resizing
 
 You can set a memory limit yourself, either through the Platform page in the console or with `kip platform resize`. The override is stored on the `PlatformConfig` CR and the reconciler applies it to the HelmChart on the next pass.

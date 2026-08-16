@@ -66,7 +66,7 @@ users:
 	path := filepath.Join(clustersDir, "cluster.example.com.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(admin), 0o600))
 
-	got, err := RewriteKubeconfigToExec("cluster.example.com", path)
+	got, err := RewriteKubeconfigToExec("cluster.example.com", path, []byte(admin))
 	require.NoError(t, err)
 	assert.Equal(t, path, got)
 
@@ -100,7 +100,9 @@ clusters:
       server: https://203.0.113.10:6443
 `)), 0o600))
 
-	_, err := RewriteKubeconfigToExec("bare", filepath.Join(clustersDir, "bare.yaml"))
+	bare, err := os.ReadFile(filepath.Join(clustersDir, "bare.yaml"))
+	require.NoError(t, err)
+	_, err = RewriteKubeconfigToExec("bare", filepath.Join(clustersDir, "bare.yaml"), bare)
 	require.Error(t, err)
 }
 
@@ -139,7 +141,7 @@ users:
 	path := filepath.Join(clustersDir, "multi.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(merged), 0o600))
 
-	_, err := RewriteKubeconfigToExec("multi", path)
+	_, err := RewriteKubeconfigToExec("multi", path, []byte(merged))
 	require.NoError(t, err)
 
 	content, err := os.ReadFile(path)
@@ -173,7 +175,7 @@ contexts:
 	path := filepath.Join(clustersDir, "ambiguous.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(ambiguous), 0o600))
 
-	_, err := RewriteKubeconfigToExec("ambiguous", path)
+	_, err := RewriteKubeconfigToExec("ambiguous", path, []byte(ambiguous))
 	require.Error(t, err)
 
 	content, readErr := os.ReadFile(path)

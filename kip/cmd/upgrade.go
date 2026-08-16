@@ -26,8 +26,10 @@ import (
 
 	"github.com/getkipper/kipper/controller/pkg/pubip"
 	"github.com/getkipper/kipper/controller/pkg/rollout"
+	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/infra"
 	"github.com/getkipper/kipper/kip/internal/installer"
+	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 //go:embed crds/*.yaml
@@ -217,7 +219,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	fmt.Printf("  verifies logins against are reconciled over SSH. This runs on every upgrade,\n")
 	fmt.Printf("  including with --skip-system, because it is this cluster's own identity\n")
 	fmt.Printf("  rather than a component version.\n")
-	if err := ensureTrustMaterial(cluster.Host, explicitKey, fallbackKey); err != nil {
+	if err := ensureTrustMaterial(cluster, explicitKey, fallbackKey); err != nil {
 		return err
 	}
 
@@ -257,7 +259,21 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 // has to know to ask for. A cluster with no host recorded is left alone: that
 // configuration cannot be reached over SSH at all, and failing the upgrade over
 // it would be worse than the gap.
-func ensureTrustMaterial(host, explicitKey, fallbackKey string) error {
+// The host-side steps of an upgrade, as function values so a test can drive the
+// sequence production runs. What matters is the order: the API server gets its
+// arguments before anything asks it to load an authentication config, because
+// on an old cluster there is no flag for it to load one with.
+var (
+	ensureHopMaterial     = func(c *ssh.Client) error { return installer.EnsureHopMaterial(c) }
+	ensureAPIServerConfig = func(c *ssh.Client, notify func(string)) (bool, error) {
+		return installer.EnsureAPIServerConfig(c, notify)
+	}
+	syncOperatorAuth   = installer.SyncOperatorAuthIfConfigured
+	ensureOperatorAuth = installer.EnsureOperatorAuth
+)
+
+func ensureTrustMaterial(cluster *config.Cluster, explicitKey, fallbackKey string) error {
+	host := cluster.Host
 	if host == "" {
 		return nil
 	}
@@ -271,9 +287,28 @@ func ensureTrustMaterial(host, explicitKey, fallbackKey string) error {
 	}
 	defer func() { _ = provider.Close() }()
 
+	return reconcileHostTrust(provider.Client(), cluster.DexHost())
+}
+
+// reconcileHostTrust is everything an upgrade does on the server itself.
+func reconcileHostTrust(client *ssh.Client, dexHost string) error {
 	fmt.Printf("\n  ...  Certificate authority and trust anchor\n")
-	if err := installer.EnsureHopMaterial(provider.Client()); err != nil {
+	if err := ensureHopMaterial(client); err != nil {
 		return fmt.Errorf("ensuring the cluster certificate authority: %w", err)
+	}
+
+	// A cluster installed before kip configured the API server has no
+	// authenticator at all, so operator login cannot work there however often
+	// the anchor is reconciled. The arguments live on the host, which is why
+	// only something reaching over SSH can add them.
+	apiserverChanged, err := ensureAPIServerConfig(client, func(m string) {
+		fmt.Printf("  ...  %s\n", m)
+	})
+	if err != nil {
+		return fmt.Errorf("bringing the API server arguments up to date: %w", err)
+	}
+	if apiserverChanged {
+		fmt.Printf("  ✔  API server arguments, and k3s restarted on them\n")
 	}
 
 	// Writing the anchor is half the job. The API server reads that file only
@@ -286,7 +321,7 @@ func ensureTrustMaterial(host, explicitKey, fallbackKey string) error {
 	// A cluster with no issuer configured has nothing to render and is left
 	// alone rather than failed: OIDC is not set up there, so there is no trust
 	// to repair.
-	synced, err := installer.SyncOperatorAuthIfConfigured(provider.Client())
+	synced, err := syncOperatorAuth(client)
 	if err != nil {
 		return fmt.Errorf("loading the trust anchor into the API server: %w", err)
 	}
@@ -294,7 +329,28 @@ func ensureTrustMaterial(host, explicitKey, fallbackKey string) error {
 		fmt.Printf("  ✔  Certificate authority, trust anchor, and the API server has loaded it\n")
 		return nil
 	}
-	fmt.Printf("  ✔  Certificate authority and trust anchor (no login issuer configured, nothing to load)\n")
+
+	// No issuer configured. On a cluster old enough to have needed the
+	// arguments above, that is the rest of the same repair: the API server is
+	// running the zero-authenticator stub, and this is what gives it Dex.
+	//
+	// A failure here is reported rather than raised. The cluster is then where
+	// it already was, with no authenticator and certificate authentication
+	// untouched, so failing the whole upgrade over it would turn a cluster that
+	// cannot reach its own Dex into a cluster that cannot be upgraded either.
+	if dexHost == "" {
+		fmt.Printf("  ✔  Certificate authority and trust anchor (no domain recorded, so no login issuer to configure)\n")
+		return nil
+	}
+	fmt.Printf("  ...  Operator login against %s\n", dexHost)
+	if err := ensureOperatorAuth(client, dexHost); err != nil {
+		fmt.Printf("  ⚠  Operator login is still not configured: %v\n", err)
+		fmt.Printf("     The API server holds no authenticator, which is where this cluster already was,\n")
+		fmt.Printf("     and certificate authentication is unaffected. Run 'kip upgrade' again once\n")
+		fmt.Printf("     %s serves its discovery document.\n", dexHost)
+		return nil
+	}
+	fmt.Printf("  ✔  Operator login configured. Run 'kip auth login', then 'kip auth kubeconfig'\n")
 	return nil
 }
 
