@@ -13,6 +13,7 @@ func TestSupportedComponents(t *testing.T) {
 	want := []string{
 		ComponentGrafana,
 		ComponentKeda,
+		ComponentKubeStateMetrics,
 		ComponentLoki,
 		ComponentPrometheus,
 		ComponentPromtail,
@@ -39,7 +40,8 @@ func TestComponentsByChart_GroupsMultiComponentCharts(t *testing.T) {
 	prom := groups[chartKubePrometheusStack]
 	assert.Contains(t, prom, ComponentPrometheus)
 	assert.Contains(t, prom, ComponentGrafana)
-	assert.Len(t, prom, 2, "prom + grafana share kube-prometheus-stack")
+	assert.Contains(t, prom, ComponentKubeStateMetrics)
+	assert.Len(t, prom, 3, "prometheus, grafana and kube-state-metrics share kube-prometheus-stack")
 
 	assert.Equal(t, []string{ComponentLoki}, groups[chartLoki])
 	assert.Equal(t, []string{ComponentPromtail}, groups[chartPromtail])

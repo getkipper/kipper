@@ -44,6 +44,15 @@ export const PLATFORM_COMPONENTS: Record<string, PlatformComponentConfig> = {
     memoryMin: 64 * Mi,
     memoryMax: 512 * Mi,
   },
+  // Its peak is a re-list, not its steady state: an API server restart makes
+  // it rebuild every store at once, which is what the card's sparkline is
+  // worth watching for.
+  'kube-state-metrics': {
+    namespace: 'monitoring',
+    selector: 'app.kubernetes.io/name=kube-state-metrics',
+    memoryMin: 64 * Mi,
+    memoryMax: 1 * Gi,
+  },
   promtail: {
     namespace: 'monitoring',
     selector: 'app.kubernetes.io/name=promtail',

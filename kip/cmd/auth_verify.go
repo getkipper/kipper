@@ -6,7 +6,6 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/getkipper/kipper/kip/internal/installer"
 )
@@ -33,23 +32,13 @@ func runAuthVerify(cmd *cobra.Command, args []string) error {
 
 	// Read the server address and cluster CA from the on-disk kubeconfig; the
 	// proof uses the operator's token, not this file's credential.
-	cfg, err := clientcmd.LoadFromFile(cluster.Kubeconfig)
+	endpoint, err := readClusterEndpoint(cluster.Kubeconfig)
 	if err != nil {
-		return fmt.Errorf("reading kubeconfig %s: %w", cluster.Kubeconfig, err)
-	}
-	var server string
-	var caData []byte
-	if ctxEntry, ok := cfg.Contexts[cfg.CurrentContext]; ok {
-		if c, ok := cfg.Clusters[ctxEntry.Cluster]; ok {
-			server, caData = c.Server, c.CertificateAuthorityData
-		}
-	}
-	if server == "" || len(caData) == 0 {
-		return fmt.Errorf("kubeconfig %s carries no server and CA to verify against", cluster.Kubeconfig)
+		return err
 	}
 
 	result, detail, err := installer.VerifyOperatorIdentity(
-		context.Background(), cluster.Domain, cluster.DexHost(), cluster.Domain, server, caData)
+		context.Background(), cluster.Domain, cluster.DexHost(), cluster.Domain, endpoint.server, endpoint.caData)
 	if err != nil {
 		return err
 	}

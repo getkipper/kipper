@@ -550,7 +550,7 @@ func TestPlatformConfigReconciler_NoStatusWriteAtSteadyState(t *testing.T) {
 
 	// PlatformConfig already in steady state: spec matches a prior reconcile
 	// whose status reflects what every chart already carries. The path
-	// table covers seven components across six charts, so this fixture
+	// table covers eight components across six charts, so this fixture
 	// has to seed all of them — otherwise the reconciler would patch in
 	// the missing defaults and that counts as a status change.
 	pc := &kipperv1.PlatformConfig{
@@ -561,6 +561,7 @@ func TestPlatformConfigReconciler_NoStatusWriteAtSteadyState(t *testing.T) {
 			Components: []kipperv1.ComponentStatus{
 				{Name: componentPrometheus, CurrentMemoryLimit: "1Gi"},
 				{Name: platform.ComponentGrafana, CurrentMemoryLimit: "128Mi"},
+				{Name: platform.ComponentKubeStateMetrics, CurrentMemoryLimit: "192Mi"},
 				{Name: componentLoki, CurrentMemoryLimit: "512Mi"},
 				{Name: platform.ComponentPromtail, CurrentMemoryLimit: "128Mi"},
 				{Name: platform.ComponentTraefik, CurrentMemoryLimit: "256Mi"},
@@ -583,6 +584,12 @@ grafana:
       memory: 64Mi
     limits:
       memory: 128Mi
+kube-state-metrics:
+  resources:
+    requests:
+      memory: 32Mi
+    limits:
+      memory: 192Mi
 `)
 	lokiChart := newHelmChart("loki", `singleBinary:
   resources:

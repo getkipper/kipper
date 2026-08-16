@@ -85,7 +85,7 @@ func renderAuthnConfig(caPEM string, dexHosts ...string) string {
 // reference; InstallK3s calls it before the k3s installer runs. Re-runs must
 // not clobber a live authenticator config back to the stub, so the stub only
 // lands when no config exists yet.
-func writeAuthnStubAndAuditPolicy(client *ssh.Client) error {
+func writeAuthnStubAndAuditPolicy(client commandRunner) error {
 	if _, err := client.Run(authnStubWriteCmd()); err != nil {
 		return fmt.Errorf("writing authentication config stub: %w", err)
 	}

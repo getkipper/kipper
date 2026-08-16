@@ -449,9 +449,40 @@ kip auth kubeconfig
 ```
 
 ```
+  ...  Checking that your login reaches this cluster (up to a minute)
+
   ✔  /Users/anna/.kip/clusters/shop.kipper.run.yaml now authenticates as your OIDC identity
      kubectl runs `kip auth kubectl-token` for short-lived tokens.
-     Not logged in yet? Run: kip auth login
+```
+
+The check comes first because the file being replaced is often the only credential that reaches the cluster from this machine. It is the same proof [`kip auth verify`](#kip-auth-verify) makes: your session token is sent to the API server, which has to accept it as you and grant you access. A cluster that answers anything else keeps the credential it has.
+
+```
+  ✗  This cluster did not accept your login: the API server rejected the token
+     /Users/anna/.kip/clusters/shop.kipper.run.yaml is unchanged, so it still reaches the cluster.
+     Run 'kip cluster ca status' to see what the API server has loaded,
+     and 'kip auth verify' to re-check the login once it is fixed.
+
+this cluster does not accept your login, kubeconfig unchanged
+```
+
+A rejected token usually means the API server has no authenticator for your issuer. `kip cluster ca status` says so directly, reporting that the authentication config names no issuer.
+
+An API server that cannot be reached is refused too, with its own message, because an answer nobody got is not a yes:
+
+```
+  ⚠  Could not reach the API server to check your login: Get "https://203.0.113.10:6443/apis/authentication.k8s.io/v1/selfsubjectreviews": dial tcp 203.0.113.10:6443: i/o timeout
+     /Users/anna/.kip/clusters/shop.kipper.run.yaml is unchanged and still works.
+
+login could not be checked, kubeconfig unchanged
+```
+
+Running it before `kip auth login` refuses in the same spirit, naming the login as the fix:
+
+```
+  ✗  Your login could not be checked, so /Users/anna/.kip/clusters/shop.kipper.run.yaml is unchanged.
+
+not authenticated. Run: kip auth login
 ```
 
 After this, the kubeconfig carries no credential at all: kubectl obtains a token valid for a few minutes each time it needs one, every action in the Kubernetes audit log names your email, and removing a person's access means removing their account rather than rotating certificates. The admin certificate stays on the server as the break-glass credential (see [Architecture](/en/architecture)).
@@ -1110,6 +1141,31 @@ On a cluster that uses a `*.kipper.run` name, the upgrade also records that name
 
 Your apps and services are not directly touched, but step 3 can briefly disrupt running workloads if a chart upgrade rolls pods. For that reason kip prompts before running step 3 and refuses to proceed in non-interactive contexts without `--yes`.
 
+### Clusters installed before operator login existed
+
+A cluster installed before Kipper configured the API server has no authenticator, so it rejects every login token while still accepting the admin certificate. `kip cluster ca status` reports it as an authentication config that names no issuer. The arguments that fix it live on the server rather than in the cluster, so only an upgrade, which reaches the host over SSH, can add them.
+
+Every upgrade checks, and repairs a cluster that needs it:
+
+```
+  ...  The API server is missing the arguments this kip installs. Adding them and restarting k3s once; workloads keep running through it.
+  ✔  API server arguments, and k3s restarted on them
+  ...  Operator login against dex.shop.kipper.run
+  ✔  Operator login configured. Run 'kip auth login', then 'kip auth kubeconfig'
+```
+
+k3s restarts once, which interrupts the control plane for a few seconds. containerd and your pods run through it, so apps keep serving. kip then waits up to two minutes for the API server to answer. It asks the API server rather than the nodes, so an unrelated agent that happens to be NotReady does not read as a failed repair.
+
+If the API server does not come back, kip restores the configuration it replaced and restarts k3s on it. A copy of the previous file stays at `/etc/rancher/k3s/config.yaml.kipper-bak` either way.
+
+What it tells you afterwards depends on how far it got, and it never claims more than it verified. When the restore worked and k3s came back on it, the cluster is where it started. When k3s did not come back on the restored configuration either, it says that, and that server needs looking at directly. When the restore itself could not run, because the server became unreachable partway, it says the state of that server is unknown, names the backup, and gives you the two commands to put it back by hand.
+
+Two things it will not do. A `kube-apiserver-arg` block kip did not write is never rewritten, and neither is one carrying only some of these arguments: kip writes the files the arguments name, prints the lines to add, and stops, because merging arguments it does not understand is how an upgrade breaks a cluster. And if Dex cannot be reached to configure the issuer, the upgrade says so and carries on rather than failing, since the cluster is then exactly where it started, with certificate authentication untouched.
+
+Audit logging arrives with the same block, writing to `/var/lib/rancher/k3s/server/logs/audit.log` under the policy fresh installs use: metadata only, never request or response bodies, capped at 100 MB per file with 10 kept for 30 days.
+
+A cluster already carrying these arguments is left alone, and nothing restarts.
+
 ```bash
 kip upgrade                    # default, prompts before system components
 kip upgrade --skip-system      # only steps 1 and 2 (Kipper console layer)
@@ -1148,7 +1204,8 @@ list, so you can tell before you run it whether the thing you need is included.
 | **Console deployment manifest** | **No** | Image moves on upgrade; the manifest does not |
 | **Initial admin ClusterRoleBinding** | **No, deliberately** | Managed as you add and remove admins |
 | **k3s** | **No** | Re-run `kip install` |
-| **Host firewall, kernel sysctls, API server flags** | **No** | Fresh install only. The trust anchor the API server verifies logins against is the exception in the second row |
+| API server arguments and operator login | Yes, over SSH, even with `--skip-system` | — |
+| **Host firewall, kernel sysctls** | **No** | Fresh install only |
 
 Four of those need more than a row.
 

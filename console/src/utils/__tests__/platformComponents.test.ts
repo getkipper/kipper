@@ -24,6 +24,7 @@ describe('platformConfig', () => {
       'prometheus',
       'loki',
       'grafana',
+      'kube-state-metrics',
       'longhorn',
       'dex',
       'zot',

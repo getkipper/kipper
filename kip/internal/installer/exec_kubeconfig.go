@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -114,8 +115,20 @@ func RenderExecFromAdmin(domain, adminKubeconfig, execCommand string) (content, 
 // not the domain-derived default. The file it replaces typically carries the
 // shared k3s admin certificate; after this, that certificate exists only on
 // the server, as break-glass.
-func RewriteKubeconfigToExec(domain, path string) (string, error) {
-	existing, err := clientcmd.LoadFromFile(path)
+//
+// snapshot is the content the caller read and acted on, and the rewrite is
+// rendered from it rather than from a second read. The caller spends up to a
+// minute proving the operator's login against the server that content names,
+// so re-reading here would let a file replaced during that minute be converted
+// on the strength of a proof made against the cluster it used to name.
+//
+// The file is re-read to refuse when it no longer holds those bytes, which
+// covers a replacement made while the proof was in flight. A replacement
+// landing between that read and the rename is not covered: POSIX has no
+// compare-and-swap on file content, so closing it needs a lock every writer of
+// a cluster kubeconfig takes, which is a wider change than this one.
+func RewriteKubeconfigToExec(domain, path string, snapshot []byte) (string, error) {
+	existing, err := clientcmd.Load(snapshot)
 	if err != nil {
 		return "", fmt.Errorf("reading kubeconfig %s: %w", path, err)
 	}
@@ -123,6 +136,14 @@ func RewriteKubeconfigToExec(domain, path string) (string, error) {
 	content, _, _, err := execFromAPIConfig(domain, existing, execCommandForHost())
 	if err != nil {
 		return "", fmt.Errorf("kubeconfig %s: %w", path, err)
+	}
+
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("re-reading kubeconfig %s: %w", path, err)
+	}
+	if !bytes.Equal(current, snapshot) {
+		return "", fmt.Errorf("kubeconfig %s changed while your login was being checked, so it was left as it is", path)
 	}
 
 	if err := WriteFileAtomic(path, []byte(content), 0o600); err != nil {

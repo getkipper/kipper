@@ -73,11 +73,12 @@ const (
 // (ComponentPrometheus, ComponentLoki) live alongside these in profile.go
 // and are re-exported transparently via Go's package scope.
 const (
-	ComponentGrafana  = "grafana"
-	ComponentPromtail = "promtail"
-	ComponentTraefik  = "traefik"
-	ComponentKeda     = "keda"
-	ComponentVelero   = "velero"
+	ComponentGrafana          = "grafana"
+	ComponentKubeStateMetrics = "kube-state-metrics"
+	ComponentPromtail         = "promtail"
+	ComponentTraefik          = "traefik"
+	ComponentKeda             = "keda"
+	ComponentVelero           = "velero"
 )
 
 // HelmChart resource names in HelmChartNamespace. Centralised so they
@@ -114,6 +115,20 @@ var componentPathsByName = map[string]ComponentPaths{
 		DefaultMemoryLimit:   "128Mi",
 		MemoryMin:            "64Mi",
 		MemoryMax:            "512Mi",
+		Toggle:               ToggleFollowsPrometheus,
+	},
+	// Sized for the re-list an API server restart forces, not for the steady
+	// state; see the constants in manifests.go. Tunable because the peak scales
+	// with how many objects a cluster holds, and a cluster that outgrows the
+	// default should not have to wait for a Kipper release.
+	ComponentKubeStateMetrics: {
+		ChartName:            chartKubePrometheusStack,
+		MemoryRequestPath:    []string{"kube-state-metrics", "resources", "requests", "memory"},
+		MemoryLimitPath:      []string{"kube-state-metrics", "resources", "limits", "memory"},
+		DefaultMemoryRequest: kubeStateMetricsMemoryRequest,
+		DefaultMemoryLimit:   kubeStateMetricsMemoryLimit,
+		MemoryMin:            "64Mi",
+		MemoryMax:            "1Gi",
 		Toggle:               ToggleFollowsPrometheus,
 	},
 	ComponentLoki: {

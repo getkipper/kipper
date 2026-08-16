@@ -217,7 +217,9 @@ Per-profile memory limits (request is typically half the limit):
 
 If Prometheus or Loki hits its limit and gets OOMKilled, the platform reconciler auto-bumps the limit (up to per-component ceilings of 4 Gi for Prometheus and 2 Gi for Loki) so a workload that outgrew the profile default doesn't fail silently. You can also override the limit manually via the console's Platform page or `kip platform resize`. See [Platform Resources](/en/platform-resources) for the full reference.
 
-Grafana sits at 64 Mi request / 128 Mi limit across all profiles. Promtail is 32 Mi / 128 Mi. kube-state-metrics and node-exporter each sit at 32 Mi / 64 Mi.
+Grafana sits at 64 Mi request / 128 Mi limit across all profiles. Promtail is 32 Mi / 128 Mi. node-exporter is 32 Mi / 64 Mi.
+
+kube-state-metrics requests 32 Mi and is allowed 192 Mi. The gap is deliberate: it keeps every object it watches in memory and re-lists all of them when the API server restarts, so it needs far more for a moment than it uses at rest. See [Platform Resources](/en/platform-resources) for what that means and how to change it.
 
 ## Data retention
 

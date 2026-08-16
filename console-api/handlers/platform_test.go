@@ -131,6 +131,14 @@ func TestPlatform_ComponentsIncludesProfileDefaultAndOverride(t *testing.T) {
 	assert.Equal(t, "256Mi", prom.MemoryMin, "bounds come from helmpaths.go")
 	assert.Equal(t, "8Gi", prom.MemoryMax)
 
+	// The console reads this to decide whether to offer enable/disable. A
+	// component that shares a chart cannot be toggled on its own, and PATCH
+	// rejects the attempt, so a card offering it produces only an error.
+	assert.True(t, prom.Toggleable, "prometheus toggles on its own")
+	assert.False(t, byName["grafana"].Toggleable, "grafana rides with prometheus")
+	assert.False(t, byName["kube-state-metrics"].Toggleable, "so does kube-state-metrics")
+	assert.False(t, byName["traefik"].Toggleable, "traefik is always on")
+
 	loki := byName["loki"]
 	assert.Equal(t, "1Gi", loki.ProfileMemoryLimit, "xlarge default for Loki")
 	assert.Empty(t, loki.OverrideMemoryLimit, "no override set")

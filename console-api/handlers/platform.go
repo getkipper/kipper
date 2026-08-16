@@ -41,8 +41,14 @@ type componentSummaryEntry struct {
 }
 
 type componentDetailEntry struct {
-	Name                string `json:"name"`
-	Enabled             bool   `json:"enabled"`
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+	// Toggleable says whether this component accepts enable/disable at all.
+	// Only self-toggling components do: the rest either follow the chart
+	// sibling they are installed with or are always on, and PATCH rejects an
+	// `enabled` update for them. The console reads this rather than keeping
+	// its own list, which would be one more copy of the same truth to drift.
+	Toggleable          bool   `json:"toggleable"`
 	ProfileMemoryLimit  string `json:"profile_memory_limit,omitempty"`
 	OverrideMemoryLimit string `json:"override_memory_limit,omitempty"`
 	CurrentMemoryLimit  string `json:"current_memory_limit,omitempty"`
@@ -158,6 +164,7 @@ func (p *Platform) Components(w http.ResponseWriter, r *http.Request) {
 		entry := componentDetailEntry{
 			Name:                name,
 			Enabled:             platform.EffectiveEnabled(name, enabledOverrides, pc.Spec.Profile),
+			Toggleable:          platform.IsToggleable(name),
 			ProfileMemoryLimit:  platform.EffectiveLimit(name, pc.Spec.Profile, ""),
 			OverrideMemoryLimit: override.MemoryLimit,
 			CurrentMemoryLimit:  statusByName[name].CurrentMemoryLimit,
@@ -264,6 +271,7 @@ func (p *Platform) UpdateComponent(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, componentDetailEntry{
 		Name:                name,
 		Enabled:             platform.EffectiveEnabled(name, enabledOverrides, pc.Spec.Profile),
+		Toggleable:          platform.IsToggleable(name),
 		ProfileMemoryLimit:  platform.EffectiveLimit(name, pc.Spec.Profile, ""),
 		OverrideMemoryLimit: pc.Spec.Components[idx].MemoryLimit,
 		MemoryMin:           paths.MemoryMin,

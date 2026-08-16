@@ -164,6 +164,17 @@ spec:
 // for the given memory resources. Grafana carries a datasource spanning every
 // tenant's logs and metrics, so it is deployed without a public ingress and is
 // reached over the cluster API instead.
+// kube-state-metrics holds every object it watches in memory, so its peak is
+// not its steady state: an API server restart makes it re-list the lot at once.
+// A 64Mi limit carried a 23Mi steady state comfortably and still OOM-killed the
+// pod nine times over on the first control-plane restart in 141 days. The limit
+// is sized for the re-list rather than for the quiet hours. It reserves
+// nothing, so the headroom costs an idle cluster nothing.
+const (
+	kubeStateMetricsMemoryRequest = "32Mi"
+	kubeStateMetricsMemoryLimit   = "192Mi"
+)
+
 func KubePrometheusStackHelmChart(res Resources) string {
 	return fmt.Sprintf(`apiVersion: helm.cattle.io/v1
 kind: HelmChart
@@ -228,9 +239,9 @@ spec:
       resources:
         requests:
           cpu: 10m
-          memory: 32Mi
+          memory: `+kubeStateMetricsMemoryRequest+`
         limits:
-          memory: 64Mi
+          memory: `+kubeStateMetricsMemoryLimit+`
     prometheus-node-exporter:
       resources:
         requests:

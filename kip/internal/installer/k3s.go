@@ -191,15 +191,21 @@ const k3sConfig = `tls-san:
 disable:
   - traefik
 resolv-conf: ` + k3sResolvConfPath + `
-kube-apiserver-arg:
+` + k3sAPIServerArgs + `kubelet-arg:
+  - "protect-kernel-defaults=true"
+`
+
+// k3sAPIServerArgs is the API server block, held apart from the rest of the
+// config because a cluster installed before it existed has it appended by
+// EnsureAPIServerConfig. Install and that repair render the same bytes, so an
+// upgraded cluster and a fresh one cannot end up configured differently.
+const k3sAPIServerArgs = `kube-apiserver-arg:
   - "authentication-config=` + authnConfigPath + `"
   - "audit-policy-file=` + auditPolicyPath + `"
   - "audit-log-path=/var/lib/rancher/k3s/server/logs/audit.log"
   - "audit-log-maxage=30"
   - "audit-log-maxbackup=10"
   - "audit-log-maxsize=100"
-kubelet-arg:
-  - "protect-kernel-defaults=true"
 `
 
 // kubeletProtectSysctls are the kernel parameters the kubelet expects when
