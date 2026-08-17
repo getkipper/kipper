@@ -601,6 +601,12 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 	if err := validateClusterName(name); err != nil {
 		return err
 	}
+	// The domain becomes the pin the credential plugin is asked for, so a
+	// bundle without one produces a kubeconfig that authenticates against
+	// nothing and fails much later, with nothing pointing back here.
+	if strings.TrimSpace(domain) == "" {
+		return fmt.Errorf("invalid export file: no domain, so kip cannot tell which cluster the kubeconfig should authenticate against")
+	}
 	if err := rejectEmbeddedCredential(kubeconfig); err != nil {
 		return err
 	}
@@ -846,15 +852,56 @@ func renameKubeconfigFile(oldPath, newName, domain string) (string, error) {
 			oldPath, newPath, domain, newPath, oldPath)
 	}
 	// A case-only rename is the one case where the destination "already exists"
-	// and is the very file being renamed: macOS and Windows fold case, so
-	// Stat finds Shop.yaml when asked for shop.yaml. Refusing there would make
+	// and is the very file being renamed: macOS and Windows fold case, so Stat
+	// finds Shop.yaml when asked for shop.yaml. Refusing there would make
 	// `kip cluster rename Shop shop` impossible on the machines people use.
-	if !strings.EqualFold(newPath, oldPath) {
-		if _, err := os.Stat(newPath); err == nil {
-			return oldPath, fmt.Errorf("destination %s already exists", newPath)
+	// Names differing only in case are the same file where the filesystem folds
+	// case and two files where it does not. os.SameFile answers that for this
+	// machine; guessing from the spelling alone would clobber an unrelated
+	// shop.yaml on ext4 while refusing a legitimate rename on APFS.
+	destination, destErr := os.Stat(newPath)
+	if destErr == nil {
+		source, srcErr := os.Stat(oldPath)
+		if srcErr == nil && os.SameFile(source, destination) {
+			return renameThroughATempName(oldPath, newPath)
 		}
+		return oldPath, fmt.Errorf("destination %s already exists", newPath)
 	}
 	if err := os.Rename(oldPath, newPath); err != nil {
+		return oldPath, err
+	}
+	return newPath, nil
+}
+
+// renameThroughATempName changes only the case of a file name. A single rename
+// does not do that reliably where the filesystem folds case: both names are one
+// directory entry, so Windows refuses and macOS reports success while leaving
+// the old spelling on disk. Going via a name that collides with neither works
+// everywhere.
+func renameThroughATempName(oldPath, newPath string) (string, error) {
+	// The staging name is reserved by creating it rather than guessed, because
+	// os.Rename replaces whatever is at the destination: a predictable name
+	// would silently destroy a file of the same name left by an earlier
+	// interrupted rename, inside the directory holding every cluster's
+	// credentials.
+	reserved, err := os.CreateTemp(filepath.Dir(oldPath), ".kipper-case-*")
+	if err != nil {
+		return oldPath, err
+	}
+	staging := reserved.Name()
+	if err := reserved.Close(); err != nil {
+		return oldPath, err
+	}
+	if err := os.Rename(oldPath, staging); err != nil {
+		_ = os.Remove(staging)
+		return oldPath, err
+	}
+	if err := os.Rename(staging, newPath); err != nil {
+		// Put it back rather than leaving the kubeconfig under a name no
+		// config entry points at.
+		if restoreErr := os.Rename(staging, oldPath); restoreErr != nil {
+			return staging, fmt.Errorf("renaming %s to %s failed (%w) and it is now at %s", oldPath, newPath, err, staging)
+		}
 		return oldPath, err
 	}
 	return newPath, nil

@@ -472,9 +472,13 @@ func TestEnsureAPIServerConfigTolerateAnUnreadableAPIServer(t *testing.T) {
 	assert.Contains(t, strings.Join(said, "\n"), "could not be asked")
 }
 
-// The retry is where the risky restart actually happens, so it needs the same
-// protection the first attempt has.
-func TestConvergenceRestartRollsBackLikeTheFirstAttempt(t *testing.T) {
+// A restart on a configuration this run did not write must never restore the
+// backup, whoever left it there. It can be months old, and an operator may have
+// edited the live config since: putting it back to recover from a failed
+// restart would destroy their work to fix something this run did not break.
+//
+// This replaces a test that asserted the opposite. That rule was wrong.
+func TestARestartOnSomeoneElsesConfigNeverRestoresTheBackup(t *testing.T) {
 	host := &hostScript{}
 	host.reply = func(cmd string) (string, error) {
 		switch {
@@ -484,8 +488,6 @@ func TestConvergenceRestartRollsBackLikeTheFirstAttempt(t *testing.T) {
 			return "1", nil
 		case strings.Contains(cmd, "apiserver_authentication_config_controller_last_config_info"):
 			return "0", nil
-		case strings.Contains(cmd, "[ -f "+k3sConfigBackupPath+" ]"):
-			return "yes", nil // the interrupted run left one
 		case strings.Contains(cmd, "kubectl get --raw /readyz"):
 			return "", assert.AnError
 		}
@@ -495,12 +497,23 @@ func TestConvergenceRestartRollsBackLikeTheFirstAttempt(t *testing.T) {
 	_, err := EnsureAPIServerConfig(host, nil)
 
 	require.Error(t, err)
-	assert.True(t, host.sent("cp -p "+k3sConfigBackupPath), "the earlier configuration is put back")
+	assert.False(t, host.sent("cp -p "+k3sConfigBackupPath),
+		"a run that wrote no configuration has no configuration to put back")
+	assert.Contains(t, err.Error(), "changed no k3s configuration")
+	assert.Contains(t, err.Error(), k3sConfigBackupPath, "the operator is told what that file is")
+	restarts := 0
+	for _, c := range host.commands {
+		if strings.Contains(c, "systemctl restart k3s") {
+			restarts++
+		}
+	}
+	assert.Equal(t, 1, restarts, "and k3s is not restarted a second time on a guess")
 }
 
-// With no backup there is nothing to restore, and claiming otherwise would send
-// an operator looking for a file that was never written.
-func TestConvergenceRestartSaysSoWhenThereIsNothingToRestore(t *testing.T) {
+// A changed policy is known rather than observed. Losing it because the API
+// server could not be asked would leave the file replaced and the policy
+// unloaded, with every later run finding the bytes matching and doing nothing.
+func TestAChangedPolicyRestartsEvenWhenTheServerCannotBeAsked(t *testing.T) {
 	host := &hostScript{}
 	host.reply = func(cmd string) (string, error) {
 		switch {
@@ -508,19 +521,18 @@ func TestConvergenceRestartSaysSoWhenThereIsNothingToRestore(t *testing.T) {
 			return currentConfig, nil
 		case strings.Contains(cmd, "list-unit-files k3s.service"):
 			return "1", nil
+		case strings.Contains(cmd, auditPolicyPath) && strings.Contains(cmd, "base64 -d"):
+			return auditPolicyChangedMarker, nil
 		case strings.Contains(cmd, "apiserver_authentication_config_controller_last_config_info"):
-			return "0", nil
-		case strings.Contains(cmd, "[ -f "+k3sConfigBackupPath+" ]"):
-			return "no", nil
-		case strings.Contains(cmd, "kubectl get --raw /readyz"):
 			return "", assert.AnError
 		}
 		return "", nil
 	}
 
-	_, err := EnsureAPIServerConfig(host, nil)
+	changed, err := EnsureAPIServerConfig(host, nil)
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no earlier configuration to restore")
-	assert.False(t, host.sent("cp -p "+k3sConfigBackupPath), "and no restore is attempted")
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.True(t, host.sent("systemctl restart k3s"),
+		"the restart the policy needs cannot depend on a metric answering")
 }
