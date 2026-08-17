@@ -118,6 +118,17 @@ func EnsureAPIServerConfig(client commandRunner, notify func(string)) (changed b
 // asks again; restarting a healthy control plane on a guess is the one outcome
 // worth avoiding here.
 func restartIfTheServerIsBehind(client commandRunner, policyChanged bool, notify func(string)) (bool, error) {
+	// A changed policy is known, not observed, so it needs no confirmation from
+	// the API server and must not be forgotten when the server cannot be asked.
+	// Dropping it would leave the file replaced and the policy unloaded, and
+	// every later run would find the bytes matching and do nothing.
+	if policyChanged {
+		if notify != nil {
+			notify("The audit policy changed, and the API server reads it only at startup. Restarting k3s once; workloads keep running through it.")
+		}
+		return true, restartAfterAPolicyChange(client)
+	}
+
 	loaded, err := apiServerLoadedAnAuthnConfig(client)
 	if err != nil {
 		if notify != nil {
@@ -125,22 +136,51 @@ func restartIfTheServerIsBehind(client commandRunner, policyChanged bool, notify
 		}
 		return false, nil
 	}
-	if loaded && !policyChanged {
+	if loaded {
 		return false, nil
 	}
 
 	if notify != nil {
-		switch {
-		case !loaded:
-			notify("The API server arguments are on disk but the running API server has not loaded them, which is where an interrupted run leaves a server. Restarting k3s once.")
-		default:
-			notify("The audit policy changed, and the API server reads it only at startup. Restarting k3s once; workloads keep running through it.")
-		}
+		notify("The API server arguments are on disk but the running API server has not loaded them, which is where an interrupted run leaves a server. Restarting k3s once.")
+	}
+	return true, restartWithoutTouchingTheConfig(client)
+}
+
+// restartAfterAPolicyChange restarts k3s to load a policy this run wrote, and
+// puts the previous policy back if the server does not return.
+//
+// This run did change a file, so undoing it is repairing its own work rather
+// than guessing at someone else's: the API server refuses to start on a policy
+// it cannot parse, and the policy is the only thing that moved.
+func restartAfterAPolicyChange(client commandRunner) error {
+	err := restartK3s(client)
+	if err == nil {
+		return nil
+	}
+	if _, rerr := client.Run(fmt.Sprintf(`cp -p %s "$(readlink -f %s)"`, auditPolicyBackupPath, auditPolicyPath)); rerr != nil {
+		return fmt.Errorf("%w; the audit policy this run replaced could not be put back either (%v), so %s holds the new one and this server needs looking at directly", err, rerr, auditPolicyPath)
 	}
 	if rerr := restartK3s(client); rerr != nil {
-		return false, rollBackK3sConfig(client, rerr)
+		return fmt.Errorf("%w; the previous audit policy was restored but k3s did not come back on it either (%v), so this server needs looking at directly", err, rerr)
 	}
-	return true, nil
+	return fmt.Errorf("%w; the previous audit policy was restored and k3s is running on it again, so the cluster is as it was and the new policy is not loaded", err)
+}
+
+// restartWithoutTouchingTheConfig restarts k3s on a configuration this run did
+// not write, and reports rather than repairs when it does not come back.
+//
+// It deliberately never restores the backup. That file is whatever the last
+// repair left behind, which can be months old and predates any change an
+// operator has made since; copying it back over a live configuration to recover
+// from a failed restart would destroy their work to fix something this run did
+// not break. The error names the file instead, so the choice stays with the
+// person who knows what is in it.
+func restartWithoutTouchingTheConfig(client commandRunner) error {
+	if err := restartK3s(client); err != nil {
+		return fmt.Errorf("%w; this run changed no k3s configuration, so nothing was rolled back and %s is as it was. If an earlier repair left %s, it holds the configuration from before the API server arguments were added",
+			err, k3sConfigPath, k3sConfigBackupPath)
+	}
+	return nil
 }
 
 // classifyAPIServerArgs decides from the parsed document rather than from the

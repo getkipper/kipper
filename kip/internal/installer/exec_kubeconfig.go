@@ -224,6 +224,76 @@ func ActiveCredentialIsKipExec(cfg *clientcmdapi.Config) bool {
 	return IsKipExecAuthInfo(cfg.AuthInfos[kubeContext.AuthInfo])
 }
 
+// isThisKipsCommand reports whether a kubeconfig's exec command is this kip.
+//
+// Three spellings are ours: the bare name, whatever this build would render
+// today, and this binary's own path. The third matters because the second
+// changes with the environment: a file written while kip was off PATH carries
+// an absolute path, and once kip is on PATH the rendered command becomes "kip",
+// which would leave kip refusing to recognise a file it wrote itself.
+//
+// Comparison folds case off Linux, where the filesystems are case-insensitive
+// and the same binary is reachable by paths that differ only in spelling.
+func isThisKipsCommand(command string) bool {
+	// The bare name only, with no directory in it. A path whose last element is
+	// "kip" is somebody's program called kip until it is shown to be this one,
+	// which is what samePath below decides.
+	if command == "kip" || command == "kip.exe" {
+		return true
+	}
+	for _, ours := range []string{execCommandForHost(), currentExecutable()} {
+		if ours == "" {
+			continue
+		}
+		if samePath(command, ours) {
+			return true
+		}
+	}
+	return false
+}
+
+func currentExecutable() string {
+	self, err := osExecutable()
+	if err != nil {
+		return ""
+	}
+	return self
+}
+
+// isKipBinaryName reports whether a command's last element names this program.
+// Windows renders it with the extension, so a kubeconfig written there carries
+// "kip.exe" wherever this one would carry "kip".
+//
+// The basename is enough for the loose predicate, whose worst outcome is a
+// stale pin. Anything deciding whether a credential may be destroyed asks
+// isThisKipsCommand instead, which does not accept a stranger's binary because
+// of what it is called.
+func isKipBinaryName(command string) bool {
+	base := filepath.Base(command)
+	return base == "kip" || base == "kip.exe"
+}
+
+// samePath reports whether two paths name one file.
+//
+// It asks the filesystem when both exist, because case sensitivity belongs to
+// the filesystem rather than to the operating system: macOS mounts
+// case-sensitive volumes, and treating two distinct executables there as one
+// would let a stranger's binary pass for kip. When a path does not exist there
+// is nothing to compare but the spelling, and the exact spelling is the only
+// safe answer.
+func samePath(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if a == b {
+		return true
+	}
+	infoA, errA := os.Stat(a)
+	infoB, errB := os.Stat(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return os.SameFile(infoA, infoB)
+}
+
 // IsKipExecAuthInfo reports whether one entry is kip's own credential plugin.
 // Callers that replace a whole file rather than an active context ask this of
 // every entry: an inactive one is still somebody's way into a cluster.
@@ -235,7 +305,7 @@ func IsKipExecAuthInfo(authInfo *clientcmdapi.AuthInfo) bool {
 	if authInfo == nil || authInfo.Exec == nil {
 		return false
 	}
-	if filepath.Base(authInfo.Exec.Command) != "kip" {
+	if !isKipBinaryName(authInfo.Exec.Command) {
 		return false
 	}
 	args := authInfo.Exec.Args
@@ -261,7 +331,7 @@ func IsExactlyKipExec(authInfo *clientcmdapi.AuthInfo) bool {
 	// re-rendering ours. The basename is not consulted, because a binary named
 	// something else is still this one when the path matches, and a stranger's
 	// binary named kip is still a stranger's.
-	if exec.Command != "kip" && exec.Command != execCommandForHost() {
+	if !isThisKipsCommand(exec.Command) {
 		return false
 	}
 	if len(exec.Args) < 2 || exec.Args[0] != "auth" || exec.Args[1] != "kubectl-token" {

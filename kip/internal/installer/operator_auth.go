@@ -20,6 +20,12 @@ const (
 
 	// auditPolicyPath is the audit policy the apiserver flag references.
 	auditPolicyPath = "/etc/rancher/k3s/audit-policy.yaml"
+
+	// auditPolicyBackupPath holds the policy a run replaced, so a restart that
+	// does not come back can be undone by whoever caused it. The API server
+	// will not start on a policy it cannot parse, and this file is the only
+	// thing such a run changed.
+	auditPolicyBackupPath = auditPolicyPath + ".kipper-bak"
 )
 
 // authnConfigStub is what the API server boots with: a valid configuration
@@ -50,25 +56,10 @@ rules:
       - system:apiserver
       - system:kube-controller-manager
       - system:kube-scheduler
-  # Secrets are recorded whoever touches them and however, ahead of every
-  # suppression below. Rules are first-match, and console-api's ServiceAccount
-  # can read secrets cluster-wide: silencing platform reads wholesale would
-  # make credential theft with that token the one action leaving no trace.
-  # Metadata only, so what was read is named and never contained.
-  - level: Metadata
-    resources:
-      - group: ""
-        resources:
-          - secrets
-  # Nodes and platform workloads keep their read chatter out of the log,
-  # and nothing more: their writes stay attributed, so a stolen
-  # ServiceAccount token cannot act invisibly.
-  #
-  # monitoring and kipper-system are here because they poll. Prometheus,
-  # kube-state-metrics and the reconcilers read continuously, and at a
-  # hundred megabytes across ten files those reads rotate an operator's
-  # actions out of the log within hours, which is the opposite of what
-  # keeping it is for.
+  # The kubelet's secret reads are structural: one per mounted secret per pod,
+  # repeated on every resync, and on a busy node they are most of the traffic.
+  # Dropping them here, above the secrets rule, is what keeps that rule
+  # affordable.
   - level: None
     verbs:
       - get
@@ -76,9 +67,55 @@ rules:
       - watch
     userGroups:
       - system:nodes
+  # Secrets, for everyone else, whatever they do to them. Rules are first-match
+  # and every rule below drops something, so this sits above them: console-api's
+  # ServiceAccount reads secrets cluster-wide, and credential access by the
+  # identities worth watching must not be the one action leaving no trace.
+  # Metadata only, so what was read is named and never contained.
+  #
+  # The two suppressions above it are a deliberate limit. An attacker holding a
+  # copied control-plane or kubelet credential reads secrets unaudited; auditing
+  # those identities instead would rotate every operator action out of the log
+  # within hours, which costs more than it catches.
+  - level: Metadata
+    resources:
+      - group: ""
+        resources:
+          - secrets
+  # Platform workloads keep their read chatter out of the log,
+  # and nothing more: their writes stay attributed, so a stolen
+  # ServiceAccount token cannot act invisibly.
+  #
+  # These namespaces are here because they poll. Prometheus,
+  # kube-state-metrics, the reconcilers, cert-manager and longhorn read
+  # continuously, and within the log's budget of eleven files at a hundred
+  # megabytes those reads rotate an operator's actions out within hours, which
+  # is the opposite of what keeping the log is for.
+  - level: None
+    verbs:
+      - get
+      - list
+      - watch
+    userGroups:
       - system:serviceaccounts:kube-system
       - system:serviceaccounts:monitoring
       - system:serviceaccounts:kipper-system
+      - system:serviceaccounts:cert-manager
+      - system:serviceaccounts:longhorn-system
+  # Leases and events are written constantly and say nothing about who did
+  # what: a lease renewal every couple of seconds from each controller, and an
+  # event for every routine pod transition. Left in, they are most of the log.
+  - level: None
+    resources:
+      - group: "coordination.k8s.io"
+        resources:
+          - leases
+      - group: ""
+        resources:
+          - events
+      - group: "events.k8s.io"
+        resources:
+          - events
   - level: None
     nonResourceURLs:
       - /healthz*
@@ -136,6 +173,7 @@ func writeAuditPolicyScript() string {
 want=%s
 target=$(readlink -f %s)
 if [ -f "$target" ] && [ "$(base64 -w0 < "$target" 2>/dev/null || base64 < "$target" | tr -d '\n')" = "$want" ]; then exit 0; fi
+[ -f "$target" ] && cp -p "$target" %s
 staged=$(mktemp "$(dirname "$target")"/.kipper-XXXXXX)
 trap 'rm -f "$staged"' EXIT
 printf %%s "$want" | base64 -d > "$staged"
@@ -144,7 +182,7 @@ mv "$staged" "$target"
 echo %s
 trap - EXIT`,
 		shellQuote(encoded),
-		auditPolicyPath, auditPolicyChangedMarker)
+		auditPolicyPath, auditPolicyBackupPath, auditPolicyChangedMarker)
 }
 
 // authnStubWriteCmd writes the boot stub only when no authentication config

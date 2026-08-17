@@ -1165,9 +1165,11 @@ Every upgrade checks, and repairs a cluster that needs it:
 
 k3s restarts once, which interrupts the control plane for a few seconds. containerd and your pods run through it, so apps keep serving. kip then waits up to two minutes for the API server to answer.
 
-One component can notice: `kube-state-metrics` rebuilds its view of every object when the API server returns, and on a cluster still carrying the old 64 Mi limit that burst can OOM-kill it for a few minutes before it settles. The current limit is applied by the system-component step of a full `kip upgrade`, which runs after this one, so a cluster being repaired for the first time may see that blip once. `--skip-system` skips the resize entirely, and the next full upgrade applies it. It asks the API server rather than the nodes, so an unrelated agent that happens to be NotReady does not read as a failed repair.
+One component can notice: `kube-state-metrics` rebuilds its view of every object when the API server returns, and on a cluster still carrying the old 64 Mi limit that burst can OOM-kill it for a few minutes before it settles. The current limit is applied by the system-component step of a full `kip upgrade`, which runs after this one, so a cluster being repaired for the first time may see that blip once. `--skip-system` skips the resize entirely, and the next full upgrade applies it.
 
-If the API server does not come back, kip restores the configuration it replaced and restarts k3s on it. A copy of the previous file stays at `/etc/rancher/k3s/config.yaml.kipper-bak` either way.
+If the API server does not come back from a restart that changed the configuration, kip restores the file it replaced and restarts k3s on that. A copy of the previous file stays at `/etc/rancher/k3s/config.yaml.kipper-bak` either way.
+
+A restart that changed no configuration is different, and kip restores nothing there. Later upgrades restart k3s to load a new audit policy, and the backup on disk may be months old and predate edits you have made since, so putting it back to recover from a failed restart would undo your work rather than kip's. The error names the file and leaves the decision with you.
 
 What it tells you afterwards depends on how far it got, and it never claims more than it verified. When the restore worked and k3s came back on it, the cluster is where it started. When k3s did not come back on the restored configuration either, it says that, and that server needs looking at directly. When the restore itself could not run, because the server became unreachable partway, it says the state of that server is unknown, names the backup, and gives you the two commands to put it back by hand.
 

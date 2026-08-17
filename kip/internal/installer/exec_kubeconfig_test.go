@@ -562,3 +562,45 @@ func TestExecRenderRefusesAKubeconfigThatSkipsVerification(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "TLS verification")
 }
+
+// The loose predicate answers "does this look like ours", where the worst
+// outcome is a stale pin. The strict one decides whether a credential may be
+// destroyed, and a stranger's binary called kip is not ours however it is spelt.
+func TestOnlyTheLoosePredicateAcceptsAStrangersBinaryCalledKip(t *testing.T) {
+	wrapper := &clientcmdapi.AuthInfo{Exec: &clientcmdapi.ExecConfig{
+		APIVersion:      "client.authentication.k8s.io/v1",
+		Command:         "/opt/company/kip",
+		Args:            []string{"auth", "kubectl-token", "--cluster-domain", "shop.example"},
+		InteractiveMode: clientcmdapi.NeverExecInteractiveMode,
+	}}
+
+	assert.True(t, IsKipExecAuthInfo(wrapper), "it looks like ours, which is all the re-pin needs to know")
+	assert.False(t, IsExactlyKipExec(wrapper), "and that is not enough to destroy it")
+}
+
+// Windows renders the command with its extension, so a kubeconfig written there
+// carries kip.exe wherever this one carries kip.
+func TestTheWindowsBinaryNameIsRecognised(t *testing.T) {
+	onPath := &clientcmdapi.AuthInfo{Exec: &clientcmdapi.ExecConfig{
+		APIVersion:      "client.authentication.k8s.io/v1",
+		Command:         "kip.exe",
+		Args:            []string{"auth", "kubectl-token", "--cluster-domain", "shop.example"},
+		InteractiveMode: clientcmdapi.NeverExecInteractiveMode,
+	}}
+
+	assert.True(t, IsKipExecAuthInfo(onPath))
+	assert.True(t, IsExactlyKipExec(onPath), "a file kip wrote on Windows is one kip can replace")
+}
+
+// Two paths differing only in case name one file where the filesystem folds
+// case and two where it does not, so the filesystem is asked rather than the
+// operating system guessed at.
+func TestSamePathAsksTheFilesystem(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kip")
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"), 0o700))
+
+	assert.True(t, samePath(path, path))
+	assert.True(t, samePath(path, filepath.Join(dir, ".", "kip")), "the same file spelt differently")
+	assert.False(t, samePath(path, filepath.Join(dir, "other")), "a path that does not exist is not this one")
+}

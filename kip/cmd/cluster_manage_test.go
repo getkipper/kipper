@@ -1287,3 +1287,88 @@ current-context: shop
 	_, statErr := os.Stat(path)
 	assert.NoError(t, statErr)
 }
+
+// Where the filesystem folds case, one rename does not change a name's case:
+// both spellings are one directory entry, so Windows refuses and macOS reports
+// success while leaving the old name on disk.
+func TestClusterRenameActuallyChangesTheCaseOnDisk(t *testing.T) {
+	home := withFakeHome(t)
+	clusters := filepath.Join(home, ".kip", "clusters")
+	require.NoError(t, os.MkdirAll(clusters, 0o700))
+	oldPath := filepath.Join(clusters, "Shop.yaml")
+	require.NoError(t, os.WriteFile(oldPath, []byte(kipRenderedKubeconfig(t, "https://203.0.113.10:6443")), 0o600))
+
+	newPath, err := renameKubeconfigFile(oldPath, "shop", "shop.example")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(clusters, "shop.yaml"), newPath)
+
+	// Read the directory rather than Stat the path: on a case-folding
+	// filesystem Stat answers for either spelling, so it cannot tell whether
+	// the rename did anything.
+	entries, err := os.ReadDir(clusters)
+	require.NoError(t, err)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	assert.Contains(t, names, "shop.yaml")
+	assert.NotContains(t, names, "Shop.yaml", "the old spelling is gone from the directory")
+	assert.NotContains(t, names, "Shop.yaml.kipper-case", "and no staging name is left behind")
+}
+
+// Where the filesystem does not fold case, Shop.yaml and shop.yaml are two
+// files, and a rename that skipped the collision check would destroy the second.
+func TestClusterRenameStillRefusesARealCollision(t *testing.T) {
+	home := withFakeHome(t)
+	clusters := filepath.Join(home, ".kip", "clusters")
+	require.NoError(t, os.MkdirAll(clusters, 0o700))
+	oldPath := filepath.Join(clusters, "shop.yaml")
+	other := filepath.Join(clusters, "warehouse.yaml")
+	require.NoError(t, os.WriteFile(oldPath, []byte(kipRenderedKubeconfig(t, "https://203.0.113.10:6443")), 0o600))
+	require.NoError(t, os.WriteFile(other, []byte("someone else's file\n"), 0o600))
+
+	_, err := renameKubeconfigFile(oldPath, "warehouse", "shop.example")
+
+	require.Error(t, err)
+	content, readErr := os.ReadFile(other)
+	require.NoError(t, readErr)
+	assert.Equal(t, "someone else's file\n", string(content), "the file already there survives")
+}
+
+// The domain is the pin the credential plugin is asked for. A bundle without
+// one produces a kubeconfig that authenticates against nothing, and the failure
+// surfaces far from the import that caused it.
+func TestClusterAddRefusesABundleWithNoDomain(t *testing.T) {
+	home := withFakeHome(t)
+	body, err := os.ReadFile(exportBundle(t, home))
+	require.NoError(t, err)
+	bundle := filepath.Join(home, "no-domain.kip")
+	//nolint:gosec // G703: bundle is a fixed path inside the test's temp home
+	require.NoError(t, os.WriteFile(bundle,
+		[]byte(strings.Replace(string(body), "domain: shop.example\n", "", 1)), 0o600))
+
+	err = runClusterAdd(clusterAddCmd, []string{bundle})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "domain")
+}
+
+// os.Rename replaces whatever is at the destination, so a predictable staging
+// name would destroy a file left by an earlier interrupted rename, in the
+// directory holding every cluster's credentials.
+func TestClusterRenameDoesNotClobberAStagingFile(t *testing.T) {
+	home := withFakeHome(t)
+	clusters := filepath.Join(home, ".kip", "clusters")
+	require.NoError(t, os.MkdirAll(clusters, 0o700))
+	oldPath := filepath.Join(clusters, "Shop.yaml")
+	require.NoError(t, os.WriteFile(oldPath, []byte(kipRenderedKubeconfig(t, "https://203.0.113.10:6443")), 0o600))
+	leftover := oldPath + ".kipper-case"
+	require.NoError(t, os.WriteFile(leftover, []byte("someone else's file\n"), 0o600))
+
+	_, err := renameKubeconfigFile(oldPath, "shop", "shop.example")
+	require.NoError(t, err)
+
+	content, readErr := os.ReadFile(leftover)
+	require.NoError(t, readErr, "the file already at the predictable staging name survives")
+	assert.Equal(t, "someone else's file\n", string(content))
+}
