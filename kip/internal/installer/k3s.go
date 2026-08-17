@@ -580,7 +580,9 @@ func InstallK3s(client *ssh.Client, host string, dnsResolvers []string, k3sPreex
 	}
 
 	// The files the apiserver flags reference must exist before k3s starts.
-	if err := writeAuthnStubAndAuditPolicy(client); err != nil {
+	// A fresh install starts k3s afterwards, so the policy it just wrote is the
+	// one the API server loads; whether it changed says nothing here.
+	if _, err := writeAuthnStubAndAuditPolicy(client); err != nil {
 		return err
 	}
 

@@ -3,6 +3,7 @@ package installer
 import (
 	"encoding/base64"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"sigs.k8s.io/yaml"
@@ -55,6 +56,10 @@ const (
 //
 // notify, when given, is called before anything restarts.
 func EnsureAPIServerConfig(client commandRunner, notify func(string)) (changed bool, err error) {
+	if err := refuseANodeThatRunsNoServer(client); err != nil {
+		return false, err
+	}
+
 	current, err := readK3sConfig(client)
 	if err != nil {
 		return false, err
@@ -71,15 +76,16 @@ func EnsureAPIServerConfig(client commandRunner, notify func(string)) (changed b
 	// Before the refusal below, not after it: an operator who follows that
 	// refusal adds flags naming these files, and flags naming files that are
 	// not there stop the API server from starting.
-	if err := writeAuthnStubAndAuditPolicy(client); err != nil {
+	policyChanged, err := writeAuthnStubAndAuditPolicy(client)
+	if err != nil {
 		return false, err
 	}
 
 	switch state {
 	case apiServerArgsCurrent:
-		return false, nil
+		return restartIfTheServerIsBehind(client, policyChanged, notify)
 	case apiServerArgsPartial:
-		return false, fmt.Errorf("%s already sets %s without all of the arguments kip installs, so it will not be rewritten. The files those arguments name are in place, so you can add these lines to that block and run 'systemctl restart k3s' on the server:\n%s",
+		return false, fmt.Errorf("%s already sets %s without all of the arguments kip installs, so it will not be rewritten. The files those arguments name are in place, so you can add the missing lines to that block and run 'systemctl restart k3s' on the server:\n%s",
 			k3sConfigPath, apiServerArgKey, indentBlock(renderAPIServerArgs(missingAPIServerArgs(current))))
 	}
 
@@ -98,6 +104,41 @@ func EnsureAPIServerConfig(client commandRunner, notify func(string)) (changed b
 
 	if err := restartK3s(client); err != nil {
 		return false, rollBackK3sConfig(client, err)
+	}
+	return true, nil
+}
+
+// restartIfTheServerIsBehind handles a config file that already carries the
+// arguments. The file is not the process: a run interrupted between the rename
+// and the restart leaves exactly this state, and the audit policy is read once
+// at startup, so replacing it changes nothing until k3s restarts.
+//
+// An API server that cannot be asked is left alone rather than restarted or
+// failed. Not knowing is not the same as knowing it is behind, and the next run
+// asks again; restarting a healthy control plane on a guess is the one outcome
+// worth avoiding here.
+func restartIfTheServerIsBehind(client commandRunner, policyChanged bool, notify func(string)) (bool, error) {
+	loaded, err := apiServerLoadedAnAuthnConfig(client)
+	if err != nil {
+		if notify != nil {
+			notify(fmt.Sprintf("The API server could not be asked what it is running (%v). Its arguments are already on disk, so nothing was changed; run this again when the cluster answers.", err))
+		}
+		return false, nil
+	}
+	if loaded && !policyChanged {
+		return false, nil
+	}
+
+	if notify != nil {
+		switch {
+		case !loaded:
+			notify("The API server arguments are on disk but the running API server has not loaded them, which is where an interrupted run leaves a server. Restarting k3s once.")
+		default:
+			notify("The audit policy changed, and the API server reads it only at startup. Restarting k3s once; workloads keep running through it.")
+		}
+	}
+	if rerr := restartK3s(client); rerr != nil {
+		return false, rollBackK3sConfig(client, rerr)
 	}
 	return true, nil
 }
@@ -207,6 +248,37 @@ func withAPIServerArgs(current string) (string, error) {
 	return desired, nil
 }
 
+// refuseANodeThatRunsNoServer stops the repair on a node that runs the k3s
+// agent rather than the server. These are server flags, and `systemctl restart
+// k3s` finds no unit there, so without this the repair writes control-plane
+// configuration onto a worker and then fails trying to apply it.
+func refuseANodeThatRunsNoServer(client commandRunner) error {
+	out, err := client.Run("systemctl list-unit-files k3s.service --no-legend 2>/dev/null | wc -l")
+	if err != nil {
+		return fmt.Errorf("checking for the k3s server on this host: %w", err)
+	}
+	// Anything but a positive count is refused, including an empty answer: not
+	// knowing whether this host runs the server is not a reason to write
+	// server flags onto it.
+	if count, cerr := strconv.Atoi(strings.TrimSpace(out)); cerr != nil || count < 1 {
+		return fmt.Errorf("this host does not appear to run a k3s server (no k3s.service), so the API server arguments do not belong here. Point the cluster's host at the server node")
+	}
+	return nil
+}
+
+// apiServerLoadedAnAuthnConfig reports whether the running API server has an
+// authentication config loaded, which is the flag taking effect rather than the
+// file existing. The metric appears only when the server was started with
+// --authentication-config.
+func apiServerLoadedAnAuthnConfig(client commandRunner) (bool, error) {
+	out, err := client.Run(`raw=$(kubectl get --raw /metrics) || exit 97
+printf '%s\n' "$raw" | grep -c 'apiserver_authentication_config_controller_last_config_info' || true`)
+	if err != nil {
+		return false, fmt.Errorf("%w: %v", errMetricsUnreadable, err)
+	}
+	return strings.TrimSpace(out) != "0", nil
+}
+
 // readK3sConfig returns the config file, distinguishing absent from unreadable
 // the way readHopCA does: a permission or I/O error must not read as "there is
 // no config", because the caller would then be told to write a fresh one and
@@ -230,23 +302,27 @@ func readK3sConfig(client commandRunner) (string, error) {
 // can hold a datastore endpoint or a node token, so an operator who tightened
 // it must not find it world-readable because an upgrade rewrote it, and `mv`
 // replaces the inode rather than the contents.
+//
+// The rename lands on what the path resolves to, so a config an operator keeps
+// as a symlink into their own configuration management still points there
+// afterwards. Replacing the link with a plain file would leave their tooling
+// writing somewhere nothing reads.
 func writeK3sConfigScript(content string) string {
 	return fmt.Sprintf(`set -e
-mode=$(stat -c %%a %s)
-owner=$(stat -c %%u:%%g %s)
-cp -p %s %s
-staged=$(mktemp %s.kipper-XXXXXX)
+target=$(readlink -f %s)
+mode=$(stat -c %%a "$target")
+owner=$(stat -c %%u:%%g "$target")
+cp -p "$target" %s
+staged=$(mktemp "$(dirname "$target")"/.kipper-XXXXXX)
 trap 'rm -f "$staged"' EXIT
 printf %%s %s | base64 -d > "$staged"
 chmod "$mode" "$staged"
 chown "$owner" "$staged"
-mv "$staged" %s
+mv "$staged" "$target"
 trap - EXIT`,
-		k3sConfigPath, k3sConfigPath,
-		k3sConfigPath, k3sConfigBackupPath,
 		k3sConfigPath,
-		shellQuote(base64.StdEncoding.EncodeToString([]byte(content))),
-		k3sConfigPath)
+		k3sConfigBackupPath,
+		shellQuote(base64.StdEncoding.EncodeToString([]byte(content))))
 }
 
 // restartK3s restarts the server and waits for its API server to answer.
@@ -273,7 +349,13 @@ func restartK3s(client commandRunner) error {
 // because an operator reading it needs to know whether their control plane is
 // up, and the one case where that is unknown says so rather than guessing.
 func rollBackK3sConfig(client commandRunner, cause error) error {
-	if _, err := client.Run(fmt.Sprintf("cp -p %s %s", k3sConfigBackupPath, k3sConfigPath)); err != nil {
+	// A restart that follows someone else's interrupted run has nothing of its
+	// own to restore, and the config on disk is the one the operator wants.
+	// Saying so beats reporting a rollback that never happened.
+	if out, err := client.Run(fmt.Sprintf("[ -f %s ] && echo yes || echo no", k3sConfigBackupPath)); err == nil && strings.TrimSpace(out) == "no" {
+		return fmt.Errorf("%w; nothing was changed on disk by this run and there is no earlier configuration to restore, so %s still holds the arguments and this server needs looking at directly", cause, k3sConfigPath)
+	}
+	if _, err := client.Run(fmt.Sprintf(`cp -p %s "$(readlink -f %s)"`, k3sConfigBackupPath, k3sConfigPath)); err != nil {
 		return fmt.Errorf("%w; the configuration could not be restored either (%v), so the state of this server is unknown. Its previous configuration is at %s: put it back with 'cp -p %s %s' and run 'systemctl restart k3s' on the server",
 			cause, err, k3sConfigBackupPath, k3sConfigBackupPath, k3sConfigPath)
 	}

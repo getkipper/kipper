@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/getkipper/kipper/controller/pkg/serving"
 	"github.com/getkipper/kipper/kip/internal/clusteridentity"
@@ -342,13 +344,119 @@ func runClusterExport(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// clusterNamePattern is what a cluster name may be. An import takes its name
+// from a file someone sent you, and that name becomes a path under
+// ~/.kip/clusters, so a name carrying a separator or a parent reference would
+// write wherever its author chose.
+var clusterNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$`)
+
+// windowsDeviceNames cannot be file names on Windows even with an extension, so
+// a cluster named for one imports on Linux and fails on a colleague's laptop.
+var windowsDeviceNames = map[string]bool{
+	"con": true, "prn": true, "aux": true, "nul": true,
+	"com1": true, "com2": true, "com3": true, "com4": true, "com5": true,
+	"com6": true, "com7": true, "com8": true, "com9": true,
+	"lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true, "lpt5": true,
+	"lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
+}
+
+// validateClusterName refuses a name that cannot safely become a file name.
+func validateClusterName(name string) error {
+	if !clusterNamePattern.MatchString(name) || strings.Contains(name, "..") {
+		return fmt.Errorf("cluster name %q is not usable: names may hold letters, digits, dots, dashes and underscores, must start with a letter or digit, and cannot contain a path", name)
+	}
+	stem, _, _ := strings.Cut(strings.ToLower(name), ".")
+	if windowsDeviceNames[stem] {
+		return fmt.Errorf("cluster name %q is a reserved device name on Windows, where the kubeconfig could not be written. Pick another name", name)
+	}
+	return nil
+}
+
+// refuseAStolenKubeconfigPath stops an import from writing over the kubeconfig
+// another cluster entry already points at. The path comes from the name, and on
+// the case-folding filesystems macOS and Windows use by default, "Shop" and
+// "shop" are two config entries over one file: one cluster's credentials then
+// answer for the other.
+func refuseAStolenKubeconfigPath(cfg *config.Config, name, path string) error {
+	for i := range cfg.Clusters {
+		other := &cfg.Clusters[i]
+		if other.Name == name || other.Kubeconfig == "" {
+			continue
+		}
+		if strings.EqualFold(filepath.Clean(other.Kubeconfig), filepath.Clean(path)) {
+			return fmt.Errorf("refusing to import: %s is already the kubeconfig for cluster %q. Two clusters cannot share one file, and these names differ only in ways some filesystems ignore. Rename the existing cluster first with 'kip cluster rename'", path, other.Name)
+		}
+	}
+	return nil
+}
+
+// refuseToReplaceACredential stops an import from overwriting a kubeconfig that
+// holds something this import cannot put back. Three files can be at that path:
+// none, which is the ordinary first import; one kip wrote, which carries no
+// credential and is replaced freely, so re-importing an updated export keeps
+// working; or one holding the cluster's admin certificate or another tool's
+// credential plugin, which is the operator's way in and is refused.
+//
+// A file that cannot be parsed is refused as well. It may be any of the three,
+// and guessing wrong costs an operator their access to the cluster.
+func refuseToReplaceACredential(path string) error {
+	// The path is <clusters dir>/<name>.yaml and the name has been through
+	// validateClusterName, which admits no separator and no parent reference.
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) { //nolint:gosec // G703: name is validated above; the taint analysis cannot see it
+		return nil
+	}
+	existing, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		return fmt.Errorf("refusing to import: %s is already there and could not be read (%v), so kip cannot tell whether replacing it would cost you access to this cluster. Move it aside and run this again", path, err)
+	}
+	// Every entry, not only the active one: this replaces the whole file, so a
+	// certificate parked in a context nobody is using is lost just as
+	// completely as the one in front.
+	for name, authInfo := range existing.AuthInfos {
+		if authInfo == nil {
+			continue
+		}
+		// A credential of any form is refused even when kip's own plugin sits
+		// in the same entry: the plugin can be re-rendered, the credential
+		// beside it cannot. Another tool's plugin is refused outright, since
+		// kip never issued it and cannot put it back.
+		if carriesCredential(authInfo) || (authInfo.Exec != nil && !installer.IsExactlyKipExec(authInfo)) {
+			// A plugin that looks like kip's but is not exactly what this build
+			// writes gets its own sentence. Calling an older kip's file "a
+			// credential an export cannot reissue" sends the operator looking
+			// for a secret that was never in it.
+			if installer.IsKipExecAuthInfo(authInfo) {
+				return fmt.Errorf("refusing to import: %s holds a kip credential plugin for %q that this build did not write, so kip cannot tell whether replacing it costs you access. It may come from another kip, or carry settings added by hand. Move it aside and run this again to replace it", path, name)
+			}
+			return fmt.Errorf("refusing to import: %s already holds a credential for %q that an export cannot reissue. It may be how this machine reaches the cluster. Move it aside and run this again to replace it", path, name)
+		}
+	}
+	return nil
+}
+
+// carriesCredential reports whether an entry holds something that authenticates
+// on its own, as opposed to a plugin invocation or nothing at all.
+//
+// Every form kubeconfig supports counts, not only the obvious ones. A refresh
+// token sitting in auth-provider config, or a basic-auth password, is as much a
+// credential as a client certificate, and missing one means both callers get it
+// wrong in opposite directions: an export carrying it is accepted as
+// credential-free, and a local file holding it is replaced as if empty.
+func carriesCredential(authInfo *clientcmdapi.AuthInfo) bool {
+	return len(authInfo.ClientCertificateData) > 0 || authInfo.ClientCertificate != "" ||
+		len(authInfo.ClientKeyData) > 0 || authInfo.ClientKey != "" ||
+		authInfo.Token != "" || authInfo.TokenFile != "" ||
+		authInfo.Username != "" || authInfo.Password != "" ||
+		authInfo.AuthProvider != nil
+}
+
 // rejectEmbeddedCredential refuses to import a kubeconfig that carries a
-// long-lived credential (a client certificate/key or a static token). The
-// per-operator model keeps no shared admin credential on disk; importing one
-// verbatim would put the shared system:masters certificate back on a machine
-// and let it be re-exported. A credential-free exec kubeconfig (the install
-// default) has none of these and imports fine. Operators authenticate as
-// themselves with `kip auth login` rather than sharing a credential.
+// long-lived credential (a client certificate/key, a static token, basic auth,
+// or an auth-provider). The per-operator model keeps no shared admin credential
+// on disk; importing one verbatim would put the shared system:masters
+// certificate back on a machine and let it be re-exported. A credential-free
+// exec kubeconfig (the install default) has none of these and imports fine.
+// Operators authenticate as themselves with `kip auth login`.
 func rejectEmbeddedCredential(kubeconfig []byte) error {
 	cfg, err := clientcmd.Load(kubeconfig)
 	if err != nil {
@@ -358,9 +466,7 @@ func rejectEmbeddedCredential(kubeconfig []byte) error {
 		if ai == nil {
 			continue
 		}
-		if len(ai.ClientCertificateData) > 0 || ai.ClientCertificate != "" ||
-			len(ai.ClientKeyData) > 0 || ai.ClientKey != "" ||
-			ai.Token != "" || ai.TokenFile != "" {
+		if carriesCredential(ai) {
 			return fmt.Errorf("refusing to import kubeconfig: user %q carries an embedded credential (client certificate/key or token). Kipper uses per-operator OIDC login. Import a credential-free export, then run `kip auth login` against the cluster", name)
 		}
 	}
@@ -492,12 +598,24 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("decoding kubeconfig: %w", err)
 	}
+	if err := validateClusterName(name); err != nil {
+		return err
+	}
 	if err := rejectEmbeddedCredential(kubeconfig); err != nil {
 		return err
 	}
 	if err := rejectMismatchedClusterPin(kubeconfig, domain); err != nil {
 		return err
 	}
+
+	// The bundle's own kubeconfig is never written. Only its server address and
+	// cluster authority survive, re-rendered around kip's credential plugin, so
+	// an exec stanza someone put in the file they sent you has nothing to run.
+	renderedKubeconfig, err := installer.RenderImportedKubeconfig(domain, string(kubeconfig))
+	if err != nil {
+		return err
+	}
+	rendered := []byte(renderedKubeconfig)
 
 	dir, err := config.Dir()
 	if err != nil {
@@ -519,7 +637,16 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 		// beside credentials that reach another.
 		// Atomic: writing in place truncates first, so a failure partway leaves
 		// a live cluster's own kubeconfig corrupt while its entry still names it.
-		if err := installer.WriteFileAtomic(kubeconfigPath, kubeconfig, 0o600); err != nil {
+		// An export carries no credential, so writing it over one is a
+		// one-way trade: the file at this path may be how this machine
+		// reaches the cluster, and nothing in the import can reissue it.
+		if err := refuseAStolenKubeconfigPath(cfg, name, kubeconfigPath); err != nil {
+			return err
+		}
+		if err := refuseToReplaceACredential(kubeconfigPath); err != nil {
+			return err
+		}
+		if err := installer.WriteFileAtomic(kubeconfigPath, rendered, 0o600); err != nil {
 			return fmt.Errorf("writing kubeconfig: %w", err)
 		}
 		// Merge rather than replace. An export carries the connection details and
@@ -621,6 +748,14 @@ func runClusterRename(_ *cobra.Command, args []string) error {
 	oldName := args[0]
 	newName := args[1]
 
+	// The new name becomes a file name under ~/.kip/clusters, exactly as an
+	// import's does, so it is checked the same way. Without this, a name
+	// carrying a parent reference moves the kubeconfig out of the managed
+	// directory to wherever the name points.
+	if err := validateClusterName(newName); err != nil {
+		return err
+	}
+
 	var actualOldName string
 	if err := config.Update(func(cfg *config.Config) error {
 		cluster := findCluster(cfg, oldName)
@@ -674,6 +809,12 @@ func renameKubeconfigFile(oldPath, newName, domain string) (string, error) {
 		return oldPath, nil
 	}
 	newPath := filepath.Join(dir, newName+".yaml")
+	// Belt and braces behind validateClusterName: this function moves a file,
+	// and the check that it lands inside the managed directory belongs next to
+	// the move rather than only at the command's edge.
+	if filepath.Dir(newPath) != dir {
+		return "", fmt.Errorf("refusing to move the kubeconfig outside %s", dir)
+	}
 	if newPath == oldPath {
 		return oldPath, nil
 	}
@@ -704,8 +845,14 @@ func renameKubeconfigFile(oldPath, newName, domain string) (string, error) {
 			"move it back to %s and re-run. If it belongs to something else, move it out of the way first",
 			oldPath, newPath, domain, newPath, oldPath)
 	}
-	if _, err := os.Stat(newPath); err == nil {
-		return oldPath, fmt.Errorf("destination %s already exists", newPath)
+	// A case-only rename is the one case where the destination "already exists"
+	// and is the very file being renamed: macOS and Windows fold case, so
+	// Stat finds Shop.yaml when asked for shop.yaml. Refusing there would make
+	// `kip cluster rename Shop shop` impossible on the machines people use.
+	if !strings.EqualFold(newPath, oldPath) {
+		if _, err := os.Stat(newPath); err == nil {
+			return oldPath, fmt.Errorf("destination %s already exists", newPath)
+		}
 	}
 	if err := os.Rename(oldPath, newPath); err != nil {
 		return oldPath, err

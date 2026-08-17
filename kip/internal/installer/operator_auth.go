@@ -50,9 +50,25 @@ rules:
       - system:apiserver
       - system:kube-controller-manager
       - system:kube-scheduler
-  # Nodes and kube-system workloads keep their read chatter out of the
-  # log, and nothing more: their writes stay attributed, so a stolen
-  # kube-system ServiceAccount token cannot act invisibly.
+  # Secrets are recorded whoever touches them and however, ahead of every
+  # suppression below. Rules are first-match, and console-api's ServiceAccount
+  # can read secrets cluster-wide: silencing platform reads wholesale would
+  # make credential theft with that token the one action leaving no trace.
+  # Metadata only, so what was read is named and never contained.
+  - level: Metadata
+    resources:
+      - group: ""
+        resources:
+          - secrets
+  # Nodes and platform workloads keep their read chatter out of the log,
+  # and nothing more: their writes stay attributed, so a stolen
+  # ServiceAccount token cannot act invisibly.
+  #
+  # monitoring and kipper-system are here because they poll. Prometheus,
+  # kube-state-metrics and the reconcilers read continuously, and at a
+  # hundred megabytes across ten files those reads rotate an operator's
+  # actions out of the log within hours, which is the opposite of what
+  # keeping it is for.
   - level: None
     verbs:
       - get
@@ -61,6 +77,8 @@ rules:
     userGroups:
       - system:nodes
       - system:serviceaccounts:kube-system
+      - system:serviceaccounts:monitoring
+      - system:serviceaccounts:kipper-system
   - level: None
     nonResourceURLs:
       - /healthz*
@@ -81,19 +99,52 @@ func renderAuthnConfig(caPEM string, dexHosts ...string) string {
 	return authncfg.Render(caPEM, dexHosts...)
 }
 
-// writeAuthnStubAndAuditPolicy places the files the apiserver flags
-// reference; InstallK3s calls it before the k3s installer runs. Re-runs must
-// not clobber a live authenticator config back to the stub, so the stub only
-// lands when no config exists yet.
-func writeAuthnStubAndAuditPolicy(client commandRunner) error {
+// writeAuthnStubAndAuditPolicy places the files the apiserver flags reference;
+// InstallK3s calls it before the k3s installer runs. Re-runs must not clobber a
+// live authenticator config back to the stub, so the stub only lands when no
+// config exists yet.
+//
+// It also reports whether the audit policy changed. That answer matters: the
+// API server reads the policy once at startup and never again, so a policy
+// written without a restart is a policy nobody is running.
+func writeAuthnStubAndAuditPolicy(client commandRunner) (policyChanged bool, err error) {
 	if _, err := client.Run(authnStubWriteCmd()); err != nil {
-		return fmt.Errorf("writing authentication config stub: %w", err)
+		return false, fmt.Errorf("writing authentication config stub: %w", err)
 	}
-	policyCmd := fmt.Sprintf("cat > %s << 'KIPEOF'\n%sKIPEOF", auditPolicyPath, auditPolicy)
-	if _, err := client.Run(policyCmd); err != nil {
-		return fmt.Errorf("writing audit policy: %w", err)
+	out, err := client.Run(writeAuditPolicyScript())
+	if err != nil {
+		return false, fmt.Errorf("writing audit policy: %w", err)
 	}
-	return nil
+	return strings.Contains(out, auditPolicyChangedMarker), nil
+}
+
+// auditPolicyChangedMarker is what the write script prints when it replaced the
+// file, so the caller can tell a no-op from a change that needs a restart.
+const auditPolicyChangedMarker = "kipper-audit-policy-changed"
+
+// writeAuditPolicyScript replaces the audit policy through a staged file and a
+// rename, and leaves it alone when it already holds this content.
+//
+// The API server reads this file at startup and refuses to start when it cannot
+// be parsed. Rewriting it in place truncates first, so an upgrade interrupted
+// mid-write, by a dropped connection or a full disk, leaves a running cluster
+// healthy on the policy it loaded and a partial file waiting to stop the next
+// restart. Nothing would report that until a reboot.
+func writeAuditPolicyScript() string {
+	encoded := base64.StdEncoding.EncodeToString([]byte(auditPolicy))
+	return fmt.Sprintf(`set -e
+want=%s
+target=$(readlink -f %s)
+if [ -f "$target" ] && [ "$(base64 -w0 < "$target" 2>/dev/null || base64 < "$target" | tr -d '\n')" = "$want" ]; then exit 0; fi
+staged=$(mktemp "$(dirname "$target")"/.kipper-XXXXXX)
+trap 'rm -f "$staged"' EXIT
+printf %%s "$want" | base64 -d > "$staged"
+chmod 0600 "$staged"
+mv "$staged" "$target"
+echo %s
+trap - EXIT`,
+		shellQuote(encoded),
+		auditPolicyPath, auditPolicyChangedMarker)
 }
 
 // authnStubWriteCmd writes the boot stub only when no authentication config

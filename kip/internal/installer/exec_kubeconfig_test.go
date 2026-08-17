@@ -9,10 +9,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 func TestRenderExecKubeconfigCarriesNoCredential(t *testing.T) {
-	rendered := renderExecKubeconfig("cluster.example.com", "https://203.0.113.10:6443", []byte("ca-pem"), "kip")
+	rendered, err := renderExecKubeconfig("cluster.example.com",
+		&clientcmdapi.Cluster{Server: "https://203.0.113.10:6443", CertificateAuthorityData: []byte("ca-pem")}, "kip")
+	require.NoError(t, err)
 
 	cfg, err := clientcmd.Load([]byte(rendered))
 	require.NoError(t, err, "the rendered kubeconfig must be loadable by client-go")
@@ -292,7 +295,9 @@ users:
 func TestRepinExecKubeconfigFollowsADomainChange(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cluster.yaml")
-	original := renderExecKubeconfig("old.example.com", "https://203.0.113.10:6443", []byte("ca-pem"), "kip")
+	original, renderErr := renderExecKubeconfig("old.example.com",
+		&clientcmdapi.Cluster{Server: "https://203.0.113.10:6443", CertificateAuthorityData: []byte("ca-pem")}, "kip")
+	require.NoError(t, renderErr)
 	require.NoError(t, os.WriteFile(path, []byte(original), 0o600))
 
 	repinned, err := RepinExecKubeconfig("new.example.com", path)
@@ -461,7 +466,9 @@ current-context: c
 func TestRepinExecKubeconfigAcceptsAnAbsolutePinnedCommand(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pinned.yaml")
-	pinned := renderExecKubeconfig("old.example.com", "https://203.0.113.10:6443", []byte("ca-pem"), "/usr/local/bin/kip")
+	pinned, renderErr := renderExecKubeconfig("old.example.com",
+		&clientcmdapi.Cluster{Server: "https://203.0.113.10:6443", CertificateAuthorityData: []byte("ca-pem")}, "/usr/local/bin/kip")
+	require.NoError(t, renderErr)
 	require.NoError(t, os.WriteFile(path, []byte(pinned), 0o600))
 
 	repinned, err := RepinExecKubeconfig("new.example.com", path)
@@ -488,4 +495,70 @@ users:
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `"only"`, "the inferred context is named")
 	assert.Contains(t, err.Error(), `"absent"`)
+}
+
+// A kubeconfig arriving from someone else can put anything in a string field.
+// While this rendered a text template, a server address carrying newlines wrote
+// its own YAML into the file kip produced, including an exec entry client-go
+// would then run.
+func TestRenderedKubeconfigCannotBeInjectedThroughAServerAddress(t *testing.T) {
+	hostile := "https://203.0.113.10:6443\n      exec:\n        command: rm\n        args: [-rf, /tmp/pwned]"
+
+	rendered, err := renderExecKubeconfig("shop.example",
+		&clientcmdapi.Cluster{Server: hostile, CertificateAuthorityData: []byte("ca-pem")}, "kip")
+	require.NoError(t, err)
+
+	cfg, err := clientcmd.Load([]byte(rendered))
+	require.NoError(t, err, "what is written has to parse as one document")
+
+	assert.Equal(t, hostile, cfg.Clusters["shop.example"].Server,
+		"the address is carried as one value, however strange it looks")
+	require.Len(t, cfg.AuthInfos, 1, "no second identity may appear")
+	user := cfg.AuthInfos["oidc@shop.example"]
+	require.NotNil(t, user)
+	require.NotNil(t, user.Exec)
+	assert.Equal(t, "kip", user.Exec.Command, "the only command in the file is kip's own")
+	assert.Len(t, cfg.Clusters, 1, "and no second cluster entry")
+	// The hostile text is still in the file, quoted as one scalar. That is the
+	// guarantee: it is data, not structure. Asserting its absence would pass on
+	// a renderer that silently dropped the address instead.
+}
+
+// Connection settings are not credentials and not executable, and without them
+// a cluster behind a proxy, or served on an address its certificate does not
+// name, cannot be reached at all.
+func TestRenderedKubeconfigKeepsWhatIsNeededToReachTheCluster(t *testing.T) {
+	rendered, err := renderExecKubeconfig("shop.example", &clientcmdapi.Cluster{
+		Server:                   "https://203.0.113.10:6443",
+		CertificateAuthorityData: []byte("ca-pem"),
+		ProxyURL:                 "socks5://127.0.0.1:1080",
+		TLSServerName:            "api.shop.example",
+	}, "kip")
+	require.NoError(t, err)
+
+	cfg, err := clientcmd.Load([]byte(rendered))
+	require.NoError(t, err)
+	cluster := cfg.Clusters["shop.example"]
+	require.NotNil(t, cluster)
+	assert.Equal(t, "socks5://127.0.0.1:1080", cluster.ProxyURL)
+	assert.Equal(t, "api.shop.example", cluster.TLSServerName)
+}
+
+// Re-rendering a kubeconfig that skips verification would put kip's name on a
+// weaker guarantee than everything else it writes.
+func TestExecRenderRefusesAKubeconfigThatSkipsVerification(t *testing.T) {
+	cfg := clientcmdapi.NewConfig()
+	cfg.Clusters["c"] = &clientcmdapi.Cluster{
+		Server:                   "https://203.0.113.10:6443",
+		CertificateAuthorityData: []byte("ca-pem"),
+		InsecureSkipTLSVerify:    true,
+	}
+	cfg.AuthInfos["u"] = &clientcmdapi.AuthInfo{}
+	cfg.Contexts["c"] = &clientcmdapi.Context{Cluster: "c", AuthInfo: "u"}
+	cfg.CurrentContext = "c"
+
+	_, _, _, err := execFromAPIConfig("shop.example", cfg, "kip")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TLS verification")
 }
