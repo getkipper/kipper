@@ -194,12 +194,21 @@ After installing, you can give other developers access to the cluster without sh
 kip cluster export > my-cluster.kip
 ```
 
-Team members import the file and start working immediately:
+Team members import the file, sign in as themselves, and start working:
 
 ```bash
 kip cluster add my-cluster.kip --set-current
+kip auth login
 kip status
 ```
+
+The export carries how to reach the cluster, never a credential. Kipper is per-operator: the kubeconfig it writes fetches short-lived tokens from your own login, so `kip auth login` is what turns an imported cluster into one you can use, and every action in the audit log names you rather than a shared certificate.
+
+An import writes the cluster's kubeconfig to `~/.kip/clusters/<name>.yaml`, and it will not overwrite a credential it cannot put back. If that file holds the cluster's admin certificate, another tool's credential plugin, or any credential at all in any of its contexts, the import stops and names the entry, because on some machines that file is the only way in. Move it aside and run the import again to replace it. A kubeconfig Kipper wrote itself carries no credential, so re-importing an updated export over one of those is the ordinary way to pick up a changed domain.
+
+What lands is a kubeconfig Kipper renders, not the one in the file you were sent. The server address, the cluster's certificate authority and the settings needed to reach that address (a proxy, a TLS server name) are taken from it and wrapped around Kipper's own credential plugin. Nothing else crosses. A kubeconfig is not only data, and an `exec` entry in one names a command your machine runs the next time anything asks for credentials, so nothing executable crosses over from a file someone sent you.
+
+An export cannot choose where the import writes either. The name inside it has to be a plain cluster name: one carrying a path is refused, as is one that another cluster's kubeconfig already occupies, or a name Windows reserves for a device.
 
 See [Team Access](/en/team-access) for the full workflow, including managing multiple clusters, database tunnels, and shell access.
 
@@ -1154,7 +1163,9 @@ Every upgrade checks, and repairs a cluster that needs it:
   ✔  Operator login configured. Run 'kip auth login', then 'kip auth kubeconfig'
 ```
 
-k3s restarts once, which interrupts the control plane for a few seconds. containerd and your pods run through it, so apps keep serving. kip then waits up to two minutes for the API server to answer. It asks the API server rather than the nodes, so an unrelated agent that happens to be NotReady does not read as a failed repair.
+k3s restarts once, which interrupts the control plane for a few seconds. containerd and your pods run through it, so apps keep serving. kip then waits up to two minutes for the API server to answer.
+
+One component can notice: `kube-state-metrics` rebuilds its view of every object when the API server returns, and on a cluster still carrying the old 64 Mi limit that burst can OOM-kill it for a few minutes before it settles. The current limit is applied by the system-component step of a full `kip upgrade`, which runs after this one, so a cluster being repaired for the first time may see that blip once. `--skip-system` skips the resize entirely, and the next full upgrade applies it. It asks the API server rather than the nodes, so an unrelated agent that happens to be NotReady does not read as a failed repair.
 
 If the API server does not come back, kip restores the configuration it replaced and restarts k3s on it. A copy of the previous file stays at `/etc/rancher/k3s/config.yaml.kipper-bak` either way.
 

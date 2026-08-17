@@ -2,7 +2,6 @@ package installer
 
 import (
 	"bytes"
-	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,45 +13,55 @@ import (
 
 // renderExecKubeconfig builds a kubeconfig that carries no credential at
 // all: the user entry is an exec plugin invoking kip, which serves the
-// operator's own short-lived OIDC token. The cluster CA and server address
-// are the only material in the file, so losing the file loses nothing and
-// revoking a person means their login, never a certificate rotation.
+// operator's own short-lived OIDC token. The cluster CA, server address and
+// the transport settings needed to reach it are the only material in the file,
+// so losing the file loses nothing and revoking a person means their login,
+// never a certificate rotation.
+//
+// It marshals a config object rather than filling in a text template. The
+// values can come from a kubeconfig somebody else wrote, and a server address
+// carrying newlines used to be written verbatim into the document: a crafted
+// export could add an exec entry of its own, which client-go then ran. Nothing
+// is escaped here because nothing is interpolated.
 //
 // The exec args pin the domain because kubectl tells a credential plugin
 // nothing about which kubeconfig invoked it. Without the pin the plugin has
 // only kip's current_cluster to go on, which is a global setting bearing no
 // relation to the file kubectl is holding, so an operator working across two
 // clusters gets one cluster's token sent to the other's API server.
-func renderExecKubeconfig(domain, server string, caData []byte, execCommand string) string {
-	return fmt.Sprintf(`apiVersion: v1
-kind: Config
-clusters:
-  - name: %[1]s
-    cluster:
-      server: %[2]s
-      certificate-authority-data: %[3]s
-contexts:
-  - name: %[1]s
-    context:
-      cluster: %[1]s
-      user: oidc@%[1]s
-current-context: %[1]s
-users:
-  - name: oidc@%[1]s
-    user:
-      exec:
-        apiVersion: client.authentication.k8s.io/v1
-        command: %[4]s
-        args:
-          - auth
-          - kubectl-token
-          - --cluster-domain
-          - %[1]s
-        interactiveMode: Never
-        installHint: |
-          This kubeconfig authenticates through the kip CLI.
-          Install kip and run: kip auth login
-`, domain, server, base64.StdEncoding.EncodeToString(caData), execCommand)
+func renderExecKubeconfig(domain string, source *clientcmdapi.Cluster, execCommand string) (string, error) {
+	user := "oidc@" + domain
+	cfg := clientcmdapi.NewConfig()
+	cfg.Clusters[domain] = &clientcmdapi.Cluster{
+		Server:                   source.Server,
+		CertificateAuthorityData: source.CertificateAuthorityData,
+		// Carried across because they decide whether the address is reachable
+		// and verifiable at all, and neither runs anything: a cluster behind a
+		// proxy, or served on an IP whose certificate names something else,
+		// is unreachable without them.
+		ProxyURL:           source.ProxyURL,
+		TLSServerName:      source.TLSServerName,
+		DisableCompression: source.DisableCompression,
+	}
+	cfg.AuthInfos[user] = &clientcmdapi.AuthInfo{
+		Exec: &clientcmdapi.ExecConfig{
+			APIVersion:      "client.authentication.k8s.io/v1",
+			Command:         execCommand,
+			Args:            []string{"auth", "kubectl-token", "--cluster-domain", domain},
+			InteractiveMode: clientcmdapi.NeverExecInteractiveMode,
+			InstallHint: `This kubeconfig authenticates through the kip CLI.
+Install kip and run: kip auth login
+`,
+		},
+	}
+	cfg.Contexts[domain] = &clientcmdapi.Context{Cluster: domain, AuthInfo: user}
+	cfg.CurrentContext = domain
+
+	out, err := clientcmd.Write(*cfg)
+	if err != nil {
+		return "", fmt.Errorf("rendering kubeconfig: %w", err)
+	}
+	return string(out), nil
 }
 
 // ActiveContext resolves which entry in a kubeconfig is live: the current
@@ -91,7 +100,17 @@ func execFromAPIConfig(domain string, cfg *clientcmdapi.Config, execCommand stri
 	if cluster.Server == "" || len(cluster.CertificateAuthorityData) == 0 {
 		return "", "", nil, fmt.Errorf("kubeconfig carries no cluster server and CA to keep")
 	}
-	return renderExecKubeconfig(domain, cluster.Server, cluster.CertificateAuthorityData, execCommand), cluster.Server, cluster.CertificateAuthorityData, nil
+	// A kubeconfig that skips verification is not re-rendered into one kip
+	// wrote: the result would carry kip's name and a weaker guarantee than
+	// every other file it writes.
+	if cluster.InsecureSkipTLSVerify {
+		return "", "", nil, fmt.Errorf("kubeconfig disables TLS verification for %q, which kip will not carry over", kubeContext.Cluster)
+	}
+	content, rerr := renderExecKubeconfig(domain, cluster, execCommand)
+	if rerr != nil {
+		return "", "", nil, rerr
+	}
+	return content, cluster.Server, cluster.CertificateAuthorityData, nil
 }
 
 // RenderExecFromAdmin renders the credential-free exec kubeconfig from an
@@ -169,7 +188,7 @@ func RepinExecKubeconfig(domain, path string) (repinned bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("reading kubeconfig %s: %w", path, err)
 	}
-	if !activeCredentialIsKipExec(existing) {
+	if !ActiveCredentialIsKipExec(existing) {
 		return false, nil
 	}
 
@@ -183,9 +202,9 @@ func RepinExecKubeconfig(domain, path string) (repinned bool, err error) {
 	return true, nil
 }
 
-// activeCredentialIsKipExec reports whether the credential the current context
+// ActiveCredentialIsKipExec reports whether the credential the current context
 // uses is kip's own exec plugin, which is the only credential a re-pin may
-// replace.
+// replace, and the only one an import may write over.
 //
 // Two narrowings, each of which is a credential someone loses otherwise. Only
 // the active entry counts, because re-rendering keeps the active context and
@@ -200,9 +219,19 @@ func RepinExecKubeconfig(domain, path string) (repinned bool, err error) {
 // "kubectl-token" as a value would otherwise read as kip's own. Recognising
 // too little only leaves a stale pin, which refuses and names the one command
 // that fixes it; recognising too much destroys a credential.
-func activeCredentialIsKipExec(cfg *clientcmdapi.Config) bool {
+func ActiveCredentialIsKipExec(cfg *clientcmdapi.Config) bool {
 	kubeContext, _ := ActiveContext(cfg)
-	authInfo := cfg.AuthInfos[kubeContext.AuthInfo]
+	return IsKipExecAuthInfo(cfg.AuthInfos[kubeContext.AuthInfo])
+}
+
+// IsKipExecAuthInfo reports whether one entry is kip's own credential plugin.
+// Callers that replace a whole file rather than an active context ask this of
+// every entry: an inactive one is still somebody's way into a cluster.
+//
+// This is the loose test, and it answers "does this look like our plugin",
+// which is the right question when the consequence is a stale pin. A caller
+// about to destroy the entry asks IsExactlyKipExec instead.
+func IsKipExecAuthInfo(authInfo *clientcmdapi.AuthInfo) bool {
 	if authInfo == nil || authInfo.Exec == nil {
 		return false
 	}
@@ -211,6 +240,58 @@ func activeCredentialIsKipExec(cfg *clientcmdapi.Config) bool {
 	}
 	args := authInfo.Exec.Args
 	return len(args) >= 2 && args[0] == "auth" && args[1] == "kubectl-token"
+}
+
+// IsExactlyKipExec reports whether an entry is the plugin kip renders, in full,
+// and nothing else. It is the question to ask before overwriting a file: kip
+// can reissue exactly what it wrote, and nothing more.
+//
+// A program named kip somewhere else, a wrapper taking extra arguments, or the
+// same plugin carrying environment the operator added, all authenticate someone
+// and none of them can be reproduced from an export. The loose test above reads
+// all three as ours.
+func IsExactlyKipExec(authInfo *clientcmdapi.AuthInfo) bool {
+	if authInfo == nil || authInfo.Exec == nil {
+		return false
+	}
+	exec := authInfo.Exec
+	// kip writes "kip" when it is on PATH and its own absolute path when it is
+	// not, so both are ours. Any other command is somebody else's, whatever it
+	// is called: destroying what it authenticates cannot be undone by
+	// re-rendering ours. The basename is not consulted, because a binary named
+	// something else is still this one when the path matches, and a stranger's
+	// binary named kip is still a stranger's.
+	if exec.Command != "kip" && exec.Command != execCommandForHost() {
+		return false
+	}
+	if len(exec.Args) < 2 || exec.Args[0] != "auth" || exec.Args[1] != "kubectl-token" {
+		return false
+	}
+	if len(exec.Args) != 4 || exec.Args[2] != "--cluster-domain" || exec.Args[3] == "" {
+		return false
+	}
+	if len(exec.Env) != 0 || exec.ProvideClusterInfo {
+		return false
+	}
+	return exec.APIVersion == "client.authentication.k8s.io/v1" &&
+		exec.InteractiveMode == clientcmdapi.NeverExecInteractiveMode
+}
+
+// RenderImportedKubeconfig re-renders a kubeconfig that arrived from someone
+// else, keeping the server address, the cluster certificate authority, and the
+// transport settings needed to reach that address. Nothing else survives.
+//
+// An import is a file a colleague sent, and a kubeconfig is not only data: an
+// exec stanza names a command that client-go runs the moment anything asks for
+// credentials. Checking the incoming file for known-bad shapes leaves whatever
+// nobody thought of, so nothing executable survives the crossing at all. What
+// lands is a file kip wrote, pinned to the domain the bundle declares.
+func RenderImportedKubeconfig(domain, kubeconfig string) (string, error) {
+	content, _, _, err := RenderExecFromAdmin(domain, kubeconfig, execCommandForHost())
+	if err != nil {
+		return "", fmt.Errorf("reading the imported kubeconfig: %w", err)
+	}
+	return content, nil
 }
 
 // WriteFileAtomic writes content to path via a temp file and rename, so a

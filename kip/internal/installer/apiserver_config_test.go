@@ -99,8 +99,37 @@ resolv-conf: /etc/rancher/k3s/resolv.conf
 
 func hostWithConfig(config string) *hostScript {
 	return &hostScript{reply: func(cmd string) (string, error) {
-		if strings.Contains(cmd, "cat "+k3sConfigPath) {
+		switch {
+		case strings.Contains(cmd, "cat "+k3sConfigPath):
 			return config, nil
+		case strings.Contains(cmd, "list-unit-files k3s.service"):
+			return "1", nil
+		case strings.Contains(cmd, "apiserver_authentication_config_controller_last_config_info"):
+			return "1", nil
+		}
+		return "", nil
+	}}
+}
+
+// hostRunningPolicy answers as a server whose audit policy already matches, so
+// a test says which of the two restart reasons it is exercising.
+func hostRunningPolicy(config string, authnLoaded, policyChanged bool) *hostScript {
+	return &hostScript{reply: func(cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "cat "+k3sConfigPath):
+			return config, nil
+		case strings.Contains(cmd, "list-unit-files k3s.service"):
+			return "1", nil
+		case strings.Contains(cmd, "apiserver_authentication_config_controller_last_config_info"):
+			if authnLoaded {
+				return "1", nil
+			}
+			return "0", nil
+		case strings.Contains(cmd, auditPolicyPath) && strings.Contains(cmd, "base64 -d"):
+			if policyChanged {
+				return auditPolicyChangedMarker, nil
+			}
+			return "", nil
 		}
 		return "", nil
 	}}
@@ -180,6 +209,8 @@ func TestEnsureAPIServerConfigRestoresTheConfigWhenTheNodeDoesNotComeBack(t *tes
 		switch {
 		case strings.Contains(cmd, "cat "+k3sConfigPath):
 			return oldConfig, nil
+		case strings.Contains(cmd, "list-unit-files k3s.service"):
+			return "1", nil
 		case strings.Contains(cmd, "kubectl get --raw /readyz"):
 			return "", assert.AnError
 		}
@@ -189,9 +220,9 @@ func TestEnsureAPIServerConfigRestoresTheConfigWhenTheNodeDoesNotComeBack(t *tes
 	_, err := EnsureAPIServerConfig(host, nil)
 
 	require.Error(t, err)
-	assert.True(t, host.sent(k3sConfigBackupPath+" "+k3sConfigPath),
+	assert.True(t, host.sent("cp -p "+k3sConfigBackupPath),
 		"the backup must be copied back over the config it replaced")
-	restores := host.indexOf(k3sConfigBackupPath + " " + k3sConfigPath)
+	restores := host.indexOf("cp -p " + k3sConfigBackupPath)
 	restarts := 0
 	for i, c := range host.commands {
 		if strings.Contains(c, "systemctl restart k3s") {
@@ -295,10 +326,12 @@ func TestEnsureAPIServerConfigKeepsTheFilesModeAndOwner(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, write)
-	assert.Contains(t, write, "stat -c %a "+k3sConfigPath, "the mode is read from the file being replaced")
+	assert.Contains(t, write, "readlink -f "+k3sConfigPath,
+		"a config kept as a symlink is written through, not replaced by a plain file")
+	assert.Contains(t, write, `stat -c %a "$target"`, "the mode is read from the file being replaced")
 	assert.Contains(t, write, `chmod "$mode"`, "and applied to the file replacing it")
 	assert.Contains(t, write, `chown "$owner"`)
-	assert.Contains(t, write, "cp -p "+k3sConfigPath, "the backup keeps them too")
+	assert.Contains(t, write, `cp -p "$target" `+k3sConfigBackupPath, "the backup keeps them too")
 }
 
 func TestEnsureAPIServerConfigRefusesAConfigItCannotParse(t *testing.T) {
@@ -339,4 +372,155 @@ func TestAPIServerArgListMatchesTheInstalledBlock(t *testing.T) {
 	assert.Len(t, args, 6)
 	assert.Contains(t, args, "authentication-config="+authnConfigPath)
 	assert.Contains(t, args, "audit-policy-file="+auditPolicyPath)
+}
+
+// A run interrupted between the rename and the restart leaves the file current
+// and the process not. Reading the file alone, every retry would agree there is
+// nothing to do and the repair would never land.
+func TestEnsureAPIServerConfigRestartsWhenTheFileIsCurrentButUnloaded(t *testing.T) {
+	host := &hostScript{}
+	host.reply = func(cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "cat "+k3sConfigPath):
+			return currentConfig, nil
+		case strings.Contains(cmd, "list-unit-files k3s.service"):
+			return "1", nil
+		case strings.Contains(cmd, "apiserver_authentication_config_controller_last_config_info"):
+			return "0", nil // the running API server never loaded one
+		}
+		return "", nil
+	}
+
+	changed, err := EnsureAPIServerConfig(host, nil)
+
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.True(t, host.sent("systemctl restart k3s"), "the restart the interrupted run never performed")
+	assert.Empty(t, host.written(t), "and the file it already holds is not rewritten")
+}
+
+// These are server flags. On an agent node there is no k3s.service to restart,
+// so writing them there leaves a worker carrying control-plane configuration
+// and a rollback that cannot run either.
+func TestEnsureAPIServerConfigRefusesANodeRunningNoServer(t *testing.T) {
+	for name, answer := range map[string]string{"no unit": "0", "no answer": ""} {
+		t.Run(name, func(t *testing.T) {
+			host := &hostScript{reply: func(cmd string) (string, error) {
+				if strings.Contains(cmd, "list-unit-files k3s.service") {
+					return answer, nil
+				}
+				return oldConfig, nil
+			}}
+
+			_, err := EnsureAPIServerConfig(host, nil)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "k3s server")
+			assert.False(t, host.sent("systemctl restart k3s"))
+			assert.Empty(t, host.written(t))
+		})
+	}
+}
+
+// The API server reads the audit policy once, at startup. Writing a new one and
+// stopping there leaves every already-repaired cluster running the old policy,
+// which is exactly the fleet this change was for.
+func TestEnsureAPIServerConfigRestartsWhenTheAuditPolicyChanged(t *testing.T) {
+	host := hostRunningPolicy(currentConfig, true, true)
+
+	changed, err := EnsureAPIServerConfig(host, nil)
+
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.True(t, host.sent("systemctl restart k3s"))
+	assert.Empty(t, host.written(t), "the config file itself has nothing to change")
+}
+
+func TestEnsureAPIServerConfigLeavesACurrentServerAloneWhenNothingChanged(t *testing.T) {
+	host := hostRunningPolicy(currentConfig, true, false)
+
+	changed, err := EnsureAPIServerConfig(host, nil)
+
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.False(t, host.sent("systemctl restart k3s"))
+}
+
+// Not knowing what the API server is running is not knowing it is behind. A
+// healthy cluster whose metrics are briefly unreadable must not fail an upgrade
+// that has nothing to do.
+func TestEnsureAPIServerConfigTolerateAnUnreadableAPIServer(t *testing.T) {
+	host := &hostScript{}
+	host.reply = func(cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "cat "+k3sConfigPath):
+			return currentConfig, nil
+		case strings.Contains(cmd, "list-unit-files k3s.service"):
+			return "1", nil
+		case strings.Contains(cmd, "apiserver_authentication_config_controller_last_config_info"):
+			return "", assert.AnError
+		}
+		return "", nil
+	}
+	var said []string
+
+	changed, err := EnsureAPIServerConfig(host, func(m string) { said = append(said, m) })
+
+	require.NoError(t, err, "an unreadable metric is not a failed upgrade")
+	assert.False(t, changed)
+	assert.False(t, host.sent("systemctl restart k3s"), "and never a restart on a guess")
+	assert.Contains(t, strings.Join(said, "\n"), "could not be asked")
+}
+
+// The retry is where the risky restart actually happens, so it needs the same
+// protection the first attempt has.
+func TestConvergenceRestartRollsBackLikeTheFirstAttempt(t *testing.T) {
+	host := &hostScript{}
+	host.reply = func(cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "cat "+k3sConfigPath):
+			return currentConfig, nil
+		case strings.Contains(cmd, "list-unit-files k3s.service"):
+			return "1", nil
+		case strings.Contains(cmd, "apiserver_authentication_config_controller_last_config_info"):
+			return "0", nil
+		case strings.Contains(cmd, "[ -f "+k3sConfigBackupPath+" ]"):
+			return "yes", nil // the interrupted run left one
+		case strings.Contains(cmd, "kubectl get --raw /readyz"):
+			return "", assert.AnError
+		}
+		return "", nil
+	}
+
+	_, err := EnsureAPIServerConfig(host, nil)
+
+	require.Error(t, err)
+	assert.True(t, host.sent("cp -p "+k3sConfigBackupPath), "the earlier configuration is put back")
+}
+
+// With no backup there is nothing to restore, and claiming otherwise would send
+// an operator looking for a file that was never written.
+func TestConvergenceRestartSaysSoWhenThereIsNothingToRestore(t *testing.T) {
+	host := &hostScript{}
+	host.reply = func(cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "cat "+k3sConfigPath):
+			return currentConfig, nil
+		case strings.Contains(cmd, "list-unit-files k3s.service"):
+			return "1", nil
+		case strings.Contains(cmd, "apiserver_authentication_config_controller_last_config_info"):
+			return "0", nil
+		case strings.Contains(cmd, "[ -f "+k3sConfigBackupPath+" ]"):
+			return "no", nil
+		case strings.Contains(cmd, "kubectl get --raw /readyz"):
+			return "", assert.AnError
+		}
+		return "", nil
+	}
+
+	_, err := EnsureAPIServerConfig(host, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no earlier configuration to restore")
+	assert.False(t, host.sent("cp -p "+k3sConfigBackupPath), "and no restore is attempted")
 }

