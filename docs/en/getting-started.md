@@ -31,7 +31,7 @@ curl -sL https://getkipper.com/install | sh
 Download `kip-windows-amd64.exe` from the [latest release](https://github.com/getkipper/kipper/releases), rename to `kip.exe`, and add the directory to your PATH.
 
 ::: tip Windows and kip install
-All kip commands work natively on Windows. The one exception is `kip install`, which uses SSH to connect to a Linux server. For this command, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/) or Git Bash.
+All kip commands work natively on Windows except `kip install`, which needs [WSL](https://learn.microsoft.com/en-us/windows/wsl/). An install runs hundreds of commands over SSH and shares one connection between them, which Windows OpenSSH cannot do. Git Bash cannot either, because its ssh comes from the same family. Everything after the install talks to the Kubernetes API and works from the native binary.
 :::
 
 **Or build from source:**

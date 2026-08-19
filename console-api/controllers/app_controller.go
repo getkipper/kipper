@@ -127,6 +127,21 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 		return ctrl.Result{}, r.removeFinalizer(ctx, &app)
 	}
 
+	// Withdrawing a credential runs before anything that can fail for unrelated
+	// reasons, the name claim included. An app whose binding is broken, whose
+	// variables do not resolve, or whose name is held by another workload fails
+	// the same step on every pass, and cleanup ordered after that point is
+	// never reached — so a token whose source was removed would sit in the
+	// namespace in plaintext for as long as the unrelated fault lasts. Each of
+	// those states is one an App written straight to the Kubernetes API can
+	// arrive in. Same reasoning as the link-policy withdrawal below.
+	if err := r.sweepDetachedGitCredential(ctx, &app); err != nil {
+		return ctrl.Result{}, fmt.Errorf("removing a detached git credential: %w", err)
+	}
+	if err := r.clearDetachedBuildStatus(ctx, &app); err != nil {
+		return ctrl.Result{}, fmt.Errorf("clearing a detached build status: %w", err)
+	}
+
 	// See the Function reconciler: a CR written straight to the API server never
 	// passed a reservation, and an App beside a Job shares no child to refuse.
 	if heldBy, claimErr := reconcileNameClaim(ctx, r.Client, r.hostReader(), r.Scheme, &app, "app"); claimErr != nil {
@@ -1060,9 +1075,13 @@ func (r *AppReconciler) adoptWriterSecrets(ctx context.Context, app *kipperv1.Ap
 func (r *AppReconciler) sweepWriterSecrets(ctx context.Context, app *kipperv1.App) error {
 	candidates := map[string]string{
 		secretname.Secrets(secretname.KindApp, app.Name): "app",
-	}
-	if app.Spec.Git != nil && app.Spec.Git.CredentialsSecret == app.Name+"-git-credentials" {
-		candidates[app.Spec.Git.CredentialsSecret] = "kipper.run/app"
+		// Unconditionally, not only while a git source is configured. An app
+		// whose source was detached still has the token on disk if the sweep
+		// that removes it has not run yet, and gating this on spec.git would
+		// strand that plaintext Secret in the namespace forever once the App
+		// it belonged to is gone. The label and ownership checks below are
+		// what keep a stranger's Secret safe, not the spec.
+		app.Name + "-git-credentials": "kipper.run/app",
 	}
 
 	for name, appLabel := range candidates {
@@ -2261,4 +2280,73 @@ func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// unrelated to touch each caller.
 		Watches(&kipperv1.Project{}, handler.EnqueueRequestsFromMapFunc(r.enqueueCallersOfProject)).
 		Complete(r)
+}
+
+// sweepDetachedGitCredential removes the token an app built with once its git
+// source is gone.
+//
+// Adoption ties the Secret's life to the App rather than to the source
+// (adoptWriterSecrets), which is right while the app builds and wrong the
+// moment it stops: without this, removing a git source leaves a plaintext
+// token in the namespace with nothing referencing it, until the app itself is
+// deleted.
+//
+// The guards are the ones adoption used, in reverse. Only the conventional
+// per-app name is considered, so a credentialsSecret naming a shared
+// credential — which the builder resolves for several apps — is never touched.
+// Only a Secret carrying the writer labels is considered, because names are
+// namespace-global and a collision must not turn a stranger's object into this
+// app's to delete. And only one this app controls, or that nothing controls.
+//
+// Idempotent by construction: a missing Secret is the goal state, so a pass
+// that half-succeeded is simply run again by the next reconcile.
+func (r *AppReconciler) sweepDetachedGitCredential(ctx context.Context, app *kipperv1.App) error {
+	if app.Spec.Git != nil {
+		return nil
+	}
+	name := app.Name + "-git-credentials"
+
+	var secret corev1.Secret
+	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: app.Namespace}, &secret)
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if secret.Labels[kipperLabel] != kipperValue || secret.Labels["kipper.run/app"] != app.Name {
+		return nil
+	}
+	if owner := metav1.GetControllerOf(&secret); owner != nil && owner.UID != app.UID {
+		return nil
+	}
+	if err := r.Delete(ctx, &secret); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("removing the detached git credential %s: %w", name, err)
+	}
+	return nil
+}
+
+// clearDetachedBuildStatus drops a build result belonging to a source that is
+// gone, and reports whether it changed anything.
+//
+// A build status outliving its source makes the console report a failed build
+// for an app that has no builds, which is what an operator saw after switching
+// an app from git to a prebuilt image.
+func (r *AppReconciler) clearDetachedBuildStatus(ctx context.Context, app *kipperv1.App) error {
+	if !detachedBuildStatus(app) {
+		return nil
+	}
+	app.Status.Build = nil
+	// Written here rather than left for the status write at the end of the
+	// pass. This runs before the steps that can fail for unrelated reasons, and
+	// an app failing one of those never reaches that write — so the console
+	// would go on reporting a failed build for an app that has no builds, for
+	// as long as the unrelated fault lasts.
+	return r.Status().Update(ctx, app)
+}
+
+// detachedBuildStatus reports whether a build result belongs to a source that
+// is gone.
+func detachedBuildStatus(app *kipperv1.App) bool {
+	return app.Spec.Git == nil && app.Status.Build != nil
 }

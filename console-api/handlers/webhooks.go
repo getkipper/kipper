@@ -26,6 +26,7 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/builder"
 	"github.com/getkipper/kipper/console-api/internal/registrycred"
+	"github.com/getkipper/kipper/controller/pkg/giturl"
 )
 
 const (
@@ -39,6 +40,17 @@ const (
 type Webhooks struct {
 	Client   kubernetes.Interface
 	CRClient crclient.Client
+	// ProbeGit authenticates a git credential against its host to report
+	// whether it still works. Injected so a test can prove a token that must
+	// not travel never reaches it.
+	ProbeGit func(ctx context.Context, server, token string) tokenHealth
+}
+
+func (wh *Webhooks) probeGit(ctx context.Context, server, token string) tokenHealth {
+	if wh.ProbeGit != nil {
+		return wh.ProbeGit(ctx, server, token)
+	}
+	return probeGitCredential(ctx, server, token)
 }
 
 type webhookRequest struct {
@@ -46,12 +58,16 @@ type webhookRequest struct {
 	Commit string `json:"commit"`
 }
 
+// deployEntry mirrors controllers.buildDeployEntry and webhook.DeployEntry in
+// kip. All three marshal the same annotation and round-trip it, so a field
+// missing here is stripped from every entry the moment somebody rolls back.
 type deployEntry struct {
 	Revision  int    `json:"revision"`
 	Image     string `json:"image"`
 	Commit    string `json:"commit,omitempty"`
 	Trigger   string `json:"trigger"`
 	Timestamp string `json:"timestamp"`
+	Build     string `json:"build,omitempty"`
 }
 
 // Receive handles incoming webhook requests from GitLab/GitHub CI pipelines.
@@ -133,8 +149,18 @@ func (wh *Webhooks) processDeploy(ctx context.Context, w http.ResponseWriter, na
 		return
 	}
 
-	// Git-based apps: trigger a build instead of a direct image update
 	if appCR.Spec.Git != nil {
+		// An image names an exact artefact the pipeline has already built and
+		// pushed. Discarding it to build the repository again answers a
+		// question nobody asked, and answering 200 for it let a pipeline stay
+		// green while nothing deployed. The two ways of deploying cannot both
+		// be in play, so say which one is configured and stop.
+		if req.Image != "" {
+			respondError(w, http.StatusConflict, fmt.Sprintf(
+				"%s builds from %s, so the image you posted would be ignored. Remove the git source with 'kip app git remove %s' to deploy prebuilt images, or post only a commit to trigger a build",
+				appCR.Name, appCR.Spec.Git.URL, appCR.Name))
+			return
+		}
 		wh.triggerBuild(ctx, w, &appCR, req.Commit)
 		return
 	}
@@ -166,6 +192,9 @@ func (wh *Webhooks) triggerBuild(ctx context.Context, w http.ResponseWriter, app
 		Phase:     "Pending",
 		Commit:    commit,
 		StartedAt: &now,
+		// Named from the start, so a status this write leaves behind is never
+		// one the guards have to treat as predating the field.
+		Build: job.Name,
 	}
 	if err := wh.CRClient.Status().Update(ctx, appCR); err != nil {
 		log.Printf("webhook: failed to update build status for %s/%s: %v", appCR.Namespace, appCR.Name, err)
@@ -251,6 +280,23 @@ func (wh *Webhooks) Rebuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wh.triggerBuild(ctx, w, &appCR, commit)
+}
+
+// describesTheSameBuild reports whether a stored verdict is about the job a
+// status was derived from. Both name the job, so this needs no clock: comparing
+// a job's apiserver-stamped creation time against a time the controller stamped
+// itself assumed the two agreed.
+//
+// A verdict that names no job predates the field and is treated as describing
+// whatever is reported, which keeps it preferred rather than hidden.
+func describesTheSameBuild(stored, derived *kipperv1.AppBuildStatus) bool {
+	if stored == nil {
+		return false
+	}
+	if stored.Build == "" {
+		return true
+	}
+	return derived == nil || derived.Build == "" || derived.Build == stored.Build
 }
 
 // BuildStatus returns the current build status and git source info for an app.
@@ -341,7 +387,21 @@ func (wh *Webhooks) BuildStatus(w http.ResponseWriter, r *http.Request) {
 					if len(token) == 0 {
 						return
 					}
-					h := probeGitCredential(probeCtx, appCR.Spec.Git.URL, string(token))
+					// The build refuses a credential whose recorded host is not
+					// the one it clones from, and this probe authenticates
+					// against exactly that host, so without the same check
+					// opening the Deployments tab discloses the token the build
+					// would not send.
+					authority, authErr := giturl.CanonicalAuthority(appCR.Spec.Git.URL)
+					if authErr != nil {
+						return
+					}
+					if _, elsewhere := builder.CredentialBoundElsewhere(secret.Annotations, authority); elsewhere {
+						unusable := false
+						gitValid = &unusable
+						return
+					}
+					h := wh.probeGit(probeCtx, appCR.Spec.Git.URL, string(token))
 					gitValid = &h.Valid
 				}()
 			}
@@ -364,6 +424,19 @@ func (wh *Webhooks) BuildStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status, err := builder.GetBuildStatus(ctx, wh.Client, project, appName)
+	// A discarded build is a job that succeeded, so the phase derived from the
+	// job says Succeeded for the hour its TTL runs. The reconciler's verdict is
+	// the one that matches what the app is actually running, and teaching the
+	// job-derived path the fingerprint rule would be a second copy of a
+	// comparison that has to stay single.
+	//
+	// The verdict only speaks for the job it was written about. A build started
+	// afterwards may never reach Active — a pod refused by a quota does not —
+	// so nothing would write over the verdict, and the operator would be shown
+	// the previous build's outcome while waiting on the current one.
+	if appCR.Status.Build != nil && appCR.Status.Build.Phase == "Discarded" && describesTheSameBuild(appCR.Status.Build, status) {
+		status = nil
+	}
 	if err != nil || status == nil {
 		// No active build jobs — fall back to the App CR's stored build
 		// status. This covers the case where the build job has been

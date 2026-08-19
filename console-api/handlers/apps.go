@@ -20,7 +20,8 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/builder"
-	"github.com/getkipper/kipper/console-api/internal/giturl"
+	"github.com/getkipper/kipper/console-api/internal/gitreach"
+	"github.com/getkipper/kipper/controller/pkg/giturl"
 	"github.com/getkipper/kipper/controller/pkg/netguard"
 )
 
@@ -29,7 +30,14 @@ type Apps struct {
 	Client   kubernetes.Interface
 	CRClient crclient.Client
 	Domain   string
+	// GitReach checks whether a git source can be cloned with the credential
+	// it is being given, before either is stored. Nil uses the real one.
+	GitReach GitReachFunc
 }
+
+// GitReachFunc reports whether a repository answers to a credential, and why
+// not when it does not.
+type GitReachFunc func(ctx context.Context, repoURL, branch, username, token string) (gitreach.Result, string)
 
 type appResponse struct {
 	Name     string `json:"name"`
@@ -148,6 +156,27 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusBadRequest, fmt.Sprintf("invalid git url: %v", err))
 			return
 		}
+		// The same clone preflight SetGit runs. Create is the path most apps
+		// arrive by, so checking only the edit path would leave the original
+		// failure — a private repository with no token, whose every build dies
+		// at clone — reachable through the front door.
+		branchToCheck := req.Git.Branch
+		if branchToCheck == "" {
+			branchToCheck = "main"
+		}
+		if err := builder.ValidateGitSource(req.Git.URL, branchToCheck); err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		result, detail := a.reachGit()(r.Context(), req.Git.URL, branchToCheck, gitCredentialUsername, req.Git.Token)
+		if result == gitreach.NeedsCredential || result == gitreach.Unsafe {
+			respondError(w, http.StatusBadRequest, fmt.Sprintf("%s cannot be cloned: %s", sanitizeGitURL(req.Git.URL), detail))
+			return
+		}
+		// Unknown does not block, for the reason set out in SetGit: the build's
+		// credential helper is bound to the clone URL's host, so a token stored
+		// against a host this cluster could not reach is not a token that can
+		// go anywhere.
 	}
 	if req.Route != nil && len(req.Route.RedirectFrom) > kipperv1.MaxRedirectFromHosts {
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("at most %d redirect domains are supported per route", kipperv1.MaxRedirectFromHosts))
@@ -162,6 +191,23 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 	// "not created" while leaving the credential in the namespace.
 	release, ok := reserveWorkloadName(ctx, w, a.CRClient, project, req.Name, "app")
 	if !ok {
+		return
+	}
+
+	// The reservation succeeds when an App of this name is already there, since
+	// the claim it makes is that App's own backfill. So the conflict has to be
+	// answered here, before the credential write: a duplicate create is an
+	// ordinary stale form or a retry, and letting it reach that write would
+	// replace the live App's token and then answer that nothing was created. A
+	// create that loses a race after this still lands on AlreadyExists below.
+	var live kipperv1.App
+	switch err := a.CRClient.Get(ctx, crclient.ObjectKey{Namespace: project, Name: req.Name}, &live); {
+	case err == nil:
+		respondError(w, http.StatusConflict, fmt.Sprintf("app %q already exists", req.Name))
+		return
+	case !errors.IsNotFound(err):
+		release()
+		respondError(w, http.StatusInternalServerError, "failed to check for an existing app")
 		return
 	}
 
@@ -203,15 +249,15 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 			Context:        req.Git.Context,
 		}
 
-		// Store git token as a Kubernetes Secret if provided
+		// The App names its credential here; the Secret itself is written
+		// after the create succeeds. Two requests creating the same name both
+		// pass the check above, because only the create tells them apart, so
+		// writing first meant the loser replaced the winner's token under the
+		// one fixed name and then answered 409, having changed a workload it
+		// did not create. Nothing builds before the create returns, so there
+		// is no window where the reference is dangling and used.
 		if req.Git.Token != "" {
-			secretName := req.Name + "-git-credentials"
-			if err := a.createGitCredentialsSecret(ctx, project, secretName, req.Name, req.Git.Token); err != nil {
-				release()
-				respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to store git credentials: %v", err))
-				return
-			}
-			app.Spec.Git.CredentialsSecret = secretName
+			app.Spec.Git.CredentialsSecret = req.Name + "-git-credentials"
 		}
 	}
 
@@ -225,6 +271,7 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := a.CRClient.Create(ctx, app); err != nil {
+		// AlreadyExists means the workload is there and owns the credential.
 		// AlreadyExists is not a create that wrote nothing: it proves the
 		// same-kind workload is there, and the reservation just made is that
 		// workload's own first claim. Releasing it would undo the backfill and
@@ -239,6 +286,24 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 		}
 		respondError(w, http.StatusInternalServerError, "failed to create app")
 		return
+	}
+
+	if req.Git != nil && req.Git.Token != "" {
+		if err := a.createGitCredentialsSecret(ctx, project, app.Spec.Git.CredentialsSecret, req.Name, req.Git.Token, req.Git.URL); err != nil {
+			// The App exists and names a credential that is not there. Nothing
+			// builds until the next push or rebuild, and that build reports the
+			// credential as missing, so saying it here is what stops the
+			// operator looking for the cause in the repository.
+			//
+			// The namespace this handler has cannot be decomposed back into the
+			// project and environment kip composes it from, so the command names
+			// the app and leaves the project for the operator rather than
+			// guessing it.
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf(
+				"%s was created but its git token could not be stored (%v). Add it again on the app's Source tab, or with 'kip app deploy --name %s --project <project> --port %d --git %s --git-token <token>'",
+				req.Name, err, req.Name, app.Spec.Port, req.Git.URL))
+			return
+		}
 	}
 
 	// Trigger first build for git-based apps. The goroutine outlives the
@@ -257,12 +322,19 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *Apps) createGitCredentialsSecret(ctx context.Context, namespace, secretName, appName, token string) error {
+// cloneURL is the source the token is for. The host is recorded on the Secret,
+// because the token and the URL are written as a pair but not in one
+// transaction, and the build refuses a credential whose recorded host is not
+// the one it is about to clone from.
+func (a *Apps) createGitCredentialsSecret(ctx context.Context, namespace, secretName, appName, token, cloneURL string) error {
 	secrets := a.Client.CoreV1().Secrets(namespace)
 	wantLabels := map[string]string{
 		"app.kubernetes.io/managed-by": "kipper",
 		"kipper.run/app":               appName,
 	}
+	// An unparseable URL records nothing rather than a wrong binding; the
+	// source validation upstream is what rejects it.
+	authority, _ := giturl.CanonicalAuthority(cloneURL)
 
 	// Update path: read the existing Secret, mutate its data + labels,
 	// write back. Calling Update with a fresh object that has no
@@ -282,6 +354,14 @@ func (a *Apps) createGitCredentialsSecret(ctx context.Context, namespace, secret
 			existing.Data = map[string][]byte{}
 		}
 		existing.Data["token"] = []byte(token)
+		if existing.Annotations == nil {
+			existing.Annotations = map[string]string{}
+		}
+		if authority != "" {
+			existing.Annotations[builder.GitAuthorityAnnotation] = authority
+		} else {
+			delete(existing.Annotations, builder.GitAuthorityAnnotation)
+		}
 		_, err := secrets.Update(ctx, existing, metav1.UpdateOptions{})
 		return err
 	}
@@ -299,6 +379,9 @@ func (a *Apps) createGitCredentialsSecret(ctx context.Context, namespace, secret
 		Data: map[string][]byte{
 			"token": []byte(token),
 		},
+	}
+	if authority != "" {
+		fresh.Annotations = map[string]string{builder.GitAuthorityAnnotation: authority}
 	}
 	_, err := secrets.Create(ctx, fresh, metav1.CreateOptions{})
 	return err
@@ -454,6 +537,16 @@ func (a *Apps) UpdateImage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		respondError(w, http.StatusInternalServerError, "failed to get app")
+		return
+	}
+
+	// The same rule the webhook and both CLI writers apply. Setting an image on
+	// an app that builds from git writes something the next build overwrites.
+	// Promotion in projects.go is the remaining writer that does it silently.
+	if app.Spec.Git != nil {
+		respondError(w, http.StatusConflict, fmt.Sprintf(
+			"%s builds its image from %s, so the image set here would be overwritten by the next build. Remove the git source first if it should deploy prebuilt images instead",
+			appName, app.Spec.Git.URL))
 		return
 	}
 

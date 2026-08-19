@@ -16,8 +16,8 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/internal/gitcred"
-	"github.com/getkipper/kipper/console-api/internal/giturl"
 	"github.com/getkipper/kipper/console-api/middleware"
+	"github.com/getkipper/kipper/controller/pkg/giturl"
 )
 
 // GitCredentials provides handlers for shared git credential management. Shared

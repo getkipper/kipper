@@ -73,7 +73,7 @@ func testCRClient(objs ...crclient.Object) crclient.Client {
 func TestAppsHandler_List(t *testing.T) {
 	t.Run("returns empty list when no apps exist", func(t *testing.T) {
 		client := fake.NewClientset()
-		handler := &Apps{Client: client, CRClient: testCRClient()}
+		handler := &Apps{Client: client, CRClient: testCRClient(), GitReach: gitAlwaysReachable}
 
 		r := chi.NewRouter()
 		r.Get("/projects/{name}/apps", handler.List)
@@ -107,7 +107,7 @@ func TestAppsHandler_List(t *testing.T) {
 			Status:     kipperv1.AppStatus{Phase: "Running", ReadyReplicas: 1},
 		}
 		client := fake.NewClientset()
-		handler := &Apps{Client: client, CRClient: testCRClient(web, api)}
+		handler := &Apps{Client: client, CRClient: testCRClient(web, api), GitReach: gitAlwaysReachable}
 
 		r := chi.NewRouter()
 		r.Get("/projects/{name}/apps", handler.List)
@@ -136,7 +136,7 @@ func TestAppsHandler_List(t *testing.T) {
 			Status:     kipperv1.AppStatus{Phase: "Running", ReadyReplicas: 2},
 		}
 		client := fake.NewClientset()
-		handler := &Apps{Client: client, CRClient: testCRClient(web)}
+		handler := &Apps{Client: client, CRClient: testCRClient(web), GitReach: gitAlwaysReachable}
 
 		r := chi.NewRouter()
 		r.Get("/projects/{name}/apps", handler.List)
@@ -256,7 +256,7 @@ func TestAppsHandler_Create(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := fake.NewClientset()
-			handler := &Apps{Client: client, CRClient: testCRClient()}
+			handler := &Apps{Client: client, CRClient: testCRClient(), GitReach: gitAlwaysReachable}
 
 			r := chi.NewRouter()
 			r.Post("/projects/{name}/apps", handler.Create)
@@ -295,7 +295,7 @@ func TestAppsHandler_CreateConflict(t *testing.T) {
 		},
 	}
 	client := fake.NewClientset()
-	handler := &Apps{Client: client, CRClient: testCRClient(existing)}
+	handler := &Apps{Client: client, CRClient: testCRClient(existing), GitReach: gitAlwaysReachable}
 
 	r := chi.NewRouter()
 	r.Post("/projects/{name}/apps", handler.Create)
@@ -358,7 +358,7 @@ func TestAppsHandler_Scale(t *testing.T) {
 				},
 			}
 			client := fake.NewClientset()
-			handler := &Apps{Client: client, CRClient: testCRClient(appCR)}
+			handler := &Apps{Client: client, CRClient: testCRClient(appCR), GitReach: gitAlwaysReachable}
 
 			r := chi.NewRouter()
 			r.Put("/projects/{name}/apps/{app}/scale", handler.Scale)
@@ -416,7 +416,7 @@ func TestAppsHandler_Delete(t *testing.T) {
 				},
 			}
 			client := fake.NewClientset()
-			handler := &Apps{Client: client, CRClient: testCRClient(appCR)}
+			handler := &Apps{Client: client, CRClient: testCRClient(appCR), GitReach: gitAlwaysReachable}
 
 			r := chi.NewRouter()
 			r.Delete("/projects/{name}/apps/{app}", handler.Delete)
@@ -464,7 +464,7 @@ func TestAppsHandler_Restart(t *testing.T) {
 				},
 			}
 			client := fake.NewClientset()
-			handler := &Apps{Client: client, CRClient: testCRClient(appCR)}
+			handler := &Apps{Client: client, CRClient: testCRClient(appCR), GitReach: gitAlwaysReachable}
 
 			r := chi.NewRouter()
 			r.Post("/projects/{name}/apps/{app}/restart", handler.Restart)
@@ -537,7 +537,7 @@ func TestAppsHandler_UpdateImage(t *testing.T) {
 				},
 			}
 			client := fake.NewClientset()
-			handler := &Apps{Client: client, CRClient: testCRClient(appCR)}
+			handler := &Apps{Client: client, CRClient: testCRClient(appCR), GitReach: gitAlwaysReachable}
 
 			r := chi.NewRouter()
 			r.Put("/projects/{name}/apps/{app}/image", handler.UpdateImage)

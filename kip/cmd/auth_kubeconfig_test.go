@@ -155,18 +155,31 @@ func TestAuthKubeconfigConvertsWhenTheLoginIsProven(t *testing.T) {
 	assert.Contains(t, string(content), "https://203.0.113.10:6443", "the server address survives")
 }
 
-// An operator who is not cluster-admin still holds a working login, and the
-// kubeconfig they get is the one their permissions allow.
-func TestAuthKubeconfigConvertsForANonAdminOperator(t *testing.T) {
+// This assertion is inverted from what it once made. It read "an operator who
+// is not cluster-admin still holds a working login, and the kubeconfig they
+// get is the one their permissions allow", and it staged the admin certificate
+// to prove it — so it pinned the command giving up that certificate for an
+// identity with no proven access at all.
+//
+// ProofPassNonAdmin is returned when the API server authenticated the operator
+// and *denied* the access review, so "not cluster-admin" and "can do nothing"
+// are the same answer here. The conversion is now judged by what replacing the
+// file destroys, which is the rule the import guard already used.
+//
+// The non-admin who legitimately converts is the one holding no credential;
+// that case lives in auth_kubeconfig_lockout_test.go alongside this one's
+// replacement.
+func TestAuthKubeconfigKeepsTheCertificateWhenTheLoginProvesNoAccess(t *testing.T) {
 	path := stageClusterWithAdminCert(t)
 	calls := withProof(t, installer.ProofPassNonAdmin, "authenticated as oidc:sam@shop.example, which is not cluster-admin", nil)
 
-	require.NoError(t, runKubeconfigCommand(t))
+	err := runKubeconfigCommand(t)
 
-	assert.Equal(t, 1, *calls, "this conversion is gated on the proof as much as the admin one")
-	content, err := os.ReadFile(path)
-	require.NoError(t, err)
-	assert.Contains(t, string(content), "kubectl-token")
+	require.Error(t, err)
+	assert.Equal(t, 1, *calls, "the proof still runs; its answer is what changed")
+	content, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, adminKubeconfig, string(content))
 }
 
 // The command tree itself. Everything above calls the handler directly and

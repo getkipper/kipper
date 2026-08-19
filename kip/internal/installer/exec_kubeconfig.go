@@ -29,7 +29,7 @@ import (
 // only kip's current_cluster to go on, which is a global setting bearing no
 // relation to the file kubectl is holding, so an operator working across two
 // clusters gets one cluster's token sent to the other's API server.
-func renderExecKubeconfig(domain string, source *clientcmdapi.Cluster, execCommand string) (string, error) {
+func renderExecKubeconfig(domain string, source *clientcmdapi.Cluster, namespace, execCommand string) (string, error) {
 	user := "oidc@" + domain
 	cfg := clientcmdapi.NewConfig()
 	cfg.Clusters[domain] = &clientcmdapi.Cluster{
@@ -54,7 +54,14 @@ Install kip and run: kip auth login
 `,
 		},
 	}
-	cfg.Contexts[domain] = &clientcmdapi.Context{Cluster: domain, AuthInfo: user}
+	cfg.Contexts[domain] = &clientcmdapi.Context{
+		Cluster:  domain,
+		AuthInfo: user,
+		// Carried across: a default namespace is the operator's own setting,
+		// and silently dropping it sends every later kubectl at the wrong
+		// namespace without saying so.
+		Namespace: namespace,
+	}
 	cfg.CurrentContext = domain
 
 	out, err := clientcmd.Write(*cfg)
@@ -106,7 +113,7 @@ func execFromAPIConfig(domain string, cfg *clientcmdapi.Config, execCommand stri
 	if cluster.InsecureSkipTLSVerify {
 		return "", "", nil, fmt.Errorf("kubeconfig disables TLS verification for %q, which kip will not carry over", kubeContext.Cluster)
 	}
-	content, rerr := renderExecKubeconfig(domain, cluster, execCommand)
+	content, rerr := renderExecKubeconfig(domain, cluster, kubeContext.Namespace, execCommand)
 	if rerr != nil {
 		return "", "", nil, rerr
 	}
@@ -385,4 +392,34 @@ func WriteFileAtomic(path string, content []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// WriteExecKubeconfigTo renders the exec kubeconfig a cluster's snapshot
+// describes and writes it somewhere new, leaving the original alone.
+//
+// Separate from RewriteKubeconfigToExec because that one re-reads its target
+// and refuses when the bytes have moved, which is exactly right when replacing
+// a file in place and meaningless for a path the snapshot never came from.
+//
+// An existing file is never overwritten. The whole point of writing elsewhere
+// is that nothing is given up, and silently replacing whatever was already at
+// the path would give up something the operator did not name.
+func WriteExecKubeconfigTo(domain, path string, snapshot []byte) (string, error) {
+	existing, err := clientcmd.Load(snapshot)
+	if err != nil {
+		return "", fmt.Errorf("reading the cluster's kubeconfig: %w", err)
+	}
+	content, _, _, err := execFromAPIConfig(domain, existing, execCommandForHost())
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return "", fmt.Errorf("%s already exists, and writing over it would give up whatever it holds. Choose a path that does not exist", path)
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("checking %s: %w", path, err)
+	}
+	if err := WriteFileAtomic(path, []byte(content), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
 }

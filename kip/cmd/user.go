@@ -8,14 +8,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/bcrypt"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/yaml"
+
+	"github.com/getkipper/kipper/controller/pkg/authncfg"
 )
 
 var userCmd = &cobra.Command{
@@ -124,12 +130,140 @@ func runUserList(_ *cobra.Command, _ []string) error {
 		return nil
 	}
 
+	access, accessErr := clusterAccessByEmail(ctx, k8sClient.Clientset(), k8sClient.Dynamic())
+
 	fmt.Println()
-	for email, role := range roles {
-		fmt.Printf("  %-40s %s\n", email, role)
+	fmt.Printf("  %-40s %-10s %s\n", "EMAIL", "CONSOLE", "CLUSTER ACCESS")
+	emails := make([]string, 0, len(roles))
+	for email := range roles {
+		emails = append(emails, email)
+	}
+	sort.Strings(emails)
+	for _, email := range emails {
+		grant := "none"
+		if accessErr != nil {
+			grant = "unknown"
+		} else if held, ok := access[email]; ok {
+			grant = held
+		}
+		fmt.Printf("  %-40s %-10s %s\n", email, roles[email], grant)
+	}
+	fmt.Println()
+
+	// The two columns are separate systems, and reading the first as the second
+	// is what left five console admins unable to run a single kip command.
+	fmt.Printf("  Console is the web UI. Cluster access is what kip and kubectl use, and\n")
+	fmt.Printf("  comes from project membership ('kip project members add') or the\n")
+	fmt.Printf("  bootstrap admin binding. A console role grants neither.\n")
+	if accessErr != nil {
+		fmt.Printf("\n  Cluster access could not be read (%v), so the last column is unknown.\n", accessErr)
+	} else if noneHaveAccess(access, emails) {
+		fmt.Printf("\n  ⚠  Nobody listed here can use kip or kubectl against this cluster.\n")
+		fmt.Printf("     Add them to a project with 'kip project members add <project> <email> deployer'.\n")
 	}
 	fmt.Println()
 	return nil
+}
+
+// noneHaveAccess reports whether not one listed user holds any grant, which is
+// a cluster running entirely on its shared admin certificate.
+func noneHaveAccess(access map[string]string, emails []string) bool {
+	for _, email := range emails {
+		if access[email] != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// clusterAccessByEmail describes what each identity may actually do at the
+// Kubernetes API, which is a different question from the console role beside
+// it.
+//
+// Two sources, because there are two ways to hold access: the bootstrap
+// binding grants cluster-admin outright, and project membership is projected
+// into namespaced RoleBindings by the reconciler.
+//
+// The RoleBindings are read rather than the Project's member list, because
+// membership is desired state and the projection is asynchronous. Reporting
+// the desired list as "cluster access" would repeat the defect this whole
+// change set is about: a plausible statement that is not evidence. An operator
+// added a moment ago is reported as pending, which is true and actionable,
+// rather than as working, which is a guess.
+func clusterAccessByEmail(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface) (map[string]string, error) {
+	access := map[string]string{}
+
+	binding, err := clientset.RbacV1().ClusterRoleBindings().Get(ctx, initialAdminBindingName, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, err
+	}
+	if err == nil {
+		for _, subject := range binding.Subjects {
+			if email, ok := strings.CutPrefix(subject.Name, authncfg.UsernamePrefix); ok {
+				access[email] = "cluster-admin"
+			}
+		}
+	}
+
+	// Effective grants: what the API server would actually consult.
+	bindings, err := clientset.RbacV1().RoleBindings(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	granted := map[string]map[string]bool{}
+	for _, rb := range bindings.Items {
+		role := strings.TrimPrefix(rb.RoleRef.Name, "kipper:project-")
+		if role == rb.RoleRef.Name {
+			continue
+		}
+		for _, subject := range rb.Subjects {
+			email, ok := strings.CutPrefix(subject.Name, authncfg.UsernamePrefix)
+			if !ok || access[email] == "cluster-admin" {
+				continue
+			}
+			if granted[email] == nil {
+				granted[email] = map[string]bool{}
+			}
+			granted[email][fmt.Sprintf("%s in %s", role, rb.Namespace)] = true
+		}
+	}
+	for email, where := range granted {
+		access[email] = joinSorted(where)
+	}
+
+	// Membership the reconciler has not projected yet. Named as pending rather
+	// than folded in, so "added but not yet effective" is distinguishable from
+	// "working".
+	projects, err := dyn.Resource(projectGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	for _, project := range projects.Items {
+		members, _, _ := unstructured.NestedSlice(project.Object, "spec", "members")
+		for _, raw := range members {
+			member, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			email, _ := member["email"].(string)
+			if email == "" || access[email] != "" {
+				continue
+			}
+			access[email] = fmt.Sprintf("pending on %s", project.GetName())
+		}
+	}
+	return access, nil
+}
+
+// joinSorted renders a set of grants in a stable order, so two runs against an
+// unchanged cluster print the same thing.
+func joinSorted(set map[string]bool) string {
+	out := make([]string, 0, len(set))
+	for item := range set {
+		out = append(out, item)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ", ")
 }
 
 func runUserRole(_ *cobra.Command, args []string) error {

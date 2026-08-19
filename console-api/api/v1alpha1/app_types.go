@@ -376,8 +376,10 @@ type BuildResources struct {
 
 // AppBuildStatus holds the status of the latest build for Git-based apps.
 type AppBuildStatus struct {
-	// Phase is the current build state.
-	// +kubebuilder:validation:Enum=Pending;Building;Succeeded;Failed
+	// Phase is the current build state. Discarded means the build finished but
+	// its image was not deployed, because it did not build from the source the
+	// app declares now.
+	// +kubebuilder:validation:Enum=Pending;Building;Succeeded;Failed;Discarded
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
@@ -396,6 +398,12 @@ type AppBuildStatus struct {
 	// Message provides details on build failure.
 	// +optional
 	Message string `json:"message,omitempty"`
+
+	// Build names the build job this status is about. It is what tells a
+	// completion that was already applied from one belonging to an earlier
+	// build, which a phase alone cannot, and it needs no clock.
+	// +optional
+	Build string `json:"build,omitempty"`
 }
 
 // AppStatus defines the observed state of the application.

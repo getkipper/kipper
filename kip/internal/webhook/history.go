@@ -18,12 +18,20 @@ const historyAnnotation = "kipper.run/deploy-history"
 const maxHistoryEntries = 10
 
 // DeployEntry represents a single deployment event.
+//
+// Three structs marshal this annotation: this one, controllers.buildDeployEntry
+// and handlers.deployEntry in console-api. All three round-trip the whole list,
+// so a field missing from any of them is stripped from every entry the first
+// time that writer runs. Add a field to all three or to none.
 type DeployEntry struct {
 	Revision  int    `json:"revision"`
 	Image     string `json:"image"`
 	Commit    string `json:"commit,omitempty"`
 	Trigger   string `json:"trigger"` // "build", "webhook", "manual", "promote", "rollback"
 	Timestamp string `json:"timestamp"`
+	// Build is the job a build entry came from, which is what stops a replayed
+	// completion recording itself twice.
+	Build string `json:"build,omitempty"`
 }
 
 // RecordDeploy adds an entry to the deploy history stored on the App CR

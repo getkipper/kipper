@@ -93,7 +93,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	// upgrade applies an ApiKey canary) need the new CRDs registered, so a
 	// failure here has to stop the upgrade at its real cause rather than let a
 	// downstream step die with a bare "no matches for kind".
-	if err := reconcileClusterAPIState(ctx, k8sClient.Dynamic(), rootCmd.Version, os.Stdout); err != nil {
+	if err := reconcileClusterAPIState(ctx, k8sClient.Dynamic(), rootCmd.Version, cluster.Domain, os.Stdout); err != nil {
 		return err
 	}
 
@@ -1154,6 +1154,11 @@ func applyCRDs(ctx context.Context, dynClient dynamic.Interface, kipVersion stri
 	return nil
 }
 
+// initialAdminBindingName is the bootstrap cluster-admin grant a fresh install
+// creates. Named here as well as in the installer because an upgrade has to
+// look for it without re-applying the manifest that declares it.
+const initialAdminBindingName = "kipper-initial-admin"
+
 // consoleRBACGVRs maps the kinds in installer.ConsoleRBACManifest to their
 // dynamic-client resources.
 var consoleRBACGVRs = map[string]schema.GroupVersionResource{
@@ -1180,7 +1185,7 @@ func progressf(out io.Writer, format string, args ...interface{}) {
 // helper. A test drives this function, so deleting a step from it fails. The
 // residual is the same one buildRouter has, that nothing can prove runUpgrade
 // still calls this, and that deletion is at least a visible one.
-func reconcileClusterAPIState(ctx context.Context, dynClient dynamic.Interface, kipVersion string, out io.Writer) error {
+func reconcileClusterAPIState(ctx context.Context, dynClient dynamic.Interface, kipVersion, domain string, out io.Writer) error {
 	// A failure here has to stop the upgrade at its real cause: later steps
 	// apply objects of the kinds these CRDs register, and would otherwise die
 	// with a bare "no matches for kind".
@@ -1201,6 +1206,18 @@ func reconcileClusterAPIState(ctx context.Context, dynClient dynamic.Interface, 
 			return fmt.Errorf("applying %s: %w", strings.ToLower(step.Name), err)
 		}
 		progressf(out, "  ✔  %s\n", step.Name)
+	}
+
+	// A cluster installed before this binding existed has no other route to it.
+	// Create-only: an existing one carries admins added since the install, and
+	// re-applying the install-time copy would revoke every one of them.
+	created, err := createInitialAdminBindingIfMissing(ctx, dynClient, domain)
+	if err != nil {
+		progressf(out, "  ✗  Operator admin binding failed: %v\n", err)
+		return fmt.Errorf("creating the operator admin binding: %w", err)
+	}
+	if created {
+		progressf(out, "  ✔  Operator admin binding created for admin@%s\n", domain)
 	}
 	return nil
 }
@@ -1285,4 +1302,41 @@ func applyRBACManifest(ctx context.Context, dynClient dynamic.Interface, manifes
 		}
 	}
 	return nil
+}
+
+// createInitialAdminBindingIfMissing gives a cluster installed before the
+// bootstrap grant existed a way to get one.
+//
+// The binding is deliberately absent from upgradeRBACSteps, because its
+// subjects are live state that EnsureAdminBindingSubjects maintains and
+// re-applying the install-time copy would revoke every admin added since. That
+// reasoning holds for a cluster that has the binding and leaves one that never
+// got it with no route to it at all: no OIDC identity can do anything, and
+// neither install nor upgrade will fix it.
+//
+// So this creates and never updates. A binding that exists is left exactly as
+// it is, including one whose subjects have been edited; AlreadyExists from a
+// concurrent upgrade is the goal state reached by someone else, not a failure.
+func createInitialAdminBindingIfMissing(ctx context.Context, dynClient dynamic.Interface, domain string) (bool, error) {
+	gvr := consoleRBACGVRs["ClusterRoleBinding"]
+	iface := dynClient.Resource(gvr)
+
+	if _, err := iface.Get(ctx, initialAdminBindingName, metav1.GetOptions{}); err == nil {
+		return false, nil
+	} else if !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("reading %s: %w", initialAdminBindingName, err)
+	}
+
+	var obj unstructured.Unstructured
+	doc := strings.TrimPrefix(strings.TrimSpace(installer.InitialAdminBindingManifest(domain)), "---\n")
+	if err := yaml.Unmarshal([]byte(doc), &obj.Object); err != nil {
+		return false, fmt.Errorf("parsing the initial admin binding: %w", err)
+	}
+	if _, err := iface.Create(ctx, &obj, metav1.CreateOptions{}); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("creating %s: %w", initialAdminBindingName, err)
+	}
+	return true, nil
 }

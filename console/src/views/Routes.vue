@@ -40,7 +40,10 @@ async function loadRoutes() {
   }
 }
 
+const appsError = ref<string | null>(null)
+
 async function loadApps() {
+  appsError.value = null
   const ns = globalNs.value
   if (!ns) {
     apps.value = []
@@ -48,9 +51,22 @@ async function loadApps() {
   }
   try {
     apps.value = await fetchApps(ns)
-  } catch {
+  } catch (e) {
+    // Not the same as "no apps". Collapsing a permission or network failure
+    // into an empty list is what made an empty dropdown indistinguishable from
+    // a denied one, and sent an operator looking for the wrong problem.
     apps.value = []
+    appsError.value = e instanceof Error ? e.message : 'the app list could not be read'
   }
+}
+
+// An app a mapping already points at, even when the list did not load. A
+// <select> whose value has no matching <option> renders blank, so a route group
+// with five working mappings looked unconfigured — which reads as data already
+// lost rather than as a list that failed to arrive.
+function optionsFor(current: string): { name: string }[] {
+  if (!current || apps.value.some(a => a.name === current)) return apps.value
+  return [...apps.value, { name: current }]
 }
 
 // Create / edit form
@@ -232,6 +248,25 @@ function envColor(env: string): string {
       <!-- Path mappings -->
       <div class="mb-4">
         <label class="mb-2 block text-xs font-medium text-slate-600 dark:text-slate-400">Path mappings</label>
+
+        <!-- Why there is nothing to choose. Said here, where the empty dropdown
+             is met, rather than only on save. -->
+        <p
+          v-if="!globalNs"
+          data-testid="routes-no-project"
+          class="mb-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+        >Pick a project at the top of the page to choose apps for these paths. "All projects" cannot list them.</p>
+        <p
+          v-else-if="appsError"
+          data-testid="routes-apps-error"
+          class="mb-2 rounded-md bg-red-50 px-3 py-2 text-xs text-red-800 dark:bg-red-950/40 dark:text-red-300"
+        >The apps in this project could not be listed, so this form may be incomplete. {{ appsError }}</p>
+        <p
+          v-else-if="apps.length === 0"
+          data-testid="routes-no-apps"
+          class="mb-2 rounded-md bg-slate-100 px-3 py-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+        >This project has no apps yet, so there is nothing to route to.</p>
+
         <div class="space-y-2">
           <div v-for="(mapping, index) in formMappings" :key="index" class="flex items-center gap-2">
             <input
@@ -246,7 +281,7 @@ function envColor(env: string): string {
               class="flex-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
             >
               <option value="">Select app...</option>
-              <option v-for="app in apps" :key="app.name" :value="app.name">{{ app.name }}</option>
+              <option v-for="app in optionsFor(mapping.app)" :key="app.name" :value="app.name">{{ app.name }}</option>
             </select>
             <button
               v-if="formMappings.length > 1"

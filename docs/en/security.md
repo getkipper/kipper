@@ -360,7 +360,7 @@ Regardless of what infrastructure-level protections Kipper provides, your team i
 - **Dependency management:** keeping libraries and base images up to date, monitoring for CVEs
 - **Secret hygiene:** never committing credentials to git, rotating secrets regularly, using the hidden prompt (`kip app secret set <app> KEY` without `=VALUE`)
 - **Access control:** limiting who can deploy to production, using strong passwords, enrolling 2FA early so the factor is mature when a migration needs it
-- **Kubeconfig custody:** `kip cluster export` hands out full cluster admin; know who holds a copy, store it like a root credential, and never paste it into chat, tickets, or shell history
+- **Kubeconfig custody:** `kip cluster export` carries no credential, so the file is safe to send; the person importing it signs in as themselves with `kip auth login`. The cluster's admin kubeconfig on the server is the credential to guard: it holds full cluster admin, so know who has a copy, store it like a root credential, and never paste it into chat, tickets, or shell history
 - **Monitoring:** reviewing Grafana dashboards and Loki logs for suspicious activity, and making sure SMTP or Slack is configured so security alerts leave the box
 
 ## Verifying your security headers

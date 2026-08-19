@@ -202,7 +202,7 @@ kip auth login
 kip status
 ```
 
-The export carries how to reach the cluster, never a credential. Kipper is per-operator: the kubeconfig it writes fetches short-lived tokens from your own login, so `kip auth login` is what turns an imported cluster into one you can use, and every action in the audit log names you rather than a shared certificate.
+The export carries how to reach the cluster and the hosts it serves on, and no credential at all: `kip cluster export` renders the kubeconfig through the same path the import uses, so a machine still holding the shared admin certificate does not put it in the file. Kipper is per-operator: the kubeconfig it writes fetches short-lived tokens from your own login, so `kip auth login` is what turns an imported cluster into one you can use, and every action in the audit log names you rather than a shared certificate.
 
 An import writes the cluster's kubeconfig to `~/.kip/clusters/<name>.yaml`, and it will not overwrite a credential it cannot put back. If that file holds the cluster's admin certificate, another tool's credential plugin, or any credential at all in any of its contexts, the import stops and names the entry, because on some machines that file is the only way in. Move it aside and run the import again to replace it. A kubeconfig Kipper wrote itself carries no credential, so re-importing an updated export over one of those is the ordinary way to pick up a changed domain.
 
@@ -229,6 +229,8 @@ kip cluster domain <domain> --ack-sso-callbacks # confirm SSO callback URLs are 
 kip cluster domain --sync             # finish an interrupted domain change
 kip cluster domain --rollback         # return to the previous domain
 kip cluster domain --repair           # rewrite local config from the cluster
+kip cluster hosts                     # show the hostnames kip uses for a cluster
+kip cluster hosts --dex dex.example.com # correct one without contacting the cluster
 kip cluster dns repair                # restore the curated DNS resolvers and restart CoreDNS
 kip platform restart <component>      # restart a platform or cluster component
 ```

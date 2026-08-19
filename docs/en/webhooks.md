@@ -81,9 +81,23 @@ deploy:
 
 ## Webhooks with `--git` apps
 
-A Kipper webhook works alongside a git-source app, not as an alternative to it. With `--image` apps the webhook payload usually carries `"image": "..."` so Kipper just rolls out the new tag. With `--git` apps you can either let Kipper notice changes itself, or POST `"commit": "..."` from your CI to fire a rebuild from the configured git source.
+With `--image` apps the webhook payload usually carries `"image": "..."` so Kipper just rolls out the new tag. With `--git` apps, POST `"commit": "..."` from your CI to fire a rebuild from the configured git source, or let Kipper notice the change itself.
 
-One caveat: if you wire your git provider's own webhook (GitHub/GitLab pointing directly at Kipper) **and** point your CI at the Kipper webhook URL, the same `git push` fires twice, once via the provider, once via CI. Kipper serialises Build CRs per app so they don't race, but you'll see two builds in deploy history. Pick one trigger source.
+Posting an `"image"` to an app that builds from git returns **409 Conflict**. The next build would overwrite whatever the pipeline pushed, so accepting it would mean the deploy silently did nothing. Pick one: either drop the `"image"` field and let Kipper build, or detach the git source so the app deploys what your pipeline builds.
+
+```bash
+kip app git remove checkout --project shop --environment production
+```
+
+```
+  ✔  checkout no longer builds from git
+     It keeps running the image it has. Deploy a new one with
+     'kip app update checkout --image <image>' or from your pipeline.
+```
+
+The Git source card in the console has a Remove button that does the same thing.
+
+One caveat: if you wire your git provider's own webhook (GitHub/GitLab pointing directly at Kipper) **and** point your CI at the Kipper webhook URL, the same `git push` fires twice, once via the provider, once via CI. The newer build wins if they overlap, so they cannot race each other onto the app, but you'll see two builds in deploy history. Pick one trigger source.
 
 ## Webhook request format
 

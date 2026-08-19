@@ -14,7 +14,7 @@ import (
 
 func TestRenderExecKubeconfigCarriesNoCredential(t *testing.T) {
 	rendered, err := renderExecKubeconfig("cluster.example.com",
-		&clientcmdapi.Cluster{Server: "https://203.0.113.10:6443", CertificateAuthorityData: []byte("ca-pem")}, "kip")
+		&clientcmdapi.Cluster{Server: "https://203.0.113.10:6443", CertificateAuthorityData: []byte("ca-pem")}, "", "kip")
 	require.NoError(t, err)
 
 	cfg, err := clientcmd.Load([]byte(rendered))
@@ -296,7 +296,7 @@ func TestRepinExecKubeconfigFollowsADomainChange(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cluster.yaml")
 	original, renderErr := renderExecKubeconfig("old.example.com",
-		&clientcmdapi.Cluster{Server: "https://203.0.113.10:6443", CertificateAuthorityData: []byte("ca-pem")}, "kip")
+		&clientcmdapi.Cluster{Server: "https://203.0.113.10:6443", CertificateAuthorityData: []byte("ca-pem")}, "", "kip")
 	require.NoError(t, renderErr)
 	require.NoError(t, os.WriteFile(path, []byte(original), 0o600))
 
@@ -467,7 +467,7 @@ func TestRepinExecKubeconfigAcceptsAnAbsolutePinnedCommand(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pinned.yaml")
 	pinned, renderErr := renderExecKubeconfig("old.example.com",
-		&clientcmdapi.Cluster{Server: "https://203.0.113.10:6443", CertificateAuthorityData: []byte("ca-pem")}, "/usr/local/bin/kip")
+		&clientcmdapi.Cluster{Server: "https://203.0.113.10:6443", CertificateAuthorityData: []byte("ca-pem")}, "", "/usr/local/bin/kip")
 	require.NoError(t, renderErr)
 	require.NoError(t, os.WriteFile(path, []byte(pinned), 0o600))
 
@@ -505,7 +505,7 @@ func TestRenderedKubeconfigCannotBeInjectedThroughAServerAddress(t *testing.T) {
 	hostile := "https://203.0.113.10:6443\n      exec:\n        command: rm\n        args: [-rf, /tmp/pwned]"
 
 	rendered, err := renderExecKubeconfig("shop.example",
-		&clientcmdapi.Cluster{Server: hostile, CertificateAuthorityData: []byte("ca-pem")}, "kip")
+		&clientcmdapi.Cluster{Server: hostile, CertificateAuthorityData: []byte("ca-pem")}, "", "kip")
 	require.NoError(t, err)
 
 	cfg, err := clientcmd.Load([]byte(rendered))
@@ -533,7 +533,7 @@ func TestRenderedKubeconfigKeepsWhatIsNeededToReachTheCluster(t *testing.T) {
 		CertificateAuthorityData: []byte("ca-pem"),
 		ProxyURL:                 "socks5://127.0.0.1:1080",
 		TLSServerName:            "api.shop.example",
-	}, "kip")
+	}, "", "kip")
 	require.NoError(t, err)
 
 	cfg, err := clientcmd.Load([]byte(rendered))
@@ -598,9 +598,26 @@ func TestTheWindowsBinaryNameIsRecognised(t *testing.T) {
 func TestSamePathAsksTheFilesystem(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "kip")
+	//nolint:gosec // 0o700 is the point: samePath resolves an executable, and a
+	// file this test cannot execute would not stand in for the binary it names.
 	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"), 0o700))
 
 	assert.True(t, samePath(path, path))
 	assert.True(t, samePath(path, filepath.Join(dir, ".", "kip")), "the same file spelt differently")
 	assert.False(t, samePath(path, filepath.Join(dir, "other")), "a path that does not exist is not this one")
+}
+
+// A default namespace is the operator's own setting, and the rewrite renders a
+// fresh context. Dropping it silently sends every later kubectl at the default
+// namespace, with nothing to say why.
+func TestRenderExecKubeconfigKeepsTheDefaultNamespace(t *testing.T) {
+	rendered, err := renderExecKubeconfig("shop.example",
+		&clientcmdapi.Cluster{Server: "https://203.0.113.10:6443", CertificateAuthorityData: []byte("ca-pem")},
+		"billing", "kip")
+	require.NoError(t, err)
+
+	cfg, err := clientcmd.Load([]byte(rendered))
+	require.NoError(t, err)
+	require.Contains(t, cfg.Contexts, "shop.example")
+	assert.Equal(t, "billing", cfg.Contexts["shop.example"].Namespace)
 }

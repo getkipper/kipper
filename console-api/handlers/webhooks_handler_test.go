@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,11 +9,15 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/builder"
 )
 
 func TestWebhooksHandler_RejectsOversizedBody(t *testing.T) {
@@ -651,4 +656,218 @@ func TestBuildStatus_DoesNotProbeSharedCredential(t *testing.T) {
 	if _, ok := resp["git_credential_valid"]; ok {
 		t.Error("a shared credential must not be probed by the per-app build-status endpoint")
 	}
+}
+
+// A discarded build is a Job with Succeeded: 1 that lives
+// out its hour of TTL, and the Job-derived phase knows nothing about the
+// fingerprint. Serving it means the console shows a green Succeeded for the
+// very build whose image was refused, which is a sharper lie than the stuck
+// Building the phase was added to replace.
+func TestWebhooksHandler_BuildStatusServesTheDiscardedVerdictOverTheJob(t *testing.T) {
+	appCR := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkout", Namespace: "shop-test"},
+		Spec: kipperv1.AppSpec{
+			Image: "registry.example.com/shop/checkout:current",
+			Git:   &kipperv1.AppGitSource{URL: "https://git.example.com/shop/checkout.git", Branch: "release"},
+		},
+		Status: kipperv1.AppStatus{Build: &kipperv1.AppBuildStatus{
+			Phase:   "Discarded",
+			Message: "The git source changed while this build was running.",
+			Build:   "checkout-build-abc12345",
+		}},
+	}
+	succeeded := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "checkout-build-abc12345", Namespace: "kipper-builds",
+			Labels: map[string]string{"kipper.run/build": "true", "kipper.run/app": "checkout", "kipper.run/source-namespace": "shop-test"},
+		},
+		Status: batchv1.JobStatus{Succeeded: 1},
+	}
+
+	handler := &Webhooks{Client: fake.NewClientset(succeeded), CRClient: testCRClient(appCR)}
+	r := chi.NewRouter()
+	r.Get("/api/v1/projects/{name}/apps/{app}/build/status", handler.BuildStatus)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/projects/shop-test/apps/checkout/build/status", nil))
+
+	var got map[string]interface{}
+	assert.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "Discarded", got["phase"],
+		"the console was told the refused build succeeded")
+	assert.Contains(t, got["message"], "git source changed")
+}
+
+// Preferring the stored verdict on phase alone assumes it
+// describes the job being reported. A build started after the discard whose
+// pod is refused — by a quota, say — never reaches Active, so nothing writes
+// over the Discarded, and the operator is shown the previous build's verdict
+// while the one they are waiting on sits pending.
+func TestWebhooksHandler_BuildStatusServesABuildStartedAfterTheDiscard(t *testing.T) {
+	appCR := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkout", Namespace: "shop-test"},
+		Spec: kipperv1.AppSpec{
+			Image: "registry.example.com/shop/checkout:current",
+			Git:   &kipperv1.AppGitSource{URL: "https://git.example.com/shop/checkout.git", Branch: "release"},
+		},
+		Status: kipperv1.AppStatus{Build: &kipperv1.AppBuildStatus{
+			Phase:   "Discarded",
+			Message: "The git source changed while this build was running.",
+			Build:   "checkout-build-abc12345",
+		}},
+	}
+	queued := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "checkout-build-def67890", Namespace: "kipper-builds",
+			Labels: map[string]string{"kipper.run/build": "true", "kipper.run/app": "checkout", "kipper.run/source-namespace": "shop-test"},
+		},
+	}
+
+	handler := &Webhooks{Client: fake.NewClientset(queued), CRClient: testCRClient(appCR)}
+	r := chi.NewRouter()
+	r.Get("/api/v1/projects/{name}/apps/{app}/build/status", handler.BuildStatus)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/projects/shop-test/apps/checkout/build/status", nil))
+
+	var got map[string]interface{}
+	assert.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "Pending", got["phase"],
+		"a build started after the discard was hidden behind the previous build's verdict")
+}
+
+// The three structs that marshal the deploy-history annotation are mirrors, and
+// this one round-trips the whole list on rollback. A field present only on the
+// controller's copy is stripped from every entry the first time somebody rolls
+// back, which would silently disarm the build-id dedupe rather than fail.
+func TestDeployEntryCarriesEveryFieldTheControllerWrites(t *testing.T) {
+	written := `[{"revision":2,"image":"registry.example.com/shop/checkout:def678","commit":"def678","trigger":"build","timestamp":"2026-08-19T04:00:00Z","build":"checkout-build-def678"}]`
+
+	var roundTripped []deployEntry
+	require.NoError(t, json.Unmarshal([]byte(written), &roundTripped))
+	back, err := json.Marshal(roundTripped)
+	require.NoError(t, err)
+
+	var before, after []map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(written), &before))
+	require.NoError(t, json.Unmarshal(back, &after))
+	assert.Equal(t, before, after, "a field the controller writes was dropped on the way through this handler")
+}
+
+// webhookTokenSecret is the Secret the handler reads a webhook token from.
+func webhookTokenSecret(namespace, app, token string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: app + "-webhook", Namespace: namespace},
+		Data:       map[string][]byte{"token": []byte(token)},
+	}
+}
+
+// postWebhook drives the real route, so a test exercises what a pipeline hits.
+func postWebhook(t *testing.T, wh *Webhooks, namespace, app, token, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := chi.NewRouter()
+	r.Post("/api/v1/webhook/{namespace}/{app}", wh.Receive)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhook/"+namespace+"/"+app, strings.NewReader(body))
+	req.Header.Set("X-Kipper-Token", token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	return rec
+}
+
+// The defect that started this: a pipeline posted the image it had just built,
+// the handler threw it away because the app also had a git source, started a
+// build instead, and answered 200 "building". The job went green, nothing
+// deployed, and the app sat on its placeholder for days.
+func TestWebhookRefusesAnImageWhileAGitSourceIsAttached(t *testing.T) {
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkout", Namespace: "shop-test"},
+		Spec: kipperv1.AppSpec{
+			Image: "busybox:latest", Port: 8080, Replicas: int32Ptr(1),
+			Git: &kipperv1.AppGitSource{URL: "https://git.example.com/shop/checkout.git", Branch: "main"},
+		},
+	}
+	client := fake.NewClientset(webhookTokenSecret("shop-test", "checkout", "s3cr3t"))
+	wh := &Webhooks{Client: client, CRClient: testCRClient(app)}
+
+	rec := postWebhook(t, wh, "shop-test", "checkout", "s3cr3t",
+		`{"image":"registry.example.com/shop/checkout:9f2c1a","commit":"9f2c1a"}`)
+
+	assert.Equal(t, http.StatusConflict, rec.Code,
+		"a pipeline naming an exact image must fail loudly rather than be diverted into a build")
+	assert.Contains(t, rec.Body.String(), "kip app git remove", "the refusal names the way out")
+}
+
+// A commit with no image is the git-backed pipeline's own signal, and still
+// starts a build.
+func TestWebhookStillBuildsWhenOnlyACommitIsPosted(t *testing.T) {
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkout", Namespace: "shop-test"},
+		Spec: kipperv1.AppSpec{
+			Image: "busybox:latest", Port: 8080, Replicas: int32Ptr(1),
+			Git: &kipperv1.AppGitSource{URL: "https://git.example.com/shop/checkout.git", Branch: "main"},
+		},
+	}
+	client := fake.NewClientset(
+		webhookTokenSecret("shop-test", "checkout", "s3cr3t"),
+		// What the builder reads to push the image it produces.
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "zot-push-credentials", Namespace: "kipper-system"},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{"password": []byte("placeholder")},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "zot-tls", Namespace: "kipper-system"},
+			Data:       map[string][]byte{"ca.crt": []byte("placeholder")},
+		},
+	)
+	wh := &Webhooks{Client: client, CRClient: testCRClient(app)}
+
+	rec := postWebhook(t, wh, "shop-test", "checkout", "s3cr3t", `{"commit":"9f2c1a"}`)
+
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "building")
+}
+
+// The credential binding is about every use of the token, not only the build.
+// The health probe authenticates against whatever URL the app currently names,
+// so a token left over from a rolled-back move is disclosed by opening the
+// Deployments tab, before any build runs. The probe must not be reached at all
+// when the recorded host disagrees.
+func TestWebhooksHandler_BuildStatusDoesNotProbeACredentialBoundElsewhere(t *testing.T) {
+	appCR := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkout", Namespace: "shop-test"},
+		Spec: kipperv1.AppSpec{Git: &kipperv1.AppGitSource{ //nolint:gosec // k8s Secret object name, not a credential value
+			URL:               "https://git.example.com/shop/checkout.git",
+			CredentialsSecret: "checkout-git-credentials",
+		}},
+	}
+	stranded := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "checkout-git-credentials", Namespace: "shop-test",
+			Annotations: map[string]string{builder.GitAuthorityAnnotation: "git.elsewhere.example.com"},
+		},
+		Data: map[string][]byte{"token": []byte("a-token-for-the-other-host")},
+	}
+
+	probed := false
+	handler := &Webhooks{
+		Client: fake.NewClientset(stranded), CRClient: testCRClient(appCR),
+		ProbeGit: func(context.Context, string, string) tokenHealth {
+			probed = true
+			return tokenHealth{Valid: true}
+		},
+	}
+	r := chi.NewRouter()
+	r.Get("/api/v1/projects/{name}/apps/{app}/build/status", handler.BuildStatus)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/projects/shop-test/apps/checkout/build/status", nil))
+
+	assert.False(t, probed, "a token stored for another host was sent to the one the app names")
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, false, got["git_credential_valid"],
+		"the console was not told the credential is unusable")
 }

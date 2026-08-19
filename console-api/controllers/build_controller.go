@@ -60,6 +60,14 @@ func (r *BuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	if job.Labels[buildLabelKey] != "true" {
 		return ctrl.Result{}, nil
 	}
+	// A job on its way out drives nothing. The TTL controller deletes a
+	// finished job with foreground propagation, which stamps a deletion
+	// timestamp and produces an update event while the job is still readable,
+	// so without this a job whose successor has already aged out gets one last
+	// reconcile on a timer rather than only on a restart.
+	if job.DeletionTimestamp != nil {
+		return ctrl.Result{}, nil
+	}
 
 	appName := job.Labels[appLabelKey]
 	if appName == "" {
@@ -96,12 +104,69 @@ func (r *BuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	if superseded {
 		return ctrl.Result{}, nil
 	}
+	// A build for a source the app no longer has writes nothing. Detaching git
+	// is how an operator moves an app onto prebuilt images, and a job still
+	// running at that moment would otherwise finish afterwards and put the app
+	// back on an artefact built from the source they just removed — over the
+	// image they chose, with a succeeded build status and a history entry for a
+	// source that is gone.
+	//
+	// Supersession does not cover this: it asks whether a newer build exists,
+	// and after a detach there is no newer build and never will be. The check
+	// lives here rather than at detach time on purpose. Cancelling the job would
+	// race a reconcile that has already read it, so cancellation could never be
+	// the guarantee; this can. A job left running is swept by the build janitor
+	// on age, and writes nothing when it lands.
+	// The invariant is not "the app has a source" but "this job belongs to the
+	// source the app declares now". Detaching then attaching a different
+	// repository, or editing the URL in place, leaves an older job running whose
+	// artefact belongs to a repository nobody asked for any more — and the app
+	// UID covers only a delete and recreate, while supersession covers only a
+	// newer job, which a source edit does not create.
+	//
+	// A job written before the annotation existed carries none, so it cannot
+	// prove which source it built either. The presence check it used to fall
+	// back on asks the wrong question: the app still has a source, just not
+	// necessarily the one this job used. That window is open during the rollout
+	// of the change that adds the annotation, when jobs from the previous
+	// console-api are still finishing.
+	if reason := staleSourceReason(&job, app.Spec.Git); reason != "" {
+		// Supersession is checked above, so no newer build exists to overwrite
+		// here. A build still running is not discarded yet and Building remains
+		// the truth; the terminal phase belongs at the point it lands, because
+		// otherwise nothing ever writes one and the app sits on Building for
+		// ever while the pipeline that pushed it reports success.
+		//
+		// A detached app is the exception: it has no source panel to show this
+		// against, and the App reconciler clears its build status, so writing
+		// one here would fight that sweep for ever.
+		//
+		// Only a phase that is not terminal is replaced. A Succeeded or Failed
+		// already on the app is the record of a completion that was applied,
+		// and a later refusal must not relabel it — the informer replays every
+		// job inside its TTL when the controller restarts, so on the upgrade
+		// that introduces the fingerprint that would rewrite every app which
+		// built in the preceding hour.
+		if app.Spec.Git != nil && (job.Status.Succeeded > 0 || job.Status.Failed > 0) &&
+			!completionAlreadyApplied(app.Status.Build, &job) {
+			// The job is terminal, so no further job event will arrive and
+			// nothing else re-enqueues this reconcile. A write dropped here
+			// leaves the app on Building for ever, which is what the phase
+			// exists to prevent, so the failure has to be retried.
+			if err := r.updateBuildStatus(ctx, sourceNS, appName, job.Labels[appUIDLabelKey], job.Name, "Discarded", "", reason); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
 
 	// Check if job is still running
 	if job.Status.Succeeded == 0 && job.Status.Failed == 0 {
 		// Update build phase to Building if pods are active
 		if job.Status.Active > 0 {
-			r.updateBuildStatus(ctx, sourceNS, appName, "Building", "", "")
+			if err := r.updateBuildStatus(ctx, sourceNS, appName, job.Labels[appUIDLabelKey], job.Name, "Building", "", ""); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 		return ctrl.Result{}, nil
 	}
@@ -121,7 +186,7 @@ func (r *BuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		app.Spec.Image = imageRef
 
 		// Record in deploy history
-		r.recordDeployHistory(&app, imageRef, commit)
+		r.recordDeployHistory(&app, job.Name, imageRef, commit)
 
 		if err := r.Update(ctx, &app); err != nil {
 			return ctrl.Result{}, fmt.Errorf("updating app image: %w", err)
@@ -133,9 +198,13 @@ func (r *BuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 			Phase:       "Succeeded",
 			Commit:      commit,
 			CompletedAt: &now,
+			Build:       job.Name,
 		}
 		if err := r.Status().Update(ctx, &app); err != nil {
+			// The job is terminal, so nothing re-enqueues this reconcile. A
+			// write dropped here leaves the app on Building for ever.
 			logger.Error(err, "failed to update build status")
+			return ctrl.Result{}, fmt.Errorf("writing build status: %w", err)
 		}
 
 	} else if job.Status.Failed > 0 {
@@ -166,9 +235,13 @@ func (r *BuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 			Commit:      commit,
 			CompletedAt: &now,
 			Message:     message,
+			Build:       job.Name,
 		}
 		if err := r.Status().Update(ctx, &app); err != nil {
+			// The job is terminal, so nothing re-enqueues this reconcile. A
+			// write dropped here leaves the app on Building for ever.
 			logger.Error(err, "failed to update build status")
+			return ctrl.Result{}, fmt.Errorf("writing build status: %w", err)
 		}
 	}
 
@@ -225,27 +298,95 @@ func (r *BuildReconciler) supersededByNewerBuild(ctx context.Context, job *batch
 	return false, nil
 }
 
-func (r *BuildReconciler) updateBuildStatus(ctx context.Context, namespace, appName, phase, commit, message string) {
+// completionAlreadyApplied reports whether a build status records the finished
+// outcome of this job, which a later refusal must not relabel.
+//
+// The phase alone cannot answer it. A status can be terminal because it belongs
+// to an *earlier* build whose result was never replaced — the current build's
+// Pending write can be dropped on a conflict — and treating that as this job's
+// own applied completion left a refused build with no verdict at all, and the
+// previous build's success reported as its own.
+func completionAlreadyApplied(status *kipperv1.AppBuildStatus, job *batchv1.Job) bool {
+	if status == nil {
+		return false
+	}
+	if status.Build == "" {
+		// A status written before builds were named can only be the completion
+		// of a job from before builds were named. A job carrying a source
+		// fingerprint is not one of those, so this status is somebody else's
+		// and does not stand in for the verdict this job is owed.
+		if _, named := job.Annotations[builder.SourceFingerprintAnnotation]; named {
+			return false
+		}
+	} else if status.Build != job.Name {
+		return false
+	}
+	return status.Phase == "Succeeded" || status.Phase == "Failed" || status.Phase == "Discarded"
+}
+
+// staleSourceReason reports why a build job may not write to its App, or the
+// empty string when the job belongs to the source the App declares now. The
+// reason is shown to the operator, so it names what changed rather than the
+// mechanism that caught it.
+func staleSourceReason(job *batchv1.Job, git *kipperv1.AppGitSource) string {
+	fingerprint, ok := job.Annotations[builder.SourceFingerprintAnnotation]
+	if !ok {
+		return "This build started before Kipper recorded which git source a build came from, so it cannot be matched against the source this app has now. Deploy again to build from the current source."
+	}
+	if fingerprint == builder.UnfingerprintableSource {
+		return "Kipper could not record which git source this build came from, so its image was not deployed. Deploy again."
+	}
+	if git == nil {
+		return "This app no longer builds from git, so the build was discarded and the image it is running was kept."
+	}
+	if fingerprint != builder.GitSourceFingerprint(git) {
+		return "The git source changed while this build was running, so it built from settings the app no longer has. Deploy again to build from the current source."
+	}
+	return ""
+}
+
+// wantUID is the App the job was created for. The reconcile's own guards ran
+// against an earlier read, so an App deleted and a same-named one recreated in
+// between would otherwise be given a dead app's build status here.
+func (r *BuildReconciler) updateBuildStatus(ctx context.Context, namespace, appName, wantUID, build, phase, commit, message string) error {
 	var app kipperv1.App
 	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: appName}, &app); err != nil {
-		return
+		return client.IgnoreNotFound(err)
+	}
+	if wantUID != "" && wantUID != string(app.UID) {
+		return nil
 	}
 
-	if app.Status.Build != nil && app.Status.Build.Phase == phase {
-		return
+	if app.Status.Build != nil && app.Status.Build.Phase == phase && app.Status.Build.Build == build {
+		return nil
 	}
 
 	if app.Status.Build == nil {
 		app.Status.Build = &kipperv1.AppBuildStatus{}
 	}
 	app.Status.Build.Phase = phase
+	app.Status.Build.Build = build
 	if commit != "" {
 		app.Status.Build.Commit = commit
 	}
 	if message != "" {
 		app.Status.Build.Message = message
 	}
-	_ = r.Status().Update(ctx, &app)
+	// Nothing else writes a completion time for a discarded build, so without
+	// this the console shows the previous build's, next to a phase that is not
+	// the previous build's.
+	if phase == "Discarded" {
+		now := metav1.Now()
+		app.Status.Build.CompletedAt = &now
+	}
+	if err := r.Status().Update(ctx, &app); err != nil {
+		// A rejected write leaves the app on a phase that will never resolve,
+		// and a schema the cluster has not been upgraded to is one way to get
+		// one. Silence here is what makes that look like the app never built.
+		log.FromContext(ctx).Error(err, "writing build status", "app", appName, "phase", phase)
+		return fmt.Errorf("writing %s build status: %w", phase, err)
+	}
+	return nil
 }
 
 type buildDeployEntry struct {
@@ -254,12 +395,26 @@ type buildDeployEntry struct {
 	Commit    string `json:"commit,omitempty"`
 	Trigger   string `json:"trigger"`
 	Timestamp string `json:"timestamp"`
+	// Build is the job the entry was recorded from. handlers.deployEntry and
+	// webhook.DeployEntry in kip mirror this shape and round-trip the
+	// annotation, so a field added here has to be added to both or it is
+	// stripped the first time either of them writes.
+	Build string `json:"build,omitempty"`
 }
 
-func (r *BuildReconciler) recordDeployHistory(app *kipperv1.App, image, commit string) {
+func (r *BuildReconciler) recordDeployHistory(app *kipperv1.App, build, image, commit string) {
 	var history []buildDeployEntry
 	if raw, ok := app.Annotations[deployHistoryAnnKey]; ok && raw != "" {
 		_ = json.Unmarshal([]byte(raw), &history)
+	}
+
+	// The succeeded branch re-runs whole: a status write that conflicts
+	// requeues it, and the informer replays a finished job for as long as its
+	// TTL lasts. Appending again each time evicts real rollback targets.
+	for i := range history {
+		if history[i].Build != "" && history[i].Build == build {
+			return
+		}
 	}
 
 	nextRevision := 1
@@ -273,6 +428,7 @@ func (r *BuildReconciler) recordDeployHistory(app *kipperv1.App, image, commit s
 		Commit:    commit,
 		Trigger:   "build",
 		Timestamp: time.Now().Format(time.RFC3339),
+		Build:     build,
 	}
 
 	history = append([]buildDeployEntry{entry}, history...)
@@ -295,7 +451,6 @@ func extractCommitFromJobName(jobName, appName string) string {
 	return ""
 }
 
-// SetupWithManager registers the build watcher with the controller manager.
 // buildWasOOMKilled reports whether the build container of any pod for this
 // Job was terminated by the OOM killer, so a memory-starved build can be
 // named instead of surfacing an opaque failure.
@@ -311,10 +466,10 @@ func (r *BuildReconciler) buildWasOOMKilled(ctx context.Context, job *batchv1.Jo
 		return false
 	}
 	for i := range pods.Items {
-		// The Job name is reused across rebuilds, so match on the owning
-		// Job's UID: a same-name earlier build can leave an OOMKilled pod
-		// behind during background deletion, and it must not be read as this
-		// build's failure.
+		// Match on the owning Job's UID: a pod from an earlier build can
+		// outlive its Job during background deletion, and it must not be read
+		// as this build's failure. A job created before build names carried a
+		// random id shares this one's name, which is how that happens.
 		if owner := metav1.GetControllerOf(&pods.Items[i]); owner == nil || owner.UID != job.UID {
 			continue
 		}
@@ -343,6 +498,7 @@ func stateTerminated(s corev1.ContainerState) *corev1.ContainerStateTerminated {
 	return s.Terminated
 }
 
+// SetupWithManager registers the build watcher with the controller manager.
 func (r *BuildReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("build").

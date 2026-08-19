@@ -22,6 +22,7 @@ import (
 
 	"k8s.io/client-go/util/retry"
 
+	"github.com/getkipper/kipper/controller/pkg/giturl"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 
 	"github.com/getkipper/kipper/controller/pkg/secretname"
@@ -172,6 +173,7 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 	name, _ := cmd.Flags().GetString("name")
 	image, _ := cmd.Flags().GetString("image")
 	gitURL, _ := cmd.Flags().GetString("git")
+	gitToken, _ := cmd.Flags().GetString("git-token")
 	gitBranch, _ := cmd.Flags().GetString("branch")
 	port, _ := cmd.Flags().GetInt("port")
 	replicas, _ := cmd.Flags().GetInt("replicas")
@@ -185,6 +187,13 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 	}
 	if image != "" && gitURL != "" {
 		return fmt.Errorf("--image and --git are mutually exclusive")
+	}
+	// The token is stored against the host its repository names, so with no
+	// repository there is no host to record. Storing it anyway wrote a
+	// credential with no host recorded, which every path that sends a token
+	// then treats as one written before hosts were recorded at all.
+	if gitToken != "" && gitURL == "" {
+		return fmt.Errorf("--git-token needs --git: a token is stored for the repository it clones")
 	}
 
 	// Git-based apps use a placeholder image until the first build completes
@@ -266,14 +275,14 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	gitToken, _ := cmd.Flags().GetString("git-token")
 	buildMemory, _ := cmd.Flags().GetString("build-memory")
 	buildCPU, _ := cmd.Flags().GetString("build-cpu")
 
 	// Record which flags the user actually set so an update only writes those
 	// fields (a bare redeploy must not reset replicas, route or branch to their
-	// flag defaults). The deployer keys the git-source clear off Changed["image"]
-	// so switching a git app to an image drops the stale repo.
+	// flag defaults). The deployer keys the git-source check off Changed["image"]
+	// so setting an image on an app that builds from git is refused rather than
+	// silently overwritten by the next build.
 	changed := map[string]bool{}
 	for _, f := range []string{"image", "git", "branch", "port", "replicas", "env", "route", "no-security-headers", "rate-limit", "redirect-from", "memory", "cpu", "profile", "build-memory", "build-cpu"} {
 		if cmd.Flags().Changed(f) {
@@ -295,44 +304,14 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 		// Store git credentials as a K8s Secret if provided.
 		if gitToken != "" {
 			secretName := name + "-git-credentials"
-			clientset := k8sClient.Clientset()
-			gitSecret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      secretName,
-					Namespace: namespace,
-					Labels: map[string]string{
-						"app.kubernetes.io/managed-by": "kipper",
-						"kipper.run/app":               name,
-					},
-				},
-				Data: map[string][]byte{
-					"token": []byte(gitToken),
-				},
+			fresh, err := storeGitCredential(ctx, k8sClient.Clientset(), namespace, name, gitToken, gitURL)
+			if err != nil {
+				return err
 			}
-			_, err := clientset.CoreV1().Secrets(namespace).Create(ctx, gitSecret, metav1.CreateOptions{})
-			switch {
-			case err == nil:
-				gitCredsCreated = true
-			case errors.IsAlreadyExists(err):
-				// Update the live object in place: a blind replace would
-				// strip the controller reference the reconciler set and the
-				// Secret would outlive the App again.
-				err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-					live, getErr := clientset.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
-					if getErr != nil {
-						return getErr
-					}
-					live.Labels = gitSecret.Labels
-					live.Data = gitSecret.Data
-					_, updErr := clientset.CoreV1().Secrets(namespace).Update(ctx, live, metav1.UpdateOptions{})
-					return updErr
-				})
-				if err != nil {
-					return fmt.Errorf("updating git credentials secret: %w", err)
-				}
-			default:
-				return fmt.Errorf("creating git credentials secret: %w", err)
-			}
+			// Only a Secret this run created is one this run may delete if the
+			// deploy then fails. One that was already there belongs to whatever
+			// put it there.
+			gitCredsCreated = fresh
 			gitCredentials = secretName
 			fmt.Printf("  ✔  Git credentials stored\n")
 		}
@@ -1040,4 +1019,62 @@ func findFunctionNamespaceOrDefault(ctx context.Context, clientset kubernetes.In
 		return "default", nil
 	}
 	return "", err
+}
+
+// storeGitCredential writes an app's git token, recording the host it is for.
+// The token and the clone URL are a pair, and every path that would send the
+// token refuses one whose recorded host is not the host being contacted, so a
+// write that omits the host leaves a credential nothing can repair through kip.
+// It reports whether the Secret was created here, which is what decides
+// whether a failed deploy may remove it again.
+func storeGitCredential(ctx context.Context, clientset kubernetes.Interface, namespace, appName, token, cloneURL string) (bool, error) {
+	secretName := appName + "-git-credentials"
+	wantLabels := map[string]string{
+		"app.kubernetes.io/managed-by": "kipper",
+		"kipper.run/app":               appName,
+	}
+	// An unparseable URL records nothing rather than a wrong host; the source
+	// validation upstream is what rejects it.
+	authority, _ := giturl.CanonicalAuthority(cloneURL)
+
+	fresh := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace, Labels: wantLabels},
+		Data:       map[string][]byte{"token": []byte(token)},
+	}
+	if authority != "" {
+		fresh.Annotations = map[string]string{labels.AnnoGitAuthority: authority}
+	}
+
+	_, err := clientset.CoreV1().Secrets(namespace).Create(ctx, fresh, metav1.CreateOptions{})
+	if err == nil {
+		return true, nil
+	}
+	if !errors.IsAlreadyExists(err) {
+		return false, fmt.Errorf("creating git credentials secret: %w", err)
+	}
+
+	// Update the live object in place: a blind replace would strip the
+	// controller reference the reconciler set and the Secret would outlive the
+	// App again.
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		live, getErr := clientset.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
+		if getErr != nil {
+			return getErr
+		}
+		live.Labels = wantLabels
+		live.Data = fresh.Data
+		if live.Annotations == nil {
+			live.Annotations = map[string]string{}
+		}
+		if authority != "" {
+			live.Annotations[labels.AnnoGitAuthority] = authority
+		} else {
+			delete(live.Annotations, labels.AnnoGitAuthority)
+		}
+		_, updErr := clientset.CoreV1().Secrets(namespace).Update(ctx, live, metav1.UpdateOptions{})
+		return updErr
+	}); err != nil {
+		return false, fmt.Errorf("updating git credentials secret: %w", err)
+	}
+	return false, nil
 }

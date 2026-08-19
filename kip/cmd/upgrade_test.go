@@ -163,7 +163,7 @@ func TestReconcileClusterAPIState_AppliesSchemasAndRBACAndNeverTheAdminBinding(t
 	dyn := rbacDynamic()
 	var out bytes.Buffer
 
-	require.NoError(t, reconcileClusterAPIState(ctx, dyn, "v0.9.0", &out))
+	require.NoError(t, reconcileClusterAPIState(ctx, dyn, "v0.9.0", "shop.example", &out))
 
 	crds, err := dyn.Resource(crdGVR).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
@@ -175,13 +175,17 @@ func TestReconcileClusterAPIState_AppliesSchemasAndRBACAndNeverTheAdminBinding(t
 		require.NoError(t, getErr, "upgrade must deliver the %s ClusterRole to existing clusters", name)
 	}
 
+	// A cluster with no binding gets one, because it has no other route to it:
+	// the install creates it and nothing else did. What must never happen is
+	// the upgrade rewriting one that already exists, which the test below
+	// covers at this same seam.
 	bindingGVR := schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterrolebindings"}
-	bindings, err := dyn.Resource(bindingGVR).List(ctx, metav1.ListOptions{})
-	require.NoError(t, err)
-	for _, b := range bindings.Items {
-		assert.NotEqual(t, "kipper-initial-admin", b.GetName(),
-			"re-applying the initial admin binding would reset its subjects and revoke every admin added since install")
-	}
+	created, err := dyn.Resource(bindingGVR).Get(ctx, "kipper-initial-admin", metav1.GetOptions{})
+	require.NoError(t, err, "a cluster installed before this binding existed has no other way to get one")
+	subjects, _, _ := unstructured.NestedSlice(created.Object, "subjects")
+	require.Len(t, subjects, 1)
+	name, _, _ := unstructured.NestedString(subjects[0].(map[string]any), "name")
+	assert.Equal(t, "oidc:admin@shop.example", name, "only the install's own admin identity is bound")
 
 	assert.Contains(t, out.String(), "Operator roles", "the operator step has to be reported, not silently skipped")
 }
@@ -195,7 +199,7 @@ func TestReconcileClusterAPIState_StopsAtTheCRDFailure(t *testing.T) {
 	ahead.SetResourceVersion("100")
 	dyn := rbacDynamic(ahead)
 
-	err := reconcileClusterAPIState(ctx, dyn, "v0.9.0", io.Discard)
+	err := reconcileClusterAPIState(ctx, dyn, "v0.9.0", "shop.example", io.Discard)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "updating CRD schemas")
 
@@ -468,4 +472,36 @@ func TestApplyCRDs_KeepsLifecycleMetadataAcrossTheReplace(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, after.GetFinalizers(), "customresourcecleanup.apiextensions.k8s.io",
 		"a finalizer must survive kip's replace")
+}
+
+// The reason the upgrade never re-applied this binding: its subjects are live
+// state, and the install-time copy names one admin. Creating when absent must
+// not become overwriting when present, or an upgrade silently revokes every
+// admin added since the install.
+//
+// Asserted at this seam rather than on the helper, because a test of the helper
+// alone stayed green three times over while the production call was removed.
+func TestReconcileClusterAPIState_NeverRewritesAnExistingAdminBinding(t *testing.T) {
+	ctx := context.Background()
+	bindingGVR := schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterrolebindings"}
+	existing := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "rbac.authorization.k8s.io/v1",
+		"kind":       "ClusterRoleBinding",
+		"metadata":   map[string]any{"name": "kipper-initial-admin"},
+		"roleRef": map[string]any{
+			"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "cluster-admin",
+		},
+		"subjects": []any{
+			map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "User", "name": "oidc:admin@shop.example"},
+			map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "User", "name": "oidc:sam@shop.example"},
+		},
+	}}
+	dyn := rbacDynamic(existing)
+
+	require.NoError(t, reconcileClusterAPIState(ctx, dyn, "v0.9.0", "shop.example", io.Discard))
+
+	after, err := dyn.Resource(bindingGVR).Get(ctx, "kipper-initial-admin", metav1.GetOptions{})
+	require.NoError(t, err)
+	subjects, _, _ := unstructured.NestedSlice(after.Object, "subjects")
+	assert.Len(t, subjects, 2, "an admin added since the install must survive an upgrade")
 }

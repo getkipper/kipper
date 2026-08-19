@@ -3,6 +3,7 @@ package ssh
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -118,4 +119,34 @@ func TestSSHArgsExplicitKeyTrumpsFallback(t *testing.T) {
 	assert.Contains(t, joined, "-i /explicit/key")
 	assert.Contains(t, joined, "IdentitiesOnly=yes")
 	assert.NotContains(t, joined, "/some/fallback", "fallback must not appear when an explicit key is set")
+}
+
+// Windows OpenSSH cannot multiplex, and ssh treats a ControlPath it cannot bind
+// as fatal rather than falling back — so asking for one there breaks every
+// command instead of costing a handshake. The no-master path already exists for
+// a home directory that is too deep; Windows takes the same route.
+func TestWindowsAsksForNoConnectionMaster(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the guard is compiled for every platform but only observable on Windows")
+	}
+	if got := controlSocket(Config{Host: "203.0.113.10", User: "root"}); got != "" {
+		t.Errorf("controlSocket = %q, want empty: Windows ssh cannot bind one", got)
+	}
+}
+
+// The flags follow the socket, so the platform check needs to be in one place
+// only. This pins that: no socket means none of the three options are passed,
+// whatever decided there was no socket.
+func TestNoControlSocketMeansNoMultiplexingFlags(t *testing.T) {
+	c := &Client{cfg: Config{Host: "203.0.113.10", User: "root"}}
+
+	args := c.sshArgs()
+
+	for _, unwanted := range []string{"ControlMaster=auto", "ControlPersist=" + controlPersist} {
+		for _, arg := range args {
+			if arg == unwanted {
+				t.Errorf("ssh args carry %q with no control socket: %v", unwanted, args)
+			}
+		}
+	}
 }

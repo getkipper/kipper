@@ -14,6 +14,8 @@ import (
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/builder"
+	"github.com/getkipper/kipper/console-api/internal/gitreach"
 )
 
 func migrationScheme() *runtime.Scheme {
@@ -188,5 +190,15 @@ func TestCreateApp_ImageAppUnchanged(t *testing.T) {
 	}
 	if len(jobs.Items) != 0 {
 		t.Fatalf("build jobs = %d, want none", len(jobs.Items))
+	}
+}
+
+// Builds run a clone preflight, and these tests are about what a migration
+// creates rather than about whether a repository answers. Without this every
+// run would reach the real internet and a private or missing repository would
+// fail the migration for the wrong reason.
+func init() {
+	builder.ReachGit = func(context.Context, string, string, string, string) (gitreach.Result, string) {
+		return gitreach.Reachable, ""
 	}
 }

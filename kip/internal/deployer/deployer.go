@@ -162,12 +162,16 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) error {
 		if opts.Changed["profile"] && opts.Profile != "" {
 			delete(merged, "resources")
 		}
-		mergeInto(merged, buildSpec(opts, false))
-		// Switching a git app to a prebuilt image clears the git source, so the
-		// old repo's webhook or `kip app rebuild` can't overwrite the new image.
+		// Setting an image on an app that builds from git used to detach the
+		// repository as a side effect. That is data loss wearing the clothes of
+		// convenience: the stored token goes with it, and nothing said so.
+		// Detaching is now something you ask for.
 		if opts.Changed["image"] {
-			delete(merged, "git")
+			if _, hasGit := merged["git"]; hasGit {
+				return errBuildsFromGit(opts.Name)
+			}
 		}
+		mergeInto(merged, buildSpec(opts, false))
 		existing.Object["spec"] = merged
 		if _, err := apps.Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("updating app: %w", err)
@@ -404,6 +408,12 @@ func (d *Deployer) UpdateImage(ctx context.Context, namespace, name, image strin
 		return fmt.Errorf("getting app: %w", err)
 	}
 
+	// The same rule the deploy path applies: an app that builds from git does
+	// not quietly stop doing so because someone set an image.
+	if _, hasGit, _ := unstructured.NestedMap(app.Object, "spec", "git"); hasGit {
+		return errBuildsFromGit(name)
+	}
+
 	if err := unstructured.SetNestedField(app.Object, image, "spec", "image"); err != nil {
 		return fmt.Errorf("setting image: %w", err)
 	}
@@ -594,4 +604,49 @@ func appStatusFromCR(cr *unstructured.Unstructured) AppStatus {
 		Replicas: replicas,
 		Ready:    ready,
 	}
+}
+
+// RemoveGitSource detaches an app's git repository, and reports whether there
+// was one to detach.
+//
+// Only spec.git is cleared. The token the source used and the build status it
+// left behind belong to the controller, which removes them on the next pass —
+// a client that did all three would leave a half-detached app behind on any
+// failure between them, with nothing coming back to finish the job.
+//
+// The image the app runs is untouched: detaching a source is not a deploy, and
+// an app whose pods vanish because its build config changed would be a
+// surprise nobody asked for.
+func (d *Deployer) RemoveGitSource(ctx context.Context, namespace, name string) (bool, error) {
+	removed := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		app, err := d.Dynamic.Resource(AppGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return fmt.Errorf("app %q not found", name)
+			}
+			return fmt.Errorf("getting app: %w", err)
+		}
+		spec, found, _ := unstructured.NestedMap(app.Object, "spec")
+		if !found {
+			return nil
+		}
+		if _, hasGit := spec["git"]; !hasGit {
+			return nil
+		}
+		delete(spec, "git")
+		app.Object["spec"] = spec
+		if _, err := d.Dynamic.Resource(AppGVR).Namespace(namespace).Update(ctx, app, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("updating app: %w", err)
+		}
+		removed = true
+		return nil
+	})
+	return removed, err
+}
+
+// errBuildsFromGit is the one refusal both image writers give, so the two
+// cannot drift into disagreeing about what setting an image means.
+func errBuildsFromGit(name string) error {
+	return fmt.Errorf("%s builds its image from git, so setting one here would be overwritten by the next build. Run 'kip app git remove %s' first if it should deploy prebuilt images instead", name, name)
 }

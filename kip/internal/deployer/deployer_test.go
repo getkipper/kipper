@@ -231,7 +231,15 @@ func TestRedeployWithReplicasFlagUpdatesReplicas(t *testing.T) {
 	assert.Equal(t, int64(3), replicas, "an explicit --replicas must be applied")
 }
 
-func TestRedeployImageClearsGitSource(t *testing.T) {
+// This assertion is inverted from what it once made. It read "spec.git must be
+// cleared when switching to --image", which made detaching a repository — and
+// discarding the access token stored with it — a side effect of naming an
+// image. Nothing said so, and the only way to stop building from git was to
+// discover that side effect.
+//
+// Detaching is now asked for by name, and both image writers refuse instead.
+// The conversion itself lives in TestRemoveGitSourceDetachesTheRepository.
+func TestRedeployImageRefusesWhileTheAppBuildsFromGit(t *testing.T) {
 	d, dynClient := testDeployer()
 	ctx := context.Background()
 	seedApp(t, dynClient, map[string]interface{}{
@@ -240,18 +248,39 @@ func TestRedeployImageClearsGitSource(t *testing.T) {
 		"git":      map[string]interface{}{"url": "https://github.com/acme/api.git", "branch": "main"},
 	})
 
-	// Switch the git app to a prebuilt image.
 	err := d.Deploy(ctx, Options{
 		Name: "api", Namespace: "default", Image: "ghcr.io/acme/api:v2", Port: 8080,
 		Changed: map[string]bool{"image": true},
 	})
-	require.NoError(t, err)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kip app git remove")
 
 	app, _ := dynClient.Resource(AppGVR).Namespace("default").Get(ctx, "api", metav1.GetOptions{})
 	_, gitFound, _ := unstructured.NestedMap(app.Object, "spec", "git")
-	assert.False(t, gitFound, "spec.git must be cleared when switching to --image")
+	assert.True(t, gitFound, "the repository survives a refused deploy")
 	image, _, _ := unstructured.NestedString(app.Object, "spec", "image")
-	assert.Equal(t, "ghcr.io/acme/api:v2", image)
+	assert.Equal(t, "busybox:latest", image, "nothing is written when the deploy is refused")
+}
+
+// The same rule from the other writer, which used to disagree with the first:
+// kip app update --image left the source attached to reassert itself on the
+// next build.
+func TestUpdateImageRefusesWhileTheAppBuildsFromGit(t *testing.T) {
+	d, dynClient := testDeployer()
+	ctx := context.Background()
+	seedApp(t, dynClient, map[string]interface{}{
+		"image": "busybox:latest",
+		"git":   map[string]interface{}{"url": "https://github.com/acme/api.git", "branch": "main"},
+	})
+
+	err := d.UpdateImage(ctx, "default", "api", "ghcr.io/acme/api:v2")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kip app git remove")
+	app, _ := dynClient.Resource(AppGVR).Namespace("default").Get(ctx, "api", metav1.GetOptions{})
+	image, _, _ := unstructured.NestedString(app.Object, "spec", "image")
+	assert.Equal(t, "busybox:latest", image)
 }
 
 func TestRedeployGitOntoImageAppKeepsServingImage(t *testing.T) {
@@ -817,4 +846,41 @@ func TestUpdateRedirectFromReplacesRatherThanAppends(t *testing.T) {
 	got, _, _ := unstructured.NestedStringSlice(app.Object, "spec", "route", "redirectFrom")
 	assert.Equal(t, []string{"old-brand.example"}, got,
 		"the new list stands alone; keeping www.example.com means passing it again")
+}
+
+// The gap an operator hit: an app set up to build from git by mistake had no
+// way to stop, so every webhook deploy was diverted into a build that could
+// not succeed.
+func TestRemoveGitSourceDetachesTheRepository(t *testing.T) {
+	d, dynClient := testDeployer()
+	ctx := context.Background()
+	seedApp(t, dynClient, map[string]interface{}{
+		"image": "registry.example.com/shop/checkout:9f2c1a",
+		"git":   map[string]interface{}{"url": "https://git.example.com/shop/checkout.git", "branch": "main"},
+	})
+
+	removed, err := d.RemoveGitSource(ctx, "default", "api")
+
+	require.NoError(t, err)
+	assert.True(t, removed)
+	stored, _ := dynClient.Resource(AppGVR).Namespace("default").Get(ctx, "api", metav1.GetOptions{})
+	_, hasGit, _ := unstructured.NestedMap(stored.Object, "spec", "git")
+	assert.False(t, hasGit, "the repository is what the caller asked to detach")
+	image, _, _ := unstructured.NestedString(stored.Object, "spec", "image")
+	assert.Equal(t, "registry.example.com/shop/checkout:9f2c1a", image,
+		"detaching a source is not a deploy, so the running image stays")
+}
+
+// Nothing to remove is an outcome, not a failure: a second operator running the
+// same command should be told plainly rather than shown an error.
+func TestRemoveGitSourceReportsWhenThereWasNoSource(t *testing.T) {
+	d, dynClient := testDeployer()
+	seedApp(t, dynClient, map[string]interface{}{
+		"image": "registry.example.com/shop/checkout:9f2c1a",
+	})
+
+	removed, err := d.RemoveGitSource(context.Background(), "default", "api")
+
+	require.NoError(t, err)
+	assert.False(t, removed)
 }

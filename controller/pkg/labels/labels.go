@@ -92,6 +92,14 @@ const (
 	AnnoCommit        = "kipper.run/commit"
 	AnnoDeployHistory = "kipper.run/deploy-history"
 
+	// AnnoGitAuthority records the clone host a per-app git credential was
+	// stored for. The token and the URL are written as a pair but not in one
+	// transaction, so this is what lets every path that would send the token
+	// catch a pair that stopped agreeing. It lives here because kip, console-api
+	// and the builder all write or read it, and two spellings would mean a
+	// credential one of them stored is refused by another.
+	AnnoGitAuthority = "kipper.run/git-authority"
+
 	// SourceNamespace records the namespace of the app a build was triggered
 	// for. Builds run in BuildsNamespace rather than beside their app, so this
 	// is what ties a build back to it, and what keeps two projects with an app

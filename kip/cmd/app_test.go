@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -17,6 +18,7 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/kip/internal/manifest"
 )
@@ -345,4 +347,62 @@ func TestFindWorkloadNamespace_ReportsALookupFailureRatherThanNotFound(t *testin
 	ns, err := findFunctionNamespaceOrDefault(context.Background(), cs, dyn, "resize")
 	require.Error(t, err, "an unreadable API must not send the command to the default namespace")
 	assert.Empty(t, ns)
+}
+
+// The credential Secret carries the host its token was stored for, and every
+// path that would send the token refuses a pair that disagrees. kip is a writer
+// of that Secret, so a kip-written credential with no host recorded sits
+// permanently in the class the compatibility rule keeps for clusters that
+// predate the binding — and a kip-written credential that keeps a previous
+// host's annotation is refused everywhere, with a remedy the operator cannot
+// reach through kip.
+func TestDeployRecordsTheHostAGitTokenWasStoredFor(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing []runtime.Object
+	}{
+		{"create", nil},
+		{"replace one stored for another host", []runtime.Object{&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "web-git-credentials", Namespace: "shop-test",
+				Annotations: map[string]string{labels.AnnoGitAuthority: "git.old.example.com"},
+			},
+			Data: map[string][]byte{"token": []byte("the-old-token")},
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clientset := k8sfake.NewClientset(tc.existing...)
+
+			_, err := storeGitCredential(context.Background(), clientset, "shop-test", "web",
+				"a-token", "https://git.example.com/acme/web.git")
+			require.NoError(t, err)
+
+			secret, getErr := clientset.CoreV1().Secrets("shop-test").Get(
+				context.Background(), "web-git-credentials", metav1.GetOptions{})
+			require.NoError(t, getErr)
+			assert.Equal(t, "a-token", string(secret.Data["token"]))
+			assert.Equal(t, "git.example.com", secret.Annotations[labels.AnnoGitAuthority],
+				"the token was stored with no record of the host it is for, or with a stale one")
+		})
+	}
+}
+
+// A token names no repository on its own, and the writer records the host from
+// the clone URL. Given a token with no --git, it stored the token and removed
+// the host binding, dropping a credential written after the binding existed
+// into the class trusted for clusters that predate it. It ran before the deploy
+// itself was refused, so the refusal did not undo it.
+func TestDeployRefusesAGitTokenWithNoRepository(t *testing.T) {
+	cmd := appDeployCmd
+	require.NoError(t, cmd.Flags().Set("image", "nginx"))
+	require.NoError(t, cmd.Flags().Set("git-token", "a-token"))
+	t.Cleanup(func() {
+		_ = cmd.Flags().Set("image", "")
+		_ = cmd.Flags().Set("git-token", "")
+	})
+
+	err := runAppDeploy(cmd, []string{"web"})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--git")
 }

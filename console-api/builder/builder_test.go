@@ -22,6 +22,7 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/internal/gitcred"
+	"github.com/getkipper/kipper/console-api/internal/gitreach"
 )
 
 func testApp() *kipperv1.App {
@@ -807,4 +808,179 @@ func TestBuildLimits(t *testing.T) {
 		t.Fatalf("malformed cluster default: mem=%s", mem.String())
 	}
 	_ = cpu
+}
+
+// The fingerprint decides whether a finished build may deploy, so anything that
+// changes the artefact has to change it. Listing fields by hand is how the
+// first version omitted BuildArgs, which Kaniko is given directly.
+func TestGitSourceFingerprintCoversEveryArtefactDecidingField(t *testing.T) {
+	base := &kipperv1.AppGitSource{
+		URL: "https://git.example.com/shop/checkout.git", Branch: "main",
+		DockerfilePath: "Dockerfile", Context: ".",
+		BuildArgs: map[string]string{"VERSION": "old"},
+	}
+
+	for name, changed := range map[string]*kipperv1.AppGitSource{
+		"repository": {URL: "https://git.example.com/shop/other.git", Branch: "main", DockerfilePath: "Dockerfile", Context: ".", BuildArgs: map[string]string{"VERSION": "old"}},
+		"branch":     {URL: base.URL, Branch: "release", DockerfilePath: "Dockerfile", Context: ".", BuildArgs: map[string]string{"VERSION": "old"}},
+		"dockerfile": {URL: base.URL, Branch: "main", DockerfilePath: "docker/Dockerfile", Context: ".", BuildArgs: map[string]string{"VERSION": "old"}},
+		"context":    {URL: base.URL, Branch: "main", DockerfilePath: "Dockerfile", Context: "./service", BuildArgs: map[string]string{"VERSION": "old"}},
+		"build arg":  {URL: base.URL, Branch: "main", DockerfilePath: "Dockerfile", Context: ".", BuildArgs: map[string]string{"VERSION": "new"}},
+		"added arg":  {URL: base.URL, Branch: "main", DockerfilePath: "Dockerfile", Context: ".", BuildArgs: map[string]string{"VERSION": "old", "FLAVOUR": "lite"}},
+	} {
+		assert.NotEqual(t, GitSourceFingerprint(base), GitSourceFingerprint(changed),
+			"changing the %s produces a different image but the same fingerprint", name)
+	}
+}
+
+// Rotating a token or resizing the build changes neither the image nor which
+// build is current, so an in-flight build must survive both.
+func TestGitSourceFingerprintIgnoresWhatDoesNotDecideTheArtefact(t *testing.T) {
+	base := &kipperv1.AppGitSource{URL: "https://git.example.com/shop/checkout.git", Branch: "main"}
+
+	rotated := *base
+	rotated.CredentialsSecret = "checkout-git-credentials" //nolint:gosec // G101 false positive: a K8s Secret name
+	resized := *base
+	resized.BuildResources = &kipperv1.BuildResources{Memory: "6Gi", CPU: "2"}
+
+	assert.Equal(t, GitSourceFingerprint(base), GitSourceFingerprint(&rotated),
+		"rotating a credential discarded a build in flight")
+	assert.Equal(t, GitSourceFingerprint(base), GitSourceFingerprint(&resized),
+		"resizing the build discarded a build in flight")
+}
+
+// Map iteration order must not leak into the fingerprint, or a build would be
+// discarded at random.
+func TestGitSourceFingerprintIsStableAcrossRuns(t *testing.T) {
+	source := &kipperv1.AppGitSource{
+		URL: "https://git.example.com/shop/checkout.git", Branch: "main",
+		BuildArgs: map[string]string{"A": "1", "B": "2", "C": "3", "D": "4", "E": "5"},
+	}
+
+	first := GitSourceFingerprint(source)
+	for range 20 {
+		assert.Equal(t, first, GitSourceFingerprint(source))
+	}
+}
+
+func TestGitSourceFingerprintOfNoSourceMatchesNothing(t *testing.T) {
+	assert.NotEqual(t, GitSourceFingerprint(nil),
+		GitSourceFingerprint(&kipperv1.AppGitSource{URL: "https://git.example.com/shop/checkout.git"}))
+}
+
+// Every existing test here is about what the Job looks like, not about whether
+// a repository answers, so the preflight is stubbed for all of them. The tests
+// that are about the preflight set it themselves.
+func init() {
+	ReachGit = func(context.Context, string, string, string, string) (gitreach.Result, string) {
+		return gitreach.Reachable, ""
+	}
+}
+
+// The gap the reviewers refused to accept as closed: an App CR written straight
+// to the Kubernetes API — by `kip app deploy --git`, or by a GitOps engine —
+// never passes through the console handler that checks. Every build passes
+// through here, so this is the one place that answers for all of them, and it
+// asks from where the clone will actually run rather than from a laptop.
+func TestCreateBuildJobRefusesASourceItCannotClone(t *testing.T) {
+	original := ReachGit
+	ReachGit = func(context.Context, string, string, string, string) (gitreach.Result, string) {
+		return gitreach.NeedsCredential, "this repository is private, so it needs an access token"
+	}
+	t.Cleanup(func() { ReachGit = original })
+
+	client := buildFakeClient()
+	app := testApp()
+
+	_, err := CreateBuildJob(context.Background(), client, app, "9f2c1a")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "access token")
+
+	jobs, listErr := client.BatchV1().Jobs(buildsNamespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, listErr)
+	assert.Empty(t, jobs.Items, "no pod is launched to attempt a clone that cannot succeed")
+}
+
+// A host this cluster cannot reach has said nothing about the repository, and
+// refusing the build on it would make a network blip look like a broken app.
+func TestCreateBuildJobStillBuildsWhenTheCheckCannotComplete(t *testing.T) {
+	original := ReachGit
+	ReachGit = func(context.Context, string, string, string, string) (gitreach.Result, string) {
+		return gitreach.Unknown, "the repository could not be reached from the cluster"
+	}
+	t.Cleanup(func() { ReachGit = original })
+
+	_, err := CreateBuildJob(context.Background(), buildFakeClient(), testApp(), "9f2c1a")
+
+	require.NoError(t, err)
+}
+
+// A token written into the URL is not a credential the builder can protect:
+// git records the clone URL in /workspace/.git/config, /workspace is the build
+// context, and an ordinary COPY bakes it into a layer. The handlers reject it,
+// but an App CR written straight to the Kubernetes API by the CLI or a GitOps
+// engine never passes through them — it passes through here.
+func TestCreateBuildJobRefusesACredentialEmbeddedInTheURL(t *testing.T) {
+	for _, embedded := range []string{
+		"https://operator:ghp_secret@git.example.com/shop/checkout.git",
+		"https://ghp_secret@git.example.com/shop/checkout.git",
+	} {
+		app := testApp()
+		app.Spec.Git.URL = embedded
+		app.Spec.Git.CredentialsSecret = ""
+
+		_, err := CreateBuildJob(context.Background(), buildFakeClient(), app, "9f2c1a")
+
+		require.Error(t, err, "%s was accepted", embedded)
+		assert.Contains(t, err.Error(), "username or password")
+	}
+}
+
+// A per-app credential was trusted purely because the tenant owns both the
+// token and the URL. Two overlapping source changes whose CR updates both fail
+// can leave the Secret holding one host's token beside another host's URL
+// without anyone asking for it, so the pairing has to be checked rather than
+// assumed — the same check the shared-credential path already makes.
+func TestResolveGitTokenRefusesAPerAppCredentialBoundElsewhere(t *testing.T) {
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkout", Namespace: "shop-test"},
+		Spec: kipperv1.AppSpec{Git: &kipperv1.AppGitSource{ //nolint:gosec // k8s Secret object name, not a credential value
+			URL:               "https://git.example.com/shop/checkout.git",
+			CredentialsSecret: "checkout-git-credentials",
+		}},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "checkout-git-credentials", Namespace: "shop-test",
+			Annotations: map[string]string{GitAuthorityAnnotation: "git.other.example.com"},
+		},
+		Data: map[string][]byte{"token": []byte("a-token-for-the-other-host")},
+	}
+
+	_, err := resolveGitToken(context.Background(), fake.NewClientset(secret), app, "git.example.com")
+
+	require.Error(t, err, "a token bound to another host was offered to this one")
+	assert.Contains(t, err.Error(), "git.other.example.com")
+}
+
+// A credential written before the binding was recorded carries no annotation,
+// and refusing those would break every app already cloning happily.
+func TestResolveGitTokenAcceptsAPerAppCredentialWithNoRecordedBinding(t *testing.T) {
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkout", Namespace: "shop-test"},
+		Spec: kipperv1.AppSpec{Git: &kipperv1.AppGitSource{ //nolint:gosec // k8s Secret object name, not a credential value
+			URL:               "https://git.example.com/shop/checkout.git",
+			CredentialsSecret: "checkout-git-credentials",
+		}},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkout-git-credentials", Namespace: "shop-test"},
+		Data:       map[string][]byte{"token": []byte("a-token")},
+	}
+
+	token, err := resolveGitToken(context.Background(), fake.NewClientset(secret), app, "git.example.com")
+
+	require.NoError(t, err)
+	assert.Equal(t, []byte("a-token"), token)
 }
