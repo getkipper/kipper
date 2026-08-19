@@ -5,6 +5,8 @@ import SidePanel from '@/components/SidePanel.vue'
 import SaveButton from '@/components/SaveButton.vue'
 import LogAnalysis from '@/components/LogAnalysis.vue'
 import DiagnoseModal from '@/components/DiagnoseModal.vue'
+import ContainerErrorsModal from '@/components/ContainerErrorsModal.vue'
+import ContainerFailureEntry from '@/components/ContainerFailureEntry.vue'
 import OptimiseModal from '@/components/OptimiseModal.vue'
 import FileViewerModal from '@/components/FileViewerModal.vue'
 import WebTerminal from '@/components/WebTerminal.vue'
@@ -630,21 +632,11 @@ const failingContainers = computed(() => {
   return out
 })
 
-// The line that names the cause. A container between restarts reports only
-// CrashLoopBackOff in its current state; the exit code and the process's own
-// message are in the previous termination, so prefer those.
-function failureDetail(container: api.ContainerHealth): string {
-  const previous = container.last_termination
-  if (previous) {
-    const message = previous.message?.trim()
-    const reason = previous.reason || 'exited'
-    return message ? `${reason} (exit ${previous.exit_code}): ${message}` : `${reason} (exit ${previous.exit_code})`
-  }
-  if (container.exit_code !== undefined) {
-    const message = container.message?.trim()
-    return message ? `exit ${container.exit_code}: ${message}` : `exit ${container.exit_code}`
-  }
-  return container.message?.trim() || ''
+function openContainerErrors() {
+  modal.open(ContainerErrorsModal, {
+    title: `Container errors — ${props.appName}`,
+    failures: failingContainers.value,
+  })
 }
 
 async function loadHealth() {
@@ -2433,37 +2425,25 @@ function openOptimise() {
           {{ failingContainers.length === 1 ? 'A container is not running' : `${failingContainers.length} containers are not running` }}
         </span>
       </div>
-      <div class="space-y-1.5">
-        <div
-          v-for="entry in failingContainers"
-          :key="`${entry.pod}/${entry.container.name}`"
-          class="text-xs"
-        >
-          <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span class="font-mono font-medium text-red-900 dark:text-red-200">{{ entry.container.name }}</span>
-            <span class="rounded bg-red-100 px-1.5 py-0.5 font-medium text-red-700 dark:bg-red-900/60 dark:text-red-300">
-              {{ entry.container.reason || entry.container.state }}
-            </span>
-            <span v-if="entry.container.restarts > 0" class="text-red-700 dark:text-red-400">
-              restarted {{ entry.container.restarts }}&times;
-            </span>
-            <span class="font-mono text-red-500 dark:text-red-500">{{ entry.pod }}</span>
-          </div>
-          <p
-            v-if="failureDetail(entry.container)"
-            class="mt-0.5 break-words font-mono text-red-800 dark:text-red-300"
-          >{{ failureDetail(entry.container) }}</p>
-          <pre
-            v-if="entry.container.log"
-            data-testid="app-health-log"
-            class="mt-1 max-h-40 overflow-auto rounded bg-red-100/60 p-2 font-mono text-[11px] leading-relaxed text-red-900 dark:bg-red-950/60 dark:text-red-200"
-          >{{ entry.container.log }}</pre>
-        </div>
+      <!-- Only the first failure inline. Replicas of one workload fail
+           identically, so further excerpts add height rather than information;
+           the full list is behind the button. -->
+      <ContainerFailureEntry
+        :pod="failingContainers[0].pod"
+        :container="failingContainers[0].container"
+      />
+      <div class="mt-2 flex items-center gap-4">
+        <button
+          v-if="failingContainers.length > 1"
+          data-testid="app-health-show-all"
+          @click="openContainerErrors"
+          class="text-xs font-medium text-red-700 underline underline-offset-2 hover:text-red-900 dark:text-red-400 dark:hover:text-red-200"
+        >Show all {{ failingContainers.length }} errors</button>
+        <button
+          @click="activeTab = 'logs'"
+          class="text-xs font-medium text-red-700 underline underline-offset-2 hover:text-red-900 dark:text-red-400 dark:hover:text-red-200"
+        >Open logs</button>
       </div>
-      <button
-        @click="activeTab = 'logs'"
-        class="mt-2 text-xs font-medium text-red-700 underline underline-offset-2 hover:text-red-900 dark:text-red-400 dark:hover:text-red-200"
-      >Open logs</button>
     </div>
 
     <div

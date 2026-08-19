@@ -4,8 +4,10 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 import AppDetail from '../AppDetail.vue'
+import ModalContainer from '../ModalContainer.vue'
 import * as appsApi from '@/api/apps'
 import * as projectsApi from '@/api/projects'
+import { useModal } from '@/composables/useModal'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectsStore } from '@/stores/projects'
 import type { ContainerHealth, PodHealth } from '@/api/apps'
@@ -210,6 +212,69 @@ describe('AppDetail health banner', () => {
     await flushPromises()
 
     expect(rendered()).not.toContain('app-health-banner')
+  })
+})
+
+// Five identical crashloop replicas rendered five full log excerpts and filled
+// the whole panel, burying the tabs. The banner leads with the first failure
+// and hands the rest to a modal.
+describe('when several containers fail', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(appsApi.fetchLogs).mockResolvedValue([])
+    document.body.innerHTML = ''
+    // useModal keeps its state at module level, so a modal opened in one test
+    // would still be open in the next.
+    useModal().close()
+  })
+
+  function crashing(podName: string, log: string): PodHealth {
+    return {
+      name: podName,
+      phase: 'Running',
+      init_containers: [],
+      containers: [{
+        name: 'checkout', ready: false, restarts: 5, state: 'waiting', reason: 'CrashLoopBackOff',
+        last_termination: { reason: 'Error', exit_code: 1 },
+        log,
+      }],
+    }
+  }
+
+  const replicas = [
+    crashing('checkout-7d76-first', 'first replica log: config key missing'),
+    crashing('checkout-7d76-second', 'second replica log'),
+    crashing('checkout-7d76-third', 'third replica log'),
+  ]
+
+  it('shows only the first failure inline', async () => {
+    await mountWithHealth(replicas)
+
+    expect(renderedText()).toContain('first replica log: config key missing')
+    expect(renderedText()).not.toContain('second replica log')
+    expect(renderedText()).toContain('Show all 3 errors')
+  })
+
+  it('lists every failure in the modal', async () => {
+    // The modal renders through ModalContainer, mounted app-wide in App.vue,
+    // so the test mounts it alongside the panel the same way.
+    mount(ModalContainer, { attachTo: document.body })
+    await mountWithHealth(replicas)
+
+    document.querySelector<HTMLButtonElement>('[data-testid="app-health-show-all"]')!.click()
+    await flushPromises()
+
+    expect(renderedText()).toContain('first replica log: config key missing')
+    expect(renderedText()).toContain('second replica log')
+    expect(renderedText()).toContain('third replica log')
+    expect(renderedText()).toContain('checkout-7d76-third')
+  })
+
+  it('keeps a single failure inline without a show-all button', async () => {
+    await mountWithHealth([replicas[0]])
+
+    expect(renderedText()).toContain('first replica log: config key missing')
+    expect(rendered()).not.toContain('app-health-show-all')
   })
 })
 
