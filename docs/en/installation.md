@@ -1179,7 +1179,7 @@ Two things it will not do. A `kube-apiserver-arg` block kip did not write is nev
 
 Audit logging arrives with the same block, writing to `/var/lib/rancher/k3s/server/logs/audit.log` under the policy fresh installs use: metadata only, never request or response bodies, capped at 100 MB per file with 10 kept for 30 days.
 
-A cluster already carrying these arguments is left alone, and nothing restarts.
+A cluster already carrying these arguments keeps them, and the arguments themselves are not rewritten. It can still restart: an upgrade that changes the audit policy loads it by restarting k3s, and says so before it does.
 
 ```bash
 kip upgrade                    # default, prompts before system components
