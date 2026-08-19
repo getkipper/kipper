@@ -798,7 +798,7 @@ func TestVerifyPinRejectsUnprovenPreviousKeyWhenEnforcing(t *testing.T) {
 
 // The first-pin settle window tolerates an unknown leaf so a lagging Traefik
 // replica does not 502 during the pin rollout. Under enforcement that tolerance
-// must not become an interception window (Codex Finding 8).
+// must not become an interception window.
 func TestVerifyPinSettleWindowRejectsUnknownLeafWhenEnforcing(t *testing.T) {
 	ts, _ := pinBackend(t) // the backend's key matches neither the pin nor the proof
 	now := time.Now().UTC().Format(time.RFC3339)
