@@ -566,7 +566,7 @@ func proveKey(t *testing.T, r *Registry, entry *Entry, spki string) {
 // The lease authorises the key it was obtained for, nothing else. A token holder
 // who parks their own key and gets it observed on the wire must not inherit the
 // proven key's remaining lease — that is interception with the token plus an
-// on-path position, and no hop private key (EOD Critical, Codex Finding 1).
+// on-path position, and no hop private key.
 func TestRoutableRequiresProofForThePinnedKey(t *testing.T) {
 	r := New()
 	entry, _, _ := r.Register("myapp", "203.0.113.1", "")
