@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -171,6 +172,15 @@ func (c *Client) masterIsServing() bool {
 // it lives under the user's own kip directory rather than a shared temp
 // directory, so no other local account can sit on the path.
 func controlSocket(cfg Config) string {
+	// Windows OpenSSH has no connection multiplexing, and asking for it there
+	// is worse than going without: ssh treats a ControlPath it cannot bind as
+	// fatal, so every command fails rather than falling back. An empty path is
+	// the documented "no master" answer this file already handles, which costs
+	// a handshake per command and works.
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""

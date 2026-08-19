@@ -225,6 +225,24 @@ Builds are separate. The build container runs your Dockerfile's `RUN` steps, so 
 
 The **Source** tab in the web console shows the current build status, commit SHA, timestamps, and error messages. You can also trigger rebuilds and cancel active builds from there.
 
+A build reports one of `Pending`, `Building`, `Succeeded`, `Failed` or `Discarded`. **Discarded** means the build finished but its image was not deployed, because by then it no longer matched the source the app declares. Editing the repository URL, the branch, the Dockerfile path, the build context or a build argument does not start a build, so a build already running when you make that edit would otherwise finish and deploy an artefact built from the settings you just changed. Kipper refuses it and says so on the Source tab. Deploy again to build from the current source.
+
+### Moving an app off git
+
+An app that builds from git ignores images your pipeline pushes, because the next build overwrites them. Detach the source when the pipeline should own the image:
+
+```bash
+kip app git remove checkout --project shop --environment production
+```
+
+```
+  ✔  checkout no longer builds from git
+     It keeps running the image it has. Deploy a new one with
+     'kip app update checkout --image <image>' or from your pipeline.
+```
+
+The app keeps running the image it has. The stored access token and the last build's status go with the source. The Git source card in the console has a Remove button that does the same thing.
+
 See the [Source tab](/en/deploying-apps#from-a-git-repository) in the web console for a visual overview.
 
 ## Path-based routing (microservices)

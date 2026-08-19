@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getkipper/kipper/console-api/internal/giturl"
+	"github.com/getkipper/kipper/controller/pkg/giturl"
 	"github.com/getkipper/kipper/controller/pkg/netguard"
 )
 
@@ -234,13 +234,16 @@ func probeTokenExpiry(ctx context.Context, token, serverHint string) tokenHealth
 // probeGitLabPAT calls the GitLab personal_access_tokens/self API and returns
 // validity and expiry info.
 func probeGitLabPAT(ctx context.Context, baseURL, token string) tokenHealth {
+	//nolint:gosec // G704: baseURL is a canonical authority from gitProbeTarget, and probeClient refuses
+	// non-public addresses and follows no redirects, so the probe cannot reach anything but the public
+	// host the operator configured.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v4/personal_access_tokens/self", nil)
 	if err != nil {
 		return tokenHealth{Valid: false, Error: "failed to build request"}
 	}
 	req.Header.Set("PRIVATE-TOKEN", token)
 
-	resp, err := probeClient.Do(req)
+	resp, err := probeClient.Do(req) //nolint:gosec // G704: see the note on the request above
 	if err != nil {
 		return tokenHealth{Valid: false, Error: "GitLab API unreachable"}
 	}

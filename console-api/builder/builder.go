@@ -23,8 +23,9 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/internal/gitcred"
-	"github.com/getkipper/kipper/console-api/internal/giturl"
+	"github.com/getkipper/kipper/console-api/internal/gitreach"
 	"github.com/getkipper/kipper/console-api/internal/registrycred"
+	"github.com/getkipper/kipper/controller/pkg/giturl"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 )
 
@@ -110,6 +111,18 @@ var validGitBranch = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
 // validateGitSource rejects branch names and clone URLs that could break out of
 // the git clone step. The URL must be https, which also blocks git's dangerous
 // local transports (ext::, file://) that would run commands even via argv.
+// ValidateGitSource checks what can be judged without a network: the URL's
+// shape and the branch's syntax.
+//
+// Exported so the handlers apply exactly this before storing anything. A
+// branch like "release..candidate" needs no host to be known impossible, and
+// letting it through because the remote check timed out stores input the
+// builder already knows it will reject — the create succeeds and the app can
+// never build.
+func ValidateGitSource(cloneURL, branch string) error {
+	return validateGitSource(cloneURL, branch)
+}
+
 func validateGitSource(cloneURL, branch string) error {
 	if len(branch) > 255 || !validGitBranch.MatchString(branch) || strings.Contains(branch, "..") {
 		return fmt.Errorf("invalid git branch")
@@ -117,6 +130,20 @@ func validateGitSource(cloneURL, branch string) error {
 	u, err := url.Parse(cloneURL)
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return fmt.Errorf("git url must be a valid https:// URL")
+	}
+	// A credential written into the URL itself is not a credential this can
+	// protect. git records the clone URL in /workspace/.git/config, and
+	// /workspace is the build context, so an ordinary COPY bakes the token
+	// into an image layer. It is also readable to anyone who can read the App.
+	//
+	// Checked here rather than only in the handlers, because this is the path
+	// every build passes through: an App CR written straight to the Kubernetes
+	// API by the CLI or a GitOps engine reaches this and not them.
+	if u.User != nil {
+		return fmt.Errorf("git url must not carry a username or password: store the token as a credential instead, or git writes it into the build context and it ends up in the image")
+	}
+	if u.Fragment != "" || strings.ContainsAny(cloneURL, " \t\n\r") {
+		return fmt.Errorf("git url must not contain a fragment or whitespace")
 	}
 	return nil
 }
@@ -172,6 +199,16 @@ const (
 func ImageRef(namespace, appName, commitSHA string) string {
 	return fmt.Sprintf("%s/%s/%s:%s", registryEndpoint, namespace, appName, commitSHA)
 }
+
+// gitCredentialUsername is what a token is sent as during the preflight. Git
+// hosts ignore the username on a personal access token and reject a request
+// that sends none.
+const gitCredentialUsername = "kipper"
+
+// ReachGit is the clone preflight. A variable, and exported, so that tests in
+// this package and in the packages that create builds can drive every answer
+// without any of them reaching the network.
+var ReachGit = gitreach.Check
 
 // CreateBuildJob creates a Kubernetes Job that clones the Git repo and builds
 // a container image using Kaniko, then pushes it to the internal Zot registry.
@@ -279,6 +316,12 @@ func CreateBuildJob(ctx context.Context, client kubernetes.Interface, app *kippe
 			Labels:    buildLabels,
 			Annotations: map[string]string{
 				"kipper.run/commit": commitSHA,
+				// The source this artefact is built from, so a completion can
+				// be checked against the source the app declares by then. The
+				// app UID covers a delete and recreate, and job ordering covers
+				// a newer build, but neither covers a source that was edited
+				// without launching one.
+				SourceFingerprintAnnotation: GitSourceFingerprint(app.Spec.Git),
 			},
 			// No App ownerRef: the App lives in the tenant namespace and
 			// cross-namespace ownerRefs are ignored by garbage collection.
@@ -442,6 +485,10 @@ func CreateBuildJob(ctx context.Context, client kubernetes.Interface, app *kippe
 		}
 	}
 
+	// The credential the clone will use, when there is one, so the preflight
+	// below asks with exactly what the build has.
+	var buildToken string
+
 	// Mount git credentials if configured. The token is resolved centrally
 	// (a shared credential from kipper-system, allow-listed to this project and
 	// bound to the clone host; or a per-app credential from the tenant
@@ -466,6 +513,7 @@ func CreateBuildJob(ctx context.Context, client kubernetes.Interface, app *kippe
 			cleanup()
 			return nil, err
 		}
+		buildToken = string(token)
 		gitSecret := jobName + "-git"
 		if err := writeBuildSecret(ctx, client, gitSecret, buildLabels, map[string][]byte{"token": token}); err != nil {
 			cleanup()
@@ -520,6 +568,26 @@ func CreateBuildJob(ctx context.Context, client kubernetes.Interface, app *kippe
 	}
 	ephemeral = append(ephemeral, registrySecret)
 
+	// Prove the clone before launching a pod to attempt it. This is the one
+	// place every build passes through — the console, a webhook, a migration,
+	// and an App CR written straight to the Kubernetes API by the CLI or a
+	// GitOps engine — so it is the only place that can answer for all of them.
+	// It runs in console-api rather than in the build pod, so it does not prove
+	// the build namespace's own egress. What it does prove is the repository's
+	// answer to a real reference advertisement with the credential the build
+	// will use, which is what the failures this exists for turn on.
+	//
+	// Outside the credential branch on purpose: an app with no credential at
+	// all against a private repository is the original failure, and checking
+	// only credentialled builds would skip exactly it.
+	//
+	// Only a definite refusal stops the build. A host this cluster cannot reach
+	// has said nothing about the repository, and the clone is worth attempting.
+	if result, detail := ReachGit(ctx, git.URL, branch, gitCredentialUsername, buildToken); result == gitreach.NeedsCredential || result == gitreach.Unsafe {
+		cleanup()
+		return nil, fmt.Errorf("%s cannot be cloned: %s", git.URL, detail)
+	}
+
 	created, err := client.BatchV1().Jobs(buildsNamespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
 		cleanup()
@@ -533,13 +601,37 @@ func CreateBuildJob(ctx context.Context, client kubernetes.Interface, app *kippe
 	return created, nil
 }
 
+// GitAuthorityAnnotation records the clone host a per-app credential was stored
+// for, so a token and a URL that stopped agreeing can be caught before the
+// token travels.
+const GitAuthorityAnnotation = labels.AnnoGitAuthority
+
+// CredentialBoundElsewhere reports the host a per-app credential was stored for
+// when that is not the host about to be contacted, and whether there is such a
+// disagreement at all.
+//
+// The token and the URL are written as a pair but not in one transaction, so
+// they can stop agreeing without anyone asking. Every path that sends the token
+// asks this, not just the build: a health probe that authenticates against the
+// app's current URL discloses it just as thoroughly. A credential stored before
+// the binding was recorded carries none and is trusted, which is what keeps
+// existing clusters working.
+func CredentialBoundElsewhere(annotations map[string]string, authority string) (string, bool) {
+	bound := annotations[GitAuthorityAnnotation]
+	if bound == "" || bound == authority {
+		return "", false
+	}
+	return bound, true
+}
+
 // resolveGitToken returns the token the build's credential helper will present.
 // A credential name that matches a shared credential in kipper-system is a
 // shared credential: it is usable only if the app's project is on the
 // credential's allow-list and the credential's bound host equals the clone
 // host. Any other name is a per-app credential read from the tenant namespace,
-// where the tenant owns both the token and the URL so there is no cross-host
-// or cross-tenant escalation. authority is the clone URL's canonical authority.
+// where the tenant owns both the token and the URL. It is still checked against
+// the host recorded when it was stored, because the two are written as a pair
+// and not in one transaction. authority is the clone URL's canonical authority.
 func resolveGitToken(ctx context.Context, client kubernetes.Interface, app *kipperv1.App, authority string) ([]byte, error) {
 	name := app.Spec.Git.CredentialsSecret
 	shared, err := gitcred.Load(ctx, client)
@@ -577,6 +669,15 @@ func resolveGitToken(ctx context.Context, client kubernetes.Interface, app *kipp
 	secret, err := client.CoreV1().Secrets(app.Namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("reading git credential %s: %w", name, err)
+	}
+	// The token and the URL are written as a pair but not in one transaction,
+	// and two overlapping source changes whose CR updates both fail can leave
+	// one host's token beside another host's URL. The binding recorded when the
+	// token was stored is what proves the pair, so a disagreement fails the
+	// build rather than sending the token to the wrong host. A credential
+	// stored before the binding was recorded carries none and is trusted.
+	if bound, elsewhere := CredentialBoundElsewhere(secret.Annotations, authority); elsewhere {
+		return nil, fmt.Errorf("git credential %s was stored for %s but the app clones from %s, so it was not sent: set the git source again", name, bound, authority)
 	}
 	token := secret.Data["token"]
 	if len(token) == 0 {
@@ -947,16 +1048,22 @@ func GetBuildStatus(ctx context.Context, client kubernetes.Interface, namespace,
 		return nil, nil
 	}
 
-	// Find the most recent job
+	// Find the most recent job. Equal timestamps break on name, the same way
+	// supersession does, so two jobs created in the same second cannot make the
+	// older one the latest for one reader and not the other.
 	latest := &jobs.Items[0]
 	for i := range jobs.Items {
-		if jobs.Items[i].CreationTimestamp.After(latest.CreationTimestamp.Time) {
+		switch {
+		case jobs.Items[i].CreationTimestamp.After(latest.CreationTimestamp.Time):
+			latest = &jobs.Items[i]
+		case jobs.Items[i].CreationTimestamp.Equal(&latest.CreationTimestamp) && jobs.Items[i].Name > latest.Name:
 			latest = &jobs.Items[i]
 		}
 	}
 
 	status := &kipperv1.AppBuildStatus{
 		StartedAt: &latest.CreationTimestamp,
+		Build:     latest.Name,
 	}
 
 	switch {
@@ -999,4 +1106,52 @@ func int64Ptr(i int64) *int64 { return &i }
 // (privileged, hostPath, host namespaces, added capabilities).
 func noPrivEscSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{AllowPrivilegeEscalation: boolPtr(false)}
+}
+
+// sourceFingerprintAnnotation records which git source a build job was created
+// from.
+//
+// Exported because the build controller must compare it, and a second spelling
+// of the same key in another package is how the two would drift apart.
+const SourceFingerprintAnnotation = "kipper.run/git-source"
+
+// GitSourceFingerprint identifies the source an artefact is built from.
+//
+// Derived from the whole source rather than a list of fields, because listing
+// them is how the last version of this went wrong: it named the four it knew
+// about and omitted BuildArgs, which Kaniko is given directly and which
+// therefore decides what the image contains.
+//
+// Only the fields that demonstrably cannot change the artefact are cleared
+// first. Everything else counts, so a field added to this type later is
+// included by default — and the two ways of being wrong are not equal. A field
+// wrongly included discards a build that was in flight, which costs a rebuild.
+// A field wrongly omitted deploys an artefact the app did not ask for.
+//
+// A nil source fingerprints as empty, which is what a detached app compares
+// against and never matches a job built from a real one.
+// UnfingerprintableSource is stamped in place of a fingerprint that could not
+// be computed. The reconciler treats it as belonging to no source at all: a
+// sentinel that compared equal to itself would let exactly the completions it
+// exists to catch deploy unchecked, since both sides compute it the same way.
+const UnfingerprintableSource = "unfingerprintable"
+
+func GitSourceFingerprint(git *kipperv1.AppGitSource) string {
+	if git == nil {
+		return ""
+	}
+	deciding := *git
+	// The credential decides whether the repository can be read, not what is
+	// built from it, and rotating a token mid-build must not discard the build.
+	deciding.CredentialsSecret = ""
+	// Resource limits decide how the build runs, not what it produces.
+	deciding.BuildResources = nil
+
+	// encoding/json sorts map keys, so BuildArgs fingerprints deterministically.
+	encoded, err := json.Marshal(deciding)
+	if err != nil {
+		return UnfingerprintableSource
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
 }

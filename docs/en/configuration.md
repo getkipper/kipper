@@ -118,7 +118,7 @@ kip --cluster dev app list
 
 ### Sharing cluster access
 
-Export cluster credentials for a team member:
+Export a cluster for a team member. The file carries no credential:
 
 ```bash
 kip cluster export > production.kip

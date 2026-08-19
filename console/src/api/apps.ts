@@ -314,6 +314,10 @@ export async function updateGitSource(project: string, app: string, payload: Upd
   return data
 }
 
+export async function deleteGitSource(project: string, app: string): Promise<void> {
+  await client.delete(`/projects/${project}/apps/${app}/git`)
+}
+
 export interface BuildStatus {
   git_configured: boolean
   git_url?: string
@@ -519,6 +523,37 @@ export async function rollbackApp(project: string, app: string, revision?: numbe
 
 export async function fetchPods(project: string, app: string): Promise<string[]> {
   const { data } = await client.get<{ pods: string[] }>(`/projects/${project}/apps/${app}/pods`)
+  return data.pods
+}
+
+export interface ContainerTermination {
+  reason?: string
+  exit_code: number
+  message?: string
+  finished_at?: string
+}
+
+export interface ContainerHealth {
+  name: string
+  ready: boolean
+  restarts: number
+  state: 'running' | 'waiting' | 'terminated' | 'unknown'
+  reason?: string
+  message?: string
+  exit_code?: number
+  last_termination?: ContainerTermination
+  log?: string
+}
+
+export interface PodHealth {
+  name: string
+  phase: string
+  init_containers: ContainerHealth[]
+  containers: ContainerHealth[]
+}
+
+export async function fetchAppHealth(project: string, app: string): Promise<PodHealth[]> {
+  const { data } = await client.get<{ pods: PodHealth[] }>(`/projects/${project}/apps/${app}/health`)
   return data.pods
 }
 

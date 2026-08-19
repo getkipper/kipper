@@ -225,3 +225,14 @@ func EnsureAdminBindingSubjects(client *ssh.Client, emails ...string) error {
 	}
 	return nil
 }
+
+// InitialAdminBindingManifest renders the bootstrap cluster-admin grant for a
+// domain, so an upgrade can create one on a cluster installed before the
+// binding existed.
+//
+// Exported for exactly that: the install applies it as part of the whole
+// operator RBAC manifest, and an upgrade needs this document on its own,
+// because the roles beside it are safe to re-apply and this is not.
+func InitialAdminBindingManifest(domain string) string {
+	return fmt.Sprintf(initialAdminBindingTemplate, oidcUsernamePrefix, domain)
+}

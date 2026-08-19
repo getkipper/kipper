@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,6 +23,7 @@ import (
 	"github.com/getkipper/kipper/kip/internal/clusteridentity"
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
+	"github.com/getkipper/kipper/kip/internal/k8s"
 )
 
 var clusterCmd = &cobra.Command{
@@ -49,9 +51,14 @@ Examples:
 
 var clusterExportCmd = &cobra.Command{
 	Use:   "export",
-	Short: "Export cluster credentials for sharing with team members",
+	Short: "Export a cluster for sharing with team members",
 	Long: `Exports the current cluster's connection details as a portable file
 that team members can import with 'kip cluster add'.
+
+The file carries how to reach the cluster and the hosts it serves on, and no
+credential: whoever imports it signs in as themselves with 'kip auth login'.
+The hosts come from the cluster's own record of what it serves, so an export
+cannot pass on a stale idea of them.
 
 Examples:
   kip cluster export > cluster.kip
@@ -322,17 +329,50 @@ func runClusterExport(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("reading kubeconfig: %w", err)
 	}
 
+	domain, hosts, err := exportServingIdentity(cluster)
+	if err != nil {
+		return err
+	}
+
+	// The bundle carries no credential. Rendering it through the importer's own
+	// renderer keeps the server address and cluster authority and discards
+	// every authentication form, so what is written is what the other side
+	// would have kept anyway — the two halves cannot disagree about it.
+	//
+	// Without this, a machine still holding the shared admin certificate wrote
+	// that certificate and its private key into a file the documentation
+	// invites you to send to your team, and the importer then refused the
+	// result.
+	shareable, err := installer.RenderImportedKubeconfig(domain, string(kubeconfig))
+	if err != nil {
+		return fmt.Errorf("preparing the kubeconfig to share: %w", err)
+	}
+	// A credential is not only an AuthInfo. The server and proxy addresses are
+	// carried across because without them the cluster is unreachable, and a URL
+	// can carry a username and password in its userinfo — so a bundle that
+	// truthfully holds no authentication data can still hand a colleague the
+	// operator's proxy password. Refused rather than stripped: silently
+	// removing it would produce a plausible bundle that cannot reach anything.
+	if err := rejectURLCredentials([]byte(shareable)); err != nil {
+		return err
+	}
+
+	// Everything the operator is told goes to stderr, so a redirected stdout is
+	// the bundle and nothing else.
+	fmt.Fprintf(os.Stderr, "\n  ✔  Exporting %s. The file carries no credential: your colleague signs in as themselves.\n\n", cluster.Name)
+
 	fmt.Printf("# Kipper cluster export: share this file with team members\n")
 	fmt.Printf("# Import with: kip cluster add <file>\n")
 	fmt.Printf("name: %s\n", cluster.Name)
 	fmt.Printf("provider: %s\n", cluster.Provider)
 	fmt.Printf("host: %s\n", cluster.Host)
-	fmt.Printf("domain: %s\n", cluster.Domain)
+	fmt.Printf("domain: %s\n", domain)
 	if cluster.Org != "" {
 		fmt.Printf("org: %s\n", cluster.Org)
 	}
+	fmt.Print(renderExportHostLines(hosts))
 	fmt.Printf("kubeconfig: |\n")
-	encoded := base64.StdEncoding.EncodeToString(kubeconfig)
+	encoded := base64.StdEncoding.EncodeToString([]byte(shareable))
 	for i := 0; i < len(encoded); i += 76 {
 		end := i + 76
 		if end > len(encoded) {
@@ -420,7 +460,7 @@ func refuseToReplaceACredential(path string) error {
 		// in the same entry: the plugin can be re-rendered, the credential
 		// beside it cannot. Another tool's plugin is refused outright, since
 		// kip never issued it and cannot put it back.
-		if carriesCredential(authInfo) || (authInfo.Exec != nil && !installer.IsExactlyKipExec(authInfo)) {
+		if irreplaceableAccess(authInfo) {
 			// A plugin that looks like kip's but is not exactly what this build
 			// writes gets its own sentence. Calling an older kip's file "a
 			// credential an export cannot reissue" sends the operator looking
@@ -442,6 +482,35 @@ func refuseToReplaceACredential(path string) error {
 // credential as a client certificate, and missing one means both callers get it
 // wrong in opposite directions: an export carrying it is accepted as
 // credential-free, and a local file holding it is replaced as if empty.
+// irreplaceableAccess reports whether replacing an entry costs access this
+// machine cannot get back.
+//
+// A credential of any form counts even when kip's own plugin sits beside it:
+// the plugin can be re-rendered, the credential cannot. Another tool's plugin
+// counts too, because kip never issued it — nothing here can write a
+// cloud provider's exec stanza back.
+//
+// Both writers that replace a whole kubeconfig ask this, so an import and a
+// conversion cannot disagree about what is safe to destroy.
+func irreplaceableAccess(authInfo *clientcmdapi.AuthInfo) bool {
+	return carriesCredential(authInfo) ||
+		(authInfo.Exec != nil && !installer.IsExactlyKipExec(authInfo)) ||
+		impersonates(authInfo)
+}
+
+// impersonates reports whether an entry assumes another identity.
+//
+// Impersonation is not a credential and is still the access: an operator whose
+// own identity is denied may be authorized entirely through the identity these
+// fields name. The rewrite renders a fresh file and keeps none of them, so
+// replacing such an entry costs exactly the access that was working.
+func impersonates(authInfo *clientcmdapi.AuthInfo) bool {
+	return authInfo.Impersonate != "" ||
+		authInfo.ImpersonateUID != "" ||
+		len(authInfo.ImpersonateGroups) > 0 ||
+		len(authInfo.ImpersonateUserExtra) > 0
+}
+
 func carriesCredential(authInfo *clientcmdapi.AuthInfo) bool {
 	return len(authInfo.ClientCertificateData) > 0 || authInfo.ClientCertificate != "" ||
 		len(authInfo.ClientKeyData) > 0 || authInfo.ClientKey != "" ||
@@ -532,6 +601,9 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	var name, provider, host, domain, org string
+	// The serving hosts, when the bundle carries them. All three or none: see
+	// exportHosts.validate.
+	var hosts exportHosts
 	// Whether the export carried an org at all, which is not the same as
 	// carrying an empty one: the export omits the key when a cluster has no org,
 	// so a merge that wrote org unconditionally would strip it from an entry
@@ -557,6 +629,17 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 
 		parts := strings.SplitN(trimmed, ": ", 2)
 		if len(parts) != 2 {
+			// A key whose value is empty carries no ": " delimiter, so it would
+			// otherwise be skipped here — and a damaged bundle whose host lines
+			// lost their values would count as no host lines at all, which is
+			// exactly the "old bundle" reading the key count exists to rule
+			// out.
+			if bare, ok := strings.CutSuffix(trimmed, ":"); ok {
+				switch bare {
+				case "console_domain", "console_api_domain", "dex_domain":
+					hosts.keys++
+				}
+			}
 			if strings.HasSuffix(trimmed, "|") {
 				key := strings.TrimSuffix(strings.TrimSpace(trimmed), ": |")
 				if key == "kubeconfig" {
@@ -586,10 +669,26 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 		case "org":
 			org = val
 			orgCarried = true
+		case "console_domain":
+			hosts.Console = val
+			hosts.keys++
+		case "console_api_domain":
+			hosts.ConsoleAPI = val
+			hosts.keys++
+		case "dex_domain":
+			hosts.Dex = val
+			hosts.keys++
 		}
 	}
 
 	if name == "" || host == "" {
+		// The file people reach for first is the kubeconfig, because it is the
+		// one that looks like the cluster config. It is not what registers a
+		// cluster, and reporting a missing field sends them hunting for the
+		// field rather than for the right file.
+		if looksLikeAKubeconfig(data) {
+			return fmt.Errorf("%s is a kubeconfig, not a cluster export. Run 'kip cluster export > cluster.kip' on a machine that already has this cluster, and import that file instead", filePath)
+		}
 		return fmt.Errorf("invalid export file: missing name or host")
 	}
 
@@ -607,7 +706,18 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 	if strings.TrimSpace(domain) == "" {
 		return fmt.Errorf("invalid export file: no domain, so kip cannot tell which cluster the kubeconfig should authenticate against")
 	}
+	if err := hosts.validate(); err != nil {
+		return err
+	}
 	if err := rejectEmbeddedCredential(kubeconfig); err != nil {
+		return err
+	}
+	// Both ends apply this. The export refuses to send userinfo in a server or
+	// proxy URL, and a bundle that arrives carrying one was written by
+	// something else — a hand edit, or an older kip. What is preserved for
+	// reachability is preserved verbatim, so an unchecked import would store
+	// somebody's password on this machine and reach the address it names.
+	if err := rejectURLCredentials(kubeconfig); err != nil {
 		return err
 	}
 	if err := rejectMismatchedClusterPin(kubeconfig, domain); err != nil {
@@ -667,6 +777,16 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 			entry.Host = host
 			entry.Domain = domain
 			entry.Kubeconfig = kubeconfigPath
+			// Only when the bundle carried them. A bundle written before hosts
+			// were carried says nothing about them, and clearing the entry's
+			// overrides on that silence would point a working machine at the
+			// derived hosts this change exists to stop.
+			if hosts.present() {
+				overrides := importedHostOverrides(domain, hosts)
+				entry.ConsoleDomain = overrides.Console
+				entry.ConsoleAPIDomain = overrides.ConsoleAPI
+				entry.DexDomain = overrides.Dex
+			}
 			if orgCarried {
 				// The display name only becomes wrong when the org itself
 				// changes. Clearing it every time costs an operator the name of
@@ -684,13 +804,17 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 			// but hand-editing the config.
 			entry.HostWiped = false
 		} else {
+			overrides := importedHostOverrides(domain, hosts)
 			cfg.Clusters = append(cfg.Clusters, config.Cluster{
-				Name:       name,
-				Provider:   provider,
-				Host:       host,
-				Domain:     domain,
-				Kubeconfig: kubeconfigPath,
-				Org:        org,
+				Name:             name,
+				Provider:         provider,
+				Host:             host,
+				Domain:           domain,
+				ConsoleDomain:    overrides.Console,
+				ConsoleAPIDomain: overrides.ConsoleAPI,
+				DexDomain:        overrides.Dex,
+				Kubeconfig:       kubeconfigPath,
+				Org:              org,
 			})
 		}
 		if setCurrent || cfg.CurrentCluster == "" {
@@ -1188,4 +1312,212 @@ func pinsDomain(path, domain string) bool {
 	}
 	pinned := pinnedClusterDomains(ai.Exec.Args)
 	return len(pinned) == 1 && pinned[0] == domain
+}
+
+// exportHosts is the serving identity an export carries, flat so that an older
+// kip reading the bundle drops the keys it does not know instead of
+// misreading them.
+//
+// The parser above strips indentation before splitting a line on ": ", so a
+// nested block containing a key named "domain" would reach an older kip as the
+// top-level cluster domain and overwrite it. Flat, unshared key names are what
+// make that impossible rather than merely unlikely.
+type exportHosts struct {
+	Console    string
+	ConsoleAPI string
+	Dex        string
+	// keys is how many of the three host keys the bundle actually carried.
+	// Counted separately from the values, because a damaged bundle whose keys
+	// all lost their values is not a bundle that predates them: judging by
+	// value alone would read it as legacy and derive the plausible wrong hosts
+	// this whole contract exists to stop.
+	keys int
+}
+
+// present reports whether the bundle carried the hosts at all. A bundle
+// written before they existed carries none, and must leave whatever overrides
+// the machine already has alone.
+func (h exportHosts) present() bool {
+	return h.keys > 0
+}
+
+// validate refuses a partial triple. The exporter always writes all three, so
+// one or two means the file was truncated or edited by hand; treating that as
+// a complete set would replace good overrides with empty strings and derive
+// the plausible wrong hosts this whole change exists to stop.
+func (h exportHosts) validate() error {
+	if !h.present() {
+		return nil
+	}
+	if h.keys != 3 || h.Console == "" || h.ConsoleAPI == "" || h.Dex == "" {
+		return fmt.Errorf("invalid export file: incomplete host set, so kip cannot tell which hosts this cluster serves. Re-export it from a machine where the cluster answers")
+	}
+	// The same rule kip cluster hosts applies to the same three fields. A
+	// bundle is a file someone sent, so a value that cannot be a hostname is
+	// caught here rather than surfacing much later as a malformed endpoint
+	// with nothing pointing back to the import.
+	for flag, value := range map[string]string{"console_domain": h.Console, "console_api_domain": h.ConsoleAPI, "dex_domain": h.Dex} {
+		if err := validateHostname(flag, value); err != nil {
+			return fmt.Errorf("invalid export file: %w", err)
+		}
+	}
+	return nil
+}
+
+// renderExportHosts resolves the hosts to export from the cluster's own
+// serving identity, so an export cannot carry the exporting machine's drift.
+//
+// All three are always returned, conventional or not: their presence in the
+// bundle is the only thing that distinguishes a host-carrying export from one
+// written before hosts were carried, and omitting the conventional case would
+// destroy that signal.
+func renderExportHosts(cluster *config.Cluster, ci *clusteridentity.ClusterIdentity) (exportHosts, error) {
+	// A move in flight is a warning, not a refusal. repairIdentity resolves
+	// every phase to the identity that authenticates right now, so the export
+	// is correct at the moment it is made; what it cannot promise is that the
+	// hosts stay put. Refusing outright would mean nobody can be onboarded, and
+	// no disaster recovery can be set up, for as long as a transition is open
+	// or stuck — which is exactly when someone is most likely to need it.
+	if ci.Status.Transition != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠  %s is moving to a new serving identity (phase %s). This export carries the\n", cluster.Name, ci.Phase())
+		fmt.Fprintf(os.Stderr, "     hosts that answer now, and they change when the move completes. Re-export\n")
+		fmt.Fprintf(os.Stderr, "     and re-import once 'kip cluster domain --sync' reports it settled.\n\n")
+	}
+	identity := repairIdentity(ci)
+	if identity == nil || identity.Domain == "" {
+		return exportHosts{}, fmt.Errorf("this cluster's serving identity carries no domain yet, so kip cannot tell which hosts to export. Let the reconciler settle and try again")
+	}
+	hosts := serving.ResolveHosts(identity.Domain, overridesOf(identity.Hosts))
+	return exportHosts{Console: hosts.Console, ConsoleAPI: hosts.ConsoleAPI, Dex: hosts.Dex}, nil
+}
+
+// renderExportHostLines writes the host keys into the bundle.
+func renderExportHostLines(h exportHosts) string {
+	return fmt.Sprintf("console_domain: %s\nconsole_api_domain: %s\ndex_domain: %s\n", h.Console, h.ConsoleAPI, h.Dex)
+}
+
+// importedHostOverrides turns the hosts a bundle carried into the overrides an
+// entry stores.
+//
+// A host that matches the convention for the domain it arrived with is stored
+// as no override at all. Writing it out would pin the entry to a name that
+// merely happens to be conventional today, so a later domain change would
+// leave every imported machine pointing at the old hosts.
+func importedHostOverrides(domain string, h exportHosts) exportHosts {
+	return exportHosts{
+		Console:    overrideIfDifferent("console", domain, h.Console),
+		ConsoleAPI: overrideIfDifferent("console-api", domain, h.ConsoleAPI),
+		Dex:        overrideIfDifferent("dex", domain, h.Dex),
+	}
+}
+
+// exportServingIdentity resolves the domain and hosts an export declares, from
+// the cluster's own ClusterIdentity rather than from local config.
+//
+// The local entry is what a colleague's import would have derived anyway, and
+// it is the thing that drifts: a machine whose config predates a domain change
+// would otherwise export the hosts it happens to remember. The CR is the
+// cluster's own record of what it serves.
+//
+// A cluster with no ClusterIdentity predates the reconciler, and there is
+// nothing more authoritative to consult, so its local config is used and the
+// operator is told. Every other failure — no permission, no route to the
+// cluster, an identity mid-move — refuses, because each of them can produce
+// hosts that look right and are not.
+func exportServingIdentity(cluster *config.Cluster) (string, exportHosts, error) {
+	client, err := k8s.NewFromCluster(cluster)
+	if err != nil {
+		return "", exportHosts{}, fmt.Errorf("reaching %s to read what it serves: %w", cluster.Name, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ci, err := clusteridentity.New(client.Dynamic()).Get(ctx)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			fmt.Fprintf(os.Stderr, "  ⚠  %s has no serving identity recorded, so this export carries the hosts\n", cluster.Name)
+			fmt.Fprintf(os.Stderr, "     this machine has stored. Run 'kip upgrade' to deploy the reconciler, then\n")
+			fmt.Fprintf(os.Stderr, "     re-export, so the cluster rather than this laptop says what it serves.\n\n")
+			return cluster.Domain, exportHosts{
+				Console:    cluster.ConsoleHost(),
+				ConsoleAPI: cluster.ConsoleAPIHost(),
+				Dex:        cluster.DexHost(),
+			}, nil
+		}
+		return "", exportHosts{}, fmt.Errorf("reading what %s serves: %w", cluster.Name, err)
+	}
+
+	hosts, err := renderExportHosts(cluster, ci)
+	if err != nil {
+		return "", exportHosts{}, err
+	}
+	identity := repairIdentity(ci)
+	return identity.Domain, hosts, nil
+}
+
+// rejectURLCredentials refuses a bundle whose server or proxy address carries a
+// username or password in its userinfo.
+//
+// The export's promise is that the file holds no credential, and the AuthInfo
+// checks alone cannot keep it: kubeconfig transport fields are URLs, and a URL
+// is allowed to carry one.
+func rejectURLCredentials(kubeconfig []byte) error {
+	cfg, err := clientcmd.Load(kubeconfig)
+	if err != nil {
+		return fmt.Errorf("reading the kubeconfig to share: %w", err)
+	}
+	for name, cluster := range cfg.Clusters {
+		if cluster == nil {
+			continue
+		}
+		for label, raw := range map[string]string{"server address": cluster.Server, "proxy address": cluster.ProxyURL} {
+			if raw == "" {
+				continue
+			}
+			parsed, parseErr := url.Parse(raw)
+			if parseErr != nil {
+				return fmt.Errorf("the %s for %q could not be read, so kip cannot tell whether it carries a credential: %w", label, name, parseErr)
+			}
+			if parsed.User != nil {
+				return fmt.Errorf("the %s for %q carries a username or password, which an export must not hand to a colleague. Move that credential into your proxy configuration and re-export", label, name)
+			}
+		}
+	}
+	return nil
+}
+
+// validateHostname refuses anything the rest of kip could not use as a host.
+//
+// These values are read back and embedded in URLs, so a scheme, a path or a
+// stray space produces an endpoint that fails much later with nothing pointing
+// back here. Empty passes, because an omitted value means "leave this one
+// alone".
+//
+// Shared by the two writers of the same three config fields: an imported
+// bundle and `kip cluster hosts`. One rule, so a hostname a bundle may carry
+// and a hostname an operator may type cannot disagree.
+func validateHostname(flag, value string) error {
+	if value == "" {
+		return nil
+	}
+	if strings.ContainsAny(value, " \t/?#@:\\") {
+		return fmt.Errorf("%s %q is not a hostname: give the name on its own, with no scheme, port, path or credentials (for example dex.example.com)", flag, value)
+	}
+	if strings.HasPrefix(value, ".") || strings.HasSuffix(value, ".") || !strings.Contains(value, ".") {
+		return fmt.Errorf("%s %q is not a hostname: it needs at least one dot and cannot start or end with one (for example dex.example.com)", flag, value)
+	}
+	return nil
+}
+
+// looksLikeAKubeconfig reports whether a file that failed to parse as an export
+// is in fact a kubeconfig.
+//
+// The kind is checked rather than only the parse, because an export's own
+// embedded kubeconfig would parse too — what distinguishes them is that a
+// bundle carries its cluster fields at the top level and a kubeconfig declares
+// itself.
+func looksLikeAKubeconfig(data []byte) bool {
+	cfg, err := clientcmd.Load(data)
+	return err == nil && len(cfg.Clusters) > 0
 }

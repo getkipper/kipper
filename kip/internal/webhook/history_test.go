@@ -2,6 +2,8 @@ package webhook
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -172,4 +174,33 @@ func TestRollbackErrorsWhenNoPreviousVersion(t *testing.T) {
 	_, err := Rollback(ctx, dyn, "default", "api", 0)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no previous version")
+}
+
+// Three structs in two modules marshal this annotation,
+// and every one of them round-trips the whole list. A field missing from any of
+// them is stripped from every entry the first time that writer runs, silently,
+// and the console-api test that pins its own two structs against each other
+// cannot see this module.
+func TestDeployEntryCarriesEveryFieldTheBuildControllerWrites(t *testing.T) {
+	written := `[{"revision":2,"image":"registry.example.com/shop/checkout:def678","commit":"def678","trigger":"build","timestamp":"2026-08-19T04:00:00Z","build":"checkout-build-9f2c"}]`
+
+	var roundTripped []DeployEntry
+	if err := json.Unmarshal([]byte(written), &roundTripped); err != nil {
+		t.Fatalf("unmarshalling: %v", err)
+	}
+	back, err := json.Marshal(roundTripped)
+	if err != nil {
+		t.Fatalf("marshalling: %v", err)
+	}
+
+	var before, after []map[string]any
+	if err := json.Unmarshal([]byte(written), &before); err != nil {
+		t.Fatalf("unmarshalling written: %v", err)
+	}
+	if err := json.Unmarshal(back, &after); err != nil {
+		t.Fatalf("unmarshalling round-tripped: %v", err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("a field the build controller writes was dropped by kip\n before: %v\n  after: %v", before, after)
+	}
 }

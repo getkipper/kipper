@@ -104,7 +104,7 @@ func TestCreateAppRefusesANameAnotherKindHolds(t *testing.T) {
 		"job":      existingJob("shop-prod"),
 	} {
 		t.Run(holder, func(t *testing.T) {
-			h := &Apps{Client: fake.NewClientset(), CRClient: testCRClient(existing)}
+			h := &Apps{Client: fake.NewClientset(), CRClient: testCRClient(existing), GitReach: gitAlwaysReachable}
 			rec := createRequest(t, func(r *chi.Mux) {
 				r.Post("/projects/{name}/apps", h.Create)
 			}, "/projects/shop-prod/apps",
@@ -190,7 +190,7 @@ func TestCreateAnswers500WhenAvailabilityCannotBeDetermined(t *testing.T) {
 // after that point answers "not created" while leaving the credential behind.
 func TestCreateAppRefusedByNameLeavesNoGitCredential(t *testing.T) {
 	k8s := fake.NewClientset()
-	h := &Apps{Client: k8s, CRClient: testCRClient(existingFunction("shop-prod"))}
+	h := &Apps{Client: k8s, CRClient: testCRClient(existingFunction("shop-prod")), GitReach: gitAlwaysReachable}
 
 	rec := createRequest(t, func(r *chi.Mux) {
 		r.Post("/projects/{name}/apps", h.Create)

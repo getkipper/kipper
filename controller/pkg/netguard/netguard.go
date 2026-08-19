@@ -92,3 +92,15 @@ func Client(timeout time.Duration) *http.Client {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 }
+
+// Dialer returns a dialer that refuses to connect to a non-public address, for
+// a caller that needs the guard but its own redirect policy.
+//
+// Client above never follows a redirect at all, which is right for a probe that
+// carries a credential to one address. A caller that must follow a hop — a git
+// host answering a reference advertisement with its canonical URL — needs the
+// same dial guard with a redirect rule of its own, and building one by hand
+// would put the SSRF boundary in two places.
+func Dialer(timeout time.Duration) *net.Dialer {
+	return &net.Dialer{Timeout: timeout, Control: publicOnlyControl}
+}

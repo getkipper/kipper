@@ -34,7 +34,7 @@ This opens a browser to the cluster's login (Dex) and stores a session token, re
 
 To give another admin complete CLI access, or to set up `kip` on a second machine of your own, export the credentials and import them on the other machine.
 
-### Step 1: Export cluster credentials (admin)
+### Step 1: Export the cluster (admin)
 
 The admin runs:
 
@@ -222,7 +222,7 @@ and stop. See [Naming one workload](/en/installation#naming-one-workload).
 
 | Task | Command |
 |---|---|
-| Export cluster credentials | `kip cluster export > file.kip` |
+| Export a cluster to share | `kip cluster export > file.kip` |
 | Import cluster credentials | `kip cluster add file.kip --set-current` |
 | List clusters | `kip cluster list` |
 | Switch cluster | `kip cluster use <name>` |

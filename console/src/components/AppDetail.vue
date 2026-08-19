@@ -602,6 +602,83 @@ async function loadLivePods() {
   }
 }
 
+const appHealth = ref<api.PodHealth[]>([])
+const healthError = ref<string | null>(null)
+
+// A pod's phase reads Running as long as any container in it is up, so an app
+// whose own container is dead and looping beside a healthy sidecar still shows
+// as running. Judging each container is what makes that visible.
+// Container state is not a failure predicate on its own. An init container
+// that did its job is "terminated" with exit 0, and flagging it red would call
+// every successful build a failure. A container caught in the moment between
+// restarts is "running" and not ready, with a failed previous termination
+// already recorded, and treating that as healthy hides the crash loop that is
+// the whole reason this panel exists.
+function hasFailed(container: api.ContainerHealth): boolean {
+  if (container.state === 'terminated') return container.exit_code !== 0
+  if (container.state === 'running') return !container.ready && container.restarts > 0
+  return true
+}
+
+const failingContainers = computed(() => {
+  const out: { pod: string; container: api.ContainerHealth }[] = []
+  for (const pod of appHealth.value) {
+    for (const container of [...pod.init_containers, ...pod.containers]) {
+      if (hasFailed(container)) out.push({ pod: pod.name, container })
+    }
+  }
+  return out
+})
+
+// The line that names the cause. A container between restarts reports only
+// CrashLoopBackOff in its current state; the exit code and the process's own
+// message are in the previous termination, so prefer those.
+function failureDetail(container: api.ContainerHealth): string {
+  const previous = container.last_termination
+  if (previous) {
+    const message = previous.message?.trim()
+    const reason = previous.reason || 'exited'
+    return message ? `${reason} (exit ${previous.exit_code}): ${message}` : `${reason} (exit ${previous.exit_code})`
+  }
+  if (container.exit_code !== undefined) {
+    const message = container.message?.trim()
+    return message ? `exit ${container.exit_code}: ${message}` : `exit ${container.exit_code}`
+  }
+  return container.message?.trim() || ''
+}
+
+async function loadHealth() {
+  try {
+    healthError.value = null
+    // The declared type says a list, and a 204 or a null body says otherwise.
+    // Everything downstream iterates this, so the coercion belongs here rather
+    // than at each reader.
+    const pods = await api.fetchAppHealth(project.value, props.appName)
+    appHealth.value = Array.isArray(pods) ? pods : []
+  } catch (e) {
+    appHealth.value = []
+    healthError.value = e instanceof Error ? e.message : 'container status could not be read'
+  }
+}
+
+let healthPollTimer: ReturnType<typeof setInterval> | undefined
+onMounted(() => {
+  loadHealth()
+  // Only while something is wrong: a healthy app has nothing to re-read, and a
+  // failing one changes state as it restarts.
+  healthPollTimer = setInterval(() => {
+    // Also while something has restarted but currently looks fine: a crash
+    // loop sampled during its running window would otherwise stop the polling
+    // that would have caught the next crash.
+    const restarting = appHealth.value.some(p =>
+      [...p.init_containers, ...p.containers].some(c => c.restarts > 0))
+    if (failingContainers.value.length > 0 || restarting) loadHealth()
+  }, 5000)
+})
+onUnmounted(() => {
+  if (healthPollTimer) clearInterval(healthPollTimer)
+})
+
 function onLivePodChange() {
   clear()
   connectLive()
@@ -1418,6 +1495,10 @@ async function loadBuildStatus(quiet = false) {
   if (!quiet) buildLoading.value = true
   try {
     buildStatus.value = await api.fetchBuildStatus(project.value, props.appName)
+    // A discarded build is the case where someone pushed, the pipeline went
+    // green and nothing appeared. Leaving the explanation behind a collapsed
+    // section is the same dead end as not writing it at all.
+    if (buildStatus.value?.phase === 'Discarded') deployMethodsOpen.value = true
   } catch {
     if (!quiet) buildStatus.value = null
   } finally {
@@ -1456,6 +1537,25 @@ onUnmounted(() => {
 const buildLogLines = ref<string[]>([])
 const buildLogsVisible = ref(false)
 let buildLogAbort: AbortController | null = null
+
+function removeGitSource() {
+  modal.open(ConfirmDialog, {
+    title: 'Stop building from git?',
+    message: `${props.appName} will deploy prebuilt images instead. It keeps running the image it has now. The stored access token and the last build's status are removed with the source.`,
+    confirmLabel: 'Remove git source',
+    onConfirm: async () => {
+      modal.close()
+      try {
+        await api.deleteGitSource(project.value, props.appName)
+        toast.success('Git source removed')
+        gitEditing.value = false
+        await loadBuildStatus()
+      } catch {
+        toast.error('Failed to remove the git source')
+      }
+    },
+  })
+}
 
 async function handleRebuild() {
   rebuilding.value = true
@@ -2320,6 +2420,59 @@ function openOptimise() {
       </button>
     </template>
 
+    <!-- Why the app is not running. Above the tabs, because this is what the
+         operator opened the app to find out. -->
+    <div
+      v-if="failingContainers.length > 0"
+      data-testid="app-health-banner"
+      class="border-b border-red-200 bg-red-50 px-5 py-3 dark:border-red-900 dark:bg-red-950/40"
+    >
+      <div class="mb-2 flex items-center gap-2">
+        <AlertTriangle class="h-4 w-4 text-red-600 dark:text-red-400" :stroke-width="1.75" />
+        <span class="text-sm font-medium text-red-800 dark:text-red-300">
+          {{ failingContainers.length === 1 ? 'A container is not running' : `${failingContainers.length} containers are not running` }}
+        </span>
+      </div>
+      <div class="space-y-1.5">
+        <div
+          v-for="entry in failingContainers"
+          :key="`${entry.pod}/${entry.container.name}`"
+          class="text-xs"
+        >
+          <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span class="font-mono font-medium text-red-900 dark:text-red-200">{{ entry.container.name }}</span>
+            <span class="rounded bg-red-100 px-1.5 py-0.5 font-medium text-red-700 dark:bg-red-900/60 dark:text-red-300">
+              {{ entry.container.reason || entry.container.state }}
+            </span>
+            <span v-if="entry.container.restarts > 0" class="text-red-700 dark:text-red-400">
+              restarted {{ entry.container.restarts }}&times;
+            </span>
+            <span class="font-mono text-red-500 dark:text-red-500">{{ entry.pod }}</span>
+          </div>
+          <p
+            v-if="failureDetail(entry.container)"
+            class="mt-0.5 break-words font-mono text-red-800 dark:text-red-300"
+          >{{ failureDetail(entry.container) }}</p>
+          <pre
+            v-if="entry.container.log"
+            data-testid="app-health-log"
+            class="mt-1 max-h-40 overflow-auto rounded bg-red-100/60 p-2 font-mono text-[11px] leading-relaxed text-red-900 dark:bg-red-950/60 dark:text-red-200"
+          >{{ entry.container.log }}</pre>
+        </div>
+      </div>
+      <button
+        @click="activeTab = 'logs'"
+        class="mt-2 text-xs font-medium text-red-700 underline underline-offset-2 hover:text-red-900 dark:text-red-400 dark:hover:text-red-200"
+      >Open logs</button>
+    </div>
+
+    <div
+      v-else-if="healthError"
+      class="border-b border-amber-200 bg-amber-50 px-5 py-2.5 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300"
+    >
+      Container status could not be read, so this app may be failing without saying so here. {{ healthError }}
+    </div>
+
     <!-- Update image form -->
     <div v-if="showImageForm" class="flex items-center gap-2 border-b border-slate-200 px-5 py-3 dark:border-slate-800">
       <input
@@ -2923,6 +3076,12 @@ function openOptimise() {
                     class="rounded-md border border-slate-300 px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"
                   >Edit</button>
                   <button
+                    v-if="!gitEditing"
+                    @click="removeGitSource"
+                    data-testid="remove-git-source"
+                    class="rounded-md border border-slate-300 px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"
+                  >Remove</button>
+                  <button
                     v-if="buildStatus.phase === 'Building' || buildStatus.phase === 'Pending'"
                     @click="handleCancelBuild"
                     class="rounded-md border border-red-300 px-3 py-1 text-xs font-medium text-red-600 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950"
@@ -2991,7 +3150,7 @@ function openOptimise() {
                       'bg-emerald-500': buildStatus.phase === 'Succeeded',
                       'bg-red-500': buildStatus.phase === 'Failed',
                       'bg-amber-500 animate-pulse': buildStatus.phase === 'Building' || buildStatus.phase === 'Pending',
-                      'bg-slate-400': buildStatus.phase === 'none',
+                      'bg-slate-400': buildStatus.phase === 'none' || buildStatus.phase === 'Discarded',
                     }"
                   />
                   <span class="font-medium text-slate-700 dark:text-slate-300">{{ buildStatus.phase }}</span>
@@ -2999,7 +3158,12 @@ function openOptimise() {
                   <span v-if="buildStatus.completedAt" class="text-slate-500 dark:text-slate-400">· {{ formatTimeAgo(buildStatus.completedAt) }}</span>
                 </div>
 
-                <NoticeCallout v-if="buildStatus.message" tone="danger" class="p-2 text-xs text-red-700 dark:text-slate-300">
+                <NoticeCallout
+                  v-if="buildStatus.message"
+                  :tone="buildStatus.phase === 'Discarded' ? 'warning' : 'danger'"
+                  class="p-2 text-xs"
+                  :class="buildStatus.phase === 'Discarded' ? 'text-amber-800 dark:text-slate-300' : 'text-red-700 dark:text-slate-300'"
+                >
                   {{ buildStatus.message }}
                 </NoticeCallout>
 
@@ -3047,7 +3211,7 @@ function openOptimise() {
                     </div>
                   </div>
                   <button
-                    v-else-if="buildStatus.phase === 'Building' || buildStatus.phase === 'Pending' || buildStatus.phase === 'Succeeded' || buildStatus.phase === 'Failed'"
+                    v-else-if="buildStatus.phase === 'Building' || buildStatus.phase === 'Pending' || buildStatus.phase === 'Succeeded' || buildStatus.phase === 'Failed' || buildStatus.phase === 'Discarded'"
                     @click="streamBuildLogs"
                     class="text-xs font-medium text-kipper-600 hover:text-kipper-700 dark:text-kipper-400"
                   >Show build logs</button>

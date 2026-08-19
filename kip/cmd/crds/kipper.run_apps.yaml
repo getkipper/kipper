@@ -370,6 +370,12 @@ spec:
                 description: Build holds the latest build information for Git-based
                   apps.
                 properties:
+                  build:
+                    description: |-
+                      Build names the build job this status is about. It is what tells a
+                      completion that was already applied from one belonging to an earlier
+                      build, which a phase alone cannot, and it needs no clock.
+                    type: string
                   commit:
                     description: Commit is the Git commit SHA that was built.
                     type: string
@@ -381,12 +387,16 @@ spec:
                     description: Message provides details on build failure.
                     type: string
                   phase:
-                    description: Phase is the current build state.
+                    description: |-
+                      Phase is the current build state. Discarded means the build finished but
+                      its image was not deployed, because it did not build from the source the
+                      app declares now.
                     enum:
                     - Pending
                     - Building
                     - Succeeded
                     - Failed
+                    - Discarded
                     type: string
                   startedAt:
                     description: StartedAt is when the build started.
