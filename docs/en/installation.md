@@ -985,12 +985,42 @@ When a workload in a granted project runs an image from that registry, the crede
 Read back the git and container-registry credentials stored in the cluster. Useful if you no longer have a copy of a token and need to reuse it somewhere else, such as another cluster or a CI pipeline.
 
 ```bash
-kip credentials list                          # masked overview, both types
+kip credentials list                          # masked overview, both types, with allowed projects
 kip credentials list --type git               # masked overview, git only
 kip credentials get git-acme-tools            # plaintext token to stdout
 kip credentials get ghcr-io --type registry   # disambiguate if names collide
 kip credentials get --app blog --project acme --environment prod   # an app's own git token
+kip credentials allow git-acme-tools --project acme    # let a project build with it
+kip credentials revoke git-acme-tools --project acme   # stop it building with it
 ```
+
+### Granting a project
+
+A shared git credential is usable only by the projects on its allow-list, so a new one builds nothing until you allow a project. Granting never asks for the token: it changes who may use the credential, not what it is.
+
+```bash
+kip credentials allow git-acme-tools --project acme
+kip credentials allow git-acme-tools --project acme --project blog
+kip credentials revoke git-acme-tools --project blog
+```
+
+A build refused for want of a grant says so and names the command:
+
+```
+git credential "git-acme-tools" is not allowed for project "acme". Allow it with 'kip credentials allow git-acme-tools --project acme'
+```
+
+Revoking leaves running apps alone. They keep the image they have, and the next build for that project is refused.
+
+Container registry credentials have their own allow-list, granted with `kip registry add --allow-project` as described above. That flag replaces the list rather than adding to it, so name every project that should keep access.
+
+The console's credential settings edit the token and the server. Who may build with an existing credential is changed with the commands above; `allow` checks that the project exists, and `revoke` takes any name, since it is also how you remove one that should never have been there. The settings API accepts a credential's allow-list when creating it, and refuses a request that would change the list on one that is already there.
+
+`kip credentials list` shows each credential's allowed projects, so you can check a grant landed where you meant it.
+
+On a cluster installed before allow-lists existed, `kip upgrade` grants each shared credential the projects whose apps reference it, so an upgrade does not stop builds that were working. It reports every grant it writes. It runs once per cluster and is recorded on the `kipper-system` namespace, so a credential added later is never granted from what happens to reference it. The upgrade records it only once the new console-api is serving, which is what stops a half-finished upgrade closing a migration it did not finish.
+
+Going back to a Kipper older than 0.14 takes the allow-lists with it: that console-api replaced a credential's whole entry when the token was edited, so the next edit clears who may build with it. Rolling forward again does not bring the grants back. Run `kip credentials list` after a rollback and grant what is missing. Upgrade before curating a legacy cluster's allow-lists by hand: a credential you grant or revoke first counts as decided, and the upgrade will not add the other projects that were building with it.
 
 A token configured per app (under the app's Git settings) lives in a secret in the app's namespace, separate from the named credentials above. It does not show up in `kip credentials list` or the global credentials screen. To read it back, pass `--app` with the project and environment instead of a credential name. Kipper finds the secret the app references for its git source and prints that token.
 
@@ -1210,6 +1240,7 @@ list, so you can tell before you run it whether the thing you need is included.
 | kipper-authz image | Yes | — |
 | console-api RBAC | Yes | — |
 | Project operator roles (viewer, deployer, owner) | Yes | — |
+| Shared git credential allow-lists, where never set | Once, from the apps that reference them | `kip credentials allow` |
 | Traefik, Longhorn, KEDA, Velero, Zot | Yes | — |
 | Loki, Prometheus, Grafana | Yes, when enabled | — |
 | Security-header middleware, build isolation | Yes | — |

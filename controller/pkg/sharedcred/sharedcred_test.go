@@ -39,7 +39,7 @@ func TestFind(t *testing.T) {
 	}
 }
 
-func TestLoadSaveRoundTrip(t *testing.T) {
+func TestLoadWriteRoundTrip(t *testing.T) {
 	client := fake.NewClientset()
 	ctx := context.Background()
 
@@ -52,8 +52,8 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 	want := []Entry{
 		{Name: "shared-gh", Server: "github.com", Username: "x", Token: "t", AllowedProjects: []string{"acme"}},
 	}
-	if err := Save(ctx, client, want); err != nil {
-		t.Fatalf("Save: %v", err)
+	if err := Update(ctx, client, func([]Entry) ([]Entry, error) { return want, nil }); err != nil {
+		t.Fatalf("Update: %v", err)
 	}
 	got, err = Load(ctx, client)
 	if err != nil {
@@ -63,9 +63,9 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 		t.Fatalf("round trip mismatch: %+v", got)
 	}
 
-	// Save again updates in place (no duplicate Secret).
-	if err := Save(ctx, client, want[:0]); err != nil {
-		t.Fatalf("Save empty: %v", err)
+	// Writing again updates in place (no duplicate Secret).
+	if err := Update(ctx, client, func([]Entry) ([]Entry, error) { return want[:0], nil }); err != nil {
+		t.Fatalf("Update to empty: %v", err)
 	}
 	if got, _ := Load(ctx, client); len(got) != 0 {
 		t.Errorf("expected empty list after clearing, got %v", got)

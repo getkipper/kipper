@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -64,8 +65,13 @@ func init() {
 	credentialsGetCmd.Flags().String("project", "", "project name (used with --app)")
 	credentialsGetCmd.Flags().String("environment", "", "target environment (used with --app)")
 
+	credentialsAllowCmd.Flags().StringArray("project", nil, "project allowed to build with this credential (repeatable)")
+	credentialsRevokeCmd.Flags().StringArray("project", nil, "project to stop from building with this credential (repeatable)")
+
 	credentialsCmd.AddCommand(credentialsListCmd)
 	credentialsCmd.AddCommand(credentialsGetCmd)
+	credentialsCmd.AddCommand(credentialsAllowCmd)
+	credentialsCmd.AddCommand(credentialsRevokeCmd)
 	rootCmd.AddCommand(credentialsCmd)
 }
 
@@ -91,9 +97,14 @@ func runCredentialsList(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	fmt.Printf("\n  %-10s %-25s %-35s %-25s %s\n", "TYPE", "NAME", "SERVER", "USERNAME", "VALUE")
+	fmt.Printf("\n  %-10s %-25s %-35s %-20s %-14s %s\n", "TYPE", "NAME", "SERVER", "USERNAME", "VALUE", "ALLOWED PROJECTS")
 	for _, c := range creds {
-		fmt.Printf("  %-10s %-25s %-35s %-25s %s\n", c.Type, c.Name, c.Server, c.Username, credentials.Mask(c.Value))
+		projects := strings.Join(c.AllowedProjects, ", ")
+		if projects == "" {
+			projects = "(none)"
+		}
+		fmt.Printf("  %-10s %-25s %-35s %-20s %-14s %s\n",
+			c.Type, c.Name, c.Server, c.Username, credentials.Mask(c.Value), projects)
 	}
 	fmt.Println()
 	return nil

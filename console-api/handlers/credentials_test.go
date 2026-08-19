@@ -14,7 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/getkipper/kipper/console-api/internal/sharedcred"
+	"github.com/getkipper/kipper/controller/pkg/sharedcred"
 )
 
 // TestMain swaps the credential-probe client for one that allows the loopback

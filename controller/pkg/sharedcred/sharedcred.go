@@ -1,8 +1,12 @@
 // Package sharedcred stores the admin-managed shared git credentials. The whole
-// list lives in one Secret in kipper-system and is read by both the settings
-// handlers (which manage it) and the builder (which resolves a shared
-// credential at build time), so a shared token never has to be copied into a
-// tenant namespace.
+// list lives in one Secret in kipper-system and is read by the settings handlers
+// that manage it, the builder that resolves a shared credential at build time,
+// and kip, so a shared token never has to be copied into a tenant namespace.
+//
+// It lives here rather than in one of those modules because the list is a
+// security control: an entry's allowed projects decide who may build with the
+// token. A second definition of the shape would drop the field it does not
+// know about, which is how a writer erases every grant on the list.
 package sharedcred
 
 import (
@@ -10,7 +14,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -30,12 +33,17 @@ const (
 // Entry is one shared git credential. AllowedProjects lists the project names
 // permitted to build with it; an empty list denies every project (fail closed),
 // so a shared token is never usable until an admin explicitly grants a project.
+//
+// The field is written even when it is empty, because an empty list and an
+// absent one mean different things: nobody may build with this, against nobody
+// has ever decided. Only the second is a credential an upgrade may seed from the
+// apps that reference it.
 type Entry struct {
 	Name            string   `json:"name"`
 	Server          string   `json:"server"`
 	Username        string   `json:"username"`
 	Token           string   `json:"token,omitempty"`
-	AllowedProjects []string `json:"allowedProjects,omitempty"`
+	AllowedProjects []string `json:"allowedProjects"`
 }
 
 // AllowsProject reports whether project is on the entry's allow-list.
@@ -83,25 +91,4 @@ func Find(entries []Entry, name string) *Entry {
 		}
 	}
 	return nil
-}
-
-// Save writes the shared-credential list back to its Secret.
-func Save(ctx context.Context, client kubernetes.Interface, entries []Entry) error {
-	data, err := json.Marshal(entries) //nolint:gosec // tokens are intentionally stored in a K8s Secret
-	if err != nil {
-		return err
-	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ConfigSecretName,
-			Namespace: Namespace,
-			Labels:    map[string]string{managedByLabel: managedByValue},
-		},
-		Data: map[string][]byte{dataKey: data},
-	}
-	_, err = client.CoreV1().Secrets(Namespace).Update(ctx, secret, metav1.UpdateOptions{})
-	if k8serrors.IsNotFound(err) {
-		_, err = client.CoreV1().Secrets(Namespace).Create(ctx, secret, metav1.CreateOptions{})
-	}
-	return err
 }
