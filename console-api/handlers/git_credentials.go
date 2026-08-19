@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -15,9 +16,9 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
-	"github.com/getkipper/kipper/console-api/internal/sharedcred"
 	"github.com/getkipper/kipper/console-api/middleware"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
+	"github.com/getkipper/kipper/controller/pkg/sharedcred"
 )
 
 // GitCredentials provides handlers for shared git credential management. Shared
@@ -60,10 +61,107 @@ func (gc *GitCredentials) List(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]interface{}{"credentials": resp})
 }
 
+// gitCredentialRequest is what this endpoint may set. It carries the allow-list
+// because the published shape always has, and it is read as raw JSON so that a
+// field left out can be told from one sent as null: under the old behaviour null
+// replaced the list, which is a revocation.
+//
+// What it may not do is change who may build with an existing credential. A
+// caller holding a copy read before somebody else granted a project would
+// revoke that project by rotating a token, and there is no server-side way to
+// validate the projects named, since the organisation prefix a grant is stored
+// under lives in kip's own configuration. So an existing credential takes the
+// list it already has, and a request that would change it is refused rather than
+// answered with "saved".
+type gitCredentialRequest struct {
+	Name            string          `json:"name"`
+	Server          string          `json:"server"`
+	Username        string          `json:"username"`
+	Token           string          `json:"token"`
+	AllowedProjects json.RawMessage `json:"allowedProjects"`
+}
+
+func (r gitCredentialRequest) entry(allowed []string) sharedcred.Entry {
+	return sharedcred.Entry{
+		Name:            r.Name,
+		Server:          r.Server,
+		Username:        r.Username,
+		Token:           r.Token,
+		AllowedProjects: allowed,
+	}
+}
+
+// requestedProjects is the allow-list a request carries, and whether it carried
+// one at all. An absent field asks for no change; null and [] both ask for a
+// credential nobody may build with, which is what the old shape did with them.
+func (r gitCredentialRequest) requestedProjects() ([]string, bool, error) {
+	if len(r.AllowedProjects) == 0 {
+		return nil, false, nil
+	}
+	var projects []string
+	if err := json.Unmarshal(r.AllowedProjects, &projects); err != nil {
+		return nil, false, err
+	}
+	if projects == nil {
+		projects = []string{}
+	}
+	return projects, true, nil
+}
+
+// sameProjects compares two allow-lists as the sets they are, so a request that
+// carries the list it read back, in whatever order or with a name repeated, is
+// the no-op it means to be. Who may build is a question about membership, and a
+// name listed twice authorises exactly what it authorises once.
+func sameProjects(a, b []string) bool {
+	in := make(map[string]bool, len(a))
+	for _, p := range a {
+		in[p] = true
+	}
+	for _, p := range b {
+		if !in[p] {
+			return false
+		}
+	}
+	for _, p := range a {
+		if !containsProject(b, p) {
+			return false
+		}
+	}
+	return true
+}
+
+func containsProject(projects []string, want string) bool {
+	for _, p := range projects {
+		if p == want {
+			return true
+		}
+	}
+	return false
+}
+
+// uniqueProjects drops a name repeated in a request, so what is stored is the
+// set it means and a later request carrying either spelling is recognised as
+// the same authorization.
+func uniqueProjects(projects []string) []string {
+	unique := make([]string, 0, len(projects))
+	for _, p := range projects {
+		// A blank name matches no project and no command can take it off again,
+		// so it is dropped rather than stored as a grant that does nothing.
+		if p != "" && !containsProject(unique, p) {
+			unique = append(unique, p)
+		}
+	}
+	return unique
+}
+
+// errChangesTheAllowList is a request that would rewrite an existing
+// credential's grants, which this endpoint does not do.
+var errChangesTheAllowList = errors.New("request changes the allow-list")
+
 // Add creates or updates a shared git credential.
 // POST /api/v1/settings/git-credentials
 func (gc *GitCredentials) Add(w http.ResponseWriter, r *http.Request) {
-	var req sharedcred.Entry
+	var req gitCredentialRequest
 	if err := decodeJSON(r, &req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body")
 		return
@@ -71,6 +169,12 @@ func (gc *GitCredentials) Add(w http.ResponseWriter, r *http.Request) {
 
 	if req.Server == "" || req.Token == "" {
 		respondError(w, http.StatusBadRequest, "server and token are required")
+		return
+	}
+
+	wanted, carried, err := req.requestedProjects()
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "allowedProjects must be a list of project names")
 		return
 	}
 
@@ -93,25 +197,39 @@ func (gc *GitCredentials) Add(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	entries, err := sharedcred.Load(ctx, gc.Client)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to read git credentials")
-		return
-	}
-
-	found := false
-	for i := range entries {
-		if entries[i].Name == req.Name {
-			entries[i] = req
-			found = true
-			break
+	if err := sharedcred.Update(ctx, gc.Client, func(entries []sharedcred.Entry) ([]sharedcred.Entry, error) {
+		if live := sharedcred.Find(entries, req.Name); live != nil {
+			if carried && !sameProjects(wanted, live.AllowedProjects) {
+				return nil, errChangesTheAllowList
+			}
+			// A request that carries the list it read is asking for no change,
+			// and one that would change it has already been refused, so what is
+			// stored is the same set either way. The carried one is written
+			// because it can still say something the stored one does not: an
+			// empty list against a credential nobody has decided about is a
+			// decision, and keeping the absent list would leave the next
+			// upgrade free to grant it from the apps that reference it.
+			stored := live.AllowedProjects
+			if carried {
+				stored = uniqueProjects(wanted)
+			}
+			*live = req.entry(stored)
+			return entries, nil
 		}
-	}
-	if !found {
-		entries = append(entries, req)
-	}
-
-	if err := sharedcred.Save(ctx, gc.Client, entries); err != nil {
+		// Nothing exists to overwrite, so the first list may be set here, which
+		// is how the published shape has always created a granted credential.
+		// A credential nobody has granted allows nobody, and recording that is
+		// what tells an upgrade this one has been decided already.
+		if !carried {
+			wanted = []string{}
+		}
+		return append(entries, req.entry(uniqueProjects(wanted))), nil
+	}); err != nil {
+		if errors.Is(err, errChangesTheAllowList) {
+			respondError(w, http.StatusBadRequest,
+				"this endpoint cannot change who may build with an existing credential. Grant a project with 'kip credentials allow <name> --project <project>', which checks that the project exists, or take one away with 'kip credentials revoke'. Send the allow-list unchanged, or leave it out, to edit the rest")
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "failed to save git credentials")
 		return
 	}
@@ -134,25 +252,23 @@ func (gc *GitCredentials) Remove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entries, err := sharedcred.Load(ctx, gc.Client)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to read git credentials")
-		return
-	}
-
-	filtered := make([]sharedcred.Entry, 0, len(entries))
-	for _, e := range entries {
-		if e.Name != name {
-			filtered = append(filtered, e)
+	if err := sharedcred.Update(ctx, gc.Client, func(entries []sharedcred.Entry) ([]sharedcred.Entry, error) {
+		kept := make([]sharedcred.Entry, 0, len(entries))
+		for _, e := range entries {
+			if e.Name != name {
+				kept = append(kept, e)
+			}
 		}
-	}
-
-	if len(filtered) == len(entries) {
-		respondError(w, http.StatusNotFound, fmt.Sprintf("git credential %q not found", name))
-		return
-	}
-
-	if err := sharedcred.Save(ctx, gc.Client, filtered); err != nil {
+		if len(kept) == len(entries) {
+			return nil, &sharedcred.UnknownCredentialError{Name: name}
+		}
+		return kept, nil
+	}); err != nil {
+		var unknown *sharedcred.UnknownCredentialError
+		if errors.As(err, &unknown) {
+			respondError(w, http.StatusNotFound, fmt.Sprintf("git credential %q not found", name))
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "failed to save git credentials")
 		return
 	}

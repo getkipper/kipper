@@ -107,6 +107,22 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("recording gateway identity: %w", err)
 	}
 
+	// Before the new console-api serves builds: a shared credential written
+	// before allow-lists existed allows nobody, so an upgrade that restarted the
+	// builder first would refuse builds that were working until the seeding
+	// caught up. It runs again after the rollout, and only then is the cluster
+	// recorded as migrated.
+	if err := seedSharedCredentialGrants(ctx, clientset, k8sClient.Dynamic(), os.Stdout); err != nil {
+		return err
+	}
+
+	// Taken off before the restart so that what is read after it was written by
+	// the console-api this upgrade started, rather than by one that served here
+	// at some point and has since been rolled back.
+	if err := clearConsoleAPIStamp(ctx, clientset); err != nil {
+		return err
+	}
+
 	// Restart console components to pull latest images. kipper-authz is
 	// pinned to :latest and released in lockstep with console-api. A bare
 	// kubectl apply of its unchanged manifest never rolls the pods to the
@@ -124,9 +140,16 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		fmt.Printf("  ...  %s\n", comp.name)
 
 		deploy, getErr := clientset.AppsV1().Deployments(comp.namespace).Get(ctx, comp.name, metav1.GetOptions{})
-		if getErr != nil {
+		if apierrors.IsNotFound(getErr) {
 			fmt.Printf("  ✗  %s (not found)\n", comp.name)
 			continue
+		}
+		// Anything else is unknown rather than absent, and the two lead opposite
+		// ways: a component that is not there is one this cluster does not run,
+		// while one that cannot be read is one this upgrade has not moved, and
+		// carrying on would report an upgrade that did not happen.
+		if getErr != nil {
+			return fmt.Errorf("reading %s: %w", comp.name, getErr)
 		}
 		var moved string
 		hardened := false
@@ -199,6 +222,14 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		}
 
 		fmt.Printf("  ✔  %s%s\n", comp.name, moved)
+	}
+
+	// Again, now that the writer which erases an allow-list is gone, and only
+	// now is the cluster recorded as migrated: a grant the old pod replaced
+	// while it was still serving is written back here, where marking the
+	// migration before this ran would have left the build refused for good.
+	if err := closeSharedCredentialGrants(ctx, clientset, k8sClient.Dynamic(), os.Stdout); err != nil {
+		return err
 	}
 
 	explicitKey, fallbackKey := resolveSSHKey(sshKey, cluster)

@@ -24,10 +24,10 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/internal/gitreach"
 	"github.com/getkipper/kipper/console-api/internal/registrycred"
-	"github.com/getkipper/kipper/console-api/internal/sharedcred"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
+	"github.com/getkipper/kipper/controller/pkg/sharedcred"
 )
 
 // Default build container limits, used when an app sets no override and the
@@ -647,7 +647,7 @@ func resolveGitToken(ctx context.Context, client kubernetes.Interface, app *kipp
 			return nil, err
 		}
 		if !entry.AllowsProject(project) {
-			return nil, fmt.Errorf("git credential %q is not allowed for project %q", name, project)
+			return nil, fmt.Errorf("git credential %q is not allowed for project %q. Allow it with 'kip credentials allow %s --project %s'", name, project, name, project)
 		}
 		credAuthority, err := giturl.CanonicalAuthority(entry.Server)
 		if err != nil {

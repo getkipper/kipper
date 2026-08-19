@@ -10,6 +10,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/getkipper/kipper/controller/pkg/sharedcred"
 )
 
 // Type identifies which credential store a Credential belongs to.
@@ -19,9 +21,8 @@ const (
 	TypeGit      Type = "git"
 	TypeRegistry Type = "registry"
 
-	systemNamespace          = "kipper-system"
-	gitCredentialsConfigName = "kipper-git-credentials" //nolint:gosec // kubernetes Secret object name, not a credential value
-	registryConfigName       = "kipper-registries"
+	systemNamespace    = "kipper-system"
+	registryConfigName = "kipper-registries"
 )
 
 // Credential is a single git or registry credential entry.
@@ -32,6 +33,9 @@ type Credential struct {
 	Username string
 	// Value is the token (for git) or password (for registry).
 	Value string
+	// AllowedProjects lists the projects that may build or pull with it. Empty
+	// means none, which is what a credential nobody has granted allows.
+	AllowedProjects []string
 }
 
 // List returns all configured credentials across both stores. Pass an empty
@@ -137,47 +141,33 @@ func typesOf(cs []Credential) []Type {
 	return out
 }
 
-type gitEntry struct {
-	Name     string `json:"name"`
-	Server   string `json:"server"`
-	Username string `json:"username"`
-	Token    string `json:"token,omitempty"`
-}
-
 type registryEntry struct {
-	Name     string `json:"name"`
-	Server   string `json:"server"`
-	Username string `json:"username"`
-	Password string `json:"password,omitempty"`
+	Name            string   `json:"name"`
+	Server          string   `json:"server"`
+	Username        string   `json:"username"`
+	Password        string   `json:"password,omitempty"`
+	AllowedProjects []string `json:"allowedProjects,omitempty"`
 }
 
+// loadGit reads the shared list through the package that owns it. A second
+// definition of the entry here would parse the list into a shape missing the
+// projects allowed to build with it, which is how a writer built on this would
+// erase every grant on the list.
 func loadGit(ctx context.Context, client kubernetes.Interface) ([]Credential, error) {
-	secret, err := client.CoreV1().Secrets(systemNamespace).Get(ctx, gitCredentialsConfigName, metav1.GetOptions{})
+	entries, err := sharedcred.Load(ctx, client)
 	if err != nil {
-		if errors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("reading git credentials: %w", err)
-	}
-
-	data, ok := secret.Data["credentials"]
-	if !ok {
-		return nil, nil
-	}
-
-	var entries []gitEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, fmt.Errorf("parsing git credentials: %w", err)
+		return nil, err
 	}
 
 	out := make([]Credential, 0, len(entries))
 	for _, e := range entries {
 		out = append(out, Credential{
-			Type:     TypeGit,
-			Name:     e.Name,
-			Server:   e.Server,
-			Username: e.Username,
-			Value:    e.Token,
+			Type:            TypeGit,
+			Name:            e.Name,
+			Server:          e.Server,
+			Username:        e.Username,
+			Value:           e.Token,
+			AllowedProjects: e.AllowedProjects,
 		})
 	}
 	return out, nil
@@ -205,11 +195,12 @@ func loadRegistries(ctx context.Context, client kubernetes.Interface) ([]Credent
 	out := make([]Credential, 0, len(entries))
 	for _, e := range entries {
 		out = append(out, Credential{
-			Type:     TypeRegistry,
-			Name:     e.Name,
-			Server:   e.Server,
-			Username: e.Username,
-			Value:    e.Password,
+			Type:            TypeRegistry,
+			Name:            e.Name,
+			Server:          e.Server,
+			Username:        e.Username,
+			Value:           e.Password,
+			AllowedProjects: e.AllowedProjects,
 		})
 	}
 	return out, nil

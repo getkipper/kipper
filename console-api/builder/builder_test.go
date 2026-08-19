@@ -22,7 +22,7 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/internal/gitreach"
-	"github.com/getkipper/kipper/console-api/internal/sharedcred"
+	"github.com/getkipper/kipper/controller/pkg/sharedcred"
 )
 
 func testApp() *kipperv1.App {

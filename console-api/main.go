@@ -37,6 +37,7 @@ import (
 	"github.com/getkipper/kipper/console-api/handlers"
 	"github.com/getkipper/kipper/console-api/handlers/migration"
 	"github.com/getkipper/kipper/console-api/handlers/twofa"
+	"github.com/getkipper/kipper/console-api/internal/clusterstamp"
 	"github.com/getkipper/kipper/console-api/middleware"
 	"github.com/getkipper/kipper/console-api/security"
 	"github.com/getkipper/kipper/console-api/share"
@@ -95,6 +96,15 @@ func main() {
 	clientset, dynClient, restConfig, err := buildK8sClients()
 	if err != nil {
 		log.Fatalf("failed to create kubernetes client: %v", err)
+	}
+
+	// Say which build is serving this cluster. An upgrade reads it to tell
+	// whether the console-api still running is one that replaces a shared
+	// credential's allow-list, which a completed rollout does not say: the image
+	// is a moving tag, so a new pod is not necessarily new code. A failure here
+	// leaves an upgrade to try again rather than stopping the API from serving.
+	if err := clusterstamp.Record(context.Background(), clientset, version); err != nil {
+		slog.Warn("recording the console-api build on the namespace failed", "error", err)
 	}
 
 	// Create a controller-runtime client for CRD operations

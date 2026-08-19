@@ -108,6 +108,28 @@ const (
 	// whichever is later.
 	AnnoGitCredentialClaimed = "kipper.run/git-credential-claimed"
 
+	// AnnoGitCredentialGrantsSeeded records that a cluster has had the projects
+	// already building with a shared git credential written onto that
+	// credential's allow-list. It lives on the kipper-system namespace rather
+	// than on the credential list itself, because what it dates is the list: a
+	// marker stored beside the data would roll back with it, and the inference
+	// it stops would run again over entries written long after the migration.
+	AnnoGitCredentialGrantsSeeded = "kipper.run/git-credential-grants-seeded"
+
+	// AnnoConsoleAPIBuild is the console-api build serving a cluster, stamped on
+	// the kipper-system namespace when it starts.
+	//
+	// It exists to be absent. The release that stopped replacing a shared git
+	// credential's allow-list is the first to write it, so an upgrade can tell
+	// whether the writer that erased those lists is still the one serving, which
+	// a rolled pod does not say: the image is a moving tag, so a rollout proves
+	// a new pod and not new code.
+	//
+	// It says a build that keeps those lists has served the cluster, not that one
+	// always will. Pinning an older console-api back during an incident leaves
+	// the stamp where it is.
+	AnnoConsoleAPIBuild = "kipper.run/console-api-build"
+
 	// SourceNamespace records the namespace of the app a build was triggered
 	// for. Builds run in BuildsNamespace rather than beside their app, so this
 	// is what ties a build back to it, and what keeps two projects with an app
