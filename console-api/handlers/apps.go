@@ -16,13 +16,17 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/builder"
 	"github.com/getkipper/kipper/console-api/internal/gitreach"
+	"github.com/getkipper/kipper/controller/pkg/appowner"
+	"github.com/getkipper/kipper/controller/pkg/gitcred"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
 	"github.com/getkipper/kipper/controller/pkg/netguard"
+	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
 // Apps provides handlers for application management within a project.
@@ -257,7 +261,9 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 		// did not create. Nothing builds before the create returns, so there
 		// is no window where the reference is dangling and used.
 		if req.Git.Token != "" {
-			app.Spec.Git.CredentialsSecret = req.Name + "-git-credentials"
+			authority, _ := giturl.CanonicalAuthority(req.Git.URL)
+			app.Spec.Git.CredentialsSecret = secretname.GitCredential(
+				req.Name, secretname.GitCredentialDigest(req.Git.Token, authority))
 		}
 	}
 
@@ -289,7 +295,7 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Git != nil && req.Git.Token != "" {
-		if err := a.createGitCredentialsSecret(ctx, project, app.Spec.Git.CredentialsSecret, req.Name, req.Git.Token, req.Git.URL); err != nil {
+		if _, err := a.writeGitCredential(ctx, project, req.Name, req.Git.Token, req.Git.URL, app); err != nil {
 			// The App exists and names a credential that is not there. Nothing
 			// builds until the next push or rebuild, and that build reports the
 			// credential as missing, so saying it here is what stops the
@@ -322,69 +328,90 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// cloneURL is the source the token is for. The host is recorded on the Secret,
-// because the token and the URL are written as a pair but not in one
-// transaction, and the build refuses a credential whose recorded host is not
-// the one it is about to clone from.
-func (a *Apps) createGitCredentialsSecret(ctx context.Context, namespace, secretName, appName, token, cloneURL string) error {
-	secrets := a.Client.CoreV1().Secrets(namespace)
-	wantLabels := map[string]string{
-		"app.kubernetes.io/managed-by": "kipper",
-		"kipper.run/app":               appName,
-	}
+// writeGitCredential stores a token for one clone host and returns the Secret
+// that holds it.
+//
+// The name is a digest of the pair, so the object is immutable: a rotation
+// writes a new one and the App moves by naming it, which is one atomic update.
+// Nothing here ever writes to the Secret the App currently names, so two
+// rotations cannot cross and a failed one has nothing to undo. Writing the same
+// pair twice converges on the same object, so winning its Create says nothing
+// about who owns it and no caller is told.
+func (a *Apps) writeGitCredential(ctx context.Context, namespace, appName, token, cloneURL string, owner *kipperv1.App) (string, error) {
 	// An unparseable URL records nothing rather than a wrong binding; the
 	// source validation upstream is what rejects it.
 	authority, _ := giturl.CanonicalAuthority(cloneURL)
+	name := secretname.GitCredential(appName, secretname.GitCredentialDigest(token, authority))
 
-	// Update path: read the existing Secret, mutate its data + labels,
-	// write back. Calling Update with a fresh object that has no
-	// resourceVersion can be rejected by the apiserver and silently
-	// loses any user-attached metadata we don't echo back. Token
-	// rotation goes through here on every retry, so the round-trip is
-	// the safer pattern.
-	existing, getErr := secrets.Get(ctx, secretName, metav1.GetOptions{})
-	if getErr == nil {
-		if existing.Labels == nil {
-			existing.Labels = map[string]string{}
-		}
-		for k, v := range wantLabels {
-			existing.Labels[k] = v
-		}
-		if existing.Data == nil {
-			existing.Data = map[string][]byte{}
-		}
-		existing.Data["token"] = []byte(token)
-		if existing.Annotations == nil {
-			existing.Annotations = map[string]string{}
-		}
-		if authority != "" {
-			existing.Annotations[builder.GitAuthorityAnnotation] = authority
-		} else {
-			delete(existing.Annotations, builder.GitAuthorityAnnotation)
-		}
-		_, err := secrets.Update(ctx, existing, metav1.UpdateOptions{})
-		return err
-	}
-	if !errors.IsNotFound(getErr) {
-		return getErr
-	}
-
-	// Create path: fresh Secret with the labels and token data.
 	fresh := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
+			Name:      name,
 			Namespace: namespace,
-			Labels:    wantLabels,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "kipper",
+				"kipper.run/app":               appName,
+			},
 		},
-		Data: map[string][]byte{
-			"token": []byte(token),
-		},
+		Data: map[string][]byte{"token": []byte(token)},
 	}
 	if authority != "" {
 		fresh.Annotations = map[string]string{builder.GitAuthorityAnnotation: authority}
 	}
-	_, err := secrets.Create(ctx, fresh, metav1.CreateOptions{})
-	return err
+	// Bound to the App that is being pointed at it, so Kubernetes collects it
+	// when that App goes. The sweep needs a live App to reconcile, so a write
+	// racing a deletion would otherwise leave the token for the life of the
+	// namespace, and no writer can safely delete an object another writer may
+	// have committed.
+	if owner != nil && owner.UID != "" {
+		fresh.OwnerReferences = []metav1.OwnerReference{
+			appowner.Reference(kipperv1.GroupVersion.String(), owner.Name, owner.UID),
+		}
+	}
+
+	_, err := a.Client.CoreV1().Secrets(namespace).Create(ctx, fresh, metav1.CreateOptions{})
+	if err == nil {
+		return name, nil
+	}
+	if !errors.IsAlreadyExists(err) {
+		return "", err
+	}
+	// AlreadyExists says the name is taken, not that the object holds the pair
+	// the name stands for: the digest is sixteen hex characters, and anything
+	// that can write a Secret can put something else at the address. The claim
+	// checks, because committing an App onto an object it has not verified
+	// would have it clone with a token nobody supplied.
+	if err := a.claimGitCredential(ctx, namespace, name, appName, owner, token, authority); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+// claimGitCredential marks a credential as being committed onto now, and binds
+// it to the App doing the committing.
+//
+// The object outlives the App that first wrote it, because a name is a digest
+// of the pair rather than of who asked. An App deleted and recreated under the
+// same name converges on the same object, and leaving the dead App's controller
+// reference on it means garbage collection removes the credential the live App
+// has just been pointed at.
+func (a *Apps) claimGitCredential(ctx context.Context, namespace, name, appName string, owner *kipperv1.App, token, authority string) error {
+	var ref *metav1.OwnerReference
+	if owner != nil && owner.UID != "" {
+		bound := appowner.Reference(kipperv1.GroupVersion.String(), owner.Name, owner.UID)
+		ref = &bound
+	}
+	secrets := a.Client.CoreV1().Secrets(namespace)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		live, err := secrets.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if err := gitcred.Claim(live, appName, token, authority, ref, time.Now()); err != nil {
+			return err
+		}
+		_, err = secrets.Update(ctx, live, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 func (a *Apps) triggerFirstBuild(app *kipperv1.App) {

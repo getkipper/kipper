@@ -16,6 +16,7 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/kip/internal/deployer"
 	"github.com/getkipper/kipper/kip/internal/manifest"
@@ -127,7 +128,7 @@ func TestCleanupDeploySecrets(t *testing.T) {
 		)
 		d := &deployer.Deployer{Client: cs, Dynamic: dynamicfake.NewSimpleDynamicClient(appScheme())}
 
-		cleanupDeploySecrets(ctx, cs, d, "blog-test", "api", true, true)
+		cleanupDeploySecrets(ctx, cs, d, "blog-test", "api", "api-git-credentials", "", true, true)
 
 		_, err := cs.CoreV1().Secrets("blog-test").Get(ctx, "app-api-secrets", metav1.GetOptions{})
 		assert.True(t, apierrors.IsNotFound(err), "a failed deploy must not leave the secrets it created behind")
@@ -139,7 +140,7 @@ func TestCleanupDeploySecrets(t *testing.T) {
 		cs := k8sfake.NewSimpleClientset(secretFixture("app-api-secrets"))
 		d := &deployer.Deployer{Client: cs, Dynamic: dynamicfake.NewSimpleDynamicClient(appScheme(), appCR("api", "blog-test"))}
 
-		cleanupDeploySecrets(ctx, cs, d, "blog-test", "api", true, false)
+		cleanupDeploySecrets(ctx, cs, d, "blog-test", "api", "api-git-credentials", "", true, false)
 
 		_, err := cs.CoreV1().Secrets("blog-test").Get(ctx, "app-api-secrets", metav1.GetOptions{})
 		assert.NoError(t, err, "an existing App CR will adopt the Secret; it must not be deleted")
@@ -149,7 +150,7 @@ func TestCleanupDeploySecrets(t *testing.T) {
 		cs := k8sfake.NewSimpleClientset(secretFixture("app-api-secrets"))
 		d := &deployer.Deployer{Client: cs, Dynamic: dynamicfake.NewSimpleDynamicClient(appScheme())}
 
-		cleanupDeploySecrets(ctx, cs, d, "blog-test", "api", false, false)
+		cleanupDeploySecrets(ctx, cs, d, "blog-test", "api", "api-git-credentials", "", false, false)
 
 		_, err := cs.CoreV1().Secrets("blog-test").Get(ctx, "app-api-secrets", metav1.GetOptions{})
 		assert.NoError(t, err, "secrets from an earlier deploy or another writer are not this invocation's to delete")
@@ -356,4 +357,34 @@ func TestApplyConfigChange_NamesNoRemedyAFunctionHasNot(t *testing.T) {
 	assert.Contains(t, err.Error(), "--restart", "the command itself is the whole of the remedy")
 	assert.NotContains(t, err.Error(), "console", "there is no function restart in the console either")
 	assert.NotContains(t, err.Error(), "kip function restart", "nor on the command line")
+}
+
+// A credential is named after the pair it holds, so two
+// first deploys of the same token converge on one object. Deleting it because
+// this run won the Create is the same fallacy the console abandoned: the other
+// run may have claimed it and be about to name an App at it.
+func TestCleanupDeploySecretsLeavesACredentialAnotherRunHasClaimed(t *testing.T) {
+	ctx := context.Background()
+	name := secretname.GitCredential("api", secretname.GitCredentialDigest("t", "git.example.com"))
+
+	created := secretFixture(name)
+	created.ResourceVersion = "1"
+	cs := k8sfake.NewSimpleClientset(created)
+	d := &deployer.Deployer{Client: cs, Dynamic: dynamicfake.NewSimpleDynamicClient(appScheme())}
+
+	// The other run claims it after this one created it.
+	claimed, err := cs.CoreV1().Secrets("blog-test").Get(ctx, name, metav1.GetOptions{})
+	require.NoError(t, err)
+	claimed.Annotations = map[string]string{labels.AnnoGitCredentialClaimed: "2026-08-19T10:00:00Z"}
+	// The apiserver bumps this on every write; the fake client does not, so the
+	// test stands in for it. The version moving is the whole signal.
+	claimed.ResourceVersion = "2"
+	_, err = cs.CoreV1().Secrets("blog-test").Update(ctx, claimed, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	cleanupDeploySecrets(ctx, cs, d, "blog-test", "api", name, "1", false, true)
+
+	_, err = cs.CoreV1().Secrets("blog-test").Get(ctx, name, metav1.GetOptions{})
+	assert.NoError(t, err,
+		"a failed deploy removed a credential another run had claimed and is about to name an app at")
 }

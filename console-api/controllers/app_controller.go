@@ -31,8 +31,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/controller/pkg/appowner"
+	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/controller/pkg/workload"
 )
@@ -135,8 +138,9 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 	// namespace in plaintext for as long as the unrelated fault lasts. Each of
 	// those states is one an App written straight to the Kubernetes API can
 	// arrive in. Same reasoning as the link-policy withdrawal below.
-	if err := r.sweepDetachedGitCredential(ctx, &app); err != nil {
-		return ctrl.Result{}, fmt.Errorf("removing a detached git credential: %w", err)
+	credentialRetry, err := r.sweepGitCredentials(ctx, &app)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("removing a git credential the app has moved off: %w", err)
 	}
 	if err := r.clearDetachedBuildStatus(ctx, &app); err != nil {
 		return ctrl.Result{}, fmt.Errorf("clearing a detached build status: %w", err)
@@ -331,6 +335,9 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 
 	if retryIn > 0 && (linkResync.RequeueAfter == 0 || retryIn < linkResync.RequeueAfter) {
 		linkResync.RequeueAfter = retryIn
+	}
+	if credentialRetry > 0 && (linkResync.RequeueAfter == 0 || credentialRetry < linkResync.RequeueAfter) {
+		linkResync.RequeueAfter = credentialRetry
 	}
 
 	return linkResync, nil
@@ -1020,8 +1027,8 @@ func bytesMapEqual(a, b map[string][]byte) bool {
 
 // adoptWriterSecrets sets the App as controller of the credential Secrets that
 // CLI and console writers create out-of-band — `app-<app>-secrets`, and
-// `<app>-git-credentials` when spec.git references that conventional per-app
-// name — so deleting the App garbage-collects them instead of leaving
+// the app's own git credential when spec.git references one — so deleting the
+// App garbage-collects them instead of leaving
 // plaintext credentials behind in the namespace. Data is untouched: these
 // Secrets have no spec-side source of truth.
 //
@@ -1031,15 +1038,14 @@ func bytesMapEqual(a, b map[string][]byte) bool {
 // into an App child that dies with the App. Every Kipper writer stamps
 // `app.kubernetes.io/managed-by: kipper` plus a per-app label, so anything
 // without those markers is foreign and stays untouched, as does a Secret
-// already controlled by something else and a git credentialsSecret under a
-// name other than the conventional `<app>-git-credentials` (which the builder
-// resolves as a shared credential, or rejects).
+// anything else already owns and a git credentialsSecret that is not this
+// app's own (which the builder resolves as a shared credential, or rejects).
 func (r *AppReconciler) adoptWriterSecrets(ctx context.Context, app *kipperv1.App) error {
 	// name → the label that must carry the app's name alongside managed-by.
 	candidates := map[string]string{
 		secretname.Secrets(secretname.KindApp, app.Name): "app",
 	}
-	if app.Spec.Git != nil && app.Spec.Git.CredentialsSecret == app.Name+"-git-credentials" {
+	if app.Spec.Git != nil && secretname.IsGitCredentialOf(app.Name, app.Spec.Git.CredentialsSecret) {
 		candidates[app.Spec.Git.CredentialsSecret] = "kipper.run/app"
 	}
 
@@ -1052,15 +1058,24 @@ func (r *AppReconciler) adoptWriterSecrets(ctx context.Context, app *kipperv1.Ap
 		if err != nil {
 			return err
 		}
-		if metav1.GetControllerOf(&secret) != nil {
-			continue
-		}
 		if secret.Labels[kipperLabel] != kipperValue || secret.Labels[appLabel] != app.Name {
 			continue
 		}
-		if err := controllerutil.SetControllerReference(app, &secret, r.Scheme); err != nil {
-			return fmt.Errorf("setting owner reference on %s: %w", name, err)
+		// The same question the writers ask: an object nothing owns is free and
+		// one this App already owns stays as it is. Anything else is left,
+		// including an object still owned by the incarnation before a delete
+		// and recreate, because garbage collection is already entitled to
+		// remove it and adopting it would tie this App to an object that can
+		// vanish.
+		refs, mayOwn := appowner.Take(secret.OwnerReferences,
+			appowner.Reference(kipperv1.GroupVersion.String(), app.Name, app.UID))
+		if !mayOwn {
+			continue
 		}
+		if equality.Semantic.DeepEqual(refs, secret.OwnerReferences) {
+			continue
+		}
+		secret.OwnerReferences = refs
 		if err := r.Update(ctx, &secret); err != nil {
 			return fmt.Errorf("adopting %s: %w", name, err)
 		}
@@ -1075,13 +1090,28 @@ func (r *AppReconciler) adoptWriterSecrets(ctx context.Context, app *kipperv1.Ap
 func (r *AppReconciler) sweepWriterSecrets(ctx context.Context, app *kipperv1.App) error {
 	candidates := map[string]string{
 		secretname.Secrets(secretname.KindApp, app.Name): "app",
-		// Unconditionally, not only while a git source is configured. An app
-		// whose source was detached still has the token on disk if the sweep
-		// that removes it has not run yet, and gating this on spec.git would
-		// strand that plaintext Secret in the namespace forever once the App
-		// it belonged to is gone. The label and ownership checks below are
-		// what keep a stranger's Secret safe, not the spec.
-		app.Name + "-git-credentials": "kipper.run/app",
+	}
+	// Every generation of the credential, not only the one the spec names and
+	// not only the name credentials used to have. Each is a plaintext token,
+	// and once the App is gone nothing else knows they were its. Listed rather
+	// than named because a generation's name carries a digest of its contents,
+	// so the set is not derivable from the App alone.
+	//
+	// Unconditional, not gated on spec.git: an app whose source was detached
+	// still has a token on disk if the sweep that removes it has not run yet,
+	// and gating this would strand it in the namespace forever. The label and
+	// ownership checks below are what keep a stranger's Secret safe.
+	var owned corev1.SecretList
+	if err := r.List(ctx, &owned, client.InNamespace(app.Namespace), client.MatchingLabels{
+		kipperLabel:      kipperValue,
+		"kipper.run/app": app.Name,
+	}); err != nil {
+		return fmt.Errorf("listing git credentials for %s: %w", app.Name, err)
+	}
+	for i := range owned.Items {
+		if secretname.IsGitCredentialOf(app.Name, owned.Items[i].Name) {
+			candidates[owned.Items[i].Name] = "kipper.run/app"
+		}
 	}
 
 	for name, appLabel := range candidates {
@@ -1096,8 +1126,10 @@ func (r *AppReconciler) sweepWriterSecrets(ctx context.Context, app *kipperv1.Ap
 		if secret.Labels[kipperLabel] != kipperValue || secret.Labels[appLabel] != app.Name {
 			continue
 		}
-		// A Secret controlled by something else is not this app's to sweep.
-		if owner := metav1.GetControllerOf(&secret); owner != nil && owner.UID != app.UID {
+		// Every owner counts, not only the controlling one: collection follows
+		// them all, so a Secret anything else owns is not this app's to
+		// remove. The same question Take asks before writing.
+		if !appowner.OnlyOwnedBy(secret.OwnerReferences, app.UID) {
 			continue
 		}
 		if err := r.Delete(ctx, &secret); err != nil && !errors.IsNotFound(err) {
@@ -2238,6 +2270,22 @@ func strPtr(s string) *string {
 	return &s
 }
 
+// enqueueAppsForGitCredential maps a per-app git credential back to its App, so
+// the sweep sees an object the App has never named.
+func (r *AppReconciler) enqueueAppsForGitCredential(_ context.Context, obj client.Object) []reconcile.Request {
+	marks := obj.GetLabels()
+	if marks[kipperLabel] != kipperValue {
+		return nil
+	}
+	app := marks["kipper.run/app"]
+	if app == "" || !secretname.IsGitCredentialOf(app, obj.GetName()) {
+		return nil
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: app},
+	}}
+}
+
 // SetupWithManager registers the App reconciler with the controller manager.
 func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Watch the Traefik Middlewares behind the API key gate so deleting or
@@ -2273,6 +2321,11 @@ func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// A rotated service password has to reach the bindings that derive from
 		// it, rather than waiting for something unrelated to touch each app.
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.enqueueAppsForServiceCredentials)).
+		// A git credential is created before the App names it, so one left
+		// behind by a write that then failed carries no owner reference and no
+		// Owns reaches it. Without this the only thing that collects it is a
+		// reconcile the App happens to get for another reason.
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.enqueueAppsForGitCredential)).
 		Watches(&kipperv1.ClusterIdentity{}, handler.EnqueueRequestsFromMapFunc(r.enqueueAppsForClusterIdentity)).
 		Watches(&kipperv1.App{}, handler.EnqueueRequestsFromMapFunc(r.enqueueCallersOfLinkTarget)).
 		// Consent is the target project's decision, and withdrawing it has to
@@ -2282,48 +2335,83 @@ func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// sweepDetachedGitCredential removes the token an app built with once its git
-// source is gone.
+// sweepGitCredentials removes the git credentials an app owns that its live
+// spec does not name.
 //
-// Adoption ties the Secret's life to the App rather than to the source
-// (adoptWriterSecrets), which is right while the app builds and wrong the
-// moment it stops: without this, removing a git source leaves a plaintext
-// token in the namespace with nothing referencing it, until the app itself is
-// deleted.
+// A credential is one object per token-and-host pair, so a rotation leaves the
+// previous one behind and a write whose CR update failed leaves one nothing
+// ever referenced. Both are plaintext tokens, so something has to collect them.
+// Detaching git names nothing at all, which is how every generation goes.
 //
-// The guards are the ones adoption used, in reverse. Only the conventional
-// per-app name is considered, so a credentialsSecret naming a shared
-// credential — which the builder resolves for several apps — is never touched.
 // Only a Secret carrying the writer labels is considered, because names are
 // namespace-global and a collision must not turn a stranger's object into this
-// app's to delete. And only one this app controls, or that nothing controls.
+// app's to delete. And only one nothing else owns: an owner that does not
+// control still governs collection, so an object co-owned with another actor is
+// not this app's to remove.
+//
+// A credential younger than the grace period is left alone whatever the spec
+// says: the object is created before the CR update that names it, so a sweep
+// racing a rotation would otherwise delete the credential that update is about
+// to point at. What was held back decides how long to wait before looking
+// again. A Secret event does reach this App, but a grace expiring raises no
+// event at all, so without the requeue a skipped object waits for an unrelated
+// reason to reconcile that may never come.
 //
 // Idempotent by construction: a missing Secret is the goal state, so a pass
 // that half-succeeded is simply run again by the next reconcile.
-func (r *AppReconciler) sweepDetachedGitCredential(ctx context.Context, app *kipperv1.App) error {
-	if app.Spec.Git != nil {
-		return nil
-	}
-	name := app.Name + "-git-credentials"
+func (r *AppReconciler) sweepGitCredentials(ctx context.Context, app *kipperv1.App) (time.Duration, error) {
+	const grace = 2 * time.Minute
 
-	var secret corev1.Secret
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: app.Namespace}, &secret)
-	if errors.IsNotFound(err) {
-		return nil
+	var secrets corev1.SecretList
+	if err := r.List(ctx, &secrets, client.InNamespace(app.Namespace), client.MatchingLabels{
+		kipperLabel:      kipperValue,
+		"kipper.run/app": app.Name,
+	}); err != nil {
+		return 0, fmt.Errorf("listing git credentials for %s: %w", app.Name, err)
 	}
-	if err != nil {
-		return err
+
+	var retryIn time.Duration
+	named := ""
+	if app.Spec.Git != nil {
+		named = app.Spec.Git.CredentialsSecret
 	}
-	if secret.Labels[kipperLabel] != kipperValue || secret.Labels["kipper.run/app"] != app.Name {
-		return nil
+
+	for i := range secrets.Items {
+		secret := &secrets.Items[i]
+		if !secretname.IsGitCredentialOf(app.Name, secret.Name) || secret.Name == named {
+			continue
+		}
+		// The later of creation and the last claim. A writer that finds the
+		// object already there reuses it, so age alone would let a rotation
+		// back to a pair the app recently held be swept out from under the
+		// commit that is naming it.
+		since := secret.CreationTimestamp.Time
+		// A claim says a writer is committing the App onto this object now, so
+		// one further ahead than the grace is not a claim at all: a machine
+		// with a wild clock, or a hand-edited annotation. Trusting it would
+		// hold a plaintext token for as long as it says, because every pass
+		// would measure the grace afresh from a time that never arrives.
+		if claimed, err := time.Parse(time.RFC3339, secret.Annotations[labels.AnnoGitCredentialClaimed]); err == nil &&
+			claimed.After(since) && !claimed.After(time.Now().Add(grace)) {
+			since = claimed
+		}
+		if held := grace - time.Since(since); held > 0 {
+			if retryIn == 0 || held < retryIn {
+				retryIn = held
+			}
+			continue
+		}
+		if !appowner.OnlyOwnedBy(secret.OwnerReferences, app.UID) {
+			continue
+		}
+		// Preconditioned on what this pass read, so a claim landing between the
+		// read and the delete refuses it rather than losing the race silently.
+		if err := r.Delete(ctx, secret, client.Preconditions{ResourceVersion: &secret.ResourceVersion}); err != nil &&
+			!errors.IsNotFound(err) && !errors.IsConflict(err) {
+			return 0, fmt.Errorf("removing the superseded git credential %s: %w", secret.Name, err)
+		}
 	}
-	if owner := metav1.GetControllerOf(&secret); owner != nil && owner.UID != app.UID {
-		return nil
-	}
-	if err := r.Delete(ctx, &secret); err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("removing the detached git credential %s: %w", name, err)
-	}
-	return nil
+	return retryIn, nil
 }
 
 // clearDetachedBuildStatus drops a build result belonging to a source that is

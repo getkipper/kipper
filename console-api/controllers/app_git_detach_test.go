@@ -74,7 +74,7 @@ func TestDetachingGitRemovesTheCredentialItAdopted(t *testing.T) {
 	scheme := testScheme()
 	r := &AppReconciler{Client: crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, secret).Build(), Scheme: scheme}
 
-	if err := r.sweepDetachedGitCredential(t.Context(), app); err != nil {
+	if _, err := r.sweepGitCredentials(t.Context(), app); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 
@@ -95,7 +95,7 @@ func TestAnAppStillBuildingFromGitKeepsItsCredential(t *testing.T) {
 	scheme := testScheme()
 	r := &AppReconciler{Client: crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, secret).Build(), Scheme: scheme}
 
-	if err := r.sweepDetachedGitCredential(t.Context(), app); err != nil {
+	if _, err := r.sweepGitCredentials(t.Context(), app); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 
@@ -113,7 +113,7 @@ func TestDetachingGitLeavesAnUnlabelledSecretAlone(t *testing.T) {
 	scheme := testScheme()
 	r := &AppReconciler{Client: crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, secret).Build(), Scheme: scheme}
 
-	if err := r.sweepDetachedGitCredential(t.Context(), app); err != nil {
+	if _, err := r.sweepGitCredentials(t.Context(), app); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 
@@ -135,7 +135,7 @@ func TestDetachingGitLeavesASecretAnotherOwnerControls(t *testing.T) {
 	scheme := testScheme()
 	r := &AppReconciler{Client: crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, secret).Build(), Scheme: scheme}
 
-	if err := r.sweepDetachedGitCredential(t.Context(), app); err != nil {
+	if _, err := r.sweepGitCredentials(t.Context(), app); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 
@@ -153,7 +153,7 @@ func TestDetachingGitIsSafeWhenThereIsNoCredential(t *testing.T) {
 	r := &AppReconciler{Client: crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app).Build(), Scheme: scheme}
 
 	for range 3 {
-		if err := r.sweepDetachedGitCredential(t.Context(), app); err != nil {
+		if _, err := r.sweepGitCredentials(t.Context(), app); err != nil {
 			t.Fatalf("sweep: %v", err)
 		}
 	}

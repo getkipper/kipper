@@ -191,7 +191,7 @@ kip app deploy --name api \
   ✔  Git source configured: https://github.com/acme/private-api.git (main)
 ```
 
-The token is stored as a Kubernetes Secret (`api-git-credentials`). At build time git receives it through a credential helper bound to the repository's host, so the token never appears in the App CR, the clone URL, or the built image.
+The token is stored as a Kubernetes Secret named after the token and the repository host it is for, so rotating it writes a new one and the app moves onto it in a single step. Kipper removes the one it moved off. At build time git receives the token through a credential helper bound to the repository's host, so it never appears in the App CR, the clone URL, or the built image.
 
 | Flag | Description |
 |---|---|

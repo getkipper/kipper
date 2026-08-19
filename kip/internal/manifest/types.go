@@ -90,7 +90,7 @@ type GitSpec struct {
 	URL    string `yaml:"url"`
 	Branch string `yaml:"branch,omitempty"`
 	// CredentialsSecret names the git credential the build uses: the app's own
-	// "<app>-git-credentials" Secret, or a shared credential configured in
+	// per-app credential Secret, or a shared credential configured in
 	// kipper-system (used only for an allow-listed project and matching host).
 	CredentialsSecret string            `yaml:"credentialsSecret,omitempty"`
 	DockerfilePath    string            `yaml:"dockerfilePath,omitempty"`

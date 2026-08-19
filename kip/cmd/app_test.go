@@ -13,13 +13,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/getkipper/kipper/controller/pkg/appowner"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
+	"github.com/getkipper/kipper/kip/internal/deployer"
 	"github.com/getkipper/kipper/kip/internal/manifest"
 )
 
@@ -373,16 +377,28 @@ func TestDeployRecordsTheHostAGitTokenWasStoredFor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			clientset := k8sfake.NewClientset(tc.existing...)
 
-			_, err := storeGitCredential(context.Background(), clientset, "shop-test", "web",
-				"a-token", "https://git.example.com/acme/web.git")
+			name, _, _, err := storeGitCredential(context.Background(), clientset, "shop-test", "web",
+				"a-token", "https://git.example.com/acme/web.git", nil)
 			require.NoError(t, err)
+			assert.True(t, secretname.IsGitCredentialOf("web", name),
+				"kip wrote a credential the readers will not recognise as this app's: %s", name)
 
 			secret, getErr := clientset.CoreV1().Secrets("shop-test").Get(
-				context.Background(), "web-git-credentials", metav1.GetOptions{})
+				context.Background(), name, metav1.GetOptions{})
 			require.NoError(t, getErr)
 			assert.Equal(t, "a-token", string(secret.Data["token"]))
 			assert.Equal(t, "git.example.com", secret.Annotations[labels.AnnoGitAuthority],
 				"the token was stored with no record of the host it is for, or with a stale one")
+
+			// The credential the app was cloning with is left for the sweep
+			// rather than replaced, so a rotation cannot damage the live pair.
+			if len(tc.existing) > 0 {
+				previous, prevErr := clientset.CoreV1().Secrets("shop-test").Get(
+					context.Background(), "web-git-credentials", metav1.GetOptions{})
+				require.NoError(t, prevErr)
+				assert.Equal(t, "the-old-token", string(previous.Data["token"]),
+					"kip rewrote the credential the app is still cloning with")
+			}
 		})
 	}
 }
@@ -405,4 +421,207 @@ func TestDeployRefusesAGitTokenWithNoRepository(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--git")
+}
+
+// kip's reuse branch had no test at all, so its
+// ownership decision could be deleted and the suite stayed green. It also kept
+// a reference left by an App of this name that is gone, which garbage
+// collection removes the object by, and it re-implemented the decision the
+// console and the reconciler share rather than using it.
+func TestStoreGitCredentialReusingAnExistingObject(t *testing.T) {
+	name := secretname.GitCredential("web", secretname.GitCredentialDigest("a-token", "git.example.com"))
+	controls := true
+	existing := func(owner *metav1.OwnerReference) *corev1.Secret {
+		s := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "shop-test"},
+			Data:       map[string][]byte{"token": []byte("a-token")},
+		}
+		if owner != nil {
+			s.OwnerReferences = []metav1.OwnerReference{*owner}
+		}
+		return s
+	}
+
+	t.Run("reuses an object nothing owns", func(t *testing.T) {
+		clientset := k8sfake.NewClientset(existing(nil))
+
+		got, _, fresh, err := storeGitCredential(context.Background(), clientset, "shop-test", "web",
+			"a-token", "https://git.example.com/acme/web.git", nil)
+		require.NoError(t, err)
+		assert.Equal(t, name, got)
+		assert.False(t, fresh, "an object that was already there was reported as created")
+
+		live, getErr := clientset.CoreV1().Secrets("shop-test").Get(context.Background(), name, metav1.GetOptions{})
+		require.NoError(t, getErr)
+		assert.NotEmpty(t, live.Annotations[labels.AnnoGitCredentialClaimed],
+			"reuse did not record that a deploy is committing onto it")
+	})
+
+	// A first deploy has no App to keep the object alive, and stripping a dead
+	// app's reference does not recall a collection already issued against it.
+	t.Run("refuses an object left owned by an app that is gone", func(t *testing.T) {
+		clientset := k8sfake.NewClientset(existing(&metav1.OwnerReference{
+			APIVersion: "kipper.run/v1alpha1", Kind: "App",
+			Name: "web", UID: "the-app-that-was-deleted", Controller: &controls,
+		}))
+
+		_, _, _, err := storeGitCredential(context.Background(), clientset, "shop-test", "web",
+			"a-token", "https://git.example.com/acme/web.git", nil)
+		require.Error(t, err, "a deploy committed onto an object garbage collection is entitled to remove")
+	})
+
+	// The name is a digest of the pair, and a digest is not a proof: sixteen
+	// hex characters can collide, and anything that can write a Secret in the
+	// namespace can put something else at the address. A deploy that claimed
+	// without reading it would clone with a token nobody supplied.
+	t.Run("refuses an object holding a different token", func(t *testing.T) {
+		planted := existing(nil)
+		planted.Data = map[string][]byte{"token": []byte("someone-elses-token")}
+		clientset := k8sfake.NewClientset(planted)
+
+		_, _, _, err := storeGitCredential(context.Background(), clientset, "shop-test", "web",
+			"a-token", "https://git.example.com/acme/web.git", nil)
+		require.Error(t, err, "the deploy committed onto an object that does not hold the token supplied")
+		assert.Contains(t, err.Error(), "does not hold the token given")
+	})
+
+	t.Run("refuses an object recorded for another clone host", func(t *testing.T) {
+		elsewhere := existing(nil)
+		elsewhere.Annotations = map[string]string{labels.AnnoGitAuthority: "git.internal.example"}
+		clientset := k8sfake.NewClientset(elsewhere)
+
+		_, _, _, err := storeGitCredential(context.Background(), clientset, "shop-test", "web",
+			"a-token", "https://git.example.com/acme/web.git", nil)
+		require.Error(t, err, "the deploy sent a token to a host it was not stored for")
+	})
+
+	// Without the writer labels the controller's sweeps cannot list the object,
+	// so a credential the app later rotates off stays in the namespace with the
+	// token in it for good.
+	t.Run("repairs the writer labels on an object that lost them", func(t *testing.T) {
+		stripped := existing(nil)
+		stripped.Labels = nil
+		clientset := k8sfake.NewClientset(stripped)
+
+		_, _, _, err := storeGitCredential(context.Background(), clientset, "shop-test", "web",
+			"a-token", "https://git.example.com/acme/web.git", nil)
+		require.NoError(t, err)
+
+		live, getErr := clientset.CoreV1().Secrets("shop-test").Get(context.Background(), name, metav1.GetOptions{})
+		require.NoError(t, getErr)
+		assert.Equal(t, labels.Kipper, live.Labels[labels.ManagedBy],
+			"the sweeps list by these labels, so a credential without them is never collected")
+		assert.Equal(t, "web", live.Labels[labels.AppRef])
+	})
+
+	t.Run("refuses an object another controller owns", func(t *testing.T) {
+		clientset := k8sfake.NewClientset(existing(&metav1.OwnerReference{
+			APIVersion: "serving.example.com/v1", Kind: "Service",
+			Name: "something-else", UID: "a-service", Controller: &controls,
+		}))
+
+		_, _, _, err := storeGitCredential(context.Background(), clientset, "shop-test", "web",
+			"a-token", "https://git.example.com/acme/web.git", nil)
+		require.Error(t, err, "the deploy committed onto a credential another controller owns")
+		assert.Contains(t, err.Error(), "belongs to something else")
+		assert.Contains(t, err.Error(), "check what owns that Secret", "the refusal gives the operator nothing to do")
+	})
+}
+
+// Reusing a credential for an App that already exists used
+// to strip that App's own ownership, because the writer had no UID to tell a
+// live owner from a dead one. Every same-pair redeploy churned the reference
+// the reconciler had just set.
+func TestStoreGitCredentialBindsToAnAppThatAlreadyExists(t *testing.T) {
+	name := secretname.GitCredential("web", secretname.GitCredentialDigest("a-token", "git.example.com"))
+	controls := true
+	clientset := k8sfake.NewClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "shop-test",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "kipper.run/v1alpha1", Kind: "App",
+				Name: "web", UID: "the-live-app", Controller: &controls,
+			}},
+		},
+		Data: map[string][]byte{"token": []byte("a-token")},
+	})
+	live := appowner.Reference("kipper.run/v1alpha1", "web", "the-live-app")
+
+	_, _, _, err := storeGitCredential(context.Background(), clientset, "shop-test", "web",
+		"a-token", "https://git.example.com/acme/web.git", &live)
+	require.NoError(t, err)
+
+	got, getErr := clientset.CoreV1().Secrets("shop-test").Get(context.Background(), name, metav1.GetOptions{})
+	require.NoError(t, getErr)
+	require.Len(t, got.OwnerReferences, 1,
+		"a redeploy stripped the ownership the reconciler had set, leaving the credential unowned")
+	assert.Equal(t, "the-live-app", string(got.OwnerReferences[0].UID))
+}
+
+// liveAppOwner decides whether a deploy can bind the credential itself or must
+// leave it for the reconciler. Only NotFound means there is no App: anything
+// else is unknown rather than absent, and treating the two alike sent a
+// redeploy down the no-App path.
+func TestLiveAppOwner(t *testing.T) {
+	app := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "kipper.run/v1alpha1", "kind": "App",
+		"metadata": map[string]interface{}{"name": "web", "namespace": "shop-test", "uid": "the-live-app"},
+	}}
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(deployer.AppGVR.GroupVersion().WithKind("App"), &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(deployer.AppGVR.GroupVersion().WithKind("AppList"), &unstructured.UnstructuredList{})
+
+	owner, err := liveAppOwner(context.Background(), dynamicfake.NewSimpleDynamicClient(scheme, app), "shop-test", "web")
+	require.NoError(t, err)
+	require.NotNil(t, owner, "an app that exists was treated as absent, so its credential is left unbound")
+	assert.Equal(t, "the-live-app", string(owner.UID))
+	assert.Equal(t, "App", owner.Kind)
+
+	owner, err = liveAppOwner(context.Background(), dynamicfake.NewSimpleDynamicClient(scheme), "shop-test", "web")
+	require.NoError(t, err)
+	assert.Nil(t, owner, "a first deploy has no app to bind to and must say so")
+
+	// An unreadable App is unknown rather than absent. Treating it as absent
+	// would send a redeploy down the no-owner path and strip the ownership the
+	// reconciler had set.
+	refusing := dynamicfake.NewSimpleDynamicClient(scheme)
+	refusing.PrependReactor("get", "apps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("the apiserver is busy")
+	})
+	_, err = liveAppOwner(context.Background(), refusing, "shop-test", "web")
+	assert.Error(t, err, "an unreadable app was treated as one that does not exist")
+}
+
+// kip left a freshly created credential unowned even
+// when it had just looked the App up, so the object stayed collectable by
+// nothing until a reconcile adopted it. The console binds at creation; this now
+// does too, and the unowned path is only a first deploy, where there is no App.
+func TestStoreGitCredentialBindsANewCredentialToALiveApp(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+	live := appowner.Reference("kipper.run/v1alpha1", "web", "the-live-app")
+
+	name, _, fresh, err := storeGitCredential(context.Background(), clientset, "shop-test", "web",
+		"a-token", "https://git.example.com/acme/web.git", &live)
+	require.NoError(t, err)
+	require.True(t, fresh)
+
+	got, getErr := clientset.CoreV1().Secrets("shop-test").Get(context.Background(), name, metav1.GetOptions{})
+	require.NoError(t, getErr)
+	require.Len(t, got.OwnerReferences, 1,
+		"a credential written for an app that already exists was left for the reconciler to find")
+	assert.Equal(t, "the-live-app", string(got.OwnerReferences[0].UID))
+}
+
+// A first deploy has no App, so the credential is written unowned and the
+// reconciler binds it once the App is there.
+func TestStoreGitCredentialLeavesAFirstDeploysCredentialForTheReconciler(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+
+	name, _, _, err := storeGitCredential(context.Background(), clientset, "shop-test", "web",
+		"a-token", "https://git.example.com/acme/web.git", nil)
+	require.NoError(t, err)
+
+	got, getErr := clientset.CoreV1().Secrets("shop-test").Get(context.Background(), name, metav1.GetOptions{})
+	require.NoError(t, getErr)
+	assert.Empty(t, got.OwnerReferences)
 }

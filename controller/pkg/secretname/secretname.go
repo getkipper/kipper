@@ -18,6 +18,12 @@
 // lives here rather than in each of them.
 package secretname
 
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
+)
+
 // Kind identifies the workload a derived Secret belongs to.
 type Kind string
 
@@ -73,4 +79,80 @@ func Binding(service string, kind Kind, workload string) string {
 // every binding without its own logical namespace reads this one directly.
 func ServiceCredentials(service string) string {
 	return service + "-credentials"
+}
+
+// GitCredential is the Secret holding the token an App clones its source with,
+// named by a digest of the token and the host it is for.
+//
+// One generation per write, like EnvGeneration and for the same reason: the
+// token and the URL are a pair, and they used to be written as a value into one
+// fixed name while the URL went to the CR. Two writes could then interleave
+// into a pair nobody asked for, and undoing a half-written change meant
+// restoring a value rather than dropping an object. Naming the pair makes the
+// App's own update the commit point, so a failed write leaves an object nothing
+// references instead of a credential that has to be put back.
+//
+// The digest also makes a repeated write idempotent: the same token for the
+// same host is the same object, so rotating twice does not churn.
+func GitCredential(app, digest string) string {
+	return GitCredentialPrefix(app) + digest
+}
+
+// GitCredentialPrefix is what every generation of one App's git credential
+// shares, so a reader can tell the App's own credential from a shared one, and
+// a sweep can find the generations the App no longer names.
+func GitCredentialPrefix(app string) string {
+	return app + "-git-credentials-"
+}
+
+// LegacyGitCredential is the single fixed name git credentials used before they
+// were written one generation per attempt. Clusters installed before that keep
+// referencing it until their next rotation, so every reader still accepts it.
+func LegacyGitCredential(app string) string {
+	return app + "-git-credentials"
+}
+
+// GitCredentialDigest identifies one token-and-host pair. Both go in, because
+// the same token used for a different host is a different pair, and a name that
+// did not say so would let one be mistaken for the other.
+//
+// The digest reaches the Secret's name and so `spec.git.credentialsSecret`,
+// where anyone who can read the App can see it while the host is public in
+// spec.git.url. A token with real entropy is unaffected; one a person chose is
+// guessable offline at hashing speed. Keying this, with an HMAC over a secret
+// every writer can already read, would close that and keep the convergence the
+// name depends on.
+func GitCredentialDigest(token, authority string) string {
+	sum := sha256.Sum256([]byte(authority + "\x00" + token))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// IsGitCredentialOf reports whether a Secret name is an App's own git
+// credential rather than a shared one or a stranger's object.
+//
+// The name alone decides this, because it is what `spec.git.credentialsSecret`
+// carries and what a reader has before it fetches anything. Both the legacy
+// fixed name and any generation of it count, so a cluster that has not rotated
+// since generations arrived keeps working.
+func IsGitCredentialOf(app, secret string) bool {
+	if secret == LegacyGitCredential(app) {
+		return true
+	}
+	rest, found := strings.CutPrefix(secret, GitCredentialPrefix(app))
+	// A generation carries a digest and nothing else. Without this an app named
+	// "web" would claim "web-git-credentials-<anything>", including the
+	// credential of an app called "web-git-credentials-x".
+	return found && isDigest(rest)
+}
+
+func isDigest(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

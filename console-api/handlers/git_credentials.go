@@ -15,7 +15,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
-	"github.com/getkipper/kipper/console-api/internal/gitcred"
+	"github.com/getkipper/kipper/console-api/internal/sharedcred"
 	"github.com/getkipper/kipper/console-api/middleware"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
 )
@@ -43,7 +43,7 @@ func (gc *GitCredentials) List(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	entries, _ := gitcred.Load(ctx, gc.Client)
+	entries, _ := sharedcred.Load(ctx, gc.Client)
 
 	resp := make([]gitCredentialResponse, len(entries))
 	for i, e := range entries {
@@ -63,7 +63,7 @@ func (gc *GitCredentials) List(w http.ResponseWriter, r *http.Request) {
 // Add creates or updates a shared git credential.
 // POST /api/v1/settings/git-credentials
 func (gc *GitCredentials) Add(w http.ResponseWriter, r *http.Request) {
-	var req gitcred.Entry
+	var req sharedcred.Entry
 	if err := decodeJSON(r, &req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body")
 		return
@@ -93,7 +93,7 @@ func (gc *GitCredentials) Add(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	entries, err := gitcred.Load(ctx, gc.Client)
+	entries, err := sharedcred.Load(ctx, gc.Client)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to read git credentials")
 		return
@@ -111,7 +111,7 @@ func (gc *GitCredentials) Add(w http.ResponseWriter, r *http.Request) {
 		entries = append(entries, req)
 	}
 
-	if err := gitcred.Save(ctx, gc.Client, entries); err != nil {
+	if err := sharedcred.Save(ctx, gc.Client, entries); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to save git credentials")
 		return
 	}
@@ -134,13 +134,13 @@ func (gc *GitCredentials) Remove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entries, err := gitcred.Load(ctx, gc.Client)
+	entries, err := sharedcred.Load(ctx, gc.Client)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to read git credentials")
 		return
 	}
 
-	filtered := make([]gitcred.Entry, 0, len(entries))
+	filtered := make([]sharedcred.Entry, 0, len(entries))
 	for _, e := range entries {
 		if e.Name != name {
 			filtered = append(filtered, e)
@@ -152,7 +152,7 @@ func (gc *GitCredentials) Remove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := gitcred.Save(ctx, gc.Client, filtered); err != nil {
+	if err := sharedcred.Save(ctx, gc.Client, filtered); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to save git credentials")
 		return
 	}
@@ -166,7 +166,7 @@ func (gc *GitCredentials) Health(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	entries, _ := gitcred.Load(ctx, gc.Client)
+	entries, _ := sharedcred.Load(ctx, gc.Client)
 
 	type result struct {
 		name   string
@@ -178,7 +178,7 @@ func (gc *GitCredentials) Health(w http.ResponseWriter, r *http.Request) {
 
 	for _, entry := range entries {
 		wg.Add(1)
-		go func(e gitcred.Entry) {
+		go func(e sharedcred.Entry) {
 			defer wg.Done()
 			probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
 			defer probeCancel()
@@ -237,8 +237,8 @@ func (gc *GitCredentials) Reveal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entries, _ := gitcred.Load(ctx, gc.Client)
-	if e := gitcred.Find(entries, name); e != nil {
+	entries, _ := sharedcred.Load(ctx, gc.Client)
+	if e := sharedcred.Find(entries, name); e != nil {
 		log.Printf("reveal git-credential=%s by user=%s: ok", name, claims.Email)
 		respondJSON(w, http.StatusOK, map[string]string{"token": e.Token})
 		return

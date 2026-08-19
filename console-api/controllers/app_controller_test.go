@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,9 +26,11 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/internal/registrycred"
+	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
@@ -2221,7 +2224,6 @@ func TestServiceBindingConditionMessageStaysWithinTheSchemaLimit(t *testing.T) {
 // the controller reference. So `kip app delete` removed the CR and left the
 // workload serving — which is what happened to one app in production, found
 // while deleting it.
-//
 // reconcileDerivedEnvSecret has re-asserted ownership on every pass since wave
 // 1, for the same reason: a reference lost to a direct write or a restore has
 // to be repaired rather than waiting for something to recreate the object.
@@ -2515,7 +2517,6 @@ func mustPublishJobEnv(t *testing.T, r *JobReconciler, ctx context.Context, job 
 
 // podEnvGeneration reads the environment a pod template names and returns the
 // object behind it.
-//
 // The name is read off the pod rather than constructed from secretname, for the
 // reason these tests existed before generations: an assertion that builds the
 // name through the same helper production uses proves only that the helper
@@ -2657,4 +2658,328 @@ func TestReconcileDeployment_EachRetryDecidesFromAFreshDesired(t *testing.T) {
 	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: "backend", Namespace: "hrportal-prod"}, &got))
 	assert.Equal(t, "ghcr.io/acme/backend:2026-08-02", got.Spec.Template.Spec.Containers[0].Image,
 		"the second attempt must decide from the app, not from what the first attempt left behind")
+}
+
+// A rotation moves the app onto a new credential object and leaves the previous
+// one behind, so something has to remove it or every rotation strands a
+// plaintext token in the namespace. Only what the live spec does not name goes,
+// and only once it is old enough that a write still on its way to the CR is not
+// mistaken for an orphan.
+func TestSweepGitCredentials_RemovesTheGenerationsTheAppHasMovedOff(t *testing.T) {
+	current := secretname.GitCredential("web", secretname.GitCredentialDigest("current", "github.com"))
+	previous := secretname.GitCredential("web", secretname.GitCredentialDigest("previous", "github.com"))
+	legacy := secretname.LegacyGitCredential("web")
+	old := metav1.NewTime(metav1.Now().Add(-time.Hour))
+
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "shop-test", UID: "app-uid"},
+		Spec: kipperv1.AppSpec{Git: &kipperv1.AppGitSource{
+			URL: "https://github.com/acme/web.git", CredentialsSecret: current,
+		}},
+	}
+	mine := func(name string, created metav1.Time) *corev1.Secret {
+		return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "shop-test", CreationTimestamp: created,
+			Labels: map[string]string{kipperLabel: kipperValue, "kipper.run/app": "web"},
+		}}
+	}
+	// Moved off, labelled, past grace — collectable but for one thing: another
+	// actor co-owns it, and an owner that does not control still governs
+	// collection, so it is not this app's to remove.
+	coOwned := mine(secretname.GitCredential("web", secretname.GitCredentialDigest("shared", "github.com")), old)
+	coOwned.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "example.com/v1", Kind: "Backup", Name: "nightly", UID: "a-backup",
+	}}
+
+	// A stranger's object that happens to sit under the app's prefix.
+	foreign := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name:      secretname.GitCredential("web", secretname.GitCredentialDigest("theirs", "example.com")),
+		Namespace: "shop-test", CreationTimestamp: old,
+	}}
+	justWritten := mine(secretname.GitCredential("web", secretname.GitCredentialDigest("inflight", "github.com")), metav1.Now())
+	// Carries this app's writer labels but is not a credential. Nothing stamps
+	// both labels on anything else today, so the sweep's name check is what
+	// keeps that true when something does.
+	notACredential := mine("web-something-else", old)
+
+	c := crfake.NewClientBuilder().WithScheme(testScheme()).
+		WithObjects(app, mine(current, old), mine(previous, old), mine(legacy, old), foreign, justWritten, notACredential, coOwned).Build()
+	r := &AppReconciler{Client: c, Scheme: testScheme()}
+
+	_, sweepErr := r.sweepGitCredentials(context.Background(), app)
+	require.NoError(t, sweepErr)
+
+	remaining := map[string]bool{}
+	var list corev1.SecretList
+	require.NoError(t, c.List(context.Background(), &list, crclient.InNamespace("shop-test")))
+	for i := range list.Items {
+		remaining[list.Items[i].Name] = true
+	}
+
+	assert.True(t, remaining[current], "the credential the app names was deleted")
+	assert.False(t, remaining[previous], "a generation the app moved off was left behind")
+	assert.False(t, remaining[legacy], "the pre-generation credential was left behind after a rotation")
+	assert.True(t, remaining[foreign.Name], "a Secret without the writer labels was deleted")
+	assert.True(t, remaining[justWritten.Name], "a credential still on its way to the CR was deleted")
+	assert.True(t, remaining[notACredential.Name],
+		"a labelled Secret that is not a credential was deleted by the credential sweep")
+	assert.True(t, remaining[coOwned.Name],
+		"a credential another actor co-owns was deleted, though its lifetime is not this app's to end")
+}
+
+// Deleting an App has to take every generation of its credential with it, not
+// only the name credentials used to have. Each one is a plaintext token, and
+// once the App is gone nothing else knows they were its.
+func TestSweepWriterSecrets_TakesEveryGenerationOfTheCredential(t *testing.T) {
+	current := secretname.GitCredential("web", secretname.GitCredentialDigest("current", "github.com"))
+	previous := secretname.GitCredential("web", secretname.GitCredentialDigest("previous", "github.com"))
+	legacy := secretname.LegacyGitCredential("web")
+
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "shop-test", UID: "app-uid"},
+		Spec: kipperv1.AppSpec{Git: &kipperv1.AppGitSource{
+			URL: "https://github.com/acme/web.git", CredentialsSecret: current,
+		}},
+	}
+	mine := func(name string) *corev1.Secret {
+		return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "shop-test",
+			Labels: map[string]string{kipperLabel: kipperValue, "kipper.run/app": "web"},
+		}}
+	}
+	// Co-owned by another actor: deleting the App does not entitle this sweep
+	// to end a lifetime something else also holds.
+	coOwned := mine(secretname.GitCredential("web", secretname.GitCredentialDigest("shared", "github.com")))
+	coOwned.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "example.com/v1", Kind: "Backup", Name: "nightly", UID: "a-backup",
+	}}
+
+	c := crfake.NewClientBuilder().WithScheme(testScheme()).
+		WithObjects(app, mine(current), mine(previous), mine(legacy), coOwned).Build()
+	r := &AppReconciler{Client: c, Scheme: testScheme()}
+
+	require.NoError(t, r.sweepWriterSecrets(context.Background(), app))
+
+	var list corev1.SecretList
+	require.NoError(t, c.List(context.Background(), &list, crclient.InNamespace("shop-test")))
+	var left []string
+	for i := range list.Items {
+		left = append(left, list.Items[i].Name)
+	}
+	assert.Equal(t, []string{coOwned.Name}, left,
+		"deleting the app either left its own credentials behind or took one another actor co-owns: %v", left)
+}
+
+// Skipping a credential inside the grace period only defers the work if
+// something comes back for it. Nothing maps a Secret event to its App, and a
+// stable app produces no further events of its own, so without a requeue the
+// plaintext token the app rotated off stays in the namespace for as long as the
+// app is quiet. The env sweep beside this one already reports its remaining
+// time for the same reason.
+func TestSweepGitCredentials_AsksToBeCalledBackWhileSomethingIsInsideTheGrace(t *testing.T) {
+	current := secretname.GitCredential("web", secretname.GitCredentialDigest("current", "github.com"))
+	justRotatedOff := secretname.GitCredential("web", secretname.GitCredentialDigest("previous", "github.com"))
+
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "shop-test", UID: "app-uid"},
+		Spec: kipperv1.AppSpec{Git: &kipperv1.AppGitSource{
+			URL: "https://github.com/acme/web.git", CredentialsSecret: current,
+		}},
+	}
+	mine := func(name string, created metav1.Time) *corev1.Secret {
+		return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "shop-test", CreationTimestamp: created,
+			Labels: map[string]string{kipperLabel: kipperValue, "kipper.run/app": "web"},
+		}}
+	}
+	c := crfake.NewClientBuilder().WithScheme(testScheme()).
+		WithObjects(app, mine(current, metav1.Now()), mine(justRotatedOff, metav1.Now())).Build()
+	r := &AppReconciler{Client: c, Scheme: testScheme()}
+
+	retryIn, err := r.sweepGitCredentials(context.Background(), app)
+	require.NoError(t, err)
+
+	assert.Greater(t, retryIn, time.Duration(0),
+		"a credential held back by the grace period was left with nothing to collect it")
+
+	var list corev1.SecretList
+	require.NoError(t, c.List(context.Background(), &list, crclient.InNamespace("shop-test")))
+	assert.Len(t, list.Items, 2, "the grace period did not hold the young credential back")
+}
+
+// Nothing mapped an unowned credential Secret back to its
+// App: `Owns` covers only children carrying an owner reference, and the two
+// Secret watches map the registry and service credentials. So a credential left
+// behind by a failed write sat in the namespace until something unrelated
+// touched the App, which for a stable app is the resync at best. Removing the
+// eager delete without this trades a race for an unbounded leak.
+func TestEnqueueAppsForGitCredential_ReachesTheAppThatOwnsIt(t *testing.T) {
+	r := &AppReconciler{}
+
+	mine := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name:      secretname.GitCredential("web", secretname.GitCredentialDigest("t", "github.com")),
+		Namespace: "shop-test",
+		Labels:    map[string]string{kipperLabel: kipperValue, "kipper.run/app": "web"},
+	}}
+	assert.Equal(t,
+		[]reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "shop-test", Name: "web"}}},
+		r.enqueueAppsForGitCredential(context.Background(), mine),
+		"an orphaned credential could not reach the app whose sweep collects it")
+
+	// A Secret carrying the labels but not a credential name belongs to some
+	// other writer, and a foreign object must not enqueue anything.
+	notACredential := mine.DeepCopy()
+	notACredential.Name = "web-something-else"
+	assert.Empty(t, r.enqueueAppsForGitCredential(context.Background(), notACredential))
+
+	unlabelled := mine.DeepCopy()
+	unlabelled.Labels = nil
+	assert.Empty(t, r.enqueueAppsForGitCredential(context.Background(), unlabelled))
+}
+
+// Creation time protects a newly created pair, not a
+// pre-existing one being committed again. Rotate away from B and back to it:
+// the writer finds B already there, the reconcile still sees the old spec and B
+// past its grace, and B is deleted just as the App commits onto it. The API
+// answers 200 and the credential is gone.
+// So a writer that reuses an object says so, and the sweep takes the later of
+// the two times.
+func TestSweepGitCredentials_KeepsACredentialAWriterHasJustClaimed(t *testing.T) {
+	current := secretname.GitCredential("web", secretname.GitCredentialDigest("current", "github.com"))
+	rotatingBackTo := secretname.GitCredential("web", secretname.GitCredentialDigest("previous", "github.com"))
+	old := metav1.NewTime(metav1.Now().Add(-time.Hour))
+
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "shop-test", UID: "app-uid"},
+		Spec: kipperv1.AppSpec{Git: &kipperv1.AppGitSource{
+			URL: "https://github.com/acme/web.git", CredentialsSecret: current,
+		}},
+	}
+	claimed := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: rotatingBackTo, Namespace: "shop-test", CreationTimestamp: old,
+		Labels:      map[string]string{kipperLabel: kipperValue, "kipper.run/app": "web"},
+		Annotations: map[string]string{labels.AnnoGitCredentialClaimed: metav1.Now().Format(time.RFC3339)},
+	}}
+	c := crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(app, claimed).Build()
+	r := &AppReconciler{Client: c, Scheme: testScheme()}
+
+	retryIn, err := r.sweepGitCredentials(context.Background(), app)
+	require.NoError(t, err)
+	assert.Greater(t, retryIn, time.Duration(0))
+
+	var still corev1.Secret
+	assert.NoError(t, c.Get(context.Background(),
+		crclient.ObjectKey{Namespace: "shop-test", Name: rotatingBackTo}, &still),
+		"a credential a writer was committing onto was swept out from under it")
+}
+
+// A claim from the future was "clamped" to now on every
+// pass, which recomputes the full grace each time: the token was never
+// collected and the App requeued every two minutes for as long as the claim
+// said. The clamp changed retention in no case at all.
+// A claim can only be about a commit happening now, so one further ahead than
+// the grace is not a claim. Falling back to creation time bounds the hold.
+func TestSweepGitCredentials_DoesNotTrustAClaimFromTheFuture(t *testing.T) {
+	current := secretname.GitCredential("web", secretname.GitCredentialDigest("current", "github.com"))
+	stranded := secretname.GitCredential("web", secretname.GitCredentialDigest("previous", "github.com"))
+
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "shop-test", UID: "app-uid"},
+		Spec: kipperv1.AppSpec{Git: &kipperv1.AppGitSource{
+			URL: "https://github.com/acme/web.git", CredentialsSecret: current,
+		}},
+	}
+	// Written long ago, claimed by a machine whose clock is a year out.
+	wild := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: stranded, Namespace: "shop-test",
+		CreationTimestamp: metav1.NewTime(metav1.Now().Add(-time.Hour)),
+		Labels:            map[string]string{kipperLabel: kipperValue, "kipper.run/app": "web"},
+		Annotations: map[string]string{
+			labels.AnnoGitCredentialClaimed: metav1.Now().Add(365 * 24 * time.Hour).Format(time.RFC3339),
+		},
+	}}
+	c := crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(app, wild).Build()
+	r := &AppReconciler{Client: c, Scheme: testScheme()}
+
+	retryIn, err := r.sweepGitCredentials(context.Background(), app)
+	require.NoError(t, err)
+	assert.Zero(t, retryIn, "the sweep asked to be woken again for a credential it should have collected")
+
+	var gone corev1.Secret
+	err = c.Get(context.Background(), crclient.ObjectKey{Namespace: "shop-test", Name: stranded}, &gone)
+	assert.True(t, errors.IsNotFound(err),
+		"a claim from the future held a plaintext token past its grace")
+}
+
+// Adoption takes an object nothing owns, and leaves everything else. A Secret
+// still owned by an App of this name that is gone is one garbage collection is
+// already entitled to remove, and installing a live owner does not recall a
+// deletion it may have issued, so adopting it would tie the live App to an
+// object that can vanish.
+func TestAdoptWriterSecrets_TakesWhatNothingOwnsAndLeavesTheRest(t *testing.T) {
+	name := secretname.GitCredential("web", secretname.GitCredentialDigest("t", "github.com"))
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "shop-test", UID: "the-app-that-exists-now"},
+		Spec:       kipperv1.AppSpec{Git: &kipperv1.AppGitSource{URL: "https://github.com/acme/web.git", CredentialsSecret: name}},
+	}
+	dead := true
+	orphaned := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: "shop-test",
+		Labels: map[string]string{kipperLabel: kipperValue, "kipper.run/app": "web"},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: kipperv1.GroupVersion.String(), Kind: "App",
+			Name: "web", UID: "the-app-that-was-deleted", Controller: &dead,
+		}},
+	}}
+	// A stranger's object at the name this app's spec points at, so adoption
+	// genuinely reaches it. Naming a different generation would put it outside
+	// the candidate set and prove nothing.
+	foreignApp := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "shop-test", UID: "the-other-app"},
+		Spec:       kipperv1.AppSpec{Git: &kipperv1.AppGitSource{URL: "https://github.com/acme/other.git", CredentialsSecret: secretname.GitCredential("other", secretname.GitCredentialDigest("t", "github.com"))}},
+	}
+	foreignOwned := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: foreignApp.Spec.Git.CredentialsSecret, Namespace: "shop-test",
+		Labels: map[string]string{kipperLabel: kipperValue, "kipper.run/app": "other"},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "serving.example.com/v1", Kind: "Service",
+			Name: "something-else", UID: "a-service", Controller: &dead,
+		}},
+	}}
+
+	unowned := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name:      secretname.GitCredential("web", secretname.GitCredentialDigest("free", "github.com")),
+		Namespace: "shop-test",
+		Labels:    map[string]string{kipperLabel: kipperValue, "kipper.run/app": "web"},
+	}}
+
+	c := crfake.NewClientBuilder().WithScheme(testScheme()).
+		WithObjects(app, foreignApp, orphaned, foreignOwned, unowned).Build()
+	r := &AppReconciler{Client: c, Scheme: testScheme()}
+
+	// Still owned by the incarnation before a delete and recreate, so garbage
+	// collection is already entitled to remove it: adoption leaves it.
+	require.NoError(t, r.adoptWriterSecrets(context.Background(), app))
+	var left corev1.Secret
+	require.NoError(t, c.Get(context.Background(), crclient.ObjectKey{Namespace: "shop-test", Name: name}, &left))
+	require.Len(t, left.OwnerReferences, 1)
+	assert.Equal(t, "the-app-that-was-deleted", string(left.OwnerReferences[0].UID),
+		"an object garbage collection may already be removing was adopted by the live app")
+
+	// Nothing owns this one, which is what adoption is for.
+	app.Spec.Git.CredentialsSecret = unowned.Name
+	require.NoError(t, r.adoptWriterSecrets(context.Background(), app))
+	var free corev1.Secret
+	require.NoError(t, c.Get(context.Background(), crclient.ObjectKey{Namespace: "shop-test", Name: unowned.Name}, &free))
+	require.Len(t, free.OwnerReferences, 1)
+	assert.Equal(t, "the-app-that-exists-now", string(free.OwnerReferences[0].UID),
+		"a credential nothing owned was not adopted")
+
+	// A stranger's object is left however often it is reconciled.
+	require.NoError(t, r.adoptWriterSecrets(context.Background(), foreignApp))
+	var foreign corev1.Secret
+	require.NoError(t, c.Get(context.Background(), crclient.ObjectKey{Namespace: "shop-test", Name: foreignOwned.Name}, &foreign))
+	require.Len(t, foreign.OwnerReferences, 1)
+	assert.Equal(t, "something-else", foreign.OwnerReferences[0].Name,
+		"a Secret another object controls was taken over")
 }

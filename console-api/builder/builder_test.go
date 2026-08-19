@@ -21,8 +21,8 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
-	"github.com/getkipper/kipper/console-api/internal/gitcred"
 	"github.com/getkipper/kipper/console-api/internal/gitreach"
+	"github.com/getkipper/kipper/console-api/internal/sharedcred"
 )
 
 func testApp() *kipperv1.App {
@@ -245,12 +245,12 @@ func managedNamespace() *corev1.Namespace {
 
 // sharedCredsSecret is the kipper-system list Secret the builder resolves a
 // shared credential from.
-func sharedCredsSecret(t *testing.T, entries ...gitcred.Entry) *corev1.Secret {
+func sharedCredsSecret(t *testing.T, entries ...sharedcred.Entry) *corev1.Secret {
 	t.Helper()
 	data, err := json.Marshal(entries)
 	require.NoError(t, err)
 	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: gitcred.ConfigSecretName, Namespace: gitcred.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: sharedcred.ConfigSecretName, Namespace: sharedcred.Namespace},
 		Data:       map[string][]byte{"credentials": data},
 	}
 }
@@ -258,7 +258,7 @@ func sharedCredsSecret(t *testing.T, entries ...gitcred.Entry) *corev1.Secret {
 func TestCreateBuildJob_SharedCredential_AllowedProject(t *testing.T) {
 	client := buildFakeClient(
 		managedNamespace(),
-		sharedCredsSecret(t, gitcred.Entry{
+		sharedCredsSecret(t, sharedcred.Entry{
 			Name: "shared-gh", Server: "github.com", Token: "shared-token",
 			AllowedProjects: []string{"acme"},
 		}),
@@ -284,7 +284,7 @@ func TestCreateBuildJob_SharedCredential_AllowedProject(t *testing.T) {
 func TestCreateBuildJob_SharedCredential_DeniedProject(t *testing.T) {
 	client := buildFakeClient(
 		managedNamespace(),
-		sharedCredsSecret(t, gitcred.Entry{
+		sharedCredsSecret(t, sharedcred.Entry{
 			Name: "shared-gh", Server: "github.com", Token: "shared-token",
 			AllowedProjects: []string{"other-project"}, // not acme
 		}),
@@ -302,7 +302,7 @@ func TestCreateBuildJob_SharedCredential_DeniedProject(t *testing.T) {
 func TestCreateBuildJob_SharedCredential_EmptyAllowListDenies(t *testing.T) {
 	client := buildFakeClient(
 		managedNamespace(),
-		sharedCredsSecret(t, gitcred.Entry{
+		sharedCredsSecret(t, sharedcred.Entry{
 			Name: "shared-gh", Server: "github.com", Token: "shared-token",
 			// No AllowedProjects: fail closed, usable by no project.
 		}),
@@ -318,7 +318,7 @@ func TestCreateBuildJob_SharedCredential_EmptyAllowListDenies(t *testing.T) {
 func TestCreateBuildJob_SharedCredential_HostMismatch(t *testing.T) {
 	client := buildFakeClient(
 		managedNamespace(),
-		sharedCredsSecret(t, gitcred.Entry{
+		sharedCredsSecret(t, sharedcred.Entry{
 			Name: "shared-gl", Server: "gitlab.example.com", Token: "shared-token",
 			AllowedProjects: []string{"acme"},
 		}),
@@ -368,7 +368,7 @@ func TestCreateBuildJob_SharedCredential_UnmanagedNamespaceFailsClosed(t *testin
 	client := buildFakeClient(
 		// The namespace exists but carries no project label.
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "project-test"}},
-		sharedCredsSecret(t, gitcred.Entry{
+		sharedCredsSecret(t, sharedcred.Entry{
 			Name: "shared-gh", Server: "github.com", Token: "shared-token",
 			AllowedProjects: []string{"acme"},
 		}),

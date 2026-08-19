@@ -14,7 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/getkipper/kipper/console-api/internal/gitcred"
+	"github.com/getkipper/kipper/console-api/internal/sharedcred"
 )
 
 // TestMain swaps the credential-probe client for one that allows the loopback
@@ -870,13 +870,13 @@ func TestGitCredentialsHealth_ReturnsEntryPerCredential(t *testing.T) {
 	// probeGitCredential derives a base URL from the server field by stripping the port,
 	// so an httptest server URL won't be reachable. The probe will fail (valid=false),
 	// but the handler should still include a health entry for each configured credential.
-	entriesJSON, _ := json.Marshal([]gitcred.Entry{
+	entriesJSON, _ := json.Marshal([]sharedcred.Entry{
 		{Name: "acme-gitlab", Server: "git.example.com", Token: "glpat-test"},
 	})
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      gitcred.ConfigSecretName,
-			Namespace: gitcred.Namespace,
+			Name:      sharedcred.ConfigSecretName,
+			Namespace: sharedcred.Namespace,
 		},
 		Data: map[string][]byte{"credentials": entriesJSON},
 	}

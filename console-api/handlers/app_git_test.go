@@ -3,24 +3,32 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/builder"
-	"github.com/getkipper/kipper/console-api/internal/gitcred"
 	"github.com/getkipper/kipper/console-api/internal/gitreach"
+	"github.com/getkipper/kipper/console-api/internal/sharedcred"
+	"github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
 // gitAlwaysReachable stands in for the clone preflight. Without it every test
@@ -135,11 +143,11 @@ func TestSetGit_TokenOnlyRotatesSecret(t *testing.T) {
 	require.NoError(t, handler.CRClient.Get(context.Background(), crclient.ObjectKey{Namespace: "default", Name: "web"}, &updated))
 	assert.Equal(t, "https://github.com/acme/web.git", updated.Spec.Git.URL)
 	assert.Equal(t, "main", updated.Spec.Git.Branch)
-	assert.Equal(t, "web-git-credentials", updated.Spec.Git.CredentialsSecret)
+	assert.True(t, secretname.IsGitCredentialOf("web", updated.Spec.Git.CredentialsSecret),
+		"the app names something that is not its own credential: %s", updated.Spec.Git.CredentialsSecret)
 
 	// Secret created with the fresh token under the `token` data key.
-	secret, err := clientset.CoreV1().Secrets("default").Get(context.Background(), "web-git-credentials", metav1.GetOptions{})
-	require.NoError(t, err)
+	secret := storedGitCredential(t, handler, "default", "web")
 	assert.Equal(t, "github_pat_FRESH", string(secret.Data["token"]))
 }
 
@@ -199,7 +207,8 @@ func TestSetGit_AttachGitToImageOnlyApp(t *testing.T) {
 	require.NoError(t, handler.CRClient.Get(context.Background(), crclient.ObjectKey{Namespace: "default", Name: "web"}, &updated))
 	require.NotNil(t, updated.Spec.Git, "git source must be created")
 	assert.Equal(t, "https://github.com/example/web.git", updated.Spec.Git.URL)
-	assert.Equal(t, "web-git-credentials", updated.Spec.Git.CredentialsSecret)
+	assert.True(t, secretname.IsGitCredentialOf("web", updated.Spec.Git.CredentialsSecret),
+		"the app names something that is not its own credential: %s", updated.Spec.Git.CredentialsSecret)
 }
 
 func TestSetGit_AttachWithoutURLOnImageOnlyAppRejected(t *testing.T) {
@@ -286,8 +295,7 @@ func TestSetGit_RotateOverExistingSecretSucceeds(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code, "rotation against an existing Secret must not return 500")
 
-	got, err := clientset.CoreV1().Secrets("default").Get(context.Background(), "web-git-credentials", metav1.GetOptions{})
-	require.NoError(t, err)
+	got := storedGitCredential(t, handler, "default", "web")
 	assert.Equal(t, "github_pat_FRESH", string(got.Data["token"]))
 	assert.Equal(t, "kipper", got.Labels["app.kubernetes.io/managed-by"])
 	assert.Equal(t, "web", got.Labels["kipper.run/app"])
@@ -439,8 +447,7 @@ func TestSetGit_ChecksTheTokenBeingRotatedTo(t *testing.T) {
 	assert.Equal(t, "stale", sawToken, "the token being rotated to is the one that has to work")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 
-	_, err := handler.Client.CoreV1().Secrets("shop-test").Get(context.Background(), "checkout-git-credentials", metav1.GetOptions{})
-	assert.Error(t, err, "a token the repository refuses must not be stored")
+	assert.Empty(t, gitCredentialsOf(t, handler, "checkout"), "a token the repository refuses must not be stored")
 }
 
 // Create is the path most apps arrive by. Checking only the edit path would
@@ -465,8 +472,7 @@ func TestCreateApp_RefusesAGitSourceItCannotClone(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "access token")
 
-	_, err := handler.Client.CoreV1().Secrets("shop-test").Get(context.Background(), "checkout-git-credentials", metav1.GetOptions{})
-	assert.Error(t, err, "no credential is stored for an app that was refused")
+	assert.Empty(t, gitCredentialsOf(t, handler, "checkout"), "no credential is stored for an app that was refused")
 }
 
 // An app may clone with an admin-managed shared credential, which lives in the
@@ -520,7 +526,7 @@ func TestSetGit_ChecksTheSharedCredentialItWouldCloneWith(t *testing.T) {
 		},
 	}
 	shared := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: gitcred.ConfigSecretName, Namespace: gitcred.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: sharedcred.ConfigSecretName, Namespace: sharedcred.Namespace},
 		Data:       map[string][]byte{"credentials": []byte(`[{"name":"shared-git-example","server":"https://git.example.com","username":"kipper","token":"sh4red","allowedProjects":["shop"]}]`)},
 	}
 	var probedWith string
@@ -599,7 +605,7 @@ func TestSetGit_NeverSendsASharedCredentialToAnotherHost(t *testing.T) {
 		},
 	}
 	shared := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: gitcred.ConfigSecretName, Namespace: gitcred.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: sharedcred.ConfigSecretName, Namespace: sharedcred.Namespace},
 		Data:       map[string][]byte{"credentials": []byte(`[{"name":"shared-git-example","server":"https://git.example.com","username":"kipper","token":"sh4red","allowedProjects":["shop"]}]`)},
 	}
 	var probedWith string
@@ -635,7 +641,7 @@ func TestSetGit_NeverUsesASharedCredentialFromAProjectItIsNotAllowedIn(t *testin
 		},
 	}
 	shared := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: gitcred.ConfigSecretName, Namespace: gitcred.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: sharedcred.ConfigSecretName, Namespace: sharedcred.Namespace},
 		Data:       map[string][]byte{"credentials": []byte(`[{"name":"shared-git-example","server":"https://git.example.com","username":"kipper","token":"sh4red","allowedProjects":["shop"]}]`)},
 	}
 	var probedWith string
@@ -712,8 +718,8 @@ func TestSetGit_StoresANewTokenEvenWhenTheHostCannotBeChecked(t *testing.T) {
 	appGitRouter(handler).ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	_, err := handler.Client.CoreV1().Secrets("shop-test").Get(context.Background(), "checkout-git-credentials", metav1.GetOptions{})
-	assert.NoError(t, err, "an unreachable host must not stop an operator rotating a credential")
+	assert.NotEmpty(t, gitCredentialsOf(t, handler, "checkout"),
+		"an unreachable host must not stop an operator rotating a credential")
 }
 
 // An edit that carries no new secret still goes through when the host cannot be
@@ -848,7 +854,7 @@ func TestCreateApp_RefusesAnImpossibleBranchWithoutAskingTheRemote(t *testing.T)
 // new token sits beside the old URL — and the builder offers a credential to
 // whatever host the live CR names, so the next build would hand the new host's
 // token to the old one.
-func TestSetGit_PutsTheTokenBackWhenTheSourceUpdateFails(t *testing.T) {
+func TestSetGit_LeavesTheCommittedTokenAloneWhenTheSourceUpdateFails(t *testing.T) {
 	app := &kipperv1.App{
 		ObjectMeta: metav1.ObjectMeta{Name: "checkout", Namespace: "shop-test"},
 		Spec: kipperv1.AppSpec{
@@ -882,9 +888,11 @@ func TestSetGit_PutsTheTokenBackWhenTheSourceUpdateFails(t *testing.T) {
 		"the new host's token was left paired with the old host's URL")
 }
 
-// The same, for an app that had no token before: there is nothing to put back,
-// so the Secret goes rather than being left behind unreferenced.
-func TestSetGit_RemovesAFirstTokenWhenTheSourceUpdateFails(t *testing.T) {
+// The same for an app that had no token before. The App is left naming no
+// credential, which is where it started, and the object this write made is the
+// sweep's to collect: removing it here cannot be told apart from removing one a
+// concurrent writer of the same pair has just committed.
+func TestSetGit_LeavesAFirstTokenUnreferencedWhenTheSourceUpdateFails(t *testing.T) {
 	app := &kipperv1.App{
 		ObjectMeta: metav1.ObjectMeta{Name: "checkout", Namespace: "shop-test"},
 		Spec: kipperv1.AppSpec{
@@ -904,8 +912,12 @@ func TestSetGit_RemovesAFirstTokenWhenTheSourceUpdateFails(t *testing.T) {
 	appGitRouter(handler).ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
-	_, err := handler.Client.CoreV1().Secrets("shop-test").Get(context.Background(), "checkout-git-credentials", metav1.GetOptions{})
-	assert.Error(t, err, "a token nothing references was left in the namespace")
+
+	var live kipperv1.App
+	require.NoError(t, handler.CRClient.Get(context.Background(),
+		crclient.ObjectKey{Namespace: "shop-test", Name: "checkout"}, &live))
+	assert.Empty(t, live.Spec.Git.CredentialsSecret,
+		"a failed write moved the app onto a credential anyway")
 }
 
 // refusingCRClient fails every Update, so a test can drive what the handler
@@ -921,77 +933,10 @@ func refusingCRClient(inner crclient.Client) crclient.Client {
 	return refusingUpdates{Client: inner}
 }
 
-// Two operators changing the same source overlap by ordinary Kubernetes
-// conflict. The one that loses the CR race must not roll its token back over
-// the one that won: that would put a token nobody chose beside a URL somebody
-// did, which is the mismatch the rollback exists to prevent, on a transaction
-// that succeeded.
-func TestRestoreGitCredentialLeavesALaterWriteAlone(t *testing.T) {
-	client := fake.NewClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "checkout-git-credentials", Namespace: "shop-test",
-			ResourceVersion: "200", // somebody wrote after us
-		},
-		Data: map[string][]byte{"token": []byte("token-b")},
-	})
-	a := &Apps{Client: client}
-
-	// We wrote version 100 and lost the CR race; version 200 is live.
-	err := a.restoreGitCredential(context.Background(), "shop-test", "checkout-git-credentials",
-		[]byte("token-old"), "", true, "100", true)
-
-	require.NoError(t, err)
-	stored, getErr := client.CoreV1().Secrets("shop-test").Get(context.Background(), "checkout-git-credentials", metav1.GetOptions{})
-	require.NoError(t, getErr)
-	assert.Equal(t, "token-b", string(stored.Data["token"]),
-		"a losing writer rolled its token back over a write that had already landed")
-}
-
-// When ours is still the live write, the rollback does its job.
-func TestRestoreGitCredentialPutsBackItsOwnWrite(t *testing.T) {
-	client := fake.NewClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "checkout-git-credentials", Namespace: "shop-test",
-			ResourceVersion: "100",
-		},
-		Data: map[string][]byte{"token": []byte("token-a")},
-	})
-	a := &Apps{Client: client}
-
-	err := a.restoreGitCredential(context.Background(), "shop-test", "checkout-git-credentials",
-		[]byte("token-old"), "", true, "100", true)
-
-	require.NoError(t, err)
-	stored, getErr := client.CoreV1().Secrets("shop-test").Get(context.Background(), "checkout-git-credentials", metav1.GetOptions{})
-	require.NoError(t, getErr)
-	assert.Equal(t, "token-old", string(stored.Data["token"]))
-}
-
-// A Secret this request created, which another writer has since committed and
-// the live CR now references, must not be deleted by the rollback.
-func TestRestoreGitCredentialDoesNotDeleteALaterWrite(t *testing.T) {
-	client := fake.NewClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "checkout-git-credentials", Namespace: "shop-test",
-			ResourceVersion: "200",
-		},
-		Data: map[string][]byte{"token": []byte("token-b")},
-	})
-	a := &Apps{Client: client}
-
-	err := a.restoreGitCredential(context.Background(), "shop-test", "checkout-git-credentials",
-		nil, "", false, "100", true)
-
-	require.NoError(t, err)
-	_, getErr := client.CoreV1().Secrets("shop-test").Get(context.Background(), "checkout-git-credentials", metav1.GetOptions{})
-	assert.NoError(t, getErr, "a token another writer committed was deleted by a losing writer's rollback")
-}
-
 // The per-app twin of the shared-credential escalation. Any deployer may change
 // an app's clone URL and none of them needs to know its token to do it, while
 // the API treats that token as write-only: reading it back needs a password
 // re-entry.
-//
 // Declining to probe is not enough. Accepting the change would store the CR
 // naming the new host beside a reference to the old host's token, and every
 // later build and status probe resolves that token against whatever host the
@@ -1139,64 +1084,9 @@ func TestSetGit_RecordsTheHostATokenWasStoredFor(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	secret, err := clientset.CoreV1().Secrets("default").Get(context.Background(), "web-git-credentials", metav1.GetOptions{})
-	require.NoError(t, err)
+	secret := storedGitCredential(t, handler, "default", "web")
 	assert.Equal(t, "git.example.com", secret.Annotations[builder.GitAuthorityAnnotation],
 		"the token was stored with no record of which host it is for")
-}
-
-// The precondition is the whole safety of the conditional rollback, and an
-// unreadable version is not a licence to skip it. A transient Get failure after
-// the write left `written` empty, which turned the rollback unconditional: it
-// then put its old token back over a write that had landed, while leaving that
-// winner's recorded host in place. Host and URL agree, so the build sends a
-// token belonging to neither, and the binding cannot see it.
-func TestRestoreGitCredentialDoesNothingWhenItsOwnWriteCannotBeIdentified(t *testing.T) {
-	client := fake.NewClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "checkout-git-credentials", Namespace: "shop-test",
-			ResourceVersion: "200",
-			Annotations:     map[string]string{builder.GitAuthorityAnnotation: "git.winner.example.com"},
-		},
-		Data: map[string][]byte{"token": []byte("the-winners-token")},
-	})
-	a := &Apps{Client: client}
-
-	err := a.restoreGitCredential(context.Background(), "shop-test", "checkout-git-credentials",
-		[]byte("our-old-token"), "git.ours.example.com", true, "", false)
-
-	require.NoError(t, err)
-	stored, getErr := client.CoreV1().Secrets("shop-test").Get(context.Background(), "checkout-git-credentials", metav1.GetOptions{})
-	require.NoError(t, getErr)
-	assert.Equal(t, "the-winners-token", string(stored.Data["token"]),
-		"a rollback that could not identify its own write clobbered one that had landed")
-	assert.Equal(t, "git.winner.example.com", stored.Annotations[builder.GitAuthorityAnnotation])
-}
-
-// The token and the host it is for are one value in two fields, so a rollback
-// that puts back half of them leaves a pairing that is correct and is refused:
-// the old token beside the attempted host, which no longer matches the URL the
-// app kept.
-func TestRestoreGitCredentialPutsBackTheHostAsWellAsTheToken(t *testing.T) {
-	client := fake.NewClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "checkout-git-credentials", Namespace: "shop-test",
-			ResourceVersion: "100",
-			Annotations:     map[string]string{builder.GitAuthorityAnnotation: "git.attempted.example.com"},
-		},
-		Data: map[string][]byte{"token": []byte("the-token-we-wrote")},
-	})
-	a := &Apps{Client: client}
-
-	err := a.restoreGitCredential(context.Background(), "shop-test", "checkout-git-credentials",
-		[]byte("our-old-token"), "git.original.example.com", true, "100", true)
-
-	require.NoError(t, err)
-	stored, getErr := client.CoreV1().Secrets("shop-test").Get(context.Background(), "checkout-git-credentials", metav1.GetOptions{})
-	require.NoError(t, getErr)
-	assert.Equal(t, "our-old-token", string(stored.Data["token"]))
-	assert.Equal(t, "git.original.example.com", stored.Annotations[builder.GitAuthorityAnnotation],
-		"the token went back but the host it is for did not, so the build refuses a pairing that is correct")
 }
 
 // The preflight is the third path that sends the token, after the build and the
@@ -1283,4 +1173,507 @@ func TestSetGit_DoesNotSendANamespaceSecretShadowingASharedCredential(t *testing
 
 	assert.Empty(t, sawToken,
 		"a namespaced Secret the builder would refuse to read was sent to the clone host")
+}
+
+// The point of the whole change. A rotation whose CR update fails must leave
+// the app on the credential it already had, not on a half-written one and not
+// needing a value restored. The new token lands under its own name, the CR
+// never names it, and the app goes on cloning with what it had.
+func TestSetGit_AFailedSourceUpdateLeavesTheCommittedCredentialAlone(t *testing.T) {
+	live := secretname.LegacyGitCredential("web")
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+		Spec: kipperv1.AppSpec{
+			Image: "nginx", Port: 80, Replicas: int32Ptr(1),
+			Git: &kipperv1.AppGitSource{
+				URL: "https://github.com/acme/web.git", Branch: "main", CredentialsSecret: live,
+			},
+		},
+	}
+	committed := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: live, Namespace: "default",
+			Annotations: map[string]string{builder.GitAuthorityAnnotation: "github.com"},
+		},
+		Data: map[string][]byte{"token": []byte("the-token-that-works")},
+	}
+	clientset := fake.NewClientset(committed)
+	handler := &Apps{
+		Client: clientset,
+		CRClient: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(app).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Update: func(context.Context, crclient.WithWatch, crclient.Object, ...crclient.UpdateOption) error {
+					return apierrors.NewInternalError(errors.New("the apiserver said no"))
+				},
+			}).Build(),
+		GitReach: gitAlwaysReachable,
+	}
+
+	body := strings.NewReader(`{"token":"a-new-token"}`)
+	req := httptest.NewRequest("PUT", "/projects/default/apps/web/git", body)
+	rec := httptest.NewRecorder()
+	appGitRouter(handler).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	kept, err := clientset.CoreV1().Secrets("default").Get(context.Background(), live, metav1.GetOptions{})
+	require.NoError(t, err, "the credential the app still names was removed")
+	assert.Equal(t, "the-token-that-works", string(kept.Data["token"]),
+		"a failed source update rewrote the token the app is still cloning with")
+
+	// The object this write made is left for the App reconciler's sweep. It
+	// cannot be removed here without risking one a concurrent writer of the
+	// same pair has committed.
+}
+
+// What makes every interleaving safe: a rotation never writes to the object the
+// App currently names. Two rotations that both fail their CR update cannot
+// therefore cross, and neither can restore the other's uncommitted token over
+// the live one, because neither ever touched it. The App moves by naming a
+// different object, which is one atomic update.
+func TestSetGit_ARotationWritesANewCredentialRatherThanOverTheLiveOne(t *testing.T) {
+	live := secretname.LegacyGitCredential("web")
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+		Spec: kipperv1.AppSpec{
+			Image: "nginx", Port: 80, Replicas: int32Ptr(1),
+			Git: &kipperv1.AppGitSource{
+				URL: "https://github.com/acme/web.git", Branch: "main", CredentialsSecret: live,
+			},
+		},
+	}
+	committed := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: live, Namespace: "default",
+			Annotations: map[string]string{builder.GitAuthorityAnnotation: "github.com"},
+		},
+		Data: map[string][]byte{"token": []byte("the-old-token")},
+	}
+	clientset := fake.NewClientset(committed)
+	handler := &Apps{Client: clientset, CRClient: testCRClient(app), GitReach: gitAlwaysReachable}
+
+	body := strings.NewReader(`{"token":"a-new-token"}`)
+	req := httptest.NewRequest("PUT", "/projects/default/apps/web/git", body)
+	rec := httptest.NewRecorder()
+	appGitRouter(handler).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var updated kipperv1.App
+	require.NoError(t, handler.CRClient.Get(context.Background(),
+		crclient.ObjectKey{Namespace: "default", Name: "web"}, &updated))
+
+	assert.NotEqual(t, live, updated.Spec.Git.CredentialsSecret,
+		"the rotation reused the name the app was already cloning with, so it wrote over the live pair")
+	assert.True(t, secretname.IsGitCredentialOf("web", updated.Spec.Git.CredentialsSecret))
+
+	fresh, err := clientset.CoreV1().Secrets("default").Get(context.Background(),
+		updated.Spec.Git.CredentialsSecret, metav1.GetOptions{})
+	require.NoError(t, err, "the app names a credential that was never created")
+	assert.Equal(t, "a-new-token", string(fresh.Data["token"]))
+
+	previous, err := clientset.CoreV1().Secrets("default").Get(context.Background(), live, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "the-old-token", string(previous.Data["token"]),
+		"the credential the app had was rewritten rather than left for the sweep")
+}
+
+// The interleaving that motivated all of this. Two operators move the same app
+// to different hosts and both CR updates fail. Under one fixed name the second
+// rollback restored the first's uncommitted token beside the live URL, which is
+// how a token reached a host it was never stored for. Each attempt now writes
+// its own object, so there is nothing shared for them to cross, and the live
+// pair is the one neither of them touched.
+func TestSetGit_TwoFailedMovesCannotCrossEachOthersCredentials(t *testing.T) {
+	live := secretname.LegacyGitCredential("web")
+	committed := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: live, Namespace: "default",
+			Annotations: map[string]string{builder.GitAuthorityAnnotation: "github.com"},
+		},
+		Data: map[string][]byte{"token": []byte("the-token-for-github")},
+	}
+	clientset := fake.NewClientset(committed)
+
+	app := func() *kipperv1.App {
+		return &kipperv1.App{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+			Spec: kipperv1.AppSpec{
+				Image: "nginx", Port: 80, Replicas: int32Ptr(1),
+				Git: &kipperv1.AppGitSource{
+					URL: "https://github.com/acme/web.git", Branch: "main", CredentialsSecret: live,
+				},
+			},
+		}
+	}
+	refuseUpdate := interceptor.Funcs{
+		Update: func(context.Context, crclient.WithWatch, crclient.Object, ...crclient.UpdateOption) error {
+			return apierrors.NewConflict(schema.GroupResource{Resource: "apps"}, "web", errors.New("modified"))
+		},
+	}
+
+	for _, move := range []string{
+		`{"url":"https://git.b.example.com/acme/web.git","token":"token-for-b"}`,
+		`{"url":"https://git.c.example.com/acme/web.git","token":"token-for-c"}`,
+	} {
+		handler := &Apps{
+			Client: clientset,
+			CRClient: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(app()).
+				WithInterceptorFuncs(refuseUpdate).Build(),
+			GitReach: gitAlwaysReachable,
+		}
+		req := httptest.NewRequest("PUT", "/projects/default/apps/web/git", strings.NewReader(move))
+		appGitRouter(handler).ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	kept, err := clientset.CoreV1().Secrets("default").Get(context.Background(), live, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "the-token-for-github", string(kept.Data["token"]),
+		"a move that never committed changed the token the app is still cloning with")
+	assert.Equal(t, "github.com", kept.Annotations[builder.GitAuthorityAnnotation],
+		"the live credential was rebound to a host the app does not clone from")
+
+	// Neither move's object is removed here, and neither could damage the other:
+	// they are different objects, and the live pair is the one nobody touched.
+}
+
+// storedGitCredential reads the credential the app currently names. Tests look
+// it up this way rather than by a fixed name because the name is a digest of
+// the pair, so a rotation moves the app to a different object.
+//
+//nolint:unparam // the namespace is part of what each caller is asserting about
+func storedGitCredential(t *testing.T, h *Apps, namespace, appName string) *corev1.Secret {
+	t.Helper()
+	var app kipperv1.App
+	require.NoError(t, h.CRClient.Get(context.Background(),
+		crclient.ObjectKey{Namespace: namespace, Name: appName}, &app))
+	require.NotNil(t, app.Spec.Git, "app has no git source")
+	secret, err := h.Client.CoreV1().Secrets(namespace).Get(context.Background(),
+		app.Spec.Git.CredentialsSecret, metav1.GetOptions{})
+	require.NoError(t, err, "the app names a credential that is not there")
+	return secret
+}
+
+// gitCredentialsOf lists every credential object belonging to an app, whatever
+// generation it is. Tests that assert nothing was stored use this, because
+// there is no single name to look up any more.
+//
+//nolint:unparam // the app is the subject of the assertion; hard-coding it here would hide what each caller is checking
+func gitCredentialsOf(t *testing.T, h *Apps, appName string) []string {
+	t.Helper()
+	all, err := h.Client.CoreV1().Secrets("shop-test").List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	var names []string
+	for i := range all.Items {
+		if secretname.IsGitCredentialOf(appName, all.Items[i].Name) {
+			names = append(names, all.Items[i].Name)
+		}
+	}
+	return names
+}
+
+// Content addressing makes two writers of the
+// same pair share one object, so whoever won the Create is not thereby its
+// owner: the other one may already have committed the App onto it. Deleting on
+// "I created it" alone destroys a credential the live App names, and after the
+// sweep collects the superseded one the app has no credential at all.
+// The restore this replaced carried a resource-version precondition for exactly
+// this, and the test that pinned it went with the mechanism.
+func TestSetGit_AConflictedWriterKeepsTheCredentialAnotherWriterCommitted(t *testing.T) {
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+		Spec: kipperv1.AppSpec{
+			Image: "nginx", Port: 80, Replicas: int32Ptr(1),
+			Git: &kipperv1.AppGitSource{
+				URL: "https://github.com/acme/web.git", Branch: "main",
+				CredentialsSecret: secretname.LegacyGitCredential("web"),
+			},
+		},
+	}
+	// What the other writer committed while this one was in flight: the App
+	// already names the object this request created.
+	shared := secretname.GitCredential("web", secretname.GitCredentialDigest("a-new-token", "github.com"))
+	committed := app.DeepCopy()
+	committed.Spec.Git.CredentialsSecret = shared
+
+	clientset := fake.NewClientset()
+	handler := &Apps{
+		Client: clientset,
+		CRClient: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(committed).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Update: func(context.Context, crclient.WithWatch, crclient.Object, ...crclient.UpdateOption) error {
+					return apierrors.NewConflict(schema.GroupResource{Resource: "apps"}, "web", errors.New("modified"))
+				},
+			}).Build(),
+		GitReach: gitAlwaysReachable,
+	}
+
+	req := httptest.NewRequest("PUT", "/projects/default/apps/web/git",
+		strings.NewReader(`{"token":"a-new-token"}`))
+	appGitRouter(handler).ServeHTTP(httptest.NewRecorder(), req)
+
+	_, err := clientset.CoreV1().Secrets("default").Get(context.Background(), shared, metav1.GetOptions{})
+	assert.NoError(t, err,
+		"a conflicted write deleted the credential the live app names, leaving it with none")
+}
+
+// The pre-delete read is a check across two objects with no
+// atomic relationship: it catches the winner who committed before the read, and
+// not the one who commits after it. Content addressing means both writers share
+// the object, so no read can establish that nobody will commit it next.
+// So a failed write leaves its object alone. An orphan is a token the tenant
+// supplied, in the tenant's own namespace, collected by the sweep; a wrong
+// delete is a credential nobody can recover without the git host.
+func TestSetGit_AFailedWriteLeavesItsCredentialForTheSweep(t *testing.T) {
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+		Spec: kipperv1.AppSpec{
+			Image: "nginx", Port: 80, Replicas: int32Ptr(1),
+			Git: &kipperv1.AppGitSource{
+				URL: "https://github.com/acme/web.git", Branch: "main",
+				CredentialsSecret: secretname.LegacyGitCredential("web"),
+			},
+		},
+	}
+	// The App still names the old credential at every point this request can
+	// read it, which is the ordering the previous guard could not tell from
+	// "the other writer is about to commit".
+	clientset := fake.NewClientset()
+	handler := &Apps{
+		Client: clientset,
+		CRClient: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(app).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Update: func(context.Context, crclient.WithWatch, crclient.Object, ...crclient.UpdateOption) error {
+					return apierrors.NewInternalError(errors.New("the apiserver said no"))
+				},
+			}).Build(),
+		GitReach: gitAlwaysReachable,
+	}
+
+	req := httptest.NewRequest("PUT", "/projects/default/apps/web/git",
+		strings.NewReader(`{"token":"a-new-token"}`))
+	appGitRouter(handler).ServeHTTP(httptest.NewRecorder(), req)
+
+	shared := secretname.GitCredential("web", secretname.GitCredentialDigest("a-new-token", "github.com"))
+	_, err := clientset.CoreV1().Secrets("default").Get(context.Background(), shared, metav1.GetOptions{})
+	assert.NoError(t, err,
+		"a failed write deleted an object a concurrent writer of the same pair may be committing")
+}
+
+// A writer that finds the object already there is committing the App onto it
+// just the same, so it has to say so: the sweep judges age from the later of
+// creation and the last claim, and without the refresh a rotation back to a
+// pair the app recently held is collected mid-commit.
+func TestSetGit_ReusingACredentialSaysItIsBeingCommittedOnto(t *testing.T) {
+	existing := secretname.GitCredential("web", secretname.GitCredentialDigest("a-token", "github.com"))
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+		Spec: kipperv1.AppSpec{
+			Image: "nginx", Port: 80, Replicas: int32Ptr(1),
+			Git: &kipperv1.AppGitSource{
+				URL: "https://github.com/acme/web.git", Branch: "main",
+				CredentialsSecret: secretname.LegacyGitCredential("web"),
+			},
+		},
+	}
+	stale := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: existing, Namespace: "default",
+			CreationTimestamp: metav1.NewTime(metav1.Now().Add(-time.Hour)),
+			Labels:            map[string]string{"app.kubernetes.io/managed-by": "kipper", "kipper.run/app": "web"},
+			Annotations:       map[string]string{builder.GitAuthorityAnnotation: "github.com"},
+		},
+		Data: map[string][]byte{"token": []byte("a-token")},
+	}
+	clientset := fake.NewClientset(stale)
+	handler := &Apps{Client: clientset, CRClient: testCRClient(app), GitReach: gitAlwaysReachable}
+
+	req := httptest.NewRequest("PUT", "/projects/default/apps/web/git",
+		strings.NewReader(`{"token":"a-token"}`))
+	rec := httptest.NewRecorder()
+	appGitRouter(handler).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	got, err := clientset.CoreV1().Secrets("default").Get(context.Background(), existing, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.NotEmpty(t, got.Annotations[labels.AnnoGitCredentialClaimed],
+		"reusing a credential did not mark it as being committed onto, so the sweep may take it mid-rotation")
+}
+
+// A credential written while its App is being deleted is
+// never collected: the sweep needs a live App to reconcile, and once deletion
+// completes the reconcile returns immediately, so the plaintext token stays for
+// the life of the namespace. Deleting it in the handler is what this change
+// established cannot be made safe.
+// The App is right there when the credential is written, so the object is bound
+// to it and Kubernetes collects it. That covers the race without any writer
+// deciding whether it may delete something another writer committed.
+func TestSetGit_ACredentialIsOwnedByTheAppItIsWrittenFor(t *testing.T) {
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default", UID: "the-app-uid"},
+		Spec: kipperv1.AppSpec{
+			Image: "nginx", Port: 80, Replicas: int32Ptr(1),
+			Git: &kipperv1.AppGitSource{
+				URL: "https://github.com/acme/web.git", Branch: "main",
+				CredentialsSecret: secretname.LegacyGitCredential("web"),
+			},
+		},
+	}
+	clientset := fake.NewClientset()
+	handler := &Apps{Client: clientset, CRClient: testCRClient(app), GitReach: gitAlwaysReachable}
+
+	req := httptest.NewRequest("PUT", "/projects/default/apps/web/git",
+		strings.NewReader(`{"token":"a-new-token"}`))
+	rec := httptest.NewRecorder()
+	appGitRouter(handler).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	stored := storedGitCredential(t, handler, "default", "web")
+	require.Len(t, stored.OwnerReferences, 1,
+		"a credential written for an App that is being deleted is collected by nothing")
+	owner := stored.OwnerReferences[0]
+	assert.Equal(t, "App", owner.Kind)
+	assert.Equal(t, "web", owner.Name)
+	assert.Equal(t, "the-app-uid", string(owner.UID))
+	require.NotNil(t, owner.Controller)
+	assert.True(t, *owner.Controller)
+}
+
+// An App deleted and recreated under the same name converges on the same
+// credential, and that object is still owned by the incarnation before it, so
+// garbage collection is already entitled to remove it. Taking it over would
+// report success on a credential that can vanish immediately, so the write is
+// refused and the next attempt makes the object fresh once collection lands.
+func TestSetGit_RefusesACredentialOwnedByThePreviousIncarnation(t *testing.T) {
+	name := secretname.GitCredential("web", secretname.GitCredentialDigest("a-token", "github.com"))
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default", UID: "the-app-that-exists-now"},
+		Spec: kipperv1.AppSpec{
+			Image: "nginx", Port: 80, Replicas: int32Ptr(1),
+			Git: &kipperv1.AppGitSource{
+				URL: "https://github.com/acme/web.git", Branch: "main",
+				CredentialsSecret: secretname.LegacyGitCredential("web"),
+			},
+		},
+	}
+	dead := true
+	leftBehind := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "default",
+			Labels:      map[string]string{"app.kubernetes.io/managed-by": "kipper", "kipper.run/app": "web"},
+			Annotations: map[string]string{builder.GitAuthorityAnnotation: "github.com"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: kipperv1.GroupVersion.String(), Kind: "App",
+				Name: "web", UID: "the-app-that-was-deleted", Controller: &dead,
+			}},
+		},
+		Data: map[string][]byte{"token": []byte("a-token")},
+	}
+	clientset := fake.NewClientset(leftBehind)
+	handler := &Apps{Client: clientset, CRClient: testCRClient(app), GitReach: gitAlwaysReachable}
+
+	req := httptest.NewRequest("PUT", "/projects/default/apps/web/git",
+		strings.NewReader(`{"token":"a-token"}`))
+	rec := httptest.NewRecorder()
+	appGitRouter(handler).ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusConflict, rec.Code,
+		"the app was pointed at a credential garbage collection may already be removing")
+
+	var live kipperv1.App
+	require.NoError(t, handler.CRClient.Get(context.Background(),
+		crclient.ObjectKey{Namespace: "default", Name: "web"}, &live))
+	assert.Equal(t, secretname.LegacyGitCredential("web"), live.Spec.Git.CredentialsSecret,
+		"the app moved onto a credential it could not own")
+}
+
+// Refusing silently and committing anyway is the defect: the
+// App ends up naming a credential whose lifetime another controller decides, so
+// that controller can delete what the app clones with, and both writers report
+// success. The refusal has to fail the write, and it can only fail it — the
+// name is derived from the token, so there is no other object to write instead.
+func TestSetGit_RefusesACredentialAnotherControllerOwns(t *testing.T) {
+	name := secretname.GitCredential("web", secretname.GitCredentialDigest("a-token", "github.com"))
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default", UID: "the-app"},
+		Spec: kipperv1.AppSpec{
+			Image: "nginx", Port: 80, Replicas: int32Ptr(1),
+			Git: &kipperv1.AppGitSource{
+				URL: "https://github.com/acme/web.git", Branch: "main",
+				CredentialsSecret: secretname.LegacyGitCredential("web"),
+			},
+		},
+	}
+	controls := true
+	theirs := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "default",
+			Labels:      map[string]string{"app.kubernetes.io/managed-by": "kipper", "kipper.run/app": "web"},
+			Annotations: map[string]string{builder.GitAuthorityAnnotation: "github.com"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "serving.example.com/v1", Kind: "Service",
+				Name: "something-else", UID: "a-service", Controller: &controls,
+			}},
+		},
+		Data: map[string][]byte{"token": []byte("a-token")},
+	}
+	clientset := fake.NewClientset(theirs)
+	handler := &Apps{Client: clientset, CRClient: testCRClient(app), GitReach: gitAlwaysReachable}
+
+	req := httptest.NewRequest("PUT", "/projects/default/apps/web/git",
+		strings.NewReader(`{"token":"a-token"}`))
+	rec := httptest.NewRecorder()
+	appGitRouter(handler).ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusConflict, rec.Code,
+		"the write reported success while pointing the app at a credential it does not own")
+
+	var live kipperv1.App
+	require.NoError(t, handler.CRClient.Get(context.Background(),
+		crclient.ObjectKey{Namespace: "default", Name: "web"}, &live))
+	assert.Equal(t, secretname.LegacyGitCredential("web"), live.Spec.Git.CredentialsSecret,
+		"the app was moved onto a credential another controller owns")
+
+	kept, err := clientset.CoreV1().Secrets("default").Get(context.Background(), name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "something-else", kept.OwnerReferences[0].Name, "the other controller's reference was taken")
+}
+
+// A name is a digest of the pair, and a digest is not a proof: sixteen hex
+// characters can collide, and anyone who can write Secrets can put something
+// else at the address. Committing an App onto whatever is found there would
+// have it clone with a token nobody supplied.
+func TestSetGit_RefusesACredentialWhoseContentIsNotThePairItNames(t *testing.T) {
+	name := secretname.GitCredential("web", secretname.GitCredentialDigest("a-token", "github.com"))
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default", UID: "the-app"},
+		Spec: kipperv1.AppSpec{
+			Image: "nginx", Port: 80, Replicas: int32Ptr(1),
+			Git: &kipperv1.AppGitSource{
+				URL: "https://github.com/acme/web.git", Branch: "main",
+				CredentialsSecret: secretname.LegacyGitCredential("web"),
+			},
+		},
+	}
+	squatted := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "default",
+			Labels:      map[string]string{"app.kubernetes.io/managed-by": "kipper", "kipper.run/app": "web"},
+			Annotations: map[string]string{builder.GitAuthorityAnnotation: "github.com"},
+		},
+		Data: map[string][]byte{"token": []byte("some-other-token")},
+	}
+	clientset := fake.NewClientset(squatted)
+	handler := &Apps{Client: clientset, CRClient: testCRClient(app), GitReach: gitAlwaysReachable}
+
+	req := httptest.NewRequest("PUT", "/projects/default/apps/web/git",
+		strings.NewReader(`{"token":"a-token"}`))
+	rec := httptest.NewRecorder()
+	appGitRouter(handler).ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusConflict, rec.Code,
+		"the app was committed onto an object that does not hold the token supplied, or a state the caller can act on was reported as the platform failing")
+
+	var live kipperv1.App
+	require.NoError(t, handler.CRClient.Get(context.Background(),
+		crclient.ObjectKey{Namespace: "default", Name: "web"}, &live))
+	assert.Equal(t, secretname.LegacyGitCredential("web"), live.Spec.Git.CredentialsSecret)
 }

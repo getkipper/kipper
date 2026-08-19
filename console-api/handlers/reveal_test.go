@@ -13,7 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/getkipper/kipper/console-api/internal/gitcred"
+	"github.com/getkipper/kipper/console-api/internal/sharedcred"
 	"github.com/getkipper/kipper/console-api/middleware"
 )
 
@@ -22,12 +22,12 @@ const testAdminPassword = "correct-horse-battery-staple"
 
 func seedGitCredential(t *testing.T, client *fake.Clientset) {
 	t.Helper()
-	entries := []gitcred.Entry{
+	entries := []sharedcred.Entry{
 		{Name: "git-acme-tools", Server: "git.example.com", Username: "kipper-deploy", Token: "glpa-abc123"},
 	}
 	data, _ := json.Marshal(entries)
-	_, err := client.CoreV1().Secrets(gitcred.Namespace).Create(context.Background(), &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: gitcred.ConfigSecretName, Namespace: gitcred.Namespace},
+	_, err := client.CoreV1().Secrets(sharedcred.Namespace).Create(context.Background(), &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: sharedcred.ConfigSecretName, Namespace: sharedcred.Namespace},
 		Data:       map[string][]byte{"credentials": data},
 	}, metav1.CreateOptions{})
 	if err != nil {

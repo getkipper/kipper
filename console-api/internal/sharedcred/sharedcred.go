@@ -1,9 +1,9 @@
-// Package gitcred stores the admin-managed shared git credentials. The whole
+// Package sharedcred stores the admin-managed shared git credentials. The whole
 // list lives in one Secret in kipper-system and is read by both the settings
 // handlers (which manage it) and the builder (which resolves a shared
 // credential at build time), so a shared token never has to be copied into a
 // tenant namespace.
-package gitcred
+package sharedcred
 
 import (
 	"context"

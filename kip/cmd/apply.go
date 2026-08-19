@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 
+	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/manifest"
 	"github.com/getkipper/kipper/kip/internal/workload"
@@ -323,11 +324,71 @@ func scanChangesWith(ctx context.Context, dyn dynamic.Interface, namespace strin
 		}
 		liveSpec, _, _ := unstructured.NestedMap(live.Object, "spec")
 		newSpec, _ := res.Object.Object["spec"].(map[string]interface{})
-		for _, c := range manifest.DiffSpec(liveSpec, newSpec, preservedPaths(newSpec), kindDefaults) {
+		// What the apply will write, not what the manifest says. The two differ
+		// where a manifest carries a credential name the cluster owns, and a
+		// scan that reported the manifest's version showed a change the write
+		// never makes and passed a preflight the write then refuses.
+		effective := effectiveSpecForDiff(name, newSpec)
+		for _, c := range manifest.DiffSpec(liveSpec, effective, preservedPaths(name, effective, liveSpec), kindDefaults) {
 			out = append(out, resourceChange{kind: res.Object.GetKind(), name: name, change: c})
 		}
 	}
 	return out, nil
+}
+
+// objectForCreate returns what a create should write. There is nothing live to
+// carry forward, so this is the manifest minus anything it does not assert: a
+// credential name the app owns is machine state, and creating an App onto one
+// names a Secret that is not there.
+//
+// The manifest is left alone, because the update path reads it afterwards.
+func objectForCreate(name string, object *unstructured.Unstructured) *unstructured.Unstructured {
+	spec, isSpec := object.Object["spec"].(map[string]interface{})
+	if !isSpec || !assertsNothingByNamingItsOwnCredential(name, spec) {
+		return object
+	}
+	out := object.DeepCopy()
+	out.Object["spec"] = effectiveSpecForDiff(name, spec)
+	return out
+}
+
+// assertsNothingByNamingItsOwnCredential reports whether a spec carries a
+// credential name this app owns, which every surface treats as machine state
+// rather than something the manifest is asking for.
+func assertsNothingByNamingItsOwnCredential(name string, spec map[string]interface{}) bool {
+	git, isGit := spec["git"].(map[string]interface{})
+	if !isGit {
+		return false
+	}
+	value, named := git["credentialsSecret"].(string)
+	return named && value != "" && secretname.IsGitCredentialOf(name, value)
+}
+
+// effectiveSpecForDiff returns the spec an apply would write, so a diff shows
+// what will happen rather than what the manifest says.
+//
+// Only the credential differs, and only where the manifest carries a name this
+// app owns. The manifest is left alone: the write path reads it afterwards and
+// derives its own value per attempt.
+func effectiveSpecForDiff(name string, newSpec map[string]interface{}) map[string]interface{} {
+	git, isGit := newSpec["git"].(map[string]interface{})
+	if !isGit {
+		return newSpec
+	}
+	if !assertsNothingByNamingItsOwnCredential(name, newSpec) {
+		return newSpec
+	}
+	effective := make(map[string]interface{}, len(newSpec))
+	for k, v := range newSpec {
+		effective[k] = v
+	}
+	gitCopy := make(map[string]interface{}, len(git))
+	for k, v := range git {
+		gitCopy[k] = v
+	}
+	delete(gitCopy, "credentialsSecret")
+	effective["git"] = gitCopy
+	return effective
 }
 
 // preservedPaths are the spec paths apply carries forward rather than
@@ -339,14 +400,71 @@ func scanChangesWith(ctx context.Context, dyn dynamic.Interface, namespace strin
 // service. Convert always stamps an image, so this never shows up as a clear —
 // what it prevents is a diff announcing that the running image is about to
 // become the placeholder, which would be alarming and untrue.
-func preservedPaths(newSpec map[string]interface{}) []string {
+func preservedPaths(name string, newSpec, liveSpec map[string]interface{}) []string {
 	if newSpec == nil {
 		return nil
 	}
-	if _, isGit := newSpec["git"]; isGit {
-		return []string{"image"}
+	git, isGit := newSpec["git"].(map[string]interface{})
+	if !isGit {
+		return nil
 	}
-	return nil
+	paths := []string{"image"}
+	v, named := git["credentialsSecret"].(string)
+	live, _, _ := unstructured.NestedString(liveSpec, "git", "credentialsSecret")
+	// Suppressed only where the apply would write back exactly what is live, so
+	// a diff never offers to clear what the cluster owns and never hides a
+	// change the operator asked for. Without this the round trip the docs
+	// describe — export, which omits the credential, then apply — is refused on
+	// every app that has a token, and the refusal tells the operator to pin the
+	// name that rotates.
+	if effective, present := effectiveGitCredential(name, v, named, live); (present && effective == live) || (!present && live == "") {
+		paths = append(paths, "git.credentialsSecret")
+	}
+	return paths
+}
+
+// effectiveGitCredential returns what git.credentialsSecret should be for this
+// app, and whether the field belongs in the spec at all.
+//
+// The manifest asserts a credential only by naming a shared one. Absent, empty,
+// and a name this app owns are the same thing: no assertion. An app-owned name
+// is machine state that a manifest exported before credentials were named this
+// way happens to carry, and by now it points at a Secret the sweep has
+// collected, so honouring it would move the app onto nothing.
+//
+// With no assertion the live value decides. One the app owns is the cluster's
+// and carries forward; a shared one is the operator's, so its absence from the
+// manifest is them taking it away, which the ordinary clear reporting handles.
+func effectiveGitCredential(app, value string, named bool, live string) (string, bool) {
+	if named && value != "" && !secretname.IsGitCredentialOf(app, value) {
+		return value, true
+	}
+	if live != "" && secretname.IsGitCredentialOf(app, live) {
+		return live, true
+	}
+	return "", false
+}
+
+// applyGitCredential puts the effective credential into a manifest's git block.
+//
+// Every attempt starts from the manifest as written, because the retry closure
+// mutates this map in place: an attempt that carried a live credential in would
+// otherwise leave it there for the next one, which then writes it over whatever
+// the cluster has moved to.
+func applyGitCredential(git map[string]interface{}, app, value string, named bool, live string) {
+	delete(git, "credentialsSecret")
+	if effective, present := effectiveGitCredential(app, value, named, live); present {
+		git["credentialsSecret"] = effective
+	}
+}
+
+// manifestGitCredential reads git.credentialsSecret straight from a converted
+// manifest, before an apply attempt writes the live value into it.
+func manifestGitCredential(object map[string]interface{}) (string, bool) {
+	spec, _ := object["spec"].(map[string]interface{})
+	git, _ := spec["git"].(map[string]interface{})
+	v, named := git["credentialsSecret"].(string)
+	return v, named
 }
 
 // clearsOf keeps only the changes that take a value away.
@@ -483,7 +601,7 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 				return "", reserveErr
 			}
 		}
-		_, err := dyn.Resource(res.GVR).Namespace(namespace).Create(ctx, res.Object, metav1.CreateOptions{})
+		_, err := dyn.Resource(res.GVR).Namespace(namespace).Create(ctx, objectForCreate(name, res.Object), metav1.CreateOptions{})
 		if err == nil {
 			return "created", nil
 		}
@@ -500,6 +618,12 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 		// replace its spec instead of failing.
 	}
 
+	// Read once, before any attempt mutates the spec below. A retry re-runs the
+	// closure over the same map, so deciding from the map would read back what
+	// the previous attempt injected and pin a credential the cluster has since
+	// moved off.
+	manifestCredential, manifestNamesCredential := manifestGitCredential(res.Object.Object)
+
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		existing, err := dyn.Resource(res.GVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
@@ -511,15 +635,24 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 		// spec never resets a running app to the busybox build placeholder (which
 		// serves a static page and 502s the real service).
 		if newSpec != nil {
-			if _, isGit := newSpec["git"]; isGit {
+			if git, isGit := newSpec["git"].(map[string]interface{}); isGit {
 				if liveImage, found, _ := unstructured.NestedString(existing.Object, "spec", "image"); found && liveImage != "" {
 					newSpec["image"] = liveImage
 				}
+				// The app's own credential is build input the console and the
+				// CLI own, one object per token-and-host pair and a new name on
+				// every rotation. The cluster decides it whenever the manifest
+				// does not name a shared one — including when the manifest
+				// names an app-owned name, which only a manifest exported
+				// before credentials were named this way can carry, and which
+				// by now points at a Secret the sweep has collected.
+				live, _, _ := unstructured.NestedString(existing.Object, "spec", "git", "credentialsSecret")
+				applyGitCredential(git, name, manifestCredential, manifestNamesCredential, live)
 			}
 		}
 		if !force {
 			liveSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
-			if clears := manifest.Clears(manifest.DiffSpec(liveSpec, newSpec, preservedPaths(newSpec), defaults)); len(clears) > 0 {
+			if clears := manifest.Clears(manifest.DiffSpec(liveSpec, newSpec, preservedPaths(name, newSpec, liveSpec), defaults)); len(clears) > 0 {
 				return &clearedUnderApplyError{kind: res.Object.GetKind(), name: name, clears: clears, schemaUnread: schemaUnread}
 			}
 		}

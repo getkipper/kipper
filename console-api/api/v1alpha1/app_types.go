@@ -333,7 +333,7 @@ type AppGitSource struct {
 	Branch string `json:"branch,omitempty"`
 
 	// CredentialsSecret names the git credential the build uses. Either the
-	// app's own per-app Secret "<app-name>-git-credentials" in the app's
+	// app's own per-app Secret, one generation per token and host, in the app's
 	// namespace (a "token" key), or the name of a shared credential configured
 	// in kipper-system. A shared credential is only used when the app's project
 	// is on its allow-list and its host matches the git URL; any other name is
