@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
@@ -19,9 +20,10 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-
 	"k8s.io/client-go/util/retry"
 
+	"github.com/getkipper/kipper/controller/pkg/appowner"
+	"github.com/getkipper/kipper/controller/pkg/gitcred"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 
@@ -297,14 +299,18 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 	// no owner to garbage-collect an invocation-created Secret, so the failure
 	// path removes it rather than leaving plaintext credentials behind.
 	var gitCredentials string
+	var gitCredentialVersion string
 	gitCredsCreated := false
 	appExisted := false
 	secretsCreated := false
 	deployErr := func() error {
 		// Store git credentials as a K8s Secret if provided.
 		if gitToken != "" {
-			secretName := name + "-git-credentials"
-			fresh, err := storeGitCredential(ctx, k8sClient.Clientset(), namespace, name, gitToken, gitURL)
+			owner, ownerErr := liveAppOwner(ctx, k8sClient.Dynamic(), namespace, name)
+			if ownerErr != nil {
+				return ownerErr
+			}
+			secretName, secretVersion, fresh, err := storeGitCredential(ctx, k8sClient.Clientset(), namespace, name, gitToken, gitURL, owner)
 			if err != nil {
 				return err
 			}
@@ -313,6 +319,7 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 			// put it there.
 			gitCredsCreated = fresh
 			gitCredentials = secretName
+			gitCredentialVersion = secretVersion
 			fmt.Printf("  ✔  Git credentials stored\n")
 		}
 
@@ -377,7 +384,7 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 		})
 	}()
 	if deployErr != nil {
-		cleanupDeploySecrets(ctx, k8sClient.Clientset(), d, namespace, name, secretsCreated, gitCredsCreated)
+		cleanupDeploySecrets(ctx, k8sClient.Clientset(), d, namespace, name, gitCredentials, gitCredentialVersion, secretsCreated, gitCredsCreated)
 		// A rotation over a pre-existing Secret has already been written at
 		// this point: the pods keep the old values, the Secret holds the new
 		// ones, and any later restart would flip credentials silently.
@@ -874,10 +881,22 @@ func collectDeploySecrets(entries []string, env map[string]string) (map[string]s
 // when the CR does exist, because the reconciler will adopt it. Deletion is
 // best-effort; a failure is reported so the user can remove the Secret by
 // hand.
-func cleanupDeploySecrets(ctx context.Context, clientset kubernetes.Interface, d *deployer.Deployer, namespace, name string, secretsCreated, gitCredsCreated bool) {
+// gitCredentialVersion is what the credential looked like when this run wrote
+// it. A credential is named after the pair it holds, so another run writing the
+// same token converges on the same object and may have claimed it since; the
+// delete carries this so it fails rather than taking that run's credential.
+func cleanupDeploySecrets(ctx context.Context, clientset kubernetes.Interface, d *deployer.Deployer, namespace, name, gitCredential, gitCredentialVersion string, secretsCreated, gitCredsCreated bool) {
 	if !secretsCreated && !gitCredsCreated {
 		return
 	}
+	// The App-absent gate is what makes deleting a credential safe here, and it
+	// is a check across two objects: a concurrent deploy of the same app with
+	// the same token and host could create the CR after this read and before
+	// the delete lands. It needs both deploys to carry the identical pair
+	// inside one window, the output names what was removed, and re-entering the
+	// token repairs it. Without the gate there is no sweeper at all for a
+	// credential written for an App that never came into existence, which is
+	// the case this exists for.
 	if _, err := d.Dynamic.Resource(deployer.AppGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{}); err == nil || !errors.IsNotFound(err) {
 		if err != nil {
 			// The conservative keep is right when the check itself failed,
@@ -891,14 +910,37 @@ func cleanupDeploySecrets(ctx context.Context, clientset kubernetes.Interface, d
 		toDelete = append(toDelete, secretname.Secrets(secretname.KindApp, name))
 	}
 	if gitCredsCreated {
-		toDelete = append(toDelete, name+"-git-credentials")
+		// The exact object this run created. A credential is one object per
+		// token-and-host pair now, so removing anything else would take one
+		// another deploy is using.
+		toDelete = append(toDelete, gitCredential)
 	}
 	for _, sec := range toDelete {
-		if err := clientset.CoreV1().Secrets(namespace).Delete(ctx, sec, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
-			fmt.Fprintf(os.Stderr, "  ⚠  the deploy failed and the %s Secret it created could not be removed: %v. Delete it manually: kubectl delete secret %s -n %s\n", sec, err, sec, namespace)
-			continue
+		opts := metav1.DeleteOptions{}
+		if sec == gitCredential && gitCredentialVersion != "" {
+			// A credential is one object per token-and-host pair, so another
+			// deploy of the same token converges on this one and may have
+			// claimed it since. The version says whether anything has touched
+			// it. Checked here and sent as a precondition: the apiserver's is
+			// the one that decides, and the read is what makes the intent
+			// legible.
+			if live, err := clientset.CoreV1().Secrets(namespace).Get(ctx, sec, metav1.GetOptions{}); err == nil &&
+				live.ResourceVersion != gitCredentialVersion {
+				fmt.Fprintf(os.Stderr, "  ⚠  %s changed since this deploy wrote it, so it was left alone: another deploy is using it.\n", sec)
+				continue
+			}
+			opts.Preconditions = &metav1.Preconditions{ResourceVersion: &gitCredentialVersion}
 		}
-		fmt.Fprintf(os.Stderr, "  Removed Secret %s created by this failed deploy so no credentials are left behind.\n", sec)
+		switch err := clientset.CoreV1().Secrets(namespace).Delete(ctx, sec, opts); {
+		case err == nil:
+			fmt.Fprintf(os.Stderr, "  Removed Secret %s created by this failed deploy so no credentials are left behind.\n", sec)
+		case errors.IsNotFound(err):
+			// Already gone, which is the goal state.
+		case errors.IsConflict(err):
+			fmt.Fprintf(os.Stderr, "  %s changed since this deploy wrote it, so it was left alone: another deploy is using it.\n", sec)
+		default:
+			fmt.Fprintf(os.Stderr, "  ⚠  the deploy failed and the %s Secret it created could not be removed: %v. Delete it manually: kubectl delete secret %s -n %s\n", sec, err, sec, namespace)
+		}
 	}
 }
 
@@ -1021,60 +1063,94 @@ func findFunctionNamespaceOrDefault(ctx context.Context, clientset kubernetes.In
 	return "", err
 }
 
-// storeGitCredential writes an app's git token, recording the host it is for.
-// The token and the clone URL are a pair, and every path that would send the
-// token refuses one whose recorded host is not the host being contacted, so a
-// write that omits the host leaves a credential nothing can repair through kip.
-// It reports whether the Secret was created here, which is what decides
-// whether a failed deploy may remove it again.
-func storeGitCredential(ctx context.Context, clientset kubernetes.Interface, namespace, appName, token, cloneURL string) (bool, error) {
-	secretName := appName + "-git-credentials"
-	wantLabels := map[string]string{
-		"app.kubernetes.io/managed-by": "kipper",
-		"kipper.run/app":               appName,
-	}
+// storeGitCredential stores a token for one clone host and returns the Secret
+// holding it, with whether this call created it.
+//
+// The name is a digest of the token and the host, so the object is immutable
+// and a rotation writes a new one rather than replacing what the App is still
+// cloning with. The App moves by naming it, which is one atomic update. The
+// created flag is what decides whether a failed deploy may remove it again.
+// owner is the App this credential is for when it already exists, and nil on a
+// first deploy, where the reconciler takes ownership once the App is there.
+func storeGitCredential(ctx context.Context, clientset kubernetes.Interface, namespace, appName, token, cloneURL string, owner *metav1.OwnerReference) (string, string, bool, error) {
 	// An unparseable URL records nothing rather than a wrong host; the source
 	// validation upstream is what rejects it.
 	authority, _ := giturl.CanonicalAuthority(cloneURL)
+	name := secretname.GitCredential(appName, secretname.GitCredentialDigest(token, authority))
 
 	fresh := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace, Labels: wantLabels},
-		Data:       map[string][]byte{"token": []byte(token)},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "kipper",
+				"kipper.run/app":               appName,
+			},
+		},
+		Data: map[string][]byte{"token": []byte(token)},
 	}
 	if authority != "" {
 		fresh.Annotations = map[string]string{labels.AnnoGitAuthority: authority}
 	}
+	// Bound at once when the App is already there, the same as the console
+	// does. Leaving it for the reconciler is only for a first deploy, where
+	// there is no App to bind to yet.
+	if owner != nil {
+		fresh.OwnerReferences = []metav1.OwnerReference{*owner}
+	}
 
-	_, err := clientset.CoreV1().Secrets(namespace).Create(ctx, fresh, metav1.CreateOptions{})
+	made, err := clientset.CoreV1().Secrets(namespace).Create(ctx, fresh, metav1.CreateOptions{})
 	if err == nil {
-		return true, nil
+		return name, made.ResourceVersion, true, nil
 	}
 	if !errors.IsAlreadyExists(err) {
-		return false, fmt.Errorf("creating git credentials secret: %w", err)
+		return "", "", false, fmt.Errorf("creating git credentials secret: %w", err)
 	}
-
-	// Update the live object in place: a blind replace would strip the
-	// controller reference the reconciler set and the Secret would outlive the
-	// App again.
+	// AlreadyExists says the name is taken, not that the object holds the pair
+	// the name stands for, so the claim checks what is there before the app is
+	// pointed at it. It is the same decision the console makes, from the same
+	// package, because a check only one writer makes protects only the apps
+	// deployed through that one.
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		live, getErr := clientset.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
+		live, getErr := clientset.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
 		if getErr != nil {
 			return getErr
 		}
-		live.Labels = wantLabels
-		live.Data = fresh.Data
-		if live.Annotations == nil {
-			live.Annotations = map[string]string{}
-		}
-		if authority != "" {
-			live.Annotations[labels.AnnoGitAuthority] = authority
-		} else {
-			delete(live.Annotations, labels.AnnoGitAuthority)
+		// The CLI's own clock, because there is no server clock a CLI writer
+		// can read. A clock far enough out either way loses the protection
+		// rather than misusing it: too slow writes a claim already past, too
+		// fast writes one the controller rejects as implausible, and the sweep
+		// then judges by creation time as it did before claims existed.
+		if claimErr := gitcred.Claim(live, appName, token, authority, owner, time.Now()); claimErr != nil {
+			return claimErr
 		}
 		_, updErr := clientset.CoreV1().Secrets(namespace).Update(ctx, live, metav1.UpdateOptions{})
 		return updErr
 	}); err != nil {
-		return false, fmt.Errorf("updating git credentials secret: %w", err)
+		return "", "", false, fmt.Errorf("claiming git credentials secret: %w", err)
 	}
-	return false, nil
+	return name, "", false, nil
+}
+
+// liveAppOwner is the owner reference for an App that already exists, or nil
+// when it does not. A credential written for a live App can be bound to it at
+// once; one written before the App exists is bound by the reconciler.
+//
+// Only NotFound means there is no App. Any other failure is unknown rather than
+// absent, and the two lead opposite ways: a missing App means the credential is
+// written unowned for the reconciler to bind, while an unreadable one would
+// send a redeploy down that same path and strip the ownership the reconciler
+// had already set. The same distinction is made on the deploy's own pre-check
+// further up this file.
+func liveAppOwner(ctx context.Context, dyn dynamic.Interface, namespace, name string) (*metav1.OwnerReference, error) {
+	live, err := dyn.Resource(deployer.AppGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	switch {
+	case err == nil:
+		ref := appowner.Reference(deployer.AppGVR.GroupVersion().String(), name, live.GetUID())
+		return &ref, nil
+	case errors.IsNotFound(err):
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("checking whether app %s exists: %w", name, err)
+	}
 }

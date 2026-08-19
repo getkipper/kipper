@@ -1,4 +1,4 @@
-package gitcred
+package sharedcred
 
 import (
 	"context"

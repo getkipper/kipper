@@ -16,10 +16,12 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/builder"
-	"github.com/getkipper/kipper/console-api/internal/gitcred"
 	"github.com/getkipper/kipper/console-api/internal/gitreach"
+	"github.com/getkipper/kipper/console-api/internal/sharedcred"
 	"github.com/getkipper/kipper/console-api/middleware"
+	"github.com/getkipper/kipper/controller/pkg/gitcred"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
+	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
 // gitResponse is what the UI reads when populating the Git source
@@ -85,10 +87,10 @@ func (a *Apps) GetGit(w http.ResponseWriter, r *http.Request) {
 // SetGit updates the App's Git source. Empty string fields are NOT
 // applied — the request acts as a partial update so the UI can rotate
 // just the token, or just the branch, without re-supplying every field.
-// A non-empty token replaces the data on the `<app>-git-credentials`
-// Secret in place; the App CR's `credentialsSecret` always points at
-// that fixed name so the reconciler picks the new value up on the next
-// build.
+// A non-empty token is stored as a new credential object named after the pair
+// it holds, and the App CR is moved onto it. Nothing writes to the credential
+// the app is currently cloning with, so a failed update leaves that pair
+// untouched and the next build is unaffected.
 //
 // PUT /api/v1/projects/{name}/apps/{app}/git
 func (a *Apps) SetGit(w http.ResponseWriter, r *http.Request) {
@@ -173,10 +175,9 @@ func (a *Apps) SetGit(w http.ResponseWriter, r *http.Request) {
 		appCR.Spec.Git.Context = req.Context
 	}
 
-	// Token rotation. The credentials Secret is named after the App so
-	// the reconciler reads the new value on the next build without
-	// needing the CR to know its name changed. We only touch it when a
-	// non-empty token comes in.
+	// Token rotation. A rotation is the App moving onto a different credential
+	// object, so the CR update below is what carries it. Only a non-empty token
+	// writes anything.
 	// Prove the source can be read before storing anything. The credential
 	// checked is the effective one — the token in this request when there is
 	// one, the stored token otherwise — so rotating to a stale token is caught
@@ -214,49 +215,41 @@ func (a *Apps) SetGit(w http.ResponseWriter, r *http.Request) {
 		// while its builds worked perfectly.
 	}
 
-	// The Secret is written before the CR. A reconcile landing in that window
-	// sees an app whose live spec.git is still nil and sweeps the Secret it
-	// just found, so a detach followed immediately by a re-attach can answer
-	// 200 with the token already gone.
-	//
-	// Accepted rather than restructured, and only this window: a CR update that
-	// fails puts the credential back, so the two never stay disagreeing. The
-	// remaining race is milliseconds wide, the failure is loud and
-	// self-correcting (the next build reports it and re-entering the token
-	// fixes it), and both alternatives are worse:
-	// writing the CR first leaves a permanently dangling credentialsSecret
-	// reference whenever the Secret write then fails, and requiring ownership
-	// before sweeping trades this race for a plaintext token that is never
-	// cleaned up at all.
-	var restore func() error
+	// The credential is a new object per pair, and the CR update is what
+	// commits it. Nothing here writes to the Secret the app currently names, so
+	// a failed update leaves the committed pair exactly as it was and this
+	// attempt has nothing to undo but the object it just made. The sweep in the
+	// App reconciler removes the one the app has moved off.
 	if req.Token != "" {
-		secretName := appName + "-git-credentials"
-		previous, previousAuthority, hadPrevious := a.readGitCredential(ctx, project, secretName)
-		if err := a.createGitCredentialsSecret(ctx, project, secretName, appName, req.Token, appCR.Spec.Git.URL); err != nil {
-			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to store git credentials: %v", err))
+		name, err := a.writeGitCredential(ctx, project, appName, req.Token, appCR.Spec.Git.URL, &appCR)
+		if err != nil {
+			// A refusal is cluster state disagreeing with the request rather
+			// than the platform failing, and the caller can act on it: nothing
+			// was written, so the app still names the credential it did.
+			status := http.StatusInternalServerError
+			var refused *gitcred.Refusal
+			if stderrors.As(err, &refused) {
+				status = http.StatusConflict
+			}
+			respondError(w, status, fmt.Sprintf("failed to store git credentials: %v", err))
 			return
 		}
-		written, identified := a.readGitCredentialVersion(ctx, project, secretName)
-		appCR.Spec.Git.CredentialsSecret = secretName
-		restore = func() error {
-			return a.restoreGitCredential(ctx, project, secretName, previous, previousAuthority, hadPrevious, written, identified)
-		}
+		appCR.Spec.Git.CredentialsSecret = name
 	}
 
 	if err := a.CRClient.Update(ctx, &appCR); err != nil {
-		// A URL and a token changed together are a pair, and the CR is what
-		// says which host the token is for: the builder offers a credential to
-		// whatever host the live CR names. Leaving the new token beside the old
-		// URL would send it to the wrong authority on the next build, so the
-		// credential goes back as it was.
-		if restore != nil {
-			if restoreErr := restore(); restoreErr != nil {
-				respondError(w, http.StatusInternalServerError, fmt.Sprintf(
-					"the git source was not updated, and the token just stored could not be put back (%v). It now belongs to a repository this app does not clone from: set the source again, or remove it with 'kip app git remove %s'",
-					restoreErr, appName))
-				return
-			}
-		}
+		// Nothing is undone here. Two writers of the same pair share one
+		// object, so winning its Create is not owning it, and no read can
+		// establish that nobody is about to commit the App onto it. An object
+		// this write leaves behind is a token the caller supplied, in their own
+		// namespace, which the App reconciler's sweep collects; deleting one
+		// another writer has committed cannot be recovered without the git
+		// host.
+		//
+		// The sweep needs an App to reconcile, so a write racing the App's own
+		// deletion would leave the object until the namespace went. The
+		// credential carries an owner reference to that App, so Kubernetes
+		// collects it instead.
 		respondError(w, http.StatusInternalServerError, "failed to update git source")
 		return
 	}
@@ -336,7 +329,7 @@ func (a *Apps) RevealGitToken(w http.ResponseWriter, r *http.Request) {
 	// deployer could point CredentialsSecret at a shared token their project is
 	// not allow-listed for and read it in plaintext, bypassing the builder's
 	// classification. This applies the same contract the builder enforces.
-	if appCR.Spec.Git.CredentialsSecret != appName+"-git-credentials" {
+	if !secretname.IsGitCredentialOf(appName, appCR.Spec.Git.CredentialsSecret) {
 		respondError(w, http.StatusForbidden, "this app uses an administrator-managed shared git credential, which cannot be revealed here")
 		return
 	}
@@ -439,11 +432,11 @@ func (a *Apps) effectiveGitToken(ctx context.Context, namespace, appName, creden
 	// Reading the namespace first let a project's own Secret of that name
 	// shadow a shared entry, and Secret names are namespace-local, so that
 	// collision is ordinary rather than contrived.
-	shared, err := gitcred.Load(ctx, a.Client)
+	shared, err := sharedcred.Load(ctx, a.Client)
 	if err != nil {
 		return "", false
 	}
-	if entry := gitcred.Find(shared, credentialsSecret); entry != nil {
+	if entry := sharedcred.Find(shared, credentialsSecret); entry != nil {
 		if entry.Token == "" {
 			return "", false
 		}
@@ -454,7 +447,7 @@ func (a *Apps) effectiveGitToken(ctx context.Context, namespace, appName, creden
 	}
 
 	// The builder reads no other name, so neither does this.
-	if credentialsSecret != appCredentialsSecretName(appName) {
+	if !secretname.IsGitCredentialOf(appName, credentialsSecret) {
 		return "", false
 	}
 	secret, err := a.Client.CoreV1().Secrets(namespace).Get(ctx, credentialsSecret, metav1.GetOptions{})
@@ -497,7 +490,7 @@ func (a *Apps) effectiveGitToken(ctx context.Context, namespace, appName, creden
 // is allow-listed to particular projects. Anything unresolvable fails closed,
 // because the caller then skips the check rather than probing with a token it
 // should not hold.
-func (a *Apps) sharedCredentialApplies(ctx context.Context, namespace string, entry *gitcred.Entry, cloneURL string) bool {
+func (a *Apps) sharedCredentialApplies(ctx context.Context, namespace string, entry *sharedcred.Entry, cloneURL string) bool {
 	credentialAuthority, err := giturl.CanonicalAuthority(entry.Server)
 	if err != nil {
 		return false
@@ -512,105 +505,6 @@ func (a *Apps) sharedCredentialApplies(ctx context.Context, namespace string, en
 	}
 	project := ns.Labels["kipper.run/project"]
 	return project != "" && entry.AllowsProject(project)
-}
-
-// appCredentialsSecretName is the only namespaced Secret the builder will read
-// for an app, so it is the only one anything here may send.
-func appCredentialsSecretName(appName string) string {
-	return appName + "-git-credentials"
-}
-
-// readGitCredential returns the token currently stored for an app, and whether
-// there was one, so a failed update can put it back exactly as it was.
-// The host the token was stored for comes back with it: they are one value in
-// two fields, and putting back half leaves a correct token beside the attempted
-// host, which the build then refuses.
-func (a *Apps) readGitCredential(ctx context.Context, namespace, secretName string) ([]byte, string, bool) {
-	secret, err := a.Client.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
-	if err != nil {
-		return nil, "", false
-	}
-	return secret.Data["token"], secret.Annotations[builder.GitAuthorityAnnotation], true
-}
-
-// readGitCredentialVersion returns the resource version a write produced, which
-// is what makes the rollback below conditional rather than destructive.
-func (a *Apps) readGitCredentialVersion(ctx context.Context, namespace, secretName string) (string, bool) {
-	secret, err := a.Client.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
-	if err != nil {
-		return "", false
-	}
-	return secret.ResourceVersion, true
-}
-
-// restoreGitCredential undoes a token write whose CR update did not land, and
-// only if that write is still the current one.
-//
-// A token published against a repository the app does not clone from is worse
-// than no change at all: the builder offers a credential to whatever host the
-// live CR names. But an unconditional restore is worse again. Two operators
-// changing the same source overlap by ordinary Kubernetes conflict, and the
-// loser of the CR race would otherwise overwrite the winner's committed token
-// with a snapshot taken before either wrote — recreating the exact mismatch
-// this exists to prevent, on a transaction that succeeded.
-//
-// So the restore carries the version it wrote as a precondition. Somebody
-// else's write since then means their pair is the live one, and this rollback
-// has nothing left to undo.
-func (a *Apps) restoreGitCredential(ctx context.Context, namespace, secretName string, previous []byte, previousAuthority string, hadPrevious bool, written string, identified bool) error {
-	secrets := a.Client.CoreV1().Secrets(namespace)
-
-	if !identified {
-		// The version of our own write could not be read, so there is no
-		// precondition and no way to tell our write from somebody else's. An
-		// unconditional rollback here is the destructive one this is built to
-		// avoid, and it is worse than doing nothing: it would put our token
-		// back while leaving the winner's recorded host, so host and URL agree
-		// and the build sends a token belonging to neither. Leaving the write
-		// in place instead is caught by that binding and fails loudly.
-		return nil
-	}
-
-	live, err := secrets.Get(ctx, secretName, metav1.GetOptions{})
-	if errors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if live.ResourceVersion != written {
-		// Somebody wrote after us and their CR update landed. Theirs is the
-		// live pair; ours is stale and has nothing to put back.
-		return nil
-	}
-
-	if !hadPrevious {
-		// Nothing to restore, so the Secret this request created goes. The
-		// precondition rides along as well as the check above, because the
-		// two reads are not atomic and the apiserver's is.
-		err := secrets.Delete(ctx, secretName, metav1.DeleteOptions{
-			Preconditions: &metav1.Preconditions{ResourceVersion: &live.ResourceVersion},
-		})
-		if errors.IsNotFound(err) || errors.IsConflict(err) {
-			return nil
-		}
-		return err
-	}
-
-	live.Data["token"] = previous
-	if live.Annotations == nil {
-		live.Annotations = map[string]string{}
-	}
-	if previousAuthority != "" {
-		live.Annotations[builder.GitAuthorityAnnotation] = previousAuthority
-	} else {
-		delete(live.Annotations, builder.GitAuthorityAnnotation)
-	}
-	_, err = secrets.Update(ctx, live, metav1.UpdateOptions{})
-	if errors.IsConflict(err) {
-		return nil
-	}
-	return err
 }
 
 // sameGitAuthority reports whether two clone URLs name the same host in the
@@ -637,10 +531,12 @@ func sameGitAuthority(a, b string) bool {
 // usesPerAppCredential reports whether an app's credential is its own rather
 // than one of the cluster's shared entries.
 //
-// The two are bound differently: a shared credential names the host it may be
-// used against, and the builder refuses it anywhere else, so moving an app does
-// not put it at risk. A per-app credential names no host at all, which is why
-// the move itself has to be the thing that is refused.
+// The two are bound differently. A shared credential names the host it may be
+// used against in the administrator's own list, so moving an app does not put
+// it at risk: the builder refuses it anywhere else. A per-app credential
+// records the host it was stored for on the object itself, which is
+// best-effort and absent on anything written before that existed, so the move
+// itself is what has to be refused.
 func usesPerAppCredential(appName, credentialsSecret string) bool {
-	return credentialsSecret == appName+"-git-credentials"
+	return secretname.IsGitCredentialOf(appName, credentialsSecret)
 }

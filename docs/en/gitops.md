@@ -160,7 +160,7 @@ The practical consequence is that a change made with `kip app update`, `kip app 
 ```
   ~ App/website
       ~ image: registry.example.com/website:v1 -> registry.example.com/website:v2
-      - git.credentialsSecret: website-git-credentials (will be cleared)
+      - git.credentialsSecret: corp-git (will be cleared)
       - route.redirectFrom: [www.example.com] (will be cleared)
       - replicas: 4 -> 1 (the cluster's default)
 ```
@@ -169,7 +169,7 @@ and `kip apply` prints the same list and stops rather than clearing it:
 
 ```
   These are set on the cluster and absent from the manifest, so applying takes them away:
-    - App/website  git.credentialsSecret: website-git-credentials (removed)
+    - App/website  git.credentialsSecret: corp-git (removed)
     - App/website  route.redirectFrom: [www.example.com] (removed)
     - App/website  replicas: 4 -> 1 (the cluster's default)
 
@@ -190,7 +190,7 @@ that access today, so an operator with one is asked about fields that are not
 really going anywhere. Running the same apply as a cluster admin shows the shorter,
 accurate list.
 
-Pass `--force` when clearing is what you meant. A git app's built image is never reported, because apply preserves it. The Project is the exception and is merged, as described above. If you also set fields in the web console, for example API-key gating on a route, include them in the manifest or the next apply clears them. Run `kip export` to capture the live state into a manifest that round-trips.
+Pass `--force` when clearing is what you meant. A git app's built image is never reported, because apply preserves it. Nor is the app's own git credential: the token you set with `--git-token` or in the console is stored in a Secret named after the token and the host it is for, so rotating writes a new one and the app moves onto it. A manifest that pinned that name would name a Secret that is gone as soon as you rotate, so `kip export` leaves it out and apply carries the live one forward. A shared credential is different, and is reported and cleared like any other field, because you chose it. The Project is the exception and is merged, as described above. If you also set fields in the web console, for example API-key gating on a route, include them in the manifest or the next apply clears them. Run `kip export` to capture the live state into a manifest that round-trips.
 
 ### Overriding project and environment
 

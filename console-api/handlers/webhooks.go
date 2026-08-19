@@ -27,6 +27,7 @@ import (
 	"github.com/getkipper/kipper/console-api/builder"
 	"github.com/getkipper/kipper/console-api/internal/registrycred"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
+	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
 const (
@@ -375,7 +376,7 @@ func (wh *Webhooks) BuildStatus(w http.ResponseWriter, r *http.Request) {
 			// must not make console-api authenticate its token (unauthorized use
 			// + a validity oracle) by naming it on the App CR; its health lives on
 			// the admin-only settings endpoint.
-			if credentialsSecret == appName+"-git-credentials" {
+			if secretname.IsGitCredentialOf(appName, credentialsSecret) {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()

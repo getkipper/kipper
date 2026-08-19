@@ -100,6 +100,14 @@ const (
 	// credential one of them stored is refused by another.
 	AnnoGitAuthority = "kipper.run/git-authority"
 
+	// AnnoGitCredentialClaimed is when a writer last took a git credential to
+	// commit an App onto it. A credential object is shared by every writer of
+	// the same token and host, so one already there is reused rather than
+	// created, and its age then says nothing about whether a commit is in
+	// flight. The sweep waits out its grace from this or from creation,
+	// whichever is later.
+	AnnoGitCredentialClaimed = "kipper.run/git-credential-claimed"
+
 	// SourceNamespace records the namespace of the app a build was triggered
 	// for. Builds run in BuildsNamespace rather than beside their app, so this
 	// is what ties a build back to it, and what keeps two projects with an app

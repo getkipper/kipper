@@ -22,11 +22,12 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
-	"github.com/getkipper/kipper/console-api/internal/gitcred"
 	"github.com/getkipper/kipper/console-api/internal/gitreach"
 	"github.com/getkipper/kipper/console-api/internal/registrycred"
+	"github.com/getkipper/kipper/console-api/internal/sharedcred"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
 	"github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
 // Default build container limits, used when an app sets no override and the
@@ -634,13 +635,13 @@ func CredentialBoundElsewhere(annotations map[string]string, authority string) (
 // and not in one transaction. authority is the clone URL's canonical authority.
 func resolveGitToken(ctx context.Context, client kubernetes.Interface, app *kipperv1.App, authority string) ([]byte, error) {
 	name := app.Spec.Git.CredentialsSecret
-	shared, err := gitcred.Load(ctx, client)
+	shared, err := sharedcred.Load(ctx, client)
 	if err != nil {
 		// Fail closed: an unreadable shared list must not silently downgrade a
 		// shared credential to the unrestricted per-app path.
 		return nil, fmt.Errorf("verifying shared git credentials: %w", err)
 	}
-	if entry := gitcred.Find(shared, name); entry != nil {
+	if entry := sharedcred.Find(shared, name); entry != nil {
 		project, err := namespaceProject(ctx, client, app.Namespace)
 		if err != nil {
 			return nil, err
@@ -663,7 +664,7 @@ func resolveGitToken(ctx context.Context, client kubernetes.Interface, app *kipp
 	// Per-app credential: only the app's own credential Secret is accepted, so a
 	// tenant cannot point CredentialsSecret at another Secret in its namespace to
 	// bypass the shared-credential allow-list and host binding.
-	if name != app.Name+"-git-credentials" {
+	if !secretname.IsGitCredentialOf(app.Name, name) {
 		return nil, fmt.Errorf("git credential %q is neither an allowed shared credential nor this app's own credential", name)
 	}
 	secret, err := client.CoreV1().Secrets(app.Namespace).Get(ctx, name, metav1.GetOptions{})

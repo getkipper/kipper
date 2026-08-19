@@ -7,6 +7,8 @@ import (
 	"gopkg.in/yaml.v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
+
+	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
 // Export reads live CRs from a namespace and produces a Manifest.
@@ -75,7 +77,7 @@ func exportApps(ctx context.Context, dynClient dynamic.Interface, namespace stri
 		spec := item.Object["spec"].(map[string]interface{})
 
 		app := AppSpec{}
-		app.Git = exportAppGit(spec)
+		app.Git = exportAppGit(spec, name)
 		// A git app's built image is build output, not manifest state. Emit it
 		// git-only so the manifest passes apply's image/git mutual-exclusion
 		// check and export→apply round-trips without resetting the built image.
@@ -278,7 +280,12 @@ func exportAutoscale(spec map[string]interface{}) *AutoscaleSpec {
 	return a
 }
 
-func exportAppGit(spec map[string]interface{}) *GitSpec {
+// appName decides which credential names are the app's own. Those are machine
+// managed — one object per token-and-host pair, replaced on every rotation and
+// collected by the controller — so pinning one in a manifest names a deleted
+// object as soon as the token is rotated. A shared credential is the operator's
+// choice and stays.
+func exportAppGit(spec map[string]interface{}, appName string) *GitSpec {
 	git := extractMap(spec, "git")
 	if git == nil {
 		return nil
@@ -290,7 +297,7 @@ func exportAppGit(spec map[string]interface{}) *GitSpec {
 	if v, ok := git["branch"].(string); ok {
 		g.Branch = v
 	}
-	if v, ok := git["credentialsSecret"].(string); ok {
+	if v, ok := git["credentialsSecret"].(string); ok && !secretname.IsGitCredentialOf(appName, v) {
 		g.CredentialsSecret = v
 	}
 	if v, ok := git["dockerfilePath"].(string); ok {
