@@ -1229,14 +1229,24 @@ func generatePassword() string {
 // Best effort: the reconcile is failing already, and losing the explanation is
 // better than losing the error that caused it.
 func (r *ServiceReconciler) reportCredentialsBlocked(ctx context.Context, svc *kipperv1.Service, cause error) {
-	svc.Status.Phase = "Failed"
-	meta.SetStatusCondition(&svc.Status.Conditions, metav1.Condition{
+	changed := meta.SetStatusCondition(&svc.Status.Conditions, metav1.Condition{
 		Type:               kipperv1.ConditionCredentialsReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             "SecretNotOwned",
 		Message:            cause.Error(),
 		ObservedGeneration: svc.Generation,
 	})
+	if svc.Status.Phase != "Failed" {
+		svc.Status.Phase = "Failed"
+		changed = true
+	}
+	// Only when it says something new. A status write is an update event on the
+	// object being reconciled, so writing the same failure every pass feeds the
+	// queue its own tail: the reconcile that failed is requeued with backoff,
+	// and the event this would emit brings it straight back.
+	if !changed {
+		return
+	}
 	if err := r.Status().Update(ctx, svc); err != nil {
 		log.FromContext(ctx).Error(err, "recording why the credentials secret is blocked")
 	}

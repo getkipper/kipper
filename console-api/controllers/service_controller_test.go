@@ -1107,3 +1107,28 @@ func TestReconcile_ReportsOnlyTheOwnershipRefusal(t *testing.T) {
 	assert.False(t, errors.As(errors.New("secrets \"db-credentials\" already exists"), &notOurs),
 		"a routine create race must not be reported as an ownership refusal")
 }
+
+// A status write is an update event on the object being reconciled, so writing
+// the same failure on every pass feeds the queue its own tail: the failed
+// reconcile is requeued with backoff, and the event this emits brings it
+// straight back. A blocked service would reconcile continuously until repaired.
+func TestReportCredentialsBlocked_WritesOnlyWhenItSaysSomethingNew(t *testing.T) {
+	svc := bareService("postgres")
+	client := crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).WithStatusSubresource(svc).Build()
+	r := &ServiceReconciler{Client: client, Scheme: testScheme()}
+	cause := &credentialsNotOursError{Secret: "db-credentials"}
+
+	r.reportCredentialsBlocked(context.Background(), svc, cause)
+
+	var afterFirst kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &afterFirst))
+	first := afterFirst.ResourceVersion
+
+	// The same refusal, again, exactly as a requeued reconcile would report it.
+	r.reportCredentialsBlocked(context.Background(), &afterFirst, cause)
+
+	var afterSecond kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &afterSecond))
+	assert.Equal(t, first, afterSecond.ResourceVersion,
+		"reporting the same failure again wrote the object and emitted another event")
+}
