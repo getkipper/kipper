@@ -47,6 +47,11 @@ func init() {
 	_ = registryAddCmd.MarkFlagRequired("server")
 
 	registryCmd.AddCommand(registryAddCmd)
+	registryAllowCmd.Flags().StringArray("project", nil, "project allowed to pull with this credential (repeatable)")
+	registryRevokeCmd.Flags().StringArray("project", nil, "project to stop from pulling with this credential (repeatable)")
+
+	registryCmd.AddCommand(registryAllowCmd)
+	registryCmd.AddCommand(registryRevokeCmd)
 	registryCmd.AddCommand(registryListCmd)
 	registryCmd.AddCommand(registryRemoveCmd)
 	rootCmd.AddCommand(registryCmd)

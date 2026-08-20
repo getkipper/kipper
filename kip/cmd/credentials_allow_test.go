@@ -122,7 +122,7 @@ func TestCredentialsAllowPointsAtTheRegistryCommandForARegistryName(t *testing.T
 	err := grantSharedCredential(context.Background(), clientset, projectsExist("shop"), "ghcr", []string{"shop"}, &bytes.Buffer{})
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "kip registry add",
+	assert.Contains(t, err.Error(), "kip registry allow",
 		"the operator was told the name does not exist when it exists in the other store")
 }
 
@@ -183,9 +183,9 @@ func TestCredentialsRevokeDoesNotRequireTheProjectToExist(t *testing.T) {
 	assert.False(t, entries[0].AllowsProject("gone"))
 }
 
-// The registry name is what identifies the entry. Sending the operator to
-// 'kip registry add --server ghcr.io' without it derives a different name,
-// finds no entry, and asks for a username and password it should not need.
+// The registry name is what identifies the entry, and the remedy has to name the
+// verb that adds a project. Sending the operator to the flag would send them to
+// one that replaces the whole allow-list.
 func TestCredentialsAllowNamesTheRegistryCredentialInTheRemedy(t *testing.T) {
 	clientset := k8sfake.NewClientset(
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge"}),
@@ -199,8 +199,8 @@ func TestCredentialsAllowNamesTheRegistryCredentialInTheRemedy(t *testing.T) {
 	err := grantSharedCredential(context.Background(), clientset, dyn, "ghcr", []string{"shop"}, &bytes.Buffer{})
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--name ghcr")
-	assert.Contains(t, err.Error(), "replaces", "the remedy presents a replacement as if it added one project")
+	assert.Contains(t, err.Error(), "kip registry allow ghcr",
+		"the remedy has to name the additive verb, not the flag that replaces the list")
 }
 
 // The registry hint stands in for "there is no such git credential" only. Any
