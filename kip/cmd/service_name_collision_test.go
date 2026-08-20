@@ -6,9 +6,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 
 	"github.com/getkipper/kipper/controller/pkg/secretname"
+	"github.com/getkipper/kipper/kip/internal/manifest"
 )
 
 // The CLI refuses what the console refuses, for the same reason and through the
@@ -38,4 +40,25 @@ func TestServiceAddDoesNotCheckANameThatCannotCollide(t *testing.T) {
 		require.NoError(t, refuseServiceNameSharingAnAppCredential(context.Background(), dyn, "shop-prod", name),
 			"%q was refused", name)
 	}
+}
+
+// A manifest is a create path too, and the comment in applyResource says so: it
+// is the one place that reaches every kind, so a kipper.yaml must not be able to
+// create what `kip service add` and the console both refuse.
+func TestApplyRefusesAServiceNameThatSharesAnAppsGitCredential(t *testing.T) {
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	res := manifest.Resource{
+		GVR: manifest.ServiceGVR,
+		Object: &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": manifest.ServiceGVR.GroupVersion().String(),
+			"kind":       "Service",
+			"metadata":   map[string]any{"name": "web-git", "namespace": "shop-prod"},
+			"spec":       map[string]any{"type": "postgres"},
+		}},
+	}
+
+	_, err := applyResource(context.Background(), dyn, "shop-prod", res, false, nil, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), secretname.ServiceCredentials("web-git"))
 }

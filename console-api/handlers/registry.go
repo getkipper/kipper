@@ -49,10 +49,16 @@ func (reg *Registry) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mask passwords in response
+	// Mask passwords in response, and answer with a list rather than a null for
+	// a credential stored before the allow-list was always written. The stored
+	// document is canonical from the next write on, and a client should not have
+	// to wait for one to read an array.
 	for i := range entries {
 		if entries[i].Password != "" {
 			entries[i].Password = maskValue(entries[i].Password)
+		}
+		if entries[i].AllowedProjects == nil {
+			entries[i].AllowedProjects = []string{}
 		}
 	}
 
