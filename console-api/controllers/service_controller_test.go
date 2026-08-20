@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -27,6 +28,7 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/serviceui"
 	"github.com/getkipper/kipper/console-api/share"
+	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
 // secretFromCluster reads the named secret back from the fake client
@@ -1062,7 +1064,7 @@ func TestReportCredentialsBlocked_SaysWhyOnTheService(t *testing.T) {
 	}
 
 	r.reportCredentialsBlocked(context.Background(), svc,
-		&credentialsNotOursError{Secret: "db-credentials"})
+		&credentialsNotOursError{Secret: "db-credentials"}, "SecretNotOwned")
 
 	var live kipperv1.Service
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
@@ -1097,17 +1099,6 @@ func TestUpdateStatus_RetractsTheCredentialsCondition(t *testing.T) {
 		"a condition describing a state that has passed was left on the object")
 }
 
-// Everything other than the ownership refusal is transient: a stale cache
-// answering AlreadyExists to the create, a Get that failed. Stamping those puts
-// a permanent false condition on a healthy service.
-func TestReconcile_ReportsOnlyTheOwnershipRefusal(t *testing.T) {
-	var notOurs *credentialsNotOursError
-	assert.True(t, errors.As(&credentialsNotOursError{Secret: "db-credentials"}, &notOurs),
-		"the refusal has to be recognisable to the reporter")
-	assert.False(t, errors.As(errors.New("secrets \"db-credentials\" already exists"), &notOurs),
-		"a routine create race must not be reported as an ownership refusal")
-}
-
 // A status write is an update event on the object being reconciled, so writing
 // the same failure on every pass feeds the queue its own tail: the failed
 // reconcile is requeued with backoff, and the event this emits brings it
@@ -1118,17 +1109,89 @@ func TestReportCredentialsBlocked_WritesOnlyWhenItSaysSomethingNew(t *testing.T)
 	r := &ServiceReconciler{Client: client, Scheme: testScheme()}
 	cause := &credentialsNotOursError{Secret: "db-credentials"}
 
-	r.reportCredentialsBlocked(context.Background(), svc, cause)
+	r.reportCredentialsBlocked(context.Background(), svc, cause, "SecretNotOwned")
 
 	var afterFirst kipperv1.Service
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &afterFirst))
 	first := afterFirst.ResourceVersion
 
 	// The same refusal, again, exactly as a requeued reconcile would report it.
-	r.reportCredentialsBlocked(context.Background(), &afterFirst, cause)
+	r.reportCredentialsBlocked(context.Background(), &afterFirst, cause, "SecretNotOwned")
 
 	var afterSecond kipperv1.Service
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &afterSecond))
 	assert.Equal(t, first, afterSecond.ResourceVersion,
 		"reporting the same failure again wrote the object and emitted another event")
+}
+
+// Driven through Reconcile rather than through the helper, because the classifier
+// is the wiring: with the helper called directly, deleting the classification from
+// Reconcile leaves every test green.
+func TestReconcile_ReportsAForeignOwnedCredentialsSecret(t *testing.T) {
+	svc := bareService("postgres")
+	svc.UID = "the-service"
+	foreign := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: secretname.ServiceCredentials("db"), Namespace: "ns",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "kipper.run/v1alpha1", Kind: "App", Name: "db",
+				UID: "somebody-else", Controller: ptr.To(true),
+			}},
+		},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).
+			WithObjects(svc, foreign).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns", Name: "db"},
+	})
+	require.Error(t, err, "the reconcile has to keep failing so it is requeued")
+
+	var live kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
+	cond := meta.FindStatusCondition(live.Status.Conditions, kipperv1.ConditionCredentialsReady)
+	require.NotNil(t, cond, "the object says nothing about why it is stuck")
+	assert.Equal(t, "SecretNotOwned", cond.Reason)
+	assert.Equal(t, "Failed", live.Status.Phase)
+}
+
+// The second permanent refusal, reached by following the first one's own advice:
+// told the Secret belongs to something else and offered "remove it if the service
+// holds no data yet", an operator who removes it lands on a volume with no
+// credentials. Reporting only the first would leave the object describing a
+// Secret that is no longer there.
+func TestReconcile_ReportsDataLeftWithoutCredentials(t *testing.T) {
+	svc := bareService("postgres")
+	svc.UID = "the-service"
+	claim := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data-db-0", Namespace: "ns"},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).
+			WithObjects(svc, claim).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns", Name: "db"},
+	})
+	require.Error(t, err)
+
+	var live kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
+	cond := meta.FindStatusCondition(live.Status.Conditions, kipperv1.ConditionCredentialsReady)
+	require.NotNil(t, cond, "the refusal an operator has to clear was not reported")
+	assert.Equal(t, "DataWithoutCredentials", cond.Reason,
+		"the object still blames the Secret an operator was told to remove")
+	assert.Contains(t, cond.Message, "restore")
+}
+
+// A transient failure is not a state an operator can clear, so it must not reach
+// the object at all.
+func TestPermanentCredentialsFailure_IgnoresATransientError(t *testing.T) {
+	_, permanent := permanentCredentialsFailure(errors.New(`secrets "db-credentials" already exists`))
+	assert.False(t, permanent, "a routine create race would have been stamped on the object")
 }
