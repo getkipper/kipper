@@ -97,3 +97,76 @@ func TestRegistryRevokeRemovesWithoutRequiringTheProjectToExist(t *testing.T) {
 	assert.False(t, entries[0].AllowsProject("gone"))
 	assert.True(t, entries[0].AllowsProject("blog"), "revoking one project removed another")
 }
+
+// `--allow-project` replaces the allow-list, which is what it has always done
+// and what the documentation says. What it never did was say which grants that
+// took away, so an operator adding one project silently lost the others.
+func TestRegistryAddReportsTheGrantsItTakesAway(t *testing.T) {
+	entries := []registrycred.Entry{{
+		Name: "ghcr", Server: "ghcr.io", Username: "deploy", Password: "p",
+		AllowedProjects: []string{"shop", "blog"},
+	}}
+
+	_, allowed, removed, err := applyRegistryAdd(entries, registryAdd{
+		Name: "ghcr", Server: "ghcr.io", AllowedProjects: []string{"shop"}, ReplaceAllowed: true,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"shop"}, allowed)
+	assert.Equal(t, []string{"blog"}, removed, "the projects the replacement dropped were not reported")
+}
+
+// An omitted flag keeps what is stored, so granting never requires re-entering
+// the password and never touches the allow-list.
+func TestRegistryAddWithoutTheFlagLeavesTheAllowListAlone(t *testing.T) {
+	entries := []registrycred.Entry{{
+		Name: "ghcr", Server: "ghcr.io", Username: "deploy", Password: "old",
+		AllowedProjects: []string{"shop"},
+	}}
+
+	updated, allowed, removed, err := applyRegistryAdd(entries, registryAdd{
+		Name: "ghcr", Server: "ghcr.io", Password: "new",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"shop"}, allowed)
+	assert.Empty(t, removed)
+	assert.Equal(t, "new", updated[0].Password)
+	assert.Equal(t, "deploy", updated[0].Username, "an omitted username replaced the stored one")
+}
+
+// A credential is addressed by name, so pointing an existing one at another host
+// hands that host the password stored for the first. That takes a fresh one.
+func TestRegistryAddRefusesToRepointWithoutAPassword(t *testing.T) {
+	entries := []registrycred.Entry{{Name: "ghcr", Server: "ghcr.io", Username: "deploy", Password: "p"}}
+
+	_, _, _, err := applyRegistryAdd(entries, registryAdd{Name: "ghcr", Server: "quay.io"})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--password")
+	assert.Contains(t, err.Error(), "quay.io")
+}
+
+func TestRegistryAddAllowsARepointWithAPassword(t *testing.T) {
+	entries := []registrycred.Entry{{Name: "ghcr", Server: "ghcr.io", Username: "deploy", Password: "p"}}
+
+	updated, _, _, err := applyRegistryAdd(entries, registryAdd{Name: "ghcr", Server: "quay.io", Password: "fresh"})
+
+	require.NoError(t, err)
+	assert.Equal(t, "quay.io", updated[0].Server)
+	assert.Equal(t, "fresh", updated[0].Password)
+}
+
+// The Docker Hub aliases are one registry, so re-running add with a different
+// spelling of the same host is not a repoint and must not demand a password.
+func TestRegistryAddTreatsTheDockerHubAliasesAsOneRegistry(t *testing.T) {
+	entries := []registrycred.Entry{{
+		Name: "docker-io", Server: registrycred.NormalizeServer("docker.io"), Username: "u", Password: "p",
+	}}
+
+	_, _, _, err := applyRegistryAdd(entries, registryAdd{
+		Name: "docker-io", Server: registrycred.NormalizeServer("index.docker.io"),
+	})
+
+	require.NoError(t, err)
+}

@@ -89,39 +89,16 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 
 	var allowed, removed []string
 	if err := registrycred.Update(ctx, clientset, func(entries []registrycred.Entry) ([]registrycred.Entry, error) {
-		live := registrycred.Find(entries, name)
-		if live == nil {
-			if username == "" || password == "" {
-				return nil, fmt.Errorf("--username and --password are required for a new registry")
-			}
-			allowed = resolved
-			return append(entries, registrycred.Entry{
-				Name: name, Server: server, Username: username, Password: password,
-				AllowedProjects: resolved,
-			}), nil
-		}
-		// A credential is addressed by name, so changing the host it points at
-		// silently repoints the password too. That is a different registry with
-		// somebody else's credential, so it takes a fresh one.
-		if !registrycred.SameRegistry(live.Server, server) && password == "" {
-			return nil, fmt.Errorf("%s currently points at %s. Pointing it at %s needs --password, because the stored one belongs to the old registry", name, live.Server, server)
-		}
-		live.Server = server
-		if username != "" {
-			live.Username = username
-		}
-		if password != "" {
-			live.Password = password
-		}
-		if cmd.Flags().Changed("allow-project") {
-			// The flag replaces, which is what it has always done and what the
-			// documentation says. What it never did was say which grants that
-			// took away.
-			removed = projectsMissingFrom(live.AllowedProjects, resolved)
-			live.AllowedProjects = resolved
-		}
-		allowed = live.AllowedProjects
-		return entries, nil
+		var applyErr error
+		entries, allowed, removed, applyErr = applyRegistryAdd(entries, registryAdd{
+			Name:            name,
+			Server:          server,
+			Username:        username,
+			Password:        password,
+			AllowedProjects: resolved,
+			ReplaceAllowed:  cmd.Flags().Changed("allow-project"),
+		})
+		return entries, applyErr
 	}); err != nil {
 		return fmt.Errorf("saving registry credentials: %w", err)
 	}
@@ -250,4 +227,54 @@ func projectsMissingFrom(before, after []string) []string {
 		}
 	}
 	return gone
+}
+
+// registryAdd is what `kip registry add` was asked to change. An omitted flag
+// keeps what is stored, so granting never requires re-entering the password.
+type registryAdd struct {
+	Name            string
+	Server          string
+	Username        string
+	Password        string
+	AllowedProjects []string
+	// ReplaceAllowed is whether --allow-project was given at all. The flag
+	// replaces the list, which is what it has always done, so its absence and an
+	// empty value mean different things.
+	ReplaceAllowed bool
+}
+
+// applyRegistryAdd is the whole decision `kip registry add` makes, kept apart
+// from the command so it can be driven directly. It returns the list to store,
+// the projects allowed afterwards, and the ones the change took away.
+func applyRegistryAdd(entries []registrycred.Entry, want registryAdd) ([]registrycred.Entry, []string, []string, error) {
+	live := registrycred.Find(entries, want.Name)
+	if live == nil {
+		if want.Username == "" || want.Password == "" {
+			return nil, nil, nil, fmt.Errorf("--username and --password are required for a new registry")
+		}
+		return append(entries, registrycred.Entry{
+			Name: want.Name, Server: want.Server, Username: want.Username, Password: want.Password,
+			AllowedProjects: want.AllowedProjects,
+		}), want.AllowedProjects, nil, nil
+	}
+	// A credential is addressed by name, so changing the host it points at
+	// silently repoints the password too. That is a different registry with
+	// somebody else's credential, so it takes a fresh one.
+	if !registrycred.SameRegistry(live.Server, want.Server) && want.Password == "" {
+		return nil, nil, nil, fmt.Errorf("%s currently points at %s. Pointing it at %s needs --password, because the stored one belongs to the old registry",
+			want.Name, live.Server, want.Server)
+	}
+	live.Server = want.Server
+	if want.Username != "" {
+		live.Username = want.Username
+	}
+	if want.Password != "" {
+		live.Password = want.Password
+	}
+	var removed []string
+	if want.ReplaceAllowed {
+		removed = projectsMissingFrom(live.AllowedProjects, want.AllowedProjects)
+		live.AllowedProjects = want.AllowedProjects
+	}
+	return entries, live.AllowedProjects, removed, nil
 }
