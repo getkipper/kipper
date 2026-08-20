@@ -35,24 +35,17 @@ __pycache__/
 # OS
 .DS_Store
 
-# IDE / agent state — never committed
+# Editor state, never committed
 .idea/
 .vscode/
 *.swp
-.claude/
-**/.claude/
 
-# Local working notes and agent guidance — kept out of the public repo
+# Local working notes, not part of the published project
 PROGRESS.md
 PLAN.md
 TO-DOS.md
 ISSUES.md
 BACKLOG.md
-CLAUDE.md
-AGENTS.md
-GEMINI.md
-codex-review.md
-codex-eod-review-*.md
 plans/
 features/
 docs/plans/
