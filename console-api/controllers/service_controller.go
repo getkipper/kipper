@@ -110,14 +110,20 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// by a name collision the create-time checks cannot see, a restore among
 		// them, so it has to explain itself.
 		//
-		// Only that one refusal is reported. Everything else out of this
-		// reconcile is transient — a stale cache answering AlreadyExists to the
-		// create, a Get that failed — and stamping those on the object would put
-		// a permanent false condition on a healthy service, which teaches an
+		// Only the refusals no retry clears are reported. Everything else out of
+		// this reconcile is transient — a stale cache answering AlreadyExists to
+		// the create, a Get that failed — and stamping those on the object would
+		// put a permanent false condition on a healthy service, which teaches an
 		// operator to ignore the condition before the real case arrives.
-		var notOurs *credentialsNotOursError
-		if stderrors.As(err, &notOurs) {
-			r.reportCredentialsBlocked(ctx, &svc, notOurs)
+		//
+		// There are two permanent ones, and the second is reached by following
+		// the first one's own advice: told the Secret belongs to something else
+		// and offered "remove it if the service holds no data yet", an operator
+		// who removes it lands on a volume with no credentials. Reporting only
+		// the first would leave the object describing a Secret that is no longer
+		// there while the real reason went to the log.
+		if reason, permanent := permanentCredentialsFailure(err); permanent {
+			r.reportCredentialsBlocked(ctx, &svc, err, reason)
 		}
 		return ctrl.Result{}, fmt.Errorf("reconciling credentials secret: %w", err)
 	}
@@ -267,8 +273,7 @@ func (r *ServiceReconciler) refuseToMintOverExistingData(ctx context.Context, sv
 	if err != nil {
 		return err
 	}
-	return fmt.Errorf("service %s has data in %s but no credentials secret, and generating a new password would lock it out of that data; restore %s from a backup, or delete the volume to start the service empty",
-		svc.Name, claim, secretname.ServiceCredentials(svc.Name))
+	return &credentialsMissingError{Service: svc.Name, Claim: claim, Secret: secretname.ServiceCredentials(svc.Name)}
 }
 
 // ensureCredentialDefaults brings an existing credentials Secret into
@@ -1228,11 +1233,11 @@ func generatePassword() string {
 //
 // Best effort: the reconcile is failing already, and losing the explanation is
 // better than losing the error that caused it.
-func (r *ServiceReconciler) reportCredentialsBlocked(ctx context.Context, svc *kipperv1.Service, cause error) {
+func (r *ServiceReconciler) reportCredentialsBlocked(ctx context.Context, svc *kipperv1.Service, cause error, reason string) {
 	changed := meta.SetStatusCondition(&svc.Status.Conditions, metav1.Condition{
 		Type:               kipperv1.ConditionCredentialsReady,
 		Status:             metav1.ConditionFalse,
-		Reason:             "SecretNotOwned",
+		Reason:             reason,
 		Message:            cause.Error(),
 		ObservedGeneration: svc.Generation,
 	})
@@ -1261,4 +1266,36 @@ type credentialsNotOursError struct {
 
 func (e *credentialsNotOursError) Error() string {
 	return fmt.Sprintf("secret %s is not owned by this service, so its credentials cannot be injected into anything bound to it; set its controller reference to this Service, or remove it if the service holds no data yet", e.Secret)
+}
+
+// permanentCredentialsFailure says whether an error out of
+// reconcileCredentialsSecret is one no retry clears, and under what reason it
+// should be reported.
+//
+// Both of these need an operator. Everything else that reconcile can return is
+// worth retrying and must not reach the object.
+func permanentCredentialsFailure(err error) (string, bool) {
+	var notOurs *credentialsNotOursError
+	if stderrors.As(err, &notOurs) {
+		return "SecretNotOwned", true
+	}
+	var missing *credentialsMissingError
+	if stderrors.As(err, &missing) {
+		return "DataWithoutCredentials", true
+	}
+	return "", false
+}
+
+// credentialsMissingError is the other refusal an operator has to clear: the
+// service has data but no credentials, and minting a new password would lock the
+// service out of its own volume.
+type credentialsMissingError struct {
+	Service string
+	Claim   string
+	Secret  string
+}
+
+func (e *credentialsMissingError) Error() string {
+	return fmt.Sprintf("service %s has data in %s but no credentials secret, and generating a new password would lock it out of that data; restore %s from a backup, or delete the volume to start the service empty",
+		e.Service, e.Claim, e.Secret)
 }
