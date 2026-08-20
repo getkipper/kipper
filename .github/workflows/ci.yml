@@ -15,6 +15,22 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# The toolchain every job builds, lints and scans with.
+#
+# Pinned, because `stable` floats: the day Go publishes a new minor, every job
+# changes compiler without a commit. That is how this file broke on 2026-08-20,
+# when one commit passed at 00:29 under Go 1.26 and failed at 09:42 under 1.27,
+# on a gofmt whose output had moved and a pinned golangci-lint whose bundled
+# staticcheck panicked on the new AST.
+#
+# Pinned to the current patch of the line go.mod declares, not to the patch it
+# names: the `go` directive is a language minimum, while this is the toolchain,
+# and an old patch means an old standard library. 1.25.12 fails the vulnerability
+# scan on five advisories that 1.25.13 fixed. Move this deliberately, and expect
+# a new minor to need golangci-lint moved with it.
+env:
+  GO_VERSION: '1.25.14'
+
 # One run per ref: a superseded run is cancelled rather than run to completion.
 concurrency:
   group: ci-${{ github.ref }}
@@ -28,7 +44,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version: 'stable'
+          go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: |
             kip/go.sum
             controller/go.mod
@@ -52,7 +68,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version: 'stable'
+          go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: |
             console-api/go.sum
             controller/go.mod
@@ -66,7 +82,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version: 'stable'
+          go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: gateway/go.sum
       - run: go test ./...
         working-directory: gateway
@@ -78,7 +94,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version: 'stable'
+          go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: |
             authz/go.sum
             console-api/go.mod
@@ -93,7 +109,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version: 'stable'
+          go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: sidecar/go.mod
       - run: go test ./...
         working-directory: sidecar
@@ -105,7 +121,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version: 'stable'
+          go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: console-api/go.sum
       # Pin to the same controller-gen version that produced the
       # currently-committed CRDs (v0.20.1). Bump the pin and the CRDs
@@ -213,7 +229,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version: 'stable'
+          go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: console-api/go.sum
       # Same controller-gen pin as crd-drift. Bump them together when
       # the project upgrades controller-tools.
@@ -243,7 +259,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version: 'stable'
+          go-version: ${{ env.GO_VERSION }}
       - name: Install goimports
         run: go install golang.org/x/tools/cmd/goimports@latest
       # Generated files (zz_generated*.go) are owned by their generator
@@ -290,7 +306,7 @@ jobs:
       # directives if the project's Go floor moves.
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25.12'
+          go-version: ${{ env.GO_VERSION }}
       - name: Run go mod tidy
         working-directory: ${{ matrix.module }}
         env:
@@ -337,7 +353,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version: 'stable'
+          go-version: ${{ env.GO_VERSION }}
       # Install golangci-lint from source so the binary is compiled with
       # the workflow's Go version. The released action ships a binary
       # built with whichever Go was current at the action's release
@@ -362,7 +378,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version: 'stable'
+          go-version: ${{ env.GO_VERSION }}
       # Deliberately unpinned: govulncheck must track the latest vuln
       # database so newly disclosed CVEs surface as soon as they land.
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -376,7 +392,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version: 'stable'
+          go-version: ${{ env.GO_VERSION }}
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
@@ -403,7 +419,7 @@ jobs:
       # matching the go mod tidy drift gate.
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25.12'
+          go-version: ${{ env.GO_VERSION }}
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
