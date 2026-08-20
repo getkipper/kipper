@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -135,7 +136,7 @@ func TestAllowsProject(t *testing.T) {
 	}
 }
 
-func TestLoadSaveRoundTrip(t *testing.T) {
+func TestLoadWriteRoundTrip(t *testing.T) {
 	client := fake.NewClientset()
 	ctx := context.Background()
 
@@ -144,7 +145,7 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 	}
 
 	want := []Entry{{Name: "ghcr", Server: "ghcr.io", Username: "u", Password: "p"}}
-	if err := Save(ctx, client, want); err != nil {
+	if err := Update(ctx, client, func([]Entry) ([]Entry, error) { return want, nil }); err != nil {
 		t.Fatal(err)
 	}
 	got, err := Load(ctx, client)
@@ -160,5 +161,79 @@ func TestLoad_MalformedFailsClosed(t *testing.T) {
 	})
 	if _, err := Load(context.Background(), client); err == nil {
 		t.Fatal("a malformed registry list must return an error")
+	}
+}
+
+// The allow-list is written for every entry on every write, not only for the one
+// a change happened to touch. A list holding entries from before the field was
+// always present would otherwise keep emitting null for the ones left alone,
+// and the stored document would not say what was decided about them.
+func TestUpdateWritesAnEmptyListForEveryLegacyEntry(t *testing.T) {
+	legacy := `[{"name":"ghcr","server":"ghcr.io","username":"u","password":"p"},` +
+		`{"name":"quay","server":"quay.io","username":"u","password":"p"}]`
+	client := fake.NewClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: ConfigSecretName, Namespace: Namespace},
+		Data:       map[string][]byte{dataKey: []byte(legacy)},
+	})
+
+	// Touch one entry. The other is never looked at by the mutate.
+	err := Update(context.Background(), client, func(entries []Entry) ([]Entry, error) {
+		entries[0].Password = "rotated"
+		return entries, nil
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	live, getErr := client.CoreV1().Secrets(Namespace).Get(
+		context.Background(), ConfigSecretName, metav1.GetOptions{})
+	if getErr != nil {
+		t.Fatalf("get: %v", getErr)
+	}
+	stored := string(live.Data[dataKey])
+	if strings.Contains(stored, "null") {
+		t.Errorf("a legacy entry was written back as null: %s", stored)
+	}
+	if strings.Count(stored, `"allowedProjects":[]`) != 2 {
+		t.Errorf("both entries should record an empty decision: %s", stored)
+	}
+}
+
+func TestUpdateKeepsWhatElseIsInTheSecret(t *testing.T) {
+	client := fake.NewClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: ConfigSecretName, Namespace: Namespace, Annotations: map[string]string{"kipper.run/note": "kept"}},
+		Data:       map[string][]byte{dataKey: []byte(`[{"name":"ghcr"}]`), "unrelated": []byte("kept")},
+	})
+
+	err := Update(context.Background(), client, func(entries []Entry) ([]Entry, error) {
+		return append(entries, Entry{Name: "quay"}), nil
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	live, _ := client.CoreV1().Secrets(Namespace).Get(
+		context.Background(), ConfigSecretName, metav1.GetOptions{})
+	if string(live.Data["unrelated"]) != "kept" || live.Annotations["kipper.run/note"] != "kept" {
+		t.Error("the write replaced the Secret rather than editing it")
+	}
+}
+
+func TestUpdateWritesNothingWhenTheMutateRefuses(t *testing.T) {
+	client := fake.NewClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: ConfigSecretName, Namespace: Namespace},
+		Data:       map[string][]byte{dataKey: []byte(`[{"name":"ghcr","allowedProjects":["shop"]}]`)},
+	})
+
+	err := Update(context.Background(), client, func([]Entry) ([]Entry, error) {
+		return nil, &UnknownRegistryError{Name: "missing"}
+	})
+	if err == nil {
+		t.Fatal("a refused change reported success")
+	}
+
+	after, _ := Load(context.Background(), client)
+	if len(after) != 1 || !after[0].AllowsProject("shop") {
+		t.Errorf("the stored list changed after a refused write: %+v", after)
 	}
 }

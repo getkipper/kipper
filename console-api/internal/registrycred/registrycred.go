@@ -7,6 +7,7 @@
 package registrycred
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -41,11 +43,17 @@ const (
 // project (fail closed), so a credential is never staged into a tenant
 // namespace until an admin explicitly grants a project.
 type Entry struct {
-	Name            string   `json:"name"`
-	Server          string   `json:"server"`
-	Username        string   `json:"username"`
-	Password        string   `json:"password,omitempty"`
-	AllowedProjects []string `json:"allowedProjects,omitempty"`
+	Name     string `json:"name"`
+	Server   string `json:"server"`
+	Username string `json:"username"`
+	Password string `json:"password,omitempty"`
+	// Always written, never omitted. Nil and empty mean the same thing here,
+	// which is that nobody may pull with this credential, and no code may branch
+	// on the difference: unlike the git list there is no migration that fills an
+	// undecided entry, and there never will be. Inferring a pull grant from a
+	// workload's image would be fail-open, because an image reference outlives
+	// the revocation that should have stopped it.
+	AllowedProjects []string `json:"allowedProjects"`
 }
 
 // AllowsProject reports whether project is on the entry's allow-list.
@@ -100,25 +108,106 @@ func parse(data []byte) ([]Entry, error) {
 	return entries, nil
 }
 
-// Save writes the registry-credential list back to its Secret.
-func Save(ctx context.Context, client kubernetes.Interface, entries []Entry) error {
-	data, err := json.Marshal(entries) //nolint:gosec // passwords are intentionally stored in a K8s Secret
-	if err != nil {
+// Find returns the entry with the given name, or nil if none matches.
+func Find(entries []Entry, name string) *Entry {
+	for i := range entries {
+		if entries[i].Name == name {
+			return &entries[i]
+		}
+	}
+	return nil
+}
+
+// Update applies mutate to the stored list and writes the result back, retrying
+// when another writer changed the list in between.
+//
+// The live Secret is edited rather than replaced. It is one object shared by
+// every writer, so building a fresh one to hold the list drops whatever else is
+// on it, and writing without the version it was read at drops whatever another
+// writer did in the meantime. A mutate that returns an error writes nothing.
+func Update(ctx context.Context, client kubernetes.Interface, mutate func([]Entry) ([]Entry, error)) error {
+	secrets := client.CoreV1().Secrets(Namespace)
+	// AlreadyExists as well as Conflict: two writers on a cluster with no list
+	// yet both find it missing, and the one that loses the race has to re-read
+	// and apply its change to what the other wrote rather than give up.
+	writeRace := func(err error) bool {
+		return k8serrors.IsConflict(err) || k8serrors.IsAlreadyExists(err)
+	}
+	return retry.OnError(retry.DefaultRetry, writeRace, func() error {
+		live, err := secrets.Get(ctx, ConfigSecretName, metav1.GetOptions{})
+		missing := k8serrors.IsNotFound(err)
+		if err != nil && !missing {
+			return fmt.Errorf("reading registry credentials: %w", err)
+		}
+		if missing {
+			live = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+				Name:      ConfigSecretName,
+				Namespace: Namespace,
+				Labels:    map[string]string{managedByLabel: managedByValue},
+			}}
+		}
+
+		entries, err := parse(live.Data[dataKey])
+		if err != nil {
+			return err
+		}
+
+		updated, err := mutate(entries)
+		if err != nil {
+			return err
+		}
+
+		data, err := marshal(updated)
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(live.Data[dataKey], data) {
+			// Every write is a new resourceVersion, an audit entry and a
+			// conflict for whoever else is writing.
+			return nil
+		}
+		if live.Data == nil {
+			live.Data = map[string][]byte{}
+		}
+		live.Data[dataKey] = data
+
+		if missing {
+			_, err = secrets.Create(ctx, live, metav1.CreateOptions{})
+			return err
+		}
+		_, err = secrets.Update(ctx, live, metav1.UpdateOptions{})
 		return err
+	})
+}
+
+// marshal is the only place the list becomes bytes, which is what makes the
+// empty allow-list an invariant of the stored document rather than a habit of
+// whoever last edited a mutator.
+//
+// A nil slice marshals as null, and entries written before this field was always
+// present load as nil, so a write that touched one entry would leave every other
+// legacy entry emitting null. Normalising here covers every whole-list write,
+// including the ones that never look at the entry they are leaving alone.
+func marshal(entries []Entry) ([]byte, error) {
+	canonical := make([]Entry, len(entries))
+	copy(canonical, entries)
+	for i := range canonical {
+		if canonical[i].AllowedProjects == nil {
+			canonical[i].AllowedProjects = []string{}
+		}
 	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ConfigSecretName,
-			Namespace: Namespace,
-			Labels:    map[string]string{managedByLabel: managedByValue},
-		},
-		Data: map[string][]byte{dataKey: data},
-	}
-	_, err = client.CoreV1().Secrets(Namespace).Update(ctx, secret, metav1.UpdateOptions{})
-	if k8serrors.IsNotFound(err) {
-		_, err = client.CoreV1().Secrets(Namespace).Create(ctx, secret, metav1.CreateOptions{})
-	}
-	return err
+	return json.Marshal(canonical) //nolint:gosec // passwords are intentionally stored in a K8s Secret
+}
+
+// UnknownRegistryError is a change asked for against a name the list does not
+// hold. It is its own type so a caller can tell it from a failure to read or
+// write, and answer with something more useful than the name is not there.
+type UnknownRegistryError struct {
+	Name string
+}
+
+func (e *UnknownRegistryError) Error() string {
+	return fmt.Sprintf("no registry credential named %q is configured", e.Name)
 }
 
 // NormalizeServer maps the common Docker Hub aliases to the exact key the
