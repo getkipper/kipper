@@ -14,9 +14,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/dynamic"
 
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/kip/internal/auth"
+	"github.com/getkipper/kipper/kip/internal/deployer"
 	"github.com/getkipper/kipper/kip/internal/manifest"
 	"github.com/getkipper/kipper/kip/internal/service"
 )
@@ -204,6 +206,10 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 	}
 	if !errors.IsNotFound(getErr) {
 		return fmt.Errorf("checking service %q: %w", name, getErr)
+	}
+
+	if err := refuseServiceNameSharingAnAppCredential(ctx, dynClient, namespace, name); err != nil {
+		return err
 	}
 
 	// Build Service CR
@@ -675,4 +681,24 @@ func runServiceCredentials(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 	return nil
+}
+
+// refuseServiceNameSharingAnAppCredential stops a service being created whose
+// credentials Secret is the object an app already keeps its git token in. The
+// console refuses the same name for the same reason; the check lives in
+// secretname so the two cannot drift.
+func refuseServiceNameSharingAnAppCredential(ctx context.Context, dyn dynamic.Interface, namespace, name string) error {
+	app, collides := secretname.AppSharingServiceCredentialName(name)
+	if !collides {
+		return nil
+	}
+	_, err := dyn.Resource(deployer.AppGVR).Namespace(namespace).Get(ctx, app, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("checking whether app %s exists: %w", app, err)
+	}
+	return fmt.Errorf("a service named %q would keep its credentials in %s, which is where the app %q keeps its git token. Pick another name for the service",
+		name, secretname.ServiceCredentials(name), app)
 }

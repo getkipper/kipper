@@ -136,3 +136,22 @@ func TestIsGitCredentialOfWantsTheLengthTheDigestActuallyIs(t *testing.T) {
 		}
 	}
 }
+
+// Two published naming schemes meet on one object: an App named web on the name
+// generated before digests stores its token at web-git-credentials, and a
+// Service named web-git stores its credentials there too.
+func TestAppSharingServiceCredentialName(t *testing.T) {
+	app, collides := AppSharingServiceCredentialName("web-git")
+	if !collides || app != "web" {
+		t.Errorf("web-git should collide with app web, got (%q, %v)", app, collides)
+	}
+	if ServiceCredentials("web-git") != LegacyGitCredential("web") {
+		t.Fatal("the premise of the whole check no longer holds")
+	}
+
+	for _, service := range []string{"web", "database", "-git", "web-gitlab"} {
+		if _, collides := AppSharingServiceCredentialName(service); collides {
+			t.Errorf("%q was reported as colliding", service)
+		}
+	}
+}
