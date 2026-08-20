@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -58,10 +59,54 @@ func (reg *Registry) List(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, registryListResponse{Registries: entries})
 }
 
+// registryRequest is what this endpoint may set. It carries the allow-list
+// because the published shape always has, and it is read as raw JSON so that a
+// field left out can be told from one sent as null.
+//
+// What it may not do is change who may pull with an existing credential. A
+// caller holding a copy read before somebody else granted a project would revoke
+// that project by rotating a password, which is what this endpoint did until
+// now, and there is no server-side way to validate the projects named, since the
+// organisation prefix a grant is stored under lives in kip's own configuration.
+type registryRequest struct {
+	Name            string          `json:"name"`
+	Server          string          `json:"server"`
+	Username        string          `json:"username"`
+	Password        string          `json:"password"`
+	AllowedProjects json.RawMessage `json:"allowedProjects"`
+}
+
+func (r registryRequest) entry(allowed []string) registrycred.Entry {
+	return registrycred.Entry{
+		Name:            r.Name,
+		Server:          r.Server,
+		Username:        r.Username,
+		Password:        r.Password,
+		AllowedProjects: allowed,
+	}
+}
+
+// requestedProjects is the allow-list a request carries, and whether it carried
+// one at all. An absent field asks for no change; null and [] both ask for a
+// credential nobody may pull with.
+func (r registryRequest) requestedProjects() ([]string, bool, error) {
+	if len(r.AllowedProjects) == 0 {
+		return nil, false, nil
+	}
+	var projects []string
+	if err := json.Unmarshal(r.AllowedProjects, &projects); err != nil {
+		return nil, false, err
+	}
+	if projects == nil {
+		projects = []string{}
+	}
+	return projects, true, nil
+}
+
 // Add creates or updates a registry credential.
 // POST /api/v1/settings/registries
 func (reg *Registry) Add(w http.ResponseWriter, r *http.Request) {
-	var req registryEntry
+	var req registryRequest
 	if err := decodeJSON(r, &req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body")
 		return
@@ -69,6 +114,12 @@ func (reg *Registry) Add(w http.ResponseWriter, r *http.Request) {
 
 	if req.Server == "" || req.Username == "" || req.Password == "" {
 		respondError(w, http.StatusBadRequest, "server, username, and password are required")
+		return
+	}
+
+	wanted, carried, err := req.requestedProjects()
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "allowedProjects must be a list of project names")
 		return
 	}
 
@@ -81,31 +132,37 @@ func (reg *Registry) Add(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	entries, err := registrycred.Load(ctx, reg.Client)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to read registry credentials")
-		return
-	}
-
-	// Update existing or append new
-	found := false
-	for i := range entries {
-		if entries[i].Name == req.Name {
-			entries[i] = req
-			found = true
-			break
+	if err := registrycred.Update(ctx, reg.Client, func(entries []registrycred.Entry) ([]registrycred.Entry, error) {
+		if live := registrycred.Find(entries, req.Name); live != nil {
+			if carried && !sameProjects(wanted, live.AllowedProjects) {
+				return nil, errChangesTheAllowList
+			}
+			// The stored list, or the carried one when it carries the same set:
+			// either way this endpoint never changes who may pull.
+			stored := live.AllowedProjects
+			if carried {
+				stored = uniqueProjects(wanted)
+			}
+			*live = req.entry(stored)
+			return entries, nil
 		}
-	}
-	if !found {
-		entries = append(entries, req)
-	}
-
-	if err := registrycred.Save(ctx, reg.Client, entries); err != nil {
+		// Nothing exists to overwrite, so the first list may be set here, which
+		// is how the published shape has always created a granted credential.
+		if !carried {
+			wanted = []string{}
+		}
+		return append(entries, req.entry(uniqueProjects(wanted))), nil
+	}); err != nil {
+		if errors.Is(err, errChangesTheAllowList) {
+			respondError(w, http.StatusBadRequest,
+				"this endpoint cannot change who may pull with an existing credential. Grant a project with 'kip registry allow <name> --project <project>' or take one away with 'kip registry revoke'. Send the allow-list unchanged, or leave it out, to edit the rest")
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "failed to save registry credentials")
 		return
 	}
 
-	respondJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+	respondJSON(w, http.StatusOK, map[string]string{"status": "saved", "name": req.Name})
 }
 
 // Remove deletes a registry credential.
@@ -116,25 +173,23 @@ func (reg *Registry) Remove(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	entries, err := registrycred.Load(ctx, reg.Client)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to read registry credentials")
-		return
-	}
-
-	filtered := make([]registryEntry, 0, len(entries))
-	for _, e := range entries {
-		if e.Name != name {
-			filtered = append(filtered, e)
+	if err := registrycred.Update(ctx, reg.Client, func(entries []registrycred.Entry) ([]registrycred.Entry, error) {
+		kept := make([]registrycred.Entry, 0, len(entries))
+		for _, e := range entries {
+			if e.Name != name {
+				kept = append(kept, e)
+			}
 		}
-	}
-
-	if len(filtered) == len(entries) {
-		respondError(w, http.StatusNotFound, fmt.Sprintf("registry %q not found", name))
-		return
-	}
-
-	if err := registrycred.Save(ctx, reg.Client, filtered); err != nil {
+		if len(kept) == len(entries) {
+			return nil, &registrycred.UnknownRegistryError{Name: name}
+		}
+		return kept, nil
+	}); err != nil {
+		var unknown *registrycred.UnknownRegistryError
+		if errors.As(err, &unknown) {
+			respondError(w, http.StatusNotFound, fmt.Sprintf("registry %q not found", name))
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "failed to save registry credentials")
 		return
 	}
