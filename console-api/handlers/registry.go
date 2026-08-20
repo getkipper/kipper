@@ -14,8 +14,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/getkipper/kipper/console-api/internal/registrycred"
 	"github.com/getkipper/kipper/console-api/middleware"
+	"github.com/getkipper/kipper/controller/pkg/registrycred"
 )
 
 const (
@@ -126,7 +126,7 @@ func (reg *Registry) Add(w http.ResponseWriter, r *http.Request) {
 	req.Server = registrycred.NormalizeServer(req.Server)
 
 	if req.Name == "" {
-		req.Name = sanitizeRegistryName(req.Server)
+		req.Name = registrycred.DefaultName(req.Server)
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
@@ -291,20 +291,6 @@ func (reg *Registry) Reveal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondError(w, http.StatusNotFound, fmt.Sprintf("registry %q not found", name))
-}
-
-// sanitizeRegistryName derives a default credential name from a server's host,
-// so the canonical Docker Hub key yields index-docker-io rather than a name
-// carrying scheme and path debris. kip generates the same default, so both
-// writers address the same entry for the same registry.
-func sanitizeRegistryName(server string) string {
-	host := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(server, "https://"), "http://"), "/")
-	if i := strings.IndexByte(host, '/'); i >= 0 {
-		host = host[:i]
-	}
-	name := strings.ReplaceAll(host, ".", "-")
-	name = strings.ReplaceAll(name, ":", "-")
-	return strings.ToLower(name)
 }
 
 func maskValue(s string) string {

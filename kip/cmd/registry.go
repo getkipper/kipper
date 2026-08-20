@@ -2,35 +2,17 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	coreClient "k8s.io/client-go/kubernetes/typed/core/v1"
-)
+	"k8s.io/client-go/dynamic"
 
-const (
-	registryConfigName = "kipper-registries"
-	registryConfigNS   = "kipper-system"
-	// dockerHubAuthKey is the canonical Docker Hub auth key — the only key the
-	// container runtime resolves Docker Hub pulls against.
-	dockerHubAuthKey = "https://index.docker.io/v1/"
+	"github.com/getkipper/kipper/controller/pkg/registrycred"
+	"github.com/getkipper/kipper/kip/internal/manifest"
 )
-
-// registryEntry mirrors console-api's registrycred.Entry. Every field must
-// round-trip here, because saving rewrites the whole list — a field missing
-// from this struct would be silently dropped from entries the console wrote.
-type registryEntry struct {
-	Name            string   `json:"name"`
-	Server          string   `json:"server"`
-	Username        string   `json:"username"`
-	Password        string   `json:"password,omitempty"`
-	AllowedProjects []string `json:"allowedProjects,omitempty"`
-}
 
 var registryCmd = &cobra.Command{
 	Use:   "registry",
@@ -77,12 +59,12 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 	name, _ := cmd.Flags().GetString("name")
 	allowProjects, _ := cmd.Flags().GetStringArray("allow-project")
 
-	server = normalizeRegistryServer(server)
+	server = registrycred.NormalizeServer(server)
 	if name == "" {
 		name = sanitizeName(server)
 	}
 
-	_, k8sClient, err := loadCurrentCluster()
+	cluster, k8sClient, err := loadCurrentCluster()
 	if err != nil {
 		return err
 	}
@@ -90,52 +72,67 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	clientset := k8sClient.Clientset()
 
-	entries, err := loadRegEntries(ctx, clientset)
-	if err != nil {
-		return err
+	// Resolved to the name the cluster knows a project by, which is what the
+	// pull check compares against. An organisation prefix is part of that name,
+	// so a bare project would otherwise be granted something that matches
+	// nothing, and the command would report success.
+	resolved := make([]string, 0, len(allowProjects))
+	for _, project := range allowProjects {
+		resolved = append(resolved, cluster.ResolveNamespace(project, ""))
 	}
+	warnUnknownProjects(ctx, k8sClient.Dynamic(), resolved)
 
-	// Update or append. Omitted flags keep an existing entry's values, so a
-	// grant (`--allow-project`) never requires re-entering the password.
-	found := false
-	for i := range entries {
-		if entries[i].Name != name {
-			continue
+	var allowed, removed []string
+	if err := registrycred.Update(ctx, clientset, func(entries []registrycred.Entry) ([]registrycred.Entry, error) {
+		live := registrycred.Find(entries, name)
+		if live == nil {
+			if username == "" || password == "" {
+				return nil, fmt.Errorf("--username and --password are required for a new registry")
+			}
+			allowed = resolved
+			return append(entries, registrycred.Entry{
+				Name: name, Server: server, Username: username, Password: password,
+				AllowedProjects: resolved,
+			}), nil
 		}
-		entries[i].Server = server
+		// A credential is addressed by name, so changing the host it points at
+		// silently repoints the password too. That is a different registry with
+		// somebody else's credential, so it takes a fresh one.
+		if !registrycred.SameRegistry(live.Server, server) && password == "" {
+			return nil, fmt.Errorf("%s currently points at %s. Pointing it at %s needs --password, because the stored one belongs to the old registry", name, live.Server, server)
+		}
+		live.Server = server
 		if username != "" {
-			entries[i].Username = username
+			live.Username = username
 		}
 		if password != "" {
-			entries[i].Password = password
+			live.Password = password
 		}
 		if cmd.Flags().Changed("allow-project") {
-			entries[i].AllowedProjects = allowProjects
+			// The flag replaces, which is what it has always done and what the
+			// documentation says. What it never did was say which grants that
+			// took away.
+			removed = projectsMissingFrom(live.AllowedProjects, resolved)
+			live.AllowedProjects = resolved
 		}
-		allowProjects = entries[i].AllowedProjects
-		found = true
-		break
-	}
-	if !found {
-		if username == "" || password == "" {
-			return fmt.Errorf("--username and --password are required for a new registry")
-		}
-		entries = append(entries, registryEntry{
-			Name: name, Server: server, Username: username, Password: password,
-			AllowedProjects: allowProjects,
-		})
-	}
-
-	if err := saveRegEntries(ctx, clientset, entries); err != nil {
+		allowed = live.AllowedProjects
+		return entries, nil
+	}); err != nil {
 		return fmt.Errorf("saving registry credentials: %w", err)
 	}
+	allowProjects = allowed
 
 	fmt.Printf("\n  ✔  Registry %s added (%s)\n", name, server)
+	if len(removed) > 0 {
+		// --allow-project replaces the list, so an operator naming one project
+		// takes away every other. It always did; now it says so.
+		fmt.Printf("  Removed: %s\n", strings.Join(removed, ", "))
+	}
 	if len(allowProjects) > 0 {
 		fmt.Printf("  Allowed projects: %s\n\n", strings.Join(allowProjects, ", "))
 	} else {
 		fmt.Printf("  No project is allowed yet: grant one with:\n")
-		fmt.Printf("    kip registry add --server %s --allow-project <project>\n\n", server)
+		fmt.Printf("    kip registry allow %s --project <project>\n\n", name)
 	}
 	return nil
 }
@@ -147,7 +144,7 @@ func runRegistryList(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	entries, err := loadRegEntries(ctx, k8sClient.Clientset())
+	entries, err := registrycred.Load(ctx, k8sClient.Clientset())
 	if err != nil {
 		return err
 	}
@@ -180,23 +177,19 @@ func runRegistryRemove(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	clientset := k8sClient.Clientset()
 
-	entries, err := loadRegEntries(ctx, clientset)
-	if err != nil {
-		return err
-	}
-	filtered := make([]registryEntry, 0, len(entries))
-	for _, e := range entries {
-		if e.Name != name {
-			filtered = append(filtered, e)
+	if err := registrycred.Update(ctx, clientset, func(entries []registrycred.Entry) ([]registrycred.Entry, error) {
+		kept := make([]registrycred.Entry, 0, len(entries))
+		for _, e := range entries {
+			if e.Name != name {
+				kept = append(kept, e)
+			}
 		}
-	}
-
-	if len(filtered) == len(entries) {
-		return fmt.Errorf("registry %q not found", name)
-	}
-
-	if err := saveRegEntries(ctx, clientset, filtered); err != nil {
-		return fmt.Errorf("saving registry credentials: %w", err)
+		if len(kept) == len(entries) {
+			return nil, &registrycred.UnknownRegistryError{Name: name}
+		}
+		return kept, nil
+	}); err != nil {
+		return err
 	}
 
 	fmt.Printf("\n  ✔  Registry %s removed\n\n", name)
@@ -207,62 +200,6 @@ func runRegistryRemove(cmd *cobra.Command, args []string) error {
 // registries are configured and returns (nil, nil); a read or parse failure is
 // an error, so a mutation never rewrites the list from a state it could not
 // read — that would silently destroy every other credential.
-func loadRegEntries(ctx context.Context, clientset interface {
-	CoreV1() coreClient.CoreV1Interface
-}) ([]registryEntry, error) {
-	secret, err := clientset.CoreV1().Secrets(registryConfigNS).Get(ctx, registryConfigName, metav1.GetOptions{})
-	if errors.IsNotFound(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("reading registry credentials: %w", err)
-	}
-	data := secret.Data["registries"]
-	if len(data) == 0 {
-		return nil, nil
-	}
-	var entries []registryEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, fmt.Errorf("parsing registry credentials: %w", err)
-	}
-	return entries, nil
-}
-
-func saveRegEntries(ctx context.Context, clientset interface {
-	CoreV1() coreClient.CoreV1Interface
-}, entries []registryEntry) error {
-	data, err := json.Marshal(entries) //nolint:gosec // password is intentionally stored in a K8s Secret
-	if err != nil {
-		return err
-	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      registryConfigName,
-			Namespace: registryConfigNS,
-			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kipper"},
-		},
-		Data: map[string][]byte{"registries": data},
-	}
-
-	_, err = clientset.CoreV1().Secrets(registryConfigNS).Update(ctx, secret, metav1.UpdateOptions{})
-	if errors.IsNotFound(err) {
-		_, err = clientset.CoreV1().Secrets(registryConfigNS).Create(ctx, secret, metav1.CreateOptions{})
-	}
-	return err
-}
-
-// normalizeRegistryServer maps the common Docker Hub aliases to the canonical
-// auth key, mirroring console-api's registrycred.NormalizeServer so both
-// writers store the same server value for the same registry.
-func normalizeRegistryServer(server string) string {
-	s := strings.TrimSpace(server)
-	host := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(s, "https://"), "http://"), "/")
-	switch strings.ToLower(host) {
-	case "docker.io", "index.docker.io", "index.docker.io/v1", "registry-1.docker.io", "registry.hub.docker.com":
-		return dockerHubAuthKey
-	}
-	return s
-}
 
 // sanitizeName derives a default credential name from a server's host. It must
 // generate the same name as the console API's sanitizeRegistryName, so kip and
@@ -273,4 +210,39 @@ func sanitizeName(server string) string {
 		host = host[:i]
 	}
 	return strings.NewReplacer(".", "-", ":", "-").Replace(strings.ToLower(host))
+}
+
+// warnUnknownProjects says when a grant names a project the cluster does not
+// have. It warns rather than refuses, because creating the credential before the
+// project it is for is an ordinary bootstrap and the grant starts matching the
+// moment that project exists. A cluster it cannot ask is not an answer either
+// way, so it says nothing.
+func warnUnknownProjects(ctx context.Context, dyn dynamic.Interface, projects []string) {
+	if len(projects) == 0 {
+		return
+	}
+	live, err := dyn.Resource(manifest.ProjectGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+	known := make([]string, 0, len(live.Items))
+	for i := range live.Items {
+		known = append(known, live.Items[i].GetName())
+	}
+	for _, project := range projects {
+		if !contains(known, project) {
+			fmt.Fprintf(os.Stderr, "  !   This cluster has no project %q. The grant is stored and starts working if one is created.\n", project)
+		}
+	}
+}
+
+// projectsMissingFrom is what a replacing grant takes away.
+func projectsMissingFrom(before, after []string) []string {
+	var gone []string
+	for _, p := range before {
+		if !contains(after, p) {
+			gone = append(gone, p)
+		}
+	}
+	return gone
 }
