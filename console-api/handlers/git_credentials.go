@@ -191,7 +191,7 @@ func (gc *GitCredentials) Add(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Name == "" {
-		req.Name = sanitizeRegistryName(req.Server)
+		req.Name = defaultGitCredentialName(req.Server)
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
@@ -376,4 +376,18 @@ func (gc *GitCredentials) countAppsUsingCredential(ctx context.Context, credenti
 		}
 	}
 	return count
+}
+
+// defaultGitCredentialName is the name derived from a host when an operator gives
+// none. It reads like the registry one and is kept apart from it: a git
+// credential's default name is this endpoint's business, and sharing the function
+// would tie two unrelated naming surfaces together for the sake of nine lines.
+func defaultGitCredentialName(server string) string {
+	host := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(server, "https://"), "http://"), "/")
+	if i := strings.IndexByte(host, '/'); i >= 0 {
+		host = host[:i]
+	}
+	name := strings.ReplaceAll(host, ".", "-")
+	name = strings.ReplaceAll(name, ":", "-")
+	return strings.ToLower(name)
 }

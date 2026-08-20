@@ -3,7 +3,7 @@ package handlers
 import (
 	"testing"
 
-	"github.com/getkipper/kipper/console-api/internal/registrycred"
+	"github.com/getkipper/kipper/controller/pkg/registrycred"
 )
 
 func TestNormalizeRegistryServer(t *testing.T) {

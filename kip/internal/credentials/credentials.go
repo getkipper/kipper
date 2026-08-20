@@ -4,13 +4,13 @@ package credentials
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/getkipper/kipper/controller/pkg/registrycred"
 	"github.com/getkipper/kipper/controller/pkg/sharedcred"
 )
 
@@ -141,14 +141,6 @@ func typesOf(cs []Credential) []Type {
 	return out
 }
 
-type registryEntry struct {
-	Name            string   `json:"name"`
-	Server          string   `json:"server"`
-	Username        string   `json:"username"`
-	Password        string   `json:"password,omitempty"`
-	AllowedProjects []string `json:"allowedProjects,omitempty"`
-}
-
 // loadGit reads the shared list through the package that owns it. A second
 // definition of the entry here would parse the list into a shape missing the
 // projects allowed to build with it, which is how a writer built on this would
@@ -173,23 +165,13 @@ func loadGit(ctx context.Context, client kubernetes.Interface) ([]Credential, er
 	return out, nil
 }
 
+// loadRegistries reads the registry list through the package that owns it, for
+// the same reason loadGit does: a second definition of the entry here would
+// parse the list into a shape missing the projects allowed to pull with it.
 func loadRegistries(ctx context.Context, client kubernetes.Interface) ([]Credential, error) {
-	secret, err := client.CoreV1().Secrets(systemNamespace).Get(ctx, registryConfigName, metav1.GetOptions{})
+	entries, err := registrycred.Load(ctx, client)
 	if err != nil {
-		if errors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("reading registry credentials: %w", err)
-	}
-
-	data, ok := secret.Data["registries"]
-	if !ok {
-		return nil, nil
-	}
-
-	var entries []registryEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, fmt.Errorf("parsing registry credentials: %w", err)
+		return nil, err
 	}
 
 	out := make([]Credential, 0, len(entries))

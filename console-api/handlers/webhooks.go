@@ -25,8 +25,8 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/builder"
-	"github.com/getkipper/kipper/console-api/internal/registrycred"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
+	"github.com/getkipper/kipper/controller/pkg/registrycred"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 

@@ -14,7 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
-	"github.com/getkipper/kipper/console-api/internal/registrycred"
+	"github.com/getkipper/kipper/controller/pkg/registrycred"
 )
 
 // registryPullSecretName is the per-workload image-pull Secret name. The kind
@@ -58,7 +58,7 @@ func ensureImagePullSecret(ctx context.Context, c client.Client, scheme *runtime
 		return nil, deleteRegistryPullSecret(ctx, c, owner.GetNamespace(), name)
 	}
 
-	entries, err := registrycred.LoadCR(ctx, c)
+	entries, err := loadRegistryCredentials(ctx, c)
 	if err != nil {
 		return nil, fmt.Errorf("reading registry credentials for %s: %w", owner.GetName(), err)
 	}
@@ -304,4 +304,20 @@ func (r *JobReconciler) enqueueForRegistryCredentials(ctx context.Context, obj c
 		}})
 	}
 	return reqs
+}
+
+// loadRegistryCredentials is Load for a controller-runtime client, so a
+// reconciler resolves the list through its own cached client. The parsing is the
+// package's; only the fetch is here, because that is the part that needs the
+// controller-runtime types.
+func loadRegistryCredentials(ctx context.Context, c client.Client) ([]registrycred.Entry, error) {
+	var secret corev1.Secret
+	err := c.Get(ctx, client.ObjectKey{Namespace: registrycred.Namespace, Name: registrycred.ConfigSecretName}, &secret)
+	if k8serrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading registry credentials: %w", err)
+	}
+	return registrycred.ParseSecret(&secret)
 }

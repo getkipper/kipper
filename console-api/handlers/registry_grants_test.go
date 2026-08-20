@@ -13,7 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/getkipper/kipper/console-api/internal/registrycred"
+	"github.com/getkipper/kipper/controller/pkg/registrycred"
 )
 
 func storedRegistries(t *testing.T, entries ...registrycred.Entry) *corev1.Secret {

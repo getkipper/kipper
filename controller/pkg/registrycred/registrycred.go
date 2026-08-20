@@ -19,7 +19,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
-	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -83,17 +82,12 @@ func Load(ctx context.Context, client kubernetes.Interface) ([]Entry, error) {
 	return parse(secret.Data[dataKey])
 }
 
-// LoadCR is Load for a controller-runtime client, so a reconciler can resolve a
-// workload's registry credential through its cached client.
-func LoadCR(ctx context.Context, c crclient.Client) ([]Entry, error) {
-	var secret corev1.Secret
-	err := c.Get(ctx, crclient.ObjectKey{Namespace: Namespace, Name: ConfigSecretName}, &secret)
-	if k8serrors.IsNotFound(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("reading registry credentials: %w", err)
-	}
+// ParseSecret reads the list out of a Secret somebody else fetched.
+//
+// It exists so a reconciler can use its own cached controller-runtime client
+// without this package depending on controller-runtime: the controller module
+// does not, and pulling it in to share eleven lines would be the wrong trade.
+func ParseSecret(secret *corev1.Secret) ([]Entry, error) {
 	return parse(secret.Data[dataKey])
 }
 
@@ -310,4 +304,23 @@ func (e Entry) DockerConfigJSON() ([]byte, error) {
 		},
 	}
 	return json.Marshal(cfg) //nolint:gosec // password is intentionally stored in a K8s Secret
+}
+
+// DefaultName is the credential name derived from a server when an operator
+// gives none. Both writers derive it, so it lives here: two spellings would mean
+// kip and the console addressing different entries for one registry.
+func DefaultName(server string) string {
+	host := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(server, "https://"), "http://"), "/")
+	if i := strings.IndexByte(host, '/'); i >= 0 {
+		host = host[:i]
+	}
+	name := strings.ReplaceAll(host, ".", "-")
+	name = strings.ReplaceAll(name, ":", "-")
+	return strings.ToLower(name)
+}
+
+// SameRegistry reports whether two server strings name the same registry, after
+// the Docker Hub aliases are folded together.
+func SameRegistry(a, b string) bool {
+	return matchKey(a) == matchKey(b)
 }
