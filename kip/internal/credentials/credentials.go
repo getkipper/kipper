@@ -21,8 +21,7 @@ const (
 	TypeGit      Type = "git"
 	TypeRegistry Type = "registry"
 
-	systemNamespace    = "kipper-system"
-	registryConfigName = "kipper-registries"
+	systemNamespace = "kipper-system"
 )
 
 // Credential is a single git or registry credential entry.

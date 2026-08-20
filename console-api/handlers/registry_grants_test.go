@@ -161,3 +161,31 @@ func TestAddRegistry_RecordsAnEmptyListWhenCreatingWithoutOne(t *testing.T) {
 		t.Errorf("a new credential stored no decision at all: %s", live.Data["registries"])
 	}
 }
+
+// A credential stored before the allow-list was always written parses as nil and
+// would answer null. The stored document becomes canonical on the next write,
+// which on a quiet cluster is never, so the read side normalises too.
+func TestListRegistries_AnswersAnArrayForALegacyEntry(t *testing.T) {
+	legacy := `[{"name":"ghcr","server":"ghcr.io","username":"deploy","password":"p"}]`
+	client := fake.NewClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: registrycred.ConfigSecretName, Namespace: registrycred.Namespace},
+		Data:       map[string][]byte{"registries": []byte(legacy)},
+	})
+	handler := &Registry{Client: client}
+
+	r := chi.NewRouter()
+	r.Get("/settings/registries", handler.List)
+	req := httptest.NewRequest("GET", "/settings/registries", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), `"allowedProjects":null`) {
+		t.Errorf("a legacy entry was answered as null: %s", rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), `"allowedProjects":[]`) {
+		t.Errorf("the response does not carry an array: %s", rec.Body)
+	}
+}

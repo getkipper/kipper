@@ -66,7 +66,7 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 
 	server = registrycred.NormalizeServer(server)
 	if name == "" {
-		name = sanitizeName(server)
+		name = registrycred.DefaultName(server)
 	}
 
 	cluster, k8sClient, err := loadCurrentCluster()
@@ -176,22 +176,6 @@ func runRegistryRemove(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\n  ✔  Registry %s removed\n\n", name)
 	return nil
-}
-
-// loadRegEntries returns the stored credential list. A missing Secret means no
-// registries are configured and returns (nil, nil); a read or parse failure is
-// an error, so a mutation never rewrites the list from a state it could not
-// read — that would silently destroy every other credential.
-
-// sanitizeName derives a default credential name from a server's host. It must
-// generate the same name as the console API's sanitizeRegistryName, so kip and
-// the console address the same entry for the same registry.
-func sanitizeName(server string) string {
-	host := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(server, "https://"), "http://"), "/")
-	if i := strings.IndexByte(host, '/'); i >= 0 {
-		host = host[:i]
-	}
-	return strings.NewReplacer(".", "-", ":", "-").Replace(strings.ToLower(host))
 }
 
 // warnUnknownProjects says when a grant names a project the cluster does not
