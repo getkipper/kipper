@@ -124,8 +124,13 @@ func LegacyGitCredential(app string) string {
 // name depends on.
 func GitCredentialDigest(token, authority string) string {
 	sum := sha256.Sum256([]byte(authority + "\x00" + token))
-	return hex.EncodeToString(sum[:])[:16]
+	return hex.EncodeToString(sum[:])[:digestLength]
 }
+
+// digestLength is how much of the hash reaches a name. It is named because two
+// places depend on it agreeing: the writer that generates a name and the
+// classifier that recognises one.
+const digestLength = 16
 
 // IsGitCredentialOf reports whether a Secret name is an App's own git
 // credential rather than a shared one or a stranger's object.
@@ -146,7 +151,10 @@ func IsGitCredentialOf(app, secret string) bool {
 }
 
 func isDigest(s string) bool {
-	if s == "" {
+	// Exactly what GitCredentialDigest produces. Any other length is a name this
+	// package did not generate, and treating one as a generated credential would
+	// hand it the lifetime rules that go with the class.
+	if len(s) != digestLength {
 		return false
 	}
 	for _, c := range s {

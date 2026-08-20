@@ -116,3 +116,23 @@ func TestIsGitCredentialOfSeparatesThisAppsOwnCredential(t *testing.T) {
 	assert.False(t, IsGitCredentialOf("web", victim),
 		"one app claimed another app's credential through the shared prefix")
 }
+
+// The classifier decides whether a name is a credential this app generated, and
+// generating one is the only way a digest name comes about. Sixteen is what
+// GitCredentialDigest produces, so accepting any other length widens the class
+// to names nothing here writes, at no benefit.
+func TestIsGitCredentialOfWantsTheLengthTheDigestActuallyIs(t *testing.T) {
+	full := GitCredentialDigest("a-token", "git.example.com")
+	if len(full) != 16 {
+		t.Fatalf("digest length = %d, the guard below is written for 16", len(full))
+	}
+
+	if !IsGitCredentialOf("web", GitCredential("web", full)) {
+		t.Error("a name this package generates was not recognised")
+	}
+	for _, wrong := range []string{full[:15], full + "0", "abc"} {
+		if IsGitCredentialOf("web", GitCredentialPrefix("web")+wrong) {
+			t.Errorf("a %d-character suffix was accepted as a digest", len(wrong))
+		}
+	}
+}
