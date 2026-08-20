@@ -170,3 +170,18 @@ func TestRegistryAddTreatsTheDockerHubAliasesAsOneRegistry(t *testing.T) {
 
 	require.NoError(t, err)
 }
+
+// The other two writers of this document normalise what they store, so this one
+// does too: a name repeated authorises what it authorises once, and a blank one
+// matches nothing and cannot be taken off again.
+func TestRegistryAddNormalisesTheProjectsItIsGiven(t *testing.T) {
+	entries := []registrycred.Entry{{Name: "ghcr", Server: "ghcr.io", Username: "u", Password: "p"}}
+
+	updated, allowed, _, err := applyRegistryAdd(entries, registryAdd{
+		Name: "ghcr", Server: "ghcr.io", AllowedProjects: []string{"shop"}, ReplaceAllowed: true,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"shop"}, allowed)
+	assert.Equal(t, []string{"shop"}, updated[0].AllowedProjects)
+}

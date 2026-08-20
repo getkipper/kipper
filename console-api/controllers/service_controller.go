@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	stderrors "errors"
 	"fmt"
 	"strings"
 
@@ -108,7 +109,16 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// visible only to whoever thinks to read the log. That state is reached
 		// by a name collision the create-time checks cannot see, a restore among
 		// them, so it has to explain itself.
-		r.reportCredentialsBlocked(ctx, &svc, err)
+		//
+		// Only that one refusal is reported. Everything else out of this
+		// reconcile is transient — a stale cache answering AlreadyExists to the
+		// create, a Get that failed — and stamping those on the object would put
+		// a permanent false condition on a healthy service, which teaches an
+		// operator to ignore the condition before the real case arrives.
+		var notOurs *credentialsNotOursError
+		if stderrors.As(err, &notOurs) {
+			r.reportCredentialsBlocked(ctx, &svc, notOurs)
+		}
 		return ctrl.Result{}, fmt.Errorf("reconciling credentials secret: %w", err)
 	}
 
@@ -149,7 +159,7 @@ func (r *ServiceReconciler) reconcileCredentialsSecret(ctx context.Context, svc 
 		// on the strength of a name, a label or a set of keys: whoever put the
 		// object here has to say so by setting the controller reference.
 		if owner := metav1.GetControllerOf(&existing); owner == nil || owner.UID != svc.UID {
-			return fmt.Errorf("secret %s is not owned by this service, so its credentials cannot be injected into anything bound to it; set its controller reference to this Service, or remove it if the service holds no data yet", secretName)
+			return &credentialsNotOursError{Secret: secretName}
 		}
 		return r.ensureCredentialDefaults(ctx, &existing, svc.Spec.Type)
 	}
@@ -929,6 +939,12 @@ func (r *ServiceReconciler) reconcileUINetworkPolicy(ctx context.Context, svc *k
 }
 
 func (r *ServiceReconciler) updateStatus(ctx context.Context, svc *kipperv1.Service) error {
+	// Reaching here means the credentials Secret reconciled, so whatever was
+	// said about it before is no longer true. A condition nothing retracts is
+	// worse than no condition: it outlives the state it describes and the next
+	// reader learns to skip it.
+	meta.RemoveStatusCondition(&svc.Status.Conditions, kipperv1.ConditionCredentialsReady)
+
 	var sts appsv1.StatefulSet
 	err := r.Get(ctx, types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}, &sts)
 	if errors.IsNotFound(err) {
@@ -1215,7 +1231,7 @@ func generatePassword() string {
 func (r *ServiceReconciler) reportCredentialsBlocked(ctx context.Context, svc *kipperv1.Service, cause error) {
 	svc.Status.Phase = "Failed"
 	meta.SetStatusCondition(&svc.Status.Conditions, metav1.Condition{
-		Type:               "CredentialsReady",
+		Type:               kipperv1.ConditionCredentialsReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             "SecretNotOwned",
 		Message:            cause.Error(),
@@ -1224,4 +1240,15 @@ func (r *ServiceReconciler) reportCredentialsBlocked(ctx context.Context, svc *k
 	if err := r.Status().Update(ctx, svc); err != nil {
 		log.FromContext(ctx).Error(err, "recording why the credentials secret is blocked")
 	}
+}
+
+// credentialsNotOursError is the one refusal worth putting on the object: the
+// credentials Secret this service would use belongs to something else, and no
+// amount of retrying changes that.
+type credentialsNotOursError struct {
+	Secret string
+}
+
+func (e *credentialsNotOursError) Error() string {
+	return fmt.Sprintf("secret %s is not owned by this service, so its credentials cannot be injected into anything bound to it; set its controller reference to this Service, or remove it if the service holds no data yet", e.Secret)
 }

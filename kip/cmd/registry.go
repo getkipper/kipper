@@ -83,7 +83,14 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 	// nothing, and the command would report success.
 	resolved := make([]string, 0, len(allowProjects))
 	for _, project := range allowProjects {
-		resolved = append(resolved, cluster.ResolveNamespace(project, ""))
+		// A blank name matches no project and no command can take it off again,
+		// and a name given twice authorises exactly what it authorises once.
+		if project == "" {
+			return fmt.Errorf("--allow-project needs a project name")
+		}
+		if name := cluster.ResolveNamespace(project, ""); !contains(resolved, name) {
+			resolved = append(resolved, name)
+		}
 	}
 	warnUnknownProjects(ctx, k8sClient.Dynamic(), resolved)
 
