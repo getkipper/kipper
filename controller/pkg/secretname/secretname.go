@@ -164,3 +164,28 @@ func isDigest(s string) bool {
 	}
 	return true
 }
+
+// AppSharingServiceCredentialName is the app whose git credential Secret would be
+// the same object as this service's credentials, and whether there is one.
+//
+// The two schemes meet: an App named web stored its token at
+// web-git-credentials while it was on the name generated before digests, and a
+// Service named web-git stores its credentials at exactly that name. Whichever
+// object exists, the other kind reads it, and the reader finds a Secret whose
+// keys are not the ones it expects.
+//
+// Both names are published, so neither scheme can move. What a caller can do is
+// refuse to create the second object, which is why this answers a question about
+// a name rather than doing anything about it.
+func AppSharingServiceCredentialName(service string) (string, bool) {
+	app, found := strings.CutSuffix(service, "-git")
+	if !found || app == "" {
+		return "", false
+	}
+	// Compared rather than assumed: the suffix arithmetic above is a shortcut,
+	// and this is the thing that actually has to be true.
+	if ServiceCredentials(service) != LegacyGitCredential(app) {
+		return "", false
+	}
+	return app, true
+}

@@ -17,6 +17,8 @@ kip service add mailhog --name mailhog
 
 Supported types: `postgres`, `mysql`, `mongodb`, `redis`, `rabbitmq`, `opensearch`, `minio`, `mailhog`
 
+One name is refused: a service called `<app>-git`, where `<app>` is an app in the same project and environment that still keeps its git token under the older naming. Both would store their credentials in the same Secret, so Kipper asks you to pick another name for the service rather than let one read the other's.
+
 ### Per-environment services
 
 Each environment can have its own database with separate credentials and storage:

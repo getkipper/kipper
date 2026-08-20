@@ -8,9 +8,12 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/middleware"
+	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
 type createServiceRequest struct {
@@ -53,6 +56,11 @@ func (s *Services) Create(w http.ResponseWriter, r *http.Request) {
 		req.Namespace = "default"
 	}
 	if !enforceProjectRole(w, r, req.Namespace, middleware.ProjectRoleDeployer) {
+		return
+	}
+
+	if err := refuseServiceNameSharingAnAppCredential(r.Context(), s.CRClient, req.Namespace, req.Name); err != nil {
+		respondError(w, http.StatusConflict, err.Error())
 		return
 	}
 
@@ -119,4 +127,28 @@ func (s *Services) Types(w http.ResponseWriter, _ *http.Request) {
 		})
 	}
 	respondJSON(w, http.StatusOK, types)
+}
+
+// refuseServiceNameSharingAnAppCredential stops a service being created whose
+// credentials Secret is the object an app already keeps its git token in.
+//
+// The two naming schemes meet on one name, both are published so neither can
+// move, and whichever object exists the other kind reads it and finds keys it
+// does not recognise. Refusing the second one is the only move left, and it is
+// only ever the service: an app created now names its credential after a digest.
+func refuseServiceNameSharingAnAppCredential(ctx context.Context, c crclient.Client, namespace, name string) error {
+	app, collides := secretname.AppSharingServiceCredentialName(name)
+	if !collides {
+		return nil
+	}
+	var existing kipperv1.App
+	err := c.Get(ctx, types.NamespacedName{Name: app, Namespace: namespace}, &existing)
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("checking whether app %s exists: %w", app, err)
+	}
+	return fmt.Errorf("a service named %q would keep its credentials in %s, which is where the app %q keeps its git token. Pick another name for the service",
+		name, secretname.ServiceCredentials(name), app)
 }
