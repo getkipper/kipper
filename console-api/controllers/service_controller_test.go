@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -1046,4 +1047,29 @@ func TestEnsureCredentialDefaults_MinioKeepsItsOwnCredentials(t *testing.T) {
 	got := secretFromCluster(t, r, "obj-credentials")
 	assert.Equal(t, "kipper", got["ACCESS_KEY"], "MinIO's access key is its username")
 	assert.Equal(t, "secret", got["SECRET_KEY"], "MinIO's secret key is its password")
+}
+
+// A service whose credentials Secret belongs to something else never reaches
+// updateStatus, so without this it sits at Pending with the reason visible only
+// in the controller's log. The state is reachable by a name collision no
+// create-time check can see, a restore among them, so the object has to say why
+// it is stuck.
+func TestReportCredentialsBlocked_SaysWhyOnTheService(t *testing.T) {
+	svc := bareService("postgres")
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(),
+	}
+
+	r.reportCredentialsBlocked(context.Background(), svc,
+		errors.New("secret db-credentials is not owned by this service"))
+
+	var live kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
+	assert.Equal(t, "Failed", live.Status.Phase, "a blocked service reported itself as healthy")
+
+	cond := meta.FindStatusCondition(live.Status.Conditions, "CredentialsReady")
+	require.NotNil(t, cond, "nothing on the object says why it is stuck")
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Contains(t, cond.Message, "not owned by this service")
 }
