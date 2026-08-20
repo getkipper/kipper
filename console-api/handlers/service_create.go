@@ -149,6 +149,13 @@ func refuseServiceNameSharingAnAppCredential(ctx context.Context, c crclient.Cli
 	if err != nil {
 		return fmt.Errorf("checking whether app %s exists: %w", app, err)
 	}
+	// The app existing is not the collision: an app names its credential after a
+	// digest of the pair now, so only one still on the older name has anything
+	// at the object this service would take. Refusing on the name alone would
+	// stop a service whose name merely resembles an app's.
+	if existing.Spec.Git == nil || existing.Spec.Git.CredentialsSecret != secretname.LegacyGitCredential(app) {
+		return nil
+	}
 	return fmt.Errorf("a service named %q would keep its credentials in %s, which is where the app %q keeps its git token. Pick another name for the service",
 		name, secretname.ServiceCredentials(name), app)
 }

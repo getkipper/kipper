@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -101,6 +102,13 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if err := r.reconcileCredentialsSecret(ctx, &svc); err != nil {
+		// Said on the object, not only in the controller's log. A service whose
+		// credentials Secret belongs to something else never reaches
+		// updateStatus, so without this it sits at Pending with the reason
+		// visible only to whoever thinks to read the log. That state is reached
+		// by a name collision the create-time checks cannot see, a restore among
+		// them, so it has to explain itself.
+		r.reportCredentialsBlocked(ctx, &svc, err)
 		return ctrl.Result{}, fmt.Errorf("reconciling credentials secret: %w", err)
 	}
 
@@ -1198,4 +1206,22 @@ func generatePassword() string {
 	b := make([]byte, 24)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// reportCredentialsBlocked writes onto the Service why it cannot proceed.
+//
+// Best effort: the reconcile is failing already, and losing the explanation is
+// better than losing the error that caused it.
+func (r *ServiceReconciler) reportCredentialsBlocked(ctx context.Context, svc *kipperv1.Service, cause error) {
+	svc.Status.Phase = "Failed"
+	meta.SetStatusCondition(&svc.Status.Conditions, metav1.Condition{
+		Type:               "CredentialsReady",
+		Status:             metav1.ConditionFalse,
+		Reason:             "SecretNotOwned",
+		Message:            cause.Error(),
+		ObservedGeneration: svc.Generation,
+	})
+	if err := r.Status().Update(ctx, svc); err != nil {
+		log.FromContext(ctx).Error(err, "recording why the credentials secret is blocked")
+	}
 }

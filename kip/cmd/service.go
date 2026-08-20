@@ -692,12 +692,22 @@ func refuseServiceNameSharingAnAppCredential(ctx context.Context, dyn dynamic.In
 	if !collides {
 		return nil
 	}
-	_, err := dyn.Resource(deployer.AppGVR).Namespace(namespace).Get(ctx, app, metav1.GetOptions{})
+	existing, err := dyn.Resource(deployer.AppGVR).Namespace(namespace).Get(ctx, app, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("checking whether app %s exists: %w", app, err)
+	}
+	// The app existing is not the collision: an app names its credential after a
+	// digest of the pair now, so only one still on the older name has anything
+	// at the object this service would take.
+	// The error is dropped because it says nothing this decision needs: a field
+	// that is absent and a field that is not a string both come back not-found,
+	// and either way the app is not on the legacy name.
+	credential, named, _ := unstructured.NestedString(existing.Object, "spec", "git", "credentialsSecret")
+	if !named || credential != secretname.LegacyGitCredential(app) {
+		return nil
 	}
 	return fmt.Errorf("a service named %q would keep its credentials in %s, which is where the app %q keeps its git token. Pick another name for the service",
 		name, secretname.ServiceCredentials(name), app)
