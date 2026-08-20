@@ -49,6 +49,12 @@ type ServiceResources struct {
 	MemoryLimit string `json:"memoryLimit,omitempty"`
 }
 
+// ConditionCredentialsReady says whether the service holds the credentials
+// Secret it injects into anything bound to it. It goes false when another object
+// already occupies that name, which a create-time check cannot always prevent:
+// a restore can put one there, and the object it collides with may be gone.
+const ConditionCredentialsReady = "CredentialsReady"
+
 // ServiceStatus defines the observed state of the service.
 type ServiceStatus struct {
 	// Phase represents the current lifecycle phase.

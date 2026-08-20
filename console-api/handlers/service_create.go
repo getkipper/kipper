@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -60,7 +61,15 @@ func (s *Services) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := refuseServiceNameSharingAnAppCredential(r.Context(), s.CRClient, req.Namespace, req.Name); err != nil {
-		respondError(w, http.StatusConflict, err.Error())
+		// A name that collides is a conflict; a cluster that could not be asked
+		// is not, and answering 409 to it would tell the caller the name is
+		// taken when nothing of the sort was established.
+		var taken *serviceNameTakenError
+		if stderrors.As(err, &taken) {
+			respondError(w, http.StatusConflict, err.Error())
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -156,6 +165,17 @@ func refuseServiceNameSharingAnAppCredential(ctx context.Context, c crclient.Cli
 	if existing.Spec.Git == nil || existing.Spec.Git.CredentialsSecret != secretname.LegacyGitCredential(app) {
 		return nil
 	}
-	return fmt.Errorf("a service named %q would keep its credentials in %s, which is where the app %q keeps its git token. Pick another name for the service",
-		name, secretname.ServiceCredentials(name), app)
+	return &serviceNameTakenError{Service: name, App: app}
+}
+
+// serviceNameTakenError is the collision itself, told apart from a cluster this
+// check could not ask.
+type serviceNameTakenError struct {
+	Service string
+	App     string
+}
+
+func (e *serviceNameTakenError) Error() string {
+	return fmt.Sprintf("a service named %q would keep its credentials in %s, which is where the app %q keeps its git token. Pick another name for the service",
+		e.Service, secretname.ServiceCredentials(e.Service), e.App)
 }

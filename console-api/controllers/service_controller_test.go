@@ -1062,7 +1062,7 @@ func TestReportCredentialsBlocked_SaysWhyOnTheService(t *testing.T) {
 	}
 
 	r.reportCredentialsBlocked(context.Background(), svc,
-		errors.New("secret db-credentials is not owned by this service"))
+		&credentialsNotOursError{Secret: "db-credentials"})
 
 	var live kipperv1.Service
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
@@ -1072,4 +1072,38 @@ func TestReportCredentialsBlocked_SaysWhyOnTheService(t *testing.T) {
 	require.NotNil(t, cond, "nothing on the object says why it is stuck")
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Contains(t, cond.Message, "not owned by this service")
+}
+
+// The condition describes a state, so it has to go when the state does. One
+// that nothing retracts outlives what it describes, and the next reader learns
+// to skip it before the case it exists for arrives.
+func TestUpdateStatus_RetractsTheCredentialsCondition(t *testing.T) {
+	svc := bareService("postgres")
+	svc.Status.Conditions = []metav1.Condition{{
+		Type: kipperv1.ConditionCredentialsReady, Status: metav1.ConditionFalse,
+		Reason: "SecretNotOwned", Message: "an older failure",
+		LastTransitionTime: metav1.Now(),
+	}}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(),
+	}
+
+	require.NoError(t, r.updateStatus(context.Background(), svc))
+
+	var live kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
+	assert.Nil(t, meta.FindStatusCondition(live.Status.Conditions, kipperv1.ConditionCredentialsReady),
+		"a condition describing a state that has passed was left on the object")
+}
+
+// Everything other than the ownership refusal is transient: a stale cache
+// answering AlreadyExists to the create, a Get that failed. Stamping those puts
+// a permanent false condition on a healthy service.
+func TestReconcile_ReportsOnlyTheOwnershipRefusal(t *testing.T) {
+	var notOurs *credentialsNotOursError
+	assert.True(t, errors.As(&credentialsNotOursError{Secret: "db-credentials"}, &notOurs),
+		"the refusal has to be recognisable to the reporter")
+	assert.False(t, errors.As(errors.New("secrets \"db-credentials\" already exists"), &notOurs),
+		"a routine create race must not be reported as an ownership refusal")
 }
