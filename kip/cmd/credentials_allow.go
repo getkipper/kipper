@@ -31,7 +31,7 @@ asked for: this changes who may use it, not what it is.
   kip credentials allow forge --project shop
   kip credentials allow forge --project shop --project blog
 
-Container registry credentials are granted with 'kip registry add --allow-project'.`,
+Container registry credentials are granted with 'kip registry allow'.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCredentialsAllow,
 }
@@ -194,7 +194,7 @@ func sharedCredentialError(ctx context.Context, clientset kubernetes.Interface, 
 	}
 	for _, reg := range regs {
 		if reg.Name == name {
-			return fmt.Errorf("%s is a container registry credential, so grant it with 'kip registry add --name %s --server %s --allow-project <project>'. That flag replaces the allow-list, so name every project that should keep access", name, reg.Name, reg.Server)
+			return fmt.Errorf("%s is a container registry credential, so grant it with 'kip registry allow %s --project <project>'", name, reg.Name)
 		}
 	}
 	return err
