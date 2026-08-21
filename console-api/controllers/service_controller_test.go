@@ -1100,6 +1100,53 @@ func TestRetractCredentialsBlocked_TakesTheConditionOff(t *testing.T) {
 		"a condition describing a state that has passed was left on the object")
 }
 
+// And it writes nothing when there was nothing to retract, for the same reason
+// the reporter does not: an identical status write is an event that brings the
+// object straight back round.
+//
+// The resourceVersion is captured into a string before the call. Status().Update
+// writes the new one back into the object it was handed, so reading the field
+// afterwards compares the store against itself and passes whatever the code does.
+func TestRetractCredentialsBlocked_WritesNothingWhenThereIsNoCondition(t *testing.T) {
+	svc := bareService("postgres")
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(),
+	}
+	var live kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
+	before := live.ResourceVersion
+
+	r.retractCredentialsBlocked(context.Background(), &live)
+
+	var after kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &after))
+	assert.Equal(t, before, after.ResourceVersion, "an empty retraction wrote the object")
+}
+
+// updateStatus runs on every pass of a healthy service, so writing an identical
+// status each time keeps the queue busy with work that changes nothing. Same
+// capture-before-the-call rule as above.
+func TestUpdateStatus_WritesNothingWhenNothingChanged(t *testing.T) {
+	svc := bareService("postgres")
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(),
+	}
+	require.NoError(t, r.updateStatus(context.Background(), svc))
+
+	var settled kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &settled))
+	before := settled.ResourceVersion
+
+	require.NoError(t, r.updateStatus(context.Background(), &settled))
+
+	var after kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &after))
+	assert.Equal(t, before, after.ResourceVersion,
+		"an unchanged status was written again, which is an event that brings the object back round")
+}
+
 // A status write is an update event on the object being reconciled, so writing
 // the same failure on every pass feeds the queue its own tail: the failed
 // reconcile is requeued with backoff, and the event this emits brings it
@@ -1195,4 +1242,35 @@ func TestReconcile_ReportsDataLeftWithoutCredentials(t *testing.T) {
 func TestPermanentCredentialsFailure_IgnoresATransientError(t *testing.T) {
 	_, permanent := permanentCredentialsFailure(errors.New(`secrets "db-credentials" already exists`))
 	assert.False(t, permanent, "a routine create race would have been stamped on the object")
+}
+
+// Driven through Reconcile, because the call site is the thing at issue: the
+// helper being correct says nothing about it being called, and it is called
+// where the state it describes stops being true rather than at the end of a
+// fully successful pass. A later step failing must not keep the object blaming
+// credentials that are fine.
+func TestReconcile_RetractsTheConditionOnceTheCredentialsReconcile(t *testing.T) {
+	svc := bareService("postgres")
+	svc.UID = "the-service"
+	svc.Status.Conditions = []metav1.Condition{{
+		Type: kipperv1.ConditionCredentialsReady, Status: metav1.ConditionFalse,
+		Reason: "SecretNotOwned", Message: "a failure that has since been cleared",
+		LastTransitionTime: metav1.Now(),
+	}}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).
+			WithObjects(svc).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(),
+	}
+
+	// The reconcile may still fail further down; the retraction is not
+	// conditional on it finishing.
+	_, _ = r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns", Name: "db"},
+	})
+
+	var live kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
+	assert.Nil(t, meta.FindStatusCondition(live.Status.Conditions, kipperv1.ConditionCredentialsReady),
+		"the object still blames credentials that reconciled")
 }
