@@ -67,8 +67,16 @@ Secret that lost its owner leaves the service running while everything bound to
 it is refused, so this is the question to ask before a controller rollout and
 after restoring a backup.
 
---repair gives an unowned Secret back to its service and removes per-binding
-Secrets nothing owns, which the workloads render again for themselves.`,
+--repair gives a Secret back to its service and removes per-binding Secrets
+nothing owns, which the workloads render again for themselves.
+
+Two states are repaired: a Secret with no owner at all, and one whose owner
+reference names an object that is not there, which is what a restore leaves
+behind when the service comes back under a new identity. The second is the
+urgent one, because Kubernetes deletes a dependent by exactly that reference and
+the password its volume was written under goes with it.
+
+A Secret an object that still exists controls is reported and left alone.`,
 	RunE: runServiceCredentials,
 }
 
@@ -161,7 +169,7 @@ func init() {
 	serviceCmd.AddCommand(serviceUnbindCmd)
 	serviceCredentialsCmd.Flags().String("project", "default", "project namespace")
 	serviceCredentialsCmd.Flags().String("environment", "", "target environment")
-	serviceCredentialsCmd.Flags().Bool("repair", false, "give unowned credentials back to their service and remove projections nothing owns")
+	serviceCredentialsCmd.Flags().Bool("repair", false, "give credentials back to their service where no live object holds them, and remove projections nothing owns")
 	serviceCmd.AddCommand(serviceCredentialsCmd)
 	rootCmd.AddCommand(serviceCmd)
 }
