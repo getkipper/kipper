@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/equality"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -127,6 +129,11 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 		return ctrl.Result{}, fmt.Errorf("reconciling credentials secret: %w", err)
 	}
+	// Retracted here rather than at the end of the reconcile, because this is
+	// where the thing it describes stopped being true. Deferring it to the last
+	// step means a later failure, a quota or a timeout on the StatefulSet, keeps
+	// the object blaming credentials that are fine.
+	r.retractCredentialsBlocked(ctx, &svc)
 
 	if err := r.reconcileStatefulSet(ctx, &svc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
@@ -944,17 +951,13 @@ func (r *ServiceReconciler) reconcileUINetworkPolicy(ctx context.Context, svc *k
 }
 
 func (r *ServiceReconciler) updateStatus(ctx context.Context, svc *kipperv1.Service) error {
-	// Reaching here means the credentials Secret reconciled, so whatever was
-	// said about it before is no longer true. A condition nothing retracts is
-	// worse than no condition: it outlives the state it describes and the next
-	// reader learns to skip it.
-	meta.RemoveStatusCondition(&svc.Status.Conditions, kipperv1.ConditionCredentialsReady)
+	before := svc.Status.DeepCopy()
 
 	var sts appsv1.StatefulSet
 	err := r.Get(ctx, types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}, &sts)
 	if errors.IsNotFound(err) {
 		svc.Status.Phase = "Pending"
-		return r.Status().Update(ctx, svc)
+		return r.writeStatusIfChanged(ctx, svc, before)
 	}
 	if err != nil {
 		return err
@@ -971,7 +974,31 @@ func (r *ServiceReconciler) updateStatus(ctx context.Context, svc *kipperv1.Serv
 		svc.Status.Phase = "Pending"
 	}
 
+	return r.writeStatusIfChanged(ctx, svc, before)
+}
+
+// writeStatusIfChanged writes only when the status says something new.
+//
+// A status write is an update event on the object being reconciled, so writing
+// an identical status every pass keeps the queue busy with work that changes
+// nothing, and on a service that reconciles often that is most of the work.
+func (r *ServiceReconciler) writeStatusIfChanged(ctx context.Context, svc *kipperv1.Service, before *kipperv1.ServiceStatus) error {
+	if equality.Semantic.DeepEqual(before, &svc.Status) {
+		return nil
+	}
 	return r.Status().Update(ctx, svc)
+}
+
+// retractCredentialsBlocked takes off the condition once the credentials Secret
+// is reconciled, because it describes a state that has passed. Best effort: the
+// reconcile carries on either way, and the next pass retracts again.
+func (r *ServiceReconciler) retractCredentialsBlocked(ctx context.Context, svc *kipperv1.Service) {
+	if !meta.RemoveStatusCondition(&svc.Status.Conditions, kipperv1.ConditionCredentialsReady) {
+		return
+	}
+	if err := r.Status().Update(ctx, svc); err != nil {
+		log.FromContext(ctx).Error(err, "retracting the credentials condition")
+	}
 }
 
 func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
