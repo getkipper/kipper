@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -344,13 +345,40 @@ func runServiceList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("\n  %-20s %-12s %-10s %-10s %s\n", "NAME", "TYPE", "STATUS", "READY", "STORAGE")
-	for _, s := range services {
-		fmt.Printf("  %-20s %-12s %-10s %-10s %s\n", s.Name, s.Type, s.Status, s.Ready, s.Storage)
-	}
-	fmt.Println()
-
+	writeServiceList(os.Stdout, services)
 	return nil
+}
+
+// writeServiceList prints the table, and under it what an operator has to do
+// about anything the reconciler has refused.
+//
+// The remedy goes below rather than in a column: it is a sentence naming objects
+// and commands, and a column wide enough for it would push everything else off
+// the screen. A service with nothing wrong adds nothing here.
+func writeServiceList(out io.Writer, services []service.Status) {
+	say(out, "\n  %-20s %-12s %-10s %-10s %s\n", "NAME", "TYPE", "STATUS", "READY", "STORAGE")
+	for _, s := range services {
+		say(out, "  %-20s %-12s %-10s %-10s %s\n", s.Name, s.Type, s.Status, s.Ready, s.Storage)
+	}
+	say(out, "\n")
+
+	for _, s := range services {
+		if s.BlockedReason == "" {
+			continue
+		}
+		say(out, "  !   %s (%s)\n", s.Name, s.BlockedReason)
+		say(out, "      %s\n\n", s.BlockedMessage)
+	}
+}
+
+// writeBlockedNotice says why a service's credentials were refused, and says
+// nothing at all when they were not.
+func writeBlockedNotice(out io.Writer, name, reason, message string) {
+	if reason == "" {
+		return
+	}
+	say(out, "  !   %s credentials are blocked (%s)\n", name, reason)
+	say(out, "      %s\n\n", message)
 }
 
 func runServiceInfo(cmd *cobra.Command, args []string) error {
@@ -363,33 +391,56 @@ func runServiceInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	mgr := &service.Manager{Client: k8sClient.Clientset(), Dynamic: k8sClient.Dynamic()}
-	ctx := context.Background()
+	return writeServiceInfo(context.Background(), os.Stdout, mgr, namespace, name)
+}
 
-	conn, err := mgr.Info(ctx, namespace, name)
+// writeServiceInfo prints what an operator asked to know about one service.
+//
+// A refusal is reported instead of the connection details rather than above
+// them. The details are read out of the very Secret the refusal is about, so in
+// the case this exists for there is nothing left to read and the command would
+// fail with "not found", burying the remedy. Where something is still readable
+// it is a credential the engine will not accept, and printing it sends an
+// operator to debug a connection that was never going to work.
+func writeServiceInfo(ctx context.Context, out io.Writer, mgr *service.Manager, namespace, name string) error {
+	snapshot, err := mgr.Read(ctx, namespace, name)
+	if err != nil {
+		return err
+	}
+	if snapshot.Blocked() {
+		say(out, "\n  Service: %s\n\n", name)
+		writeBlockedNotice(out, name, snapshot.BlockedReason, snapshot.BlockedMessage)
+		return nil
+	}
+
+	// The type comes from the snapshot that answered the question above, so the
+	// command cannot decide it is healthy from one read of the service and then
+	// describe a different one.
+	conn, err := mgr.Connection(ctx, namespace, name, snapshot.Type)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("\n  Service: %s\n\n", name)
+	say(out, "\n  Service: %s\n\n", name)
 	if conn.Type == "minio" {
 		// S3 service: endpoint URL + access key / secret key.
-		fmt.Printf("  Endpoint:   %s\n", conn.URL)
-		fmt.Printf("  Access Key: %s\n", conn.Username)
-		fmt.Printf("  Secret Key: %s\n", conn.Password)
-		fmt.Println()
+		say(out, "  Endpoint:   %s\n", conn.URL)
+		say(out, "  Access Key: %s\n", conn.Username)
+		say(out, "  Secret Key: %s\n", conn.Password)
+		say(out, "\n")
 		return nil
 	}
-	fmt.Printf("  Host:     %s\n", conn.Host)
-	fmt.Printf("  Port:     %d\n", conn.Port)
+	say(out, "  Host:     %s\n", conn.Host)
+	say(out, "  Port:     %d\n", conn.Port)
 	if conn.Username != "" {
-		fmt.Printf("  Username: %s\n", conn.Username)
-		fmt.Printf("  Password: %s\n", conn.Password)
-		fmt.Printf("  Database: %s\n", conn.Database)
+		say(out, "  Username: %s\n", conn.Username)
+		say(out, "  Password: %s\n", conn.Password)
+		say(out, "  Database: %s\n", conn.Database)
 	}
 	if conn.URL != "" {
-		fmt.Printf("  URL:      %s\n", conn.URL)
+		say(out, "  URL:      %s\n", conn.URL)
 	}
-	fmt.Println()
+	say(out, "\n")
 
 	return nil
 }

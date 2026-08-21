@@ -43,6 +43,11 @@ type Status struct {
 	Status  string
 	Storage string
 	Ready   string
+	// BlockedReason and BlockedMessage carry the CredentialsReady condition
+	// when the reconciler has refused this service's credentials. Empty on a
+	// service that is fine, and on any cluster older than the condition.
+	BlockedReason  string
+	BlockedMessage string
 }
 
 // ConnectionInfo holds the connection details for a service.
@@ -454,6 +459,79 @@ func (m *Manager) Update(ctx context.Context, namespace, name string, opts Optio
 // only consulted to enrich each entry with live workload status (READY
 // count, storage). A CR with no StatefulSet yet (controller has not
 // reconciled) still appears in the list with phase from the CR.
+// Snapshot is one read of a service's CR: everything a caller decides from, taken
+// at a single moment.
+//
+// Type and the blockage are read together because the info command needs both
+// and has to agree with itself. Asking twice lets the condition change between
+// the reads, and then it prints credentials the reconciler has just refused,
+// which is the one outcome it exists to prevent.
+type Snapshot struct {
+	Type           string
+	BlockedReason  string
+	BlockedMessage string
+}
+
+// Blocked reports whether the reconciler has refused these credentials.
+func (s Snapshot) Blocked() bool { return s.BlockedReason != "" }
+
+// Read takes that one look at the service.
+func (m *Manager) Read(ctx context.Context, namespace, name string) (Snapshot, error) {
+	if m.Dynamic == nil {
+		return Snapshot{}, fmt.Errorf("service manager is not configured with a dynamic client")
+	}
+	cr, err := m.Dynamic.Resource(manifest.ServiceGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return Snapshot{}, fmt.Errorf("service %q not found", name)
+		}
+		return Snapshot{}, fmt.Errorf("getting service CR: %w", err)
+	}
+	svcType, _, _ := unstructured.NestedString(cr.Object, "spec", "type")
+	reason, message := credentialsBlockage(cr.Object)
+	return Snapshot{Type: svcType, BlockedReason: reason, BlockedMessage: message}, nil
+}
+
+// credentialsBlockage reads the reason and remedy off a service that the
+// reconciler has refused, and answers empty for one it has not.
+//
+// Everything here is read defensively. The condition is absent on every cluster
+// older than it, absent on a healthy service, and the object comes off the wire
+// as whatever the API server holds, so a status that is not a map or a
+// conditions entry that is not one has to answer "nothing wrong" rather than
+// stop the listing.
+func credentialsBlockage(obj map[string]interface{}) (string, string) {
+	conditions, found, err := unstructured.NestedSlice(obj, "status", "conditions")
+	if err != nil || !found {
+		return "", ""
+	}
+	for _, entry := range conditions {
+		condition, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := condition["type"].(string)
+		if name != servicecatalog.ConditionCredentialsReady {
+			continue
+		}
+		// Only a condition that is false is a blockage: the reconciler takes the
+		// condition off entirely once the cause clears, so a true one says
+		// nothing to act on.
+		//
+		// Every entry is read rather than the first, because this CRD puts no
+		// uniqueness on the type. A restore or an edit can leave two, and
+		// stopping at a stale true one would hide a live refusal. A warning is
+		// the safe thing to get wrong in the direction of showing it.
+		if status, _ := condition["status"].(string); status != "False" {
+			continue
+		}
+		reason, _ := condition["reason"].(string)
+		message, _ := condition["message"].(string)
+		return reason, message
+	}
+	return "", ""
+}
+
 func (m *Manager) List(ctx context.Context, namespace string) ([]Status, error) {
 	if m.Dynamic == nil {
 		return nil, fmt.Errorf("service manager is not configured with a dynamic client")
@@ -488,12 +566,15 @@ func (m *Manager) List(ctx context.Context, namespace string) ([]Status, error) 
 			}
 		}
 
+		reason, message := credentialsBlockage(cr.Object)
 		services = append(services, Status{
-			Name:    name,
-			Type:    svcType,
-			Status:  phase,
-			Storage: storage,
-			Ready:   ready,
+			Name:           name,
+			Type:           svcType,
+			Status:         phase,
+			Storage:        storage,
+			Ready:          ready,
+			BlockedReason:  reason,
+			BlockedMessage: message,
 		})
 	}
 
@@ -506,18 +587,23 @@ func (m *Manager) List(ctx context.Context, namespace string) ([]Status, error) 
 func (m *Manager) Info(ctx context.Context, namespace, name string) (*ConnectionInfo, error) {
 	svcType := ""
 	if m.Dynamic != nil {
-		cr, err := m.Dynamic.Resource(manifest.ServiceGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		snapshot, err := m.Read(ctx, namespace, name)
 		if err != nil {
-			if errors.IsNotFound(err) {
-				return nil, fmt.Errorf("service %q not found", name)
-			}
-			return nil, fmt.Errorf("getting service CR: %w", err)
+			return nil, err
 		}
-		svcType, _, _ = unstructured.NestedString(cr.Object, "spec", "type")
+		svcType = snapshot.Type
 	} else if ss, ssErr := m.Client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{}); ssErr == nil {
 		svcType = ss.Labels[labels.ServiceType]
 	}
 
+	return m.Connection(ctx, namespace, name, svcType)
+}
+
+// Connection reads the credentials Secret and shapes what a client needs to
+// reach the service. The type comes from the caller, so a caller that has
+// already read the service does not read it again and cannot disagree with
+// itself about what it found.
+func (m *Manager) Connection(ctx context.Context, namespace, name, svcType string) (*ConnectionInfo, error) {
 	secret, err := m.Client.CoreV1().Secrets(namespace).Get(ctx, secretname.ServiceCredentials(name), metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {

@@ -10,6 +10,18 @@
 // than a matching pair.
 package servicecatalog
 
+// ConditionCredentialsReady is the status condition a service carries while its
+// credentials Secret cannot be used, under one of two reasons that no retry
+// clears: SecretNotOwned, where the object belongs to something else, and
+// DataWithoutCredentials, where there is a volume and no password or username
+// for it. Its message names the remedy.
+//
+// The name lives here because three components read it off the object: the
+// reconciler that writes it, the console that shows it, and the CLI. An operator
+// who cannot see this condition cannot act on it, so a component spelling the
+// name differently is a service that silently reports nothing.
+const ConditionCredentialsReady = "CredentialsReady"
+
 // HasAuth reports whether the server this service type runs asks a connecting
 // client for a credential.
 //
