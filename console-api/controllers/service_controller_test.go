@@ -1076,10 +1076,11 @@ func TestReportCredentialsBlocked_SaysWhyOnTheService(t *testing.T) {
 	assert.Contains(t, cond.Message, "not owned by this service")
 }
 
-// The condition describes a state, so it has to go when the state does. One
-// that nothing retracts outlives what it describes, and the next reader learns
-// to skip it before the case it exists for arrives.
-func TestUpdateStatus_RetractsTheCredentialsCondition(t *testing.T) {
+// The condition describes a state, so it has to go the moment that state does,
+// which is when the credentials reconcile succeeds rather than when the whole
+// reconcile does. Deferring it to the last step means a later failure keeps the
+// object blaming credentials that are fine.
+func TestRetractCredentialsBlocked_TakesTheConditionOff(t *testing.T) {
 	svc := bareService("postgres")
 	svc.Status.Conditions = []metav1.Condition{{
 		Type: kipperv1.ConditionCredentialsReady, Status: metav1.ConditionFalse,
@@ -1091,7 +1092,7 @@ func TestUpdateStatus_RetractsTheCredentialsCondition(t *testing.T) {
 		Scheme: testScheme(),
 	}
 
-	require.NoError(t, r.updateStatus(context.Background(), svc))
+	r.retractCredentialsBlocked(context.Background(), svc)
 
 	var live kipperv1.Service
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
