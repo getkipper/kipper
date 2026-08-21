@@ -2,6 +2,8 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/getkipper/kipper/controller/pkg/servicecatalog"
 )
 
 // ServiceSpec defines the desired state of a stateful service.
@@ -57,7 +59,7 @@ type ServiceResources struct {
 // DataWithoutCredentials: the service has a volume an engine has already
 // initialised, and no password or username for it, so making one up would lock
 // the service out of its own data.
-const ConditionCredentialsReady = "CredentialsReady"
+const ConditionCredentialsReady = servicecatalog.ConditionCredentialsReady
 
 // ServiceStatus defines the observed state of the service.
 type ServiceStatus struct {

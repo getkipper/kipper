@@ -7,6 +7,13 @@ export interface ServiceStatus {
   status: string
   ready: string
   storage: string
+  /**
+   * Why the reconciler refused this service's credentials, and what to do about
+   * it. Absent on a healthy service, and on any cluster older than the
+   * condition, so both are optional.
+   */
+  blockedReason?: string
+  blockedMessage?: string
 }
 
 export interface ServiceInfo {

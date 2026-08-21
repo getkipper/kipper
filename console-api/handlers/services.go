@@ -40,6 +40,12 @@ type serviceResponse struct {
 	Status    string `json:"status"`
 	Ready     string `json:"ready"`
 	Storage   string `json:"storage"`
+	// BlockedReason and BlockedMessage carry the CredentialsReady condition
+	// where the reconciler has refused this service's credentials. Omitted
+	// entirely otherwise, which is every healthy service and every service on a
+	// cluster older than the condition.
+	BlockedReason  string `json:"blockedReason,omitempty"`
+	BlockedMessage string `json:"blockedMessage,omitempty"`
 }
 
 type serviceInfoResponse struct {
@@ -56,6 +62,26 @@ type serviceInfoResponse struct {
 	// OpenSearch Dashboards, etc. will follow). Empty when the
 	// service has no UI or the cluster has no Domain configured.
 	UIURL string `json:"ui_url,omitempty"`
+}
+
+// credentialsBlockage reads the reason and the remedy off a service the
+// reconciler has refused, and answers empty for one it has not.
+//
+// Only a condition that is false is a blockage: the reconciler removes it
+// entirely once the cause clears, so a true one is somebody else's convention
+// and says nothing an operator has to act on.
+func credentialsBlockage(svc *kipperv1.Service) (string, string) {
+	// Every entry is read rather than the first, because this CRD puts no
+	// uniqueness on the condition type. A restore or an edit can leave two, and
+	// stopping at a stale true one would hide a live refusal. A warning is the
+	// safe thing to get wrong in the direction of showing it.
+	for _, condition := range svc.Status.Conditions {
+		if condition.Type != kipperv1.ConditionCredentialsReady || condition.Status != metav1.ConditionFalse {
+			continue
+		}
+		return condition.Reason, condition.Message
+	}
+	return "", ""
 }
 
 // List returns all Kipper-managed stateful services.
@@ -92,13 +118,16 @@ func (s *Services) List(w http.ResponseWriter, r *http.Request) {
 			ready = "1/1"
 		}
 
+		reason, message := credentialsBlockage(&svc)
 		services = append(services, serviceResponse{
-			Name:      svc.Name,
-			Namespace: svc.Namespace,
-			Type:      svc.Spec.Type,
-			Status:    status,
-			Ready:     ready,
-			Storage:   svc.Spec.Storage,
+			Name:           svc.Name,
+			Namespace:      svc.Namespace,
+			Type:           svc.Spec.Type,
+			Status:         status,
+			Ready:          ready,
+			Storage:        svc.Spec.Storage,
+			BlockedReason:  reason,
+			BlockedMessage: message,
 		})
 	}
 
