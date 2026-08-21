@@ -178,10 +178,15 @@ func TestRegistryAddNormalisesTheProjectsItIsGiven(t *testing.T) {
 	entries := []registrycred.Entry{{Name: "ghcr", Server: "ghcr.io", Username: "u", Password: "p"}}
 
 	updated, allowed, _, err := applyRegistryAdd(entries, registryAdd{
-		Name: "ghcr", Server: "ghcr.io", AllowedProjects: []string{"shop"}, ReplaceAllowed: true,
+		Name: "ghcr", Server: "ghcr.io", AllowedProjects: []string{"shop", "shop"}, ReplaceAllowed: true,
 	})
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"shop"}, allowed)
 	assert.Equal(t, []string{"shop"}, updated[0].AllowedProjects)
+
+	_, _, _, err = applyRegistryAdd(entries, registryAdd{
+		Name: "ghcr", Server: "ghcr.io", AllowedProjects: []string{"shop", ""}, ReplaceAllowed: true,
+	})
+	assert.Error(t, err, "a blank would be stored as a grant nothing matches and no command removes")
 }

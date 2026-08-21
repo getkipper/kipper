@@ -64,6 +64,15 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 	name, _ := cmd.Flags().GetString("name")
 	allowProjects, _ := cmd.Flags().GetStringArray("allow-project")
 
+	// applyRegistryAdd refuses a blank for every caller; refusing it here too is
+	// what keeps the message at the flag that carried it, before the command
+	// contacts a cluster.
+	for _, project := range allowProjects {
+		if project == "" {
+			return fmt.Errorf("--allow-project needs a project name")
+		}
+	}
+
 	server = registrycred.NormalizeServer(server)
 	if name == "" {
 		name = registrycred.DefaultName(server)
@@ -83,11 +92,8 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 	// nothing, and the command would report success.
 	resolved := make([]string, 0, len(allowProjects))
 	for _, project := range allowProjects {
-		// A blank name matches no project and no command can take it off again,
-		// and a name given twice authorises exactly what it authorises once.
-		if project == "" {
-			return fmt.Errorf("--allow-project needs a project name")
-		}
+		// Deduped here as well as in applyRegistryAdd, so a name given twice
+		// does not warn twice about the same unknown project.
 		if name := cluster.ResolveNamespace(project, ""); !contains(resolved, name) {
 			resolved = append(resolved, name)
 		}
@@ -238,6 +244,21 @@ type registryAdd struct {
 // from the command so it can be driven directly. It returns the list to store,
 // the projects allowed afterwards, and the ones the change took away.
 func applyRegistryAdd(entries []registrycred.Entry, want registryAdd) ([]registrycred.Entry, []string, []string, error) {
+	// A blank name matches no project and no command can take it off again, and
+	// a name given twice authorises exactly what it authorises once. Normalised
+	// here rather than at the flag, so every caller gets the same list and the
+	// rule is testable without a cluster.
+	normalised := make([]string, 0, len(want.AllowedProjects))
+	for _, project := range want.AllowedProjects {
+		if project == "" {
+			return nil, nil, nil, fmt.Errorf("--allow-project needs a project name")
+		}
+		if !contains(normalised, project) {
+			normalised = append(normalised, project)
+		}
+	}
+	want.AllowedProjects = normalised
+
 	live := registrycred.Find(entries, want.Name)
 	if live == nil {
 		if want.Username == "" || want.Password == "" {

@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
 	"github.com/getkipper/kipper/controller/pkg/secretname"
@@ -208,7 +209,7 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("checking service %q: %w", name, getErr)
 	}
 
-	if err := refuseServiceNameSharingAnAppCredential(ctx, dynClient, namespace, name); err != nil {
+	if err := refuseServiceNameWhoseCredentialIsTaken(ctx, dynClient, namespace, name); err != nil {
 		return err
 	}
 
@@ -683,32 +684,151 @@ func runServiceCredentials(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// refuseServiceNameSharingAnAppCredential stops a service being created whose
-// credentials Secret is the object an app already keeps its git token in. The
-// console refuses the same name for the same reason; the check lives in
-// secretname so the two cannot drift.
-func refuseServiceNameSharingAnAppCredential(ctx context.Context, dyn dynamic.Interface, namespace, name string) error {
+// refuseServiceNameWhoseCredentialIsTaken stops a service being created whose
+// credentials Secret is somebody else's object. The console refuses the same
+// name for the same reason; the collision arithmetic lives in secretname so the
+// two cannot drift.
+func refuseServiceNameWhoseCredentialIsTaken(ctx context.Context, dyn dynamic.Interface, namespace, name string) error {
+	app, holds, err := appHoldingTheCredential(ctx, dyn, namespace, name)
+	if err != nil {
+		return err
+	}
+	if holds {
+		return fmt.Errorf("a service named %q would keep its credentials in %s, which is where the app %q keeps its git token. Pick another name for the service",
+			name, secretname.ServiceCredentials(name), app)
+	}
+	return credentialNameFree(ctx, dyn, namespace, name)
+}
+
+// appHoldingTheCredential says whether an app keeps its git token in the object
+// this service name would take. The app existing is not the collision: an app
+// names its credential after a digest of the pair now, so only one still on the
+// older name has anything at that object.
+func appHoldingTheCredential(ctx context.Context, dyn dynamic.Interface, namespace, name string) (string, bool, error) {
 	app, collides := secretname.AppSharingServiceCredentialName(name)
 	if !collides {
-		return nil
+		return "", false, nil
 	}
 	existing, err := dyn.Resource(deployer.AppGVR).Namespace(namespace).Get(ctx, app, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
-		return nil
+		return "", false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("checking whether app %s exists: %w", app, err)
+		return "", false, fmt.Errorf("checking whether app %s exists: %w", app, err)
 	}
-	// The app existing is not the collision: an app names its credential after a
-	// digest of the pair now, so only one still on the older name has anything
-	// at the object this service would take.
 	// The error is dropped because it says nothing this decision needs: a field
 	// that is absent and a field that is not a string both come back not-found,
 	// and either way the app is not on the legacy name.
 	credential, named, _ := unstructured.NestedString(existing.Object, "spec", "git", "credentialsSecret")
 	if !named || credential != secretname.LegacyGitCredential(app) {
+		return "", false, nil
+	}
+	return app, true, nil
+}
+
+// credentialNameFree refuses the name while the object is still there.
+//
+// Nothing on a create path mints this Secret ahead of the CR, so one already in
+// the namespace belongs to something else: an app that rotated onto a digest
+// name and left its old token for a sweep that runs on a delay, a restore, or a
+// hand-written object. Refusing now says what the reconciler would say later,
+// while there is still a choice of name.
+func credentialNameFree(ctx context.Context, dyn dynamic.Interface, namespace, name string) error {
+	secret := secretname.ServiceCredentials(name)
+	existing, err := dyn.Resource(secretGVR).Namespace(namespace).Get(ctx, secret, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
 		return nil
 	}
-	return fmt.Errorf("a service named %q would keep its credentials in %s, which is where the app %q keeps its git token. Pick another name for the service",
-		name, secretname.ServiceCredentials(name), app)
+	if err != nil {
+		return fmt.Errorf("checking whether %s is free: %w", secret, err)
+	}
+	// A live controller is what makes this final: that Secret is one this service
+	// can never take, no repair claims it away, and the only way out is another
+	// name. Nothing else here is permanent, so nothing else is refused.
+	//
+	// With no owner at all, `kip service credentials --repair` hands the Secret
+	// to the service that should have it, which is how a password gets back to
+	// the volume it was written under.
+	//
+	// An owner that has gone is a weaker case, and it is allowed rather than
+	// recommended. The reconciler will report SecretNotOwned and ask for the
+	// reference to be pointed at this Service, which does keep the password, but
+	// no kip command does that yet: the audit calls a Secret with any controller
+	// reference foreign and repair claims only an unowned one. Garbage collection
+	// is entitled to delete the Secret by that dangling reference in the
+	// meantime. Refusing would not save it, and would take away the one window
+	// where an operator can act.
+	//
+	// A Secret this very service already owns is not a collision at all: the
+	// service exists, and saying so is the other check's job.
+	ref := controllerOf(existing)
+	if ref == nil {
+		return nil
+	}
+	if ours(ref) && ref.Kind == "Service" && ref.Name == name {
+		return nil
+	}
+	live, err := ownerIsLive(ctx, dyn, namespace, ref)
+	if err != nil || !live {
+		return err
+	}
+	return fmt.Errorf("a service named %q would keep its credentials in %s, and that secret already belongs to something else in this namespace. Pick another name for the service",
+		name, secret)
+}
+
+// controllerOf is the reference naming the object that controls this one, which
+// is the claim the service reconciler reads before it will use a Secret.
+func controllerOf(obj *unstructured.Unstructured) *metav1.OwnerReference {
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.Controller != nil && *ref.Controller {
+			return ref.DeepCopy()
+		}
+	}
+	return nil
+}
+
+// ownerIsLive says whether the object a controller reference names is still
+// there under the same identity.
+//
+// A reference outlives its object: garbage collection is not instant, and a
+// restore brings back a dependent whose owner came back with a new UID. Reading
+// the reference alone would take both for a live claim on the name.
+//
+// Only the two kinds Kipper creates are checked. Anything else holding this
+// Secret belongs to a controller whose objects are not ours to look up, and a
+// claim that cannot be disproved is treated as real.
+func ownerIsLive(ctx context.Context, dyn dynamic.Interface, namespace string, ref *metav1.OwnerReference) (bool, error) {
+	if !ours(ref) {
+		return true, nil
+	}
+	var gvr schema.GroupVersionResource
+	switch ref.Kind {
+	case "Service":
+		gvr = manifest.ServiceGVR
+	case "App":
+		gvr = deployer.AppGVR
+	default:
+		return true, nil
+	}
+
+	owner, err := dyn.Resource(gvr).Namespace(namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("checking whether %s %s still holds its credentials: %w", ref.Kind, ref.Name, err)
+	}
+	return owner.GetUID() == ref.UID, nil
+}
+
+// secretGVR reaches Secrets through the dynamic client the collision check
+// already holds, rather than threading a second client through three callers.
+var secretGVR = schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
+
+// ours says whether a controller reference names one of Kipper's own kinds. The
+// kind alone does not: Service is a core kind too, and looking a core Service up
+// as a kipper.run one answers not-found, which would read as a claim that has
+// lapsed when it is somebody's live object.
+func ours(ref *metav1.OwnerReference) bool {
+	return schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind).Group == manifest.ServiceGVR.Group
 }

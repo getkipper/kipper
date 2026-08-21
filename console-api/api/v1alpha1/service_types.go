@@ -50,9 +50,13 @@ type ServiceResources struct {
 }
 
 // ConditionCredentialsReady says whether the service holds the credentials
-// Secret it injects into anything bound to it. It goes false when another object
-// already occupies that name, which a create-time check cannot always prevent:
-// a restore can put one there, and the object it collides with may be gone.
+// Secret it injects into anything bound to it. It goes false for two reasons,
+// neither of which a retry clears. SecretNotOwned: another object occupies that
+// name, which a create-time check cannot always prevent, because a restore can
+// put one there and the object it collides with may be gone.
+// DataWithoutCredentials: the service has a volume an engine has already
+// initialised, and no password or username for it, so making one up would lock
+// the service out of its own data.
 const ConditionCredentialsReady = "CredentialsReady"
 
 // ServiceStatus defines the observed state of the service.

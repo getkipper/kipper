@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -133,7 +134,9 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// where the thing it describes stopped being true. Deferring it to the last
 	// step means a later failure, a quota or a timeout on the StatefulSet, keeps
 	// the object blaming credentials that are fine.
-	r.retractCredentialsBlocked(ctx, &svc)
+	if err := r.retractCredentialsBlocked(ctx, &svc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("retracting the credentials condition: %w", err)
+	}
 
 	if err := r.reconcileStatefulSet(ctx, &svc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
@@ -174,18 +177,38 @@ func (r *ServiceReconciler) reconcileCredentialsSecret(ctx context.Context, svc 
 		if owner := metav1.GetControllerOf(&existing); owner == nil || owner.UID != svc.UID {
 			return &credentialsNotOursError{Secret: secretName}
 		}
-		return r.ensureCredentialDefaults(ctx, &existing, svc.Spec.Type)
+		return r.repairCredentials(ctx, &existing, svc)
 	}
 	if !errors.IsNotFound(err) {
 		return err
 	}
 
-	if err := r.refuseToMintOverExistingData(ctx, svc); err != nil {
+	if err := r.refuseToMintOverExistingData(ctx, svc, ""); err != nil {
 		return err
 	}
 
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: svc.Namespace,
+			Labels:    serviceLabels(svc),
+		},
+		Data: credentialData(svc, generatePassword()),
+	}
+
+	if err := controllerutil.SetControllerReference(svc, secret, r.Scheme); err != nil {
+		return err
+	}
+
+	return r.Create(ctx, secret)
+}
+
+// credentialData is every key a credentials Secret of this service type carries,
+// with password filling whichever one holds the secret material. One definition,
+// because a Secret is built twice: minted when there is none, and restored key
+// by key when one comes back from a restore with keys missing.
+func credentialData(svc *kipperv1.Service, password string) map[string][]byte {
 	catalog := serviceCatalog(svc.Spec.Type)
-	password := generatePassword()
 	host := fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace)
 
 	var data map[string][]byte
@@ -234,21 +257,21 @@ func (r *ServiceReconciler) reconcileCredentialsSecret(ctx context.Context, svc 
 			data[k] = []byte(v)
 		}
 	}
+	return data
+}
 
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: svc.Namespace,
-			Labels:    serviceLabels(svc),
-		},
-		Data: data,
+// secretCredentialKey names the one key in a credentials Secret that cannot be
+// worked out again from the Service. Everything else is derived from the
+// service's own name, namespace and type. An empty answer means the type
+// authenticates nobody, so its whole Secret is reconstructible.
+func secretCredentialKey(svcType string) string {
+	if !servicecatalog.HasAuth(svcType) {
+		return ""
 	}
-
-	if err := controllerutil.SetControllerReference(svc, secret, r.Scheme); err != nil {
-		return err
+	if svcType == "minio" {
+		return "SECRET_KEY"
 	}
-
-	return r.Create(ctx, secret)
+	return "PASSWORD"
 }
 
 // refuseToMintOverExistingData stops the reconciler generating a password for a
@@ -268,71 +291,210 @@ func (r *ServiceReconciler) reconcileCredentialsSecret(ctx context.Context, svc 
 // this service means an engine has already initialised and made up its mind. A
 // genuinely new service has none, and a deleted one has its volumes removed
 // alongside it, so this only refuses where the two have come apart.
-func (r *ServiceReconciler) refuseToMintOverExistingData(ctx context.Context, svc *kipperv1.Service) error {
-	// The StatefulSet's volume claim template is named "data" and it runs a
-	// single replica, so its claim is data-<service>-0.
-	claim := fmt.Sprintf("data-%s-0", svc.Name)
-	var pvc corev1.PersistentVolumeClaim
-	err := r.Get(ctx, types.NamespacedName{Name: claim, Namespace: svc.Namespace}, &pvc)
-	if errors.IsNotFound(err) {
+func (r *ServiceReconciler) refuseToMintOverExistingData(ctx context.Context, svc *kipperv1.Service, missing string) error {
+	// A server that asks for no credential cannot be locked out by one. Its
+	// Secret is HOST and PORT, both derived from the service's own name and its
+	// type's port, so minting it again produces the same two values the volume
+	// was already being served under. Refusing would strand a restored redis,
+	// opensearch or mailhog permanently, and this refusal's remedy is to delete
+	// the volume.
+	if !servicecatalog.HasAuth(svc.Spec.Type) {
 		return nil
 	}
-	if err != nil {
+	initialised, err := r.serviceHasData(ctx, svc)
+	if err != nil || !initialised {
 		return err
 	}
-	return &credentialsMissingError{Service: svc.Name, Claim: claim, Secret: secretname.ServiceCredentials(svc.Name)}
+	return &credentialsMissingError{
+		Service: svc.Name, Claim: dataClaim(svc.Name),
+		Secret: secretname.ServiceCredentials(svc.Name), Key: missing,
+	}
 }
 
-// ensureCredentialDefaults brings an existing credentials Secret into
-// the current shape: adds any missing type-specific defaults (e.g.
-// VHOST=/ on a rabbitmq secret that pre-dates the rabbitmq fix) and
-// prunes type-specific keys that no longer belong (e.g. NAME=app on a
-// rabbitmq or minio secret — a leftover from when every authed
-// service inherited the database-shaped credentials). Whatever base
-// keys a service type carries are preserved: HOST/PORT/USERNAME/PASSWORD
-// for most, ENDPOINT/ACCESS_KEY/SECRET_KEY for minio (S3).
+// dataClaim is the volume a service keeps its data on. The StatefulSet's claim
+// template is named "data" and it runs a single replica.
+func dataClaim(service string) string {
+	return fmt.Sprintf("data-%s-0", service)
+}
+
+// serviceHasData says whether an engine has already initialised and made up its
+// mind about its credentials. A genuinely new service has no volume, and a
+// deleted one has its volumes removed alongside it, so this is only true where
+// the data and the credentials have come apart.
+func (r *ServiceReconciler) serviceHasData(ctx context.Context, svc *kipperv1.Service) (bool, error) {
+	var pvc corev1.PersistentVolumeClaim
+	err := r.Get(ctx, types.NamespacedName{Name: dataClaim(svc.Name), Namespace: svc.Namespace}, &pvc)
+	if errors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// convergedKey says whether the reconciler owns a key's value outright, so it is
+// recomputed on every pass and overwrites whatever is there.
 //
-// A type that starts without authentication keeps HOST and PORT alone,
-// so a Secret minted before that rule loses the credentials it carried.
-// Pruning them is safe in the direction that matters: redis, opensearch
-// and mailhog never read the password when they started, so no server
-// is locked out of anything by its removal.
-func (r *ServiceReconciler) ensureCredentialDefaults(ctx context.Context, secret *corev1.Secret, svcType string) error {
-	desired := kipperv1.CredentialDefaults(svcType)
-	// A pre-existing Secret with no data (created out of band, or
-	// drained of keys) has Data == nil; assigning to a nil map
-	// panics. Initialise before writing.
+// Two kinds qualify. The address keys only say where the service is, and a
+// Secret restored into another namespace carries the old namespace's host, so
+// every workload bound to the restored service would open its connections
+// against the one it was copied from. MinIO's ACCESS_KEY is the root user the
+// StatefulSet passes at every start, so the running server answers to that name
+// whatever the Secret happens to say.
+//
+// Nothing else is overwritten. A password, and USERNAME on the types that bake
+// it in when they initialise, are what the engine holds rather than anything
+// derived from the Service. NAME and VHOST are the operator's to choose.
+func convergedKey(svcType, key string) bool {
+	switch key {
+	case "HOST", "PORT", "ENDPOINT":
+		return true
+	case "ACCESS_KEY":
+		return svcType == "minio"
+	}
+	return false
+}
+
+// engineIdentityKey names the key recording who the engine answers to, where
+// that is something it baked in as it initialised rather than something the
+// container is handed at every start.
+//
+// An empty answer means the identity is not the Secret's to remember: minio
+// takes its root user from the StatefulSet every time it starts, and a type that
+// authenticates nobody has no identity at all.
+func engineIdentityKey(svcType string) string {
+	if svcType == "minio" || !servicecatalog.HasAuth(svcType) {
+		return ""
+	}
+	return "USERNAME"
+}
+
+// credentialKeys is every key this reconciler writes into a credentials Secret,
+// across every service type. One of these that the service's own type does not
+// want is stale, whether it was minted under an older shape or belongs to
+// another type entirely, and envFrom injects it into every bound workload either
+// way.
+//
+// A key that is not on this list is left alone, which covers both an operator's
+// own additions and rabbitmq's management URL, written by the CLI's own service
+// manager and by nothing here. Adding a key to this list prunes it from every
+// Secret that carries it, so a key another writer maintains belongs on it only
+// alongside a definition of what this reconciler should write in its place.
+func credentialKeys() []string {
+	return []string{
+		"HOST", "PORT", "USERNAME", "PASSWORD",
+		"ENDPOINT", "ACCESS_KEY", "SECRET_KEY",
+		"NAME", "VHOST",
+	}
+}
+
+// carryLegacyMinioCredential moves a minio root credential to the key the server
+// reads it from.
+//
+// MinIO Secrets exist in the shape every authenticating service once shared,
+// holding the root credential under PASSWORD, and the container takes
+// MINIO_ROOT_PASSWORD from SECRET_KEY. Refusing such a Secret as material that
+// cannot be reconstructed would send an operator to a backup, or to deleting the
+// volume, while the credential its data was written under sits in the same
+// Secret under the other name.
+func carryLegacyMinioCredential(secret *corev1.Secret, svcType string) bool {
+	if svcType != "minio" || len(secret.Data["SECRET_KEY"]) > 0 || len(secret.Data["PASSWORD"]) == 0 {
+		return false
+	}
+	secret.Data["SECRET_KEY"] = secret.Data["PASSWORD"]
+	return true
+}
+
+// repairCredentials brings an existing credentials Secret to the shape this
+// service type carries, in one write.
+//
+// Ownership is not readiness. A restore can bring the Secret back with the right
+// controller reference and none of the keys a bound workload reads, and taking
+// that as reconciled retracts the credentials condition and leaves the pod in
+// CreateContainerConfigError with nothing on the object saying why. Address keys
+// converge, everything else is filled only where it is missing, and the password
+// is the one key that cannot be worked out again: over an initialised volume the
+// engine already knows the old one, so that case is refused exactly as a Secret
+// deleted outright is.
+func (r *ServiceReconciler) repairCredentials(ctx context.Context, secret *corev1.Secret, svc *kipperv1.Service) error {
+	// A Secret created out of band, or drained of its keys, has Data == nil;
+	// assigning to a nil map panics.
 	if secret.Data == nil {
 		secret.Data = map[string][]byte{}
 	}
-	updated := false
-	for k, v := range desired {
-		if _, ok := secret.Data[k]; !ok {
-			secret.Data[k] = []byte(v)
-			updated = true
+
+	changed := carryLegacyMinioCredential(secret, svc.Spec.Type)
+
+	desired := credentialData(svc, "")
+
+	// The password and the identity are the two things the engine keeps and the
+	// Service cannot say, and what to do about either one turns on whether an
+	// engine has initialised at all.
+	//
+	// Over a volume the Secret is the only record: a missing key cannot be
+	// filled in from the current default, because that would publish an account
+	// the engine has never heard of and every bound workload would authenticate
+	// as nobody, and an identity that disagrees with the default is the one the
+	// engine answers to. With no volume there is no history to preserve, and
+	// what the service will come up as is what the StatefulSet passes it.
+	identity := engineIdentityKey(svc.Spec.Type)
+	missing := ""
+	for _, key := range []string{secretCredentialKey(svc.Spec.Type), identity} {
+		if key != "" && len(secret.Data[key]) == 0 {
+			missing = key
+			break
 		}
 	}
-	// Stale type-specific keys to prune. NAME belongs to the database
-	// services; VHOST to rabbitmq. If the current service type doesn't
-	// want a key, remove it so EnvFrom stops injecting a meaningless
-	// env var (e.g. AMQP_NAME=app).
-	stale := []string{"NAME", "VHOST"}
-	// MinIO authenticates under ACCESS_KEY/SECRET_KEY and has neither of
-	// these, so this only reaches a type that carries them and does not
-	// use them.
-	if !servicecatalog.HasAuth(svcType) {
-		stale = append(stale, "USERNAME", "PASSWORD")
+	disagrees := identity != "" && len(secret.Data[identity]) > 0 &&
+		!bytes.Equal(secret.Data[identity], desired[identity])
+
+	if missing != "" || disagrees {
+		initialised, err := r.serviceHasData(ctx, svc)
+		if err != nil {
+			return err
+		}
+		switch {
+		case initialised && missing != "":
+			return &credentialsMissingError{
+				Service: svc.Name, Claim: dataClaim(svc.Name),
+				Secret: secretname.ServiceCredentials(svc.Name), Key: missing,
+			}
+		case !initialised:
+			if key := secretCredentialKey(svc.Spec.Type); key != "" && len(secret.Data[key]) == 0 {
+				desired[key] = []byte(generatePassword())
+			}
+			if disagrees {
+				secret.Data[identity] = desired[identity]
+				changed = true
+			}
+		}
 	}
-	for _, k := range stale {
+
+	for k, v := range desired {
+		if convergedKey(svc.Spec.Type, k) {
+			if !bytes.Equal(secret.Data[k], v) {
+				secret.Data[k] = v
+				changed = true
+			}
+			continue
+		}
+		if len(secret.Data[k]) > 0 {
+			continue
+		}
+		secret.Data[k] = v
+		changed = true
+	}
+	for _, k := range credentialKeys() {
 		if _, wanted := desired[k]; wanted {
 			continue
 		}
 		if _, present := secret.Data[k]; present {
 			delete(secret.Data, k)
-			updated = true
+			changed = true
 		}
 	}
-	if !updated {
+	if !changed {
 		return nil
 	}
 	return r.Update(ctx, secret)
@@ -990,15 +1152,19 @@ func (r *ServiceReconciler) writeStatusIfChanged(ctx context.Context, svc *kippe
 }
 
 // retractCredentialsBlocked takes off the condition once the credentials Secret
-// is reconciled, because it describes a state that has passed. Best effort: the
-// reconcile carries on either way, and the next pass retracts again.
-func (r *ServiceReconciler) retractCredentialsBlocked(ctx context.Context, svc *kipperv1.Service) {
+// is reconciled, because it describes a state that has passed.
+//
+// A failed write has to reach the caller. The condition is already off the copy
+// in memory by then, so the status diff that closes the pass compares two
+// objects that both lack it and writes nothing; on a service whose status is
+// otherwise settled the pass ends clean and the object goes on claiming its
+// credentials are blocked until something else happens to it. Returning the
+// error requeues the service, and the next pass retracts against a fresh copy.
+func (r *ServiceReconciler) retractCredentialsBlocked(ctx context.Context, svc *kipperv1.Service) error {
 	if !meta.RemoveStatusCondition(&svc.Status.Conditions, kipperv1.ConditionCredentialsReady) {
-		return
+		return nil
 	}
-	if err := r.Status().Update(ctx, svc); err != nil {
-		log.FromContext(ctx).Error(err, "retracting the credentials condition")
-	}
+	return r.Status().Update(ctx, svc)
 }
 
 func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -1284,9 +1450,9 @@ func (r *ServiceReconciler) reportCredentialsBlocked(ctx context.Context, svc *k
 	}
 }
 
-// credentialsNotOursError is the one refusal worth putting on the object: the
-// credentials Secret this service would use belongs to something else, and no
-// amount of retrying changes that.
+// credentialsNotOursError refuses a credentials Secret that belongs to something
+// else. It is one of the two states an operator has to clear, and no amount of
+// retrying changes it.
 type credentialsNotOursError struct {
 	Secret string
 }
@@ -1313,16 +1479,26 @@ func permanentCredentialsFailure(err error) (string, bool) {
 	return "", false
 }
 
-// credentialsMissingError is the other refusal an operator has to clear: the
-// service has data but no credentials, and minting a new password would lock the
-// service out of its own volume.
+// credentialsMissingError is the other one: the service has data and no password
+// for it, either because the Secret is gone or because it came back without one,
+// and minting a fresh password would lock the service out of its own volume.
 type credentialsMissingError struct {
 	Service string
 	Claim   string
 	Secret  string
+	// Key is the one that is missing, where the Secret itself is still there.
+	Key string
 }
 
 func (e *credentialsMissingError) Error() string {
-	return fmt.Sprintf("service %s has data in %s but no credentials secret, and generating a new password would lock it out of that data; restore %s from a backup, or delete the volume to start the service empty",
-		e.Service, e.Claim, e.Secret)
+	// Deleting the volume on its own is not the way out, whatever it looks
+	// like from here: the statefulset recreates the claim from its template
+	// before the next reconcile, so the refusal comes straight back, now
+	// against an empty volume.
+	lost := fmt.Sprintf("no credentials secret %s", e.Secret)
+	if e.Key != "" {
+		lost = fmt.Sprintf("no %s in %s", e.Key, e.Secret)
+	}
+	return fmt.Sprintf("service %s has data in %s and %s, and a new one would not be what that data was written under; restore %s from a backup, or delete the service together with its volume and create it again to start empty",
+		e.Service, e.Claim, lost, e.Secret)
 }

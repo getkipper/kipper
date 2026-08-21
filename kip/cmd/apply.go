@@ -594,7 +594,7 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 		// kind's own command is what keeps a manifest from doing what the
 		// commands refuse.
 		if res.GVR == manifest.ServiceGVR {
-			if err := refuseServiceNameSharingAnAppCredential(ctx, dyn, namespace, name); err != nil {
+			if err := refuseServiceNameWhoseCredentialIsTaken(ctx, dyn, namespace, name); err != nil {
 				return "", err
 			}
 		}
