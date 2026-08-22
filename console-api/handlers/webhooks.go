@@ -181,7 +181,7 @@ func (wh *Webhooks) triggerBuild(ctx context.Context, w http.ResponseWriter, app
 		return
 	}
 
-	job, err := builder.CreateBuildJob(ctx, wh.Client, appCR, commit)
+	job, err := builder.CreateBuildJob(ctx, wh.Client, wh.CRClient, appCR, commit)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create build: %v", err))
 		return

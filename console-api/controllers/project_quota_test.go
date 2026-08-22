@@ -317,7 +317,7 @@ func TestTierQuota_SmallFitsJvmRolloutWithBuild(t *testing.T) {
 			Data:       map[string][]byte{"ca.crt": []byte("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n")},
 		},
 	)
-	buildJob, err := builder.CreateBuildJob(context.Background(), buildClient, app, "abc1234")
+	buildJob, err := builder.CreateBuildJob(context.Background(), buildClient, fakeClient, app, "abc1234")
 	require.NoError(t, err)
 	buildPod := &corev1.Pod{Spec: buildJob.Spec.Template.Spec}
 
