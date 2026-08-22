@@ -140,7 +140,14 @@ func (p *Projects) List(w http.ResponseWriter, r *http.Request) {
 		role := projectMemberRole(proj, email)
 		if isAdmin {
 			role = middleware.ProjectRoleOwner
-		} else if role == "" {
+		} else if !validProjectRole(role) {
+			// Not just the empty string. A member holding a role this build
+			// does not know holds nothing: the projection binds them nowhere
+			// and the resolver refuses them. This index is the one
+			// authorization decision made straight from spec.members rather
+			// than through the resolver, so treating any non-empty role as
+			// membership would hand project, app and route names to somebody
+			// no other path admits.
 			continue
 		}
 		// The effective list, not the declared one. A Project that declares no

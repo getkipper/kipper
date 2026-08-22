@@ -28,6 +28,13 @@ type Members struct {
 type memberEntry struct {
 	Email string `json:"email"`
 	Role  string `json:"role"`
+
+	// Unrecognised marks a role this build does not know. Such a member holds
+	// no access at all, because the projection binds only the roles it knows,
+	// and the console has to say so rather than show the name as though it
+	// granted something. A role arrives here by kubectl, by a restore, or by a
+	// migration from a cluster that had it.
+	Unrecognised bool `json:"unrecognised,omitempty"`
 }
 
 func validProjectRole(role string) bool {
@@ -61,7 +68,11 @@ func (m *Members) List(w http.ResponseWriter, r *http.Request) {
 
 	members := make([]memberEntry, 0, len(p.Spec.Members))
 	for _, mem := range p.Spec.Members {
-		members = append(members, memberEntry{Email: mem.Email, Role: string(mem.Role)})
+		members = append(members, memberEntry{
+			Email:        mem.Email,
+			Role:         string(mem.Role),
+			Unrecognised: !validProjectRole(string(mem.Role)),
+		})
 	}
 	sort.Slice(members, func(i, j int) bool { return members[i].Email < members[j].Email })
 	respondJSON(w, http.StatusOK, members)
