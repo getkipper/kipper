@@ -16,6 +16,7 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/controller/pkg/memberbinding"
 )
 
 // Revocation has to reach a namespace the reconcile will not grant in.
@@ -273,4 +274,93 @@ func TestAFullReconcileDoesNotGrantANewMemberInARefusedNamespace(t *testing.T) {
 		types.NamespacedName{Name: "kipper-project-owner", Namespace: "shop-test"}, &binding))
 	assert.NotContains(t, subjectNames(binding), "oidc:newcomer@example.com",
 		"a whole reconcile granted a new member in a namespace whose ownership the project cannot prove")
+}
+
+// The revoke pass has to cover both generations. One that recognised only the
+// fixed names would take a departed member out of the old binding and leave
+// them in the new one, which is the same access under a different name.
+func TestRevokeCoversTheGeneratedGenerationToo(t *testing.T) {
+	project := quotaTestProject("small", kipperv1.ProjectEnvironment{Name: "test"})
+	project.Spec.Members = []kipperv1.ProjectMember{
+		{Email: "anna@example.com", Role: kipperv1.ProjectRoleOwner},
+	}
+
+	generated := memberBinding("shop-test", "shop", "anna@example.com", "ben@example.com")
+	generated.Name = memberbinding.Name("shop", "owner")
+
+	c := revokeFixture(t, project,
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shop-test"}},
+		generated,
+	)
+
+	r := &ProjectReconciler{Client: c, Scheme: testScheme(), APIReader: c}
+	require.NoError(t, r.revokeStaleMemberBindings(context.Background(), project))
+
+	var binding rbacv1.RoleBinding
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: memberbinding.Name("shop", "owner"), Namespace: "shop-test"}, &binding))
+	assert.NotContains(t, subjectNames(binding), "oidc:ben@example.com",
+		"a departed member is still bound under the generated name, so revoking the fixed one only moved their access")
+}
+
+// The generated name exists to carry a project identity that survives label
+// drift, and the revoke pass was selecting on the label alone. So a binding
+// whose label went was invisible to the one pass that exists to reach exactly
+// that state, while the watch mapper could still route it.
+func TestRevokeFindsAGeneratedBindingWhoseLabelIsGone(t *testing.T) {
+	project := quotaTestProject("small", kipperv1.ProjectEnvironment{Name: "test"})
+	project.Spec.Members = []kipperv1.ProjectMember{
+		{Email: "anna@example.com", Role: kipperv1.ProjectRoleOwner},
+	}
+
+	stripped := memberBinding("shop-test", "shop", "anna@example.com", "ben@example.com")
+	stripped.Name = memberbinding.Name("shop", "owner")
+	delete(stripped.Labels, kipperlabels.Project)
+
+	c := revokeFixture(t, project,
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shop-test"}},
+		stripped,
+	)
+
+	r := &ProjectReconciler{Client: c, Scheme: testScheme(), APIReader: c}
+	require.NoError(t, r.revokeStaleMemberBindings(context.Background(), project))
+
+	var binding rbacv1.RoleBinding
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: memberbinding.Name("shop", "owner"), Namespace: "shop-test"}, &binding))
+	assert.NotContains(t, subjectNames(binding), "oidc:ben@example.com",
+		"a departed member kept access under a generated binding whose label had drifted, which is the state the digest in the name exists to survive")
+}
+
+// An RBAC subject is a tuple, not a name. Comparing names alone kept a Group
+// subject that happened to share a member's name, and both usernames and groups
+// carry the oidc: prefix on this cluster, so that is one drifted field away
+// from granting everyone in a group what the project granted one person.
+func TestRevokeRemovesASubjectThatOnlySharesAGrantedName(t *testing.T) {
+	project := quotaTestProject("small", kipperv1.ProjectEnvironment{Name: "test"})
+	project.Spec.Members = []kipperv1.ProjectMember{
+		{Email: "anna@example.com", Role: kipperv1.ProjectRoleOwner},
+	}
+
+	drifted := memberBinding("shop-test", "shop")
+	drifted.Subjects = []rbacv1.Subject{
+		{APIGroup: rbacv1.GroupName, Kind: rbacv1.UserKind, Name: "oidc:anna@example.com"},
+		{APIGroup: rbacv1.GroupName, Kind: rbacv1.GroupKind, Name: "oidc:anna@example.com"},
+	}
+
+	c := revokeFixture(t, project,
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shop-test"}},
+		drifted,
+	)
+
+	r := &ProjectReconciler{Client: c, Scheme: testScheme(), APIReader: c}
+	require.NoError(t, r.revokeStaleMemberBindings(context.Background(), project))
+
+	var binding rbacv1.RoleBinding
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: "kipper-project-owner", Namespace: "shop-test"}, &binding))
+
+	require.Len(t, binding.Subjects, 1,
+		"a Group subject sharing a member's name survived, so everyone in that group holds what the project granted one person")
+	assert.Equal(t, rbacv1.UserKind, binding.Subjects[0].Kind)
 }
