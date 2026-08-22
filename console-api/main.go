@@ -190,7 +190,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 	// Chi auth chain, so they authenticate and resolve project access with the
 	// same resolver the REST middleware uses.
 	roleStore := middleware.NewRoleStore(clientset)
-	projectAccess := middleware.NewProjectAccessResolver(clientset, roleStore, &middleware.CRProjectMembers{Client: crClient})
+	projectAccess := middleware.NewProjectAccessResolver(clientset, roleStore, &middleware.CRProjectMembers{Client: crClient}, crClient)
 	// Handlers that resolve a namespace from the request body or by looking up
 	// a resource (jobs, storage, bind, link, backups, resource usage) enforce
 	// membership through this shared resolver.

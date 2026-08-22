@@ -64,21 +64,28 @@ func TestEachProjectRouteResolvesTheDeclaredPrincipal(t *testing.T) {
 		return s
 	}
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-		Name: "shop-prod", Labels: map[string]string{kipperlabels.Project: "shop"}}}
+		Name: "shop-prod", UID: "the-namespace",
+		Labels: map[string]string{kipperlabels.Project: "shop"}}}
 	clientset := fake.NewClientset(
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kipper-system"}}, ns,
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "kipper-users", Namespace: "kipper-system"},
 			Data: map[string]string{"users": fmt.Sprintf(`{%q:"deployer",%q:"deployer"}`, shopOwner, sprOwner)}})
 	scheme := runtime.NewScheme()
 	_ = kipperv1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 	m := func(e string) []kipperv1.ProjectMember {
 		return []kipperv1.ProjectMember{{Email: e, Role: kipperv1.ProjectRoleOwner}}
 	}
 	shop := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "shop"},
-		Spec: kipperv1.ProjectSpec{Environments: []kipperv1.ProjectEnvironment{{Name: "prod"}}, Members: m(shopOwner)}}
+		Spec: kipperv1.ProjectSpec{Environments: []kipperv1.ProjectEnvironment{{Name: "prod"}}, Members: m(shopOwner)},
+		// shop holds the namespace. shop-prod, the project of the same name,
+		// holds nothing, which is what the two ends of this fixture are for.
+		Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+			{Name: "shop-prod", UID: "the-namespace"},
+		}}}
 	spr := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "shop-prod"},
 		Spec: kipperv1.ProjectSpec{Members: m(sprOwner)}}
-	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(shop, spr).Build()
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(shop, spr, ns.DeepCopy()).Build()
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	router := buildRouter(ctx, clientset, dynfake.NewSimpleDynamicClient(scheme), &rest.Config{Host: "https://127.0.0.1:6443"}, crClient)

@@ -84,7 +84,7 @@ func TestLinkConsent_RoutesEnforceOwnershipBeforeTheHandler(t *testing.T) {
 			"deployer@test.com": middleware.ProjectRoleDeployer,
 			"viewer@test.com":   middleware.ProjectRoleViewer,
 		},
-	})
+	}, handlerOwners(t))
 	scope := middleware.ProjectScope(resolver)
 	member := func(h http.HandlerFunc) http.HandlerFunc { return scope(h).ServeHTTP }
 	owner := func(h http.HandlerFunc) http.HandlerFunc {
@@ -184,7 +184,7 @@ func TestLinkConsent_ANamespaceOwnerDoesNotInheritTheSameNamedProject(t *testing
 	resolver := middleware.NewProjectAccessResolver(client, middleware.NewRoleStore(client), stubProjectMembers{
 		"shop":      {"shopowner@test.com": middleware.ProjectRoleOwner},
 		"shop-prod": {"sprowner@test.com": middleware.ProjectRoleOwner},
-	})
+	}, handlerOwners(t, shopProdNS))
 	scope := middleware.ProjectScope(resolver)
 	owner := func(h http.HandlerFunc) http.HandlerFunc {
 		return scope(middleware.RequireProjectRole(middleware.ProjectRoleOwner)(h)).ServeHTTP
@@ -244,7 +244,7 @@ func TestNamespaceScope_TheNamespacesOwnerReachesItRatherThanTheSameNamedProject
 	resolver := middleware.NewProjectAccessResolver(client, middleware.NewRoleStore(client), stubProjectMembers{
 		"shop":      {"shopdev@test.com": middleware.ProjectRoleDeployer},
 		"shop-prod": {"sprowner@test.com": middleware.ProjectRoleOwner},
-	})
+	}, handlerOwners(t, shopProdNS))
 
 	apps := &Apps{Client: client, CRClient: crClient}
 	r := chi.NewRouter()

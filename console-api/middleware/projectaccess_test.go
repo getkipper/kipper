@@ -5,10 +5,17 @@ import (
 	"strconv"
 	"testing"
 
+	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/getkipper/kipper/console-api/internal/nsowner"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 )
 
@@ -52,27 +59,31 @@ func TestProjectAccess_Allows(t *testing.T) {
 	}
 }
 
-func TestProjectAccessResolver_CacheIsBounded(t *testing.T) {
+// The resolver used to cache namespace-to-project answers for a minute, and
+// that cache had to be bounded because an authenticated caller could grow it by
+// probing random names.
+//
+// There is no cache now, so there is nothing to bound and nothing to go stale:
+// a namespace whose ownership has been withdrawn stops authorising on the next
+// request rather than at the end of a TTL. This keeps the probing case
+// exercised, because the answer for a name nothing owns still has to be right.
+func TestProbingNamesNothingOwnsAnswersConsistently(t *testing.T) {
 	client := fake.NewClientset(kipperNamespace())
 	roles := NewRoleStore(fake.NewClientset(kipperNamespace(), roleConfigMap(`{}`)))
-	r := NewProjectAccessResolver(client, roles, stubMembers{})
+	r := NewProjectAccessResolver(client, roles, stubMembers{}, ownersFor(t))
 	ctx := context.Background()
 
-	// Probe far more distinct (nonexistent) names than the cache holds.
-	for i := 0; i < nsCacheMax*3; i++ {
-		if _, err := r.projectForName(ctx, "ghost-"+strconv.Itoa(i)); err != nil {
-			t.Fatalf("projectForName: %v", err)
+	for i := 0; i < 100; i++ {
+		name := "ghost-" + strconv.Itoa(i)
+		got, err := r.projectForName(ctx, name)
+		if err != nil {
+			t.Fatalf("projectForName(%s): %v", name, err)
+		}
+		if got != name {
+			t.Fatalf("projectForName(%s) = %q; a name with no namespace is a project name, which is how a project is reached before its namespace exists", name, got)
 		}
 	}
-
-	r.mu.RLock()
-	size := len(r.nsProj)
-	r.mu.RUnlock()
-	if size > nsCacheMax {
-		t.Fatalf("cache grew to %d entries, want <= %d", size, nsCacheMax)
-	}
 }
-
 func TestProjectAccessResolver_Resolve(t *testing.T) {
 	client := fake.NewClientset(
 		kipperNamespace(),
@@ -92,7 +103,12 @@ func TestProjectAccessResolver_Resolve(t *testing.T) {
 		"shop": {"dev@test.com": "owner"},
 		"team": {"lead@test.com": "owner"},
 	}
-	r := NewProjectAccessResolver(client, roles, members)
+	r := NewProjectAccessResolver(client, roles, members, ownersFor(t,
+		projectNamespace("blog", "blog"),
+		projectNamespace("blog-test", "blog"),
+		projectNamespace("shop", "shop"),
+		projectNamespace("team-prod", "team"),
+	))
 	ctx := context.Background()
 
 	tests := []struct {
@@ -156,7 +172,9 @@ func TestResolveProject_NamesTheProjectRatherThanWhoeverOwnsTheNamespace(t *test
 	r := NewProjectAccessResolver(client, roles, stubMembers{
 		"shop":      {"shopowner@test.com": ProjectRoleOwner},
 		"shop-prod": {"sprowner@test.com": ProjectRoleOwner},
-	})
+	}, ownersFor(t,
+		projectNamespace("shop-prod", "shop"),
+	))
 	ctx := context.Background()
 
 	access, ok := r.ResolveProject(ctx, "sprowner@test.com", "shop-prod")
@@ -188,7 +206,9 @@ func TestResolveProject_MultiEnvironmentProjectsAndAdmins(t *testing.T) {
 		`{"lead@test.com":"deployer","root@test.com":"admin","ghost@test.com":""}`)))
 	r := NewProjectAccessResolver(client, roles, stubMembers{
 		"team": {"lead@test.com": ProjectRoleOwner},
-	})
+	}, ownersFor(t,
+		projectNamespace("team-prod", "team"),
+	))
 	ctx := context.Background()
 
 	if access, ok := r.ResolveProject(ctx, "lead@test.com", "team"); !ok || access.Role != ProjectRoleOwner {
@@ -225,7 +245,9 @@ func TestResolve_AdminSemanticsAreUnchanged(t *testing.T) {
 	r := NewProjectAccessResolver(client, roles, stubMembers{
 		"blog":       {"dev@test.com": ProjectRoleDeployer},
 		"memberless": {},
-	})
+	}, ownersFor(t,
+		projectNamespace("blog", "blog"),
+	))
 	ctx := context.Background()
 
 	access, ok := r.Resolve(ctx, "root@test.com", "unowned")
@@ -272,7 +294,9 @@ func TestTheResolverRefusesARoleThisBuildDoesNotKnow(t *testing.T) {
 	roles := NewRoleStore(fake.NewClientset(kipperNamespace(), roleConfigMap(
 		`{"lead@test.com":"member","stranger@test.com":"member"}`,
 	)))
-	resolver := NewProjectAccessResolver(client, roles, members)
+	resolver := NewProjectAccessResolver(client, roles, members, ownersFor(t,
+		projectNamespace("blog", "blog"),
+	))
 
 	if _, ok := resolver.Resolve(context.Background(), "stranger@test.com", "blog"); ok {
 		t.Error("the resolver admitted a member holding a role it does not know; nothing else grants them anything, so this would be their only access")
@@ -285,4 +309,43 @@ func TestTheResolverRefusesARoleThisBuildDoesNotKnow(t *testing.T) {
 	if access.Role != ProjectRoleOwner {
 		t.Errorf("the owner resolved as %q", access.Role)
 	}
+}
+
+// ownersFor builds the owner reader from the namespaces a test declares, with
+// a Project claiming each one.
+//
+// Namespace ownership is now the claim rather than the label, so a fixture that
+// sets only the label describes a cluster that cannot happen without somebody
+// having forged it. Deriving the projects from the namespaces keeps the two
+// consistent by construction: whatever a test says the label is, the project of
+// that name holds the namespace.
+func ownersFor(t *testing.T, namespaces ...*corev1.Namespace) nsowner.Reader {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := kipperv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("registering the kipper scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("registering the core scheme: %v", err)
+	}
+
+	claims := map[string][]kipperv1.NamespaceClaim{}
+	objs := make([]crclient.Object, 0, len(namespaces))
+	for _, ns := range namespaces {
+		ns := ns.DeepCopy()
+		if ns.UID == "" {
+			ns.UID = types.UID(ns.Name + "-uid")
+		}
+		objs = append(objs, ns)
+		if project := ns.Labels[kipperlabels.Project]; project != "" {
+			claims[project] = append(claims[project], kipperv1.NamespaceClaim{Name: ns.Name, UID: ns.UID})
+		}
+	}
+	for project, held := range claims {
+		objs = append(objs, &kipperv1.Project{
+			ObjectMeta: metav1.ObjectMeta{Name: project},
+			Status:     kipperv1.ProjectStatus{NamespaceClaims: held},
+		})
+	}
+	return crfake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 }
