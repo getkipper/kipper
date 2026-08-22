@@ -176,6 +176,25 @@ type ProjectStatus struct {
 	// Conditions represent the latest available observations.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// ProjectedMembers is the member list the reconciler last projected onto
+	// RBAC, and ProjectedMembersGeneration is the spec generation it came from.
+	//
+	// They exist for the audit trail. No API audit event carries the object a
+	// write replaced, so a membership change can be attributed to who and when
+	// and not to what it was before. The reconciler is the one component that
+	// sees both, so it records what it acted on.
+	//
+	// Nothing reads them yet. This status is written whole by every controller
+	// already running, so a pod whose struct lacks these fields drops them on
+	// its next write; in a rolling window that is one old pod away from an
+	// empty baseline. They ship a release before anything leans on them, and a
+	// baseline whose generation does not match the object's is stale rather
+	// than current.
+	// +optional
+	ProjectedMembers []ProjectMember `json:"projectedMembers,omitempty"`
+	// +optional
+	ProjectedMembersGeneration int64 `json:"projectedMembersGeneration,omitempty"`
 }
 
 // +kubebuilder:object:root=true

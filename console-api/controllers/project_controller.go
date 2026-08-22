@@ -206,6 +206,12 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	r.setNamespaceConflictCondition(&project, namespaceConflicts)
 	project.Status.Phase = "Active"
 	project.Status.Namespaces = namespaces
+	// What was projected, and from which generation. Written now and read a
+	// release later, once every pod carries the field: an older pod's
+	// whole-status write drops what its struct does not know, so a build that
+	// trusted this today would be trusting a gap.
+	project.Status.ProjectedMembers = append([]kipperv1.ProjectMember(nil), project.Spec.Members...)
+	project.Status.ProjectedMembersGeneration = project.Generation
 	if err := r.Status().Update(ctx, &project); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}

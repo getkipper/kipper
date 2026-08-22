@@ -255,14 +255,51 @@ func (r *ProjectReconciler) revokeStaleMemberBindings(ctx context.Context, proje
 	// precisely the state this pass exists for. Selecting on the label alone
 	// left the generated binding invisible to the only pass that reaches it.
 	//
-	// A prefix is not a list selector, so the name half needs an unfiltered
-	// list and an in-memory match. That costs a pass over the cluster's
-	// RoleBindings per project reconcile; the cache field index that makes it
-	// an equality lookup lands with the manager wiring, and until then this is
-	// correct and slow rather than fast and blind.
+	// The label half is a label selector. The name half is a direct Get of each
+	// generated name in each namespace this project could be using, because a
+	// prefix is not a list selector and an unfiltered list would walk every
+	// RoleBinding on the cluster on every reconcile, which is quadratic in the
+	// thing it is scanning once a cluster has a few thousand projects.
+	//
+	// Both halves of that lookup are derivable: the names from the project and
+	// its roles, the namespaces from its environments and what it last
+	// recorded. A binding in a namespace that is neither derivable nor recorded
+	// is out of reach here, which is the report-only residue the design already
+	// names rather than a gap this could close by scanning harder.
 	var bindings rbacv1.RoleBindingList
-	if err := r.List(ctx, &bindings); err != nil {
-		return fmt.Errorf("listing member bindings: %w", err)
+	if err := r.List(ctx, &bindings, client.MatchingLabels{
+		kipperlabels.Project: project.Name,
+	}); err != nil {
+		return fmt.Errorf("listing this project's labelled member bindings: %w", err)
+	}
+	seen := map[string]bool{}
+	for i := range bindings.Items {
+		seen[bindings.Items[i].Namespace+"/"+bindings.Items[i].Name] = true
+	}
+
+	candidates := map[string]bool{}
+	for _, env := range ProjectEnvironments(project) {
+		candidates[ResolveNamespace(project.Name, env.Name)] = true
+	}
+	for _, ns := range project.Status.Namespaces {
+		candidates[ns] = true
+	}
+	for ns := range candidates {
+		for role := range memberClusterRoles {
+			name := memberbinding.Name(project.Name, string(role))
+			if seen[ns+"/"+name] {
+				continue
+			}
+			var found rbacv1.RoleBinding
+			if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &found); err != nil {
+				if errors.IsNotFound(err) {
+					continue
+				}
+				return fmt.Errorf("reading the generated %s binding in %s: %w", role, ns, err)
+			}
+			seen[ns+"/"+name] = true
+			bindings.Items = append(bindings.Items, found)
+		}
 	}
 	prefix := memberbinding.Prefix(project.Name)
 
@@ -282,6 +319,22 @@ func (r *ProjectReconciler) revokeStaleMemberBindings(ctx context.Context, proje
 			continue
 		}
 
+		// A subject kept on a binding whose RoleRef drifted is not the access
+		// the project granted: the role is inferred from the object's name, so
+		// a binding called kipper-project-owner pointing at cluster-admin looks
+		// like an owner binding and its subjects look granted. RoleRef is
+		// immutable, so deleting is the only revoke-only answer, and in a
+		// namespace whose ownership cannot be proved nothing else will come and
+		// fix it.
+		if binding.RoleRef.Name != memberClusterRoles[role] ||
+			binding.RoleRef.Kind != "ClusterRole" ||
+			binding.RoleRef.APIGroup != rbacv1.GroupName {
+			if err := r.deleteObserved(ctx, binding); err != nil {
+				return fmt.Errorf("removing the drifted %s binding in %s: %w", binding.Name, binding.Namespace, err)
+			}
+			continue
+		}
+
 		keep := make([]rbacv1.Subject, 0, len(binding.Subjects))
 		for _, s := range binding.Subjects {
 			if granted[role][s] {
@@ -293,19 +346,7 @@ func (r *ProjectReconciler) revokeStaleMemberBindings(ctx context.Context, proje
 		}
 
 		if len(keep) == 0 {
-			// Pinned to the object this pass read. A fixed name is the same in
-			// every namespace, so a namespace changing hands means another
-			// project legitimately rewrites the binding under that name; an
-			// unconditioned delete issued from a stale cache would then remove
-			// the new owner's binding rather than the one that was examined.
-			// An update gets this from resourceVersion conflict detection for
-			// free, and a delete does not.
-			precondition := client.Preconditions{
-				UID:             &binding.UID,
-				ResourceVersion: &binding.ResourceVersion,
-			}
-			if err := r.Delete(ctx, binding, precondition); err != nil &&
-				!errors.IsNotFound(err) && !errors.IsConflict(err) {
+			if err := r.deleteObserved(ctx, binding); err != nil {
 				return fmt.Errorf("removing the emptied %s binding in %s: %w", binding.Name, binding.Namespace, err)
 			}
 			continue
@@ -317,6 +358,27 @@ func (r *ProjectReconciler) revokeStaleMemberBindings(ctx context.Context, proje
 		}
 	}
 	return nil
+}
+
+// deleteObserved removes the exact object this pass read.
+//
+// A fixed name is the same in every namespace, so a namespace changing hands
+// means another project legitimately rewrites the binding under that name; an
+// unconditioned delete issued from a stale cache would then remove the new
+// owner's binding rather than the one that was examined. An update gets this
+// from resourceVersion conflict detection for free and a delete does not.
+//
+// A conflict is not an error: somebody else changed the object, so this pass no
+// longer knows whether it should go, and the next reconcile reads it afresh.
+func (r *ProjectReconciler) deleteObserved(ctx context.Context, binding *rbacv1.RoleBinding) error {
+	err := r.Delete(ctx, binding, client.Preconditions{
+		UID:             &binding.UID,
+		ResourceVersion: &binding.ResourceVersion,
+	})
+	if errors.IsNotFound(err) || errors.IsConflict(err) {
+		return nil
+	}
+	return err
 }
 
 // grantedSubjects is who the project still grants each built-in role, as whole

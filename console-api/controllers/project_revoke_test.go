@@ -166,9 +166,14 @@ func TestRevokeLeavesAnotherProjectsBindingsAlone(t *testing.T) {
 }
 
 // A RoleRef is immutable in Kubernetes, so a binding pointing at the wrong role
-// cannot be corrected in place. The pass must not try: it deletes rather than
-// edits, and it never writes a RoleRef at all.
-func TestRevokeDoesNotRewriteARoleRef(t *testing.T) {
+// cannot be corrected in place. The pass never writes one: it deletes the
+// binding instead, which is the only revoke-only move available.
+//
+// This asserts the binding is gone rather than that it survived with its
+// RoleRef untouched. An earlier version checked the latter behind an
+// error-is-nil guard, so once deletion became the behaviour it passed without
+// asserting anything at all.
+func TestRevokeDeletesRatherThanRewritingADriftedRoleRef(t *testing.T) {
 	project := quotaTestProject("small", kipperv1.ProjectEnvironment{Name: "test"})
 	project.Spec.Members = []kipperv1.ProjectMember{
 		{Email: "anna@example.com", Role: kipperv1.ProjectRoleOwner},
@@ -185,12 +190,10 @@ func TestRevokeDoesNotRewriteARoleRef(t *testing.T) {
 	require.NoError(t, r.revokeStaleMemberBindings(context.Background(), project))
 
 	var binding rbacv1.RoleBinding
-	if err := c.Get(context.Background(),
-		types.NamespacedName{Name: "kipper-project-owner", Namespace: "shop-test"}, &binding); err == nil {
-		assert.Equal(t, "kipper:project-viewer", binding.RoleRef.Name,
-			"the revoke pass rewrote a RoleRef, which Kubernetes rejects and which is not its job")
-		assert.NotContains(t, subjectNames(binding), "oidc:ben@example.com")
-	}
+	err := c.Get(context.Background(),
+		types.NamespacedName{Name: "kipper-project-owner", Namespace: "shop-test"}, &binding)
+	require.True(t, apierrors.IsNotFound(err),
+		"a binding whose RoleRef names a different role is still there, so its subjects hold that role instead of the one the project granted")
 }
 
 // The pass records nothing. Writing the namespace into status would widen the
@@ -363,4 +366,58 @@ func TestRevokeRemovesASubjectThatOnlySharesAGrantedName(t *testing.T) {
 	require.Len(t, binding.Subjects, 1,
 		"a Group subject sharing a member's name survived, so everyone in that group holds what the project granted one person")
 	assert.Equal(t, rbacv1.UserKind, binding.Subjects[0].Kind)
+}
+
+// A subject kept on a binding whose RoleRef drifted is not the access the
+// project granted. The pass infers the role from the object's name, so a
+// binding called kipper-project-owner pointing at cluster-admin looks like an
+// owner binding and its subjects look granted.
+//
+// RoleRef is immutable, so it cannot be corrected in place. Deleting is the
+// revoke-only answer, and in a namespace whose ownership cannot be proved
+// nothing else will ever come and fix it.
+func TestRevokeDeletesABindingWhoseRoleRefGrantsSomethingElse(t *testing.T) {
+	project := quotaTestProject("small", kipperv1.ProjectEnvironment{Name: "test"})
+	project.Spec.Members = []kipperv1.ProjectMember{
+		{Email: "anna@example.com", Role: kipperv1.ProjectRoleOwner},
+	}
+
+	escalated := memberBinding("shop-test", "shop", "anna@example.com")
+	escalated.RoleRef.Name = "cluster-admin"
+
+	c := revokeFixture(t, project,
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shop-test"}},
+		escalated,
+	)
+
+	r := &ProjectReconciler{Client: c, Scheme: testScheme(), APIReader: c}
+	require.NoError(t, r.revokeStaleMemberBindings(context.Background(), project))
+
+	var binding rbacv1.RoleBinding
+	err := c.Get(context.Background(),
+		types.NamespacedName{Name: "kipper-project-owner", Namespace: "shop-test"}, &binding)
+	assert.True(t, apierrors.IsNotFound(err),
+		"a managed binding pointing at cluster-admin kept its subject, so a member holds a role the project never granted and nothing else visits that namespace to fix it")
+}
+
+// And a binding whose RoleRef is the declared one is left alone, so the check
+// deletes on mismatch rather than on sight.
+func TestRevokeKeepsABindingWhoseRoleRefIsRight(t *testing.T) {
+	project := quotaTestProject("small", kipperv1.ProjectEnvironment{Name: "test"})
+	project.Spec.Members = []kipperv1.ProjectMember{
+		{Email: "anna@example.com", Role: kipperv1.ProjectRoleOwner},
+	}
+	c := revokeFixture(t, project,
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shop-test"}},
+		memberBinding("shop-test", "shop", "anna@example.com"),
+	)
+
+	r := &ProjectReconciler{Client: c, Scheme: testScheme(), APIReader: c}
+	require.NoError(t, r.revokeStaleMemberBindings(context.Background(), project))
+
+	var binding rbacv1.RoleBinding
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: "kipper-project-owner", Namespace: "shop-test"}, &binding),
+		"a correct binding was deleted, so the pass removes access the project still grants")
+	assert.Contains(t, subjectNames(binding), "oidc:anna@example.com")
 }
