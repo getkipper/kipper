@@ -253,6 +253,13 @@ func (m *Manager) RepairCredentials(ctx context.Context, namespace string, audit
 			}
 			return done, fmt.Errorf("reading service %s: %w", report.Service, err)
 		}
+		// A service on its way out is not one to hand a Secret to: the reference
+		// would be written, reported as repaired, and collected with the service
+		// moments later. The window is as long as the cleanup takes, which is as
+		// long as the workload takes to stop.
+		if cr.GetDeletionTimestamp() != nil {
+			return done, fmt.Errorf("service %s is being deleted; run the audit again once it has gone", report.Service)
+		}
 		uid := cr.GetUID()
 
 		// The dead reference is replaced rather than added to. An object has one

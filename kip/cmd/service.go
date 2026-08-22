@@ -16,8 +16,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 
+	"github.com/getkipper/kipper/controller/pkg/datavolume"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/kip/internal/auth"
 	"github.com/getkipper/kipper/kip/internal/deployer"
@@ -98,7 +100,7 @@ Examples:
 
 var serviceDeleteCmd = &cobra.Command{
 	Use:   "delete [name]",
-	Short: "Delete a stateful service and its data",
+	Short: "Delete a stateful service, and its volume with --delete-data",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runServiceDelete,
 }
@@ -210,8 +212,14 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 	dynClient := k8sClient.Dynamic()
 
 	// Check if service already exists
-	_, getErr := dynClient.Resource(manifest.ServiceGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	existing, getErr := dynClient.Resource(manifest.ServiceGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if getErr == nil {
+		// A service on its way out still holds the name, and a delete that has
+		// stopped holds it for good. "Already exists" would send an operator
+		// looking for a service they have just deleted.
+		if existing.GetDeletionTimestamp() != nil {
+			return fmt.Errorf("service %q in %s is still being deleted and holds the name until it has finished; kip service list says what is holding it up", name, namespace)
+		}
 		return fmt.Errorf("service %q already exists in %s", name, namespace)
 	}
 	if !errors.IsNotFound(getErr) {
@@ -264,7 +272,8 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\n  Creating %s service %q in %s...\n", serviceType, name, namespace)
 
-	if _, err := dynClient.Resource(manifest.ServiceGVR).Namespace(namespace).Create(ctx, serviceCR, metav1.CreateOptions{}); err != nil {
+	created, err := dynClient.Resource(manifest.ServiceGVR).Namespace(namespace).Create(ctx, serviceCR, metav1.CreateOptions{})
+	if err != nil {
 		return fmt.Errorf("creating service CR: %w", err)
 	}
 	fmt.Printf("  ✔  Service CR created\n")
@@ -276,7 +285,11 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 	var secret *unstructured.Unstructured
 	for attempt := 0; attempt < 30; attempt++ {
 		s, err := clientset.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
-		if err == nil {
+		// The Secret has to be this service's, not merely standing under its
+		// name. One already there is what the reconciler refuses over, and
+		// waiting on the name alone reads somebody else's credentials as this
+		// service coming up.
+		if err == nil && ownedBy(s, created.GetUID()) {
 			// Read credentials from the secret created by the reconciler
 			secret = &unstructured.Unstructured{}
 			secret.Object = map[string]interface{}{
@@ -294,8 +307,14 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	fmt.Printf("  ✔  Credentials generated\n")
-	fmt.Printf("  ✔  Persistent storage provisioned\n")
+	snapshot, _ := (&service.Manager{Client: clientset, Dynamic: dynClient}).Read(ctx, namespace, name)
+	workload, workloadErr := clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+	sayHowItCameUp(os.Stdout, snapshot, name, secret != nil, workloadErr == nil && ownedBy(workload, created.GetUID()))
+	if snapshot.Blocked() {
+		// The values in that Secret are whatever is standing under the name, and
+		// printing them hands out another object's credentials.
+		secret = nil
+	}
 
 	if secret != nil {
 		fmt.Printf("\n")
@@ -379,13 +398,17 @@ func writeServiceList(out io.Writer, services []service.Status) {
 	}
 }
 
-// writeBlockedNotice says why a service's credentials were refused, and says
-// nothing at all when they were not.
+// writeBlockedNotice says why a service was refused, and says nothing at all
+// when it was not.
+//
+// The headline names no subsystem, because more than one refusal reaches it: the
+// credentials the reconciler would not use, and a name that belongs to something
+// else. The reason and the message say which.
 func writeBlockedNotice(out io.Writer, name, reason, message string) {
 	if reason == "" {
 		return
 	}
-	say(out, "  !   %s credentials are blocked (%s)\n", name, reason)
+	say(out, "  !   %s is blocked (%s)\n", name, reason)
 	say(out, "      %s\n\n", message)
 }
 
@@ -522,28 +545,258 @@ func runServiceDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx := context.Background()
-	dynClient := k8sClient.Dynamic()
-
-	// Try to delete the Service CR first (proper path)
-	crErr := dynClient.Resource(manifest.ServiceGVR).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{})
-	if crErr == nil {
-		fmt.Printf("\n  ✔  Service %q deleted\n\n", name)
-		return nil
-	}
-
-	// Fall back to direct resource deletion for services created before CR support
-	if !errors.IsNotFound(crErr) && !deleteData {
-		return fmt.Errorf("refusing to delete service %q without --delete-data flag (this permanently destroys all data)", name)
-	}
-
 	mgr := &service.Manager{Client: k8sClient.Clientset(), Dynamic: k8sClient.Dynamic()}
-	if err := mgr.Delete(ctx, namespace, name, deleteData); err != nil {
+	return deleteService(context.Background(), os.Stdout, mgr, k8sClient.Dynamic(), namespace, name, deleteData)
+}
+
+// deleteService removes a service, and its data when that was asked for.
+//
+// The two are separate steps because they finish at different times. Deleting
+// the CR takes the workload with it through owner references, and only once that
+// has happened can the volume go: a claim deleted while the StatefulSet is still
+// there is written straight back from its template, so the operator would be
+// left with an empty volume and the data still on disk.
+func deleteService(ctx context.Context, out io.Writer, mgr *service.Manager, dyn dynamic.Interface, namespace, name string, deleteData bool) error {
+	// The service is read first, and everything after is pinned to that read. A
+	// set of volumes read before it, or a delete sent without it, would let a
+	// service that took the name in between be the one this acts on.
+	cr, err := readService(ctx, dyn, namespace, name)
+	if err != nil {
+		return err
+	}
+	if cr == nil {
+		// Nothing to delete under that name. Whatever appears there now is
+		// somebody's new service, not this one, so the CR is never touched and
+		// only what an earlier delete left behind is cleared.
+		return deleteLeftovers(ctx, out, mgr, dyn, namespace, name, deleteData)
+	}
+
+	var volumes service.DataVolumes
+	var decided string
+	if deleteData {
+		if volumes, err = mgr.DataVolumes(ctx, namespace, name); err != nil {
+			return err
+		}
+		if decided, err = markForDataDeletion(ctx, dyn, namespace, cr); err != nil {
+			return err
+		}
+	} else if decided, err = clearTheDataMark(ctx, dyn, namespace, cr); err != nil {
 		return err
 	}
 
-	fmt.Printf("\n  ✔  Service %q deleted (data destroyed)\n\n", name)
+	// Pinned to the version the mark was decided on as well as to the service
+	// itself. The identity alone would let somebody else's mark land in between
+	// and turn a delete that says it kept the volume into one that destroyed it.
+	uid := cr.GetUID()
+	pinned := metav1.Preconditions{UID: &uid}
+	if decided != "" {
+		pinned.ResourceVersion = &decided
+	}
+	crErr := dyn.Resource(manifest.ServiceGVR).Namespace(namespace).Delete(ctx, name,
+		metav1.DeleteOptions{Preconditions: &pinned})
+	switch {
+	case errors.IsConflict(crErr):
+		// Careful about what this claims. The conflict says this delete was not
+		// the one the API server took, and nothing more: another may have been
+		// accepted a moment earlier and be running now.
+		return fmt.Errorf("service %q changed while this delete was running, so this command did not delete it; run kip service list to see where it stands", name)
+	case crErr == nil:
+		if !deleteData {
+			say(out, "\n  ✔  Service %q deleted\n", name)
+			// Said plainly, because a volume nobody knows about is what a
+			// service of the same name lands on later, and the reconciler then
+			// refuses it for having data and no password to go with it.
+			say(out, "      Its volume was kept. Run the same delete with --delete-data to remove it.\n\n")
+			return nil
+		}
+		if err := mgr.DestroyVolumes(ctx, namespace, name, volumes); err != nil {
+			// The CR has gone by now and is not coming back, so the failure has
+			// to say so. An operator reading only about the volume would go
+			// looking for a service that is no longer there.
+			return fmt.Errorf("service %q was deleted, but its volume was not: %w", name, err)
+		}
+		sayWhatBecameOfTheVolume(out, name, volumes)
+		return nil
+	case !errors.IsNotFound(crErr):
+		return fmt.Errorf("deleting service %q: %w", name, crErr)
+	}
+
+	// The CR went between the read and the delete, so there may still be a
+	// volume under the name.
+	return deleteLeftovers(ctx, out, mgr, dyn, namespace, name, deleteData)
+}
+
+// deleteLeftovers clears what is under a name that has no service record: a
+// service from before those records existed, or one whose record has already
+// gone and left the volume behind.
+//
+// Nothing here touches a service record, because there is none to touch. What it
+// does touch is checked for being Kipper's and for having no owner, so a service
+// created under the name while this was running keeps everything of its own.
+func deleteLeftovers(ctx context.Context, out io.Writer, mgr *service.Manager, dyn dynamic.Interface, namespace, name string, deleteData bool) error {
+	// The Secret this name derives can be where an app keeps its git token.
+	// Creating such a service is refused for that reason; deleting one that was
+	// never there must not take the app's token instead.
+	if app, holds, err := appHoldingTheCredential(ctx, dyn, namespace, name); err != nil {
+		return err
+	} else if holds {
+		return fmt.Errorf("there is no service %q, and %s is where the app %q keeps its git token, so this would delete that instead",
+			name, secretname.ServiceCredentials(name), app)
+	}
+
+	volumes, err := mgr.DataVolumes(ctx, namespace, name)
+	if err != nil {
+		return err
+	}
+	if err := mgr.Delete(ctx, namespace, name, deleteData); err != nil {
+		return err
+	}
+	sayWhatBecameOfTheVolume(out, name, volumes)
 	return nil
+}
+
+// sayWhatBecameOfTheVolume reports the destroy for what it was.
+//
+// Nothing found is its own outcome: the volume may have gone in an earlier
+// delete, or it may be standing there under a name or label this does not
+// recognise as the service's. Saying it went either way is a claim about data
+// nobody can check afterwards.
+func sayWhatBecameOfTheVolume(out io.Writer, name string, volumes service.DataVolumes) {
+	if len(volumes) == 0 {
+		say(out, "\n  ✔  Service %q deleted. No volume of its own was found to remove.\n\n", name)
+		return
+	}
+	say(out, "\n  ✔  Service %q deleted, and its volume with it\n\n", name)
+}
+
+// ownedBy says whether the reconciler made this object for the service that was
+// just created.
+func ownedBy(object metav1.Object, service types.UID) bool {
+	owner := metav1.GetControllerOf(object)
+	return owner != nil && owner.UID == service
+}
+
+// sayHowItCameUp reports what the wait actually found.
+//
+// The wait gives up after a while, and a service the reconciler refused never
+// produces the Secret it is waiting for. Ticking both lines regardless tells an
+// operator the service came up on the one flow where it most often has not: a
+// volume left behind by an earlier delete, and a new service of the same name
+// landing on it with no password recorded for the data already there.
+func sayHowItCameUp(out io.Writer, snapshot service.Snapshot, name string, ready, provisioned bool) {
+	// The refusal comes first, because the wait finds a Secret by name and a
+	// name is all it proves. A Secret already standing there is the very thing
+	// the reconciler refuses over, so a service can be blocked and look ready in
+	// the same breath.
+	if snapshot.Blocked() {
+		say(out, "  !   Service %q was created but has not come up\n", name)
+		writeBlockedNotice(out, name, snapshot.BlockedReason, snapshot.BlockedMessage)
+		return
+	}
+	if ready {
+		say(out, "  ✔  Credentials generated\n")
+		// Asked separately, because the reconciler writes the credentials before
+		// it makes the workload. Finding the Secret says nothing about whether
+		// the volume exists.
+		if provisioned {
+			say(out, "  ✔  Persistent storage provisioned\n")
+			return
+		}
+		say(out, "  !   Its volume is not there yet. Run kip service list to see where it has got to.\n\n")
+		return
+	}
+	say(out, "  !   Service %q was created but has not come up\n", name)
+	say(out, "      Nothing has said why yet. Run kip service list to see where it has got to.\n\n")
+}
+
+// markForDataDeletion asks the cluster to remove the service's volumes as well.
+//
+// A project's own operators can delete their services and read their volumes,
+// and delete no volume at all: kipper:project-owner and kipper:project-deployer
+// carry get, list and watch on claims and nothing more. The mark is what gets
+// their data removed, by the Service finalizer, and it is set before the CR goes
+// because afterwards there is nothing left to set it on.
+//
+// It returns the version the service stands at once the mark is on it, so the
+// delete that follows can be pinned to the decision and not only to the object.
+func markForDataDeletion(ctx context.Context, dyn dynamic.Interface, namespace string, cr *unstructured.Unstructured) (string, error) {
+	if cr.GetAnnotations()[datavolume.DeleteAnnotation] == "true" {
+		return cr.GetResourceVersion(), nil
+	}
+
+	// The resourceVersion goes in the patch, which the API server reads as a
+	// condition: the mark lands on the service that was read, before its volumes
+	// were, or on nothing at all.
+	mark := []byte(fmt.Sprintf(`{"metadata":{"resourceVersion":%q,"annotations":{%q:"true"}}}`,
+		cr.GetResourceVersion(), datavolume.DeleteAnnotation))
+	services := dyn.Resource(manifest.ServiceGVR).Namespace(namespace)
+	marked, err := services.Patch(ctx, cr.GetName(), types.MergePatchType, mark, metav1.PatchOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return cr.GetResourceVersion(), nil
+		}
+		return "", fmt.Errorf("asking the cluster to remove the volume of %q: %w", cr.GetName(), err)
+	}
+	return marked.GetResourceVersion(), nil
+}
+
+// readService reads the service a delete was asked about, and refuses one whose
+// own deletion has already started. Nothing there is not an error: the CR-less
+// path takes over from here.
+func readService(ctx context.Context, dyn dynamic.Interface, namespace, name string) (*unstructured.Unstructured, error) {
+	cr, err := dyn.Resource(manifest.ServiceGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading service %q: %w", name, err)
+	}
+	if err := notAlreadyGoing(cr, name); err != nil {
+		return nil, err
+	}
+	return cr, nil
+}
+
+// clearTheDataMark takes off a mark an earlier delete left behind.
+//
+// A mark outlives the command that set it whenever the delete that should have
+// followed did not happen. Left there, this delete would say the volume was kept
+// while the finalizer destroyed it, which is the one thing an operator cannot
+// check afterwards. Saying the volume stays means making sure it does.
+// It returns the version the service stands at once the mark is off it, so the
+// delete that follows can be pinned to the decision and not only to the object.
+// Nothing to clear is left alone: a write nobody needs is one more chance for
+// this and a concurrent delete to disagree.
+func clearTheDataMark(ctx context.Context, dyn dynamic.Interface, namespace string, cr *unstructured.Unstructured) (string, error) {
+	if _, marked := cr.GetAnnotations()[datavolume.DeleteAnnotation]; !marked {
+		return cr.GetResourceVersion(), nil
+	}
+
+	clear := []byte(fmt.Sprintf(`{"metadata":{"resourceVersion":%q,"annotations":{%q:null}}}`,
+		cr.GetResourceVersion(), datavolume.DeleteAnnotation))
+	services := dyn.Resource(manifest.ServiceGVR).Namespace(namespace)
+	cleared, err := services.Patch(ctx, cr.GetName(), types.MergePatchType, clear, metav1.PatchOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return cr.GetResourceVersion(), nil
+		}
+		return "", fmt.Errorf("making sure the volume of %q is kept: %w", cr.GetName(), err)
+	}
+	return cleared.GetResourceVersion(), nil
+}
+
+// notAlreadyGoing refuses a service whose deletion has already started.
+//
+// Neither half of the delete has anything to say about a service that is on its
+// way out: the mark cannot be added, because the API server will not take a
+// finalizer onto a deleting object and the mark without one decides nothing, and
+// taking the mark off cannot call back a volume the finalizer has already
+// deleted.
+func notAlreadyGoing(cr *unstructured.Unstructured, name string) error {
+	if cr.GetDeletionTimestamp() == nil {
+		return nil
+	}
+	return fmt.Errorf("service %q is already being deleted, and what happens to its volume was settled by that delete; kip service list says what is holding it up", name)
 }
 
 func runServiceBind(cmd *cobra.Command, args []string) error {

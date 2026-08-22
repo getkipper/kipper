@@ -77,6 +77,14 @@ func (s *Services) Create(w http.ResponseWriter, r *http.Request) {
 	var live kipperv1.Service
 	switch err := s.CRClient.Get(r.Context(), types.NamespacedName{Name: req.Name, Namespace: req.Namespace}, &live); {
 	case err == nil:
+		// A service on its way out still holds the name, and a delete that has
+		// stopped holds it for good. "Already exists" would send an operator
+		// looking for a service they have just deleted.
+		if !live.DeletionTimestamp.IsZero() {
+			respondError(w, http.StatusConflict, fmt.Sprintf(
+				"service %q is still being deleted and holds the name until it has finished", req.Name))
+			return
+		}
 		respondError(w, http.StatusConflict, fmt.Sprintf("service %q already exists", req.Name))
 		return
 	case !errors.IsNotFound(err):

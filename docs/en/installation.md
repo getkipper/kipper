@@ -728,7 +728,7 @@ kip service share mailhog --expires 72h      # shareable link to a service web U
 kip service import mydb --file dump.sql      # load a database dump
 kip service export mydb --file nightly.dump  # dump a database to a local file
 kip service credentials                      # check every service owns its credentials
-kip service delete mydb --delete-data        # delete (requires flag)
+kip service delete mydb --delete-data        # delete the service and its volume
 ```
 
 `kip service share` accepts `--project` and `--environment` to target a service outside the active project, `--expires` (up to 720h) for the link lifetime, and `--label` for a note in the listing. Use `--list` to see a service's links, `--revoke <id>` to kill one, and `--revoke-all` plus `--rotate-key` to contain a leak.

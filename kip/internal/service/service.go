@@ -43,9 +43,10 @@ type Status struct {
 	Status  string
 	Storage string
 	Ready   string
-	// BlockedReason and BlockedMessage carry the CredentialsReady condition
-	// when the reconciler has refused this service's credentials. Empty on a
-	// service that is fine, and on any cluster older than the condition.
+	// BlockedReason and BlockedMessage carry whichever refusal the service is
+	// standing on: credentials the reconciler would not use, a name that belongs
+	// to something else, or a deletion that cannot finish. Empty on a service
+	// that is fine, and on any cluster older than the conditions.
 	BlockedReason  string
 	BlockedMessage string
 }
@@ -342,22 +343,127 @@ func (m *Manager) Delete(ctx context.Context, namespace, name string, deleteData
 		return fmt.Errorf("refusing to delete service %q without --delete-data flag (this permanently destroys all data)", name)
 	}
 
-	c := m.Client
-	_ = c.AppsV1().StatefulSets(namespace).Delete(ctx, name, metav1.DeleteOptions{})
-	_ = c.CoreV1().Services(namespace).Delete(ctx, name, metav1.DeleteOptions{})
-	_ = c.CoreV1().Secrets(namespace).Delete(ctx, secretname.ServiceCredentials(name), metav1.DeleteOptions{})
+	// There is no CR on this path and so no owner reference to go on, which
+	// leaves the management label as the only thing saying the workload is
+	// Kipper's. A StatefulSet called db with a claim called data-db-0 is what
+	// anybody's database looks like, and Kipper's rule is that a resource
+	// without the label is not its to touch.
+	workload, err := m.workloadIsKippers(ctx, namespace, name)
+	if err != nil {
+		return err
+	}
 
-	// Delete PVCs created by the StatefulSet
-	pvcs, err := c.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("app=%s", name),
+	// Read before deleting, because the name is free the moment the workload
+	// goes and what gets destroyed has to be the volumes of the service that was
+	// asked about.
+	volumes, err := m.DataVolumes(ctx, namespace, name)
+	if err != nil {
+		return err
+	}
+
+	// Everything is read before anything is deleted. Checking as it went would
+	// leave a service half removed the moment one object turned out to be
+	// somebody else's, and every rerun would stop in the same place, so the
+	// volume that made the operator run this could never be cleared.
+	c := m.Client
+	address, err := m.ourObject("address", namespace, name, func() (metav1.Object, error) {
+		return c.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
 	})
-	if err == nil {
-		for _, pvc := range pvcs.Items {
-			_ = c.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, pvc.Name, metav1.DeleteOptions{})
+	if err != nil {
+		return err
+	}
+	credentials := secretname.ServiceCredentials(name)
+	secret, err := m.ourObject("credentials", namespace, credentials, func() (metav1.Object, error) {
+		return c.CoreV1().Secrets(namespace).Get(ctx, credentials, metav1.GetOptions{})
+	})
+	if err != nil {
+		return err
+	}
+
+	// Pinned to the workload whose provenance was read, because the name is free
+	// the moment it goes and what stands there next may be nobody's business of
+	// this command's.
+	if workload != nil {
+		uid := workload.GetUID()
+		err := c.AppsV1().StatefulSets(namespace).Delete(ctx, name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid},
+		})
+		if err != nil && !errors.IsNotFound(err) && !errors.IsConflict(err) {
+			return fmt.Errorf("deleting the workload of %s: %w", name, err)
+		}
+	}
+	if address != nil {
+		uid := address.GetUID()
+		err := c.CoreV1().Services(namespace).Delete(ctx, name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid},
+		})
+		if err != nil && !errors.IsNotFound(err) && !errors.IsConflict(err) {
+			return fmt.Errorf("deleting the cluster address of %s: %w", name, err)
+		}
+	}
+	if secret != nil {
+		uid := secret.GetUID()
+		err := c.CoreV1().Secrets(namespace).Delete(ctx, credentials, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid},
+		})
+		if err != nil && !errors.IsNotFound(err) && !errors.IsConflict(err) {
+			return fmt.Errorf("deleting %s: %w", credentials, err)
 		}
 	}
 
-	return nil
+	// Through the same destroy the CR path uses, so both agree on which volumes
+	// belong to a service, and neither deletes a claim while the StatefulSet is
+	// still there to write it back.
+	return m.DestroyVolumes(ctx, namespace, name, volumes)
+}
+
+// ourObject reads one of the objects a service's name derives and refuses it if
+// it is not Kipper's. Nothing there is not a refusal, and comes back nil.
+func (m *Manager) ourObject(kind, namespace, name string, read func() (metav1.Object, error)) (metav1.Object, error) {
+	object, err := read()
+	if errors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading the %s of %s: %w", kind, name, err)
+	}
+	if object.GetLabels()[labels.ManagedBy] != labels.Kipper {
+		return nil, fmt.Errorf("the %s named %s in %s is not Kipper's", kind, name, namespace)
+	}
+	// An owner means something else is keeping this object, and this path clears
+	// what a deleted service left behind. Whether it has stood there all along or
+	// appeared while this was reading, it is not the leftover.
+	if owner := metav1.GetControllerOf(object); owner != nil {
+		return nil, fmt.Errorf("the %s named %s in %s belongs to %s %s, so it is not the leftover of a deleted service",
+			kind, name, namespace, owner.Kind, owner.Name)
+	}
+	return object, nil
+}
+
+// workloadIsKippers refuses a workload that carries no sign of being Kipper's,
+// and returns the one it read so the delete can be pinned to it.
+//
+// Nothing to refuse is not a refusal: a service whose workload has already gone
+// leaves only its volume, and that is the state this path exists to clear.
+func (m *Manager) workloadIsKippers(ctx context.Context, namespace, name string) (metav1.Object, error) {
+	workload, err := m.Client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading the workload of %s: %w", name, err)
+	}
+	if workload.Labels[labels.ManagedBy] != labels.Kipper {
+		return nil, fmt.Errorf("the workload named %s in %s is not Kipper's, so the data under that name is not this service's to destroy", name, namespace)
+	}
+	// A workload with a controller belongs to a service record, and this path
+	// clears what a service that has gone left behind. Whether the record has
+	// stood there all along or appeared while this was reading, this workload is
+	// not the leftover.
+	if owner := metav1.GetControllerOf(workload); owner != nil {
+		return nil, fmt.Errorf("the workload named %s in %s belongs to %s %s, so it is not the leftover of a deleted service", name, namespace, owner.Kind, owner.Name)
+	}
+	return workload, nil
 }
 
 // UpdateResult describes what changed during an update.
@@ -466,13 +572,17 @@ func (m *Manager) Update(ctx context.Context, namespace, name string, opts Optio
 // and has to agree with itself. Asking twice lets the condition change between
 // the reads, and then it prints credentials the reconciler has just refused,
 // which is the one outcome it exists to prevent.
+//
+// The blockage is whichever refusal the service is standing on, not the
+// credentials one alone: a name that belongs to something else stops a service
+// just as surely.
 type Snapshot struct {
 	Type           string
 	BlockedReason  string
 	BlockedMessage string
 }
 
-// Blocked reports whether the reconciler has refused these credentials.
+// Blocked reports whether the reconciler has refused this service anything.
 func (s Snapshot) Blocked() bool { return s.BlockedReason != "" }
 
 // Read takes that one look at the service.
@@ -488,7 +598,10 @@ func (m *Manager) Read(ctx context.Context, namespace, name string) (Snapshot, e
 		return Snapshot{}, fmt.Errorf("getting service CR: %w", err)
 	}
 	svcType, _, _ := unstructured.NestedString(cr.Object, "spec", "type")
-	reason, message := credentialsBlockage(cr.Object)
+	reason, message := blockage(cr.Object, servicecatalog.ConditionCredentialsReady)
+	if reason == "" {
+		reason, message = blockage(cr.Object, servicecatalog.ConditionNameFree)
+	}
 	return Snapshot{Type: svcType, BlockedReason: reason, BlockedMessage: message}, nil
 }
 
@@ -500,7 +613,7 @@ func (m *Manager) Read(ctx context.Context, namespace, name string) (Snapshot, e
 // as whatever the API server holds, so a status that is not a map or a
 // conditions entry that is not one has to answer "nothing wrong" rather than
 // stop the listing.
-func credentialsBlockage(obj map[string]interface{}) (string, string) {
+func blockage(obj map[string]interface{}, wanted string) (string, string) {
 	conditions, found, err := unstructured.NestedSlice(obj, "status", "conditions")
 	if err != nil || !found {
 		return "", ""
@@ -511,7 +624,7 @@ func credentialsBlockage(obj map[string]interface{}) (string, string) {
 			continue
 		}
 		name, _ := condition["type"].(string)
-		if name != servicecatalog.ConditionCredentialsReady {
+		if name != wanted {
 			continue
 		}
 		// Only a condition that is false is a blockage: the reconciler takes the
@@ -553,6 +666,19 @@ func (m *Manager) List(ctx context.Context, namespace string) ([]Status, error) 
 		} else {
 			phase = strings.ToLower(phase)
 		}
+		// A service keeps the phase it had until it goes, and one whose cleanup
+		// has stopped keeps it for good. Left as running it reads as a delete
+		// that did nothing.
+		reason, message := blockage(cr.Object, servicecatalog.ConditionCredentialsReady)
+		if reason == "" {
+			reason, message = blockage(cr.Object, servicecatalog.ConditionNameFree)
+		}
+		if cr.GetDeletionTimestamp() != nil {
+			phase = "deleting"
+			if stuck, why := blockage(cr.Object, servicecatalog.ConditionCleanupComplete); stuck != "" {
+				reason, message = stuck, why
+			}
+		}
 
 		ready := "0/0"
 		if ss, ssErr := m.Client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{}); ssErr == nil {
@@ -566,7 +692,6 @@ func (m *Manager) List(ctx context.Context, namespace string) ([]Status, error) 
 			}
 		}
 
-		reason, message := credentialsBlockage(cr.Object)
 		services = append(services, Status{
 			Name:           name,
 			Type:           svcType,

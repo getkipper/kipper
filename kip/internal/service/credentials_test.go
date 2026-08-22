@@ -571,3 +571,32 @@ func TestRepairCredentials_KeepsReferencesThatDoNotControl(t *testing.T) {
 		t.Fatalf("a reference that controls nothing was dropped: %+v", got.OwnerReferences)
 	}
 }
+
+// A service on its way out is not one to hand a Secret to. The reference would
+// be written, reported as repaired, and collected with the service moments
+// later, and the window is as long as the cleanup takes.
+func TestRepairCredentials_RefusesAServiceThatIsBeingDeleted(t *testing.T) {
+	ctx := context.Background()
+	leaving := serviceCR("db", "uid-db")
+	metadata, _ := leaving.Object["metadata"].(map[string]interface{})
+	metadata["deletionTimestamp"] = "2026-08-21T23:00:00Z"
+	metadata["finalizers"] = []interface{}{"kipper.run/service-cleanup"}
+
+	m := managerWith([]runtime.Object{credentialsSecret("db-credentials", nil)}, leaving)
+
+	audit, err := m.AuditCredentials(ctx, "shop-prod")
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	if _, err := m.RepairCredentials(ctx, "shop-prod", audit); err == nil {
+		t.Fatal("a secret was handed to a service on its way out, and goes with it")
+	}
+
+	got, err := m.Client.CoreV1().Secrets("shop-prod").Get(ctx, "db-credentials", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reading the secret: %v", err)
+	}
+	if metav1.GetControllerOf(got) != nil {
+		t.Error("the secret was adopted onto a service that is leaving, so it is collected with it")
+	}
+}
