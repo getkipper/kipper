@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 )
 
 // oidcUsernamePrefix must match the API server's claimMappings username
@@ -147,4 +148,105 @@ func (r *ProjectReconciler) reconcileMemberBindings(ctx context.Context, project
 		}
 	}
 	return nil
+}
+
+// revokeStaleMemberBindings takes access away and can do nothing else.
+//
+// The ordinary reconcile refuses a namespace whose ownership it cannot prove
+// and skips it, which is correct for granting and leaves revocation unreachable
+// exactly where it matters: a namespace whose project label has drifted still
+// holds the bindings this project wrote, and a member removed from the project
+// keeps them. Nothing else visits that namespace, because nothing else is
+// allowed to.
+//
+// So this pass exists, and it is a separate one rather than a reordering.
+// reconcileMemberBindings writes desired bindings, so running it before
+// ownership is proven would let a project whose environment resolves to a
+// namespace it does not own put its own members into that namespace's bindings,
+// and the later refusal would leave the grant standing. Two projects can
+// resolve to one namespace name, so that is not hypothetical.
+//
+// The rule is that the desired subject set here is the existing set minus
+// whoever the project no longer grants. Never a union, never an addition. A
+// binding it empties is deleted, and a RoleRef is never written: it is
+// immutable in Kubernetes, so a binding pointing at the wrong role is deleted
+// rather than corrected.
+//
+// It is scoped to bindings carrying this project's own label, so it cannot
+// reach another tenant's, and it records nothing: writing the namespace into
+// status would widen the Project finalizer's deletion backstop onto a namespace
+// whose ownership was never proven.
+func (r *ProjectReconciler) revokeStaleMemberBindings(ctx context.Context, project *kipperv1.Project) error {
+	var bindings rbacv1.RoleBindingList
+	if err := r.List(ctx, &bindings, client.MatchingLabels{
+		kipperlabels.Project: project.Name,
+	}); err != nil {
+		return fmt.Errorf("listing this project's member bindings: %w", err)
+	}
+
+	granted := grantedSubjects(project)
+
+	for i := range bindings.Items {
+		binding := &bindings.Items[i]
+		role, managed := managedMemberBindingRole(binding.Name)
+		if !managed {
+			continue
+		}
+
+		keep := make([]rbacv1.Subject, 0, len(binding.Subjects))
+		for _, s := range binding.Subjects {
+			if granted[role][s.Name] {
+				keep = append(keep, s)
+			}
+		}
+		if len(keep) == len(binding.Subjects) {
+			continue
+		}
+
+		if len(keep) == 0 {
+			if err := r.Delete(ctx, binding); err != nil && !errors.IsNotFound(err) {
+				return fmt.Errorf("removing the emptied %s binding in %s: %w", binding.Name, binding.Namespace, err)
+			}
+			continue
+		}
+
+		binding.Subjects = keep
+		if err := r.Update(ctx, binding); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("revoking from the %s binding in %s: %w", binding.Name, binding.Namespace, err)
+		}
+	}
+	return nil
+}
+
+// grantedSubjects is who the project still grants each built-in role, as the
+// subject names a binding carries.
+//
+// A member holding a role this build does not know appears under none of them,
+// so the revoke pass takes their access away wherever it finds it. That is the
+// same direction every other path takes for an unrecognised role.
+func grantedSubjects(project *kipperv1.Project) map[kipperv1.ProjectMemberRole]map[string]bool {
+	granted := make(map[kipperv1.ProjectMemberRole]map[string]bool, len(memberClusterRoles))
+	for role := range memberClusterRoles {
+		granted[role] = map[string]bool{}
+	}
+	for _, m := range project.Spec.Members {
+		email := strings.TrimSpace(m.Email)
+		if email == "" {
+			continue
+		}
+		if subjects, ok := granted[m.Role]; ok {
+			subjects[oidcUsernamePrefix+email] = true
+		}
+	}
+	return granted
+}
+
+// managedMemberBindingRole maps a managed binding's name back to its role.
+func managedMemberBindingRole(name string) (kipperv1.ProjectMemberRole, bool) {
+	for role := range memberClusterRoles {
+		if name == "kipper-project-"+string(role) {
+			return role, true
+		}
+	}
+	return "", false
 }

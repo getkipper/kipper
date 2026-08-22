@@ -182,6 +182,20 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, fmt.Errorf("pruning removed environments: %w", err)
 	}
 
+	// Granting is done. Everything above skips a namespace whose ownership it
+	// cannot prove, which leaves the bindings already sitting there untouched:
+	// a member removed from the project keeps their access in exactly the
+	// namespace nobody is watching. This pass reaches those, and can only take
+	// away.
+	//
+	// It runs after the loop rather than inside it because it is not per
+	// namespace: it finds every binding carrying this project's label wherever
+	// it is, including in namespaces that have dropped out of the project's
+	// environments entirely.
+	if err := r.revokeStaleMemberBindings(ctx, &project); err != nil {
+		return ctrl.Result{}, fmt.Errorf("revoking stale member bindings: %w", err)
+	}
+
 	// The project is over limit whenever it declares more environments than its
 	// cap, whether that is a fresh spec we capped or an existing project a
 	// downgrade pushed over. Both surface the condition; creation is what the
