@@ -43,6 +43,15 @@ const conditionEnvLimitExceeded = "EnvironmentLimitExceeded"
 // alone and the conflict is reported instead.
 const conditionNamespaceConflict = "NamespaceConflict"
 
+// The two reasons a namespace is refused need different repairs, so they are
+// different reasons. Another project holding it is fixed by renaming one of
+// them; nothing holding it is fixed by a person deciding whose it is. Sharing
+// one reason sent an operator looking for a project that was not there.
+const (
+	reasonNamespaceOwnedByAnotherProject = "NamespaceOwnedByAnotherProject"
+	reasonNamespaceNotLabelled           = "NamespaceNotLabelled"
+)
+
 // ProjectReconciler reconciles a Project CR.
 type ProjectReconciler struct {
 	client.Client
@@ -528,6 +537,13 @@ func (r *ProjectReconciler) setNamespaceConflictCondition(project *kipperv1.Proj
 		return
 	}
 	message := conflicts[0].Error()
+	// The reason describes the first conflict, which is the one the message
+	// leads with. A pass that hits both kinds reports the first and names the
+	// rest, and the operator sees the second kind once the first is dealt with.
+	reason := reasonNamespaceOwnedByAnotherProject
+	if conflicts[0].owner == "" {
+		reason = reasonNamespaceNotLabelled
+	}
 	if len(conflicts) > 1 {
 		others := make([]string, 0, len(conflicts)-1)
 		for _, conflict := range conflicts[1:] {
@@ -539,7 +555,7 @@ func (r *ProjectReconciler) setNamespaceConflictCondition(project *kipperv1.Proj
 	changed := apimeta.SetStatusCondition(&project.Status.Conditions, metav1.Condition{
 		Type:               conditionNamespaceConflict,
 		Status:             metav1.ConditionTrue,
-		Reason:             "NamespaceOwnedByAnotherProject",
+		Reason:             reason,
 		Message:            message,
 		ObservedGeneration: project.Generation,
 	})
