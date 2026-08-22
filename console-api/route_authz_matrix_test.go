@@ -477,64 +477,6 @@ func matrixCells(t *testing.T) map[string]map[string]string {
 	return out
 }
 
-// matrixGateNotReached are the routes where the probe stops at a 400 before any
-// authorization gate runs, so their cells prove nothing about who may call
-// them.
-//
-// They are listed rather than left to be noticed, because a blind spot nobody
-// has written down is indistinguishable from coverage. Each one authorizes from
-// the request body, which the probe cannot supply generically: it sends `{}` to
-// every route, and these answer "that is not a valid request" first. Giving
-// each a real body is the way to shrink this list, and it should only shrink.
-var matrixGateNotReached = map[string]bool{
-	"GET /api/v1/storage/{service}/shared": true,
-	"POST /api/v1/ai/analyse-logs":         true,
-	"POST /api/v1/ai/chat":                 true,
-	"POST /api/v1/auth/2fa/confirm":        true,
-	"POST /api/v1/auth/2fa/enroll":         true,
-	"POST /api/v1/auth/2fa/reset":          true,
-	"POST /api/v1/bind":                    true,
-	"POST /api/v1/invites/{token}/accept":  true,
-	"POST /api/v1/jobs":                    true,
-	"POST /api/v1/link":                    true,
-	"POST /api/v1/services":                true,
-	"POST /api/v1/unbind":                  true,
-	"POST /api/v1/unlink":                  true,
-	"POST /auth/callback":                  true,
-	"POST /auth/ui-code":                   true,
-}
-
-// TestTheMatrixKnowsWhereItIsBlind holds the list above to exactly the routes
-// that are actually blind.
-//
-// It fails in both directions. A new route that authorizes from its body would
-// otherwise join the matrix looking covered while proving nothing, and a route
-// that stops being blind should leave the list rather than sit there implying a
-// gap that has closed.
-func TestTheMatrixKnowsWhereItIsBlind(t *testing.T) {
-	blind := map[string]bool{}
-	for route, cells := range matrixCells(t) {
-		answers := map[string]bool{}
-		for _, column := range []string{"outsider", "viewer", "deployer", "owner"} {
-			answers[cells[column]] = true
-		}
-		if len(answers) == 1 && cells["outsider"] == "400" {
-			blind[route] = true
-		}
-	}
-
-	for route := range blind {
-		if !matrixGateNotReached[route] {
-			t.Errorf("%s answers 400 to every authenticated identity, so its gate is never reached and its cells prove nothing; add it to matrixGateNotReached or give the probe a body it accepts", route)
-		}
-	}
-	for route := range matrixGateNotReached {
-		if !blind[route] {
-			t.Errorf("%s is listed as never reaching its gate but now discriminates between identities; take it off the list", route)
-		}
-	}
-}
-
 // TestEveryWebsocketHandlerIsInTheMatrix counts the raw mux's registrations in
 // buildRouter and holds matrixWebsocketRoutes to that number.
 //

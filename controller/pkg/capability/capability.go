@@ -20,6 +20,7 @@
 package capability
 
 import (
+	"slices"
 	"sort"
 
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -124,6 +125,42 @@ var writeVerbs = []string{"create", "update", "patch", "delete"}
 // capabilities the same way twice.
 var catalogue = []Capability{
 	{
+		Name:      "apikeys.manage",
+		Planes:    PlaneC,
+		Grantable: true,
+		Effect:    "create, change and delete the project's API keys and their usage plans",
+	},
+	{
+		Name:      "database.read",
+		Planes:    PlaneC,
+		Grantable: true,
+		Effect:    "browse a service's databases, tables, rows and saved queries",
+	},
+	{
+		Name:      "database.write",
+		Planes:    PlaneC,
+		Grantable: true,
+		Effect:    "change rows, tables, indexes and saved queries in a service's database",
+	},
+	{
+		Name:      "env.read",
+		Planes:    PlaneC,
+		Grantable: true,
+		Effect:    "see an app's environment variables and which of them are secret, through the console",
+	},
+	{
+		Name:      "env.reveal",
+		Planes:    PlaneC,
+		Grantable: true,
+		Effect:    "reveal the stored value of a secret environment variable or git token through the console",
+	},
+	{
+		Name:      "env.write",
+		Planes:    PlaneC,
+		Grantable: true,
+		Effect:    "change an app's environment variables through the console",
+	},
+	{
 		Name:      "kipper.read",
 		Planes:    PlaneK | PlaneC,
 		Action:    "read",
@@ -161,7 +198,7 @@ var catalogue = []Capability{
 	},
 	{
 		Name:      "pods.exec",
-		Planes:    PlaneK | PlaneC,
+		Planes:    PlaneK,
 		Action:    "open a shell in",
 		Grantable: true,
 		Touches:   []string{"pods/exec"},
@@ -184,14 +221,33 @@ var catalogue = []Capability{
 		}},
 	},
 	{
+		Name:      "project.delete",
+		Planes:    PlaneC,
+		Grantable: true,
+		Effect:    "delete the project and everything in it",
+	},
+	{
+		Name:      "project.read",
+		Planes:    PlaneC,
+		Grantable: true,
+		Effect:    "see the project's settings, quota, resource requests, API keys and usage plans",
+	},
+	{
 		Name:      "project.settings",
 		Planes:    PlaneC,
 		Grantable: true,
 		Effect:    "change the project's own settings",
 	},
+	// secrets.read, secrets.write and pods.exec are the kubeconfig-level grants: they
+	// render RBAC so a member can read and write Secrets and ConfigMaps
+	// directly. No console route maps to them, because the console reaches the
+	// same data through env.read, env.reveal and env.write, and opens a shell
+	// through terminal.open, none of which grant anything outside it. That is the plane split doing its job rather than an
+	// oversight: a deployer changes an app's environment through the console
+	// today and holds no Kubernetes access to the Secret underneath.
 	{
 		Name:      "secrets.read",
-		Planes:    PlaneK | PlaneC,
+		Planes:    PlaneK,
 		Action:    "read",
 		Grantable: true,
 		Touches:   []string{"secrets", "configmaps"},
@@ -203,7 +259,7 @@ var catalogue = []Capability{
 	},
 	{
 		Name:      "secrets.write",
-		Planes:    PlaneK | PlaneC,
+		Planes:    PlaneK,
 		Action:    "create, change and delete",
 		Grantable: true,
 		Touches:   []string{"secrets", "configmaps"},
@@ -212,6 +268,24 @@ var catalogue = []Capability{
 			Resources: []string{"secrets", "configmaps"},
 			Verbs:     writeVerbs,
 		}},
+	},
+	{
+		Name:      "storage.read",
+		Planes:    PlaneC,
+		Grantable: true,
+		Effect:    "list and download objects in a service's buckets",
+	},
+	{
+		Name:      "storage.write",
+		Planes:    PlaneC,
+		Grantable: true,
+		Effect:    "upload and delete objects, and change what a bucket exposes publicly",
+	},
+	{
+		Name:      "terminal.open",
+		Planes:    PlaneC,
+		Grantable: true,
+		Effect:    "open a shell into a running workload through the console",
 	},
 	{
 		Name:      "workloads.read",
@@ -249,45 +323,96 @@ var catalogue = []Capability{
 // built-in takes more than a capability comparison.
 var builtIn = map[Role][]Name{
 	RoleViewer: {
+		"database.read",
+		"env.read",
 		"kipper.read",
 		"members.read",
 		"pods.logs.read",
+		"project.read",
+		"storage.read",
 		"workloads.read",
 	},
 	RoleDeployer: {
+		"apikeys.manage",
+		"database.read",
+		"database.write",
+		"env.read",
+		"env.reveal",
+		"env.write",
 		"kipper.read",
 		"kipper.write",
 		"members.read",
 		"pods.logs.read",
+		"project.read",
+		"storage.read",
+		"storage.write",
+		"terminal.open",
 		"workloads.read",
 		"workloads.restart",
 	},
 	RoleOwner: {
+		"apikeys.manage",
+		"database.read",
+		"database.write",
+		"env.read",
+		"env.reveal",
+		"env.write",
 		"kipper.read",
 		"kipper.write",
 		"members.manage",
 		"members.read",
 		"pods.exec",
 		"pods.logs.read",
+		"project.delete",
+		"project.read",
 		"project.settings",
 		"secrets.read",
 		"secrets.write",
+		"storage.read",
+		"storage.write",
+		"terminal.open",
 		"workloads.read",
 		"workloads.restart",
 	},
 }
 
 // All returns the catalogue in name order.
-func All() []Capability { return catalogue }
+//
+// It copies, as does Lookup, because this package is the authorization source
+// of truth and a caller sorting or appending to what it hands back would be
+// rewriting that: the verb slices are shared between capabilities, so one
+// in-place sort would change what several of them render.
+func All() []Capability {
+	out := make([]Capability, 0, len(catalogue))
+	for _, c := range catalogue {
+		out = append(out, c.clone())
+	}
+	return out
+}
 
 // Lookup finds a capability by name.
 func Lookup(name Name) (Capability, bool) {
 	for _, c := range catalogue {
 		if c.Name == name {
-			return c, true
+			return c.clone(), true
 		}
 	}
 	return Capability{}, false
+}
+
+// clone deep-copies a capability, including the slices inside its claims.
+func (c Capability) clone() Capability {
+	out := c
+	out.Touches = slices.Clone(c.Touches)
+	out.Claims = make([]Claim, 0, len(c.Claims))
+	for _, claim := range c.Claims {
+		out.Claims = append(out.Claims, Claim{
+			APIGroup:  claim.APIGroup,
+			Resources: slices.Clone(claim.Resources),
+			Verbs:     slices.Clone(claim.Verbs),
+		})
+	}
+	return out
 }
 
 // Unknown returns the names that are not in the catalogue, so a caller can say
@@ -325,8 +450,8 @@ func Rules(names []Name) []rbacv1.PolicyRule {
 		for _, claim := range c.Claims {
 			out = append(out, rbacv1.PolicyRule{
 				APIGroups: []string{claim.APIGroup},
-				Resources: claim.Resources,
-				Verbs:     claim.Verbs,
+				Resources: slices.Clone(claim.Resources),
+				Verbs:     slices.Clone(claim.Verbs),
 			})
 		}
 	}

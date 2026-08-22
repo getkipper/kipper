@@ -269,3 +269,64 @@ func equalRules(a, b []rbacv1.PolicyRule) bool {
 	}
 	return true
 }
+
+// The catalogue is the authorization source of truth, so what the read APIs
+// hand back must not be the catalogue itself. The verb slices are shared
+// between capabilities, so one caller sorting in place would change what
+// several of them render.
+func TestTheReadAPIsDoNotHandOutTheCatalogue(t *testing.T) {
+	before, ok := Lookup("secrets.read")
+	if !ok {
+		t.Fatal("secrets.read is missing")
+	}
+
+	all := All()
+	for i := range all {
+		all[i].Name = "clobbered"
+		all[i].Touches = append(all[i].Touches, "clobbered")
+		for j := range all[i].Claims {
+			all[i].Claims[j].Verbs = append(all[i].Claims[j].Verbs, "clobbered")
+			all[i].Claims[j].Resources = append(all[i].Claims[j].Resources, "clobbered")
+		}
+	}
+	rules := Rules([]Name{"secrets.read"})
+	for i := range rules {
+		rules[i].Verbs = append(rules[i].Verbs, "clobbered")
+	}
+
+	after, ok := Lookup("secrets.read")
+	if !ok {
+		t.Fatal("secrets.read went missing after a caller mutated what it was given")
+	}
+	if after.Name != before.Name {
+		t.Errorf("a caller renamed a catalogue entry: %q", after.Name)
+	}
+	if len(after.Touches) != len(before.Touches) {
+		t.Errorf("a caller changed what %s declares it touches: %v", after.Name, after.Touches)
+	}
+	for i := range after.Claims {
+		if len(after.Claims[i].Verbs) != len(before.Claims[i].Verbs) {
+			t.Errorf("a caller changed the verbs %s renders: %v", after.Name, after.Claims[i].Verbs)
+		}
+	}
+}
+
+// The plane bits are a contract: PlaneC means console-api enforces the
+// capability on a route it serves. Three capabilities are deliberately plane K
+// only, because the console reaches the same data through env.* and
+// terminal.open and these exist to grant a kubeconfig.
+func TestTheKubeconfigOnlyCapabilitiesClaimNoConsolePlane(t *testing.T) {
+	for _, name := range []Name{"pods.exec", "secrets.read", "secrets.write"} {
+		c, ok := Lookup(name)
+		if !ok {
+			t.Errorf("%s is missing", name)
+			continue
+		}
+		if c.Planes.Has(PlaneC) {
+			t.Errorf("%s claims the console plane, but no console route maps to it: a caller listing console abilities would present a kubeconfig grant as one", name)
+		}
+		if !c.Planes.Has(PlaneK) {
+			t.Errorf("%s claims no Kubernetes plane and renders rules", name)
+		}
+	}
+}
