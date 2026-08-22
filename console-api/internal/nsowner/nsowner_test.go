@@ -141,3 +141,16 @@ func TestOwnsAnswersForOneProject(t *testing.T) {
 		t.Errorf("Owns(rival) = (%v, %v), want false: a project was told it owns another's namespace", no, err)
 	}
 }
+
+// A caller with no reader gets no answer. Resolving is an authorization
+// decision, so the absence of the thing that answers it means nobody owns the
+// namespace rather than that the caller does.
+func TestNoReaderOwnsNothing(t *testing.T) {
+	_, ok, err := Of(context.Background(), nil, "shop-test")
+	if err != nil {
+		t.Fatalf("a nil reader is an answer, not a failure: %v", err)
+	}
+	if ok {
+		t.Error("a nil reader resolved a namespace to a project")
+	}
+}

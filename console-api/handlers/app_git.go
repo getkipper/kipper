@@ -17,6 +17,7 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/builder"
 	"github.com/getkipper/kipper/console-api/internal/gitreach"
+	"github.com/getkipper/kipper/console-api/internal/nsowner"
 	"github.com/getkipper/kipper/console-api/middleware"
 	"github.com/getkipper/kipper/controller/pkg/gitcred"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
@@ -499,12 +500,13 @@ func (a *Apps) sharedCredentialApplies(ctx context.Context, namespace string, en
 	if err != nil || cloneAuthority != credentialAuthority {
 		return false
 	}
-	ns, err := a.Client.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
-	if err != nil || ns.Labels["app.kubernetes.io/managed-by"] != "kipper" {
+	// Through the shared owner lookup: an allow-list checked against a label
+	// anyone who can write a namespace can set is no allow-list.
+	project, ok, err := nsowner.Of(ctx, a.CRClient, namespace)
+	if err != nil || !ok {
 		return false
 	}
-	project := ns.Labels["kipper.run/project"]
-	return project != "" && entry.AllowsProject(project)
+	return entry.AllowsProject(project)
 }
 
 // sameGitAuthority reports whether two clone URLs name the same host in the

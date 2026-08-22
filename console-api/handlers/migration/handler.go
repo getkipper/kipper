@@ -30,6 +30,7 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/domain"
+	"github.com/getkipper/kipper/console-api/internal/nsowner"
 	"github.com/getkipper/kipper/console-api/middleware"
 	"github.com/getkipper/kipper/console-api/security"
 )
@@ -333,16 +334,20 @@ func (h *Handler) projectAccepted(sessionID, project string) bool {
 // the migration was accepted for. A Kipper project owns one namespace per
 // environment, each tagged with the kipper.run/project label, so the namespace
 // is resolved to its project here rather than matched against project names.
-// Fails closed when the namespace is missing or carries no project label.
+// Fails closed when nothing owns the namespace.
 func (h *Handler) namespaceInScope(ctx context.Context, sessionID, namespace string) bool {
 	if namespace == "" {
 		return false
 	}
-	ns, err := h.Client.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
-	if err != nil {
+	// Through the shared owner lookup. This gates a write authenticated by a
+	// migration secret, so the project it resolves to decides what that secret
+	// can reach, and the label alone is writable by anyone who can write a
+	// namespace.
+	project, ok, err := nsowner.Of(ctx, h.CRClient, namespace)
+	if err != nil || !ok {
 		return false
 	}
-	return h.projectAccepted(sessionID, ns.Labels["kipper.run/project"])
+	return h.projectAccepted(sessionID, project)
 }
 
 // ReceiveResourceHandler receives a CRD resource (Project, App, Service, etc.)
