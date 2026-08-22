@@ -18,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -26,7 +27,7 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/builder"
 	"github.com/getkipper/kipper/console-api/internal/gitreach"
-	"github.com/getkipper/kipper/controller/pkg/labels"
+	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/controller/pkg/sharedcred"
 )
@@ -531,7 +532,13 @@ func TestSetGit_ChecksTheSharedCredentialItWouldCloneWith(t *testing.T) {
 	}
 	var probedWith string
 	handler := &Apps{
-		Client: fake.NewClientset(shared, managedNamespace("shop-test", "shop")), CRClient: testCRClient(app),
+		// The CR client is what resolves the namespace's owner now, so it needs
+		// the namespace and the project that claims it, not just the App.
+		Client: fake.NewClientset(shared, managedNamespace("shop-test", "shop")),
+		CRClient: testCRClient(app,
+			claimedNamespace("shop-test", "shop"),
+			claimingProjectFor("shop", "shop-test"),
+		),
 		GitReach: func(_ context.Context, _, _, _, token string) (gitreach.Result, string) {
 			probedWith = token
 			return gitreach.Reachable, ""
@@ -1495,7 +1502,7 @@ func TestSetGit_ReusingACredentialSaysItIsBeingCommittedOnto(t *testing.T) {
 
 	got, err := clientset.CoreV1().Secrets("default").Get(context.Background(), existing, metav1.GetOptions{})
 	require.NoError(t, err)
-	assert.NotEmpty(t, got.Annotations[labels.AnnoGitCredentialClaimed],
+	assert.NotEmpty(t, got.Annotations[kipperlabels.AnnoGitCredentialClaimed],
 		"reusing a credential did not mark it as being committed onto, so the sweep may take it mid-rotation")
 }
 
@@ -1676,4 +1683,28 @@ func TestSetGit_RefusesACredentialWhoseContentIsNotThePairItNames(t *testing.T) 
 	require.NoError(t, handler.CRClient.Get(context.Background(),
 		crclient.ObjectKey{Namespace: "default", Name: "web"}, &live))
 	assert.Equal(t, secretname.LegacyGitCredential("web"), live.Spec.Git.CredentialsSecret)
+}
+
+// claimedNamespace and claimingProjectFor build the pair that makes a namespace
+// a project's: the object, and the project's record of having taken it.
+//
+// The label alone stopped being the answer; a fixture that sets only the label
+// describes a cluster nobody could have reached honestly.
+func claimedNamespace(name, project string) *corev1.Namespace {
+	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: name, UID: types.UID(name + "-uid"),
+		Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "kipper",
+			kipperlabels.Project:           project,
+		},
+	}}
+}
+
+func claimingProjectFor(project string, namespaces ...string) *kipperv1.Project {
+	p := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: project}}
+	for _, ns := range namespaces {
+		p.Status.NamespaceClaims = append(p.Status.NamespaceClaims,
+			kipperv1.NamespaceClaim{Name: ns, UID: types.UID(ns + "-uid")})
+	}
+	return p
 }

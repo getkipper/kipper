@@ -64,6 +64,10 @@ func TestNamespaceInScope(t *testing.T) {
 			projectNamespace("payments-prod", "payments"),
 			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "unlabelled"}},
 		),
+		// Scope resolves ownership from the claim, so the projects that hold
+		// these namespaces have to exist. "unlabelled" deliberately has no
+		// owner, which is what makes it out of scope.
+		CRClient: migrationOwners(t),
 	}
 	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}, Secret: "test-session-secret"})
 
@@ -95,6 +99,7 @@ func TestReceiveResourceHandler_RejectsOutOfScope(t *testing.T) {
 	h := &Handler{
 		Sessions: NewSessionStore(),
 		Client:   fake.NewSimpleClientset(projectNamespace("payments-prod", "payments")),
+		CRClient: migrationOwners(t),
 	}
 	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}, Secret: "test-session-secret"})
 
@@ -126,6 +131,7 @@ func TestReceiveSecretHandler_ScopeGate(t *testing.T) {
 	h := &Handler{
 		Sessions: NewSessionStore(),
 		Client:   fake.NewSimpleClientset(projectNamespace("shop-test", "shop")),
+		CRClient: migrationOwners(t),
 	}
 	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}, Secret: "test-session-secret"})
 
@@ -170,6 +176,7 @@ func TestReceiveSecretHandler_ReplacesSecretOnTypeChange(t *testing.T) {
 	h := &Handler{
 		Sessions: NewSessionStore(),
 		Client:   fake.NewSimpleClientset(projectNamespace("shop-test", "shop"), existing),
+		CRClient: migrationOwners(t),
 	}
 	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}, Secret: "test-session-secret"})
 
@@ -224,7 +231,7 @@ func TestReceiveSecretHandler_RestoresOnFailedTypeChange(t *testing.T) {
 		}
 		return false, nil, nil
 	})
-	h := &Handler{Sessions: NewSessionStore(), Client: client}
+	h := &Handler{Sessions: NewSessionStore(), Client: client, CRClient: migrationOwners(t)}
 	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}, Secret: "test-session-secret"})
 
 	router := chi.NewRouter()
@@ -260,6 +267,7 @@ func TestAbortHandler_RemovesOnlyUnadoptedCreatedSecrets(t *testing.T) {
 	h := &Handler{
 		Sessions: NewSessionStore(),
 		Client:   fake.NewSimpleClientset(projectNamespace("shop-test", "shop"), preexisting),
+		CRClient: migrationOwners(t),
 	}
 	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}, Secret: "test-session-secret"})
 

@@ -352,6 +352,7 @@ func TestReceiveDBImportHandler_ValidatesParams(t *testing.T) {
 	h := &Handler{
 		Sessions: NewSessionStore(),
 		Client:   fake.NewSimpleClientset(projectNamespace("shop-prod", "shop")),
+		CRClient: migrationOwners(t),
 	}
 	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}})
 

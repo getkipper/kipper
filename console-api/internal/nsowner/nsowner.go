@@ -49,6 +49,12 @@ type Reader interface {
 // caller that treats it as "not owned" fails closed; one that treats it as
 // owned has misread this.
 func Of(ctx context.Context, reader Reader, namespace string) (project string, ok bool, err error) {
+	// No reader is no answer, and this decides authorization, so it is not
+	// owned by anybody rather than owned by whoever asked.
+	if reader == nil {
+		return "", false, nil
+	}
+
 	var ns corev1.Namespace
 	if err := reader.Get(ctx, types.NamespacedName{Name: namespace}, &ns); err != nil {
 		if apierrors.IsNotFound(err) {
