@@ -254,3 +254,35 @@ func TestResolve_AdminSemanticsAreUnchanged(t *testing.T) {
 		t.Error("an admin reaches a project with no members")
 	}
 }
+
+// The resolver is the gate every guarded project route runs through, so its
+// answer for a role this build does not know is the one that matters most.
+//
+// It must be no. A member holding such a role holds nothing: the projection
+// binds them nowhere, the project index hides the project from them, and this
+// refuses them. All three have to agree, because a role arrives by kubectl, by
+// a restore, or by a migration from a cluster that had it, and none of those
+// asks this build's permission first.
+func TestTheResolverRefusesARoleThisBuildDoesNotKnow(t *testing.T) {
+	members := stubMembers{"blog": {
+		"lead@test.com":     ProjectRoleOwner,
+		"stranger@test.com": "acme.support",
+	}}
+	client := fake.NewClientset(kipperNamespace(), projectNamespace("blog", "blog"))
+	roles := NewRoleStore(fake.NewClientset(kipperNamespace(), roleConfigMap(
+		`{"lead@test.com":"member","stranger@test.com":"member"}`,
+	)))
+	resolver := NewProjectAccessResolver(client, roles, members)
+
+	if _, ok := resolver.Resolve(context.Background(), "stranger@test.com", "blog"); ok {
+		t.Error("the resolver admitted a member holding a role it does not know; nothing else grants them anything, so this would be their only access")
+	}
+
+	access, ok := resolver.Resolve(context.Background(), "lead@test.com", "blog")
+	if !ok {
+		t.Fatal("the resolver refused the owner, so it is refusing everybody rather than the unknown role")
+	}
+	if access.Role != ProjectRoleOwner {
+		t.Errorf("the owner resolved as %q", access.Role)
+	}
+}

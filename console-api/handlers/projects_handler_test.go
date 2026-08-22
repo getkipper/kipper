@@ -1901,3 +1901,59 @@ func TestProjectsHandler_OwnershipOutageIsRedactedButRecorded(t *testing.T) {
 		t.Errorf("the cause must reach the server log, got %q", logged.String())
 	}
 }
+
+// The project index is its own authorization decision, made from spec.members
+// rather than through the resolver the guarded routes use, and it treated every
+// non-empty role as membership.
+//
+// A member holding a role this build does not know holds nothing: the
+// projection binds them nowhere and the resolver refuses them. The index has to
+// agree, or the one place that does not go through the resolver hands out
+// project names, app names, images, replica counts and route URLs to somebody
+// no other path lets in.
+func TestTheProjectIndexHidesProjectsFromAnUnrecognisedRole(t *testing.T) {
+	const stranger = "stranger@test.com"
+	project := &kipperv1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "blog"},
+		Spec: kipperv1.ProjectSpec{
+			Members: []kipperv1.ProjectMember{
+				{Email: "lead@test.com", Role: kipperv1.ProjectRoleOwner},
+				{Email: stranger, Role: kipperv1.ProjectMemberRole("acme.support")},
+			},
+		},
+	}
+	handler := &Projects{Client: fake.NewClientset(), CRClient: testCRClient(project)}
+
+	r := chi.NewRouter()
+	r.Get("/api/v1/projects", handler.List)
+
+	req := httptest.NewRequest("GET", "/api/v1/projects", nil)
+	req = asUser(req, stranger, middleware.RoleDeployer)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("listing projects = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var projects []projectResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &projects); err != nil {
+		t.Fatalf("decoding the project list: %v", err)
+	}
+	if len(projects) != 0 {
+		t.Errorf("the index returned %d project(s) to a member whose role this build does not know; they hold no access anywhere else and must hold none here", len(projects))
+	}
+
+	// The same request as the owner still works, so the filter is not simply
+	// refusing everybody.
+	req = httptest.NewRequest("GET", "/api/v1/projects", nil)
+	req = asUser(req, "lead@test.com", middleware.RoleDeployer)
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	projects = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &projects); err != nil {
+		t.Fatalf("decoding the project list: %v", err)
+	}
+	if len(projects) != 1 {
+		t.Errorf("the owner sees %d project(s), want 1: the filter refuses a member it should admit", len(projects))
+	}
+}

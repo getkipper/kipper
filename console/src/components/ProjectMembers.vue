@@ -112,8 +112,15 @@ watch(() => props.project, load)
       >
         <span class="truncate text-sm text-slate-700 dark:text-slate-200">{{ member.email }}</span>
         <div class="flex items-center gap-2">
+          <span
+            v-if="member.unrecognised"
+            :title="`This build does not know the role &quot;${member.role}&quot;, so this member has no access. Remove them, or give them a role that exists.`"
+            class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"
+          >
+            {{ member.role }} &middot; no access
+          </span>
           <select
-            v-if="canManage"
+            v-else-if="canManage"
             :value="member.role"
             @change="changeRole(member, ($event.target as HTMLSelectElement).value as ProjectRole)"
             class="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 focus:border-kipper-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
@@ -124,7 +131,7 @@ watch(() => props.project, load)
             v-else
             class="rounded-full bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300"
           >
-            {{ roleLabels[member.role] }}
+            {{ roleLabels[member.role as ProjectRole] }}
           </span>
           <button
             v-if="canManage"

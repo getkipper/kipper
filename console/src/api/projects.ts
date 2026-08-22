@@ -47,7 +47,14 @@ export async function fetchProjects(): Promise<Project[]> {
 
 export interface ProjectMember {
   email: string
-  role: ProjectRole
+  // The role exactly as the Project says it. Usually one of the built-ins, but
+  // a role this build does not know reaches a Project through kubectl, a
+  // restore, or a migration from a cluster that had it, and the panel has to
+  // show what is actually stored so somebody can act on it.
+  role: ProjectRole | string
+  // Set when the API does not recognise the role. Such a member holds no
+  // access at all: nothing binds them and every gate refuses them.
+  unrecognised?: boolean
 }
 
 export async function fetchMembers(project: string): Promise<ProjectMember[]> {

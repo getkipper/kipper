@@ -153,10 +153,8 @@ spec:
                       type: string
                     role:
                       description: Role is the user's capability within this project.
-                      enum:
-                      - owner
-                      - deployer
-                      - viewer
+                      maxLength: 127
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)?$
                       type: string
                   required:
                   - email

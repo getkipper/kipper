@@ -78,9 +78,32 @@ type ProjectSpec struct {
 	AllowLinksFrom []string `json:"allowLinksFrom,omitempty"`
 }
 
-// ProjectMemberRole is a user's capability within a single project, ordered
-// viewer < deployer < owner.
-// +kubebuilder:validation:Enum=owner;deployer;viewer
+// memberRolePattern constrains a member's role name. It is the same string as
+// the Pattern marker below, and a test asserts the generated CRD carries it:
+// a marker edited without this constant, or the reverse, is drift nobody would
+// otherwise see.
+//
+// One optional dotted suffix, both halves DNS labels. That covers the three
+// built-ins, a shared role's dot-free name, and a tenant role's
+// `<project>.<name>`. It stays this narrow because a role name reaches a
+// generated object name, and a name carrying a slash or a space is one nothing
+// can address.
+const memberRolePattern = `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)?$`
+
+// ProjectMemberRole is a user's capability within a single project.
+//
+// The three built-ins are ordered viewer < deployer < owner. The schema does
+// not list them, because a member may also name a role this build does not
+// know: written with kubectl, restored from a backup, or carried in by a
+// migration from a cluster that had it. A closed enum would fail the whole
+// Project object in that case, and the member holding the unknown role is
+// exactly the one an operator needs to be able to remove.
+//
+// Such a member holds nothing. The projection binds only the roles it knows, so
+// an unrecognised name grants no access, and the console reports it as
+// unrecognised rather than showing it as a role.
+// +kubebuilder:validation:MaxLength=127
+// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)?$`
 type ProjectMemberRole string
 
 const (

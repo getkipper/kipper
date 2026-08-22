@@ -112,6 +112,31 @@ func TestWithoutMember(t *testing.T) {
 			remainingOwners: 1,
 		},
 		{
+			// A role this build does not know reaches a Project by kubectl, by
+			// a restore, or by a migration off a cluster that had it. Removing
+			// that member has to work: not understanding what somebody holds is
+			// a reason to revoke them, never a reason the command cannot.
+			name:            "removes a member holding a role this build does not know",
+			members:         []interface{}{member("lead@acme.com", "owner"), member("stranger@acme.com", "acme.support")},
+			email:           "stranger@acme.com",
+			matched:         true,
+			kept:            []interface{}{member("lead@acme.com", "owner")},
+			removingOwner:   false,
+			remainingOwners: 1,
+		},
+		{
+			// The last-owner guard keeps a project from being orphaned, and a
+			// role nobody can interpret is not evidence that somebody can still
+			// administer it.
+			name:            "an unrecognised role does not count towards the remaining owners",
+			members:         []interface{}{member("lead@acme.com", "owner"), member("stranger@acme.com", "acme.support")},
+			email:           "lead@acme.com",
+			matched:         true,
+			kept:            []interface{}{member("stranger@acme.com", "acme.support")},
+			removingOwner:   true,
+			remainingOwners: 0,
+		},
+		{
 			name:            "an address in no entry matches nothing and keeps everyone",
 			members:         []interface{}{member("lead@acme.com", "owner"), member("dev@acme.com", "deployer")},
 			email:           "typo@acme.com",
