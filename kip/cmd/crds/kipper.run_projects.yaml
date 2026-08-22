@@ -270,6 +270,41 @@ spec:
                 - Active
                 - Terminating
                 type: string
+              projectedMembers:
+                description: |-
+                  ProjectedMembers is the member list the reconciler last projected onto
+                  RBAC, and ProjectedMembersGeneration is the spec generation it came from.
+
+                  They exist for the audit trail. No API audit event carries the object a
+                  write replaced, so a membership change can be attributed to who and when
+                  and not to what it was before. The reconciler is the one component that
+                  sees both, so it records what it acted on.
+
+                  Nothing reads them yet. This status is written whole by every controller
+                  already running, so a pod whose struct lacks these fields drops them on
+                  its next write; in a rolling window that is one old pod away from an
+                  empty baseline. They ship a release before anything leans on them, and a
+                  baseline whose generation does not match the object's is stale rather
+                  than current.
+                items:
+                  description: ProjectMember grants a user a role within a project.
+                  properties:
+                    email:
+                      description: Email identifies the user, matching their Dex identity.
+                      type: string
+                    role:
+                      description: Role is the user's capability within this project.
+                      maxLength: 127
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)?$
+                      type: string
+                  required:
+                  - email
+                  - role
+                  type: object
+                type: array
+              projectedMembersGeneration:
+                format: int64
+                type: integer
             type: object
         type: object
     served: true
