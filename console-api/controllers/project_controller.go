@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
@@ -510,7 +511,13 @@ func (r *ProjectReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&kipperv1.Project{}).
 		// Member RoleBindings are authorization objects: drift must trigger
 		// repair, not wait for the next Project event.
-		Watches(&rbacv1.RoleBinding{}, handler.EnqueueRequestsFromMapFunc(mapMemberBindingToProject)).
+		// The manager's client is handed to the mapper so a binding whose
+		// project label has drifted is still routed: without a reader it can
+		// only read the label, which is the one thing drift removes.
+		Watches(&rbacv1.RoleBinding{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []reconcile.Request {
+				return memberBindingProjects(ctx, mgr.GetClient(), obj)
+			})).
 		// A node added or removed changes every project's egress except-list.
 		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.enqueueProjectsForNode)).
 		Complete(r)
