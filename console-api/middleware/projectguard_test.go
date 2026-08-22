@@ -9,7 +9,8 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-func newQueryScopeResolver() *ProjectAccessResolver {
+func newQueryScopeResolver(t *testing.T) *ProjectAccessResolver {
+	t.Helper()
 	client := fake.NewClientset(
 		kipperNamespace(),
 		projectNamespace("blog", "blog"),
@@ -21,7 +22,10 @@ func newQueryScopeResolver() *ProjectAccessResolver {
 	members := stubMembers{
 		"blog": {"dev@test.com": "deployer"},
 	}
-	return NewProjectAccessResolver(client, roles, members)
+	return NewProjectAccessResolver(client, roles, members, ownersFor(t,
+		projectNamespace("blog", "blog"),
+		projectNamespace("shop", "shop"),
+	))
 }
 
 func requestWithUser(method, target, email string) *http.Request {
@@ -34,7 +38,7 @@ func requestWithUser(method, target, email string) *http.Request {
 }
 
 func TestProjectScopeQuery(t *testing.T) {
-	resolver := newQueryScopeResolver()
+	resolver := newQueryScopeResolver(t)
 	scoped := ProjectScopeQuery(resolver)
 
 	tests := []struct {

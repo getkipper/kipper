@@ -310,6 +310,7 @@ func matrixRouter(t *testing.T, email, globalRole string, projectRole kipperv1.P
 
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name:   matrixProject,
+		UID:    "the-fixture-namespace",
 		Labels: map[string]string{kipperlabels.Project: matrixProject},
 	}}
 	clientset := fake.NewClientset(
@@ -325,14 +326,27 @@ func matrixRouter(t *testing.T, email, globalRole string, projectRole kipperv1.P
 	if err := kipperv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("registering the scheme: %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("registering the core scheme: %v", err)
+	}
 	project := &kipperv1.Project{
 		ObjectMeta: metav1.ObjectMeta{Name: matrixProject},
 		Spec:       kipperv1.ProjectSpec{},
+		// The claim, because ownership is the claim now and not the label. A
+		// fixture carrying only the label describes a cluster nobody could
+		// have reached honestly, and every project route would refuse it.
+		Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+			{Name: matrixProject, UID: "the-fixture-namespace"},
+		}},
 	}
 	if email != "" && projectRole != "" {
 		project.Spec.Members = []kipperv1.ProjectMember{{Email: email, Role: projectRole}}
 	}
-	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(project).Build()
+	// The namespace goes into the CR client too: ownership is resolved from
+	// the claim, and resolving reads the namespace and the project through the
+	// same reader. In production that reader is the manager's client, which
+	// sees both kinds.
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(project, namespace.DeepCopy()).Build()
 
 	ctx, stopSweepers := context.WithCancel(context.Background())
 	t.Cleanup(stopSweepers)
@@ -351,6 +365,7 @@ func matrixRouter(t *testing.T, email, globalRole string, projectRole kipperv1.P
 		var live kipperv1.Project
 		if err := crClient.Get(ctx, crclient.ObjectKey{Name: matrixProject}, &live); err == nil {
 			live.Spec = *project.Spec.DeepCopy()
+			live.Status.NamespaceClaims = project.Status.NamespaceClaims
 			if uerr := crClient.Update(ctx, &live); uerr != nil {
 				t.Fatalf("restoring the fixture project: %v", uerr)
 			}

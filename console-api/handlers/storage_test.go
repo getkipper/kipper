@@ -846,7 +846,7 @@ func TestStorage_RoutesEnforceAuthzBeforeAccess(t *testing.T) {
 
 	resolver := middleware.NewProjectAccessResolver(client, middleware.NewRoleStore(client), stubProjectMembers{
 		"blog": {"dev@test.com": middleware.ProjectRoleDeployer, "viewer@test.com": middleware.ProjectRoleViewer},
-	})
+	}, handlerOwners(t, ns("blog", "blog"), ns("shop", "shop")))
 	qscope := middleware.ProjectScopeQuery(resolver)
 	nsRead := func(h http.HandlerFunc) http.HandlerFunc { return qscope(h).ServeHTTP }
 	nsDeployer := func(h http.HandlerFunc) http.HandlerFunc {
