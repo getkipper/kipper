@@ -853,13 +853,27 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 	})
 
 	// Combine: WebSocket mux handles log streams, Chi handles everything else
-	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.Header.Get("Upgrade") == "websocket" {
-			wsMux.ServeHTTP(w, req)
-			return
-		}
-		r.ServeHTTP(w, req)
-	})
+	return consoleRouter{api: r, ws: wsMux}
+}
+
+// consoleRouter sends WebSocket upgrades to the log-stream mux and everything
+// else to the API router.
+//
+// It names the two halves rather than closing over them so that a test can walk
+// the API router's own route table. The authorization-class inventory asserts
+// over every route the mux actually serves, which means it has to be able to
+// ask the mux what those are.
+type consoleRouter struct {
+	api *chi.Mux
+	ws  http.Handler
+}
+
+func (c consoleRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.Header.Get("Upgrade") == "websocket" {
+		c.ws.ServeHTTP(w, req)
+		return
+	}
+	c.api.ServeHTTP(w, req)
 }
 
 // shareGrantStoreFor builds the grant store the service reconciler uses
