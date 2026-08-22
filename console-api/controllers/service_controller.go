@@ -32,11 +32,16 @@ import (
 	"github.com/getkipper/kipper/console-api/serviceui"
 	"github.com/getkipper/kipper/console-api/share"
 	"github.com/getkipper/kipper/console-api/uisession"
+	"github.com/getkipper/kipper/controller/pkg/datavolume"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/controller/pkg/servicecatalog"
 )
 
-const serviceFinalizer = "kipper.run/service-cleanup"
+// ServiceFinalizer holds a deleting Service until its cleanup has finished. The
+// console adds it along with the delete-data annotation, because a CR that has
+// never been reconciled carries neither, and without it the API server would
+// take the service away before anything had destroyed its data.
+const ServiceFinalizer = "kipper.run/service-cleanup"
 
 // ServiceReconciler reconciles a Service CR.
 type ServiceReconciler struct {
@@ -74,32 +79,26 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	if !svc.DeletionTimestamp.IsZero() {
 		logger.Info("cleaning up service resources", "service", svc.Name)
-		// Revoke the service's share links before releasing the
-		// finalizer — fail closed. A grant that outlives its service
-		// could otherwise open a recreated namesake if the UID check
-		// were ever bypassed. A missing store or a failed revoke keeps
-		// the finalizer, so deletion retries rather than orphaning
-		// grants.
-		if r.ShareGrants == nil {
-			return ctrl.Result{}, fmt.Errorf("share grant store not configured; refusing to finalize service %s/%s with its links intact", svc.Namespace, svc.Name)
+		done, reason, err := r.cleanUp(ctx, &svc)
+		if err != nil {
+			r.reportCleanupBlocked(ctx, &svc, err, reason)
+			return ctrl.Result{}, err
 		}
-		if err := r.ShareGrants.RevokeAllForService(ctx, svc.Namespace, svc.Name); err != nil {
-			return ctrl.Result{}, fmt.Errorf("revoking share links: %w", err)
+		// The step that failed has succeeded, so the reason it left behind is
+		// no longer true. A service waiting normally for its workload to stop
+		// would otherwise keep telling an operator it is blocked on something
+		// that cleared several passes ago.
+		r.retractCleanupBlocked(ctx, &svc)
+		if !done {
+			return ctrl.Result{RequeueAfter: destroyDataInterval}, nil
 		}
-		// Unbind everything that names this service, for the same reason and in
-		// the same way: fail closed, keep the finalizer, retry. A workload left
-		// bound to a service that has gone fails its own reconcile outright and
-		// cannot be unbound afterwards, so the service must not finish leaving
-		// until nothing depends on it.
-		if err := ClearBindingsToService(ctx, r.Client, svc.Name, svc.Namespace); err != nil {
-			return ctrl.Result{}, fmt.Errorf("clearing bindings to %s: %w", svc.Name, err)
-		}
-		controllerutil.RemoveFinalizer(&svc, serviceFinalizer)
+		controllerutil.RemoveFinalizer(&svc, ServiceFinalizer)
+		controllerutil.RemoveFinalizer(&svc, DataFinalizer)
 		return ctrl.Result{}, r.Update(ctx, &svc)
 	}
 
-	if !controllerutil.ContainsFinalizer(&svc, serviceFinalizer) {
-		controllerutil.AddFinalizer(&svc, serviceFinalizer)
+	if !controllerutil.ContainsFinalizer(&svc, ServiceFinalizer) {
+		controllerutil.AddFinalizer(&svc, ServiceFinalizer)
 		if err := r.Update(ctx, &svc); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -139,12 +138,19 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if err := r.reconcileStatefulSet(ctx, &svc); err != nil {
+		r.reportNameTaken(ctx, &svc, err)
 		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
 	}
 
 	if err := r.reconcileHeadlessService(ctx, &svc); err != nil {
+		r.reportNameTaken(ctx, &svc, err)
 		return ctrl.Result{}, fmt.Errorf("reconciling headless service: %w", err)
 	}
+	// Retracted where the thing it describes stopped being true: both objects
+	// this service needs under its own name are now its own. An operator who
+	// cleared the collision the message named would otherwise be told the name
+	// is taken by a service that has been running since.
+	r.retractNameTaken(ctx, &svc)
 
 	if err := r.reconcileUIIngress(ctx, &svc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling ui ingress: %w", err)
@@ -619,6 +625,16 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	if errors.IsNotFound(err) {
 		return r.Create(ctx, desired)
 	}
+	if err == nil {
+		// The same rule the finalizer deletes by, applied before the first
+		// write rather than only at the end. Taking a workload over here is
+		// what stamps the label that later authorises destroying its volume,
+		// so a foreign StatefulSet adopted at this point becomes one Kipper
+		// believes it may delete.
+		if err := objectIsOurs("workload", &existing, svc); err != nil {
+			return err
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -638,7 +654,23 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	}
 	existing.Spec.Template.Spec.Containers = desired.Spec.Template.Spec.Containers
 	existing.Labels = desired.Labels
+	// Accepted is not adopted. A workload from before these records existed has
+	// no owner, and without one garbage collection has nothing to follow when
+	// the service goes, so an ordinary delete would leave it running against the
+	// data it was keeping.
+	if err := adopt(&existing, svc, r.Scheme); err != nil {
+		return err
+	}
 	return r.Update(ctx, &existing)
+}
+
+// adopt gives the service the object it has just been shown to own, so deleting
+// the service takes the object with it.
+func adopt(object client.Object, svc *kipperv1.Service, scheme *runtime.Scheme) error {
+	if metav1.GetControllerOf(object) != nil {
+		return nil
+	}
+	return controllerutil.SetControllerReference(svc, object, scheme)
 }
 
 func (r *ServiceReconciler) reconcileHeadlessService(ctx context.Context, svc *kipperv1.Service) error {
@@ -679,15 +711,30 @@ func (r *ServiceReconciler) reconcileHeadlessService(ctx context.Context, svc *k
 	if err != nil {
 		return err
 	}
+	// Same rule as the workload, and for the same reason: the update below
+	// writes this service's labels onto whatever stands under the name, and the
+	// management label among them is what a later delete reads as proof the
+	// object is Kipper's.
+	if err := objectIsOurs("address", &existing, svc); err != nil {
+		return err
+	}
 	// Update if ports drifted — catalog changes (e.g. adding a UI
 	// port to a service type that didn't have one) must propagate
-	// to already-running services.
-	if !servicePortsEqual(existing.Spec.Ports, desired.Spec.Ports) {
+	// to already-running services. An address with no owner is adopted whether
+	// or not anything drifted, for the same reason the workload is.
+	drifted := !servicePortsEqual(existing.Spec.Ports, desired.Spec.Ports)
+	unowned := metav1.GetControllerOf(&existing) == nil
+	if !drifted && !unowned {
+		return nil
+	}
+	if drifted {
 		existing.Spec.Ports = desired.Spec.Ports
 		existing.Labels = desired.Labels
-		return r.Update(ctx, &existing)
 	}
-	return nil
+	if err := adopt(&existing, svc, r.Scheme); err != nil {
+		return err
+	}
+	return r.Update(ctx, &existing)
 }
 
 // servicePortsEqual compares two Service port lists by name + port +
@@ -1420,6 +1467,173 @@ func generatePassword() string {
 	b := make([]byte, 24)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// cleanUp takes the service's dependants away before it goes, and reports
+// whether that has finished and which step to name if it has not.
+//
+// Every step fails closed: the finalizer stays, the deletion retries, and
+// nothing further is attempted. The data goes last because it cannot be undone
+// and the two before it can, so a service whose bindings will not clear does not
+// have its data destroyed on the way to failing.
+func (r *ServiceReconciler) cleanUp(ctx context.Context, svc *kipperv1.Service) (bool, string, error) {
+	// A grant that outlives its service could open a recreated namesake if the
+	// UID check were ever bypassed. A missing store or a failed revoke keeps the
+	// finalizer, so deletion retries rather than orphaning grants.
+	if r.ShareGrants == nil {
+		return false, "ShareLinksNotRevoked", fmt.Errorf("share grant store not configured; refusing to finalize service %s/%s with its links intact", svc.Namespace, svc.Name)
+	}
+	if err := r.ShareGrants.RevokeAllForService(ctx, svc.Namespace, svc.Name); err != nil {
+		return false, "ShareLinksNotRevoked", fmt.Errorf("revoking share links: %w", err)
+	}
+
+	// A workload left bound to a service that has gone fails its own reconcile
+	// outright and cannot be unbound afterwards, so the service must not finish
+	// leaving until nothing depends on it.
+	if err := ClearBindingsToService(ctx, r.Client, svc.Name, svc.Namespace); err != nil {
+		return false, "BindingsNotCleared", fmt.Errorf("clearing bindings to %s: %w", svc.Name, err)
+	}
+
+	// Adoption only reaches a service the controller reconciles while it is
+	// alive. One deleted before that, or restored without its owner references,
+	// still has dependants nothing will collect, and leaving them means a
+	// workload still running against the volume this delete meant to keep.
+	if err := r.removeOrphanedDependants(ctx, svc); err != nil {
+		return false, "DependantsNotRemoved", err
+	}
+
+	if svc.Annotations[datavolume.DeleteAnnotation] != "true" {
+		return true, "", nil
+	}
+	destroyed, err := r.destroyData(ctx, svc)
+	if err != nil {
+		// The remedy is a deletion one. The service is already leaving, so
+		// calling it something else is not on the table, and without this an
+		// operator is left with a service that will not go and nothing saying
+		// how to let it.
+		return false, "DataNotDestroyed", fmt.Errorf(
+			"%w; remove the %s annotation to let the service finish leaving, with its volume where it is",
+			err, datavolume.DeleteAnnotation)
+	}
+	return destroyed, "", nil
+}
+
+// removeOrphanedDependants deletes the objects that would otherwise outlive the
+// service because nothing owns them.
+//
+// An object this service owns is left to garbage collection, which is what
+// takes it. An object that is somebody else's is left alone entirely: nothing
+// here is destructive to data, so a collision is no reason to hold the service
+// back from leaving.
+func (r *ServiceReconciler) removeOrphanedDependants(ctx context.Context, svc *kipperv1.Service) error {
+	name := types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}
+
+	var workload appsv1.StatefulSet
+	if err := r.orphanIsGone(ctx, name, &workload, svc); err != nil {
+		return fmt.Errorf("removing the workload of %s: %w", svc.Name, err)
+	}
+	var address corev1.Service
+	if err := r.orphanIsGone(ctx, name, &address, svc); err != nil {
+		return fmt.Errorf("removing the cluster address of %s: %w", svc.Name, err)
+	}
+	return nil
+}
+
+// orphanIsGone deletes one dependant if it is the service's and nothing owns it.
+func (r *ServiceReconciler) orphanIsGone(ctx context.Context, name types.NamespacedName, object client.Object, svc *kipperv1.Service) error {
+	if err := r.Get(ctx, name, object); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if metav1.GetControllerOf(object) != nil {
+		return nil
+	}
+	if !isOurs(object, svc) {
+		return nil
+	}
+	uid := object.GetUID()
+	err := r.Delete(ctx, object, client.Preconditions{UID: &uid})
+	if err != nil && !errors.IsNotFound(err) && !errors.IsConflict(err) {
+		return err
+	}
+	return nil
+}
+
+// reportCleanupBlocked writes onto the Service which step of its deletion could
+// not be completed.
+//
+// Best effort, like the credentials report: the deletion is failing already, and
+// losing the explanation is better than losing the error that caused it. Without
+// this the service sits in deleting with the reason only in the controller's log,
+// which is not somewhere an operator watching it can look.
+func (r *ServiceReconciler) reportCleanupBlocked(ctx context.Context, svc *kipperv1.Service, cause error, reason string) {
+	if !meta.SetStatusCondition(&svc.Status.Conditions, metav1.Condition{
+		Type:               kipperv1.ConditionCleanupComplete,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            cause.Error(),
+		ObservedGeneration: svc.Generation,
+	}) {
+		return
+	}
+	if err := r.Status().Update(ctx, svc); err != nil {
+		log.FromContext(ctx).Error(err, "recording why the service cannot finish deleting")
+	}
+}
+
+// reportNameTaken writes onto the Service that an object of its name belongs to
+// something else, and says nothing about any other failure.
+//
+// The refusal is permanent: no retry frees a name somebody holds. Left in the
+// log it is a service that sits at Pending with the reason somewhere an operator
+// cannot look, which is the thing this range set out to stop.
+func (r *ServiceReconciler) reportNameTaken(ctx context.Context, svc *kipperv1.Service, cause error) {
+	var taken *nameTakenError
+	if !stderrors.As(cause, &taken) {
+		return
+	}
+	changed := meta.SetStatusCondition(&svc.Status.Conditions, metav1.Condition{
+		Type:               kipperv1.ConditionNameFree,
+		Status:             metav1.ConditionFalse,
+		Reason:             "NameTaken",
+		Message:            cause.Error(),
+		ObservedGeneration: svc.Generation,
+	})
+	if svc.Status.Phase != "Failed" {
+		svc.Status.Phase = "Failed"
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	if err := r.Status().Update(ctx, svc); err != nil {
+		log.FromContext(ctx).Error(err, "recording that the service's name is taken")
+	}
+}
+
+// retractNameTaken takes the refusal off once the name is the service's own.
+func (r *ServiceReconciler) retractNameTaken(ctx context.Context, svc *kipperv1.Service) {
+	if !meta.RemoveStatusCondition(&svc.Status.Conditions, kipperv1.ConditionNameFree) {
+		return
+	}
+	if err := r.Status().Update(ctx, svc); err != nil {
+		log.FromContext(ctx).Error(err, "retracting that the service's name is taken")
+	}
+}
+
+// retractCleanupBlocked takes the reason off once the step that failed has run.
+//
+// Best effort for the same reason as writing it: losing the retraction costs an
+// operator a stale line, and the next pass writes it again.
+func (r *ServiceReconciler) retractCleanupBlocked(ctx context.Context, svc *kipperv1.Service) {
+	if !meta.RemoveStatusCondition(&svc.Status.Conditions, kipperv1.ConditionCleanupComplete) {
+		return
+	}
+	if err := r.Status().Update(ctx, svc); err != nil {
+		log.FromContext(ctx).Error(err, "retracting why the service could not finish deleting")
+	}
 }
 
 // reportCredentialsBlocked writes onto the Service why it cannot proceed.

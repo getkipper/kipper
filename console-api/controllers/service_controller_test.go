@@ -591,7 +591,7 @@ func TestServiceDeletionRevokesShareLinks(t *testing.T) {
 			Namespace:         "supplemento-test",
 			UID:               "uid-mailhog-1",
 			DeletionTimestamp: &now,
-			Finalizers:        []string{serviceFinalizer},
+			Finalizers:        []string{ServiceFinalizer},
 		},
 		Spec: kipperv1.ServiceSpec{Type: "mailhog"},
 	}
@@ -630,7 +630,7 @@ func TestServiceDeletionFailsClosedWithoutGrantStore(t *testing.T) {
 			Namespace:         "supplemento-test",
 			UID:               "uid-mailhog-1",
 			DeletionTimestamp: &now,
-			Finalizers:        []string{serviceFinalizer},
+			Finalizers:        []string{ServiceFinalizer},
 		},
 		Spec: kipperv1.ServiceSpec{Type: "mailhog"},
 	}
@@ -648,7 +648,7 @@ func TestServiceDeletionFailsClosedWithoutGrantStore(t *testing.T) {
 
 	var still kipperv1.Service
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "mailhog", Namespace: "supplemento-test"}, &still))
-	assert.Contains(t, still.Finalizers, serviceFinalizer, "the finalizer must be retained so deletion retries")
+	assert.Contains(t, still.Finalizers, ServiceFinalizer, "the finalizer must be retained so deletion retries")
 }
 
 // Nothing claims a credentials Secret on the strength of its name, its labels
@@ -779,7 +779,7 @@ func TestServiceFinalizer_ClearsBindingsBeforeReleasing(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "db", Namespace: "shop-test",
 			DeletionTimestamp: &now,
-			Finalizers:        []string{serviceFinalizer},
+			Finalizers:        []string{ServiceFinalizer},
 		},
 		Spec: kipperv1.ServiceSpec{Type: "postgres"},
 	}
@@ -840,7 +840,7 @@ func TestServiceFinalizer_KeepsTheFinalizerWhenClearingFails(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "db", Namespace: "shop-test",
 			DeletionTimestamp: &now,
-			Finalizers:        []string{serviceFinalizer},
+			Finalizers:        []string{ServiceFinalizer},
 		},
 		Spec: kipperv1.ServiceSpec{Type: "postgres"},
 	}
@@ -867,7 +867,7 @@ func TestServiceFinalizer_KeepsTheFinalizerWhenClearingFails(t *testing.T) {
 
 	var still kipperv1.Service
 	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "db", Namespace: "shop-test"}, &still))
-	assert.Contains(t, still.Finalizers, serviceFinalizer, "the finalizer must be held until the bindings are gone")
+	assert.Contains(t, still.Finalizers, ServiceFinalizer, "the finalizer must be held until the bindings are gone")
 }
 
 // Deleting a service must not delete a Secret its bindings never derived.
@@ -885,7 +885,7 @@ func TestServiceFinalizer_LeavesASecretItNeverDerived(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "cache", Namespace: "shop-test", UID: types.UID("uid-cache"),
 			DeletionTimestamp: &now,
-			Finalizers:        []string{serviceFinalizer},
+			Finalizers:        []string{ServiceFinalizer},
 		},
 		Spec: kipperv1.ServiceSpec{Type: "redis"},
 	}
@@ -930,7 +930,7 @@ func TestServiceFinalizer_LeavesADerivedNameItDoesNotOwn(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "db", Namespace: "shop-test", UID: types.UID("uid-db"),
 			DeletionTimestamp: &now,
-			Finalizers:        []string{serviceFinalizer},
+			Finalizers:        []string{ServiceFinalizer},
 		},
 		Spec: kipperv1.ServiceSpec{Type: "postgres"},
 	}

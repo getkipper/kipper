@@ -686,3 +686,48 @@ func TestListFindsABlockageBehindAStaleCondition(t *testing.T) {
 	assert.Equal(t, "DataWithoutCredentials", services[0].BlockedReason,
 		"a stale condition ahead of the live one hid the refusal")
 }
+
+// deletingService is a Service CR on its way out whose cleanup has stopped on
+// something no retry clears.
+func deletingService(name, namespace, reason, message string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "kipper.run/v1alpha1",
+		"kind":       "Service",
+		"metadata": map[string]interface{}{
+			"name": name, "namespace": namespace,
+			"deletionTimestamp": "2026-08-21T23:00:00Z",
+			"finalizers":        []interface{}{"kipper.run/service-cleanup"},
+		},
+		"spec": map[string]interface{}{"type": "postgres", "storage": "1Gi"},
+		"status": map[string]interface{}{
+			"phase": "Running",
+			"conditions": []interface{}{
+				map[string]interface{}{
+					"type":    servicecatalog.ConditionCleanupComplete,
+					"status":  "False",
+					"reason":  reason,
+					"message": message,
+				},
+			},
+		},
+	}}
+}
+
+// A service on its way out keeps the phase it had until it goes, and a delete
+// held up by something no retry clears keeps it for good. Listing it as running
+// says the delete did nothing.
+func TestListSaysAServiceIsDeletingAndWhyItIsStuck(t *testing.T) {
+	mgr := &Manager{
+		Client: fake.NewSimpleClientset(), //nolint:staticcheck
+		Dynamic: dynamicWith(t, deletingService("db", "default", "DataNotDestroyed",
+			"the workload named db in default is not Kipper's")),
+	}
+
+	services, err := mgr.List(context.Background(), "default")
+
+	require.NoError(t, err)
+	require.Len(t, services, 1)
+	assert.Equal(t, "deleting", services[0].Status, "a service on its way out was listed as though nothing had happened")
+	assert.Equal(t, "DataNotDestroyed", services[0].BlockedReason, "nothing said why the delete is stuck")
+	assert.Contains(t, services[0].BlockedMessage, "not Kipper's")
+}

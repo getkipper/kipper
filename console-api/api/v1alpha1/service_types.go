@@ -61,6 +61,16 @@ type ServiceResources struct {
 // the service out of its own data.
 const ConditionCredentialsReady = servicecatalog.ConditionCredentialsReady
 
+// ConditionCleanupComplete says whether a deleting service has finished leaving.
+// It goes false with the step that could not be completed, so an operator
+// watching a service sit in deleting can see which one and why.
+const ConditionCleanupComplete = servicecatalog.ConditionCleanupComplete
+
+// ConditionNameFree says whether the objects a service needs under its own name
+// are free. It goes false when one of them belongs to something else, which no
+// retry clears.
+const ConditionNameFree = servicecatalog.ConditionNameFree
+
 // ServiceStatus defines the observed state of the service.
 type ServiceStatus struct {
 	// Phase represents the current lifecycle phase.
