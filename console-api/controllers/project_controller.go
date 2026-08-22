@@ -132,6 +132,7 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	created := 0
 	var namespaces []string
+	var claimed []kipperv1.NamespaceClaim
 	var namespaceConflicts []*namespaceConflictError
 	for _, pl := range plans {
 		if !pl.exists {
@@ -160,6 +161,26 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// it is never usable without its egress policy in place.
 		if err := r.reconcileEgressPolicy(ctx, pl.ns); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconciling egress policy in %s: %w", pl.ns, err)
+		}
+
+		// The claim is recorded here rather than at the end of the pass. Later
+		// than the egress policy, because a namespace is not this project's to
+		// hand out until it is isolated; earlier than everything else, because
+		// a claim written only after quota, bindings and pruning had all
+		// succeeded would leave the namespace unclaimed whenever any of them
+		// failed, and the add-environment flow waits on the claim.
+		if uid := nsUID(ctx, r, pl.ns); uid != "" {
+			claimed = append(claimed, kipperv1.NamespaceClaim{Name: pl.ns, UID: uid})
+			// Published now rather than with the rest of the status at the end
+			// of the pass. Quota, bindings, shared storage and pruning all come
+			// after this point and any of them can fail, and a claim written
+			// only once they had all succeeded would leave the namespace
+			// unclaimed for as long as one of them kept failing. The
+			// add-environment flow waits on the claim, so that is a hang rather
+			// than a delay.
+			if err := r.publishClaim(ctx, &project, pl.ns, claimed); err != nil {
+				return ctrl.Result{}, fmt.Errorf("recording the claim to %s: %w", pl.ns, err)
+			}
 		}
 
 		if err := r.reconcileQuota(ctx, &project, pl.env, pl.ns); err != nil {
@@ -210,6 +231,7 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// release later, once every pod carries the field: an older pod's
 	// whole-status write drops what its struct does not know, so a build that
 	// trusted this today would be trusting a gap.
+	project.Status.NamespaceClaims = claimed
 	project.Status.ProjectedMembers = append([]kipperv1.ProjectMember(nil), project.Spec.Members...)
 	project.Status.ProjectedMembersGeneration = project.Generation
 	if err := r.Status().Update(ctx, &project); err != nil {
@@ -397,9 +419,30 @@ func (r *ProjectReconciler) reconcileNamespace(ctx context.Context, project *kip
 	var existing corev1.Namespace
 	err := r.Get(ctx, types.NamespacedName{Name: ns}, &existing)
 	if errors.IsNotFound(err) {
+		// Checked before creating, not only before adopting. Two projects that
+		// resolve to one name and find it absent would otherwise both create
+		// it, and whichever lost the race would carry on as though it had not:
+		// ownership decided by scheduling, which is the thing the collision
+		// refusal exists to prevent.
+		if err := r.claimable(ctx, project, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}); err != nil {
+			return err
+		}
 		return r.Create(ctx, desired)
 	}
 	if err != nil {
+		return err
+	}
+
+	// Whose namespace this is, decided from what projects recorded taking
+	// rather than from the label on the object.
+	//
+	// The rule is one sentence: a project adopts a namespace no project claims,
+	// whatever created it and whenever it appears, and never takes one another
+	// project claims. Not "only what this reconcile created", which locks a
+	// project out of namespaces a restore or `kip` made; not "seeded once while
+	// the project has no claims", which refuses an environment added later. Both
+	// were tried and both were wrong.
+	if err := r.claimable(ctx, project, &existing); err != nil {
 		return err
 	}
 
@@ -589,4 +632,113 @@ func (r *ProjectReconciler) setNamespaceConflictCondition(project *kipperv1.Proj
 	if changed && r.Recorder != nil {
 		r.Recorder.Event(project, corev1.EventTypeWarning, conditionNamespaceConflict, message)
 	}
+}
+
+// claimable reports whether this project may hold the namespace, and refuses
+// with a conflict naming whoever does hold it.
+//
+// It reads the claims rather than the label because the label is what drifts:
+// anyone who can write a namespace can rewrite it, and it is the thing an
+// attacker rewrites. A claim is what a project's own reconcile recorded taking.
+//
+// Matching is on the UID as well as the name. A name outlives the object it
+// named, so a namespace deleted and recreated is a different namespace, and a
+// claim naming the old UID says nothing about the new one.
+//
+// Two projects resolving to one name, with nobody holding it, is refused to
+// both. Handing it to whichever reconciles first decides ownership by a race,
+// and the loser is a tenant whose workloads the winner's members can then read.
+func (r *ProjectReconciler) claimable(ctx context.Context, project *kipperv1.Project, ns *corev1.Namespace) error {
+	var projects kipperv1.ProjectList
+	if err := r.List(ctx, &projects); err != nil {
+		return fmt.Errorf("reading projects to see who holds %s: %w", ns.Name, err)
+	}
+
+	var rivalClaim, rivalDerives string
+	for i := range projects.Items {
+		other := &projects.Items[i]
+		if other.Name == project.Name {
+			continue
+		}
+		for _, claim := range other.Status.NamespaceClaims {
+			if claim.Name == ns.Name && claim.UID == ns.UID {
+				rivalClaim = other.Name
+			}
+		}
+		for _, env := range ProjectEnvironments(other) {
+			if ResolveNamespace(other.Name, env.Name) == ns.Name {
+				rivalDerives = other.Name
+			}
+		}
+	}
+
+	if rivalClaim != "" {
+		return &namespaceConflictError{namespace: ns.Name, owner: rivalClaim, claimant: project.Name}
+	}
+
+	// Nobody holds it. If this project already does, it is ours and the
+	// derivation below does not matter: a collision resolved once stays
+	// resolved rather than reopening every reconcile.
+	for _, claim := range project.Status.NamespaceClaims {
+		if claim.Name == ns.Name && claim.UID == ns.UID {
+			return nil
+		}
+	}
+
+	if rivalDerives != "" {
+		return &namespaceConflictError{namespace: ns.Name, owner: rivalDerives, claimant: project.Name}
+	}
+	return nil
+}
+
+// nsUID reads the namespace's UID, which is what makes a claim about an object
+// rather than about a name.
+//
+// An unreadable namespace yields an empty UID and the caller records no claim
+// at all. A claim carrying an empty UID would be worse than none: it matches no
+// live namespace, so the project would not recognise its own, while still
+// reading as a claim to anything that looks at the name alone.
+func nsUID(ctx context.Context, r *ProjectReconciler, name string) types.UID {
+	var ns corev1.Namespace
+	if err := r.Get(ctx, types.NamespacedName{Name: name}, &ns); err != nil {
+		return ""
+	}
+	return ns.UID
+}
+
+// publishClaim writes the claims recorded so far, without touching the rest of
+// the status.
+//
+// The whole-status write at the end of the pass still happens and is still what
+// prunes: this only ever adds. A claim is worth recording the moment the
+// namespace is proven this project's and isolated, because everything after
+// that point can fail and the claim is what the add-environment flow waits on.
+//
+// A conflict is not an error. Another writer got there first, this pass will
+// see their version on its next run, and the claim it wanted to add is
+// derivable again from the same namespace.
+func (r *ProjectReconciler) publishClaim(ctx context.Context, project *kipperv1.Project, ns string, claimed []kipperv1.NamespaceClaim) error {
+	var live kipperv1.Project
+	if err := r.Get(ctx, types.NamespacedName{Name: project.Name}, &live); err != nil {
+		return err
+	}
+	for _, existing := range live.Status.NamespaceClaims {
+		if existing.Name == ns {
+			return nil
+		}
+	}
+	live.Status.NamespaceClaims = append(live.Status.NamespaceClaims, claimed[len(claimed)-1])
+	if err := r.Status().Update(ctx, &live); err != nil {
+		if errors.IsConflict(err) {
+			return nil
+		}
+		return err
+	}
+	// The write moved the object on, so the copy this pass is still holding
+	// carries a resourceVersion the API server has already superseded. Without
+	// this the whole-status update at the end of the pass conflicts with a
+	// change this same pass made.
+	project.ResourceVersion = live.ResourceVersion
+	project.Status.NamespaceClaims = live.Status.NamespaceClaims
+	return nil
 }

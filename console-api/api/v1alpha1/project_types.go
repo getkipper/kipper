@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // ProjectSpec defines the desired state of a project.
@@ -124,6 +125,18 @@ type ProjectMember struct {
 	Role ProjectMemberRole `json:"role"`
 }
 
+// NamespaceClaim is one namespace a project holds, identified by the object
+// rather than by its name.
+type NamespaceClaim struct {
+	// Name is the namespace.
+	Name string `json:"name"`
+
+	// UID is the object the project took. A namespace deleted and recreated
+	// under the same name is a different object, and a claim matching on name
+	// alone would hand the replacement to whoever held its predecessor.
+	UID types.UID `json:"uid"`
+}
+
 // ProjectEnvironment defines a single environment stage.
 type ProjectEnvironment struct {
 	// Name is the environment name (e.g. test, acc, prod).
@@ -191,6 +204,22 @@ type ProjectStatus struct {
 	// empty baseline. They ship a release before anything leans on them, and a
 	// baseline whose generation does not match the object's is stale rather
 	// than current.
+	// NamespaceClaims records the namespaces this project took and the exact
+	// objects it took, so ownership rests on something a relabel does not
+	// touch.
+	//
+	// A namespace's project label is the only thing saying whose it is today,
+	// and anyone who can write the object can rewrite it. The claim is a second
+	// record: the reconcile writes what it actually adopted, and the UID is
+	// there because a name outlives the object it named, so a namespace deleted
+	// and recreated is a different namespace and must not inherit a claim.
+	//
+	// Written now and required a release later, for the same reason as
+	// ProjectedMembers: an older pod's whole-status write drops what its struct
+	// does not know.
+	// +optional
+	NamespaceClaims []NamespaceClaim `json:"namespaceClaims,omitempty"`
+
 	// +optional
 	ProjectedMembers []ProjectMember `json:"projectedMembers,omitempty"`
 	// +optional

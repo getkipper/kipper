@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+
 	"github.com/go-chi/chi/v5"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -25,7 +27,7 @@ import (
 	"github.com/getkipper/kipper/console-api/handlers/copyenv"
 	"github.com/getkipper/kipper/console-api/internal/workloadname"
 	"github.com/getkipper/kipper/console-api/middleware"
-	"github.com/getkipper/kipper/controller/pkg/labels"
+	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 )
 
 // projectMemberRole returns email's role in the project, or "" if not a member.
@@ -243,7 +245,7 @@ func (p *Projects) namespaceOwners(ctx context.Context) (map[string]string, bool
 	}
 	owners := make(map[string]string, len(list.Items))
 	for _, ns := range list.Items {
-		owners[ns.Name] = ns.Labels[labels.Project]
+		owners[ns.Name] = ns.Labels[kipperlabels.Project]
 	}
 	return owners, true
 }
@@ -860,7 +862,7 @@ func shouldOmitSecretFromPreview(s *corev1.Secret) bool {
 	if _, ok := s.Labels["kipper.run/service-type"]; ok {
 		return true
 	}
-	if s.Labels[labels.Binding] == "true" {
+	if s.Labels[kipperlabels.Binding] == "true" {
 		return true
 	}
 	if s.Labels["kipper.run/registry"] == "true" {
@@ -1009,9 +1011,23 @@ func (p *Projects) AddEnvironment(w http.ResponseWriter, r *http.Request) {
 		targetNs = fmt.Sprintf("%s-%s", projectName, req.Name)
 	}
 
-	if err := waitForNamespace(ctx, p.Client, targetNs); err != nil {
-		log.Printf("projects: waiting for namespace %s: %v", targetNs, err)
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("namespace %s did not appear", targetNs))
+	// Waits for the project to claim the namespace, not merely for the
+	// namespace to exist.
+	//
+	// The reconciler creates a namespace before it decides whether the project
+	// may hold it, and refuses one another project claims. Waiting on existence
+	// alone returned as soon as the object appeared and left this handler
+	// writing into a namespace the reconcile was about to refuse. The claim is
+	// recorded once the namespace is proven this project's, so it is the thing
+	// worth waiting for.
+	if err := waitForNamespaceClaim(ctx, p.CRClient, p.Client, projectName, targetNs); err != nil {
+		log.Printf("projects: waiting for project %s to claim namespace %s: %v", projectName, targetNs, err)
+		if goerrors.Is(err, errNamespaceRefused) {
+			respondError(w, http.StatusConflict, err.Error())
+			return
+		}
+		respondError(w, http.StatusInternalServerError,
+			fmt.Sprintf("namespace %s did not become this project's", targetNs))
 		return
 	}
 
@@ -1073,17 +1089,68 @@ func (p *Projects) AddEnvironment(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusCreated, resp)
 }
 
-// waitForNamespace polls until the namespace exists or the context expires.
-// The project reconciler creates namespaces asynchronously — we need it
-// before issuing creates against it.
-func waitForNamespace(ctx context.Context, client kubernetes.Interface, name string) error {
+// errNamespaceRefused says the reconcile examined the namespace and would not
+// give it to this project, so waiting longer changes nothing.
+var errNamespaceRefused = goerrors.New("the namespace is not this project's")
+
+// waitForNamespaceClaim polls until the project records holding the namespace,
+// or the context expires.
+//
+// The claim is what says the namespace is this project's, and the reconciler
+// writes it only after it has proven that and isolated the namespace. Existence
+// says only that an object appeared, which is also true of a namespace the
+// reconcile is about to refuse because another project holds it.
+func waitForNamespaceClaim(ctx context.Context, cr crclient.Client, client kubernetes.Interface, project, namespace string) error {
 	for {
-		_, err := client.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
-		if err == nil {
-			return nil
+		live, liveErr := client.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+		if liveErr != nil && !errors.IsNotFound(liveErr) {
+			return liveErr
 		}
-		if !errors.IsNotFound(err) {
+
+		var p kipperv1.Project
+		err := cr.Get(ctx, crclient.ObjectKey{Name: project}, &p)
+		if err != nil && !errors.IsNotFound(err) {
 			return err
+		}
+		if err == nil && liveErr == nil {
+			// Name and UID both. A claim naming a namespace that has since been
+			// deleted and recreated describes an object that is gone, and the
+			// label on the replacement is exactly the record claims exist to
+			// supplement, so it cannot stand in either.
+			for _, claim := range p.Status.NamespaceClaims {
+				if claim.Name == namespace && claim.UID == live.UID {
+					return nil
+				}
+			}
+
+			// The compatibility window, and the limit it carries.
+			//
+			// An older controller reconciles the namespace fully and cannot
+			// write a claim, because its status struct has no such field, so
+			// requiring one here would fail an AddEnvironment that has in fact
+			// succeeded. Until every pod writes claims, a namespace carrying
+			// this project's label is accepted.
+			//
+			// That means the label still decides in this release, so a
+			// namespace recreated under the same name and relabelled for this
+			// project is accepted here, and the UID check above cannot stop it.
+			// Claims do not protect against a relabel until this branch is
+			// gone, which is what "required in release 2" means and is the
+			// reason the split is worth the two releases rather than one.
+			if live.Labels[kipperlabels.Project] == project {
+				return nil
+			}
+		}
+
+		// The reconcile has looked and refused. Checked whether or not the
+		// namespace is readable, because a refusal is a decision about a name
+		// and the namespace may be somebody else's or not there at all.
+		// Waiting out the timeout would turn a decision already made into a
+		// generic failure a minute later.
+		if err == nil {
+			if refusal := namespaceRefusal(&p, namespace); refusal != "" {
+				return fmt.Errorf("%w: %s", errNamespaceRefused, refusal)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -1091,6 +1158,32 @@ func waitForNamespace(ctx context.Context, client kubernetes.Interface, name str
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+// namespaceRefusal returns the reconcile's reason for refusing this namespace,
+// or empty when it has not refused this one.
+//
+// The condition names one namespace and lists the others, so a substring test
+// against the whole message answers about the wrong namespace: a project with a
+// standing conflict over `shop-prod` would refuse `shop-prod-eu` on the strength
+// of it. The name is matched between delimiters instead, and a condition from an
+// older generation is ignored rather than treated as current.
+func namespaceRefusal(p *kipperv1.Project, namespace string) string {
+	cond := apimeta.FindStatusCondition(p.Status.Conditions, "NamespaceConflict")
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		return ""
+	}
+	if cond.ObservedGeneration != 0 && cond.ObservedGeneration < p.Generation {
+		return ""
+	}
+	for _, field := range strings.FieldsFunc(cond.Message, func(r rune) bool {
+		return r == ' ' || r == ',' || r == '.' || r == ';'
+	}) {
+		if field == namespace {
+			return cond.Message
+		}
+	}
+	return ""
 }
 
 // validateEnvironmentNames rejects duplicates and names that would produce an
@@ -1296,7 +1389,7 @@ func namespaceBelongsTo(ctx context.Context, client kubernetes.Interface, namesp
 		}
 		return fmt.Errorf("reading namespace %s: %w", namespace, err)
 	}
-	if owner := ns.Labels[labels.Project]; owner != projectName {
+	if owner := ns.Labels[kipperlabels.Project]; owner != projectName {
 		return &foreignNamespaceError{msg: fmt.Sprintf(
 			"namespace %q is not owned by project %q", namespace, projectName)}
 	}
