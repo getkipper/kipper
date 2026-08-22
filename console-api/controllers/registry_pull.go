@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/internal/nsowner"
 	"github.com/getkipper/kipper/controller/pkg/registrycred"
 )
 
@@ -112,21 +113,36 @@ func validateClusterImage(ctx context.Context, c client.Client, owner client.Obj
 	return nil
 }
 
-// workloadProject returns the project a workload's namespace belongs to, from
-// the controller-owned kipper.run/project label, or "" when the namespace is
-// definitively not a managed project namespace — a tenant cannot label a
-// namespace, so the result is never tenant-influenced. Only a read failure is
-// an error, so a transient one is retried rather than mistaken for "no
-// project".
+// workloadProject returns the project a workload's namespace belongs to, or ""
+// when nothing owns it.
+//
+// It resolves through the shared owner lookup rather than reading the label
+// here. The comment this replaces said a tenant cannot label a namespace, and
+// that was the assumption worth removing: anyone who can write a namespace can
+// write that label, and this decides which project's registry credentials a
+// workload is given. The label is now a hint that the named project must back
+// with a claim.
+//
+// Only a read failure is an error, so a transient one is retried rather than
+// mistaken for "no project".
 func workloadProject(ctx context.Context, c client.Client, namespace string) (string, error) {
+	// A workload's namespace should exist, so its absence is a failure to find
+	// out rather than an answer, and the caller retries. nsowner treats a
+	// missing namespace as unowned, which is right for the authorization
+	// question and wrong here, so the existence check stays.
 	var ns corev1.Namespace
 	if err := c.Get(ctx, client.ObjectKey{Name: namespace}, &ns); err != nil {
 		return "", fmt.Errorf("resolving project for namespace %s: %w", namespace, err)
 	}
-	if ns.Labels["app.kubernetes.io/managed-by"] != "kipper" {
+
+	project, ok, err := nsowner.Of(ctx, c, namespace)
+	if err != nil {
+		return "", fmt.Errorf("resolving project for namespace %s: %w", namespace, err)
+	}
+	if !ok {
 		return "", nil
 	}
-	return ns.Labels["kipper.run/project"], nil
+	return project, nil
 }
 
 func upsertPullSecret(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, name string, dockercfg []byte) error {

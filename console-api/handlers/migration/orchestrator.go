@@ -874,7 +874,7 @@ func (h *Handler) createApp(ctx context.Context, name, namespace string, spec ma
 		}); err != nil {
 			return fmt.Errorf("resetting build status for %s/%s: %w", namespace, name, err)
 		}
-		if _, err := builder.CreateBuildJob(ctx, h.Client, app, commit); err != nil {
+		if _, err := builder.CreateBuildJob(ctx, h.Client, h.CRClient, app, commit); err != nil {
 			return fmt.Errorf("triggering rebuild for %s/%s: %w", namespace, name, err)
 		}
 	}

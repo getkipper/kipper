@@ -1711,11 +1711,28 @@ func appWithImage(image string) *kipperv1.App {
 func managedNamespace() *corev1.Namespace {
 	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: "project-test",
+		UID:  "the-namespace",
 		Labels: map[string]string{
 			"app.kubernetes.io/managed-by": "kipper",
 			"kipper.run/project":           "acme",
 		},
 	}}
+}
+
+// claimingProject is the Project that holds managedNamespace, as a reconcile
+// that ran would have recorded.
+//
+// The label alone no longer answers who owns a namespace: anyone who can write
+// a namespace can write it, and the answer decides which project's registry
+// credentials a workload is given. A fixture that sets only the label is
+// describing a cluster that cannot happen without somebody having forged it.
+func claimingProject() *kipperv1.Project {
+	return &kipperv1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme"},
+		Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+			{Name: "project-test", UID: "the-namespace"},
+		}},
+	}
 }
 
 func TestEnsureImagePullSecret_PrivateThirdPartyImage(t *testing.T) {
@@ -1729,7 +1746,7 @@ func TestEnsureImagePullSecret_PrivateThirdPartyImage(t *testing.T) {
 		AllowedProjects: []string{"acme"},
 	})
 	ns := managedNamespace()
-	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, list, ns).Build()
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, list, ns, claimingProject()).Build()
 
 	refs, err := ensureImagePullSecret(context.Background(), c, scheme, app, app.Spec.Image)
 	require.NoError(t, err)
@@ -1831,7 +1848,7 @@ func TestEnsureImagePullSecret_DeniesUnlistedProject(t *testing.T) {
 		},
 		Type: corev1.SecretTypeDockerConfigJson,
 	}
-	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, list, ns, stale).Build()
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, list, ns, claimingProject(), stale).Build()
 
 	refs, err := ensureImagePullSecret(context.Background(), c, scheme, app, app.Spec.Image)
 	require.NoError(t, err)
@@ -1848,7 +1865,7 @@ func TestEnsureImagePullSecret_DeniesWithoutGrant(t *testing.T) {
 	app := appWithImage("ghcr.io/org/app:v1")
 	list := registryListSecret(t, registrycred.Entry{Name: "ghcr", Server: "ghcr.io", Username: "bob", Password: "s3cr3t"})
 	ns := managedNamespace()
-	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, list, ns).Build()
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, list, ns, claimingProject()).Build()
 
 	refs, err := ensureImagePullSecret(context.Background(), c, scheme, app, app.Spec.Image)
 	require.NoError(t, err)
@@ -1868,7 +1885,7 @@ func TestEnsureImagePullSecret_DeniesUnmanagedNamespace(t *testing.T) {
 		AllowedProjects: []string{"acme"},
 	})
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "project-test"}}
-	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, list, ns).Build()
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, list, ns, claimingProject()).Build()
 
 	refs, err := ensureImagePullSecret(context.Background(), c, scheme, app, app.Spec.Image)
 	require.NoError(t, err)
@@ -1923,7 +1940,7 @@ func TestEnsureImagePullSecret_RejectsForeignClusterImage(t *testing.T) {
 			"kipper.run/project":           "victim",
 		},
 	}}
-	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, managedNamespace(), victim).Build()
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, managedNamespace(), claimingProject(), victim).Build()
 
 	_, err := ensureImagePullSecret(context.Background(), c, scheme, app, app.Spec.Image)
 	require.Error(t, err)
@@ -1937,12 +1954,19 @@ func TestEnsureImagePullSecret_AllowsSameProjectClusterImage(t *testing.T) {
 	app := appWithImage("zot.kipper-system.svc.cluster.local:5000/project-staging/web:v3")
 	staging := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: "project-staging",
+		UID:  "the-staging-namespace",
 		Labels: map[string]string{
 			"app.kubernetes.io/managed-by": "kipper",
 			"kipper.run/project":           "acme",
 		},
 	}}
-	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, managedNamespace(), staging).Build()
+	// acme holds both namespaces, which is what makes this the same project.
+	// Two namespaces carrying the same label and claimed by nobody would be
+	// two namespaces nobody owns, not one project's pair.
+	owner := claimingProject()
+	owner.Status.NamespaceClaims = append(owner.Status.NamespaceClaims,
+		kipperv1.NamespaceClaim{Name: "project-staging", UID: "the-staging-namespace"})
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, managedNamespace(), owner, staging).Build()
 
 	refs, err := ensureImagePullSecret(context.Background(), c, scheme, app, app.Spec.Image)
 	require.NoError(t, err)
@@ -1954,7 +1978,7 @@ func TestEnsureImagePullSecret_ErrorOnUnknownClusterImageNamespace(t *testing.T)
 	// unknown state and must fail closed.
 	scheme := testScheme()
 	app := appWithImage("zot.kipper-system.svc.cluster.local:5000/no-such-ns/app:v1")
-	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, managedNamespace()).Build()
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, managedNamespace(), claimingProject()).Build()
 
 	_, err := ensureImagePullSecret(context.Background(), c, scheme, app, app.Spec.Image)
 	require.Error(t, err)
@@ -1979,7 +2003,7 @@ func TestJobReconciler_RejectsForeignClusterImage(t *testing.T) {
 				Schedule: schedule,
 			},
 		}
-		c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(job, managedNamespace(), victim).Build()
+		c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(job, managedNamespace(), claimingProject(), victim).Build()
 		r := &JobReconciler{Client: c, Scheme: scheme}
 
 		var err error
@@ -2014,7 +2038,7 @@ func TestJobReconciler_StagesPullSecretForPrivateImage(t *testing.T) {
 		Name: "ghcr", Server: "ghcr.io", Username: "bob", Password: "s3cr3t",
 		AllowedProjects: []string{"acme"},
 	})
-	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(job, list, managedNamespace()).Build()
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(job, list, managedNamespace(), claimingProject()).Build()
 	r := &JobReconciler{Client: c, Scheme: scheme}
 
 	require.NoError(t, r.reconcileCronJob(context.Background(), job, ""))
@@ -2045,7 +2069,7 @@ func TestEnsureImagePullSecret_ErrorOnFailedCleanup(t *testing.T) {
 		},
 		Type: corev1.SecretTypeDockerConfigJson,
 	}
-	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, list, ns, stale).
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, list, ns, claimingProject(), stale).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Delete: func(ctx context.Context, cl crclient.WithWatch, obj crclient.Object, opts ...crclient.DeleteOption) error {
 				return context.DeadlineExceeded
@@ -2107,7 +2131,7 @@ func TestStageFunctionPullSecret_StagesForTestRun(t *testing.T) {
 		Name: "ghcr", Server: "ghcr.io", Username: "bob", Password: "s3cr3t",
 		AllowedProjects: []string{"acme"},
 	})
-	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(fn, list, managedNamespace()).Build()
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(fn, list, managedNamespace(), claimingProject()).Build()
 
 	refs, err := StageFunctionPullSecret(context.Background(), c, fn)
 	require.NoError(t, err)
@@ -2133,7 +2157,7 @@ func TestReconcileCronJob_StagesPullSecret(t *testing.T) {
 		AllowedProjects: []string{"acme"},
 	})
 	ns := managedNamespace()
-	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(fn, list, ns).Build()
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(fn, list, ns, claimingProject()).Build()
 
 	r := &FunctionReconciler{Client: c, Scheme: scheme}
 	require.NoError(t, r.reconcileCronJob(context.Background(), fn, &fn.Spec.Triggers[0], nil, ""))

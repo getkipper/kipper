@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/internal/nsowner"
 	"github.com/getkipper/kipper/controller/pkg/applink"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 )
@@ -367,14 +368,18 @@ func linkIsConsentedTo(ctx context.Context, c crclient.Client, callerNS, targetN
 // projectOfNamespace reads the project a namespace belongs to from the label the
 // project reconciler puts there. An empty result means it is not one.
 func projectOfNamespace(ctx context.Context, c crclient.Client, ns string) (string, error) {
-	var namespace corev1.Namespace
-	switch err := c.Get(ctx, types.NamespacedName{Name: ns}, &namespace); {
-	case errors.IsNotFound(err):
-		return "", nil
-	case err != nil:
-		return "", fmt.Errorf("reading namespace %s: %w", ns, err)
+	// Through the shared owner lookup, because this decides whether one
+	// project's app may reach another's. Reading the label here trusted a value
+	// anyone who can write a namespace can set, and consent between two tenants
+	// is exactly the decision that must not rest on one.
+	project, ok, err := nsowner.Of(ctx, c, ns)
+	if err != nil {
+		return "", err
 	}
-	return namespace.Labels[kipperlabels.Project], nil
+	if !ok {
+		return "", nil
+	}
+	return project, nil
 }
 
 // enqueueCallersOfProject re-reconciles every app whose links point into a

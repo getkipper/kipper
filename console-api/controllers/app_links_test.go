@@ -36,8 +36,30 @@ func linkTestApp(name, ns string, port int32, links ...kipperv1.AppLink) *kipper
 func projectNS(name, project string) *corev1.Namespace {
 	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name:   name,
+		UID:    types.UID(name + "-uid"),
 		Labels: map[string]string{kipperlabels.Project: project},
 	}}
+}
+
+// claimingBoth is a project holding the namespaces named.
+func claimingBoth(name string, namespaces ...string) *kipperv1.Project {
+	p := consentingProject(name)
+	for _, ns := range namespaces {
+		p.Status.NamespaceClaims = append(p.Status.NamespaceClaims,
+			kipperv1.NamespaceClaim{Name: ns, UID: types.UID(ns + "-uid")})
+	}
+	return p
+}
+
+// linkProject is a project that holds its namespace, which is what makes it
+// the owner. Consent between two tenants is decided from this, and a label
+// anyone can write is not enough to decide it.
+func linkProject(name string, from ...string) *kipperv1.Project {
+	p := consentingProject(name, from...)
+	p.Status.NamespaceClaims = []kipperv1.NamespaceClaim{
+		{Name: name + "-test", UID: types.UID(name + "-test-uid")},
+	}
+	return p
 }
 
 // consentingProject is a target project that has agreed to be linked to.
@@ -55,9 +77,12 @@ func linkWorld() []crclient.Object {
 		projectNS("docuseal-test", "docuseal"),
 		projectNS("billing-test", "billing"),
 		projectNS("elsewhere-test", "elsewhere"),
-		consentingProject("docuseal", "hrportal"),
-		consentingProject("billing", "hrportal"),
-		consentingProject("elsewhere", "hrportal"),
+		// hrportal is the caller, and has to resolve as an owner too: consent
+		// compares two projects, so both ends need to be somebody's.
+		linkProject("hrportal"),
+		linkProject("docuseal", "hrportal"),
+		linkProject("billing", "hrportal"),
+		linkProject("elsewhere", "hrportal"),
 	}
 }
 
@@ -329,9 +354,9 @@ func TestALinkWithoutTheTargetProjectsConsentOpensNothing(t *testing.T) {
 		project *kipperv1.Project
 		opens   bool
 	}{
-		{name: "the target project allows this caller", project: consentingProject("docuseal", "hrportal"), opens: true},
-		{name: "the target project allows a different one", project: consentingProject("docuseal", "someone-else"), opens: false},
-		{name: "the target project allows nobody", project: consentingProject("docuseal"), opens: false},
+		{name: "the target project allows this caller", project: linkProject("docuseal", "hrportal"), opens: true},
+		{name: "the target project allows a different one", project: linkProject("docuseal", "someone-else"), opens: false},
+		{name: "the target project allows nobody", project: linkProject("docuseal"), opens: false},
 	}
 
 	for _, tt := range tests {
@@ -339,6 +364,9 @@ func TestALinkWithoutTheTargetProjectsConsentOpensNothing(t *testing.T) {
 			objs := []crclient.Object{
 				projectNS("hrportal-test", "hrportal"),
 				projectNS("docuseal-test", "docuseal"),
+				// The caller's project too: consent compares two owners, so
+				// the calling end has to be somebody's as well.
+				linkProject("hrportal"),
 				tt.project, caller, target,
 			}
 			r := &AppReconciler{Client: crfake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(), Scheme: scheme}
@@ -365,7 +393,7 @@ func TestConsentIsResolvedFromTheNamespacesNotTheLink(t *testing.T) {
 	objs := []crclient.Object{
 		projectNS("hrportal-test", "hrportal"),
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "some-other-ns"}},
-		consentingProject("hrportal", "hrportal"),
+		linkProject("hrportal", "hrportal"),
 		caller, target,
 	}
 	r := &AppReconciler{Client: crfake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(), Scheme: scheme}
@@ -388,7 +416,10 @@ func TestAnotherEnvironmentOfTheSameProjectNeedsNoConsent(t *testing.T) {
 	objs := []crclient.Object{
 		projectNS("hrportal-test", "hrportal"),
 		projectNS("hrportal-staging", "hrportal"),
-		consentingProject("hrportal"), // allows nobody, and needs to allow nobody
+		// Allows nobody, and needs to allow nobody. It holds both namespaces,
+		// which is what makes them one project's rather than two carrying the
+		// same label.
+		claimingBoth("hrportal", "hrportal-test", "hrportal-staging"),
 		caller, target,
 	}
 	r := &AppReconciler{Client: crfake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(), Scheme: scheme}
@@ -578,8 +609,9 @@ func TestALinkThatOpensNothingSaysSoOnTheApp(t *testing.T) {
 			projectNS("hrportal-test", "hrportal"),
 			projectNS("docuseal-test", "docuseal"),
 			projectNS("billing-test", "billing"),
-			consentingProject("docuseal", "hrportal"),
-			consentingProject("billing"),
+			linkProject("hrportal"),
+			linkProject("docuseal", "hrportal"),
+			linkProject("billing"),
 			caller, target,
 		).WithStatusSubresource(&kipperv1.App{}).Build(),
 		Scheme: scheme,
