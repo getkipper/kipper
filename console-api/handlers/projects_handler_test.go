@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	corev1 "k8s.io/api/core/v1"
@@ -497,6 +498,13 @@ func TestProjectsHandler_AddEnvironment(t *testing.T) {
 		project := &kipperv1.Project{
 			ObjectMeta: metav1.ObjectMeta{Name: "demo"},
 			Spec:       kipperv1.ProjectSpec{Environments: []kipperv1.ProjectEnvironment{{Name: "test"}}},
+			// AddEnvironment waits for the project to claim the namespace
+			// rather than for the namespace to exist, because existence is
+			// also true of one the reconcile is about to refuse. These
+			// fixtures stand in for a reconcile that has already run.
+			Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+				{Name: "demo-test"}, {Name: "demo-prod"},
+			}},
 		}
 		// Pre-create the namespaces the project reconciler would create — the
 		// handler waits for the new env's namespace before returning.
@@ -530,6 +538,11 @@ func TestProjectsHandler_AddEnvironment(t *testing.T) {
 		project := &kipperv1.Project{
 			ObjectMeta: metav1.ObjectMeta{Name: "demo"},
 			Spec:       kipperv1.ProjectSpec{Environments: []kipperv1.ProjectEnvironment{{Name: "test"}}},
+			// The handler waits for the claim rather than the namespace, so
+			// this fixture stands in for a reconcile that has already run.
+			Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+				{Name: "demo-test"}, {Name: "demo-prod"},
+			}},
 		}
 		webApp := &kipperv1.App{
 			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "demo-test"},
@@ -1166,7 +1179,12 @@ func TestProjectsHandler_ListReportsTheEnvironmentAProjectGetsByDefault(t *testi
 		},
 	}
 	// No environments declared, so the reconciler gives it "test".
-	bare := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "scratch"}}
+	bare := &kipperv1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "scratch"},
+		Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+			{Name: "scratch-test"}, {Name: "scratch-acc"},
+		}},
+	}
 
 	handler := &Projects{Client: fake.NewClientset(), CRClient: testCRClient(declared, bare)}
 	r := chi.NewRouter()
@@ -1322,10 +1340,16 @@ func TestProjectsHandler_ListCountsAForeignNamespaceAsContradicting(t *testing.T
 // question, because the deletion is the reconciler acting on what the handler
 // wrote — a test that only inspected the response would have passed throughout.
 func TestProjectsHandler_AddEnvironmentKeepsTheOneTheProjectAlreadyHas(t *testing.T) {
-	bare := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "scratch"}}
-	// Both namespaces the reconciler would have: the implicit one the project
-	// already runs in, and the one this addition asks for. The handler waits
-	// for the second before returning.
+	// Both namespaces the reconciler would have, and the claims it would have
+	// recorded for them: the handler waits for the claim rather than for the
+	// namespace, because existence is also true of one the reconcile is about
+	// to refuse.
+	bare := &kipperv1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "scratch"},
+		Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+			{Name: "scratch-test"}, {Name: "scratch-acc"},
+		}},
+	}
 	nsTest := newKipperNamespace("scratch-test", "scratch", "test", "0")
 	nsAcc := newKipperNamespace("scratch-acc", "scratch", "acc", "1")
 	handler := &Projects{
@@ -1557,20 +1581,22 @@ func TestProjectsHandler_AddEnvironmentRefusesANamespaceThatAppearsMidFlight(t *
 	shopTest := newKipperNamespace("shop-test", "shop", "test", "0")
 	client := fake.NewClientset(shopTest)
 
-	// shop-prod is absent when the collision check looks, and somebody else's
-	// by the time the handler waits for it.
-	var looks int
-	client.PrependReactor("get", "namespaces", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		get, ok := action.(k8stesting.GetAction)
-		if !ok || get.GetName() != "shop-prod" {
-			return false, nil, nil
-		}
-		looks++
-		if looks == 1 {
-			return true, nil, apierrors.NewNotFound(corev1.Resource("namespaces"), "shop-prod")
-		}
-		return true, newKipperNamespace("shop-prod", "somebody-else", "prod", "1"), nil
-	})
+	// shop-prod is absent when the collision check looks. By the time the
+	// handler waits, the reconcile has looked at it and refused, which is how
+	// the handler learns the namespace is not this project's: it waits for the
+	// claim, and the claim never comes.
+	//
+	// Driving it through the Project rather than through a namespace reactor is
+	// the point of the change. Existence was never the question; whether the
+	// reconcile would give the namespace to this project was, and only the
+	// reconcile can answer it.
+	shop.Status.Conditions = []metav1.Condition{{
+		Type:               "NamespaceConflict",
+		Status:             metav1.ConditionTrue,
+		Reason:             "NamespaceOwnedByAnotherProject",
+		Message:            "namespace shop-prod already belongs to project somebody-else",
+		LastTransitionTime: metav1.Now(),
+	}}
 
 	handler := &Projects{Client: client, CRClient: testCRClient(shop), Domain: "example.com"}
 	r := chi.NewRouter()
@@ -1582,12 +1608,11 @@ func TestProjectsHandler_AddEnvironmentRefusesANamespaceThatAppearsMidFlight(t *
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	if looks < 2 {
-		t.Fatalf("the handler asked about the namespace %d times; the window this covers was never opened", looks)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("a namespace the reconcile refused is a 409, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("a namespace that became somebody else's mid-flight is a 403, got %d: %s",
-			rec.Code, rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "somebody-else") {
+		t.Errorf("the refusal does not name the project holding the namespace: %s", rec.Body.String())
 	}
 
 	var apps kipperv1.AppList
@@ -1955,5 +1980,100 @@ func TestTheProjectIndexHidesProjectsFromAnUnrecognisedRole(t *testing.T) {
 	}
 	if len(projects) != 1 {
 		t.Errorf("the owner sees %d project(s), want 1: the filter refuses a member it should admit", len(projects))
+	}
+}
+
+// During a rolling upgrade this handler runs beside a controller whose status
+// struct has no claims field. That controller creates and configures the
+// namespace perfectly well and writes no claim, and a later whole-status write
+// from it drops any claim a newer pod recorded.
+//
+// So this release accepts either record: the claim, or the namespace carrying
+// this project's label. Requiring the claim now would fail an AddEnvironment
+// that has in fact succeeded, which is the compatibility boundary the whole
+// two-release split exists to hold. The next release drops the label branch.
+func TestAddEnvironmentSucceedsWhenAnOlderControllerWroteNoClaim(t *testing.T) {
+	project := &kipperv1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		Spec:       kipperv1.ProjectSpec{Environments: []kipperv1.ProjectEnvironment{{Name: "test"}}},
+		// No claims at all: an older controller reconciled this project.
+	}
+	nsTest := newKipperNamespace("demo-test", "demo", "test", "0")
+	nsProd := newKipperNamespace("demo-prod", "demo", "prod", "1")
+
+	handler := &Projects{
+		Client:   fake.NewClientset(nsTest, nsProd),
+		CRClient: testCRClient(project),
+		Domain:   "example.com",
+	}
+	r := chi.NewRouter()
+	r.Post("/api/v1/projects/{name}/environments", handler.AddEnvironment)
+
+	req := httptest.NewRequest("POST", "/api/v1/projects/demo/environments", strings.NewReader(`{"name":"prod"}`))
+	req = asUser(req, "owner@test.com", middleware.RoleAdmin)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("adding an environment beside an older controller = %d, want 201: the handler is requiring a claim this release cannot rely on. Body: %s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// A claim names an object, and the handler has to check the object.
+//
+// A namespace deleted and recreated under the same name is a different
+// namespace, so a claim naming the old one describes something that is gone and
+// must not authorise the copy that follows.
+//
+// What this proves is the stale-claim half only. The replacement here carries
+// somebody else's label, so the compatibility branch cannot admit it either. A
+// replacement relabelled for this project *is* still accepted in this release,
+// because the label remains authoritative until the resolver requires claims;
+// that limit is stated where the branch is.
+func TestAddEnvironmentRefusesAStaleClaimOverARecreatedNamespace(t *testing.T) {
+	project := &kipperv1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		Spec:       kipperv1.ProjectSpec{Environments: []kipperv1.ProjectEnvironment{{Name: "test"}}},
+		Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+			{Name: "demo-test", UID: "still-here"},
+			// Names the namespace that used to be there.
+			{Name: "demo-prod", UID: "the-old-object"},
+		}},
+	}
+	nsTest := newKipperNamespace("demo-test", "demo", "test", "0")
+	nsTest.UID = "still-here"
+
+	// The replacement, carrying somebody else's label so the compatibility
+	// branch cannot admit it either.
+	nsProd := newKipperNamespace("demo-prod", "somebody-else", "prod", "1")
+	nsProd.UID = "the-new-object"
+
+	handler := &Projects{
+		Client:   fake.NewClientset(nsTest, nsProd),
+		CRClient: testCRClient(project),
+		Domain:   "example.com",
+	}
+	r := chi.NewRouter()
+	r.Post("/api/v1/projects/{name}/environments", handler.AddEnvironment)
+
+	body := strings.NewReader(`{"name":"prod","copy_from":"test"}`)
+	req := asUser(httptest.NewRequest("POST", "/api/v1/projects/demo/environments", body),
+		"owner@test.com", middleware.RoleAdmin)
+	ctx, cancel := context.WithTimeout(req.Context(), 2*time.Second)
+	defer cancel()
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req.WithContext(ctx))
+
+	if rec.Code == http.StatusCreated {
+		t.Fatalf("a stale claim authorised a namespace that is a different object: %s", rec.Body.String())
+	}
+
+	var apps kipperv1.AppList
+	if err := handler.CRClient.List(context.Background(), &apps, crclient.InNamespace("demo-prod")); err != nil {
+		t.Fatalf("listing apps in the replacement namespace: %v", err)
+	}
+	if len(apps.Items) != 0 {
+		t.Errorf("the copy wrote %d apps into a namespace the project never claimed", len(apps.Items))
 	}
 }

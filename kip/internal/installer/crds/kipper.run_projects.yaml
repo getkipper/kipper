@@ -258,19 +258,7 @@ spec:
                   - type
                   type: object
                 type: array
-              namespaces:
-                description: Namespaces lists the Kubernetes namespaces created for
-                  this project.
-                items:
-                  type: string
-                type: array
-              phase:
-                description: Phase represents the current lifecycle phase.
-                enum:
-                - Active
-                - Terminating
-                type: string
-              projectedMembers:
+              namespaceClaims:
                 description: |-
                   ProjectedMembers is the member list the reconciler last projected onto
                   RBAC, and ProjectedMembersGeneration is the spec generation it came from.
@@ -286,6 +274,51 @@ spec:
                   empty baseline. They ship a release before anything leans on them, and a
                   baseline whose generation does not match the object's is stale rather
                   than current.
+                  NamespaceClaims records the namespaces this project took and the exact
+                  objects it took, so ownership rests on something a relabel does not
+                  touch.
+
+                  A namespace's project label is the only thing saying whose it is today,
+                  and anyone who can write the object can rewrite it. The claim is a second
+                  record: the reconcile writes what it actually adopted, and the UID is
+                  there because a name outlives the object it named, so a namespace deleted
+                  and recreated is a different namespace and must not inherit a claim.
+
+                  Written now and required a release later, for the same reason as
+                  ProjectedMembers: an older pod's whole-status write drops what its struct
+                  does not know.
+                items:
+                  description: |-
+                    NamespaceClaim is one namespace a project holds, identified by the object
+                    rather than by its name.
+                  properties:
+                    name:
+                      description: Name is the namespace.
+                      type: string
+                    uid:
+                      description: |-
+                        UID is the object the project took. A namespace deleted and recreated
+                        under the same name is a different object, and a claim matching on name
+                        alone would hand the replacement to whoever held its predecessor.
+                      type: string
+                  required:
+                  - name
+                  - uid
+                  type: object
+                type: array
+              namespaces:
+                description: Namespaces lists the Kubernetes namespaces created for
+                  this project.
+                items:
+                  type: string
+                type: array
+              phase:
+                description: Phase represents the current lifecycle phase.
+                enum:
+                - Active
+                - Terminating
+                type: string
+              projectedMembers:
                 items:
                   description: ProjectMember grants a user a role within a project.
                   properties:
