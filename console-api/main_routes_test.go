@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -175,6 +176,63 @@ func TestTheRouterGatesEachProjectRouteByWhatItsNameMeans(t *testing.T) {
 					path, code)
 			}
 		}
+	})
+
+	// The two groups above name the routes somebody thought of. This walks the
+	// whole tree instead and holds every one of them to the property that makes
+	// the split matter: a path under /projects/{name} resolves to one tenant or
+	// the other, never to both.
+	//
+	// Two projects can put the same string in that segment, so a route that
+	// admitted both owners would be reachable by a tenant who owns neither the
+	// project nor the namespace the other means by it. Enumerating was
+	// impossible while buildRouter returned a closure over the mux; it returns
+	// a consoleRouter now, so the gap that comment described is closed.
+	t.Run("no route under a shared name admits both tenants", func(t *testing.T) {
+		cr, ok := router.(consoleRouter)
+		if !ok {
+			t.Fatalf("router is %T, not consoleRouter", router)
+		}
+		checked := 0
+		err := chi.Walk(cr.api, func(method, pattern string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+			if !strings.HasPrefix(pattern, "/api/v1/projects/{name}") || method != "GET" {
+				return nil
+			}
+			path := strings.NewReplacer(
+				"{name}", "shop-prod",
+				"{app}", "shop-api",
+				"{fn}", "shop-fn",
+				"{service}", "shop-db",
+				"{vol}", "shop-data",
+				"{key}", "key-1",
+				"{schema}", "public",
+				"{table}", "widgets",
+				"{indexName}", "widgets_pkey",
+				"{snippetName}", "snippet-1",
+				"{email}", sprOwner,
+				"{transfer}", "transfer-1",
+				"{session}", "session-1",
+				"{plan}", "plan-1",
+				"{id}", "id-1",
+				"{host}", "shop.example.com",
+				"*", "wildcard",
+			).Replace(pattern)
+
+			shop, spr := call("GET", path, shopOwner), call("GET", path, sprOwner)
+			checked++
+			if shop != http.StatusForbidden && spr != http.StatusForbidden {
+				t.Errorf("GET %s admits both shop's owner (%d) and shop-prod's owner (%d): one path, two tenants",
+					pattern, shop, spr)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walking the router: %v", err)
+		}
+		if checked == 0 {
+			t.Fatal("no /projects/{name} routes were walked, so this proves nothing")
+		}
+		t.Logf("checked %d routes under /projects/{name}", checked)
 	})
 
 	// The gate is the thing under test, so prove it is running at all.
