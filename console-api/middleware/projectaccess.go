@@ -137,10 +137,11 @@ func (r *ProjectAccessResolver) resolveProject(ctx context.Context, email, proje
 
 // projectForName maps a namespace to the project that owns it.
 //
-// An existing namespace is resolved through the shared owner lookup, so the
-// project it names must also claim it. The label alone used to answer this, and
-// it is writable by anyone who can write a namespace, which made every gated
-// route's authority rest on a value the caller might have set.
+// An existing namespace is resolved through the shared owner lookup, because
+// the label that used to answer this is writable by anyone who can write a
+// namespace, which made every gated route's authority rest on a value the
+// caller might have set. What that lookup requires, and the release it starts
+// requiring the claim, is stated once in nsowner.Of.
 //
 // When no namespace by that name exists the name is returned unchanged, which
 // is what a caller naming a project by its own name before its namespace exists

@@ -103,6 +103,16 @@ func appScheme() *runtime.Scheme {
 		schema.GroupVersionKind{Group: "kipper.run", Version: "v1alpha1", Kind: "AppList"},
 		&unstructured.UnstructuredList{},
 	)
+	// Projects too, because the upgrade paths that read apps also read which
+	// project holds the namespace each app is in.
+	scheme.AddKnownTypeWithName(
+		schema.GroupVersionKind{Group: "kipper.run", Version: "v1alpha1", Kind: "Project"},
+		&unstructured.Unstructured{},
+	)
+	scheme.AddKnownTypeWithName(
+		schema.GroupVersionKind{Group: "kipper.run", Version: "v1alpha1", Kind: "ProjectList"},
+		&unstructured.UnstructuredList{},
+	)
 	return scheme
 }
 

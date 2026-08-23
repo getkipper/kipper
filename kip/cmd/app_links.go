@@ -295,6 +295,13 @@ func runningPodFor(ctx context.Context, k8sClient *k8s.Client, ns, app string) s
 
 // projectOwning returns the project a namespace belongs to, from the label the
 // project reconciler writes.
+//
+// The label and not the project's records, which is deliberate for now. This
+// prints a consent verdict for a person to read, and the server decides for itself
+// through the shared owner lookup; that lookup still answers from the label
+// when neither record covers the namespace, so reading the records here would
+// have the diagnostic disagree with the server it is describing. It moves with
+// the other two when the label stops answering.
 func projectOwning(ctx context.Context, k8sClient *k8s.Client, ns string) string {
 	obj, err := k8sClient.Clientset().CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
 	if err != nil {

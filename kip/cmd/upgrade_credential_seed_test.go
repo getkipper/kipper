@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -43,10 +44,33 @@ func gitApp(namespace, credential string) *unstructured.Unstructured {
 func namespaceOfProject(name, project string) *corev1.Namespace {
 	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: name,
+		// Matching the claim owningProject writes. Which project a namespace
+		// belongs to is read from that project's records, so a claim names the
+		// object and a fixture with no UID matches nothing.
+		UID: k8stypes.UID(name + "-uid"),
 		Labels: map[string]string{
 			"app.kubernetes.io/managed-by": "kipper",
 			"kipper.run/project":           project,
 		},
+	}}
+}
+
+// owningProject is the project these fixtures build for, whose records say it
+// holds these namespaces.
+//
+// A credential grant reconstructed here is written into the allow-list and
+// stays there, so which project a namespace belongs to is decided from the
+// project's own records. A fixture without them grants nobody anything.
+func owningProject(namespaces ...string) *unstructured.Unstructured {
+	claims := make([]any, 0, len(namespaces))
+	for _, ns := range namespaces {
+		claims = append(claims, map[string]any{"name": ns, "uid": ns + "-uid"})
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kipper.run/v1alpha1",
+		"kind":       "Project",
+		"metadata":   map[string]any{"name": "shop"},
+		"status":     map[string]any{"namespaceClaims": claims},
 	}}
 }
 
@@ -59,7 +83,7 @@ func TestUpgradeSeedsAnEmptyAllowListFromWhatIsAlreadyBuilding(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
 	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &out))
@@ -79,7 +103,7 @@ func TestUpgradeIgnoresACredentialThatIsNotShared(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "web-git-credentials"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "web-git-credentials"), owningProject("shop-prod"))
 
 	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
 
@@ -98,7 +122,7 @@ func TestUpgradeSeedsASharedCredentialNamedLikeAnAppsOwn(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "web-git-credentials", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "web-git-credentials"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "web-git-credentials"), owningProject("shop-prod"))
 
 	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
 
@@ -114,7 +138,7 @@ func TestUpgradeLeavesACuratedAllowListAlone(t *testing.T) {
 		namespaceOfProject("blog-prod", "blog"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token", AllowedProjects: []string{"blog"}}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 
 	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
 
@@ -131,7 +155,7 @@ func TestUpgradeSkipsAnAppInANamespaceWithNoProject(t *testing.T) {
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "stray"}},
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("stray", "forge"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("stray", "forge"), owningProject("shop-prod"))
 
 	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
 
@@ -156,7 +180,7 @@ func TestUpgradeSaysNothingWhenThereIsNothingToSeed(t *testing.T) {
 // created for it by an upgrade.
 func TestUpgradeDoesNotCreateAListForAClusterWithNoSharedCredentials(t *testing.T) {
 	clientset := k8sfake.NewClientset(kipperSystemUpgraded(), namespaceOfProject("shop-prod", "shop"))
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 
 	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
 
@@ -212,7 +236,7 @@ func TestUpgradeSeedsOncePerCluster(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token", AllowedProjects: []string{"blog"}}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "later"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "later"), owningProject("shop-prod"))
 
 	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
 	require.True(t, seeded(t, clientset), "the cluster was not recorded as migrated")
@@ -239,7 +263,7 @@ func TestUpgradeSeedsOncePerCluster(t *testing.T) {
 // still a candidate for the inference.
 func TestUpgradeRecordsTheMigrationOnAClusterWithNoSharedCredentials(t *testing.T) {
 	clientset := k8sfake.NewClientset(kipperSystemUpgraded(), namespaceOfProject("shop-prod", "shop"))
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 
 	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
 
@@ -258,7 +282,7 @@ func TestUpgradeRepairsAGrantTheOldWriterErasedDuringTheRollout(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 
 	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
 	require.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"))
@@ -290,7 +314,7 @@ func TestUpgradeDoesNotCloseTheMigrationWhileTheOldWriterServes(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 
 	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
 
@@ -318,7 +342,7 @@ func TestUpgradeLeavesAnUnusedCredentialUndecidedBeforeTheRollout(t *testing.T) 
 
 	// The app arrives during the rollout window, still building under the old
 	// rules, and the pass that runs afterwards has to see it.
-	withApp := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	withApp := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, withApp, &bytes.Buffer{}))
 
 	assert.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"),
@@ -369,7 +393,7 @@ func TestUpgradeSeedsAnAppThatArrivedWhileTheMigrationCouldNotClose(t *testing.T
 	_, err = clientset.CoreV1().Namespaces().Update(context.Background(), ns, metav1.UpdateOptions{})
 	require.NoError(t, err)
 
-	withApp := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "archive"))
+	withApp := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "archive"), owningProject("shop-prod"))
 	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, withApp, &bytes.Buffer{}))
 
 	assert.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"),
@@ -441,7 +465,7 @@ func TestUpgradeNamesOnlyTheCredentialsStillWaiting(t *testing.T) {
 			sharedcred.Entry{Name: "forge", Token: "a-token"},
 			sharedcred.Entry{Name: "archive", Token: "another-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
 	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, dyn, &out))
@@ -463,7 +487,7 @@ func TestUpgradeNamesACredentialWhoseAllowListWasCleared(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
 	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, dyn, &out))
@@ -512,8 +536,93 @@ func TestUpgradeSurvivesAFailureToReadTheListForTheOpenMigrationReport(t *testin
 	var out bytes.Buffer
 
 	err := closeSharedCredentialGrants(context.Background(), clientset,
-		dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge")), &out)
+		dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"), owningProject("shop-prod")), &out)
 
 	require.NoError(t, err, "an advisory read failure stopped the upgrade before its trust material")
 	assert.Contains(t, out.String(), "Could not check", "a skipped check passed as a clean run")
+}
+
+// The population this seeding exists for is a cluster upgrading from a build
+// that wrote no claims at all, where the only record a project has of holding
+// a namespace is the older name list. Every other fixture here carries claims,
+// so switching the ownership rule to claims-only would leave the whole suite
+// green while a real pre-claims upgrade granted nobody anything and every build
+// that had been working stopped.
+func TestUpgradeSeedsFromTheRecordOnAClusterThatWroteNoClaims(t *testing.T) {
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		namespaceOfProject("shop-prod", "shop"),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
+	)
+	preClaims := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kipper.run/v1alpha1",
+		"kind":       "Project",
+		"metadata":   map[string]any{"name": "shop"},
+		"status":     map[string]any{"namespaces": []any{"shop-prod"}},
+	}}
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"), preClaims)
+
+	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
+
+	entries := storedEntries(t, clientset)
+	require.Len(t, entries, 1)
+	assert.True(t, entries[0].AllowsProject("shop"),
+		"a cluster with no claims yet was left with a credential nobody may build with: %v", entries[0].AllowedProjects)
+}
+
+// And the label on its own still grants nothing, which is the half the record
+// is there to make decidable.
+func TestUpgradeGrantsNothingForANamespaceNoProjectRecordCovers(t *testing.T) {
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		namespaceOfProject("victim-prod", "attacker"),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
+	)
+	attacker := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kipper.run/v1alpha1",
+		"kind":       "Project",
+		"metadata":   map[string]any{"name": "attacker"},
+		"status":     map[string]any{},
+	}}
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("victim-prod", "forge"), attacker)
+
+	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
+
+	entries := storedEntries(t, clientset)
+	require.Len(t, entries, 1)
+	assert.False(t, entries[0].AllowsProject("attacker"),
+		"a namespace pointed at a project by its label alone won a standing grant to build with a shared credential: %v", entries[0].AllowedProjects)
+}
+
+// And a project left off says so, because that write does not come back.
+//
+// The allow-list is filled once and no later upgrade revisits it, so a project
+// dropped here is dropped for good. The cluster where that happens is the one
+// whose reconciler has been refusing a namespace, which keeps it out of the
+// project's own records, and this runs before the console-api that fixes it has
+// rolled. Without the notice the operator's first evidence is a build refused
+// months later.
+func TestUpgradeSaysWhichProjectItLeftOffAnAllowList(t *testing.T) {
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		namespaceOfProject("shop-prod", "shop"),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
+	)
+	// The project exists and its records do not cover the namespace, which is
+	// what a refused pass leaves behind.
+	shop := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kipper.run/v1alpha1",
+		"kind":       "Project",
+		"metadata":   map[string]any{"name": "shop"},
+		"status":     map[string]any{},
+	}}
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"), shop)
+
+	var out bytes.Buffer
+	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &out))
+
+	assert.Contains(t, out.String(), "shop-prod",
+		"a project was left off a shared credential's allow-list for good and nothing said so")
+	assert.Contains(t, out.String(), "kip credentials allow forge --project shop",
+		"the notice does not say how to put it right")
 }

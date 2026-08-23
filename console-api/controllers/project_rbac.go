@@ -32,17 +32,6 @@ var memberClusterRoles = map[kipperv1.ProjectMemberRole]string{
 	kipperv1.ProjectRoleOwner:    "kipper:project-owner",
 }
 
-// mapMemberBindingToProject routes events on managed member RoleBindings
-// back to their owning Project, so out-of-band deletion or edits of an
-// authorization object are repaired on the next reconcile instead of
-// lingering until an unrelated Project event. The delete event carries the
-// object's last state, so the project label is present there too; a managed
-// name stripped of its labels is unmappable and left to the periodic
-// resync.
-func mapMemberBindingToProject(ctx context.Context, obj client.Object) []reconcile.Request {
-	return memberBindingProjects(ctx, nil, obj)
-}
-
 // memberBindingProjects routes a member binding to the Project that owns it.
 //
 // Three ways, in order of how much they can be trusted, because a map function
@@ -62,8 +51,9 @@ func mapMemberBindingToProject(ctx context.Context, obj client.Object) []reconci
 // stripped label leaves nothing on the object; the containing namespace's own
 // label is the last thing that says whose it is.
 //
-// A reader is only needed for the last two. The watch passes none, so an event
-// on a labelled binding costs nothing extra.
+// A reader is only needed for the last two, and the watch passes the manager's,
+// so a binding stripped of its label is still routed. An event on a labelled
+// binding answers from the label and reads nothing.
 func memberBindingProjects(ctx context.Context, reader client.Reader, obj client.Object) []reconcile.Request {
 	if !memberbinding.IsManaged(obj.GetName()) {
 		return nil
@@ -161,9 +151,19 @@ func (r *ProjectReconciler) reconcileMemberBindings(ctx context.Context, project
 			sort.Slice(subjects, func(i, j int) bool { return subjects[i].Name < subjects[j].Name })
 
 			if len(subjects) == 0 {
-				stale := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
-				if err := r.Delete(ctx, stale); err != nil && !errors.IsNotFound(err) {
-					return fmt.Errorf("removing %s member binding in %s: %w", role, ns, err)
+				// Read then delete the object that was read, the same as every
+				// other binding delete in this file. These names are fixed
+				// across namespaces, so a delete by name alone can remove a
+				// binding another project wrote after this pass looked.
+				var stale rbacv1.RoleBinding
+				switch err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &stale); {
+				case errors.IsNotFound(err):
+				case err != nil:
+					return fmt.Errorf("reading %s member binding in %s: %w", role, ns, err)
+				default:
+					if err := r.deleteObserved(ctx, &stale); err != nil {
+						return fmt.Errorf("removing %s member binding in %s: %w", role, ns, err)
+					}
 				}
 				continue
 			}
@@ -202,10 +202,19 @@ func (r *ProjectReconciler) reconcileMemberBindings(ctx context.Context, project
 			// subjects would grant members whatever it happens to reference.
 			// Delete and recreate instead.
 			if existing.RoleRef != desired.RoleRef {
-				if err := r.Delete(ctx, &existing); err != nil && !errors.IsNotFound(err) {
+				// Bound to the object that was read, like every other delete in
+				// this file. A namespace that changes hands means another
+				// project legitimately writes the binding under this name, and
+				// an unconditioned delete issued from a stale cache removes
+				// theirs and then recreates this project's members over it.
+				if err := r.deleteObserved(ctx, &existing); err != nil {
 					return fmt.Errorf("removing drifted %s member binding in %s: %w", role, ns, err)
 				}
-				if err := r.Create(ctx, desired); err != nil {
+				// A refused delete leaves the object standing, so the create
+				// finds it there. That is the drift still unrepaired rather
+				// than an error: the next pass reads it afresh and decides
+				// again, which is what the refusal asked for.
+				if err := r.Create(ctx, desired); err != nil && !errors.IsAlreadyExists(err) {
 					return fmt.Errorf("recreating %s member binding in %s: %w", role, ns, err)
 				}
 				continue
@@ -218,6 +227,40 @@ func (r *ProjectReconciler) reconcileMemberBindings(ctx context.Context, project
 		}
 	}
 	return nil
+}
+
+// memberBindingProjectIndex indexes a member RoleBinding under the prefix of
+// the project that generated its name.
+//
+// The prefix is a digest of the project name and sits in the object's own name,
+// which Kubernetes will not let anyone edit in place. That is what the index is
+// for: every other trail from a binding back to its project is mutable. The
+// label can be stripped, the namespace's label can be stripped, the environment
+// can leave the spec, and status can forget the namespace. A binding that has
+// lost all of those is still indexed here, and the revoke pass is the only
+// thing that will ever visit it again.
+const memberBindingProjectIndex = "kipper.run/member-binding-project"
+
+// MemberBindingProjectKeys returns the index keys for a RoleBinding.
+//
+// Only generated names index, and each under exactly one prefix. A fixed legacy
+// name carries no digest, so placing it under any project's prefix would be a
+// guess; those are reached through the label and the namespace instead.
+func MemberBindingProjectKeys(obj client.Object) []string {
+	binding, ok := obj.(*rbacv1.RoleBinding)
+	if !ok {
+		return nil
+	}
+	projectPrefix, ok := memberbinding.ProjectPrefixOf(binding.Name)
+	if !ok {
+		return nil
+	}
+	return []string{projectPrefix}
+}
+
+// IndexMemberBindings registers the index the revoke pass lists by.
+func IndexMemberBindings(ctx context.Context, indexer client.FieldIndexer) error {
+	return indexer.IndexField(ctx, &rbacv1.RoleBinding{}, memberBindingProjectIndex, MemberBindingProjectKeys)
 }
 
 // revokeStaleMemberBindings takes access away and can do nothing else.
@@ -255,17 +298,13 @@ func (r *ProjectReconciler) revokeStaleMemberBindings(ctx context.Context, proje
 	// precisely the state this pass exists for. Selecting on the label alone
 	// left the generated binding invisible to the only pass that reaches it.
 	//
-	// The label half is a label selector. The name half is a direct Get of each
-	// generated name in each namespace this project could be using, because a
-	// prefix is not a list selector and an unfiltered list would walk every
-	// RoleBinding on the cluster on every reconcile, which is quadratic in the
-	// thing it is scanning once a cluster has a few thousand projects.
-	//
-	// Both halves of that lookup are derivable: the names from the project and
-	// its roles, the namespaces from its environments and what it last
-	// recorded. A binding in a namespace that is neither derivable nor recorded
-	// is out of reach here, which is the report-only residue the design already
-	// names rather than a gap this could close by scanning harder.
+	// Both halves are list selectors, so neither walks the cluster. The label
+	// half selects on the label. The name half selects on an index keyed by the
+	// prefix, which is why the index exists: a prefix is not a selector on its
+	// own, and deriving the namespaces instead from the spec and from status
+	// could not reach a binding whose environment had left the spec and whose
+	// namespace status had forgotten, which is the case the generated name was
+	// introduced to survive.
 	var bindings rbacv1.RoleBindingList
 	if err := r.List(ctx, &bindings, client.MatchingLabels{
 		kipperlabels.Project: project.Name,
@@ -277,29 +316,19 @@ func (r *ProjectReconciler) revokeStaleMemberBindings(ctx context.Context, proje
 		seen[bindings.Items[i].Namespace+"/"+bindings.Items[i].Name] = true
 	}
 
-	candidates := map[string]bool{}
-	for _, env := range ProjectEnvironments(project) {
-		candidates[ResolveNamespace(project.Name, env.Name)] = true
+	var generated rbacv1.RoleBindingList
+	if err := r.List(ctx, &generated, client.MatchingFields{
+		memberBindingProjectIndex: memberbinding.Prefix(project.Name),
+	}); err != nil {
+		return fmt.Errorf("listing this project's generated member bindings: %w", err)
 	}
-	for _, ns := range project.Status.Namespaces {
-		candidates[ns] = true
-	}
-	for ns := range candidates {
-		for role := range memberClusterRoles {
-			name := memberbinding.Name(project.Name, string(role))
-			if seen[ns+"/"+name] {
-				continue
-			}
-			var found rbacv1.RoleBinding
-			if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &found); err != nil {
-				if errors.IsNotFound(err) {
-					continue
-				}
-				return fmt.Errorf("reading the generated %s binding in %s: %w", role, ns, err)
-			}
-			seen[ns+"/"+name] = true
-			bindings.Items = append(bindings.Items, found)
+	for i := range generated.Items {
+		b := &generated.Items[i]
+		if seen[b.Namespace+"/"+b.Name] {
+			continue
 		}
+		seen[b.Namespace+"/"+b.Name] = true
+		bindings.Items = append(bindings.Items, *b)
 	}
 	prefix := memberbinding.Prefix(project.Name)
 

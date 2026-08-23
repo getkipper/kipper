@@ -13,8 +13,10 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 
+	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 )
 
@@ -22,6 +24,9 @@ func requestUsageNamespace(name, project, env string) *corev1.Namespace {
 	return &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
+			// A claim names the object, so a fixture with no UID would have
+			// every claim match every namespace that ever carried the name.
+			UID: types.UID("uid-" + name),
 			Labels: map[string]string{
 				kipperlabels.Project:     project,
 				kipperlabels.Environment: env,
@@ -30,8 +35,16 @@ func requestUsageNamespace(name, project, env string) *corev1.Namespace {
 	}
 }
 
+// serveRequestUsage backs each fixture namespace with a claim unless the test
+// has said otherwise, which is what a reconciled cluster looks like. Usage is
+// only summed out of a namespace established as the project's, so a fixture
+// without claims would report every project as having no traffic and every
+// assertion here would pass on nothing.
 func serveRequestUsage(t *testing.T, h *RequestUsage, project string) RequestUsageResponse {
 	t.Helper()
+	if h.CRClient == nil {
+		h.CRClient = crClientOwning(t, h.Client)
+	}
 	router := chi.NewRouter()
 	router.Get("/projects/{name}/requests", h.Get)
 
@@ -152,4 +165,65 @@ func TestSplitTraefikService_PrefersLongestNamespace(t *testing.T) {
 
 	_, _, ok = splitTraefikService("unrelated-web-80@kubernetes", namespaces)
 	assert.False(t, ok)
+}
+
+// The label gathers the candidates and does not decide which of them are the
+// project's, so a namespace pointed at this project by anyone who can write
+// namespace metadata reaches the owner lookup rather than the sum.
+//
+// In this release the lookup still answers from the label when neither record
+// covers the namespace, so the traffic is counted and this pins the
+// compatibility answer rather than the intended one. Release 2 deletes
+// fallbackToLabel and this is one of the tests that fails when it does; invert
+// it then, and the assertions below say what it becomes.
+func TestRequestUsage_StillCountsANamespaceOnlyPointedAtTheProjectWhileTheClaimIsOnlySeeded(t *testing.T) {
+	shop := &kipperv1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "shop"},
+		Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+			{Name: "shop-test", UID: "uid-shop-test"},
+		}},
+	}
+	h := &RequestUsage{
+		Client: fake.NewClientset(
+			requestUsageNamespace("shop-test", "shop", "test"),
+			requestUsageNamespace("victim-prod", "shop", "prod"),
+		),
+		CRClient: testCRClient(shop),
+		PromQueryVec: func(ctx context.Context, query string, at time.Time) ([]PromVectorSample, error) {
+			return []PromVectorSample{
+				{Labels: map[string]string{"service": "shop-test-web-8080@kubernetes"}, Value: 100},
+				{Labels: map[string]string{"service": "victim-prod-web-8080@kubernetes"}, Value: 9000},
+			}, nil
+		},
+	}
+
+	resp := serveRequestUsage(t, h, "shop")
+
+	// Release 2: one environment, shop-test, and 100 requests.
+	require.Len(t, resp.Environments, 2)
+	assert.InDelta(t, 9100, resp.TotalRequests, 0.001)
+}
+
+// A namespace whose label names another project was never a candidate, which is
+// the half that holds in both releases.
+func TestRequestUsage_IgnoresANamespaceLabelledForAnotherProject(t *testing.T) {
+	h := &RequestUsage{
+		Client: fake.NewClientset(
+			requestUsageNamespace("shop-test", "shop", "test"),
+			requestUsageNamespace("grocer-prod", "grocer", "prod"),
+		),
+		PromQueryVec: func(ctx context.Context, query string, at time.Time) ([]PromVectorSample, error) {
+			return []PromVectorSample{
+				{Labels: map[string]string{"service": "shop-test-web-8080@kubernetes"}, Value: 100},
+				{Labels: map[string]string{"service": "grocer-prod-web-8080@kubernetes"}, Value: 9000},
+			}, nil
+		},
+	}
+
+	resp := serveRequestUsage(t, h, "shop")
+
+	require.Len(t, resp.Environments, 1)
+	assert.Equal(t, "shop-test", resp.Environments[0].Namespace)
+	assert.InDelta(t, 100, resp.TotalRequests, 0.001,
+		"another project's request counts were reported as this project's")
 }

@@ -132,3 +132,41 @@ func TestIsManagedRecognisesBothGenerationsAndNothingElse(t *testing.T) {
 		}
 	}
 }
+
+// ProjectPrefixOf is what lets a binding be attributed to its project when the
+// label has gone. It must answer for generated names and refuse everything
+// else, because the caller uses the answer to decide which project may edit the
+// binding.
+func TestProjectPrefixOfAnswersOnlyForGeneratedNames(t *testing.T) {
+	got, ok := ProjectPrefixOf(Name("shop", "owner"))
+	if !ok || got != Prefix("shop") {
+		t.Errorf("ProjectPrefixOf(generated) = (%q, %v), want (%q, true)", got, ok, Prefix("shop"))
+	}
+
+	// Every role of one project shares the prefix, and that is the point:
+	// listing by it finds a role the project no longer lists.
+	for _, role := range []string{"owner", "deployer", "viewer", "some-custom-role"} {
+		if p, ok := ProjectPrefixOf(Name("shop", role)); !ok || p != Prefix("shop") {
+			t.Errorf("role %q indexes under %q, so a binding for it is invisible to the project's own listing", role, p)
+		}
+	}
+
+	// A legacy name carries no digest. Returning any prefix for one would
+	// attribute somebody's binding to a project by guesswork.
+	for _, legacy := range LegacyNames() {
+		if p, ok := ProjectPrefixOf(legacy); ok {
+			t.Errorf("the fixed name %q was attributed to prefix %q, which is a guess", legacy, p)
+		}
+	}
+
+	for _, name := range []string{"", "kipper-", "kipper-nothex-nothex", "somebody-elses-binding", Prefix("shop")} {
+		if p, ok := ProjectPrefixOf(name); ok {
+			t.Errorf("ProjectPrefixOf(%q) claimed prefix %q for a name this package never generated", name, p)
+		}
+	}
+
+	// Two projects never share a prefix.
+	if Prefix("shop") == Prefix("shop-support") {
+		t.Error("two projects share a prefix, so one project's revoke pass edits the other's bindings")
+	}
+}

@@ -15,7 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
-	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
@@ -43,7 +42,7 @@ func unlabelledFixture(t *testing.T, claimants ...*kipperv1.Project) crclient.Cl
 	}
 	objs = append(objs, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9"))
 
-	return crfake.NewClientBuilder().
+	return projectFakeBuilder().
 		WithScheme(testScheme()).
 		WithObjects(objs...).
 		WithStatusSubresource(&kipperv1.Project{}).
@@ -129,7 +128,7 @@ func TestTheConditionStillNamesTheOwnerWhenAnotherProjectHasIt(t *testing.T) {
 		Name:   "shop-test",
 		Labels: map[string]string{kipperlabels.Project: "someone-else"},
 	}}
-	c := crfake.NewClientBuilder().
+	c := projectFakeBuilder().
 		WithScheme(testScheme()).
 		WithObjects(shop, owned, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9")).
 		WithStatusSubresource(&kipperv1.Project{}).

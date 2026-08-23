@@ -332,9 +332,11 @@ func matrixRouter(t *testing.T, email, globalRole string, projectRole kipperv1.P
 	project := &kipperv1.Project{
 		ObjectMeta: metav1.ObjectMeta{Name: matrixProject},
 		Spec:       kipperv1.ProjectSpec{},
-		// The claim, because ownership is the claim now and not the label. A
-		// fixture carrying only the label describes a cluster nobody could
-		// have reached honestly, and every project route would refuse it.
+		// The claim, because that is what the reconcile writes and what release
+		// 2 answers from. A fixture carrying only the label describes a cluster
+		// nobody could have reached honestly, and would be recording the label
+		// fallback's answers rather than the ones these routes are meant to
+		// give.
 		Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
 			{Name: matrixProject, UID: "the-fixture-namespace"},
 		}},

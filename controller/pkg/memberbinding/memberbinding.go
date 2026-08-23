@@ -86,6 +86,24 @@ func IsManaged(name string) bool {
 	return isDigest(project) && isDigest(role)
 }
 
+// ProjectPrefixOf returns the project prefix carried by a generated name.
+//
+// ok is false for anything else, including the fixed legacy names: those carry
+// no digest, so any prefix returned for one would be a guess. This is what lets
+// a binding be attributed to its project from the name alone, after every
+// mutable trail back to it has been edited away.
+func ProjectPrefixOf(name string) (string, bool) {
+	rest, ok := strings.CutPrefix(name, prefix)
+	if !ok {
+		return "", false
+	}
+	project, role, found := strings.Cut(rest, "-")
+	if !found || !isDigest(project) || !isDigest(role) {
+		return "", false
+	}
+	return prefix + project + "-", true
+}
+
 func digest(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])[:digestLength]

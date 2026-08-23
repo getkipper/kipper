@@ -14,18 +14,62 @@ import (
 //
 // It exists because a route added without a gate does not look like anything.
 // It answers 200, the reviewer sees a handler, and nothing in the suite objects.
-// With this table an unclassified route fails the build, and a class that
-// disagrees with what the route actually does fails too.
+// With this table an unclassified route fails the build, and a route whose
+// declaration disagrees with the answers the matrix recorded fails too.
+//
+// What no test here can check is whether the capability a route names describes
+// what the handler actually hands over. Several capabilities are held by exactly
+// the same built-in roles, so naming the wrong one of those reproduces every
+// column and passes. Four review rounds each found entries of that shape, in
+// routes nobody had questioned: a file listing under "read apps and services", a
+// diagnosis route that ships pod logs to an external provider, a token that is
+// really a deploy. They were found by reading handlers, and the next one will be
+// too.
+//
+// So this table is reviewed rather than proven, and the release that makes it
+// the gate has to re-read it rather than trust that the build is green. It will
+// have a better tool than a re-read: once a capability is what admits a caller,
+// a probe holding exactly one capability separates the ten that share built-in
+// membership, the way a column with a lower cluster role would separate the
+// global ranks below. Both are fixtures that cannot exist while role ranks are
+// still the gate.
 type authzClass int
 
 const (
 	// classPublic is reachable without credentials, deliberately.
 	classPublic authzClass = iota
-	// classAuthenticated needs a valid token and nothing more: it either acts
-	// on the caller themselves or exposes nothing project-specific.
+	// classAuthenticated needs a valid token and nothing more at the router.
+	//
+	// Many of these act on the caller themselves or expose nothing
+	// project-specific. The rest serve project-scoped content and are filtered
+	// item by item inside the handler, and their gate is real and is not here.
+	//
+	// Find that family by its gate rather than by any list, including this one:
+	// it is the callers of canAccessNamespace, whether directly or through
+	// filterPodsByAccess, accessibleAlerts or filterSeriesByAccess. Today that
+	// is the cluster-wide routes, services and jobs lists, resource adjustments,
+	// the resource log, the usage summary, both alerts routes, the dashboard and
+	// its usage history. An earlier version of this comment counted six, and the
+	// count was the wrong thing to write down: the four it missed were found by
+	// following the helper's callers, which is what the next reader should do.
+	//
+	// GET /api/v1/projects is in the family and outside that gate. It filters on
+	// projectMemberRole directly and serves app names, images, replica counts,
+	// readiness and route hosts, so converting only canAccessNamespace's callers
+	// leaves it behind.
+	//
+	// The gate asks whether the caller is a member and nothing else, with no
+	// capability attached, so the release that makes capabilities the gate has
+	// to convert it along with this table: a role refused
+	// GET /projects/{name}/apps would otherwise read the same summaries off the
+	// projects list, and that project's hostnames, services and jobs off the
+	// cluster-wide ones. The matrix cannot see any of this, because every column
+	// answers 200 and the difference is in the body, which is also why
+	// TestAuthenticatedRoutesDoNotDiscriminate passes.
 	classAuthenticated
-	// classGlobalRole is gated on the cluster-wide admin role, which is a
-	// different axis from project membership and is not a capability.
+	// classGlobalRole is gated on a cluster-wide role, which is a different axis
+	// from project membership and is not a capability. globalRank says which
+	// role; admin unless stated.
 	classGlobalRole
 	// classProjectCapability is gated on the caller's standing in a project,
 	// and names the capability that will carry it once the role rank is gone.
@@ -92,6 +136,25 @@ func (s routeScope) String() string {
 	return "none"
 }
 
+// globalRank is which cluster-wide role a classGlobalRole route needs. It is a
+// different axis from project membership: a project owner holds no cluster
+// role, and a cluster deployer holds one in every project.
+type globalRank int
+
+const (
+	// globalAdmin is the default, and the only rank the matrix can prove: the
+	// fixture's admin column holds it and no other column does.
+	globalAdmin globalRank = iota
+	// globalDeployer admits the cluster's deployers as well as its admins.
+	//
+	// The matrix cannot tell this apart from an ungated route, because every
+	// member column in the fixture holds the cluster deployer role, so all of
+	// them are admitted whether the wrapper is there or not. Declaring the rank
+	// is what records the gate; proving it needs a column with a lower cluster
+	// role, which is the fixture change release 2 should make.
+	globalDeployer
+)
+
 type authzDeclaration struct {
 	class authzClass
 	// capability is set only for classProjectCapability, and must name a
@@ -102,86 +165,94 @@ type authzDeclaration struct {
 	// scope is which principal {name} names, for routes under
 	// /api/v1/projects/{name}.
 	scope routeScope
+	// globalRank is set only for classGlobalRole, and defaults to admin.
+	globalRank globalRank
 }
 
 // routeAuthz declares every route in the mux and every raw WebSocket handler.
 var routeAuthz = map[string]authzDeclaration{
-	"CONNECT /api/v1/migrate-target/{session}/transfer/{transfer}/*":   {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
-	"DELETE /api/v1/backups/{backup}":                                  {class: classGlobalRole},
-	"DELETE /api/v1/invites/{token}":                                   {class: classGlobalRole},
-	"DELETE /api/v1/migrate-target/{session}/transfer/{transfer}":      {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
-	"DELETE /api/v1/migrate-target/{session}/transfer/{transfer}/*":    {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
-	"DELETE /api/v1/projects/{name}/":                                  {class: classProjectCapability, capability: "project.delete", scope: scopeProject},
-	"DELETE /api/v1/projects/{name}/api-keys/{key}":                    {class: classProjectCapability, capability: "apikeys.manage", scope: scopeNamespace},
-	"DELETE /api/v1/projects/{name}/apps/{app}/":                       {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"DELETE /api/v1/projects/{name}/apps/{app}/autoscale":              {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"DELETE /api/v1/projects/{name}/apps/{app}/basic-auth":             {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"DELETE /api/v1/projects/{name}/apps/{app}/basic-auth/{username}":  {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"DELETE /api/v1/projects/{name}/apps/{app}/env/conflicts":          {class: classProjectCapability, capability: "env.write", scope: scopeNamespace},
-	"DELETE /api/v1/projects/{name}/apps/{app}/git":                    {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"DELETE /api/v1/projects/{name}/apps/{app}/route":                  {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"DELETE /api/v1/projects/{name}/apps/{app}/secrets/{key}":          {class: classProjectCapability, capability: "env.write", scope: scopeNamespace},
-	"DELETE /api/v1/projects/{name}/apps/{app}/webhook":                {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"DELETE /api/v1/projects/{name}/functions/{fn}/":                   {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"DELETE /api/v1/projects/{name}/functions/{fn}/secrets/{key}":      {class: classProjectCapability, capability: "env.write", scope: scopeNamespace},
-	"DELETE /api/v1/projects/{name}/members/{email}":                   {class: classProjectCapability, capability: "members.manage", scope: scopeProject},
-	"DELETE /api/v1/projects/{name}/route-groups/{host}":               {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"DELETE /api/v1/projects/{name}/usage-plans/{plan}":                {class: classProjectCapability, capability: "apikeys.manage", scope: scopeNamespace},
-	"DELETE /api/v1/projects/{name}/volumes/{vol}":                     {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"DELETE /api/v1/services/{name}":                                   {class: classProjectCapability, capability: "kipper.write"},
-	"DELETE /api/v1/services/{name}/db/indexes/{schema}/{indexName}":   {class: classProjectCapability, capability: "database.write"},
-	"DELETE /api/v1/services/{name}/db/snippets/{snippetName}":         {class: classProjectCapability, capability: "database.write"},
-	"DELETE /api/v1/services/{name}/db/tables/{schema}/{table}/rows":   {class: classProjectCapability, capability: "database.write"},
-	"DELETE /api/v1/services/{name}/shares/{id}":                       {class: classGlobalRole},
-	"DELETE /api/v1/settings/git-credentials/*":                        {class: classGlobalRole},
-	"DELETE /api/v1/settings/registries/*":                             {class: classGlobalRole},
-	"DELETE /api/v1/shares":                                            {class: classGlobalRole},
-	"DELETE /api/v1/storage/{service}/objects":                         {class: classProjectCapability, capability: "storage.write"},
-	"DELETE /api/v1/storage/{service}/public":                          {class: classProjectCapability, capability: "storage.write"},
-	"DELETE /api/v1/users/{email}":                                     {class: classGlobalRole},
-	"GET /api/v1/alerts":                                               {class: classAuthenticated},
-	"GET /api/v1/alerts/unread-count":                                  {class: classAuthenticated},
-	"GET /api/v1/auth/2fa/status":                                      {class: classAuthenticated},
-	"GET /api/v1/backups":                                              {class: classGlobalRole},
-	"GET /api/v1/backups/schedules":                                    {class: classGlobalRole},
-	"GET /api/v1/cluster/status":                                       {class: classGlobalRole},
-	"GET /api/v1/dashboard":                                            {class: classAuthenticated},
-	"GET /api/v1/dashboard/usage-history":                              {class: classAuthenticated},
-	"GET /api/v1/invites":                                              {class: classGlobalRole},
-	"GET /api/v1/invites/{token}":                                      {class: classPublic},
-	"GET /api/v1/jobs":                                                 {class: classAuthenticated},
-	"GET /api/v1/jobs/{name}/history":                                  {class: classHandlerInternal, reason: "the job's namespace decides, and the fixture has no such job so the probe stops at 404"},
-	"GET /api/v1/jobs/{name}/resources":                                {class: classHandlerInternal, reason: "the job's namespace decides, and the fixture has no such job so the probe stops at 404"},
-	"GET /api/v1/me":                                                   {class: classAuthenticated},
-	"GET /api/v1/migrate-target/capacity":                              {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
-	"GET /api/v1/migrate-target/projects":                              {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
-	"GET /api/v1/migrate-target/{session}/apps":                        {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
-	"GET /api/v1/migrate-target/{session}/status":                      {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
-	"GET /api/v1/migrate-target/{session}/transfer/{transfer}/*":       {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
-	"GET /api/v1/migration/notification-status":                        {class: classGlobalRole},
-	"GET /api/v1/migration/{session}":                                  {class: classGlobalRole},
-	"GET /api/v1/migration/{session}/dns":                              {class: classGlobalRole},
-	"GET /api/v1/migration/{session}/progress":                         {class: classGlobalRole},
-	"GET /api/v1/migration/{session}/verify":                           {class: classGlobalRole},
-	"GET /api/v1/nodes":                                                {class: classGlobalRole},
-	"GET /api/v1/platform":                                             {class: classAuthenticated},
-	"GET /api/v1/platform/components":                                  {class: classAuthenticated},
-	"GET /api/v1/projects":                                             {class: classAuthenticated},
-	"GET /api/v1/projects/{name}/api-keys":                             {class: classProjectCapability, capability: "project.read", scope: scopeNamespace},
-	"GET /api/v1/projects/{name}/api-keys/{key}/usage":                 {class: classProjectCapability, capability: "project.read", scope: scopeNamespace},
-	"GET /api/v1/projects/{name}/apps":                                 {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
-	"GET /api/v1/projects/{name}/apps/{app}/autoscale":                 {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
-	"GET /api/v1/projects/{name}/apps/{app}/basic-auth":                {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
-	"GET /api/v1/projects/{name}/apps/{app}/build/logs":                {class: classProjectCapability, capability: "pods.logs.read", scope: scopeNamespace},
+	"CONNECT /api/v1/migrate-target/{session}/transfer/{transfer}/*":  {class: classForeignCredential, reason: "the per-transfer token derived for this transfer, not a user identity"},
+	"DELETE /api/v1/backups/{backup}":                                 {class: classGlobalRole},
+	"DELETE /api/v1/invites/{token}":                                  {class: classGlobalRole},
+	"DELETE /api/v1/migrate-target/{session}/transfer/{transfer}":     {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
+	"DELETE /api/v1/migrate-target/{session}/transfer/{transfer}/*":   {class: classForeignCredential, reason: "the per-transfer token derived for this transfer, not a user identity"},
+	"DELETE /api/v1/projects/{name}/":                                 {class: classProjectCapability, capability: "project.delete", scope: scopeProject},
+	"DELETE /api/v1/projects/{name}/api-keys/{key}":                   {class: classProjectCapability, capability: "apikeys.manage", scope: scopeNamespace},
+	"DELETE /api/v1/projects/{name}/apps/{app}/":                      {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"DELETE /api/v1/projects/{name}/apps/{app}/autoscale":             {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"DELETE /api/v1/projects/{name}/apps/{app}/basic-auth":            {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"DELETE /api/v1/projects/{name}/apps/{app}/basic-auth/{username}": {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"DELETE /api/v1/projects/{name}/apps/{app}/env/conflicts":         {class: classProjectCapability, capability: "env.write", scope: scopeNamespace},
+	"DELETE /api/v1/projects/{name}/apps/{app}/git":                   {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"DELETE /api/v1/projects/{name}/apps/{app}/route":                 {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"DELETE /api/v1/projects/{name}/apps/{app}/secrets/{key}":         {class: classProjectCapability, capability: "env.write", scope: scopeNamespace},
+	"DELETE /api/v1/projects/{name}/apps/{app}/webhook":               {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"DELETE /api/v1/projects/{name}/functions/{fn}/":                  {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"DELETE /api/v1/projects/{name}/functions/{fn}/secrets/{key}":     {class: classProjectCapability, capability: "env.write", scope: scopeNamespace},
+	"DELETE /api/v1/projects/{name}/members/{email}":                  {class: classProjectCapability, capability: "members.manage", scope: scopeProject},
+	"DELETE /api/v1/projects/{name}/route-groups/{host}":              {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"DELETE /api/v1/projects/{name}/usage-plans/{plan}":               {class: classProjectCapability, capability: "apikeys.manage", scope: scopeNamespace},
+	"DELETE /api/v1/projects/{name}/volumes/{vol}":                    {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"DELETE /api/v1/services/{name}":                                  {class: classProjectCapability, capability: "kipper.write"},
+	"DELETE /api/v1/services/{name}/db/indexes/{schema}/{indexName}":  {class: classProjectCapability, capability: "database.write"},
+	"DELETE /api/v1/services/{name}/db/snippets/{snippetName}":        {class: classProjectCapability, capability: "database.write"},
+	"DELETE /api/v1/services/{name}/db/tables/{schema}/{table}/rows":  {class: classProjectCapability, capability: "database.write"},
+	"DELETE /api/v1/services/{name}/shares/{id}":                      {class: classGlobalRole},
+	"DELETE /api/v1/settings/git-credentials/*":                       {class: classGlobalRole},
+	"DELETE /api/v1/settings/registries/*":                            {class: classGlobalRole},
+	"DELETE /api/v1/shares":                                           {class: classGlobalRole},
+	"DELETE /api/v1/storage/{service}/objects":                        {class: classProjectCapability, capability: "storage.write"},
+	"DELETE /api/v1/storage/{service}/public":                         {class: classProjectCapability, capability: "storage.write"},
+	"DELETE /api/v1/users/{email}":                                    {class: classGlobalRole},
+	"GET /api/v1/alerts":                                              {class: classAuthenticated},
+	"GET /api/v1/alerts/unread-count":                                 {class: classAuthenticated},
+	"GET /api/v1/auth/2fa/status":                                     {class: classAuthenticated},
+	"GET /api/v1/backups":                                             {class: classGlobalRole},
+	"GET /api/v1/backups/schedules":                                   {class: classGlobalRole},
+	"GET /api/v1/cluster/status":                                      {class: classGlobalRole},
+	"GET /api/v1/dashboard":                                           {class: classAuthenticated},
+	"GET /api/v1/dashboard/usage-history":                             {class: classAuthenticated},
+	"GET /api/v1/invites":                                             {class: classGlobalRole},
+	"GET /api/v1/invites/{token}":                                     {class: classPublic},
+	"GET /api/v1/jobs":                                                {class: classAuthenticated},
+	"GET /api/v1/jobs/{name}/history":                                 {class: classHandlerInternal, reason: "the job's namespace decides, and the fixture has no such job so the probe stops at 404"},
+	"GET /api/v1/jobs/{name}/resources":                               {class: classHandlerInternal, reason: "the job's namespace decides, and the fixture has no such job so the probe stops at 404"},
+	"GET /api/v1/me":                                                  {class: classAuthenticated},
+	"GET /api/v1/migrate-target/capacity":                             {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
+	"GET /api/v1/migrate-target/projects":                             {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
+	"GET /api/v1/migrate-target/{session}/apps":                       {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
+	"GET /api/v1/migrate-target/{session}/status":                     {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
+	"GET /api/v1/migrate-target/{session}/transfer/{transfer}/*":      {class: classForeignCredential, reason: "the per-transfer token derived for this transfer, not a user identity"},
+	"GET /api/v1/migration/notification-status":                       {class: classGlobalRole},
+	"GET /api/v1/migration/{session}":                                 {class: classGlobalRole},
+	"GET /api/v1/migration/{session}/dns":                             {class: classGlobalRole},
+	"GET /api/v1/migration/{session}/progress":                        {class: classGlobalRole},
+	"GET /api/v1/migration/{session}/verify":                          {class: classGlobalRole},
+	"GET /api/v1/nodes":                                               {class: classGlobalRole},
+	"GET /api/v1/platform":                                            {class: classAuthenticated},
+	"GET /api/v1/platform/components":                                 {class: classAuthenticated},
+	"GET /api/v1/projects":                                            {class: classAuthenticated},
+	"GET /api/v1/projects/{name}/api-keys":                            {class: classProjectCapability, capability: "project.read", scope: scopeNamespace},
+	"GET /api/v1/projects/{name}/api-keys/{key}/usage":                {class: classProjectCapability, capability: "project.read", scope: scopeNamespace},
+	"GET /api/v1/projects/{name}/apps":                                {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
+	"GET /api/v1/projects/{name}/apps/{app}/autoscale":                {class: classProjectCapability, capability: "workloads.read", scope: scopeNamespace},
+	"GET /api/v1/projects/{name}/apps/{app}/basic-auth":               {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
+	"GET /api/v1/projects/{name}/apps/{app}/build/logs":               {class: classProjectCapability, capability: "pods.logs.read", scope: scopeNamespace},
+	// Wider than the build status it is named for: the handler also reports
+	// whether the app's git credential and the cluster's registry credentials
+	// authenticate, which is a validity oracle for credentials the caller never
+	// sees. workloads.read is the closest capability and understates it; a
+	// capability of its own would move who can reach it, which is a decision
+	// for the release that replaces the role ranks.
 	"GET /api/v1/projects/{name}/apps/{app}/build/status":              {class: classProjectCapability, capability: "workloads.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/env":                       {class: classProjectCapability, capability: "env.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/env/conflicts":             {class: classProjectCapability, capability: "env.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/env/injected":              {class: classProjectCapability, capability: "env.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/env/preview":               {class: classProjectCapability, capability: "env.reveal", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/env/status":                {class: classProjectCapability, capability: "env.read", scope: scopeNamespace},
-	"GET /api/v1/projects/{name}/apps/{app}/files":                     {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
-	"GET /api/v1/projects/{name}/apps/{app}/files/content":             {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
-	"GET /api/v1/projects/{name}/apps/{app}/files/download":            {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
+	"GET /api/v1/projects/{name}/apps/{app}/files":                     {class: classProjectCapability, capability: "files.read", scope: scopeNamespace},
+	"GET /api/v1/projects/{name}/apps/{app}/files/content":             {class: classProjectCapability, capability: "files.read", scope: scopeNamespace},
+	"GET /api/v1/projects/{name}/apps/{app}/files/download":            {class: classProjectCapability, capability: "files.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/git":                       {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/health":                    {class: classProjectCapability, capability: "workloads.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/history":                   {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
@@ -190,12 +261,12 @@ var routeAuthz = map[string]authzDeclaration{
 	"GET /api/v1/projects/{name}/apps/{app}/pods":                      {class: classProjectCapability, capability: "workloads.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/recommendation":            {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/resources":                 {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
-	"GET /api/v1/projects/{name}/apps/{app}/route":                     {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
+	"GET /api/v1/projects/{name}/apps/{app}/route":                     {class: classProjectCapability, capability: "workloads.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/route/dns-status":          {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/secrets":                   {class: classProjectCapability, capability: "env.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/secrets/{key}":             {class: classProjectCapability, capability: "env.reveal", scope: scopeNamespace},
-	"GET /api/v1/projects/{name}/apps/{app}/settings":                  {class: classProjectCapability, capability: "project.read", scope: scopeNamespace},
-	"GET /api/v1/projects/{name}/apps/{app}/webhook":                   {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
+	"GET /api/v1/projects/{name}/apps/{app}/settings":                  {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
+	"GET /api/v1/projects/{name}/apps/{app}/webhook":                   {class: classProjectCapability, capability: "webhook.reveal", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/copy-preview":                         {class: classProjectCapability, capability: "kipper.read", scope: scopeProject},
 	"GET /api/v1/projects/{name}/functions":                            {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/functions/{fn}/bindings":              {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
@@ -204,16 +275,16 @@ var routeAuthz = map[string]authzDeclaration{
 	"GET /api/v1/projects/{name}/functions/{fn}/resources":             {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/functions/{fn}/secrets":               {class: classProjectCapability, capability: "env.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/functions/{fn}/secrets/{key}":         {class: classProjectCapability, capability: "env.reveal", scope: scopeNamespace},
-	"GET /api/v1/projects/{name}/functions/{fn}/settings":              {class: classProjectCapability, capability: "project.read", scope: scopeNamespace},
+	"GET /api/v1/projects/{name}/functions/{fn}/settings":              {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/inline-functions/{fn}/code":           {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
-	"GET /api/v1/projects/{name}/link-consent":                         {class: classProjectCapability, capability: "members.read", scope: scopeProject},
+	"GET /api/v1/projects/{name}/link-consent":                         {class: classProjectCapability, capability: "project.read", scope: scopeProject},
 	"GET /api/v1/projects/{name}/members":                              {class: classProjectCapability, capability: "members.read", scope: scopeProject},
 	"GET /api/v1/projects/{name}/quota":                                {class: classProjectCapability, capability: "project.read", scope: scopeProject},
 	"GET /api/v1/projects/{name}/requests":                             {class: classProjectCapability, capability: "project.read", scope: scopeProject},
 	"GET /api/v1/projects/{name}/usage-plans":                          {class: classProjectCapability, capability: "project.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/volumes":                              {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
 	"GET /api/v1/resources/adjustments":                                {class: classAuthenticated},
-	"GET /api/v1/resources/usage":                                      {class: classProjectCapability, capability: "kipper.read"},
+	"GET /api/v1/resources/usage":                                      {class: classProjectCapability, capability: "workloads.read"},
 	"GET /api/v1/resources/usage/summary":                              {class: classAuthenticated},
 	"GET /api/v1/routes":                                               {class: classAuthenticated},
 	"GET /api/v1/service-types":                                        {class: classAuthenticated},
@@ -226,10 +297,10 @@ var routeAuthz = map[string]authzDeclaration{
 	"GET /api/v1/services/{name}/db/tables/{schema}/{table}/rows":      {class: classProjectCapability, capability: "database.read"},
 	"GET /api/v1/services/{name}/db/tables/{schema}/{table}/structure": {class: classProjectCapability, capability: "database.read"},
 	"GET /api/v1/services/{name}/logs":                                 {class: classProjectCapability, capability: "pods.logs.read"},
-	"GET /api/v1/services/{name}/migrate-data/status":                  {class: classProjectCapability, capability: "workloads.read"},
-	"GET /api/v1/services/{name}/rabbitmq/vhosts":                      {class: classProjectCapability, capability: "kipper.read"},
-	"GET /api/v1/services/{name}/resources":                            {class: classProjectCapability, capability: "kipper.read"},
-	"GET /api/v1/services/{name}/rollout":                              {class: classProjectCapability, capability: "kipper.read"},
+	"GET /api/v1/services/{name}/migrate-data/status":                  {class: classProjectCapability, capability: "pods.logs.read"},
+	"GET /api/v1/services/{name}/rabbitmq/vhosts":                      {class: classProjectCapability, capability: "database.read"},
+	"GET /api/v1/services/{name}/resources":                            {class: classProjectCapability, capability: "workloads.read"},
+	"GET /api/v1/services/{name}/rollout":                              {class: classProjectCapability, capability: "workloads.read"},
 	"GET /api/v1/services/{name}/shares":                               {class: classGlobalRole},
 	"GET /api/v1/settings/ai":                                          {class: classGlobalRole},
 	"GET /api/v1/settings/ai/bundle-status":                            {class: classGlobalRole},
@@ -254,17 +325,23 @@ var routeAuthz = map[string]authzDeclaration{
 	"GET /health":                                                      {class: classPublic},
 	"GET /health/controllers":                                          {class: classPublic},
 	"GET ws /api/v1/migration/":                                        {class: classGlobalRole},
-	"GET ws /api/v1/projects/":                                         {class: classProjectCapability, capability: "kipper.read"},
+	// The log streamer, serving the same pod logs as the REST log routes and
+	// so declaring the same capability. Every built-in that holds kipper.read
+	// also holds pods.logs.read, so the matrix agrees either way and cannot
+	// catch a divergence here; a custom role that reads resources without
+	// reading logs would have been refused the REST routes and streamed the
+	// same logs from this one.
+	"GET ws /api/v1/projects/":                                         {class: classProjectCapability, capability: "pods.logs.read"},
 	"GET ws /api/v1/terminal/":                                         {class: classProjectCapability, capability: "terminal.open"},
-	"HEAD /api/v1/migrate-target/{session}/transfer/{transfer}/*":      {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
-	"OPTIONS /api/v1/migrate-target/{session}/transfer/{transfer}/*":   {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
-	"PATCH /api/v1/migrate-target/{session}/transfer/{transfer}/*":     {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
+	"HEAD /api/v1/migrate-target/{session}/transfer/{transfer}/*":      {class: classForeignCredential, reason: "the per-transfer token derived for this transfer, not a user identity"},
+	"OPTIONS /api/v1/migrate-target/{session}/transfer/{transfer}/*":   {class: classForeignCredential, reason: "the per-transfer token derived for this transfer, not a user identity"},
+	"PATCH /api/v1/migrate-target/{session}/transfer/{transfer}/*":     {class: classForeignCredential, reason: "the per-transfer token derived for this transfer, not a user identity"},
 	"PATCH /api/v1/platform/components/{name}":                         {class: classGlobalRole},
 	"PATCH /api/v1/projects/{name}/api-keys/{key}":                     {class: classProjectCapability, capability: "apikeys.manage", scope: scopeNamespace},
 	"PATCH /api/v1/services/{name}/db/tables/{schema}/{table}":         {class: classProjectCapability, capability: "database.write"},
 	"PATCH /api/v1/services/{name}/db/tables/{schema}/{table}/rows":    {class: classProjectCapability, capability: "database.write"},
-	"POST /api/v1/ai/analyse-logs":                                     {class: classHandlerInternal, reason: "the namespace comes from the request body"},
-	"POST /api/v1/ai/chat":                                             {class: classHandlerInternal, reason: "the namespace comes from the request body"},
+	"POST /api/v1/ai/analyse-logs":                                     {class: classGlobalRole, globalRank: globalDeployer},
+	"POST /api/v1/ai/chat":                                             {class: classGlobalRole, globalRank: globalDeployer},
 	"POST /api/v1/alerts/dismiss":                                      {class: classAuthenticated},
 	"POST /api/v1/auth/2fa/confirm":                                    {class: classAuthenticated},
 	"POST /api/v1/auth/2fa/enroll":                                     {class: classAuthenticated},
@@ -276,7 +353,7 @@ var routeAuthz = map[string]authzDeclaration{
 	"POST /api/v1/invites/{token}/accept":                              {class: classPublic},
 	"POST /api/v1/jobs":                                                {class: classHandlerInternal, reason: "the namespace comes from the request body"},
 	"POST /api/v1/jobs/{name}/trigger":                                 {class: classHandlerInternal, reason: "the job's namespace decides, and the fixture has no such job so the probe stops at 404"},
-	"POST /api/v1/link":                                                {class: classHandlerInternal, reason: "both namespaces come from the request body"},
+	"POST /api/v1/link":                                                {class: classHandlerInternal, reason: "the caller's namespace comes from the request body"},
 	"POST /api/v1/migrate-target/accept":                               {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
 	"POST /api/v1/migrate-target/{session}/abort":                      {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
 	"POST /api/v1/migrate-target/{session}/commit":                     {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
@@ -285,7 +362,7 @@ var routeAuthz = map[string]authzDeclaration{
 	"POST /api/v1/migrate-target/{session}/resource":                   {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
 	"POST /api/v1/migrate-target/{session}/secret":                     {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
 	"POST /api/v1/migrate-target/{session}/transfer":                   {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
-	"POST /api/v1/migrate-target/{session}/transfer/{transfer}/*":      {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
+	"POST /api/v1/migrate-target/{session}/transfer/{transfer}/*":      {class: classForeignCredential, reason: "the per-transfer token derived for this transfer, not a user identity"},
 	"POST /api/v1/migrate-target/{session}/transfer/{transfer}/ensure": {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
 	"POST /api/v1/migration/plan":                                      {class: classGlobalRole},
 	"POST /api/v1/migration/start":                                     {class: classGlobalRole},
@@ -296,91 +373,94 @@ var routeAuthz = map[string]authzDeclaration{
 	"POST /api/v1/projects/{name}/api-keys":                            {class: classProjectCapability, capability: "apikeys.manage", scope: scopeNamespace},
 	"POST /api/v1/projects/{name}/apps":                                {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
 	"POST /api/v1/projects/{name}/apps/{app}/build/cancel":             {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/apps/{app}/diagnose":                 {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/apps/{app}/files/upload":             {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/apps/{app}/git/reveal":               {class: classProjectCapability, capability: "env.reveal", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/apps/{app}/optimise":                 {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/apps/{app}/rebuild":                  {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/apps/{app}/recommendation/apply":     {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/apps/{app}/recommendation/dismiss":   {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/apps/{app}/restart":                  {class: classProjectCapability, capability: "workloads.restart", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/apps/{app}/rollback":                 {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/apps/{app}/webhook":                  {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/environments":                        {class: classProjectCapability, capability: "project.settings", scope: scopeProject},
-	"POST /api/v1/projects/{name}/functions":                           {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/functions/{fn}/diagnose":             {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/functions/{fn}/test":                 {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/inline-functions":                    {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/promote":                             {class: classProjectCapability, capability: "kipper.write", scope: scopeProject},
-	"POST /api/v1/projects/{name}/route-groups":                        {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/volumes":                             {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/volumes/mount":                       {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/projects/{name}/volumes/unmount":                     {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"POST /api/v1/services":                                            {class: classHandlerInternal, reason: "the namespace comes from the request body"},
-	"POST /api/v1/services/{name}/db/ddl/preview":                      {class: classProjectCapability, capability: "database.write"},
-	"POST /api/v1/services/{name}/db/indexes":                          {class: classProjectCapability, capability: "database.write"},
-	"POST /api/v1/services/{name}/db/query":                            {class: classProjectCapability, capability: "database.write"},
-	"POST /api/v1/services/{name}/db/snippets":                         {class: classProjectCapability, capability: "database.write"},
-	"POST /api/v1/services/{name}/db/tables":                           {class: classProjectCapability, capability: "database.write"},
-	"POST /api/v1/services/{name}/db/tables/{schema}/{table}/rows":     {class: classProjectCapability, capability: "database.write"},
-	"POST /api/v1/services/{name}/diagnose":                            {class: classProjectCapability, capability: "kipper.write"},
-	"POST /api/v1/services/{name}/migrate-data":                        {class: classProjectCapability, capability: "kipper.write"},
-	"POST /api/v1/services/{name}/shares":                              {class: classGlobalRole},
-	"POST /api/v1/sessions/revoke-all":                                 {class: classGlobalRole},
-	"POST /api/v1/settings/git-credentials":                            {class: classGlobalRole},
-	"POST /api/v1/settings/git-credentials/{name}/reveal":              {class: classGlobalRole},
-	"POST /api/v1/settings/registries":                                 {class: classGlobalRole},
-	"POST /api/v1/settings/registries/{name}/reveal":                   {class: classGlobalRole},
-	"POST /api/v1/settings/smtp/test":                                  {class: classGlobalRole},
-	"POST /api/v1/shares/rotate-key":                                   {class: classGlobalRole},
-	"POST /api/v1/storage/{service}/buckets":                           {class: classProjectCapability, capability: "storage.write"},
-	"POST /api/v1/storage/{service}/folder":                            {class: classProjectCapability, capability: "storage.write"},
-	"POST /api/v1/storage/{service}/share":                             {class: classProjectCapability, capability: "storage.write"},
-	"POST /api/v1/storage/{service}/upload":                            {class: classProjectCapability, capability: "storage.write"},
-	"POST /api/v1/unbind":                                              {class: classHandlerInternal, reason: "the namespace comes from the request body"},
-	"POST /api/v1/unlink":                                              {class: classHandlerInternal, reason: "both namespaces come from the request body"},
-	"POST /api/v1/users/":                                              {class: classGlobalRole},
-	"POST /api/v1/users/{email}/reset-password":                        {class: classGlobalRole},
-	"POST /api/v1/webhook/{namespace}/{app}":                           {class: classForeignCredential, reason: "the webhook token in the request, not a user identity"},
-	"POST /auth/callback":                                              {class: classPublic},
-	"POST /auth/logout":                                                {class: classPublic},
-	"POST /auth/refresh":                                               {class: classForeignCredential, reason: "the refresh token in the request, not an access token"},
-	"POST /auth/ui-code":                                               {class: classAuthenticated},
-	"PUT /api/v1/backups/schedules/{schedule}":                         {class: classGlobalRole},
-	"PUT /api/v1/jobs/{name}/resources":                                {class: classHandlerInternal, reason: "the job's namespace decides, and the fixture has no such job so the probe stops at 404"},
-	"PUT /api/v1/migrate-target/{session}/transfer/{transfer}/*":       {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
-	"PUT /api/v1/projects/{name}/":                                     {class: classProjectCapability, capability: "project.settings", scope: scopeProject},
-	"PUT /api/v1/projects/{name}/apps/{app}/autoscale":                 {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/apps/{app}/basic-auth":                {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/apps/{app}/env":                       {class: classProjectCapability, capability: "env.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/apps/{app}/files/content":             {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/apps/{app}/git":                       {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/apps/{app}/image":                     {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/apps/{app}/resources":                 {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/apps/{app}/route":                     {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/apps/{app}/scale":                     {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/apps/{app}/secrets":                   {class: classProjectCapability, capability: "env.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/apps/{app}/settings":                  {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/functions/{fn}/dependencies":          {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/functions/{fn}/env":                   {class: classProjectCapability, capability: "env.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/functions/{fn}/resources":             {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/functions/{fn}/secrets":               {class: classProjectCapability, capability: "env.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/functions/{fn}/settings":              {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/inline-functions/{fn}/code":           {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/link-consent":                         {class: classProjectCapability, capability: "members.manage", scope: scopeProject},
-	"PUT /api/v1/projects/{name}/members":                              {class: classProjectCapability, capability: "members.manage", scope: scopeProject},
-	"PUT /api/v1/projects/{name}/quota":                                {class: classGlobalRole},
-	"PUT /api/v1/projects/{name}/route-groups":                         {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"PUT /api/v1/projects/{name}/usage-plans":                          {class: classProjectCapability, capability: "apikeys.manage", scope: scopeNamespace},
-	"PUT /api/v1/services/{name}/resources":                            {class: classProjectCapability, capability: "kipper.write"},
-	"PUT /api/v1/settings/ai":                                          {class: classGlobalRole},
-	"PUT /api/v1/settings/auth":                                        {class: classGlobalRole},
-	"PUT /api/v1/settings/mode":                                        {class: classGlobalRole},
-	"PUT /api/v1/settings/slack":                                       {class: classGlobalRole},
-	"PUT /api/v1/settings/smtp":                                        {class: classGlobalRole},
-	"PUT /api/v1/storage/{service}/public":                             {class: classProjectCapability, capability: "storage.write"},
-	"PUT /api/v1/users/{email}/role":                                   {class: classGlobalRole},
-	"TRACE /api/v1/migrate-target/{session}/transfer/{transfer}/*":     {class: classForeignCredential, reason: "the migration secret the source cluster presents, not a user identity"},
+	// The three diagnose routes run one code path and carry two declarations,
+	// because their gates differ: the function one is reachable by a viewer and
+	// these two are not. kipper.write declares the log read it grants here.
+	"POST /api/v1/projects/{name}/apps/{app}/diagnose":               {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/apps/{app}/files/upload":           {class: classProjectCapability, capability: "files.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/apps/{app}/git/reveal":             {class: classProjectCapability, capability: "env.reveal", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/apps/{app}/optimise":               {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/apps/{app}/rebuild":                {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/apps/{app}/recommendation/apply":   {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/apps/{app}/recommendation/dismiss": {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/apps/{app}/restart":                {class: classProjectCapability, capability: "workloads.restart", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/apps/{app}/rollback":               {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/apps/{app}/webhook":                {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/environments":                      {class: classProjectCapability, capability: "project.settings", scope: scopeProject},
+	"POST /api/v1/projects/{name}/functions":                         {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/functions/{fn}/diagnose":           {class: classProjectCapability, capability: "pods.logs.read", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/functions/{fn}/test":               {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/inline-functions":                  {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/promote":                           {class: classProjectCapability, capability: "kipper.write", scope: scopeProject},
+	"POST /api/v1/projects/{name}/route-groups":                      {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/volumes":                           {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/volumes/mount":                     {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/volumes/unmount":                   {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/services":                                          {class: classHandlerInternal, reason: "the namespace comes from the request body"},
+	"POST /api/v1/services/{name}/db/ddl/preview":                    {class: classProjectCapability, capability: "database.write"},
+	"POST /api/v1/services/{name}/db/indexes":                        {class: classProjectCapability, capability: "database.write"},
+	"POST /api/v1/services/{name}/db/query":                          {class: classProjectCapability, capability: "database.write"},
+	"POST /api/v1/services/{name}/db/snippets":                       {class: classProjectCapability, capability: "database.write"},
+	"POST /api/v1/services/{name}/db/tables":                         {class: classProjectCapability, capability: "database.write"},
+	"POST /api/v1/services/{name}/db/tables/{schema}/{table}/rows":   {class: classProjectCapability, capability: "database.write"},
+	"POST /api/v1/services/{name}/diagnose":                          {class: classProjectCapability, capability: "kipper.write"},
+	"POST /api/v1/services/{name}/migrate-data":                      {class: classProjectCapability, capability: "kipper.write"},
+	"POST /api/v1/services/{name}/shares":                            {class: classGlobalRole},
+	"POST /api/v1/sessions/revoke-all":                               {class: classGlobalRole},
+	"POST /api/v1/settings/git-credentials":                          {class: classGlobalRole},
+	"POST /api/v1/settings/git-credentials/{name}/reveal":            {class: classGlobalRole},
+	"POST /api/v1/settings/registries":                               {class: classGlobalRole},
+	"POST /api/v1/settings/registries/{name}/reveal":                 {class: classGlobalRole},
+	"POST /api/v1/settings/smtp/test":                                {class: classGlobalRole},
+	"POST /api/v1/shares/rotate-key":                                 {class: classGlobalRole},
+	"POST /api/v1/storage/{service}/buckets":                         {class: classProjectCapability, capability: "storage.write"},
+	"POST /api/v1/storage/{service}/folder":                          {class: classProjectCapability, capability: "storage.write"},
+	"POST /api/v1/storage/{service}/share":                           {class: classProjectCapability, capability: "storage.write"},
+	"POST /api/v1/storage/{service}/upload":                          {class: classProjectCapability, capability: "storage.write"},
+	"POST /api/v1/unbind":                                            {class: classHandlerInternal, reason: "the namespace comes from the request body"},
+	"POST /api/v1/unlink":                                            {class: classHandlerInternal, reason: "the caller's namespace comes from the request body"},
+	"POST /api/v1/users/":                                            {class: classGlobalRole},
+	"POST /api/v1/users/{email}/reset-password":                      {class: classGlobalRole},
+	"POST /api/v1/webhook/{namespace}/{app}":                         {class: classForeignCredential, reason: "the webhook token in the request, not a user identity"},
+	"POST /auth/callback":                                            {class: classPublic},
+	"POST /auth/logout":                                              {class: classPublic},
+	"POST /auth/refresh":                                             {class: classForeignCredential, reason: "the refresh token in the request, not an access token"},
+	"POST /auth/ui-code":                                             {class: classAuthenticated},
+	"PUT /api/v1/backups/schedules/{schedule}":                       {class: classGlobalRole},
+	"PUT /api/v1/jobs/{name}/resources":                              {class: classHandlerInternal, reason: "the job's namespace decides, and the fixture has no such job so the probe stops at 404"},
+	"PUT /api/v1/migrate-target/{session}/transfer/{transfer}/*":     {class: classForeignCredential, reason: "the per-transfer token derived for this transfer, not a user identity"},
+	"PUT /api/v1/projects/{name}/":                                   {class: classProjectCapability, capability: "project.settings", scope: scopeProject},
+	"PUT /api/v1/projects/{name}/apps/{app}/autoscale":               {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/apps/{app}/basic-auth":              {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/apps/{app}/env":                     {class: classProjectCapability, capability: "env.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/apps/{app}/files/content":           {class: classProjectCapability, capability: "files.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/apps/{app}/git":                     {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/apps/{app}/image":                   {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/apps/{app}/resources":               {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/apps/{app}/route":                   {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/apps/{app}/scale":                   {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/apps/{app}/secrets":                 {class: classProjectCapability, capability: "env.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/apps/{app}/settings":                {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/functions/{fn}/dependencies":        {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/functions/{fn}/env":                 {class: classProjectCapability, capability: "env.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/functions/{fn}/resources":           {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/functions/{fn}/secrets":             {class: classProjectCapability, capability: "env.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/functions/{fn}/settings":            {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/inline-functions/{fn}/code":         {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/link-consent":                       {class: classProjectCapability, capability: "project.settings", scope: scopeProject},
+	"PUT /api/v1/projects/{name}/members":                            {class: classProjectCapability, capability: "members.manage", scope: scopeProject},
+	"PUT /api/v1/projects/{name}/quota":                              {class: classGlobalRole},
+	"PUT /api/v1/projects/{name}/route-groups":                       {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"PUT /api/v1/projects/{name}/usage-plans":                        {class: classProjectCapability, capability: "apikeys.manage", scope: scopeNamespace},
+	"PUT /api/v1/services/{name}/resources":                          {class: classProjectCapability, capability: "kipper.write"},
+	"PUT /api/v1/settings/ai":                                        {class: classGlobalRole},
+	"PUT /api/v1/settings/auth":                                      {class: classGlobalRole},
+	"PUT /api/v1/settings/mode":                                      {class: classGlobalRole},
+	"PUT /api/v1/settings/slack":                                     {class: classGlobalRole},
+	"PUT /api/v1/settings/smtp":                                      {class: classGlobalRole},
+	"PUT /api/v1/storage/{service}/public":                           {class: classProjectCapability, capability: "storage.write"},
+	"PUT /api/v1/users/{email}/role":                                 {class: classGlobalRole},
+	"TRACE /api/v1/migrate-target/{session}/transfer/{transfer}/*":   {class: classForeignCredential, reason: "the per-transfer token derived for this transfer, not a user identity"},
 }
 
 // TestEveryRouteDeclaresHowItIsAuthorized holds the table to the router in both
@@ -478,11 +558,17 @@ func TestEachRouteBehavesLikeItsClass(t *testing.T) {
 				}
 			}
 		case classGlobalRole:
-			if !denied(cells["owner"]) {
-				t.Errorf("%s is declared admin-only and admits a project owner (%s)", route, cells["owner"])
+			if cells["anon"] != "401" {
+				t.Errorf("%s is gated on a cluster role and admits an anonymous caller (%s)", route, cells["anon"])
 			}
 			if denied(cells["admin"]) {
-				t.Errorf("%s is declared admin-only and refuses an admin (%s)", route, cells["admin"])
+				t.Errorf("%s is gated on a cluster role and refuses an admin (%s)", route, cells["admin"])
+			}
+			// Only the admin rank is provable here. Every member column in the
+			// fixture holds the cluster deployer role, so a deployer-ranked
+			// gate admits all of them and looks exactly like no gate at all.
+			if d.globalRank == globalAdmin && !denied(cells["owner"]) {
+				t.Errorf("%s is declared admin-only and admits a project owner (%s)", route, cells["owner"])
 			}
 		case classProjectCapability:
 			if cells["anon"] != "401" {

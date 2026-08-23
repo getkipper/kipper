@@ -117,11 +117,10 @@ func validateClusterImage(ctx context.Context, c client.Client, owner client.Obj
 // when nothing owns it.
 //
 // It resolves through the shared owner lookup rather than reading the label
-// here. The comment this replaces said a tenant cannot label a namespace, and
-// that was the assumption worth removing: anyone who can write a namespace can
-// write that label, and this decides which project's registry credentials a
-// workload is given. The label is now a hint that the named project must back
-// with a claim.
+// here, because anyone who can write a namespace can write that label and this
+// decides which project's registry credentials a workload is given. What the
+// lookup requires, and the release it starts requiring the claim, is stated
+// once in nsowner.Of.
 //
 // Only a read failure is an error, so a transient one is retried rather than
 // mistaken for "no project".

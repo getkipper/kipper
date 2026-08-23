@@ -3,14 +3,18 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/projectenv"
@@ -278,8 +282,10 @@ func runProjectDelete(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	dynClient := k8sClient.Dynamic()
 
-	// Verify it exists
-	_, getErr := dynClient.Resource(manifest.ProjectGVR).Get(ctx, crName, metav1.GetOptions{})
+	// Read it, rather than only checking that it is there: what may be deleted
+	// below is decided from this project's own status, and the delete takes that
+	// away.
+	project, getErr := dynClient.Resource(manifest.ProjectGVR).Get(ctx, crName, metav1.GetOptions{})
 	if errors.IsNotFound(getErr) {
 		return fmt.Errorf("project %q not found", name)
 	}
@@ -295,27 +301,73 @@ func runProjectDelete(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n  Deleting project %q...\n", name)
 
 	// Delete the Project CR — the controller's finalizer and cascade handles cleanup
-	if err := dynClient.Resource(manifest.ProjectGVR).Delete(ctx, crName, metav1.DeleteOptions{}); err != nil {
-		return fmt.Errorf("deleting project: %w", err)
+	if err := deleteProjectCR(ctx, dynClient, crName, name, project.GetUID()); err != nil {
+		return err
 	}
 
-	// Also delete the namespaces (the console-api delete handler does this too)
+	// Also delete the namespaces (the console-api delete handler does this too).
+	//
+	// The label lists the candidates and authorises none of them. Anyone who can
+	// write a namespace can point its label at another project, so deleting on
+	// the label alone turns an ordinary project delete into the destruction of
+	// somebody else's namespace, and the operator running it would have no way
+	// to tell.
 	clientset := k8sClient.Clientset()
-	namespaces, _ := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
+	namespaces, nsErr := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("%s=%s", labels.Project, crName),
 	})
+	if nsErr != nil {
+		return fmt.Errorf("project %q is being deleted, but its namespaces could not be listed, so none were collected: %w", name, nsErr)
+	}
+	others, othersErr := dynClient.Resource(manifest.ProjectGVR).List(ctx, metav1.ListOptions{})
+	if othersErr != nil {
+		return fmt.Errorf("reading projects to see who holds %q's namespaces: %w", name, othersErr)
+	}
 	if namespaces != nil {
-		for _, ns := range namespaces.Items {
-			if err := clientset.CoreV1().Namespaces().Delete(ctx, ns.Name, metav1.DeleteOptions{}); err != nil {
-				fmt.Printf("  ✗  %s: %v\n", ns.Name, err)
-			} else {
-				fmt.Printf("  ✔  %s\n", ns.Name)
-			}
-		}
+		collectNamespaces(ctx, clientset, heldByProject(project, others.Items, namespaces.Items))
 	}
 	fmt.Println()
 
 	return nil
+}
+
+// deleteProjectCR deletes the project bound to the object that was read.
+//
+// The confirmation is a human pause, so the window between reading the project
+// and deleting it is as long as somebody takes to answer, and a delete by name
+// alone would take whatever carries the name by then.
+func deleteProjectCR(ctx context.Context, dyn dynamic.Interface, crName, name string, uid types.UID) error {
+	if err := dyn.Resource(manifest.ProjectGVR).Delete(ctx, crName, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid},
+	}); err != nil {
+		if errors.IsConflict(err) {
+			return fmt.Errorf("project %q was replaced while this command was waiting for confirmation, so nothing was deleted; run it again", name)
+		}
+		return fmt.Errorf("deleting project: %w", err)
+	}
+	return nil
+}
+
+// collectNamespaces deletes the namespaces the project holds on record, each
+// delete naming the object it was authorised against for the same reason the
+// project's own delete does.
+func collectNamespaces(ctx context.Context, clientset kubernetes.Interface, held []corev1.Namespace) {
+	for _, ns := range held {
+		uid := ns.UID
+		err := clientset.CoreV1().Namespaces().Delete(ctx, ns.Name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid},
+		})
+		switch {
+		case err == nil, errors.IsNotFound(err):
+			// Already gone counts as collected. Printing it as a failure
+			// sends an operator looking for a namespace that is not there.
+			fmt.Printf("  ✔  %s\n", ns.Name)
+		case errors.IsConflict(err):
+			fmt.Printf("  ✗  %s: replaced by a different namespace of the same name, so it was left alone\n", ns.Name)
+		default:
+			fmt.Printf("  ✗  %s: %v\n", ns.Name, err)
+		}
+	}
 }
 
 func runProjectUse(cmd *cobra.Command, args []string) error {
@@ -737,4 +789,52 @@ func setActiveProject(clusterName *string, project, environment string) error {
 		cluster.CurrentEnvironment = environment
 		return nil
 	})
+}
+
+// heldByProject keeps the namespaces this project's own records say it took.
+//
+// Two records, and a label is neither. A claim names the object; the namespace
+// list is the older record and carries only a name, which is all it ever
+// carried. Both live in the project's status, which needs projects/status to
+// write, while the label on a namespace needs only namespaces update.
+//
+// It asks the name question rather than the object one, the same way the
+// console's own cleanup does: what is being decided is whether a namespace
+// carrying this project's label is the project's to collect, and a namespace
+// recreated out of band is the case that most needs collecting.
+//
+// console-api answers this from one function and kip cannot call it, because it
+// lives in that module's internal package. The two read the same two fields.
+func heldByProject(project *unstructured.Unstructured, others []unstructured.Unstructured, namespaces []corev1.Namespace) []corev1.Namespace {
+	claims := claimedObjects(project)
+	recorded, _, _ := unstructured.NestedStringSlice(project.Object, "status", "namespaces")
+	var held []corev1.Namespace
+	for _, ns := range namespaces {
+		if claims[ns.Name] != string(ns.UID) && !slices.Contains(recorded, ns.Name) {
+			continue
+		}
+		// A claim on the live object outranks any record of the name, whoever
+		// holds it. Two projects can both have a namespace on record and only
+		// one can hold the object, so without this the loser's record plus a
+		// rewritten label deletes the winner's namespace.
+		if claimedByAnother(project.GetName(), others, ns) {
+			continue
+		}
+		held = append(held, ns)
+	}
+	return held
+}
+
+// claimedByAnother reports whether a project other than this one claims this
+// exact object.
+func claimedByAnother(self string, projects []unstructured.Unstructured, ns corev1.Namespace) bool {
+	for i := range projects {
+		if projects[i].GetName() == self {
+			continue
+		}
+		if claimedObjects(&projects[i])[ns.Name] == string(ns.UID) {
+			return true
+		}
+	}
+	return false
 }

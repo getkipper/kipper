@@ -196,7 +196,7 @@ func (h *Quota) quotaView(ctx context.Context, name string, project *kipperv1.Pr
 		// namespace whose quota has not published status yet looks like.
 		ownErr := error(nil)
 		if withUsage {
-			ownErr = namespaceBelongsTo(ctx, h.Client, ns, name)
+			ownErr = namespaceBelongsTo(ctx, h.Client, h.CRClient, ns, name)
 			var foreign *foreignNamespaceError
 			if ownErr != nil && !goerrors.As(ownErr, &foreign) {
 				return QuotaResponse{}, fmt.Errorf("establishing ownership of %s: %w", ns, ownErr)
@@ -404,7 +404,7 @@ func (h *Quota) belowUsageWarnings(ctx context.Context, project *kipperv1.Projec
 		// A namespace this project does not own is skipped like a missing one.
 		// This warns about usage that would exceed a new cap, and somebody
 		// else's usage is neither the caller's to see nor governed by it.
-		if err := namespaceBelongsTo(ctx, h.Client, ns, project.Name); err != nil {
+		if err := namespaceBelongsTo(ctx, h.Client, h.CRClient, ns, project.Name); err != nil {
 			var foreign *foreignNamespaceError
 			if goerrors.As(err, &foreign) {
 				continue

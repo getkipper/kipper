@@ -39,7 +39,8 @@ func crFakeWithWorkloads(t *testing.T) crclient.Client {
 			Git:   &kipperv1.AppGitSource{URL: "https://github.com/example/storefront.git"},
 		},
 	}
-	return crfake.NewClientBuilder().WithScheme(migrationScheme()).WithStatusSubresource(&kipperv1.App{}).WithObjects(app).Build()
+	return crfake.NewClientBuilder().WithScheme(migrationScheme()).WithStatusSubresource(&kipperv1.App{}).
+		WithObjects(app, ownerOf("shop-prod")).Build()
 }
 
 func planClaims(email string) *middleware.Claims {

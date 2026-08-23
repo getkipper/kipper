@@ -10,7 +10,6 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
@@ -83,7 +82,7 @@ func TestTheMapperRoutesAGeneratedBindingByItsLabel(t *testing.T) {
 		Namespace: "shop-test",
 		Labels:    map[string]string{kipperlabels.Project: "shop"},
 	}}
-	got := mapMemberBindingToProject(context.Background(), binding)
+	got := memberBindingProjects(context.Background(), nil, binding)
 	require.Len(t, got, 1,
 		"an out-of-band edit to a generated binding maps to no project, so nothing repairs it until an unrelated event")
 	assert.Equal(t, "shop", got[0].Name)
@@ -94,7 +93,7 @@ func TestTheMapperRoutesAGeneratedBindingByItsLabel(t *testing.T) {
 func TestTheMapperRoutesAGeneratedBindingWithNoLabelByGeneratingPrefixes(t *testing.T) {
 	shop := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "shop"}}
 	other := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "rival"}}
-	c := crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(shop, other).Build()
+	c := projectFakeBuilder().WithScheme(testScheme()).WithObjects(shop, other).Build()
 
 	binding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{
 		Name:      memberbinding.Name("shop", "owner"),
@@ -116,7 +115,7 @@ func TestTheMapperRoutesAFixedNameWithNoLabelByItsNamespace(t *testing.T) {
 		Name:   "shop-test",
 		Labels: map[string]string{kipperlabels.Project: "shop"},
 	}}
-	c := crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(shop, ns).Build()
+	c := projectFakeBuilder().WithScheme(testScheme()).WithObjects(shop, ns).Build()
 
 	binding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{
 		Name:      "kipper-project-owner",
@@ -133,7 +132,7 @@ func TestTheMapperRoutesAFixedNameWithNoLabelByItsNamespace(t *testing.T) {
 // enqueue a reconcile, or every RoleBinding write on the cluster wakes the
 // project controller.
 func TestTheMapperIgnoresWhatIsNotAMemberBinding(t *testing.T) {
-	c := crfake.NewClientBuilder().WithScheme(testScheme()).Build()
+	c := projectFakeBuilder().WithScheme(testScheme()).Build()
 	binding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{
 		Name:      "someone-elses-binding",
 		Namespace: "shop-test",
@@ -152,7 +151,7 @@ func TestTheMapperIgnoresWhatIsNotAMemberBinding(t *testing.T) {
 func TestTheMapperBelievesTheNameOverALabelThatDisagrees(t *testing.T) {
 	shop := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "shop"}}
 	rival := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "rival"}}
-	c := crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(shop, rival).Build()
+	c := projectFakeBuilder().WithScheme(testScheme()).WithObjects(shop, rival).Build()
 
 	binding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{
 		Name:      memberbinding.Name("shop", "owner"),
@@ -169,7 +168,7 @@ func TestTheMapperBelievesTheNameOverALabelThatDisagrees(t *testing.T) {
 // A fixed name has no digest to check a label against, so there the label is
 // all there is and is still used.
 func TestTheMapperStillUsesTheLabelForAFixedName(t *testing.T) {
-	c := crfake.NewClientBuilder().WithScheme(testScheme()).Build()
+	c := projectFakeBuilder().WithScheme(testScheme()).Build()
 	binding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{
 		Name:      "kipper-project-owner",
 		Namespace: "shop-test",

@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -15,6 +16,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/builder"
@@ -31,10 +33,39 @@ func quotaTestProject(tier string, envs ...kipperv1.ProjectEnvironment) *kipperv
 	}
 }
 
+// projectFakeBuilder is the fake client every Project reconcile test builds on.
+//
+// The revoke pass lists generated member bindings through a field index, so a
+// client without it answers that list with an error rather than with nothing,
+// and the test fails somewhere unrelated to what it is asking about.
+//
+// It also assigns a UID on create, which the fake does not and a real API server
+// always does. Without one a pass that created a namespace got nothing back to
+// name in the claim, so the create path published none and no test could see it,
+// which is the very path the claim exists for.
+//
+// A caller that adds its own WithInterceptorFuncs replaces this one whole rather
+// than merging with it, so it has to chain stampUID itself or every namespace it
+// creates comes back without a UID and the pass stops. WithIndex accumulates,
+// which is why only half of this helper survives that.
+func projectFakeBuilder() *crfake.ClientBuilder {
+	return crfake.NewClientBuilder().
+		WithIndex(&rbacv1.RoleBinding{}, memberBindingProjectIndex, MemberBindingProjectKeys).
+		WithInterceptorFuncs(interceptor.Funcs{Create: stampUID})
+}
+
+// stampUID gives a created object the UID the API server would have assigned.
+func stampUID(ctx context.Context, c crclient.WithWatch, obj crclient.Object, opts ...crclient.CreateOption) error {
+	if obj.GetUID() == "" {
+		obj.SetUID(types.UID("uid-" + obj.GetName()))
+	}
+	return c.Create(ctx, obj, opts...)
+}
+
 func reconcileProject(t *testing.T, objs ...crclient.Object) crclient.Client {
 	t.Helper()
 	scheme := testScheme()
-	fakeClient := crfake.NewClientBuilder().
+	fakeClient := projectFakeBuilder().
 		WithScheme(scheme).
 		WithObjects(append(objs, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9"))...).
 		WithStatusSubresource(&kipperv1.Project{}).
@@ -106,7 +137,7 @@ func TestReconcileQuota_InvalidOverrideFailsReconcile(t *testing.T) {
 		}},
 	)
 	scheme := testScheme()
-	fakeClient := crfake.NewClientBuilder().
+	fakeClient := projectFakeBuilder().
 		WithScheme(scheme).
 		WithObjects(project, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9")).
 		WithStatusSubresource(&kipperv1.Project{}).
@@ -121,7 +152,7 @@ func TestReconcileQuota_InvalidOverrideFailsReconcile(t *testing.T) {
 func TestReconcileQuota_UpdatesExistingQuotaOnTierChange(t *testing.T) {
 	scheme := testScheme()
 	project := quotaTestProject("small", kipperv1.ProjectEnvironment{Name: "test"})
-	fakeClient := crfake.NewClientBuilder().
+	fakeClient := projectFakeBuilder().
 		WithScheme(scheme).
 		WithObjects(project, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9")).
 		WithStatusSubresource(&kipperv1.Project{}).
@@ -153,7 +184,8 @@ func TestReconcileQuota_GrandfathersNamespaceOverTierDefault(t *testing.T) {
 	// current usage: it raises the quota and records an explicit override.
 	project := quotaTestProject("small", kipperv1.ProjectEnvironment{Name: "test"})
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-		Name: "shop-test", Labels: map[string]string{kipperlabels.Project: "shop"}}}
+		Name: "shop-test", UID: "uid-shop-test",
+		Labels: map[string]string{kipperlabels.Project: "shop"}}}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "big-app", Namespace: "shop-test"},
 		Spec: corev1.PodSpec{
@@ -197,7 +229,8 @@ func TestReconcileQuota_GrandfathersNamespaceOverTierDefault(t *testing.T) {
 func TestReconcileQuota_GrandfatherSkipsTerminalPods(t *testing.T) {
 	project := quotaTestProject("small", kipperv1.ProjectEnvironment{Name: "test"})
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-		Name: "shop-test", Labels: map[string]string{kipperlabels.Project: "shop"}}}
+		Name: "shop-test", UID: "uid-shop-test",
+		Labels: map[string]string{kipperlabels.Project: "shop"}}}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "finished-build", Namespace: "shop-test"},
 		Spec: corev1.PodSpec{
@@ -277,7 +310,7 @@ func TestTierQuota_SmallFitsJvmRolloutWithBuild(t *testing.T) {
 	app.Spec.Route = &kipperv1.AppRoute{}
 	app.Spec.Git = &kipperv1.AppGitSource{URL: "https://git.example.com/shop/web.git", Branch: "main"}
 
-	fakeClient := crfake.NewClientBuilder().
+	fakeClient := projectFakeBuilder().
 		WithScheme(scheme).
 		WithObjects(app).
 		WithStatusSubresource(app).

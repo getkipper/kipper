@@ -323,7 +323,8 @@ func (r *AppReconciler) enqueueCallersOfLinkTarget(ctx context.Context, obj crcl
 // Consent lives on the target's Project because that is where the authority to
 // grant it sits. Reading it from the namespaces rather than from the link means
 // a caller cannot name a project it does not belong to and have that believed:
-// both ends are resolved from labels the project reconciler owns.
+// both ends are resolved through the shared owner lookup rather than from a
+// label anyone who can write a namespace can set.
 func linkIsConsentedTo(ctx context.Context, c crclient.Client, callerNS, targetNS string) (bool, string, error) {
 	callerProject, err := projectOfNamespace(ctx, c, callerNS)
 	if err != nil {
@@ -340,13 +341,10 @@ func linkIsConsentedTo(ctx context.Context, c crclient.Client, callerNS, targetN
 		// A different environment of the same project. The project already owns
 		// both ends, so there is nobody else to ask.
 		//
-		// This trusts the namespace label, and two projects can currently
-		// resolve to one namespace and overwrite each other's — see
-		// plans/namespace-collision-plan.md. Nothing here can defend against
-		// that: the label is the only link between a namespace and its project,
-		// so any check built on it is circular. The fix belongs where the
-		// collision is created, by refusing to adopt a namespace another
-		// project already claims.
+		// Both ends resolved to the same project through the shared owner
+		// lookup. Two projects resolving to one namespace name is refused where
+		// a namespace is adopted rather than here, so this branch does not have
+		// to defend against it.
 		return true, "", nil
 	}
 
@@ -365,8 +363,8 @@ func linkIsConsentedTo(ctx context.Context, c crclient.Client, callerNS, targetN
 	return false, "project " + targetProject + " does not allow links from " + callerProject, nil
 }
 
-// projectOfNamespace reads the project a namespace belongs to from the label the
-// project reconciler puts there. An empty result means it is not one.
+// projectOfNamespace returns the project a namespace belongs to. An empty result
+// means it is not a project's.
 func projectOfNamespace(ctx context.Context, c crclient.Client, ns string) (string, error) {
 	// Through the shared owner lookup, because this decides whether one
 	// project's app may reach another's. Reading the label here trusted a value

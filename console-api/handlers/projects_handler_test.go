@@ -17,6 +17,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -26,6 +28,7 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/controllers"
 	"github.com/getkipper/kipper/console-api/middleware"
+	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 )
 
 // asUser returns req with an authenticated user and global role in context,
@@ -36,10 +39,59 @@ func asUser(req *http.Request, email, role string) *http.Request {
 	return req.WithContext(ctx)
 }
 
+// crClientOwning builds the CR client for a fixture whose namespaces have all
+// been reconciled: every namespace carrying a project label gets a matching
+// claim on the project it names, inventing the project if the fixture did not.
+//
+// A Project passed in explicitly keeps whatever else it declares and gains the
+// claims for its namespaces.
+//
+// So it cannot be used for a test about a label nothing backs. It answers that
+// question with a claim it wrote itself, and the test passes while proving
+// nothing. Build the project and its claims by hand for those; see
+// namespace_authority_test.go.
+func crClientOwning(t *testing.T, clientset kubernetes.Interface, objs ...crclient.Object) crclient.Client {
+	t.Helper()
+	namespaces, err := clientset.CoreV1().Namespaces().List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("listing the fixture namespaces: %v", err)
+	}
+
+	projects := map[string]*kipperv1.Project{}
+	for _, obj := range objs {
+		if p, ok := obj.(*kipperv1.Project); ok {
+			projects[p.Name] = p
+		}
+	}
+
+	all := append([]crclient.Object{}, objs...)
+	for i := range namespaces.Items {
+		ns := namespaces.Items[i]
+		all = append(all, ns.DeepCopy())
+		owner := ns.Labels[kipperlabels.Project]
+		if owner == "" {
+			continue
+		}
+		p, known := projects[owner]
+		if !known {
+			p = &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: owner}}
+			projects[owner] = p
+			all = append(all, p)
+		}
+		p.Status.NamespaceClaims = append(p.Status.NamespaceClaims,
+			kipperv1.NamespaceClaim{Name: ns.Name, UID: ns.UID})
+	}
+	return crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(all...).Build()
+}
+
 func newKipperNamespace(name, project, env, order string) *corev1.Namespace {
 	return &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
+			// A claim names the object, not the name, so a fixture with no UID
+			// would have every claim match every namespace that ever carried
+			// the name and prove nothing about ownership.
+			UID: types.UID("uid-" + name),
 			Labels: map[string]string{
 				kipperLabel:              kipperValue,
 				"kipper.run/project":     project,
@@ -54,7 +106,7 @@ func newKipperNamespace(name, project, env, order string) *corev1.Namespace {
 func TestProjectsHandler_List(t *testing.T) {
 	t.Run("returns empty list when no projects exist", func(t *testing.T) {
 		client := fake.NewClientset()
-		handler := &Projects{Client: client, CRClient: testCRClient()}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client)}
 
 		r := chi.NewRouter()
 		r.Get("/api/v1/projects", handler.List)
@@ -96,7 +148,7 @@ func TestProjectsHandler_List(t *testing.T) {
 			},
 		}
 		client := fake.NewClientset()
-		handler := &Projects{Client: client, CRClient: testCRClient(myapp, other)}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, myapp, other)}
 
 		r := chi.NewRouter()
 		r.Get("/api/v1/projects", handler.List)
@@ -135,7 +187,7 @@ func TestProjectsHandler_List(t *testing.T) {
 			},
 		}
 		client := fake.NewClientset()
-		handler := &Projects{Client: client, CRClient: testCRClient(mine, theirs)}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, mine, theirs)}
 
 		r := chi.NewRouter()
 		r.Get("/api/v1/projects", handler.List)
@@ -165,7 +217,7 @@ func TestProjectsHandler_List(t *testing.T) {
 			},
 		}
 		client := fake.NewClientset()
-		handler := &Projects{Client: client, CRClient: testCRClient(proj)}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, proj)}
 
 		r := chi.NewRouter()
 		r.Get("/api/v1/projects", handler.List)
@@ -210,7 +262,7 @@ func TestProjectsHandler_List(t *testing.T) {
 			Status:     kipperv1.AppStatus{Phase: "Running", ReadyReplicas: 2},
 		}
 		client := fake.NewClientset()
-		handler := &Projects{Client: client, CRClient: testCRClient(proj, webApp)}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, proj, webApp)}
 
 		r := chi.NewRouter()
 		r.Get("/api/v1/projects", handler.List)
@@ -312,7 +364,7 @@ func TestProjectsHandler_Create(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := fake.NewClientset()
-			handler := &Projects{Client: client, CRClient: testCRClient()}
+			handler := &Projects{Client: client, CRClient: crClientOwning(t, client)}
 
 			r := chi.NewRouter()
 			r.Post("/api/v1/projects", handler.Create)
@@ -351,7 +403,7 @@ func TestProjectsHandler_CreateConflict(t *testing.T) {
 		},
 	}
 	client := fake.NewClientset()
-	handler := &Projects{Client: client, CRClient: testCRClient(existing)}
+	handler := &Projects{Client: client, CRClient: crClientOwning(t, client, existing)}
 
 	r := chi.NewRouter()
 	r.Post("/api/v1/projects", handler.Create)
@@ -367,7 +419,7 @@ func TestProjectsHandler_CreateConflict(t *testing.T) {
 
 func TestProjectsHandler_CreateMultiEnvNamespaces(t *testing.T) {
 	client := fake.NewClientset()
-	handler := &Projects{Client: client, CRClient: testCRClient()}
+	handler := &Projects{Client: client, CRClient: crClientOwning(t, client)}
 
 	r := chi.NewRouter()
 	r.Post("/api/v1/projects", handler.Create)
@@ -449,7 +501,7 @@ func TestProjectsHandler_CopyPreview(t *testing.T) {
 	// project owns before reading anything out of it.
 	sourceNs := newKipperNamespace("demo-test", "demo", "test", "0")
 	client := fake.NewClientset(stripe, credentials, sourceNs)
-	handler := &Projects{Client: client, CRClient: testCRClient(apps...), Domain: "example.com"}
+	handler := &Projects{Client: client, CRClient: crClientOwning(t, client, apps...), Domain: "example.com"}
 
 	r := chi.NewRouter()
 	r.Get("/api/v1/projects/{name}/copy-preview", handler.CopyPreview)
@@ -502,8 +554,12 @@ func TestProjectsHandler_AddEnvironment(t *testing.T) {
 			// rather than for the namespace to exist, because existence is
 			// also true of one the reconcile is about to refuse. These
 			// fixtures stand in for a reconcile that has already run.
+			// The UIDs are newKipperNamespace's, because a claim names an
+			// object: one with no UID matches no live namespace, so a fixture
+			// carrying it would prove the label fallback rather than the claim.
 			Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
-				{Name: "demo-test"}, {Name: "demo-prod"},
+				{Name: "demo-test", UID: "uid-demo-test"},
+				{Name: "demo-prod", UID: "uid-demo-prod"},
 			}},
 		}
 		// Pre-create the namespaces the project reconciler would create — the
@@ -540,8 +596,12 @@ func TestProjectsHandler_AddEnvironment(t *testing.T) {
 			Spec:       kipperv1.ProjectSpec{Environments: []kipperv1.ProjectEnvironment{{Name: "test"}}},
 			// The handler waits for the claim rather than the namespace, so
 			// this fixture stands in for a reconcile that has already run.
+			// The UIDs are newKipperNamespace's, because a claim names an
+			// object: one with no UID matches no live namespace, so a fixture
+			// carrying it would prove the label fallback rather than the claim.
 			Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
-				{Name: "demo-test"}, {Name: "demo-prod"},
+				{Name: "demo-test", UID: "uid-demo-test"},
+				{Name: "demo-prod", UID: "uid-demo-prod"},
 			}},
 		}
 		webApp := &kipperv1.App{
@@ -590,7 +650,7 @@ func TestProjectsHandler_AddEnvironment(t *testing.T) {
 			Spec:       kipperv1.ProjectSpec{Environments: []kipperv1.ProjectEnvironment{{Name: "test"}}},
 		}
 		client := fake.NewClientset()
-		handler := &Projects{Client: client, CRClient: testCRClient(project)}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, project)}
 
 		r := chi.NewRouter()
 		r.Post("/api/v1/projects/{name}/environments", handler.AddEnvironment)
@@ -612,7 +672,7 @@ func TestProjectsHandler_AddEnvironment(t *testing.T) {
 			},
 		}
 		client := fake.NewClientset()
-		handler := &Projects{Client: client, CRClient: testCRClient(project)}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, project)}
 
 		r := chi.NewRouter()
 		r.Post("/api/v1/projects/{name}/environments", handler.AddEnvironment)
@@ -810,7 +870,7 @@ func TestProjectsHandler_Delete(t *testing.T) {
 		prod := newKipperNamespace("myapp-production", "myapp", "production", "1")
 		projectCR := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "myapp"}}
 		client := fake.NewClientset(staging, prod)
-		handler := &Projects{Client: client, CRClient: testCRClient(projectCR)}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, projectCR)}
 
 		r := chi.NewRouter()
 		r.Delete("/api/v1/projects/{name}", handler.Delete)
@@ -835,7 +895,7 @@ func TestProjectsHandler_Delete(t *testing.T) {
 		}
 		projectCR := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "simple"}}
 		client := fake.NewClientset(ns)
-		handler := &Projects{Client: client, CRClient: testCRClient(projectCR)}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, projectCR)}
 
 		r := chi.NewRouter()
 		r.Delete("/api/v1/projects/{name}", handler.Delete)
@@ -857,7 +917,7 @@ func TestProjectsHandler_Delete(t *testing.T) {
 			},
 		}
 		client := fake.NewClientset(ns)
-		handler := &Projects{Client: client, CRClient: testCRClient()}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client)}
 
 		r := chi.NewRouter()
 		r.Delete("/api/v1/projects/{name}", handler.Delete)
@@ -873,7 +933,7 @@ func TestProjectsHandler_Delete(t *testing.T) {
 
 	t.Run("returns 404 for nonexistent project", func(t *testing.T) {
 		client := fake.NewClientset()
-		handler := &Projects{Client: client, CRClient: testCRClient()}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client)}
 
 		r := chi.NewRouter()
 		r.Delete("/api/v1/projects/{name}", handler.Delete)
@@ -896,6 +956,13 @@ func promoteProject() *kipperv1.Project {
 		ObjectMeta: metav1.ObjectMeta{Name: "myapp"},
 		Spec: kipperv1.ProjectSpec{Environments: []kipperv1.ProjectEnvironment{
 			{Name: "staging"}, {Name: "production"},
+		}},
+		// The namespaces it holds, claimed, because promote establishes
+		// ownership of both ends and declaring an environment is not what makes
+		// a namespace the project's. The UIDs are newKipperNamespace's.
+		Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+			{Name: "myapp-staging", UID: "uid-myapp-staging"},
+			{Name: "myapp-production", UID: "uid-myapp-production"},
 		}},
 	}
 }
@@ -921,7 +988,7 @@ func TestProjectsHandler_Promote(t *testing.T) {
 		// The namespaces myapp holds. Promote establishes ownership of both
 		// ends before reading or writing an app in either.
 		client := fake.NewClientset(promoteNamespaces()...)
-		handler := &Projects{Client: client, CRClient: testCRClient(promoteProject(), sourceApp, targetApp)}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, promoteProject(), sourceApp, targetApp)}
 
 		r := chi.NewRouter()
 		r.Post("/api/v1/projects/{name}/promote", handler.Promote)
@@ -957,7 +1024,7 @@ func TestProjectsHandler_Promote(t *testing.T) {
 		// The namespaces myapp holds. Promote establishes ownership of both
 		// ends before reading or writing an app in either.
 		client := fake.NewClientset(promoteNamespaces()...)
-		handler := &Projects{Client: client, CRClient: testCRClient(promoteProject(), sourceApp)}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, promoteProject(), sourceApp)}
 
 		r := chi.NewRouter()
 		r.Post("/api/v1/projects/{name}/promote", handler.Promote)
@@ -1049,7 +1116,7 @@ func TestProjectsHandler_Promote(t *testing.T) {
 		// The namespaces myapp holds. Promote establishes ownership of both
 		// ends before reading or writing an app in either.
 		client := fake.NewClientset(promoteNamespaces()...)
-		handler := &Projects{Client: client, CRClient: testCRClient(promoteProject(), web, api)}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, promoteProject(), web, api)}
 
 		r := chi.NewRouter()
 		r.Post("/api/v1/projects/{name}/promote", handler.Promote)
@@ -1091,7 +1158,7 @@ func TestProjectsHandler_Promote(t *testing.T) {
 		// The namespaces myapp holds. Promote establishes ownership of both
 		// ends before reading or writing an app in either.
 		client := fake.NewClientset(promoteNamespaces()...)
-		handler := &Projects{Client: client, CRClient: testCRClient(promoteProject(), sourceApp, targetApp)}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, promoteProject(), sourceApp, targetApp)}
 
 		r := chi.NewRouter()
 		r.Post("/api/v1/projects/{name}/promote", handler.Promote)
@@ -1110,7 +1177,7 @@ func TestProjectsHandler_Promote(t *testing.T) {
 		// The namespaces myapp holds. Promote establishes ownership of both
 		// ends before reading or writing an app in either.
 		client := fake.NewClientset(promoteNamespaces()...)
-		handler := &Projects{Client: client, CRClient: testCRClient(promoteProject())}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, promoteProject())}
 
 		r := chi.NewRouter()
 		r.Post("/api/v1/projects/{name}/promote", handler.Promote)
@@ -1129,7 +1196,7 @@ func TestProjectsHandler_Promote(t *testing.T) {
 		// The namespaces myapp holds. Promote establishes ownership of both
 		// ends before reading or writing an app in either.
 		client := fake.NewClientset(promoteNamespaces()...)
-		handler := &Projects{Client: client, CRClient: testCRClient(promoteProject())}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, promoteProject())}
 
 		r := chi.NewRouter()
 		r.Post("/api/v1/projects/{name}/promote", handler.Promote)
@@ -1148,7 +1215,7 @@ func TestProjectsHandler_Promote(t *testing.T) {
 		// The namespaces myapp holds. Promote establishes ownership of both
 		// ends before reading or writing an app in either.
 		client := fake.NewClientset(promoteNamespaces()...)
-		handler := &Projects{Client: client, CRClient: testCRClient(promoteProject())}
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, promoteProject())}
 
 		r := chi.NewRouter()
 		r.Post("/api/v1/projects/{name}/promote", handler.Promote)
@@ -1178,13 +1245,10 @@ func TestProjectsHandler_ListReportsTheEnvironmentAProjectGetsByDefault(t *testi
 			Environments: []kipperv1.ProjectEnvironment{{Name: "prod"}},
 		},
 	}
-	// No environments declared, so the reconciler gives it "test".
-	bare := &kipperv1.Project{
-		ObjectMeta: metav1.ObjectMeta{Name: "scratch"},
-		Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
-			{Name: "scratch-test"}, {Name: "scratch-acc"},
-		}},
-	}
+	// No environments declared, so the reconciler gives it "test". No claims
+	// either: this fixture has no namespaces, so there is nothing for a claim
+	// to name and carrying one would only imply coverage it does not have.
+	bare := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "scratch"}}
 
 	handler := &Projects{Client: fake.NewClientset(), CRClient: testCRClient(declared, bare)}
 	r := chi.NewRouter()
@@ -1219,8 +1283,8 @@ func TestProjectsHandler_ListReportsTheEnvironmentAProjectGetsByDefault(t *testi
 // projects the caller belongs to. A caller in the losing project alone sees one
 // claim and nothing to compare it with.
 //
-// So the server answers from the namespace's own label, which is what
-// authorization reads.
+// So the server answers from the shared owner lookup, which is what
+// authorization asks.
 func TestProjectsHandler_ListSaysWhichProjectActuallyHoldsANamespace(t *testing.T) {
 	shop := &kipperv1.Project{
 		ObjectMeta: metav1.ObjectMeta{Name: "shop"},
@@ -1233,6 +1297,12 @@ func TestProjectsHandler_ListSaysWhichProjectActuallyHoldsANamespace(t *testing.
 		Spec: kipperv1.ProjectSpec{
 			Environments: []kipperv1.ProjectEnvironment{{Name: "default"}},
 		},
+		// It holds the namespace, so it claims it. Declaring the environment is
+		// what shop also does, and the whole point here is telling the two
+		// apart.
+		Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+			{Name: "shop-prod", UID: "uid-shop-prod"},
+		}},
 	}
 	// shop-prod got there first, so the live namespace carries its label.
 	ns := newKipperNamespace("shop-prod", "shop-prod", "default", "0")
@@ -1347,7 +1417,8 @@ func TestProjectsHandler_AddEnvironmentKeepsTheOneTheProjectAlreadyHas(t *testin
 	bare := &kipperv1.Project{
 		ObjectMeta: metav1.ObjectMeta{Name: "scratch"},
 		Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
-			{Name: "scratch-test"}, {Name: "scratch-acc"},
+			{Name: "scratch-test", UID: "uid-scratch-test"},
+			{Name: "scratch-acc", UID: "uid-scratch-acc"},
 		}},
 	}
 	nsTest := newKipperNamespace("scratch-test", "scratch", "test", "0")
@@ -1418,7 +1489,7 @@ func TestProjectsHandler_AddEnvironmentRefusesAForeignTargetNamespace(t *testing
 	foreign := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shop-prod"}}
 
 	client := fake.NewClientset(shopTest, foreign)
-	handler := &Projects{Client: client, CRClient: testCRClient(shop), Domain: "example.com"}
+	handler := &Projects{Client: client, CRClient: crClientOwning(t, client, shop), Domain: "example.com"}
 
 	r := chi.NewRouter()
 	r.Post("/api/v1/projects/{name}/environments", handler.AddEnvironment)
@@ -1460,7 +1531,7 @@ func TestProjectsHandler_AddEnvironmentRefusesAForeignSourceNamespace(t *testing
 	target := newKipperNamespace("shop-prod", "shop", "prod", "1")
 
 	client := fake.NewClientset(foreignSource, target)
-	handler := &Projects{Client: client, CRClient: testCRClient(shop), Domain: "example.com"}
+	handler := &Projects{Client: client, CRClient: crClientOwning(t, client, shop), Domain: "example.com"}
 
 	r := chi.NewRouter()
 	r.Post("/api/v1/projects/{name}/environments", handler.AddEnvironment)
@@ -1591,14 +1662,16 @@ func TestProjectsHandler_AddEnvironmentRefusesANamespaceThatAppearsMidFlight(t *
 	// reconcile would give the namespace to this project was, and only the
 	// reconcile can answer it.
 	shop.Status.Conditions = []metav1.Condition{{
-		Type:               "NamespaceConflict",
-		Status:             metav1.ConditionTrue,
-		Reason:             "NamespaceOwnedByAnotherProject",
-		Message:            "namespace shop-prod already belongs to project somebody-else",
+		Type:   "NamespaceConflict",
+		Status: metav1.ConditionTrue,
+		Reason: "NamespaceOwnedByAnotherProject",
+		Message: `namespace "shop-prod" already belongs to project "somebody-else", so project ` +
+			`"shop" cannot use it; the two projects resolve to the same namespace name and ` +
+			`one of them has to be renamed`,
 		LastTransitionTime: metav1.Now(),
 	}}
 
-	handler := &Projects{Client: client, CRClient: testCRClient(shop), Domain: "example.com"}
+	handler := &Projects{Client: client, CRClient: crClientOwning(t, client, shop), Domain: "example.com"}
 	r := chi.NewRouter()
 	r.Post("/api/v1/projects/{name}/environments", handler.AddEnvironment)
 
@@ -1664,7 +1737,7 @@ func TestProjectsHandler_CopyPreviewRefusesWhenOwnershipCannotBeRead(t *testing.
 		return true, nil, apierrors.NewServiceUnavailable("the apiserver is having a moment")
 	})
 
-	handler := &Projects{Client: client, CRClient: testCRClient(), Domain: "example.com"}
+	handler := &Projects{Client: client, CRClient: crClientOwning(t, client), Domain: "example.com"}
 	r := chi.NewRouter()
 	r.Get("/api/v1/projects/{name}/copy-preview", handler.CopyPreview)
 
@@ -1845,7 +1918,7 @@ func TestProjectsHandler_PromoteReportsAnOwnershipOutageAsAServerFailure(t *test
 	client.PrependReactor("get", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, apierrors.NewServiceUnavailable("etcd leader election in progress")
 	})
-	handler := &Projects{Client: client, CRClient: testCRClient(promoteProject())}
+	handler := &Projects{Client: client, CRClient: crClientOwning(t, client, promoteProject())}
 
 	r := chi.NewRouter()
 	r.Post("/api/v1/projects/{name}/promote", handler.Promote)
@@ -1872,7 +1945,7 @@ func TestProjectsHandler_PromoteDistinguishesMissingFromUndeclared(t *testing.T)
 		newKipperNamespace("myapp-staging", "myapp", "staging", "0"),
 		newKipperNamespace("myapp-production", "myapp", "production", "1"),
 	)
-	handler := &Projects{Client: client, CRClient: testCRClient(promoteProject())}
+	handler := &Projects{Client: client, CRClient: crClientOwning(t, client, promoteProject())}
 	r := chi.NewRouter()
 	r.Post("/api/v1/projects/{name}/promote", handler.Promote)
 
@@ -1906,7 +1979,7 @@ func TestProjectsHandler_OwnershipOutageIsRedactedButRecorded(t *testing.T) {
 	client.PrependReactor("get", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, apierrors.NewServiceUnavailable("etcd leader election in progress")
 	})
-	handler := &Projects{Client: client, CRClient: testCRClient(promoteProject())}
+	handler := &Projects{Client: client, CRClient: crClientOwning(t, client, promoteProject())}
 
 	r := chi.NewRouter()
 	r.Post("/api/v1/projects/{name}/promote", handler.Promote)
@@ -1991,7 +2064,13 @@ func TestTheProjectIndexHidesProjectsFromAnUnrecognisedRole(t *testing.T) {
 // So this release accepts either record: the claim, or the namespace carrying
 // this project's label. Requiring the claim now would fail an AddEnvironment
 // that has in fact succeeded, which is the compatibility boundary the whole
-// two-release split exists to hold. The next release drops the label branch.
+// two-release split exists to hold.
+//
+// Release 2 deletes `fallbackToLabel` and this is one of the five tests that
+// fails when it goes. What it becomes then is the opposite assertion: a project
+// carrying the label and no claim owns nothing, so AddEnvironment refuses and
+// this test expects the refusal. A failure here after that flip is the expected
+// inversion and not a regression in the handler.
 func TestAddEnvironmentSucceedsWhenAnOlderControllerWroteNoClaim(t *testing.T) {
 	project := &kipperv1.Project{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo"},

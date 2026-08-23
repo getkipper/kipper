@@ -35,9 +35,13 @@ func TestANamespaceAnotherProjectOwnsIsNotAdopted(t *testing.T) {
 	}
 
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(claimed, claimant).Build()
-	r := &ProjectReconciler{Client: client, Scheme: scheme}
+	c := client
+	r := &ProjectReconciler{
+		Client:    c,
+		APIReader: c,
+	}
 
-	err := r.reconcileNamespace(context.Background(), claimant, "shop-prod", "default", []string{"default"}, 0)
+	_, err := r.reconcileNamespace(context.Background(), claimant, "shop-prod", "default", []string{"default"}, 0)
 	require.Error(t, err, "a namespace another project owns must not be adopted")
 
 	var conflict *namespaceConflictError
@@ -64,9 +68,14 @@ func TestAProjectStillReconcilesItsOwnNamespace(t *testing.T) {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: "shop", Labels: map[string]string{kipperlabels.Project: "shop"}}}
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(ns, project).Build()
-	r := &ProjectReconciler{Client: client, Scheme: scheme}
+	c := client
+	r := &ProjectReconciler{
+		Client:    c,
+		APIReader: c,
+	}
 
-	require.NoError(t, r.reconcileNamespace(context.Background(), project, "shop", "default", []string{"default"}, 0))
+	_, err := r.reconcileNamespace(context.Background(), project, "shop", "default", []string{"default"}, 0)
+	require.NoError(t, err)
 
 	var after corev1.Namespace
 	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: "shop"}, &after))
@@ -86,9 +95,13 @@ func TestAnUnlabelledNamespaceIsNotAdopted(t *testing.T) {
 	foreign := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shop"}}
 
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(foreign, project).Build()
-	r := &ProjectReconciler{Client: client, Scheme: scheme}
+	c := client
+	r := &ProjectReconciler{
+		Client:    c,
+		APIReader: c,
+	}
 
-	err := r.reconcileNamespace(context.Background(), project, "shop", "default", []string{"default"}, 0)
+	_, err := r.reconcileNamespace(context.Background(), project, "shop", "default", []string{"default"}, 0)
 	require.Error(t, err, "a namespace Kipper did not create must not be adopted")
 	assert.Contains(t, err.Error(), "not created by Kipper")
 
@@ -113,12 +126,13 @@ func TestDeletingAProjectCollectsANamespaceThatLostItsLabel(t *testing.T) {
 		Status:     kipperv1.ProjectStatus{Namespaces: []string{"shop-prod", "shop-test"}},
 	}
 
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(stripped, labelled, project).WithStatusSubresource(project).Build()
 	r := &ProjectReconciler{
-		Client: crfake.NewClientBuilder().WithScheme(scheme).
-			WithObjects(stripped, labelled, project).WithStatusSubresource(project).Build(),
-		Scheme: scheme,
+		Client:    c,
+		APIReader: c,
+		Scheme:    scheme,
 	}
-	require.NoError(t, r.deleteProjectNamespaces(context.Background(), project, nil))
+	require.NoError(t, pruneRan(r.deleteProjectNamespaces(context.Background(), project, false)))
 
 	var ns corev1.Namespace
 	err := r.Get(context.Background(), types.NamespacedName{Name: "shop-prod"}, &ns)
@@ -141,12 +155,13 @@ func TestDeletingAProjectLeavesANamespaceAnotherProjectNowOwns(t *testing.T) {
 		Status:     kipperv1.ProjectStatus{Namespaces: []string{"shop-prod"}},
 	}
 
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(reassigned, project).WithStatusSubresource(project).Build()
 	r := &ProjectReconciler{
-		Client: crfake.NewClientBuilder().WithScheme(scheme).
-			WithObjects(reassigned, project).WithStatusSubresource(project).Build(),
-		Scheme: scheme,
+		Client:    c,
+		APIReader: c,
+		Scheme:    scheme,
 	}
-	require.NoError(t, r.deleteProjectNamespaces(context.Background(), project, nil))
+	require.NoError(t, pruneRan(r.deleteProjectNamespaces(context.Background(), project, false)))
 
 	var ns corev1.Namespace
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "shop-prod"}, &ns),
@@ -176,9 +191,11 @@ func TestProjectEnvironmentsIncludesTheOneTheReconcilerAdds(t *testing.T) {
 func TestEveryConflictedNamespaceIsReported(t *testing.T) {
 	scheme := testScheme()
 	project := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "shop"}}
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(project).WithStatusSubresource(project).Build()
 	r := &ProjectReconciler{
-		Client: crfake.NewClientBuilder().WithScheme(scheme).WithObjects(project).WithStatusSubresource(project).Build(),
-		Scheme: scheme,
+		Client:    c,
+		APIReader: c,
+		Scheme:    scheme,
 	}
 
 	r.setNamespaceConflictCondition(project, []*namespaceConflictError{
@@ -236,9 +253,14 @@ func TestTheNamespaceIsLabelledWithTheDeclaredEnvironment(t *testing.T) {
 		Spec:       kipperv1.ProjectSpec{Environments: []kipperv1.ProjectEnvironment{{Name: "default"}}},
 	}
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(project).Build()
-	r := &ProjectReconciler{Client: client, Scheme: scheme}
+	c := client
+	r := &ProjectReconciler{
+		Client:    c,
+		APIReader: c,
+	}
 
-	require.NoError(t, r.reconcileNamespace(context.Background(), project, "shop", "default", []string{"default"}, 0))
+	_, err := r.reconcileNamespace(context.Background(), project, "shop", "default", []string{"default"}, 0)
+	require.NoError(t, err)
 
 	var ns corev1.Namespace
 	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: "shop"}, &ns))
@@ -261,14 +283,16 @@ func TestPruningKeepsTheDefaultNamespaceWhicheverWayItIsSpelled(t *testing.T) {
 			project := &kipperv1.Project{
 				ObjectMeta: metav1.ObjectMeta{Name: "shop"},
 				Spec:       kipperv1.ProjectSpec{Environments: []kipperv1.ProjectEnvironment{{Name: env}}},
+				Status:     kipperv1.ProjectStatus{Namespaces: []string{"shop", "shop-old"}},
 			}
+			c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(bare, stale, project).WithStatusSubresource(project).Build()
 			r := &ProjectReconciler{
-				Client: crfake.NewClientBuilder().WithScheme(scheme).
-					WithObjects(bare, stale, project).WithStatusSubresource(project).Build(),
-				Scheme: scheme,
+				Client:    c,
+				APIReader: c,
+				Scheme:    scheme,
 			}
 
-			require.NoError(t, r.deleteProjectNamespaces(context.Background(), project, []string{env}))
+			require.NoError(t, pruneRan(r.deleteProjectNamespaces(context.Background(), project, true)))
 
 			var ns corev1.Namespace
 			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "shop"}, &ns),
