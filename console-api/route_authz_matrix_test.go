@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -99,10 +100,12 @@ const matrixProject = "shop-prod"
 // widening or narrowing there is an access change nobody sees. A diff in this
 // file is the review.
 //
-// The statuses themselves are not assertions about what is correct. Several are
-// certainly wrong and some are 500s from a handler that a fake client cannot
-// satisfy. What matters is that the number does not change for a reason nobody
-// intended: a 403 becoming a 200 is the failure this catches.
+// The cells are the authorization decision and nothing downstream of it, which
+// is why a route that let the caller through records "allow" rather than what
+// the handler went on to answer. Several of those answers are certainly wrong
+// and some are 500s from a handler a fake client cannot satisfy; none of that is
+// what this file is for. What matters is that a cell does not change for a
+// reason nobody intended: a 403 becoming an allow is the failure this catches.
 func TestRouteAuthorizationMatrix(t *testing.T) {
 	rows := map[string][]string{}
 	var order []string
@@ -115,7 +118,7 @@ func TestRouteAuthorizationMatrix(t *testing.T) {
 			if _, seen := rows[key]; !seen {
 				order = append(order, key)
 			}
-			rows[key] = append(rows[key], fmt.Sprintf("%s=%d", id.column, matrixProbe(t, router, r, token)))
+			rows[key] = append(rows[key], fmt.Sprintf("%s=%s", id.column, matrixCell(matrixProbe(t, router, r, token))))
 			// A route that deletes the project or its namespace would
 			// otherwise answer for every route after it: the first run of
 			// this had an owner deleting the project and then being refused
@@ -274,6 +277,30 @@ func matrixProbe(t *testing.T, router http.Handler, r matrixRoute, token string)
 		return code
 	case <-ctx.Done():
 		return 598
+	}
+}
+
+// matrixCell is what a cell records.
+//
+// Only the codes an authorization gate produces are kept apart. A caller who
+// got past the gate can then be answered 200, or 502 because the backend the
+// handler proxies is not there, or nothing at all before this test stops
+// waiting, and which of the three a run sees depends on the machine it runs on:
+// where an outbound dial fails fast the handler answers, and where it hangs the
+// probe times out. Recording the raw code pinned four log and usage routes to a
+// timeout, so the golden file agreed with the machine that wrote it and failed
+// everywhere else. All three mean the same thing about authorization.
+//
+// A panic stays its own answer. It is not a race, and a route that starts
+// panicking is worth a failing test even when the cause is fixture data.
+func matrixCell(code int) string {
+	switch code {
+	case 401, 403, 404:
+		return strconv.Itoa(code)
+	case 599:
+		return "panic"
+	default:
+		return "allow"
 	}
 }
 
