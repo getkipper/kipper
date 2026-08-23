@@ -173,10 +173,7 @@ func TestTargetCreators_ReplayConverges(t *testing.T) {
 // selected projects' volumes, and must not refuse on storage when the target
 // cannot report its disk capacity.
 func TestCheckTargetCapacity_Storage(t *testing.T) {
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-		Name:   "shop-prod",
-		Labels: map[string]string{"kipper.run/project": "shop"},
-	}}
+	ns := projectNamespace("shop-prod", "shop")
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "data-db-0", Namespace: "shop-prod"},
 		Spec: corev1.PersistentVolumeClaimSpec{
@@ -187,7 +184,7 @@ func TestCheckTargetCapacity_Storage(t *testing.T) {
 	}
 	h := &Handler{
 		Client:   fake.NewSimpleClientset(ns, pvc),
-		CRClient: crfake.NewClientBuilder().WithScheme(migrationScheme()).Build(),
+		CRClient: crfake.NewClientBuilder().WithScheme(migrationScheme()).WithObjects(ownerOf("shop-prod")).Build(),
 	}
 
 	serve := func(capacity clusterCapacity) *httptest.Server {
@@ -306,10 +303,7 @@ func TestNamespacesResourceRequests_AmbiguousNameKeepsSpecDemand(t *testing.T) {
 // overwrite: their workloads get replaced by the incoming ones, and counting
 // both refuses overwrites and retries that actually fit.
 func TestCapacity_ExcludesOverwrittenProjects(t *testing.T) {
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-		Name:   "shop-prod",
-		Labels: map[string]string{"kipper.run/project": "shop"},
-	}}
+	ns := projectNamespace("shop-prod", "shop")
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "web-1", Namespace: "shop-prod"},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{
@@ -426,7 +420,8 @@ func TestTargetAppsHandler_BuildIdentity(t *testing.T) {
 	h := &Handler{
 		Sessions: NewSessionStore(),
 		Client:   fake.NewSimpleClientset(projectNamespace("shop-prod", "shop")),
-		CRClient: crfake.NewClientBuilder().WithScheme(migrationScheme()).WithObjects(staleBuild, currentBuild).Build(),
+		CRClient: crfake.NewClientBuilder().WithScheme(migrationScheme()).
+			WithObjects(staleBuild, currentBuild, ownerOf("shop-prod")).Build(),
 	}
 	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}})
 

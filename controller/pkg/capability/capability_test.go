@@ -1,6 +1,7 @@
 package capability
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -327,6 +328,161 @@ func TestTheKubeconfigOnlyCapabilitiesClaimNoConsolePlane(t *testing.T) {
 		}
 		if !c.Planes.Has(PlaneK) {
 			t.Errorf("%s claims no Kubernetes plane and renders rules", name)
+		}
+	}
+}
+
+// Some capabilities cannot be separated from others, whatever the rules say.
+// Exec into a container reads its environment, so it reads the Secrets that
+// environment came from; declaring a Secret as an app's environment does the
+// same thing through a Kipper CR. An owner granting one of these is granting
+// the other, and the catalogue is where that is written down, because the
+// catalogue is what the console and kip show at the point of granting.
+func TestCapabilitiesThatCannotBeSeparatedSayWhatElseTheyGrant(t *testing.T) {
+	cannotBeSeparated := map[Name]Name{
+		"pods.exec":      "secrets.read",
+		"terminal.open":  "secrets.read",
+		"files.read":     "secrets.read",
+		"kipper.write":   "secrets.read",
+		"secrets.write":  "secrets.read",
+		"webhook.reveal": "kipper.write",
+	}
+
+	for name, alsoGrants := range cannotBeSeparated {
+		c, ok := Lookup(name)
+		if !ok {
+			t.Fatalf("%s is not in the catalogue", name)
+		}
+		var found bool
+		for _, imp := range c.Implications {
+			if imp.Grants == alsoGrants {
+				found = true
+				if imp.Via == "" {
+					t.Errorf("%s says it grants %s and not how, so an owner cannot judge it", name, alsoGrants)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("granting %s also grants %s in practice, and the catalogue does not say so; an owner reading the console is told less than the grant does", name, alsoGrants)
+		}
+	}
+}
+
+// The description is what a person actually reads. An implication recorded in a
+// field nothing renders is a comment, not a disclosure.
+func TestTheDescriptionDisclosesTheImplications(t *testing.T) {
+	for _, c := range All() {
+		if len(c.Implications) == 0 {
+			continue
+		}
+		got := c.Description()
+		for _, imp := range c.Implications {
+			if !strings.Contains(got, string(imp.Grants)) {
+				t.Errorf("%s describes itself as %q, which never mentions %s; the reach is in the data and not in what anyone is shown", c.Name, got, imp.Grants)
+			}
+		}
+	}
+}
+
+// Every implication names a capability that exists, or the console renders a
+// disclosure pointing at nothing.
+func TestEveryImplicationNamesARealCapability(t *testing.T) {
+	for _, c := range All() {
+		for _, imp := range c.Implications {
+			if _, ok := Lookup(imp.Grants); !ok {
+				t.Errorf("%s says it grants %s, which is not in the catalogue", c.Name, imp.Grants)
+			}
+			if imp.Grants == c.Name {
+				t.Errorf("%s lists itself as its own implication", c.Name)
+			}
+		}
+	}
+}
+
+// All() hands out copies. A caller that edited an implication would be editing
+// the catalogue every other caller reads.
+func TestImplicationsAreCopiedOut(t *testing.T) {
+	first := All()
+	var target *Capability
+	for i := range first {
+		if len(first[i].Implications) > 0 {
+			target = &first[i]
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("no capability declares an implication, so nothing discloses the exec and secrets equivalence")
+	}
+	target.Implications[0].Grants = "tampered"
+
+	for _, c := range All() {
+		for _, imp := range c.Implications {
+			if imp.Grants == "tampered" {
+				t.Fatalf("%s kept an edit made to a copy: the catalogue is shared mutable state", c.Name)
+			}
+		}
+	}
+}
+
+// Every way into a running container's contents grants the same reach, so they
+// all have to say so.
+//
+// The list above is written by hand, and a hand-written list proves the entries
+// it names and nothing about the ones it forgets. terminal.open was forgotten:
+// it opens the shell pods.exec opens and said nothing about the environment
+// that shell can read. files.read is the third door, reading the files a Secret
+// is mounted into. This pins the property rather than the list: the doors named
+// here have to agree with each other, which is what the hand-written list could
+// not do. A fourth door still has to be added to both.
+func TestEveryWayIntoAContainersContentsDeclaresTheSameReach(t *testing.T) {
+	doors := []Name{"pods.exec", "terminal.open", "files.read"}
+
+	granted := func(name Name) []Name {
+		c, ok := Lookup(name)
+		if !ok {
+			t.Fatalf("%s is not in the catalogue", name)
+		}
+		var names []Name
+		for _, imp := range c.Implications {
+			names = append(names, imp.Grants)
+		}
+		return names
+	}
+
+	want := granted(doors[0])
+	for _, door := range doors[1:] {
+		if !slices.Equal(want, granted(door)) {
+			t.Errorf("%s grants %v and %s grants %v; both reach the contents of a running container, so an owner granting either is granting the same reach and the catalogue is what tells them so",
+				doors[0], want, door, granted(door))
+		}
+	}
+}
+
+// A capability that reads more than its rules grant has to say so, because the
+// rules are what the reader would otherwise take as the whole answer.
+//
+// workloads.read is the case: the console's autoscale and usage routes return
+// autoscaler status and pod metrics, and neither API can be in the claims,
+// because the staged ClusterRoles do not carry them and the bound test refuses
+// a claim they do not back. Without this the description reads as a complete
+// list and is not one.
+func TestReachTheRulesCannotExpressIsInTheDescription(t *testing.T) {
+	c, ok := Lookup("workloads.read")
+	if !ok {
+		t.Fatal("workloads.read is not in the catalogue")
+	}
+	if c.AlsoReads == "" {
+		t.Fatal("workloads.read reads the autoscaler status and pod metrics through the console, and its description does not say so")
+	}
+	if !strings.Contains(c.Description(), c.AlsoReads) {
+		t.Errorf("Description() = %q, which drops what the rules cannot express", c.Description())
+	}
+	// And it is not in the rules, which is the whole reason it needs saying.
+	for _, claim := range c.Claims {
+		for _, r := range claim.Resources {
+			if r == "horizontalpodautoscalers" {
+				t.Error("the autoscaler is in the claims now, so declare it in Touches and drop it from AlsoReads")
+			}
 		}
 	}
 }

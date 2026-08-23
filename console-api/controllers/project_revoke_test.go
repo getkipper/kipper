@@ -12,7 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
-	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
@@ -59,7 +59,7 @@ func memberBinding(namespace, project string, emails ...string) *rbacv1.RoleBind
 func revokeFixture(t *testing.T, project *kipperv1.Project, objs ...crclient.Object) crclient.Client {
 	t.Helper()
 	all := append([]crclient.Object{project}, objs...)
-	return crfake.NewClientBuilder().
+	return projectFakeBuilder().
 		WithScheme(testScheme()).
 		WithObjects(all...).
 		WithStatusSubresource(&kipperv1.Project{}).
@@ -223,7 +223,7 @@ func TestAFullReconcileRevokesInANamespaceItRefusesToGrantIn(t *testing.T) {
 	project.Spec.Members = []kipperv1.ProjectMember{
 		{Email: "anna@example.com", Role: kipperv1.ProjectRoleOwner},
 	}
-	c := crfake.NewClientBuilder().
+	c := projectFakeBuilder().
 		WithScheme(testScheme()).
 		WithObjects(
 			project,
@@ -259,7 +259,7 @@ func TestAFullReconcileDoesNotGrantANewMemberInARefusedNamespace(t *testing.T) {
 		{Email: "anna@example.com", Role: kipperv1.ProjectRoleOwner},
 		{Email: "newcomer@example.com", Role: kipperv1.ProjectRoleOwner},
 	}
-	c := crfake.NewClientBuilder().
+	c := projectFakeBuilder().
 		WithScheme(testScheme()).
 		WithObjects(
 			project,
@@ -420,4 +420,53 @@ func TestRevokeKeepsABindingWhoseRoleRefIsRight(t *testing.T) {
 		types.NamespacedName{Name: "kipper-project-owner", Namespace: "shop-test"}, &binding),
 		"a correct binding was deleted, so the pass removes access the project still grants")
 	assert.Contains(t, subjectNames(binding), "oidc:anna@example.com")
+}
+
+// A project that drops its last member of a role loses that role's binding, and
+// that delete is bound to the object the pass read, the same as every other
+// binding delete here.
+//
+// The names are fixed across namespaces, so a namespace changing hands means
+// another project legitimately writes a binding under the same name. Deleting
+// by name alone removes whatever is standing there rather than the object that
+// was examined.
+func TestRemovingTheLastMemberDeletesTheBindingItRead(t *testing.T) {
+	scheme := testScheme()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name:   "shop-prod",
+		Labels: map[string]string{kipperlabels.Project: "shop"},
+	}}
+	// The project no longer grants anybody the owner role.
+	shop := &kipperv1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "shop"},
+		Spec:       kipperv1.ProjectSpec{Environments: []kipperv1.ProjectEnvironment{{Name: "prod"}}},
+	}
+	standing := memberBinding("shop-prod", "grocer", "rival@example.com")
+
+	store := projectFakeBuilder().WithScheme(scheme).
+		WithObjects(shop, ns, standing).
+		WithStatusSubresource(&kipperv1.Project{}).
+		Build()
+	// The pass reads a version of the binding that has since been overwritten,
+	// which is the interleaving the preconditions exist to survive.
+	reader := interceptor.NewClient(store, interceptor.Funcs{
+		Get: func(ctx context.Context, c crclient.WithWatch, key crclient.ObjectKey, obj crclient.Object, opts ...crclient.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if binding, ok := obj.(*rbacv1.RoleBinding); ok {
+				binding.ResourceVersion = "1"
+			}
+			return nil
+		},
+	})
+
+	r := &ProjectReconciler{Client: reader, APIReader: reader, Scheme: scheme}
+	require.NoError(t, r.reconcileMemberBindings(context.Background(), shop, "shop-prod"))
+
+	var after rbacv1.RoleBinding
+	require.NoError(t, store.Get(context.Background(),
+		types.NamespacedName{Name: "kipper-project-owner", Namespace: "shop-prod"}, &after),
+		"an emptied role deleted a binding by name, so it removed whatever was standing under that name rather than the object it had examined")
+	assert.Equal(t, "grocer", after.Labels[kipperlabels.Project])
 }

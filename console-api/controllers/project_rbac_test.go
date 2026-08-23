@@ -151,7 +151,7 @@ func TestMapMemberBindingToProject(t *testing.T) {
 		Namespace: "shop-test",
 		Labels:    map[string]string{"kipper.run/project": "shop"},
 	}}
-	reqs := mapMemberBindingToProject(context.Background(), managed)
+	reqs := memberBindingProjects(context.Background(), nil, managed)
 	require.Len(t, reqs, 1)
 	assert.Equal(t, "shop", reqs[0].Name)
 
@@ -161,12 +161,12 @@ func TestMapMemberBindingToProject(t *testing.T) {
 		Name: "some-other-binding", Namespace: "shop-test",
 		Labels: map[string]string{"kipper.run/project": "shop"},
 	}}
-	assert.Empty(t, mapMemberBindingToProject(context.Background(), foreign))
+	assert.Empty(t, memberBindingProjects(context.Background(), nil, foreign))
 
 	unlabelled := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{
 		Name: "kipper-project-owner", Namespace: "shop-test",
 	}}
-	assert.Empty(t, mapMemberBindingToProject(context.Background(), unlabelled))
+	assert.Empty(t, memberBindingProjects(context.Background(), nil, unlabelled))
 }
 
 // A role this build does not know grants nothing. The projection walks the

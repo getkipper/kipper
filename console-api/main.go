@@ -500,7 +500,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 		}
 		usageHistoryHandler.PrometheusBaseURL = promURL
 		resourceUsageHandler := &handlers.ResourceUsage{Client: clientset, PrometheusBaseURL: promURL}
-		requestUsageHandler := &handlers.RequestUsage{Client: clientset, PrometheusBaseURL: promURL}
+		requestUsageHandler := &handlers.RequestUsage{Client: clientset, CRClient: crClient, PrometheusBaseURL: promURL}
 		r.Get("/resources/usage", resourceUsageHandler.Get)
 		r.Get("/resources/usage/summary", resourceUsageHandler.Summary)
 		r.Get("/resources/adjustments", adjustmentsHandler.List)

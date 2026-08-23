@@ -692,9 +692,10 @@ func resolveGitToken(ctx context.Context, client kubernetes.Interface, owners ns
 //
 // It fails closed when nothing owns the namespace, because the answer decides
 // whether a build is handed a shared git credential. It resolves through the
-// shared owner lookup rather than reading the label here: the label is writable
-// by anyone who can write a namespace, and an allow-list checked against a
-// forged one is no allow-list.
+// shared owner lookup rather than reading the label here, because the label is
+// writable by anyone who can write a namespace and an allow-list checked
+// against a forged one is no allow-list. What the lookup requires, and the
+// release it starts requiring the claim, is stated once in nsowner.Of.
 func namespaceProject(ctx context.Context, reader nsowner.Reader, namespace string) (string, error) {
 	project, ok, err := nsowner.Of(ctx, reader, namespace)
 	if err != nil {

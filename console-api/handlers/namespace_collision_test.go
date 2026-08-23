@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -21,10 +22,18 @@ import (
 	"github.com/getkipper/kipper/console-api/controllers"
 )
 
+// The project claims the namespace each of its environments resolves to, which
+// is what a reconciled cluster looks like. Declaring an environment is not what
+// makes a namespace this project's, so a fixture carrying only the spec asserts
+// against a cluster where nothing is owned and passes for the wrong reason. The
+// UIDs are newKipperNamespace's.
 func projectWithEnvs(name string, envs ...string) *kipperv1.Project {
 	p := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	for _, e := range envs {
 		p.Spec.Environments = append(p.Spec.Environments, kipperv1.ProjectEnvironment{Name: e})
+		ns := controllers.ResolveNamespace(name, e)
+		p.Status.NamespaceClaims = append(p.Status.NamespaceClaims,
+			kipperv1.NamespaceClaim{Name: ns, UID: types.UID("uid-" + ns)})
 	}
 	return p
 }

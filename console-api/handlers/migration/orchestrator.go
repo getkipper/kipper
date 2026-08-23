@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	goerrors "errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/builder"
+	"github.com/getkipper/kipper/console-api/internal/nsowner"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
@@ -158,20 +160,35 @@ func (h *Handler) abortTarget(session *Session, log func(string, ...interface{})
 	}
 }
 
+// autoscaledDetail names what keeps serving, and what could not be looked at.
+func autoscaledDetail(autoscaled, unchecked []string) string {
+	detail := fmt.Sprintf("autoscaling keeps %s serving during the data copy; anything written there after its copy stays on this cluster", strings.Join(autoscaled, ", "))
+	if len(unchecked) > 0 {
+		detail += fmt.Sprintf(". %s could not be checked, so there may be more", strings.Join(unchecked, ", "))
+	}
+	return detail
+}
+
 // autoscaledAppsWarning surfaces apps whose HPA keeps them serving through a
 // replica freeze. The scale writers refuse replica edits on these apps, but
 // an operator who skipped the freeze — or froze before that guard existed —
 // must see in the flow who is still taking writes during the data copy.
 func (h *Handler) autoscaledAppsWarning(ctx context.Context, projects []string) *Step {
 	var autoscaled []string
+	var unchecked []string
 	for _, project := range projects {
 		namespaces, err := h.getProjectNamespaces(ctx, project)
+		if goerrors.Is(err, errNoNamespaces) {
+			continue
+		}
 		if err != nil {
+			unchecked = append(unchecked, "project "+project)
 			continue
 		}
 		for _, ns := range namespaces {
 			var appList kipperv1.AppList
 			if err := h.CRClient.List(ctx, &appList, crclient.InNamespace(ns)); err != nil {
+				unchecked = append(unchecked, "namespace "+ns)
 				continue
 			}
 			for _, app := range appList.Items {
@@ -181,6 +198,19 @@ func (h *Handler) autoscaledAppsWarning(ctx context.Context, projects []string) 
 			}
 		}
 	}
+	// A check that could not run is not a check that found nothing. Silence
+	// here reads as "nothing is still taking writes", and the cost of believing
+	// that wrongly is data written after its copy and left behind on this
+	// cluster. Saying which projects were not checked is the whole of the fix:
+	// failing the migration over an advisory would be worse.
+	if len(autoscaled) == 0 && len(unchecked) > 0 {
+		return &Step{
+			Name:   "Write freeze check",
+			Phase:  "structure",
+			Status: StepSkipped,
+			Detail: fmt.Sprintf("could not check whether anything in %s keeps serving during the data copy, so this list may be incomplete", strings.Join(unchecked, ", ")),
+		}
+	}
 	if len(autoscaled) == 0 {
 		return nil
 	}
@@ -188,7 +218,7 @@ func (h *Handler) autoscaledAppsWarning(ctx context.Context, projects []string) 
 		Name:   "Write freeze check",
 		Phase:  "structure",
 		Status: StepSkipped,
-		Detail: fmt.Sprintf("autoscaling keeps %s serving during the data copy; anything written there after its copy stays on this cluster", strings.Join(autoscaled, ", ")),
+		Detail: autoscaledDetail(autoscaled, unchecked),
 		ManualSteps: []string{
 			"# Autoscaled apps keep running through a replica freeze. To stop their writes:",
 			"kip app autoscale <app> --off",
@@ -395,8 +425,28 @@ func (h *Handler) exportProjectSpec(ctx context.Context, name string) (map[strin
 	return spec, nil
 }
 
+// getProjectNamespaces returns the namespaces a migration moves for a project.
+//
+// This is the migration's scope, not a hint towards it: what it returns is
+// inventoried, planned, and sent to the target cluster, apps and Secrets and
+// volume data included. The label gathers the candidates and does not decide
+// which are the project's, because anyone who can write a namespace can write
+// the label, and pointing one at a project being migrated would carry another
+// tenant's secrets to a different cluster.
+//
+// A candidate whose ownership cannot be read is an error rather than a
+// namespace left out. Silently migrating less than the operator asked for is
+// the one outcome worse than refusing.
+//
+// The label is still what finds the candidates, so a namespace a project holds
+// on record but whose label has been stripped is not one of them and does not
+// move. That predates this and is not made worse by it: the same namespace is
+// invisible to every other label query on the cluster, including the one the
+// `kip upgrade` readiness report runs, so nothing on the cluster currently
+// reports it. Finding those needs a sweep that starts from what the projects
+// record rather than from the namespaces, which is its own piece of work.
 func (h *Handler) getProjectNamespaces(ctx context.Context, projectName string) ([]string, error) {
-	nsList, err := h.Client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
+	labelled, err := h.Client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("kipper.run/project=%s", projectName),
 	})
 	if err != nil {
@@ -404,16 +454,28 @@ func (h *Handler) getProjectNamespaces(ctx context.Context, projectName string) 
 	}
 
 	var namespaces []string
-	for _, ns := range nsList.Items {
-		namespaces = append(namespaces, ns.Name)
+	for i := range labelled.Items {
+		owns, err := nsowner.OwnsNamespace(ctx, h.CRClient, projectName, &labelled.Items[i])
+		if err != nil {
+			return nil, fmt.Errorf("establishing whether namespace %s is project %s's: %w", labelled.Items[i].Name, projectName, err)
+		}
+		if owns {
+			namespaces = append(namespaces, labelled.Items[i].Name)
+		}
 	}
 
 	if len(namespaces) == 0 {
-		return nil, fmt.Errorf("no namespaces found for project %s", projectName)
+		return nil, errNoNamespaces
 	}
 
 	return namespaces, nil
 }
+
+// errNoNamespaces says the project holds nothing, which is an answer and not a
+// failure to find out. The callers that need an inventory still refuse; the
+// advisory checks tell the two apart, because "nothing here keeps serving" and
+// "could not look" are opposite things to show an operator.
+var errNoNamespaces = goerrors.New("this project holds no namespaces")
 
 // transferableSecret reports whether a Secret moves in the bulk Secret phase.
 // Service-account tokens and Helm release records are cluster-local state the

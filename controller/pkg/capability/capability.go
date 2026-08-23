@@ -81,13 +81,42 @@ type Capability struct {
 	// to render one that is not, which is what stops a hand-written or
 	// restored object from granting something nobody authorised.
 	Grantable bool
+
+	// AlsoReads is reach the rules cannot express and no other capability
+	// names, so an Implication cannot carry it either.
+	//
+	// The console reaches APIs the rendered RBAC does not mention, because it
+	// reads them with its own service account rather than the member's:
+	// autoscaler status, pod metrics. The rules are the truth about what a
+	// kubeconfig can do and say nothing about that, so the operator granting
+	// this would be told less than the grant is worth. It joins the rendered
+	// description.
+	AlsoReads string
+
+	// Implications are what this capability grants in practice beyond its own
+	// rules. Exec into a container reads that container's environment, so it
+	// reads whatever Secret the environment came from, and no RBAC rule says
+	// so. They are declared here because this is what the console and kip
+	// show when somebody grants it.
+	Implications []Implication
+}
+
+// Implication is a capability another one grants in practice, and the route by
+// which it does.
+type Implication struct {
+	Grants Name
+	Via    string
 }
 
 // Description is what the console and kip show. It is rendered from the
 // declaration rather than written by hand, so prose cannot drift from rules.
 func (c Capability) Description() string {
 	if len(c.Touches) == 0 {
-		return c.Effect
+		out := c.Effect
+		if c.AlsoReads != "" {
+			out += ", and " + c.AlsoReads
+		}
+		return out + implicationSuffix(c.Implications)
 	}
 	out := c.Action + " " + c.Touches[0]
 	for i := 1; i < len(c.Touches); i++ {
@@ -97,6 +126,31 @@ func (c Capability) Description() string {
 		default:
 			out += ", " + c.Touches[i]
 		}
+	}
+	if c.AlsoReads != "" {
+		out += ", and " + c.AlsoReads
+	}
+	return out + implicationSuffix(c.Implications)
+}
+
+// implicationSuffix puts the reach into the sentence a person reads. A grant
+// decision made from a description that stops at the rules is made on less than
+// the grant does.
+func implicationSuffix(implications []Implication) string {
+	if len(implications) == 0 {
+		return ""
+	}
+	out := ""
+	for i, imp := range implications {
+		switch {
+		case i == 0:
+			out = ", which also grants " + string(imp.Grants)
+		case i == len(implications)-1:
+			out += " and " + string(imp.Grants)
+		default:
+			out += ", " + string(imp.Grants)
+		}
+		out += " " + imp.Via
 	}
 	return out
 }
@@ -161,6 +215,30 @@ var catalogue = []Capability{
 		Effect:    "change an app's environment variables through the console",
 	},
 	{
+		Name:      "files.read",
+		Planes:    PlaneC,
+		Grantable: true,
+		Effect:    "read and download any file inside a running workload through the console",
+		// Reading a container's filesystem reads whatever is mounted into it,
+		// and a Secret mounted as a file is a file. Same reach as a shell,
+		// arrived at through a different route, so it says the same thing.
+		Implications: []Implication{{Grants: "secrets.read", Via: "by reading the files a Secret is mounted into"}},
+	},
+	{
+		Name:      "files.write",
+		Planes:    PlaneC,
+		Grantable: true,
+		Effect:    "change and upload files inside a running workload through the console",
+		// Writing into a running container changes what it runs, so this is the
+		// same reach as deploying to it: the code that ends up executing is the
+		// caller's, in a namespace whose Secrets it can then read. The rule says
+		// a file was written; this says what writing one is worth.
+		Implications: []Implication{
+			{Grants: "kipper.write", Via: "by changing what the running workload executes"},
+			{Grants: "secrets.read", Via: "through the environment that code then runs with"},
+		},
+	},
+	{
 		Name:      "kipper.read",
 		Planes:    PlaneK | PlaneC,
 		Action:    "read",
@@ -178,6 +256,11 @@ var catalogue = []Capability{
 		Action:    "create, change and delete",
 		Grantable: true,
 		Touches:   []string{"apps", "services", "functions", "jobs", "volumes"},
+		Implications: []Implication{
+			{Grants: "secrets.read", Via: "by declaring any Secret as an app's environment"},
+			{Grants: "pods.logs.read", Via: "through the diagnosis routes, which read a workload's logs and send them to the AI provider"},
+			{Grants: "workloads.read", Via: "through the optimisation route, which reads deployments, pods and their metrics"},
+		},
 		Claims: []Claim{{
 			APIGroup:  groupKipper,
 			Resources: []string{"apps", "services", "functions", "jobs", "volumes"},
@@ -197,11 +280,12 @@ var catalogue = []Capability{
 		Effect:    "see who is in the project and what they hold",
 	},
 	{
-		Name:      "pods.exec",
-		Planes:    PlaneK,
-		Action:    "open a shell in",
-		Grantable: true,
-		Touches:   []string{"pods/exec"},
+		Name:         "pods.exec",
+		Planes:       PlaneK,
+		Action:       "open a shell in",
+		Grantable:    true,
+		Touches:      []string{"pods/exec"},
+		Implications: []Implication{{Grants: "secrets.read", Via: "by reading the environment of the container it opens"}},
 		Claims: []Claim{{
 			APIGroup:  groupCore,
 			Resources: []string{"pods/exec"},
@@ -236,15 +320,26 @@ var catalogue = []Capability{
 		Name:      "project.settings",
 		Planes:    PlaneC,
 		Grantable: true,
-		Effect:    "change the project's own settings",
+		// Link consent is the widest of those settings and does not read like a
+		// setting: it lets another project's apps reach this project's services
+		// directly, past the ingress. Naming it is the difference between an
+		// owner granting "settings" and an owner granting that. It belongs in
+		// the effect and not in AlsoReads, which is for what a holder reads.
+		Effect: "change the project's own settings, including which other projects may route into this one",
 	},
-	// secrets.read, secrets.write and pods.exec are the kubeconfig-level grants: they
-	// render RBAC so a member can read and write Secrets and ConfigMaps
+	// secrets.read, secrets.write and pods.exec are the kubeconfig-level grants:
+	// they render RBAC so a member can read and write Secrets and ConfigMaps
 	// directly. No console route maps to them, because the console reaches the
-	// same data through env.read, env.reveal and env.write, and opens a shell
-	// through terminal.open, none of which grant anything outside it. That is the plane split doing its job rather than an
-	// oversight: a deployer changes an app's environment through the console
-	// today and holds no Kubernetes access to the Secret underneath.
+	// same data through env.read, env.reveal and env.write, opens a shell
+	// through terminal.open, and reads a container's files through files.read.
+	// That is the plane split doing its job rather than an oversight: a deployer
+	// changes an app's environment through the console today and holds no
+	// Kubernetes access to the Secret underneath.
+	//
+	// The console doors are not narrower in what they can reach, only in what
+	// they hand out. terminal.open and files.read both arrive at a container's
+	// contents, so both declare that they grant secrets.read in practice; the
+	// difference is that neither gives the member a kubeconfig.
 	{
 		Name:      "secrets.read",
 		Planes:    PlaneK,
@@ -258,11 +353,12 @@ var catalogue = []Capability{
 		}},
 	},
 	{
-		Name:      "secrets.write",
-		Planes:    PlaneK,
-		Action:    "create, change and delete",
-		Grantable: true,
-		Touches:   []string{"secrets", "configmaps"},
+		Name:         "secrets.write",
+		Planes:       PlaneK,
+		Action:       "create, change and delete",
+		Grantable:    true,
+		Touches:      []string{"secrets", "configmaps"},
+		Implications: []Implication{{Grants: "secrets.read", Via: "because writing one requires reading what is there"}},
 		Claims: []Claim{{
 			APIGroup:  groupCore,
 			Resources: []string{"secrets", "configmaps"},
@@ -286,12 +382,49 @@ var catalogue = []Capability{
 		Planes:    PlaneC,
 		Grantable: true,
 		Effect:    "open a shell into a running workload through the console",
+		// The same shell pods.exec reaches, arrived at through the console
+		// rather than through Kubernetes, so it reads the same environment and
+		// the same Secrets behind it. The plane split changes who holds
+		// kubectl access; it does not change what a shell can read.
+		Implications: []Implication{{Grants: "secrets.read", Via: "by reading the environment of the container it opens"}},
+	},
+	{
+		Name:      "webhook.reveal",
+		Planes:    PlaneC,
+		Grantable: true,
+		Effect:    "reveal the token an app's deploy webhook is called with",
+		// The token is the deploy. Anyone holding it can post to the app's
+		// webhook, and for an image app the image to run comes from the
+		// request, so revealing the token is handing over the ability to run
+		// chosen code in the namespace, with the app's environment and the
+		// Secrets behind it. The rules say only that a string is read out of a
+		// Secret, which is why this has to be declared: it is the widest reach
+		// in the catalogue that no rule expresses.
+		Implications: []Implication{
+			{Grants: "kipper.write", Via: "by posting an image of its choosing to the app's webhook"},
+			{Grants: "secrets.read", Via: "through the environment the deployed image runs with"},
+		},
 	},
 	{
 		Name:      "workloads.read",
 		Planes:    PlaneK | PlaneC,
 		Action:    "read",
 		Grantable: true,
+		// The console routes under this read more than the rules grant: the
+		// autoscale route returns the autoscaler's live status and current
+		// utilisation, and the usage route returns pod CPU and memory samples
+		// from metrics.k8s.io. Neither API is in the claims, and neither can be,
+		// because the staged ClusterRoles that back this capability do not carry
+		// them and the bound test refuses a claim they do not.
+		//
+		// One more route under this capability is wider than any of that and is
+		// not described here: the app build status reports whether the app's git
+		// credential and the cluster's registry credentials authenticate, which
+		// is a validity oracle for credentials the caller never sees. Narrowing
+		// it would move who can reach it, so it is recorded against the route in
+		// the console's authorization table rather than turned into a grant this
+		// description could carry.
+		AlsoReads: "the autoscaler status and resource metrics behind them",
 		Touches: []string{
 			"pods", "persistentvolumeclaims",
 			"deployments", "statefulsets",
@@ -325,11 +458,13 @@ var builtIn = map[Role][]Name{
 	RoleViewer: {
 		"database.read",
 		"env.read",
+		"files.read",
 		"kipper.read",
 		"members.read",
 		"pods.logs.read",
 		"project.read",
 		"storage.read",
+		"webhook.reveal",
 		"workloads.read",
 	},
 	RoleDeployer: {
@@ -339,6 +474,8 @@ var builtIn = map[Role][]Name{
 		"env.read",
 		"env.reveal",
 		"env.write",
+		"files.read",
+		"files.write",
 		"kipper.read",
 		"kipper.write",
 		"members.read",
@@ -347,6 +484,7 @@ var builtIn = map[Role][]Name{
 		"storage.read",
 		"storage.write",
 		"terminal.open",
+		"webhook.reveal",
 		"workloads.read",
 		"workloads.restart",
 	},
@@ -357,6 +495,8 @@ var builtIn = map[Role][]Name{
 		"env.read",
 		"env.reveal",
 		"env.write",
+		"files.read",
+		"files.write",
 		"kipper.read",
 		"kipper.write",
 		"members.manage",
@@ -371,6 +511,7 @@ var builtIn = map[Role][]Name{
 		"storage.read",
 		"storage.write",
 		"terminal.open",
+		"webhook.reveal",
 		"workloads.read",
 		"workloads.restart",
 	},
@@ -404,6 +545,7 @@ func Lookup(name Name) (Capability, bool) {
 func (c Capability) clone() Capability {
 	out := c
 	out.Touches = slices.Clone(c.Touches)
+	out.Implications = slices.Clone(c.Implications)
 	out.Claims = make([]Claim, 0, len(c.Claims))
 	for _, claim := range c.Claims {
 		out.Claims = append(out.Claims, Claim{

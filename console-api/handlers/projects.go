@@ -25,6 +25,7 @@ import (
 	"github.com/getkipper/kipper/console-api/controllers"
 	"github.com/getkipper/kipper/console-api/domain"
 	"github.com/getkipper/kipper/console-api/handlers/copyenv"
+	"github.com/getkipper/kipper/console-api/internal/nsowner"
 	"github.com/getkipper/kipper/console-api/internal/workloadname"
 	"github.com/getkipper/kipper/console-api/middleware"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
@@ -65,9 +66,9 @@ type environmentResponse struct {
 	// — project "shop" with an environment "prod" beside a project "shop-prod"
 	// with a default one — and only the one that got there first has it. The
 	// reconciler records the other as a conflict and leaves both CRs listable,
-	// so a client comparing declarations cannot tell them apart. Authorization
-	// does not compare declarations either: it reads the namespace's own
-	// kipper.run/project label, which is what this reports.
+	// so a client comparing declarations cannot tell them apart. This reports
+	// what the shared owner lookup answers, which is the same thing
+	// authorization asks.
 	Owned bool `json:"owned"`
 }
 
@@ -135,7 +136,7 @@ func (p *Projects) List(w http.ResponseWriter, r *http.Request) {
 		email = claims.Email
 	}
 
-	owners, ownersKnown := p.namespaceOwners(ctx)
+	owners, ownersKnown := p.namespaceOwners(ctx, projectList.Items)
 
 	projects := make([]projectResponse, 0, len(projectList.Items))
 	for _, proj := range projectList.Items {
@@ -223,9 +224,18 @@ func (p *Projects) List(w http.ResponseWriter, r *http.Request) {
 // stamps from this spec), so passing it through keeps implicit-host
 // derivation in agreement without a namespace read per environment on every
 // Projects poll.
-// namespaceOwners maps each live namespace to the project holding it, from the
-// label the authorization resolver reads. A namespace with no such label maps
-// to the empty string, which no project name matches.
+// namespaceOwners maps each live namespace to the project that owns it.
+//
+// Through the shared owner lookup, because what this gates is reading what is
+// inside the namespace: app names, images, replica counts, readiness and route
+// hosts. Reading the label here answered that from a value anyone who can write
+// a namespace can set. A namespace nothing owns maps to the empty string, which
+// no project name matches.
+//
+// The projects it resolves against are the ones the caller has already listed,
+// so the whole map costs one namespace list and no project reads at all. What
+// the lookup requires, and the release it starts requiring the claim, is stated
+// once in nsowner.Of.
 //
 // Every namespace, not only the Kipper-managed ones. A namespace that exists
 // without Kipper's managed-by label still occupies the name, the reconciler
@@ -238,16 +248,48 @@ func (p *Projects) List(w http.ResponseWriter, r *http.Request) {
 // and only affects which tab the console offers; it must not be read as
 // permission to list what is inside those namespaces, so the caller stops
 // reading them instead.
-func (p *Projects) namespaceOwners(ctx context.Context) (map[string]string, bool) {
+func (p *Projects) namespaceOwners(ctx context.Context, projects []kipperv1.Project) (map[string]string, bool) {
 	list, err := p.Client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, false
 	}
+	listed := make(listedProjects, len(projects))
+	for i := range projects {
+		listed[projects[i].Name] = &projects[i]
+	}
 	owners := make(map[string]string, len(list.Items))
-	for _, ns := range list.Items {
-		owners[ns.Name] = ns.Labels[kipperlabels.Project]
+	for i := range list.Items {
+		owner, ok, err := nsowner.OfNamespace(ctx, listed, &list.Items[i])
+		if err != nil {
+			return nil, false
+		}
+		if ok {
+			owners[list.Items[i].Name] = owner
+		} else {
+			owners[list.Items[i].Name] = ""
+		}
 	}
 	return owners, true
+}
+
+// listedProjects answers the owner lookup's project reads from a page the
+// caller has already fetched.
+//
+// Resolving every namespace on a cluster would otherwise be one project read
+// per namespace on an endpoint that already holds all of them.
+type listedProjects map[string]*kipperv1.Project
+
+func (l listedProjects) Get(_ context.Context, key crclient.ObjectKey, obj crclient.Object, _ ...crclient.GetOption) error {
+	found, ok := l[key.Name]
+	if !ok {
+		return errors.NewNotFound(kipperv1.GroupVersion.WithResource("projects").GroupResource(), key.Name)
+	}
+	target, ok := obj.(*kipperv1.Project)
+	if !ok {
+		return fmt.Errorf("listedProjects can only answer for a Project, not %T", obj)
+	}
+	found.DeepCopyInto(target)
+	return nil
 }
 
 func (p *Projects) getAppSummaries(ctx context.Context, namespace, environment string) []appSummary {
@@ -739,13 +781,13 @@ func (p *Projects) CopyPreview(w http.ResponseWriter, r *http.Request) {
 	// name and key names of every Secret in it. Both names are guesses built
 	// from a project and an environment the caller supplied, so ownership is
 	// established before anything is read.
-	if err := namespaceBelongsTo(ctx, p.Client, sourceNs, projectName); err != nil {
+	if err := namespaceBelongsTo(ctx, p.Client, p.CRClient, sourceNs, projectName); err != nil {
 		respondForeignNamespace(w, err)
 		return
 	}
 	// The target is normally the environment about to be created, so its
 	// absence is expected and only a namespace somebody else holds is refused.
-	if err := namespaceBelongsTo(ctx, p.Client, targetNs, projectName); err != nil {
+	if err := namespaceBelongsTo(ctx, p.Client, p.CRClient, targetNs, projectName); err != nil {
 		var foreign *foreignNamespaceError
 		if !goerrors.As(err, &foreign) || !foreign.absent {
 			respondForeignNamespace(w, err)
@@ -979,7 +1021,7 @@ func (p *Projects) AddEnvironment(w http.ResponseWriter, r *http.Request) {
 		// environment that does not exist stays the plain answer it was instead
 		// of becoming a refusal about a namespace.
 		sourceNs := controllers.ResolveNamespace(projectName, req.CopyFrom)
-		if err := namespaceBelongsTo(ctx, p.Client, sourceNs, projectName); err != nil {
+		if err := namespaceBelongsTo(ctx, p.Client, p.CRClient, sourceNs, projectName); err != nil {
 			respondForeignNamespace(w, err)
 			return
 		}
@@ -1011,8 +1053,8 @@ func (p *Projects) AddEnvironment(w http.ResponseWriter, r *http.Request) {
 		targetNs = fmt.Sprintf("%s-%s", projectName, req.Name)
 	}
 
-	// Waits for the project to claim the namespace, not merely for the
-	// namespace to exist.
+	// Waits for the namespace to resolve to this project, not merely for it to
+	// exist.
 	//
 	// The reconciler creates a namespace before it decides whether the project
 	// may hold it, and refuses one another project claims. Waiting on existence
@@ -1037,7 +1079,7 @@ func (p *Projects) AddEnvironment(w http.ResponseWriter, r *http.Request) {
 	// that check and now, and it sits here because what follows writes into the
 	// namespace under the console's own service account rather than the
 	// caller's.
-	if err := namespaceBelongsTo(ctx, p.Client, targetNs, projectName); err != nil {
+	if err := namespaceBelongsTo(ctx, p.Client, p.CRClient, targetNs, projectName); err != nil {
 		respondForeignNamespace(w, err)
 		return
 	}
@@ -1055,7 +1097,7 @@ func (p *Projects) AddEnvironment(w http.ResponseWriter, r *http.Request) {
 		// The source is read, not written, and it is derived from a name the
 		// caller supplied. Reading a namespace this project does not own would
 		// copy its apps, services and secrets into one the caller does.
-		if err := namespaceBelongsTo(ctx, p.Client, sourceNs, projectName); err != nil {
+		if err := namespaceBelongsTo(ctx, p.Client, p.CRClient, sourceNs, projectName); err != nil {
 			respondForeignNamespace(w, err)
 			return
 		}
@@ -1093,11 +1135,13 @@ func (p *Projects) AddEnvironment(w http.ResponseWriter, r *http.Request) {
 // give it to this project, so waiting longer changes nothing.
 var errNamespaceRefused = goerrors.New("the namespace is not this project's")
 
-// waitForNamespaceClaim polls until the project records holding the namespace,
-// or the context expires.
+// waitForNamespaceClaim polls until the namespace resolves to this project, or
+// the context expires.
 //
-// The claim is what says the namespace is this project's, and the reconciler
-// writes it only after it has proven that and isolated the namespace. Existence
+// It asks the shared owner lookup, so what it waits for is whatever that
+// requires. In this release the label still answers when neither record covers
+// the namespace, which means it can return before the claim is published;
+// release 2 is where the name becomes literal. Existence
 // says only that an object appeared, which is also true of a namespace the
 // reconcile is about to refuse because another project holds it.
 func waitForNamespaceClaim(ctx context.Context, cr crclient.Client, client kubernetes.Interface, project, namespace string) error {
@@ -1113,31 +1157,17 @@ func waitForNamespaceClaim(ctx context.Context, cr crclient.Client, client kuber
 			return err
 		}
 		if err == nil && liveErr == nil {
-			// Name and UID both. A claim naming a namespace that has since been
-			// deleted and recreated describes an object that is gone, and the
-			// label on the replacement is exactly the record claims exist to
-			// supplement, so it cannot stand in either.
-			for _, claim := range p.Status.NamespaceClaims {
-				if claim.Name == namespace && claim.UID == live.UID {
-					return nil
-				}
-			}
-
-			// The compatibility window, and the limit it carries.
-			//
-			// An older controller reconciles the namespace fully and cannot
-			// write a claim, because its status struct has no such field, so
-			// requiring one here would fail an AddEnvironment that has in fact
-			// succeeded. Until every pod writes claims, a namespace carrying
-			// this project's label is accepted.
-			//
-			// That means the label still decides in this release, so a
-			// namespace recreated under the same name and relabelled for this
-			// project is accepted here, and the UID check above cannot stop it.
-			// Claims do not protect against a relabel until this branch is
-			// gone, which is what "required in release 2" means and is the
-			// reason the split is worth the two releases rather than one.
-			if live.Labels[kipperlabels.Project] == project {
+			// Through the shared owner lookup rather than a second copy of the
+			// rule. This used to carry its own claim check and its own label
+			// fallback, so the release that stops accepting a label had two
+			// places to change and one of them was not the one anybody would
+			// look at. What the lookup requires, and the release it starts
+			// requiring the claim, is stated once in nsowner.Of.
+			// A read that failed is not an answer, and this is a poll: the
+			// two reads either side of it retry the same class of failure, so
+			// giving up here fails an AddEnvironment on one blip.
+			owns, ownErr := nsowner.OwnsNamespace(ctx, cr, project, live)
+			if ownErr == nil && owns {
 				return nil
 			}
 		}
@@ -1163,11 +1193,8 @@ func waitForNamespaceClaim(ctx context.Context, cr crclient.Client, client kuber
 // namespaceRefusal returns the reconcile's reason for refusing this namespace,
 // or empty when it has not refused this one.
 //
-// The condition names one namespace and lists the others, so a substring test
-// against the whole message answers about the wrong namespace: a project with a
-// standing conflict over `shop-prod` would refuse `shop-prod-eu` on the strength
-// of it. The name is matched between delimiters instead, and a condition from an
-// older generation is ignored rather than treated as current.
+// A condition from an older generation describes a spec that has since changed
+// and is ignored rather than treated as current.
 func namespaceRefusal(p *kipperv1.Project, namespace string) string {
 	cond := apimeta.FindStatusCondition(p.Status.Conditions, "NamespaceConflict")
 	if cond == nil || cond.Status != metav1.ConditionTrue {
@@ -1176,10 +1203,8 @@ func namespaceRefusal(p *kipperv1.Project, namespace string) string {
 	if cond.ObservedGeneration != 0 && cond.ObservedGeneration < p.Generation {
 		return ""
 	}
-	for _, field := range strings.FieldsFunc(cond.Message, func(r rune) bool {
-		return r == ' ' || r == ',' || r == '.' || r == ';'
-	}) {
-		if field == namespace {
+	for _, refused := range controllers.RefusedNamespaces(cond.Message) {
+		if refused == namespace {
 			return cond.Message
 		}
 	}
@@ -1215,11 +1240,10 @@ func (p *Projects) Delete(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	// Delete the Project CR
-	project := &kipperv1.Project{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-	}
-	if err := p.CRClient.Delete(ctx, project); err != nil {
+	// Read before deleting, because what this may delete afterwards is decided
+	// from the project's own status and the delete takes that away.
+	var project kipperv1.Project
+	if err := p.CRClient.Get(ctx, crclient.ObjectKey{Name: name}, &project); err != nil {
 		if errors.IsNotFound(err) {
 			respondError(w, http.StatusNotFound, fmt.Sprintf("project %q not found", name))
 			return
@@ -1227,14 +1251,71 @@ func (p *Projects) Delete(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, "failed to delete project")
 		return
 	}
+	held := project.Status
 
-	// Best-effort cleanup: delete namespaces and keda function ingresses
-	namespaces, nsErr := p.Client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
+	// Bound to the object that was read. Between the read and here the project
+	// can finish deleting and be created again under the same name with
+	// different members, and a delete by name alone would take that one instead
+	// on the strength of a check made against its predecessor.
+	if err := p.CRClient.Delete(ctx, &project, crclient.Preconditions{UID: &project.UID}); err != nil {
+		if errors.IsNotFound(err) || errors.IsConflict(err) {
+			respondError(w, http.StatusNotFound, fmt.Sprintf("project %q not found", name))
+			return
+		}
+		respondError(w, http.StatusInternalServerError, "failed to delete project")
+		return
+	}
+
+	// Best-effort cleanup: delete namespaces and keda function ingresses.
+	//
+	// The label lists the candidates and does not authorise deleting any of
+	// them. Anyone who can write a namespace can point its label at another
+	// project, and deleting on the label alone made that a way to have somebody
+	// else's namespace destroyed: relabel it, delete a project of your own, and
+	// the namespace goes with everything in it. The project's own record of
+	// having held it is what decides, which is the rule the reconciler's own
+	// cleanup deletes by.
+	labelled, nsErr := p.Client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("kipper.run/project=%s", name),
 	})
-	if nsErr == nil {
-		for _, ns := range namespaces.Items {
-			_ = p.Client.CoreV1().Namespaces().Delete(ctx, ns.Name, metav1.DeleteOptions{})
+	// Every project, because this project's own records cannot tell whether
+	// somebody else holds the live object, and a claim on it outranks any
+	// name-only record of the name. A failed read leaves the candidates
+	// unchecked, so nothing is deleted rather than deleted unchecked.
+	var projects kipperv1.ProjectList
+	projectsErr := p.CRClient.List(ctx, &projects)
+	//
+	// Each delete names the object it was authorised against, for the same
+	// reason: a namespace can finish deleting and be recreated under the same
+	// name between the list and the delete, and the record covered only the one
+	// that was read. A precondition that no longer holds means the object is
+	// already gone, and there is nothing to collect.
+	namespaces := &corev1.NamespaceList{}
+	var stranded []string
+	if nsErr == nil && projectsErr == nil {
+		for _, ns := range labelled.Items {
+			if !nsowner.EverHeld(held, ns.Name, ns.UID) {
+				continue
+			}
+			if nsowner.ClaimedElsewhere(projects.Items, name, ns.Name, ns.UID) {
+				continue
+			}
+			uid := ns.UID
+			err := p.Client.CoreV1().Namespaces().Delete(ctx, ns.Name, metav1.DeleteOptions{
+				Preconditions: &metav1.Preconditions{UID: &uid},
+			})
+			switch {
+			case err == nil, errors.IsNotFound(err):
+				// The keda ingresses below belong to namespaces that are going.
+				namespaces.Items = append(namespaces.Items, ns)
+			case errors.IsConflict(err):
+				// The precondition no longer holds, so the object this was
+				// authorised against has already gone and something else
+				// carries the name. Nothing to collect, and its ingresses are
+				// not this project's to remove.
+			default:
+				stranded = append(stranded, ns.Name)
+			}
 		}
 	}
 
@@ -1252,6 +1333,34 @@ func (p *Projects) Delete(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+
+	// A namespace that could not be deleted for any reason other than already
+	// being gone is still there with its workloads, its credentials and its
+	// member bindings, and answering 204 says it was collected. Say which ones
+	// instead.
+	//
+	// This is a report about a moment, not a verdict. The delete above only
+	// marks the Project, and the reconciler's finalizer runs the same cleanup
+	// until it succeeds, so a namespace named here is often collected shortly
+	// afterwards. What the caller must not be told is that the work is done
+	// when it is not: a project whose finalizer never runs strands these for
+	// good, and nothing else would ever mention them.
+	if nsErr != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf(
+			"project %q is being deleted, but its namespaces could not be listed, so whether any are still on the cluster is unknown", name))
+		return
+	}
+	if projectsErr != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf(
+			"project %q is being deleted, but the other projects could not be read, so which of its namespaces are still its own is unknown and none were collected", name))
+		return
+	}
+	if len(stranded) > 0 {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf(
+			"project %q is being deleted, but these namespaces could not be collected and are still on the cluster: %s",
+			name, strings.Join(stranded, ", ")))
+		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -1308,7 +1417,7 @@ func (p *Projects) projectEnvironmentNamespace(ctx context.Context, project, env
 		// change exists for, a project declares an environment whose namespace
 		// another project holds, and promote would then read one project's app
 		// or write into the other's using the console's own credentials.
-		if err := namespaceBelongsTo(ctx, p.Client, ns, project); err != nil {
+		if err := namespaceBelongsTo(ctx, p.Client, p.CRClient, ns, project); err != nil {
 			return "", err
 		}
 		return ns, nil
@@ -1373,14 +1482,17 @@ func (e *foreignNamespaceError) Error() string { return e.msg }
 // That label is what ProjectAccessResolver reads to decide who may reach a
 // namespace, so asking the same question here keeps a handler from working
 // inside a namespace the request gate would have refused. A name derived from a
-// project and an environment is a guess about which namespace is meant; only
-// the label says whose it is.
+// project and an environment is a guess about which namespace is meant, and the
+// label on the namespace is a guess too: anyone who can write namespace
+// metadata can write it. Ownership goes through the shared owner lookup for
+// that reason; what it requires, and the release it starts requiring the claim,
+// is stated once in nsowner.Of.
 //
 // Fail closed in every direction. A namespace that does not exist is not this
 // project's, one that cannot be read is not assumed to be, and one carrying no
 // label at all is refused like one carrying another project's — an unlabelled
 // namespace is exactly what the reconciler will not adopt.
-func namespaceBelongsTo(ctx context.Context, client kubernetes.Interface, namespace, projectName string) error {
+func namespaceBelongsTo(ctx context.Context, client kubernetes.Interface, reader crclient.Client, namespace, projectName string) error {
 	ns, err := client.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -1389,7 +1501,11 @@ func namespaceBelongsTo(ctx context.Context, client kubernetes.Interface, namesp
 		}
 		return fmt.Errorf("reading namespace %s: %w", namespace, err)
 	}
-	if owner := ns.Labels[kipperlabels.Project]; owner != projectName {
+	owns, err := nsowner.OwnsNamespace(ctx, reader, projectName, ns)
+	if err != nil {
+		return fmt.Errorf("establishing who owns namespace %s: %w", namespace, err)
+	}
+	if !owns {
 		return &foreignNamespaceError{msg: fmt.Sprintf(
 			"namespace %q is not owned by project %q", namespace, projectName)}
 	}
@@ -1481,7 +1597,7 @@ func (p *Projects) refuseNamespaceCollision(ctx context.Context, projectName str
 	// the copy covers the race; this covers the ordinary case, and covers it
 	// before anything has been changed.
 	for ns := range wanted {
-		err := namespaceBelongsTo(ctx, p.Client, ns, projectName)
+		err := namespaceBelongsTo(ctx, p.Client, p.CRClient, ns, projectName)
 		if err == nil {
 			continue
 		}

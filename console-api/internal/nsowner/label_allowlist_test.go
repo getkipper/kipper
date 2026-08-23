@@ -25,12 +25,12 @@ var mayMentionTheLabel = map[string]string{
 	"controllers/project_controller.go": "writes the label onto namespaces it creates",
 	"controllers/project_quota.go":      "writes the label onto quota objects",
 	"controllers/project_rbac.go":       "writes the label onto member bindings, and reads it as one of the revoke pass's anchors",
-	"handlers/projects.go":              "writes the label, and reads it only to report who owns what to an admin",
+	"handlers/projects.go":              "writes the label onto namespaces it creates, and gathers candidates by it; every decision resolves through nsowner",
 
 	// Selectors: these gather candidates by label, and whatever they hand the
 	// candidates to decides.
 	"controllers/app_links.go":           "lists a project's namespaces by label to map events; consent itself resolves through nsowner",
-	"handlers/request_usage.go":          "lists a project's namespaces by label to sum usage",
+	"handlers/request_usage.go":          "lists a project's namespaces by label to gather candidates; which of them are the project's resolves through nsowner",
 	"handlers/migration/capacity.go":     "lists namespaces by label to measure capacity",
 	"handlers/routes.go":                 "puts the label in a response for display",
 	"handlers/migration/orchestrator.go": "lists a project's namespaces by label to enumerate what to move",

@@ -231,12 +231,11 @@ func TestPlanSecretCountMatchesWhatTransfers(t *testing.T) {
 		projectionOf("mail-app-api-credentials", "api"),
 		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "app-api-secrets", Namespace: "shop-prod"}},
 	}
-	objects = append(objects, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-		Name: "shop-prod", Labels: map[string]string{"kipper.run/project": "shop"},
-	}})
+	objects = append(objects, projectNamespace("shop-prod", "shop"))
 	h := &Handler{
-		Client:   fake.NewSimpleClientset(objects...),
-		CRClient: crfake.NewClientBuilder().WithScheme(migrationScheme()).WithObjects(mailhogService()).Build(),
+		Client: fake.NewSimpleClientset(objects...),
+		CRClient: crfake.NewClientBuilder().WithScheme(migrationScheme()).
+			WithObjects(mailhogService(), ownerOf("shop-prod")).Build(),
 	}
 	ctx := context.Background()
 

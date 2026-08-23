@@ -260,20 +260,6 @@ spec:
                 type: array
               namespaceClaims:
                 description: |-
-                  ProjectedMembers is the member list the reconciler last projected onto
-                  RBAC, and ProjectedMembersGeneration is the spec generation it came from.
-
-                  They exist for the audit trail. No API audit event carries the object a
-                  write replaced, so a membership change can be attributed to who and when
-                  and not to what it was before. The reconciler is the one component that
-                  sees both, so it records what it acted on.
-
-                  Nothing reads them yet. This status is written whole by every controller
-                  already running, so a pod whose struct lacks these fields drops them on
-                  its next write; in a rolling window that is one old pod away from an
-                  empty baseline. They ship a release before anything leans on them, and a
-                  baseline whose generation does not match the object's is stale rather
-                  than current.
                   NamespaceClaims records the namespaces this project took and the exact
                   objects it took, so ownership rests on something a relabel does not
                   touch.
@@ -283,10 +269,6 @@ spec:
                   record: the reconcile writes what it actually adopted, and the UID is
                   there because a name outlives the object it named, so a namespace deleted
                   and recreated is a different namespace and must not inherit a claim.
-
-                  Written now and required a release later, for the same reason as
-                  ProjectedMembers: an older pod's whole-status write drops what its struct
-                  does not know.
                 items:
                   description: |-
                     NamespaceClaim is one namespace a project holds, identified by the object
@@ -319,6 +301,19 @@ spec:
                 - Terminating
                 type: string
               projectedMembers:
+                description: |-
+                  ProjectedMembers is the member list the reconciler last projected onto
+                  RBAC.
+
+                  It exists for the audit trail. No API audit event carries the object a
+                  write replaced, so a membership change can be attributed to who and when
+                  and not to what it was before. The reconciler is the one component that
+                  sees both, so it records what it acted on.
+
+                  Nothing reads it yet. This status is written whole by every controller
+                  already running, so a pod whose struct lacks the field drops it on its
+                  next write; in a rolling window that is one old pod away from an empty
+                  baseline. It ships a release before anything leans on it.
                 items:
                   description: ProjectMember grants a user a role within a project.
                   properties:
@@ -336,6 +331,10 @@ spec:
                   type: object
                 type: array
               projectedMembersGeneration:
+                description: |-
+                  ProjectedMembersGeneration is the spec generation ProjectedMembers came
+                  from. A baseline whose generation does not match the object's describes a
+                  spec that has since changed, and is stale rather than current.
                 format: int64
                 type: integer
             type: object

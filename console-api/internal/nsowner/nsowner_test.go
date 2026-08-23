@@ -42,17 +42,47 @@ func project(name string, claims ...kipperv1.NamespaceClaim) *kipperv1.Project {
 	}
 }
 
-func TestTheLabelAloneOwnsNothing(t *testing.T) {
-	// The label says shop, and shop claims nothing. A forged label is exactly
-	// this shape, and it must resolve to nobody.
+// The claim is what the label is a hint towards, and it is tested here on its
+// own terms because release 2 answers from it alone.
+func TestAClaimCoversOneObjectUnderOneName(t *testing.T) {
+	claims := []kipperv1.NamespaceClaim{{Name: "shop-test", UID: "the-object"}}
+
+	if !Claimed(claims, "shop-test", "the-object") {
+		t.Error("a project's claim on the namespace it holds did not cover it")
+	}
+	// A namespace deleted and recreated is a different object, and a claim
+	// naming the one that is gone must not carry over to its replacement.
+	if Claimed(claims, "shop-test", "the-new-object") {
+		t.Error("a claim naming an object that is gone covered its replacement, so whoever held the old namespace holds the new one")
+	}
+	if Claimed(claims, "shop-prod", "the-object") {
+		t.Error("a claim on one namespace covered another")
+	}
+	if Claimed(nil, "shop-test", "the-object") {
+		t.Error("a project that claims nothing covered a namespace")
+	}
+}
+
+// A label naming a project that claims nothing still resolves in this release.
+//
+// This is the compatibility fallback, not the intended answer. A pod running
+// the previous release erases namespaceClaims on its next status write, so a
+// build that refused this would lock every non-admin out of their project for
+// the length of a rolling upgrade. The claim is seeded now and required next
+// release; see the package comment.
+//
+// Release 2 deletes fallbackToLabel. This test and
+// TestAStaleClaimFallsBackLikeNoClaimAtAll are the two in this file that fail
+// when it does. Invert them then: the answer becomes ("", false).
+func TestALabelWithNoClaimStillResolvesWhileTheClaimIsOnlySeeded(t *testing.T) {
 	c := reader(t, namespace("shop-test", "shop", "the-object"), project("shop"))
 
 	owner, ok, err := Of(context.Background(), c, "shop-test")
 	if err != nil {
 		t.Fatalf("resolving: %v", err)
 	}
-	if ok {
-		t.Errorf("a namespace whose label names a project that claims nothing resolved to %q; the label is writable by anyone who can write the namespace", owner)
+	if !ok || owner != "shop" {
+		t.Errorf("Of = (%q, %v), want (shop, true): a namespace an older pod had erased the claim for resolved to nobody, which is every non-admin locked out for the rolling window", owner, ok)
 	}
 }
 
@@ -71,21 +101,20 @@ func TestAClaimedNamespaceResolvesToItsProject(t *testing.T) {
 	}
 }
 
-func TestAClaimForADifferentObjectDoesNotCount(t *testing.T) {
-	// The namespace was deleted and recreated; the claim names the one that is
-	// gone. Matching on name alone would hand the replacement to whoever held
-	// its predecessor.
+// A stale claim is the same case as no claim: it covers nothing, so the answer
+// comes from the fallback for as long as there is one.
+func TestAStaleClaimFallsBackLikeNoClaimAtAll(t *testing.T) {
 	c := reader(t,
 		namespace("shop-test", "shop", "the-new-object"),
 		project("shop", kipperv1.NamespaceClaim{Name: "shop-test", UID: "the-old-object"}),
 	)
 
-	_, ok, err := Of(context.Background(), c, "shop-test")
+	owner, ok, err := Of(context.Background(), c, "shop-test")
 	if err != nil {
 		t.Fatalf("resolving: %v", err)
 	}
-	if ok {
-		t.Error("a claim naming an object that is gone was read as ownership of its replacement")
+	if !ok || owner != "shop" {
+		t.Errorf("Of = (%q, %v), want (shop, true): a stale claim answered differently from no claim, so the release-1 answer depends on how the claim went missing", owner, ok)
 	}
 }
 
@@ -152,5 +181,38 @@ func TestNoReaderOwnsNothing(t *testing.T) {
 	}
 	if ok {
 		t.Error("a nil reader resolved a namespace to a project")
+	}
+}
+
+// The name-only record predates claims, so it says nothing about which object
+// carried the name. A claim does, and when one names this namespace at a
+// different object that is positive evidence the object has been replaced.
+// Letting the older record answer over it would hand a project a namespace
+// somebody recreated under a name it used to hold.
+func TestAStaleClaimStopsTheOlderRecordAnsweringForAReplacement(t *testing.T) {
+	status := kipperv1.ProjectStatus{
+		Namespaces:      []string{"shop-test"},
+		NamespaceClaims: []kipperv1.NamespaceClaim{{Name: "shop-test", UID: "the-old-object"}},
+	}
+
+	if HoldsObject(status, "shop-test", "the-new-object") {
+		t.Error("a namespace recreated under a name this project used to hold was read as still held, so its members reach an object nobody gave them")
+	}
+	if !HoldsObject(status, "shop-test", "the-old-object") {
+		t.Error("the project was refused the object its own claim names")
+	}
+}
+
+// With no claim naming it at all there is nothing better than the name, which
+// is every namespace on a cluster that has not yet run a pass under this
+// release.
+func TestTheOlderRecordAnswersWhenNoClaimNamesTheNamespace(t *testing.T) {
+	status := kipperv1.ProjectStatus{Namespaces: []string{"shop-test"}}
+
+	if !HoldsObject(status, "shop-test", "any-object") {
+		t.Error("a namespace the project recorded holding before claims existed was read as not held")
+	}
+	if HoldsObject(status, "shop-prod", "any-object") {
+		t.Error("a namespace the project never recorded was read as held")
 	}
 }

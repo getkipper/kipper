@@ -31,6 +31,16 @@ func quotaProject(tier string, envs ...kipperv1.ProjectEnvironment) *kipperv1.Pr
 	return &kipperv1.Project{
 		ObjectMeta: metav1.ObjectMeta{Name: "shop"},
 		Spec:       kipperv1.ProjectSpec{Tier: tier, Environments: envs},
+		// The two namespaces these fixtures use, claimed, because usage is only
+		// read out of a namespace established as this project's and a project
+		// that claims nothing establishes nothing once the label stops
+		// answering. The UIDs are newKipperNamespace's. Claiming a namespace a
+		// given fixture does not create costs nothing, because a claim covers
+		// an object and there is no object.
+		Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+			{Name: "shop-test", UID: "uid-shop-test"},
+			{Name: "shop-prod", UID: "uid-shop-prod"},
+		}},
 	}
 }
 

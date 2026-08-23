@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,7 +36,7 @@ func claimFixture(t *testing.T, objs ...crclient.Object) crclient.Client {
 	all := make([]crclient.Object, 0, len(objs)+1)
 	all = append(all, objs...)
 	all = append(all, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9"))
-	return crfake.NewClientBuilder().
+	return projectFakeBuilder().
 		WithScheme(testScheme()).
 		WithObjects(all...).
 		WithStatusSubresource(&kipperv1.Project{}).
@@ -54,10 +55,9 @@ func namespaceClaimFor(t *testing.T, c crclient.Client, project, namespace strin
 	return kipperv1.NamespaceClaim{}, false
 }
 
-// The claim names the object, not the name. The fixture gives the namespace a
-// UID because the fake client assigns none on create, and a test whose
-// namespace and claim both carried an empty UID would compare nothing with
-// nothing.
+// The claim names the object, not the name. The namespace is put in the fixture
+// already carrying its UID, so this is the adoption path rather than the create
+// path that TestTheCreatingPassClaimsTheNamespace covers.
 func TestAProjectClaimsTheNamespaceByItsObject(t *testing.T) {
 	c := claimFixture(t,
 		quotaTestProject("small", kipperv1.ProjectEnvironment{Name: "test"}),
@@ -75,16 +75,53 @@ func TestAProjectClaimsTheNamespaceByItsObject(t *testing.T) {
 		"the claim carries no UID, so a namespace deleted and recreated under the same name would inherit it")
 }
 
-// A namespace whose UID cannot be read yields no claim rather than a claim with
-// an empty one. An empty UID matches no live namespace, so the project would
-// not recognise its own, while still reading as a claim to anything looking at
-// the name alone.
-func TestNoUIDMeansNoClaim(t *testing.T) {
+// The pass that creates a namespace claims it on that same pass. The claim is
+// what the add-environment flow waits on, and what every ownership decision
+// afterwards reads, so a namespace taken without one is a namespace the project
+// does not yet own.
+func TestTheCreatingPassClaimsTheNamespace(t *testing.T) {
 	c := claimFixture(t, quotaTestProject("small", kipperv1.ProjectEnvironment{Name: "test"}))
 	reconcileNamed(t, c, "shop")
 
+	var ns corev1.Namespace
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "shop-test"}, &ns))
+
+	claim, ok := namespaceClaimFor(t, c, "shop", "shop-test")
+	require.True(t, ok, "the pass created a namespace and recorded no claim to it, so the add-environment flow waits on a claim that never comes")
+	assert.Equal(t, ns.UID, claim.UID,
+		"the claim names something other than the object this pass created")
+}
+
+// A namespace the pass wrote and cannot name stops it, rather than leaving it to
+// grant quota and member bindings inside a namespace no record says is this
+// project's. Recording the claim anyway would be worse than recording none: an
+// empty UID matches no live namespace, so the project would not recognise its
+// own, while still reading as a claim to anything looking at the name alone.
+func TestANamespaceWithNoUIDStopsThePass(t *testing.T) {
+	scheme := testScheme()
+	// Built without the create stamp every other fixture uses, so the write
+	// comes back the way a broken one would.
+	c := crfake.NewClientBuilder().
+		WithIndex(&rbacv1.RoleBinding{}, memberBindingProjectIndex, MemberBindingProjectKeys).
+		WithScheme(scheme).
+		WithObjects(
+			quotaTestProject("small", kipperv1.ProjectEnvironment{Name: "test"}),
+			nodeWithIP("worker-1", "ExternalIP", "203.0.113.9"),
+		).
+		WithStatusSubresource(&kipperv1.Project{}).
+		Build()
+
+	r := &ProjectReconciler{Client: c, APIReader: c, Scheme: scheme}
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "shop"}})
+	require.Error(t, err, "the pass carried on into a namespace it could not name")
+
 	claim, ok := namespaceClaimFor(t, c, "shop", "shop-test")
 	assert.False(t, ok, "a claim was recorded with UID %q, which matches nothing and reads as ownership to anything checking the name", claim.UID)
+
+	var quota corev1.ResourceQuota
+	err = c.Get(context.Background(), types.NamespacedName{Name: projectQuotaName, Namespace: "shop-test"}, &quota)
+	assert.True(t, apierrors.IsNotFound(err),
+		"the pass provisioned a namespace no record says is this project's")
 }
 
 // The rule, in one form: adopt what nobody claims, whatever created it, and
@@ -187,9 +224,16 @@ func TestAStaleClaimDoesNotStandInForTheObjectItNamed(t *testing.T) {
 	)
 	reconcileNamed(t, c, "shop")
 
+	// The claim naming the object that went away stays, because it is what
+	// tells every later pass and every cleanup path that the object now
+	// carrying the name is not this project's. What must not happen is the
+	// claim being repointed at that object, which is what taking it would look
+	// like.
 	claim, ok := namespaceClaimFor(t, c, "shop", "shop-prod")
-	assert.False(t, ok,
-		"a claim naming a UID that is gone was read as current, so the project took a recreated namespace another project also resolves to (claim=%v)", claim)
+	require.True(t, ok,
+		"the claim naming the object that went away was dropped, and it is the only thing telling the cleanup paths that the object now carrying the name is not this project's")
+	assert.Equal(t, types.UID("the-old-one"), claim.UID,
+		"a claim naming a UID that is gone was read as current, so the project took a recreated namespace another project also resolves to")
 }
 
 // Two projects resolving to one name, with nobody holding it yet. Handing it to
@@ -257,7 +301,7 @@ func TestNothingRequiresTheClaimYet(t *testing.T) {
 // waits on the claim, so that is a hang rather than a delay.
 func TestTheClaimSurvivesAFailureLaterInThePass(t *testing.T) {
 	project := quotaTestProject("small", kipperv1.ProjectEnvironment{Name: "test"})
-	c := crfake.NewClientBuilder().
+	c := projectFakeBuilder().
 		WithScheme(testScheme()).
 		WithObjects(
 			project,

@@ -154,3 +154,30 @@ func TestBuiltInCapabilitySetsAreBackedByTheirClusterRoles(t *testing.T) {
 		}
 	}
 }
+
+// A rule restricted by resourceNames must not count towards the bound.
+//
+// The bound asks whether the operator (or the owner role) already grants what a
+// capability claims. A rule that reaches one named object does not grant the
+// resource, and counting it would let a widening pass the build: a capability
+// claiming "bind clusterroles" would look covered by the operator's permission
+// to bind one specific ClusterRole.
+func TestARuleRestrictedToNamedObjectsGrantsNothingToTheBound(t *testing.T) {
+	role := &rbacv1.ClusterRole{Rules: []rbacv1.PolicyRule{{
+		APIGroups:     []string{"rbac.authorization.k8s.io"},
+		Resources:     []string{"clusterroles"},
+		Verbs:         []string{"bind"},
+		ResourceNames: []string{"kipper-project-owner"},
+	}}}
+
+	if grants(role, "rbac.authorization.k8s.io", "clusterroles", "bind") {
+		t.Error("a rule that may bind one named ClusterRole was read as permission to bind clusterroles, so a capability claiming it would pass the bound on coverage nobody granted")
+	}
+
+	// And the same rule without the restriction does grant it, so the exclusion
+	// is the resourceNames and not the shape of the rule.
+	role.Rules[0].ResourceNames = nil
+	if !grants(role, "rbac.authorization.k8s.io", "clusterroles", "bind") {
+		t.Error("an unrestricted rule stopped granting, so the bound now under-reports what the operator holds")
+	}
+}
