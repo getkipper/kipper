@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, watch } from 'vue'
 import { Globe, ShieldCheck, ArrowRight, ExternalLink, RefreshCw, Plus, Trash2, X, Pencil } from 'lucide-vue-next'
 import SaveButton from '@/components/SaveButton.vue'
 import NoticeCallout from '@/components/NoticeCallout.vue'
@@ -24,7 +24,11 @@ onMounted(async () => {
 })
 
 watch(globalNs, () => {
-  loadApps()
+  // While the editor is open its own `formNamespace` is authoritative for
+  // the apps dropdown, so a top-selector change must not overwrite the list
+  // the operator is choosing from mid-edit.
+  if (showForm.value) return
+  loadApps(globalNs.value)
 })
 
 async function loadRoutes() {
@@ -32,7 +36,10 @@ async function loadRoutes() {
   error.value = null
   try {
     routes.value = await fetchRoutes()
-    await loadApps()
+    // While the editor is open, `formNamespace` governs the dropdown — a
+    // Refresh that also refetched apps from the top selector would replace
+    // the edited group's choices with unrelated ones.
+    if (!showForm.value) await loadApps(globalNs.value)
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'unknown error'
   } finally {
@@ -41,22 +48,41 @@ async function loadRoutes() {
 }
 
 const appsError = ref<string | null>(null)
+// The empty-project callout is only true once the request has come back with
+// no rows. Without this an in-flight request would render "no apps yet" and
+// then flip to a populated list, telling the operator something the code did
+// not yet know.
+const appsLoading = ref(false)
+// Two openEdit clicks in quick succession issue two overlapping fetches.
+// Whichever settles last would win, and if it is the older one it silently
+// replaces the current namespace's apps with a stale set. A monotonic token
+// lets a superseded fetch drop its response.
+let appsRequestId = 0
 
-async function loadApps() {
+async function loadApps(ns: string) {
+  const requestId = ++appsRequestId
   appsError.value = null
-  const ns = globalNs.value
+  // Clear before every fetch so the previous namespace's apps do not remain
+  // selectable while the new fetch is in flight. `optionsFor` still keeps any
+  // existing mapping's app visible on its own row.
+  apps.value = []
   if (!ns) {
-    apps.value = []
+    appsLoading.value = false
     return
   }
+  appsLoading.value = true
   try {
-    apps.value = await fetchApps(ns)
+    const result = await fetchApps(ns)
+    if (requestId !== appsRequestId) return
+    apps.value = result
   } catch (e) {
+    if (requestId !== appsRequestId) return
     // Not the same as "no apps". Collapsing a permission or network failure
     // into an empty list is what made an empty dropdown indistinguishable from
     // a denied one, and sent an operator looking for the wrong problem.
-    apps.value = []
     appsError.value = e instanceof Error ? e.message : 'the app list could not be read'
+  } finally {
+    if (requestId === appsRequestId) appsLoading.value = false
   }
 }
 
@@ -75,19 +101,46 @@ const editingHost = ref<string | null>(null)
 const formHost = ref('')
 const formMappings = ref<PathMapping[]>([{ path: '/', app: '' }])
 const formSaving = ref(false)
+// The namespace the form writes to. On create this follows the top selector,
+// because there is no other project to infer from. On edit it follows the
+// group being edited, so the editor works while "All projects" is selected
+// and does not force the operator to change the top selector just to fix a
+// path they already know belongs to a specific project.
+const formNamespace = ref<string>('')
+const formRef = ref<HTMLElement | null>(null)
 
-function openCreate() {
+async function openCreate() {
   editingHost.value = null
   formHost.value = ''
   formMappings.value = [{ path: '/', app: '' }]
+  formNamespace.value = globalNs.value
   showForm.value = true
+  // Kick the app list off in the background. Blocking the reveal on it lets
+  // a slow backend swallow bug 3 all over again.
+  void loadApps(formNamespace.value)
+  await revealForm()
 }
 
-function openEdit(group: RouteGroup) {
+async function openEdit(group: RouteGroup) {
   editingHost.value = group.host
   formHost.value = group.host
   formMappings.value = group.routes.map(r => ({ path: r.path, app: r.service }))
+  formNamespace.value = group.namespace
   showForm.value = true
+  void loadApps(formNamespace.value)
+  await revealForm()
+}
+
+// Clicking Edit on a group far down the page used to open the form at the top
+// of the page with no visible change, so the click looked like it had done
+// nothing. Scroll it into view and land focus in the first field the operator
+// can actually type into — the Domain input is disabled during an edit.
+async function revealForm() {
+  await nextTick()
+  formRef.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  formRef.value
+    ?.querySelector<HTMLInputElement | HTMLSelectElement>('input:not([disabled]), select:not([disabled])')
+    ?.focus()
 }
 
 function addMapping() {
@@ -99,7 +152,7 @@ function removeMapping(index: number) {
 }
 
 async function saveForm() {
-  const ns = globalNs.value
+  const ns = formNamespace.value
   if (!ns) {
     toast.error('Select a project first')
     return
@@ -135,11 +188,9 @@ async function saveForm() {
   }
 }
 
-async function handleDelete(host: string) {
-  const ns = globalNs.value
-  if (!ns) return
+async function handleDelete(group: RouteGroup) {
   try {
-    await deleteRouteGroup(ns, host)
+    await deleteRouteGroup(group.namespace, group.host)
     toast.success('Route group deleted')
     await loadRoutes()
   } catch {
@@ -223,7 +274,7 @@ function envColor(env: string): string {
     </div>
 
     <!-- Create / Edit form -->
-    <div v-if="showForm" class="mb-6 rounded-xl border border-kipper-200 bg-kipper-50 p-5 dark:border-kipper-800 dark:bg-kipper-950">
+    <div v-if="showForm" ref="formRef" class="mb-6 rounded-xl border border-kipper-200 bg-kipper-50 p-5 dark:border-kipper-800 dark:bg-kipper-950">
       <div class="mb-4 flex items-center justify-between">
         <h3 class="text-sm font-semibold text-slate-900 dark:text-slate-50">
           {{ editingHost ? 'Edit route group' : 'Create route group' }}
@@ -250,17 +301,19 @@ function envColor(env: string): string {
         <label class="mb-2 block text-xs font-medium text-slate-600 dark:text-slate-400">Path mappings</label>
 
         <!-- Why there is nothing to choose. Said here, where the empty dropdown
-             is met, rather than only on save. -->
+             is met, rather than only on save. The empty callout waits for the
+             request to actually return with no rows, so an operator does not
+             see "no apps yet" during the wait. -->
         <p
-          v-if="!globalNs"
-          data-testid="routes-no-project"
-          class="mb-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
-        >Pick a project at the top of the page to choose apps for these paths. "All projects" cannot list them.</p>
-        <p
-          v-else-if="appsError"
+          v-if="appsError"
           data-testid="routes-apps-error"
           class="mb-2 rounded-md bg-red-50 px-3 py-2 text-xs text-red-800 dark:bg-red-950/40 dark:text-red-300"
         >The apps in this project could not be listed, so this form may be incomplete. {{ appsError }}</p>
+        <p
+          v-else-if="appsLoading"
+          data-testid="routes-apps-loading"
+          class="mb-2 rounded-md bg-slate-100 px-3 py-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+        >Loading apps...</p>
         <p
           v-else-if="apps.length === 0"
           data-testid="routes-no-apps"
@@ -357,7 +410,7 @@ function envColor(env: string): string {
                   </button>
                   <button
                     v-if="authStore.isDeployer"
-                    @click="handleDelete(group.host)"
+                    @click="handleDelete(group)"
                     class="rounded-lg p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950"
                     title="Delete route group"
                   >
