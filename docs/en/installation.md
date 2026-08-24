@@ -1018,7 +1018,9 @@ The console's credential settings edit the token and the server. Who may build w
 
 `kip credentials list` shows each credential's allowed projects, so you can check a grant landed where you meant it.
 
-On a cluster installed before allow-lists existed, `kip upgrade` grants each shared credential the projects whose apps reference it, so an upgrade does not stop builds that were working. It reports every grant it writes. It runs once per cluster and is recorded on the `kipper-system` namespace, so a credential added later is never granted from what happens to reference it. The upgrade records it only once the new console-api is serving, which is what stops a half-finished upgrade closing a migration it did not finish.
+On a cluster installed before allow-lists existed, `kip upgrade` offers to grant each shared credential the projects whose apps reference it, so an upgrade does not stop builds that were working. Before the console-api rollout it prints the credentials and the projects referencing them, and asks. A reference is not proof of a successful build, so the wording stops at what is observed. Answering yes grants exactly the previewed pairs and closes the migration; answering no continues the upgrade, grants nothing, and prints the two ways to grant later. It reports every grant it writes. It runs once per cluster and is recorded on the `kipper-system` namespace, so a credential added later is never granted from what happens to reference it. The snapshot is frozen when the prompt is shown: an app that starts referencing a credential during the rollout window is not silently granted, because the closing pass fills only what was previewed and approved. The upgrade records the migration only once the new console-api is serving, which is what stops a half-finished upgrade closing a migration it did not finish.
+
+A scripted upgrade with no terminal on stdin declines rather than aborting: it grants nothing, prints the same list, and points at `--seed-credential-grants` for the automated grant. Pass that flag to skip the prompt and grant every referenced project without asking, mirroring how `--yes` opts in to the system-component prompt. A cluster with no undecided credentials, or one where no app references an undecided one, closes the migration automatically without asking; the fail-closed decision needs no permission.
 
 Going back to a Kipper older than 0.14 takes the allow-lists with it: that console-api replaced a credential's whole entry when the token was edited, so the next edit clears who may build with it. Rolling forward again does not bring the grants back. Run `kip credentials list` after a rollback and grant what is missing. Upgrade before curating a legacy cluster's allow-lists by hand: a credential you grant or revoke first counts as decided, and the upgrade will not add the other projects that were building with it.
 
@@ -1240,7 +1242,7 @@ list, so you can tell before you run it whether the thing you need is included.
 | kipper-authz image | Yes | — |
 | console-api RBAC | Yes | — |
 | Project operator roles (viewer, deployer, owner) | Yes | — |
-| Shared git credential allow-lists, where never set | Once, from the apps that reference them | `kip credentials allow` |
+| Shared git credential allow-lists, where never set | Once, on consent (prompt, or `--seed-credential-grants`), from the apps that reference them | `kip credentials allow` |
 | Traefik, Longhorn, KEDA, Velero, Zot | Yes | — |
 | Loki, Prometheus, Grafana | Yes, when enabled | — |
 | Security-header middleware, build isolation | Yes | — |

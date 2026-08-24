@@ -13,7 +13,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -50,123 +49,73 @@ func namespaceOfProject(name, project string) *corev1.Namespace {
 	}}
 }
 
-// The defect this exists for: a cluster installed before allow-lists denies every
-// project, so the first rebuild after an upgrade fails on an app that was
-// building perfectly well the day before.
-func TestUpgradeSeedsAnEmptyAllowListFromWhatIsAlreadyBuilding(t *testing.T) {
+// The defect this exists for: a cluster installed before allow-lists denies
+// every project, so the first rebuild after an upgrade fails on an app that was
+// building perfectly well the day before. The seeding writes what the operator
+// consented to at the preview.
+func TestSeedFillsFromTheApprovedSnapshot(t *testing.T) {
 	clientset := k8sfake.NewClientset(
 		kipperSystemUpgraded(),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	approved := map[string][]string{"forge": {"shop"}}
 	var out bytes.Buffer
 
-	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &out))
+	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &out, approved))
 
 	entries := storedEntries(t, clientset)
 	require.Len(t, entries, 1)
 	assert.True(t, entries[0].AllowsProject("shop"),
-		"the upgrade left an app that was building denied: %v", entries[0].AllowedProjects)
+		"the upgrade left an app whose grant was approved denied: %v", entries[0].AllowedProjects)
 	assert.Contains(t, out.String(), "forge")
 }
 
-// An app's own credential is not on the shared list, so nothing an app names for
-// itself can invent a grant.
-func TestUpgradeIgnoresACredentialThatIsNotShared(t *testing.T) {
-	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(),
-		namespaceOfProject("shop-prod", "shop"),
-		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
-	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "web-git-credentials"))
-
-	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
-
-	entries := storedEntries(t, clientset)
-	assert.Empty(t, entries[0].AllowedProjects,
-		"a credential the app names for itself was treated as a shared one")
-}
-
-// Membership of the list decides, in the same order the builder decides it. A
-// shared credential that happens to be named the way an app of that name would
-// name its own is still shared, and skipping it would leave exactly that app
-// refused after the upgrade that was meant to keep it building.
-func TestUpgradeSeedsASharedCredentialNamedLikeAnAppsOwn(t *testing.T) {
-	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(),
-		namespaceOfProject("shop-prod", "shop"),
-		sharedCredentialSecret(t, sharedcred.Entry{Name: "web-git-credentials", Token: "a-token"}),
-	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "web-git-credentials"))
-
-	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
-
-	entries := storedEntries(t, clientset)
-	assert.True(t, entries[0].AllowsProject("shop"),
-		"the builder resolves this name from the shared list, so the seeding has to as well")
-}
-
-func TestUpgradeLeavesACuratedAllowListAlone(t *testing.T) {
+// A credential the operator has curated is their decision. Even if the approved
+// map somehow named it, Seed skips a non-nil AllowedProjects, so the fill
+// cannot widen it.
+func TestSeedLeavesACuratedAllowListAlone(t *testing.T) {
 	clientset := k8sfake.NewClientset(
 		kipperSystemUpgraded(),
 		namespaceOfProject("shop-prod", "shop"),
 		namespaceOfProject("blog-prod", "blog"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token", AllowedProjects: []string{"blog"}}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	approved := map[string][]string{"forge": {"shop"}}
 
-	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
+	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approved))
 
 	entries := storedEntries(t, clientset)
 	assert.False(t, entries[0].AllowsProject("shop"),
 		"an upgrade widened an allow-list an admin had set")
 }
 
-// A namespace outside any project cannot name one, and an upgrade that stopped
-// there would refuse to run on a cluster with a stray namespace.
-func TestUpgradeSkipsAnAppInANamespaceWithNoProject(t *testing.T) {
-	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(),
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "stray"}},
-		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
-	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("stray", "forge"))
-
-	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
-
-	entries := storedEntries(t, clientset)
-	assert.Empty(t, entries[0].AllowedProjects)
-}
-
-// Nothing to seed is the normal case on a cluster installed since allow-lists
-// existed, and it must not print a step that did nothing.
-func TestUpgradeSaysNothingWhenThereIsNothingToSeed(t *testing.T) {
+// Nothing to seed is the normal case on a cluster whose undecided entries the
+// operator did not approve grants for, and it must not print a step that did
+// nothing.
+func TestSeedSaysNothingWhenNothingToSeed(t *testing.T) {
 	clientset := k8sfake.NewClientset(kipperSystemUpgraded(), sharedCredentialSecret(t,
 		sharedcred.Entry{Name: "forge", Token: "a-token", AllowedProjects: []string{"shop"}}))
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme())
 	var out bytes.Buffer
 
-	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &out))
+	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &out, map[string][]string{}))
 
 	assert.Empty(t, out.String())
 }
 
 // A cluster with no shared credentials at all must not have the list Secret
 // created for it by an upgrade.
-func TestUpgradeDoesNotCreateAListForAClusterWithNoSharedCredentials(t *testing.T) {
+func TestSeedDoesNotCreateAListForAClusterWithNoSharedCredentials(t *testing.T) {
 	clientset := k8sfake.NewClientset(kipperSystemUpgraded(), namespaceOfProject("shop-prod", "shop"))
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	approved := map[string][]string{"forge": {"shop"}}
 
-	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
+	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approved))
 
 	_, err := clientset.CoreV1().Secrets(sharedcred.Namespace).Get(
 		context.Background(), sharedcred.ConfigSecretName, metav1.GetOptions{})
 	assert.True(t, apierrors.IsNotFound(err), "the upgrade created a shared-credential list that did not exist")
 }
 
-// The namespace as a cluster whose console-api still replaces an allow-list
-// leaves it: no build stamped on it.
 // The upgrade waits for the console-api it just rolled to record its build.
 // A test that exercises the pass without one should not wait it out.
 func noStampWait(t *testing.T) {
@@ -212,9 +161,8 @@ func TestUpgradeSeedsOncePerCluster(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token", AllowedProjects: []string{"blog"}}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "later"))
 
-	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
+	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, map[string][]string{}))
 	require.True(t, seeded(t, clientset), "the cluster was not recorded as migrated")
 
 	// What the old console-api writes in the window: an entry with no list.
@@ -223,13 +171,16 @@ func TestUpgradeSeedsOncePerCluster(t *testing.T) {
 			return append(entries, sharedcred.Entry{Name: "later", Token: "another-token"}), nil
 		}))
 
-	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
+	// A subsequent seed on the same cluster must not re-fill the freshly-added
+	// entry from any snapshot: the marker is what stops it.
+	approved := map[string][]string{"later": {"shop"}}
+	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approved))
 
 	entries := storedEntries(t, clientset)
 	for _, entry := range entries {
 		if entry.Name == "later" {
 			assert.Empty(t, entry.AllowedProjects,
-				"an app reference became a grant on a credential created after the migration")
+				"an entry created after the migration was filled by a later seed")
 		}
 	}
 }
@@ -239,9 +190,8 @@ func TestUpgradeSeedsOncePerCluster(t *testing.T) {
 // still a candidate for the inference.
 func TestUpgradeRecordsTheMigrationOnAClusterWithNoSharedCredentials(t *testing.T) {
 	clientset := k8sfake.NewClientset(kipperSystemUpgraded(), namespaceOfProject("shop-prod", "shop"))
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
 
-	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
+	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, map[string][]string{}))
 
 	assert.True(t, seeded(t, clientset), "a cluster with nothing to seed was left seedable")
 }
@@ -251,16 +201,17 @@ func TestUpgradeRecordsTheMigrationOnAClusterWithNoSharedCredentials(t *testing.
 // recorded before that is gone turns a rollout race into a build refused for
 // good, because every later upgrade reads the marker and leaves the credential
 // alone. Seeding twice is what repairs it, and only the second pass closes the
-// migration.
+// migration. Both fills draw from the same approved snapshot the consent
+// wrapper captured before the rollout.
 func TestUpgradeRepairsAGrantTheOldWriterErasedDuringTheRollout(t *testing.T) {
 	clientset := k8sfake.NewClientset(
 		kipperSystemUpgraded(),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	approved := map[string][]string{"forge": {"shop"}}
 
-	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
+	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approved))
 	require.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"))
 	require.False(t, seeded(t, clientset), "the migration was closed while the old writer was still serving")
 
@@ -272,7 +223,7 @@ func TestUpgradeRepairsAGrantTheOldWriterErasedDuringTheRollout(t *testing.T) {
 			return entries, nil
 		}))
 
-	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
+	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approved))
 
 	assert.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"),
 		"a grant erased during the rollout stayed erased")
@@ -290,9 +241,9 @@ func TestUpgradeDoesNotCloseTheMigrationWhileTheOldWriterServes(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	approved := map[string][]string{"forge": {"shop"}}
 
-	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
+	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approved))
 
 	assert.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"),
 		"the grant that keeps builds working was not written")
@@ -300,35 +251,41 @@ func TestUpgradeDoesNotCloseTheMigrationWhileTheOldWriterServes(t *testing.T) {
 		"the migration was closed against a console-api that still erases allow-lists")
 }
 
-// The pass that runs while the old writer is still serving fills grants and
-// decides nothing. A credential nothing references yet is one an app may be
-// pointed at a second later, under rules that still allow it, and a decision
-// recorded now is one the later pass will not revisit.
-func TestUpgradeLeavesAnUnusedCredentialUndecidedBeforeTheRollout(t *testing.T) {
+// The snapshot is frozen at consent time. An app that appears during the
+// rollout window points at what was undecided, and the closing pass must not
+// grant it silently: consent covered a specific credential/project set, and
+// the plan this exists for turns exactly on nothing outside that set becoming
+// a grant.
+func TestUpgradeFreezesTheApprovedSnapshotAgainstAppsThatArriveDuringRollout(t *testing.T) {
 	clientset := k8sfake.NewClientset(
 		kipperSystemUpgraded(),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme())
+	// Consent was captured before the rollout with nothing referenced.
+	approved := map[string][]string{}
 
-	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, dyn, &bytes.Buffer{}))
+	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approved))
 	require.Nil(t, storedEntries(t, clientset)[0].AllowedProjects,
 		"a credential nothing referenced yet was decided before the rollout")
 
-	// The app arrives during the rollout window, still building under the old
-	// rules, and the pass that runs afterwards has to see it.
-	withApp := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
-	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, withApp, &bytes.Buffer{}))
+	// An app arrives during the rollout window pointing at the undecided
+	// credential. Under the new consent model this is a reference, not a
+	// grant.
+	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approved))
 
-	assert.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"),
-		"an app that was building through the rollout was left refused")
+	entry := storedEntries(t, clientset)[0]
+	assert.NotNil(t, entry.AllowedProjects,
+		"the closing pass left the credential undecided instead of deciding it as nobody")
+	assert.Empty(t, entry.AllowedProjects,
+		"the closing pass granted an app that arrived after consent")
 	assert.True(t, seeded(t, clientset))
 }
 
-// Deciding is what Seed will not revisit, so deciding against a console-api that
-// still allows every build freezes a snapshot of a cluster still changing under
-// the old rules. The pass that cannot see the new writer fills and stops there.
+// Deciding is what Seed will not revisit, so deciding against a console-api
+// that still allows every build freezes a snapshot of a cluster still changing
+// under the old rules. The pass that cannot see the new writer fills and stops
+// there.
 func TestUpgradeDecidesNothingWhileTheOldWriterServes(t *testing.T) {
 	noStampWait(t)
 	clientset := k8sfake.NewClientset(
@@ -336,10 +293,9 @@ func TestUpgradeDecidesNothingWhileTheOldWriterServes(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "archive", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme())
 	var out bytes.Buffer
 
-	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, dyn, &out))
+	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &out, map[string][]string{}))
 
 	require.Nil(t, storedEntries(t, clientset)[0].AllowedProjects,
 		"a credential nothing references yet was decided against a writer that still allows every build")
@@ -348,9 +304,9 @@ func TestUpgradeDecidesNothingWhileTheOldWriterServes(t *testing.T) {
 		"the upgrade left the migration open without saying which credentials are waiting")
 }
 
-// The app that arrives while the old writer is still serving, on a cluster whose
-// upgrade could not finish. It builds fine under the old rules, and the upgrade
-// that does replace the writer has to seed it rather than refuse it.
+// The app that arrives while the old writer is still serving, on a cluster
+// whose upgrade could not finish. Consent at the next upgrade captures it and
+// the closing pass fills what was approved.
 func TestUpgradeSeedsAnAppThatArrivedWhileTheMigrationCouldNotClose(t *testing.T) {
 	noStampWait(t)
 	clientset := k8sfake.NewClientset(
@@ -358,8 +314,9 @@ func TestUpgradeSeedsAnAppThatArrivedWhileTheMigrationCouldNotClose(t *testing.T
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "archive", Token: "a-token"}),
 	)
+	// First upgrade: nothing referenced, migration cannot close (no stamp).
 	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset,
-		dynamicfake.NewSimpleDynamicClient(appScheme()), &bytes.Buffer{}))
+		&bytes.Buffer{}, map[string][]string{}))
 
 	// A week later: the app is pointed at the credential, and the next upgrade
 	// delivers the console-api that keeps allow-lists.
@@ -369,18 +326,20 @@ func TestUpgradeSeedsAnAppThatArrivedWhileTheMigrationCouldNotClose(t *testing.T
 	_, err = clientset.CoreV1().Namespaces().Update(context.Background(), ns, metav1.UpdateOptions{})
 	require.NoError(t, err)
 
-	withApp := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "archive"))
-	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, withApp, &bytes.Buffer{}))
+	// The second upgrade's consent captures the app that has now been
+	// referencing the credential for a week and the operator approves it.
+	approved := map[string][]string{"archive": {"shop"}}
+	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approved))
 
 	assert.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"),
-		"the upgrade refused an app that had been building since the one before it")
+		"the second upgrade refused a reference the operator had approved")
 	assert.True(t, seeded(t, clientset))
 }
 
 // The stamp has to be evidence about the console-api serving now. Left from a
-// build that served weeks ago, it would vouch for a writer an operator has since
-// pinned back during an incident, and the upgrade would close the migration
-// against the one that clears allow-lists.
+// build that served weeks ago, it would vouch for a writer an operator has
+// since pinned back during an incident, and the upgrade would close the
+// migration against the one that clears allow-lists.
 func TestUpgradeClearsTheStampBeforeTheRollout(t *testing.T) {
 	clientset := k8sfake.NewClientset(kipperSystemUpgraded())
 
@@ -416,16 +375,15 @@ func TestUpgradeWaitsForTheConsoleAPIToRecordItsBuild(t *testing.T) {
 	assert.True(t, keeps, "the upgrade gave up before the pod it had just started recorded its build")
 }
 
-// A cluster with no shared credentials has nothing waiting on a decision, and a
-// warning about allow-lists it does not have is noise on every upgrade until the
-// images publish.
+// A cluster with no shared credentials has nothing waiting on a decision, and
+// a warning about allow-lists it does not have is noise on every upgrade until
+// the images publish.
 func TestUpgradeSaysNothingAboutAMigrationWithNothingInIt(t *testing.T) {
 	noStampWait(t)
 	clientset := k8sfake.NewClientset(kipperSystem(), namespaceOfProject("shop-prod", "shop"))
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme())
 	var out bytes.Buffer
 
-	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, dyn, &out))
+	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &out, map[string][]string{}))
 
 	assert.Empty(t, out.String())
 }
@@ -441,10 +399,11 @@ func TestUpgradeNamesOnlyTheCredentialsStillWaiting(t *testing.T) {
 			sharedcred.Entry{Name: "forge", Token: "a-token"},
 			sharedcred.Entry{Name: "archive", Token: "another-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	// Consent granted only forge; archive stays undecided.
+	approved := map[string][]string{"forge": {"shop"}}
 	var out bytes.Buffer
 
-	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, dyn, &out))
+	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &out, approved))
 
 	printed := out.String()
 	assert.Contains(t, printed, "archive", "the credential still waiting was not named")
@@ -452,21 +411,44 @@ func TestUpgradeNamesOnlyTheCredentialsStillWaiting(t *testing.T) {
 		"a credential this pass granted was reported as still waiting")
 }
 
-// On a migrated cluster every writer records a decision, so a credential with no
-// list at all has been edited by an older console-api or restored from an older
-// copy. The upgrade says so and grants nothing: filling it from the apps that
-// reference it would grant a project that had been revoked while its app still
-// named the credential, which is the same shape.
+// The declined path reports its own reason. Blaming the console-api stamp
+// after the operator has said no would send them into a repair for something
+// that is not broken.
+func TestUpgradeReportsConsentDeclinedOnPassTwo(t *testing.T) {
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		namespaceOfProject("shop-prod", "shop"),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
+	)
+	var out bytes.Buffer
+
+	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &out, nil))
+
+	printed := out.String()
+	assert.Contains(t, printed, "forge", "the credential still waiting was not named")
+	assert.Contains(t, printed, "consent was declined",
+		"the operator was told the wrong reason for a migration they declined")
+	assert.NotContains(t, printed, "has not recorded its build",
+		"the declined path blamed the console-api stamp")
+	assert.False(t, seeded(t, clientset), "a declined pass recorded the migration")
+	assert.Nil(t, storedEntries(t, clientset)[0].AllowedProjects,
+		"a declined pass wrote a grant anyway")
+}
+
+// On a migrated cluster every writer records a decision, so a credential with
+// no list at all has been edited by an older console-api or restored from an
+// older copy. The upgrade says so and grants nothing: filling it from the apps
+// that reference it would grant a project that had been revoked while its app
+// still named the credential, which is the same shape.
 func TestUpgradeNamesACredentialWhoseAllowListWasCleared(t *testing.T) {
 	clientset := k8sfake.NewClientset(
 		kipperSystemMigrated(),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
 	var out bytes.Buffer
 
-	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, dyn, &out))
+	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &out, map[string][]string{}))
 
 	assert.Contains(t, out.String(), "forge", "a cleared allow-list passed in silence")
 	assert.Contains(t, out.String(), "kip credentials allow")
@@ -484,16 +466,15 @@ func TestUpgradeSurvivesAFailureToReadTheListForAReport(t *testing.T) {
 	})
 	var out bytes.Buffer
 
-	err := closeSharedCredentialGrants(context.Background(), clientset,
-		dynamicfake.NewSimpleDynamicClient(appScheme()), &out)
+	err := closeSharedCredentialGrants(context.Background(), clientset, &out, map[string][]string{})
 
 	require.NoError(t, err, "an advisory read failure stopped the upgrade")
 	assert.Contains(t, out.String(), "Could not check", "a skipped check passed as a clean run")
 }
 
-// The same softening on the other path, which the twin test cannot reach: there
-// the report's read is the third, after the fill's own read and its write, so a
-// reactor that fails every read kills the fill instead.
+// The same softening on the other path, which the twin test cannot reach:
+// there the report's read is the third, after the fill's own read and its
+// write, so a reactor that fails every read kills the fill instead.
 func TestUpgradeSurvivesAFailureToReadTheListForTheOpenMigrationReport(t *testing.T) {
 	noStampWait(t)
 	clientset := k8sfake.NewClientset(
@@ -511,8 +492,8 @@ func TestUpgradeSurvivesAFailureToReadTheListForTheOpenMigrationReport(t *testin
 	})
 	var out bytes.Buffer
 
-	err := closeSharedCredentialGrants(context.Background(), clientset,
-		dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge")), &out)
+	err := closeSharedCredentialGrants(context.Background(), clientset, &out,
+		map[string][]string{"forge": {"shop"}})
 
 	require.NoError(t, err, "an advisory read failure stopped the upgrade before its trust material")
 	assert.Contains(t, out.String(), "Could not check", "a skipped check passed as a clean run")

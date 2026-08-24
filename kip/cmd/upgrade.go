@@ -54,6 +54,12 @@ because a chart upgrade can fail mid-rollout and disrupt running
 workloads. Pass --yes to skip the prompt (e.g. for automation), or
 --skip-system to upgrade only the Kipper console layer.
 
+On a cluster old enough to hold shared git credentials with no
+allow-list, the upgrade prints which apps reference each one and asks
+before granting them. Pass --seed-credential-grants to skip that
+prompt (e.g. for automation); a scripted upgrade without it completes
+and prints the flag rather than granting on inference.
+
 The cluster's own certificate authority and the trust anchor the API
 server verifies logins against are reconciled over SSH on every run,
 including with --skip-system, because they are this cluster's identity
@@ -62,7 +68,8 @@ rather than a component version.
 Examples:
   kip upgrade
   kip upgrade --skip-system
-  kip upgrade --yes`,
+  kip upgrade --yes
+  kip upgrade --seed-credential-grants`,
 	SilenceUsage: true,
 	RunE:         runUpgrade,
 }
@@ -70,6 +77,7 @@ Examples:
 func init() {
 	upgradeCmd.Flags().Bool("skip-system", false, "skip cluster system components (Traefik, Longhorn, KEDA, etc.). Upgrade only Kipper CRDs and console")
 	upgradeCmd.Flags().Bool("yes", false, "skip the confirmation prompt before upgrading system components")
+	upgradeCmd.Flags().Bool("seed-credential-grants", false, "grant each shared git credential the projects whose apps already reference it, without asking. Skips the pre-rollout prompt on a legacy cluster; a no-op everywhere else")
 	upgradeCmd.Flags().String("ssh-key", "", "path to SSH private key for the host; needed by every upgrade, including --skip-system, because the cluster's trust material is reconciled over SSH (overrides cluster.ssh_key in config and KIP_SSH_KEY env)")
 	rootCmd.AddCommand(upgradeCmd)
 }
@@ -77,6 +85,7 @@ func init() {
 func runUpgrade(cmd *cobra.Command, _ []string) error {
 	skipSystem, _ := cmd.Flags().GetBool("skip-system")
 	autoYes, _ := cmd.Flags().GetBool("yes")
+	seedGrants, _ := cmd.Flags().GetBool("seed-credential-grants")
 	sshKey, _ := cmd.Flags().GetString("ssh-key")
 
 	cluster, k8sClient, err := loadCurrentCluster()
@@ -107,12 +116,31 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("recording gateway identity: %w", err)
 	}
 
+	// Ask before granting: reference is not proof, and shared credential names
+	// are predictable enough that an app pointed at the wrong one used to eat
+	// one failed build and get the permission on the next upgrade. Deciding
+	// this once, before either pass, freezes the snapshot both passes fill
+	// from: an app pointed at an undecided credential during the rollout
+	// window is a reference, not a grant, and turning it into one would be the
+	// exact defect this exists to prevent.
+	approvedGrants, err := credentialSeedConsent(
+		ctx, clientset, k8sClient.Dynamic(), os.Stdout,
+		seedGrants,
+		term.IsTerminal(int(os.Stdin.Fd())),
+		func() (bool, error) {
+			return confirmInteractiveNonFatal("  Grant these credentials on their apps' projects? [y/N] ")
+		},
+	)
+	if err != nil {
+		return err
+	}
+
 	// Before the new console-api serves builds: a shared credential written
 	// before allow-lists existed allows nobody, so an upgrade that restarted the
 	// builder first would refuse builds that were working until the seeding
 	// caught up. It runs again after the rollout, and only then is the cluster
 	// recorded as migrated.
-	if err := seedSharedCredentialGrants(ctx, clientset, k8sClient.Dynamic(), os.Stdout); err != nil {
+	if err := seedSharedCredentialGrants(ctx, clientset, os.Stdout, approvedGrants); err != nil {
 		return err
 	}
 
@@ -228,7 +256,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	// now is the cluster recorded as migrated: a grant the old pod replaced
 	// while it was still serving is written back here, where marking the
 	// migration before this ran would have left the build refused for good.
-	if err := closeSharedCredentialGrants(ctx, clientset, k8sClient.Dynamic(), os.Stdout); err != nil {
+	if err := closeSharedCredentialGrants(ctx, clientset, os.Stdout, approvedGrants); err != nil {
 		return err
 	}
 
@@ -966,6 +994,23 @@ func runSystemUpgrade(host, explicitKey, fallbackKey, domain string, dnsResolver
 func confirmInteractive(prompt string) (bool, error) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return false, fmt.Errorf("stdin is not a terminal. Pass --yes to confirm system upgrade non-interactively, or --skip-system")
+	}
+	fmt.Print(prompt)
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return false, fmt.Errorf("reading confirmation: %w", err)
+	}
+	return parseYesNo(line), nil
+}
+
+// confirmInteractiveNonFatal is confirmInteractive's sibling for a prompt the
+// upgrade must survive without a TTY. A scripted run declines rather than
+// aborts, so the upgrade completes and the caller prints how to answer the
+// prompt next time. Interactive runs read y/N through the same path.
+func confirmInteractiveNonFatal(prompt string) (bool, error) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return false, nil
 	}
 	fmt.Print(prompt)
 	reader := bufio.NewReader(os.Stdin)

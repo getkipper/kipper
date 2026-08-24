@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,14 +19,15 @@ import (
 	"github.com/getkipper/kipper/kip/internal/deployer"
 )
 
-// seedSharedCredentialGrants allows the projects whose apps reference a shared
-// git credential to keep building with it.
+// seedSharedCredentialGrants writes the credential/project pairs the operator
+// approved onto the entries that still have no allow-list.
 //
 // A shared credential names the projects that may build with it, and one with no
 // projects named allows none. Credentials written before that list existed have
 // none, so upgrading such a cluster stops every build that used one, and the
 // operator meets it as a refused rebuild rather than as anything the upgrade
-// said. What the cluster is already doing is written down here instead.
+// said. What the cluster is already doing is written down here instead — but
+// only what the operator consented to, and only for entries nobody has decided.
 //
 // Only a list nobody has decided is filled. A list somebody has curated is their
 // decision and an upgrade does not get to widen it.
@@ -39,12 +41,21 @@ import (
 //
 // Seeding itself is idempotent and safe to run more than once in an upgrade,
 // which is what repairs a grant the old writer erased while it was still up.
-func seedSharedCredentialGrants(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, out io.Writer) error {
-	return fillSharedCredentialGrants(ctx, clientset, dyn, out, false)
+//
+// approved is the snapshot captured by credentialSeedConsent before the
+// rollout. nil means consent was declined; nothing is filled. A non-nil map,
+// even empty, is a permission to proceed: the empty case is the auto-close
+// path where nothing was referenced at consent time.
+func seedSharedCredentialGrants(ctx context.Context, clientset kubernetes.Interface, out io.Writer, approved map[string][]string) error {
+	if approved == nil {
+		return nil
+	}
+	return fillSharedCredentialGrants(ctx, clientset, out, approved, false)
 }
 
-// closeSharedCredentialGrants seeds and then decides everything still
-// undecided, which ends the migration for this cluster.
+// closeSharedCredentialGrants fills the approved grants a second time, then
+// decides everything still undecided, which ends the migration for this
+// cluster.
 //
 // Only this pass decides, and only when the console-api serving the cluster is
 // one that keeps an allow-list. Deciding is what Seed will not revisit, so
@@ -55,7 +66,16 @@ func seedSharedCredentialGrants(ctx context.Context, clientset kubernetes.Interf
 //
 // Without that evidence the pass still fills, since repairing a grant the old
 // writer erased is wanted either way, and says why it stopped there.
-func closeSharedCredentialGrants(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, out io.Writer) error {
+//
+// approved is nil when consent was declined; the migration then stays open and
+// reportConsentDeclined names what is still waiting and how to grant it. A
+// non-nil map may still be empty, which is the auto-close path.
+//
+// Live app usage is not read here. What can be granted is exactly what the
+// operator saw and approved at consent time: an app that arrived during the
+// rollout is a reference under the new rules, and the plan this pass belongs
+// to exists to stop a reference becoming a grant on its own.
+func closeSharedCredentialGrants(ctx context.Context, clientset kubernetes.Interface, out io.Writer, approved map[string][]string) error {
 	done, err := grantsAlreadySeeded(ctx, clientset)
 	if err != nil {
 		return err
@@ -63,11 +83,14 @@ func closeSharedCredentialGrants(ctx context.Context, clientset kubernetes.Inter
 	if done {
 		return reportClearedAllowLists(ctx, clientset, out)
 	}
+	if approved == nil {
+		return reportConsentDeclined(ctx, clientset, out)
+	}
 	stamped, err := consoleAPIKeepsGrants(ctx, clientset)
 	if err != nil {
 		return err
 	}
-	if err := fillSharedCredentialGrants(ctx, clientset, dyn, out, stamped); err != nil {
+	if err := fillSharedCredentialGrants(ctx, clientset, out, approved, stamped); err != nil {
 		return err
 	}
 	if !stamped {
@@ -76,7 +99,13 @@ func closeSharedCredentialGrants(ctx context.Context, clientset kubernetes.Inter
 	return recordGrantsSeeded(ctx, clientset)
 }
 
-func fillSharedCredentialGrants(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, out io.Writer, closing bool) error {
+// fillSharedCredentialGrants writes approved into every entry that still has
+// no allow-list, and — when closing — decides the rest as nobody.
+//
+// It never reads live app usage. Its job is to make the stored list match what
+// was approved, and to close what stayed undecided when the writer that
+// erased lists is gone.
+func fillSharedCredentialGrants(ctx context.Context, clientset kubernetes.Interface, out io.Writer, approved map[string][]string, closing bool) error {
 	done, err := grantsAlreadySeeded(ctx, clientset)
 	if err != nil {
 		return err
@@ -93,37 +122,35 @@ func fillSharedCredentialGrants(ctx context.Context, clientset kubernetes.Interf
 		return nil
 	}
 
-	shared := make(map[string]bool, len(stored))
-	for _, entry := range stored {
-		shared[entry.Name] = true
-	}
-	usage, err := sharedCredentialUsage(ctx, clientset, dyn, shared)
-	if err != nil {
-		return err
-	}
-
 	var seeded []string
 	if err := sharedcred.Update(ctx, clientset, func(entries []sharedcred.Entry) ([]sharedcred.Entry, error) {
-		updated, filled, _ := sharedcred.Seed(entries, usage)
+		updated, filled, _ := sharedcred.Seed(entries, approved)
 		seeded = filled
 		if closing {
 			updated, _ = sharedcred.CloseUndecided(updated)
 		}
 		return updated, nil
 	}); err != nil {
-		return fmt.Errorf("granting the projects already building with a shared credential: %w", err)
+		return fmt.Errorf("writing the approved shared credential grants: %w", err)
 	}
 
+	sort.Strings(seeded)
 	for _, name := range seeded {
-		_, _ = fmt.Fprintf(out, "  ✔  Shared credential %s now allows %s\n", name, strings.Join(usage[name], ", "))
+		projects := append([]string(nil), approved[name]...)
+		sort.Strings(projects)
+		_, _ = fmt.Fprintf(out, "  ✔  Shared credential %s now allows %s\n", name, strings.Join(projects, ", "))
 	}
 	return nil
 }
 
-// reportMigrationLeftOpen says which credentials are still waiting on a decision,
-// and stays quiet when none are: an upgrade that grants nothing and decides
-// nothing has nothing to report, and a warning about allow-lists reads oddly on a
-// cluster that has none.
+// reportMigrationLeftOpen says which credentials are still waiting on a
+// decision because the console-api that keeps allow-lists is not yet the one
+// serving. Its wording is specific to that cause; the declined-consent case
+// uses reportConsentDeclined.
+//
+// It stays quiet when nothing is undecided: an upgrade that grants nothing and
+// decides nothing has nothing to report, and a warning about allow-lists reads
+// oddly on a cluster that has none.
 func reportMigrationLeftOpen(ctx context.Context, clientset kubernetes.Interface, out io.Writer) error {
 	stored, err := sharedcred.Load(ctx, clientset)
 	if err != nil {
@@ -142,6 +169,35 @@ func reportMigrationLeftOpen(ctx context.Context, clientset kubernetes.Interface
 	_, _ = fmt.Fprintf(out, "  !   Still to decide who may build with %s: the console-api serving this\n"+
 		"      cluster has not recorded its build, so this upgrade has not replaced the\n"+
 		"      one that clears allow-lists. The next upgrade finishes it.\n",
+		strings.Join(undecided, ", "))
+	return nil
+}
+
+// reportConsentDeclined names the credentials that stay undecided because the
+// operator declined consent, and repeats the two ways to grant later.
+//
+// It is separate from reportMigrationLeftOpen because the two states share a
+// shape and nothing else: the console-api may be perfectly current, and the
+// next upgrade will ask again rather than finish anything.
+func reportConsentDeclined(ctx context.Context, clientset kubernetes.Interface, out io.Writer) error {
+	stored, err := sharedcred.Load(ctx, clientset)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "  !   Could not check which shared credentials are still undecided: %v\n", err)
+		return nil
+	}
+	var undecided []string
+	for _, entry := range stored {
+		if entry.AllowedProjects == nil {
+			undecided = append(undecided, entry.Name)
+		}
+	}
+	if len(undecided) == 0 {
+		return nil
+	}
+	_, _ = fmt.Fprintf(out, "  !   Still to decide who may build with %s: consent was declined this run,\n"+
+		"      so no reference was turned into a grant. Re-run 'kip upgrade\n"+
+		"      --seed-credential-grants' to grant every referenced project, or\n"+
+		"      'kip credentials allow <name> --project <project>' per pair.\n",
 		strings.Join(undecided, ", "))
 	return nil
 }
@@ -282,12 +338,16 @@ func recordGrantsSeeded(ctx context.Context, clientset kubernetes.Interface) err
 }
 
 // sharedCredentialUsage maps each shared credential to the projects whose apps
-// build with it.
+// reference it.
 //
 // It reads the apps because the cluster this runs for has no other record: the
-// grant it is reconstructing is exactly what was never written down. Only names
-// on the shared list count, so an app's own credential cannot invent a grant
-// nobody asked for.
+// grant it is reconstructing is exactly what was never written down. A
+// reference is what can be observed; whether the app has ever built with the
+// credential is not, so the caller is the consent wrapper, which describes the
+// pairs it returns as references rather than as grants.
+//
+// Only names on the shared list count, so an app's own credential cannot
+// invent a grant nobody asked for.
 func sharedCredentialUsage(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, shared map[string]bool) (map[string][]string, error) {
 	namespaces, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
 		LabelSelector: labels.ManagedBy + "=" + labels.Kipper,
