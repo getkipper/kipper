@@ -419,7 +419,7 @@ func (a *Apps) triggerFirstBuild(app *kipperv1.App) {
 	defer cancel()
 
 	commit := fmt.Sprintf("initial-%d", time.Now().Unix())
-	_, err := builder.CreateBuildJob(ctx, a.Client, app, commit)
+	_, err := builder.CreateBuildJob(ctx, a.Client, a.CRClient, app, commit)
 	if err != nil {
 		fmt.Printf("failed to trigger first build for %s/%s: %v\n", app.Namespace, app.Name, err)
 	}

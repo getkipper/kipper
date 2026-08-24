@@ -123,7 +123,7 @@ func TestSeedConsentClosesAutomaticallyWhenNothingIsReferenced(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme())
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), owningProject("shop-prod"))
 	var out bytes.Buffer
 
 	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
@@ -144,7 +144,8 @@ func TestSeedConsentDeclinesInAScriptWithoutTheFlag(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
+		gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
 	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
@@ -167,7 +168,8 @@ func TestSeedConsentGrantsUnderTheFlag(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
+		gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
 	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, true, false, refuseToConfirm(t))
@@ -185,7 +187,8 @@ func TestSeedConsentGrantsOnYes(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
+		gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
 	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, true,
@@ -204,7 +207,8 @@ func TestSeedConsentDeclinesOnNo(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
+		gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
 	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, true,
@@ -214,6 +218,22 @@ func TestSeedConsentDeclinesOnNo(t *testing.T) {
 	assert.Nil(t, approved)
 	assert.Contains(t, out.String(), "--seed-credential-grants",
 		"a declined prompt did not print how to answer yes next time")
+}
+
+// projectNamed builds a Project CR under a chosen name that claims the given
+// namespaces. owningProject hardcodes the name to "shop"; this variant is for
+// tests that need more than one project on the same cluster.
+func projectNamed(project string, namespaces ...string) *unstructured.Unstructured {
+	claims := make([]any, 0, len(namespaces))
+	for _, ns := range namespaces {
+		claims = append(claims, map[string]any{"name": ns, "uid": ns + "-uid"})
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kipper.run/v1alpha1",
+		"kind":       "Project",
+		"metadata":   map[string]any{"name": project},
+		"status":     map[string]any{"namespaceClaims": claims},
+	}}
 }
 
 // The preview drives an operator's decision, so it must name the credentials
@@ -233,6 +253,8 @@ func TestSeedConsentPreviewNamesEveryReferencedCredentialAndNoOther(t *testing.T
 	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
 		gitAppNamed("shop-prod", "shop-web", "forge"),
 		gitAppNamed("blog-prod", "blog-web", "archive"),
+		projectNamed("shop", "shop-prod"),
+		projectNamed("blog", "blog-prod"),
 	)
 	var out bytes.Buffer
 
@@ -284,7 +306,8 @@ func TestSeedConsentSaysNothingOnAMigratedCluster(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
+		gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
 	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
@@ -311,6 +334,7 @@ func TestSeedConsentIgnoresCuratedAllowLists(t *testing.T) {
 	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
 		gitAppNamed("shop-prod", "storefront", "forge"),
 		gitAppNamed("shop-prod", "archiver", "archive"),
+		owningProject("shop-prod"),
 	)
 	var out bytes.Buffer
 
@@ -333,7 +357,8 @@ func TestSeedConsentIgnoresACredentialThatIsNotShared(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "web-git-credentials"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
+		gitApp("shop-prod", "web-git-credentials"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
 	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
@@ -355,7 +380,8 @@ func TestSeedConsentTreatsASharedCredentialNamedLikeAnAppsOwnAsShared(t *testing
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "web-git-credentials", Token: "a-token"}),
 	)
-	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "web-git-credentials"))
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
+		gitApp("shop-prod", "web-git-credentials"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
 	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, true, false, refuseToConfirm(t))
@@ -383,4 +409,62 @@ func TestSeedConsentSkipsAnAppInANamespaceWithNoProject(t *testing.T) {
 	require.NotNil(t, approved)
 	assert.Empty(t, approved,
 		"a stray namespace's app inferred a grant nobody could have approved")
+}
+
+// The population this consent covers on the pre-claims side: a cluster
+// upgrading from a build that wrote no claims at all, where the only record a
+// project has of holding a namespace is the older status.namespaces list. The
+// wrapper must accept that record, or every build on that cluster stops.
+func TestSeedConsentAcceptsAPreClaimsProjectRecord(t *testing.T) {
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		namespaceOfProject("shop-prod", "shop"),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
+	)
+	preClaims := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kipper.run/v1alpha1",
+		"kind":       "Project",
+		"metadata":   map[string]any{"name": "shop"},
+		"status":     map[string]any{"namespaces": []any{"shop-prod"}},
+	}}
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"), preClaims)
+	var out bytes.Buffer
+
+	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, true, false, refuseToConfirm(t))
+
+	require.NoError(t, err)
+	require.NotNil(t, approved)
+	assert.Equal(t, []string{"shop"}, approved["forge"],
+		"a cluster with no claims yet was left with a credential nobody may build with")
+}
+
+// And the label on its own still grants nothing, which is the half the record
+// is there to make decidable. The consent wrapper leaves the pair out of the
+// approved map and calls it a missed grant instead.
+func TestSeedConsentReportsAMissedGrantForANamespaceNoRecordCovers(t *testing.T) {
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		namespaceOfProject("victim-prod", "attacker"),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
+	)
+	attacker := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kipper.run/v1alpha1",
+		"kind":       "Project",
+		"metadata":   map[string]any{"name": "attacker"},
+		"status":     map[string]any{},
+	}}
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("victim-prod", "forge"), attacker)
+	var out bytes.Buffer
+
+	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, true, false, refuseToConfirm(t))
+
+	require.NoError(t, err)
+	require.NotNil(t, approved)
+	assert.Empty(t, approved["forge"],
+		"a namespace pointed at a project by its label alone was previewed for a standing grant to a shared credential")
+	printed := out.String()
+	assert.Contains(t, printed, "victim-prod",
+		"a namespace whose project could not be proven was not named as a missed grant")
+	assert.Contains(t, printed, "kip credentials allow forge --project attacker",
+		"the notice does not say how to put it right")
 }

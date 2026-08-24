@@ -10,9 +10,12 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/getkipper/kipper/console-api/internal/nsowner"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 )
 
@@ -26,6 +29,7 @@ const requestUsageWindow = 72 * time.Hour
 // Traefik's Prometheus metrics.
 type RequestUsage struct {
 	Client            kubernetes.Interface
+	CRClient          crclient.Client
 	PrometheusBaseURL string
 
 	// PromQueryVec is injectable for tests; when nil a real client against
@@ -65,12 +69,28 @@ func (h *RequestUsage) Get(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	nsList, err := h.Client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
+	labelled, err := h.Client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("%s=%s", kipperlabels.Project, projectName),
 	})
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("listing project namespaces: %v", err))
 		return
+	}
+	// The label gathers the candidates and does not decide. What is summed here
+	// is one project's traffic, and a namespace pointed at this project by
+	// somebody who can write namespace metadata would have its request counts
+	// reported as this project's. The owner lookup decides, the same way every
+	// other project-scoped read does.
+	nsList := &corev1.NamespaceList{}
+	for i := range labelled.Items {
+		owns, err := nsowner.OwnsNamespace(ctx, h.CRClient, projectName, &labelled.Items[i])
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("establishing which namespaces are project %s's: %v", projectName, err))
+			return
+		}
+		if owns {
+			nsList.Items = append(nsList.Items, labelled.Items[i])
+		}
 	}
 
 	resp := RequestUsageResponse{

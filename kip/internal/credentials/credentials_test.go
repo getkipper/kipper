@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/getkipper/kipper/controller/pkg/registrycred"
 	"github.com/getkipper/kipper/controller/pkg/sharedcred"
 )
 
@@ -26,12 +27,12 @@ func seedGit(t *testing.T, client *fake.Clientset, entries []sharedcred.Entry) {
 	require.NoError(t, err)
 }
 
-func seedRegistries(t *testing.T, client *fake.Clientset, entries []registryEntry) {
+func seedRegistries(t *testing.T, client *fake.Clientset, entries []registrycred.Entry) {
 	t.Helper()
 	data, err := json.Marshal(entries) //nolint:gosec // test fixture: marshals a struct with a Password field whose value is a fake test credential
 	require.NoError(t, err)
 	_, err = client.CoreV1().Secrets(systemNamespace).Create(context.Background(), &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: registryConfigName, Namespace: systemNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: registrycred.ConfigSecretName, Namespace: registrycred.Namespace},
 		Data:       map[string][]byte{"registries": data},
 	}, metav1.CreateOptions{})
 	require.NoError(t, err)
@@ -88,7 +89,7 @@ func TestList_BothTypes(t *testing.T) {
 	seedGit(t, client, []sharedcred.Entry{
 		{Name: "git-acme-tools", Server: "git.example.com", Username: "kipper-deploy", Token: "glpa-abc123"},
 	})
-	seedRegistries(t, client, []registryEntry{
+	seedRegistries(t, client, []registrycred.Entry{
 		{Name: "ghcr-io", Server: "ghcr.io", Username: "acme", Password: "ghp_xyz789"},
 	})
 
@@ -111,7 +112,7 @@ func TestList_TypeFilter(t *testing.T) {
 	seedGit(t, client, []sharedcred.Entry{
 		{Name: "git-acme-tools", Server: "git.example.com", Username: "u", Token: "t"},
 	})
-	seedRegistries(t, client, []registryEntry{
+	seedRegistries(t, client, []registrycred.Entry{
 		{Name: "ghcr-io", Server: "ghcr.io", Username: "u", Password: "p"},
 	})
 
@@ -140,7 +141,7 @@ func TestGet_GitOnly(t *testing.T) {
 
 func TestGet_RegistryOnly(t *testing.T) {
 	client := fake.NewSimpleClientset() //nolint:staticcheck // matches project test pattern
-	seedRegistries(t, client, []registryEntry{
+	seedRegistries(t, client, []registrycred.Entry{
 		{Name: "ghcr-io", Server: "ghcr.io", Username: "acme", Password: "ghp_xyz789"},
 	})
 
@@ -155,7 +156,7 @@ func TestGet_AmbiguousName(t *testing.T) {
 	seedGit(t, client, []sharedcred.Entry{
 		{Name: "shared", Server: "a", Username: "u", Token: "token-value"},
 	})
-	seedRegistries(t, client, []registryEntry{
+	seedRegistries(t, client, []registrycred.Entry{
 		{Name: "shared", Server: "b", Username: "u", Password: "password-value"},
 	})
 
@@ -172,7 +173,7 @@ func TestGet_AmbiguousResolvedByType(t *testing.T) {
 	seedGit(t, client, []sharedcred.Entry{
 		{Name: "shared", Server: "a", Username: "u", Token: "token-value"},
 	})
-	seedRegistries(t, client, []registryEntry{
+	seedRegistries(t, client, []registrycred.Entry{
 		{Name: "shared", Server: "b", Username: "u", Password: "password-value"},
 	})
 
@@ -194,7 +195,7 @@ func TestGet_NotFound(t *testing.T) {
 
 func TestGet_NotFoundWithType(t *testing.T) {
 	client := fake.NewSimpleClientset() //nolint:staticcheck // matches project test pattern
-	seedRegistries(t, client, []registryEntry{
+	seedRegistries(t, client, []registrycred.Entry{
 		{Name: "ghcr-io", Server: "ghcr.io", Username: "u", Password: "p"},
 	})
 
@@ -216,7 +217,7 @@ func TestMask(t *testing.T) {
 // to nobody while 'kip registry list' showed the truth.
 func TestList_CarriesTheRegistryAllowList(t *testing.T) {
 	client := fake.NewSimpleClientset() //nolint:staticcheck // matches project test pattern
-	seedRegistries(t, client, []registryEntry{
+	seedRegistries(t, client, []registrycred.Entry{
 		{Name: "ghcr-io", Server: "ghcr.io", Username: "acme", Password: "ghp_xyz789",
 			AllowedProjects: []string{"acme"}},
 	})

@@ -13,10 +13,12 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/controllers"
 	"github.com/getkipper/kipper/console-api/serviceui"
+	"github.com/getkipper/kipper/controller/pkg/datavolume"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
@@ -40,6 +42,13 @@ type serviceResponse struct {
 	Status    string `json:"status"`
 	Ready     string `json:"ready"`
 	Storage   string `json:"storage"`
+	// BlockedReason and BlockedMessage carry whichever refusal the service is
+	// standing on: credentials the reconciler would not use, a name that belongs
+	// to something else, or a deletion that cannot finish. Omitted entirely
+	// otherwise, which is every healthy service and every service on a cluster
+	// older than the conditions.
+	BlockedReason  string `json:"blockedReason,omitempty"`
+	BlockedMessage string `json:"blockedMessage,omitempty"`
 }
 
 type serviceInfoResponse struct {
@@ -56,6 +65,26 @@ type serviceInfoResponse struct {
 	// OpenSearch Dashboards, etc. will follow). Empty when the
 	// service has no UI or the cluster has no Domain configured.
 	UIURL string `json:"ui_url,omitempty"`
+}
+
+// credentialsBlockage reads the reason and the remedy off a service the
+// reconciler has refused, and answers empty for one it has not.
+//
+// Only a condition that is false is a blockage: the reconciler removes it
+// entirely once the cause clears, so a true one is somebody else's convention
+// and says nothing an operator has to act on.
+func blockage(svc *kipperv1.Service, wanted string) (string, string) {
+	// Every entry is read rather than the first, because this CRD puts no
+	// uniqueness on the condition type. A restore or an edit can leave two, and
+	// stopping at a stale true one would hide a live refusal. A warning is the
+	// safe thing to get wrong in the direction of showing it.
+	for _, condition := range svc.Status.Conditions {
+		if condition.Type != wanted || condition.Status != metav1.ConditionFalse {
+			continue
+		}
+		return condition.Reason, condition.Message
+	}
+	return "", ""
 }
 
 // List returns all Kipper-managed stateful services.
@@ -86,6 +115,25 @@ func (s *Services) List(w http.ResponseWriter, r *http.Request) {
 		if status == "" {
 			status = "pending"
 		}
+		// A service being deleted keeps the phase it had until it goes, and
+		// destroying its data takes as long as the workload takes to stop. Left
+		// as "running" it reads as a delete that did nothing.
+		if !svc.DeletionTimestamp.IsZero() {
+			status = "deleting"
+		}
+
+		reason, message := blockage(&svc, kipperv1.ConditionCredentialsReady)
+		if reason == "" {
+			reason, message = blockage(&svc, kipperv1.ConditionNameFree)
+		}
+		// A delete that has stopped on something no retry clears would otherwise
+		// sit at "deleting" for good with the reason only in the controller's
+		// log.
+		if !svc.DeletionTimestamp.IsZero() {
+			if stuck, why := blockage(&svc, kipperv1.ConditionCleanupComplete); stuck != "" {
+				reason, message = stuck, why
+			}
+		}
 
 		ready := "0/1"
 		if status == "running" {
@@ -93,12 +141,14 @@ func (s *Services) List(w http.ResponseWriter, r *http.Request) {
 		}
 
 		services = append(services, serviceResponse{
-			Name:      svc.Name,
-			Namespace: svc.Namespace,
-			Type:      svc.Spec.Type,
-			Status:    status,
-			Ready:     ready,
-			Storage:   svc.Spec.Storage,
+			Name:           svc.Name,
+			Namespace:      svc.Namespace,
+			Type:           svc.Spec.Type,
+			Status:         status,
+			Ready:          ready,
+			Storage:        svc.Spec.Storage,
+			BlockedReason:  reason,
+			BlockedMessage: message,
 		})
 	}
 
@@ -127,6 +177,16 @@ func (s *Services) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A service already on its way out cannot be marked: the API server rejects
+	// a finalizer added to an object that is being deleted, so the request would
+	// fail on the patch and report nothing useful. What happens to its volume
+	// was settled by whoever deleted it.
+	if !svc.DeletionTimestamp.IsZero() {
+		respondError(w, http.StatusConflict, fmt.Sprintf(
+			"service %q is already being deleted; kip service list says what is holding it up", name))
+		return
+	}
+
 	ns := svc.Namespace
 
 	// Unbind before deleting. Cleaning up afterwards cannot be retried — the
@@ -141,24 +201,65 @@ func (s *Services) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete the CR — owner references cascade to StatefulSet, Service, and Secret
-	if err := s.CRClient.Delete(ctx, svc); err != nil {
-		if errors.IsNotFound(err) {
-			respondError(w, http.StatusNotFound, fmt.Sprintf("service %q not found", name))
+	// Ask for the data before deleting, because the volume outlives the CR:
+	// nothing owns a claim a StatefulSet built from its template. The finalizer
+	// destroys it, which is the only place that can wait for the workload to
+	// stop. This handler cannot: it is capped well below the time a database
+	// takes to go, and once the CR has left it answers 404, so a cleanup it did
+	// itself could never be retried.
+	//
+	// Both calls are pinned to the service that was read: the mark carries its
+	// resourceVersion and the delete its UID, so neither can land on a service
+	// somebody created under the same name in between. The data goes with
+	// whichever one the operator confirmed or with none at all.
+	marked := svc.DeepCopy()
+	if marked.Annotations == nil {
+		marked.Annotations = map[string]string{}
+	}
+	marked.Annotations[datavolume.DeleteAnnotation] = "true"
+	// The finalizer goes on with the mark. A service the controller has never
+	// reconciled carries neither, and the API server would take it away before
+	// anything had read the mark, leaving the volume with nothing left to
+	// remove it and the console reporting the data destroyed.
+	//
+	// It is the data finalizer rather than the cleanup one, because a controller
+	// from the build before this one knows the cleanup finalizer and would take
+	// it off without ever looking at the mark.
+	controllerutil.AddFinalizer(marked, controllers.DataFinalizer)
+	lock := crclient.MergeFromWithOptions(svc, crclient.MergeFromWithOptimisticLock{})
+	if err := s.CRClient.Patch(ctx, marked, lock); err != nil {
+		// The same interference the delete below reports, one call earlier, and
+		// it gets the same answer: somebody wrote to this service between the
+		// read and the mark, so the service is still there. What ran before this
+		// is the unbinding, which is safe to leave done and safe to repeat.
+		if errors.IsConflict(err) {
+			respondError(w, http.StatusConflict, fmt.Sprintf(
+				"service %q changed while it was being deleted, so this request did not delete it; check where it stands and try again", name))
 			return
 		}
-		respondError(w, http.StatusInternalServerError, "failed to delete service")
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to mark %q for data deletion: %v", name, err))
 		return
 	}
 
-	// Best-effort cleanup of PVCs (not owned by the CR since they're in the VCT)
-	pvcs, pvcErr := s.Client.CoreV1().PersistentVolumeClaims(ns).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("app=%s", name),
-	})
-	if pvcErr == nil {
-		for _, pvc := range pvcs.Items {
-			_ = s.Client.CoreV1().PersistentVolumeClaims(ns).Delete(ctx, pvc.Name, metav1.DeleteOptions{})
+	// Delete the CR — owner references cascade to StatefulSet, Service, and Secret.
+	//
+	// Pinned to the version the mark landed at as well as to the service, so a
+	// writer who takes the mark off in between cannot leave this answering that
+	// the data went while the finalizer keeps the volume.
+	decided := marked.ResourceVersion
+	if err := s.CRClient.Delete(ctx, svc, crclient.Preconditions{UID: &svc.UID, ResourceVersion: &decided}); err != nil {
+		switch {
+		case errors.IsNotFound(err):
+			respondError(w, http.StatusNotFound, fmt.Sprintf("service %q not found", name))
+		case errors.IsConflict(err):
+			// Only that this delete was not the one taken. Another may have been
+			// accepted a moment earlier and be running now.
+			respondError(w, http.StatusConflict, fmt.Sprintf(
+				"service %q changed while it was being deleted, so this request did not delete it; check where it stands and try again", name))
+		default:
+			respondError(w, http.StatusInternalServerError, "failed to delete service")
 		}
+		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)

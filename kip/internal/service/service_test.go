@@ -15,6 +15,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/controller/pkg/servicecatalog"
 	"github.com/getkipper/kipper/kip/internal/manifest"
 )
 
@@ -479,4 +480,254 @@ func TestImageWithVersion_EveryCatalogEntry(t *testing.T) {
 			assert.NotContains(t, tag, "9.9.9-0", "no fragment of the old tag may be appended to the new version")
 		})
 	}
+}
+
+// blockedService is a Service CR carrying the condition the reconciler writes
+// when its credentials cannot be used.
+func blockedService(name, namespace, reason, message string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "kipper.run/v1alpha1",
+		"kind":       "Service",
+		"metadata":   map[string]interface{}{"name": name, "namespace": namespace},
+		"spec":       map[string]interface{}{"type": "postgres", "storage": "1Gi"},
+		"status": map[string]interface{}{
+			"phase": "Failed",
+			"conditions": []interface{}{
+				map[string]interface{}{
+					"type": "Ready", "status": "False", "reason": "Pending", "message": "not up yet",
+				},
+				map[string]interface{}{
+					"type":    servicecatalog.ConditionCredentialsReady,
+					"status":  "False",
+					"reason":  reason,
+					"message": message,
+				},
+			},
+		},
+	}}
+}
+
+func dynamicWith(t *testing.T, objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
+	t.Helper()
+	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{manifest.ServiceGVR: "ServiceList"},
+		objects...,
+	)
+}
+
+// A service the reconciler has refused says so on the object, and that is the
+// only place an operator can read what to do about it. Listing has to carry it
+// out, or the remedy is written for nobody.
+func TestListCarriesWhyTheCredentialsAreBlocked(t *testing.T) {
+	mgr := &Manager{
+		Client: fake.NewSimpleClientset(), //nolint:staticcheck
+		Dynamic: dynamicWith(t, blockedService("db", "default", "DataWithoutCredentials",
+			"service db has data in data-db-0 and no PASSWORD in db-credentials")),
+	}
+
+	services, err := mgr.List(context.Background(), "default")
+
+	require.NoError(t, err)
+	require.Len(t, services, 1)
+	assert.Equal(t, "DataWithoutCredentials", services[0].BlockedReason)
+	assert.Contains(t, services[0].BlockedMessage, "data-db-0")
+}
+
+// Every cluster older than the condition has services with no conditions at all,
+// and a healthy service on a current one has none either. Absent reads as fine.
+func TestListSaysNothingAboutAServiceThatIsNotBlocked(t *testing.T) {
+	mgr := &Manager{
+		Client:  fake.NewSimpleClientset(), //nolint:staticcheck
+		Dynamic: fakeDynamicForServices(t, "default", map[string]string{"db": "postgres"}),
+	}
+
+	services, err := mgr.List(context.Background(), "default")
+
+	require.NoError(t, err)
+	require.Len(t, services, 1)
+	assert.Empty(t, services[0].BlockedReason)
+	assert.Empty(t, services[0].BlockedMessage)
+}
+
+// The condition going true is the reconciler saying the cause has cleared. Only
+// a false one is a blockage.
+func TestListIgnoresACredentialsConditionThatIsTrue(t *testing.T) {
+	cleared := blockedService("db", "default", "DataWithoutCredentials", "cleared since")
+	conds, _, _ := unstructured.NestedSlice(cleared.Object, "status", "conditions")
+	conds[1].(map[string]interface{})["status"] = "True"
+	require.NoError(t, unstructured.SetNestedSlice(cleared.Object, conds, "status", "conditions"))
+
+	mgr := &Manager{Client: fake.NewSimpleClientset(), Dynamic: dynamicWith(t, cleared)} //nolint:staticcheck
+
+	services, err := mgr.List(context.Background(), "default")
+
+	require.NoError(t, err)
+	require.Len(t, services, 1)
+	assert.Empty(t, services[0].BlockedReason, "a condition that is true is not a blockage")
+}
+
+// Asking about one service reads the same condition the listing does, because an
+// operator who runs info on a broken service wants the reason before connection
+// details that will not work.
+func TestReadCarriesTheBlockageAndTheTypeTogether(t *testing.T) {
+	mgr := &Manager{
+		Client: fake.NewSimpleClientset(), //nolint:staticcheck
+		Dynamic: dynamicWith(t, blockedService("db", "default", "SecretNotOwned",
+			"secret db-credentials is not owned by this service")),
+	}
+
+	snapshot, err := mgr.Read(context.Background(), "default", "db")
+
+	require.NoError(t, err)
+	assert.True(t, snapshot.Blocked())
+	assert.Equal(t, "SecretNotOwned", snapshot.BlockedReason)
+	assert.Contains(t, snapshot.BlockedMessage, "not owned by this service")
+	assert.Equal(t, "postgres", snapshot.Type, "the type comes from the same read as the blockage")
+}
+
+// A service that is fine answers with nothing, and so does one on a cluster that
+// predates the condition.
+func TestReadIsUnblockedForAHealthyService(t *testing.T) {
+	mgr := &Manager{
+		Client:  fake.NewSimpleClientset(), //nolint:staticcheck
+		Dynamic: fakeDynamicForServices(t, "default", map[string]string{"db": "postgres"}),
+	}
+
+	snapshot, err := mgr.Read(context.Background(), "default", "db")
+
+	require.NoError(t, err)
+	assert.False(t, snapshot.Blocked())
+	assert.Empty(t, snapshot.BlockedReason)
+	assert.Equal(t, "postgres", snapshot.Type)
+}
+
+// The CRD schema constrains a condition's fields, so most of these shapes cannot
+// come through the API server, and this is a robustness test for the unstructured
+// helper rather than a catalogue of what a cluster returns. It earns its place on
+// the two that can reach it: a status absent entirely, which is every service
+// before its first reconcile, and a field the helper reads without owning the
+// schema that produced it. None of it is a reason to stop listing a namespace,
+// because an unreadable condition means nothing is known to be wrong.
+func TestListSurvivesAMalformedStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status interface{}
+	}{
+		{"no status at all", nil},
+		{"status is not a map", "Running"},
+		{"conditions is not a list", map[string]interface{}{"conditions": "none"}},
+		{"a condition is not a map", map[string]interface{}{"conditions": []interface{}{"CredentialsReady"}}},
+		{"a condition has no type", map[string]interface{}{"conditions": []interface{}{map[string]interface{}{"status": "False"}}}},
+		{"the reason is a number", map[string]interface{}{"conditions": []interface{}{
+			map[string]interface{}{"type": servicecatalog.ConditionCredentialsReady, "status": "False", "reason": int64(7)},
+		}}},
+		{"the type is a number", map[string]interface{}{"conditions": []interface{}{
+			map[string]interface{}{"type": int64(1), "status": "False", "reason": "DataWithoutCredentials"},
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cr := map[string]interface{}{
+				"apiVersion": "kipper.run/v1alpha1",
+				"kind":       "Service",
+				"metadata":   map[string]interface{}{"name": "db", "namespace": "default"},
+				"spec":       map[string]interface{}{"type": "postgres"},
+			}
+			if tc.status != nil {
+				cr["status"] = tc.status
+			}
+			mgr := &Manager{
+				Client:  fake.NewSimpleClientset(), //nolint:staticcheck
+				Dynamic: dynamicWith(t, &unstructured.Unstructured{Object: cr}),
+			}
+
+			services, err := mgr.List(context.Background(), "default")
+
+			require.NoError(t, err, "an unreadable status stopped the whole listing")
+			require.Len(t, services, 1)
+			assert.Empty(t, services[0].BlockedReason)
+		})
+	}
+}
+
+// This CRD puts no uniqueness on a condition's type, so a restore or an edit can
+// leave two of the same kind. Stopping at the first would let a stale true one
+// hide a live refusal, and a warning is the safe thing to get wrong in the
+// direction of showing it.
+func TestListFindsABlockageBehindAStaleCondition(t *testing.T) {
+	cr := map[string]interface{}{
+		"apiVersion": "kipper.run/v1alpha1",
+		"kind":       "Service",
+		"metadata":   map[string]interface{}{"name": "db", "namespace": "default"},
+		"spec":       map[string]interface{}{"type": "postgres"},
+		"status": map[string]interface{}{
+			"phase": "Failed",
+			"conditions": []interface{}{
+				map[string]interface{}{
+					"type": servicecatalog.ConditionCredentialsReady, "status": "True",
+					"reason": "Cleared", "message": "left behind by an edit",
+				},
+				map[string]interface{}{
+					"type": servicecatalog.ConditionCredentialsReady, "status": "False",
+					"reason": "DataWithoutCredentials", "message": "db has data in data-db-0 and no PASSWORD",
+				},
+			},
+		},
+	}
+	mgr := &Manager{
+		Client:  fake.NewSimpleClientset(), //nolint:staticcheck
+		Dynamic: dynamicWith(t, &unstructured.Unstructured{Object: cr}),
+	}
+
+	services, err := mgr.List(context.Background(), "default")
+
+	require.NoError(t, err)
+	require.Len(t, services, 1)
+	assert.Equal(t, "DataWithoutCredentials", services[0].BlockedReason,
+		"a stale condition ahead of the live one hid the refusal")
+}
+
+// deletingService is a Service CR on its way out whose cleanup has stopped on
+// something no retry clears.
+func deletingService(name, namespace, reason, message string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "kipper.run/v1alpha1",
+		"kind":       "Service",
+		"metadata": map[string]interface{}{
+			"name": name, "namespace": namespace,
+			"deletionTimestamp": "2026-08-21T23:00:00Z",
+			"finalizers":        []interface{}{"kipper.run/service-cleanup"},
+		},
+		"spec": map[string]interface{}{"type": "postgres", "storage": "1Gi"},
+		"status": map[string]interface{}{
+			"phase": "Running",
+			"conditions": []interface{}{
+				map[string]interface{}{
+					"type":    servicecatalog.ConditionCleanupComplete,
+					"status":  "False",
+					"reason":  reason,
+					"message": message,
+				},
+			},
+		},
+	}}
+}
+
+// A service on its way out keeps the phase it had until it goes, and a delete
+// held up by something no retry clears keeps it for good. Listing it as running
+// says the delete did nothing.
+func TestListSaysAServiceIsDeletingAndWhyItIsStuck(t *testing.T) {
+	mgr := &Manager{
+		Client: fake.NewSimpleClientset(), //nolint:staticcheck
+		Dynamic: dynamicWith(t, deletingService("db", "default", "DataNotDestroyed",
+			"the workload named db in default is not Kipper's")),
+	}
+
+	services, err := mgr.List(context.Background(), "default")
+
+	require.NoError(t, err)
+	require.Len(t, services, 1)
+	assert.Equal(t, "deleting", services[0].Status, "a service on its way out was listed as though nothing had happened")
+	assert.Equal(t, "DataNotDestroyed", services[0].BlockedReason, "nothing said why the delete is stuck")
+	assert.Contains(t, services[0].BlockedMessage, "not Kipper's")
 }

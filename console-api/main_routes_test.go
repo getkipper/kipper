@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -90,8 +91,7 @@ func TestTheRouterGatesEachProjectRouteByWhatItsNameMeans(t *testing.T) {
 	clientset := fake.NewClientset(
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kipper-system"}},
 		// shop reached the namespace first, so it carries shop's label.
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-			Name: "shop-prod", Labels: map[string]string{kipperlabels.Project: "shop"}}},
+		shopProdNamespace(),
 		&corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Name: "kipper-users", Namespace: "kipper-system"},
 			Data: map[string]string{"users": fmt.Sprintf(
@@ -103,9 +103,17 @@ func TestTheRouterGatesEachProjectRouteByWhatItsNameMeans(t *testing.T) {
 	if err := kipperv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("registering the scheme: %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("registering the core scheme: %v", err)
+	}
 	member := func(email string) []kipperv1.ProjectMember {
 		return []kipperv1.ProjectMember{{Email: email, Role: kipperv1.ProjectRoleOwner}}
 	}
+	// shop holds the namespace, which is what makes it shop's. shop-prod holds
+	// nothing, which is the whole point: it has the same name and no claim.
+	shopProdNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: "shop-prod", UID: "the-namespace",
+		Labels: map[string]string{kipperlabels.Project: "shop"}}}
 	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(
 		&kipperv1.Project{
 			ObjectMeta: metav1.ObjectMeta{Name: "shop"},
@@ -113,11 +121,15 @@ func TestTheRouterGatesEachProjectRouteByWhatItsNameMeans(t *testing.T) {
 				Environments: []kipperv1.ProjectEnvironment{{Name: "prod"}},
 				Members:      member(shopOwner),
 			},
+			Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+				{Name: "shop-prod", UID: "the-namespace"},
+			}},
 		},
 		&kipperv1.Project{
 			ObjectMeta: metav1.ObjectMeta{Name: "shop-prod"},
 			Spec:       kipperv1.ProjectSpec{Members: member(sprOwner)},
 		},
+		shopProdNS,
 	).Build()
 
 	dynClient := dynfake.NewSimpleDynamicClient(scheme)
@@ -175,6 +187,63 @@ func TestTheRouterGatesEachProjectRouteByWhatItsNameMeans(t *testing.T) {
 					path, code)
 			}
 		}
+	})
+
+	// The two groups above name the routes somebody thought of. This walks the
+	// whole tree instead and holds every one of them to the property that makes
+	// the split matter: a path under /projects/{name} resolves to one tenant or
+	// the other, never to both.
+	//
+	// Two projects can put the same string in that segment, so a route that
+	// admitted both owners would be reachable by a tenant who owns neither the
+	// project nor the namespace the other means by it. Enumerating was
+	// impossible while buildRouter returned a closure over the mux; it returns
+	// a consoleRouter now, so the gap that comment described is closed.
+	t.Run("no route under a shared name admits both tenants", func(t *testing.T) {
+		cr, ok := router.(consoleRouter)
+		if !ok {
+			t.Fatalf("router is %T, not consoleRouter", router)
+		}
+		checked := 0
+		err := chi.Walk(cr.api, func(method, pattern string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+			if !strings.HasPrefix(pattern, "/api/v1/projects/{name}") || method != "GET" {
+				return nil
+			}
+			path := strings.NewReplacer(
+				"{name}", "shop-prod",
+				"{app}", "shop-api",
+				"{fn}", "shop-fn",
+				"{service}", "shop-db",
+				"{vol}", "shop-data",
+				"{key}", "key-1",
+				"{schema}", "public",
+				"{table}", "widgets",
+				"{indexName}", "widgets_pkey",
+				"{snippetName}", "snippet-1",
+				"{email}", sprOwner,
+				"{transfer}", "transfer-1",
+				"{session}", "session-1",
+				"{plan}", "plan-1",
+				"{id}", "id-1",
+				"{host}", "shop.example.com",
+				"*", "wildcard",
+			).Replace(pattern)
+
+			shop, spr := call("GET", path, shopOwner), call("GET", path, sprOwner)
+			checked++
+			if shop != http.StatusForbidden && spr != http.StatusForbidden {
+				t.Errorf("GET %s admits both shop's owner (%d) and shop-prod's owner (%d): one path, two tenants",
+					pattern, shop, spr)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walking the router: %v", err)
+		}
+		if checked == 0 {
+			t.Fatal("no /projects/{name} routes were walked, so this proves nothing")
+		}
+		t.Logf("checked %d routes under /projects/{name}", checked)
 	})
 
 	// The gate is the thing under test, so prove it is running at all.
@@ -266,8 +335,7 @@ func TestTheEnvPreviewIsDeployerOnly(t *testing.T) {
 
 	clientset := fake.NewClientset(
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kipper-system"}},
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-			Name: "shop-prod", Labels: map[string]string{kipperlabels.Project: "shop"}}},
+		shopProdNamespace(),
 		&corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Name: "kipper-users", Namespace: "kipper-system"},
 			Data: map[string]string{"users": fmt.Sprintf(
@@ -295,7 +363,11 @@ func TestTheEnvPreviewIsDeployerOnly(t *testing.T) {
 					{Email: deployer, Role: kipperv1.ProjectRoleDeployer},
 				},
 			},
+			Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+				{Name: "shop-prod", UID: "the-namespace"},
+			}},
 		},
+		shopProdNamespace(),
 		&kipperv1.App{
 			ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "shop-prod"},
 			Spec: kipperv1.AppSpec{
@@ -379,8 +451,7 @@ func TestRevealingASecretIsDeployerOnly(t *testing.T) {
 
 	clientset := fake.NewClientset(
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kipper-system"}},
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-			Name: "shop-prod", Labels: map[string]string{kipperlabels.Project: "shop"}}},
+		shopProdNamespace(),
 		&corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Name: "kipper-users", Namespace: "kipper-system"},
 			Data: map[string]string{"users": fmt.Sprintf(
@@ -413,7 +484,11 @@ func TestRevealingASecretIsDeployerOnly(t *testing.T) {
 					{Email: deployer, Role: kipperv1.ProjectRoleDeployer},
 				},
 			},
+			Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+				{Name: "shop-prod", UID: "the-namespace"},
+			}},
 		},
+		shopProdNamespace(),
 		&kipperv1.App{
 			ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "shop-prod"},
 			Spec:       kipperv1.AppSpec{Image: "api:v1", Port: 8080},
@@ -594,8 +669,7 @@ func TestBrowsingAPodIsReadableByAViewerAndWritableByADeployer(t *testing.T) {
 
 	clientset := fake.NewClientset(
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kipper-system"}},
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-			Name: "shop-prod", Labels: map[string]string{kipperlabels.Project: "shop"}}},
+		shopProdNamespace(),
 		&corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Name: "kipper-users", Namespace: "kipper-system"},
 			Data: map[string]string{"users": fmt.Sprintf(
@@ -620,7 +694,11 @@ func TestBrowsingAPodIsReadableByAViewerAndWritableByADeployer(t *testing.T) {
 					{Email: deployer, Role: kipperv1.ProjectRoleDeployer},
 				},
 			},
+			Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+				{Name: "shop-prod", UID: "the-namespace"},
+			}},
 		},
+		shopProdNamespace(),
 		&kipperv1.App{
 			ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "shop-prod"},
 			Spec:       kipperv1.AppSpec{Image: "api:v1", Port: 8080},
@@ -660,4 +738,13 @@ func TestBrowsingAPodIsReadableByAViewerAndWritableByADeployer(t *testing.T) {
 	if code := call("PUT", base+"/content?path=/app/config.json", deployer); code == http.StatusForbidden {
 		t.Errorf("writing a file as a deployer = 403, want the gate to pass it through")
 	}
+}
+
+// shopProdNamespace is the namespace project shop holds, with the UID its claim
+// names. Ownership is the claim rather than the label, so a fixture setting one
+// without the other describes a cluster nobody could have reached.
+func shopProdNamespace() *corev1.Namespace {
+	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: "shop-prod", UID: "the-namespace",
+		Labels: map[string]string{kipperlabels.Project: "shop"}}}
 }

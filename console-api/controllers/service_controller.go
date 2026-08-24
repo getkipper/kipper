@@ -1,16 +1,21 @@
 package controllers
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	stderrors "errors"
 	"fmt"
 	"strings"
+
+	"k8s.io/apimachinery/pkg/api/equality"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -27,11 +32,16 @@ import (
 	"github.com/getkipper/kipper/console-api/serviceui"
 	"github.com/getkipper/kipper/console-api/share"
 	"github.com/getkipper/kipper/console-api/uisession"
+	"github.com/getkipper/kipper/controller/pkg/datavolume"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/controller/pkg/servicecatalog"
 )
 
-const serviceFinalizer = "kipper.run/service-cleanup"
+// ServiceFinalizer holds a deleting Service until its cleanup has finished. The
+// console adds it along with the delete-data annotation, because a CR that has
+// never been reconciled carries neither, and without it the API server would
+// take the service away before anything had destroyed its data.
+const ServiceFinalizer = "kipper.run/service-cleanup"
 
 // ServiceReconciler reconciles a Service CR.
 type ServiceReconciler struct {
@@ -69,48 +79,78 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	if !svc.DeletionTimestamp.IsZero() {
 		logger.Info("cleaning up service resources", "service", svc.Name)
-		// Revoke the service's share links before releasing the
-		// finalizer — fail closed. A grant that outlives its service
-		// could otherwise open a recreated namesake if the UID check
-		// were ever bypassed. A missing store or a failed revoke keeps
-		// the finalizer, so deletion retries rather than orphaning
-		// grants.
-		if r.ShareGrants == nil {
-			return ctrl.Result{}, fmt.Errorf("share grant store not configured; refusing to finalize service %s/%s with its links intact", svc.Namespace, svc.Name)
+		done, reason, err := r.cleanUp(ctx, &svc)
+		if err != nil {
+			r.reportCleanupBlocked(ctx, &svc, err, reason)
+			return ctrl.Result{}, err
 		}
-		if err := r.ShareGrants.RevokeAllForService(ctx, svc.Namespace, svc.Name); err != nil {
-			return ctrl.Result{}, fmt.Errorf("revoking share links: %w", err)
+		// The step that failed has succeeded, so the reason it left behind is
+		// no longer true. A service waiting normally for its workload to stop
+		// would otherwise keep telling an operator it is blocked on something
+		// that cleared several passes ago.
+		r.retractCleanupBlocked(ctx, &svc)
+		if !done {
+			return ctrl.Result{RequeueAfter: destroyDataInterval}, nil
 		}
-		// Unbind everything that names this service, for the same reason and in
-		// the same way: fail closed, keep the finalizer, retry. A workload left
-		// bound to a service that has gone fails its own reconcile outright and
-		// cannot be unbound afterwards, so the service must not finish leaving
-		// until nothing depends on it.
-		if err := ClearBindingsToService(ctx, r.Client, svc.Name, svc.Namespace); err != nil {
-			return ctrl.Result{}, fmt.Errorf("clearing bindings to %s: %w", svc.Name, err)
-		}
-		controllerutil.RemoveFinalizer(&svc, serviceFinalizer)
+		controllerutil.RemoveFinalizer(&svc, ServiceFinalizer)
+		controllerutil.RemoveFinalizer(&svc, DataFinalizer)
 		return ctrl.Result{}, r.Update(ctx, &svc)
 	}
 
-	if !controllerutil.ContainsFinalizer(&svc, serviceFinalizer) {
-		controllerutil.AddFinalizer(&svc, serviceFinalizer)
+	if !controllerutil.ContainsFinalizer(&svc, ServiceFinalizer) {
+		controllerutil.AddFinalizer(&svc, ServiceFinalizer)
 		if err := r.Update(ctx, &svc); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 
 	if err := r.reconcileCredentialsSecret(ctx, &svc); err != nil {
+		// Said on the object, not only in the controller's log. A service whose
+		// credentials Secret belongs to something else never reaches
+		// updateStatus, so without this it sits at Pending with the reason
+		// visible only to whoever thinks to read the log. That state is reached
+		// by a name collision the create-time checks cannot see, a restore among
+		// them, so it has to explain itself.
+		//
+		// Only the refusals no retry clears are reported. Everything else out of
+		// this reconcile is transient — a stale cache answering AlreadyExists to
+		// the create, a Get that failed — and stamping those on the object would
+		// put a permanent false condition on a healthy service, which teaches an
+		// operator to ignore the condition before the real case arrives.
+		//
+		// There are two permanent ones, and the second is reached by following
+		// the first one's own advice: told the Secret belongs to something else
+		// and offered "remove it if the service holds no data yet", an operator
+		// who removes it lands on a volume with no credentials. Reporting only
+		// the first would leave the object describing a Secret that is no longer
+		// there while the real reason went to the log.
+		if reason, permanent := permanentCredentialsFailure(err); permanent {
+			r.reportCredentialsBlocked(ctx, &svc, err, reason)
+		}
 		return ctrl.Result{}, fmt.Errorf("reconciling credentials secret: %w", err)
+	}
+	// Retracted here rather than at the end of the reconcile, because this is
+	// where the thing it describes stopped being true. Deferring it to the last
+	// step means a later failure, a quota or a timeout on the StatefulSet, keeps
+	// the object blaming credentials that are fine.
+	if err := r.retractCredentialsBlocked(ctx, &svc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("retracting the credentials condition: %w", err)
 	}
 
 	if err := r.reconcileStatefulSet(ctx, &svc); err != nil {
+		r.reportNameTaken(ctx, &svc, err)
 		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
 	}
 
 	if err := r.reconcileHeadlessService(ctx, &svc); err != nil {
+		r.reportNameTaken(ctx, &svc, err)
 		return ctrl.Result{}, fmt.Errorf("reconciling headless service: %w", err)
 	}
+	// Retracted where the thing it describes stopped being true: both objects
+	// this service needs under its own name are now its own. An operator who
+	// cleared the collision the message named would otherwise be told the name
+	// is taken by a service that has been running since.
+	r.retractNameTaken(ctx, &svc)
 
 	if err := r.reconcileUIIngress(ctx, &svc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling ui ingress: %w", err)
@@ -141,20 +181,40 @@ func (r *ServiceReconciler) reconcileCredentialsSecret(ctx context.Context, svc 
 		// on the strength of a name, a label or a set of keys: whoever put the
 		// object here has to say so by setting the controller reference.
 		if owner := metav1.GetControllerOf(&existing); owner == nil || owner.UID != svc.UID {
-			return fmt.Errorf("secret %s is not owned by this service, so its credentials cannot be injected into anything bound to it; set its controller reference to this Service, or remove it if the service holds no data yet", secretName)
+			return &credentialsNotOursError{Secret: secretName}
 		}
-		return r.ensureCredentialDefaults(ctx, &existing, svc.Spec.Type)
+		return r.repairCredentials(ctx, &existing, svc)
 	}
 	if !errors.IsNotFound(err) {
 		return err
 	}
 
-	if err := r.refuseToMintOverExistingData(ctx, svc); err != nil {
+	if err := r.refuseToMintOverExistingData(ctx, svc, ""); err != nil {
 		return err
 	}
 
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: svc.Namespace,
+			Labels:    serviceLabels(svc),
+		},
+		Data: credentialData(svc, generatePassword()),
+	}
+
+	if err := controllerutil.SetControllerReference(svc, secret, r.Scheme); err != nil {
+		return err
+	}
+
+	return r.Create(ctx, secret)
+}
+
+// credentialData is every key a credentials Secret of this service type carries,
+// with password filling whichever one holds the secret material. One definition,
+// because a Secret is built twice: minted when there is none, and restored key
+// by key when one comes back from a restore with keys missing.
+func credentialData(svc *kipperv1.Service, password string) map[string][]byte {
 	catalog := serviceCatalog(svc.Spec.Type)
-	password := generatePassword()
 	host := fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace)
 
 	var data map[string][]byte
@@ -203,21 +263,21 @@ func (r *ServiceReconciler) reconcileCredentialsSecret(ctx context.Context, svc 
 			data[k] = []byte(v)
 		}
 	}
+	return data
+}
 
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: svc.Namespace,
-			Labels:    serviceLabels(svc),
-		},
-		Data: data,
+// secretCredentialKey names the one key in a credentials Secret that cannot be
+// worked out again from the Service. Everything else is derived from the
+// service's own name, namespace and type. An empty answer means the type
+// authenticates nobody, so its whole Secret is reconstructible.
+func secretCredentialKey(svcType string) string {
+	if !servicecatalog.HasAuth(svcType) {
+		return ""
 	}
-
-	if err := controllerutil.SetControllerReference(svc, secret, r.Scheme); err != nil {
-		return err
+	if svcType == "minio" {
+		return "SECRET_KEY"
 	}
-
-	return r.Create(ctx, secret)
+	return "PASSWORD"
 }
 
 // refuseToMintOverExistingData stops the reconciler generating a password for a
@@ -237,72 +297,210 @@ func (r *ServiceReconciler) reconcileCredentialsSecret(ctx context.Context, svc 
 // this service means an engine has already initialised and made up its mind. A
 // genuinely new service has none, and a deleted one has its volumes removed
 // alongside it, so this only refuses where the two have come apart.
-func (r *ServiceReconciler) refuseToMintOverExistingData(ctx context.Context, svc *kipperv1.Service) error {
-	// The StatefulSet's volume claim template is named "data" and it runs a
-	// single replica, so its claim is data-<service>-0.
-	claim := fmt.Sprintf("data-%s-0", svc.Name)
-	var pvc corev1.PersistentVolumeClaim
-	err := r.Get(ctx, types.NamespacedName{Name: claim, Namespace: svc.Namespace}, &pvc)
-	if errors.IsNotFound(err) {
+func (r *ServiceReconciler) refuseToMintOverExistingData(ctx context.Context, svc *kipperv1.Service, missing string) error {
+	// A server that asks for no credential cannot be locked out by one. Its
+	// Secret is HOST and PORT, both derived from the service's own name and its
+	// type's port, so minting it again produces the same two values the volume
+	// was already being served under. Refusing would strand a restored redis,
+	// opensearch or mailhog permanently, and this refusal's remedy is to delete
+	// the volume.
+	if !servicecatalog.HasAuth(svc.Spec.Type) {
 		return nil
 	}
-	if err != nil {
+	initialised, err := r.serviceHasData(ctx, svc)
+	if err != nil || !initialised {
 		return err
 	}
-	return fmt.Errorf("service %s has data in %s but no credentials secret, and generating a new password would lock it out of that data; restore %s from a backup, or delete the volume to start the service empty",
-		svc.Name, claim, secretname.ServiceCredentials(svc.Name))
+	return &credentialsMissingError{
+		Service: svc.Name, Claim: dataClaim(svc.Name),
+		Secret: secretname.ServiceCredentials(svc.Name), Key: missing,
+	}
 }
 
-// ensureCredentialDefaults brings an existing credentials Secret into
-// the current shape: adds any missing type-specific defaults (e.g.
-// VHOST=/ on a rabbitmq secret that pre-dates the rabbitmq fix) and
-// prunes type-specific keys that no longer belong (e.g. NAME=app on a
-// rabbitmq or minio secret — a leftover from when every authed
-// service inherited the database-shaped credentials). Whatever base
-// keys a service type carries are preserved: HOST/PORT/USERNAME/PASSWORD
-// for most, ENDPOINT/ACCESS_KEY/SECRET_KEY for minio (S3).
+// dataClaim is the volume a service keeps its data on. The StatefulSet's claim
+// template is named "data" and it runs a single replica.
+func dataClaim(service string) string {
+	return fmt.Sprintf("data-%s-0", service)
+}
+
+// serviceHasData says whether an engine has already initialised and made up its
+// mind about its credentials. A genuinely new service has no volume, and a
+// deleted one has its volumes removed alongside it, so this is only true where
+// the data and the credentials have come apart.
+func (r *ServiceReconciler) serviceHasData(ctx context.Context, svc *kipperv1.Service) (bool, error) {
+	var pvc corev1.PersistentVolumeClaim
+	err := r.Get(ctx, types.NamespacedName{Name: dataClaim(svc.Name), Namespace: svc.Namespace}, &pvc)
+	if errors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// convergedKey says whether the reconciler owns a key's value outright, so it is
+// recomputed on every pass and overwrites whatever is there.
 //
-// A type that starts without authentication keeps HOST and PORT alone,
-// so a Secret minted before that rule loses the credentials it carried.
-// Pruning them is safe in the direction that matters: redis, opensearch
-// and mailhog never read the password when they started, so no server
-// is locked out of anything by its removal.
-func (r *ServiceReconciler) ensureCredentialDefaults(ctx context.Context, secret *corev1.Secret, svcType string) error {
-	desired := kipperv1.CredentialDefaults(svcType)
-	// A pre-existing Secret with no data (created out of band, or
-	// drained of keys) has Data == nil; assigning to a nil map
-	// panics. Initialise before writing.
+// Two kinds qualify. The address keys only say where the service is, and a
+// Secret restored into another namespace carries the old namespace's host, so
+// every workload bound to the restored service would open its connections
+// against the one it was copied from. MinIO's ACCESS_KEY is the root user the
+// StatefulSet passes at every start, so the running server answers to that name
+// whatever the Secret happens to say.
+//
+// Nothing else is overwritten. A password, and USERNAME on the types that bake
+// it in when they initialise, are what the engine holds rather than anything
+// derived from the Service. NAME and VHOST are the operator's to choose.
+func convergedKey(svcType, key string) bool {
+	switch key {
+	case "HOST", "PORT", "ENDPOINT":
+		return true
+	case "ACCESS_KEY":
+		return svcType == "minio"
+	}
+	return false
+}
+
+// engineIdentityKey names the key recording who the engine answers to, where
+// that is something it baked in as it initialised rather than something the
+// container is handed at every start.
+//
+// An empty answer means the identity is not the Secret's to remember: minio
+// takes its root user from the StatefulSet every time it starts, and a type that
+// authenticates nobody has no identity at all.
+func engineIdentityKey(svcType string) string {
+	if svcType == "minio" || !servicecatalog.HasAuth(svcType) {
+		return ""
+	}
+	return "USERNAME"
+}
+
+// credentialKeys is every key this reconciler writes into a credentials Secret,
+// across every service type. One of these that the service's own type does not
+// want is stale, whether it was minted under an older shape or belongs to
+// another type entirely, and envFrom injects it into every bound workload either
+// way.
+//
+// A key that is not on this list is left alone, which covers both an operator's
+// own additions and rabbitmq's management URL, written by the CLI's own service
+// manager and by nothing here. Adding a key to this list prunes it from every
+// Secret that carries it, so a key another writer maintains belongs on it only
+// alongside a definition of what this reconciler should write in its place.
+func credentialKeys() []string {
+	return []string{
+		"HOST", "PORT", "USERNAME", "PASSWORD",
+		"ENDPOINT", "ACCESS_KEY", "SECRET_KEY",
+		"NAME", "VHOST",
+	}
+}
+
+// carryLegacyMinioCredential moves a minio root credential to the key the server
+// reads it from.
+//
+// MinIO Secrets exist in the shape every authenticating service once shared,
+// holding the root credential under PASSWORD, and the container takes
+// MINIO_ROOT_PASSWORD from SECRET_KEY. Refusing such a Secret as material that
+// cannot be reconstructed would send an operator to a backup, or to deleting the
+// volume, while the credential its data was written under sits in the same
+// Secret under the other name.
+func carryLegacyMinioCredential(secret *corev1.Secret, svcType string) bool {
+	if svcType != "minio" || len(secret.Data["SECRET_KEY"]) > 0 || len(secret.Data["PASSWORD"]) == 0 {
+		return false
+	}
+	secret.Data["SECRET_KEY"] = secret.Data["PASSWORD"]
+	return true
+}
+
+// repairCredentials brings an existing credentials Secret to the shape this
+// service type carries, in one write.
+//
+// Ownership is not readiness. A restore can bring the Secret back with the right
+// controller reference and none of the keys a bound workload reads, and taking
+// that as reconciled retracts the credentials condition and leaves the pod in
+// CreateContainerConfigError with nothing on the object saying why. Address keys
+// converge, everything else is filled only where it is missing, and the password
+// is the one key that cannot be worked out again: over an initialised volume the
+// engine already knows the old one, so that case is refused exactly as a Secret
+// deleted outright is.
+func (r *ServiceReconciler) repairCredentials(ctx context.Context, secret *corev1.Secret, svc *kipperv1.Service) error {
+	// A Secret created out of band, or drained of its keys, has Data == nil;
+	// assigning to a nil map panics.
 	if secret.Data == nil {
 		secret.Data = map[string][]byte{}
 	}
-	updated := false
-	for k, v := range desired {
-		if _, ok := secret.Data[k]; !ok {
-			secret.Data[k] = []byte(v)
-			updated = true
+
+	changed := carryLegacyMinioCredential(secret, svc.Spec.Type)
+
+	desired := credentialData(svc, "")
+
+	// The password and the identity are the two things the engine keeps and the
+	// Service cannot say, and what to do about either one turns on whether an
+	// engine has initialised at all.
+	//
+	// Over a volume the Secret is the only record: a missing key cannot be
+	// filled in from the current default, because that would publish an account
+	// the engine has never heard of and every bound workload would authenticate
+	// as nobody, and an identity that disagrees with the default is the one the
+	// engine answers to. With no volume there is no history to preserve, and
+	// what the service will come up as is what the StatefulSet passes it.
+	identity := engineIdentityKey(svc.Spec.Type)
+	missing := ""
+	for _, key := range []string{secretCredentialKey(svc.Spec.Type), identity} {
+		if key != "" && len(secret.Data[key]) == 0 {
+			missing = key
+			break
 		}
 	}
-	// Stale type-specific keys to prune. NAME belongs to the database
-	// services; VHOST to rabbitmq. If the current service type doesn't
-	// want a key, remove it so EnvFrom stops injecting a meaningless
-	// env var (e.g. AMQP_NAME=app).
-	stale := []string{"NAME", "VHOST"}
-	// MinIO authenticates under ACCESS_KEY/SECRET_KEY and has neither of
-	// these, so this only reaches a type that carries them and does not
-	// use them.
-	if !servicecatalog.HasAuth(svcType) {
-		stale = append(stale, "USERNAME", "PASSWORD")
+	disagrees := identity != "" && len(secret.Data[identity]) > 0 &&
+		!bytes.Equal(secret.Data[identity], desired[identity])
+
+	if missing != "" || disagrees {
+		initialised, err := r.serviceHasData(ctx, svc)
+		if err != nil {
+			return err
+		}
+		switch {
+		case initialised && missing != "":
+			return &credentialsMissingError{
+				Service: svc.Name, Claim: dataClaim(svc.Name),
+				Secret: secretname.ServiceCredentials(svc.Name), Key: missing,
+			}
+		case !initialised:
+			if key := secretCredentialKey(svc.Spec.Type); key != "" && len(secret.Data[key]) == 0 {
+				desired[key] = []byte(generatePassword())
+			}
+			if disagrees {
+				secret.Data[identity] = desired[identity]
+				changed = true
+			}
+		}
 	}
-	for _, k := range stale {
+
+	for k, v := range desired {
+		if convergedKey(svc.Spec.Type, k) {
+			if !bytes.Equal(secret.Data[k], v) {
+				secret.Data[k] = v
+				changed = true
+			}
+			continue
+		}
+		if len(secret.Data[k]) > 0 {
+			continue
+		}
+		secret.Data[k] = v
+		changed = true
+	}
+	for _, k := range credentialKeys() {
 		if _, wanted := desired[k]; wanted {
 			continue
 		}
 		if _, present := secret.Data[k]; present {
 			delete(secret.Data, k)
-			updated = true
+			changed = true
 		}
 	}
-	if !updated {
+	if !changed {
 		return nil
 	}
 	return r.Update(ctx, secret)
@@ -427,6 +625,16 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	if errors.IsNotFound(err) {
 		return r.Create(ctx, desired)
 	}
+	if err == nil {
+		// The same rule the finalizer deletes by, applied before the first
+		// write rather than only at the end. Taking a workload over here is
+		// what stamps the label that later authorises destroying its volume,
+		// so a foreign StatefulSet adopted at this point becomes one Kipper
+		// believes it may delete.
+		if err := objectIsOurs("workload", &existing, svc); err != nil {
+			return err
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -446,7 +654,23 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	}
 	existing.Spec.Template.Spec.Containers = desired.Spec.Template.Spec.Containers
 	existing.Labels = desired.Labels
+	// Accepted is not adopted. A workload from before these records existed has
+	// no owner, and without one garbage collection has nothing to follow when
+	// the service goes, so an ordinary delete would leave it running against the
+	// data it was keeping.
+	if err := adopt(&existing, svc, r.Scheme); err != nil {
+		return err
+	}
 	return r.Update(ctx, &existing)
+}
+
+// adopt gives the service the object it has just been shown to own, so deleting
+// the service takes the object with it.
+func adopt(object client.Object, svc *kipperv1.Service, scheme *runtime.Scheme) error {
+	if metav1.GetControllerOf(object) != nil {
+		return nil
+	}
+	return controllerutil.SetControllerReference(svc, object, scheme)
 }
 
 func (r *ServiceReconciler) reconcileHeadlessService(ctx context.Context, svc *kipperv1.Service) error {
@@ -487,15 +711,30 @@ func (r *ServiceReconciler) reconcileHeadlessService(ctx context.Context, svc *k
 	if err != nil {
 		return err
 	}
+	// Same rule as the workload, and for the same reason: the update below
+	// writes this service's labels onto whatever stands under the name, and the
+	// management label among them is what a later delete reads as proof the
+	// object is Kipper's.
+	if err := objectIsOurs("address", &existing, svc); err != nil {
+		return err
+	}
 	// Update if ports drifted — catalog changes (e.g. adding a UI
 	// port to a service type that didn't have one) must propagate
-	// to already-running services.
-	if !servicePortsEqual(existing.Spec.Ports, desired.Spec.Ports) {
+	// to already-running services. An address with no owner is adopted whether
+	// or not anything drifted, for the same reason the workload is.
+	drifted := !servicePortsEqual(existing.Spec.Ports, desired.Spec.Ports)
+	unowned := metav1.GetControllerOf(&existing) == nil
+	if !drifted && !unowned {
+		return nil
+	}
+	if drifted {
 		existing.Spec.Ports = desired.Spec.Ports
 		existing.Labels = desired.Labels
-		return r.Update(ctx, &existing)
 	}
-	return nil
+	if err := adopt(&existing, svc, r.Scheme); err != nil {
+		return err
+	}
+	return r.Update(ctx, &existing)
 }
 
 // servicePortsEqual compares two Service port lists by name + port +
@@ -921,11 +1160,13 @@ func (r *ServiceReconciler) reconcileUINetworkPolicy(ctx context.Context, svc *k
 }
 
 func (r *ServiceReconciler) updateStatus(ctx context.Context, svc *kipperv1.Service) error {
+	before := svc.Status.DeepCopy()
+
 	var sts appsv1.StatefulSet
 	err := r.Get(ctx, types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}, &sts)
 	if errors.IsNotFound(err) {
 		svc.Status.Phase = "Pending"
-		return r.Status().Update(ctx, svc)
+		return r.writeStatusIfChanged(ctx, svc, before)
 	}
 	if err != nil {
 		return err
@@ -942,6 +1183,34 @@ func (r *ServiceReconciler) updateStatus(ctx context.Context, svc *kipperv1.Serv
 		svc.Status.Phase = "Pending"
 	}
 
+	return r.writeStatusIfChanged(ctx, svc, before)
+}
+
+// writeStatusIfChanged writes only when the status says something new.
+//
+// A status write is an update event on the object being reconciled, so writing
+// an identical status every pass keeps the queue busy with work that changes
+// nothing, and on a service that reconciles often that is most of the work.
+func (r *ServiceReconciler) writeStatusIfChanged(ctx context.Context, svc *kipperv1.Service, before *kipperv1.ServiceStatus) error {
+	if equality.Semantic.DeepEqual(before, &svc.Status) {
+		return nil
+	}
+	return r.Status().Update(ctx, svc)
+}
+
+// retractCredentialsBlocked takes off the condition once the credentials Secret
+// is reconciled, because it describes a state that has passed.
+//
+// A failed write has to reach the caller. The condition is already off the copy
+// in memory by then, so the status diff that closes the pass compares two
+// objects that both lack it and writes nothing; on a service whose status is
+// otherwise settled the pass ends clean and the object goes on claiming its
+// credentials are blocked until something else happens to it. Returning the
+// error requeues the service, and the next pass retracts against a fresh copy.
+func (r *ServiceReconciler) retractCredentialsBlocked(ctx context.Context, svc *kipperv1.Service) error {
+	if !meta.RemoveStatusCondition(&svc.Status.Conditions, kipperv1.ConditionCredentialsReady) {
+		return nil
+	}
 	return r.Status().Update(ctx, svc)
 }
 
@@ -1198,4 +1467,252 @@ func generatePassword() string {
 	b := make([]byte, 24)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// cleanUp takes the service's dependants away before it goes, and reports
+// whether that has finished and which step to name if it has not.
+//
+// Every step fails closed: the finalizer stays, the deletion retries, and
+// nothing further is attempted. The data goes last because it cannot be undone
+// and the two before it can, so a service whose bindings will not clear does not
+// have its data destroyed on the way to failing.
+func (r *ServiceReconciler) cleanUp(ctx context.Context, svc *kipperv1.Service) (bool, string, error) {
+	// A grant that outlives its service could open a recreated namesake if the
+	// UID check were ever bypassed. A missing store or a failed revoke keeps the
+	// finalizer, so deletion retries rather than orphaning grants.
+	if r.ShareGrants == nil {
+		return false, "ShareLinksNotRevoked", fmt.Errorf("share grant store not configured; refusing to finalize service %s/%s with its links intact", svc.Namespace, svc.Name)
+	}
+	if err := r.ShareGrants.RevokeAllForService(ctx, svc.Namespace, svc.Name); err != nil {
+		return false, "ShareLinksNotRevoked", fmt.Errorf("revoking share links: %w", err)
+	}
+
+	// A workload left bound to a service that has gone fails its own reconcile
+	// outright and cannot be unbound afterwards, so the service must not finish
+	// leaving until nothing depends on it.
+	if err := ClearBindingsToService(ctx, r.Client, svc.Name, svc.Namespace); err != nil {
+		return false, "BindingsNotCleared", fmt.Errorf("clearing bindings to %s: %w", svc.Name, err)
+	}
+
+	// Adoption only reaches a service the controller reconciles while it is
+	// alive. One deleted before that, or restored without its owner references,
+	// still has dependants nothing will collect, and leaving them means a
+	// workload still running against the volume this delete meant to keep.
+	if err := r.removeOrphanedDependants(ctx, svc); err != nil {
+		return false, "DependantsNotRemoved", err
+	}
+
+	if svc.Annotations[datavolume.DeleteAnnotation] != "true" {
+		return true, "", nil
+	}
+	destroyed, err := r.destroyData(ctx, svc)
+	if err != nil {
+		// The remedy is a deletion one. The service is already leaving, so
+		// calling it something else is not on the table, and without this an
+		// operator is left with a service that will not go and nothing saying
+		// how to let it.
+		return false, "DataNotDestroyed", fmt.Errorf(
+			"%w; remove the %s annotation to let the service finish leaving, with its volume where it is",
+			err, datavolume.DeleteAnnotation)
+	}
+	return destroyed, "", nil
+}
+
+// removeOrphanedDependants deletes the objects that would otherwise outlive the
+// service because nothing owns them.
+//
+// An object this service owns is left to garbage collection, which is what
+// takes it. An object that is somebody else's is left alone entirely: nothing
+// here is destructive to data, so a collision is no reason to hold the service
+// back from leaving.
+func (r *ServiceReconciler) removeOrphanedDependants(ctx context.Context, svc *kipperv1.Service) error {
+	name := types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}
+
+	var workload appsv1.StatefulSet
+	if err := r.orphanIsGone(ctx, name, &workload, svc); err != nil {
+		return fmt.Errorf("removing the workload of %s: %w", svc.Name, err)
+	}
+	var address corev1.Service
+	if err := r.orphanIsGone(ctx, name, &address, svc); err != nil {
+		return fmt.Errorf("removing the cluster address of %s: %w", svc.Name, err)
+	}
+	return nil
+}
+
+// orphanIsGone deletes one dependant if it is the service's and nothing owns it.
+func (r *ServiceReconciler) orphanIsGone(ctx context.Context, name types.NamespacedName, object client.Object, svc *kipperv1.Service) error {
+	if err := r.Get(ctx, name, object); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if metav1.GetControllerOf(object) != nil {
+		return nil
+	}
+	if !isOurs(object, svc) {
+		return nil
+	}
+	uid := object.GetUID()
+	err := r.Delete(ctx, object, client.Preconditions{UID: &uid})
+	if err != nil && !errors.IsNotFound(err) && !errors.IsConflict(err) {
+		return err
+	}
+	return nil
+}
+
+// reportCleanupBlocked writes onto the Service which step of its deletion could
+// not be completed.
+//
+// Best effort, like the credentials report: the deletion is failing already, and
+// losing the explanation is better than losing the error that caused it. Without
+// this the service sits in deleting with the reason only in the controller's log,
+// which is not somewhere an operator watching it can look.
+func (r *ServiceReconciler) reportCleanupBlocked(ctx context.Context, svc *kipperv1.Service, cause error, reason string) {
+	if !meta.SetStatusCondition(&svc.Status.Conditions, metav1.Condition{
+		Type:               kipperv1.ConditionCleanupComplete,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            cause.Error(),
+		ObservedGeneration: svc.Generation,
+	}) {
+		return
+	}
+	if err := r.Status().Update(ctx, svc); err != nil {
+		log.FromContext(ctx).Error(err, "recording why the service cannot finish deleting")
+	}
+}
+
+// reportNameTaken writes onto the Service that an object of its name belongs to
+// something else, and says nothing about any other failure.
+//
+// The refusal is permanent: no retry frees a name somebody holds. Left in the
+// log it is a service that sits at Pending with the reason somewhere an operator
+// cannot look, which is the thing this range set out to stop.
+func (r *ServiceReconciler) reportNameTaken(ctx context.Context, svc *kipperv1.Service, cause error) {
+	var taken *nameTakenError
+	if !stderrors.As(cause, &taken) {
+		return
+	}
+	changed := meta.SetStatusCondition(&svc.Status.Conditions, metav1.Condition{
+		Type:               kipperv1.ConditionNameFree,
+		Status:             metav1.ConditionFalse,
+		Reason:             "NameTaken",
+		Message:            cause.Error(),
+		ObservedGeneration: svc.Generation,
+	})
+	if svc.Status.Phase != "Failed" {
+		svc.Status.Phase = "Failed"
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	if err := r.Status().Update(ctx, svc); err != nil {
+		log.FromContext(ctx).Error(err, "recording that the service's name is taken")
+	}
+}
+
+// retractNameTaken takes the refusal off once the name is the service's own.
+func (r *ServiceReconciler) retractNameTaken(ctx context.Context, svc *kipperv1.Service) {
+	if !meta.RemoveStatusCondition(&svc.Status.Conditions, kipperv1.ConditionNameFree) {
+		return
+	}
+	if err := r.Status().Update(ctx, svc); err != nil {
+		log.FromContext(ctx).Error(err, "retracting that the service's name is taken")
+	}
+}
+
+// retractCleanupBlocked takes the reason off once the step that failed has run.
+//
+// Best effort for the same reason as writing it: losing the retraction costs an
+// operator a stale line, and the next pass writes it again.
+func (r *ServiceReconciler) retractCleanupBlocked(ctx context.Context, svc *kipperv1.Service) {
+	if !meta.RemoveStatusCondition(&svc.Status.Conditions, kipperv1.ConditionCleanupComplete) {
+		return
+	}
+	if err := r.Status().Update(ctx, svc); err != nil {
+		log.FromContext(ctx).Error(err, "retracting why the service could not finish deleting")
+	}
+}
+
+// reportCredentialsBlocked writes onto the Service why it cannot proceed.
+//
+// Best effort: the reconcile is failing already, and losing the explanation is
+// better than losing the error that caused it.
+func (r *ServiceReconciler) reportCredentialsBlocked(ctx context.Context, svc *kipperv1.Service, cause error, reason string) {
+	changed := meta.SetStatusCondition(&svc.Status.Conditions, metav1.Condition{
+		Type:               kipperv1.ConditionCredentialsReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            cause.Error(),
+		ObservedGeneration: svc.Generation,
+	})
+	if svc.Status.Phase != "Failed" {
+		svc.Status.Phase = "Failed"
+		changed = true
+	}
+	// Only when it says something new. A status write is an update event on the
+	// object being reconciled, so writing the same failure every pass feeds the
+	// queue its own tail: the reconcile that failed is requeued with backoff,
+	// and the event this would emit brings it straight back.
+	if !changed {
+		return
+	}
+	if err := r.Status().Update(ctx, svc); err != nil {
+		log.FromContext(ctx).Error(err, "recording why the credentials secret is blocked")
+	}
+}
+
+// credentialsNotOursError refuses a credentials Secret that belongs to something
+// else. It is one of the two states an operator has to clear, and no amount of
+// retrying changes it.
+type credentialsNotOursError struct {
+	Secret string
+}
+
+func (e *credentialsNotOursError) Error() string {
+	return fmt.Sprintf("secret %s is not owned by this service, so its credentials cannot be injected into anything bound to it; set its controller reference to this Service, or remove it if the service holds no data yet", e.Secret)
+}
+
+// permanentCredentialsFailure says whether an error out of
+// reconcileCredentialsSecret is one no retry clears, and under what reason it
+// should be reported.
+//
+// Both of these need an operator. Everything else that reconcile can return is
+// worth retrying and must not reach the object.
+func permanentCredentialsFailure(err error) (string, bool) {
+	var notOurs *credentialsNotOursError
+	if stderrors.As(err, &notOurs) {
+		return "SecretNotOwned", true
+	}
+	var missing *credentialsMissingError
+	if stderrors.As(err, &missing) {
+		return "DataWithoutCredentials", true
+	}
+	return "", false
+}
+
+// credentialsMissingError is the other one: the service has data and no password
+// for it, either because the Secret is gone or because it came back without one,
+// and minting a fresh password would lock the service out of its own volume.
+type credentialsMissingError struct {
+	Service string
+	Claim   string
+	Secret  string
+	// Key is the one that is missing, where the Secret itself is still there.
+	Key string
+}
+
+func (e *credentialsMissingError) Error() string {
+	// Deleting the volume on its own is not the way out, whatever it looks
+	// like from here: the statefulset recreates the claim from its template
+	// before the next reconcile, so the refusal comes straight back, now
+	// against an empty volume.
+	lost := fmt.Sprintf("no credentials secret %s", e.Secret)
+	if e.Key != "" {
+		lost = fmt.Sprintf("no %s in %s", e.Key, e.Secret)
+	}
+	return fmt.Sprintf("service %s has data in %s and %s, and a new one would not be what that data was written under; restore %s from a backup, or delete the service together with its volume and create it again to start empty",
+		e.Service, e.Claim, lost, e.Secret)
 }

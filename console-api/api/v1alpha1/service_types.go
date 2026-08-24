@@ -2,6 +2,8 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/getkipper/kipper/controller/pkg/servicecatalog"
 )
 
 // ServiceSpec defines the desired state of a stateful service.
@@ -48,6 +50,26 @@ type ServiceResources struct {
 	// +optional
 	MemoryLimit string `json:"memoryLimit,omitempty"`
 }
+
+// ConditionCredentialsReady says whether the service holds the credentials
+// Secret it injects into anything bound to it. It goes false for two reasons,
+// neither of which a retry clears. SecretNotOwned: another object occupies that
+// name, which a create-time check cannot always prevent, because a restore can
+// put one there and the object it collides with may be gone.
+// DataWithoutCredentials: the service has a volume an engine has already
+// initialised, and no password or username for it, so making one up would lock
+// the service out of its own data.
+const ConditionCredentialsReady = servicecatalog.ConditionCredentialsReady
+
+// ConditionCleanupComplete says whether a deleting service has finished leaving.
+// It goes false with the step that could not be completed, so an operator
+// watching a service sit in deleting can see which one and why.
+const ConditionCleanupComplete = servicecatalog.ConditionCleanupComplete
+
+// ConditionNameFree says whether the objects a service needs under its own name
+// are free. It goes false when one of them belongs to something else, which no
+// retry clears.
+const ConditionNameFree = servicecatalog.ConditionNameFree
 
 // ServiceStatus defines the observed state of the service.
 type ServiceStatus struct {

@@ -14,7 +14,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
-	"github.com/getkipper/kipper/console-api/internal/registrycred"
+	"github.com/getkipper/kipper/console-api/internal/nsowner"
+	"github.com/getkipper/kipper/controller/pkg/registrycred"
 )
 
 // registryPullSecretName is the per-workload image-pull Secret name. The kind
@@ -58,7 +59,7 @@ func ensureImagePullSecret(ctx context.Context, c client.Client, scheme *runtime
 		return nil, deleteRegistryPullSecret(ctx, c, owner.GetNamespace(), name)
 	}
 
-	entries, err := registrycred.LoadCR(ctx, c)
+	entries, err := loadRegistryCredentials(ctx, c)
 	if err != nil {
 		return nil, fmt.Errorf("reading registry credentials for %s: %w", owner.GetName(), err)
 	}
@@ -112,21 +113,35 @@ func validateClusterImage(ctx context.Context, c client.Client, owner client.Obj
 	return nil
 }
 
-// workloadProject returns the project a workload's namespace belongs to, from
-// the controller-owned kipper.run/project label, or "" when the namespace is
-// definitively not a managed project namespace — a tenant cannot label a
-// namespace, so the result is never tenant-influenced. Only a read failure is
-// an error, so a transient one is retried rather than mistaken for "no
-// project".
+// workloadProject returns the project a workload's namespace belongs to, or ""
+// when nothing owns it.
+//
+// It resolves through the shared owner lookup rather than reading the label
+// here, because anyone who can write a namespace can write that label and this
+// decides which project's registry credentials a workload is given. What the
+// lookup requires, and the release it starts requiring the claim, is stated
+// once in nsowner.Of.
+//
+// Only a read failure is an error, so a transient one is retried rather than
+// mistaken for "no project".
 func workloadProject(ctx context.Context, c client.Client, namespace string) (string, error) {
+	// A workload's namespace should exist, so its absence is a failure to find
+	// out rather than an answer, and the caller retries. nsowner treats a
+	// missing namespace as unowned, which is right for the authorization
+	// question and wrong here, so the existence check stays.
 	var ns corev1.Namespace
 	if err := c.Get(ctx, client.ObjectKey{Name: namespace}, &ns); err != nil {
 		return "", fmt.Errorf("resolving project for namespace %s: %w", namespace, err)
 	}
-	if ns.Labels["app.kubernetes.io/managed-by"] != "kipper" {
+
+	project, ok, err := nsowner.Of(ctx, c, namespace)
+	if err != nil {
+		return "", fmt.Errorf("resolving project for namespace %s: %w", namespace, err)
+	}
+	if !ok {
 		return "", nil
 	}
-	return ns.Labels["kipper.run/project"], nil
+	return project, nil
 }
 
 func upsertPullSecret(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, name string, dockercfg []byte) error {
@@ -304,4 +319,20 @@ func (r *JobReconciler) enqueueForRegistryCredentials(ctx context.Context, obj c
 		}})
 	}
 	return reqs
+}
+
+// loadRegistryCredentials is Load for a controller-runtime client, so a
+// reconciler resolves the list through its own cached client. The parsing is the
+// package's; only the fetch is here, because that is the part that needs the
+// controller-runtime types.
+func loadRegistryCredentials(ctx context.Context, c client.Client) ([]registrycred.Entry, error) {
+	var secret corev1.Secret
+	err := c.Get(ctx, client.ObjectKey{Namespace: registrycred.Namespace, Name: registrycred.ConfigSecretName}, &secret)
+	if k8serrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading registry credentials: %w", err)
+	}
+	return registrycred.ParseSecret(&secret)
 }

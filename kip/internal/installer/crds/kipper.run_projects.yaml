@@ -153,10 +153,8 @@ spec:
                       type: string
                     role:
                       description: Role is the user's capability within this project.
-                      enum:
-                      - owner
-                      - deployer
-                      - viewer
+                      maxLength: 127
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)?$
                       type: string
                   required:
                   - email
@@ -260,6 +258,36 @@ spec:
                   - type
                   type: object
                 type: array
+              namespaceClaims:
+                description: |-
+                  NamespaceClaims records the namespaces this project took and the exact
+                  objects it took, so ownership rests on something a relabel does not
+                  touch.
+
+                  A namespace's project label is the only thing saying whose it is today,
+                  and anyone who can write the object can rewrite it. The claim is a second
+                  record: the reconcile writes what it actually adopted, and the UID is
+                  there because a name outlives the object it named, so a namespace deleted
+                  and recreated is a different namespace and must not inherit a claim.
+                items:
+                  description: |-
+                    NamespaceClaim is one namespace a project holds, identified by the object
+                    rather than by its name.
+                  properties:
+                    name:
+                      description: Name is the namespace.
+                      type: string
+                    uid:
+                      description: |-
+                        UID is the object the project took. A namespace deleted and recreated
+                        under the same name is a different object, and a claim matching on name
+                        alone would hand the replacement to whoever held its predecessor.
+                      type: string
+                  required:
+                  - name
+                  - uid
+                  type: object
+                type: array
               namespaces:
                 description: Namespaces lists the Kubernetes namespaces created for
                   this project.
@@ -272,6 +300,43 @@ spec:
                 - Active
                 - Terminating
                 type: string
+              projectedMembers:
+                description: |-
+                  ProjectedMembers is the member list the reconciler last projected onto
+                  RBAC.
+
+                  It exists for the audit trail. No API audit event carries the object a
+                  write replaced, so a membership change can be attributed to who and when
+                  and not to what it was before. The reconciler is the one component that
+                  sees both, so it records what it acted on.
+
+                  Nothing reads it yet. This status is written whole by every controller
+                  already running, so a pod whose struct lacks the field drops it on its
+                  next write; in a rolling window that is one old pod away from an empty
+                  baseline. It ships a release before anything leans on it.
+                items:
+                  description: ProjectMember grants a user a role within a project.
+                  properties:
+                    email:
+                      description: Email identifies the user, matching their Dex identity.
+                      type: string
+                    role:
+                      description: Role is the user's capability within this project.
+                      maxLength: 127
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)?$
+                      type: string
+                  required:
+                  - email
+                  - role
+                  type: object
+                type: array
+              projectedMembersGeneration:
+                description: |-
+                  ProjectedMembersGeneration is the spec generation ProjectedMembers came
+                  from. A baseline whose generation does not match the object's describes a
+                  spec that has since changed, and is stale rather than current.
+                format: int64
+                type: integer
             type: object
         type: object
     served: true

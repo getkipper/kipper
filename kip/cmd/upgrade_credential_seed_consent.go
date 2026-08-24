@@ -101,13 +101,18 @@ func credentialSeedConsent(
 	if len(undecided) == 0 {
 		return empty, nil
 	}
-	usage, err := sharedCredentialUsage(ctx, clientset, dyn, undecided)
+	usage, missed, err := sharedCredentialUsage(ctx, clientset, dyn, undecided)
 	if err != nil {
 		return nil, err
 	}
 	if len(usage) > 0 {
 		printSeedConsentPreview(out, usage)
 	}
+	// Missed grants are printed regardless of the decision that follows, and
+	// before it: they are the namespaces this migration will not cover no
+	// matter how the operator answers, so seeing them before the yes/no is
+	// what puts them into the same run rather than the next one.
+	reportMissedGrants(out, missed)
 	decision, err := decideCredentialSeedConsent(usage, flag, isTTY, confirm)
 	if err != nil {
 		return nil, err

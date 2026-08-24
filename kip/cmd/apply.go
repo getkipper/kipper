@@ -593,6 +593,11 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 		// reaches all three workload kinds. Checking here rather than in each
 		// kind's own command is what keeps a manifest from doing what the
 		// commands refuse.
+		if res.GVR == manifest.ServiceGVR {
+			if err := refuseServiceNameWhoseCredentialIsTaken(ctx, dyn, namespace, name); err != nil {
+				return "", err
+			}
+		}
 		release := func() {}
 		if kind := workloadKindOf(res.GVR); kind != "" {
 			var reserveErr error

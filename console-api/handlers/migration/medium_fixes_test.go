@@ -9,11 +9,12 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	"k8s.io/apimachinery/pkg/runtime"
-
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 )
@@ -248,7 +249,11 @@ func TestEnsureReceiverHandler(t *testing.T) {
 			}},
 		}
 		client := fake.NewSimpleClientset(append(base, objs...)...)
-		h := &Handler{Client: client, Sessions: NewSessionStore()}
+		// Scope is resolved from the claim now, so the CR client has to carry
+		// the namespaces and the projects that hold them. The label alone is
+		// writable by anyone who can write a namespace, and this gates what a
+		// migration secret can reach.
+		h := &Handler{Client: client, Sessions: NewSessionStore(), CRClient: migrationOwners(t)}
 		h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}, Secret: "test-session-secret"})
 		r := chi.NewRouter()
 		r.Post("/{session}/transfer/{transfer}/ensure", h.EnsureReceiverHandler)
@@ -339,4 +344,35 @@ func TestMigrationReplacesUnusablePerAppCPU(t *testing.T) {
 	if res["memory"] != "2Gi" {
 		t.Errorf("memory = %v, want the app's own valid value preserved", res["memory"])
 	}
+}
+
+// migrationOwners is the pair of namespaces used above, with the projects that
+// hold them.
+func migrationOwners(t *testing.T) crclient.Client {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := kipperv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("registering the kipper scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("registering the core scheme: %v", err)
+	}
+	held := map[string][]kipperv1.NamespaceClaim{
+		"shop":     {{Name: "shop-prod", UID: "shop-prod-uid"}, {Name: "shop-test", UID: "shop-test-uid"}},
+		"payments": {{Name: "payments-prod", UID: "payments-prod-uid"}},
+	}
+	var objs []crclient.Object
+	for project, claims := range held {
+		objs = append(objs, &kipperv1.Project{
+			ObjectMeta: metav1.ObjectMeta{Name: project},
+			Status:     kipperv1.ProjectStatus{NamespaceClaims: claims},
+		})
+		for _, c := range claims {
+			objs = append(objs, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+				Name: c.Name, UID: c.UID,
+				Labels: map[string]string{"kipper.run/project": project},
+			}})
+		}
+	}
+	return crfake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 }

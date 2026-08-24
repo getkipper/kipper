@@ -588,6 +588,18 @@ function typeIcon(type: string): string {
           </div>
         </div>
 
+        <!--
+          The remedy the reconciler wrote onto a refused service. Full width so
+          the message keeps its sentence, and only present when there is one.
+        -->
+        <p
+          v-if="svc.blockedReason"
+          class="order-last w-full rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200"
+        >
+          <span class="font-semibold">{{ svc.blockedReason }}</span>
+          {{ svc.blockedMessage }}
+        </p>
+
         <div class="flex items-center gap-4">
           <!-- Status -->
           <span class="inline-flex items-center gap-1.5 text-sm">

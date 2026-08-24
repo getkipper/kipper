@@ -8,8 +8,14 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/internal/nsowner"
 	"github.com/getkipper/kipper/console-api/middleware"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 )
@@ -41,7 +47,9 @@ func withResolver(t *testing.T) {
 	}))
 	members := stubMemberSource{"blog": {"dev@test.com": "deployer"}}
 	prev := projectResolver
-	SetProjectResolver(middleware.NewProjectAccessResolver(client, roles, members))
+	SetProjectResolver(middleware.NewProjectAccessResolver(client, roles, members, handlerOwners(t,
+		projectNS("blog", "blog"), projectNS("shop", "shop"),
+	)))
 	t.Cleanup(func() { projectResolver = prev })
 }
 
@@ -129,4 +137,41 @@ func TestFilterSeriesByAccess(t *testing.T) {
 	if len(admin) != 2 {
 		t.Fatalf("admin should see both project series (orphan dropped), got %d", len(admin))
 	}
+}
+
+// handlerOwners builds the namespace-owner reader these tests need, with a
+// Project claiming each namespace it is given.
+//
+// Ownership is the claim now, not the label, so a fixture that sets only the
+// label describes a cluster nobody could have reached honestly. Deriving the
+// projects from the namespaces keeps the two agreeing by construction.
+func handlerOwners(t *testing.T, namespaces ...*corev1.Namespace) nsowner.Reader {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := kipperv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("registering the kipper scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("registering the core scheme: %v", err)
+	}
+
+	claims := map[string][]kipperv1.NamespaceClaim{}
+	objs := make([]crclient.Object, 0, len(namespaces))
+	for _, ns := range namespaces {
+		ns := ns.DeepCopy()
+		if ns.UID == "" {
+			ns.UID = types.UID(ns.Name + "-uid")
+		}
+		objs = append(objs, ns)
+		if project := ns.Labels[kipperlabels.Project]; project != "" {
+			claims[project] = append(claims[project], kipperv1.NamespaceClaim{Name: ns.Name, UID: ns.UID})
+		}
+	}
+	for project, held := range claims {
+		objs = append(objs, &kipperv1.Project{
+			ObjectMeta: metav1.ObjectMeta{Name: project},
+			Status:     kipperv1.ProjectStatus{NamespaceClaims: held},
+		})
+	}
+	return crfake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 }

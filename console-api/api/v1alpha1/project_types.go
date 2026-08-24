@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // ProjectSpec defines the desired state of a project.
@@ -78,9 +79,32 @@ type ProjectSpec struct {
 	AllowLinksFrom []string `json:"allowLinksFrom,omitempty"`
 }
 
-// ProjectMemberRole is a user's capability within a single project, ordered
-// viewer < deployer < owner.
-// +kubebuilder:validation:Enum=owner;deployer;viewer
+// memberRolePattern constrains a member's role name. It is the same string as
+// the Pattern marker below, and a test asserts the generated CRD carries it:
+// a marker edited without this constant, or the reverse, is drift nobody would
+// otherwise see.
+//
+// One optional dotted suffix, both halves DNS labels. That covers the three
+// built-ins, a shared role's dot-free name, and a tenant role's
+// `<project>.<name>`. It stays this narrow because a role name reaches a
+// generated object name, and a name carrying a slash or a space is one nothing
+// can address.
+const memberRolePattern = `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)?$`
+
+// ProjectMemberRole is a user's capability within a single project.
+//
+// The three built-ins are ordered viewer < deployer < owner. The schema does
+// not list them, because a member may also name a role this build does not
+// know: written with kubectl, restored from a backup, or carried in by a
+// migration from a cluster that had it. A closed enum would fail the whole
+// Project object in that case, and the member holding the unknown role is
+// exactly the one an operator needs to be able to remove.
+//
+// Such a member holds nothing. The projection binds only the roles it knows, so
+// an unrecognised name grants no access, and the console reports it as
+// unrecognised rather than showing it as a role.
+// +kubebuilder:validation:MaxLength=127
+// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)?$`
 type ProjectMemberRole string
 
 const (
@@ -99,6 +123,18 @@ type ProjectMember struct {
 
 	// Role is the user's capability within this project.
 	Role ProjectMemberRole `json:"role"`
+}
+
+// NamespaceClaim is one namespace a project holds, identified by the object
+// rather than by its name.
+type NamespaceClaim struct {
+	// Name is the namespace.
+	Name string `json:"name"`
+
+	// UID is the object the project took. A namespace deleted and recreated
+	// under the same name is a different object, and a claim matching on name
+	// alone would hand the replacement to whoever held its predecessor.
+	UID types.UID `json:"uid"`
 }
 
 // ProjectEnvironment defines a single environment stage.
@@ -153,6 +189,39 @@ type ProjectStatus struct {
 	// Conditions represent the latest available observations.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// NamespaceClaims records the namespaces this project took and the exact
+	// objects it took, so ownership rests on something a relabel does not
+	// touch.
+	//
+	// A namespace's project label is the only thing saying whose it is today,
+	// and anyone who can write the object can rewrite it. The claim is a second
+	// record: the reconcile writes what it actually adopted, and the UID is
+	// there because a name outlives the object it named, so a namespace deleted
+	// and recreated is a different namespace and must not inherit a claim.
+	// +optional
+	NamespaceClaims []NamespaceClaim `json:"namespaceClaims,omitempty"`
+
+	// ProjectedMembers is the member list the reconciler last projected onto
+	// RBAC.
+	//
+	// It exists for the audit trail. No API audit event carries the object a
+	// write replaced, so a membership change can be attributed to who and when
+	// and not to what it was before. The reconciler is the one component that
+	// sees both, so it records what it acted on.
+	//
+	// Nothing reads it yet. This status is written whole by every controller
+	// already running, so a pod whose struct lacks the field drops it on its
+	// next write; in a rolling window that is one old pod away from an empty
+	// baseline. It ships a release before anything leans on it.
+	// +optional
+	ProjectedMembers []ProjectMember `json:"projectedMembers,omitempty"`
+
+	// ProjectedMembersGeneration is the spec generation ProjectedMembers came
+	// from. A baseline whose generation does not match the object's describes a
+	// spec that has since changed, and is stale rather than current.
+	// +optional
+	ProjectedMembersGeneration int64 `json:"projectedMembersGeneration,omitempty"`
 }
 
 // +kubebuilder:object:root=true

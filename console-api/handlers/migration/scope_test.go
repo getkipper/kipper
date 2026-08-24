@@ -13,17 +13,37 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+
+	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 )
 
 func projectNamespace(name, project string) *corev1.Namespace {
 	return &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   name,
+			Name: name,
+			// Matching the claims ownerOf writes, because a claim names an
+			// object and migration scope resolves through those claims.
+			UID:    types.UID(name + "-uid"),
 			Labels: map[string]string{"kipper.run/project": project},
 		},
 	}
+}
+
+// ownerOf is the project these fixtures migrate, holding these namespaces.
+//
+// What a migration moves is resolved through the owner lookup rather than read
+// off the namespace label, so a fixture whose namespaces no project claims
+// migrates nothing and every assertion after it is about an empty plan.
+func ownerOf(namespaces ...string) *kipperv1.Project {
+	p := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "shop"}}
+	for _, ns := range namespaces {
+		p.Status.NamespaceClaims = append(p.Status.NamespaceClaims,
+			kipperv1.NamespaceClaim{Name: ns, UID: types.UID(ns + "-uid")})
+	}
+	return p
 }
 
 func TestProjectAccepted(t *testing.T) {
@@ -64,6 +84,10 @@ func TestNamespaceInScope(t *testing.T) {
 			projectNamespace("payments-prod", "payments"),
 			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "unlabelled"}},
 		),
+		// Scope resolves ownership from the claim, so the projects that hold
+		// these namespaces have to exist. "unlabelled" deliberately has no
+		// owner, which is what makes it out of scope.
+		CRClient: migrationOwners(t),
 	}
 	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}, Secret: "test-session-secret"})
 
@@ -95,6 +119,7 @@ func TestReceiveResourceHandler_RejectsOutOfScope(t *testing.T) {
 	h := &Handler{
 		Sessions: NewSessionStore(),
 		Client:   fake.NewSimpleClientset(projectNamespace("payments-prod", "payments")),
+		CRClient: migrationOwners(t),
 	}
 	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}, Secret: "test-session-secret"})
 
@@ -126,6 +151,7 @@ func TestReceiveSecretHandler_ScopeGate(t *testing.T) {
 	h := &Handler{
 		Sessions: NewSessionStore(),
 		Client:   fake.NewSimpleClientset(projectNamespace("shop-test", "shop")),
+		CRClient: migrationOwners(t),
 	}
 	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}, Secret: "test-session-secret"})
 
@@ -170,6 +196,7 @@ func TestReceiveSecretHandler_ReplacesSecretOnTypeChange(t *testing.T) {
 	h := &Handler{
 		Sessions: NewSessionStore(),
 		Client:   fake.NewSimpleClientset(projectNamespace("shop-test", "shop"), existing),
+		CRClient: migrationOwners(t),
 	}
 	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}, Secret: "test-session-secret"})
 
@@ -224,7 +251,7 @@ func TestReceiveSecretHandler_RestoresOnFailedTypeChange(t *testing.T) {
 		}
 		return false, nil, nil
 	})
-	h := &Handler{Sessions: NewSessionStore(), Client: client}
+	h := &Handler{Sessions: NewSessionStore(), Client: client, CRClient: migrationOwners(t)}
 	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}, Secret: "test-session-secret"})
 
 	router := chi.NewRouter()
@@ -260,6 +287,7 @@ func TestAbortHandler_RemovesOnlyUnadoptedCreatedSecrets(t *testing.T) {
 	h := &Handler{
 		Sessions: NewSessionStore(),
 		Client:   fake.NewSimpleClientset(projectNamespace("shop-test", "shop"), preexisting),
+		CRClient: migrationOwners(t),
 	}
 	h.Sessions.Put(&Session{ID: "s1", Projects: []string{"shop"}, Secret: "test-session-secret"})
 

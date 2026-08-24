@@ -25,8 +25,8 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/builder"
-	"github.com/getkipper/kipper/console-api/internal/registrycred"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
+	"github.com/getkipper/kipper/controller/pkg/registrycred"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
@@ -181,7 +181,7 @@ func (wh *Webhooks) triggerBuild(ctx context.Context, w http.ResponseWriter, app
 		return
 	}
 
-	job, err := builder.CreateBuildJob(ctx, wh.Client, appCR, commit)
+	job, err := builder.CreateBuildJob(ctx, wh.Client, wh.CRClient, appCR, commit)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create build: %v", err))
 		return

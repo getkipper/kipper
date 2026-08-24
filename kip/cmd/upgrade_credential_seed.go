@@ -143,6 +143,28 @@ func fillSharedCredentialGrants(ctx context.Context, clientset kubernetes.Interf
 	return nil
 }
 
+// reportMissedGrants names every namespace that references a shared credential
+// and whose project could not be proven from its project's own records.
+//
+// It is the only notice an operator gets. The allow-list is written once and
+// no later upgrade revisits it, so a project left off stays off, and without
+// this the first evidence is a build refused long after anybody connects it
+// to an upgrade. What causes it is a namespace the project's own records do
+// not cover, which on a cluster whose reconciler was refusing that namespace
+// is exactly the one that matters.
+//
+// The consent wrapper prints this: it is the one place that reads live app
+// usage, and the fill passes work from the approved snapshot alone.
+func reportMissedGrants(out io.Writer, missed []missedGrant) {
+	for _, m := range missed {
+		_, _ = fmt.Fprintf(out, "  !   %s references shared credential %s, and project %s was not previewed for a grant:\n"+
+			"      no record proves that namespace is theirs, and a label alone cannot decide a\n"+
+			"      standing grant to somebody else's credential. If it is theirs, run\n"+
+			"      kip credentials allow %s --project %s\n",
+			m.namespace, m.credential, m.project, m.credential, m.project)
+	}
+}
+
 // reportMigrationLeftOpen says which credentials are still waiting on a
 // decision because the console-api that keeps allow-lists is not yet the one
 // serving. Its wording is specific to that cause; the declined-consent case
@@ -338,7 +360,7 @@ func recordGrantsSeeded(ctx context.Context, clientset kubernetes.Interface) err
 }
 
 // sharedCredentialUsage maps each shared credential to the projects whose apps
-// reference it.
+// reference it, and lists the namespaces whose ownership could not be proven.
 //
 // It reads the apps because the cluster this runs for has no other record: the
 // grant it is reconstructing is exactly what was never written down. A
@@ -346,32 +368,71 @@ func recordGrantsSeeded(ctx context.Context, clientset kubernetes.Interface) err
 // credential is not, so the caller is the consent wrapper, which describes the
 // pairs it returns as references rather than as grants.
 //
+// Which project each namespace belongs to is decided from that project's own
+// records rather than from the namespace's label. What this builds is written
+// into a shared credential's allow-list and stays there, so a namespace pointed
+// at a project by anyone who can write namespace metadata would hand that
+// project a standing grant to build with another tenant's credential.
+//
+// The cost of that strictness, which is why the drop is reported rather than
+// passed over in silence: this runs before the console-api that fixes the
+// records has rolled, so on a cluster where the released reconciler has been
+// refusing a namespace it is exactly that namespace whose record is missing.
+// Its project is left off the preview, and an unreported miss arrives as a
+// refused build months later with nothing connecting it to this.
+//
 // Only names on the shared list count, so an app's own credential cannot
 // invent a grant nobody asked for.
-func sharedCredentialUsage(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, shared map[string]bool) (map[string][]string, error) {
+func sharedCredentialUsage(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, shared map[string]bool) (map[string][]string, []missedGrant, error) {
 	namespaces, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
 		LabelSelector: labels.ManagedBy + "=" + labels.Kipper,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("listing project namespaces: %w", err)
+		return nil, nil, fmt.Errorf("listing project namespaces: %w", err)
+	}
+	held, err := readProjectRecords(ctx, dyn)
+	if err != nil {
+		return nil, nil, err
 	}
 	project := make(map[string]string, len(namespaces.Items))
+	unproven := map[string]string{}
 	for _, ns := range namespaces.Items {
-		if name := ns.Labels[labels.Project]; name != "" {
-			project[ns.Name] = name
+		name := ns.Labels[labels.Project]
+		if name == "" {
+			continue
 		}
+		if !held[name].covers(ns.Name, string(ns.UID)) {
+			unproven[ns.Name] = name
+			continue
+		}
+		project[ns.Name] = name
 	}
 
 	apps, err := dyn.Resource(deployer.AppGVR).Namespace("").List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("listing apps: %w", err)
+		return nil, nil, fmt.Errorf("listing apps: %w", err)
 	}
 
+	var missed []missedGrant
 	usage := map[string][]string{}
 	for i := range apps.Items {
 		app := &apps.Items[i]
 		owner := project[app.GetNamespace()]
 		if owner == "" {
+			// Named only where it costs somebody something: a namespace whose
+			// ownership could not be proven and which references a shared
+			// credential. Anything else on that list is a namespace nobody was
+			// going to preview a grant for anyway, and printing it would bury
+			// the one line that matters.
+			if project, dropped := unproven[app.GetNamespace()]; dropped {
+				if credential := appGitCredential(app); shared[credential] {
+					missed = append(missed, missedGrant{
+						namespace:  app.GetNamespace(),
+						project:    project,
+						credential: credential,
+					})
+				}
+			}
 			// A namespace outside any project cannot name one, and stopping
 			// here would refuse to upgrade a cluster with a stray namespace.
 			continue
@@ -385,7 +446,8 @@ func sharedCredentialUsage(ctx context.Context, clientset kubernetes.Interface, 
 			}
 		}
 	}
-	return usage, nil
+	sort.Slice(missed, func(i, j int) bool { return missed[i].namespace < missed[j].namespace })
+	return usage, missed, nil
 }
 
 func appGitCredential(app *unstructured.Unstructured) string {
@@ -403,4 +465,12 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// missedGrant is a namespace referencing a shared credential whose project
+// could not be proven from that project's own records.
+type missedGrant struct {
+	namespace  string
+	project    string
+	credential string
 }

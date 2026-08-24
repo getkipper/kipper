@@ -30,7 +30,7 @@ func journalHandler(t *testing.T, objs ...runtime.Object) *Handler {
 	}
 	all = append(all, objs...)
 	client := fake.NewSimpleClientset(all...)
-	h := &Handler{Client: client, Sessions: NewSessionStore()}
+	h := &Handler{Client: client, Sessions: NewSessionStore(), CRClient: migrationOwners(t)}
 	h.Sessions.Put(&Session{
 		ID:        "sess-1",
 		Projects:  []string{"shop"},
@@ -482,7 +482,7 @@ func TestJournalRefusesWhenInventoryCannotPersist(t *testing.T) {
 	// A session store that actually writes, so persistence can be made to fail.
 	store := NewPersistentSessionStore(client, "kipper-system")
 	store.Put(&Session{ID: "sess-1", Projects: []string{"shop"}, Status: SessionRunning, Secret: "s"})
-	h := &Handler{Client: client, Sessions: store}
+	h := &Handler{Client: client, Sessions: store, CRClient: migrationOwners(t)}
 
 	client.PrependReactor("create", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, fmt.Errorf("etcd unavailable")

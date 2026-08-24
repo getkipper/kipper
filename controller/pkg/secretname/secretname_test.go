@@ -116,3 +116,42 @@ func TestIsGitCredentialOfSeparatesThisAppsOwnCredential(t *testing.T) {
 	assert.False(t, IsGitCredentialOf("web", victim),
 		"one app claimed another app's credential through the shared prefix")
 }
+
+// The classifier decides whether a name is a credential this app generated, and
+// generating one is the only way a digest name comes about. Sixteen is what
+// GitCredentialDigest produces, so accepting any other length widens the class
+// to names nothing here writes, at no benefit.
+func TestIsGitCredentialOfWantsTheLengthTheDigestActuallyIs(t *testing.T) {
+	full := GitCredentialDigest("a-token", "git.example.com")
+	if len(full) != 16 {
+		t.Fatalf("digest length = %d, the guard below is written for 16", len(full))
+	}
+
+	if !IsGitCredentialOf("web", GitCredential("web", full)) {
+		t.Error("a name this package generates was not recognised")
+	}
+	for _, wrong := range []string{full[:15], full + "0", "abc"} {
+		if IsGitCredentialOf("web", GitCredentialPrefix("web")+wrong) {
+			t.Errorf("a %d-character suffix was accepted as a digest", len(wrong))
+		}
+	}
+}
+
+// Two published naming schemes meet on one object: an App named web on the name
+// generated before digests stores its token at web-git-credentials, and a
+// Service named web-git stores its credentials there too.
+func TestAppSharingServiceCredentialName(t *testing.T) {
+	app, collides := AppSharingServiceCredentialName("web-git")
+	if !collides || app != "web" {
+		t.Errorf("web-git should collide with app web, got (%q, %v)", app, collides)
+	}
+	if ServiceCredentials("web-git") != LegacyGitCredential("web") {
+		t.Fatal("the premise of the whole check no longer holds")
+	}
+
+	for _, service := range []string{"web", "database", "-git", "web-gitlab"} {
+		if _, collides := AppSharingServiceCredentialName(service); collides {
+			t.Errorf("%q was reported as colliding", service)
+		}
+	}
+}

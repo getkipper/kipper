@@ -88,6 +88,7 @@ func TestCreateTransferScopeEnforced(t *testing.T) {
 		Client:         fake.NewSimpleClientset(projectNamespace("other-prod", "other")),
 		Sessions:       NewSessionStore(),
 		DatamoverImage: "img",
+		CRClient:       migrationOwners(t),
 	}
 	session := transferSession(t, h)
 
@@ -110,6 +111,7 @@ func TestCreateTransferCreatesReceiver(t *testing.T) {
 		Client:         fake.NewSimpleClientset(projectNamespace("shop-prod", "shop")),
 		Sessions:       NewSessionStore(),
 		DatamoverImage: "img",
+		CRClient:       migrationOwners(t),
 	}
 	session := transferSession(t, h)
 
@@ -167,6 +169,7 @@ func TestCreateTransferStopsServiceStatefulSet(t *testing.T) {
 		Client:         fake.NewSimpleClientset(projectNamespace("shop-prod", "shop"), sts),
 		Sessions:       NewSessionStore(),
 		DatamoverImage: "img",
+		CRClient:       migrationOwners(t),
 	}
 	session := transferSession(t, h)
 

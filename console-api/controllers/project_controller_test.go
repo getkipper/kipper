@@ -14,7 +14,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
-	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
@@ -33,7 +32,7 @@ func TestProjectReconciler_CreatesNamespacesForEachEnvironment(t *testing.T) {
 		},
 	}
 
-	fakeClient := crfake.NewClientBuilder().
+	fakeClient := projectFakeBuilder().
 		WithScheme(scheme).
 		WithObjects(project, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9")).
 		WithStatusSubresource(&kipperv1.Project{}).
@@ -74,7 +73,7 @@ func TestProjectReconciler_CapsNamespaceCreationAtLimit(t *testing.T) {
 		},
 	}
 
-	fakeClient := crfake.NewClientBuilder().
+	fakeClient := projectFakeBuilder().
 		WithScheme(scheme).
 		WithObjects(project, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9")).
 		WithStatusSubresource(&kipperv1.Project{}).
@@ -113,7 +112,7 @@ func TestProjectReconciler_TierlessCreatesNoQuotaObjects(t *testing.T) {
 		},
 	}
 
-	fakeClient := crfake.NewClientBuilder().
+	fakeClient := projectFakeBuilder().
 		WithScheme(scheme).
 		WithObjects(project, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9")).
 		WithStatusSubresource(&kipperv1.Project{}).
@@ -147,7 +146,7 @@ func TestProjectReconciler_TierRemovalDeletesQuotaObjects(t *testing.T) {
 		},
 	}
 
-	fakeClient := crfake.NewClientBuilder().
+	fakeClient := projectFakeBuilder().
 		WithScheme(scheme).
 		WithObjects(project, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9")).
 		WithStatusSubresource(&kipperv1.Project{}).
@@ -193,7 +192,7 @@ func TestProjectReconciler_TierlessDirectCreateCappedAtSix(t *testing.T) {
 		},
 	}
 
-	fakeClient := crfake.NewClientBuilder().
+	fakeClient := projectFakeBuilder().
 		WithScheme(scheme).
 		WithObjects(project, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9")).
 		WithStatusSubresource(&kipperv1.Project{}).
@@ -224,10 +223,12 @@ func TestProjectReconciler_KeepsExistingNamespacesOverLimit(t *testing.T) {
 	}
 	objs := []crclient.Object{project}
 	for _, e := range []string{"e1", "e2", "e3", "e4", "e5"} {
-		objs = append(objs, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shop-" + e, Labels: map[string]string{kipperlabels.Project: "shop"}}})
+		objs = append(objs, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+			Name: "shop-" + e, UID: types.UID("uid-shop-" + e),
+			Labels: map[string]string{kipperlabels.Project: "shop"}}})
 	}
 
-	fakeClient := crfake.NewClientBuilder().
+	fakeClient := projectFakeBuilder().
 		WithScheme(scheme).
 		WithObjects(append(objs, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9"))...).
 		WithStatusSubresource(&kipperv1.Project{}).
@@ -260,10 +261,12 @@ func TestProjectReconciler_ReorderDoesNotStrandExisting(t *testing.T) {
 	}
 	objs := []crclient.Object{project}
 	for _, e := range []string{"e1", "e2", "e3", "e4"} {
-		objs = append(objs, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shop-" + e, Labels: map[string]string{kipperlabels.Project: "shop"}}})
+		objs = append(objs, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+			Name: "shop-" + e, UID: types.UID("uid-shop-" + e),
+			Labels: map[string]string{kipperlabels.Project: "shop"}}})
 	}
 
-	fakeClient := crfake.NewClientBuilder().
+	fakeClient := projectFakeBuilder().
 		WithScheme(scheme).
 		WithObjects(append(objs, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9"))...).
 		WithStatusSubresource(&kipperv1.Project{}).
@@ -293,28 +296,36 @@ func TestProjectReconciler_PrunesNamespacesRemovedFromSpec(t *testing.T) {
 		Spec: kipperv1.ProjectSpec{
 			Environments: []kipperv1.ProjectEnvironment{{Name: "test"}},
 		},
+		// What the pass before this one recorded, back when prod was still
+		// declared. Pruning deletes from what the project has a record of
+		// holding, so this is the difference between a namespace it is dropping
+		// and one somebody has pointed at it.
+		Status: kipperv1.ProjectStatus{Namespaces: []string{"demo-test", "demo-prod"}},
 	}
 
 	keep := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "demo-test",
+			UID:    "uid-demo-test",
 			Labels: map[string]string{kipperlabels.Project: "demo"},
 		},
 	}
 	stale := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "demo-prod",
+			UID:    "uid-demo-prod",
 			Labels: map[string]string{kipperlabels.Project: "demo"},
 		},
 	}
 	unrelated := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "other-prod",
+			UID:    "uid-other-prod",
 			Labels: map[string]string{kipperlabels.Project: "other"},
 		},
 	}
 
-	fakeClient := crfake.NewClientBuilder().
+	fakeClient := projectFakeBuilder().
 		WithScheme(scheme).
 		WithObjects(project, keep, stale, unrelated, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9")).
 		WithStatusSubresource(&kipperv1.Project{}).
@@ -349,22 +360,25 @@ func TestProjectReconciler_FinalizerDeletesAllProjectNamespaces(t *testing.T) {
 		Spec: kipperv1.ProjectSpec{
 			Environments: []kipperv1.ProjectEnvironment{{Name: "test"}, {Name: "prod"}},
 		},
+		Status: kipperv1.ProjectStatus{Namespaces: []string{"demo-test", "demo-prod"}},
 	}
 
 	nsTest := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "demo-test",
+			UID:    "uid-demo-test",
 			Labels: map[string]string{kipperlabels.Project: "demo"},
 		},
 	}
 	nsProd := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "demo-prod",
+			UID:    "uid-demo-prod",
 			Labels: map[string]string{kipperlabels.Project: "demo"},
 		},
 	}
 
-	fakeClient := crfake.NewClientBuilder().
+	fakeClient := projectFakeBuilder().
 		WithScheme(scheme).
 		WithObjects(project, nsTest, nsProd, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9")).
 		WithStatusSubresource(&kipperv1.Project{}).

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,6 +15,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/controller/pkg/memberbinding"
 )
 
 // oidcUsernamePrefix must match the API server's claimMappings username
@@ -29,30 +32,77 @@ var memberClusterRoles = map[kipperv1.ProjectMemberRole]string{
 	kipperv1.ProjectRoleOwner:    "kipper:project-owner",
 }
 
-// managedMemberBindingNames is the set of RoleBinding names the membership
-// reconciler owns in project namespaces.
-var managedMemberBindingNames = map[string]bool{
-	"kipper-project-viewer":   true,
-	"kipper-project-deployer": true,
-	"kipper-project-owner":    true,
-}
+// memberBindingProjects routes a member binding to the Project that owns it.
+//
+// Three ways, in order of how much they can be trusted, because a map function
+// runs backwards from an object and the object may have lost the thing that
+// says whose it is.
+//
+// The label, when it is there. Console-api writes it on every binding it
+// creates, so this is the ordinary case and the other two are drift.
+//
+// Failing that, generation. A generated name carries a project digest, and a
+// digest does not run backwards: nothing recovers a project name from a
+// SHA-256. So it walks the Projects it can see and generates each one's prefix,
+// which is forward and needs no parsing. The walk is bounded by the number of
+// projects and only runs for a binding whose label has gone.
+//
+// Failing that, the namespace. A fixed name carries no digest at all, so a
+// stripped label leaves nothing on the object; the containing namespace's own
+// label is the last thing that says whose it is.
+//
+// A reader is only needed for the last two, and the watch passes the manager's,
+// so a binding stripped of its label is still routed. An event on a labelled
+// binding answers from the label and reads nothing.
+func memberBindingProjects(ctx context.Context, reader client.Reader, obj client.Object) []reconcile.Request {
+	if !memberbinding.IsManaged(obj.GetName()) {
+		return nil
+	}
+	enqueue := func(project string) []reconcile.Request {
+		if project == "" {
+			return nil
+		}
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: project}}}
+	}
 
-// mapMemberBindingToProject routes events on managed member RoleBindings
-// back to their owning Project, so out-of-band deletion or edits of an
-// authorization object are repaired on the next reconcile instead of
-// lingering until an unrelated Project event. The delete event carries the
-// object's last state, so the project label is present there too; a managed
-// name stripped of its labels is unmappable and left to the periodic
-// resync.
-func mapMemberBindingToProject(_ context.Context, obj client.Object) []reconcile.Request {
-	if !managedMemberBindingNames[obj.GetName()] {
+	// A generated name carries a project digest nothing can edit in place, so
+	// where the two disagree the name wins. Taking the label's word for it sent
+	// a binding to a project that could not recognise it while the project that
+	// could was never woken, which is drift routed into silence.
+	labelled := obj.GetLabels()[kipperlabels.Project]
+	if labelled != "" && strings.HasPrefix(obj.GetName(), memberbinding.Prefix(labelled)) {
+		return enqueue(labelled)
+	}
+	if labelled != "" && !strings.HasPrefix(obj.GetName(), "kipper-project-") {
+		// A generated name whose label names some other project. Fall through
+		// to the walk, which reads the name rather than the label.
+		if reader == nil {
+			return nil
+		}
+	} else if labelled != "" {
+		// A fixed name carries no digest to check the label against, so the
+		// label is all there is.
+		return enqueue(labelled)
+	}
+	if reader == nil {
 		return nil
 	}
-	project := obj.GetLabels()["kipper.run/project"]
-	if project == "" {
+
+	var projects kipperv1.ProjectList
+	if err := reader.List(ctx, &projects); err == nil {
+		for i := range projects.Items {
+			name := projects.Items[i].Name
+			if strings.HasPrefix(obj.GetName(), memberbinding.Prefix(name)) {
+				return enqueue(name)
+			}
+		}
+	}
+
+	var ns corev1.Namespace
+	if err := reader.Get(ctx, types.NamespacedName{Name: obj.GetNamespace()}, &ns); err != nil {
 		return nil
 	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: project}}}
+	return enqueue(ns.Labels[kipperlabels.Project])
 }
 
 // reconcileMemberBindings projects the Project's membership onto Kubernetes
@@ -65,86 +115,350 @@ func mapMemberBindingToProject(_ context.Context, obj client.Object) []reconcile
 // the next reconcile.
 func (r *ProjectReconciler) reconcileMemberBindings(ctx context.Context, project *kipperv1.Project, ns string) error {
 	for role, clusterRole := range memberClusterRoles {
-		name := "kipper-project-" + string(role)
+		// Both generations, alongside each other. The generated name carries a
+		// project digest, which is what lets a cluster-wide listing find this
+		// project's bindings without parsing anything; the fixed name is what
+		// every released build writes, and a controller from one of those in a
+		// rolling window would recreate it the moment this one deleted it. The
+		// fixed generation is retired in a later release, once nothing writes
+		// it.
+		for _, name := range []string{
+			"kipper-project-" + string(role),
+			memberbinding.Name(project.Name, string(role)),
+		} {
 
-		var subjects []rbacv1.Subject
-		for _, m := range project.Spec.Members {
-			if m.Role != role {
+			var subjects []rbacv1.Subject
+			for _, m := range project.Spec.Members {
+				if m.Role != role {
+					continue
+				}
+				// Kubernetes username matching is exact. Membership emails come
+				// from the account store, which holds them as the IdP emits them;
+				// trimming guards against whitespace slipping in through any
+				// write path. Full canonicalisation (casing across connectors)
+				// belongs to the connector design, together with the account
+				// store that must apply the same rule.
+				email := strings.TrimSpace(m.Email)
+				if email == "" {
+					continue
+				}
+				subjects = append(subjects, rbacv1.Subject{
+					APIGroup: rbacv1.GroupName,
+					Kind:     rbacv1.UserKind,
+					Name:     oidcUsernamePrefix + email,
+				})
+			}
+			sort.Slice(subjects, func(i, j int) bool { return subjects[i].Name < subjects[j].Name })
+
+			if len(subjects) == 0 {
+				// Read then delete the object that was read, the same as every
+				// other binding delete in this file. These names are fixed
+				// across namespaces, so a delete by name alone can remove a
+				// binding another project wrote after this pass looked.
+				var stale rbacv1.RoleBinding
+				switch err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &stale); {
+				case errors.IsNotFound(err):
+				case err != nil:
+					return fmt.Errorf("reading %s member binding in %s: %w", role, ns, err)
+				default:
+					if err := r.deleteObserved(ctx, &stale); err != nil {
+						return fmt.Errorf("removing %s member binding in %s: %w", role, ns, err)
+					}
+				}
 				continue
 			}
-			// Kubernetes username matching is exact. Membership emails come
-			// from the account store, which holds them as the IdP emits them;
-			// trimming guards against whitespace slipping in through any
-			// write path. Full canonicalisation (casing across connectors)
-			// belongs to the connector design, together with the account
-			// store that must apply the same rule.
-			email := strings.TrimSpace(m.Email)
-			if email == "" {
-				continue
-			}
-			subjects = append(subjects, rbacv1.Subject{
-				APIGroup: rbacv1.GroupName,
-				Kind:     rbacv1.UserKind,
-				Name:     oidcUsernamePrefix + email,
-			})
-		}
-		sort.Slice(subjects, func(i, j int) bool { return subjects[i].Name < subjects[j].Name })
 
-		if len(subjects) == 0 {
-			stale := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
-			if err := r.Delete(ctx, stale); err != nil && !errors.IsNotFound(err) {
-				return fmt.Errorf("removing %s member binding in %s: %w", role, ns, err)
-			}
-			continue
-		}
-
-		desired := &rbacv1.RoleBinding{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      name,
-				Namespace: ns,
-				Labels: map[string]string{
-					kipperLabel:          kipperValue,
-					"kipper.run/project": project.Name,
+			desired := &rbacv1.RoleBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: ns,
+					Labels: map[string]string{
+						kipperLabel:          kipperValue,
+						"kipper.run/project": project.Name,
+					},
 				},
-			},
-			RoleRef: rbacv1.RoleRef{
-				APIGroup: rbacv1.GroupName,
-				Kind:     "ClusterRole",
-				Name:     clusterRole,
-			},
-			Subjects: subjects,
-		}
+				RoleRef: rbacv1.RoleRef{
+					APIGroup: rbacv1.GroupName,
+					Kind:     "ClusterRole",
+					Name:     clusterRole,
+				},
+				Subjects: subjects,
+			}
 
-		var existing rbacv1.RoleBinding
-		err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &existing)
-		if errors.IsNotFound(err) {
-			if err := r.Create(ctx, desired); err != nil {
-				return fmt.Errorf("creating %s member binding in %s: %w", role, ns, err)
+			var existing rbacv1.RoleBinding
+			err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &existing)
+			if errors.IsNotFound(err) {
+				if err := r.Create(ctx, desired); err != nil {
+					return fmt.Errorf("creating %s member binding in %s: %w", role, ns, err)
+				}
+				continue
 			}
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("reading %s member binding in %s: %w", role, ns, err)
-		}
-		// RoleRef is immutable, so a binding under a managed name that
-		// references anything else (a restore from backup, a manual object)
-		// can never be updated into the declared state — and rewriting its
-		// subjects would grant members whatever it happens to reference.
-		// Delete and recreate instead.
-		if existing.RoleRef != desired.RoleRef {
-			if err := r.Delete(ctx, &existing); err != nil && !errors.IsNotFound(err) {
-				return fmt.Errorf("removing drifted %s member binding in %s: %w", role, ns, err)
+			if err != nil {
+				return fmt.Errorf("reading %s member binding in %s: %w", role, ns, err)
 			}
-			if err := r.Create(ctx, desired); err != nil {
-				return fmt.Errorf("recreating %s member binding in %s: %w", role, ns, err)
+			// RoleRef is immutable, so a binding under a managed name that
+			// references anything else (a restore from backup, a manual object)
+			// can never be updated into the declared state — and rewriting its
+			// subjects would grant members whatever it happens to reference.
+			// Delete and recreate instead.
+			if existing.RoleRef != desired.RoleRef {
+				// Bound to the object that was read, like every other delete in
+				// this file. A namespace that changes hands means another
+				// project legitimately writes the binding under this name, and
+				// an unconditioned delete issued from a stale cache removes
+				// theirs and then recreates this project's members over it.
+				if err := r.deleteObserved(ctx, &existing); err != nil {
+					return fmt.Errorf("removing drifted %s member binding in %s: %w", role, ns, err)
+				}
+				// A refused delete leaves the object standing, so the create
+				// finds it there. That is the drift still unrepaired rather
+				// than an error: the next pass reads it afresh and decides
+				// again, which is what the refusal asked for.
+				if err := r.Create(ctx, desired); err != nil && !errors.IsAlreadyExists(err) {
+					return fmt.Errorf("recreating %s member binding in %s: %w", role, ns, err)
+				}
+				continue
 			}
-			continue
-		}
-		existing.Labels = desired.Labels
-		existing.Subjects = desired.Subjects
-		if err := r.Update(ctx, &existing); err != nil {
-			return fmt.Errorf("updating %s member binding in %s: %w", role, ns, err)
+			existing.Labels = desired.Labels
+			existing.Subjects = desired.Subjects
+			if err := r.Update(ctx, &existing); err != nil {
+				return fmt.Errorf("updating %s member binding in %s: %w", role, ns, err)
+			}
 		}
 	}
 	return nil
+}
+
+// memberBindingProjectIndex indexes a member RoleBinding under the prefix of
+// the project that generated its name.
+//
+// The prefix is a digest of the project name and sits in the object's own name,
+// which Kubernetes will not let anyone edit in place. That is what the index is
+// for: every other trail from a binding back to its project is mutable. The
+// label can be stripped, the namespace's label can be stripped, the environment
+// can leave the spec, and status can forget the namespace. A binding that has
+// lost all of those is still indexed here, and the revoke pass is the only
+// thing that will ever visit it again.
+const memberBindingProjectIndex = "kipper.run/member-binding-project"
+
+// MemberBindingProjectKeys returns the index keys for a RoleBinding.
+//
+// Only generated names index, and each under exactly one prefix. A fixed legacy
+// name carries no digest, so placing it under any project's prefix would be a
+// guess; those are reached through the label and the namespace instead.
+func MemberBindingProjectKeys(obj client.Object) []string {
+	binding, ok := obj.(*rbacv1.RoleBinding)
+	if !ok {
+		return nil
+	}
+	projectPrefix, ok := memberbinding.ProjectPrefixOf(binding.Name)
+	if !ok {
+		return nil
+	}
+	return []string{projectPrefix}
+}
+
+// IndexMemberBindings registers the index the revoke pass lists by.
+func IndexMemberBindings(ctx context.Context, indexer client.FieldIndexer) error {
+	return indexer.IndexField(ctx, &rbacv1.RoleBinding{}, memberBindingProjectIndex, MemberBindingProjectKeys)
+}
+
+// revokeStaleMemberBindings takes access away and can do nothing else.
+//
+// The ordinary reconcile refuses a namespace whose ownership it cannot prove
+// and skips it, which is correct for granting and leaves revocation unreachable
+// exactly where it matters: a namespace whose project label has drifted still
+// holds the bindings this project wrote, and a member removed from the project
+// keeps them. Nothing else visits that namespace, because nothing else is
+// allowed to.
+//
+// So this pass exists, and it is a separate one rather than a reordering.
+// reconcileMemberBindings writes desired bindings, so running it before
+// ownership is proven would let a project whose environment resolves to a
+// namespace it does not own put its own members into that namespace's bindings,
+// and the later refusal would leave the grant standing. Two projects can
+// resolve to one namespace name, so that is not hypothetical.
+//
+// The rule is that the desired subject set here is the existing set minus
+// whoever the project no longer grants. Never a union, never an addition. A
+// binding it empties is deleted, and a RoleRef is never written: it is
+// immutable in Kubernetes, so a binding pointing at the wrong role is deleted
+// rather than corrected.
+//
+// It is scoped to bindings carrying this project's own label, so it cannot
+// reach another tenant's, and it records nothing: writing the namespace into
+// status would widen the Project finalizer's deletion backstop onto a namespace
+// whose ownership was never proven.
+func (r *ProjectReconciler) revokeStaleMemberBindings(ctx context.Context, project *kipperv1.Project) error {
+	// Two ways in, because either can be the one that survives.
+	//
+	// The label is what console-api writes on every binding it creates, and is
+	// the ordinary way. The generated name carries a project digest nothing can
+	// edit in place, and is what remains when the label has drifted, which is
+	// precisely the state this pass exists for. Selecting on the label alone
+	// left the generated binding invisible to the only pass that reaches it.
+	//
+	// Both halves are list selectors, so neither walks the cluster. The label
+	// half selects on the label. The name half selects on an index keyed by the
+	// prefix, which is why the index exists: a prefix is not a selector on its
+	// own, and deriving the namespaces instead from the spec and from status
+	// could not reach a binding whose environment had left the spec and whose
+	// namespace status had forgotten, which is the case the generated name was
+	// introduced to survive.
+	var bindings rbacv1.RoleBindingList
+	if err := r.List(ctx, &bindings, client.MatchingLabels{
+		kipperlabels.Project: project.Name,
+	}); err != nil {
+		return fmt.Errorf("listing this project's labelled member bindings: %w", err)
+	}
+	seen := map[string]bool{}
+	for i := range bindings.Items {
+		seen[bindings.Items[i].Namespace+"/"+bindings.Items[i].Name] = true
+	}
+
+	var generated rbacv1.RoleBindingList
+	if err := r.List(ctx, &generated, client.MatchingFields{
+		memberBindingProjectIndex: memberbinding.Prefix(project.Name),
+	}); err != nil {
+		return fmt.Errorf("listing this project's generated member bindings: %w", err)
+	}
+	for i := range generated.Items {
+		b := &generated.Items[i]
+		if seen[b.Namespace+"/"+b.Name] {
+			continue
+		}
+		seen[b.Namespace+"/"+b.Name] = true
+		bindings.Items = append(bindings.Items, *b)
+	}
+	prefix := memberbinding.Prefix(project.Name)
+
+	granted := grantedSubjects(project)
+
+	for i := range bindings.Items {
+		binding := &bindings.Items[i]
+		role, managed := managedMemberBindingRole(project.Name, binding.Name)
+		if !managed {
+			continue
+		}
+		// Ours by either anchor. A fixed name is identical in every namespace,
+		// so only its label says whose it is; a generated name says so itself.
+		byLabel := binding.Labels[kipperlabels.Project] == project.Name
+		byName := strings.HasPrefix(binding.Name, prefix)
+		if !byLabel && !byName {
+			continue
+		}
+
+		// A subject kept on a binding whose RoleRef drifted is not the access
+		// the project granted: the role is inferred from the object's name, so
+		// a binding called kipper-project-owner pointing at cluster-admin looks
+		// like an owner binding and its subjects look granted. RoleRef is
+		// immutable, so deleting is the only revoke-only answer, and in a
+		// namespace whose ownership cannot be proved nothing else will come and
+		// fix it.
+		if binding.RoleRef.Name != memberClusterRoles[role] ||
+			binding.RoleRef.Kind != "ClusterRole" ||
+			binding.RoleRef.APIGroup != rbacv1.GroupName {
+			if err := r.deleteObserved(ctx, binding); err != nil {
+				return fmt.Errorf("removing the drifted %s binding in %s: %w", binding.Name, binding.Namespace, err)
+			}
+			continue
+		}
+
+		keep := make([]rbacv1.Subject, 0, len(binding.Subjects))
+		for _, s := range binding.Subjects {
+			if granted[role][s] {
+				keep = append(keep, s)
+			}
+		}
+		if len(keep) == len(binding.Subjects) {
+			continue
+		}
+
+		if len(keep) == 0 {
+			if err := r.deleteObserved(ctx, binding); err != nil {
+				return fmt.Errorf("removing the emptied %s binding in %s: %w", binding.Name, binding.Namespace, err)
+			}
+			continue
+		}
+
+		binding.Subjects = keep
+		if err := r.Update(ctx, binding); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("revoking from the %s binding in %s: %w", binding.Name, binding.Namespace, err)
+		}
+	}
+	return nil
+}
+
+// deleteObserved removes the exact object this pass read.
+//
+// A fixed name is the same in every namespace, so a namespace changing hands
+// means another project legitimately rewrites the binding under that name; an
+// unconditioned delete issued from a stale cache would then remove the new
+// owner's binding rather than the one that was examined. An update gets this
+// from resourceVersion conflict detection for free and a delete does not.
+//
+// A conflict is not an error: somebody else changed the object, so this pass no
+// longer knows whether it should go, and the next reconcile reads it afresh.
+func (r *ProjectReconciler) deleteObserved(ctx context.Context, binding *rbacv1.RoleBinding) error {
+	err := r.Delete(ctx, binding, client.Preconditions{
+		UID:             &binding.UID,
+		ResourceVersion: &binding.ResourceVersion,
+	})
+	if errors.IsNotFound(err) || errors.IsConflict(err) {
+		return nil
+	}
+	return err
+}
+
+// grantedSubjects is who the project still grants each built-in role, as whole
+// RBAC subjects rather than names.
+//
+// A subject is a tuple of API group, kind and name, and comparing names alone
+// kept a Group subject that happened to share a member's name. Both usernames
+// and group claims carry the same oidc: prefix on this cluster, so that is one
+// drifted field away from granting everyone in a group what the project granted
+// one person. Removing such a subject adds no access, so this stays revoke-only.
+//
+// A member holding a role this build does not know appears under none of them,
+// so the revoke pass takes their access away wherever it finds it. That is the
+// same direction every other path takes for an unrecognised role.
+func grantedSubjects(project *kipperv1.Project) map[kipperv1.ProjectMemberRole]map[rbacv1.Subject]bool {
+	granted := make(map[kipperv1.ProjectMemberRole]map[rbacv1.Subject]bool, len(memberClusterRoles))
+	for role := range memberClusterRoles {
+		granted[role] = map[rbacv1.Subject]bool{}
+	}
+	for _, m := range project.Spec.Members {
+		email := strings.TrimSpace(m.Email)
+		if email == "" {
+			continue
+		}
+		if subjects, ok := granted[m.Role]; ok {
+			subjects[rbacv1.Subject{
+				APIGroup: rbacv1.GroupName,
+				Kind:     rbacv1.UserKind,
+				Name:     oidcUsernamePrefix + email,
+			}] = true
+		}
+	}
+	return granted
+}
+
+// managedMemberBindingRole maps a managed binding's name back to its role, in
+// either generation.
+//
+// It generates rather than parses, for the reason the whole naming scheme does:
+// a generated name is two digests and neither runs backwards. Both candidate
+// names are produced from the project and role and compared, which is three
+// comparisons per binding and needs no separator that survives every name.
+//
+// Covering both generations matters here more than anywhere: the revoke pass is
+// the security requirement, and one that recognised only the fixed names would
+// leave a departed member bound under the generated one.
+func managedMemberBindingRole(project, name string) (kipperv1.ProjectMemberRole, bool) {
+	for role := range memberClusterRoles {
+		if name == "kipper-project-"+string(role) || name == memberbinding.Name(project, string(role)) {
+			return role, true
+		}
+	}
+	return "", false
 }

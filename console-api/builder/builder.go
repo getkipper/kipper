@@ -23,9 +23,10 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/internal/gitreach"
-	"github.com/getkipper/kipper/console-api/internal/registrycred"
+	"github.com/getkipper/kipper/console-api/internal/nsowner"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
 	"github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/controller/pkg/registrycred"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/controller/pkg/sharedcred"
 )
@@ -213,7 +214,7 @@ var ReachGit = gitreach.Check
 
 // CreateBuildJob creates a Kubernetes Job that clones the Git repo and builds
 // a container image using Kaniko, then pushes it to the internal Zot registry.
-func CreateBuildJob(ctx context.Context, client kubernetes.Interface, app *kipperv1.App, commitSHA string) (*batchv1.Job, error) {
+func CreateBuildJob(ctx context.Context, client kubernetes.Interface, owners nsowner.Reader, app *kipperv1.App, commitSHA string) (*batchv1.Job, error) {
 	git := app.Spec.Git
 	if git == nil {
 		return nil, fmt.Errorf("app %s/%s has no git source configured", app.Namespace, app.Name)
@@ -509,7 +510,7 @@ func CreateBuildJob(ctx context.Context, client kubernetes.Interface, app *kippe
 			return nil, fmt.Errorf("git url is not host-bindable: %w", err)
 		}
 		cloneURL = canonicalURL
-		token, err := resolveGitToken(ctx, client, app, authority)
+		token, err := resolveGitToken(ctx, client, owners, app, authority)
 		if err != nil {
 			cleanup()
 			return nil, err
@@ -633,7 +634,7 @@ func CredentialBoundElsewhere(annotations map[string]string, authority string) (
 // where the tenant owns both the token and the URL. It is still checked against
 // the host recorded when it was stored, because the two are written as a pair
 // and not in one transaction. authority is the clone URL's canonical authority.
-func resolveGitToken(ctx context.Context, client kubernetes.Interface, app *kipperv1.App, authority string) ([]byte, error) {
+func resolveGitToken(ctx context.Context, client kubernetes.Interface, owners nsowner.Reader, app *kipperv1.App, authority string) ([]byte, error) {
 	name := app.Spec.Git.CredentialsSecret
 	shared, err := sharedcred.Load(ctx, client)
 	if err != nil {
@@ -642,7 +643,7 @@ func resolveGitToken(ctx context.Context, client kubernetes.Interface, app *kipp
 		return nil, fmt.Errorf("verifying shared git credentials: %w", err)
 	}
 	if entry := sharedcred.Find(shared, name); entry != nil {
-		project, err := namespaceProject(ctx, client, app.Namespace)
+		project, err := namespaceProject(ctx, owners, app.Namespace)
 		if err != nil {
 			return nil, err
 		}
@@ -687,22 +688,21 @@ func resolveGitToken(ctx context.Context, client kubernetes.Interface, app *kipp
 	return token, nil
 }
 
-// namespaceProject returns the project a namespace belongs to, from the
-// controller-owned kipper.run/project label. It fails closed if the namespace
-// is absent, not a managed Kipper namespace, or unlabelled, so a shared
-// credential's allow-list is never checked against a project a tenant could
-// influence.
-func namespaceProject(ctx context.Context, client kubernetes.Interface, namespace string) (string, error) {
-	ns, err := client.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+// namespaceProject returns the project a namespace belongs to.
+//
+// It fails closed when nothing owns the namespace, because the answer decides
+// whether a build is handed a shared git credential. It resolves through the
+// shared owner lookup rather than reading the label here, because the label is
+// writable by anyone who can write a namespace and an allow-list checked
+// against a forged one is no allow-list. What the lookup requires, and the
+// release it starts requiring the claim, is stated once in nsowner.Of.
+func namespaceProject(ctx context.Context, reader nsowner.Reader, namespace string) (string, error) {
+	project, ok, err := nsowner.Of(ctx, reader, namespace)
 	if err != nil {
 		return "", fmt.Errorf("resolving project for namespace %s: %w", namespace, err)
 	}
-	if ns.Labels[managedByLabel] != managedByValue {
-		return "", fmt.Errorf("namespace %s is not a managed kipper project", namespace)
-	}
-	project := ns.Labels[projectLabel]
-	if project == "" {
-		return "", fmt.Errorf("namespace %s has no project label", namespace)
+	if !ok {
+		return "", fmt.Errorf("namespace %s is not a project's", namespace)
 	}
 	return project, nil
 }

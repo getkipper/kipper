@@ -260,6 +260,13 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	// Which namespaces their projects have not recorded taking. The console
+	// publishes those records as it reconciles and the next release resolves
+	// ownership from them, so this is the operator's chance to see a namespace
+	// that is about to stop answering to anybody while it is still harmless.
+	// It reads and prints; it changes nothing.
+	reportNamespacesWithoutAClaim(ctx, clientset, k8sClient.Dynamic(), os.Stdout, claimsSettleWait)
+
 	explicitKey, fallbackKey := resolveSSHKey(sshKey, cluster)
 
 	// The cluster's trust material is not a system component and is not skipped

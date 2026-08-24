@@ -2,14 +2,12 @@ package middleware
 
 import (
 	"context"
-	"sync"
-	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
-	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/console-api/internal/nsowner"
 )
 
 // ProjectMemberSource returns a project's members as an email->role map.
@@ -57,29 +55,16 @@ type ProjectAccessResolver struct {
 	client  kubernetes.Interface
 	roles   *RoleStore
 	members ProjectMemberSource
-
-	mu     sync.RWMutex
-	nsProj map[string]nsCacheEntry
-	ttl    time.Duration
-}
-
-// nsCacheMax bounds the namespace->project cache so an authenticated caller
-// cannot grow it without limit by probing random names.
-const nsCacheMax = 4096
-
-type nsCacheEntry struct {
-	project string
-	at      time.Time
+	owners  nsowner.Reader
 }
 
 // NewProjectAccessResolver builds a resolver over the given clients.
-func NewProjectAccessResolver(client kubernetes.Interface, roles *RoleStore, members ProjectMemberSource) *ProjectAccessResolver {
+func NewProjectAccessResolver(client kubernetes.Interface, roles *RoleStore, members ProjectMemberSource, owners nsowner.Reader) *ProjectAccessResolver {
 	return &ProjectAccessResolver{
 		client:  client,
 		roles:   roles,
 		members: members,
-		nsProj:  make(map[string]nsCacheEntry),
-		ttl:     60 * time.Second,
+		owners:  owners,
 	}
 }
 
@@ -150,41 +135,39 @@ func (r *ProjectAccessResolver) resolveProject(ctx context.Context, email, proje
 	return ProjectAccess{Project: project, Role: role}, true
 }
 
-// projectForName maps a namespace to the project that owns it. When a namespace
-// by that name exists, the project comes from its Kipper project label (empty
-// for a namespace no project owns, e.g. a system namespace). When no such
-// namespace exists the name is returned unchanged, which is what a caller
-// naming a project's own namespace before it is created relies on. Results are
-// cached for a short TTL.
+// projectForName maps a namespace to the project that owns it.
+//
+// An existing namespace is resolved through the shared owner lookup, because
+// the label that used to answer this is writable by anyone who can write a
+// namespace, which made every gated route's authority rest on a value the
+// caller might have set. What that lookup requires, and the release it starts
+// requiring the claim, is stated once in nsowner.Of.
+//
+// When no namespace by that name exists the name is returned unchanged, which
+// is what a caller naming a project by its own name before its namespace exists
+// relies on. Nothing is being trusted there: no metadata was read, and the
+// caller named the project outright.
+//
+// There is no cache. The TTL map that used to sit here held an answer for a
+// minute, so a namespace whose ownership had been withdrawn kept authorising
+// for the rest of it, and carrying the claim in the cached value would not have
+// helped because nothing invalidated it.
 func (r *ProjectAccessResolver) projectForName(ctx context.Context, name string) (string, error) {
-	r.mu.RLock()
-	entry, ok := r.nsProj[name]
-	r.mu.RUnlock()
-	if ok && time.Since(entry.at) < r.ttl {
-		return entry.project, nil
-	}
-
-	var project string
-	ns, err := r.client.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
-	switch {
-	case err == nil:
-		project = ns.Labels[kipperlabels.Project]
-	case apierrors.IsNotFound(err):
-		project = name
-	default:
+	project, ok, err := nsowner.Of(ctx, r.owners, name)
+	if err != nil {
 		return "", err
 	}
-
-	r.mu.Lock()
-	if len(r.nsProj) >= nsCacheMax {
-		// Evict one entry to keep the cache bounded. Map iteration order is
-		// random, so this is a cheap random eviction; the TTL ages the rest.
-		for k := range r.nsProj {
-			delete(r.nsProj, k)
-			break
-		}
+	if ok {
+		return project, nil
 	}
-	r.nsProj[name] = nsCacheEntry{project: project, at: time.Now()}
-	r.mu.Unlock()
-	return project, nil
+
+	// Not owned. Either the namespace is nobody's, or there is no namespace by
+	// that name and the caller is naming a project.
+	if _, err := r.client.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{}); err != nil {
+		if apierrors.IsNotFound(err) {
+			return name, nil
+		}
+		return "", err
+	}
+	return "", nil
 }

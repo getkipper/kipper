@@ -41,8 +41,18 @@ func parseOperatorRBAC(t *testing.T) (map[string]*rbacv1.ClusterRole, []*rbacv1.
 }
 
 // grants reports whether a role allows a verb on a resource in an apiGroup.
+//
+// A rule restricted by resourceNames grants nothing here. Reading it as an
+// unrestricted grant would expand "bind this one ClusterRole" into "bind
+// clusterroles", which is the manufactured coverage the capability bound exists
+// to refuse: a broad claim would look owner-covered on the strength of a rule
+// that reaches a single object. Rules carrying only nonResourceURLs fall out on
+// their own, having no resources to match.
 func grants(role *rbacv1.ClusterRole, apiGroup, resource, verb string) bool {
 	for _, rule := range role.Rules {
+		if len(rule.ResourceNames) > 0 {
+			continue
+		}
 		groupMatch, resourceMatch, verbMatch := false, false, false
 		for _, g := range rule.APIGroups {
 			if g == apiGroup || g == "*" {
@@ -216,5 +226,29 @@ func TestOperatorRBACEverySubjectIsPrefixed(t *testing.T) {
 		}
 		assert.True(t, strings.HasPrefix(name, "oidc:"),
 			"identity name %q in the manifest is unprefixed", name)
+	}
+}
+
+// grants skips a rule restricted by resourceNames, which is right for the
+// coverage bound and blunts every assertion of the form "this role must never
+// reach X". A rule granting a tenant role one named Secret would be skipped and
+// the refusal would pass while the grant stood.
+//
+// Nothing hidden today, and this is what keeps it that way: the three tenant
+// roles carry no name-restricted rules at all, so on these manifests skipping
+// them removes nothing from either direction.
+func TestNoTenantRoleIsRestrictedToNamedObjects(t *testing.T) {
+	roles, _ := parseOperatorRBAC(t)
+	for _, name := range []string{"kipper:project-viewer", "kipper:project-deployer", "kipper:project-owner"} {
+		role, ok := roles[name]
+		if !ok {
+			t.Fatalf("%s is not in the staged manifests", name)
+		}
+		for i, rule := range role.Rules {
+			if len(rule.ResourceNames) > 0 {
+				t.Errorf("%s rule %d is restricted to %v, which the bound helper skips; the assertions that this role reaches nothing it should not would pass whatever it granted",
+					name, i, rule.ResourceNames)
+			}
+		}
 	}
 }

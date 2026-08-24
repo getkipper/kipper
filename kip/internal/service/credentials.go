@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/getkipper/kipper/controller/pkg/labels"
@@ -26,9 +27,15 @@ const (
 	// but every binding on it is refused, so bound workloads never receive the
 	// credentials they declare.
 	CredentialUnowned CredentialState = "unowned"
-	// CredentialForeign is a Secret controlled by something that is not this
-	// Service, including a reference to a Service CR that has been replaced.
+	// CredentialForeign is a Secret an object that still exists controls.
+	// Claiming it would take it from that object, so repair leaves it alone.
 	CredentialForeign CredentialState = "foreign"
+	// CredentialAbandoned is a Secret whose controller reference names an object
+	// that is not there: the owner was deleted, or came back from a restore
+	// under a new identity. Nobody is holding it, and Kubernetes deletes a
+	// dependent by exactly this kind of reference, so the Secret is on its way
+	// out and the password its volume was written under goes with it.
+	CredentialAbandoned CredentialState = "abandoned"
 	// CredentialMissing is a service with no credentials Secret at all.
 	CredentialMissing CredentialState = "missing"
 )
@@ -67,7 +74,7 @@ func (a CredentialAudit) NeedsRepair() bool {
 		return true
 	}
 	for _, s := range a.Services {
-		if s.State == CredentialUnowned {
+		if s.State == CredentialUnowned || s.State == CredentialAbandoned {
 			return true
 		}
 	}
@@ -112,7 +119,14 @@ func (m *Manager) AuditCredentials(ctx context.Context, namespace string) (Crede
 			case owner.UID == cr.GetUID():
 				report.State = CredentialOwned
 			default:
-				report.State = CredentialForeign
+				live, liveErr := m.ownerIsLive(ctx, namespace, owner)
+				if liveErr != nil {
+					return audit, liveErr
+				}
+				report.State = CredentialAbandoned
+				if live {
+					report.State = CredentialForeign
+				}
 				report.Owner = owner.Kind + "/" + owner.Name
 			}
 		}
@@ -134,6 +148,55 @@ func (m *Manager) AuditCredentials(ctx context.Context, namespace string) (Crede
 	return audit, nil
 }
 
+// ownerIsLive says whether the object a controller reference names is still
+// there under the same identity.
+//
+// A reference outlives its object: garbage collection is not instant, and a
+// restore brings back a dependent whose owner came back with a new UID. Reading
+// the reference alone would take both for a live claim, and repair would leave
+// the Secret to be deleted along with the password nothing else records.
+//
+// Only the two kinds Kipper creates are checked. A controller outside the group
+// belongs to somebody whose objects are not ours to look up, and a claim that
+// cannot be disproved is treated as real, because taking a Secret from an
+// operator's own controller is the one mistake repair must never make.
+func (m *Manager) ownerIsLive(ctx context.Context, namespace string, ref *metav1.OwnerReference) (bool, error) {
+	if schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind).Group != manifest.ServiceGVR.Group {
+		return true, nil
+	}
+	var gvr schema.GroupVersionResource
+	switch ref.Kind {
+	case "Service":
+		gvr = manifest.ServiceGVR
+	case "App":
+		gvr = manifest.AppGVR
+	default:
+		return true, nil
+	}
+	owner, err := m.Dynamic.Resource(gvr).Namespace(namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("checking whether %s %s still holds its credentials: %w", ref.Kind, ref.Name, err)
+	}
+	return owner.GetUID() == ref.UID, nil
+}
+
+// withoutController drops the controlling reference and keeps every other one.
+// An object has one controller, so the dead reference has to go before the live
+// one is written rather than sit beside it.
+func withoutController(refs []metav1.OwnerReference) []metav1.OwnerReference {
+	kept := make([]metav1.OwnerReference, 0, len(refs))
+	for _, ref := range refs {
+		if ref.Controller != nil && *ref.Controller {
+			continue
+		}
+		kept = append(kept, ref)
+	}
+	return kept
+}
+
 // RepairCredentials gives an unowned credentials Secret back to its service and
 // removes per-binding projections nothing owns.
 //
@@ -141,8 +204,12 @@ func (m *Manager) AuditCredentials(ctx context.Context, namespace string) (Crede
 // claimed an ownerless Secret on its name would hand whatever sits under that
 // name to anything able to create a Service CR, so the reconciler refuses and
 // this exists instead: a person, holding cluster credentials, saying that this
-// object belongs to that service. It only ever claims a Secret with no
-// controller at all, so nothing is taken from another owner.
+// object belongs to that service.
+//
+// It claims a Secret with no controller, and one whose controller reference
+// names an object that is not there. Nothing is taken from an owner that exists:
+// liveness is decided again here rather than trusted from the audit, because the
+// two are separate reads and a Secret can be claimed in between.
 //
 // Projections are deleted rather than claimed. They are rendered from the
 // service's shared credentials on the next reconcile, so the workload's own
@@ -151,22 +218,9 @@ func (m *Manager) AuditCredentials(ctx context.Context, namespace string) (Crede
 func (m *Manager) RepairCredentials(ctx context.Context, namespace string, audit CredentialAudit) ([]string, error) {
 	var done []string
 
-	crList, err := m.Dynamic.Resource(manifest.ServiceGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("listing service CRs: %w", err)
-	}
-	uids := make(map[string]types.UID, len(crList.Items))
-	for _, cr := range crList.Items {
-		uids[cr.GetName()] = cr.GetUID()
-	}
-
 	for _, report := range audit.Services {
-		if report.State != CredentialUnowned {
+		if report.State != CredentialUnowned && report.State != CredentialAbandoned {
 			continue
-		}
-		uid, ok := uids[report.Service]
-		if !ok {
-			return done, fmt.Errorf("service %s has gone since the audit; run the audit again", report.Service)
 		}
 		secret, err := m.Client.CoreV1().Secrets(namespace).Get(ctx, report.Secret, metav1.GetOptions{})
 		if err != nil {
@@ -174,10 +228,43 @@ func (m *Manager) RepairCredentials(ctx context.Context, namespace string, audit
 		}
 		// Re-check under the object we are about to write: the audit was a
 		// separate read, and claiming a Secret that has acquired a controller
-		// since then would take it from that controller.
-		if metav1.GetControllerOf(secret) != nil {
-			return done, fmt.Errorf("%s acquired an owner since the audit; run the audit again", report.Secret)
+		// since then would take it from that controller. A reference with
+		// nothing behind it is not one, and is exactly what this is here to
+		// replace.
+		if owner := metav1.GetControllerOf(secret); owner != nil {
+			live, liveErr := m.ownerIsLive(ctx, namespace, owner)
+			if liveErr != nil {
+				return done, liveErr
+			}
+			if live {
+				return done, fmt.Errorf("%s acquired an owner since the audit; run the audit again", report.Secret)
+			}
 		}
+		// The identity is read here, last of everything and immediately before
+		// the write, rather than from a list taken at the top. A service
+		// deleted and recreated in between answers to a new one, and writing
+		// the old would install a fresh dangling reference while reporting
+		// success, which is the state this is here to clear.
+		cr, err := m.Dynamic.Resource(manifest.ServiceGVR).Namespace(namespace).
+			Get(ctx, report.Service, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return done, fmt.Errorf("service %s has gone since the audit; run the audit again", report.Service)
+			}
+			return done, fmt.Errorf("reading service %s: %w", report.Service, err)
+		}
+		// A service on its way out is not one to hand a Secret to: the reference
+		// would be written, reported as repaired, and collected with the service
+		// moments later. The window is as long as the cleanup takes, which is as
+		// long as the workload takes to stop.
+		if cr.GetDeletionTimestamp() != nil {
+			return done, fmt.Errorf("service %s is being deleted; run the audit again once it has gone", report.Service)
+		}
+		uid := cr.GetUID()
+
+		// The dead reference is replaced rather than added to. An object has one
+		// controller, and leaving the old one beside the new is invalid.
+		secret.OwnerReferences = withoutController(secret.OwnerReferences)
 		controller := true
 		secret.OwnerReferences = append(secret.OwnerReferences, metav1.OwnerReference{
 			APIVersion: manifest.ServiceGVR.GroupVersion().String(),

@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -42,11 +43,68 @@ func gitApp(namespace, credential string) *unstructured.Unstructured {
 func namespaceOfProject(name, project string) *corev1.Namespace {
 	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: name,
+		// Matching the claim owningProject writes. Which project a namespace
+		// belongs to is read from that project's records, so a claim names the
+		// object and a fixture with no UID matches nothing.
+		UID: k8stypes.UID(name + "-uid"),
 		Labels: map[string]string{
 			"app.kubernetes.io/managed-by": "kipper",
 			"kipper.run/project":           project,
 		},
 	}}
+}
+
+// owningProject is the project these fixtures build for, whose records say it
+// holds these namespaces.
+//
+// A credential grant reconstructed here is written into the allow-list and
+// stays there, so which project a namespace belongs to is decided from the
+// project's own records. A fixture without them grants nobody anything.
+func owningProject(namespaces ...string) *unstructured.Unstructured {
+	claims := make([]any, 0, len(namespaces))
+	for _, ns := range namespaces {
+		claims = append(claims, map[string]any{"name": ns, "uid": ns + "-uid"})
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kipper.run/v1alpha1",
+		"kind":       "Project",
+		"metadata":   map[string]any{"name": "shop"},
+		"status":     map[string]any{"namespaceClaims": claims},
+	}}
+}
+
+// The upgrade waits for the console-api it just rolled to record its build.
+// A test that exercises the pass without one should not wait it out.
+func noStampWait(t *testing.T) {
+	t.Helper()
+	wait, poll := stampWait, stampPoll
+	stampWait, stampPoll = 0, time.Millisecond
+	t.Cleanup(func() { stampWait, stampPoll = wait, poll })
+}
+
+func kipperSystem() *corev1.Namespace {
+	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kipper-system"}}
+}
+
+// The namespace of a cluster whose migration finished long ago.
+func kipperSystemMigrated() *corev1.Namespace {
+	ns := kipperSystemUpgraded()
+	ns.Annotations[labels.AnnoGitCredentialGrantsSeeded] = "2026-08-19T00:00:00Z"
+	return ns
+}
+
+// The namespace once the console-api that keeps allow-lists has started.
+func kipperSystemUpgraded() *corev1.Namespace {
+	ns := kipperSystem()
+	ns.Annotations = map[string]string{labels.AnnoConsoleAPIBuild: "v0.14.0"}
+	return ns
+}
+
+func seeded(t *testing.T, clientset *k8sfake.Clientset) bool {
+	t.Helper()
+	ns, err := clientset.CoreV1().Namespaces().Get(context.Background(), "kipper-system", metav1.GetOptions{})
+	require.NoError(t, err)
+	return ns.Annotations[labels.AnnoGitCredentialGrantsSeeded] != ""
 }
 
 // The defect this exists for: a cluster installed before allow-lists denies
@@ -114,40 +172,6 @@ func TestSeedDoesNotCreateAListForAClusterWithNoSharedCredentials(t *testing.T) 
 	_, err := clientset.CoreV1().Secrets(sharedcred.Namespace).Get(
 		context.Background(), sharedcred.ConfigSecretName, metav1.GetOptions{})
 	assert.True(t, apierrors.IsNotFound(err), "the upgrade created a shared-credential list that did not exist")
-}
-
-// The upgrade waits for the console-api it just rolled to record its build.
-// A test that exercises the pass without one should not wait it out.
-func noStampWait(t *testing.T) {
-	t.Helper()
-	wait, poll := stampWait, stampPoll
-	stampWait, stampPoll = 0, time.Millisecond
-	t.Cleanup(func() { stampWait, stampPoll = wait, poll })
-}
-
-func kipperSystem() *corev1.Namespace {
-	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kipper-system"}}
-}
-
-// The namespace of a cluster whose migration finished long ago.
-func kipperSystemMigrated() *corev1.Namespace {
-	ns := kipperSystemUpgraded()
-	ns.Annotations[labels.AnnoGitCredentialGrantsSeeded] = "2026-08-19T00:00:00Z"
-	return ns
-}
-
-// The namespace once the console-api that keeps allow-lists has started.
-func kipperSystemUpgraded() *corev1.Namespace {
-	ns := kipperSystem()
-	ns.Annotations = map[string]string{labels.AnnoConsoleAPIBuild: "v0.14.0"}
-	return ns
-}
-
-func seeded(t *testing.T, clientset *k8sfake.Clientset) bool {
-	t.Helper()
-	ns, err := clientset.CoreV1().Namespaces().Get(context.Background(), "kipper-system", metav1.GetOptions{})
-	require.NoError(t, err)
-	return ns.Annotations[labels.AnnoGitCredentialGrantsSeeded] != ""
 }
 
 // The migration ran once per credential, which is not the same as once per

@@ -151,7 +151,7 @@ func TestMapMemberBindingToProject(t *testing.T) {
 		Namespace: "shop-test",
 		Labels:    map[string]string{"kipper.run/project": "shop"},
 	}}
-	reqs := mapMemberBindingToProject(context.Background(), managed)
+	reqs := memberBindingProjects(context.Background(), nil, managed)
 	require.Len(t, reqs, 1)
 	assert.Equal(t, "shop", reqs[0].Name)
 
@@ -161,10 +161,87 @@ func TestMapMemberBindingToProject(t *testing.T) {
 		Name: "some-other-binding", Namespace: "shop-test",
 		Labels: map[string]string{"kipper.run/project": "shop"},
 	}}
-	assert.Empty(t, mapMemberBindingToProject(context.Background(), foreign))
+	assert.Empty(t, memberBindingProjects(context.Background(), nil, foreign))
 
 	unlabelled := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{
 		Name: "kipper-project-owner", Namespace: "shop-test",
 	}}
-	assert.Empty(t, mapMemberBindingToProject(context.Background(), unlabelled))
+	assert.Empty(t, memberBindingProjects(context.Background(), nil, unlabelled))
+}
+
+// A role this build does not know grants nothing. The projection walks the
+// three roles it knows and binds the members holding each, so a name outside
+// that set matches none of them and the member appears in no binding.
+//
+// This is the direction that has to hold when a Project arrives from a restore,
+// from kubectl, or from a migration off a cluster that had roles this one does
+// not: less than the name says, never a silent grant of something else.
+func TestAnUnrecognisedRoleBindsNobody(t *testing.T) {
+	project := projectWithMembers(
+		kipperv1.ProjectMember{Email: "anna@example.com", Role: kipperv1.ProjectRoleOwner},
+		kipperv1.ProjectMember{Email: "stranger@example.com", Role: kipperv1.ProjectMemberRole("acme.support")},
+	)
+	fakeClient := reconcileProject(t, project)
+
+	for _, role := range []string{"owner", "deployer", "viewer"} {
+		var binding rbacv1.RoleBinding
+		err := fakeClient.Get(context.Background(),
+			types.NamespacedName{Name: "kipper-project-" + role, Namespace: "shop-test"}, &binding)
+		if errors.IsNotFound(err) {
+			continue
+		}
+		require.NoError(t, err)
+		for _, s := range binding.Subjects {
+			assert.NotEqual(t, "oidc:stranger@example.com", s.Name,
+				"the member holding an unrecognised role was bound to %s, which grants them access nobody chose", role)
+		}
+	}
+}
+
+// Revocation must not depend on understanding what somebody held. A member
+// removed from the project loses every binding whatever their role was, which
+// matters most for the role nobody recognises: that is the one an operator is
+// likeliest to be removing in a hurry.
+func TestRemovingAMemberRevokesWhateverRoleTheyHeld(t *testing.T) {
+	const strange = kipperv1.ProjectMemberRole("acme.support")
+	project := projectWithMembers(
+		kipperv1.ProjectMember{Email: "anna@example.com", Role: kipperv1.ProjectRoleOwner},
+		kipperv1.ProjectMember{Email: "ben@example.com", Role: kipperv1.ProjectRoleDeployer},
+		kipperv1.ProjectMember{Email: "stranger@example.com", Role: strange},
+	)
+	fakeClient := reconcileProject(t, project)
+
+	var stored kipperv1.Project
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "shop"}, &stored))
+
+	// Ben's role changes to the unrecognised one, which must take his access
+	// away rather than leave the deployer binding as it was.
+	stored.Spec.Members = []kipperv1.ProjectMember{
+		{Email: "anna@example.com", Role: kipperv1.ProjectRoleOwner},
+		{Email: "ben@example.com", Role: strange},
+	}
+	require.NoError(t, fakeClient.Update(context.Background(), &stored))
+
+	r := &ProjectReconciler{Client: fakeClient, Scheme: testScheme(), APIReader: fakeClient}
+	require.NoError(t, r.reconcileMemberBindings(context.Background(), &stored, "shop-test"))
+
+	var deployer rbacv1.RoleBinding
+	err := fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: "kipper-project-deployer", Namespace: "shop-test"}, &deployer)
+	if !errors.IsNotFound(err) {
+		require.NoError(t, err)
+		for _, s := range deployer.Subjects {
+			assert.NotEqual(t, "oidc:ben@example.com", s.Name,
+				"moving a member to a role this build does not know left their old binding in place")
+		}
+	}
+
+	// And the member who was only ever unrecognised is gone from the object
+	// entirely, with nothing left behind.
+	var owner rbacv1.RoleBinding
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: "kipper-project-owner", Namespace: "shop-test"}, &owner))
+	for _, s := range owner.Subjects {
+		assert.NotEqual(t, "oidc:stranger@example.com", s.Name, "a departed member is still bound")
+	}
 }

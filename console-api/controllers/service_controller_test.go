@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -12,12 +13,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -26,6 +29,7 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/serviceui"
 	"github.com/getkipper/kipper/console-api/share"
+	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
 // secretFromCluster reads the named secret back from the fake client
@@ -41,6 +45,13 @@ func secretFromCluster(t *testing.T, r *ServiceReconciler, name string) map[stri
 		out[k] = string(v)
 	}
 	return out
+}
+
+func namedService(name, svcType string) *kipperv1.Service {
+	return &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
+		Spec:       kipperv1.ServiceSpec{Type: svcType},
+	}
 }
 
 func bareService(svcType string) *kipperv1.Service {
@@ -191,7 +202,7 @@ func TestReconcileStatefulSet_PartialOverrideKeepsUnpinnedBump(t *testing.T) {
 	assert.Equal(t, "2", res.Requests.Cpu().String(), "one-sided CPU limit mirrors to the request")
 }
 
-func TestEnsureCredentialDefaults_RabbitMQAddsVHOSTAndDropsNAME(t *testing.T) {
+func TestRepairCredentials_RabbitMQAddsVHOSTAndDropsNAME(t *testing.T) {
 	// Pre-existing rabbitmq secret in the old shape: NAME=app from
 	// when every authed service inherited the database template.
 	existing := &corev1.Secret{
@@ -205,17 +216,17 @@ func TestEnsureCredentialDefaults_RabbitMQAddsVHOSTAndDropsNAME(t *testing.T) {
 		},
 	}
 	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
-	require.NoError(t, r.ensureCredentialDefaults(context.Background(), existing, "rabbitmq"))
+	require.NoError(t, r.repairCredentials(context.Background(), existing, namedService("rabbit", "rabbitmq")))
 
 	got := secretFromCluster(t, r, "rabbit-credentials")
 	assert.Equal(t, "/", got["VHOST"], "VHOST should be added with the default vhost value")
 	_, hasName := got["NAME"]
 	assert.False(t, hasName, "NAME should be pruned from rabbitmq secrets — AMQP_NAME is meaningless")
-	assert.Equal(t, "rabbit.ns.svc.cluster.local", got["HOST"], "HOST must not be touched")
+	assert.Equal(t, "rabbit.ns.svc.cluster.local", got["HOST"], "HOST is the service's own address")
 	assert.Equal(t, "kipper", got["USERNAME"], "USERNAME must not be touched")
 }
 
-func TestEnsureCredentialDefaults_MinioDropsNAME(t *testing.T) {
+func TestRepairCredentials_MinioDropsNAME(t *testing.T) {
 	existing := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "obj-credentials", Namespace: "ns"},
 		Data: map[string][]byte{
@@ -227,7 +238,7 @@ func TestEnsureCredentialDefaults_MinioDropsNAME(t *testing.T) {
 		},
 	}
 	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
-	require.NoError(t, r.ensureCredentialDefaults(context.Background(), existing, "minio"))
+	require.NoError(t, r.repairCredentials(context.Background(), existing, namedService("obj", "minio")))
 
 	got := secretFromCluster(t, r, "obj-credentials")
 	_, hasName := got["NAME"]
@@ -275,7 +286,7 @@ func TestReconcileCredentialsSecret_MinioS3Shape(t *testing.T) {
 	assert.Equal(t, "storage-credentials", rootPass.ValueFrom.SecretKeyRef.Name)
 }
 
-func TestEnsureCredentialDefaults_PostgresPreservesName(t *testing.T) {
+func TestRepairCredentials_PostgresPreservesName(t *testing.T) {
 	// A postgres secret that the user has customised — NAME is the
 	// default database name and must not be touched.
 	existing := &corev1.Secret{
@@ -289,13 +300,13 @@ func TestEnsureCredentialDefaults_PostgresPreservesName(t *testing.T) {
 		},
 	}
 	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
-	require.NoError(t, r.ensureCredentialDefaults(context.Background(), existing, "postgres"))
+	require.NoError(t, r.repairCredentials(context.Background(), existing, namedService("db", "postgres")))
 
 	got := secretFromCluster(t, r, "db-credentials")
 	assert.Equal(t, "custom_app", got["NAME"], "existing custom database name must be preserved")
 }
 
-func TestEnsureCredentialDefaults_HandlesNilDataMap(t *testing.T) {
+func TestRepairCredentials_HandlesNilDataMap(t *testing.T) {
 	// A Secret created out of band (or fully drained) can have Data
 	// == nil. The reconciler must not panic on the assignment.
 	existing := &corev1.Secret{
@@ -303,7 +314,7 @@ func TestEnsureCredentialDefaults_HandlesNilDataMap(t *testing.T) {
 		Data:       nil,
 	}
 	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
-	require.NoError(t, r.ensureCredentialDefaults(context.Background(), existing, "rabbitmq"))
+	require.NoError(t, r.repairCredentials(context.Background(), existing, namedService("rabbit", "rabbitmq")))
 
 	got := secretFromCluster(t, r, "rabbit-credentials")
 	assert.Equal(t, "/", got["VHOST"], "VHOST default must be added even when Data starts nil")
@@ -503,7 +514,7 @@ func unstructuredMiddleware() unstructured.Unstructured {
 	return mw
 }
 
-func TestEnsureCredentialDefaults_NoChangesIsNoUpdate(t *testing.T) {
+func TestRepairCredentials_NoChangesIsNoUpdate(t *testing.T) {
 	// Secret already matches the desired shape — the helper should
 	// not call Update (a no-op).
 	existing := &corev1.Secret{
@@ -516,9 +527,18 @@ func TestEnsureCredentialDefaults_NoChangesIsNoUpdate(t *testing.T) {
 			"VHOST":    []byte("/"),
 		},
 	}
-	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
-	require.NoError(t, r.ensureCredentialDefaults(context.Background(), existing, "rabbitmq"))
+	writes := 0
+	c := crfake.NewClientBuilder().WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, cl crclient.WithWatch, obj crclient.Object, opts ...crclient.UpdateOption) error {
+				writes++
+				return cl.Update(ctx, obj, opts...)
+			},
+		}).Build()
+	r := &ServiceReconciler{Client: c}
+	require.NoError(t, r.repairCredentials(context.Background(), existing, namedService("rabbit", "rabbitmq")))
 
+	assert.Zero(t, writes, "a Secret already in shape was written again, and the reconciler watches its own Secrets")
 	got := secretFromCluster(t, r, "rabbit-credentials")
 	assert.Equal(t, "/", got["VHOST"])
 	_, hasName := got["NAME"]
@@ -571,7 +591,7 @@ func TestServiceDeletionRevokesShareLinks(t *testing.T) {
 			Namespace:         "supplemento-test",
 			UID:               "uid-mailhog-1",
 			DeletionTimestamp: &now,
-			Finalizers:        []string{serviceFinalizer},
+			Finalizers:        []string{ServiceFinalizer},
 		},
 		Spec: kipperv1.ServiceSpec{Type: "mailhog"},
 	}
@@ -610,7 +630,7 @@ func TestServiceDeletionFailsClosedWithoutGrantStore(t *testing.T) {
 			Namespace:         "supplemento-test",
 			UID:               "uid-mailhog-1",
 			DeletionTimestamp: &now,
-			Finalizers:        []string{serviceFinalizer},
+			Finalizers:        []string{ServiceFinalizer},
 		},
 		Spec: kipperv1.ServiceSpec{Type: "mailhog"},
 	}
@@ -628,7 +648,7 @@ func TestServiceDeletionFailsClosedWithoutGrantStore(t *testing.T) {
 
 	var still kipperv1.Service
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "mailhog", Namespace: "supplemento-test"}, &still))
-	assert.Contains(t, still.Finalizers, serviceFinalizer, "the finalizer must be retained so deletion retries")
+	assert.Contains(t, still.Finalizers, ServiceFinalizer, "the finalizer must be retained so deletion retries")
 }
 
 // Nothing claims a credentials Secret on the strength of its name, its labels
@@ -759,7 +779,7 @@ func TestServiceFinalizer_ClearsBindingsBeforeReleasing(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "db", Namespace: "shop-test",
 			DeletionTimestamp: &now,
-			Finalizers:        []string{serviceFinalizer},
+			Finalizers:        []string{ServiceFinalizer},
 		},
 		Spec: kipperv1.ServiceSpec{Type: "postgres"},
 	}
@@ -820,7 +840,7 @@ func TestServiceFinalizer_KeepsTheFinalizerWhenClearingFails(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "db", Namespace: "shop-test",
 			DeletionTimestamp: &now,
-			Finalizers:        []string{serviceFinalizer},
+			Finalizers:        []string{ServiceFinalizer},
 		},
 		Spec: kipperv1.ServiceSpec{Type: "postgres"},
 	}
@@ -847,7 +867,7 @@ func TestServiceFinalizer_KeepsTheFinalizerWhenClearingFails(t *testing.T) {
 
 	var still kipperv1.Service
 	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "db", Namespace: "shop-test"}, &still))
-	assert.Contains(t, still.Finalizers, serviceFinalizer, "the finalizer must be held until the bindings are gone")
+	assert.Contains(t, still.Finalizers, ServiceFinalizer, "the finalizer must be held until the bindings are gone")
 }
 
 // Deleting a service must not delete a Secret its bindings never derived.
@@ -865,7 +885,7 @@ func TestServiceFinalizer_LeavesASecretItNeverDerived(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "cache", Namespace: "shop-test", UID: types.UID("uid-cache"),
 			DeletionTimestamp: &now,
-			Finalizers:        []string{serviceFinalizer},
+			Finalizers:        []string{ServiceFinalizer},
 		},
 		Spec: kipperv1.ServiceSpec{Type: "redis"},
 	}
@@ -910,7 +930,7 @@ func TestServiceFinalizer_LeavesADerivedNameItDoesNotOwn(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "db", Namespace: "shop-test", UID: types.UID("uid-db"),
 			DeletionTimestamp: &now,
-			Finalizers:        []string{serviceFinalizer},
+			Finalizers:        []string{ServiceFinalizer},
 		},
 		Spec: kipperv1.ServiceSpec{Type: "postgres"},
 	}
@@ -989,12 +1009,12 @@ func TestReconcileCredentialsSecret_NoPasswordWithoutAuth(t *testing.T) {
 	}
 }
 
-// TestEnsureCredentialDefaults_PrunesCredentialsWithoutAuth covers the Secrets
+// TestRepairCredentials_PrunesCredentialsWithoutAuth covers the Secrets
 // already on the three live clusters, which were minted before the rule.
 //
 // Pruning is safe in the direction that matters: none of these servers read the
 // password when they started, so removing it locks nothing out of its own data.
-func TestEnsureCredentialDefaults_PrunesCredentialsWithoutAuth(t *testing.T) {
+func TestRepairCredentials_PrunesCredentialsWithoutAuth(t *testing.T) {
 	for _, tc := range []struct {
 		svcType string
 		wantPw  bool
@@ -1015,7 +1035,7 @@ func TestEnsureCredentialDefaults_PrunesCredentialsWithoutAuth(t *testing.T) {
 				},
 			}
 			r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
-			require.NoError(t, r.ensureCredentialDefaults(context.Background(), existing, tc.svcType))
+			require.NoError(t, r.repairCredentials(context.Background(), existing, namedService("cache", tc.svcType)))
 
 			got := secretFromCluster(t, r, "cache-credentials")
 			_, hasPw := got["PASSWORD"]
@@ -1023,15 +1043,16 @@ func TestEnsureCredentialDefaults_PrunesCredentialsWithoutAuth(t *testing.T) {
 			assert.Equal(t, tc.wantPw, hasPw, "a stale PASSWORD is pruned where the server has no auth")
 			assert.Equal(t, tc.wantPw, hasUser, "so is the USERNAME beside it")
 			assert.Equal(t, "cache.ns.svc.cluster.local", got["HOST"], "HOST must survive the prune")
-			assert.Equal(t, "6379", got["PORT"], "PORT must survive the prune")
+			assert.Equal(t, fmt.Sprintf("%d", serviceCatalog(tc.svcType).port), got["PORT"],
+				"the address keys are the service's own, whatever the Secret arrived carrying")
 		})
 	}
 }
 
-// TestEnsureCredentialDefaults_MinioKeepsItsOwnCredentials guards the edge the
+// TestRepairCredentials_MinioKeepsItsOwnCredentials guards the edge the
 // prune could have taken with it: MinIO authenticates, but under
 // ACCESS_KEY/SECRET_KEY rather than USERNAME/PASSWORD.
-func TestEnsureCredentialDefaults_MinioKeepsItsOwnCredentials(t *testing.T) {
+func TestRepairCredentials_MinioKeepsItsOwnCredentials(t *testing.T) {
 	existing := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "obj-credentials", Namespace: "ns"},
 		Data: map[string][]byte{
@@ -1041,9 +1062,767 @@ func TestEnsureCredentialDefaults_MinioKeepsItsOwnCredentials(t *testing.T) {
 		},
 	}
 	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
-	require.NoError(t, r.ensureCredentialDefaults(context.Background(), existing, "minio"))
+	require.NoError(t, r.repairCredentials(context.Background(), existing, namedService("obj", "minio")))
 
 	got := secretFromCluster(t, r, "obj-credentials")
 	assert.Equal(t, "kipper", got["ACCESS_KEY"], "MinIO's access key is its username")
 	assert.Equal(t, "secret", got["SECRET_KEY"], "MinIO's secret key is its password")
+}
+
+// A service whose credentials Secret belongs to something else never reaches
+// updateStatus, so without this it sits at Pending with the reason visible only
+// in the controller's log. The state is reachable by a name collision no
+// create-time check can see, a restore among them, so the object has to say why
+// it is stuck.
+func TestReportCredentialsBlocked_SaysWhyOnTheService(t *testing.T) {
+	svc := bareService("postgres")
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(),
+	}
+
+	r.reportCredentialsBlocked(context.Background(), svc,
+		&credentialsNotOursError{Secret: "db-credentials"}, "SecretNotOwned")
+
+	var live kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
+	assert.Equal(t, "Failed", live.Status.Phase, "a blocked service reported itself as healthy")
+
+	cond := meta.FindStatusCondition(live.Status.Conditions, "CredentialsReady")
+	require.NotNil(t, cond, "nothing on the object says why it is stuck")
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Contains(t, cond.Message, "not owned by this service")
+}
+
+// The condition describes a state, so it has to go the moment that state does,
+// which is when the credentials reconcile succeeds rather than when the whole
+// reconcile does. Deferring it to the last step means a later failure keeps the
+// object blaming credentials that are fine.
+func TestRetractCredentialsBlocked_TakesTheConditionOff(t *testing.T) {
+	svc := bareService("postgres")
+	svc.Status.Conditions = []metav1.Condition{{
+		Type: kipperv1.ConditionCredentialsReady, Status: metav1.ConditionFalse,
+		Reason: "SecretNotOwned", Message: "an older failure",
+		LastTransitionTime: metav1.Now(),
+	}}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(),
+	}
+
+	require.NoError(t, r.retractCredentialsBlocked(context.Background(), svc))
+
+	var live kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
+	assert.Nil(t, meta.FindStatusCondition(live.Status.Conditions, kipperv1.ConditionCredentialsReady),
+		"a condition describing a state that has passed was left on the object")
+}
+
+// And it writes nothing when there was nothing to retract, for the same reason
+// the reporter does not: an identical status write is an event that brings the
+// object straight back round.
+//
+// The resourceVersion is captured into a string before the call. Status().Update
+// writes the new one back into the object it was handed, so reading the field
+// afterwards compares the store against itself and passes whatever the code does.
+func TestRetractCredentialsBlocked_WritesNothingWhenThereIsNoCondition(t *testing.T) {
+	svc := bareService("postgres")
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(),
+	}
+	var live kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
+	before := live.ResourceVersion
+
+	require.NoError(t, r.retractCredentialsBlocked(context.Background(), &live))
+
+	var after kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &after))
+	assert.Equal(t, before, after.ResourceVersion, "an empty retraction wrote the object")
+}
+
+// updateStatus runs on every pass of a healthy service, so writing an identical
+// status each time keeps the queue busy with work that changes nothing. Same
+// capture-before-the-call rule as above.
+func TestUpdateStatus_WritesNothingWhenNothingChanged(t *testing.T) {
+	svc := bareService("postgres")
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(),
+	}
+	require.NoError(t, r.updateStatus(context.Background(), svc))
+
+	var settled kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &settled))
+	before := settled.ResourceVersion
+
+	require.NoError(t, r.updateStatus(context.Background(), &settled))
+
+	var after kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &after))
+	assert.Equal(t, before, after.ResourceVersion,
+		"an unchanged status was written again, which is an event that brings the object back round")
+}
+
+// A status write is an update event on the object being reconciled, so writing
+// the same failure on every pass feeds the queue its own tail: the failed
+// reconcile is requeued with backoff, and the event this emits brings it
+// straight back. A blocked service would reconcile continuously until repaired.
+func TestReportCredentialsBlocked_WritesOnlyWhenItSaysSomethingNew(t *testing.T) {
+	svc := bareService("postgres")
+	client := crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc).WithStatusSubresource(svc).Build()
+	r := &ServiceReconciler{Client: client, Scheme: testScheme()}
+	cause := &credentialsNotOursError{Secret: "db-credentials"}
+
+	r.reportCredentialsBlocked(context.Background(), svc, cause, "SecretNotOwned")
+
+	var afterFirst kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &afterFirst))
+	first := afterFirst.ResourceVersion
+
+	// The same refusal, again, exactly as a requeued reconcile would report it.
+	r.reportCredentialsBlocked(context.Background(), &afterFirst, cause, "SecretNotOwned")
+
+	var afterSecond kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &afterSecond))
+	assert.Equal(t, first, afterSecond.ResourceVersion,
+		"reporting the same failure again wrote the object and emitted another event")
+}
+
+// Driven through Reconcile rather than through the helper, because the classifier
+// is the wiring: with the helper called directly, deleting the classification from
+// Reconcile leaves every test green.
+func TestReconcile_ReportsAForeignOwnedCredentialsSecret(t *testing.T) {
+	svc := bareService("postgres")
+	svc.UID = "the-service"
+	foreign := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: secretname.ServiceCredentials("db"), Namespace: "ns",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "kipper.run/v1alpha1", Kind: "App", Name: "db",
+				UID: "somebody-else", Controller: ptr.To(true),
+			}},
+		},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).
+			WithObjects(svc, foreign).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns", Name: "db"},
+	})
+	require.Error(t, err, "the reconcile has to keep failing so it is requeued")
+
+	var live kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
+	cond := meta.FindStatusCondition(live.Status.Conditions, kipperv1.ConditionCredentialsReady)
+	require.NotNil(t, cond, "the object says nothing about why it is stuck")
+	assert.Equal(t, "SecretNotOwned", cond.Reason)
+	assert.Equal(t, "Failed", live.Status.Phase)
+}
+
+// The second permanent refusal, reached by following the first one's own advice:
+// told the Secret belongs to something else and offered "remove it if the service
+// holds no data yet", an operator who removes it lands on a volume with no
+// credentials. Reporting only the first would leave the object describing a
+// Secret that is no longer there.
+func TestReconcile_ReportsDataLeftWithoutCredentials(t *testing.T) {
+	svc := bareService("postgres")
+	svc.UID = "the-service"
+	claim := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data-db-0", Namespace: "ns"},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).
+			WithObjects(svc, claim).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns", Name: "db"},
+	})
+	require.Error(t, err)
+
+	var live kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
+	cond := meta.FindStatusCondition(live.Status.Conditions, kipperv1.ConditionCredentialsReady)
+	require.NotNil(t, cond, "the refusal an operator has to clear was not reported")
+	assert.Equal(t, "DataWithoutCredentials", cond.Reason,
+		"the object still blames the Secret an operator was told to remove")
+	assert.Contains(t, cond.Message, "restore")
+}
+
+// A transient failure is not a state an operator can clear, so it must not reach
+// the object at all.
+func TestPermanentCredentialsFailure_IgnoresATransientError(t *testing.T) {
+	_, permanent := permanentCredentialsFailure(errors.New(`secrets "db-credentials" already exists`))
+	assert.False(t, permanent, "a routine create race would have been stamped on the object")
+}
+
+// Driven through Reconcile, because the call site is the thing at issue: the
+// helper being correct says nothing about it being called, and it is called
+// where the state it describes stops being true rather than at the end of a
+// fully successful pass. A later step failing must not keep the object blaming
+// credentials that are fine.
+func TestReconcile_RetractsTheConditionOnceTheCredentialsReconcile(t *testing.T) {
+	svc := bareService("postgres")
+	svc.UID = "the-service"
+	svc.Status.Conditions = []metav1.Condition{{
+		Type: kipperv1.ConditionCredentialsReady, Status: metav1.ConditionFalse,
+		Reason: "SecretNotOwned", Message: "a failure that has since been cleared",
+		LastTransitionTime: metav1.Now(),
+	}}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).
+			WithObjects(svc).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(),
+	}
+
+	// The reconcile may still fail further down; the retraction is not
+	// conditional on it finishing.
+	_, _ = r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns", Name: "db"},
+	})
+
+	var live kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
+	assert.Nil(t, meta.FindStatusCondition(live.Status.Conditions, kipperv1.ConditionCredentialsReady),
+		"the object still blames credentials that reconciled")
+}
+
+// A service type whose server asks for no credential cannot be locked out of its
+// own data, because the Secret it carries is HOST and PORT — both derived from
+// the service's own name and its type's port. Refusing to mint them leaves a
+// restored redis, opensearch or mailhog permanently blocked, and the refusal's
+// own remedy tells the operator to delete the volume.
+func TestReconcileCredentials_MintsForAPasswordlessServiceOverExistingData(t *testing.T) {
+	ctx := context.Background()
+	svc := bareService("redis")
+	svc.UID = "the-service"
+	claim := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data-db-0", Namespace: "ns"},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).
+			WithObjects(svc, claim).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(), ShareGrants: share.NewGrantStore(k8sfake.NewClientset()),
+	}
+
+	require.NoError(t, r.reconcileCredentialsSecret(ctx, svc),
+		"a service with no password was refused its own reconstructible connection details")
+
+	var minted corev1.Secret
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "db-credentials"}, &minted))
+	assert.Equal(t, "db.ns.svc.cluster.local", string(minted.Data["HOST"]))
+	assert.NotEmpty(t, minted.Data["PORT"])
+	assert.NotContains(t, minted.Data, "PASSWORD")
+}
+
+// The same guard on a type that does authenticate still refuses: postgres reads
+// its password once, at initialisation, so a fresh one over an initialised
+// volume locks every bound workload out with no indication of why.
+func TestReconcileCredentials_StillRefusesAnAuthenticatedServiceOverExistingData(t *testing.T) {
+	ctx := context.Background()
+	svc := bareService("postgres")
+	svc.UID = "the-service"
+	claim := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data-db-0", Namespace: "ns"},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).
+			WithObjects(svc, claim).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(), ShareGrants: share.NewGrantStore(k8sfake.NewClientset()),
+	}
+
+	var missing *credentialsMissingError
+	require.ErrorAs(t, r.reconcileCredentialsSecret(ctx, svc), &missing,
+		"a password was minted over a database that had already made up its mind")
+}
+
+// Ownership is not readiness. A restore can bring back a Secret with the right
+// controller reference and none of the keys a bound workload reads, and the
+// derived ones are reconstructible, so they are restored rather than reported.
+func TestReconcileCredentials_RestoresDerivedKeysOnADrainedSecret(t *testing.T) {
+	ctx := context.Background()
+	svc := bareService("redis")
+	svc.UID = "the-service"
+	drained := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "db-credentials", Namespace: "ns",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: kipperv1.GroupVersion.String(), Kind: "Service",
+				Name: "db", UID: "the-service", Controller: ptr.To(true),
+			}},
+		},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).
+			WithObjects(svc, drained).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(), ShareGrants: share.NewGrantStore(k8sfake.NewClientset()),
+	}
+
+	require.NoError(t, r.reconcileCredentialsSecret(ctx, svc))
+
+	var repaired corev1.Secret
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "db-credentials"}, &repaired))
+	assert.Equal(t, "db.ns.svc.cluster.local", string(repaired.Data["HOST"]),
+		"a bound workload reads HOST out of this Secret and it was left absent")
+	assert.NotEmpty(t, repaired.Data["PORT"])
+}
+
+// The key that cannot be reconstructed is the password, and an initialised
+// volume already knows the old one. That is the same permanent state as a Secret
+// deleted outright, so it is reported the same way rather than passing as a
+// successful reconcile that leaves the pod in CreateContainerConfigError.
+func TestReconcileCredentials_RefusesADrainedPasswordOverExistingData(t *testing.T) {
+	ctx := context.Background()
+	svc := bareService("postgres")
+	svc.UID = "the-service"
+	drained := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "db-credentials", Namespace: "ns",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: kipperv1.GroupVersion.String(), Kind: "Service",
+				Name: "db", UID: "the-service", Controller: ptr.To(true),
+			}},
+		},
+		Data: map[string][]byte{"HOST": []byte("db.ns.svc.cluster.local"), "PORT": []byte("5432")},
+	}
+	claim := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data-db-0", Namespace: "ns"},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).
+			WithObjects(svc, drained, claim).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(), ShareGrants: share.NewGrantStore(k8sfake.NewClientset()),
+	}
+
+	var missing *credentialsMissingError
+	require.ErrorAs(t, r.reconcileCredentialsSecret(ctx, svc), &missing,
+		"an owned Secret with no password passed as reconciled, so nothing on the object says why the pod will not start")
+}
+
+// With no volume the engine has not initialised, so nothing disagrees with a
+// fresh password. This is the same rule the mint path already follows, applied
+// to a Secret that survived with its password missing.
+func TestReconcileCredentials_MintsAPasswordIntoADrainedSecretWithNoData(t *testing.T) {
+	ctx := context.Background()
+	svc := bareService("postgres")
+	svc.UID = "the-service"
+	drained := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "db-credentials", Namespace: "ns",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: kipperv1.GroupVersion.String(), Kind: "Service",
+				Name: "db", UID: "the-service", Controller: ptr.To(true),
+			}},
+		},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).
+			WithObjects(svc, drained).WithStatusSubresource(svc).Build(),
+		Scheme: testScheme(), ShareGrants: share.NewGrantStore(k8sfake.NewClientset()),
+	}
+
+	require.NoError(t, r.reconcileCredentialsSecret(ctx, svc))
+
+	var repaired corev1.Secret
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "db-credentials"}, &repaired))
+	assert.NotEmpty(t, repaired.Data["PASSWORD"], "a service with no data was left with no password")
+	assert.Equal(t, "kipper", string(repaired.Data["USERNAME"]))
+}
+
+// A retraction that fails to write is invisible to every later check in the
+// pass: the condition is already gone from the copy in memory, so the status
+// diff at the end compares two objects that both lack it and writes nothing.
+// On a settled service nothing else changes either, so the pass ends clean and
+// the object goes on claiming its credentials are blocked until something else
+// happens to it. The reconcile has to fail so it is requeued.
+func TestReconcile_RequeuesWhenTheRetractionCannotBeWritten(t *testing.T) {
+	ctx := context.Background()
+	svc := bareService("postgres")
+	svc.UID = "the-service"
+	svc.Status = kipperv1.ServiceStatus{
+		Phase:             "Pending",
+		Host:              "db.ns.svc.cluster.local",
+		Port:              serviceCatalog("postgres").port,
+		CredentialsSecret: "db-credentials",
+		Conditions: []metav1.Condition{{
+			Type: kipperv1.ConditionCredentialsReady, Status: metav1.ConditionFalse,
+			Reason: "SecretNotOwned", Message: "cleared since", LastTransitionTime: metav1.Now(),
+		}},
+	}
+	creds := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "db-credentials", Namespace: "ns",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: kipperv1.GroupVersion.String(), Kind: "Service",
+				Name: "db", UID: "the-service", Controller: ptr.To(true),
+			}},
+		},
+		Data: map[string][]byte{
+			"HOST": []byte("db.ns.svc.cluster.local"), "PORT": []byte("5432"),
+			"USERNAME": []byte("kipper"), "PASSWORD": []byte("already-set"), "NAME": []byte("app"),
+		},
+	}
+
+	writes := 0
+	c := crfake.NewClientBuilder().WithScheme(testScheme()).
+		WithObjects(svc, creds).WithStatusSubresource(svc).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, cl crclient.Client, sub string, obj crclient.Object, opts ...crclient.SubResourceUpdateOption) error {
+				writes++
+				// Only the retraction, which is the first status write of the
+				// pass. Failing every one of them would make the closing status
+				// write fail too, and the reconcile would report that instead.
+				if writes == 1 {
+					return kerrors.NewInternalError(errors.New("etcd unavailable"))
+				}
+				return cl.Status().Update(ctx, obj, opts...)
+			},
+		}).Build()
+	r := &ServiceReconciler{Client: c, Scheme: testScheme(), ShareGrants: share.NewGrantStore(k8sfake.NewClientset())}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "db"}})
+	require.Error(t, err, "the failed retraction ended the pass clean, so nothing will retract it")
+
+	var live kipperv1.Service
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "db"}, &live))
+	assert.NotNil(t, meta.FindStatusCondition(live.Status.Conditions, kipperv1.ConditionCredentialsReady),
+		"the write failed, so the object still carries the condition and the requeue is what clears it")
+}
+
+// A Secret restored into another namespace carries the old namespace's host, and
+// filling only what is absent would leave it there: every workload bound to the
+// restored service would open its connections against the service it was copied
+// from. The address keys say where the service is, nothing more, so they are
+// computed from the Service on every pass.
+func TestRepairCredentials_ConvergesAnAddressFromAnotherNamespace(t *testing.T) {
+	restored := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"HOST":     []byte("db.production.svc.cluster.local"),
+			"PORT":     []byte("5432"),
+			"USERNAME": []byte("kipper"),
+			"PASSWORD": []byte("carried-over"),
+		},
+	}
+	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(restored).Build()}
+
+	require.NoError(t, r.repairCredentials(context.Background(), restored, namedService("db", "postgres")))
+
+	got := secretFromCluster(t, r, "db-credentials")
+	assert.Equal(t, "db.ns.svc.cluster.local", got["HOST"],
+		"bound workloads would have connected to the namespace this was copied from")
+	assert.Equal(t, "carried-over", got["PASSWORD"], "the password the volume knows must survive")
+}
+
+// MinIO's endpoint is an address like any other, and it carries the namespace
+// twice over: in the host and in the URL a bound workload is handed whole.
+func TestRepairCredentials_ConvergesTheMinioEndpoint(t *testing.T) {
+	restored := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "obj-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"ENDPOINT":   []byte("http://obj.production.svc.cluster.local:9000"),
+			"ACCESS_KEY": []byte("kipper"),
+			"SECRET_KEY": []byte("carried-over"),
+		},
+	}
+	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(restored).Build()}
+
+	require.NoError(t, r.repairCredentials(context.Background(), restored, namedService("obj", "minio")))
+
+	got := secretFromCluster(t, r, "obj-credentials")
+	assert.Contains(t, got["ENDPOINT"], "obj.ns.svc.cluster.local")
+	assert.Equal(t, "carried-over", got["SECRET_KEY"], "the key minio initialised with must survive")
+}
+
+// The username is not an address. The StatefulSet passes a fixed one, which an
+// engine reads only when it initialises, so a database that came up under a
+// different name still answers to that name alone and the Secret is the only
+// record of it. Overwriting it would lock out every workload bound to a service
+// older than the current default.
+func TestRepairCredentials_KeepsAUsernameItDidNotChoose(t *testing.T) {
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"HOST":     []byte("db.ns.svc.cluster.local"),
+			"PORT":     []byte("5432"),
+			"USERNAME": []byte("postgres"),
+			"PASSWORD": []byte("secret"),
+		},
+	}
+	// The volume is the premise: it is what makes the name in the Secret the one
+	// the engine answers to rather than a value somebody typed.
+	claim := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data-db-0", Namespace: "ns"},
+	}
+	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing, claim).Build()}
+
+	require.NoError(t, r.repairCredentials(context.Background(), existing, namedService("db", "postgres")))
+
+	got := secretFromCluster(t, r, "db-credentials")
+	assert.Equal(t, "postgres", got["USERNAME"], "the engine answers to this name and nothing else")
+}
+
+// MinIO authenticates under ACCESS_KEY and SECRET_KEY, so a USERNAME or PASSWORD
+// on its Secret is read by nothing and injected into every bound workload.
+func TestRepairCredentials_PrunesTheKeysMinioDoesNotAuthenticateWith(t *testing.T) {
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "obj-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"ENDPOINT":   []byte("http://obj.ns.svc.cluster.local:9000"),
+			"ACCESS_KEY": []byte("kipper"),
+			"SECRET_KEY": []byte("secret"),
+			"USERNAME":   []byte("kipper"),
+			"PASSWORD":   []byte("read-by-nothing"),
+		},
+	}
+	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
+
+	require.NoError(t, r.repairCredentials(context.Background(), existing, namedService("obj", "minio")))
+
+	got := secretFromCluster(t, r, "obj-credentials")
+	assert.NotContains(t, got, "USERNAME")
+	assert.NotContains(t, got, "PASSWORD")
+	assert.Equal(t, "secret", got["SECRET_KEY"], "the key it does authenticate with must stay")
+}
+
+// One pass, one write. The reconciler watches the Secrets it owns, so a second
+// update in the same pass is a second event bringing the reconcile straight
+// back to do nothing.
+func TestRepairCredentials_WritesOnceForAllOfIt(t *testing.T) {
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "rabbit-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"USERNAME": []byte("kipper"),
+			"PASSWORD": []byte("secret"),
+			"NAME":     []byte("app"),
+		},
+	}
+	writes := 0
+	c := crfake.NewClientBuilder().WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, cl crclient.WithWatch, obj crclient.Object, opts ...crclient.UpdateOption) error {
+				if _, isSecret := obj.(*corev1.Secret); isSecret {
+					writes++
+				}
+				return cl.Update(ctx, obj, opts...)
+			},
+		}).Build()
+	r := &ServiceReconciler{Client: c}
+
+	// Restores an absent HOST and PORT, adds the VHOST default, prunes NAME.
+	require.NoError(t, r.repairCredentials(context.Background(), existing, namedService("rabbit", "rabbitmq")))
+
+	assert.Equal(t, 1, writes, "the repair and the defaults each wrote, so the pass fed the queue twice")
+	got := secretFromCluster(t, r, "rabbit-credentials")
+	assert.Equal(t, "rabbit.ns.svc.cluster.local", got["HOST"])
+	assert.Equal(t, "/", got["VHOST"])
+	assert.NotContains(t, got, "NAME")
+}
+
+// A minio Secret in the shape every authenticating service once shared holds the
+// root credential under PASSWORD, and the container reads MINIO_ROOT_PASSWORD
+// from SECRET_KEY. Refusing it as material that cannot be reconstructed would
+// send an operator to a backup, or to deleting the volume, while the credential
+// its data was written under is in the same Secret under the other name.
+func TestRepairCredentials_CarriesALegacyMinioCredentialOver(t *testing.T) {
+	legacy := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "obj-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"HOST":     []byte("obj.ns.svc.cluster.local"),
+			"PORT":     []byte("9000"),
+			"USERNAME": []byte("kipper"),
+			"PASSWORD": []byte("what-the-volume-knows"),
+			"NAME":     []byte("app"),
+		},
+	}
+	claim := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data-obj-0", Namespace: "ns"},
+	}
+	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(legacy, claim).Build()}
+
+	require.NoError(t, r.repairCredentials(context.Background(), legacy, namedService("obj", "minio")),
+		"the credential was in the Secret all along, so there was nothing to refuse")
+
+	got := secretFromCluster(t, r, "obj-credentials")
+	assert.Equal(t, "what-the-volume-knows", got["SECRET_KEY"],
+		"the root credential the volume was written under must reach the key minio reads")
+	assert.Equal(t, "kipper", got["ACCESS_KEY"])
+	assert.NotContains(t, got, "PASSWORD", "the key minio reads nothing from must not stay behind")
+}
+
+// MinIO carries no HOST or PORT, so a legacy-shaped Secret's pair was converged
+// by nothing and pruned by nothing. A restore from another namespace left them
+// pointing at it, and a workload reading HOST rather than ENDPOINT connected
+// there. A key this type does not carry is stale whatever it holds.
+func TestRepairCredentials_PrunesAnAddressTheTypeDoesNotCarry(t *testing.T) {
+	restored := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "obj-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"HOST":       []byte("obj.production.svc.cluster.local"),
+			"PORT":       []byte("9000"),
+			"ENDPOINT":   []byte("http://obj.production.svc.cluster.local:9000"),
+			"ACCESS_KEY": []byte("kipper"),
+			"SECRET_KEY": []byte("carried-over"),
+		},
+	}
+	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(restored).Build()}
+
+	require.NoError(t, r.repairCredentials(context.Background(), restored, namedService("obj", "minio")))
+
+	got := secretFromCluster(t, r, "obj-credentials")
+	assert.NotContains(t, got, "HOST", "minio has no HOST, so this one pointed at another namespace for ever")
+	assert.NotContains(t, got, "PORT")
+	assert.Contains(t, got["ENDPOINT"], "obj.ns.svc.cluster.local")
+}
+
+// The same rule from the other side: the S3 pair on a service that authenticates
+// under USERNAME and PASSWORD is read by nothing and injected into everything.
+func TestRepairCredentials_PrunesTheKeysOfAnotherShape(t *testing.T) {
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"HOST":       []byte("db.ns.svc.cluster.local"),
+			"PORT":       []byte("5432"),
+			"USERNAME":   []byte("kipper"),
+			"PASSWORD":   []byte("secret"),
+			"ACCESS_KEY": []byte("kipper"),
+			"SECRET_KEY": []byte("read-by-nothing"),
+		},
+	}
+	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
+
+	require.NoError(t, r.repairCredentials(context.Background(), existing, namedService("db", "postgres")))
+
+	got := secretFromCluster(t, r, "db-credentials")
+	assert.NotContains(t, got, "ACCESS_KEY")
+	assert.NotContains(t, got, "SECRET_KEY")
+	assert.Equal(t, "secret", got["PASSWORD"], "the key this type does authenticate with must stay")
+}
+
+// The identity is the other half of what the engine keeps, and it is no more
+// reconstructible than the password. Filling in the current default over a
+// volume would publish an account the database has never heard of, and every
+// bound workload would authenticate as nobody.
+func TestRepairCredentials_RefusesADrainedUsernameOverExistingData(t *testing.T) {
+	svc := bareService("postgres")
+	svc.UID = "the-service"
+	drained := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"HOST":     []byte("db.ns.svc.cluster.local"),
+			"PORT":     []byte("5432"),
+			"PASSWORD": []byte("still-here"),
+		},
+	}
+	claim := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data-db-0", Namespace: "ns"},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc, drained, claim).Build(),
+		Scheme: testScheme(),
+	}
+
+	var missing *credentialsMissingError
+	require.ErrorAs(t, r.repairCredentials(context.Background(), drained, svc), &missing,
+		"the default username was published for a database that may answer to another")
+}
+
+// With no volume nothing has initialised, so the default identity is the one the
+// engine will come up under.
+func TestRepairCredentials_FillsADrainedUsernameWithNoData(t *testing.T) {
+	svc := bareService("postgres")
+	svc.UID = "the-service"
+	drained := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "ns"},
+		Data:       map[string][]byte{"PASSWORD": []byte("still-here")},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc, drained).Build(),
+		Scheme: testScheme(),
+	}
+
+	require.NoError(t, r.repairCredentials(context.Background(), drained, svc))
+
+	got := secretFromCluster(t, r, "db-credentials")
+	assert.Equal(t, "kipper", got["USERNAME"])
+	assert.Equal(t, "still-here", got["PASSWORD"], "a password that was never missing must not be replaced")
+}
+
+// MinIO's root user is not engine state: the StatefulSet passes it at every
+// start, so the running server answers to that name and a Secret saying
+// otherwise is simply wrong.
+func TestRepairCredentials_ConvergesTheMinioRootUser(t *testing.T) {
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "obj-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"ENDPOINT":   []byte("http://obj.ns.svc.cluster.local:9000"),
+			"ACCESS_KEY": []byte("someone-else"),
+			"SECRET_KEY": []byte("carried-over"),
+		},
+	}
+	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
+
+	require.NoError(t, r.repairCredentials(context.Background(), existing, namedService("obj", "minio")))
+
+	got := secretFromCluster(t, r, "obj-credentials")
+	assert.Equal(t, "kipper", got["ACCESS_KEY"], "the server answers to the name its container was given")
+	assert.Equal(t, "carried-over", got["SECRET_KEY"])
+}
+
+// A refusal that misnames its cause sends the operator to look at the wrong
+// thing: told the password is missing, they open the Secret, find one, and
+// conclude the condition is lying. It names the key that is actually absent.
+func TestRepairCredentials_NamesTheKeyThatIsMissing(t *testing.T) {
+	svc := bareService("postgres")
+	svc.UID = "the-service"
+	drained := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"HOST":     []byte("db.ns.svc.cluster.local"),
+			"PORT":     []byte("5432"),
+			"PASSWORD": []byte("still-here"),
+		},
+	}
+	claim := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data-db-0", Namespace: "ns"},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc, drained, claim).Build(),
+		Scheme: testScheme(),
+	}
+
+	err := r.repairCredentials(context.Background(), drained, svc)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "USERNAME", "the operator was sent to look for the wrong missing key")
+	assert.NotContains(t, err.Error(), "no password", "the password is right there in the Secret")
+}
+
+// With no volume there is no history to preserve. The engine has not started, so
+// it will come up as whatever the StatefulSet passes it, and a Secret naming
+// somebody else would hand every bound workload an account that does not exist.
+func TestRepairCredentials_ConvergesAUsernameWithNoDataBehindIt(t *testing.T) {
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "ns"},
+		Data: map[string][]byte{
+			"HOST":     []byte("db.ns.svc.cluster.local"),
+			"PORT":     []byte("5432"),
+			"USERNAME": []byte("postgres"),
+			"PASSWORD": []byte("secret"),
+		},
+	}
+	r := &ServiceReconciler{Client: crfake.NewClientBuilder().WithObjects(existing).Build()}
+
+	require.NoError(t, r.repairCredentials(context.Background(), existing, namedService("db", "postgres")))
+
+	got := secretFromCluster(t, r, "db-credentials")
+	assert.Equal(t, "kipper", got["USERNAME"],
+		"the statefulset will initialise this database as kipper, whatever the Secret says")
+	assert.Equal(t, "secret", got["PASSWORD"], "a password that was never missing must not be replaced")
 }

@@ -16,6 +16,7 @@ import (
 
 func projectScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(projectGVR.GroupVersion().WithKind("Project"), &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(projectGVR.GroupVersion().WithKind("ProjectList"), &unstructured.UnstructuredList{})
 	return scheme
 }

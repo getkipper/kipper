@@ -728,7 +728,7 @@ kip service share mailhog --expires 72h      # shareable link to a service web U
 kip service import mydb --file dump.sql      # load a database dump
 kip service export mydb --file nightly.dump  # dump a database to a local file
 kip service credentials                      # check every service owns its credentials
-kip service delete mydb --delete-data        # delete (requires flag)
+kip service delete mydb --delete-data        # delete the service and its volume
 ```
 
 `kip service share` accepts `--project` and `--environment` to target a service outside the active project, `--expires` (up to 720h) for the link lifetime, and `--label` for a note in the listing. Use `--list` to see a service's links, `--revoke <id>` to kill one, and `--revoke-all` plus `--rotate-key` to contain a leak.
@@ -963,7 +963,8 @@ Manage container registry credentials. A credential is stored once in `kipper-sy
 ```bash
 kip registry add --server ghcr.io --username myuser --password ghp_token123 --allow-project acme
 kip registry add --server registry.git.example.com --username deploy --password secret --allow-project acme
-kip registry add --server ghcr.io --allow-project acme --allow-project shop
+kip registry allow ghcr-io --project shop      # adds shop, keeps acme
+kip registry revoke ghcr-io --project shop     # removes shop, keeps the rest
 kip registry list
 kip registry remove ghcr-io
 ```
@@ -977,6 +978,19 @@ kip registry remove ghcr-io
 | `--allow-project` | No | none | Project allowed to pull with this credential (repeatable; replaces the allow-list) |
 
 A credential is used only by projects on its allow-list, so grant at least one. Re-running `kip registry add` for an existing name updates just the flags you pass, so granting a project keeps the stored password.
+
+`--allow-project` **replaces** the allow-list. Naming one project takes every other away, which is what it has always done; it now prints what it removed so you can see it happen. To add a project without disturbing the others, use `kip registry allow`, and to take one away use `kip registry revoke`:
+
+```bash
+kip registry allow ghcr-io --project shop --project blog
+kip registry revoke ghcr-io --project blog
+```
+
+`allow` checks that the project exists and refuses a name the cluster does not have, since a project name is matched exactly at pull time and a typo would be stored as a grant that can never work. `revoke` takes any name, because it is also how you remove one that should never have been there.
+
+Pointing an existing credential at a different registry needs `--password`. The credential is addressed by its name, so changing the server would otherwise hand the new registry the password stored for the old one.
+
+The console's registry settings edit the password and the server. Who may pull with a credential is changed with the commands above, and the settings API refuses a request that would change the allow-list on a credential that already exists.
 
 When a workload in a granted project runs an image from that registry, the credential is staged into the workload's namespace as a pull secret, where the project's members can read it. Grant a credential only to projects that may share that registry login. When projects must stay isolated, create a separate registry account per project and add each as its own credential; a project's workloads then use the credential granted to them.
 

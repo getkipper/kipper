@@ -17,6 +17,8 @@ kip service add mailhog --name mailhog
 
 Supported types: `postgres`, `mysql`, `mongodb`, `redis`, `rabbitmq`, `opensearch`, `minio`, `mailhog`
 
+One name is refused: a service called `<app>-git`, where `<app>` is an app in the same project and environment that still keeps its git token under the older naming. Both would store their credentials in the same Secret, so Kipper asks you to pick another name for the service rather than let one read the other's. An app whose token is stored under the current naming does not block the name.
+
 ### Per-environment services
 
 Each environment can have its own database with separate credentials and storage:
@@ -451,19 +453,29 @@ Repair never touches the credentials themselves, so a database keeps the passwor
 
 ## Deleting a service
 
-Deleting a service permanently destroys all data. Kipper requires an explicit flag to prevent accidents:
+Deleting a service removes the service and the workload behind it. The volume it kept its data on stays where it is unless you ask for that to go too:
 
 ```bash
-# This will be rejected
+# The service goes, the volume stays
 kip service delete mydb
 
-# This works, data is permanently destroyed
+# The service goes, and the volume with it
 kip service delete mydb --delete-data
 ```
 
 ::: danger
 `--delete-data` is irreversible. The persistent volume and all data are permanently deleted. There is no undo.
 :::
+
+What `--delete-data` removes is the volume Kipper created for the service. One that was renamed, or whose labels were changed by hand, is no longer recognisable as that service's and stays where it is, and the command says when it found nothing to remove. Recognisable means the name a StatefulSet gives a claim, `data-<service>-0`, carrying that service's `app` label. When the service itself has already gone that is the only evidence left, so name a service you no longer have carefully.
+
+A volume left behind is what a service of the same name lands on later, and Kipper blocks that service with `DataWithoutCredentials`: there is data on the volume and no password recorded that opens it. `kip service list` names any service in that state under the table. Run the delete again with `--delete-data` once the data is genuinely finished with.
+
+A delete that stops on a name collision, because the workload under that name turned out to belong to something else, keeps the service until the collision is cleared. The service says which object it means. If the leftover object is the one you want to keep, remove the `kipper.run/delete-data` annotation from the Service with `kubectl` and the service finishes leaving with its volume where it is.
+
+Some services have no record for Kipper to delete: ones created before Kipper kept those records, and ones whose record has already gone, leaving the volume behind. Deleting either needs `--delete-data`, and the volume goes with it. Without the flag the command says so and deletes nothing.
+
+Deleting from the web console destroys the data, which is what its confirmation asks you to type the service name for. The service stays in the list as `deleting` until the volume has actually gone, because the workload has to stop first, and both `kip service list` and the console say so. A delete that cannot finish, because the workload turned out to belong to something else or a volume will not go, stays there and says which step stopped it. Deleting the Service with `kubectl` keeps the volume, the same as `kip service delete` without the flag; annotate it with `kipper.run/delete-data=true` first to have the volume go too.
 
 ## Importing and exporting data
 
@@ -550,6 +562,6 @@ Changing resource limits on a service triggers a pod restart. For databases (Pos
 | Kubernetes resource | Deployment | StatefulSet |
 | Storage | None (stateless) | PersistentVolumeClaim |
 | Restart | Rolling restart, safe | Warns, requires `--force` |
-| Delete | Immediate | Requires `--delete-data` |
+| Delete | Immediate | Volume kept unless `--delete-data` |
 | Scaling | `kip app scale` | Single replica |
 | External access | Via Ingress (public URL) | Internal only (cluster DNS) |
