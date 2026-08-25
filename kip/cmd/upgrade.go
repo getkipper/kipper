@@ -141,12 +141,14 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	// retrying a failed upgrade and a curated grant arriving at the next one as
 	// an inference to approve, with whatever else came to reference it in the
 	// meantime.
-	closedGrants := false
-	defer func() {
-		if !closedGrants {
-			repairErasedAllowLists(ctx, clientset, os.Stdout, grants.decided)
-		}
-	}()
+	//
+	// It runs on every exit, successful or not, rather than on a flag saying
+	// which. A repair with nothing to repair writes nothing: Restore only fills
+	// a list that is absent, and by the end of a run that got as far as pass two
+	// none are. That leaves no ordering to get wrong, and it catches the one
+	// case a flag would miss — a late write from the pod being replaced, landing
+	// after the closing pass had already checked.
+	defer repairErasedAllowLists(ctx, clientset, os.Stdout, grants.decided)
 
 	// Before the new console-api serves builds: a shared credential written
 	// before allow-lists existed allows nobody, so an upgrade that restarted the
@@ -269,7 +271,6 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	// now is the cluster recorded as migrated: a grant the old pod replaced
 	// while it was still serving is written back here, where marking the
 	// migration before this ran would have left the build refused for good.
-	closedGrants = true
 	if err := closeSharedCredentialGrants(ctx, clientset, os.Stdout, grants); err != nil {
 		return err
 	}

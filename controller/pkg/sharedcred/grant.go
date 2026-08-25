@@ -154,23 +154,23 @@ func copyOf(projects []string) []string {
 // projects, and it writes the whole list at once, so editing any one credential
 // reads back as every credential having been decided by nobody. Writing the
 // record back is a repair: every project in it was already allowed when the
-// record was taken.
+// record was taken, against the same credential.
 //
-// It writes only into an absent list, so a grant, a revocation or a decision
-// made after the record was taken wins over it.
+// It writes only into an absent list, so a decision recorded after the record
+// was taken is left alone. One case escapes that and is worth stating rather
+// than implying: a revocation the old writer then erased reads as absent like
+// anything else, so a project revoked during the rollout can come back. The
+// upgrade names every list it writes back for that reason.
 //
-// A credential now bound to a different server is refused. The build hands a
-// project the credential's token against the credential's host, so one pointing
-// somewhere else is a different credential and nobody granted anything about it.
-//
-// A credential carrying a different token is restored and named separately.
-// Rotating a token keeps the projects that were allowed, which is what the
-// console-api's own edit path does, so refusing here would take a working
-// cluster's grants away on the commonest reason a list gets erased at all. What
-// it cannot tell apart is a credential deleted and recreated under its old name,
-// which is the same shape and means the opposite, so the operator is told which
-// ones changed hands and how to take the grant back.
-func Restore(entries []Entry, decided map[string]Decision) (updated []Entry, restored, rotated, moved []string) {
+// A credential whose server or token has changed is refused. The build hands a
+// project the credential's token against the credential's host, so a grant
+// authorises a project against that pair, and an entry carrying a different one
+// is a credential nobody granted anything about. The name cannot tell a token
+// rotation from a credential deleted and recreated under its old name, and the
+// two mean opposite things, so the ambiguous case fails closed and is named with
+// the command that puts it right. Writing first and warning afterwards would
+// hand out the access before anybody read the warning.
+func Restore(entries []Entry, decided map[string]Decision) (updated []Entry, restored, moved, replaced []string) {
 	for i := range entries {
 		if entries[i].AllowedProjects != nil {
 			continue
@@ -183,14 +183,14 @@ func Restore(entries []Entry, decided map[string]Decision) (updated []Entry, res
 			moved = append(moved, entries[i].Name)
 			continue
 		}
-		entries[i].AllowedProjects = copyOf(record.AllowedProjects)
-		if sha256.Sum256([]byte(entries[i].Token)) == record.TokenDigest {
-			restored = append(restored, entries[i].Name)
+		if sha256.Sum256([]byte(entries[i].Token)) != record.TokenDigest {
+			replaced = append(replaced, entries[i].Name)
 			continue
 		}
-		rotated = append(rotated, entries[i].Name)
+		entries[i].AllowedProjects = copyOf(record.AllowedProjects)
+		restored = append(restored, entries[i].Name)
 	}
-	return entries, restored, rotated, moved
+	return entries, restored, moved, replaced
 }
 
 // CloseUndecided records that nobody may build with the credentials still

@@ -29,6 +29,10 @@ type credentialGrants struct {
 	// decided is the allow-list each credential already carried before the
 	// rollout. Writing one back is a repair, so it is not gated on consent.
 	decided map[string]sharedcred.Decision
+	// boundTo is the server each previewed credential was bound to when the
+	// operator was shown it. What consent covers is a credential at a host, so
+	// an entry re-pointed during the rollout is not the one that was approved.
+	boundTo map[string]string
 	// mayClose is whether this run may decide the rest as nobody and record the
 	// migration as finished.
 	mayClose bool
@@ -123,9 +127,11 @@ func credentialSeedConsent(
 		return credentialGrants{decided: decided}, nil
 	}
 	undecided := map[string]bool{}
+	boundTo := map[string]string{}
 	for _, e := range stored {
 		if e.AllowedProjects == nil {
 			undecided[e.Name] = true
+			boundTo[e.Name] = e.Server
 		}
 	}
 	if len(undecided) == 0 {
@@ -152,7 +158,7 @@ func credentialSeedConsent(
 		printSeedConsentDeclineHint(out)
 		return credentialGrants{decided: decided}, nil
 	case consentGrant:
-		return credentialGrants{approved: usage, decided: decided, mayClose: true}, nil
+		return credentialGrants{approved: usage, decided: decided, boundTo: boundTo, mayClose: true}, nil
 	default:
 		return credentialGrants{decided: decided, mayClose: true}, nil
 	}

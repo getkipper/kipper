@@ -9,7 +9,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
@@ -44,10 +43,9 @@ import (
 // Seeding itself is idempotent and safe to run more than once in an upgrade,
 // which is what repairs a grant the old writer erased while it was still up.
 //
-// approved is the snapshot captured by credentialSeedConsent before the
-// rollout. nil means consent was declined; nothing is filled. A non-nil map,
-// even empty, is a permission to proceed: the empty case is the auto-close
-// path where nothing was referenced at consent time.
+// grants carries what credentialSeedConsent decided before the rollout. Only
+// its approved pairs are used here, and an empty set writes nothing, which is
+// both the declined path and the one where nothing was referenced.
 func seedSharedCredentialGrants(ctx context.Context, clientset kubernetes.Interface, out io.Writer, grants credentialGrants) error {
 	if len(grants.approved) == 0 {
 		return nil
@@ -57,7 +55,7 @@ func seedSharedCredentialGrants(ctx context.Context, clientset kubernetes.Interf
 	// back. Withholding it here is what makes "pass one may fill but must never
 	// decide" true with no argument: writing back a decided-empty list would be
 	// deciding, against a writer that still allows every build.
-	return fillSharedCredentialGrants(ctx, clientset, out, grants.approved, nil, false)
+	return fillSharedCredentialGrants(ctx, clientset, out, grants.approved, grants.boundTo, nil, false)
 }
 
 // closeSharedCredentialGrants fills the approved grants a second time, then
@@ -74,9 +72,9 @@ func seedSharedCredentialGrants(ctx context.Context, clientset kubernetes.Interf
 // Without that evidence the pass still fills, since repairing a grant the old
 // writer erased is wanted either way, and says why it stopped there.
 //
-// approved is nil when consent was declined; the migration then stays open and
-// reportConsentDeclined names what is still waiting and how to grant it. A
-// non-nil map may still be empty, which is the auto-close path.
+// grants.mayClose is false when consent was declined; the migration then stays
+// open, the lists recorded before the rollout are still written back, and
+// reportConsentDeclined names what is still waiting and how to grant it.
 //
 // Live app usage is not read here. What can be granted is exactly what the
 // operator saw and approved at consent time: an app that arrived during the
@@ -100,7 +98,7 @@ func closeSharedCredentialGrants(ctx context.Context, clientset kubernetes.Inter
 		return err
 	}
 	if !stamped {
-		if err := fillSharedCredentialGrants(ctx, clientset, out, grants.approved, grants.decided, false); err != nil {
+		if err := fillSharedCredentialGrants(ctx, clientset, out, grants.approved, grants.boundTo, grants.decided, false); err != nil {
 			return err
 		}
 		return reportMigrationLeftOpen(ctx, clientset, out)
@@ -113,9 +111,9 @@ func closeSharedCredentialGrants(ctx context.Context, clientset kubernetes.Inter
 	if err := waitForConsoleAPIQuiescence(ctx, clientset); err != nil {
 		_, _ = fmt.Fprintf(out, "  !   %v\n"+
 			"      The migration stays open, and the next upgrade finishes it.\n", err)
-		return fillSharedCredentialGrants(ctx, clientset, out, grants.approved, grants.decided, false)
+		return fillSharedCredentialGrants(ctx, clientset, out, grants.approved, grants.boundTo, grants.decided, false)
 	}
-	if err := fillSharedCredentialGrants(ctx, clientset, out, grants.approved, grants.decided, true); err != nil {
+	if err := fillSharedCredentialGrants(ctx, clientset, out, grants.approved, grants.boundTo, grants.decided, true); err != nil {
 		return err
 	}
 	// A closing fill decides every list, so one still absent means the write did
@@ -146,7 +144,7 @@ func repairErasedAllowLists(ctx context.Context, clientset kubernetes.Interface,
 	if len(decided) == 0 {
 		return
 	}
-	if err := fillSharedCredentialGrants(ctx, clientset, out, nil, decided, false); err != nil {
+	if err := fillSharedCredentialGrants(ctx, clientset, out, nil, nil, decided, false); err != nil {
 		_, _ = fmt.Fprintf(out, "  !   Could not write back the shared credential allow-lists: %v\n", err)
 	}
 }
@@ -182,6 +180,7 @@ func fillSharedCredentialGrants(
 	clientset kubernetes.Interface,
 	out io.Writer,
 	approved map[string][]string,
+	boundTo map[string]string,
 	decided map[string]sharedcred.Decision,
 	closing bool,
 ) error {
@@ -203,14 +202,31 @@ func fillSharedCredentialGrants(
 	if len(stored) == 0 {
 		return nil
 	}
+	approved, movedSinceApproved := approvedStillBoundWhereShown(stored, approved, boundTo)
 
-	var seeded, restored, rotated, moved []string
+	var seeded, restored, moved, replaced, closedUnseen []string
 	if err := sharedcred.Update(ctx, clientset, func(entries []sharedcred.Entry) ([]sharedcred.Entry, error) {
-		updated, back, spun, gone := sharedcred.Restore(entries, decided)
-		restored, rotated, moved = back, spun, gone
+		updated, back, gone, swapped := sharedcred.Restore(entries, decided)
+		restored, moved, replaced = back, gone, swapped
 		updated, filled, _ := sharedcred.Seed(updated, approved)
 		seeded = filled
 		if closing {
+			// What is about to be decided as nobody without anybody having seen
+			// it: a credential that did not exist when the operator was shown
+			// this cluster, which the writer being replaced can create with no
+			// allow-list at all. Deciding it is right, and deciding it in
+			// silence is not: the marker goes on straight after, and no later
+			// upgrade revisits a migrated cluster.
+			closedUnseen = nil
+			for i := range updated {
+				if updated[i].AllowedProjects != nil {
+					continue
+				}
+				if _, known := decided[updated[i].Name]; known {
+					continue
+				}
+				closedUnseen = append(closedUnseen, updated[i].Name)
+			}
 			updated, _ = sharedcred.CloseUndecided(updated)
 		}
 		return updated, nil
@@ -224,43 +240,122 @@ func fillSharedCredentialGrants(
 		sort.Strings(projects)
 		_, _ = fmt.Fprintf(out, "  ✔  Shared credential %s now allows %s\n", name, strings.Join(projects, ", "))
 	}
-	reportRepairedAllowLists(out, decided, restored, rotated, moved)
+	reportRepairedAllowLists(out, decided, restored, moved, replaced)
+	reportApprovedButMoved(out, movedSinceApproved)
+	reportClosedUnseen(out, closedUnseen)
 	return nil
+}
+
+// approvedStillBoundWhereShown drops an approved grant whose credential has
+// been re-pointed at a different server since the operator saw it.
+//
+// What the preview showed was a credential at a host, and what a grant lets a
+// project do is present that credential's token to that host. An entry
+// re-pointed during the rollout is a different one to allow, so the approval
+// does not carry over to it, exactly as a repair does not.
+func approvedStillBoundWhereShown(stored []sharedcred.Entry, approved map[string][]string, boundTo map[string]string) (map[string][]string, []string) {
+	if len(approved) == 0 {
+		return approved, nil
+	}
+	kept := make(map[string][]string, len(approved))
+	var moved []string
+	for name, projects := range approved {
+		shown, known := boundTo[name]
+		entry := sharedcred.Find(stored, name)
+		if known && entry != nil && entry.Server != shown {
+			moved = append(moved, name)
+			continue
+		}
+		kept[name] = projects
+	}
+	sort.Strings(moved)
+	return kept, moved
+}
+
+// reportApprovedButMoved names a credential the operator approved that has
+// since been re-pointed, so nothing lands silently short of what was agreed.
+func reportApprovedButMoved(out io.Writer, moved []string) {
+	for _, name := range moved {
+		_, _ = fmt.Fprintf(out, "  !   Shared credential %s was approved for a grant, then re-pointed at a\n"+
+			"      different server before it could be written, so nothing was granted. Allow the\n"+
+			"      projects again with 'kip credentials allow %s --project <project>' if it is\n"+
+			"      still the credential they should build with.\n", name, name)
+	}
+}
+
+// reportClosedUnseen names every credential this pass decided as nobody without
+// the operator ever having been shown it.
+//
+// The writer being replaced can create a credential during the rollout, and one
+// it creates carries no allow-list, so the closing pass decides it. That is the
+// right way round — a credential nobody has been asked about grants nobody —
+// but the migration is recorded straight afterwards and no later upgrade
+// revisits a migrated cluster, so unnamed it arrives as a build refused months
+// later with nothing connecting it to this.
+func reportClosedUnseen(out io.Writer, closed []string) {
+	if len(closed) == 0 {
+		return
+	}
+	sort.Strings(closed)
+	_, _ = fmt.Fprintf(out, "  !   Nobody may build with %s. It was added while this upgrade was running, so\n"+
+		"      it was never shown for a decision and this upgrade decided it as nobody. Allow\n"+
+		"      a project with 'kip credentials allow <name> --project <project>'.\n",
+		strings.Join(closed, ", "))
 }
 
 // reportRepairedAllowLists names every allow-list written back, and every one
 // refused.
 //
 // Restoring a list that was decided as nobody says nothing: nobody could build
-// before and nobody can now. The other three all cost somebody something, and
-// the allow-list is written once and no later upgrade revisits it, so without
-// this the first evidence is a build refused long after anybody connects it to
-// an upgrade.
-func reportRepairedAllowLists(out io.Writer, decided map[string]sharedcred.Decision, restored, rotated, moved []string) {
+// before and nobody can now. The rest all cost somebody something, and the
+// allow-list is written once and no later upgrade revisits it, so without this
+// the first evidence is a build refused long after anybody connects it to an
+// upgrade.
+func reportRepairedAllowLists(out io.Writer, decided map[string]sharedcred.Decision, restored, moved, replaced []string) {
 	sort.Strings(restored)
-	sort.Strings(rotated)
 	sort.Strings(moved)
+	sort.Strings(replaced)
 	for _, name := range restored {
 		if projects := allowedIn(decided, name); projects != "" {
 			_, _ = fmt.Fprintf(out, "  ✔  Shared credential %s allows %s again. Its allowed projects were taken\n"+
 				"      off while this upgrade was running, which the console-api it replaces does\n"+
-				"      when a credential is edited.\n", name, projects)
-		}
-	}
-	for _, name := range rotated {
-		if projects := allowedIn(decided, name); projects != "" {
-			_, _ = fmt.Fprintf(out, "  ✔  Shared credential %s allows %s again, and its token changed while this\n"+
-				"      upgrade was running. Rotating a token keeps the projects that were allowed. If\n"+
-				"      this credential was replaced rather than rotated, take the grant back with\n"+
-				"      'kip credentials revoke %s --project <project>'.\n", name, projects, name)
+				"      when a credential is edited. If you revoked one of them during the upgrade,\n"+
+				"      revoke it again.\n", name, projects)
 		}
 	}
 	for _, name := range moved {
-		record := decided[name]
-		_, _ = fmt.Fprintf(out, "  !   Shared credential %s now points at a different server, and its allowed\n"+
-			"      projects are gone. It was bound to %s and allowed %s. Grant them again with\n"+
-			"      'kip credentials allow %s --project <project>' if this is the same credential.\n",
-			name, record.Server, allowedOrNobody(decided, name), name)
+		_, _ = fmt.Fprintf(out, "  !   Shared credential %s is bound to a different server than when this\n"+
+			"      upgrade started, so its allowed projects were not written back. It was bound\n"+
+			"      to %s. A grant lets a project use one token against one host.\n",
+			name, decided[name].Server)
+		printRegrantCommands(out, decided, name)
+	}
+	for _, name := range replaced {
+		_, _ = fmt.Fprintf(out, "  !   Shared credential %s carries a different token than when this upgrade\n"+
+			"      started, so its allowed projects were not written back. Rotating a token keeps\n"+
+			"      them, but a credential deleted and recreated under the same name is a different\n"+
+			"      credential, and nothing here can tell the two apart.\n", name)
+		printRegrantCommands(out, decided, name)
+	}
+}
+
+// printRegrantCommands writes the exact command per project, rather than one
+// line with a placeholder in it.
+//
+// What was lost is a list somebody curated, and the operator reading this is
+// usually the person who just edited the credential. Making them assemble the
+// commands from a placeholder is where a grant gets left off and turns up as a
+// refused build months later.
+func printRegrantCommands(out io.Writer, decided map[string]sharedcred.Decision, name string) {
+	projects := append([]string(nil), decided[name].AllowedProjects...)
+	sort.Strings(projects)
+	if len(projects) == 0 {
+		_, _ = fmt.Fprintf(out, "      It allowed nobody, so there is nothing to put back.\n")
+		return
+	}
+	_, _ = fmt.Fprintf(out, "      It allowed %s. If that is still right, put it back with:\n", strings.Join(projects, ", "))
+	for _, project := range projects {
+		_, _ = fmt.Fprintf(out, "        kip credentials allow %s --project %s\n", name, project)
 	}
 }
 
@@ -268,13 +363,6 @@ func allowedIn(decided map[string]sharedcred.Decision, name string) string {
 	projects := append([]string(nil), decided[name].AllowedProjects...)
 	sort.Strings(projects)
 	return strings.Join(projects, ", ")
-}
-
-func allowedOrNobody(decided map[string]sharedcred.Decision, name string) string {
-	if projects := allowedIn(decided, name); projects != "" {
-		return projects
-	}
-	return "nobody"
 }
 
 // reportMissedGrants names every namespace// reportMissedGrants names every namespace that references a shared credential
@@ -307,13 +395,6 @@ func reportMissedGrants(out io.Writer, missed []missedGrant) {
 // It stays quiet when nothing is undecided: an upgrade that grants nothing and
 // decides nothing has nothing to report, and a warning about allow-lists reads
 // oddly on a cluster that has none.
-// quiescenceWait bounds the wait for the console-api being replaced to stop.
-// Overridden in tests, as stampWait is.
-var (
-	quiescenceWait = 90 * time.Second
-	quiescencePoll = 2 * time.Second
-)
-
 func reportMigrationLeftOpen(ctx context.Context, clientset kubernetes.Interface, out io.Writer) error {
 	stored, err := sharedcred.Load(ctx, clientset)
 	if err != nil {
@@ -616,6 +697,13 @@ type missedGrant struct {
 	credential string
 }
 
+// quiescenceWait bounds the wait for the console-api being replaced to stop.
+// Overridden in tests, as stampWait is.
+var (
+	quiescenceWait = 90 * time.Second
+	quiescencePoll = 2 * time.Second
+)
+
 // waitForConsoleAPIQuiescence waits until no console-api pod from before the
 // rollout can still write.
 //
@@ -630,16 +718,18 @@ type missedGrant struct {
 // What it waits for is every pod under the Deployment's selector being one the
 // Deployment is keeping: none deleted, and none from an earlier revision.
 func waitForConsoleAPIQuiescence(ctx context.Context, clientset kubernetes.Interface) error {
+	// The Deployment is what says which pods are the console-api's and how many
+	// of them belong here, so without it there is nothing to ask. It is not
+	// evidence that no writer is left: a Deployment can go before the pods it
+	// owns do, and those pods keep serving until the garbage collector catches
+	// up. The upgrade has just rolled this Deployment, so its absence is odd
+	// rather than ordinary, and holding the migration open for one run is the
+	// answer that cannot seal a loss.
 	dep, err := clientset.AppsV1().Deployments(kipperSystemNS).Get(ctx, consoleAPIName, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		// No Deployment is no writer. This is not the fail-open case: a
-		// console-api that is not there cannot be the one holding a request
-		// open, and every other read failure below is still fatal to closing.
-		return nil
-	}
 	if err != nil {
-		return fmt.Errorf("reading %s to wait for the console-api it replaces to stop: %w", consoleAPIName, err)
+		return fmt.Errorf("could not tell whether the console-api being replaced has stopped: reading %s: %w", consoleAPIName, err)
 	}
+	updated := dep.Status.UpdatedReplicas
 	selector := metav1.FormatLabelSelector(dep.Spec.Selector)
 	deadline := time.Now().Add(quiescenceWait)
 	for {
@@ -647,7 +737,7 @@ func waitForConsoleAPIQuiescence(ctx context.Context, clientset kubernetes.Inter
 		if err != nil {
 			return fmt.Errorf("listing %s pods to wait for the one it replaces to stop: %w", consoleAPIName, err)
 		}
-		lingering := lingeringConsoleAPIPods(pods.Items, dep.Status.UpdatedReplicas)
+		lingering := lingeringConsoleAPIPods(pods.Items, updated)
 		if lingering == 0 {
 			return nil
 		}

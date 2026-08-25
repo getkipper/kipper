@@ -402,7 +402,7 @@ func TestDecisionsCopiesTheList(t *testing.T) {
 }
 
 func TestRestoreWritesBackAnErasedList(t *testing.T) {
-	entries, restored, rotated, moved := Restore(
+	entries, restored, moved, replaced := Restore(
 		listOf(Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
 		Decisions(listOf(Entry{
 			Name: "forge", Server: "git.example.com", Token: "a-token",
@@ -416,8 +416,8 @@ func TestRestoreWritesBackAnErasedList(t *testing.T) {
 	if len(restored) != 1 || restored[0] != "forge" {
 		t.Errorf("the restore was not reported: %v", restored)
 	}
-	if len(rotated) != 0 || len(moved) != 0 {
-		t.Errorf("an unchanged credential was reported as changed: rotated=%v moved=%v", rotated, moved)
+	if len(moved) != 0 || len(replaced) != 0 {
+		t.Errorf("an unchanged credential was refused: moved=%v replaced=%v", moved, replaced)
 	}
 }
 
@@ -474,7 +474,7 @@ func TestRestoreLeavesADecisionMadeAfterTheRecordAlone(t *testing.T) {
 // The build hands a project the credential's token against the credential's
 // host, so a credential now bound elsewhere is a different one to authorise.
 func TestRestoreRefusesACredentialBoundElsewhere(t *testing.T) {
-	entries, restored, rotated, moved := Restore(
+	entries, restored, moved, replaced := Restore(
 		listOf(Entry{Name: "forge", Server: "git.other.example", Token: "a-token"}),
 		Decisions(listOf(Entry{
 			Name: "forge", Server: "git.example.com", Token: "a-token",
@@ -491,17 +491,17 @@ func TestRestoreRefusesACredentialBoundElsewhere(t *testing.T) {
 	if len(moved) != 1 || moved[0] != "forge" {
 		t.Errorf("the refusal was not named: %v", moved)
 	}
-	if len(rotated) != 0 {
-		t.Errorf("a refused credential was reported as rotated: %v", rotated)
+	if len(replaced) != 0 {
+		t.Errorf("a credential refused for its server was also named for its token: %v", replaced)
 	}
 }
 
-// Rotating a token keeps the projects that were allowed, which is what the
-// console-api's own edit path does. It is named separately because a credential
-// deleted and recreated under its old name is the same shape and means the
-// opposite, and the operator is the only one who can tell them apart.
-func TestRestoreNamesACredentialWhoseTokenChanged(t *testing.T) {
-	entries, restored, rotated, _ := Restore(
+// A credential deleted and recreated under its old name carries a token nobody
+// was granted, and it is the same shape as a rotation. The two mean opposite
+// things and nothing here can tell them apart, so the ambiguous case is refused
+// rather than written and warned about afterwards.
+func TestRestoreRefusesACredentialCarryingADifferentToken(t *testing.T) {
+	entries, restored, _, replaced := Restore(
 		listOf(Entry{Name: "forge", Server: "git.example.com", Token: "a-new-token"}),
 		Decisions(listOf(Entry{
 			Name: "forge", Server: "git.example.com", Token: "a-token",
@@ -509,14 +509,14 @@ func TestRestoreNamesACredentialWhoseTokenChanged(t *testing.T) {
 		})),
 	)
 
-	if !entries[0].AllowsProject("shop") {
-		t.Errorf("a rotated credential lost the projects it allowed: %v", entries[0].AllowedProjects)
+	if entries[0].AllowedProjects != nil {
+		t.Errorf("a project was authorised against a token it was never granted: %v", entries[0].AllowedProjects)
 	}
 	if len(restored) != 0 {
-		t.Errorf("a rotated credential was reported as an ordinary restore: %v", restored)
+		t.Errorf("the refusal was reported as a restore: %v", restored)
 	}
-	if len(rotated) != 1 || rotated[0] != "forge" {
-		t.Errorf("the rotation was not named: %v", rotated)
+	if len(replaced) != 1 || replaced[0] != "forge" {
+		t.Errorf("the refusal was not named: %v", replaced)
 	}
 }
 
