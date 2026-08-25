@@ -3,6 +3,7 @@ package sharedcred
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 
@@ -101,6 +102,95 @@ func Seed(entries []Entry, usage map[string][]string) ([]Entry, []string, bool) 
 		}
 	}
 	return entries, seeded, len(seeded) > 0
+}
+
+// Decision is one credential's allow-list as it stood at a point in time, with
+// what identified the credential it belonged to.
+//
+// Somebody recorded that list, so a credential nobody has decided never becomes
+// one. The token is held as a digest rather than as itself: this travels
+// through printing and reporting code, and a token that is never in the struct
+// cannot be printed out of it.
+type Decision struct {
+	Server          string
+	TokenDigest     [32]byte
+	AllowedProjects []string
+}
+
+// Decisions records the allow-list of every credential somebody has decided,
+// keyed by name.
+//
+// A credential nobody has decided is left out, which is what stops Restore ever
+// writing back a list nobody wrote. The lists are copied, so the record does not
+// alias the entries it came from and a later write cannot edit the record.
+func Decisions(entries []Entry) map[string]Decision {
+	decided := make(map[string]Decision, len(entries))
+	for _, entry := range entries {
+		if entry.AllowedProjects == nil {
+			continue
+		}
+		decided[entry.Name] = Decision{
+			Server:      entry.Server,
+			TokenDigest: sha256.Sum256([]byte(entry.Token)),
+			// make and copy rather than append to a nil slice: appending
+			// nothing to nil yields nil, which would turn a restored
+			// decided-empty list back into one nobody has decided.
+			AllowedProjects: copyOf(entry.AllowedProjects),
+		}
+	}
+	return decided
+}
+
+func copyOf(projects []string) []string {
+	out := make([]string, len(projects))
+	copy(out, projects)
+	return out
+}
+
+// Restore puts a recorded allow-list back onto a credential whose list has gone
+// absent, and sorts what it did into three answers.
+//
+// The console-api an upgrade replaces writes a credential without its allowed
+// projects, and it writes the whole list at once, so editing any one credential
+// reads back as every credential having been decided by nobody. Writing the
+// record back is a repair: every project in it was already allowed when the
+// record was taken.
+//
+// It writes only into an absent list, so a grant, a revocation or a decision
+// made after the record was taken wins over it.
+//
+// A credential now bound to a different server is refused. The build hands a
+// project the credential's token against the credential's host, so one pointing
+// somewhere else is a different credential and nobody granted anything about it.
+//
+// A credential carrying a different token is restored and named separately.
+// Rotating a token keeps the projects that were allowed, which is what the
+// console-api's own edit path does, so refusing here would take a working
+// cluster's grants away on the commonest reason a list gets erased at all. What
+// it cannot tell apart is a credential deleted and recreated under its old name,
+// which is the same shape and means the opposite, so the operator is told which
+// ones changed hands and how to take the grant back.
+func Restore(entries []Entry, decided map[string]Decision) (updated []Entry, restored, rotated, moved []string) {
+	for i := range entries {
+		if entries[i].AllowedProjects != nil {
+			continue
+		}
+		record, held := decided[entries[i].Name]
+		if !held {
+			continue
+		}
+		if entries[i].Server != record.Server {
+			moved = append(moved, entries[i].Name)
+			continue
+		}
+		entries[i].AllowedProjects = copyOf(record.AllowedProjects)
+		if sha256.Sum256([]byte(entries[i].Token)) == record.TokenDigest {
+			restored = append(restored, entries[i].Name)
+			continue
+		}
+		rotated = append(rotated, entries[i].Name)
+	}
+	return entries, restored, rotated, moved
 }
 
 // CloseUndecided records that nobody may build with the credentials still

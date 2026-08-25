@@ -13,6 +13,27 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/sharedcred"
 )
 
+// credentialGrants is what one upgrade run may write to the shared credential
+// allow-lists, decided once before the rollout.
+//
+// Three independent facts travel, and none of them is encoded in whether a map
+// is nil: what may be inferred from the apps, what may be repaired from what was
+// already stored, and whether this run may end the migration. The zero value
+// infers nothing, repairs nothing and closes nothing, so a caller that forgets a
+// field fails closed.
+type credentialGrants struct {
+	// approved is the credential/project pairs the operator agreed to infer
+	// from the apps referencing them. Empty both when consent was declined and
+	// when nothing was referenced.
+	approved map[string][]string
+	// decided is the allow-list each credential already carried before the
+	// rollout. Writing one back is a repair, so it is not gated on consent.
+	decided map[string]sharedcred.Decision
+	// mayClose is whether this run may decide the rest as nobody and record the
+	// migration as finished.
+	mayClose bool
+}
+
 // consentDecision is the outcome of asking whether the upgrade may fill the
 // shared credential allow-lists nobody has decided.
 type consentDecision int
@@ -57,21 +78,18 @@ func decideCredentialSeedConsent(usage map[string][]string, flag, isTTY bool, co
 	return consentDecline, nil
 }
 
-// credentialSeedConsent decides once for both passes what the upgrade may
-// grant, and returns the snapshot the passes work from.
+// credentialSeedConsent decides once, before the rollout, what this upgrade may
+// write to the shared credential allow-lists.
 //
-// The return convention distinguishes three states with one map:
-//   - nil map: consent was declined. Neither pass fills; pass two reports why.
-//   - non-nil empty map: nothing was referenced at consent time; the
-//     fail-closed close needs no permission. Pass two decides everything still
-//     undecided as nobody.
-//   - non-nil non-empty map: the operator approved these credential/project
-//     pairs. Pass one and pass two fill exactly these.
+// It answers two separate questions from one read. What may be *inferred* is
+// gated on the operator: an app naming a credential is a reference, and
+// spec.git.credentialsSecret is a field a project member writes. What may be
+// *repaired* is not gated on anybody: it is the list the cluster was already
+// enforcing when the operator typed kip upgrade, and writing it back leaves no
+// project holding anything it did not already hold.
 //
-// A migrated cluster and a cluster with no undecided credentials both shortcut
-// to a non-nil empty map with no prompt and nothing printed. Freezing the
-// snapshot here is what stops the closing pass turning an app that arrived
-// during the rollout window into a silent grant.
+// Freezing both here is what stops the closing pass turning an app that arrived
+// during the rollout window into a grant nobody agreed to.
 func credentialSeedConsent(
 	ctx context.Context,
 	clientset kubernetes.Interface,
@@ -79,18 +97,30 @@ func credentialSeedConsent(
 	out io.Writer,
 	flag, isTTY bool,
 	confirm func() (bool, error),
-) (map[string][]string, error) {
-	empty := map[string][]string{}
+) (credentialGrants, error) {
 	done, err := grantsAlreadySeeded(ctx, clientset)
 	if err != nil {
-		return nil, err
-	}
-	if done {
-		return empty, nil
+		return credentialGrants{}, err
 	}
 	stored, err := sharedcred.Load(ctx, clientset)
 	if err != nil {
-		return nil, err
+		if done {
+			// A migrated cluster did not read this list at all before the
+			// repair existed, so a blip reading it must not become a new way
+			// for an upgrade to abort on a working cluster. Saying it was
+			// skipped keeps that from passing as a clean bill of health.
+			_, _ = fmt.Fprintf(out, "  !   Could not record the shared credential allow-lists before the rollout: %v\n"+
+				"      An allow-list an older console-api clears during this upgrade will not be written back.\n", err)
+			return credentialGrants{}, nil
+		}
+		return credentialGrants{}, err
+	}
+	// Taken before both shortcuts below. A credential decided before the
+	// rollout is exactly the one neither of them looks at, and it is the one
+	// the old writer erases.
+	decided := sharedcred.Decisions(stored)
+	if done {
+		return credentialGrants{decided: decided}, nil
 	}
 	undecided := map[string]bool{}
 	for _, e := range stored {
@@ -99,11 +129,11 @@ func credentialSeedConsent(
 		}
 	}
 	if len(undecided) == 0 {
-		return empty, nil
+		return credentialGrants{decided: decided, mayClose: true}, nil
 	}
 	usage, missed, err := sharedCredentialUsage(ctx, clientset, dyn, undecided)
 	if err != nil {
-		return nil, err
+		return credentialGrants{}, err
 	}
 	if len(usage) > 0 {
 		printSeedConsentPreview(out, usage)
@@ -115,16 +145,16 @@ func credentialSeedConsent(
 	reportMissedGrants(out, missed)
 	decision, err := decideCredentialSeedConsent(usage, flag, isTTY, confirm)
 	if err != nil {
-		return nil, err
+		return credentialGrants{}, err
 	}
 	switch decision {
 	case consentDecline:
 		printSeedConsentDeclineHint(out)
-		return nil, nil
+		return credentialGrants{decided: decided}, nil
 	case consentGrant:
-		return usage, nil
+		return credentialGrants{approved: usage, decided: decided, mayClose: true}, nil
 	default:
-		return empty, nil
+		return credentialGrants{decided: decided, mayClose: true}, nil
 	}
 }
 

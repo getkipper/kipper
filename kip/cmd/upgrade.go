@@ -123,7 +123,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	// from: an app pointed at an undecided credential during the rollout
 	// window is a reference, not a grant, and turning it into one would be the
 	// exact defect this exists to prevent.
-	approvedGrants, err := credentialSeedConsent(
+	grants, err := credentialSeedConsent(
 		ctx, clientset, k8sClient.Dynamic(), os.Stdout,
 		seedGrants,
 		term.IsTerminal(int(os.Stdin.Fd())),
@@ -135,12 +135,25 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	// An upgrade that gives up during the rollout still has the record, and the
+	// lists the old console-api erased are erased whether or not it finishes.
+	// Writing them back on the way out is the difference between an operator
+	// retrying a failed upgrade and a curated grant arriving at the next one as
+	// an inference to approve, with whatever else came to reference it in the
+	// meantime.
+	closedGrants := false
+	defer func() {
+		if !closedGrants {
+			repairErasedAllowLists(ctx, clientset, os.Stdout, grants.decided)
+		}
+	}()
+
 	// Before the new console-api serves builds: a shared credential written
 	// before allow-lists existed allows nobody, so an upgrade that restarted the
 	// builder first would refuse builds that were working until the seeding
 	// caught up. It runs again after the rollout, and only then is the cluster
 	// recorded as migrated.
-	if err := seedSharedCredentialGrants(ctx, clientset, os.Stdout, approvedGrants); err != nil {
+	if err := seedSharedCredentialGrants(ctx, clientset, os.Stdout, grants); err != nil {
 		return err
 	}
 
@@ -256,7 +269,8 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	// now is the cluster recorded as migrated: a grant the old pod replaced
 	// while it was still serving is written back here, where marking the
 	// migration before this ran would have left the build refused for good.
-	if err := closeSharedCredentialGrants(ctx, clientset, os.Stdout, approvedGrants); err != nil {
+	closedGrants = true
+	if err := closeSharedCredentialGrants(ctx, clientset, os.Stdout, grants); err != nil {
 		return err
 	}
 

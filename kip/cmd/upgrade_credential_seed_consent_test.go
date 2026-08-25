@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -126,11 +127,11 @@ func TestSeedConsentClosesAutomaticallyWhenNothingIsReferenced(t *testing.T) {
 	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), owningProject("shop-prod"))
 	var out bytes.Buffer
 
-	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
+	grants, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
 
 	require.NoError(t, err)
-	require.NotNil(t, approved, "an unreferenced credential's fail-closed decision was gated on the operator")
-	assert.Empty(t, approved, "the auto path recorded a grant against a credential nothing references")
+	assert.True(t, grants.mayClose, "an unreferenced credential's fail-closed decision was gated on the operator")
+	assert.Empty(t, grants.approved, "the auto path recorded a grant against a credential nothing references")
 	assert.Empty(t, out.String(), "the operator was asked about nothing")
 }
 
@@ -148,10 +149,11 @@ func TestSeedConsentDeclinesInAScriptWithoutTheFlag(t *testing.T) {
 		gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
-	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
+	grants, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
 
 	require.NoError(t, err)
-	assert.Nil(t, approved, "a scripted upgrade granted on inference")
+	assert.False(t, grants.mayClose, "a scripted upgrade closed the migration without consent")
+	assert.Empty(t, grants.approved, "a scripted upgrade granted on inference")
 	printed := out.String()
 	assert.Contains(t, printed, "forge", "the referenced credential was not named")
 	assert.Contains(t, printed, "shop", "the project referencing it was not named")
@@ -172,11 +174,11 @@ func TestSeedConsentGrantsUnderTheFlag(t *testing.T) {
 		gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
-	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, true, false, refuseToConfirm(t))
+	grants, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, true, false, refuseToConfirm(t))
 
 	require.NoError(t, err)
-	require.NotNil(t, approved, "the flag was passed and consent was still withheld")
-	assert.Equal(t, []string{"shop"}, approved["forge"], "the flag path did not return the previewed pair")
+	assert.True(t, grants.mayClose, "the flag was passed and consent was still withheld")
+	assert.Equal(t, []string{"shop"}, grants.approved["forge"], "the flag path did not return the previewed pair")
 	assert.Contains(t, out.String(), "forge", "the flag path did not show what it was about to grant")
 }
 
@@ -191,12 +193,12 @@ func TestSeedConsentGrantsOnYes(t *testing.T) {
 		gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
-	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, true,
+	grants, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, true,
 		func() (bool, error) { return true, nil })
 
 	require.NoError(t, err)
-	require.NotNil(t, approved)
-	assert.Equal(t, []string{"shop"}, approved["forge"])
+	assert.True(t, grants.mayClose)
+	assert.Equal(t, []string{"shop"}, grants.approved["forge"])
 }
 
 // A no at the prompt has to look identical to the no-flag no-TTY case, or the
@@ -211,11 +213,11 @@ func TestSeedConsentDeclinesOnNo(t *testing.T) {
 		gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
-	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, true,
+	grants, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, true,
 		func() (bool, error) { return false, nil })
 
 	require.NoError(t, err)
-	assert.Nil(t, approved)
+	assert.False(t, grants.mayClose)
 	assert.Contains(t, out.String(), "--seed-credential-grants",
 		"a declined prompt did not print how to answer yes next time")
 }
@@ -269,6 +271,62 @@ func TestSeedConsentPreviewNamesEveryReferencedCredentialAndNoOther(t *testing.T
 	assert.Contains(t, printed, "blog")
 }
 
+// The preview is what a scripted operator diffs between runs, and map order is
+// random, so an unsorted preview reorders itself on an unchanged cluster. Both
+// sorts are pinned here: the credential names, and the projects under each.
+func TestSeedConsentPreviewIsOrdered(t *testing.T) {
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		namespaceOfProject("zed-prod", "zed"),
+		namespaceOfProject("abe-prod", "abe"),
+		sharedCredentialSecret(t,
+			sharedcred.Entry{Name: "zeta", Token: "a-token"},
+			sharedcred.Entry{Name: "alpha", Token: "another-token"},
+		),
+	)
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
+		gitAppNamed("zed-prod", "zed-web", "zeta"),
+		gitAppNamed("abe-prod", "abe-web", "zeta"),
+		gitAppNamed("zed-prod", "zed-api", "alpha"),
+		projectNamed("zed", "zed-prod"),
+		projectNamed("abe", "abe-prod"),
+	)
+	var out bytes.Buffer
+
+	_, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
+	require.NoError(t, err)
+
+	printed := out.String()
+	assert.Less(t, strings.Index(printed, "alpha"), strings.Index(printed, "zeta"),
+		"the credentials were previewed in map order")
+	assert.Contains(t, printed, "abe, zed",
+		"the projects under a credential were previewed in map order")
+}
+
+// Absent is not empty, and this is the line that tells them apart. A list
+// somebody decided as nobody is a decision, so the upgrade neither offers to
+// fill it nor asks about it. Reading it as undecided would re-prompt on every
+// upgrade for ever, which is what the automatic close exists to prevent.
+func TestSeedConsentLeavesADecidedEmptyListAlone(t *testing.T) {
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		namespaceOfProject("shop-prod", "shop"),
+		sharedCredentialSecret(t, sharedcred.Entry{
+			Name: "forge", Token: "a-token", AllowedProjects: []string{},
+		}),
+	)
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
+		gitApp("shop-prod", "forge"), owningProject("shop-prod"))
+	var out bytes.Buffer
+
+	grants, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
+
+	require.NoError(t, err)
+	assert.True(t, grants.mayClose, "a credential already decided as nobody was treated as undecided")
+	assert.Empty(t, grants.approved, "a decided-empty list was offered for a grant")
+	assert.Empty(t, out.String(), "the operator was asked about a decision already made")
+}
+
 // Not calling the confirm callback when consent is not needed is the guard the
 // noopConfirm in the table test also checks, one composition level up: the
 // wrapper must not surprise the operator with a prompt in a script.
@@ -300,21 +358,30 @@ func gitAppNamed(namespace, name, credential string) *unstructured.Unstructured 
 
 // A cluster already migrated is not asked. The wrapper returns the auto empty
 // map and prints nothing, whichever way the flag and the TTY go.
+//
+// It does still record what the allow-lists held. That cluster is the commonest
+// one there is — v0.14.0 auto-seeded most legacy clusters — and its lists can be
+// erased by an old console-api during this rollout like anybody else's.
 func TestSeedConsentSaysNothingOnAMigratedCluster(t *testing.T) {
 	clientset := k8sfake.NewClientset(
 		kipperSystemMigrated(),
 		namespaceOfProject("shop-prod", "shop"),
-		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
+		sharedCredentialSecret(t, sharedcred.Entry{
+			Name: "forge", Server: "git.example.com", Token: "a-token",
+			AllowedProjects: []string{"shop"},
+		}),
 	)
 	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
 		gitApp("shop-prod", "forge"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
-	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
+	grants, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
 
 	require.NoError(t, err)
-	require.NotNil(t, approved, "a migrated cluster was told it had no consent")
-	assert.Empty(t, approved)
+	assert.False(t, grants.mayClose, "a finished migration was offered up to be closed again")
+	assert.Empty(t, grants.approved)
+	assert.Equal(t, []string{"shop"}, grants.decided["forge"].AllowedProjects,
+		"a migrated cluster kept no record, so nothing could be written back")
 	assert.Empty(t, out.String(), "the wrapper spoke on a cluster whose migration was long finished")
 }
 
@@ -361,11 +428,11 @@ func TestSeedConsentIgnoresACredentialThatIsNotShared(t *testing.T) {
 		gitApp("shop-prod", "web-git-credentials"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
-	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
+	grants, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
 
 	require.NoError(t, err)
-	require.NotNil(t, approved, "an app-own credential was treated as a shared one")
-	assert.Empty(t, approved)
+	assert.True(t, grants.mayClose, "an app-own credential was treated as a shared one")
+	assert.Empty(t, grants.approved)
 	assert.Empty(t, out.String(),
 		"the operator was asked about a credential the app names for itself")
 }
@@ -384,11 +451,11 @@ func TestSeedConsentTreatsASharedCredentialNamedLikeAnAppsOwnAsShared(t *testing
 		gitApp("shop-prod", "web-git-credentials"), owningProject("shop-prod"))
 	var out bytes.Buffer
 
-	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, true, false, refuseToConfirm(t))
+	grants, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, true, false, refuseToConfirm(t))
 
 	require.NoError(t, err)
-	require.NotNil(t, approved)
-	assert.Equal(t, []string{"shop"}, approved["web-git-credentials"],
+	assert.True(t, grants.mayClose)
+	assert.Equal(t, []string{"shop"}, grants.approved["web-git-credentials"],
 		"the builder resolves this name from the shared list, so the consent wrapper has to as well")
 }
 
@@ -403,11 +470,11 @@ func TestSeedConsentSkipsAnAppInANamespaceWithNoProject(t *testing.T) {
 	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("stray", "forge"))
 	var out bytes.Buffer
 
-	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
+	grants, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
 
 	require.NoError(t, err)
-	require.NotNil(t, approved)
-	assert.Empty(t, approved,
+	assert.True(t, grants.mayClose)
+	assert.Empty(t, grants.approved,
 		"a stray namespace's app inferred a grant nobody could have approved")
 }
 
@@ -430,11 +497,11 @@ func TestSeedConsentAcceptsAPreClaimsProjectRecord(t *testing.T) {
 	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("shop-prod", "forge"), preClaims)
 	var out bytes.Buffer
 
-	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, true, false, refuseToConfirm(t))
+	grants, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, true, false, refuseToConfirm(t))
 
 	require.NoError(t, err)
-	require.NotNil(t, approved)
-	assert.Equal(t, []string{"shop"}, approved["forge"],
+	assert.True(t, grants.mayClose)
+	assert.Equal(t, []string{"shop"}, grants.approved["forge"],
 		"a cluster with no claims yet was left with a credential nobody may build with")
 }
 
@@ -456,11 +523,11 @@ func TestSeedConsentReportsAMissedGrantForANamespaceNoRecordCovers(t *testing.T)
 	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), gitApp("victim-prod", "forge"), attacker)
 	var out bytes.Buffer
 
-	approved, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, true, false, refuseToConfirm(t))
+	grants, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, true, false, refuseToConfirm(t))
 
 	require.NoError(t, err)
-	require.NotNil(t, approved)
-	assert.Empty(t, approved["forge"],
+	assert.True(t, grants.mayClose)
+	assert.Empty(t, grants.approved["forge"],
 		"a namespace pointed at a project by its label alone was previewed for a standing grant to a shared credential")
 	printed := out.String()
 	assert.Contains(t, printed, "victim-prod",
