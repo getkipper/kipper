@@ -29,10 +29,12 @@ type credentialGrants struct {
 	// decided is the allow-list each credential already carried before the
 	// rollout. Writing one back is a repair, so it is not gated on consent.
 	decided map[string]sharedcred.Decision
-	// boundTo is the server each previewed credential was bound to when the
-	// operator was shown it. What consent covers is a credential at a host, so
-	// an entry re-pointed during the rollout is not the one that was approved.
-	boundTo map[string]string
+	// shownAs is what identified every credential the operator was shown, by
+	// name. Consent covers a credential at a host holding a token, so an entry
+	// that changed hands during the rollout is not the one that was approved.
+	// It also records which names existed at all, which is how a credential
+	// added during the rollout is told from one that was merely undecided.
+	shownAs map[string]sharedcred.Identity
 	// mayClose is whether this run may decide the rest as nobody and record the
 	// migration as finished.
 	mayClose bool
@@ -123,19 +125,18 @@ func credentialSeedConsent(
 	// rollout is exactly the one neither of them looks at, and it is the one
 	// the old writer erases.
 	decided := sharedcred.Decisions(stored)
+	shownAs := sharedcred.Identities(stored)
 	if done {
-		return credentialGrants{decided: decided}, nil
+		return credentialGrants{decided: decided, shownAs: shownAs}, nil
 	}
 	undecided := map[string]bool{}
-	boundTo := map[string]string{}
 	for _, e := range stored {
 		if e.AllowedProjects == nil {
 			undecided[e.Name] = true
-			boundTo[e.Name] = e.Server
 		}
 	}
 	if len(undecided) == 0 {
-		return credentialGrants{decided: decided, mayClose: true}, nil
+		return credentialGrants{decided: decided, shownAs: shownAs, mayClose: true}, nil
 	}
 	usage, missed, err := sharedCredentialUsage(ctx, clientset, dyn, undecided)
 	if err != nil {
@@ -156,11 +157,11 @@ func credentialSeedConsent(
 	switch decision {
 	case consentDecline:
 		printSeedConsentDeclineHint(out)
-		return credentialGrants{decided: decided}, nil
+		return credentialGrants{decided: decided, shownAs: shownAs}, nil
 	case consentGrant:
-		return credentialGrants{approved: usage, decided: decided, boundTo: boundTo, mayClose: true}, nil
+		return credentialGrants{approved: usage, decided: decided, shownAs: shownAs, mayClose: true}, nil
 	default:
-		return credentialGrants{decided: decided, mayClose: true}, nil
+		return credentialGrants{decided: decided, shownAs: shownAs, mayClose: true}, nil
 	}
 }
 

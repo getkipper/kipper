@@ -104,16 +104,41 @@ func Seed(entries []Entry, usage map[string][]string) ([]Entry, []string, bool) 
 	return entries, seeded, len(seeded) > 0
 }
 
+// Identity is what makes a stored credential the same credential it was when
+// something was decided or approved about it.
+//
+// A build hands a project the entry's token against the entry's host, so those
+// two together are what a grant authorises. The name is not enough: an entry
+// deleted and recreated under its old name keeps the name and means the
+// opposite. The token is held as a digest rather than as itself, because this
+// travels through printing and reporting code and a token that is never in the
+// struct cannot be printed out of it.
+type Identity struct {
+	Server      string
+	TokenDigest [32]byte
+}
+
+// IdentityOf is the identity an entry carries now.
+func IdentityOf(entry Entry) Identity {
+	return Identity{Server: entry.Server, TokenDigest: sha256.Sum256([]byte(entry.Token))}
+}
+
+// Identities records what identified every credential in the list.
+func Identities(entries []Entry) map[string]Identity {
+	held := make(map[string]Identity, len(entries))
+	for _, entry := range entries {
+		held[entry.Name] = IdentityOf(entry)
+	}
+	return held
+}
+
 // Decision is one credential's allow-list as it stood at a point in time, with
-// what identified the credential it belonged to.
+// the identity of the credential it belonged to.
 //
 // Somebody recorded that list, so a credential nobody has decided never becomes
-// one. The token is held as a digest rather than as itself: this travels
-// through printing and reporting code, and a token that is never in the struct
-// cannot be printed out of it.
+// one.
 type Decision struct {
-	Server          string
-	TokenDigest     [32]byte
+	Identity
 	AllowedProjects []string
 }
 
@@ -130,8 +155,7 @@ func Decisions(entries []Entry) map[string]Decision {
 			continue
 		}
 		decided[entry.Name] = Decision{
-			Server:      entry.Server,
-			TokenDigest: sha256.Sum256([]byte(entry.Token)),
+			Identity: IdentityOf(entry),
 			// make and copy rather than append to a nil slice: appending
 			// nothing to nil yields nil, which would turn a restored
 			// decided-empty list back into one nobody has decided.
@@ -183,7 +207,7 @@ func Restore(entries []Entry, decided map[string]Decision) (updated []Entry, res
 			moved = append(moved, entries[i].Name)
 			continue
 		}
-		if sha256.Sum256([]byte(entries[i].Token)) != record.TokenDigest {
+		if IdentityOf(entries[i]) != record.Identity {
 			replaced = append(replaced, entries[i].Name)
 			continue
 		}

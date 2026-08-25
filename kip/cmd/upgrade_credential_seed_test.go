@@ -116,14 +116,14 @@ func seeded(t *testing.T, clientset *k8sfake.Clientset) bool {
 // consented to at the preview.
 func TestSeedFillsFromTheApprovedSnapshot(t *testing.T) {
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
 	approved := map[string][]string{"forge": {"shop"}}
 	var out bytes.Buffer
 
-	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &out, credentialGrants{approved: approved}))
+	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &out, approving(t, clientset, approved, false)))
 
 	entries := storedEntries(t, clientset)
 	require.Len(t, entries, 1)
@@ -137,14 +137,14 @@ func TestSeedFillsFromTheApprovedSnapshot(t *testing.T) {
 // cannot widen it.
 func TestSeedLeavesACuratedAllowListAlone(t *testing.T) {
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		namespaceOfProject("blog-prod", "blog"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token", AllowedProjects: []string{"blog"}}),
 	)
 	approved := map[string][]string{"forge": {"shop"}}
 
-	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, credentialGrants{approved: approved}))
+	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approving(t, clientset, approved, false)))
 
 	entries := storedEntries(t, clientset)
 	assert.False(t, entries[0].AllowsProject("shop"),
@@ -155,7 +155,7 @@ func TestSeedLeavesACuratedAllowListAlone(t *testing.T) {
 // operator did not approve grants for, and it must not print a step that did
 // nothing.
 func TestSeedSaysNothingWhenNothingToSeed(t *testing.T) {
-	clientset := k8sfake.NewClientset(kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false), sharedCredentialSecret(t,
+	clientset := k8sfake.NewClientset(kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false), sharedCredentialSecret(t,
 		sharedcred.Entry{Name: "forge", Token: "a-token", AllowedProjects: []string{"shop"}}))
 	var out bytes.Buffer
 
@@ -167,10 +167,10 @@ func TestSeedSaysNothingWhenNothingToSeed(t *testing.T) {
 // A cluster with no shared credentials at all must not have the list Secret
 // created for it by an upgrade.
 func TestSeedDoesNotCreateAListForAClusterWithNoSharedCredentials(t *testing.T) {
-	clientset := k8sfake.NewClientset(kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false), namespaceOfProject("shop-prod", "shop"))
+	clientset := k8sfake.NewClientset(kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false), namespaceOfProject("shop-prod", "shop"))
 	approved := map[string][]string{"forge": {"shop"}}
 
-	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, credentialGrants{approved: approved}))
+	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approving(t, clientset, approved, false)))
 
 	_, err := clientset.CoreV1().Secrets(sharedcred.Namespace).Get(
 		context.Background(), sharedcred.ConfigSecretName, metav1.GetOptions{})
@@ -184,7 +184,7 @@ func TestSeedDoesNotCreateAListForAClusterWithNoSharedCredentials(t *testing.T) 
 // the guard and grant it whatever names it. A reference is not a grant.
 func TestUpgradeSeedsOncePerCluster(t *testing.T) {
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token", AllowedProjects: []string{"blog"}}),
 	)
@@ -201,7 +201,7 @@ func TestUpgradeSeedsOncePerCluster(t *testing.T) {
 	// A subsequent seed on the same cluster must not re-fill the freshly-added
 	// entry from any snapshot: the marker is what stops it.
 	approved := map[string][]string{"later": {"shop"}}
-	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, credentialGrants{approved: approved}))
+	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approving(t, clientset, approved, false)))
 
 	entries := storedEntries(t, clientset)
 	for _, entry := range entries {
@@ -216,7 +216,7 @@ func TestUpgradeSeedsOncePerCluster(t *testing.T) {
 // the whole point: otherwise its first credential, whenever it arrives, is
 // still a candidate for the inference.
 func TestUpgradeRecordsTheMigrationOnAClusterWithNoSharedCredentials(t *testing.T) {
-	clientset := k8sfake.NewClientset(kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false), namespaceOfProject("shop-prod", "shop"))
+	clientset := k8sfake.NewClientset(kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false), namespaceOfProject("shop-prod", "shop"))
 
 	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, credentialGrants{mayClose: true}))
 
@@ -232,13 +232,13 @@ func TestUpgradeRecordsTheMigrationOnAClusterWithNoSharedCredentials(t *testing.
 // wrapper captured before the rollout.
 func TestUpgradeRepairsAGrantTheOldWriterErasedDuringTheRollout(t *testing.T) {
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
 	approved := map[string][]string{"forge": {"shop"}}
 
-	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, credentialGrants{approved: approved}))
+	require.NoError(t, seedSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approving(t, clientset, approved, false)))
 	require.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"))
 	require.False(t, seeded(t, clientset), "the migration was closed while the old writer was still serving")
 
@@ -250,7 +250,7 @@ func TestUpgradeRepairsAGrantTheOldWriterErasedDuringTheRollout(t *testing.T) {
 			return entries, nil
 		}))
 
-	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, credentialGrants{approved: approved, mayClose: true}))
+	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approving(t, clientset, approved, true)))
 
 	assert.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"),
 		"a grant erased during the rollout stayed erased")
@@ -264,13 +264,13 @@ func TestUpgradeRepairsAGrantTheOldWriterErasedDuringTheRollout(t *testing.T) {
 func TestUpgradeDoesNotCloseTheMigrationWhileTheOldWriterServes(t *testing.T) {
 	noStampWait(t)
 	clientset := k8sfake.NewClientset(
-		kipperSystem(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystem(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
 	approved := map[string][]string{"forge": {"shop"}}
 
-	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, credentialGrants{approved: approved, mayClose: true}))
+	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approving(t, clientset, approved, true)))
 
 	assert.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"),
 		"the grant that keeps builds working was not written")
@@ -286,7 +286,7 @@ func TestUpgradeDoesNotCloseTheMigrationWhileTheOldWriterServes(t *testing.T) {
 func TestUpgradeFreezesTheApprovedSnapshotAgainstAppsThatArriveDuringRollout(t *testing.T) {
 	ctx := context.Background()
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
@@ -328,7 +328,7 @@ func TestUpgradeFreezesTheApprovedSnapshotAgainstAppsThatArriveDuringRollout(t *
 func TestUpgradeDecidesNothingWhileTheOldWriterServes(t *testing.T) {
 	noStampWait(t)
 	clientset := k8sfake.NewClientset(
-		kipperSystem(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystem(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "archive", Token: "a-token"}),
 	)
@@ -349,7 +349,7 @@ func TestUpgradeDecidesNothingWhileTheOldWriterServes(t *testing.T) {
 func TestUpgradeSeedsAnAppThatArrivedWhileTheMigrationCouldNotClose(t *testing.T) {
 	noStampWait(t)
 	clientset := k8sfake.NewClientset(
-		kipperSystem(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystem(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "archive", Token: "a-token"}),
 	)
@@ -368,7 +368,7 @@ func TestUpgradeSeedsAnAppThatArrivedWhileTheMigrationCouldNotClose(t *testing.T
 	// The second upgrade's consent captures the app that has now been
 	// referencing the credential for a week and the operator approves it.
 	approved := map[string][]string{"archive": {"shop"}}
-	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, credentialGrants{approved: approved, mayClose: true}))
+	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &bytes.Buffer{}, approving(t, clientset, approved, true)))
 
 	assert.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"),
 		"the second upgrade refused a reference the operator had approved")
@@ -419,7 +419,7 @@ func TestUpgradeWaitsForTheConsoleAPIToRecordItsBuild(t *testing.T) {
 // the images publish.
 func TestUpgradeSaysNothingAboutAMigrationWithNothingInIt(t *testing.T) {
 	noStampWait(t)
-	clientset := k8sfake.NewClientset(kipperSystem(), consoleAPIDeployment(), consoleAPIPod("console-api", false), namespaceOfProject("shop-prod", "shop"))
+	clientset := k8sfake.NewClientset(kipperSystem(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false), namespaceOfProject("shop-prod", "shop"))
 	var out bytes.Buffer
 
 	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &out, credentialGrants{mayClose: true}))
@@ -432,7 +432,7 @@ func TestUpgradeSaysNothingAboutAMigrationWithNothingInIt(t *testing.T) {
 func TestUpgradeNamesOnlyTheCredentialsStillWaiting(t *testing.T) {
 	noStampWait(t)
 	clientset := k8sfake.NewClientset(
-		kipperSystem(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystem(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t,
 			sharedcred.Entry{Name: "forge", Token: "a-token"},
@@ -442,7 +442,7 @@ func TestUpgradeNamesOnlyTheCredentialsStillWaiting(t *testing.T) {
 	approved := map[string][]string{"forge": {"shop"}}
 	var out bytes.Buffer
 
-	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &out, credentialGrants{approved: approved, mayClose: true}))
+	require.NoError(t, closeSharedCredentialGrants(context.Background(), clientset, &out, approving(t, clientset, approved, true)))
 
 	printed := out.String()
 	assert.Contains(t, printed, "archive", "the credential still waiting was not named")
@@ -455,7 +455,7 @@ func TestUpgradeNamesOnlyTheCredentialsStillWaiting(t *testing.T) {
 // that is not broken.
 func TestUpgradeReportsConsentDeclinedOnPassTwo(t *testing.T) {
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
@@ -481,7 +481,7 @@ func TestUpgradeReportsConsentDeclinedOnPassTwo(t *testing.T) {
 // still named the credential, which is the same shape.
 func TestUpgradeNamesACredentialWhoseAllowListWasCleared(t *testing.T) {
 	clientset := k8sfake.NewClientset(
-		kipperSystemMigrated(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemMigrated(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
@@ -517,7 +517,7 @@ func TestUpgradeSurvivesAFailureToReadTheListForAReport(t *testing.T) {
 func TestUpgradeSurvivesAFailureToReadTheListForTheOpenMigrationReport(t *testing.T) {
 	noStampWait(t)
 	clientset := k8sfake.NewClientset(
-		kipperSystem(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystem(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Token: "a-token"}),
 	)
@@ -556,6 +556,19 @@ func erasedByTheOldWriter(t *testing.T, clientset *k8sfake.Clientset, names ...s
 		}))
 }
 
+// approving is what consent returns once the operator has agreed to a preview:
+// the pairs, and the identity each credential carried when they were shown it.
+// The two always travel together, because a grant is permission for a
+// particular credential rather than for a name.
+func approving(t *testing.T, clientset *k8sfake.Clientset, approved map[string][]string, mayClose bool) credentialGrants {
+	t.Helper()
+	return credentialGrants{
+		approved: approved,
+		shownAs:  sharedcred.Identities(storedEntries(t, clientset)),
+		mayClose: mayClose,
+	}
+}
+
 // The curated credential these fixtures turn on: decided before the rollout,
 // which is what keeps it out of the consent preview and the approved snapshot.
 func curatedForge(projects ...string) sharedcred.Entry {
@@ -572,7 +585,7 @@ func curatedForge(projects ...string) sharedcred.Entry {
 func TestUpgradeRestoresACuratedAllowListTheOldWriterErased(t *testing.T) {
 	ctx := context.Background()
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, curatedForge("shop")),
 	)
@@ -600,7 +613,7 @@ func TestUpgradeRestoresACuratedAllowListTheOldWriterErased(t *testing.T) {
 func TestUpgradeRestoresAnErasedAllowListWhenConsentWasDeclined(t *testing.T) {
 	ctx := context.Background()
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, curatedForge("shop"), sharedcred.Entry{Name: "archive", Token: "another"}),
 	)
@@ -630,7 +643,7 @@ func TestUpgradeRestoresAnErasedAllowListWhenConsentWasDeclined(t *testing.T) {
 func TestUpgradeRestoresOnAClusterThatMigratedLongAgo(t *testing.T) {
 	ctx := context.Background()
 	clientset := k8sfake.NewClientset(
-		kipperSystemMigrated(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemMigrated(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, curatedForge("shop")),
 	)
@@ -656,7 +669,7 @@ func TestUpgradeRestoresOnAClusterThatMigratedLongAgo(t *testing.T) {
 func TestUpgradeNeverRestoresAProjectThatWasNotAlreadyAllowed(t *testing.T) {
 	ctx := context.Background()
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		namespaceOfProject("evil-prod", "evil"),
 		sharedCredentialSecret(t, curatedForge("shop")),
@@ -684,7 +697,7 @@ func TestUpgradeNeverRestoresAProjectThatWasNotAlreadyAllowed(t *testing.T) {
 func TestUpgradeDoesNotUndoARevocationMadeDuringTheRollout(t *testing.T) {
 	ctx := context.Background()
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, curatedForge("shop", "blog")),
 	)
@@ -709,7 +722,7 @@ func TestUpgradeDoesNotUndoARevocationMadeDuringTheRollout(t *testing.T) {
 func TestUpgradeNamesACredentialBoundElsewhereInsteadOfRestoringIt(t *testing.T) {
 	ctx := context.Background()
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, curatedForge("shop")),
 	)
@@ -748,8 +761,12 @@ func TestUpgradeHoldsTheMigrationOpenWhileTheOldConsoleAPIIsStillRunning(t *test
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, curatedForge("shop")),
 		consoleAPIDeployment(),
+		consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIReplicaSet("1", "old456"),
 		consoleAPIPod("console-api-new", false),
-		consoleAPIPod("console-api-old", true),
+		// The pod being replaced: still Running, not yet marked for deletion,
+		// and carrying the previous revision's hash. A count cannot see it.
+		consoleAPIPodOfRevision("console-api-old", "old456", false),
 	)
 	var out bytes.Buffer
 
@@ -770,6 +787,7 @@ func TestUpgradeClosesOnceTheOldConsoleAPIHasGone(t *testing.T) {
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, curatedForge("shop")),
 		consoleAPIDeployment(),
+		consoleAPIReplicaSet("2", currentRevision),
 		consoleAPIPod("console-api-new", false),
 	)
 
@@ -785,7 +803,7 @@ func TestUpgradeClosesOnceTheOldConsoleAPIHasGone(t *testing.T) {
 func TestUpgradeHoldsTheMigrationOpenWhenTheClosingWriteDidNotSurvive(t *testing.T) {
 	ctx := context.Background()
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		// Undecided, so the closing pass has something to write and the old
 		// pod's save has something to land on top of.
@@ -827,7 +845,7 @@ func TestPassOneRepairsNothing(t *testing.T) {
 
 	require.NoError(t, seedSharedCredentialGrants(ctx, clientset, &bytes.Buffer{}, credentialGrants{
 		approved: map[string][]string{"other": {"shop"}},
-		decided:  map[string]sharedcred.Decision{"forge": {Server: "git.example.com"}},
+		decided:  map[string]sharedcred.Decision{"forge": {Identity: sharedcred.Identity{Server: "git.example.com"}}},
 	}))
 
 	assert.Nil(t, storedEntries(t, clientset)[0].AllowedProjects,
@@ -842,12 +860,16 @@ func shortQuiescence(t *testing.T) {
 	t.Cleanup(func() { quiescenceWait, quiescencePoll = wait, poll })
 }
 
-// The console-api Deployment as it stands once the upgrade has rolled it: one
-// replica, and that replica updated.
+// The console-api as it stands once the upgrade has rolled it: the Deployment,
+// and the ReplicaSet of the revision it is now serving. Which revision a pod
+// belongs to is what tells the pod being replaced from its replacement, so
+// every fixture that closes a migration needs both.
+const currentRevision = "abc123"
+
 func consoleAPIDeployment() *appsv1.Deployment {
 	updated := int32(1)
 	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: consoleAPIName, Namespace: "kipper-system"},
+		ObjectMeta: metav1.ObjectMeta{Name: consoleAPIName, Namespace: "kipper-system", UID: "console-api-uid"},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &updated,
 			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": consoleAPIName}},
@@ -856,13 +878,33 @@ func consoleAPIDeployment() *appsv1.Deployment {
 	}
 }
 
-// A pod under the console-api Deployment. going is one on its way out, which is
-// the pod that can still write for the rest of its termination grace.
+func consoleAPIReplicaSet(revision, hash string) *appsv1.ReplicaSet {
+	controller := true
+	return &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        consoleAPIName + "-" + hash,
+			Namespace:   "kipper-system",
+			Labels:      map[string]string{"app": consoleAPIName, podTemplateHashLabel: hash},
+			Annotations: map[string]string{deploymentRevisionAnnotation: revision},
+			OwnerReferences: []metav1.OwnerReference{{
+				Name: consoleAPIName, UID: "console-api-uid", Controller: &controller,
+			}},
+		},
+	}
+}
+
+// A pod under the console-api Deployment, of the revision it is now serving.
+// going is one on its way out, which is the pod that can still write for the
+// rest of its termination grace.
 func consoleAPIPod(name string, going bool) *corev1.Pod {
+	return consoleAPIPodOfRevision(name, currentRevision, going)
+}
+
+func consoleAPIPodOfRevision(name, hash string, going bool) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: "kipper-system",
-			Labels: map[string]string{"app": consoleAPIName},
+			Labels: map[string]string{"app": consoleAPIName, podTemplateHashLabel: hash},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
@@ -902,7 +944,7 @@ func erasedByTheOldWriterOnTracker(t *testing.T, clientset *k8sfake.Clientset) {
 func TestUpgradeRefusesACredentialWhoseTokenChangedAndNamesIt(t *testing.T) {
 	ctx := context.Background()
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, curatedForge("shop")),
 	)
@@ -936,7 +978,7 @@ func TestUpgradeRefusesACredentialWhoseTokenChangedAndNamesIt(t *testing.T) {
 func TestUpgradeRestoresARevocationTheOldWriterThenErased(t *testing.T) {
 	ctx := context.Background()
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, curatedForge("shop")),
 	)
@@ -966,7 +1008,7 @@ func TestUpgradeRestoresARevocationTheOldWriterThenErased(t *testing.T) {
 func TestUpgradeNamesACredentialItClosedThatNobodyWasShown(t *testing.T) {
 	ctx := context.Background()
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, curatedForge("shop")),
 	)
@@ -1014,7 +1056,7 @@ func TestUpgradeHoldsTheMigrationOpenWithoutTheConsoleAPIDeployment(t *testing.T
 func TestRepairErasedAllowListsWritesBackWithoutPassTwo(t *testing.T) {
 	ctx := context.Background()
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		sharedCredentialSecret(t, curatedForge("shop")),
 	)
 	decided := sharedcred.Decisions(storedEntries(t, clientset))
@@ -1033,7 +1075,7 @@ func TestRepairErasedAllowListsWritesBackWithoutPassTwo(t *testing.T) {
 func TestUpgradeDoesNotGrantACredentialRePointedAfterConsent(t *testing.T) {
 	ctx := context.Background()
 	clientset := k8sfake.NewClientset(
-		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIPod("console-api", false),
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision), consoleAPIPod("console-api", false),
 		namespaceOfProject("shop-prod", "shop"),
 		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
 	)
@@ -1057,4 +1099,132 @@ func TestUpgradeDoesNotGrantACredentialRePointedAfterConsent(t *testing.T) {
 	assert.Empty(t, entry.AllowedProjects,
 		"a grant approved for one host was written onto a credential bound to another")
 	assert.Contains(t, out.String(), "re-pointed", "the dropped grant was not named")
+}
+
+// An approval covers a credential at a host holding a token, the same identity
+// a repair checks. A credential deleted and recreated under its old name during
+// the rollout is a different one, and the project being granted had no recorded
+// grant at all before this run, so inference is the more sensitive of the two
+// paths rather than the less.
+func TestUpgradeDoesNotGrantACredentialGivenANewTokenAfterConsent(t *testing.T) {
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api", false),
+		namespaceOfProject("shop-prod", "shop"),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
+		gitApp("shop-prod", "forge"), owningProject("shop-prod"))
+	var out bytes.Buffer
+
+	grants, err := credentialSeedConsent(ctx, clientset, dyn, &bytes.Buffer{}, true, false, refuseToConfirm(t))
+	require.NoError(t, err)
+	require.Equal(t, []string{"shop"}, grants.approved["forge"])
+
+	require.NoError(t, sharedcred.Update(ctx, clientset, func(entries []sharedcred.Entry) ([]sharedcred.Entry, error) {
+		entries[0].Token = "a-different-token"
+		return entries, nil
+	}))
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &out, grants))
+
+	entry := storedEntries(t, clientset)[0]
+	assert.NotNil(t, entry.AllowedProjects)
+	assert.Empty(t, entry.AllowedProjects,
+		"a grant approved for one credential was written onto the one that replaced it")
+	assert.Contains(t, out.String(), "another token", "the dropped grant was not named")
+}
+
+// Undecided before the rollout is not the same as added during it. A credential
+// that was simply never referenced is closed as nobody like any other, and
+// telling the operator it arrived mid-upgrade would point them at the wrong
+// cause for a refused build.
+func TestUpgradeDoesNotCallAPreExistingCredentialNewlyAdded(t *testing.T) {
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api", false),
+		namespaceOfProject("shop-prod", "shop"),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "archive", Server: "git.example.com", Token: "a-token"}),
+	)
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), owningProject("shop-prod"))
+	var out bytes.Buffer
+
+	grants, err := credentialSeedConsent(ctx, clientset, dyn, &bytes.Buffer{}, false, false, refuseToConfirm(t))
+	require.NoError(t, err)
+	require.True(t, grants.mayClose)
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &out, grants))
+
+	entry := storedEntries(t, clientset)[0]
+	assert.NotNil(t, entry.AllowedProjects)
+	assert.Empty(t, entry.AllowedProjects, "an unreferenced credential was not decided as nobody")
+	assert.NotContains(t, out.String(), "added while this upgrade was running",
+		"a credential that existed before the upgrade was reported as having arrived during it")
+	assert.True(t, seeded(t, clientset))
+}
+
+// A pod of the current revision that is on its way out is still a pod that can
+// finish the request it holds, and the write it makes replaces the whole list.
+// Deciding is permanent, so it waits for that pod too.
+func TestUpgradeHoldsTheMigrationOpenWhileAConsoleAPIPodIsTerminating(t *testing.T) {
+	shortQuiescence(t)
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		consoleAPIDeployment(),
+		consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api-new", false),
+		consoleAPIPod("console-api-going", true),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+	var out bytes.Buffer
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &out, credentialGrants{mayClose: true}))
+
+	assert.False(t, seeded(t, clientset),
+		"the migration was closed while a pod inside its termination grace could still write")
+	assert.Nil(t, storedEntries(t, clientset)[0].AllowedProjects,
+		"a credential was decided by a pass that could not prove the old writer was gone")
+}
+
+// An approval for a credential that has since been removed lands nowhere. Said
+// nowhere, it reads as a grant that went through, and the operator finds out
+// when a build is refused.
+func TestUpgradeNamesAnApprovedCredentialThatIsGone(t *testing.T) {
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api", false),
+		namespaceOfProject("shop-prod", "shop"),
+		sharedCredentialSecret(t,
+			sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"},
+			sharedcred.Entry{Name: "archive", Server: "git.example.com", Token: "another"},
+		),
+	)
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
+		gitApp("shop-prod", "forge"), owningProject("shop-prod"))
+	var out bytes.Buffer
+
+	grants, err := credentialSeedConsent(ctx, clientset, dyn, &bytes.Buffer{}, true, false, refuseToConfirm(t))
+	require.NoError(t, err)
+	require.Equal(t, []string{"shop"}, grants.approved["forge"])
+
+	require.NoError(t, sharedcred.Update(ctx, clientset, func(entries []sharedcred.Entry) ([]sharedcred.Entry, error) {
+		kept := make([]sharedcred.Entry, 0, len(entries))
+		for _, e := range entries {
+			if e.Name != "forge" {
+				kept = append(kept, e)
+			}
+		}
+		return kept, nil
+	}))
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &out, grants))
+
+	assert.Nil(t, sharedcred.Find(storedEntries(t, clientset), "forge"),
+		"a credential removed during the rollout was put back")
+	assert.Contains(t, out.String(), "no longer there",
+		"an approval that landed nowhere was not reported")
 }
