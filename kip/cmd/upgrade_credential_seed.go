@@ -202,6 +202,10 @@ func fillSharedCredentialGrants(
 		return err
 	}
 	if len(stored) == 0 {
+		// Nothing to write into, and no Secret is created for a cluster that has
+		// never had a shared credential. An approval still has to be answered
+		// for: every one of them landed nowhere.
+		reportApprovedButGone(out, sortedNames(approved))
 		return nil
 	}
 
@@ -290,6 +294,16 @@ func approvedForTheSameCredential(entries []sharedcred.Entry, approved map[strin
 	sort.Strings(handed)
 	sort.Strings(gone)
 	return grantable, handed, gone
+}
+
+// sortedNames is the keys of a grant map, in a stable order.
+func sortedNames(approved map[string][]string) []string {
+	names := make([]string, 0, len(approved))
+	for name := range approved {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // reportApprovedButGone names a credential the operator approved that the list
@@ -837,10 +851,16 @@ func currentConsoleAPIRevision(ctx context.Context, clientset kubernetes.Interfa
 // which is still running, which is exactly the writer this waits for. A pod on
 // its way out is counted whatever its revision, because a terminating pod of the
 // current revision is still a pod that can finish the request it holds.
+//
+// Only Succeeded and Failed are passed over, because only those two say the
+// containers have stopped. Unknown in particular is counted: it means the
+// control plane has lost touch with the node, which is the absence of an answer
+// rather than the answer that nothing is running there, and what this has to
+// establish is that nothing can write.
 func lingeringConsoleAPIPods(pods []corev1.Pod, current string) int {
 	lingering := 0
 	for i := range pods {
-		if pods[i].Status.Phase != corev1.PodRunning && pods[i].Status.Phase != corev1.PodPending {
+		if pods[i].Status.Phase == corev1.PodSucceeded || pods[i].Status.Phase == corev1.PodFailed {
 			continue
 		}
 		if pods[i].DeletionTimestamp != nil || pods[i].Labels[podTemplateHashLabel] != current {

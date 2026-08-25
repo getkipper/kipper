@@ -1228,3 +1228,58 @@ func TestUpgradeNamesAnApprovedCredentialThatIsGone(t *testing.T) {
 	assert.Contains(t, out.String(), "no longer there",
 		"an approval that landed nowhere was not reported")
 }
+
+// Unknown is the control plane saying it has lost touch with the node, not that
+// nothing is running on it. Deciding is permanent, and what this pass has to
+// establish is that nothing can write, so a pod it cannot account for counts.
+func TestUpgradeHoldsTheMigrationOpenForAPodInAnUnknownState(t *testing.T) {
+	shortQuiescence(t)
+	ctx := context.Background()
+	stranded := consoleAPIPodOfRevision("console-api-old", "old456", false)
+	stranded.Status.Phase = corev1.PodUnknown
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		consoleAPIDeployment(),
+		consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIReplicaSet("1", "old456"),
+		consoleAPIPod("console-api-new", false),
+		stranded,
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+	var out bytes.Buffer
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &out, credentialGrants{mayClose: true}))
+
+	assert.False(t, seeded(t, clientset),
+		"the migration was closed while a pod nobody could account for might still be writing")
+}
+
+// A credential removed along with every other one leaves nothing to write into,
+// and the pass returns early. The approval still landed nowhere, and saying so
+// is the difference between an operator knowing and finding out at a build.
+func TestUpgradeNamesAnApprovedCredentialWhenTheListIsEmptied(t *testing.T) {
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api", false),
+		namespaceOfProject("shop-prod", "shop"),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
+		gitApp("shop-prod", "forge"), owningProject("shop-prod"))
+	var out bytes.Buffer
+
+	grants, err := credentialSeedConsent(ctx, clientset, dyn, &bytes.Buffer{}, true, false, refuseToConfirm(t))
+	require.NoError(t, err)
+	require.Equal(t, []string{"shop"}, grants.approved["forge"])
+
+	require.NoError(t, sharedcred.Update(ctx, clientset, func([]sharedcred.Entry) ([]sharedcred.Entry, error) {
+		return nil, nil
+	}))
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &out, grants))
+
+	assert.Contains(t, out.String(), "no longer there",
+		"an approval with nothing left to write into was not reported")
+	assert.Contains(t, out.String(), "forge", "the credential the approval named was not reported")
+}
