@@ -103,6 +103,7 @@ func init() {
 	projectCmd.AddCommand(projectUseCmd)
 	projectCmd.AddCommand(projectAddEnvCmd)
 	projectCmd.AddCommand(projectRemoveEnvCmd)
+	projectCmd.AddCommand(projectBindingsCmd)
 	rootCmd.AddCommand(projectCmd)
 }
 
