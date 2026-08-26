@@ -8,14 +8,17 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/getkipper/kipper/console-api/internal/nsowner"
+	"github.com/getkipper/kipper/controller/pkg/capability"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 )
 
@@ -39,22 +42,41 @@ func projectNamespace(name, project string) *corev1.Namespace {
 func TestProjectAccess_Allows(t *testing.T) {
 	tests := []struct {
 		role     string
-		required string
+		required capability.Name
 		want     bool
 	}{
-		{"owner", "deployer", true},
-		{"deployer", "deployer", true},
-		{"viewer", "deployer", false},
-		{"deployer", "viewer", true},
-		{"owner", "owner", true},
-		{"deployer", "owner", false},
-		{"", "viewer", false},
+		{"owner", "kipper.write", true},
+		{"deployer", "kipper.write", true},
+		{"viewer", "kipper.write", false},
+		{"deployer", "kipper.read", true},
+		{"owner", "members.manage", true},
+		{"deployer", "members.manage", false},
+		{"viewer", "project.read", true},
+		{"", "project.read", false},
 		{"viewer", "", false},
+		// A role this build does not know holds nothing. It reaches a Project
+		// through kubectl, a restore, or a cluster that had it, and the gate
+		// answers the same way the reconciler does: no binding, no capability.
+		{"auditor", "project.read", false},
+		{"auditor", "kipper.write", false},
 	}
 	for _, tt := range tests {
 		a := ProjectAccess{Role: tt.role}
 		if got := a.Allows(tt.required); got != tt.want {
-			t.Errorf("Allows(role=%q, required=%q) = %v, want %v", tt.role, tt.required, got, tt.want)
+			t.Errorf("Allows(role=%q, capability=%q) = %v, want %v", tt.role, tt.required, got, tt.want)
+		}
+	}
+}
+
+// A cluster admin is not a project member, and the gate has to admit them
+// anyway. They resolve as owner, which holds the whole catalogue, so nothing
+// else is needed — but a route reachable by no project member at all would be
+// a route the admin column could not reach either.
+func TestProjectAccess_AdminHoldsEveryCapability(t *testing.T) {
+	a := ProjectAccess{Role: ProjectRoleOwner, IsAdmin: true}
+	for _, c := range capability.All() {
+		if !a.Allows(c.Name) {
+			t.Errorf("a cluster admin is refused %s", c.Name)
 		}
 	}
 }
@@ -348,4 +370,194 @@ func ownersFor(t *testing.T, namespaces ...*corev1.Namespace) nsowner.Reader {
 		})
 	}
 	return crfake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+}
+
+// The resolver reads a namespace and a Project on every gated request. Until
+// the manager's cache is warm those are two live API calls; once it is, they
+// are two informer reads. The swap has to be safe while requests are in flight,
+// because that is exactly when it happens.
+func TestResolverReadsThroughTheCacheOnceItIsWarm(t *testing.T) {
+	direct := &countingReader{}
+	cached := &countingReader{}
+	roles := NewRoleStore(fake.NewClientset(kipperNamespace(), roleConfigMap(`{"someone@test.com":"deployer"}`)))
+	r := NewProjectAccessResolver(fake.NewClientset(kipperNamespace()), roles, stubMembers{}, direct)
+
+	_, _ = r.Resolve(context.Background(), "someone@test.com", "shop-prod")
+	if direct.calls == 0 {
+		t.Fatal("the resolver did not read through the reader it was built with")
+	}
+	before := cached.calls
+
+	r.UseOwners(cached)
+	_, _ = r.Resolve(context.Background(), "someone@test.com", "shop-prod")
+
+	if cached.calls == before {
+		t.Error("the resolver kept reading directly after the cache was offered")
+	}
+}
+
+// A manager that never starts — a cluster whose CRDs have not been applied yet
+// is the documented case — must leave the resolver working. Refusing to
+// authorize until an informer syncs would take the console down on exactly the
+// cluster that comment protects.
+func TestResolverKeepsWorkingWhenNoCacheEverArrives(t *testing.T) {
+	direct := &countingReader{}
+	roles := NewRoleStore(fake.NewClientset(kipperNamespace(), roleConfigMap(`{"someone@test.com":"deployer"}`)))
+	r := NewProjectAccessResolver(fake.NewClientset(kipperNamespace()), roles, stubMembers{}, direct)
+
+	_, _ = r.Resolve(context.Background(), "someone@test.com", "shop-prod")
+
+	if direct.calls == 0 {
+		t.Error("the resolver stopped reading when no cache was ever offered")
+	}
+}
+
+type countingReader struct {
+	calls int
+	// onGet runs after the call is counted, so a test can move the world
+	// between a reader being taken and the lookup finishing.
+	onGet func()
+}
+
+func (c *countingReader) Get(_ context.Context, _ crclient.ObjectKey, _ crclient.Object, _ ...crclient.GetOption) error {
+	c.calls++
+	if c.onGet != nil {
+		c.onGet()
+	}
+	return k8serrors.NewNotFound(schema.GroupResource{Resource: "namespaces"}, "shop-prod")
+}
+
+// Two goroutines offer readers and neither orders against the other: the
+// manager's cache arrives when its informers sync, and the live client comes
+// back when the manager stops. A manager that dies in the window between its
+// cache syncing and the swap landing would otherwise have its frozen cache
+// installed last, with no later event to take it out again.
+func TestACacheOfferedAfterTheManagerStoppedIsRefused(t *testing.T) {
+	direct := &countingReader{}
+	stopped := &countingReader{}
+	roles := NewRoleStore(fake.NewClientset(kipperNamespace(), roleConfigMap(`{"someone@test.com":"deployer"}`)))
+	r := NewProjectAccessResolver(fake.NewClientset(kipperNamespace()), roles, stubMembers{}, direct)
+
+	r.RetireOwners(direct)
+	r.UseOwners(stopped)
+
+	before := stopped.calls
+	_, _ = r.Resolve(context.Background(), "someone@test.com", "shop-prod")
+
+	if stopped.calls != before {
+		t.Error("a stopped manager's cache was installed after it had been withdrawn")
+	}
+	if direct.calls == 0 {
+		t.Error("the resolver stopped reading live after the cache was withdrawn")
+	}
+}
+
+// The ordinary order still works: cache in while the manager runs, live again
+// when it stops.
+func TestTheCacheIsUsedWhileTheManagerRunsAndDroppedWhenItStops(t *testing.T) {
+	direct := &countingReader{}
+	cached := &countingReader{}
+	roles := NewRoleStore(fake.NewClientset(kipperNamespace(), roleConfigMap(`{"someone@test.com":"deployer"}`)))
+	r := NewProjectAccessResolver(fake.NewClientset(kipperNamespace()), roles, stubMembers{}, direct)
+
+	r.UseOwners(cached)
+	_, _ = r.Resolve(context.Background(), "someone@test.com", "shop-prod")
+	if cached.calls == 0 {
+		t.Fatal("the cache was not used while the manager was running")
+	}
+
+	r.RetireOwners(direct)
+	was := cached.calls
+	_, _ = r.Resolve(context.Background(), "someone@test.com", "shop-prod")
+
+	if cached.calls != was {
+		t.Error("the resolver kept reading a cache whose manager had stopped")
+	}
+}
+
+// Taking the reader is atomic and the lookup that follows is not. A request
+// that took the manager's cache and was descheduled would otherwise finish both
+// its reads through a cache whose manager had stopped in the meantime, and
+// answer from whatever those informers last saw.
+func TestALookupThatBeganOnAWithdrawnCacheIsRedone(t *testing.T) {
+	direct := &countingReader{}
+	roles := NewRoleStore(fake.NewClientset(kipperNamespace(), roleConfigMap(`{"someone@test.com":"deployer"}`)))
+	r := NewProjectAccessResolver(fake.NewClientset(kipperNamespace()), roles, stubMembers{}, direct)
+
+	// A cache that withdraws itself the moment it is read, standing in for the
+	// manager dying between the reader being taken and the lookup running.
+	withdrawing := &countingReader{}
+	withdrawing.onGet = func() {
+		if withdrawing.calls == 1 {
+			r.RetireOwners(direct)
+		}
+	}
+	r.UseOwners(withdrawing)
+
+	before := direct.calls
+	_, _ = r.Resolve(context.Background(), "someone@test.com", "shop-prod")
+
+	if direct.calls == before {
+		t.Error("a lookup that began on a cache withdrawn under it was not redone against the live reader")
+	}
+}
+
+// hookReader delegates to a real reader and runs a hook after each read, so a
+// test can swap the resolver's reader between one being taken and its lookup
+// finishing.
+type hookReader struct {
+	inner nsowner.Reader
+	calls int
+	onGet func()
+}
+
+func (h *hookReader) Get(ctx context.Context, key crclient.ObjectKey, obj crclient.Object, opts ...crclient.GetOption) error {
+	err := h.inner.Get(ctx, key, obj, opts...)
+	h.calls++
+	if h.onGet != nil {
+		h.onGet()
+	}
+	return err
+}
+
+// A process swaps its owner reader twice: the manager's cache arrives, and the
+// cache is withdrawn when the manager stops. A single request slow enough to
+// span both had every read invalidated under it, and the answer it carried out
+// was the one the withdrawn cache gave — which is the cache's last view of who
+// owned a namespace, not the cluster's.
+func TestARequestSpanningBothReaderSwapsAnswersFromTheLiveReader(t *testing.T) {
+	live := ownersFor(t, projectNamespace("shop-prod", "shop"))
+	// The cache's frozen view: it still has the namespace under its former
+	// owner, who is this caller's own project.
+	withdrawn := ownersFor(t, projectNamespace("shop-prod", "former"))
+
+	roles := NewRoleStore(fake.NewClientset(kipperNamespace(), roleConfigMap(`{"someone@test.com":"deployer"}`)))
+	members := stubMembers{
+		"shop":   {},
+		"former": {"someone@test.com": ProjectRoleOwner},
+	}
+
+	var r *ProjectAccessResolver
+	hookedLive := &hookReader{inner: live}
+	hookedCache := &hookReader{inner: withdrawn}
+	hookedLive.onGet = func() {
+		if hookedLive.calls == 1 {
+			r.UseOwners(hookedCache)
+		}
+	}
+	hookedCache.onGet = func() {
+		if hookedCache.calls == 1 {
+			r.RetireOwners(hookedLive)
+		}
+	}
+	r = NewProjectAccessResolver(fake.NewClientset(kipperNamespace(), projectNamespace("shop-prod", "shop")), roles, members, hookedLive)
+
+	access, ok := r.Resolve(context.Background(), "someone@test.com", "shop-prod")
+
+	if ok {
+		t.Errorf("a request spanning both reader swaps was answered from the withdrawn cache: it granted %s on project %q", access.Role, access.Project)
+	}
+	if hookedCache.calls == 0 {
+		t.Fatal("the test never read through the cache, so it is not exercising the interleaving it describes")
+	}
 }

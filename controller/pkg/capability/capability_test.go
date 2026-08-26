@@ -486,3 +486,74 @@ func TestReachTheRulesCannotExpressIsInTheDescription(t *testing.T) {
 		}
 	}
 }
+
+// Holds is what an authorization gate asks, so it answers for exactly the
+// built-in roles and refuses everything else. A role this build does not know
+// reaches a Project through kubectl, a restore, or a cluster that had it, and
+// the answer it must get is no capability at all rather than an error nobody
+// checks.
+func TestHoldsAnswersForBuiltInRolesAndRefusesTheRest(t *testing.T) {
+	if !Holds(RoleViewer, "project.read") {
+		t.Error("a viewer cannot read the project they are a member of")
+	}
+	if Holds(RoleViewer, "kipper.write") {
+		t.Error("a viewer may change what runs in the project")
+	}
+	if !Holds(RoleDeployer, "kipper.write") {
+		t.Error("a deployer cannot change what runs in the project")
+	}
+	if Holds(RoleDeployer, "members.manage") {
+		t.Error("a deployer may change who is in the project")
+	}
+	if !Holds(RoleOwner, "members.manage") {
+		t.Error("an owner cannot change who is in the project")
+	}
+	if Holds("auditor", "project.read") {
+		t.Error("a role this build does not know was granted a capability")
+	}
+	if Holds(RoleOwner, "not.a.capability") {
+		t.Error("a name outside the catalogue was granted")
+	}
+}
+
+// Every gate an owner meets has to admit them, or a route would be reachable by
+// nobody. It is also what makes a cluster admin work: they resolve as owner.
+func TestAnOwnerHoldsEveryCapabilityInTheCatalogue(t *testing.T) {
+	for _, c := range All() {
+		if !Holds(RoleOwner, c.Name) {
+			t.Errorf("an owner does not hold %s, so no project member can reach what it gates", c.Name)
+		}
+	}
+}
+
+// The three built-in sets nest, which is what the ladder they replace meant.
+// Losing that would take something from a role that has it today.
+func TestTheBuiltInRolesNest(t *testing.T) {
+	for _, c := range BuiltIn(RoleViewer) {
+		if !Holds(RoleDeployer, c) {
+			t.Errorf("a deployer does not hold %s, which a viewer does", c)
+		}
+	}
+	for _, c := range BuiltIn(RoleDeployer) {
+		if !Holds(RoleOwner, c) {
+			t.Errorf("an owner does not hold %s, which a deployer does", c)
+		}
+	}
+}
+
+// KnownRole is what tells a member from somebody a restore left behind. It is
+// the resolver's question, not a gate's: a role that means nothing here is not
+// a member at all, which keeps their namespaces out of the lists that filter on
+// membership rather than on a capability.
+func TestKnownRoleAnswersForTheBuiltInsAndNothingElse(t *testing.T) {
+	for _, role := range []Role{RoleViewer, RoleDeployer, RoleOwner} {
+		if !KnownRole(role) {
+			t.Errorf("%s is a built-in role and was not recognised", role)
+		}
+	}
+	for _, role := range []Role{"auditor", "", "Owner", "admin"} {
+		if KnownRole(role) {
+			t.Errorf("%q was recognised as a built-in project role", role)
+		}
+	}
+}

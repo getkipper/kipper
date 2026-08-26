@@ -15,7 +15,6 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/controllers"
-	"github.com/getkipper/kipper/console-api/middleware"
 )
 
 type linkRequest struct {
@@ -105,7 +104,7 @@ func (a *Apps) Link(w http.ResponseWriter, r *http.Request) {
 	if ns == "" {
 		ns = "default"
 	}
-	if !enforceProjectRole(w, r, ns, middleware.ProjectRoleDeployer) {
+	if !enforceCapability(w, r, ns, "kipper.write") {
 		return
 	}
 
@@ -233,7 +232,7 @@ func (a *Apps) Unlink(w http.ResponseWriter, r *http.Request) {
 	if ns == "" {
 		ns = "default"
 	}
-	if !enforceProjectRole(w, r, ns, middleware.ProjectRoleDeployer) {
+	if !enforceCapability(w, r, ns, "kipper.write") {
 		return
 	}
 

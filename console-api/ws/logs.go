@@ -63,14 +63,14 @@ func (l *LogStreamer) Handle(w http.ResponseWriter, r *http.Request) {
 
 func (l *LogStreamer) streamLogs(w http.ResponseWriter, r *http.Request, project, app string) {
 	// This handler runs on the raw mux, bypassing the Chi auth chain, so it
-	// authenticates and authorizes here before upgrading. Reading logs needs
-	// membership of the project (viewer or above).
+	// authenticates and authorizes here before upgrading. Reading logs takes
+	// pods.logs.read on the project that owns the namespace.
 	email, ok := AuthenticatedEmail(r, l.Issuer, l.Audience, l.KeyFunc)
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if !authorizeProject(r.Context(), l.Resolver, email, project, middleware.ProjectRoleViewer) {
+	if !authorizeProject(r.Context(), l.Resolver, email, project, "pods.logs.read") {
 		http.Error(w, "forbidden: you do not have access to this project", http.StatusForbidden)
 		return
 	}

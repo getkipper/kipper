@@ -14,8 +14,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
-
-	"github.com/getkipper/kipper/console-api/middleware"
 )
 
 // ResourceUsage serves live CPU and memory usage for any pod (or set of
@@ -142,7 +140,7 @@ func (h *ResourceUsage) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	// A named namespace must belong to the caller's project. Cluster-wide
 	// selector mode is filtered to accessible namespaces after collection.
-	if namespace != "" && !enforceProjectRole(w, r, namespace, middleware.ProjectRoleViewer) {
+	if namespace != "" && !enforceCapability(w, r, namespace, "workloads.read") {
 		return
 	}
 

@@ -615,6 +615,46 @@ func Subset(inner, outer []Name) bool {
 	return true
 }
 
+// held is BuiltIn as a lookup, built once. Every gated request asks this
+// question, and BuiltIn allocates and sorts a copy to answer it.
+var held = func() map[Role]map[Name]bool {
+	out := make(map[Role]map[Name]bool, len(builtIn))
+	for role, names := range builtIn {
+		set := make(map[Name]bool, len(names))
+		for _, n := range names {
+			set[n] = true
+		}
+		out[role] = set
+	}
+	return out
+}()
+
+// Holds reports whether a built-in project role carries a capability.
+//
+// This is what an authorization gate asks. A role outside the built-ins holds
+// nothing: one reaches a Project through kubectl, a restore, or a migration
+// from a cluster that had it, and the answer a gate needs is that the member
+// can do nothing rather than an error the gate would have to decide about.
+// That is the same answer the reconciler gives such a member, which binds them
+// to no Kubernetes role either.
+func Holds(role Role, name Name) bool {
+	return held[role][name]
+}
+
+// KnownRole reports whether a role name is one this build understands.
+//
+// It is asked where a member is resolved rather than where a route is gated. A
+// member whose role means nothing here holds no capability, so every gate would
+// refuse them anyway; what this decides is the stronger thing, that they are
+// not a member for the purpose of reading either. Admitting them as a member
+// with an empty capability set would put their project's namespaces back into
+// the cluster-wide lists, which are filtered on membership and not on any
+// capability.
+func KnownRole(role Role) bool {
+	_, ok := held[role]
+	return ok
+}
+
 // BuiltIn returns the capability set standing for a built-in project role, or
 // nothing for a name that is not one.
 func BuiltIn(role Role) []Name {

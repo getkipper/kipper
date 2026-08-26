@@ -2,12 +2,15 @@ package middleware
 
 import (
 	"context"
+	"fmt"
+	"sync"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/getkipper/kipper/console-api/internal/nsowner"
+	"github.com/getkipper/kipper/controller/pkg/capability"
 )
 
 // ProjectMemberSource returns a project's members as an email->role map.
@@ -21,29 +24,33 @@ type ProjectAccess struct {
 	// Project is the Kipper project that owns the namespace. It is empty for
 	// an admin acting on a namespace that no project owns.
 	Project string
-	// Role is the caller's capability: owner, deployer, or viewer. Admins
-	// resolve to owner.
+	// Role is the caller's project role: owner, deployer, or viewer. Admins
+	// resolve to owner, which holds the whole catalogue. What the role may do
+	// is Allows's question, and the catalogue's answer.
 	Role string
 	// IsAdmin is true when access comes from the cluster-wide admin role.
 	IsAdmin bool
 }
 
-// Project role names, ordered viewer < deployer < owner.
+// The built-in project roles. They are the names stored on a Project and the
+// names an operator types, so they are part of the released surface. What each
+// one may do is the catalogue's to say, not this package's.
 const (
 	ProjectRoleViewer   = "viewer"
 	ProjectRoleDeployer = "deployer"
 	ProjectRoleOwner    = "owner"
 )
 
-var projectRoleRank = map[string]int{
-	ProjectRoleViewer:   1,
-	ProjectRoleDeployer: 2,
-	ProjectRoleOwner:    3,
-}
-
-// Allows reports whether the resolved access meets the required project role.
-func (a ProjectAccess) Allows(required string) bool {
-	return projectRoleRank[a.Role] >= projectRoleRank[required] && projectRoleRank[required] > 0
+// Allows reports whether the resolved access carries a capability.
+//
+// It asks the catalogue rather than comparing roles. The three built-ins nest,
+// so while they are the only roles a Project can hold this answers what a
+// viewer<deployer<owner comparison did; what it stops doing is deciding from
+// the ordering, which is what made a fourth role unrepresentable. A role the
+// catalogue does not know holds nothing and is refused everywhere, which is the
+// same answer the reconciler gives it.
+func (a ProjectAccess) Allows(required capability.Name) bool {
+	return capability.Holds(capability.Role(a.Role), required)
 }
 
 // ProjectAccessResolver decides whether a user may act on a namespace and at
@@ -55,7 +62,86 @@ type ProjectAccessResolver struct {
 	client  kubernetes.Interface
 	roles   *RoleStore
 	members ProjectMemberSource
-	owners  nsowner.Reader
+
+	// owners answers which project holds a namespace, on every gated request.
+	// It starts as a direct client and is swapped for the controller manager's
+	// cached one when that has synced, which turns two live API calls per
+	// request into two informer reads.
+	//
+	// The swap is guarded because it happens while requests are in flight: the
+	// manager syncs in its own goroutine some time after serving starts.
+	ownersMu sync.RWMutex
+	owners   nsowner.Reader
+	// ownersRetired records that a cache has been withdrawn, so a later offer
+	// of one cannot put it back. Two goroutines offer readers and neither
+	// orders against the other: the manager's cache arrives when its informers
+	// sync, and the live client comes back when the manager stops. A mutex
+	// makes each swap atomic and says nothing about which happens last, so
+	// without this a cache offered a moment before the manager died could be
+	// installed a moment after, and nothing would ever take it out again.
+	ownersRetired bool
+	// ownersGen counts swaps. A lookup takes the reader and the count together
+	// and checks the count again afterwards: the lock makes taking the reader
+	// atomic, and nothing else stops a request that took the manager's cache
+	// from finishing its reads through it after that cache was withdrawn.
+	ownersGen uint64
+}
+
+// UseOwners swaps in a reader for resolving namespace ownership.
+//
+// Nothing waits for this. Authorization is correct through either reader, so a
+// cluster whose controller manager never starts — one whose CRDs have not been
+// applied yet, which this image is documented to survive — keeps authorizing
+// through the client it began with rather than refusing every request until an
+// informer that will never sync does so.
+func (r *ProjectAccessResolver) UseOwners(owners nsowner.Reader) {
+	if owners == nil {
+		return
+	}
+	r.ownersMu.Lock()
+	defer r.ownersMu.Unlock()
+	if r.ownersRetired {
+		// The only cache this is ever offered belongs to the manager that has
+		// since stopped. Installing it now would freeze ownership at whatever
+		// its informers last saw, with no later event to undo it.
+		return
+	}
+	r.owners = owners
+	r.ownersGen++
+}
+
+// RetireOwners goes back to reading live and refuses any cache offered
+// afterwards.
+//
+// The caller is the manager's own exit. A stopped manager's informers keep
+// answering from the stores they last filled and answer without an error, so
+// leaving one in place freezes ownership there while membership stays current:
+// a namespace that changes hands afterwards keeps authorizing its old
+// project's members until the process restarts.
+func (r *ProjectAccessResolver) RetireOwners(live nsowner.Reader) {
+	r.ownersMu.Lock()
+	defer r.ownersMu.Unlock()
+	r.ownersRetired = true
+	if live != nil {
+		r.owners = live
+	}
+	r.ownersGen++
+}
+
+// ownerReader is the reader to resolve with now, and the swap count it came
+// from.
+func (r *ProjectAccessResolver) ownerReader() (nsowner.Reader, uint64) {
+	r.ownersMu.RLock()
+	defer r.ownersMu.RUnlock()
+	return r.owners, r.ownersGen
+}
+
+// ownersChangedSince reports whether the reader has been swapped since a lookup
+// took it.
+func (r *ProjectAccessResolver) ownersChangedSince(gen uint64) bool {
+	r.ownersMu.RLock()
+	defer r.ownersMu.RUnlock()
+	return r.ownersGen != gen
 }
 
 // NewProjectAccessResolver builds a resolver over the given clients.
@@ -129,7 +215,7 @@ func (r *ProjectAccessResolver) resolveProject(ctx context.Context, email, proje
 		return ProjectAccess{}, false
 	}
 	role, ok := members[email]
-	if !ok || projectRoleRank[role] == 0 {
+	if !ok || !capability.KnownRole(capability.Role(role)) {
 		return ProjectAccess{}, false
 	}
 	return ProjectAccess{Project: project, Role: role}, true
@@ -148,14 +234,38 @@ func (r *ProjectAccessResolver) resolveProject(ctx context.Context, email, proje
 // relies on. Nothing is being trusted there: no metadata was read, and the
 // caller named the project outright.
 //
-// There is no cache. The TTL map that used to sit here held an answer for a
-// minute, so a namespace whose ownership had been withdrawn kept authorising
-// for the rest of it, and carrying the claim in the cached value would not have
-// helped because nothing invalidated it.
+// This keeps no cache of its own. The TTL map that used to sit here held an
+// answer for a minute, so a namespace whose ownership had been withdrawn kept
+// authorising for the rest of it, and carrying the claim in the cached value
+// would not have helped because nothing invalidated it.
+//
+// The reader underneath may be an informer, which is a cache with a watch on
+// it: it goes stale only for as long as a watch takes to deliver, and it is
+// swapped back to a live client if the manager driving it stops.
 func (r *ProjectAccessResolver) projectForName(ctx context.Context, name string) (string, error) {
-	project, ok, err := nsowner.Of(ctx, r.owners, name)
-	if err != nil {
-		return "", err
+	// Read, then check the reader has not been swapped underneath. Taking it is
+	// atomic and the lookup is not: a request that took the manager's cache and
+	// was descheduled would otherwise finish both its reads through a cache
+	// whose manager had since stopped, and answer from whatever it last saw.
+	// It retries until the reader it read through is still the current one. A
+	// process swaps at most twice, the cache arriving and the cache being
+	// withdrawn, so this settles. The bound is a backstop, and running out of
+	// attempts refuses rather than returning an answer already known to have
+	// come from a reader that had been replaced.
+	var project string
+	var ok bool
+	settled := false
+	for attempt := 0; attempt < 4 && !settled; attempt++ {
+		owners, gen := r.ownerReader()
+		var err error
+		project, ok, err = nsowner.Of(ctx, owners, name)
+		if err != nil {
+			return "", err
+		}
+		settled = !r.ownersChangedSince(gen)
+	}
+	if !settled {
+		return "", fmt.Errorf("resolving the owner of namespace %s: the ownership reader changed under every attempt", name)
 	}
 	if ok {
 		return project, nil

@@ -63,6 +63,7 @@ GET /api/v1/migration/{session}/verify	anon=401 outsider=403 viewer=403 deployer
 GET /api/v1/nodes	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 GET /api/v1/platform	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/platform/components	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow
+GET /api/v1/project-roles	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/projects	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/projects/{name}/api-keys	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/projects/{name}/api-keys/{key}/usage	anon=401 outsider=403 viewer=404 deployer=404 owner=404 admin=404

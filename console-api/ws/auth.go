@@ -8,6 +8,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/getkipper/kipper/console-api/middleware"
+	"github.com/getkipper/kipper/controller/pkg/capability"
 )
 
 // authSubprotocol is the sentinel the client sends as the first
@@ -62,9 +63,9 @@ func AuthenticatedEmail(r *http.Request, issuer, audience string, keyFunc jwt.Ke
 	return claims.Email, true
 }
 
-// authorizeProject reports whether the caller may act on the namespace at the
-// required project role.
-func authorizeProject(ctx context.Context, resolver *middleware.ProjectAccessResolver, email, namespace, required string) bool {
+// authorizeProject reports whether the caller holds the capability on the
+// project that owns the namespace.
+func authorizeProject(ctx context.Context, resolver *middleware.ProjectAccessResolver, email, namespace string, required capability.Name) bool {
 	if resolver == nil {
 		return false
 	}

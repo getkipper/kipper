@@ -15,7 +15,6 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
-	"github.com/getkipper/kipper/console-api/middleware"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
@@ -58,7 +57,7 @@ func (s *Services) Create(w http.ResponseWriter, r *http.Request) {
 	if req.Namespace == "" {
 		req.Namespace = "default"
 	}
-	if !enforceProjectRole(w, r, req.Namespace, middleware.ProjectRoleDeployer) {
+	if !enforceCapability(w, r, req.Namespace, "kipper.write") {
 		return
 	}
 

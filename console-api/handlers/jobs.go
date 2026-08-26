@@ -16,7 +16,6 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
-	"github.com/getkipper/kipper/console-api/middleware"
 )
 
 // Jobs provides handlers for job and cronjob management.
@@ -64,7 +63,7 @@ func (j *Jobs) Create(w http.ResponseWriter, r *http.Request) {
 	if namespace == "" {
 		namespace = "default"
 	}
-	if !enforceProjectRole(w, r, namespace, middleware.ProjectRoleDeployer) {
+	if !enforceCapability(w, r, namespace, "kipper.write") {
 		return
 	}
 
@@ -242,7 +241,7 @@ func (j *Jobs) Trigger(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusForbidden, "you do not have access to this job")
 		return
 	}
-	if !enforceProjectRole(w, r, cj.Namespace, middleware.ProjectRoleDeployer) {
+	if !enforceCapability(w, r, cj.Namespace, "kipper.write") {
 		return
 	}
 	backoff := int32(0)
