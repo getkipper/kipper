@@ -26,7 +26,21 @@ export interface Environment {
   owned: boolean
 }
 
-export type ProjectRole = 'owner' | 'deployer' | 'viewer'
+/**
+ * A project role name.
+ *
+ * It is a string rather than a union of the three built-ins, because the set of
+ * roles is the cluster's to decide and not this build's. A role this console
+ * does not enumerate reaches a Project through kubectl, a restore, or a cluster
+ * newer than the browser, and the panel has to render what is actually stored.
+ *
+ * Nothing is gated on the name. What a member may do arrives as `capabilities`,
+ * which is the same thing the API gates its own routes on.
+ */
+export type ProjectRole = string
+
+/** A capability name, as the server's catalogue spells it. */
+export type Capability = string
 
 export interface Project {
   name: string
@@ -34,6 +48,15 @@ export interface Project {
   org?: string
   // The current user's role in this project. Admins see 'owner' everywhere.
   role: ProjectRole
+  /**
+   * What the current user may do in this project.
+   *
+   * Always present and always a list: an empty one means they may do nothing,
+   * which is what a role this build does not know resolves to. Gate on this
+   * rather than on `role`, so a console older than its cluster hides a control
+   * it cannot reason about instead of offering one the API will refuse.
+   */
+  capabilities: Capability[]
   environments: Environment[]
   // Effective environment cap for the project's tier. Adding an environment
   // beyond this needs a cluster admin to raise the tier or the limit.
@@ -42,6 +65,24 @@ export interface Project {
 
 export async function fetchProjects(): Promise<Project[]> {
   const { data } = await client.get<Project[]>('/projects')
+  return data
+}
+
+/** A role a member may be given, and what it may do. */
+export interface ProjectRoleOption {
+  name: ProjectRole
+  capabilities: Capability[]
+}
+
+/**
+ * The roles this cluster offers, least to most.
+ *
+ * Asked rather than assumed: the console used to hold the list itself, so a
+ * cluster that gained a role could not offer it and one that lost a role would
+ * still have shown it.
+ */
+export async function fetchProjectRoles(): Promise<ProjectRoleOption[]> {
+  const { data } = await client.get<ProjectRoleOption[]>('/project-roles')
   return data
 }
 

@@ -8,6 +8,7 @@ import * as projectsApi from '@/api/projects'
 vi.mock('@/api/projects', async importOriginal => ({
   ...(await importOriginal<typeof projectsApi>()),
   fetchMembers: vi.fn(),
+  fetchProjectRoles: vi.fn().mockResolvedValue([]),
   setMember: vi.fn(),
   removeMember: vi.fn(),
 }))
@@ -77,5 +78,37 @@ describe('ProjectMembers', () => {
 
     expect(wrapper.text()).toContain('acme.support')
     expect(wrapper.text()).toContain('no access')
+  })
+})
+
+// The role dropdown used to be a literal in this component, so a cluster that
+// gained a role could not offer it and one that dropped a role would still have
+// shown it. It is asked for now.
+describe('the role dropdown', () => {
+  it('offers the roles the cluster reports, including ones this build never knew', async () => {
+    vi.mocked(projectsApi.fetchProjectRoles).mockResolvedValue([
+      { name: 'viewer', capabilities: ['project.read'] },
+      { name: 'auditor', capabilities: ['project.read', 'workloads.read'] },
+    ])
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    const options = wrapper.findAll('option').map(o => o.attributes('value'))
+    expect(options).toContain('auditor')
+    expect(options).not.toContain('deployer')
+  })
+
+  // A console newer than its cluster: the endpoint is not there yet. An empty
+  // picker would mean nobody can be added at all, so it falls back to the three
+  // roles every cluster that predates the endpoint has.
+  it('falls back to the built-in roles when the cluster cannot be asked', async () => {
+    vi.mocked(projectsApi.fetchProjectRoles).mockRejectedValue(new Error('nope'))
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    const options = wrapper.findAll('option').map(o => o.attributes('value'))
+    expect(options).toContain('viewer')
+    expect(options).toContain('deployer')
+    expect(options).toContain('owner')
   })
 })

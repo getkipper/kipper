@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { capabilitiesForRole } from '@/utils/testCapabilities'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia } from 'pinia'
@@ -14,6 +15,7 @@ vi.mock('@/api/projects', async importOriginal => ({
   ...(await importOriginal<typeof projectsApi>()),
   fetchQuota: vi.fn(),
   fetchMembers: vi.fn(),
+  fetchProjectRoles: vi.fn().mockResolvedValue([]),
 }))
 vi.mock('@/api/apikeys', async importOriginal => ({
   ...(await importOriginal<typeof apikeysApi>()),
@@ -30,7 +32,7 @@ const fetchPlans = vi.mocked(apikeysApi.fetchPlans)
 const project: Project = {
   name: 'shop',
   display_name: 'Web Shop',
-  role: 'owner',
+  role: 'owner', capabilities: capabilitiesForRole('owner'),
   environments: [
     { name: 'test', namespace: 'shop-test', apps: [], status: 'active', order: '0', owned: true },
     { name: 'prod', namespace: 'shop-prod', apps: [], status: 'active', order: '1', owned: true },
@@ -92,5 +94,33 @@ describe('ProjectSettingsPanel', () => {
     expect(closeButton).toBeDefined()
     await closeButton!.trigger('click')
     expect(wrapper.emitted('close')).toBeTruthy()
+  })
+})
+
+// The panel used to decide what to offer by comparing the role name to 'owner'
+// and 'deployer'. It asks what the caller may do now, which is the same thing
+// the API gates the matching routes on — and the only thing that can answer for
+// a role this build does not enumerate.
+describe('gating on capabilities rather than the role name', () => {
+  async function membersTabFor(capabilities: string[]) {
+    const wrapper = mount(ProjectSettingsPanel, {
+      props: { project: { ...project, role: 'auditor', capabilities } },
+      global: { plugins: [createPinia()], stubs: { teleport: true } },
+    })
+    await flushPromises()
+    const tab = wrapper.findAll('button').find(b => b.text() === 'Members')
+    await tab!.trigger('click')
+    await flushPromises()
+    return wrapper.findComponent(ProjectMembers)
+  }
+
+  it('offers member management to a role it has never heard of that carries it', async () => {
+    const members = await membersTabFor(['project.read', 'members.read', 'members.manage'])
+    expect(members.props('canManage')).toBe(true)
+  })
+
+  it('withholds it from a role that does not, whatever the role is called', async () => {
+    const members = await membersTabFor(['project.read', 'members.read'])
+    expect(members.props('canManage')).toBe(false)
   })
 })

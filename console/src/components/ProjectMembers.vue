@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { Users, Trash2, Plus } from 'lucide-vue-next'
-import type { ProjectMember, ProjectRole } from '@/api/projects'
+import { fetchProjectRoles, type ProjectMember, type ProjectRole, type ProjectRoleOption } from '@/api/projects'
 import { useProjectMembersStore } from '@/stores/projectMembers'
 import { useToast } from '@/composables/useToast'
 import { useModal } from '@/composables/useModal'
@@ -23,10 +23,20 @@ const newEmail = ref('')
 const newRole = ref<ProjectRole>('deployer')
 const saving = ref(false)
 
-const roleLabels: Record<ProjectRole, string> = {
+// The roles this cluster offers, asked for rather than assumed. A console
+// older than its cluster shows the ones it was told about instead of offering
+// one that no longer exists.
+const roles = ref<ProjectRoleOption[]>([])
+
+// Names the three built-ins the way the console always has. A role that is not
+// one of them shows its own name, which is the only honest thing to call it.
+const builtInLabels: Record<string, string> = {
   owner: 'Owner',
   deployer: 'Can deploy',
   viewer: 'View only',
+}
+function roleLabel(role: ProjectRole): string {
+  return builtInLabels[role] ?? role
 }
 
 const sortedMembers = computed(() =>
@@ -35,6 +45,23 @@ const sortedMembers = computed(() =>
 
 function load() {
   return store.loadMembers(props.project)
+}
+
+async function loadRoles() {
+  try {
+    roles.value = await fetchProjectRoles()
+  } catch {
+    // A console newer than its cluster: the endpoint is not there yet, and an
+    // empty picker would mean nobody can be added at all until the cluster
+    // catches up. The three built-ins are what every cluster that predates the
+    // endpoint has, so they are the honest answer for one — a fallback for a
+    // server that cannot be asked, not a second opinion about what roles exist.
+    roles.value = [
+      { name: 'viewer', capabilities: [] },
+      { name: 'deployer', capabilities: [] },
+      { name: 'owner', capabilities: [] },
+    ]
+  }
 }
 
 async function add() {
@@ -80,7 +107,10 @@ function remove(member: ProjectMember) {
   })
 }
 
-onMounted(load)
+onMounted(() => {
+  void load()
+  void loadRoles()
+})
 watch(() => props.project, load)
 </script>
 
@@ -125,13 +155,13 @@ watch(() => props.project, load)
             @change="changeRole(member, ($event.target as HTMLSelectElement).value as ProjectRole)"
             class="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 focus:border-kipper-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
           >
-            <option v-for="(label, value) in roleLabels" :key="value" :value="value">{{ label }}</option>
+            <option v-for="role in roles" :key="role.name" :value="role.name">{{ roleLabel(role.name) }}</option>
           </select>
           <span
             v-else
             class="rounded-full bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300"
           >
-            {{ roleLabels[member.role as ProjectRole] }}
+            {{ roleLabel(member.role) }}
           </span>
           <button
             v-if="canManage"
@@ -158,7 +188,7 @@ watch(() => props.project, load)
         :disabled="saving"
         class="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-900 focus:border-kipper-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
       >
-        <option v-for="(label, value) in roleLabels" :key="value" :value="value">{{ label }}</option>
+        <option v-for="role in roles" :key="role.name" :value="role.name">{{ roleLabel(role.name) }}</option>
       </select>
       <button
         type="submit"

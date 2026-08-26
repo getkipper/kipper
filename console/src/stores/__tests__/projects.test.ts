@@ -1,3 +1,4 @@
+import { capabilitiesForRole } from '@/utils/testCapabilities'
 import { setActivePinia, createPinia } from 'pinia'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useProjectsStore } from '../projects'
@@ -19,7 +20,7 @@ describe('projects store', () => {
 
   it('loads projects successfully', async () => {
     vi.mocked(api.fetchProjects).mockResolvedValue([
-      { name: 'blog', role: 'owner', env_limit: 4, environments: [
+      { name: 'blog', role: 'owner', capabilities: capabilitiesForRole('owner'), env_limit: 4, environments: [
         { name: 'test', namespace: 'blog-test', status: 'Active', apps: [], order: '0', owned: true },
         { name: 'prod', namespace: 'blog-prod', status: 'Active', apps: [], order: '1', owned: true },
       ]},
@@ -36,7 +37,7 @@ describe('projects store', () => {
   it('adds a project and reloads', async () => {
     vi.mocked(api.createProject).mockResolvedValue()
     vi.mocked(api.fetchProjects).mockResolvedValue([
-      { name: 'staging', role: 'owner', env_limit: 4, environments: [{ name: 'default', namespace: 'staging', status: 'Active', apps: [], order: '0', owned: true }] },
+      { name: 'staging', role: 'owner', capabilities: capabilitiesForRole('owner'), env_limit: 4, environments: [{ name: 'default', namespace: 'staging', status: 'Active', apps: [], order: '0', owned: true }] },
     ])
 
     const store = useProjectsStore()
@@ -48,7 +49,7 @@ describe('projects store', () => {
 
   it('removes a project and clears selection if it was current', async () => {
     vi.mocked(api.fetchProjects).mockResolvedValue([
-      { name: 'staging', role: 'owner', env_limit: 4, environments: [{ name: 'default', namespace: 'staging', status: 'Active', apps: [], order: '0', owned: true }] },
+      { name: 'staging', role: 'owner', capabilities: capabilitiesForRole('owner'), env_limit: 4, environments: [{ name: 'default', namespace: 'staging', status: 'Active', apps: [], order: '0', owned: true }] },
     ])
     vi.mocked(api.deleteProject).mockResolvedValue()
 
