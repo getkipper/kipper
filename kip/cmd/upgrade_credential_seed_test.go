@@ -866,8 +866,10 @@ func shortQuiescence(t *testing.T) {
 // every fixture that closes a migration needs both.
 const currentRevision = "abc123"
 
-func consoleAPIDeployment() *appsv1.Deployment {
-	updated := int32(1)
+func consoleAPIDeployment() *appsv1.Deployment { return consoleAPIDeploymentOf(1) }
+
+func consoleAPIDeploymentOf(replicas int32) *appsv1.Deployment {
+	updated := replicas
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: consoleAPIName, Namespace: "kipper-system", UID: "console-api-uid"},
 		Spec: appsv1.DeploymentSpec{
@@ -900,13 +902,25 @@ func consoleAPIPod(name string, going bool) *corev1.Pod {
 	return consoleAPIPodOfRevision(name, currentRevision, going)
 }
 
+// The image every fixture pod reports. One image across the live pods is what
+// makes the namespace-wide build stamp vouch for all of them rather than for
+// whichever pod started first.
+const currentImage = "ghcr.io/example/console-api@sha256:aaaa"
+
 func consoleAPIPodOfRevision(name, hash string, going bool) *corev1.Pod {
+	return consoleAPIPodRunning(name, hash, "containerd://"+currentImage, going)
+}
+
+func consoleAPIPodRunning(name, hash, image string, going bool) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: "kipper-system",
 			Labels: map[string]string{"app": consoleAPIName, podTemplateHashLabel: hash},
 		},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		Status: corev1.PodStatus{
+			Phase:             corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{Name: consoleAPIName, ImageID: image}},
+		},
 	}
 	if going {
 		now := metav1.Now()
@@ -1282,4 +1296,195 @@ func TestUpgradeNamesAnApprovedCredentialWhenTheListIsEmptied(t *testing.T) {
 	assert.Contains(t, out.String(), "no longer there",
 		"an approval with nothing left to write into was not reported")
 	assert.Contains(t, out.String(), "forge", "the credential the approval named was not reported")
+}
+
+// A rollout that reports ready can still be a replica short: the pod that
+// stamped can go, and its replacement may not have appeared yet. Reading that
+// as a finished rollout would decide the lists against a fleet nobody has
+// counted.
+func TestUpgradeHoldsTheMigrationOpenWhileAReplicaIsMissing(t *testing.T) {
+	shortQuiescence(t)
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		consoleAPIDeploymentOf(2),
+		consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api-one", false),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+	var out bytes.Buffer
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &out, credentialGrants{mayClose: true}))
+
+	assert.False(t, seeded(t, clientset),
+		"the migration was closed with one of the console-api's two pods missing")
+	assert.Nil(t, storedEntries(t, clientset)[0].AllowedProjects,
+		"a credential was decided by a pass that had not counted the fleet")
+}
+
+// Filling on the closing pass is filling something twice: the pass before the
+// rollout already wrote it, so the list went back to nobody having decided it
+// in between. A revocation made in that window looks identical from here, and
+// this line is the only place it surfaces.
+func TestUpgradeSaysAGrantItRefilledMayHaveUndoneARevocation(t *testing.T) {
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api", false),
+		namespaceOfProject("shop-prod", "shop"),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+	var out bytes.Buffer
+	approved := map[string][]string{"forge": {"shop"}}
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &out, approving(t, clientset, approved, true)))
+
+	require.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"))
+	assert.Contains(t, out.String(), "revoke it again",
+		"a grant written after the rollout was reported as an ordinary first grant")
+}
+
+// The repair has already said precisely why it left a list alone, with the
+// projects and the commands. Following that with the generic notice tells the
+// operator the wrong cause for the same credential in the same breath.
+func TestUpgradeDoesNotRepeatWhatTheRepairAlreadyExplained(t *testing.T) {
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemMigrated(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api", false),
+		namespaceOfProject("shop-prod", "shop"),
+		sharedCredentialSecret(t, curatedForge("shop")),
+	)
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), owningProject("shop-prod"))
+	var out bytes.Buffer
+
+	grants, err := credentialSeedConsent(ctx, clientset, dyn, &bytes.Buffer{}, false, false, refuseToConfirm(t))
+	require.NoError(t, err)
+
+	require.NoError(t, sharedcred.Update(ctx, clientset, func(entries []sharedcred.Entry) ([]sharedcred.Entry, error) {
+		entries[0].AllowedProjects = nil
+		entries[0].Server = "git.other.example"
+		return entries, nil
+	}))
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &out, grants))
+
+	printed := out.String()
+	assert.Contains(t, printed, "bound to a different server", "the repair did not explain the refusal")
+	assert.NotContains(t, printed, "The allowed projects are gone",
+		"the same credential was given a second, contradicting explanation")
+}
+
+// The revision says which template a pod was made from, not which build the tag
+// resolved to when it started. Two pods of one ReplicaSet can be running
+// different ones, and the stamp that one of them wrote says nothing about the
+// other, which may still be the writer that clears every allow-list.
+func TestUpgradeHoldsTheMigrationOpenWhilePodsRunDifferentBuilds(t *testing.T) {
+	shortQuiescence(t)
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		consoleAPIDeploymentOf(2),
+		consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api-new", false),
+		consoleAPIPodRunning("console-api-stale", currentRevision,
+			"containerd://ghcr.io/example/console-api@sha256:bbbb", false),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+	var out bytes.Buffer
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &out, credentialGrants{mayClose: true}))
+
+	assert.False(t, seeded(t, clientset),
+		"the migration was closed while a pod of the same revision was running another build")
+}
+
+// Two runtimes name one image differently either side of "://", and that
+// difference says nothing about what is running.
+func TestUpgradeIgnoresTheRuntimePrefixOnAnImage(t *testing.T) {
+	shortQuiescence(t)
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		consoleAPIDeploymentOf(2),
+		consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPodRunning("console-api-one", currentRevision, "containerd://"+currentImage, false),
+		consoleAPIPodRunning("console-api-two", currentRevision, "docker-pullable://"+currentImage, false),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &bytes.Buffer{}, credentialGrants{mayClose: true}))
+
+	assert.True(t, seeded(t, clientset),
+		"one image named by two runtimes was read as two builds")
+}
+
+// A pod whose node has not reported what it is running is a pod the upgrade
+// cannot vouch for, and deciding is permanent.
+func TestUpgradeHoldsTheMigrationOpenWhileAPodReportsNoImage(t *testing.T) {
+	shortQuiescence(t)
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		consoleAPIDeployment(),
+		consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPodRunning("console-api-quiet", currentRevision, "", false),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &bytes.Buffer{}, credentialGrants{mayClose: true}))
+
+	assert.False(t, seeded(t, clientset),
+		"the migration was closed while a pod had not said what it was running")
+}
+
+// An autoscaler moving the replica count during the wait must not leave a
+// converged Deployment failing a comparison it can never satisfy.
+func TestUpgradeClosesWhenTheFleetHasGrownSinceTheWaitBegan(t *testing.T) {
+	shortQuiescence(t)
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		consoleAPIDeploymentOf(1),
+		consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api-one", false),
+		consoleAPIPod("console-api-two", false),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &bytes.Buffer{}, credentialGrants{mayClose: true}))
+
+	assert.True(t, seeded(t, clientset),
+		"a surge of current-revision pods with nothing lingering was read as a rollout still in progress")
+}
+
+// An autoscaler moving the replica count while the wait is polling. Reading the
+// target once would leave a Deployment that has since converged failing a
+// comparison it can never satisfy, and the upgrade would wait that out on a
+// healthy cluster.
+func TestUpgradeRereadsTheReplicaTargetWhileItWaits(t *testing.T) {
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		consoleAPIDeploymentOf(2),
+		consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api-one", false),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+	// The first read sees the fleet it was scaled to; by the second, the
+	// autoscaler has taken it down to the one pod that is actually there.
+	reads := 0
+	clientset.PrependReactor("get", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+		reads++
+		if reads == 1 {
+			return true, consoleAPIDeploymentOf(2), nil
+		}
+		return true, consoleAPIDeploymentOf(1), nil
+	})
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &bytes.Buffer{}, credentialGrants{mayClose: true}))
+
+	assert.Greater(t, reads, 1, "the replica target was read once and never again")
+	assert.True(t, seeded(t, clientset),
+		"a Deployment that had converged to one replica was still measured against two")
 }

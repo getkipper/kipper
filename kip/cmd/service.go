@@ -669,8 +669,8 @@ func sayWhatBecameOfTheVolume(out io.Writer, name string, volumes service.DataVo
 	say(out, "\n  ✔  Service %q deleted, and its volume with it\n\n", name)
 }
 
-// ownedBy says whether the reconciler made this object for the service that was
-// just created.
+// ownedBy says whether this object was made for the object that owns it, by the
+// controller reference rather than by name.
 func ownedBy(object metav1.Object, service types.UID) bool {
 	owner := metav1.GetControllerOf(object)
 	return owner != nil && owner.UID == service

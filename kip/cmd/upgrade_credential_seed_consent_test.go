@@ -12,8 +12,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/getkipper/kipper/controller/pkg/sharedcred"
 	"github.com/getkipper/kipper/kip/internal/deployer"
@@ -117,7 +119,7 @@ func TestDecideCredentialSeedConsent(t *testing.T) {
 // The nothing-referenced path is the reason the migration can still close
 // automatically: a cluster whose undecided credentials are referenced by no
 // app has no permission to invent, and asking every upgrade forever is what
-// this exists not to do. The wrapper signals it with a non-nil empty map.
+// this exists not to do. The wrapper signals it by letting the run close.
 func TestSeedConsentClosesAutomaticallyWhenNothingIsReferenced(t *testing.T) {
 	clientset := k8sfake.NewClientset(
 		kipperSystemUpgraded(),
@@ -356,8 +358,9 @@ func gitAppNamed(namespace, name, credential string) *unstructured.Unstructured 
 	}}
 }
 
-// A cluster already migrated is not asked. The wrapper returns the auto empty
-// map and prints nothing, whichever way the flag and the TTY go.
+// A cluster already migrated is not asked, and nothing is offered up to be
+// closed again: it prints nothing and approves nothing, whichever way the flag
+// and the TTY go.
 //
 // It does still record what the allow-lists held. That cluster is the commonest
 // one there is — v0.14.0 auto-seeded most legacy clusters — and its lists can be
@@ -534,4 +537,37 @@ func TestSeedConsentReportsAMissedGrantForANamespaceNoRecordCovers(t *testing.T)
 		"a namespace whose project could not be proven was not named as a missed grant")
 	assert.Contains(t, printed, "kip credentials allow forge --project attacker",
 		"the notice does not say how to put it right")
+}
+
+// A migrated cluster did not read this list at all before the repair existed,
+// so a blip reading it must not become a new way for an upgrade to abort on a
+// working cluster. Saying it was skipped keeps that from passing as a clean
+// bill of health.
+func TestSeedConsentSurvivesAFailureToReadTheListOnAMigratedCluster(t *testing.T) {
+	clientset := k8sfake.NewClientset(kipperSystemMigrated())
+	clientset.PrependReactor("get", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("the apiserver is having a moment")
+	})
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme())
+	var out bytes.Buffer
+
+	grants, err := credentialSeedConsent(context.Background(), clientset, dyn, &out, false, false, refuseToConfirm(t))
+
+	require.NoError(t, err, "an advisory read failure aborted the upgrade on a migrated cluster")
+	assert.Empty(t, grants.decided, "a failed read was recorded as a cluster with nothing decided")
+	assert.Contains(t, out.String(), "Could not record", "a skipped check passed as a clean run")
+}
+
+// Before the migration is finished the same read is load-bearing: an unreadable
+// list must not read as nothing to decide.
+func TestSeedConsentStillFailsOnAnUnreadableListBeforeTheMigration(t *testing.T) {
+	clientset := k8sfake.NewClientset(kipperSystemUpgraded())
+	clientset.PrependReactor("get", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("the apiserver is having a moment")
+	})
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme())
+
+	_, err := credentialSeedConsent(context.Background(), clientset, dyn, &bytes.Buffer{}, false, false, refuseToConfirm(t))
+
+	require.Error(t, err, "an unreadable list read as a cluster with nothing to decide")
 }

@@ -89,7 +89,7 @@ func closeSharedCredentialGrants(ctx context.Context, clientset kubernetes.Inter
 	}
 	if done {
 		repairErasedAllowLists(ctx, clientset, out, grants.decided)
-		return reportClearedAllowLists(ctx, clientset, out)
+		return reportClearedAllowLists(ctx, clientset, out, grants.decided)
 	}
 	if !grants.mayClose {
 		repairErasedAllowLists(ctx, clientset, out, grants.decided)
@@ -252,6 +252,18 @@ func fillSharedCredentialGrants(
 		projects := append([]string(nil), approved[name]...)
 		sort.Strings(projects)
 		_, _ = fmt.Fprintf(out, "  ✔  Shared credential %s now allows %s\n", name, strings.Join(projects, ", "))
+		if closing {
+			// Written after the rollout, which usually means written twice: the
+			// pass before it wrote the same thing, and the list went back to
+			// nobody having decided it in between. A revocation made in that
+			// window is indistinguishable from here, and this is the only place
+			// it surfaces. The wording stops at what is certain, because the
+			// same line covers a credential that was missing when the first
+			// pass ran and came back during the rollout, which was never
+			// written twice at all.
+			_, _ = fmt.Fprintf(out, "      This was written after the rollout. If you revoked one of its projects\n"+
+				"      while the upgrade was running, revoke it again.\n")
+		}
 	}
 	reportRepairedAllowLists(out, decided, restored, moved, replaced)
 	reportApprovedButMoved(out, changedHands)
@@ -501,7 +513,12 @@ func reportConsentDeclined(ctx context.Context, clientset kubernetes.Interface, 
 // it would be the fail-open half of the same coin: a project revoked while its
 // app still names the credential is exactly this shape, and would be granted
 // again by a repair.
-func reportClearedAllowLists(ctx context.Context, clientset kubernetes.Interface, out io.Writer) error {
+//
+// explained is what this run has already accounted for: a credential the repair
+// looked at and either wrote back or refused by name. Following that with this
+// notice would give the same credential a second and contradicting cause in the
+// same breath, so what is left here is a list cleared before the upgrade began.
+func reportClearedAllowLists(ctx context.Context, clientset kubernetes.Interface, out io.Writer, explained map[string]sharedcred.Decision) error {
 	stored, err := sharedcred.Load(ctx, clientset)
 	if err != nil {
 		// Advisory, and the migration is long finished, so a blip reading the
@@ -513,6 +530,13 @@ func reportClearedAllowLists(ctx context.Context, clientset kubernetes.Interface
 	var cleared []string
 	for _, entry := range stored {
 		if entry.AllowedProjects == nil {
+			if _, said := explained[entry.Name]; said {
+				// The repair has just been over this one and said precisely why
+				// it left the list alone, with the projects and the commands.
+				// Following that with the generic notice tells the operator the
+				// wrong cause for the same credential in the same breath.
+				continue
+			}
 			cleared = append(cleared, entry.Name)
 		}
 	}
@@ -769,11 +793,22 @@ const (
 // silently replaces everything this pass just decided.
 //
 // What it waits for is every pod under the Deployment's selector belonging to
-// the revision the Deployment is currently rolling out, and none of them on the
-// way out. The revision is read from the ReplicaSet rather than counted: a count
-// says how many pods there should be, not which ones are there, so a new pod
-// vanishing while an old one keeps running leaves the count unchanged and the
-// old writer alive.
+// the revision the Deployment is currently rolling out, none of them on the way
+// out, and as many of them as the Deployment asks for. The revision is read from
+// the ReplicaSet rather than counted, because a count says how many pods there
+// should be and not which ones are there; the replica count is then checked as
+// well, so a replacement that has not appeared yet cannot read as a rollout that
+// has finished.
+//
+// What this cannot establish is which build a pod of the current revision is
+// running. The image is a mutable tag, so two pods made from one template can
+// have resolved it differently, and the build stamp is written once for the
+// namespace by whichever pod started first. Telling them apart needs evidence
+// from the pod itself, which is a console-api change rather than one here.
+// Comparing the images they report does not stand in for it: the same release
+// has a different digest per architecture and a different prefix per runtime, so
+// the comparison fails on healthy clusters while still not proving the surviving
+// pod is the one that stamped.
 func waitForConsoleAPIQuiescence(ctx context.Context, clientset kubernetes.Interface) error {
 	// The Deployment is what says which pods are the console-api's and which
 	// revision is current, so without it there is nothing to ask. It is not
@@ -789,7 +824,13 @@ func waitForConsoleAPIQuiescence(ctx context.Context, clientset kubernetes.Inter
 	selector := metav1.FormatLabelSelector(dep.Spec.Selector)
 	deadline := time.Now().Add(quiescenceWait)
 	for {
-		current, err := currentConsoleAPIRevision(ctx, clientset, dep, selector)
+		// Re-read every poll. The replica count is the thing being compared
+		// against, and an autoscaler moving it under a target read once would
+		// leave a converged Deployment failing a comparison it can never satisfy.
+		if dep, err = clientset.AppsV1().Deployments(kipperSystemNS).Get(ctx, consoleAPIName, metav1.GetOptions{}); err != nil {
+			return fmt.Errorf("could not tell whether the console-api being replaced has stopped: reading %s: %w", consoleAPIName, err)
+		}
+		hash, err := currentConsoleAPIRevision(ctx, clientset, dep, selector)
 		if err != nil {
 			return err
 		}
@@ -797,13 +838,27 @@ func waitForConsoleAPIQuiescence(ctx context.Context, clientset kubernetes.Inter
 		if err != nil {
 			return fmt.Errorf("listing %s pods to wait for the one it replaces to stop: %w", consoleAPIName, err)
 		}
-		lingering := lingeringConsoleAPIPods(pods.Items, current)
-		if lingering == 0 {
+		lingering, current := consoleAPIPodsInPlay(pods.Items, hash)
+		want := int(wantReplicas(dep))
+		running := consoleAPIBuildsInPlay(pods.Items, hash)
+		// current >= want rather than ==: with nothing lingering, every pod left
+		// is this revision's and staying, so more of them than the Deployment
+		// asks for is a surge rather than a writer nobody has accounted for.
+		if lingering == 0 && current >= want && len(running) < 2 && !running[""] {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%d console-api pod(s) from before the upgrade were still running after %s, and one of them can still clear a shared credential's allowed projects",
-				lingering, quiescenceWait)
+			switch {
+			case lingering > 0:
+				return fmt.Errorf("%d console-api pod(s) from before the upgrade were still running after %s, and one of them can still clear a shared credential's allowed projects",
+					lingering, quiescenceWait)
+			case current < want:
+				return fmt.Errorf("only %d of %d console-api pods were up after %s, so whether the one being replaced has stopped is unknown",
+					current, want, quiescenceWait)
+			default:
+				return fmt.Errorf("the console-api pods were still reporting %d different images after %s, so whether one of them is the build that clears a shared credential's allowed projects is unknown",
+					len(running), quiescenceWait)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -844,8 +899,57 @@ func currentConsoleAPIRevision(ctx context.Context, clientset kubernetes.Interfa
 	return hash, nil
 }
 
-// lingeringConsoleAPIPods counts the pods that are not this revision's, plus
-// any pod on its way out.
+// consoleAPIBuildsInPlay is the set of images the console-api pods of this
+// revision are actually running.
+//
+// The revision says which template a pod was made from. The image is a mutable
+// tag, so two pods of one ReplicaSet can have resolved it to different builds,
+// and the build stamp is written once for the namespace by whichever started
+// first: it vouches for that pod and not for its neighbour. One image across
+// them all is what makes the stamp cover the fleet rather than one pod of it.
+//
+// A container that has not reported its image counts as its own answer, so a pod
+// nobody can identify holds the wait open rather than passing through it.
+//
+// What this cannot rule out is one image legitimately reporting two ids. The
+// runtime prefix is stripped, which is the difference that shows up between
+// container runtimes; a fleet whose nodes resolved one tag to per-architecture
+// digests would still wait this out and leave the migration open, loudly, with
+// its builds unaffected. Kipper installs k3s and one containerd on every node,
+// and pins an amd64 platform image, so that is not a shape it produces today.
+func consoleAPIBuildsInPlay(pods []corev1.Pod, hash string) map[string]bool {
+	running := map[string]bool{}
+	for i := range pods {
+		if pods[i].Status.Phase == corev1.PodSucceeded || pods[i].Status.Phase == corev1.PodFailed {
+			continue
+		}
+		if pods[i].DeletionTimestamp != nil || pods[i].Labels[podTemplateHashLabel] != hash {
+			continue
+		}
+		running[consoleAPIImage(pods[i])] = true
+	}
+	return running
+}
+
+// consoleAPIImage is the image the pod's console-api container reports, without
+// the runtime's scheme. Two runtimes name one image differently either side of
+// "://", and that difference says nothing about what is running.
+func consoleAPIImage(pod corev1.Pod) string {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name != consoleAPIName {
+			continue
+		}
+		if _, ref, found := strings.Cut(status.ImageID, "://"); found {
+			return ref
+		}
+		return status.ImageID
+	}
+	return ""
+}
+
+// consoleAPIPodsInPlay counts what is running under the Deployment's selector:
+// the pods that are not this revision's or are on their way out, and the pods
+// that are this revision's and staying.
 //
 // A pod carrying another revision's hash is one the Deployment has replaced and
 // which is still running, which is exactly the writer this waits for. A pod on
@@ -857,15 +961,21 @@ func currentConsoleAPIRevision(ctx context.Context, clientset kubernetes.Interfa
 // control plane has lost touch with the node, which is the absence of an answer
 // rather than the answer that nothing is running there, and what this has to
 // establish is that nothing can write.
-func lingeringConsoleAPIPods(pods []corev1.Pod, current string) int {
-	lingering := 0
+//
+// The second count is what the caller compares against the replica count. A
+// replacement that has not appeared yet leaves the pods this revision is
+// supposed to have short, and waiting for them is what stops the pass reading a
+// half-finished rollout as a finished one.
+func consoleAPIPodsInPlay(pods []corev1.Pod, hash string) (lingering, current int) {
 	for i := range pods {
 		if pods[i].Status.Phase == corev1.PodSucceeded || pods[i].Status.Phase == corev1.PodFailed {
 			continue
 		}
-		if pods[i].DeletionTimestamp != nil || pods[i].Labels[podTemplateHashLabel] != current {
+		if pods[i].DeletionTimestamp != nil || pods[i].Labels[podTemplateHashLabel] != hash {
 			lingering++
+			continue
 		}
+		current++
 	}
-	return lingering
+	return lingering, current
 }
