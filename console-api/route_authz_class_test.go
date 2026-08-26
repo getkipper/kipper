@@ -231,6 +231,7 @@ var routeAuthz = map[string]authzDeclaration{
 	"GET /api/v1/nodes":                                               {class: classGlobalRole},
 	"GET /api/v1/platform":                                            {class: classAuthenticated},
 	"GET /api/v1/platform/components":                                 {class: classAuthenticated},
+	"GET /api/v1/project-roles":                                       {class: classAuthenticated},
 	"GET /api/v1/projects":                                            {class: classAuthenticated},
 	"GET /api/v1/projects/{name}/api-keys":                            {class: classProjectCapability, capability: "project.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/api-keys/{key}/usage":                {class: classProjectCapability, capability: "project.read", scope: scopeNamespace},

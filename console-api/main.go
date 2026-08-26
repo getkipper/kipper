@@ -43,6 +43,7 @@ import (
 	"github.com/getkipper/kipper/console-api/share"
 	"github.com/getkipper/kipper/console-api/uisession"
 	"github.com/getkipper/kipper/console-api/ws"
+	"github.com/getkipper/kipper/controller/pkg/capability"
 )
 
 // controllerLogger adapts console-api's slog handler for controller-runtime.
@@ -128,9 +129,6 @@ func main() {
 	// orphaned by a console-api restart never outlives its build.
 	go builder.RunBuildJanitor(context.Background(), clientset, 30*time.Minute, 3*time.Hour)
 
-	// Start the CRD controller manager
-	go startControllerManager(restConfig)
-
 	// Keep the cluster's kipper.run subdomain alive on the gateway.
 	// No-op when KIPPER_RUN_DOMAIN / CLUSTER_HOST aren't set, so this
 	// is safe for clusters that don't use the kipper.run gateway.
@@ -143,6 +141,12 @@ func main() {
 	if !handlers.ProjectResolverWired() {
 		log.Fatal("project access resolver not wired: refusing to start")
 	}
+
+	// After the router, because the manager hands the resolver its cached
+	// client once the informers are warm and buildRouter is what publishes the
+	// resolver. Started before it, the two race and the loser is the swap,
+	// which then never happens and says nothing.
+	go startControllerManager(restConfig, crClient)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -465,11 +469,12 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 		// ?namespace=; membership replaces the cluster-wide role check so a
 		// project member reaches their own project and a non-member does not.
 		qscope := middleware.ProjectScopeQuery(projectAccess)
-		nsRead := func(h http.HandlerFunc) http.HandlerFunc {
-			return qscope(h).ServeHTTP
-		}
-		nsDeployer := func(h http.HandlerFunc) http.HandlerFunc {
-			return qscope(middleware.RequireProjectRole(middleware.ProjectRoleDeployer)(h)).ServeHTTP
+		// The same gate as cap below, for the routes that name their namespace
+		// in ?namespace= rather than in the path.
+		nsCap := func(name capability.Name) func(http.HandlerFunc) http.HandlerFunc {
+			return func(h http.HandlerFunc) http.HandlerFunc {
+				return qscope(middleware.RequireCapability(name)(h)).ServeHTTP
+			}
 		}
 
 		// Raw node inventory carries node names, roles, kubelet versions, and
@@ -528,28 +533,28 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 		r.Put("/jobs/{name}/resources", jobHandler.UpdateResources)
 
 		// bind/link carry their namespace in the request body, so each handler
-		// enforces deploy access on that namespace itself.
+		// enforces kipper.write on that namespace itself.
 		r.Post("/bind", svcHandler.Bind)
 		r.Post("/unbind", svcHandler.Unbind)
 		r.Post("/link", apps.Link)
 		r.Post("/unlink", apps.Unlink)
 
 		// Service list filters to the caller's projects in the handler; create
-		// enforces deploy access on the target namespace from the request body.
+		// enforces kipper.write on the target namespace from the request body.
 		// The service catalogue carries no namespace, so it stays open to any
 		// signed-in user. Every /services/{name} route below identifies its
-		// namespace through ?namespace= and is scoped by nsRead/nsDeployer.
+		// namespace through ?namespace= and is scoped by nsCap.
 		r.Get("/services", svcHandler.List)
 		r.Post("/services", svcHandler.Create)
 		r.Get("/service-types", svcHandler.Types)
-		r.Get("/services/{name}", nsRead(svcHandler.Info))
-		r.Delete("/services/{name}", nsDeployer(svcHandler.Delete))
-		r.Get("/services/{name}/logs", nsRead((&handlers.ServiceLogs{Client: clientset}).Query))
-		r.Get("/services/{name}/resources", nsRead(svcHandler.GetResources))
-		r.Put("/services/{name}/resources", nsDeployer(svcHandler.UpdateResources))
-		r.Get("/services/{name}/rollout", nsRead(svcHandler.RolloutStatus))
-		r.Post("/services/{name}/migrate-data", nsDeployer(svcHandler.MigrateData))
-		r.Get("/services/{name}/migrate-data/status", nsRead(svcHandler.MigrateDataStatus))
+		r.Get("/services/{name}", nsCap("kipper.read")(svcHandler.Info))
+		r.Delete("/services/{name}", nsCap("kipper.write")(svcHandler.Delete))
+		r.Get("/services/{name}/logs", nsCap("pods.logs.read")((&handlers.ServiceLogs{Client: clientset}).Query))
+		r.Get("/services/{name}/resources", nsCap("workloads.read")(svcHandler.GetResources))
+		r.Put("/services/{name}/resources", nsCap("kipper.write")(svcHandler.UpdateResources))
+		r.Get("/services/{name}/rollout", nsCap("workloads.read")(svcHandler.RolloutStatus))
+		r.Post("/services/{name}/migrate-data", nsCap("kipper.write")(svcHandler.MigrateData))
+		r.Get("/services/{name}/migrate-data/status", nsCap("pods.logs.read")(svcHandler.MigrateDataStatus))
 
 		// Share links hand a service UI to someone outside the cluster's
 		// user base — minting, listing, and revoking are admin-only.
@@ -570,35 +575,40 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 		// code within the caches' TTLs. Admin-only; accepts either audience so
 		// `kip auth sessions revoke-all` can drive it.
 		r.Post("/sessions/revoke-all", admin(authHandler.RevokeAllUISessions))
-		r.Post("/services/{name}/diagnose", nsDeployer((&handlers.AIDiagnoseService{Client: clientset, Settings: aiSettingsHandler}).Diagnose))
-		r.Get("/services/{name}/db/databases", nsRead(dbHandler.ListDatabases))
-		r.Get("/services/{name}/rabbitmq/vhosts", nsRead(svcHandler.ListRabbitMQVhosts))
-		r.Get("/services/{name}/db/schema", nsRead(dbHandler.Schema))
-		r.Post("/services/{name}/db/query", nsDeployer(dbHandler.Query))
-		r.Get("/services/{name}/db/tables/{schema}/{table}/rows", nsRead(dbHandler.ListRows))
-		r.Post("/services/{name}/db/tables/{schema}/{table}/rows", nsDeployer(dbHandler.InsertRow))
-		r.Patch("/services/{name}/db/tables/{schema}/{table}/rows", nsDeployer(dbHandler.UpdateRow))
-		r.Delete("/services/{name}/db/tables/{schema}/{table}/rows", nsDeployer(dbHandler.DeleteRows))
-		r.Get("/services/{name}/db/tables/{schema}/{table}/structure", nsRead(dbHandler.GetTableStructure))
-		r.Post("/services/{name}/db/tables", nsDeployer(dbHandler.CreateTable))
-		r.Patch("/services/{name}/db/tables/{schema}/{table}", nsDeployer(dbHandler.AlterTable))
-		r.Post("/services/{name}/db/indexes", nsDeployer(dbHandler.CreateIndex))
-		r.Delete("/services/{name}/db/indexes/{schema}/{indexName}", nsDeployer(dbHandler.DropIndex))
-		r.Post("/services/{name}/db/ddl/preview", nsDeployer(dbHandler.PreviewDDL))
-		r.Get("/services/{name}/db/snippets", nsRead(dbHandler.ListSnippets))
-		r.Post("/services/{name}/db/snippets", nsDeployer(dbHandler.SaveSnippet))
-		r.Delete("/services/{name}/db/snippets/{snippetName}", nsDeployer(dbHandler.DeleteSnippet))
-		r.Get("/services/{name}/db/history", nsRead(dbHandler.ListHistory))
+		r.Post("/services/{name}/diagnose", nsCap("kipper.write")((&handlers.AIDiagnoseService{Client: clientset, Settings: aiSettingsHandler}).Diagnose))
+		r.Get("/services/{name}/db/databases", nsCap("database.read")(dbHandler.ListDatabases))
+		r.Get("/services/{name}/rabbitmq/vhosts", nsCap("database.read")(svcHandler.ListRabbitMQVhosts))
+		r.Get("/services/{name}/db/schema", nsCap("database.read")(dbHandler.Schema))
+		r.Post("/services/{name}/db/query", nsCap("database.write")(dbHandler.Query))
+		r.Get("/services/{name}/db/tables/{schema}/{table}/rows", nsCap("database.read")(dbHandler.ListRows))
+		r.Post("/services/{name}/db/tables/{schema}/{table}/rows", nsCap("database.write")(dbHandler.InsertRow))
+		r.Patch("/services/{name}/db/tables/{schema}/{table}/rows", nsCap("database.write")(dbHandler.UpdateRow))
+		r.Delete("/services/{name}/db/tables/{schema}/{table}/rows", nsCap("database.write")(dbHandler.DeleteRows))
+		r.Get("/services/{name}/db/tables/{schema}/{table}/structure", nsCap("database.read")(dbHandler.GetTableStructure))
+		r.Post("/services/{name}/db/tables", nsCap("database.write")(dbHandler.CreateTable))
+		r.Patch("/services/{name}/db/tables/{schema}/{table}", nsCap("database.write")(dbHandler.AlterTable))
+		r.Post("/services/{name}/db/indexes", nsCap("database.write")(dbHandler.CreateIndex))
+		r.Delete("/services/{name}/db/indexes/{schema}/{indexName}", nsCap("database.write")(dbHandler.DropIndex))
+		r.Post("/services/{name}/db/ddl/preview", nsCap("database.write")(dbHandler.PreviewDDL))
+		r.Get("/services/{name}/db/snippets", nsCap("database.read")(dbHandler.ListSnippets))
+		r.Post("/services/{name}/db/snippets", nsCap("database.write")(dbHandler.SaveSnippet))
+		r.Delete("/services/{name}/db/snippets/{snippetName}", nsCap("database.write")(dbHandler.DeleteSnippet))
+		r.Get("/services/{name}/db/history", nsCap("database.read")(dbHandler.ListHistory))
+
+		// The roles a member may be given, and what each may do. Any
+		// authenticated caller may read it: it describes the cluster's model
+		// rather than anybody's access, and the console needs it to render a
+		// member list it is only allowed to look at.
+		r.Get("/project-roles", handlers.ProjectRoles)
 
 		r.Get("/projects", projects.List)
 		r.Post("/projects", admin(projects.Create))
 
 		r.Route("/projects/{name}", func(r chi.Router) {
 			// Every route below is scoped to the caller's membership of this
-			// project. Reads need membership (viewer+), and the shadowed
-			// deployer/owner helpers gate mutations. This replaces the
-			// cluster-wide role checks for project-scoped routes so a user only
-			// reaches their own projects.
+			// project, and each names the capability it takes. This replaces
+			// the cluster-wide role checks for project-scoped routes so a user
+			// only reaches their own projects.
 			//
 			// The {name} segment does not mean the same thing throughout, so the
 			// subtree is split into two groups with the matching gate. Routes
@@ -608,11 +618,21 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 			// "shop-prod" both answer to "shop-prod" — and resolving one as the
 			// other hands whoever owns the namespace authority over the Project,
 			// or the reverse.
-			deployer := func(h http.HandlerFunc) http.HandlerFunc {
-				return middleware.RequireProjectRole(middleware.ProjectRoleDeployer)(h).ServeHTTP
-			}
-			owner := func(h http.HandlerFunc) http.HandlerFunc {
-				return middleware.RequireProjectRole(middleware.ProjectRoleOwner)(h).ServeHTTP
+			// Each route names the capability it takes rather than a role, so
+			// what admits a caller is a thing the catalogue defines and a
+			// custom role can carry.
+			//
+			// Which capability each route takes is also declared in routeAuthz.
+			// Nothing checks the router against that declaration: the wrappers
+			// are closures and chi.Walk cannot see inside them, so the two are
+			// kept in step by review. The matrix catches a route wired to a
+			// capability of a different level; one wired to another capability
+			// of the same level it cannot see, and neither can anything else
+			// until a member can hold exactly one.
+			cap := func(name capability.Name) func(http.HandlerFunc) http.HandlerFunc {
+				return func(h http.HandlerFunc) http.HandlerFunc {
+					return middleware.RequireCapability(name)(h).ServeHTTP
+				}
 			}
 
 			// {name} is the project's own name here: every handler in this group
@@ -621,27 +641,27 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.ProjectScope(projectAccess))
 
-				r.Put("/", owner(projects.Update))
-				r.Delete("/", owner(projects.Delete))
-				r.Post("/environments", owner(projects.AddEnvironment))
-				r.Get("/copy-preview", projects.CopyPreview)
-				r.Post("/promote", deployer(projects.Promote))
-				r.Get("/requests", requestUsageHandler.Get)
-				r.Get("/quota", quotaHandler.Get)
+				r.Put("/", cap("project.settings")(projects.Update))
+				r.Delete("/", cap("project.delete")(projects.Delete))
+				r.Post("/environments", cap("project.settings")(projects.AddEnvironment))
+				r.Get("/copy-preview", cap("kipper.read")(projects.CopyPreview))
+				r.Post("/promote", cap("kipper.write")(projects.Promote))
+				r.Get("/requests", cap("project.read")(requestUsageHandler.Get))
+				r.Get("/quota", cap("project.read")(quotaHandler.Get))
 				// Raising a quota grants cluster capacity, so mutation stays
 				// with cluster admins rather than project owners.
 				r.Put("/quota", admin(quotaHandler.Set))
 
-				// Consent for another project's apps to reach this one's. The
-				// owner wrapper is the point: this is the target project's
-				// decision, and a project owner has no access to the Project
-				// resource directly.
-				r.Get("/link-consent", projects.LinkConsent)
-				r.Put("/link-consent", owner(projects.SetLinkConsent))
+				// Consent for another project's apps to reach this one's.
+				// project.settings is the point: this is the target project's
+				// own decision to make, and a project owner has no access to
+				// the Project resource directly.
+				r.Get("/link-consent", cap("project.read")(projects.LinkConsent))
+				r.Put("/link-consent", cap("project.settings")(projects.SetLinkConsent))
 
-				r.Get("/members", membersHandler.List)
-				r.Put("/members", owner(membersHandler.Set))
-				r.Delete("/members/{email}", owner(membersHandler.Remove))
+				r.Get("/members", cap("members.read")(membersHandler.List))
+				r.Put("/members", cap("members.manage")(membersHandler.Set))
+				r.Delete("/members/{email}", cap("members.manage")(membersHandler.Remove))
 			})
 
 			// {name} is an environment namespace from here down. Every handler
@@ -651,136 +671,136 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 				r.Use(middleware.NamespaceScope(projectAccess))
 
 				// API gateway control plane: plans throttle, keys authenticate.
-				// Reads for every member; issuing and revoking is deployer work,
+				// Reads for every member; issuing and revoking is work that changes what runs,
 				// like managing the apps the keys protect.
-				r.Get("/usage-plans", apiGatewayHandler.ListPlans)
-				r.Put("/usage-plans", deployer(apiGatewayHandler.UpsertPlan))
-				r.Delete("/usage-plans/{plan}", deployer(apiGatewayHandler.DeletePlan))
-				r.Get("/api-keys", apiGatewayHandler.ListKeys)
-				r.Post("/api-keys", deployer(apiGatewayHandler.CreateKey))
-				r.Patch("/api-keys/{key}", deployer(apiGatewayHandler.UpdateKey))
-				r.Delete("/api-keys/{key}", deployer(apiGatewayHandler.DeleteKey))
-				r.Get("/api-keys/{key}/usage", apiGatewayHandler.KeyUsage)
+				r.Get("/usage-plans", cap("project.read")(apiGatewayHandler.ListPlans))
+				r.Put("/usage-plans", cap("apikeys.manage")(apiGatewayHandler.UpsertPlan))
+				r.Delete("/usage-plans/{plan}", cap("apikeys.manage")(apiGatewayHandler.DeletePlan))
+				r.Get("/api-keys", cap("project.read")(apiGatewayHandler.ListKeys))
+				r.Post("/api-keys", cap("apikeys.manage")(apiGatewayHandler.CreateKey))
+				r.Patch("/api-keys/{key}", cap("apikeys.manage")(apiGatewayHandler.UpdateKey))
+				r.Delete("/api-keys/{key}", cap("apikeys.manage")(apiGatewayHandler.DeleteKey))
+				r.Get("/api-keys/{key}/usage", cap("project.read")(apiGatewayHandler.KeyUsage))
 
-				r.Get("/functions", fnHandler.List)
-				r.Post("/functions", deployer(fnHandler.Create))
+				r.Get("/functions", cap("kipper.read")(fnHandler.List))
+				r.Post("/functions", cap("kipper.write")(fnHandler.Create))
 				r.Route("/functions/{fn}", func(r chi.Router) {
-					r.Delete("/", deployer(fnHandler.Delete))
-					r.Post("/test", deployer(fnHandler.TestRun))
-					r.Post("/diagnose", aiDiagnoseHandler.DiagnoseFunction)
-					r.Get("/resources", resourcesHandler.GetByParam("fn", handlers.ResourceKindFunction))
-					r.Put("/resources", deployer(resourcesHandler.UpdateByParam("fn", handlers.ResourceKindFunction)))
-					r.Get("/settings", fnHandler.GetSettings)
-					r.Put("/settings", deployer(fnHandler.UpdateSettings))
-					r.Get("/env", fnConfig.GetEnv)
-					r.Put("/env", deployer(fnConfig.UpdateEnv))
-					r.Get("/secrets", fnConfig.ListSecretKeys)
-					r.Put("/secrets", deployer(fnConfig.SetSecrets))
-					r.Get("/secrets/{key}", deployer(fnConfig.RevealSecret))
-					r.Delete("/secrets/{key}", deployer(fnConfig.DeleteSecret))
-					r.Get("/dependencies", fnConfig.GetDependencies)
-					r.Put("/dependencies", deployer(fnConfig.UpdateDependencies))
-					r.Get("/bindings", fnConfig.ListBindings)
+					r.Delete("/", cap("kipper.write")(fnHandler.Delete))
+					r.Post("/test", cap("kipper.write")(fnHandler.TestRun))
+					r.Post("/diagnose", cap("pods.logs.read")(aiDiagnoseHandler.DiagnoseFunction))
+					r.Get("/resources", cap("kipper.read")(resourcesHandler.GetByParam("fn", handlers.ResourceKindFunction)))
+					r.Put("/resources", cap("kipper.write")(resourcesHandler.UpdateByParam("fn", handlers.ResourceKindFunction)))
+					r.Get("/settings", cap("kipper.read")(fnHandler.GetSettings))
+					r.Put("/settings", cap("kipper.write")(fnHandler.UpdateSettings))
+					r.Get("/env", cap("env.read")(fnConfig.GetEnv))
+					r.Put("/env", cap("env.write")(fnConfig.UpdateEnv))
+					r.Get("/secrets", cap("env.read")(fnConfig.ListSecretKeys))
+					r.Put("/secrets", cap("env.write")(fnConfig.SetSecrets))
+					r.Get("/secrets/{key}", cap("env.reveal")(fnConfig.RevealSecret))
+					r.Delete("/secrets/{key}", cap("env.write")(fnConfig.DeleteSecret))
+					r.Get("/dependencies", cap("kipper.read")(fnConfig.GetDependencies))
+					r.Put("/dependencies", cap("kipper.write")(fnConfig.UpdateDependencies))
+					r.Get("/bindings", cap("kipper.read")(fnConfig.ListBindings))
 				})
 
-				r.Get("/volumes", volumeHandler.List)
-				r.Post("/volumes", deployer(volumeHandler.Create))
-				r.Delete("/volumes/{vol}", deployer(volumeHandler.Delete))
-				r.Post("/volumes/mount", deployer(volumeHandler.Mount))
-				r.Post("/volumes/unmount", deployer(volumeHandler.Unmount))
+				r.Get("/volumes", cap("kipper.read")(volumeHandler.List))
+				r.Post("/volumes", cap("kipper.write")(volumeHandler.Create))
+				r.Delete("/volumes/{vol}", cap("kipper.write")(volumeHandler.Delete))
+				r.Post("/volumes/mount", cap("kipper.write")(volumeHandler.Mount))
+				r.Post("/volumes/unmount", cap("kipper.write")(volumeHandler.Unmount))
 
-				r.Post("/inline-functions", deployer(inlineFnHandler.Create))
-				r.Get("/inline-functions/{fn}/code", inlineFnHandler.GetCode)
-				r.Put("/inline-functions/{fn}/code", deployer(inlineFnHandler.UpdateCode))
+				r.Post("/inline-functions", cap("kipper.write")(inlineFnHandler.Create))
+				r.Get("/inline-functions/{fn}/code", cap("kipper.read")(inlineFnHandler.GetCode))
+				r.Put("/inline-functions/{fn}/code", cap("kipper.write")(inlineFnHandler.UpdateCode))
 
-				r.Post("/route-groups", deployer(routeGroupHandler.Create))
-				r.Put("/route-groups", deployer(routeGroupHandler.Update))
-				r.Delete("/route-groups/{host}", deployer(routeGroupHandler.Delete))
+				r.Post("/route-groups", cap("kipper.write")(routeGroupHandler.Create))
+				r.Put("/route-groups", cap("kipper.write")(routeGroupHandler.Update))
+				r.Delete("/route-groups/{host}", cap("kipper.write")(routeGroupHandler.Delete))
 
-				r.Get("/apps", apps.List)
-				r.Post("/apps", deployer(apps.Create))
+				r.Get("/apps", cap("kipper.read")(apps.List))
+				r.Post("/apps", cap("kipper.write")(apps.Create))
 
 				r.Route("/apps/{app}", func(r chi.Router) {
-					r.Delete("/", deployer(apps.Delete))
-					r.Post("/restart", deployer(apps.Restart))
-					r.Get("/pods", podsHandler.List)
-					r.Get("/health", podsHandler.Health)
-					r.Put("/image", deployer(apps.UpdateImage))
-					r.Put("/scale", deployer(apps.Scale))
-					r.Get("/history", webhookHandler.History)
-					r.Post("/rollback", deployer(webhookHandler.Rollback))
-					r.Get("/webhook", webhookHandler.GetConfig)
-					r.Post("/webhook", deployer(webhookHandler.GenerateToken))
-					r.Delete("/webhook", deployer(webhookHandler.DeleteWebhook))
-					r.Post("/rebuild", deployer(webhookHandler.Rebuild))
-					r.Get("/build/status", webhookHandler.BuildStatus)
-					r.Get("/build/logs", webhookHandler.BuildLogs)
-					r.Post("/build/cancel", deployer(webhookHandler.CancelBuild))
-					r.Get("/logs", logsHandler.Query)
-					r.Post("/diagnose", deployer(aiDiagnoseHandler.Diagnose))
-					r.Post("/optimise", deployer(aiResourcesHandler.Optimise))
-					r.Get("/resources", resourcesHandler.Get)
-					r.Put("/resources", deployer(resourcesHandler.Update))
-					r.Get("/autoscale", autoscaleHandler.Get)
-					r.Put("/autoscale", deployer(autoscaleHandler.Set))
-					r.Delete("/autoscale", deployer(autoscaleHandler.Delete))
-					r.Get("/recommendation", recommendationHandler.Get)
-					r.Post("/recommendation/dismiss", deployer(recommendationHandler.Dismiss))
-					r.Post("/recommendation/apply", deployer(recommendationHandler.Apply))
-					r.Get("/settings", settingsHandler.Get)
-					r.Put("/settings", deployer(settingsHandler.Update))
-					r.Get("/route", apps.GetRoute)
-					r.Put("/route", deployer(apps.SetRoute))
-					r.Delete("/route", deployer(apps.DeleteRoute))
-					r.Get("/route/dns-status", apps.GetRouteDNSStatus)
-					r.Get("/git", apps.GetGit)
-					r.Put("/git", deployer(apps.SetGit))
-					r.Delete("/git", deployer(apps.DeleteGit))
-					r.Post("/git/reveal", deployer(apps.RevealGitToken))
-					r.Get("/links", apps.Links)
-					r.Get("/env", env.Get)
-					r.Put("/env", deployer(env.Update))
-					// Deployer, unlike the GET above it: that one returns the
+					r.Delete("/", cap("kipper.write")(apps.Delete))
+					r.Post("/restart", cap("workloads.restart")(apps.Restart))
+					r.Get("/pods", cap("workloads.read")(podsHandler.List))
+					r.Get("/health", cap("workloads.read")(podsHandler.Health))
+					r.Put("/image", cap("kipper.write")(apps.UpdateImage))
+					r.Put("/scale", cap("kipper.write")(apps.Scale))
+					r.Get("/history", cap("kipper.read")(webhookHandler.History))
+					r.Post("/rollback", cap("kipper.write")(webhookHandler.Rollback))
+					r.Get("/webhook", cap("webhook.reveal")(webhookHandler.GetConfig))
+					r.Post("/webhook", cap("kipper.write")(webhookHandler.GenerateToken))
+					r.Delete("/webhook", cap("kipper.write")(webhookHandler.DeleteWebhook))
+					r.Post("/rebuild", cap("kipper.write")(webhookHandler.Rebuild))
+					r.Get("/build/status", cap("workloads.read")(webhookHandler.BuildStatus))
+					r.Get("/build/logs", cap("pods.logs.read")(webhookHandler.BuildLogs))
+					r.Post("/build/cancel", cap("kipper.write")(webhookHandler.CancelBuild))
+					r.Get("/logs", cap("pods.logs.read")(logsHandler.Query))
+					r.Post("/diagnose", cap("kipper.write")(aiDiagnoseHandler.Diagnose))
+					r.Post("/optimise", cap("kipper.write")(aiResourcesHandler.Optimise))
+					r.Get("/resources", cap("kipper.read")(resourcesHandler.Get))
+					r.Put("/resources", cap("kipper.write")(resourcesHandler.Update))
+					r.Get("/autoscale", cap("workloads.read")(autoscaleHandler.Get))
+					r.Put("/autoscale", cap("kipper.write")(autoscaleHandler.Set))
+					r.Delete("/autoscale", cap("kipper.write")(autoscaleHandler.Delete))
+					r.Get("/recommendation", cap("kipper.read")(recommendationHandler.Get))
+					r.Post("/recommendation/dismiss", cap("kipper.write")(recommendationHandler.Dismiss))
+					r.Post("/recommendation/apply", cap("kipper.write")(recommendationHandler.Apply))
+					r.Get("/settings", cap("kipper.read")(settingsHandler.Get))
+					r.Put("/settings", cap("kipper.write")(settingsHandler.Update))
+					r.Get("/route", cap("workloads.read")(apps.GetRoute))
+					r.Put("/route", cap("kipper.write")(apps.SetRoute))
+					r.Delete("/route", cap("kipper.write")(apps.DeleteRoute))
+					r.Get("/route/dns-status", cap("kipper.read")(apps.GetRouteDNSStatus))
+					r.Get("/git", cap("kipper.read")(apps.GetGit))
+					r.Put("/git", cap("kipper.write")(apps.SetGit))
+					r.Delete("/git", cap("kipper.write")(apps.DeleteGit))
+					r.Post("/git/reveal", cap("env.reveal")(apps.RevealGitToken))
+					r.Get("/links", cap("kipper.read")(apps.Links))
+					r.Get("/env", cap("env.read")(env.Get))
+					r.Put("/env", cap("env.write")(env.Update))
+					// A reveal, unlike the GET above it: that one returns the
 					// templates as written and this one returns what they
-					// resolve to.
-					r.Get("/env/preview", deployer(env.Preview))
-					r.Get("/env/status", env.RestartStatus)
-					r.Get("/env/conflicts", env.DirectEnvConflicts)
-					r.Delete("/env/conflicts", deployer(env.RemoveDirectEnvConflicts))
-					r.Get("/env/injected", svcHandler.InjectedEnv)
-					r.Get("/secrets", secrets.ListKeys)
-					r.Put("/secrets", deployer(secrets.Set))
-					r.Get("/secrets/{key}", deployer(secrets.Reveal))
-					r.Delete("/secrets/{key}", deployer(secrets.Delete))
-					r.Get("/files", filesHandler.List)
-					r.Get("/files/content", filesHandler.Content)
-					r.Put("/files/content", deployer(filesHandler.Save))
-					r.Get("/files/download", filesHandler.Download)
-					r.Post("/files/upload", deployer(filesHandler.Upload))
-					r.Get("/basic-auth", basicAuthHandler.Get)
-					r.Put("/basic-auth", deployer(basicAuthHandler.Set))
-					r.Delete("/basic-auth", deployer(basicAuthHandler.Delete))
-					r.Delete("/basic-auth/{username}", deployer(basicAuthHandler.DeleteUser))
+					// resolve to, secrets included.
+					r.Get("/env/preview", cap("env.reveal")(env.Preview))
+					r.Get("/env/status", cap("env.read")(env.RestartStatus))
+					r.Get("/env/conflicts", cap("env.read")(env.DirectEnvConflicts))
+					r.Delete("/env/conflicts", cap("env.write")(env.RemoveDirectEnvConflicts))
+					r.Get("/env/injected", cap("env.read")(svcHandler.InjectedEnv))
+					r.Get("/secrets", cap("env.read")(secrets.ListKeys))
+					r.Put("/secrets", cap("env.write")(secrets.Set))
+					r.Get("/secrets/{key}", cap("env.reveal")(secrets.Reveal))
+					r.Delete("/secrets/{key}", cap("env.write")(secrets.Delete))
+					r.Get("/files", cap("files.read")(filesHandler.List))
+					r.Get("/files/content", cap("files.read")(filesHandler.Content))
+					r.Put("/files/content", cap("files.write")(filesHandler.Save))
+					r.Get("/files/download", cap("files.read")(filesHandler.Download))
+					r.Post("/files/upload", cap("files.write")(filesHandler.Upload))
+					r.Get("/basic-auth", cap("kipper.read")(basicAuthHandler.Get))
+					r.Put("/basic-auth", cap("kipper.write")(basicAuthHandler.Set))
+					r.Delete("/basic-auth", cap("kipper.write")(basicAuthHandler.Delete))
+					r.Delete("/basic-auth/{username}", cap("kipper.write")(basicAuthHandler.DeleteUser))
 				})
 			})
 		})
 
 		// Storage routes carry the service in the path and its namespace in
-		// ?namespace=. nsRead / nsDeployer authorize that namespace (project
-		// membership for reads, deploy access for writes) before the handler
+		// ?namespace=. nsCap authorizes that namespace (storage.read for reads,
+		// storage.write for writes) before the handler
 		// runs, so each handler resolves an already-authorized namespace by an
 		// exact lookup — never a cluster-wide name search.
-		r.Get("/storage/{service}/buckets", nsRead(storageHandler.ListBuckets))
-		r.Post("/storage/{service}/buckets", nsDeployer(storageHandler.CreateBucket))
-		r.Get("/storage/{service}/objects", nsRead(storageHandler.ListObjects))
-		r.Post("/storage/{service}/upload", nsDeployer(storageHandler.Upload))
-		r.Post("/storage/{service}/folder", nsDeployer(storageHandler.CreateFolder))
-		r.Get("/storage/{service}/download", nsRead(storageHandler.Download))
-		r.Delete("/storage/{service}/objects", nsDeployer(storageHandler.DeleteObject))
-		r.Post("/storage/{service}/share", nsDeployer(storageHandler.Share))
-		r.Get("/storage/{service}/public", nsRead(storageHandler.IsPublic))
-		r.Put("/storage/{service}/public", nsDeployer(storageHandler.MakePublic))
-		r.Delete("/storage/{service}/public", nsDeployer(storageHandler.MakePrivate))
+		r.Get("/storage/{service}/buckets", nsCap("storage.read")(storageHandler.ListBuckets))
+		r.Post("/storage/{service}/buckets", nsCap("storage.write")(storageHandler.CreateBucket))
+		r.Get("/storage/{service}/objects", nsCap("storage.read")(storageHandler.ListObjects))
+		r.Post("/storage/{service}/upload", nsCap("storage.write")(storageHandler.Upload))
+		r.Post("/storage/{service}/folder", nsCap("storage.write")(storageHandler.CreateFolder))
+		r.Get("/storage/{service}/download", nsCap("storage.read")(storageHandler.Download))
+		r.Delete("/storage/{service}/objects", nsCap("storage.write")(storageHandler.DeleteObject))
+		r.Post("/storage/{service}/share", nsCap("storage.write")(storageHandler.Share))
+		r.Get("/storage/{service}/public", nsCap("storage.read")(storageHandler.IsPublic))
+		r.Put("/storage/{service}/public", nsCap("storage.write")(storageHandler.MakePublic))
+		r.Delete("/storage/{service}/public", nsCap("storage.write")(storageHandler.MakePrivate))
 
 		r.Post("/ai/chat", deployer(aiChatHandler.Chat))
 		r.Post("/ai/analyse-logs", deployer(aiLogsHandler.AnalyseLogs))
@@ -921,7 +941,7 @@ func discoveryFor(cfg *rest.Config) discovery.ServerResourcesInterface {
 	return dc
 }
 
-func startControllerManager(cfg *rest.Config) {
+func startControllerManager(cfg *rest.Config, direct crclient.Client) {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(kipperv1.AddToScheme(scheme))
@@ -1026,6 +1046,18 @@ func startControllerManager(cfg *rest.Config) {
 			return
 		}
 		handlers.SetControllerCacheSynced(true)
+
+		// Authorization resolves a namespace's owning project on every gated
+		// request. Until now that was two live API calls each time; the
+		// manager's client reads the same two objects from informers that are
+		// now warm. Nothing waited for this: both readers give the same answer,
+		// so a cluster whose manager never starts keeps authorizing rather than
+		// refusing everything until a cache that will never sync does.
+		if resolver := handlers.ProjectResolver(); resolver != nil {
+			resolver.UseOwners(mgr.GetClient())
+			log.Printf("project access now resolving through the controller cache")
+		}
+
 		controllers.RunOrphanWarner(
 			context.Background(),
 			mgr.GetClient(),
@@ -1039,6 +1071,16 @@ func startControllerManager(cfg *rest.Config) {
 		log.Printf("controller manager exited: %v", err)
 	}
 	handlers.SetControllerManagerStarted(false)
+
+	// Back to reading live. A stopped manager's informers keep answering from
+	// the stores they last filled, and they answer without an error, so
+	// ownership would freeze at the moment the manager died while membership
+	// stayed current: a namespace that changed hands afterwards would keep
+	// authorizing its old project's members until the pod restarted.
+	if resolver := handlers.ProjectResolver(); resolver != nil {
+		resolver.RetireOwners(direct)
+		log.Printf("project access resolving live again: the controller cache has stopped")
+	}
 }
 
 // metricsPort is where controller-runtime serves its own metrics, including

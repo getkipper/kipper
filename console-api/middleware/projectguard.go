@@ -5,6 +5,8 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/getkipper/kipper/controller/pkg/capability"
 )
 
 const projectAccessKey = contextKey("project-access")
@@ -72,7 +74,7 @@ func scopeBy(resolve func(context.Context, string, string) (ProjectAccess, bool)
 // ProjectScopeQuery is ProjectScope for routes that identify their namespace
 // through the ?namespace= query parameter instead of the {name} path segment
 // (services, jobs). It rejects non-members and callers who omit the namespace,
-// then stores the resolved access for RequireProjectRole.
+// then stores the resolved access for RequireCapability.
 func ProjectScopeQuery(resolver *ProjectAccessResolver) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -99,9 +101,17 @@ func ProjectScopeQuery(resolver *ProjectAccessResolver) func(http.Handler) http.
 	}
 }
 
-// RequireProjectRole gates a route on a minimum project role (viewer <
-// deployer < owner). It must run after ProjectScope.
-func RequireProjectRole(required string) func(http.Handler) http.Handler {
+// RequireCapability gates a route on one capability. It must run after
+// ProjectScope, NamespaceScope or ProjectScopeQuery, which is what resolved the
+// caller's standing in the project.
+//
+// Which capability a route takes is also declared in routeAuthz. Nothing checks
+// the router against that declaration — the wrappers are closures and chi.Walk
+// cannot see inside them — so the two are kept in step by review. The route
+// matrix catches a route wired to a capability of a different level; one wired
+// to another capability of the same level nothing catches, until a member can
+// hold exactly one.
+func RequireCapability(required capability.Name) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			access, ok := ProjectAccessFromContext(r.Context())

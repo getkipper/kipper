@@ -268,11 +268,12 @@ func (a *Apps) SetGit(w http.ResponseWriter, r *http.Request) {
 // RevealGitToken returns the plaintext token an app uses to clone its source
 // repository, after re-verifying the caller's password against Dex. This
 // breaks the write-only invariant of GetGit, so it sits behind two gates:
-// the deployer role (enforced upstream by middleware.RequireRole) and the
+// env.reveal (enforced upstream by middleware.RequireCapability) and the
 // knowledge-factor password check here.
 //
-// Reveal is deployer-accessible, looser than the admin-only global credential
-// reveal. A deployer already owns an app's git source and can rotate its token
+// env.reveal is looser than the admin-only global credential reveal. Every
+// built-in role that carries it also carries kipper.write, so its holder can
+// already rotate an app's git token
 // via SetGit, so recovering it stays within their existing scope; the password
 // re-entry is the second factor. Operators who treat app tokens as broad,
 // cross-repo PATs should scope them per repository.

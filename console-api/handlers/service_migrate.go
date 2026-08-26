@@ -11,7 +11,6 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/handlers/migrationjob"
-	"github.com/getkipper/kipper/console-api/middleware"
 )
 
 // MigrateDataRequest is the body of POST .../migrate-data.
@@ -62,7 +61,7 @@ func (s *Services) MigrateData(w http.ResponseWriter, r *http.Request) {
 	// The target namespace is gated by the route wrapper, but the source is
 	// supplied in the body. Copying another project's data requires deploy
 	// access to the source project too.
-	if !enforceProjectRole(w, r, req.SourceNamespace, middleware.ProjectRoleDeployer) {
+	if !enforceCapability(w, r, req.SourceNamespace, "kipper.write") {
 		return
 	}
 	if req.Confirm != name {

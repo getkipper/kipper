@@ -110,9 +110,9 @@ type EnvPreview struct {
 // injectable. Answering from a second implementation is how a preview ends up
 // showing a value the process never receives.
 //
-// The caller must gate this on the deployer role. Env GET is viewer-readable
-// while env mutation is deployer-only, so an unmasked-by-default preview
-// handed to a viewer would widen who can read a credential (D13).
+// The caller must gate this on env.reveal. Env GET only takes env.read, so an
+// unmasked-by-default preview behind that would widen who can read a
+// credential (D13).
 func BuildEnvPreview(ctx context.Context, c client.Client, app *kipperv1.App) (*EnvPreview, error) {
 	links, _, err := ResolveLinks(ctx, c, app)
 	if err != nil {

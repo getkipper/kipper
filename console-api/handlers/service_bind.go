@@ -19,7 +19,6 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/controllers"
-	"github.com/getkipper/kipper/console-api/middleware"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
@@ -76,7 +75,7 @@ func (s *Services) Bind(w http.ResponseWriter, r *http.Request) {
 	// bind cannot probe service existence in a project the caller has no role
 	// on.
 	appNamespace := req.Namespace
-	if !enforceProjectRole(w, r, appNamespace, middleware.ProjectRoleDeployer) {
+	if !enforceCapability(w, r, appNamespace, "kipper.write") {
 		return
 	}
 	svcType, err := s.findServiceInNamespace(ctx, req.Service, appNamespace)
@@ -214,7 +213,7 @@ func (s *Services) Unbind(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	appNamespace := req.Namespace
-	if !enforceProjectRole(w, r, appNamespace, middleware.ProjectRoleDeployer) {
+	if !enforceCapability(w, r, appNamespace, "kipper.write") {
 		return
 	}
 	// The type lookup only feeds the default env-var prefix, but it must
