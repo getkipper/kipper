@@ -6,7 +6,7 @@ import { useToast } from '@/composables/useToast'
 import { useModal } from '@/composables/useModal'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { formatDateTime } from '@/utils/datetime'
-import { useAuthStore } from '@/stores/auth'
+import { useCapabilities } from '@/composables/useCapabilities'
 import { fetchServices, type ServiceStatus } from '@/api/services'
 import {
   fetchBuckets,
@@ -26,7 +26,7 @@ import {
 
 const toast = useToast()
 const modal = useModal()
-const authStore = useAuthStore()
+const { canInNamespace } = useCapabilities()
 const route = useRoute()
 const router = useRouter()
 
@@ -557,7 +557,7 @@ async function copyShareLink() {
       </div>
       <div class="flex items-center gap-2">
         <button
-          v-if="selectedBucket && authStore.isDeployer"
+          v-if="selectedBucket && canInNamespace(selectedNamespace, 'storage.write')"
           @click="triggerUpload"
           :disabled="uploading"
           class="inline-flex items-center gap-1.5 rounded-lg bg-kipper-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-kipper-700 disabled:opacity-50"
@@ -619,7 +619,7 @@ async function copyShareLink() {
 
         <div class="flex items-end gap-2 pt-5">
           <button
-            v-if="authStore.isDeployer"
+            v-if="canInNamespace(selectedNamespace, 'storage.write')"
             @click="showCreateBucket = !showCreateBucket"
             class="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-800"
           >
@@ -627,7 +627,7 @@ async function copyShareLink() {
             New bucket
           </button>
           <button
-            v-if="selectedBucket && authStore.isDeployer"
+            v-if="selectedBucket && canInNamespace(selectedNamespace, 'storage.write')"
             @click="showCreateFolder = !showCreateFolder"
             class="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-800"
           >
@@ -814,7 +814,7 @@ async function copyShareLink() {
               <Download class="h-4 w-4" />
             </button>
             <button
-              v-if="authStore.isDeployer"
+              v-if="canInNamespace(selectedNamespace, 'storage.write')"
               @click="togglePublic(obj)"
               class="rounded-lg p-1.5 transition-colors"
               :class="obj.is_public
@@ -826,7 +826,7 @@ async function copyShareLink() {
               <Lock v-else class="h-4 w-4" />
             </button>
             <button
-              v-if="authStore.isDeployer"
+              v-if="canInNamespace(selectedNamespace, 'storage.write')"
               @click="openShare(obj.key)"
               class="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
               title="Share link"
@@ -834,7 +834,7 @@ async function copyShareLink() {
               <Share2 class="h-4 w-4" />
             </button>
             <button
-              v-if="authStore.isDeployer && confirmDelete !== obj.key"
+              v-if="canInNamespace(selectedNamespace, 'storage.write') && confirmDelete !== obj.key"
               @click="confirmDelete = obj.key"
               class="rounded-lg p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950 dark:hover:text-red-400"
               title="Delete"
@@ -842,7 +842,7 @@ async function copyShareLink() {
               <Trash2 class="h-4 w-4" />
             </button>
             <button
-              v-else-if="authStore.isDeployer"
+              v-else-if="canInNamespace(selectedNamespace, 'storage.write')"
               @click="handleDelete(obj.key)"
               class="rounded-lg bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-700"
             >
@@ -858,7 +858,7 @@ async function copyShareLink() {
         <p class="text-sm font-medium text-slate-900 dark:text-slate-50">This bucket is empty</p>
         <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Drag files here or click Upload</p>
         <button
-          v-if="authStore.isDeployer"
+          v-if="canInNamespace(selectedNamespace, 'storage.write')"
           @click="triggerUpload"
           class="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-kipper-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-kipper-700"
         >
@@ -977,7 +977,7 @@ async function copyShareLink() {
               Download
             </button>
             <button
-              v-if="authStore.isDeployer"
+              v-if="canInNamespace(selectedNamespace, 'storage.write')"
               @click="bulkMakePublic"
               class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
             >
@@ -985,7 +985,7 @@ async function copyShareLink() {
               Public
             </button>
             <button
-              v-if="authStore.isDeployer"
+              v-if="canInNamespace(selectedNamespace, 'storage.write')"
               @click="bulkMakePrivate"
               class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
             >
@@ -993,7 +993,7 @@ async function copyShareLink() {
               Private
             </button>
             <button
-              v-if="authStore.isDeployer"
+              v-if="canInNamespace(selectedNamespace, 'storage.write')"
               @click="confirmBulkDelete"
               class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950"
             >

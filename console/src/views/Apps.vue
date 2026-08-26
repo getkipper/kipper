@@ -5,7 +5,7 @@ import AppDetail from '@/components/AppDetail.vue'
 import NoticeCallout from '@/components/NoticeCallout.vue'
 import { useAppsStore } from '@/stores/apps'
 import { useProjectsStore } from '@/stores/projects'
-import { useAuthStore } from '@/stores/auth'
+import { useCapabilities } from '@/composables/useCapabilities'
 import { useToast } from '@/composables/useToast'
 import { useModal } from '@/composables/useModal'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -13,7 +13,7 @@ import type { CreateAppPayload } from '@/api/types'
 
 const apps = useAppsStore()
 const projects = useProjectsStore()
-const authStore = useAuthStore()
+const { canInNamespace } = useCapabilities()
 const toast = useToast()
 const modal = useModal()
 
@@ -195,7 +195,7 @@ function openApp(appName: string, namespace?: string) {
           <RefreshCw class="h-4 w-4" :class="refreshing ? 'animate-spin' : ''" :stroke-width="1.75" />
         </button>
         <button
-          v-if="!isAllProjects && authStore.isDeployer"
+          v-if="!isAllProjects && canInNamespace(projects.globalNamespace, 'kipper.write')"
           @click="showDeploy = !showDeploy"
           class="inline-flex items-center gap-2 rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-kipper-700 dark:bg-kipper-500 dark:hover:bg-kipper-600"
         >
@@ -392,7 +392,7 @@ function openApp(appName: string, namespace?: string) {
 
           <!-- Delete -->
           <button
-            v-if="authStore.isDeployer"
+            v-if="canInNamespace(app.namespace, 'kipper.write')"
             @click.stop="handleDelete(app.name, app.namespace)"
             class="rounded-lg p-2 text-slate-400 md:opacity-0 transition-all hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-950 dark:hover:text-red-400"
             title="Delete app"
