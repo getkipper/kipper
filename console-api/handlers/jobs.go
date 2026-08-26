@@ -37,12 +37,17 @@ type createJobRequest struct {
 }
 
 type jobResponse struct {
-	Name     string `json:"name"`
-	Type     string `json:"type"`
-	Schedule string `json:"schedule"`
-	Last     string `json:"last"`
-	Status   string `json:"status"`
-	Image    string `json:"image"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+	// The namespace the job runs in. A job is reached by name across
+	// namespaces and every write to one resolves the owning project from this,
+	// so a client with the list alone could not tell which project's
+	// capabilities decide what it may offer for a given row.
+	Namespace string `json:"namespace"`
+	Schedule  string `json:"schedule"`
+	Last      string `json:"last"`
+	Status    string `json:"status"`
+	Image     string `json:"image"`
 }
 
 // Create creates a new job or scheduled job.
@@ -122,11 +127,12 @@ func (j *Jobs) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusCreated, jobResponse{
-		Name:     req.Name,
-		Type:     jobType,
-		Schedule: req.Schedule,
-		Status:   "pending",
-		Image:    req.Image,
+		Name:      req.Name,
+		Type:      jobType,
+		Namespace: req.Namespace,
+		Schedule:  req.Schedule,
+		Status:    "pending",
+		Image:     req.Image,
 	})
 }
 
@@ -166,12 +172,13 @@ func (j *Jobs) List(w http.ResponseWriter, r *http.Request) {
 		}
 
 		result = append(result, jobResponse{
-			Name:     job.Name,
-			Type:     jobType,
-			Schedule: job.Spec.Schedule,
-			Last:     last,
-			Status:   status,
-			Image:    job.Spec.Image,
+			Name:      job.Name,
+			Type:      jobType,
+			Namespace: job.Namespace,
+			Schedule:  job.Spec.Schedule,
+			Last:      last,
+			Status:    status,
+			Image:     job.Spec.Image,
 		})
 	}
 
@@ -201,10 +208,11 @@ func (j *Jobs) History(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		result = append(result, jobResponse{
-			Name:   job.Name,
-			Type:   "job",
-			Last:   timeSince(job.CreationTimestamp.Time),
-			Status: jobStatus(job),
+			Name:      job.Name,
+			Type:      "job",
+			Namespace: job.Namespace,
+			Last:      timeSince(job.CreationTimestamp.Time),
+			Status:    jobStatus(job),
 		})
 	}
 
