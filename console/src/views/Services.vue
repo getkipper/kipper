@@ -25,6 +25,7 @@ import {
 } from '@/utils/resources'
 import { useProjectsStore } from '@/stores/projects'
 import { useAuthStore } from '@/stores/auth'
+import { useCapabilities } from '@/composables/useCapabilities'
 import { fetchServices, fetchServiceInfo, fetchServiceResources, updateServiceResources, fetchRolloutStatus, fetchServiceLogs, createService, deleteService, type ServiceStatus, type ServiceInfo, type ServiceResources, type ServiceLogEntry } from '@/api/services'
 import { fetchProjects, type Project } from '@/api/projects'
 import LogAnalysis from '@/components/LogAnalysis.vue'
@@ -33,6 +34,7 @@ const toast = useToast()
 const modal = useModal()
 const projectsStore = useProjectsStore()
 const authStore = useAuthStore()
+const { canInNamespace } = useCapabilities()
 
 function openServiceDiagnose(name: string, namespace: string) {
   modal.open(ServiceDiagnoseModal, { serviceName: name, namespace })
@@ -498,7 +500,7 @@ function typeIcon(type: string): string {
       </div>
       <div class="flex items-center gap-2">
         <button
-          v-if="authStore.isDeployer"
+          v-if="canInNamespace(projectsStore.globalNamespace, 'kipper.write')"
           @click="showCreate = !showCreate"
           class="inline-flex items-center gap-1.5 rounded-lg bg-kipper-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-kipper-700"
         >
@@ -629,7 +631,7 @@ function typeIcon(type: string): string {
           </button>
           <!-- Delete -->
           <button
-            v-if="authStore.isDeployer"
+            v-if="canInNamespace(svc.namespace, 'kipper.write')"
             @click.stop="handleDelete(svc.name, svc.namespace)"
             class="rounded-lg p-1.5 text-slate-400 md:opacity-0 transition-opacity hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-950 dark:hover:text-red-400"
             title="Delete service"

@@ -2,13 +2,13 @@
 import { ref, onMounted, computed } from 'vue'
 import { Timer, Play, Clock, RefreshCw, Plus } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
-import { useAuthStore } from '@/stores/auth'
+import { useCapabilities } from '@/composables/useCapabilities'
 import { fetchJobs, createJob, type Job } from '@/api/jobs'
 import { fetchProjects, type Project } from '@/api/projects'
 import JobDetail from '@/components/JobDetail.vue'
 
 const toast = useToast()
-const authStore = useAuthStore()
+const { canInNamespace } = useCapabilities()
 
 const jobs = ref<Job[]>([])
 const loading = ref(false)
@@ -27,6 +27,12 @@ const newNamespace = ref('default')
 const newMemory = ref('')
 const newCPU = ref('')
 
+// Somewhere the caller may create a job. The button opens the form; the form's
+// own namespace field decides where, and the submit asks again for that one.
+const canCreateSomewhere = computed(() =>
+  namespaceOptions.value.some(o => canInNamespace(o.value, 'kipper.write')),
+)
+
 const namespaceOptions = computed(() => {
   const options: { label: string; value: string }[] = [
     { label: 'default', value: 'default' },
@@ -44,6 +50,7 @@ onMounted(async () => {
 })
 
 async function handleCreate() {
+  if (!canInNamespace(newNamespace.value, 'kipper.write')) return
   if (!newName.value || !newImage.value) return
   creating.value = true
   try {
@@ -141,7 +148,7 @@ function statusDot(status: string): string {
           <RefreshCw class="h-4 w-4" :class="refreshing ? 'animate-spin' : ''" :stroke-width="1.75" />
         </button>
         <button
-          v-if="authStore.isDeployer"
+          v-if="canCreateSomewhere"
           @click="showCreate = !showCreate"
           class="inline-flex items-center gap-2 rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-kipper-700 dark:bg-kipper-500 dark:hover:bg-kipper-600"
         >
@@ -289,6 +296,7 @@ function statusDot(status: string): string {
     <JobDetail
       v-if="selectedJob"
       :job-name="selectedJob.name"
+      :namespace="selectedJob.namespace"
       :job-type="selectedJob.type"
       :schedule="selectedJob.schedule"
       @close="selectedJob = null"

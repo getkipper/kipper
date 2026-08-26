@@ -12,9 +12,11 @@ import { useToast } from '@/composables/useToast'
 import { useModal } from '@/composables/useModal'
 import { fetchProjects, createProject, deleteProject, promoteApp, promoteAll, updateProjectEnvironments, addEnvironment, type Project, type Environment } from '@/api/projects'
 import { useAuthStore } from '@/stores/auth'
+import { useCapabilities } from '@/composables/useCapabilities'
 
 const modal = useModal()
 const authStore = useAuthStore()
+const { canInProject } = useCapabilities()
 
 const toast = useToast()
 
@@ -459,7 +461,7 @@ function statusColor(status: string): string {
           <RefreshCw class="h-4 w-4" :stroke-width="1.75" />
         </button>
         <button
-          v-if="authStore.isDeployer"
+          v-if="authStore.isAdmin"
           @click="showCreate = !showCreate"
           class="inline-flex items-center gap-2 rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-kipper-700 dark:bg-kipper-500 dark:hover:bg-kipper-600"
         >
@@ -544,7 +546,7 @@ function statusColor(status: string): string {
               <Settings class="h-4 w-4" :stroke-width="1.75" />
             </button>
             <button
-              v-if="authStore.isDeployer"
+              v-if="canInProject(project, 'project.delete')"
               @click.stop="handleDelete(project)"
               class="rounded-lg p-2 text-slate-400 md:opacity-0 transition-all hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-950 dark:hover:text-red-400"
               title="Delete project"
@@ -574,7 +576,7 @@ function statusColor(status: string): string {
                 <span class="ml-1 text-xs text-slate-400">{{ env.apps.length }}</span>
               </button>
               <button
-                v-if="authStore.isDeployer && project.environments.length > 1"
+                v-if="canInProject(project, 'project.settings') && project.environments.length > 1"
                 @click.stop="handleRemoveEnv(project, env)"
                 class="mr-2 rounded p-0.5 text-slate-300 md:opacity-0 transition-all hover:bg-red-50 hover:text-red-600 group-hover/tab:opacity-100 dark:text-slate-600 dark:hover:bg-red-950 dark:hover:text-red-400"
                 :title="`Remove ${env.name}`"
@@ -584,7 +586,7 @@ function statusColor(status: string): string {
             </div>
 
             <!-- Add environment -->
-            <div v-if="authStore.isDeployer" class="ml-2">
+            <div v-if="canInProject(project, 'project.settings')" class="ml-2">
               <div v-if="addingEnvFor === project.name" class="px-3 py-1.5">
                 <form
                   @submit.prevent="handleAddEnv(project)"
@@ -658,7 +660,7 @@ function statusColor(status: string): string {
           <div v-for="env in project.environments" :key="env.name">
             <div v-if="activeEnv === env.name" class="p-5">
               <!-- Promote all button -->
-              <div v-if="authStore.isDeployer && getNextEnv(env.name) && env.apps.length" class="mb-4 flex justify-end">
+              <div v-if="canInProject(project, 'kipper.write') && getNextEnv(env.name) && env.apps.length" class="mb-4 flex justify-end">
                 <button
                   @click.stop="handlePromoteAll(env.name, getNextEnv(env.name)!)"
                   :disabled="promoting"
@@ -707,7 +709,7 @@ function statusColor(status: string): string {
 
                     <!-- Promote button -->
                     <button
-                      v-if="authStore.isDeployer && getNextEnv(env.name)"
+                      v-if="canInProject(project, 'kipper.write') && getNextEnv(env.name)"
                       @click.stop="handlePromote(app.name, env.name, getNextEnv(env.name)!)"
                       :disabled="promoting"
                       class="inline-flex items-center gap-1 rounded-md bg-kipper-600 px-2 py-1 text-xs font-medium text-white transition-colors hover:bg-kipper-700 disabled:opacity-50"
@@ -718,7 +720,7 @@ function statusColor(status: string): string {
 
                     <!-- Delete button -->
                     <button
-                      v-if="authStore.isDeployer"
+                      v-if="canInProject(project, 'kipper.write')"
                       @click.stop="handleDeleteEnvApp(app.name, env.namespace)"
                       class="rounded-md p-1 text-slate-400 md:opacity-0 transition-all hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-950 dark:hover:text-red-400"
                       title="Delete app"

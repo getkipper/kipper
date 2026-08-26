@@ -182,7 +182,7 @@ function statusIcon(status: string) {
       </div>
       <div class="flex items-center gap-2">
         <button
-          v-if="authStore.isDeployer"
+          v-if="authStore.isAdmin"
           @click="showCreate = !showCreate"
           class="inline-flex items-center gap-1.5 rounded-lg bg-kipper-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-kipper-700"
         >
@@ -259,7 +259,7 @@ function statusIcon(status: string) {
             <div class="flex items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
               <span>Last: {{ s.last_backup }}</span>
               <button
-                v-if="authStore.isDeployer"
+                v-if="authStore.isAdmin"
                 @click="handleToggleSchedule(s.name, s.status === 'Enabled')"
                 class="relative inline-flex h-5 w-9 items-center rounded-full transition-colors"
                 :class="s.status === 'Enabled' ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600'"
@@ -315,7 +315,7 @@ function statusIcon(status: string) {
                 </div>
               </div>
             </div>
-            <div v-if="authStore.isDeployer" class="flex items-center gap-2 md:opacity-0 transition-opacity group-hover:opacity-100">
+            <div v-if="authStore.isAdmin" class="flex items-center gap-2 md:opacity-0 transition-opacity group-hover:opacity-100">
               <button
                 v-if="b.status === 'Completed'"
                 @click="openRestore(b.name)"

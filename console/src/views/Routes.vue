@@ -5,14 +5,14 @@ import SaveButton from '@/components/SaveButton.vue'
 import NoticeCallout from '@/components/NoticeCallout.vue'
 import { useToast } from '@/composables/useToast'
 import { useProjectsStore } from '@/stores/projects'
-import { useAuthStore } from '@/stores/auth'
+import { useCapabilities } from '@/composables/useCapabilities'
 import { fetchRoutes, createRouteGroup, updateRouteGroup, deleteRouteGroup, type RouteGroup, type PathMapping } from '@/api/routes'
 import { fetchApps } from '@/api/apps'
 import type { App } from '@/api/types'
 
 const toast = useToast()
 const projectsStore = useProjectsStore()
-const authStore = useAuthStore()
+const { canInNamespace } = useCapabilities()
 const globalNs = computed(() => projectsStore.globalNamespace)
 const routes = ref<RouteGroup[]>([])
 const loading = ref(false)
@@ -205,7 +205,7 @@ function envColor(env: string): string {
       </div>
       <div class="flex items-center gap-2">
         <button
-          v-if="globalNs && authStore.isDeployer"
+          v-if="globalNs && canInNamespace(globalNs, 'kipper.write')"
           @click="openCreate"
           class="flex items-center gap-1.5 rounded-lg bg-kipper-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-kipper-700"
         >
@@ -348,7 +348,7 @@ function envColor(env: string): string {
                 </div>
                 <div class="flex items-center gap-1">
                   <button
-                    v-if="authStore.isDeployer"
+                    v-if="canInNamespace(env.namespace, 'kipper.write')"
                     @click="openEdit(group)"
                     class="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
                     title="Edit"
@@ -356,7 +356,7 @@ function envColor(env: string): string {
                     <Pencil class="h-4 w-4" :stroke-width="1.75" />
                   </button>
                   <button
-                    v-if="authStore.isDeployer"
+                    v-if="canInNamespace(env.namespace, 'kipper.write')"
                     @click="handleDelete(group.host)"
                     class="rounded-lg p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950"
                     title="Delete route group"
@@ -401,7 +401,7 @@ function envColor(env: string): string {
         Create a route group to expose your apps via HTTPS with automatic TLS.
       </p>
       <button
-        v-if="globalNs && authStore.isDeployer"
+        v-if="globalNs && canInNamespace(globalNs, 'kipper.write')"
         @click="openCreate"
         class="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-kipper-600 px-4 py-2 text-sm font-medium text-white hover:bg-kipper-700"
       >

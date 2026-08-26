@@ -3,6 +3,8 @@ import client from './client'
 export interface Job {
   name: string
   type: string
+  /** The namespace it runs in, which names the project whose capabilities gate it. */
+  namespace: string
   schedule: string
   last: string
   status: string

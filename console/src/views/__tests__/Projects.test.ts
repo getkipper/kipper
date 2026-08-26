@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { capabilitiesForRole } from '@/utils/testCapabilities'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia } from 'pinia'
@@ -26,7 +27,7 @@ function shopProject(): Project {
   return {
     name: 'shop',
     display_name: 'Web Shop',
-    role: 'owner',
+    role: 'owner', capabilities: capabilitiesForRole('owner'),
     env_limit: 3,
     environments: [
       {
