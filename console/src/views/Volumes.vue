@@ -5,7 +5,7 @@ import { useToast } from '@/composables/useToast'
 import { useModal } from '@/composables/useModal'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { useProjectsStore } from '@/stores/projects'
-import { useAuthStore } from '@/stores/auth'
+import { useCapabilities } from '@/composables/useCapabilities'
 import { fetchVolumes, createVolume, deleteVolume, mountVolume, unmountVolume, type Volume } from '@/api/volumes'
 import { fetchApps } from '@/api/apps'
 import type { App } from '@/api/types'
@@ -13,7 +13,7 @@ import type { App } from '@/api/types'
 const toast = useToast()
 const modal = useModal()
 const projectsStore = useProjectsStore()
-const authStore = useAuthStore()
+const { canInNamespace } = useCapabilities()
 
 // Projects loaded globally via sidebar selector
 const selectedNamespace = computed(() => projectsStore.globalNamespace || 'default')
@@ -164,7 +164,7 @@ function statusColor(status: string): string {
       </div>
       <div class="flex items-center gap-2">
         <button
-          v-if="authStore.isDeployer"
+          v-if="canInNamespace(selectedNamespace, 'kipper.write')"
           @click="showMount = !showMount"
           class="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-800"
         >
@@ -172,7 +172,7 @@ function statusColor(status: string): string {
           Mount
         </button>
         <button
-          v-if="authStore.isDeployer"
+          v-if="canInNamespace(selectedNamespace, 'kipper.write')"
           @click="showCreate = !showCreate"
           class="inline-flex items-center gap-1.5 rounded-lg bg-kipper-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-kipper-700"
         >
@@ -273,7 +273,7 @@ function statusColor(status: string): string {
           </div>
 
           <button
-            v-if="authStore.isDeployer"
+            v-if="canInNamespace(selectedNamespace, 'kipper.write')"
             @click="handleDelete(vol.name)"
             class="rounded-lg p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950 dark:hover:text-red-400"
             title="Delete volume"
@@ -296,7 +296,7 @@ function statusColor(status: string): string {
               <span class="font-mono text-slate-500 dark:text-slate-400">{{ mount.path }}</span>
             </div>
             <button
-              v-if="authStore.isDeployer"
+              v-if="canInNamespace(selectedNamespace, 'kipper.write')"
               @click="handleUnmount(vol.name, mount.app)"
               class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950 dark:hover:text-red-400"
               title="Unmount"

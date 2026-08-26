@@ -7,16 +7,17 @@ import LogAnalysis from '@/components/LogAnalysis.vue'
 import TabBar from '@/components/TabBar.vue'
 import { useToast } from '@/composables/useToast'
 import { useLogStream } from '@/composables/useLogStream'
-import { useAuthStore } from '@/stores/auth'
+import { useCapabilities } from '@/composables/useCapabilities'
 import { fetchJobHistory, triggerJob, fetchJobResources, updateJobResources, type Job, type JobResources } from '@/api/jobs'
 
 const toast = useToast()
-const authStore = useAuthStore()
+const { canInNamespace } = useCapabilities()
 
 const props = defineProps<{
   jobName: string
   jobType: string
   schedule?: string
+  namespace: string
 }>()
 
 const emit = defineEmits<{
@@ -72,8 +73,7 @@ async function handleTrigger() {
 
 function connectLogs() {
   // Jobs run in various namespaces — try to find the pod
-  // The WebSocket endpoint searches across namespaces by app label
-  connect('default', props.jobName)
+  connect(props.namespace, props.jobName)
 }
 
 async function loadJobResources() {
@@ -149,7 +149,7 @@ function statusColor(status: string): string {
     </template>
     <template #actions>
       <button
-        v-if="authStore.isDeployer && jobType === 'cronjob'"
+        v-if="canInNamespace(props.namespace, 'kipper.write') && jobType === 'cronjob'"
         @click="handleTrigger"
         :disabled="triggering"
         class="inline-flex items-center gap-1 rounded-lg bg-kipper-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-kipper-700 disabled:opacity-50"
@@ -250,7 +250,7 @@ function statusColor(status: string): string {
             Current request: {{ jobResources.cpu_request }}
           </p>
         </div>
-        <SaveButton :saving="jobResourcesSaving" @click="saveJobResources" />
+        <SaveButton v-if="canInNamespace(props.namespace, 'kipper.write')" :saving="jobResourcesSaving" @click="saveJobResources" />
       </div>
     </div>
   </SidePanel>

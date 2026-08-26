@@ -8,12 +8,12 @@ import { useModal } from '@/composables/useModal'
 import { useToast } from '@/composables/useToast'
 import { fetchFunctions, deleteFunction, type FunctionInfo } from '@/api/functions'
 import { useProjectsStore } from '@/stores/projects'
-import { useAuthStore } from '@/stores/auth'
+import { useCapabilities } from '@/composables/useCapabilities'
 
 const router = useRouter()
 const toast = useToast()
 const projectsStore = useProjectsStore()
-const authStore = useAuthStore()
+const { canInNamespace } = useCapabilities()
 const modal = useModal()
 
 const selectedNamespace = computed(() => projectsStore.globalNamespace || 'default')
@@ -119,7 +119,7 @@ function displayImage(image: string): string {
       </div>
       <div class="flex items-center gap-2">
         <button
-          v-if="authStore.isDeployer"
+          v-if="canInNamespace(selectedNamespace, 'kipper.write')"
           @click="newFunction"
           class="inline-flex items-center gap-1.5 rounded-lg bg-kipper-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-kipper-700"
         >
@@ -191,7 +191,7 @@ function displayImage(image: string): string {
               <Settings2 class="h-4 w-4" />
             </button>
             <button
-              v-if="authStore.isDeployer"
+              v-if="canInNamespace(selectedNamespace, 'kipper.write')"
               @click.stop="handleDelete(fn.name)"
               class="rounded-lg p-1.5 text-slate-400 md:opacity-0 transition-opacity hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-950 dark:hover:text-red-400"
               title="Delete"
