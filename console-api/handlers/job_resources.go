@@ -11,7 +11,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/getkipper/kipper/console-api/middleware"
 	quotapkg "github.com/getkipper/kipper/console-api/quota"
 )
 
@@ -78,7 +77,7 @@ func (j *Jobs) UpdateResources(w http.ResponseWriter, r *http.Request) {
 		if cj.Name != name || !canAccessNamespace(r, cj.Namespace) {
 			continue
 		}
-		if !enforceProjectRole(w, r, cj.Namespace, middleware.ProjectRoleDeployer) {
+		if !enforceCapability(w, r, cj.Namespace, "kipper.write") {
 			return
 		}
 

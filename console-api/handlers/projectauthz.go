@@ -6,6 +6,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/getkipper/kipper/console-api/middleware"
+	"github.com/getkipper/kipper/controller/pkg/capability"
 )
 
 // projectResolver enforces project membership on routes that carry a namespace
@@ -24,10 +25,16 @@ func SetProjectResolver(r *middleware.ProjectAccessResolver) { projectResolver =
 // and refuses to run rather than fail open.
 func ProjectResolverWired() bool { return projectResolver != nil }
 
-// enforceProjectRole reports whether the caller holds at least the required
-// role on the project that owns the namespace. It writes a 401/403 and returns
-// false when access is denied. Cluster admins pass for any namespace.
-func enforceProjectRole(w http.ResponseWriter, r *http.Request, namespace, required string) bool {
+// ProjectResolver returns the shared resolver, or nil before startup has wired
+// it. It is here so the controller manager can hand the resolver its cached
+// client once the informers have synced, which is the only thing outside this
+// package that needs the value rather than the answer.
+func ProjectResolver() *middleware.ProjectAccessResolver { return projectResolver }
+
+// enforceCapability reports whether the caller holds the capability on the
+// project that owns the namespace. It writes a 401/403 and returns false when
+// access is denied. Cluster admins pass for any namespace.
+func enforceCapability(w http.ResponseWriter, r *http.Request, namespace string, required capability.Name) bool {
 	if projectResolver == nil {
 		return true
 	}

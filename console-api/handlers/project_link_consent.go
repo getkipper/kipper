@@ -63,8 +63,8 @@ func (p *Projects) LinkConsent(w http.ResponseWriter, r *http.Request) {
 // reached, and a Kipper project owner holds a namespaced role — they have no
 // access to the cluster-scoped Project resource, and granting them one would
 // hand them every project on the cluster. The route's own middleware resolves
-// membership of this project and requires the owner role, so the authority to
-// decide sits exactly where the decision does.
+// membership of this project and requires project.settings, so the authority
+// to decide sits exactly where the decision does.
 //
 // What is being granted is not small: a link opens a direct route to a backend
 // in this project, past the ingress and so past anything enforced on a public

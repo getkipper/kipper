@@ -136,8 +136,8 @@ func (f *FunctionConfig) ListSecretKeys(w http.ResponseWriter, r *http.Request) 
 }
 
 // RevealSecret returns a single secret value in plaintext, so the route is
-// registered behind the deployer middleware. Listing the keys beside it is open
-// to any project member; reading one is not. Use sparingly — the preferred
+// registered behind env.reveal. Listing the keys beside it takes env.read;
+// reading one takes more. Use sparingly — the preferred
 // pattern is to rotate, not to read.
 // GET /api/v1/projects/{name}/functions/{fn}/secrets/{key}
 func (f *FunctionConfig) RevealSecret(w http.ResponseWriter, r *http.Request) {

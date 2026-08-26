@@ -60,9 +60,9 @@ func (e *Env) Get(w http.ResponseWriter, r *http.Request) {
 // Preview resolves the app's environment templates and reports what each value
 // becomes, with every secret-derived substitution masked.
 //
-// Deployer-gated at the route. Env GET is viewer-readable because it returns
-// the templates as written, which hold no credential; this returns what they
-// resolve to, so it must not reach a role that cannot write them (D13).
+// Gated on env.reveal at the route. Env GET takes only env.read because it
+// returns the templates as written, which hold no credential; this returns what
+// they resolve to, so it takes the capability for reading one (D13).
 // GET /api/v1/projects/{name}/apps/{app}/env/preview
 func (e *Env) Preview(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "name")

@@ -28,6 +28,7 @@ import (
 	"github.com/getkipper/kipper/console-api/internal/nsowner"
 	"github.com/getkipper/kipper/console-api/internal/workloadname"
 	"github.com/getkipper/kipper/console-api/middleware"
+	"github.com/getkipper/kipper/controller/pkg/capability"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 )
 
@@ -82,14 +83,34 @@ type appSummary struct {
 }
 
 type projectResponse struct {
-	Name         string                `json:"name"`
-	DisplayName  string                `json:"display_name,omitempty"`
-	Org          string                `json:"org,omitempty"`
-	Role         string                `json:"role"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name,omitempty"`
+	Org         string `json:"org,omitempty"`
+	Role        string `json:"role"`
+	// Capabilities is what the caller may do in this project, so the console
+	// gates its own controls on the same thing the API gates its routes on.
+	// Sending the role alone made the console keep a copy of what each role
+	// means, which is the thing that cannot be kept true for a role added
+	// later.
+	Capabilities []string              `json:"capabilities"`
 	Environments []environmentResponse `json:"environments"`
 	// EnvLimit is the effective environment cap so the console can show
 	// "N of M environments" and stop offering Add at the limit.
 	EnvLimit int `json:"env_limit"`
+}
+
+// capabilitiesFor is what a role may do, as strings the console can compare.
+//
+// Always a list, never null: the console has to tell "holds nothing" from "the
+// server did not say", and a role this build does not know is the first case.
+// It is sorted so two responses for one cluster read the same.
+func capabilitiesFor(role string) []string {
+	names := capability.BuiltIn(capability.Role(role))
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		out = append(out, string(n))
+	}
+	return out
 }
 
 type createProjectRequest struct {
@@ -205,6 +226,7 @@ func (p *Projects) List(w http.ResponseWriter, r *http.Request) {
 			Name:         proj.Name,
 			DisplayName:  proj.Spec.DisplayName,
 			Role:         role,
+			Capabilities: capabilitiesFor(role),
 			Environments: envs,
 			EnvLimit:     proj.EffectiveEnvLimit(),
 		})
