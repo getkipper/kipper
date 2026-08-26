@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { capabilitiesForRole } from '@/utils/testCapabilities'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
@@ -32,7 +33,7 @@ async function mountWithBuild(phase: string, message: string) {
   setActivePinia(createPinia())
   useAuthStore().role = 'admin'
   useProjectsStore().projects = [{
-    name: 'shop', role: 'owner', env_limit: 3,
+    name: 'shop', role: 'owner', capabilities: capabilitiesForRole('owner'), env_limit: 3,
     environments: [{ name: 'test', namespace: 'shop-test', apps: [], status: 'active', order: '0', owned: true }],
   } as Project]
 

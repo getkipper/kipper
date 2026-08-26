@@ -11,6 +11,13 @@ interface Props {
   filePath: string
   fileName: string
   fileSize: number
+  /**
+   * Whether the caller may save the file back. Reading it takes files.read and
+   * saving takes files.write, so a caller can reach this modal and still have
+   * nothing to save with; the opener resolves that and passes it in, because
+   * this modal has no project to ask.
+   */
+  canEdit: boolean
 }
 
 const props = defineProps<Props>()
@@ -42,6 +49,7 @@ onMounted(async () => {
 async function save() {
   saving.value = true
   try {
+    if (!props.canEdit) return
     await filesApi.saveFileContent(props.project, props.appName, props.filePath, content.value)
     toast.success('File saved')
     editing.value = false
@@ -94,7 +102,7 @@ onBeforeUnmount(() => {
           <Download class="h-4 w-4" />
         </button>
         <button
-          v-if="!tooLarge && !loading"
+          v-if="canEdit && !tooLarge && !loading"
           @click="editing = !editing"
           class="rounded-md p-1.5 transition-colors"
           :class="editing ? 'bg-kipper-100 text-kipper-600 dark:bg-kipper-900 dark:text-kipper-400' : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'"
