@@ -147,8 +147,10 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	// a list that is absent, and by the end of a run that got as far as pass two
 	// none are. That leaves no ordering to get wrong, and it catches the one
 	// case a flag would miss — a late write from the pod being replaced, landing
-	// after the closing pass had already checked.
-	defer repairErasedAllowLists(ctx, clientset, os.Stdout, grants.decided)
+	// after the closing pass had already checked. What it writes back is
+	// everything this run stands behind, the grants it made as well as the ones
+	// it found, or the promise would hold for one kind and not the other.
+	defer repairErasedAllowLists(ctx, clientset, os.Stdout, grants.repairRecord())
 
 	// Before the new console-api serves builds: a shared credential written
 	// before allow-lists existed allows nobody, so an upgrade that restarted the
@@ -265,6 +267,27 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		}
 
 		fmt.Printf("  ✔  %s%s\n", comp.name, moved)
+
+		if comp.name == consoleAPIName {
+			// The revision this upgrade just rolled, taken here because this is
+			// the only moment anything knows which one that is. The build stamp
+			// it will record is an annotation and outlives the pod that wrote
+			// it, so reading the stamp later says a console-api recorded itself
+			// and not which one is serving now. The components after this take
+			// their own time to roll, and a rollback landing in that stretch
+			// would otherwise be adopted as the rollout to wait out.
+			grants.rolledConsoleAPI = true
+			pinned, pinErr := pinConsoleAPIRollout(ctx, clientset)
+			if pinErr != nil {
+				// Said out loud, and the migration stays open for it. Silently
+				// carrying on would leave the closing pass to look the rollout
+				// up for itself at the end, by which point a rollback could
+				// have landed and would be what it found.
+				fmt.Printf("  !   Could not record which console-api this upgrade rolled: %v\n"+
+					"      The shared credential migration stays open, and the next upgrade finishes it.\n", pinErr)
+			}
+			grants.rolled = pinned
+		}
 	}
 
 	// Again, now that the writer which erases an allow-list is gone, and only

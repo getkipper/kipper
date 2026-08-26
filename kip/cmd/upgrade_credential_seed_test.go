@@ -1488,3 +1488,233 @@ func TestUpgradeRereadsTheReplicaTargetWhileItWaits(t *testing.T) {
 	assert.True(t, seeded(t, clientset),
 		"a Deployment that had converged to one replica was still measured against two")
 }
+
+// The build stamp is an annotation, and it outlives the pod that wrote it. A
+// rollback to the console-api being replaced, landing while this waits, would
+// otherwise converge on the old build with the stamp still vouching for it, and
+// the migration would be recorded against the very writer it waits out.
+//
+// The second poll is quiescent on its own terms — one pod, no lingering, one
+// image — so the only thing that can hold it open is noticing that the rollout
+// underneath moved.
+func TestUpgradeHoldsTheMigrationOpenWhenTheConsoleAPIRollsAgain(t *testing.T) {
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		consoleAPIDeployment(),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+	polls := 0
+	clientset.PrependReactor("list", "replicasets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		polls++
+		items := []appsv1.ReplicaSet{*consoleAPIReplicaSet("2", currentRevision)}
+		if polls > 1 {
+			// The rollback, now the Deployment's current revision.
+			items = append(items, *consoleAPIReplicaSet("3", "rolledback"))
+		}
+		return true, &appsv1.ReplicaSetList{Items: items}, nil
+	})
+	clientset.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if polls <= 1 {
+			// Nothing up yet, so the first poll settles on the stamped revision
+			// and comes round again.
+			return true, &corev1.PodList{}, nil
+		}
+		return true, &corev1.PodList{Items: []corev1.Pod{
+			*consoleAPIPodOfRevision("console-api-old", "rolledback", false),
+		}}, nil
+	})
+	var out bytes.Buffer
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &out, credentialGrants{mayClose: true}))
+
+	assert.False(t, seeded(t, clientset),
+		"the migration was recorded against a console-api that rolled again while this waited")
+	assert.Nil(t, storedEntries(t, clientset)[0].AllowedProjects,
+		"a credential was decided by a pass that had followed a different rollout")
+}
+
+// The branch that runs when the console-api has not recorded its build: it may
+// not decide anything, but a list the old writer erased is still this upgrade's
+// to put back.
+func TestUpgradeRepairsWhileTheOldWriterIsStillServing(t *testing.T) {
+	noStampWait(t)
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystem(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api", false),
+		namespaceOfProject("shop-prod", "shop"),
+		sharedCredentialSecret(t, curatedForge("shop")),
+	)
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(), owningProject("shop-prod"))
+	var out bytes.Buffer
+
+	grants, err := credentialSeedConsent(ctx, clientset, dyn, &bytes.Buffer{}, false, false, refuseToConfirm(t))
+	require.NoError(t, err)
+
+	erasedByTheOldWriter(t, clientset, "forge")
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &out, grants))
+
+	assert.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"),
+		"a curated list erased during the rollout stayed erased because the console-api had not stamped yet")
+	assert.False(t, seeded(t, clientset), "the migration closed against a writer that still erases lists")
+}
+
+// A rollback that lands before the wait has even looked. The pin is taken when
+// the build stamp is read, so a pin that established itself on the first poll
+// would adopt the rollback as the rollout to follow and close the migration
+// against it.
+func TestUpgradeHoldsTheMigrationOpenWhenTheConsoleAPIRolledBeforeTheWait(t *testing.T) {
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		consoleAPIDeployment(),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+	reads := 0
+	clientset.PrependReactor("list", "replicasets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		reads++
+		items := []appsv1.ReplicaSet{*consoleAPIReplicaSet("2", currentRevision)}
+		if reads > 1 {
+			// By the time the wait polls, the rollback is current.
+			items = append(items, *consoleAPIReplicaSet("3", "rolledback"))
+		}
+		return true, &appsv1.ReplicaSetList{Items: items}, nil
+	})
+	clientset.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &corev1.PodList{Items: []corev1.Pod{
+			*consoleAPIPodOfRevision("console-api-old", "rolledback", false),
+		}}, nil
+	})
+	var out bytes.Buffer
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &out, credentialGrants{mayClose: true}))
+
+	assert.False(t, seeded(t, clientset),
+		"the migration was recorded against a rollback that landed before the wait began")
+}
+
+// The late write the defer exists for, landing after the closing pass checked.
+// An approved grant is a decision this run made, and losing it is the same
+// accident as losing a curated one, so the repair has to cover both.
+func TestUpgradeRepairsAnApprovedGrantClearedAfterTheFinalCheck(t *testing.T) {
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(), consoleAPIDeployment(), consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api", false),
+		namespaceOfProject("shop-prod", "shop"),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+	dyn := dynamicfake.NewSimpleDynamicClient(appScheme(),
+		gitApp("shop-prod", "forge"), owningProject("shop-prod"))
+
+	grants, err := credentialSeedConsent(ctx, clientset, dyn, &bytes.Buffer{}, true, false, refuseToConfirm(t))
+	require.NoError(t, err)
+	require.Equal(t, []string{"shop"}, grants.approved["forge"])
+
+	require.NoError(t, seedSharedCredentialGrants(ctx, clientset, &bytes.Buffer{}, grants))
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &bytes.Buffer{}, grants))
+	require.True(t, seeded(t, clientset))
+
+	// The old pod's write, arriving after the closing pass had confirmed its own.
+	erasedByTheOldWriter(t, clientset, "forge")
+
+	// What runUpgrade defers on every exit.
+	repairErasedAllowLists(ctx, clientset, &bytes.Buffer{}, grants.repairRecord())
+
+	assert.True(t, storedEntries(t, clientset)[0].AllowsProject("shop"),
+		"a grant this upgrade made was lost to a late write the repair could not reach")
+}
+
+// A Deployment deleted and recreated under the same name during the wait. The
+// revision hash can coincide, because an identical template hashes identically,
+// so the object is what tells the two apart.
+func TestUpgradeHoldsTheMigrationOpenWhenTheConsoleAPIWasReplaced(t *testing.T) {
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		consoleAPIDeployment(),
+		consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api", false),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+	var out bytes.Buffer
+
+	// The upgrade rolled one Deployment; the object answering now is another.
+	rolled := consoleAPIRollout{uid: "a-deployment-that-has-gone", hash: currentRevision}
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &out,
+		credentialGrants{mayClose: true, rolled: rolled}))
+
+	assert.False(t, seeded(t, clientset),
+		"the migration was recorded against a console-api Deployment that had been replaced")
+	assert.Nil(t, storedEntries(t, clientset)[0].AllowedProjects,
+		"a credential was decided by a pass following a Deployment it never rolled")
+}
+
+// The ordinary path: the rollout the upgrade recorded is the one still serving.
+func TestUpgradeClosesAgainstTheRolloutItRecorded(t *testing.T) {
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		consoleAPIDeployment(),
+		consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api", false),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &bytes.Buffer{},
+		credentialGrants{mayClose: true, rolled: consoleAPIRollout{uid: "console-api-uid", hash: currentRevision}}))
+
+	assert.True(t, seeded(t, clientset),
+		"the migration stayed open against the very rollout the upgrade put there")
+}
+
+// An upgrade that rolled console-api and could not say which rollout resulted.
+// Everything after that moment is time a rollback could have landed in, so
+// looking the rollout up at the end would find the rollback and wait for it.
+// The two failures are opposite answers and must not share a zero value.
+func TestUpgradeHoldsTheMigrationOpenWhenItCouldNotRecordWhatItRolled(t *testing.T) {
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		consoleAPIDeployment(),
+		consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api", false),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+	var out bytes.Buffer
+
+	// It rolled console-api; the pin that follows failed, so nothing was
+	// recorded. The cluster is otherwise perfectly quiescent, so the only thing
+	// that can hold the migration open is refusing to look the rollout up now.
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &out,
+		credentialGrants{mayClose: true, rolledConsoleAPI: true}))
+
+	assert.False(t, seeded(t, clientset),
+		"the migration was closed against a rollout this upgrade could not identify")
+	assert.Contains(t, out.String(), "could not record which console-api it rolled",
+		"the operator was not told why the migration stayed open")
+	assert.Nil(t, storedEntries(t, clientset)[0].AllowedProjects,
+		"a credential was decided by a pass that could not tell what was serving")
+}
+
+// A run that never rolled console-api has replaced nothing, so it may look up
+// what is serving and wait for that.
+func TestUpgradeClosesWhenItRolledNoConsoleAPIAtAll(t *testing.T) {
+	ctx := context.Background()
+	clientset := k8sfake.NewClientset(
+		kipperSystemUpgraded(),
+		consoleAPIDeployment(),
+		consoleAPIReplicaSet("2", currentRevision),
+		consoleAPIPod("console-api", false),
+		sharedCredentialSecret(t, sharedcred.Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+	)
+
+	require.NoError(t, closeSharedCredentialGrants(ctx, clientset, &bytes.Buffer{},
+		credentialGrants{mayClose: true}))
+
+	assert.True(t, seeded(t, clientset),
+		"a run that replaced nothing was still refused the rollout in front of it")
+}

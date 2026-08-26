@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
@@ -88,11 +89,11 @@ func closeSharedCredentialGrants(ctx context.Context, clientset kubernetes.Inter
 		return err
 	}
 	if done {
-		repairErasedAllowLists(ctx, clientset, out, grants.decided)
-		return reportClearedAllowLists(ctx, clientset, out, grants.decided)
+		repairErasedAllowLists(ctx, clientset, out, grants.repairRecord())
+		return reportClearedAllowLists(ctx, clientset, out, grants.repairRecord())
 	}
 	if !grants.mayClose {
-		repairErasedAllowLists(ctx, clientset, out, grants.decided)
+		repairErasedAllowLists(ctx, clientset, out, grants.repairRecord())
 		return reportConsentDeclined(ctx, clientset, out)
 	}
 	stamped, err := consoleAPIKeepsGrants(ctx, clientset)
@@ -110,7 +111,30 @@ func closeSharedCredentialGrants(ctx context.Context, clientset kubernetes.Inter
 	// builds fresh, with no resourceVersion, so its write cannot conflict with
 	// anything: a request still running inside a terminating pod lands on top
 	// of this pass and recording the migration over it would seal the loss.
-	if err := waitForConsoleAPIQuiescence(ctx, clientset); err != nil {
+	// The rollout this upgrade put in place, recorded when it finished rolling
+	// rather than read back here. Everything between then and now is time a
+	// rollback could have landed in, and the stamp cannot tell: it is an
+	// annotation that says a console-api recorded itself, not which one serves.
+	pinned := grants.rolled
+	if pinned.hash == "" {
+		if grants.rolledConsoleAPI {
+			// It rolled console-api and could not say which rollout resulted.
+			// Looking it up now would find whatever is current, which is the
+			// rollback if one has landed since, so there is nothing safe left
+			// to wait for.
+			_, _ = fmt.Fprintf(out, "  !   This upgrade could not record which console-api it rolled, so it cannot\n"+
+				"      tell whether the one it replaced has stopped. The migration stays open, and\n"+
+				"      the next upgrade finishes it.\n")
+			return fillSharedCredentialGrants(ctx, clientset, out, grants.approved, grants.shownAs, grants.decided, false)
+		}
+		var pinErr error
+		if pinned, pinErr = pinConsoleAPIRollout(ctx, clientset); pinErr != nil {
+			_, _ = fmt.Fprintf(out, "  !   %v\n"+
+				"      The migration stays open, and the next upgrade finishes it.\n", pinErr)
+			return fillSharedCredentialGrants(ctx, clientset, out, grants.approved, grants.shownAs, grants.decided, false)
+		}
+	}
+	if err := waitForConsoleAPIQuiescence(ctx, clientset, pinned); err != nil {
 		_, _ = fmt.Fprintf(out, "  !   %v\n"+
 			"      The migration stays open, and the next upgrade finishes it.\n", err)
 		return fillSharedCredentialGrants(ctx, clientset, out, grants.approved, grants.shownAs, grants.decided, false)
@@ -767,6 +791,55 @@ type missedGrant struct {
 	credential string
 }
 
+// consoleAPIRollout is the Deployment and the revision that were serving when
+// the console-api recorded its build.
+//
+// A scale moves the replica count and nothing else, which is why the count is
+// re-read every poll. A rollback moves the revision, and a delete and recreate
+// moves the object, and neither is the rollout whose pod wrote the build stamp:
+// following either would end the migration against the writer it exists to wait
+// out.
+type consoleAPIRollout struct {
+	uid  types.UID
+	hash string
+}
+
+// pinConsoleAPIRollout reads which console-api rollout is current.
+//
+// The upgrade takes this the moment it has finished rolling console-api, which
+// is the only point at which anything knows which rollout it put there. Taken
+// any later it records whatever is current then, which is the replacement if one
+// has landed.
+//
+// So the closing pass calls it only for a run that did not roll console-api at
+// all — an upgrade that found no such Deployment, where nothing this run did can
+// have replaced anything. A run that rolled it and could not identify the result
+// holds the migration open instead of asking again.
+func pinConsoleAPIRollout(ctx context.Context, clientset kubernetes.Interface) (consoleAPIRollout, error) {
+	dep, err := clientset.AppsV1().Deployments(kipperSystemNS).Get(ctx, consoleAPIName, metav1.GetOptions{})
+	if err != nil {
+		return consoleAPIRollout{}, fmt.Errorf("could not tell which console-api recorded its build: reading %s: %w", consoleAPIName, err)
+	}
+	hash, err := currentConsoleAPIRevision(ctx, clientset, dep, metav1.FormatLabelSelector(dep.Spec.Selector))
+	if err != nil {
+		return consoleAPIRollout{}, err
+	}
+	return consoleAPIRollout{uid: dep.UID, hash: hash}, nil
+}
+
+// movedTo names what changed since the pin, and nothing when the rollout is
+// still the one that stamped. It never adopts what it is given: a pin that
+// re-established itself would accept exactly the replacement it exists to catch.
+func (r consoleAPIRollout) movedTo(uid types.UID, hash string) string {
+	switch {
+	case r.uid != uid:
+		return "was replaced"
+	case r.hash != hash:
+		return "rolled again"
+	}
+	return ""
+}
+
 // quiescenceWait bounds the wait for the console-api being replaced to stop.
 // Overridden in tests, as stampWait is.
 var (
@@ -792,24 +865,27 @@ const (
 // fresh, with no resourceVersion, so that late write conflicts with nothing and
 // silently replaces everything this pass just decided.
 //
-// What it waits for is every pod under the Deployment's selector belonging to
-// the revision the Deployment is currently rolling out, none of them on the way
-// out, and as many of them as the Deployment asks for. The revision is read from
-// the ReplicaSet rather than counted, because a count says how many pods there
-// should be and not which ones are there; the replica count is then checked as
-// well, so a replacement that has not appeared yet cannot read as a rollout that
-// has finished.
+// What it waits for is four things, all of them about the pods rather than
+// about what any of them is: none on the way out, none carrying another
+// revision's pod-template-hash, at least as many of this revision as the
+// Deployment asks for, and one image across them with none unreported. The
+// revision is read from the ReplicaSet rather than counted, because a count says
+// how many pods there should be and not which ones are there; the replica count
+// is checked as well, so a replacement that has not arrived cannot read as a
+// rollout that has finished; and the image is checked because the build stamp is
+// written once for the namespace by whichever pod started first, so on its own
+// it vouches for that pod and not for its neighbour.
 //
-// What this cannot establish is which build a pod of the current revision is
-// running. The image is a mutable tag, so two pods made from one template can
-// have resolved it differently, and the build stamp is written once for the
-// namespace by whichever pod started first. Telling them apart needs evidence
-// from the pod itself, which is a console-api change rather than one here.
-// Comparing the images they report does not stand in for it: the same release
-// has a different digest per architecture and a different prefix per runtime, so
-// the comparison fails on healthy clusters while still not proving the surviving
-// pod is the one that stamped.
-func waitForConsoleAPIQuiescence(ctx context.Context, clientset kubernetes.Interface) error {
+// It also refuses to follow a different rollout than the one it started on. The
+// stamp is an annotation that outlives the pod that wrote it, so a rollback to
+// the console-api being replaced, landing while this waits, would otherwise
+// converge on the old build with the stamp still vouching for it.
+//
+// What it cannot do is prove which build a pod of the current revision is
+// running. That needs evidence from the pod itself, which is a console-api
+// change rather than one here; the image check narrows it to pods that disagree
+// with each other, which is as far as the API reaches.
+func waitForConsoleAPIQuiescence(ctx context.Context, clientset kubernetes.Interface, pinned consoleAPIRollout) error {
 	// The Deployment is what says which pods are the console-api's and which
 	// revision is current, so without it there is nothing to ask. It is not
 	// evidence that no writer is left: a Deployment can go before the pods it
@@ -834,6 +910,9 @@ func waitForConsoleAPIQuiescence(ctx context.Context, clientset kubernetes.Inter
 		if err != nil {
 			return err
 		}
+		if changed := pinned.movedTo(dep.UID, hash); changed != "" {
+			return fmt.Errorf("the console-api %s while this upgrade was waiting for the one it replaces to stop, so the build that is serving now is not the one that recorded itself", changed)
+		}
 		pods, err := clientset.CoreV1().Pods(kipperSystemNS).List(ctx, metav1.ListOptions{LabelSelector: selector})
 		if err != nil {
 			return fmt.Errorf("listing %s pods to wait for the one it replaces to stop: %w", consoleAPIName, err)
@@ -855,6 +934,9 @@ func waitForConsoleAPIQuiescence(ctx context.Context, clientset kubernetes.Inter
 			case current < want:
 				return fmt.Errorf("only %d of %d console-api pods were up after %s, so whether the one being replaced has stopped is unknown",
 					current, want, quiescenceWait)
+			case running[""]:
+				return fmt.Errorf("a console-api pod had still not reported what it is running after %s, so whether the build that clears a shared credential's allowed projects has stopped is unknown",
+					quiescenceWait)
 			default:
 				return fmt.Errorf("the console-api pods were still reporting %d different images after %s, so whether one of them is the build that clears a shared credential's allowed projects is unknown",
 					len(running), quiescenceWait)

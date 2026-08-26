@@ -38,6 +38,48 @@ type credentialGrants struct {
 	// mayClose is whether this run may decide the rest as nobody and record the
 	// migration as finished.
 	mayClose bool
+	// rolled is the console-api rollout this upgrade put in place, recorded the
+	// moment it finished rolling. Deciding waits for that rollout and no other.
+	rolled consoleAPIRollout
+	// rolledConsoleAPI records that this upgrade rolled console-api at all,
+	// whether or not it managed to identify the rollout afterwards.
+	//
+	// It is separate from rolled because the two failures it tells apart are
+	// opposite answers to the same question. A run that never rolled console-api
+	// may look up what is serving and wait for that. A run that rolled it and
+	// could not say which rollout resulted may not: everything from that moment
+	// on is time a rollback could have landed in, and looking it up then would
+	// find the rollback and wait for it.
+	rolledConsoleAPI bool
+}
+
+// repairRecord is every allow-list this run may write back: the ones it found
+// already decided, and the ones it wrote itself.
+//
+// An approved grant becomes a decision the moment this upgrade writes it, and
+// from then on losing it is the same accident as losing a curated one — the
+// writer being replaced clears the whole list either way. Without this the
+// repair could put back only the half of the state it did not create, which is
+// a promise that holds for one kind of grant and not the other.
+//
+// It is a repair for the same reason the rest is: every pair in it was either
+// already stored when the run began or approved by the operator during it, and
+// each carries the identity of the credential it was meant for, so an entry that
+// changed hands is refused exactly as it is anywhere else.
+func (g credentialGrants) repairRecord() map[string]sharedcred.Decision {
+	record := make(map[string]sharedcred.Decision, len(g.decided)+len(g.approved))
+	for name, decision := range g.decided {
+		record[name] = decision
+	}
+	for name, projects := range g.approved {
+		if _, held := record[name]; held {
+			// Already decided before the rollout, so what was stored then is
+			// the older and better record: Seed cannot have widened it.
+			continue
+		}
+		record[name] = sharedcred.Decision{Identity: g.shownAs[name], AllowedProjects: projects}
+	}
+	return record
 }
 
 // consentDecision is the outcome of asking whether the upgrade may fill the
