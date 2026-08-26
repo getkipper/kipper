@@ -33,7 +33,8 @@ import { gitCardState as deriveGitCardState, imageCardState as deriveImageCardSt
 import { formatDateTime } from '@/utils/datetime'
 import { isSensitiveEnvVar } from '@/utils/sensitiveEnv'
 import EnvVariableValue from './EnvVariableValue.vue'
-import { claimantsInNamespace, roleInNamespace } from '@/utils/projectRole'
+import { claimantsInNamespace, projectInNamespace } from '@/utils/projectRole'
+import { can } from '@/utils/capabilities'
 import EnvAvailableVariables from './EnvAvailableVariables.vue'
 import type { EnvPreview, EnvPreviewSnippet, EnvPreviewVariable } from '@/api/apps'
 import * as filesApi from '@/api/files'
@@ -88,20 +89,43 @@ const TAB_LABELS: Record<TabKey, string> = {
 
 // Reading the Env tab and writing to it are different permissions, because the
 // API treats them as different: a namespace-scoped read needs membership of the
-// project owning the namespace, a mutation needs the deployer role there.
-// A cluster deployer is not a deployer of every project. ProjectAccessResolver
+// project owning the namespace, a mutation needs the capability for it there.
+// A cluster deployer holds nothing in a project by virtue of that role. ProjectAccessResolver
 // hands the cluster role an override to an admin alone, whom it resolves as
-// owner, and evaluates project membership for everyone else. So the project
-// role is the whole answer here, and where it is unknown — an unclaimed or
-// contested namespace, or a store that has not loaded — there is no role to act
-// on and nothing is offered. Falling back to the cluster role there showed a
-// cluster deployer every control for a moment on someone else's project, each
-// of which answers 403.
-const namespaceRole = computed(() => roleInNamespace(projects.projects, project.value))
-const canReadEnv = computed(() => authStore.isAdmin || namespaceRole.value !== null)
-const canWriteEnv = computed(() =>
-  authStore.isAdmin || namespaceRole.value === 'owner' || namespaceRole.value === 'deployer',
-)
+// owner, and evaluates project membership for everyone else. So the capability
+// set the project carries is the whole answer here, and where it is unknown —
+// an unclaimed or contested namespace, or a store that has not loaded — there
+// is nothing to act on and nothing is offered. Falling back to the cluster role
+// there showed a cluster deployer every control for a moment on someone else's
+// project, each of which answers 403.
+// What the caller may do here, as the server reported it. Comparing the role
+// name to 'owner' and 'deployer' was a copy of a ladder the API no longer has,
+// and it could only ever answer for the names this build was written with: a
+// role carrying env.write renders read-only under it while the API admits every
+// write it makes.
+const namespaceProject = computed(() => projectInNamespace(projects.projects, project.value))
+// Belonging to the project used to stand in for every read gate here. It is
+// not the question the API asks: /env takes env.read, /files takes files.read,
+// and a role can carry one without the other. Membership answered true to all
+// of them and opened tabs whose every request came back 403.
+const canReadEnv = computed(() => authStore.isAdmin || can(namespaceProject.value, 'env.read'))
+const canRevealEnv = computed(() => authStore.isAdmin || can(namespaceProject.value, 'env.reveal'))
+const canReadFiles = computed(() => authStore.isAdmin || can(namespaceProject.value, 'files.read'))
+const canWriteFiles = computed(() => authStore.isAdmin || can(namespaceProject.value, 'files.write'))
+const canReadApp = computed(() => authStore.isAdmin || can(namespaceProject.value, 'kipper.read'))
+const canReadWorkloads = computed(() => authStore.isAdmin || can(namespaceProject.value, 'workloads.read'))
+const canReadLogs = computed(() => authStore.isAdmin || can(namespaceProject.value, 'pods.logs.read'))
+const canOpenTerminal = computed(() => authStore.isAdmin || can(namespaceProject.value, 'terminal.open'))
+const canWriteEnv = computed(() => authStore.isAdmin || can(namespaceProject.value, 'env.write'))
+// Binding a service, linking an app, updating the image and asking for a
+// diagnosis all write the App CR, so their routes take kipper.write;
+// restarting takes workloads.restart. Reading them all off
+// env.write showed a caller controls whose call the API then refused, and hid
+// controls from a caller the API would have let through. A built-in role holds
+// all three or none, which is why this only shows up against a role that does
+// not.
+const canWriteApp = computed(() => authStore.isAdmin || can(namespaceProject.value, 'kipper.write'))
+const canRestart = computed(() => authStore.isAdmin || can(namespaceProject.value, 'workloads.restart'))
 
 /**
  * Drops everything the Env tab read for one app.
@@ -181,27 +205,70 @@ watch(canReadEnv, (mayRead) => {
 })
 
 const visibleTabs = computed<Tab[]>(() => {
-  const keys: TabKey[] = ['logs']
-  if (authStore.isDeployer) {
-    keys.push('deploys', 'scale', 'resources')
+  const keys: TabKey[] = []
+  if (canReadLogs.value) {
+    keys.push('logs')
   }
-  // Env answers to its own rule wherever it appears. The env routes gate on the
-  // caller's role in the project owning this namespace rather than on the
-  // cluster-wide role, so a project member is authorised by the API and was
-  // being shown no tab to use it from — while a cluster deployer with no role
-  // here was shown one whose reads the API refuses. A viewer gets it read-only;
-  // every control that writes is behind canWriteEnv.
+  if (canReadApp.value) {
+    keys.push('deploys')
+  }
+  if (canReadWorkloads.value) {
+    keys.push('scale')
+  }
+  if (canReadApp.value) {
+    keys.push('resources')
+  }
+  // Every tab answers to the capability its own routes take. The cluster role
+  // used to decide eight of them, which denied a project member the tabs the
+  // API would have served them and showed a cluster deployer with no role here
+  // tabs whose every read the API refuses. A caller who can read but not write
+  // gets the tab read-only, each control behind its own capability.
   //
-  // Only Env. The other seven are gated by their own handlers and answering for
-  // them here would be guessing at rules this does not know.
   if (canReadEnv.value) {
     keys.push('env')
   }
-  if (authStore.isDeployer) {
-    keys.push('files', 'connect', 'secrets', 'settings')
+  if (canReadFiles.value) {
+    keys.push('files')
+  }
+  if (canOpenTerminal.value) {
+    keys.push('connect')
+  }
+  if (canReadEnv.value) {
+    keys.push('secrets')
+  }
+  if (canReadApp.value) {
+    keys.push('settings')
   }
   return keys.map((k) => ({ key: k, label: TAB_LABELS[k] }))
 })
+
+// A pane renders only while its tab is still on offer. activeTab on its own
+// kept a pane rendering after the capability behind it was withdrawn.
+//
+// This stops the markup, not the sockets. What closes the log stream is the
+// watch on activeTab moving off logs, and onUnmounted when the panel closes.
+// The watch below covers the case neither reaches: every tab withdrawn while
+// the panel stays open, which the canReadEnv watch deliberately allows for a
+// namespace two projects claim.
+// Gating the reveal controls stops a new reveal; it does nothing about values
+// already on screen. Losing the capability has to take them back, or a role
+// downgrade leaves the plaintext readable for as long as the panel stays open.
+watch(canRevealEnv, (mayReveal) => {
+  if (mayReveal) return
+  revealedSecrets.value = {}
+  showJsonView.value = false
+  revealGitTokenOpen.value = false
+  // The secret editor holds the plaintext it was opened with, and the env
+  // preview is behind env.reveal too. Clearing the reveals and leaving these
+  // would keep the same values on screen by another route.
+  editingSecret.value = null
+  editSecretValue.value = ''
+  envPreview.value = null
+})
+
+function showsTab(key: TabKey): boolean {
+  return activeTab.value === key && visibleTabs.value.some(t => t.key === key)
+}
 
 function setActiveTab(key: string) {
   activeTab.value = key as TabKey
@@ -394,7 +461,7 @@ async function loadAvailableServices() {
 
 const beginBind = loadGuard()
 async function handleBind() {
-  if (!bindingService.value) return
+  if (!canWriteApp.value || !bindingService.value) return
   // The namespace picker only renders for postgres/mysql/rabbitmq;
   // for other services bindingDbMode is just a stale default from the
   // last reset and must not block the bind. A blank value is the
@@ -460,6 +527,7 @@ async function handleBind() {
 }
 
 async function handleUnbind(serviceName: string) {
+  if (!canWriteApp.value) return
   const op = envMutation()
   try {
     await op.ready()
@@ -509,7 +577,7 @@ async function loadLinkableApps() {
 
 const beginLink = loadGuard()
 async function handleLink() {
-  if (!linkingTarget.value) return
+  if (!canWriteApp.value || !linkingTarget.value) return
   const op = envMutation()
   const onPanel = op.onPanel
   const newestLink = beginLink()
@@ -537,6 +605,7 @@ async function handleLink() {
 }
 
 async function handleUnlink(target: string) {
+  if (!canWriteApp.value) return
   const op = envMutation()
   try {
     await op.ready()
@@ -583,6 +652,18 @@ const regularEnvVars = computed(() => envVars.value)
 // Logs — dual mode: Loki (searchable history) and Live (WebSocket stream)
 const logMode = ref<'loki' | 'live'>('loki')
 const { lines, connected, connect, disconnect, clear } = useLogStream()
+
+watch(visibleTabs, (tabs) => {
+  if (!tabs.length) {
+    // Nothing here is readable any more. No tab to move to, and no later event
+    // to close the stream, so it is closed here.
+    disconnect()
+    return
+  }
+  if (!tabs.some(t => t.key === activeTab.value)) {
+    activeTab.value = tabs[0].key as TabKey
+  }
+}, { immediate: true })
 
 // Live log pod selection and filtering
 const livePods = ref<string[]>([])
@@ -1610,6 +1691,7 @@ const restarting = ref(false)
 
 const beginRestart = loadGuard()
 async function handleRestart() {
+  if (!canRestart.value) return
   const current = beginRestart()
   const restarted = props.appName
   restarting.value = true
@@ -1634,7 +1716,7 @@ const newImage = ref('')
 const updatingImage = ref(false)
 
 async function handleUpdateImage() {
-  if (!newImage.value) return
+  if (!canWriteApp.value || !newImage.value) return
   updatingImage.value = true
   try {
     await api.updateImage(project.value, props.appName, newImage.value)
@@ -2334,6 +2416,7 @@ function viewFile(entry: filesApi.FileEntry) {
     filePath: filePath,
     fileName: entry.name,
     fileSize: entry.size,
+    canEdit: canWriteFiles.value,
   })
 }
 
@@ -2389,6 +2472,7 @@ function openOptimise() {
     </template>
     <template #actions>
       <button
+        v-if="canWriteApp"
         @click="openDiagnose"
         class="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
         title="AI Diagnose"
@@ -2396,6 +2480,7 @@ function openOptimise() {
         <Sparkles class="h-4 w-4" :stroke-width="1.75" />
       </button>
       <button
+        v-if="canWriteApp"
         @click="showImageForm = !showImageForm"
         class="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
         title="Update image"
@@ -2403,6 +2488,7 @@ function openOptimise() {
         <Package class="h-4 w-4" :stroke-width="1.75" />
       </button>
       <button
+        v-if="canRestart"
         @click="handleRestart"
         :disabled="restarting"
         class="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
@@ -2440,6 +2526,7 @@ function openOptimise() {
           class="text-xs font-medium text-red-700 underline underline-offset-2 hover:text-red-900 dark:text-red-400 dark:hover:text-red-200"
         >Show all {{ failingContainers.length }} errors</button>
         <button
+          v-if="canReadLogs"
           @click="activeTab = 'logs'"
           class="text-xs font-medium text-red-700 underline underline-offset-2 hover:text-red-900 dark:text-red-400 dark:hover:text-red-200"
         >Open logs</button>
@@ -2454,7 +2541,7 @@ function openOptimise() {
     </div>
 
     <!-- Update image form -->
-    <div v-if="showImageForm" class="flex items-center gap-2 border-b border-slate-200 px-5 py-3 dark:border-slate-800">
+    <div v-if="showImageForm && canWriteApp" class="flex items-center gap-2 border-b border-slate-200 px-5 py-3 dark:border-slate-800">
       <input
         v-model="newImage"
         type="text"
@@ -2486,7 +2573,7 @@ function openOptimise() {
     <!-- Content -->
     <div class="flex-1 overflow-y-auto">
       <!-- Logs tab -->
-      <div v-if="activeTab === 'logs'" class="flex h-full flex-col">
+      <div v-if="showsTab('logs')" class="flex h-full flex-col">
         <!-- Log toolbar -->
         <div class="flex flex-wrap items-center gap-2 border-b border-slate-100 px-5 py-2 dark:border-slate-800">
           <!-- Mode toggle -->
@@ -2601,9 +2688,9 @@ function openOptimise() {
       </div>
 
       <!-- Env tab -->
-      <div v-if="activeTab === 'env'" class="p-5">
+      <div v-if="showsTab('env')" class="p-5">
         <!-- Bind service -->
-        <div v-if="canWriteEnv && bindableServices.length" class="mb-4 space-y-2">
+        <div v-if="canWriteApp && bindableServices.length" class="mb-4 space-y-2">
           <div class="flex flex-wrap items-center gap-2">
             <Link class="h-4 w-4 text-slate-400" />
             <select
@@ -2677,7 +2764,7 @@ function openOptimise() {
         </div>
 
         <!-- Link an app -->
-        <div v-if="canWriteEnv && linkableApps.length" class="mb-4 flex flex-wrap items-center gap-2">
+        <div v-if="canWriteApp && linkableApps.length" class="mb-4 flex flex-wrap items-center gap-2">
           <Link class="h-4 w-4 text-slate-400" />
           <select
             v-model="linkingTarget"
@@ -2713,7 +2800,7 @@ function openOptimise() {
                   Environment or secrets changed. The running pods keep the old values until you restart.
                 </p>
                 <button
-                  v-if="canWriteEnv"
+                  v-if="canRestart"
                   @click="handleRestart"
                   :disabled="restarting"
                   class="mt-2 rounded-md bg-amber-600 px-3 py-1 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-50"
@@ -2757,7 +2844,7 @@ function openOptimise() {
               <Link class="h-3.5 w-3.5 text-slate-400" />
               <span class="text-xs font-medium text-slate-500 dark:text-slate-400">{{ svcName }}</span>
               <span class="text-[10px] text-slate-400 dark:text-slate-500">(via EnvFrom)</span>
-              <button v-if="canWriteEnv" @click="handleUnbind(svcName)" class="ml-auto text-slate-400 hover:text-red-500" title="Unbind service">
+              <button v-if="canWriteApp" @click="handleUnbind(svcName)" class="ml-auto text-slate-400 hover:text-red-500" title="Unbind service">
                 <X class="h-3.5 w-3.5" />
               </button>
             </div>
@@ -2794,7 +2881,7 @@ function openOptimise() {
                 <span v-else-if="link.open" class="flex-1 truncate text-xs text-slate-400 dark:text-slate-500">{{ link.url }} — waiting for the app to pick it up</span>
                 <span v-else class="flex-1 truncate text-xs text-amber-600 dark:text-amber-500">{{ link.reason || 'no traffic allowed yet' }}</span>
                 <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-400 dark:bg-slate-700 dark:text-slate-500">{{ link.app }}</span>
-                <button v-if="canWriteEnv" @click="handleUnlink(link.app)" class="text-slate-400 hover:text-red-500" title="Unlink">
+                <button v-if="canWriteApp" @click="handleUnlink(link.app)" class="text-slate-400 hover:text-red-500" title="Unlink">
                   <X class="h-3.5 w-3.5" />
                 </button>
               </div>
@@ -2877,8 +2964,8 @@ function openOptimise() {
           />
 
           <p v-if="!canWriteEnv" class="pt-2 text-xs text-slate-500 dark:text-slate-400">
-            You have read access to this project. Changing environment variables, bindings and links
-            needs the deployer role.
+            You have read access to this project. Changing environment variables, bindings and
+            links needs permission to change them, which your role in this project does not carry.
           </p>
 
           <!-- Add new -->
@@ -2899,13 +2986,13 @@ function openOptimise() {
       </div>
 
       <!-- Secrets tab -->
-      <div v-if="activeTab === 'secrets'" class="p-5">
+      <div v-if="showsTab('secrets')" class="p-5">
         <div v-if="secretsLoading" class="text-sm text-slate-500 dark:text-slate-400">Loading...</div>
 
         <div v-else class="space-y-3">
           <!-- JSON toggle -->
           <div v-if="secretKeys.length" class="flex justify-end">
-            <button @click="toggleJsonView" class="text-xs text-kipper-600 hover:text-kipper-700 dark:text-kipper-400">
+            <button v-if="canRevealEnv" @click="toggleJsonView" class="text-xs text-kipper-600 hover:text-kipper-700 dark:text-kipper-400">
               {{ showJsonView ? 'Key-value view' : 'JSON view' }}
             </button>
           </div>
@@ -2947,14 +3034,14 @@ function openOptimise() {
                 <span class="flex-1 truncate font-mono text-xs text-slate-600 dark:text-slate-400">
                   {{ revealedSecrets[key] ?? '••••••••' }}
                 </span>
-                <button @click="revealSecret(key)" class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300" title="Reveal">
+                <button v-if="canRevealEnv" @click="revealSecret(key)" class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300" title="Reveal">
                   <EyeOff v-if="revealedSecrets[key]" class="h-3.5 w-3.5" />
                   <Eye v-else class="h-3.5 w-3.5" />
                 </button>
-                <button @click="startEditSecret(key)" class="text-slate-400 hover:text-kipper-600 dark:hover:text-kipper-400" title="Edit">
+                <button v-if="canWriteEnv" @click="startEditSecret(key)" class="text-slate-400 hover:text-kipper-600 dark:hover:text-kipper-400" title="Edit">
                   <Pencil class="h-3.5 w-3.5" />
                 </button>
-                <button @click="deleteSecretKey(key)" class="text-slate-400 hover:text-red-500" title="Delete">
+                <button v-if="canWriteEnv" @click="deleteSecretKey(key)" class="text-slate-400 hover:text-red-500" title="Delete">
                   <Trash2 class="h-3.5 w-3.5" />
                 </button>
               </div>
@@ -2966,7 +3053,7 @@ function openOptimise() {
           </div>
 
           <!-- Add new -->
-          <div class="flex items-end gap-2 pt-2">
+          <div v-if="canWriteEnv" class="flex items-end gap-2 pt-2">
             <div class="min-w-0 flex-1">
               <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Key</label>
               <input v-model="newSecretKey" type="text" placeholder="DATABASE_URL" class="block w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
@@ -2983,7 +3070,7 @@ function openOptimise() {
       </div>
 
       <!-- Deploys tab — Deploy methods + Deploy history -->
-      <div v-if="activeTab === 'deploys'" class="p-5 space-y-8">
+      <div v-if="showsTab('deploys')" class="p-5 space-y-8">
         <!-- Deploy methods section (collapsed by default) -->
         <section>
           <button
@@ -3049,7 +3136,7 @@ function openOptimise() {
                       : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400'"
                   >{{ gitCardState === 'active' ? 'active' : gitCardState === 'error' ? 'build failed' : 'not configured' }}</span>
                 </div>
-                <div v-if="buildStatus?.git_configured" class="flex shrink-0 gap-2">
+                <div v-if="buildStatus?.git_configured && canWriteApp" class="flex shrink-0 gap-2">
                   <button
                     v-if="!gitEditing"
                     @click="openGitEdit"
@@ -3062,7 +3149,7 @@ function openOptimise() {
                     class="rounded-md border border-slate-300 px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"
                   >Remove</button>
                   <button
-                    v-if="buildStatus.phase === 'Building' || buildStatus.phase === 'Pending'"
+                    v-if="canWriteApp && (buildStatus.phase === 'Building' || buildStatus.phase === 'Pending')"
                     @click="handleCancelBuild"
                     class="rounded-md border border-red-300 px-3 py-1 text-xs font-medium text-red-600 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950"
                   >Cancel</button>
@@ -3157,6 +3244,7 @@ function openOptimise() {
                     auth: {{ buildStatus.credentials_secret }}
                     <button
                       type="button"
+                      v-if="canRevealEnv"
                       @click="revealGitTokenOpen = true"
                       title="Reveal git token"
                       class="rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-600 dark:hover:bg-slate-700 dark:hover:text-slate-300"
@@ -3233,7 +3321,7 @@ function openOptimise() {
                       : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400'"
                   >{{ webhookEnabled ? 'active' : 'not configured' }}</span>
                 </div>
-                <div v-if="webhookEnabled && authStore.isDeployer" class="flex shrink-0 gap-2">
+                <div v-if="webhookEnabled && canWriteApp" class="flex shrink-0 gap-2">
                   <button
                     @click="removeWebhook"
                     class="rounded-md border border-red-300 px-3 py-1 text-xs font-medium text-red-600 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950"
@@ -3248,7 +3336,7 @@ function openOptimise() {
               <div v-if="!webhookEnabled" class="flex items-center justify-between gap-3 text-xs">
                 <span class="text-slate-500 dark:text-slate-400">Trigger deploys from your CI pipeline.</span>
                 <button
-                  v-if="authStore.isDeployer"
+                  v-if="canWriteApp"
                   @click="generateWebhook"
                   class="shrink-0 rounded-md bg-kipper-600 px-3 py-1 text-xs font-medium text-white hover:bg-kipper-700"
                 >Generate webhook URL</button>
@@ -3350,7 +3438,7 @@ function openOptimise() {
                 </div>
               </div>
               <button
-                v-if="i > 0"
+                v-if="i > 0 && canWriteApp"
                 @click="handleRollback(entry.revision)"
                 :disabled="rollingBack"
                 class="inline-flex items-center gap-1 rounded-md border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-700"
@@ -3369,7 +3457,7 @@ function openOptimise() {
       </div>
 
       <!-- Resources tab -->
-      <div v-if="activeTab === 'resources'" class="p-5">
+      <div v-if="showsTab('resources')" class="p-5">
         <div v-if="resourcesLoading" class="text-sm text-slate-500 dark:text-slate-400">Loading...</div>
         <div v-else class="space-y-6">
           <div class="rounded-lg border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
@@ -3468,7 +3556,7 @@ function openOptimise() {
                 </div>
               </div>
               <div class="mt-3 flex justify-end">
-                <SaveButton :saving="resourcesSaving" label="Save request &amp; limit" @click="saveResources" />
+                <SaveButton v-if="canWriteApp" :saving="resourcesSaving" label="Save request &amp; limit" @click="saveResources" />
               </div>
             </div>
 
@@ -3514,7 +3602,7 @@ function openOptimise() {
       </div>
 
       <!-- Settings tab -->
-      <div v-if="activeTab === 'settings'" class="p-5">
+      <div v-if="showsTab('settings')" class="p-5">
         <div v-if="settingsLoading" class="text-sm text-slate-500 dark:text-slate-400">Loading...</div>
 
         <div v-else class="space-y-6">
@@ -3576,7 +3664,7 @@ function openOptimise() {
                 <div class="mb-1 flex items-center justify-between">
                   <label class="block text-xs font-medium text-slate-600 dark:text-slate-400">Redirect domains</label>
                   <button
-                    v-if="authStore.isDeployer"
+                    v-if="canWriteApp"
                     @click="addRouteRedirectFrom"
                     :disabled="routeRedirectFrom.length >= 10"
                     title="Up to 10 redirect domains per route"
@@ -3594,7 +3682,7 @@ function openOptimise() {
                       class="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
                     />
                     <button
-                      v-if="authStore.isDeployer"
+                      v-if="canWriteApp"
                       @click="removeRouteRedirectFrom(i)"
                       class="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950"
                     >
@@ -3681,10 +3769,10 @@ function openOptimise() {
                 </div>
               </NoticeCallout>
 
-              <SaveButton :saving="routeSaving" label="Save route" @click="saveRoute" />
+              <SaveButton v-if="canWriteApp" :saving="routeSaving" label="Save route" @click="saveRoute" />
             </div>
             <div v-else-if="routeURL">
-              <SaveButton :saving="routeSaving" label="Remove route" @click="saveRoute" />
+              <SaveButton v-if="canWriteApp" :saving="routeSaving" label="Remove route" @click="saveRoute" />
             </div>
           </div>
 
@@ -3813,7 +3901,7 @@ function openOptimise() {
                 </div>
               </div>
               <button
-                v-if="authStore.isDeployer"
+                v-if="canWriteApp"
                 @click="addRedirect"
                 class="inline-flex items-center gap-1 rounded-md border border-slate-300 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-800"
               >
@@ -3840,7 +3928,7 @@ function openOptimise() {
                   301
                 </label>
                 <button
-                  v-if="authStore.isDeployer"
+                  v-if="canWriteApp"
                   @click="removeRedirect(i)"
                   class="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950"
                 >
@@ -3862,7 +3950,7 @@ function openOptimise() {
                 </div>
               </div>
               <button
-                v-if="authStore.isDeployer && basicAuthEnabled"
+                v-if="canWriteApp && basicAuthEnabled"
                 @click="handleDeleteBasicAuth"
                 class="text-xs text-red-500 hover:text-red-700"
               >Remove all</button>
@@ -3872,7 +3960,7 @@ function openOptimise() {
               <div v-for="user in basicAuthUsers" :key="user" class="flex items-center justify-between rounded-md bg-white px-3 py-1.5 text-xs dark:bg-slate-900">
                 <span class="font-mono text-slate-700 dark:text-slate-300">{{ user }}</span>
                 <button
-                  v-if="authStore.isDeployer"
+                  v-if="canWriteApp"
                   @click="handleDeleteBasicAuthUser(user)"
                   class="rounded p-0.5 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950 dark:hover:text-red-400"
                   title="Remove user"
@@ -3882,7 +3970,7 @@ function openOptimise() {
               </div>
             </div>
 
-            <div v-if="authStore.isDeployer" class="flex items-center gap-2">
+            <div v-if="canWriteApp" class="flex items-center gap-2">
               <input
                 v-model="basicAuthUsername"
                 type="text"
@@ -3907,7 +3995,7 @@ function openOptimise() {
 
           <!-- Save button -->
           <div class="flex justify-end">
-            <SaveButton :saving="settingsSaving" label="Save settings" @click="saveSettings" />
+            <SaveButton v-if="canWriteApp" :saving="settingsSaving" label="Save settings" @click="saveSettings" />
           </div>
 
           <!-- Info box -->
@@ -3922,7 +4010,7 @@ function openOptimise() {
       </div>
 
       <!-- Files tab -->
-      <div v-show="activeTab === 'files'" class="flex h-full flex-col">
+      <div v-show="showsTab('files')" class="flex h-full flex-col">
         <!-- Warnings -->
         <div class="space-y-0">
           <div v-if="podCount > 1" class="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:shadow-[inset_3px_0_0_theme(colors.orange.300)]">
@@ -3950,6 +4038,7 @@ function openOptimise() {
           <span class="flex-1" />
           <input ref="fileUploadRef" type="file" class="hidden" @change="handleFileUpload" />
           <button
+            v-if="canWriteFiles"
             @click="fileUploadRef?.click()"
             :disabled="uploading"
             class="inline-flex items-center gap-1 rounded-md bg-kipper-600 px-2 py-1 text-xs font-medium text-white hover:bg-kipper-700 disabled:opacity-50"
@@ -3996,7 +4085,7 @@ function openOptimise() {
       <!-- File viewer uses the global modal system (ModalContainer in App.vue) -->
 
       <!-- Connect tab -->
-      <div v-show="activeTab === 'connect'" class="flex-1 overflow-y-auto p-5">
+      <div v-show="showsTab('connect')" class="flex-1 overflow-y-auto p-5">
         <div class="space-y-6">
           <!-- Web Terminal -->
           <div>
@@ -4021,15 +4110,21 @@ function openOptimise() {
                 </button>
               </div>
             </div>
-            <WebTerminal
-              v-for="pod in terminalPods"
-              :key="pod"
-              v-show="pod === selectedPod"
-              :ref="(el) => setTerminalRef(pod, el)"
-              :namespace="project"
-              :app-name="appName"
-              :pod="pod"
-            />
+            <!-- The connect pane is kept alive with v-show so a terminal
+                 survives a tab switch, which means hiding it does not close its
+                 socket. The capability has to unmount them itself: the
+                 WebSocket authorizes terminal.open once, when it opens. -->
+            <template v-if="canOpenTerminal">
+              <WebTerminal
+                v-for="pod in terminalPods"
+                :key="pod"
+                v-show="pod === selectedPod"
+                :ref="(el) => setTerminalRef(pod, el)"
+                :namespace="project"
+                :app-name="appName"
+                :pod="pod"
+              />
+            </template>
             <div v-if="terminalLoading && !terminalPods.length" class="flex h-80 items-center justify-center rounded-lg border border-slate-200 bg-[#020617] dark:border-slate-700">
               <span class="text-sm text-slate-400">Loading pods...</span>
             </div>
@@ -4145,7 +4240,7 @@ function openOptimise() {
         </div>
       </div>
 
-      <div v-if="activeTab === 'scale'" class="p-5">
+      <div v-if="showsTab('scale')" class="p-5">
         <!-- Auto mode banner -->
         <div v-if="isAutoMode" class="mb-4 flex items-start gap-2 rounded-lg border border-kipper-200 bg-kipper-50 p-3 dark:border-kipper-800 dark:bg-kipper-950">
           <Info class="mt-0.5 h-4 w-4 flex-shrink-0 text-kipper-600 dark:text-kipper-400" />
@@ -4162,12 +4257,14 @@ function openOptimise() {
             <p class="mt-1 text-xs text-amber-700 dark:text-slate-400">{{ recommendation.message }}</p>
             <div class="mt-3 flex gap-2">
               <button
+                v-if="canWriteApp"
                 @click="handleApplyRecommendation"
                 class="rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700"
               >
                 Apply {{ recommendation.recommended_profile }} profile
               </button>
               <button
+                v-if="canWriteApp"
                 @click="handleDismissRecommendation"
                 class="rounded-md border border-amber-300 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 dark:border-amber-600 dark:text-amber-300 dark:hover:bg-amber-900"
               >
@@ -4179,6 +4276,7 @@ function openOptimise() {
 
         <div class="mb-4 flex justify-end">
           <button
+            v-if="canWriteApp"
             @click="openOptimise"
             class="inline-flex items-center gap-1.5 rounded-lg border border-emerald-600/30 bg-emerald-600/10 px-3 py-1.5 text-xs font-medium text-emerald-500 transition-colors hover:bg-emerald-600/20"
           >
@@ -4192,6 +4290,7 @@ function openOptimise() {
             <label class="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-300">Manual replicas</label>
             <div class="flex items-center gap-4">
               <button
+                v-if="canWriteApp"
                 @click="setScale(replicaCount - 1)"
                 :disabled="scaling || replicaCount <= 0 || autoscaleEnabled"
                 class="rounded-lg border border-slate-300 p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-800"
@@ -4202,6 +4301,7 @@ function openOptimise() {
                 {{ replicaCount }}
               </span>
               <button
+                v-if="canWriteApp"
                 @click="setScale(replicaCount + 1)"
                 :disabled="scaling || autoscaleEnabled"
                 class="rounded-lg border border-slate-300 p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-800"
@@ -4221,6 +4321,7 @@ function openOptimise() {
                 <p class="text-xs text-slate-500 dark:text-slate-400">Automatically scale based on CPU and memory usage</p>
               </div>
               <button
+                v-if="canWriteApp"
                 @click="autoscaleEnabled = !autoscaleEnabled"
                 class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors"
                 :class="autoscaleEnabled ? 'bg-kipper-600' : 'bg-slate-300 dark:bg-slate-600'"
@@ -4258,7 +4359,7 @@ function openOptimise() {
               </div>
 
               <div class="flex justify-end">
-                <SaveButton :saving="autoscaleSaving" label="Save autoscaling" @click="saveAutoscale" />
+                <SaveButton v-if="canWriteApp" :saving="autoscaleSaving" label="Save autoscaling" @click="saveAutoscale" />
               </div>
             </div>
 
