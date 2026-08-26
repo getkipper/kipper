@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { capabilitiesForRole } from '@/utils/testCapabilities'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
@@ -10,7 +11,7 @@ import * as databaseApi from '@/api/database'
 import * as projectsApi from '@/api/projects'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectsStore } from '@/stores/projects'
-import type { Project, ProjectRole } from '@/api/projects'
+import type { Capability, Project, ProjectRole } from '@/api/projects'
 
 // Nothing in this test may reach the network. AppDetail loads build status and
 // logs on mount as well as the env tab's own data, and the point here is which
@@ -50,22 +51,34 @@ beforeEach(() => {
 // them were in exactly that state: the fixtures had no services, links,
 // injected variables or conflicts, so bind, link, unbind, unlink and the
 // conflict fix were absent for a viewer whatever the guards said.
-const WRITE_MARKERS = [
-  'Restart to apply',         // the restart banner's button
+//
+// They are grouped by the capability the route behind them takes, because the
+// three do not travel together: a role can carry env.write without kipper.write
+// and the console then has to offer one set and withhold the other.
+const ENV_WRITE_MARKERS = [
   'placeholder="LOG_LEVEL"',  // the add-variable form
   'title="Edit"',
   'title="Delete"',
+  'Remove direct entries',    // the conflicts fix
+  'Variables you can reference', // the available-variables panel
+]
+const KIPPER_WRITE_MARKERS = [
   'Bind a service...',        // the service binding form
   'Link an app...',           // the app linking form
   'title="Unbind service"',
   'title="Unlink"',
-  'Remove direct entries',    // the conflicts fix
-  'Variables you can reference', // the available-variables panel
+  'title="AI Diagnose"',      // header toolbar
+  'title="Update image"',
 ]
+const RESTART_MARKERS = [
+  'Restart to apply',         // the restart banner's button
+  'title="Rolling restart"',  // header toolbar
+]
+const WRITE_MARKERS = [...ENV_WRITE_MARKERS, ...KIPPER_WRITE_MARKERS, ...RESTART_MARKERS]
 
-function projectWithRole(role: ProjectRole): Project {
+function projectWithRole(role: ProjectRole, capabilities?: Capability[]): Project {
   return {
-    name: 'shop', role, env_limit: 3,
+    name: 'shop', role, capabilities: capabilities ?? capabilitiesForRole(role), env_limit: 3,
     environments: [
       { name: 'prod', namespace: 'shop-prod', apps: [], status: 'active', order: '0', owned: true },
       { name: 'test', namespace: 'shop-test', apps: [], status: 'active', order: '1', owned: true },
@@ -73,10 +86,10 @@ function projectWithRole(role: ProjectRole): Project {
   }
 }
 
-async function mountEnvTab(role: ProjectRole, clusterRole: string) {
+async function mountEnvTab(role: ProjectRole, clusterRole: string, capabilities?: Capability[]) {
   setActivePinia(createPinia())
   useAuthStore().role = clusterRole
-  useProjectsStore().projects = [projectWithRole(role)]
+  useProjectsStore().projects = [projectWithRole(role, capabilities)]
 
   // Everything a write control needs in order to render at all. Without these
   // the absence of a control says nothing about the role that asked for it.
@@ -159,7 +172,7 @@ describe('the Env tab and the project role', () => {
     for (const marker of WRITE_MARKERS) {
       expect(html, `a viewer must not be offered: ${marker}`).not.toContain(marker)
     }
-    expect(html, 'and is told why the controls are absent').toContain('needs the deployer role')
+    expect(html, 'and is told why the controls are absent').toContain('which your role in this project does not carry')
   })
 
   // The preview route is deployer-gated, so a viewer is normally refused it and
@@ -253,7 +266,7 @@ describe('the Env tab and the project role', () => {
     for (const marker of WRITE_MARKERS) {
       expect(html, `a deployer must still get: ${marker}`).toContain(marker)
     }
-    expect(html).not.toContain('needs the deployer role')
+    expect(html).not.toContain('which your role in this project does not carry')
   })
 })
 
@@ -332,7 +345,7 @@ describe('a load publishes only while it still describes the panel', () => {
     setActivePinia(createPinia())
     useAuthStore().role = 'deployer'
     useProjectsStore().projects = [
-      { name: 'shop', role: 'deployer', env_limit: 3, environments: [
+      { name: 'shop', role: 'deployer', capabilities: capabilitiesForRole('deployer'), env_limit: 3, environments: [
         { name: 'test', namespace: 'shop-test', apps: [], status: 'active', order: '0', owned: true },
         { name: 'prod', namespace: 'shop-prod', apps: [], status: 'active', order: '1', owned: true },
       ] } as Project,
@@ -932,7 +945,7 @@ describe('the write queue holds under the awkward cases', () => {
     setActivePinia(createPinia())
     useAuthStore().role = 'deployer'
     useProjectsStore().projects = [
-      { name: 'shop', role: 'deployer', env_limit: 3, environments: [
+      { name: 'shop', role: 'deployer', capabilities: capabilitiesForRole('deployer'), env_limit: 3, environments: [
         { name: 'test', namespace: 'shop-test', apps: [], status: 'active', order: '0', owned: true },
         { name: 'prod', namespace: 'shop-prod', apps: [], status: 'active', order: '1', owned: true },
       ] } as Project,
@@ -1418,7 +1431,7 @@ it('sends nothing when the panel moves during the stale-map re-read', async () =
   setActivePinia(createPinia())
   useAuthStore().role = 'viewer'
   useProjectsStore().projects = [
-    { name: 'shop', role: 'deployer', env_limit: 3, environments: [
+    { name: 'shop', role: 'deployer', capabilities: capabilitiesForRole('deployer'), env_limit: 3, environments: [
       { name: 'test', namespace: 'shop-test', apps: [], status: 'active', order: '0', owned: true },
       { name: 'prod', namespace: 'shop-prod', apps: [], status: 'active', order: '1', owned: true },
     ] } as Project,
@@ -1631,7 +1644,7 @@ it('closes an open editor when the role stops allowing writes', async () => {
   vm.startEditEnv('LOG_LEVEL')
   await flushPromises()
   expect(vm.editingEnv).toBe('LOG_LEVEL')
-  expect(document.body.innerHTML, 'the editor is open').not.toContain('needs the deployer role')
+  expect(document.body.innerHTML, 'the editor is open').not.toContain('which your role in this project does not carry')
 
   // The store refreshes and the caller is now only a viewer here.
   projects.projects = [projectWithRole('viewer')]
@@ -1639,7 +1652,7 @@ it('closes an open editor when the role stops allowing writes', async () => {
 
   expect((w.vm as unknown as { editingEnv: string | null }).editingEnv,
     'the editor must not outlive the permission that opened it').toBeNull()
-  expect(document.body.innerHTML, 'and the tab says why it is read-only now').toContain('needs the deployer role')
+  expect(document.body.innerHTML, 'and the tab says why it is read-only now').toContain('which your role in this project does not carry')
 
   // And the handler refuses on its own account, not just in the template.
   await vm.saveEditEnv('LOG_LEVEL')
@@ -2062,7 +2075,7 @@ it('hides the tab but keeps the panel when ownership is contested', async () => 
   // ownership lookup looks like from here.
   projects.projects = [
     projectWithRole('deployer'),
-    { name: 'shop-prod', role: 'deployer', env_limit: 3, environments: [
+    { name: 'shop-prod', role: 'deployer', capabilities: capabilitiesForRole('deployer'), env_limit: 3, environments: [
       { name: 'default', namespace: 'shop-prod', apps: [], status: 'active', order: '0', owned: true },
     ] } as Project,
   ]
@@ -2150,7 +2163,7 @@ it('reloads the Env tab when a later refresh restores the role', async () => {
   // A refresh that cannot settle ownership empties the tab.
   projects.projects = [
     projectWithRole('deployer'),
-    { name: 'shop-prod', role: 'deployer', env_limit: 3, environments: [
+    { name: 'shop-prod', role: 'deployer', capabilities: capabilitiesForRole('deployer'), env_limit: 3, environments: [
       { name: 'default', namespace: 'shop-prod', apps: [], status: 'active', order: '0', owned: true },
     ] } as Project,
   ]
@@ -2210,7 +2223,7 @@ it('can still read after a write was retired by losing access', async () => {
   // A contested refresh retires that write along with everything else.
   projects.projects = [
     projectWithRole('deployer'),
-    { name: 'shop-prod', role: 'deployer', env_limit: 3, environments: [
+    { name: 'shop-prod', role: 'deployer', capabilities: capabilitiesForRole('deployer'), env_limit: 3, environments: [
       { name: 'default', namespace: 'shop-prod', apps: [], status: 'active', order: '0', owned: true },
     ] } as Project,
   ]
@@ -2274,7 +2287,7 @@ it('keeps the write queue across a momentary loss of the role', async () => {
 
   const contested = [
     projectWithRole('deployer'),
-    { name: 'shop-prod', role: 'deployer', env_limit: 3, environments: [
+    { name: 'shop-prod', role: 'deployer', capabilities: capabilitiesForRole('deployer'), env_limit: 3, environments: [
       { name: 'default', namespace: 'shop-prod', apps: [], status: 'active', order: '0', owned: true },
     ] } as Project,
   ]
@@ -2389,7 +2402,7 @@ it('reads again once a retired write releases the last slot', async () => {
   // Ownership goes contested and comes back while that PUT is still out.
   projects.projects = [
     owned,
-    { name: 'shop-prod', role: 'deployer', env_limit: 3, environments: [
+    { name: 'shop-prod', role: 'deployer', capabilities: capabilitiesForRole('deployer'), env_limit: 3, environments: [
       { name: 'default', namespace: 'shop-prod', apps: [], status: 'active', order: '0', owned: true },
     ] } as Project,
   ]
@@ -2405,4 +2418,204 @@ it('reads again once a retired write releases the last slot', async () => {
 
   expect((w.vm as unknown as { envVars: Record<string, string> }).envVars,
     'so releasing the slot has to read again').toEqual({ BASE: '1' })
+})
+
+// Every built-in role holds env.write, kipper.write and workloads.restart
+// together or holds none of them, so a fixture built from a role cannot tell
+// whether a control asks for the capability its own route takes. A cluster is
+// free to grant a role that splits them, and these two name the capabilities
+// outright to cover that.
+describe('the Env tab and a capability set no built-in role produces', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    document.body.innerHTML = ''
+  })
+
+  it('offers env editing but not binding or restarting to a set holding only env.write', async () => {
+    const w = await mountEnvTab('deployer', 'viewer', ['kipper.read', 'env.read', 'env.write', 'workloads.read'])
+    await openEnvTab(w)
+    const html = rendered()
+
+    for (const marker of ENV_WRITE_MARKERS) {
+      expect(html, `env.write carries: ${marker}`).toContain(marker)
+    }
+    for (const marker of [...KIPPER_WRITE_MARKERS, ...RESTART_MARKERS]) {
+      expect(html, `env.write does not carry: ${marker}`).not.toContain(marker)
+    }
+  })
+
+  it('offers binding but not env editing to a set holding only kipper.write', async () => {
+    const w = await mountEnvTab('deployer', 'viewer', ['kipper.read', 'kipper.write', 'env.read', 'workloads.read'])
+    await openEnvTab(w)
+    const html = rendered()
+
+    for (const marker of KIPPER_WRITE_MARKERS) {
+      expect(html, `kipper.write carries: ${marker}`).toContain(marker)
+    }
+    for (const marker of [...ENV_WRITE_MARKERS, ...RESTART_MARKERS]) {
+      expect(html, `kipper.write does not carry: ${marker}`).not.toContain(marker)
+    }
+  })
+})
+
+// Eight of the nine tabs used to be gated on the cluster role. That denied a
+// project member the tabs the API would have served them, and showed a cluster
+// deployer with no role in this project tabs whose every read comes back 403.
+describe('which tabs the panel offers', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    document.body.innerHTML = ''
+  })
+
+  function tabsOf(w: Awaited<ReturnType<typeof mountEnvTab>>): string[] {
+    return (w.vm as unknown as { visibleTabs: { key: string }[] }).visibleTabs.map(t => t.key)
+  }
+
+  it('offers a project owner every tab even though their cluster role is viewer', async () => {
+    const w = await mountEnvTab('owner', 'viewer')
+    expect(tabsOf(w)).toEqual(
+      expect.arrayContaining(['logs', 'deploys', 'scale', 'resources', 'env', 'files', 'connect', 'secrets', 'settings']),
+    )
+  })
+
+  it('offers a cluster deployer with no role in this project nothing', async () => {
+    setActivePinia(createPinia())
+    useAuthStore().role = 'deployer'
+    // No project claims this namespace, so the caller holds nothing in it.
+    useProjectsStore().projects = []
+    const w = mount(AppDetail, {
+      props: { appName: 'api', namespace: 'someone-elses-ns' },
+      attachTo: document.body,
+      global: { stubs: { RouterLink: true } },
+    })
+    await flushPromises()
+    expect(tabsOf(w)).toEqual([])
+  })
+
+  it('withholds the env and secrets tabs from a set that cannot read env', async () => {
+    const w = await mountEnvTab('deployer', 'viewer', ['kipper.read', 'workloads.read', 'pods.logs.read'])
+    const tabs = tabsOf(w)
+    expect(tabs).toContain('logs')
+    expect(tabs).not.toContain('env')
+    expect(tabs).not.toContain('secrets')
+  })
+
+  it('withholds the files tab from a set that cannot read files', async () => {
+    const w = await mountEnvTab('deployer', 'viewer', ['kipper.read', 'env.read'])
+    expect(tabsOf(w)).not.toContain('files')
+  })
+
+  it('withholds the connect tab from a set that cannot open a terminal', async () => {
+    const w = await mountEnvTab('deployer', 'viewer', ['kipper.read', 'env.read', 'files.read'])
+    expect(tabsOf(w)).not.toContain('connect')
+  })
+})
+
+// The Secrets and Files tabs carried no gate at all: every control rendered for
+// anyone who reached the tab, and the server refused each one.
+describe('the Secrets and Files tabs', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    document.body.innerHTML = ''
+    vi.mocked(appsApi.fetchSecretKeys).mockResolvedValue([{ key: 'DATABASE_URL', has_previous: false }])
+  })
+
+  async function openTab(w: Awaited<ReturnType<typeof mountEnvTab>>, tab: string) {
+    ;(w.vm as unknown as { activeTab: string }).activeTab = tab
+    await flushPromises()
+    await flushPromises()
+  }
+
+  const SECRET_WRITE_MARKERS = ['title="Edit"', 'title="Delete"', 'placeholder="DATABASE_URL"']
+
+  it('offers a set that can read but not write secrets no control that writes one', async () => {
+    const w = await mountEnvTab('deployer', 'viewer', ['kipper.read', 'env.read'])
+    await openTab(w, 'secrets')
+    const html = rendered()
+    for (const marker of SECRET_WRITE_MARKERS) {
+      expect(html, `env.read alone must not be offered: ${marker}`).not.toContain(marker)
+    }
+    expect(html, 'and cannot reveal one either').not.toContain('title="Reveal"')
+  })
+
+  it('offers those controls to a set that can write them', async () => {
+    const w = await mountEnvTab('deployer', 'viewer', ['kipper.read', 'env.read', 'env.write', 'env.reveal'])
+    await openTab(w, 'secrets')
+    const html = rendered()
+    for (const marker of SECRET_WRITE_MARKERS) {
+      expect(html, `env.write carries: ${marker}`).toContain(marker)
+    }
+    expect(html, 'and env.reveal carries the reveal').toContain('title="Reveal"')
+  })
+
+  it('withholds upload from a set that can read files but not write them', async () => {
+    const w = await mountEnvTab('deployer', 'viewer', ['kipper.read', 'files.read'])
+    await openTab(w, 'files')
+    expect(rendered(), 'files.read alone must not be offered an upload').not.toContain('Upload')
+  })
+
+  it('offers upload to a set that can write files', async () => {
+    const w = await mountEnvTab('deployer', 'viewer', ['kipper.read', 'files.read', 'files.write'])
+    await openTab(w, 'files')
+    expect(rendered(), 'files.write carries the upload').toContain('Upload')
+  })
+})
+
+// Opening the deploys, scale, resources and settings tabs on a read capability
+// made write controls reachable that the cluster-role gate used to hide with the
+// whole tab. A project viewer holds every read these tabs take and none of the
+// writes inside them.
+describe('the write controls inside the read-gated tabs', () => {
+  // Each of these tabs needs its own data before any control in it renders, or
+  // the control is absent for a deployer too and the viewer assertion proves
+  // nothing about the gate.
+  beforeEach(() => {
+    vi.clearAllMocks()
+    document.body.innerHTML = ''
+    vi.mocked(appsApi.fetchResources).mockResolvedValue({
+      memory_limit: '512Mi', memory_request: '256Mi', cpu_limit: '500m', cpu_request: '100m',
+    })
+    vi.mocked(appsApi.fetchAutoscale).mockResolvedValue({
+      enabled: true, min_replicas: 1, max_replicas: 4, cpu_target: 70, memory_target: 80,
+      current_replicas: 2, current_cpu: '20m', current_memory: '100Mi',
+    })
+    vi.mocked(appsApi.fetchRoute).mockResolvedValue({
+      host: 'api.example.com', path: '/', redirect_from: [], url: 'https://api.example.com',
+      enabled: true, health: { ingress_ready: true, tls_ready: true, message: '' },
+    })
+  })
+
+  // The resources tab is not covered here: its save sits behind an advanced
+  // toggle this test could not open, so an assertion on it would pass whether
+  // or not the gate existed. It reads the same canWriteApp these two prove.
+  const WRITES_BY_TAB: Record<string, string[]> = {
+    settings: ['Save settings', 'Save route'],
+    scale: ['Save autoscaling', 'Optimise'],
+  }
+
+  async function openTab(w: Awaited<ReturnType<typeof mountEnvTab>>, tab: string) {
+    ;(w.vm as unknown as { activeTab: string }).activeTab = tab
+    await flushPromises()
+    await flushPromises()
+  }
+
+  for (const [tab, markers] of Object.entries(WRITES_BY_TAB)) {
+    it(`offers a project viewer no write control on the ${tab} tab`, async () => {
+      const w = await mountEnvTab('viewer', 'viewer')
+      await openTab(w, tab)
+      const html = rendered()
+      for (const marker of markers) {
+        expect(html, `a viewer must not be offered on ${tab}: ${marker}`).not.toContain(marker)
+      }
+    })
+
+    it(`offers a project deployer those controls on the ${tab} tab`, async () => {
+      const w = await mountEnvTab('deployer', 'viewer')
+      await openTab(w, tab)
+      const html = rendered()
+      for (const marker of markers) {
+        expect(html, `a deployer holds kipper.write, so ${tab} carries: ${marker}`).toContain(marker)
+      }
+    })
+  }
 })
