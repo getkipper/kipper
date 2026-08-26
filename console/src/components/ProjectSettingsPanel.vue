@@ -7,6 +7,7 @@ import ProjectApiKeys from '@/components/ProjectApiKeys.vue'
 import ProjectMembers from '@/components/ProjectMembers.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { Project } from '@/api/projects'
+import { can } from '@/utils/capabilities'
 
 interface Props {
   project: Project
@@ -32,10 +33,11 @@ const envNames = computed(() => props.project.environments.map((e) => e.name))
 const envKey = computed(() => envNames.value.join(','))
 
 const canManageQuota = computed(() => authStore.isAdmin)
-const canManageApiKeys = computed(
-  () => props.project.role === 'owner' || props.project.role === 'deployer'
-)
-const canManageMembers = computed(() => props.project.role === 'owner' || authStore.isAdmin)
+// What the server says this caller may do here, rather than what this build
+// thinks each role name means. Quota stays on the cluster role: raising one
+// spends cluster capacity, which is not a project's to grant.
+const canManageApiKeys = computed(() => can(props.project, 'apikeys.manage'))
+const canManageMembers = computed(() => can(props.project, 'members.manage') || authStore.isAdmin)
 </script>
 
 <template>
