@@ -229,7 +229,7 @@ func fillSharedCredentialGrants(
 		// Nothing to write into, and no Secret is created for a cluster that has
 		// never had a shared credential. An approval still has to be answered
 		// for: every one of them landed nowhere.
-		reportApprovedButGone(out, sortedNames(approved))
+		reportApprovedButGone(out, approved, sortedNames(approved))
 		return nil
 	}
 
@@ -290,8 +290,8 @@ func fillSharedCredentialGrants(
 		}
 	}
 	reportRepairedAllowLists(out, decided, restored, moved, replaced)
-	reportApprovedButMoved(out, changedHands)
-	reportApprovedButGone(out, approvedButGone)
+	reportApprovedButMoved(out, approved, changedHands)
+	reportApprovedButGone(out, approved, approvedButGone)
 	reportClosedUnseen(out, closedUnseen)
 	return nil
 }
@@ -345,23 +345,39 @@ func sortedNames(approved map[string][]string) []string {
 // reportApprovedButGone names a credential the operator approved that the list
 // no longer holds, so an approval that landed nowhere does not pass for one
 // that landed.
-func reportApprovedButGone(out io.Writer, gone []string) {
+func reportApprovedButGone(out io.Writer, approved map[string][]string, gone []string) {
 	for _, name := range gone {
 		_, _ = fmt.Fprintf(out, "  !   Shared credential %s was approved for a grant and is no longer there, so\n"+
-			"      nothing was granted. If it comes back, allow the projects again with\n"+
-			"      'kip credentials allow %s --project <project>'.\n", name, name)
+			"      nothing was granted.\n", name)
+		printApprovedCommands(out, approved, name, "If it comes back, allow them again with:")
 	}
 }
 
 // reportApprovedButMoved names a credential the operator approved that changed
 // hands before the grant could be written, so nothing lands silently short of
 // what was agreed.
-func reportApprovedButMoved(out io.Writer, handed []string) {
+func reportApprovedButMoved(out io.Writer, approved map[string][]string, handed []string) {
 	for _, name := range handed {
 		_, _ = fmt.Fprintf(out, "  !   Shared credential %s was approved for a grant, then re-pointed at another\n"+
 			"      server or given another token before it could be written, so nothing was\n"+
-			"      granted. Allow the projects again with 'kip credentials allow %s --project\n"+
-			"      <project>' if it is still the credential they should build with.\n", name, name)
+			"      granted.\n", name)
+		printApprovedCommands(out, approved, name, "If it is still the credential they should build with, allow them with:")
+	}
+}
+
+// printApprovedCommands writes the exact command per approved project, the same
+// way the repair path does for a list it refused to write back. Both are a grant
+// the operator agreed to that did not land, and both are recovered one command
+// at a time.
+func printApprovedCommands(out io.Writer, approved map[string][]string, name, lead string) {
+	projects := append([]string(nil), approved[name]...)
+	sort.Strings(projects)
+	if len(projects) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(out, "      It was approved for %s. %s\n", strings.Join(projects, ", "), lead)
+	for _, project := range projects {
+		_, _ = fmt.Fprintf(out, "        kip credentials allow %s --project %s\n", name, project)
 	}
 }
 
