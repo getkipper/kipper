@@ -1,7 +1,7 @@
-import { defineConfig } from 'vitepress'
+import { defineConfig, type HeadConfig } from 'vitepress'
 import { withMermaid } from 'vitepress-plugin-mermaid'
 
-const SITE_URL = 'https://getkipper.com'
+const SITE_URL = 'https://docs.getkipper.com'
 const SITE_TITLE = 'Kipper'
 const SITE_DESCRIPTION = 'Production Kubernetes for startups'
 
@@ -19,6 +19,31 @@ export default withMermaid(
     // has gone wrong.
     srcExclude: ['en/certificate-authority.md'],
 
+    sitemap: { hostname: SITE_URL },
+
+    // VitePress emits one static head for the whole site, so without this every
+    // page would share the home page's URL and title.
+    transformHead({ pageData }) {
+      const title = pageData.title ? `${pageData.title} | ${SITE_TITLE}` : SITE_TITLE
+      const head: HeadConfig[] = [
+        ['meta', { property: 'og:title', content: title }],
+        ['meta', { name: 'twitter:title', content: title }],
+      ]
+
+      // The generated 404 answers on any URL, so it claims none of them.
+      if (pageData.relativePath !== '404.md') {
+        const path = pageData.relativePath
+          .replace(/index\.md$/, '')
+          .replace(/\.md$/, '.html')
+        head.push(
+          ['link', { rel: 'canonical', href: `${SITE_URL}/${path}` }],
+          ['meta', { property: 'og:url', content: `${SITE_URL}/${path}` }],
+        )
+      }
+
+      return head
+    },
+
     head: [
       ['link', { rel: 'icon', type: 'image/svg+xml', href: '/logo.svg' }],
       ['link', { rel: 'alternate icon', type: 'image/x-icon', href: '/favicon.ico' }],
@@ -33,15 +58,12 @@ export default withMermaid(
       ['meta', { name: 'apple-mobile-web-app-status-bar-style', content: 'default' }],
       ['meta', { property: 'og:type', content: 'website' }],
       ['meta', { property: 'og:site_name', content: SITE_TITLE }],
-      ['meta', { property: 'og:title', content: SITE_TITLE }],
       ['meta', { property: 'og:description', content: SITE_DESCRIPTION }],
-      ['meta', { property: 'og:url', content: SITE_URL }],
       ['meta', { property: 'og:image', content: `${SITE_URL}/og-image.png` }],
       ['meta', { property: 'og:image:width', content: '1200' }],
       ['meta', { property: 'og:image:height', content: '630' }],
       ['meta', { property: 'og:image:alt', content: `${SITE_TITLE}: ${SITE_DESCRIPTION}` }],
       ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
-      ['meta', { name: 'twitter:title', content: SITE_TITLE }],
       ['meta', { name: 'twitter:description', content: SITE_DESCRIPTION }],
       ['meta', { name: 'twitter:image', content: `${SITE_URL}/og-image.png` }],
     ],

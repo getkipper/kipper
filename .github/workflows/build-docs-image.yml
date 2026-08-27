@@ -1,0 +1,51 @@
+name: Build and publish the docs image
+
+# Builds and publishes kipper-docs when a docs change lands on main, or on
+# demand. The other nine images live in build-images.yml, which ignores docs/**
+# so a wording fix does not rebuild the whole matrix.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+  workflow_dispatch:
+
+concurrency:
+  group: build-docs-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  ORG: getkipper
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The Dockerfile runs the VitePress build, so a page that fails to render
+      # fails the job rather than publishing a broken site.
+      - name: Build and push kipper-docs
+        uses: docker/build-push-action@v7
+        with:
+          context: docs
+          file: docs/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.ORG }}/kipper-docs:latest
+            ${{ env.REGISTRY }}/${{ env.ORG }}/kipper-docs:${{ github.sha }}
+          cache-from: type=gha,scope=kipper-docs
+          cache-to: type=gha,scope=kipper-docs,mode=max
