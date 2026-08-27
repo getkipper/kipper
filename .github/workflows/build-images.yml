@@ -1,7 +1,8 @@
 name: Build and publish images
 
-# Builds and publishes the ten images on a push to main, or on demand.
-# paths-ignore keeps a docs-only change from running the matrix.
+# Builds and publishes the nine code images on a push to main, or on demand.
+# paths-ignore keeps a docs-only change from running the matrix; the docs
+# image has its own workflow that triggers on exactly those paths.
 
 on:
   push:
@@ -14,7 +15,7 @@ on:
   workflow_dispatch:
 
 # One run per ref, for the same reason CI has one: three merges in ten minutes
-# should not run three ten-image matrices to completion when only the last
+# should not run three nine-image matrices to completion when only the last
 # one's images are ever pulled.
 concurrency:
   group: build-images-${{ github.ref }}
@@ -65,9 +66,6 @@ jobs:
           - image: kipper-runtime-python
             context: kipper-runtime-python
             dockerfile: kipper-runtime-python/Dockerfile
-          - image: kipper-docs
-            context: docs
-            dockerfile: docs/Dockerfile
     steps:
       # For workflow_run events, github.sha is whatever main points at when
       # this workflow starts — a commit that landed after the CI run would be
