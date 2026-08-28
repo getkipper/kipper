@@ -66,6 +66,11 @@ export default withMermaid(
       ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
       ['meta', { name: 'twitter:description', content: SITE_DESCRIPTION }],
       ['meta', { name: 'twitter:image', content: `${SITE_URL}/og-image.png` }],
+      // Plausible sets no cookies and stores no personal data, so the site
+      // needs no consent banner. plausible.io is on the app's CSP allowlist.
+      // The script filename identifies the site, so there is no data-domain.
+      ['script', { async: '', src: 'https://plausible.io/js/pa-hNLTVzwL4CpsYcJEEtoFW.js' }],
+      ['script', {}, `window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};plausible.init()`],
     ],
 
     locales: {
