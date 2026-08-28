@@ -91,6 +91,18 @@ Kipper installs [k3s](https://k3s.io) with opinionated defaults:
 
 See [Architecture](docs/en/architecture.md) for the full technical deep-dive.
 
+## Known limitations
+
+Kipper is pre-release. These are the edges a new user is most likely to meet in the first week, and each one has a way around it today.
+
+**Upgrades run forwards only.** `kip upgrade` moves a cluster to the current release. You cannot pin a version, nothing refuses to upgrade an unhealthy cluster, and a component that fails to start is not rolled back for you. Take a backup with `kip backup create` before you upgrade.
+
+**Images come from a registry.** `kip app deploy --image` pulls from a registry, and `kip registry add` covers private ones. There is no way to import an image you built on your own machine and no control over the pull policy, so a local `docker build` has to be pushed somewhere the cluster can reach. Deploying from git with `kip app deploy --git` sidesteps this, because Kipper builds the image in the cluster and stores it itself.
+
+**A database belongs to one project.** Apps and functions in the same project and environment bind to the same service, and another project gets its own instance. Cross-project links join one app to another app rather than to a service, so sharing data across projects means putting an app in front of the database, or keeping those workloads in one project.
+
+See the [roadmap](ROADMAP.md) for where these are going, and [open an issue](https://github.com/getkipper/kipper/issues) if you hit something that is not listed.
+
 ## Repository structure
 
 | Directory | Language | What it does |
