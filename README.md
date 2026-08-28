@@ -49,28 +49,34 @@ No Helm charts. No YAML manifests. No PhD required.
 ### Prerequisites
 
 - A Linux server (Ubuntu 20.04/22.04/24.04/26.04 or Debian 11/12) with root SSH access
-- Minimum 2GB RAM, 30GB disk
+- 2 vCPU / 2 GB RAM / 30 GB free disk to install. For a cluster you will actually use, pick 4 vCPU / 8 GB / 80 GB
 - An SSH key
 
-### Install
+### Install the CLI
 
 ```bash
-# Build the CLI (Homebrew coming soon)
-cd kip && go build -o kip .
+curl -sL https://getkipper.com/install | sh
+```
 
-# Install the cluster
-./kip install --host <your-server-ip> --ssh-key ~/.ssh/id_ed25519 --admin-email you@example.com
+Downloads the binary for your platform from the [latest release](https://github.com/getkipper/kipper/releases/latest), checks it against the published checksums, and puts `kip` in `/usr/local/bin`. Linux and macOS, on x86-64 and arm64.
+
+On Windows, run this inside [WSL](https://learn.microsoft.com/en-us/windows/wsl/), which `kip install` needs because it shares one SSH connection across hundreds of commands and Windows OpenSSH cannot. Every other command works from the native `kip-windows-amd64.exe` in the same release.
+
+### Install the cluster
+
+```bash
+kip install --host <your-server-ip> --ssh-key ~/.ssh/id_ed25519 --admin-email you@example.com
 ```
 
 ### Deploy
 
 ```bash
-./kip app deploy --name hello --image nginx:latest --port 80
+kip app deploy --name hello --image nginx:latest --port 80
 ```
 
 Your app is live at `https://hello-<cluster>.kipper.run` with a valid TLS certificate.
 
-See the [Getting Started guide](docs/en/getting-started.md) for a complete walkthrough.
+See the [Getting Started guide](docs/en/getting-started.md) for a complete walkthrough, or [CONTRIBUTING.md](CONTRIBUTING.md) to build from source.
 
 ## Architecture
 
