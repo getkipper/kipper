@@ -99,7 +99,7 @@ See [Architecture](docs/en/architecture.md) for the full technical deep-dive.
 
 ## Known limitations
 
-Kipper is pre-release. These are the edges a new user is most likely to meet in the first week, and each one has a way around it today.
+Kipper has not reached 1.0. These are the edges a new user is most likely to meet in the first week, and each one has a way around it today.
 
 **Upgrades run forwards only.** `kip upgrade` moves a cluster to the current release. You cannot pin a version, nothing refuses to upgrade an unhealthy cluster, and a component that fails to start is not rolled back for you. Take a backup with `kip backup create` before you upgrade.
 

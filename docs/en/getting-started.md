@@ -5,7 +5,7 @@ This guide walks you through installing Kipper on a fresh Linux server and deplo
 ## Prerequisites
 
 - A Linux server with root SSH access (Ubuntu 20.04, 22.04, 24.04, 26.04, or Debian 11, 12). `kip` signs in as `root`, so if your provider gave you a `sudo` user instead, put your key on the root account before you start
-- 2 vCPU / 2 GB RAM / 30 GB free disk minimum to install (4 vCPU / 8 GB / 80 GB realistic floor for a usable cluster)
+- 2 GB RAM and 30 GB free disk are enforced by the installer, which refuses less. Plan on 2 vCPU alongside them as a practical minimum, and 4 vCPU / 8 GB / 80 GB for a cluster you will enjoy using
 - Ports 80, 443, and 6443 allowed through your provider's firewall (see below). Leave the server's own firewall alone, Kipper sets that one up for you
 - An SSH key on your local machine. No key yet? `ssh-keygen -t ed25519` makes one, and most providers have a field for the public half when you create the server. For a server that already exists, `ssh-copy-id root@your-server` installs it
 
@@ -16,7 +16,7 @@ The firewall on the server is Kipper's job. `kip install` installs UFW and write
 :::
 
 ::: tip Any Linux VPS will work, but pick a generous one
-Any cloud provider or hosting company that gives you a Linux VM with a public IP and root SSH access will work. The "minimum" line above is what the install command will accept; it isn't what makes Kipper pleasant to use. For a side-project box that will host an app or two, a database, and Kipper's own backups: pick **8 GB RAM, 4 vCPU, 80 GB SSD or larger**. If you're going to run the [AI Bundle](/en/ai), aim for **16 GB RAM, 4+ vCPU, 100+ GB SSD** at minimum. See [Installation → recommended sizing in practice](/en/installation#preflight-checks) for the full table.
+Any cloud provider or hosting company works, so long as the VM runs one of the Ubuntu or Debian versions listed above with a public IP and root SSH access. The installer checks the distribution and version and stops if it finds something else. The install command enforces the RAM and disk figures above and leaves CPU to you; none of it is what makes Kipper pleasant to use. For a side-project box that will host an app or two, a database, and Kipper's own backups: pick **8 GB RAM, 4 vCPU, 80 GB SSD or larger**. If you're going to run the [AI Bundle](/en/ai), aim for **16 GB RAM, 4+ vCPU, 100+ GB SSD** at minimum. See [Installation → recommended sizing in practice](/en/installation#preflight-checks) for the full table.
 :::
 
 ## Step 1: Install the CLI
