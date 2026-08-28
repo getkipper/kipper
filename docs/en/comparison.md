@@ -32,7 +32,7 @@ Kipper is much younger than all of them and has not reached 1.0. Seven stars aga
 
 **CapRover** has been public since 2017, a one-line install, and straightforward multi-node scaling on Swarm. Its licence appendix adds terms covering modification and redistribution of paid features, and says modifications of free features should be distributed as free and open source software.
 
-**Kubero** is closest to Kipper in shape, a PaaS whose apps run as Kubernetes workloads. It brings its own pipelines and pull request review apps, and a catalogue of app templates and add-ons installed as Helm charts. The difference is where the cluster comes from: Kubero provisions one on a managed provider or uses one you already have, while Kipper builds the cluster on the server you point it at.
+**Kubero** is closest to Kipper in shape, a PaaS whose apps run as Kubernetes workloads. It brings its own pipelines and pull request review apps, add-ons installed as Helm charts, and a catalogue of app templates that need no Helm chart of your own. The difference is where the cluster comes from: Kubero provisions one on a managed provider or uses one you already have, while Kipper builds the cluster on the server you point it at.
 
 ## Where Kipper fits
 
