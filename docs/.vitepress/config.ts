@@ -3,7 +3,7 @@ import { withMermaid } from 'vitepress-plugin-mermaid'
 
 const SITE_URL = 'https://docs.getkipper.com'
 const SITE_TITLE = 'Kipper'
-const SITE_DESCRIPTION = 'Production Kubernetes for startups'
+const SITE_DESCRIPTION = 'Turn a plain Linux server into production Kubernetes in one command: web console, automatic SSL, storage and backups. Open source, self-hosted.'
 
 export default withMermaid(
   defineConfig({
