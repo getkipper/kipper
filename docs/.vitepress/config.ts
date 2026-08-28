@@ -134,6 +134,7 @@ export default withMermaid(
             items: [
               { text: 'Architecture', link: '/en/architecture' },
               { text: 'Git Providers', link: '/en/git-providers' },
+              { text: 'Kipper vs other self-hosted PaaS', link: '/en/comparison' },
               { text: 'FAQ', link: '/en/faq' },
             ],
           },
