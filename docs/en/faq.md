@@ -46,6 +46,10 @@ Ubuntu and Debian. RHEL, Rocky Linux, AlmaLinux, Fedora, openSUSE, and Alpine Li
 
 Run `kip auth reset-password` to generate a new one.
 
+### Can I roll back an upgrade?
+
+Not automatically. `kip upgrade` moves the cluster to the current release, and there is no version pinning, no check that refuses an unhealthy cluster, and no automatic revert when a component fails to start. Run `kip backup create` before upgrading so you have a restore point.
+
 ### Can I re-run kip install?
 
 Yes, but not as a general way to catch a cluster up. Parts of it are idempotent and parts of it replace state.
@@ -69,6 +73,14 @@ kip app update api --image ghcr.io/acme/api:v2.1.0
 ```
 
 You can also update the image from the web console using the package icon in the app detail panel.
+
+### Can I deploy an image I built locally?
+
+Only after pushing it somewhere the cluster can pull from. `kip app deploy --image` pulls from a registry, and `kip registry add` stores credentials for a private one. There is no local-image import and no pull-policy control, so an image that exists only on your machine will not deploy. `kip app deploy --git` avoids the question, because Kipper builds the image in the cluster.
+
+### Can two projects share one database?
+
+Not directly. A service belongs to the project and environment it was created in, and apps and functions there bind to it. Another project gets its own instance. [Cross-project links](/en/deploying-apps#linking-across-projects) join an app to another app rather than to a service, so either put the workloads that share data in one project, or put an app in front of the database and link to that.
 
 ### Where are my secrets stored?
 
