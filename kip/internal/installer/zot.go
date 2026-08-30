@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -552,7 +553,9 @@ func InstallZot(client *ssh.Client) error {
 	if _, err := client.Run("systemctl restart k3s"); err != nil {
 		return fmt.Errorf("restarting k3s: %w", err)
 	}
-	if _, err := client.Run("kubectl wait --for=condition=Ready node --all --timeout=120s"); err != nil {
+	// The restart takes the node out of the API for a moment, so the wait has
+	// to tolerate it being absent rather than treat that as a failure.
+	if err := WaitForNodeReady(client, 5*time.Minute); err != nil {
 		return fmt.Errorf("waiting for k3s after restart: %w", err)
 	}
 
