@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/getkipper/kipper/kip/internal/ssh"
 )
@@ -609,8 +610,10 @@ func InstallK3s(client *ssh.Client, host string, dnsResolvers []string, k3sPreex
 		fmt.Printf("  ⚠  %s\n", skipReason)
 	}
 
-	// Wait for k3s to be ready
-	if _, err := client.Run("kubectl wait --for=condition=Ready node --all --timeout=120s"); err != nil {
+	// A freshly installed k3s has not registered its node the instant the
+	// installer script returns, and `kubectl wait --all` errors on an empty
+	// match rather than waiting for one.
+	if err := WaitForNodeReady(client, 5*time.Minute); err != nil {
 		return fmt.Errorf("waiting for k3s node to be ready: %w", err)
 	}
 
