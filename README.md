@@ -127,4 +127,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, 
 
 Apache 2.0. See [LICENSE](LICENSE).
 
+The grant is irrevocable for every published release, so a version you run today stays yours whatever happens later. Funding is an open question, and the [FAQ](docs/en/faq.md) sets out the current thinking.
+
 Maintained by [Labb Consulting](https://labb-consulting.com). Built for everyone.
