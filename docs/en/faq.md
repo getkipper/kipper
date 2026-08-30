@@ -18,6 +18,12 @@ Managed Kubernetes gives you the cluster but leaves you to figure out ingress, T
 
 Kipper is in active development. The core install, deploy, and management commands work on real infrastructure, and we use it for staging environments and early-stage production workloads. It has not been battle-tested at scale.
 
+### How is this funded, and could the licence change?
+
+Kipper is Apache 2.0, and that grant is irrevocable for every version already published. A release you run today stays yours to use, fork and redistribute, whatever happens later.
+
+Funding is an open question. Kipper is written by one person and earns nothing today. Should that change, the likely shape is paid hosting or support around the same open codebase, with shipped features staying under the same licence. Treat that as the current intention; the paragraph above is the part to rely on.
+
 ### Does kip work on Windows?
 
 Yes. The kip CLI runs natively on Windows for all commands: deploying apps, managing secrets, viewing logs, scaling, rollbacks, etc. The only exception is `kip install`, which needs [WSL](https://learn.microsoft.com/en-us/windows/wsl/). An install runs hundreds of commands over SSH and shares one connection between them, which Windows OpenSSH cannot do, and Git Bash cannot either because its ssh comes from the same family. Download `kip-windows-amd64.exe` from the releases page for everything else.
