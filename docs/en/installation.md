@@ -453,6 +453,19 @@ The admin account is printed first, because the sign-in asks for it.
 
 Headless installs (CI, no terminal, or `--no-login`) finish credential-free without the sign-in; the first operator runs `kip auth login && kip auth verify`. The admin certificate reaches your machine only when you ask for it with `--admin-kubeconfig`, when an interactive install fails partway (so you can inspect the half-built cluster), or when sign-in genuinely fails to authorize against the cluster. Each case says so loudly.
 
+### A kubeconfig is not a login
+
+Most of `kip` talks to the Kubernetes API, so the certificate `--admin-kubeconfig` writes covers it: creating projects, adding services, deploying apps, reading logs, scaling, and everything `kubectl` does. A few commands go through the console API instead, which authenticates the operator rather than the kubeconfig, and they stop with `not authenticated. Run: kip auth login`:
+
+- `kip service bind` and `kip service unbind`
+- `kip function bind` and `kip function unbind`
+- `kip app rebuild`
+- `kip service share`
+- `kip project allow-links` and `kip project links`
+- `kip auth sessions revoke-all`
+
+A pipeline holding only the certificate can therefore install a cluster, create a database and deploy an app, and connecting the two needs an operator to sign in once with `kip auth login`. The token that sign-in writes is what those commands read afterwards.
+
 ## kip auth verify
 
 Proves your OIDC identity authenticates and authorizes against the cluster, the same check the installer runs inline. Run it after a headless install, or any time you want to confirm the login path works end to end.
