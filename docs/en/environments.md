@@ -1,3 +1,8 @@
+---
+title: 'Dev, test and production environments on one cluster'
+description: 'Projects and environments give each stage its own namespace, database and hostnames, with promotion from one stage to the next.'
+---
+
 # Projects & Environments
 
 Projects group related apps and services together. Each project can have multiple environments that form a promotion pipeline. Deploy to test, verify, then promote to production.

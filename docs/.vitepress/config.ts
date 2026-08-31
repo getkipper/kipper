@@ -25,9 +25,12 @@ export default withMermaid(
     // page would share the home page's URL and title.
     transformHead({ pageData }) {
       const title = pageData.title ? `${pageData.title} | ${SITE_TITLE}` : SITE_TITLE
+      const description = pageData.description || SITE_DESCRIPTION
       const head: HeadConfig[] = [
         ['meta', { property: 'og:title', content: title }],
         ['meta', { name: 'twitter:title', content: title }],
+        ['meta', { property: 'og:description', content: description }],
+        ['meta', { name: 'twitter:description', content: description }],
       ]
 
       // The generated 404 answers on any URL, so it claims none of them.
@@ -58,13 +61,11 @@ export default withMermaid(
       ['meta', { name: 'apple-mobile-web-app-status-bar-style', content: 'default' }],
       ['meta', { property: 'og:type', content: 'website' }],
       ['meta', { property: 'og:site_name', content: SITE_TITLE }],
-      ['meta', { property: 'og:description', content: SITE_DESCRIPTION }],
       ['meta', { property: 'og:image', content: `${SITE_URL}/og-image.png` }],
       ['meta', { property: 'og:image:width', content: '1200' }],
       ['meta', { property: 'og:image:height', content: '630' }],
       ['meta', { property: 'og:image:alt', content: `${SITE_TITLE}: ${SITE_DESCRIPTION}` }],
       ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
-      ['meta', { name: 'twitter:description', content: SITE_DESCRIPTION }],
       ['meta', { name: 'twitter:image', content: `${SITE_URL}/og-image.png` }],
       // Plausible sets no cookies and stores no personal data, so the site
       // needs no consent banner. plausible.io is on the app's CSP allowlist.

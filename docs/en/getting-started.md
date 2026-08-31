@@ -1,3 +1,8 @@
+---
+title: 'Install Kubernetes on a Linux server in one command'
+description: 'Install a production k3s cluster on an Ubuntu or Debian server with one command, then deploy your first app over HTTPS.'
+---
+
 # Getting Started
 
 This guide walks you through installing Kipper on a fresh Linux server and deploying your first application. By the end, you will have a running Kubernetes cluster with automatic SSL and a web console.

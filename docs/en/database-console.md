@@ -1,3 +1,8 @@
+---
+title: 'Browse and query your database in the browser'
+description: 'Run SQL against a Kipper-managed database from the console, browse tables and export results, without exposing the database to the internet.'
+---
+
 # Database Console
 
 Kipper has a built-in database client in the web console for Postgres and MySQL services. You can browse tables, edit rows, design schema, manage indexes, run SQL with autocomplete, and ask the AI assistant to write queries that actually use your real schema. No desktop tool needed.
