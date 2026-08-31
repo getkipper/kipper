@@ -1,3 +1,8 @@
+---
+title: 'kip install reference: every flag, check and default'
+description: 'Reference for kip install and the cluster commands: flags, preflight checks, sizing profiles, backup storage, and what the install writes to your machine.'
+---
+
 # Installation Reference
 
 ## kip install

@@ -1,3 +1,8 @@
+---
+title: 'Environment variables and secrets for Kubernetes apps'
+description: 'Set plain environment variables and secrets on an app or a function, see what a change restarts, and keep secrets out of your manifests.'
+---
+
 # Secrets & Environment Variables
 
 Kipper separates non-sensitive configuration (environment variables) from sensitive credentials (secrets). They are stored and displayed differently.

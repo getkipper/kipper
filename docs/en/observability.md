@@ -1,3 +1,8 @@
+---
+title: 'Logs, metrics and dashboards for a k3s cluster'
+description: 'Prometheus, Loki and Grafana come with the install. What each one costs, how long data is kept, and where to read it.'
+---
+
 # Observability
 
 Kipper includes a built-in observability stack for production monitoring: **Loki** for logs, **Prometheus** for metrics, and **Grafana** for dashboards.

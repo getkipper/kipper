@@ -1,3 +1,8 @@
+---
+title: 'Open a shell in a Kubernetes pod from your browser'
+description: 'A terminal into any running pod from the console or the CLI, with no kubectl on your machine and no SSH to the node.'
+---
+
 # Web Terminal
 
 The Connect tab in the app detail panel opens an interactive shell session inside a running pod directly in your browser. No CLI, no SSH keys, no `kubectl` knowledge required.

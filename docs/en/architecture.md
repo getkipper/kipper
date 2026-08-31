@@ -1,3 +1,8 @@
+---
+title: 'What a Kipper install puts on your k3s cluster'
+description: 'The components an install adds, how a request reaches an app, and where the data lives.'
+---
+
 # Architecture
 
 This document explains how Kipper works internally. It is aimed at contributors and anyone who wants to understand the system before diving into the code.

@@ -1,3 +1,8 @@
+---
+title: 'Give your team access to a Kubernetes cluster'
+description: 'Invite people, give each a role per project, and let them deploy and debug without handing out the cluster admin certificate.'
+---
+
 # Team Access
 
 Kipper is designed for teams. There are two ways to give someone access to a cluster, and the right one depends on how much they should be able to do. Neither shares SSH keys or server passwords.

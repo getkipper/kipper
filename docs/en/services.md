@@ -1,3 +1,8 @@
+---
+title: 'Run PostgreSQL, MySQL, Redis or MongoDB on Kubernetes'
+description: 'Add a database or cache with one command, bind it to an app so the credentials are injected, and give each environment its own.'
+---
+
 # Stateful Services
 
 Kipper manages stateful services (databases, caches) separately from apps. Services use StatefulSets with persistent storage. They survive restarts and keep their data.
