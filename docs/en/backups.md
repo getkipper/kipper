@@ -1,6 +1,6 @@
 ---
 title: 'Back up a Kubernetes cluster to S3 and restore it'
-description: 'Scheduled and on-demand backups with Velero, stored off-cluster in any S3-compatible bucket, and how to restore one app, one volume or everything.'
+description: 'Daily and on-demand backups of every resource and volume, with Velero, kept on the cluster by default or in an S3-compatible bucket, and restored into the same namespace or another.'
 ---
 
 # Backup & Restore
