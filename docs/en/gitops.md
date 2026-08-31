@@ -1,3 +1,8 @@
+---
+title: 'GitOps for Kubernetes with one kipper.yaml file'
+description: 'Describe a whole project in one file, diff it against the live cluster, and apply it from CI.'
+---
+
 # GitOps
 
 Kipper supports declarative infrastructure through a `kipper.yaml` manifest file. Define your entire project (apps, services, volumes, and jobs) in a single file, commit it to Git, and apply it to the cluster.

@@ -1,3 +1,8 @@
+---
+title: 'What Kipper hardens on your server, and what stays yours'
+description: 'The firewall rules, host hardening, tenant boundaries and security headers an install applies, and where the responsibility stays yours.'
+---
+
 # Security
 
 Kipper takes security seriously. Every cluster is hardened by default with production-grade security controls, no configuration required.

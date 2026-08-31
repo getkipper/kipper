@@ -1,3 +1,8 @@
+---
+title: 'Custom domains and automatic Let''s Encrypt SSL'
+description: 'Point your own domain at an app, have a Let''s Encrypt certificate issued and renewed for you, and diagnose the DNS that usually holds it up.'
+---
+
 # Domains & SSL
 
 Every Kipper cluster gets automatic HTTPS, both on free kipper.run subdomains and custom domains.

@@ -1,3 +1,8 @@
+---
+title: 'Move a Kubernetes cluster to another server'
+description: 'Copy projects, apps, databases and volumes from one Kipper cluster to another, with a plan you approve before anything moves.'
+---
+
 # Cluster Migration
 
 Kipper can migrate entire projects (apps, services, databases with data, volumes, functions, jobs, and secrets) from one cluster to another. No kubectl, no manual exports.
