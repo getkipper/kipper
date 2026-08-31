@@ -176,6 +176,10 @@ kip status
     ✔  1.1.1.1, 8.8.8.8, 9.9.9.9
 ```
 
+::: tip A cross straight after the install is often a slow starter
+`kip status` reports how many replicas of each component the cluster counts as ready at that moment, so a component whose pods are still failing their readiness checks while they start shows as `✗` until they pass. Promtail has been seen doing it on a fresh install, failing its probe twice before settling. Wait a minute and run the command again before you go looking for a fault.
+:::
+
 The DNS resolvers section reads the curated resolver file on the server and audits it. If someone hand-edits it into something the cluster can't use (an IPv6 entry, more than three nameservers, a hostname), if the entries drift from the set the cluster was configured with, or if a resolver stops accepting connections from the server, `kip status` warns you here before it turns into a DNS outage. `kip cluster dns repair` puts the configured resolvers back. The check is best-effort: if the server can't be reached over SSH, the section reports that it could not check instead of silently passing, and the rest of the status still prints.
 
 ## Step 4: Deploy your first app
