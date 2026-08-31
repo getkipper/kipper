@@ -109,8 +109,10 @@ var serviceBindCmd = &cobra.Command{
 	Use:   "bind [service] [app]",
 	Short: "Bind a service to an app, injecting connection credentials",
 	Long: `Binds a service to an application by injecting connection credentials
-as environment variables. For database services (postgres, mysql, mongodb),
-a per-app database is created automatically.
+as environment variables. The app attaches to the service's own database unless
+--database names one, which postgres, mysql, mongodb and rabbitmq create inside
+the service. Every binding connects as the service's own user, so a named
+database decides where an app's data sits rather than what it may reach.
 
 Examples:
   kip service bind mydb api
@@ -157,7 +159,7 @@ func init() {
 	serviceBindCmd.Flags().String("project", "default", "project namespace")
 	serviceBindCmd.Flags().String("environment", "", "target environment")
 	serviceBindCmd.Flags().String("prefix", "", "env var prefix (e.g. DB_, REDIS_), auto-detected from service type if omitted")
-	serviceBindCmd.Flags().String("database", "", "custom database name (auto-derived for database services if omitted)")
+	serviceBindCmd.Flags().String("database", "", "database this binding uses, created inside the service if it does not exist (a vhost for rabbitmq); omit to use the service's own")
 
 	serviceUnbindCmd.Flags().String("project", "default", "project namespace")
 	serviceUnbindCmd.Flags().String("environment", "", "target environment")
