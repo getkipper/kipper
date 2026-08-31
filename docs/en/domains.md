@@ -86,6 +86,8 @@ After those 90 days the name is free for anyone to register. This matters most i
 
 `kip cluster uninstall` is different: it frees the name straight away. The hold exists for the cluster that went quiet without anyone deciding to stop, where a name disappearing would be an accident. An uninstall is a decision, and the command deletes the credential that would reclaim the name anyway, so holding it would lock the name away from you as well as from everyone else. It also means you can rebuild a server under the same name whenever you like. If you published links under a name you are giving up, move them before you uninstall rather than after.
 
+Reimaging the server from your provider's control panel is the case to think about, because it never runs that command. Two copies of the credential exist: one on the cluster, which the wipe destroys, and one in the `~/.kip/config.yaml` of the machine that ran the install, written when the name was first claimed. Keep that machine's config and a fresh install on the same server renews the same name. Lose both, by installing from a different machine or by clearing the local entry, and the name stays registered to a cluster that no longer exists, with nothing able to release it until the timetable above runs out. Running `kip cluster uninstall <name>` before you rebuild avoids the question entirely.
+
 ## Custom console domain
 
 Replace the auto-generated console URL with your own domain:
