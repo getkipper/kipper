@@ -105,6 +105,7 @@ export default withMermaid(
             text: 'Using Kipper',
             items: [
               { text: 'Deploying Apps', link: '/en/deploying-apps' },
+              { text: 'From Docker Compose', link: '/en/docker-compose-to-kubernetes' },
               { text: 'Stateful Services', link: '/en/services' },
               { text: 'Database Console', link: '/en/database-console' },
               { text: 'Shared Storage', link: '/en/shared-storage' },

@@ -1,6 +1,6 @@
 ---
 title: 'Dev, test and production environments on one cluster'
-description: 'Projects and environments give each stage its own namespace, database and hostnames, with promotion from one stage to the next.'
+description: 'A project gives each stage its own namespace, quota and members, so the apps and databases you create in one never touch another, and promotion moves an app between them.'
 ---
 
 # Projects & Environments
