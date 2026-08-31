@@ -14,7 +14,7 @@ kip install --host <ip> [flags]
 |---|---|---|---|
 | `--host` | Yes | — | IP address or hostname of the target server |
 | `--ssh-key` | No | see below | Path to SSH private key. Saved to `~/.kip/config.yaml` so subsequent `kip` commands inherit it. If unset, `kip` reads `KIP_SSH_KEY`, then `cluster.ssh_key` from config; if still unset, ssh consults your ssh-agent and `~/.ssh/config` as normal |
-| `--domain` | No | `<ip>.kipper.run` | The name the cluster serves on. A `*.kipper.run` name (`lab.kipper.run`) is registered for you on the shared gateway; anything else is a domain whose DNS you run yourself. Omit it and the free name is derived from the server's address. See [choosing your own name](/en/domains#choosing-your-own-name) |
+| `--domain` | No | `<ip>.kipper.run` | The name the cluster serves on. A `*.kipper.run` name (`lab.kipper.run`) is registered for you on the shared gateway; anything else is a domain whose DNS you run yourself, and whose hostnames have to resolve to the server before you install (see [DNS for a domain you run](#dns-for-a-domain-you-run)). Omit it and the free name is derived from the server's address. See [choosing your own name](/en/domains#choosing-your-own-name) |
 | `--admin-email` | No | `admin@<domain>` | Email for Let's Encrypt certificates and the admin account. Defaults to `admin@<domain>` when `--domain` is a domain you run, otherwise `admin@kipper.local` |
 | `--org` | No | — | Organisation short code (e.g. `acme`), used as namespace prefix |
 | `--org-display-name` | No | — | Human-readable organisation name (e.g. `Acme Inc`) |
@@ -30,6 +30,22 @@ kip install --host <ip> [flags]
 | `--backup-storage-endpoint` | No | — | S3 endpoint URL. Omit for native AWS S3 (Velero derives it from the region). Required for R2, self-hosted MinIO, B2, Wasabi, DigitalOcean Spaces |
 | `--backup-storage-credentials` | No | `~/.aws/credentials` | Path to an AWS-style INI credentials file. Read only at install time and never stored back on disk |
 | `--backup-storage-profile` | No | `default` | Profile name inside the credentials file. Lets you reuse an existing AWS CLI profile like `acme` without copying it to a separate file |
+
+#### DNS for a domain you run
+
+`--domain example.com` puts the console on `console.example.com`, the API on `console-api.example.com` and the login on `dex.example.com`, and every app you deploy afterwards gets its own host under the same domain. cert-manager issues a Let's Encrypt certificate for each of those hosts and solves the HTTP-01 challenge against it, so each one has to resolve to the server.
+
+One wildcard A record covers all of them, including the apps you have not deployed yet:
+
+```
+*.example.com.   A   203.0.113.10
+```
+
+Individual records work too, so long as `console`, `console-api` and `dex` exist before you install and you add another for every app you deploy afterwards.
+
+There is no DNS preflight, so nothing stops an install whose records are missing. An interactive install notices one of the three on its way past: before it opens the browser it waits up to five minutes for `dex.example.com` to answer its discovery URL over verified TLS, and says whether DNS or the certificate is what it is waiting for. The install still finishes if that never comes good, with sign-in deferred. `console.` and `console-api.` are not checked at all, and a headless install or `--no-login` skips the wait altogether. Each missing record then shows up as its own service failing: `console.` as a page that will not load, `dex.` as a sign-in that never completes, and `console-api.` as the `kip` commands that call the console API refusing to connect. The browser console is unaffected by that last one, because it reaches the API through `/api` on its own host.
+
+Adding the record afterwards is enough on its own. cert-manager keeps retrying and issues once the hostnames resolve, and `kip auth login` finishes the sign-in that was deferred. See [troubleshooting certificates](/en/domains#troubleshooting-certificates).
 
 #### SSH rate limiting
 
