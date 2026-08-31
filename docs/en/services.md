@@ -297,18 +297,20 @@ kip service bind db domain-service --project blog --environment test
 kip function bind domain-sync db --project blog --environment test
 ```
 
-### Per-app databases
+### A database of its own, when you ask for one
 
-For database services (PostgreSQL, MySQL, MongoDB), Kipper automatically creates a dedicated database for each app. The database name is derived from the app name and environment:
+A binding attaches the app to the service's own database, which is what a service backing one app wants. Several apps on one instance is the case that needs more: name a database and Kipper creates it inside the service and points that binding at it.
 
-| App | Environment | Database name |
-|---|---|---|
-| `domain-service` | `test` | `domain_service_test` |
-| `identity-service` | `prod` | `identity_service_prod` |
-| `exchange-service` | `acc` | `exchange_service_acc` |
-| `api` | *(none)* | `api` |
+```bash
+kip service bind db domain-service --database domain_service_test --project blog --environment test
+kip service bind db identity-service --database identity_service_prod --project blog --environment prod
+```
 
-This means multiple microservices can share a single PostgreSQL instance while keeping their data completely isolated.
+A manifest binding takes the same value as `database:`. Each app then reads its own `DB_NAME` and shares everything else: the instance, the storage, and the credentials.
+
+That last one is worth being clear about. Every binding connects as the service's own user, so naming a database decides where an app's tables live rather than what it is allowed to reach, and an app that goes looking can still open a sibling's database with the credentials it already has. Take it as tidiness on one instance. Anything that needs a boundary someone cannot step over gets a service of its own.
+
+PostgreSQL, MySQL, MongoDB and RabbitMQ can be divided this way. RabbitMQ calls it a vhost and takes the name in the same place, where `/` means the service's own. Redis, OpenSearch and MinIO have nothing to divide, so a binding there always points at the whole service.
 
 ### Injected environment variables
 
