@@ -83,8 +83,8 @@ jobs:
 ### The route block
 
 `route` is the largest block an app can carry. Every field is optional, and the manifest is the only
-place several of them can be set at all. `kip app deploy` covers `host`, `group`, `path`,
-`redirectFrom`, `rateLimit` and `noSecurityHeaders`, and the rest are manifest or console.
+place several of them can be set at all. `kip app deploy` covers `group` and `path` through `--route`,
+plus `redirectFrom`, `rateLimit` and `noSecurityHeaders`. The rest, `host` included, are manifest or console.
 
 | Field | What it does |
 |---|---|
