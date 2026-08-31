@@ -78,7 +78,7 @@ A wildcard DNS record (`*.kipper.run`) points all subdomains to the Kipper Gatew
 
 ### Subdomain expiry
 
-Free subdomains stop serving after 30 days of inactivity. A live cluster renews itself: its console API heartbeats to the gateway once a day, which is what keeps the name and the proof of control current.
+A free subdomain keeps its place on the gateway for as long as its cluster keeps proving it holds it, and a live cluster does that without being asked: the console API heartbeats once a day, and each beat renews a proof of control good for seven days. A few missed beats during an outage therefore change nothing. Once the proof lapses the gateway stops routing the name at all and answers 404, which is about a week after a cluster is switched off. Its apps stop answering the moment the server does, of course; what changes at the week is that the name itself goes dark. The registration lasts longer again, and lapses after 30 days without contact.
 
 The name is not handed to anyone else at that point. It stays reserved for you for a further 90 days, and only your cluster's own gateway credential can bring it back, so a cluster that was off for a season finds its name waiting. Re-registering means re-running `kip install`, which is heavier than it sounds: see [re-running install](/en/installation#re-running-install) for what it costs on a cluster with console-created users.
 
