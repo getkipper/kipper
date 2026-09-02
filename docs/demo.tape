@@ -3,6 +3,9 @@
 #   brew install vhs
 #   export KIPPER_DEMO_HOST=<ip of a throwaway server>
 #   export KIPPER_DEMO_KEY=~/.ssh/id_ed25519
+#   export KIPPER_DEMO_NAME=<a free kipper.run label, e.g. demo>
+#   export KIP_INSTALL_DIR=$HOME/.local/bin
+#   export PATH="$HOME/.local/bin:$PATH"
 #   vhs docs/demo.tape
 #
 # Run it against a server you are willing to destroy, and destroy it afterwards.
@@ -21,6 +24,17 @@
 #      and `ResolveKubeconfigMode` defers the login in that case, which would
 #      leave the next command with no credential. A person installing by hand
 #      gets the interactive sign-in instead and does not need the flag.
+#   4. `--domain` takes a free kipper.run label, which keeps the server's
+#      address out of every URL on screen: console--demo.kipper.run rather than
+#      console--203-0-113-10.kipper.run. Pick one that is unregistered, and
+#      release it afterwards with `kip cluster uninstall`, or it stays claimed
+#      for four months. Anything already taken is refused before the install
+#      touches the server.
+#   5. KIP_INSTALL_DIR is not decoration. The installer writes to
+#      /usr/local/bin, and on a machine where that is root-owned it calls sudo,
+#      which vhs cannot answer. Naming a directory you own keeps the recording
+#      unattended; put it first on PATH so the next line runs the binary this
+#      one just installed.
 #
 # Nothing here is staged. Every line is real output from a real run; the tape
 # only compresses playback so that several minutes of install fit a README.
@@ -60,7 +74,7 @@ Enter
 Wait+Screen@3m /installed to/
 Sleep 1s
 
-Type "kip install --host $KIPPER_DEMO_HOST --ssh-key $KIPPER_DEMO_KEY --admin-email you@example.com --admin-kubeconfig 2>&1 | sed -E 's/^([[:space:]]*Password:[[:space:]]*).*/\1********/'"
+Type "kip install --host $KIPPER_DEMO_HOST --ssh-key $KIPPER_DEMO_KEY --domain $KIPPER_DEMO_NAME.kipper.run --admin-email you@example.com --admin-kubeconfig 2>&1 | sed -E 's/^([[:space:]]*Password:[[:space:]]*).*/\1********/'"
 Enter
 Wait+Screen@30m /Cluster ready/
 Sleep 2s
