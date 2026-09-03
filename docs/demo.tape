@@ -4,8 +4,6 @@
 #   export KIPPER_DEMO_HOST=<ip of a throwaway server>
 #   export KIPPER_DEMO_KEY=~/.ssh/id_ed25519
 #   export KIPPER_DEMO_NAME=<a free kipper.run label, e.g. demo>
-#   export KIP_INSTALL_DIR=$HOME/.local/bin
-#   export PATH="$HOME/.local/bin:$PATH"
 #   vhs docs/demo.tape
 #
 # Run it against a server you are willing to destroy, and destroy it afterwards.
@@ -17,8 +15,10 @@
 #      replaces that line before it reaches the screen, so the GIF never carries
 #      a live credential. If the run is interrupted, rotate the password anyway.
 #   2. The installer writes to /usr/local/bin and calls sudo when it cannot.
-#      vhs cannot answer a sudo prompt, so record on a machine where you own
-#      that directory.
+#      vhs cannot answer a sudo prompt, so it waits for output that never comes
+#      and gives up with no recording. Own the directory before you start
+#      (`sudo chown $(id -u) /usr/local/bin`) rather than working around it: the
+#      GIF then shows the path a viewer would get.
 #   3. `--admin-kubeconfig` is here because the recording is unattended. Piping
 #      the install through the redaction filter leaves it without a terminal,
 #      and `ResolveKubeconfigMode` defers the login in that case, which would
@@ -30,11 +30,6 @@
 #      release it afterwards with `kip cluster uninstall`, or it stays claimed
 #      for four months. Anything already taken is refused before the install
 #      touches the server.
-#   5. KIP_INSTALL_DIR is not decoration. The installer writes to
-#      /usr/local/bin, and on a machine where that is root-owned it calls sudo,
-#      which vhs cannot answer. Naming a directory you own keeps the recording
-#      unattended; put it first on PATH so the next line runs the binary this
-#      one just installed.
 #
 # Nothing here is staged. Every line is real output from a real run; the tape
 # only compresses playback so that several minutes of install fit a README.
