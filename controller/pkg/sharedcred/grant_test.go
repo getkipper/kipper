@@ -369,3 +369,171 @@ func TestUpdateRetriesOnConflict(t *testing.T) {
 		t.Errorf("the retry lost the change: %+v", after)
 	}
 }
+
+// The record is what a repair is allowed to write back, so a credential nobody
+// has decided must never reach it. Everything Restore does is safe only because
+// this filter holds.
+func TestDecisionsSkipsACredentialNobodyHasDecided(t *testing.T) {
+	decided := Decisions(listOf(
+		Entry{Name: "forge"},
+		Entry{Name: "archive", AllowedProjects: []string{}},
+		Entry{Name: "shop", AllowedProjects: []string{"shop"}},
+	))
+
+	if _, held := decided["forge"]; held {
+		t.Error("a credential nobody has decided was recorded as a decision")
+	}
+	if len(decided) != 2 {
+		t.Errorf("recorded %d decisions, want 2", len(decided))
+	}
+}
+
+// The record outlives the slice it was read from, and the passes write to that
+// slice. Aliasing would let a fill edit the record it is being checked against.
+func TestDecisionsCopiesTheList(t *testing.T) {
+	entries := listOf(Entry{Name: "forge", AllowedProjects: []string{"shop"}})
+	decided := Decisions(entries)
+
+	entries[0].AllowedProjects[0] = "evil"
+
+	if decided["forge"].AllowedProjects[0] != "shop" {
+		t.Errorf("the record aliased the entry it came from: %v", decided["forge"].AllowedProjects)
+	}
+}
+
+func TestRestoreWritesBackAnErasedList(t *testing.T) {
+	entries, restored, moved, replaced := Restore(
+		listOf(Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+		Decisions(listOf(Entry{
+			Name: "forge", Server: "git.example.com", Token: "a-token",
+			AllowedProjects: []string{"shop"},
+		})),
+	)
+
+	if !entries[0].AllowsProject("shop") {
+		t.Errorf("an erased allow-list was not written back: %v", entries[0].AllowedProjects)
+	}
+	if len(restored) != 1 || restored[0] != "forge" {
+		t.Errorf("the restore was not reported: %v", restored)
+	}
+	if len(moved) != 0 || len(replaced) != 0 {
+		t.Errorf("an unchanged credential was refused: moved=%v replaced=%v", moved, replaced)
+	}
+}
+
+// Absent is not empty, and this is where the difference is easiest to lose:
+// appending nothing to a nil slice yields nil, so a decided-empty list would
+// come back as one nobody has decided and the migration would offer to fill it
+// again.
+func TestRestoreKeepsADecidedEmptyListDecided(t *testing.T) {
+	entries, _, _, _ := Restore(
+		listOf(Entry{Name: "forge", Server: "git.example.com", Token: "a-token"}),
+		Decisions(listOf(Entry{
+			Name: "forge", Server: "git.example.com", Token: "a-token",
+			AllowedProjects: []string{},
+		})),
+	)
+
+	if entries[0].AllowedProjects == nil {
+		t.Error("a decided-empty list came back as one nobody has decided")
+	}
+	if len(entries[0].AllowedProjects) != 0 {
+		t.Errorf("a decided-empty list came back with projects on it: %v", entries[0].AllowedProjects)
+	}
+}
+
+// A decision taken after the record was read is the newer one, and the record
+// does not get to overrule it. Both halves matter: a grant somebody widened,
+// and a revocation that took the last project off.
+func TestRestoreLeavesADecisionMadeAfterTheRecordAlone(t *testing.T) {
+	record := Decisions(listOf(Entry{
+		Name: "forge", Server: "git.example.com", Token: "a-token",
+		AllowedProjects: []string{"shop"},
+	}))
+
+	widened, restored, _, _ := Restore(listOf(Entry{
+		Name: "forge", Server: "git.example.com", Token: "a-token",
+		AllowedProjects: []string{"ops"},
+	}), record)
+	if widened[0].AllowsProject("shop") || !widened[0].AllowsProject("ops") {
+		t.Errorf("the record overruled a later grant: %v", widened[0].AllowedProjects)
+	}
+
+	revoked, alsoRestored, _, _ := Restore(listOf(Entry{
+		Name: "forge", Server: "git.example.com", Token: "a-token",
+		AllowedProjects: []string{},
+	}), record)
+	if len(revoked[0].AllowedProjects) != 0 {
+		t.Errorf("the record undid a revocation: %v", revoked[0].AllowedProjects)
+	}
+	if len(restored) != 0 || len(alsoRestored) != 0 {
+		t.Error("a list nobody had erased was reported as restored")
+	}
+}
+
+// The build hands a project the credential's token against the credential's
+// host, so a credential now bound elsewhere is a different one to authorise.
+func TestRestoreRefusesACredentialBoundElsewhere(t *testing.T) {
+	entries, restored, moved, replaced := Restore(
+		listOf(Entry{Name: "forge", Server: "git.other.example", Token: "a-token"}),
+		Decisions(listOf(Entry{
+			Name: "forge", Server: "git.example.com", Token: "a-token",
+			AllowedProjects: []string{"shop"},
+		})),
+	)
+
+	if entries[0].AllowedProjects != nil {
+		t.Errorf("a list was written onto a credential bound somewhere nobody granted: %v", entries[0].AllowedProjects)
+	}
+	if len(restored) != 0 {
+		t.Errorf("the refusal was reported as a restore: %v", restored)
+	}
+	if len(moved) != 1 || moved[0] != "forge" {
+		t.Errorf("the refusal was not named: %v", moved)
+	}
+	if len(replaced) != 0 {
+		t.Errorf("a credential refused for its server was also named for its token: %v", replaced)
+	}
+}
+
+// A credential deleted and recreated under its old name carries a token nobody
+// was granted, and it is the same shape as a rotation. The two mean opposite
+// things and nothing here can tell them apart, so the ambiguous case is refused
+// rather than written and warned about afterwards.
+func TestRestoreRefusesACredentialCarryingADifferentToken(t *testing.T) {
+	entries, restored, _, replaced := Restore(
+		listOf(Entry{Name: "forge", Server: "git.example.com", Token: "a-new-token"}),
+		Decisions(listOf(Entry{
+			Name: "forge", Server: "git.example.com", Token: "a-token",
+			AllowedProjects: []string{"shop"},
+		})),
+	)
+
+	if entries[0].AllowedProjects != nil {
+		t.Errorf("a project was authorised against a token it was never granted: %v", entries[0].AllowedProjects)
+	}
+	if len(restored) != 0 {
+		t.Errorf("the refusal was reported as a restore: %v", restored)
+	}
+	if len(replaced) != 1 || replaced[0] != "forge" {
+		t.Errorf("the refusal was not named: %v", replaced)
+	}
+}
+
+// A credential deleted during the rollout stays deleted. Restoring it would put
+// back an allow-list with no credential under it.
+func TestRestoreLeavesACredentialThatIsGoneGone(t *testing.T) {
+	entries, restored, _, _ := Restore(
+		listOf(Entry{Name: "archive", Server: "git.example.com"}),
+		Decisions(listOf(Entry{
+			Name: "forge", Server: "git.example.com", AllowedProjects: []string{"shop"},
+		})),
+	)
+
+	if len(entries) != 1 || entries[0].Name != "archive" {
+		t.Errorf("a deleted credential was put back: %v", entries)
+	}
+	if len(restored) != 0 {
+		t.Errorf("a credential that is gone was reported as restored: %v", restored)
+	}
+}
