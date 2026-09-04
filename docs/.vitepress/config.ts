@@ -99,6 +99,7 @@ export default withMermaid(
               { text: 'Overview', link: '/en/' },
               { text: 'Getting Started', link: '/en/getting-started' },
               { text: 'Installation', link: '/en/installation' },
+              { text: 'Installing from Windows', link: '/en/windows' },
             ],
           },
           {
