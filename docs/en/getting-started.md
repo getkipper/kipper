@@ -12,7 +12,7 @@ This guide walks you through installing Kipper on a fresh Linux server and deplo
 - A Linux server with root SSH access (Ubuntu 20.04, 22.04, 24.04, 26.04, or Debian 11, 12). `kip` signs in as `root`, so if your provider gave you a `sudo` user instead, put your key on the root account before you start
 - 2 GB RAM and 30 GB free disk are enforced by the installer, which refuses less. Plan on 2 vCPU alongside them as a practical minimum, and 4 vCPU / 8 GB / 80 GB for a cluster you will enjoy using
 - Ports 80, 443, and 6443 allowed through your provider's firewall (see below). Leave the server's own firewall alone, Kipper sets that one up for you
-- An SSH key on your local machine. No key yet? `ssh-keygen -t ed25519` makes one, and most providers have a field for the public half when you create the server. For a server that already exists, `ssh-copy-id root@your-server` installs it
+- An SSH key on your local machine. No key yet? `ssh-keygen -t ed25519` makes one, and most providers have a field for the public half when you create the server. For a server that already exists, `ssh-copy-id root@your-server` installs it. If your provider forces a password change on first login, `ssh-copy-id` cannot drive that prompt because it allocates no terminal: log in once with `ssh root@your-server`, change the password, `exit`, then copy the key
 - DNS records, if you are installing on a domain of your own. Kipper serves the console, the API and the login on subdomains of it and gives every app another one, so point a wildcard (`*.example.com`) at the server before you install and every one of them is covered. Records named host by host work too. A record on the bare domain alone looks right and then fails when certificates are issued. Clusters on a free `*.kipper.run` name need no DNS from you. See [DNS for a domain you run](/en/installation#dns-for-a-domain-you-run)
 
 ::: tip Two firewalls, and only one of them is yours
@@ -37,7 +37,9 @@ curl -sL https://getkipper.com/install | sh
 Download `kip-windows-amd64.exe` from the [latest release](https://github.com/getkipper/kipper/releases), rename to `kip.exe`, and add the directory to your PATH.
 
 ::: tip Windows and kip install
-All kip commands work natively on Windows except `kip install`, which needs [WSL](https://learn.microsoft.com/en-us/windows/wsl/). An install runs hundreds of commands over SSH and shares one connection between them, which Windows OpenSSH cannot do. Git Bash cannot either, because its ssh comes from the same family. Everything after the install talks to the Kubernetes API and works from the native binary.
+Run `kip install` from [WSL](https://learn.microsoft.com/en-us/windows/wsl/). An install runs hundreds of commands over SSH and shares one connection between them, which neither Windows OpenSSH nor Git Bash can do, so a native install opens a connection per command and can fail partway against a busy server. Deploying, logs, secrets, scaling and the rest talk to the Kubernetes API and work from the native binary; a few server-maintenance commands go over SSH and belong in WSL too.
+
+[Installing from Windows](/en/windows) walks through the whole path: WSL setup, the install, and handing the finished cluster back to PowerShell.
 :::
 
 **Or build from source:**

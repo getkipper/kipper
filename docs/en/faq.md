@@ -26,7 +26,7 @@ Funding is an open question. Kipper is written by one person and earns nothing t
 
 ### Does kip work on Windows?
 
-Yes. The kip CLI runs natively on Windows for all commands: deploying apps, managing secrets, viewing logs, scaling, rollbacks, etc. The only exception is `kip install`, which needs [WSL](https://learn.microsoft.com/en-us/windows/wsl/). An install runs hundreds of commands over SSH and shares one connection between them, which Windows OpenSSH cannot do, and Git Bash cannot either because its ssh comes from the same family. Download `kip-windows-amd64.exe` from the releases page for everything else.
+Yes. The kip CLI runs natively on Windows for deploying apps, managing secrets, viewing logs, scaling, rollbacks and the rest of the everyday work, all of which talks to the Kubernetes API. Run `kip install` from [WSL](https://learn.microsoft.com/en-us/windows/wsl/) instead: an install shares one SSH connection across hundreds of commands, and neither Windows OpenSSH nor Git Bash multiplexes, so a native install opens a connection per command and can fail partway against a busy server. The same goes for the few commands that maintain the server itself. Download `kip-windows-amd64.exe` from the releases page, and see [Installing from Windows](/en/windows) for the full path.
 
 One small difference: in `kip exec`, a shell keeps drawing to the size the window had when the session opened, because Windows reports resizes as console input rather than as a signal. Resize before you connect, or reconnect after.
 

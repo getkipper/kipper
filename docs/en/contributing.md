@@ -27,6 +27,32 @@ cd console && npm install && npm run dev && cd ..
 cd docs && npm install && npm run dev && cd ..
 ```
 
+### Building kip inside WSL
+
+A checkout on the Windows filesystem built from WSL needs two extra flags:
+
+```bash
+sudo apt install -y golang-go openssh-client
+cd /mnt/c/Users/<you>/kipper/kip
+CGO_ENABLED=0 go build -buildvcs=false -o kip .
+sudo mv kip /usr/local/bin/
+```
+
+`-buildvcs=false` skips Go's VCS stamping, which fails because git refuses to trust
+a repository whose owner differs across the WSL and Windows filesystem boundary.
+Adding the checkout to git's safe list works too:
+
+```bash
+git config --global --add safe.directory /mnt/c/Users/<you>/kipper
+```
+
+`CGO_ENABLED=0` builds a static binary, which a fresh Ubuntu WSL needs because it
+ships without `build-essential` and `runtime/cgo` will not compile without a C
+toolchain. Installing `build-essential` is the other way round it.
+
+This is also the route to take when `getkipper.com/install` is unreachable from
+your network. See [Installing from Windows](/en/windows) for the rest of that path.
+
 ### Running tests
 
 ```bash
