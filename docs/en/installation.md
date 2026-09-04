@@ -48,7 +48,7 @@ One wildcard A record covers all of them, including the apps you have not deploy
 
 Individual records work too, so long as `console`, `console-api` and `dex` exist before you install and you add another for every app you deploy afterwards.
 
-There is no DNS preflight, so nothing stops an install whose records are missing. An interactive install notices one of the three on its way past: before it opens the browser it waits up to five minutes for `dex.example.com` to answer its discovery URL over verified TLS, and says whether DNS or the certificate is what it is waiting for. The install still finishes if that never comes good, with sign-in deferred. `console.` and `console-api.` are not checked at all, and a headless install or `--no-login` skips the wait altogether. Each missing record then shows up as its own service failing: `console.` as a page that will not load, `dex.` as a sign-in that never completes, and `console-api.` as the `kip` commands that call the console API refusing to connect. The browser console is unaffected by that last one, because it reaches the API through `/api` on its own host.
+The install checks one of the three on its way past. An install that ends in a browser sign-in waits up to five minutes for `dex.example.com` to answer its discovery URL over verified TLS, and tells you whether DNS or the certificate is what it is waiting for; if that never comes good it finishes anyway, with sign-in deferred. Four routes skip the wait: `--admin-kubeconfig`, `--no-login`, a run with no terminal, and a re-install by an operator whose session is still valid. The console and API hosts go unchecked either way, so an install can complete with records still missing. Each one then shows up as its own service failing: `console.` as a page that will not load, `dex.` as a sign-in that never completes, and `console-api.` as the `kip` commands that call the console API refusing to connect. The browser console is unaffected by that last one, because it reaches the API through `/api` on its own host.
 
 Adding the record afterwards is enough on its own. cert-manager keeps retrying and issues once the hostnames resolve, and `kip auth login` finishes the sign-in that was deferred. See [troubleshooting certificates](/en/domains#troubleshooting-certificates).
 
@@ -158,7 +158,7 @@ The `nano` profile (sub-4 GB) already does this for you. See [Platform Resources
 
 Re-running `kip install` updates a component that is already there rather than duplicating it, and it keeps the serving identity recorded in the cluster (the domain and hosts for the console, API, and login) even when the cluster has moved to a different domain since the original install. Passing a conflicting `--domain` is an error: domain changes go through `kip cluster domain`, which keeps login available throughout the change.
 
-It is not a general way to catch a cluster up, and it is destructive in one specific way: it re-renders the Dex ConfigMap, which deletes every user account created through the console. Read [what an upgrade moves](#what-an-upgrade-moves-and-what-it-does-not) before re-running it on a cluster with console-created users. `kip upgrade` is the routine path.
+`kip upgrade` is the routine way to catch a cluster up. Re-running the install is destructive in one specific way: it re-renders the Dex ConfigMap, which deletes every user account created through the console. Read [what an upgrade moves](#what-an-upgrade-moves-and-what-it-does-not) before re-running it on a cluster that has any.
 
 ### External backup storage
 
@@ -1275,8 +1275,9 @@ kip upgrade --yes              # all three steps, no prompt (for automation)
 
 ### What an upgrade moves, and what it does not
 
-`kip upgrade` does not move everything on the cluster. This table is the full
-list, so you can tell before you run it whether the thing you need is included.
+This table is the full list of what `kip upgrade` moves and how the rest moves
+instead, so you can tell before you run it whether the thing you need is
+included.
 
 | Component | `kip upgrade` | How it moves otherwise |
 |---|---|---|
