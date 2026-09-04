@@ -68,7 +68,7 @@ curl -sL https://getkipper.com/install | sh
 
 Downloads the binary for your platform from the [latest release](https://github.com/getkipper/kipper/releases/latest), checks it against the published checksums, and puts `kip` in `/usr/local/bin`. Linux and macOS, on x86-64 and arm64.
 
-On Windows, run this inside [WSL](https://learn.microsoft.com/en-us/windows/wsl/). An install shares one SSH connection across hundreds of commands and Windows OpenSSH cannot, so a native install opens a connection per command and can fail partway against a busy server. Everyday work runs from the native `kip-windows-amd64.exe` in the same release. See [Installing from Windows](docs/en/windows.md).
+On Windows, run this inside [WSL](https://learn.microsoft.com/en-us/windows/wsl/), where SSH reuses one connection for the hundreds of commands an install sends. Everyday work runs from the native `kip-windows-amd64.exe` in the same release. See [Installing from Windows](docs/en/windows.md).
 
 ### Install the cluster
 
