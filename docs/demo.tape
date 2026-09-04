@@ -11,6 +11,9 @@
 #
 # Two things to know before recording:
 #
+#   0. The recording runs on fixed timings, so read the GIF before you trust
+#      it: a step that took longer than its sleep leaves the next command typed
+#      into a busy terminal, and the tape cannot notice.
 #   1. `kip install` prints the cluster's admin password. The sed filter below
 #      replaces that line before it reaches the screen, so the GIF never carries
 #      a live credential. If the run is interrupted, rotate the password anyway.
@@ -71,10 +74,16 @@ Sleep 1s
 
 Type "kip install --host $KIPPER_DEMO_HOST --ssh-key $KIPPER_DEMO_KEY --domain $KIPPER_DEMO_NAME.kipper.run --admin-email you@example.com --admin-kubeconfig 2>&1 | sed -E 's/^([[:space:]]*Password:[[:space:]]*).*/\1********/'"
 Enter
-Wait+Screen@30m /Cluster ready/
-Sleep 2s
+# vhs cannot detect completion here. Both Wait+Screen and Wait+Line match
+# against the visible screen, and this install prints far more than one
+# screenful, so once the output scrolls neither ever matches and the recording
+# is thrown away after the timeout. A fixed sleep is what works. The figure is
+# a measured install plus margin: 4m40s on a 4 vCPU / 8 GB Hetzner box, most of
+# it pulling images. Raise it on a slower server rather than hoping.
+Sleep 390s
 
 Type "kip app deploy --name hello --image nginx:latest --port 80"
 Enter
-Wait+Screen@5m /Live at/
+# Same reason, and the screen is scrolled by now regardless.
+Sleep 90s
 Sleep 4s
