@@ -7,7 +7,7 @@ description: 'Map a compose file onto a Kipper project: which containers become 
 
 Most self-hosted applications start life as a `docker-compose.yml` on one server. This page maps that file onto a Kipper cluster piece by piece, so you can see what each part becomes before you move anything.
 
-There is no importer. You do the mapping once, by hand, and the result is a set of `kip` commands or a `kipper.yaml` you keep in the repository. That is deliberate: a compose file says how containers run on one machine, and a fair amount of it (bind mounts, host networking, a reverse proxy container) has no equivalent here because the platform already does the job.
+The mapping is manual and you do it once: read the compose file, and what comes out is a set of `kip` commands or a `kipper.yaml` you keep in the repository. That is deliberate: a compose file says how containers run on one machine, and a fair amount of it (bind mounts, host networking, a reverse proxy container) has no equivalent here because the platform already does the job.
 
 ## What each part becomes
 
@@ -23,8 +23,8 @@ There is no importer. You do the mapping once, by hand, and the result is a set 
 | A named volume shared between containers | A [shared volume](/en/shared-storage): `kip volume create` then `kip volume mount` |
 | A bind mount of a host directory | Either a shared volume, or object storage. There is no host path to mount |
 | Another container reached by its compose name | `kip app link`, which injects the target's internal URL |
-| An nginx, Traefik or Caddy container in front | Nothing. The cluster routes and terminates TLS for you |
-| `restart: always` | Nothing. Kubernetes restarts a failed container by default |
+| An nginx, Traefik or Caddy container in front | Built in: the cluster routes and terminates TLS for you |
+| `restart: always` | Built in: Kubernetes restarts a failed container by default |
 | `deploy.replicas: 3` | `--replicas 3`, or [autoscaling](/en/resource-management) |
 | A cron container, or ofelia | A [scheduled job](/en/jobs): `kip job schedule --cron` |
 
