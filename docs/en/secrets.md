@@ -280,7 +280,7 @@ apart: `app-api-env-…` beside `function-api-env-…`, and `app-api-secrets` be
 alone. See [names are shared across workload kinds](/en/functions#names-are-shared-across-workload-kinds).
 
 From the application's perspective these are all standard environment variables.
-There is no difference at runtime.
+They behave identically at runtime.
 
 ### When a change reaches the pod
 
