@@ -1,3 +1,8 @@
+---
+title: 'Share files between pods on k3s: S3 or ReadWriteMany'
+description: 'Two ways several pods can use the same files: S3-compatible object storage, or a ReadWriteMany volume mounted into every replica.'
+---
+
 # Shared Storage
 
 When multiple replicas of an app need to access the same files (uploads, media, shared data), you need shared storage. Kipper provides two approaches.

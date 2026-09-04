@@ -86,10 +86,11 @@ func (t *Terminal) Handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	// A shell is a mutating action, so it needs deployer or above on the
-	// project that owns the namespace.
-	if !authorizeProject(r.Context(), t.Resolver, email, namespace, middleware.ProjectRoleDeployer) {
-		http.Error(w, "forbidden: you do not have deploy access to this project", http.StatusForbidden)
+	// A shell reaches everything the container can, so it takes the capability
+	// that says so rather than a rank: terminal.open on the project that owns
+	// the namespace.
+	if !authorizeProject(r.Context(), t.Resolver, email, namespace, "terminal.open") {
+		http.Error(w, "forbidden: you may not open a terminal in this project", http.StatusForbidden)
 		return
 	}
 

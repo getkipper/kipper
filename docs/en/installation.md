@@ -1,3 +1,8 @@
+---
+title: 'kip install reference: every flag, check and default'
+description: 'Reference for kip install and the cluster commands: flags, preflight checks, sizing profiles, backup storage, and what the install writes to your machine.'
+---
+
 # Installation Reference
 
 ## kip install
@@ -14,7 +19,7 @@ kip install --host <ip> [flags]
 |---|---|---|---|
 | `--host` | Yes | — | IP address or hostname of the target server |
 | `--ssh-key` | No | see below | Path to SSH private key. Saved to `~/.kip/config.yaml` so subsequent `kip` commands inherit it. If unset, `kip` reads `KIP_SSH_KEY`, then `cluster.ssh_key` from config; if still unset, ssh consults your ssh-agent and `~/.ssh/config` as normal |
-| `--domain` | No | `<ip>.kipper.run` | The name the cluster serves on. A `*.kipper.run` name (`lab.kipper.run`) is registered for you on the shared gateway; anything else is a domain whose DNS you run yourself. Omit it and the free name is derived from the server's address. See [choosing your own name](/en/domains#choosing-your-own-name) |
+| `--domain` | No | `<ip>.kipper.run` | The name the cluster serves on. A `*.kipper.run` name (`lab.kipper.run`) is registered for you on the shared gateway; anything else is a domain whose DNS you run yourself, and whose hostnames have to resolve to the server before you install (see [DNS for a domain you run](#dns-for-a-domain-you-run)). Omit it and the free name is derived from the server's address. See [choosing your own name](/en/domains#choosing-your-own-name) |
 | `--admin-email` | No | `admin@<domain>` | Email for Let's Encrypt certificates and the admin account. Defaults to `admin@<domain>` when `--domain` is a domain you run, otherwise `admin@kipper.local` |
 | `--org` | No | — | Organisation short code (e.g. `acme`), used as namespace prefix |
 | `--org-display-name` | No | — | Human-readable organisation name (e.g. `Acme Inc`) |
@@ -30,6 +35,22 @@ kip install --host <ip> [flags]
 | `--backup-storage-endpoint` | No | — | S3 endpoint URL. Omit for native AWS S3 (Velero derives it from the region). Required for R2, self-hosted MinIO, B2, Wasabi, DigitalOcean Spaces |
 | `--backup-storage-credentials` | No | `~/.aws/credentials` | Path to an AWS-style INI credentials file. Read only at install time and never stored back on disk |
 | `--backup-storage-profile` | No | `default` | Profile name inside the credentials file. Lets you reuse an existing AWS CLI profile like `acme` without copying it to a separate file |
+
+#### DNS for a domain you run
+
+`--domain example.com` puts the console on `console.example.com`, the API on `console-api.example.com` and the login on `dex.example.com`, and every app you deploy afterwards gets its own host under the same domain. cert-manager issues a Let's Encrypt certificate for each of those hosts and solves the HTTP-01 challenge against it, so each one has to resolve to the server.
+
+One wildcard A record covers all of them, including the apps you have not deployed yet:
+
+```
+*.example.com.   A   203.0.113.10
+```
+
+Individual records work too, so long as `console`, `console-api` and `dex` exist before you install and you add another for every app you deploy afterwards.
+
+The install checks one of the three on its way past. An install that ends in a browser sign-in waits up to five minutes for `dex.example.com` to answer its discovery URL over verified TLS, and tells you whether DNS or the certificate is what it is waiting for; if that never comes good it finishes anyway, with sign-in deferred. Four routes skip the wait: `--admin-kubeconfig`, `--no-login`, a run with no terminal, and a re-install by an operator whose session is still valid. The console and API hosts go unchecked either way, so an install can complete with records still missing. Each one then shows up as its own service failing: `console.` as a page that will not load, `dex.` as a sign-in that never completes, and `console-api.` as the `kip` commands that call the console API refusing to connect. The browser console is unaffected by that last one, because it reaches the API through `/api` on its own host.
+
+Adding the record afterwards is enough on its own. cert-manager keeps retrying and issues once the hostnames resolve, and `kip auth login` finishes the sign-in that was deferred. See [troubleshooting certificates](/en/domains#troubleshooting-certificates).
 
 #### SSH rate limiting
 
@@ -137,7 +158,7 @@ The `nano` profile (sub-4 GB) already does this for you. See [Platform Resources
 
 Re-running `kip install` updates a component that is already there rather than duplicating it, and it keeps the serving identity recorded in the cluster (the domain and hosts for the console, API, and login) even when the cluster has moved to a different domain since the original install. Passing a conflicting `--domain` is an error: domain changes go through `kip cluster domain`, which keeps login available throughout the change.
 
-It is not a general way to catch a cluster up, and it is destructive in one specific way: it re-renders the Dex ConfigMap, which deletes every user account created through the console. Read [what an upgrade moves](#what-an-upgrade-moves-and-what-it-does-not) before re-running it on a cluster with console-created users. `kip upgrade` is the routine path.
+`kip upgrade` is the routine way to catch a cluster up. Re-running the install is destructive in one specific way: it re-renders the Dex ConfigMap, which deletes every user account created through the console. Read [what an upgrade moves](#what-an-upgrade-moves-and-what-it-does-not) before re-running it on a cluster that has any.
 
 ### External backup storage
 
@@ -250,7 +271,7 @@ The command prompts you to type the cluster name to confirm, so you cannot tear 
 
 A cluster on a free `*.kipper.run` subdomain also hands that name back to the gateway. The name is released after the host is wiped, using a credential read from the cluster beforehand: the gateway will only release a name to whoever holds its token, and that token lives on the cluster the wipe destroys. The name is free again straight away, so a rebuild of the same server can claim it back immediately. That also means links you published under it can be claimed by someone else, so move them before you uninstall if they still matter.
 
-If the cluster cannot be reached, kip falls back to a copy of that credential it keeps in `~/.kip/config.yaml`, recorded on an earlier command. When neither is available the command says so and asks whether to wipe anyway. Answering no is the safe choice: wiping leaves the name registered with nothing able to release it, and installing on that host again cannot serve on it. Such a name stops serving after 30 days without contact and comes free 90 days after that, so waiting it out means waiting four months. `--yes` skips this question as well as the typed-name one, so scripted teardown consents to stranding a name it could not release.
+If the cluster cannot be reached, kip falls back to a copy of that credential it keeps in `~/.kip/config.yaml`, recorded on an earlier command. When neither is available the command says so and asks whether to wipe anyway. Answering no is the safe choice: wiping leaves the name registered with nothing able to release it, and installing on that host again cannot serve on it. The gateway stops routing such a name about a week after the cluster's last heartbeat, the registration lapses after 30 days without contact, and the name comes free 90 days after that, so waiting it out means waiting four months. `--yes` skips this question as well as the typed-name one, so scripted teardown consents to stranding a name it could not release.
 
 If the server itself cannot be reached, kip offers to hand the name back without it, provided a credential for that name is recorded locally. Say yes only when the server is really gone: a cluster that is merely unreachable is still serving, and releasing its name takes it off the air. `--yes` never takes this offer, because a script cannot tell those two apart.
 
@@ -436,6 +457,19 @@ The admin account is printed first, because the sign-in asks for it.
 ```
 
 Headless installs (CI, no terminal, or `--no-login`) finish credential-free without the sign-in; the first operator runs `kip auth login && kip auth verify`. The admin certificate reaches your machine only when you ask for it with `--admin-kubeconfig`, when an interactive install fails partway (so you can inspect the half-built cluster), or when sign-in genuinely fails to authorize against the cluster. Each case says so loudly.
+
+### A kubeconfig is not a login
+
+Most of `kip` talks to the Kubernetes API, so the certificate `--admin-kubeconfig` writes covers it: creating projects, adding services, deploying apps, reading logs, scaling, and everything `kubectl` does. A few commands go through the console API instead, which authenticates the operator rather than the kubeconfig, and they stop with `not authenticated. Run: kip auth login`:
+
+- `kip service bind` and `kip service unbind`
+- `kip function bind` and `kip function unbind`
+- `kip app rebuild`
+- `kip service share`
+- `kip project allow-links` and `kip project links`
+- `kip auth sessions revoke-all`
+
+A pipeline holding only the certificate can therefore install a cluster, create a database and deploy an app, and connecting the two needs an operator to sign in once with `kip auth login`. The token that sign-in writes is what those commands read afterwards.
 
 ## kip auth verify
 
@@ -1245,8 +1279,9 @@ kip upgrade --yes              # all three steps, no prompt (for automation)
 
 ### What an upgrade moves, and what it does not
 
-`kip upgrade` does not move everything on the cluster. This table is the full
-list, so you can tell before you run it whether the thing you need is included.
+This table is the full list of what `kip upgrade` moves and how the rest moves
+instead, so you can tell before you run it whether the thing you need is
+included.
 
 | Component | `kip upgrade` | How it moves otherwise |
 |---|---|---|

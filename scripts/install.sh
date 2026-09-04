@@ -61,7 +61,43 @@ if [ "$OS" = "unsupported" ] || [ "$ARCH" = "unsupported" ]; then
 fi
 
 BINARY="kip-${OS}-${ARCH}"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${KIP_INSTALL_DIR:-/usr/local/bin}"
+case "$INSTALL_DIR" in
+  ?*/) INSTALL_DIR="${INSTALL_DIR%/}" ;;
+esac
+
+if [ ! -d "$INSTALL_DIR" ]; then
+  echo ""
+  echo "  Error: $INSTALL_DIR does not exist."
+  echo "  Create it, or name a directory you already have:"
+  echo ""
+  echo "    curl -sL https://getkipper.com/install | KIP_INSTALL_DIR=\$HOME/.local/bin sh"
+  echo ""
+  exit 1
+fi
+
+# mv moves a file INTO a destination that is a directory, so a directory
+# named kip would take the binary and leave the reported path holding no
+# executable at all.
+if [ -e "$INSTALL_DIR/kip" ] && [ ! -f "$INSTALL_DIR/kip" ]; then
+  echo ""
+  echo "  Error: $INSTALL_DIR/kip exists and is not a regular file."
+  echo "  Move it aside, or name a different directory:"
+  echo ""
+  echo "    curl -sL https://getkipper.com/install | KIP_INSTALL_DIR=\$HOME/.local/bin sh"
+  echo ""
+  exit 1
+fi
+
+if [ ! -w "$INSTALL_DIR" ] && ! command -v sudo >/dev/null 2>&1; then
+  echo ""
+  echo "  Error: $INSTALL_DIR is not writable and sudo is not installed."
+  echo "  Run this as a user who can write there, or name a directory you own:"
+  echo ""
+  echo "    curl -sL https://getkipper.com/install | KIP_INSTALL_DIR=\$HOME/.local/bin sh"
+  echo ""
+  exit 1
+fi
 
 echo ""
 echo "  Kipper CLI Installer"
@@ -154,16 +190,36 @@ fi
 
 chmod 755 "$TMP_DIR/kip"
 
+# TMP_DIR is usually on another filesystem, so this move is a copy and can
+# fail late on space or I/O. Both branches report it the same way.
+install_failed() {
+  echo ""
+  echo "  Error: could not install to $INSTALL_DIR. Name a directory you own"
+  echo "  and run this again:"
+  echo ""
+  echo "    curl -sL https://getkipper.com/install | KIP_INSTALL_DIR=\$HOME/.local/bin sh"
+  echo ""
+  exit 1
+}
+
 if [ -w "$INSTALL_DIR" ]; then
-  mv "$TMP_DIR/kip" "$INSTALL_DIR/kip"
+  mv "$TMP_DIR/kip" "$INSTALL_DIR/kip" || install_failed
 else
   echo "  Installing to $INSTALL_DIR (requires sudo)..."
-  sudo mv "$TMP_DIR/kip" "$INSTALL_DIR/kip"
+  sudo mv "$TMP_DIR/kip" "$INSTALL_DIR/kip" || install_failed
 fi
 
 echo ""
 echo "  ✔  kip $VERSION installed to $INSTALL_DIR/kip"
 echo ""
+case ":$PATH:" in
+  *":$INSTALL_DIR:"*) ;;
+  *)
+    echo "  $INSTALL_DIR is not on your PATH. Add it to your shell profile:"
+    echo "    export PATH='$INSTALL_DIR':\$PATH"
+    echo ""
+    ;;
+esac
 echo "  Get started:"
 echo "    kip install --host <your-server-ip>"
 echo ""

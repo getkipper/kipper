@@ -1,3 +1,8 @@
+---
+title: 'Custom domains and automatic Let''s Encrypt SSL'
+description: 'Point your own domain at an app, have a Let''s Encrypt certificate issued and renewed for you, and diagnose the DNS that usually holds it up.'
+---
+
 # Domains & SSL
 
 Every Kipper cluster gets automatic HTTPS, both on free kipper.run subdomains and custom domains.
@@ -78,13 +83,15 @@ A wildcard DNS record (`*.kipper.run`) points all subdomains to the Kipper Gatew
 
 ### Subdomain expiry
 
-Free subdomains stop serving after 30 days of inactivity. A live cluster renews itself: its console API heartbeats to the gateway once a day, which is what keeps the name and the proof of control current.
+A free subdomain keeps its place on the gateway for as long as its cluster keeps proving it holds it, and a live cluster does that without being asked: the console API heartbeats once a day, and each beat renews a proof of control good for seven days. A few missed beats during an outage therefore change nothing. Once the proof lapses the gateway stops routing the name at all and answers 404, which is about a week after a cluster is switched off. Its apps stop answering the moment the server does, of course; what changes at the week is that the name itself goes dark. The registration lasts longer again, and lapses after 30 days without contact.
 
 The name is not handed to anyone else at that point. It stays reserved for you for a further 90 days, and only your cluster's own gateway credential can bring it back, so a cluster that was off for a season finds its name waiting. Re-registering means re-running `kip install`, which is heavier than it sounds: see [re-running install](/en/installation#re-running-install) for what it costs on a cluster with console-created users.
 
 After those 90 days the name is free for anyone to register. This matters most if you chose your own name and published it, because links, bookmarks and sign-in URLs pointing at `lab.kipper.run` will reach whoever registers it next, over a valid certificate, with nothing for a visitor to notice. Keeping the cluster in normal use is what avoids all of this. If you are retiring a cluster whose name you published, move the links before the reservation runs out.
 
 `kip cluster uninstall` is different: it frees the name straight away. The hold exists for the cluster that went quiet without anyone deciding to stop, where a name disappearing would be an accident. An uninstall is a decision, and the command deletes the credential that would reclaim the name anyway, so holding it would lock the name away from you as well as from everyone else. It also means you can rebuild a server under the same name whenever you like. If you published links under a name you are giving up, move them before you uninstall rather than after.
+
+Reimaging the server from your provider's control panel is the case to think about, because it never runs that command. Two copies of the credential exist: one on the cluster, which the wipe destroys, and one in the `~/.kip/config.yaml` of the machine that ran the install, written when the name was first claimed. Keep that machine's config and a fresh install on the same server renews the same name. Lose both, by installing from a different machine or by clearing the local entry, and the name stays registered to a cluster that no longer exists, with nothing able to release it until the timetable above runs out. Running `kip cluster uninstall <name>` before you rebuild avoids the question entirely.
 
 ## Custom console domain
 

@@ -35,8 +35,25 @@ LICENSE_CHECKER = "license-checker@25.0.1"
 # Weak-copyleft dependencies reviewed and accepted, keyed by module/package name
 # to its SPDX id. go-sql-driver/mysql (MPL-2.0) is imported unmodified, so it
 # imposes no terms on Kipper's own code.
+#
+# lightningcss comes in under vite as a build-time CSS transformer. The console's
+# Dockerfile builds in one stage and copies only the built assets into the runtime
+# image, so none of it is distributed. The platform binaries are listed one by one
+# so that a lightningcss-* package nobody has looked at still fails the gate.
 ACCEPTED_WEAK = {
     "github.com/go-sql-driver/mysql": "MPL-2.0",
+    "lightningcss": "MPL-2.0",
+    "lightningcss-android-arm64": "MPL-2.0",
+    "lightningcss-darwin-arm64": "MPL-2.0",
+    "lightningcss-darwin-x64": "MPL-2.0",
+    "lightningcss-freebsd-x64": "MPL-2.0",
+    "lightningcss-linux-arm-gnueabihf": "MPL-2.0",
+    "lightningcss-linux-arm64-gnu": "MPL-2.0",
+    "lightningcss-linux-arm64-musl": "MPL-2.0",
+    "lightningcss-linux-x64-gnu": "MPL-2.0",
+    "lightningcss-linux-x64-musl": "MPL-2.0",
+    "lightningcss-win32-arm64-msvc": "MPL-2.0",
+    "lightningcss-win32-x64-msvc": "MPL-2.0",
 }
 
 OWN_GO_PREFIX = "github.com/getkipper/kipper"

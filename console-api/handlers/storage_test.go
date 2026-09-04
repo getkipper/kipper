@@ -820,7 +820,7 @@ func (s stubProjectMembers) ProjectMembers(_ context.Context, project string) (m
 }
 
 // TestStorage_RoutesEnforceAuthzBeforeAccess mounts the storage handlers behind
-// the same ProjectScopeQuery / RequireProjectRole wrappers used in main.go and
+// the same ProjectScopeQuery / RequireCapability wrappers used in main.go and
 // proves the plan's release-blocking invariant: an omitted namespace, a
 // non-member namespace, and a viewer on a write route are all denied before the
 // handler resolves any service. (ProjectScopeQuery's deny-before-handler
@@ -850,7 +850,7 @@ func TestStorage_RoutesEnforceAuthzBeforeAccess(t *testing.T) {
 	qscope := middleware.ProjectScopeQuery(resolver)
 	nsRead := func(h http.HandlerFunc) http.HandlerFunc { return qscope(h).ServeHTTP }
 	nsDeployer := func(h http.HandlerFunc) http.HandlerFunc {
-		return qscope(middleware.RequireProjectRole(middleware.ProjectRoleDeployer)(h)).ServeHTTP
+		return qscope(middleware.RequireCapability("storage.write")(h)).ServeHTTP
 	}
 
 	handler := &Storage{Client: client}

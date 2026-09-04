@@ -1,3 +1,8 @@
+---
+title: 'Back up a Kubernetes cluster to S3 and restore it'
+description: 'Daily and on-demand backups of every resource and volume, with Velero, kept on the cluster by default or in an S3-compatible bucket, and restored into the same namespace or another.'
+---
+
 # Backup & Restore
 
 Kipper includes automatic backup and restore powered by [Velero](https://velero.io). Every cluster gets daily backups of all Kubernetes resources and persistent volume data (databases, file storage) out of the box.

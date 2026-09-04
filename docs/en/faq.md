@@ -18,9 +18,15 @@ Managed Kubernetes gives you the cluster but leaves you to figure out ingress, T
 
 Kipper is in active development. The core install, deploy, and management commands work on real infrastructure, and we use it for staging environments and early-stage production workloads. It has not been battle-tested at scale.
 
+### How is this funded, and could the licence change?
+
+Kipper is Apache 2.0, and that grant is irrevocable for every version already published. A release you run today stays yours to use, fork and redistribute, whatever happens later.
+
+Funding is an open question. Kipper is written by one person and earns nothing today. Should that change, the likely shape is paid hosting or support around the same open codebase, with shipped features staying under the same licence. Treat that as the current intention; the paragraph above is the part to rely on.
+
 ### Does kip work on Windows?
 
-Yes. The kip CLI runs natively on Windows for all commands: deploying apps, managing secrets, viewing logs, scaling, rollbacks, etc. The only exception is `kip install`, which uses SSH to connect to a Linux server. For that command, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/) or Git Bash. Download `kip-windows-amd64.exe` from the releases page.
+Yes. The kip CLI runs natively on Windows for deploying apps, managing secrets, viewing logs, scaling, rollbacks and the rest of the everyday work, all of which talks to the Kubernetes API. Install from [WSL](https://learn.microsoft.com/en-us/windows/wsl/), where SSH reuses one connection for the hundreds an install sends; PowerShell opens one per command, which works and leaves less margin on a busy server. The handful of commands that maintain the server belong in WSL for the same reason. Download `kip-windows-amd64.exe` from the releases page, and see [Installing from Windows](/en/windows) for the full path.
 
 One small difference: in `kip exec`, a shell keeps drawing to the size the window had when the session opened, because Windows reports resizes as console input rather than as a signal. Resize before you connect, or reconnect after.
 
@@ -46,6 +52,10 @@ Ubuntu and Debian. RHEL, Rocky Linux, AlmaLinux, Fedora, openSUSE, and Alpine Li
 
 Run `kip auth reset-password` to generate a new one.
 
+### Can I roll back an upgrade?
+
+Not automatically. `kip upgrade` moves the cluster to the current release, and there is no version pinning, no check that refuses an unhealthy cluster, and no automatic revert when a component fails to start. Run `kip backup create` before upgrading so you have a restore point.
+
 ### Can I re-run kip install?
 
 Yes, but not as a general way to catch a cluster up. Parts of it are idempotent and parts of it replace state.
@@ -69,6 +79,14 @@ kip app update api --image ghcr.io/acme/api:v2.1.0
 ```
 
 You can also update the image from the web console using the package icon in the app detail panel.
+
+### Can I deploy an image I built locally?
+
+Only after pushing it somewhere the cluster can pull from. `kip app deploy --image` pulls from a registry, and `kip registry add` stores credentials for a private one. There is no local-image import and no pull-policy control, so an image that exists only on your machine will not deploy. `kip app deploy --git` avoids the question, because Kipper builds the image in the cluster.
+
+### Can two projects share one database?
+
+Not directly. A service belongs to the project and environment it was created in, and apps and functions there bind to it. Another project gets its own instance. [Cross-project links](/en/deploying-apps#linking-across-projects) join an app to another app rather than to a service, so either put the workloads that share data in one project, or put an app in front of the database and link to that.
 
 ### Where are my secrets stored?
 

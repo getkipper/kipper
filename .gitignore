@@ -41,17 +41,18 @@ __pycache__/
 *.swp
 
 # Local working notes, not part of the published project
-PROGRESS.md
-PLAN.md
-TO-DOS.md
-ISSUES.md
-BACKLOG.md
+/PROGRESS.md
+/PLAN.md
+/TO-DOS.md
+/ISSUES.md
+/BACKLOG.md
 plans/
 features/
 docs/plans/
 kipper-poll/kipper-poll
-COMPARISON.md
+/COMPARISON.md
 presentation/
+/whats-next.md
 
 # Built binaries
 kip/kip

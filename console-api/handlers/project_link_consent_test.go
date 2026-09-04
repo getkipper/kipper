@@ -88,7 +88,7 @@ func TestLinkConsent_RoutesEnforceOwnershipBeforeTheHandler(t *testing.T) {
 	scope := middleware.ProjectScope(resolver)
 	member := func(h http.HandlerFunc) http.HandlerFunc { return scope(h).ServeHTTP }
 	owner := func(h http.HandlerFunc) http.HandlerFunc {
-		return scope(middleware.RequireProjectRole(middleware.ProjectRoleOwner)(h)).ServeHTTP
+		return scope(middleware.RequireCapability("project.settings")(h)).ServeHTTP
 	}
 
 	handler := &Projects{Client: client, CRClient: crClient}
@@ -187,7 +187,7 @@ func TestLinkConsent_ANamespaceOwnerDoesNotInheritTheSameNamedProject(t *testing
 	}, handlerOwners(t, shopProdNS))
 	scope := middleware.ProjectScope(resolver)
 	owner := func(h http.HandlerFunc) http.HandlerFunc {
-		return scope(middleware.RequireProjectRole(middleware.ProjectRoleOwner)(h)).ServeHTTP
+		return scope(middleware.RequireCapability("project.settings")(h)).ServeHTTP
 	}
 
 	handler := &Projects{Client: client, CRClient: crClient}

@@ -15,6 +15,14 @@
   <a href="docs/en/architecture.md">Architecture</a>
 </p>
 
+<p align="center">
+  <img src="docs/public/demo.gif" width="800" alt="A bare Ubuntu server becoming a Kubernetes cluster with an app serving over HTTPS, in two commands" />
+</p>
+
+<p align="center">
+  <em>A bare server to an app on HTTPS. Recorded against a real machine, played back at 8x.</em>
+</p>
+
 ---
 
 ## What is Kipper?
@@ -49,28 +57,34 @@ No Helm charts. No YAML manifests. No PhD required.
 ### Prerequisites
 
 - A Linux server (Ubuntu 20.04/22.04/24.04/26.04 or Debian 11/12) with root SSH access
-- Minimum 2GB RAM, 30GB disk
+- 2 vCPU / 2 GB RAM / 30 GB free disk to install. For a cluster you will actually use, pick 4 vCPU / 8 GB / 80 GB
 - An SSH key
 
-### Install
+### Install the CLI
 
 ```bash
-# Build the CLI (Homebrew coming soon)
-cd kip && go build -o kip .
+curl -sL https://getkipper.com/install | sh
+```
 
-# Install the cluster
-./kip install --host <your-server-ip> --ssh-key ~/.ssh/id_ed25519 --admin-email you@example.com
+Downloads the binary for your platform from the [latest release](https://github.com/getkipper/kipper/releases/latest), checks it against the published checksums, and puts `kip` in `/usr/local/bin`. Linux and macOS, on x86-64 and arm64.
+
+On Windows, run this inside [WSL](https://learn.microsoft.com/en-us/windows/wsl/), where SSH reuses one connection for the hundreds of commands an install sends. Everyday work runs from the native `kip-windows-amd64.exe` in the same release. See [Installing from Windows](docs/en/windows.md).
+
+### Install the cluster
+
+```bash
+kip install --host <your-server-ip> --ssh-key ~/.ssh/id_ed25519 --admin-email you@example.com
 ```
 
 ### Deploy
 
 ```bash
-./kip app deploy --name hello --image nginx:latest --port 80
+kip app deploy --name hello --image nginx:latest --port 80
 ```
 
 Your app is live at `https://hello-<cluster>.kipper.run` with a valid TLS certificate.
 
-See the [Getting Started guide](docs/en/getting-started.md) for a complete walkthrough.
+See the [Getting Started guide](docs/en/getting-started.md) for a complete walkthrough, or [CONTRIBUTING.md](CONTRIBUTING.md) to build from source.
 
 ## Architecture
 
@@ -91,6 +105,18 @@ Kipper installs [k3s](https://k3s.io) with opinionated defaults:
 
 See [Architecture](docs/en/architecture.md) for the full technical deep-dive.
 
+## Known limitations
+
+Kipper has not reached 1.0. These are the edges a new user is most likely to meet in the first week, and each one has a way around it today.
+
+**Upgrades run forwards only.** `kip upgrade` moves a cluster to the current release. You cannot pin a version, nothing refuses to upgrade an unhealthy cluster, and a component that fails to start is not rolled back for you. Take a backup with `kip backup create` before you upgrade.
+
+**Images come from a registry.** `kip app deploy --image` pulls from a registry, and `kip registry add` covers private ones. There is no way to import an image you built on your own machine and no control over the pull policy, so a local `docker build` has to be pushed somewhere the cluster can reach. Deploying from git with `kip app deploy --git` sidesteps this, because Kipper builds the image in the cluster and stores it itself.
+
+**A database belongs to one project.** Apps and functions in the same project and environment bind to the same service, and another project gets its own instance. Cross-project links join one app to another app rather than to a service, so sharing data across projects means putting an app in front of the database, or keeping those workloads in one project.
+
+See the [roadmap](ROADMAP.md) for where these are going, and [open an issue](https://github.com/getkipper/kipper/issues) if you hit something that is not listed.
+
 ## Repository structure
 
 | Directory | Language | What it does |
@@ -108,5 +134,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, 
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
+
+The grant is irrevocable for every published release, so a version you run today stays yours whatever happens later. Funding is an open question, and the [FAQ](docs/en/faq.md) sets out the current thinking.
 
 Maintained by [Labb Consulting](https://labb-consulting.com). Built for everyone.

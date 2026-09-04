@@ -17,6 +17,7 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/internal/nsowner"
 	"github.com/getkipper/kipper/console-api/middleware"
+	"github.com/getkipper/kipper/controller/pkg/capability"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 )
 
@@ -59,28 +60,29 @@ func reqAs(email, namespace string) *http.Request {
 	return req.WithContext(ctx)
 }
 
-func TestEnforceProjectRole(t *testing.T) {
+func TestEnforceCapability(t *testing.T) {
 	withResolver(t)
 
 	tests := []struct {
 		name     string
 		email    string
 		ns       string
-		required string
+		required capability.Name
 		allow    bool
 	}{
-		{"deployer allowed as deployer", "dev@test.com", "blog", middleware.ProjectRoleDeployer, true},
-		{"deployer allowed as viewer", "dev@test.com", "blog", middleware.ProjectRoleViewer, true},
-		{"non-member denied", "dev@test.com", "shop", middleware.ProjectRoleViewer, false},
-		{"outsider denied", "outsider@test.com", "blog", middleware.ProjectRoleViewer, false},
-		{"admin allowed anywhere", "root@test.com", "shop", middleware.ProjectRoleDeployer, true},
+		{"deployer holds a write capability", "dev@test.com", "blog", "kipper.write", true},
+		{"deployer holds a read capability", "dev@test.com", "blog", "workloads.read", true},
+		{"deployer does not hold an owner's", "dev@test.com", "blog", "members.manage", false},
+		{"non-member denied", "dev@test.com", "shop", "workloads.read", false},
+		{"outsider denied", "outsider@test.com", "blog", "workloads.read", false},
+		{"admin allowed anywhere", "root@test.com", "shop", "kipper.write", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			got := enforceProjectRole(rec, reqAs(tt.email, tt.ns), tt.ns, tt.required)
+			got := enforceCapability(rec, reqAs(tt.email, tt.ns), tt.ns, tt.required)
 			if got != tt.allow {
-				t.Fatalf("enforceProjectRole = %v, want %v (status %d)", got, tt.allow, rec.Code)
+				t.Fatalf("enforceCapability = %v, want %v (status %d)", got, tt.allow, rec.Code)
 			}
 		})
 	}
