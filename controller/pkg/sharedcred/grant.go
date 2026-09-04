@@ -3,6 +3,7 @@ package sharedcred
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 
@@ -101,6 +102,119 @@ func Seed(entries []Entry, usage map[string][]string) ([]Entry, []string, bool) 
 		}
 	}
 	return entries, seeded, len(seeded) > 0
+}
+
+// Identity is what makes a stored credential the same credential it was when
+// something was decided or approved about it.
+//
+// A build hands a project the entry's token against the entry's host, so those
+// two together are what a grant authorises. The name is not enough: an entry
+// deleted and recreated under its old name keeps the name and means the
+// opposite. The token is held as a digest rather than as itself, because this
+// travels through printing and reporting code and a token that is never in the
+// struct cannot be printed out of it.
+type Identity struct {
+	Server      string
+	TokenDigest [32]byte
+}
+
+// IdentityOf is the identity an entry carries now.
+func IdentityOf(entry Entry) Identity {
+	return Identity{Server: entry.Server, TokenDigest: sha256.Sum256([]byte(entry.Token))}
+}
+
+// Identities records what identified every credential in the list.
+func Identities(entries []Entry) map[string]Identity {
+	held := make(map[string]Identity, len(entries))
+	for _, entry := range entries {
+		held[entry.Name] = IdentityOf(entry)
+	}
+	return held
+}
+
+// Decision is one credential's allow-list as it stood at a point in time, with
+// the identity of the credential it belonged to.
+//
+// Somebody recorded that list, so a credential nobody has decided never becomes
+// one.
+type Decision struct {
+	Identity
+	AllowedProjects []string
+}
+
+// Decisions records the allow-list of every credential somebody has decided,
+// keyed by name.
+//
+// A credential nobody has decided is left out, which is what stops Restore ever
+// writing back a list nobody wrote. The lists are copied, so the record does not
+// alias the entries it came from and a later write cannot edit the record.
+func Decisions(entries []Entry) map[string]Decision {
+	decided := make(map[string]Decision, len(entries))
+	for _, entry := range entries {
+		if entry.AllowedProjects == nil {
+			continue
+		}
+		decided[entry.Name] = Decision{
+			Identity: IdentityOf(entry),
+			// make and copy rather than append to a nil slice: appending
+			// nothing to nil yields nil, which would turn a restored
+			// decided-empty list back into one nobody has decided.
+			AllowedProjects: copyOf(entry.AllowedProjects),
+		}
+	}
+	return decided
+}
+
+func copyOf(projects []string) []string {
+	out := make([]string, len(projects))
+	copy(out, projects)
+	return out
+}
+
+// Restore puts a recorded allow-list back onto a credential whose list has gone
+// absent, and sorts what it did into three answers.
+//
+// The console-api an upgrade replaces writes a credential without its allowed
+// projects, and it writes the whole list at once, so editing any one credential
+// reads back as every credential having been decided by nobody. Writing the
+// record back is a repair: every project in it was already allowed when the
+// record was taken, against the same credential.
+//
+// It writes only into an absent list, so a decision recorded after the record
+// was taken is left alone. One case escapes that and is worth stating rather
+// than implying: a revocation the old writer then erased reads as absent like
+// anything else, so a project revoked during the rollout can come back. The
+// upgrade names every list it writes back for that reason.
+//
+// A credential whose server or token has changed is refused. The build hands a
+// project the credential's token against the credential's host, so a grant
+// authorises a project against that pair, and an entry carrying a different one
+// is a credential nobody granted anything about. The name cannot tell a token
+// rotation from a credential deleted and recreated under its old name, and the
+// two mean opposite things, so the ambiguous case fails closed and is named with
+// the command that puts it right. Writing first and warning afterwards would
+// hand out the access before anybody read the warning.
+func Restore(entries []Entry, decided map[string]Decision) (updated []Entry, restored, moved, replaced []string) {
+	for i := range entries {
+		if entries[i].AllowedProjects != nil {
+			continue
+		}
+		record, held := decided[entries[i].Name]
+		if !held {
+			continue
+		}
+		if entries[i].Server != record.Server {
+			moved = append(moved, entries[i].Name)
+			continue
+		}
+		if IdentityOf(entries[i]) != record.Identity {
+			replaced = append(replaced, entries[i].Name)
+			continue
+		}
+		entries[i].AllowedProjects = copyOf(record.AllowedProjects)
+		restored = append(restored, entries[i].Name)
+	}
+	return entries, restored, moved, replaced
 }
 
 // CloseUndecided records that nobody may build with the credentials still
