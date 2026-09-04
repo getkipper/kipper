@@ -36,6 +36,26 @@
 #
 # Nothing here is staged. Every line is real output from a real run; the tape
 # only compresses playback so that several minutes of install fit a README.
+#
+# The tape does not produce the finished file on its own. What ships as
+# docs/public/demo.gif is this recording with two things appended: a longer hold
+# on the last terminal frame, and a screenshot of the app the install just
+# deployed, held long enough to read before the loop restarts. Without them the
+# result flashes past and starts again. The screenshot has to be taken while the
+# cluster is still up, so take it before the teardown:
+#
+#   chrome --headless --screenshot=app.png --window-size=1400,820 https://hello--<name>.kipper.run
+#   ffmpeg -i docs/public/demo.gif -loop 1 -t 3 -i last-terminal-frame.png \
+#          -loop 1 -t 4.5 -i app-framed.png \
+#          -filter_complex "[0:v]fps=25,setsar=1[a];[1:v]fps=25,setsar=1[b];\
+#          [2:v]fps=25,setsar=1[c];[a][b][c]concat=n=3:v=1:a=0[v];[v]split[x][y];\
+#          [x]palettegen=max_colors=128:stats_mode=diff[p];[y][p]paletteuse=dither=bayer" \
+#          -loop 0 out.gif
+#
+# The screenshot is framed on the tape's own background colour with the same
+# inset and corner radius, so it reads as the next panel rather than a pasted
+# image. Take it with the browser in light mode: the nginx welcome page declares
+# `color-scheme: light dark`, so a dark desktop renders it as more dark terminal.
 
 Require curl
 Require ssh

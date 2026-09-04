@@ -15,6 +15,14 @@
   <a href="docs/en/architecture.md">Architecture</a>
 </p>
 
+<p align="center">
+  <img src="docs/public/demo.gif" width="800" alt="A bare Ubuntu server becoming a Kubernetes cluster with an app serving over HTTPS, in two commands" />
+</p>
+
+<p align="center">
+  <em>A bare server to an app on HTTPS. Recorded against a real machine, played back at 8x.</em>
+</p>
+
 ---
 
 ## What is Kipper?
