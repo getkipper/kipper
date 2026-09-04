@@ -37,7 +37,7 @@ curl -sL https://getkipper.com/install | sh
 Download `kip-windows-amd64.exe` from the [latest release](https://github.com/getkipper/kipper/releases), rename to `kip.exe`, and add the directory to your PATH.
 
 ::: tip Windows and kip install
-Run `kip install` from [WSL](https://learn.microsoft.com/en-us/windows/wsl/). An install runs hundreds of commands over SSH and shares one connection between them, which neither Windows OpenSSH nor Git Bash can do, so a native install opens a connection per command and can fail partway against a busy server. Deploying, logs, secrets, scaling and the rest talk to the Kubernetes API and work from the native binary; a few server-maintenance commands go over SSH and belong in WSL too.
+Install from [WSL](https://learn.microsoft.com/en-us/windows/wsl/), where SSH reuses one connection for the hundreds of commands an install sends. PowerShell opens one per command, which works and leaves less margin on a server already fielding SSH traffic. Deploying, logs, secrets, scaling and the rest talk to the Kubernetes API and run from the native binary; the handful of commands that maintain the server go over SSH and belong in WSL too. See [Installing from Windows](/en/windows).
 
 [Installing from Windows](/en/windows) walks through the whole path: WSL setup, the install, and handing the finished cluster back to PowerShell.
 :::

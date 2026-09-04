@@ -13,20 +13,21 @@ PowerShell.
 If someone on your team has already installed the cluster, you need none of this.
 Ask them for a `kip cluster export` file, then read [Team Access](/en/team-access).
 
-## Why `kip install` is the exception
+## Why the install runs from WSL
 
-An install runs hundreds of commands over SSH and shares one connection between
-them, which OpenSSH does through connection multiplexing. Windows OpenSSH has no
-multiplexing, and Git Bash's ssh comes from the same family.
+An install sends hundreds of commands to your server over SSH. WSL's OpenSSH
+multiplexes, so they all share one connection. Windows OpenSSH does not, and Git
+Bash's ssh comes from the same family, so from PowerShell each command opens its
+own.
 
-Nothing blocks an install from PowerShell. kip notices there is no multiplexing
-and opens a connection per command instead, which is why it also leaves the
-server's SSH port unrestricted in that case rather than rate-limiting itself off
-a host it is halfway through building. What you lose is robustness: sshd drops
-unauthenticated connections once ten are in flight, so a server under any
-connection pressure can fail the install partway and leave a half-built host.
-That failure is what WSL avoids, and it is why WSL is the path this page takes
-and the one that gets tested.
+The difference shows up on a busy server. sshd stops accepting new
+unauthenticated connections once ten are in flight, and a public IP collecting
+the usual background scans can sit close to that line, so one of those hundreds
+of connections gets refused and the install stops partway through. A single
+reused connection never meets the limit.
+
+Both routes install the same cluster. WSL is the one this page takes, and the
+one that gets tested.
 
 Deploying, logs, secrets, scaling and the rest run from `kip.exe`, talking to
 the Kubernetes API over HTTPS. A short list of commands maintains the server
@@ -93,13 +94,11 @@ Around ten minutes. It prints the console URL and an admin email and password.
 **Copy the password now**, it is shown once. If it goes missing, `kip auth
 reset-password` issues a new one.
 
-`--no-login` keeps the install from depending on a browser. Without it, the
-install finishes by opening one and waiting for the sign-in to come back to
-`localhost:18741` on the machine running kip. Whether a Windows browser reaches a
-listener inside WSL depends on your WSL networking, and kip has no Windows branch
-in its browser opener anyway, so it prints the URL rather than opening anything.
-Skipping the step costs nothing: the cluster is fully installed either way, and
-you sign in from Windows in the next step.
+`--no-login` keeps the install self-contained. Left off, the install ends by
+waiting for a browser sign-in to come back to `localhost:18741` on the machine
+running kip, which puts your WSL networking in the path for no gain here. The
+cluster is fully installed either way, and you sign in from Windows in the next
+step, where the browser is already to hand.
 
 ## 5. Hand the cluster to Windows
 
@@ -138,15 +137,18 @@ server's DNS resolver file, but that check is best-effort, so from PowerShell it
 reports that it could not read the file and prints the rest of the status as
 normal.
 
-Run the SSH ones from WSL as well, for the same reason the install goes there. The
-install sets the server's firewall to rate-limit SSH at six connections per thirty
-seconds per source, which comfortably fits one multiplexed connection. A client
-that cannot multiplex opens a connection per command, and the heavier commands go
-well past six: `kip cluster ca status` alone makes a series of independent reads
-and probes. Lighter ones such as `kip cluster dns repair` stay under it on their
-own, though the rule counts every connection from your address in that window, so
-a second command or another person behind the same address can still push you
-over. Installing with `--no-ssh-rate-limit` drops that rule if you would rather manage
-the cluster from PowerShell. It removes Kipper's firewall limit and nothing else;
-sshd keeps its own ceiling on connections in flight. An install that was not
-multiplexing never gets the rule in the first place, for the same reason.
+Keep those in WSL too, for the same reason the install goes there. The install
+protects the server's SSH port with a rate limit of six connections per thirty
+seconds from any one address, which one multiplexed connection sits comfortably
+inside. Run the heavier ones from PowerShell and they can cross it on their own:
+`kip cluster ca status` makes a series of independent reads and probes. Lighter
+ones like `kip cluster dns repair` stay under it, though the limit counts every
+connection from your address in that window, so a colleague behind the same
+address counts towards yours.
+
+If you would rather run everything from PowerShell, install with
+`--no-ssh-rate-limit` and the rule is left off. That changes Kipper's firewall
+and nothing else, so sshd keeps its own ceiling on connections in flight. An
+install that ran without multiplexing skips the rule anyway, so a cluster you
+installed from PowerShell is already set up for a client that opens a connection
+per command.
