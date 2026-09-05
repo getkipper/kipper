@@ -31,7 +31,7 @@ const (
 const (
 	secretNamespace = "kipper-system"
 	slackSecretName = "kipper-slack"
-	slackWebhookKey = "webhook-url"
+	slackWebhookKey = "webhook_url"
 	smtpSecretName  = "kipper-smtp"
 	smtpConfigKey   = "config"
 )

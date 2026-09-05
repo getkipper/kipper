@@ -19,7 +19,7 @@ import (
 func slackSecret(url string) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "kipper-slack", Namespace: "kipper-system"},
-		Data:       map[string][]byte{"webhook-url": []byte(url)},
+		Data:       map[string][]byte{"webhook_url": []byte(url)},
 	}
 }
 
@@ -67,4 +67,27 @@ func toObjects(secrets []runtime) []k8sruntime.Object {
 		out = append(out, s)
 	}
 	return out
+}
+
+// These names are console-api's, read here because kip and console-api are
+// separate modules and neither can import the other. A rename on either side
+// has to be made on both, and a mismatch is silent: kip reads an absent key,
+// finds nothing, and reports that alerts go nowhere while Slack is delivering
+// them.
+//
+// The names are pinned here against console-api/handlers/slack.go and
+// email.go. If one of those changes, this fails and says which.
+func TestSecretNamesMatchConsoleAPI(t *testing.T) {
+	for _, tc := range []struct{ name, got, want string }{
+		{"namespace", secretNamespace, "kipper-system"},
+		{"slack secret", slackSecretName, "kipper-slack"},
+		{"slack webhook key", slackWebhookKey, "webhook_url"},
+		{"smtp secret", smtpSecretName, "kipper-smtp"},
+		{"smtp config key", smtpConfigKey, "config"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s is %q here and %q in console-api; kip would read an absent key and report the wrong route",
+				tc.name, tc.got, tc.want)
+		}
+	}
 }
