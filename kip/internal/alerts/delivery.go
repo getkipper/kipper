@@ -34,6 +34,20 @@ const (
 	slackWebhookKey = "webhook_url"
 	smtpSecretName  = "kipper-smtp"
 	smtpConfigKey   = "config"
+
+	rolesConfigMapName = "kipper-users"
+	rolesConfigMapKey  = "users"
+	adminRole          = "admin"
+)
+
+// Reason says why alerts are not leaving, so the advice can match. Telling an
+// operator to configure SMTP is wrong when SMTP is already configured and the
+// cluster simply has nobody to send to.
+type Reason string
+
+const (
+	NoChannel    Reason = "no_channel"
+	NoRecipients Reason = "no_recipients"
 )
 
 // RouteFor reports how alerts leave this cluster.
@@ -45,10 +59,46 @@ func RouteFor(ctx context.Context, client kubernetes.Interface) Route {
 	if slackConfigured(ctx, client) {
 		return Slack
 	}
-	if smtpConfigured(ctx, client) {
+	// A configured server with no admin to send to delivers nothing, so it is
+	// the nowhere case. console-api decides this the same way from its role
+	// store; a CLI that disagreed with the console about whether alerts leave
+	// would be the false assurance both of them exist to remove.
+	if smtpConfigured(ctx, client) && len(adminAddresses(ctx, client)) > 0 {
 		return Email
 	}
 	return Nowhere
+}
+
+// NowhereReason says why nothing is leaving. It is only meaningful when
+// RouteFor returned Nowhere.
+func NowhereReason(ctx context.Context, client kubernetes.Interface) Reason {
+	if smtpConfigured(ctx, client) {
+		return NoRecipients
+	}
+	return NoChannel
+}
+
+// adminAddresses reads the cluster admins from the role store console-api
+// writes. An unreadable store returns none, which reports nowhere: an
+// unanswerable question is not evidence that somebody is being told.
+func adminAddresses(ctx context.Context, client kubernetes.Interface) []string {
+	cm, err := client.CoreV1().ConfigMaps(secretNamespace).Get(ctx, rolesConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		return nil
+	}
+
+	var roles map[string]string
+	if err := json.Unmarshal([]byte(cm.Data[rolesConfigMapKey]), &roles); err != nil {
+		return nil
+	}
+
+	var admins []string
+	for email, role := range roles {
+		if role == adminRole {
+			admins = append(admins, email)
+		}
+	}
+	return admins
 }
 
 func slackConfigured(ctx context.Context, client kubernetes.Interface) bool {

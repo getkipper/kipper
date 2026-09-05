@@ -51,7 +51,11 @@ func TestRouteFor(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			client := fake.NewClientset(toObjects(tc.objects)...)
+			// The email route needs a recipient as well as a server, so every
+			// case here supplies one. Whether the recipient matters is
+			// TestRouteForNeedsSomebodyToEmail's subject.
+			objects := append(toObjects(tc.objects), adminsConfigMap(map[string]string{"ops@example.com": "admin"}))
+			client := fake.NewClientset(objects...)
 			if got := RouteFor(context.Background(), client); got != tc.want {
 				t.Errorf("RouteFor() = %q, want %q", got, tc.want)
 			}
@@ -89,5 +93,74 @@ func TestSecretNamesMatchConsoleAPI(t *testing.T) {
 			t.Errorf("%s is %q here and %q in console-api; kip would read an absent key and report the wrong route",
 				tc.name, tc.got, tc.want)
 		}
+	}
+}
+
+// An SMTP server with no admin to email delivers nothing, so kip status must
+// call it what it is. console-api reaches the same verdict from its role store;
+// this reads the same ConfigMap, because a CLI that disagrees with the console
+// about whether alerts are leaving is the false assurance both are here to
+// remove.
+func adminsConfigMap(roles map[string]string) *corev1.ConfigMap {
+	data, _ := json.Marshal(roles)
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "kipper-users", Namespace: "kipper-system"},
+		Data:       map[string]string{"users": string(data)},
+	}
+}
+
+func TestRouteForNeedsSomebodyToEmail(t *testing.T) {
+	tests := []struct {
+		name  string
+		roles map[string]string
+		want  Route
+	}{
+		{
+			name:  "an admin to email",
+			roles: map[string]string{"ops@example.com": "admin"},
+			want:  Email,
+		},
+		{
+			name:  "no users at all",
+			roles: nil,
+			want:  Nowhere,
+		},
+		{
+			name:  "users, but none of them an admin",
+			roles: map[string]string{"dev@example.com": "deployer", "read@example.com": "viewer"},
+			want:  Nowhere,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := fake.NewClientset(smtpSecret(t, "smtp.example.com"), adminsConfigMap(tc.roles))
+			if got := RouteFor(context.Background(), client); got != tc.want {
+				t.Errorf("RouteFor() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Slack needs no admin list, so an empty one must not take a working webhook off
+// the table.
+func TestRouteForSlackDoesNotNeedAdmins(t *testing.T) {
+	client := fake.NewClientset(slackSecret("https://hooks.example.com/abc"), adminsConfigMap(nil))
+	if got := RouteFor(context.Background(), client); got != Slack {
+		t.Errorf("RouteFor() = %q, want %q", got, Slack)
+	}
+}
+
+// The reason is what kip status turns into advice, and "configure SMTP" is
+// wrong advice for a cluster that already has it.
+func TestNowhereReasonDistinguishesTheTwoCases(t *testing.T) {
+	noChannel := fake.NewClientset(adminsConfigMap(map[string]string{"ops@example.com": "admin"}))
+	if got := NowhereReason(context.Background(), noChannel); got != NoChannel {
+		t.Errorf("NowhereReason() = %q, want %q", got, NoChannel)
+	}
+
+	noAdmins := fake.NewClientset(smtpSecret(t, "smtp.example.com"), adminsConfigMap(nil))
+	if got := NowhereReason(context.Background(), noAdmins); got != NoRecipients {
+		t.Errorf("NowhereReason() = %q, want %q", got, NoRecipients)
 	}
 }

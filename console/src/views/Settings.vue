@@ -71,13 +71,17 @@ const recentLog = computed(() => resourceLog.value.slice(-10).reverse())
 // Whether alerts have any way out of the cluster. Shown next to the Slack
 // panel because that is where an operator fixes it.
 const alertsGoNowhere = ref(false)
+const alertsNowhereReason = ref<'no_channel' | 'no_recipients' | undefined>(undefined)
 
 async function loadAlertDelivery() {
   try {
-    alertsGoNowhere.value = (await getAlertDelivery()).going_nowhere
+    const delivery = await getAlertDelivery()
+    alertsGoNowhere.value = delivery.going_nowhere
+    alertsNowhereReason.value = delivery.reason
   } catch {
     // A failed check must not claim the cluster is silent when it may not be.
     alertsGoNowhere.value = false
+    alertsNowhereReason.value = undefined
   }
 }
 
@@ -656,7 +660,11 @@ onMounted(async () => {
           class="border-b border-amber-200 bg-amber-50 px-6 py-4 dark:border-amber-900/50 dark:bg-amber-950/30"
         >
           <p class="text-sm font-medium text-amber-900 dark:text-amber-200">Alerts are not leaving this cluster</p>
-          <p class="mt-1 text-xs text-amber-800 dark:text-amber-300">
+          <p v-if="alertsNowhereReason === 'no_recipients'" class="mt-1 text-xs text-amber-800 dark:text-amber-300">
+            An SMTP server is configured, but no cluster admin has an email address, so there is nobody to send
+            to. Give an admin an address under Team access, or add a Slack webhook below.
+          </p>
+          <p v-else class="mt-1 text-xs text-amber-800 dark:text-amber-300">
             They are recorded in the bell above and nowhere else, so nobody is told when a service starts failing.
             Add a Slack webhook below, or configure SMTP under Email, and Kipper will use whichever is set.
           </p>
