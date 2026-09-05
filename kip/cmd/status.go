@@ -9,6 +9,8 @@ import (
 
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
+	"github.com/getkipper/kipper/kip/internal/k8s"
+	"github.com/getkipper/kipper/kip/internal/service"
 	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
@@ -67,9 +69,32 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 
+	reportCrashLoopingServices(ctx, client)
+
 	checkHostDNSResolvers(cluster)
 
 	return nil
+}
+
+// reportCrashLoopingServices names every service on the cluster whose container
+// Kubernetes has given up restarting, and says nothing when there are none.
+//
+// Components above cover the platform's own pieces, so a tenant's database can
+// be three days into a crash loop while every line on this screen reads ✔. The
+// namespace is part of the line because two projects can each run a service
+// called db.
+func reportCrashLoopingServices(ctx context.Context, client *k8s.Client) {
+	loops := service.CrashLoopsEverywhere(ctx, client.Clientset())
+	if len(loops) == 0 {
+		return
+	}
+
+	fmt.Printf("  Services needing attention:\n")
+	for _, l := range loops {
+		fmt.Printf("    ✗  %s/%s\n", l.Namespace, l.Service)
+		fmt.Printf("       %s\n", l.Message)
+	}
+	fmt.Println()
 }
 
 // checkHostDNSResolvers reads the curated resolv.conf from the host and

@@ -465,6 +465,17 @@ func runAppList(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 
+	// An app reads Running whenever its own pods are up, which stays true while
+	// the database behind it is dead. The note goes below the table because it
+	// is a sentence, and because the app's own status is not what is wrong.
+	for _, app := range apps {
+		if app.BrokenDependency == "" {
+			continue
+		}
+		fmt.Printf("  !   %s depends on %s, which is crash-looping\n", app.Name, app.BrokenDependency)
+		fmt.Printf("      kip service list  shows why, and how to recover it\n\n")
+	}
+
 	return nil
 }
 

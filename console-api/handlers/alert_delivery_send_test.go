@@ -19,7 +19,7 @@ type recordedSend struct {
 
 func TestDeliverBatch(t *testing.T) {
 	alerts := []Alert{
-		{Time: "2026-09-01T06:58:05Z", Namespace: "payroll-test", App: "db",
+		{Time: "2026-09-01T06:58:05Z", Namespace: "shop-test", App: "db",
 			Action: "CrashLoopBackOff", Severity: "critical",
 			Reason: "could not remove old lock file: Read-only file system"},
 	}
@@ -42,7 +42,7 @@ func TestDeliverBatch(t *testing.T) {
 		if len(sent) != 2 {
 			t.Fatalf("sent %d emails, want one per admin (2)", len(sent))
 		}
-		if !strings.Contains(sent[0].subject, "payroll-test") || !strings.Contains(sent[0].subject, "db") {
+		if !strings.Contains(sent[0].subject, "shop-test") || !strings.Contains(sent[0].subject, "db") {
 			t.Errorf("subject %q names neither the namespace nor the service", sent[0].subject)
 		}
 		if !strings.Contains(sent[0].body, "Read-only file system") {
