@@ -198,7 +198,7 @@ func TestImportStillAcceptsABundleWithNoHostLinesAtAll(t *testing.T) {
 // than for the right file.
 func TestImportRecognisesABareKubeconfig(t *testing.T) {
 	home := withFakeHome(t)
-	path := filepath.Join(home, "example.yaml")
+	path := filepath.Join(home, "example-cluster.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`apiVersion: v1
 kind: Config
 clusters:

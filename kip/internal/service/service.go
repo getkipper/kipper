@@ -655,6 +655,8 @@ func (m *Manager) List(ctx context.Context, namespace string) ([]Status, error) 
 		return nil, fmt.Errorf("listing service CRs: %w", err)
 	}
 
+	crashLoops := CrashLoopingServices(ctx, m.Client, namespace)
+
 	var services []Status
 	for _, cr := range crList.Items {
 		name := cr.GetName()
@@ -690,6 +692,15 @@ func (m *Manager) List(ctx context.Context, namespace string) ([]Status, error) 
 			if storage == "" && len(ss.Spec.VolumeClaimTemplates) > 0 {
 				storage = ss.Spec.VolumeClaimTemplates[0].Spec.Resources.Requests.Storage().String()
 			}
+		}
+
+		// A crash loop is invisible in the fields above: phase comes from the
+		// CR, which is fine, and readiness says 0/1, which a service that is
+		// merely starting also says. One service read "running 0/1" for three
+		// and a half days while its container died 996 times.
+		if why, looping := crashLoops[name]; looping && phase != "deleting" && reason == "" {
+			phase = "crash-looping"
+			reason, message = "CrashLoopBackOff", why
 		}
 
 		services = append(services, Status{

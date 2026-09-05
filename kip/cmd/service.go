@@ -389,9 +389,9 @@ func runServiceList(cmd *cobra.Command, args []string) error {
 // and commands, and a column wide enough for it would push everything else off
 // the screen. A service with nothing wrong adds nothing here.
 func writeServiceList(out io.Writer, services []service.Status) {
-	say(out, "\n  %-20s %-12s %-10s %-10s %s\n", "NAME", "TYPE", "STATUS", "READY", "STORAGE")
+	say(out, "\n  %-20s %-12s %-14s %-10s %s\n", "NAME", "TYPE", "STATUS", "READY", "STORAGE")
 	for _, s := range services {
-		say(out, "  %-20s %-12s %-10s %-10s %s\n", s.Name, s.Type, s.Status, s.Ready, s.Storage)
+		say(out, "  %-20s %-12s %-14s %-10s %s\n", s.Name, s.Type, s.Status, s.Ready, s.Storage)
 	}
 	say(out, "\n")
 

@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
 	"time"
+
+	"github.com/getkipper/kipper/kip/internal/service"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -555,11 +558,47 @@ func (d *Deployer) List(ctx context.Context, namespace string) ([]AppStatus, err
 		return nil, fmt.Errorf("listing app CRs: %w", err)
 	}
 
+	// An app's own status says nothing about the services it binds. In the
+	// incident behind this, a backend read Running 1/1 for fourteen days because
+	// its liveness probe never touched the database that had been crash-looping
+	// since the week before.
+	crashLoops := service.CrashLoopingServices(ctx, d.Client, namespace)
+
 	apps := make([]AppStatus, 0, len(crList.Items))
 	for i := range crList.Items {
-		apps = append(apps, appStatusFromCR(&crList.Items[i]))
+		app := appStatusFromCR(&crList.Items[i])
+		app.BrokenDependency = brokenDependency(&crList.Items[i], crashLoops)
+		apps = append(apps, app)
 	}
 	return apps, nil
+}
+
+// brokenDependency names the services this app binds that are crash-looping,
+// and says nothing when they are all fine or when the app binds none.
+func brokenDependency(cr *unstructured.Unstructured, crashLoops map[string]string) string {
+	if len(crashLoops) == 0 {
+		return ""
+	}
+	bindings, found, err := unstructured.NestedSlice(cr.Object, "spec", "serviceBindings")
+	if !found || err != nil {
+		return ""
+	}
+
+	var broken []string
+	for _, b := range bindings {
+		binding, ok := b.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _, _ := unstructured.NestedString(binding, "name")
+		if _, looping := crashLoops[name]; looping {
+			broken = append(broken, name)
+		}
+	}
+	if len(broken) == 0 {
+		return ""
+	}
+	return strings.Join(broken, ", ")
 }
 
 // AppStatus is a summary of a deployed app.
@@ -569,6 +608,12 @@ type AppStatus struct {
 	Image    string
 	Replicas int32
 	Ready    int32
+
+	// BrokenDependency names the bound services that are crash-looping, comma
+	// separated, and is empty when there are none. An app can be healthy in
+	// every respect it reports about itself while the database it cannot run
+	// without has been down for days.
+	BrokenDependency string
 }
 
 // appStatusFromCR derives the CLI's display status from an App CR. Status
