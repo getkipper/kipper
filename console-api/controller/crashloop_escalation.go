@@ -171,6 +171,15 @@ func (rc *ResourceController) crashLoopAlert(key string, cs *corev1.ContainerSta
 		next.escalatedAt = now
 	}
 
+	// A volume that remounted read-only produces a crash loop like any other,
+	// and the only place it says so is the log the container wrote as it gave
+	// up. It gets its own alert because the remedy differs: the pod has to be
+	// recreated, and the restarts Kubernetes is already doing cannot clear a
+	// mount.
+	if evidence := rc.readOnlyVolumeEvidence(pod, cs); evidence != "" {
+		return rc.readOnlyVolumeAlert(key, pod, next, now, nowStr, evidence), true
+	}
+
 	action := "CrashLoopBackOff"
 	reason := fmt.Sprintf("container %q is crash-looping", cs.Name)
 	if term := cs.LastTerminationState.Terminated; term != nil {

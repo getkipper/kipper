@@ -289,3 +289,63 @@ func TestPendingRestartsWithoutNeedrestart(t *testing.T) {
 		t.Error("a host without needrestart must be an error, not a clean bill of health")
 	}
 }
+
+// A Longhorn volume that remounted read-only says so in /proc/mounts, and the
+// control plane's mount namespace is one thing the status command can already
+// reach. It is confirmation rather than the primary signal, because it sees one
+// node's mounts and the cluster may have more.
+
+func TestReadOnlyMountsFindsAPersistentVolume(t *testing.T) {
+	mounts := `/dev/longhorn/pvc-4f2a /var/lib/kubelet/pods/9c1/volumes/kubernetes.io~csi/pvc-4f2a/mount ext4 ro,relatime 0 0
+/dev/longhorn/pvc-88b /var/lib/kubelet/pods/1a2/volumes/kubernetes.io~csi/pvc-88b/mount ext4 rw,relatime 0 0
+/dev/sda1 / ext4 rw,relatime 0 0
+`
+	runner := &storageHostRunner{replies: map[string]string{"/proc/mounts": mounts}}
+
+	readOnly, err := ReadOnlyVolumeMounts(runner)
+	if err != nil {
+		t.Fatalf("ReadOnlyVolumeMounts: %v", err)
+	}
+	if len(readOnly) != 1 {
+		t.Fatalf("found %v, want only the read-only volume", readOnly)
+	}
+	if !strings.Contains(readOnly[0], "pvc-4f2a") {
+		t.Errorf("the finding has to name the volume, got %q", readOnly[0])
+	}
+}
+
+// A read-only root filesystem, a squashfs, and every other ro mount on a normal
+// host are not what this looks for. Reporting them would bury the one that
+// matters in noise the operator has to learn to ignore.
+func TestReadOnlyMountsIgnoresEverythingButVolumes(t *testing.T) {
+	mounts := `/dev/loop0 /snap/core/1 squashfs ro,nodev 0 0
+sysfs /sys sysfs rw,nosuid 0 0
+/dev/sda1 /boot/efi vfat ro,relatime 0 0
+`
+	runner := &storageHostRunner{replies: map[string]string{"/proc/mounts": mounts}}
+
+	readOnly, err := ReadOnlyVolumeMounts(runner)
+	if err != nil {
+		t.Fatalf("ReadOnlyVolumeMounts: %v", err)
+	}
+	if len(readOnly) != 0 {
+		t.Errorf("reported %v; only persistent volume mounts belong here", readOnly)
+	}
+}
+
+// "ro" as a whole option, never as a prefix. A "rootcontext=" or "rw" mount is
+// not read-only, and matching loosely would report a healthy volume as broken.
+func TestReadOnlyMountsMatchesTheOptionNotAPrefix(t *testing.T) {
+	mounts := `/dev/longhorn/pvc-1 /var/lib/kubelet/pods/1/volumes/kubernetes.io~csi/pvc-1/mount ext4 rw,rootcontext=x 0 0
+/dev/longhorn/pvc-2 /var/lib/kubelet/pods/2/volumes/kubernetes.io~csi/pvc-2/mount ext4 rw,errors=remount-ro 0 0
+`
+	runner := &storageHostRunner{replies: map[string]string{"/proc/mounts": mounts}}
+
+	readOnly, err := ReadOnlyVolumeMounts(runner)
+	if err != nil {
+		t.Fatalf("ReadOnlyVolumeMounts: %v", err)
+	}
+	if len(readOnly) != 0 {
+		t.Errorf("reported %v; both of those are read-write", readOnly)
+	}
+}

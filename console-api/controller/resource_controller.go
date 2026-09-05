@@ -102,8 +102,13 @@ const (
 // ResourceController runs a background loop that automatically adjusts
 // resource requests and limits for kipper-managed workloads.
 type ResourceController struct {
-	client           kubernetes.Interface
-	crClient         crclient.Client
+	client   kubernetes.Interface
+	crClient crclient.Client
+
+	// readPreviousLog fetches the log of the container that died, so a crash
+	// loop can be told apart from a volume that went read-only underneath one.
+	// It is a field so a test can supply a log without an API server.
+	readPreviousLog  func(namespace, pod, container string) string
 	history          map[workloadKey][]usageObservation
 	hpaReplicas      map[string]int32       // namespace/name → last seen replica count
 	changeTimestamps map[string][]time.Time // namespace/name → recent resource or HPA change times
@@ -131,7 +136,7 @@ type ResourceController struct {
 
 // NewResourceController creates a controller that manages resources automatically.
 func NewResourceController(client kubernetes.Interface, crClient crclient.Client) *ResourceController {
-	return &ResourceController{
+	rc := &ResourceController{
 		hpaReplicas:      make(map[string]int32),
 		changeTimestamps: make(map[string][]time.Time),
 		imagePullAlerted: make(map[string]time.Time),
@@ -148,6 +153,8 @@ func NewResourceController(client kubernetes.Interface, crClient crclient.Client
 		crClient:         crClient,
 		history:          make(map[workloadKey][]usageObservation),
 	}
+	rc.readPreviousLog = rc.readPreviousContainerLog
+	return rc
 }
 
 // Run starts the controller loop. It blocks until the context is cancelled.
