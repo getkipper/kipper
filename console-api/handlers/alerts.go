@@ -198,6 +198,35 @@ func StoreAlert(ctx context.Context, client kubernetes.Interface, alert Alert) {
 	_ = storeAlerts(ctx, client, []Alert{alert})
 }
 
+// StoreSecurityAlert writes a security event to the bell and posts it to Slack,
+// and never emails it.
+//
+// The security notifier owns the email: a fuller body, a recipient list
+// snapshotted before the change that caused the event, and an env-pinned
+// channel. It has no Slack sender of its own, so this is how a security event
+// reaches the console-configured webhook, and sending the email from here as
+// well would put a second thinner copy in every admin's inbox.
+func StoreSecurityAlert(ctx context.Context, client kubernetes.Interface, alert Alert) {
+	if err := storeAlerts(ctx, client, []Alert{alert}); err != nil {
+		return
+	}
+
+	go func() {
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+		defer cancel()
+
+		d := securityDelivery(sctx, client)
+		if d.route != DeliverySlack {
+			return
+		}
+		d.deliver(sctx, []Alert{alert})
+	}()
+}
+
+// securityDelivery is deliveryFor, named so a test can supply transports without
+// a webhook or an SMTP server.
+var securityDelivery = deliveryFor
+
 // AddAlerts appends alerts to the alerts ConfigMap in one conflict-retried
 // update and delivers them to Slack off the caller's goroutine. Writing the
 // whole batch in a single update avoids a write per alert and keeps the
