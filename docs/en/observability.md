@@ -156,6 +156,31 @@ When everything is up the endpoint returns `200`. When the manager is still star
 
 This is a reporting endpoint, not the pod readiness probe. console-api usually runs a single replica, so gating readiness on a controller would pull the whole console out of rotation over one broken reconciler. Keeping it separate means a degraded controller shows up as a warning while the console stays reachable.
 
+## What the metrics do not cover
+
+Prometheus's node exporter reports every filesystem the node mounts, but not the
+persistent volumes your workloads write to. Those mounts live under
+`/var/lib/kubelet`, which is `0750 root:root`, and node exporter runs as an
+unprivileged user so it cannot read them. `kubelet_volume_stats_*` does not fill
+the gap either: it reports capacity, usage and inodes, never whether a volume is
+writable.
+
+So a volume that has remounted read-only is invisible in the dashboards. Every
+metric stays green while the database on top of it fails on its first write.
+
+Kipper covers that from two directions instead:
+
+- The console API reads the log a container wrote before it died. A line saying
+  the filesystem is read-only raises a `VolumeReadOnly` alert quoting that line
+  and naming the volume claim. It runs in the cluster and sees pods on every
+  node, and it only considers workloads that mount a persistent volume.
+- `kip status` reads `/proc/mounts` on the cluster host and names any persistent
+  volume mounted read-only. It sees one node, so it lists the nodes it could not
+  check rather than implying they are clean.
+
+See [Alerts: recovering a read-only
+volume](/en/alerts#recovering-a-read-only-volume) for what to do about one.
+
 ## AI log analysis
 
 The log viewers in the web console (for apps, functions, and jobs) include an **Analyse** button. Click it to send the currently visible logs to the configured AI provider for analysis.
