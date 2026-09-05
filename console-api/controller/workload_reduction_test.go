@@ -253,8 +253,10 @@ func TestClaimsAreScopedToTheContainerKind(t *testing.T) {
 	}
 
 	line := "cannot write: read-only file system"
-	assert.Equal(t, "data", blamedClaim(pod, "db", mainContainer, line))
-	assert.Equal(t, "scratch", blamedClaim(pod, "db", initContainer, line))
+	assert.Equal(t, []string{"data"}, blameFor(pod, "db", mainContainer, line).candidates,
+		"the main container mounts the data volume and nothing else")
+	assert.Equal(t, []string{"scratch"}, blameFor(pod, "db", initContainer, line).candidates,
+		"and the init container of the same name mounts a different one")
 }
 
 // One replica being replaced drops the workload's total restart count. Compared

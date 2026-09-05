@@ -403,39 +403,40 @@ func TestReadOnlyEvidenceFollowsThePathTheLogNames(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.blame, blamedClaim(pod, "postgres", mainContainer, tc.line))
+			assert.Equal(t, tc.blame, blameFor(pod, "postgres", mainContainer, tc.line).claim)
 		})
 	}
 }
 
 // The line from the incident names a lock file and no path at all, which is the
-// case this whole feature exists for. With nothing to correlate, the container's
-// mounts decide: every writable mount it has is a persistent volume, so a
-// read-only filesystem underneath it is one of them.
+// case this whole feature exists for. Nothing can be placed, so the alert goes
+// out without claiming to know which filesystem: the container's volumes are
+// named as the place to look, and the node's own disk stays on the table.
 func TestReadOnlyEvidenceWithNoPathInTheLine(t *testing.T) {
 	incident := `FATAL:  could not remove old lock file "postmaster.pid": Read-only file system`
 
-	onlyAVolume := &corev1.Pod{
+	pod := &corev1.Pod{
 		Spec: corev1.PodSpec{
-			Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data-db-0"}}}},
+			Volumes: []corev1.Volume{
+				{Name: "data", VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data-db-0"}}},
+				{Name: "scratch", VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			},
 			Containers: []corev1.Container{{
-				Name:         "postgres",
-				VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/var/lib/postgresql"}},
+				Name: "postgres",
+				VolumeMounts: []corev1.VolumeMount{
+					{Name: "data", MountPath: "/var/lib/postgresql"},
+					{Name: "scratch", MountPath: "/scratch"},
+				},
 			}},
 		},
 	}
-	assert.Equal(t, "data-db-0", blamedClaim(onlyAVolume, "postgres", mainContainer, incident),
-		"the only writable mount it has is the volume")
 
-	alsoWritesElsewhere := onlyAVolume.DeepCopy()
-	alsoWritesElsewhere.Spec.Volumes = append(alsoWritesElsewhere.Spec.Volumes, corev1.Volume{
-		Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-	})
-	alsoWritesElsewhere.Spec.Containers[0].VolumeMounts = append(
-		alsoWritesElsewhere.Spec.Containers[0].VolumeMounts,
-		corev1.VolumeMount{Name: "scratch", MountPath: "/scratch"})
-
-	assert.Empty(t, blamedClaim(alsoWritesElsewhere, "postgres", mainContainer, incident),
-		"it writes somewhere that is not a volume, so an unplaced message cannot be pinned on one")
+	b := blameFor(pod, "postgres", mainContainer, incident)
+	assert.True(t, b.alert, "the container writes to a persistent volume, so this is worth saying")
+	assert.False(t, b.certain, "and which filesystem went is not knowable from that line")
+	assert.Equal(t, []string{"data-db-0"}, b.candidates)
+	assert.Contains(t, describeBlame(b), "the node's own disk",
+		"the message has to leave the other possibility open rather than blame the volume")
 }

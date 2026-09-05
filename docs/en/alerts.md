@@ -61,21 +61,38 @@ owed the news that it is over.
 
 When a container with a persistent volume dies, Kipper reads the log it wrote on
 the way out. A line saying the filesystem is read-only raises a `VolumeReadOnly`
-alert rather than another crash-loop warning. The alert quotes the line it found
-and names the volume claim, so you can see the evidence rather than take the
-diagnosis on trust:
+alert rather than another crash-loop warning, quoting the line it found so you
+can see the evidence rather than take the diagnosis on trust.
+
+A log line says a filesystem stopped accepting writes. It rarely says which, and
+a container has several: its persistent volumes, anything mounted from a
+ConfigMap or Secret, and its own image, which lives on the node's disk. So the
+alert says only as much as the line supports.
+
+Where the message names a path that lands on one of the volumes, it says so:
+
+```
+container "postgres" wrote this before it died: could not write
+/var/lib/postgresql/data/pg_wal/000001: Read-only file system. That points at
+volume data-db-0 having remounted read-only, which a container restart cannot
+clear because the mount belongs to the pod. Recover with: kip service restart db
+```
+
+Where it names no path, which is what the failure behind this feature actually
+produced, the alert names what the container mounts and leaves the rest open:
 
 ```
 container "postgres" wrote this before it died: FATAL:  could not remove old
-lock file "postmaster.pid": Read-only file system. That points at volume
-data-db-0 having remounted read-only, which a container restart cannot clear
-because the mount belongs to the pod. Recover with: kip service restart db
+lock file "postmaster.pid": Read-only file system. The container mounts volume
+data-db-0. Either that volume or the node's own disk has stopped accepting
+writes, which a container restart cannot clear because the mount belongs to the
+pod. Recover with: kip service restart db
 ```
 
-Only workloads that mount a persistent volume are considered. A pod with a
-read-only root filesystem, or one writing to a ConfigMap mount, logs the same
-message for a configuration reason, and recreating it would reproduce the mount
-rather than clear it.
+Nothing is raised when the message can be placed somewhere that is read-only by
+design: a mount asked for read-only, a container with a read-only root
+filesystem, or a path under neither. Recreating those pods would reproduce the
+configuration rather than clear it.
 
 It is critical from the first sighting rather than climbing the ladder above.
 The filesystem does not come back on its own, and restarting the container
