@@ -149,10 +149,10 @@ func TestStampStorageRestartsRecordsVersionAndIdentity(t *testing.T) {
 	if !strings.Contains(all, "kubectl annotate node worker-2") {
 		t.Errorf("nothing annotated the node; commands were:\n%s", all)
 	}
-	if !strings.Contains(all, storageRestartsVersionAnnotation+"="+StorageRestartConfigVersion) {
+	if !strings.Contains(all, StorageRestartsVersionAnnotation+"="+StorageRestartConfigVersion) {
 		t.Error("the stamp does not record which config version was applied")
 	}
-	if !strings.Contains(all, storageRestartsMachineAnnotation+"=9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d") {
+	if !strings.Contains(all, StorageRestartsMachineAnnotation+"=9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d") {
 		t.Error("the stamp does not record the machine it was applied to, so a reimage reads as covered")
 	}
 	if !strings.Contains(all, "--overwrite") {

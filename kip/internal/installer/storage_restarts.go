@@ -81,8 +81,8 @@ func ConfigureStorageRestarts(runner commandRunner) error {
 // or edited by hand afterwards leaves the stamp saying the node is covered. The
 // docs say so, because reading it as an audit is the way it misleads.
 const (
-	storageRestartsVersionAnnotation = "kipper.run/storage-restarts-version"
-	storageRestartsMachineAnnotation = "kipper.run/storage-restarts-machine"
+	StorageRestartsVersionAnnotation = "kipper.run/storage-restarts-version"
+	StorageRestartsMachineAnnotation = "kipper.run/storage-restarts-machine"
 )
 
 // ReadMachineID reads the host's own identity.
@@ -114,8 +114,8 @@ func StampStorageRestarts(runner commandRunner, nodeName, machineID string) erro
 
 	cmd := fmt.Sprintf("kubectl annotate node %s %s=%s %s=%s --overwrite",
 		nodeName,
-		storageRestartsVersionAnnotation, StorageRestartConfigVersion,
-		storageRestartsMachineAnnotation, machineID)
+		StorageRestartsVersionAnnotation, StorageRestartConfigVersion,
+		StorageRestartsMachineAnnotation, machineID)
 	if _, err := runner.Run(cmd); err != nil {
 		return fmt.Errorf("stamping node %s: %w", nodeName, err)
 	}
@@ -264,4 +264,32 @@ func mountedReadOnly(options string) bool {
 		}
 	}
 	return false
+}
+
+// StorageRestartCoverage reads a node's stamp back and says whether the host
+// configuration written to it still applies, and what is wrong when it does not.
+//
+// It compares the machine identity as well as the version, because a node
+// reimaged under the same name keeps its annotation, and a stamp that survived
+// its host would report a green node with nothing on it.
+//
+// This is a record that a write once succeeded, not an audit. A file deleted or
+// edited by hand afterwards is invisible here, which the docs say plainly.
+func StorageRestartCoverage(stampedVersion, stampedMachineID, liveMachineID string) (bool, string) {
+	if stampedVersion == "" || stampedMachineID == "" {
+		return false, "never configured"
+	}
+	if liveMachineID == "" {
+		// Without the node's own identity there is nothing to compare against,
+		// and answering "covered" from the stamp alone is the false green the
+		// identity was stamped to prevent.
+		return false, "cannot be confirmed"
+	}
+	if stampedMachineID != liveMachineID {
+		return false, "reimaged since it was configured"
+	}
+	if stampedVersion != StorageRestartConfigVersion {
+		return false, "configured with an older version"
+	}
+	return true, ""
 }

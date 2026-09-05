@@ -70,6 +70,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 
+	reportStorageRestartCoverage(nodes)
 	reportAlertDelivery(ctx, client)
 	reportCrashLoopingServices(ctx, client)
 
@@ -159,6 +160,41 @@ func checkHost(cluster *config.Cluster, nodes []k8s.NodeInfo) {
 	checkHostDNSResolvers(cluster, client)
 	reportPendingRestarts(client)
 	reportReadOnlyVolumes(cluster, client, nodes)
+}
+
+// reportStorageRestartCoverage names the nodes whose host configuration is
+// missing, out of date, or was written to a machine that has since been
+// replaced.
+//
+// It reads the stamp kip writes at install and at node add, so it covers every
+// node in the cluster rather than the one this command can SSH to. The stamp
+// records that a write once succeeded: a file deleted or edited by hand
+// afterwards still reads as configured.
+func reportStorageRestartCoverage(nodes []k8s.NodeInfo) {
+	var uncovered []string
+	for _, node := range nodes {
+		covered, why := installer.StorageRestartCoverage(
+			node.Annotations[installer.StorageRestartsVersionAnnotation],
+			node.Annotations[installer.StorageRestartsMachineAnnotation],
+			node.MachineID,
+		)
+		if !covered {
+			uncovered = append(uncovered, fmt.Sprintf("%s (%s)", node.Name, why))
+		}
+	}
+
+	fmt.Printf("  Host configuration:\n")
+	if len(uncovered) == 0 {
+		fmt.Printf("    ✔  every node is configured to keep security updates off the storage path\n\n")
+		return
+	}
+
+	for _, node := range uncovered {
+		fmt.Printf("    ⚠  %s\n", node)
+	}
+	fmt.Printf("       An unattended upgrade on these can restart iscsid, which drops every\n")
+	fmt.Printf("       Longhorn volume on the node. Fix one with:\n")
+	fmt.Printf("         kip node repair-host --host <address>\n\n")
 }
 
 // reportReadOnlyVolumes checks the mounts on the one node this command can
