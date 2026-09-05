@@ -417,12 +417,54 @@ kip service list
 ```
 
 ```
-  NAME       TYPE         STATUS     READY      STORAGE
-  mydb       postgres     running    1/1        5Gi
-  cache      redis        running    1/1        1Gi
+  NAME       TYPE         STATUS         READY      STORAGE
+  mydb       postgres     running        1/1        5Gi
+  cache      redis        running        1/1        1Gi
 ```
 
 Services also appear in the web console under the **Services** sidebar item, where you can view connection details with a masked URL and copy-to-clipboard.
+
+A service whose container Kubernetes has given up restarting reads
+`crash-looping`, with the detail below the table:
+
+```
+  NAME       TYPE         STATUS         READY      STORAGE
+  db         postgres     crash-looping  0/1        20Gi
+
+  !   db (CrashLoopBackOff)
+      container "postgres" has restarted 996 times and is not staying up
+      (last exit code 1). Recover with: kip service restart db
+```
+
+An app bound to it keeps its own status, because the app really is running. Its
+broken dependency is named under `kip app list`:
+
+```
+  !   api depends on db, which is crash-looping
+      kip service list  shows why, and how to recover it
+```
+
+## Restarting a service
+
+```bash
+kip service restart <name>
+```
+
+This recreates the service's pod, which is what a container restart cannot do.
+The volume is reattached rather than recreated, so the data is untouched.
+
+Reach for it when a service is crash-looping on something that belongs to the
+pod rather than to the container. The clearest case is a volume that remounted
+read-only: the mount belongs to the pod, so however many times the container
+dies it comes back to the same read-only filesystem. See [Recovering a read-only
+volume](/en/alerts#recovering-a-read-only-volume).
+
+`kip service restart` finds the service by name across the cluster. Name the
+project when two of them run a service under the same name:
+
+```bash
+kip service restart db --project shop --environment prod
+```
 
 ## Checking that a service owns its credentials
 
