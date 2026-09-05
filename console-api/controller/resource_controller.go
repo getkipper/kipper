@@ -105,10 +105,17 @@ type ResourceController struct {
 	client           kubernetes.Interface
 	crClient         crclient.Client
 	history          map[workloadKey][]usageObservation
-	hpaReplicas      map[string]int32        // namespace/name → last seen replica count
-	changeTimestamps map[string][]time.Time  // namespace/name → recent resource or HPA change times
-	imagePullAlerted map[string]time.Time    // namespace/pod/container → last ImagePullBackOff alert time
-	crashLoopAlerted map[string]time.Time    // namespace/pod/container → last CrashLoopBackOff alert time
+	hpaReplicas      map[string]int32       // namespace/name → last seen replica count
+	changeTimestamps map[string][]time.Time // namespace/name → recent resource or HPA change times
+	imagePullAlerted map[string]time.Time   // namespace/pod/container → last ImagePullBackOff alert time
+	crashLoopAlerted map[string]time.Time   // namespace/pod/container → last CrashLoopBackOff alert time
+	// crashLoopEpisode tracks one unresolved crash loop per container, which is
+	// what escalation is measured from. Separate from crashLoopAlerted, which
+	// stays the hard floor of one alert per container per hour whatever else
+	// happens: clearing that on recovery would let a container running twelve
+	// minutes between crashes re-arm a first-tick alert and roughly double
+	// today's traffic.
+	crashLoopEpisode map[string]episode
 	oomHandledAt     map[string]time.Time    // namespace/app/container → finish time of the last OOM acted on
 	rolloutAlerted   map[string]time.Time    // namespace/name → last stuck-rollout alert time
 	jobFailAlerted   map[string]time.Time    // job UID → last failed-job alert time
@@ -129,6 +136,7 @@ func NewResourceController(client kubernetes.Interface, crClient crclient.Client
 		changeTimestamps: make(map[string][]time.Time),
 		imagePullAlerted: make(map[string]time.Time),
 		crashLoopAlerted: make(map[string]time.Time),
+		crashLoopEpisode: make(map[string]episode),
 		oomHandledAt:     make(map[string]time.Time),
 		rolloutAlerted:   make(map[string]time.Time),
 		jobFailAlerted:   make(map[string]time.Time),
@@ -785,6 +793,10 @@ type pendingMark struct {
 type alertBatch struct {
 	entry ResourceLogEntry
 	marks []pendingMark
+	// apply carries state changes that are not a timestamp in a map, such as an
+	// episode transition. Deferred for the same reason marks are, and run under
+	// the same lock once the alert has been stored.
+	apply []func()
 }
 
 // capBatches bounds a tick to the store's per-write cap, dropping the oldest
@@ -808,6 +820,9 @@ func (rc *ResourceController) commitBatches(batches []alertBatch) {
 				continue
 			}
 			m.dst[m.key] = m.at
+		}
+		for _, fn := range b.apply {
+			fn()
 		}
 	}
 }
@@ -859,6 +874,17 @@ func (rc *ResourceController) pruneAlertState() {
 			if t.Before(cutoff) {
 				delete(m, k)
 			}
+		}
+	}
+
+	// An episode ages on lastSeen, never on firstSeen. A crash loop that has
+	// run for three days has a firstSeen far past the TTL, and sweeping on it
+	// would delete precisely the episode worth keeping — the one about to
+	// escalate. A live episode refreshes lastSeen every tick; one whose pod is
+	// gone stops and ages out.
+	for k, ep := range rc.crashLoopEpisode {
+		if ep.lastSeen.Before(cutoff) {
+			delete(rc.crashLoopEpisode, k)
 		}
 	}
 
@@ -1743,7 +1769,7 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) []alertBatch
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 
-	cooldown := 60 * time.Minute
+	cooldown := crashLoopCooldown
 	now := time.Now()
 	nowStr := now.UTC().Format(time.RFC3339)
 	var batches []alertBatch
@@ -1751,10 +1777,25 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) []alertBatch
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		for _, cs := range pod.Status.ContainerStatuses {
+			key := pod.Namespace + "/" + pod.Name + "/" + cs.Name
+
+			// A container with no Waiting state used to be skipped outright,
+			// which meant a crash loop could only ever be observed starting and
+			// never ending. An episode has to see recovery to close, so this
+			// runs first and only then falls through to the problem cases.
 			if cs.State.Waiting == nil {
+				if b, ok := rc.observeCrashLoopRecovery(key, &cs, pod, now, nowStr); ok {
+					batches = append(batches, b)
+				}
 				continue
 			}
-			key := pod.Namespace + "/" + pod.Name + "/" + cs.Name
+
+			// Waiting means the container is not running clean, whatever the
+			// reason. An episode already open has its recovery run restarted
+			// here; CrashLoopBackOff sets its own state below.
+			if cs.State.Waiting.Reason != "CrashLoopBackOff" {
+				rc.holdEpisode(key, now)
+			}
 
 			switch cs.State.Waiting.Reason {
 			case "ImagePullBackOff", "ErrImagePull":
@@ -1775,25 +1816,22 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) []alertBatch
 				// The OOM path already bumps memory for OOM crash loops;
 				// alerting here too would double-count them.
 				if term := cs.LastTerminationState.Terminated; term != nil && term.Reason == "OOMKilled" {
+					// Alerted through the memory path, but still a crash loop:
+					// an episode already open must not read as recovered when
+					// the container comes back, nor age out of the sweep.
+					rc.holdEpisode(key, now)
 					continue
 				}
+				// The hourly floor still applies to every crash-loop alert,
+				// escalation included, so a flapping container costs no more
+				// than it does today.
 				if last, seen := rc.crashLoopAlerted[key]; seen && now.Sub(last) < cooldown {
+					rc.touchEpisode(key, cs.RestartCount, now)
 					continue
 				}
-				reason := fmt.Sprintf("container %q is crash-looping", cs.Name)
-				if term := cs.LastTerminationState.Terminated; term != nil {
-					reason += fmt.Sprintf(" (last exit code %d)", term.ExitCode)
+				if b, ok := rc.crashLoopAlert(key, &cs, pod, now, nowStr); ok {
+					batches = append(batches, b)
 				}
-				batches = append(batches, alertBatch{
-					entry: ResourceLogEntry{
-						Time:      nowStr,
-						App:       pod.Labels["app"],
-						Namespace: pod.Namespace,
-						Action:    "CrashLoopBackOff",
-						Reason:    reason,
-					},
-					marks: []pendingMark{pendingMark{dst: rc.crashLoopAlerted, key: key, at: now}},
-				})
 			}
 		}
 	}

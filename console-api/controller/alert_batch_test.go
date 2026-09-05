@@ -96,3 +96,34 @@ func TestAlertBatch_CommitsDeletions(t *testing.T) {
 	_, stays := dst["stays"]
 	assert.True(t, stays, "and must touch nothing else")
 }
+
+// Not every state change is a timestamp in a map. An episode is a struct, and
+// its transitions gate whether the alert is ever sent again, so they defer for
+// exactly the same reason a cooldown mark does: a change applied before the
+// store accepted the alert can suppress something nobody saw.
+func TestAlertBatch_DefersTypedStateChanges(t *testing.T) {
+	episodes := map[string]episode{"ns/pod/db": {restarts: 3}}
+
+	rc := &ResourceController{}
+	batches := []alertBatch{{
+		entry: ResourceLogEntry{Action: "escalated"},
+		apply: []func(){func() { episodes["ns/pod/db"] = episode{restarts: 99} }},
+	}}
+
+	assert.Equal(t, int32(3), episodes["ns/pod/db"].restarts, "nothing applies before the alert is stored")
+	rc.commitBatches(batches)
+	assert.Equal(t, int32(99), episodes["ns/pod/db"].restarts, "and it applies once it is")
+}
+
+func TestAlertBatch_DroppedEntryAppliesNothing(t *testing.T) {
+	applied := false
+	batches := []alertBatch{
+		{entry: ResourceLogEntry{Action: "dropped"}, apply: []func(){func() { applied = true }}},
+		{entry: ResourceLogEntry{Action: "kept"}},
+	}
+
+	kept, _ := capBatches(batches, 1)
+	(&ResourceController{}).commitBatches(kept)
+
+	assert.False(t, applied, "an alert the store never received must change nothing")
+}
