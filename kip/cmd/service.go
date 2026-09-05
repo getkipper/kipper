@@ -152,6 +152,9 @@ func init() {
 	serviceUpdateCmd.Flags().String("cpu", "", "new CPU limit (e.g. 1)")
 	serviceUpdateCmd.Flags().String("version", "", "new image version")
 
+	serviceRestartCmd.Flags().String("project", "default", "project namespace")
+	serviceRestartCmd.Flags().String("environment", "", "target environment")
+
 	serviceDeleteCmd.Flags().String("project", "default", "project namespace")
 	serviceDeleteCmd.Flags().String("environment", "", "target environment")
 	serviceDeleteCmd.Flags().Bool("delete-data", false, "confirm permanent data deletion")
@@ -165,6 +168,7 @@ func init() {
 	serviceUnbindCmd.Flags().String("environment", "", "target environment")
 
 	serviceCmd.AddCommand(serviceAddCmd)
+	serviceCmd.AddCommand(serviceRestartCmd)
 	serviceCmd.AddCommand(serviceListCmd)
 	serviceCmd.AddCommand(serviceInfoCmd)
 	serviceCmd.AddCommand(serviceUpdateCmd)
