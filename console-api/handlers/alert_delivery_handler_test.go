@@ -9,8 +9,8 @@ import (
 )
 
 // The console asks this so it can tell an operator that the bell is filling in
-// silence. Nobody on the example cluster knew that until a database had been
-// crash-looping for three and a half days.
+// silence. On the cluster this comes from, nobody knew until a database had
+// been crash-looping for three and a half days.
 
 func TestAlertDeliveryHandler(t *testing.T) {
 	tests := []struct {
@@ -38,6 +38,8 @@ func TestAlertDeliveryHandler(t *testing.T) {
 			wantNowhere: false,
 		},
 	}
+
+	withAdmin(t)
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -74,5 +76,57 @@ func TestAlertDeliveryHandler_RevealsNoCredential(t *testing.T) {
 
 	if body := rec.Body.String(); strings.Contains(body, "XXXXsecretXXXX") || strings.Contains(body, "hooks.example.com") {
 		t.Errorf("response carries the webhook: %s", body)
+	}
+}
+
+// When alerts go nowhere the console has to give the right advice, and "add a
+// Slack webhook or configure SMTP" is wrong advice for a cluster that already
+// has SMTP and simply has nobody to send to.
+func TestAlertDeliveryHandlerSaysWhyAlertsGoNowhere(t *testing.T) {
+	restore := adminRecipients
+	defer func() { adminRecipients = restore }()
+
+	tests := []struct {
+		name       string
+		objects    []runtimeObject
+		admins     []string
+		wantReason string
+	}{
+		{
+			name:       "no channel at all",
+			objects:    nil,
+			admins:     []string{"ops@example.com"},
+			wantReason: "no_channel",
+		},
+		{
+			name:       "smtp is configured but no admin has an address",
+			objects:    []runtimeObject{smtpSecret(t, "smtp.example.com")},
+			admins:     nil,
+			wantReason: "no_recipients",
+		},
+		{
+			name:       "delivery works, so there is nothing to explain",
+			objects:    []runtimeObject{slackSecret("https://hooks.example.com/abc")},
+			admins:     nil,
+			wantReason: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			adminRecipients = func() []string { return tc.admins }
+			h := &AlertDelivery{Client: newFakeClient(tc.objects...)}
+
+			rec := httptest.NewRecorder()
+			h.Get(rec, httptest.NewRequest(http.MethodGet, "/settings/alert-delivery", nil))
+
+			var got alertDeliveryResponse
+			if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+				t.Fatalf("decoding: %v", err)
+			}
+			if got.Reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", got.Reason, tc.wantReason)
+			}
+		})
 	}
 }

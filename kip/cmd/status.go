@@ -94,6 +94,12 @@ func reportAlertDelivery(ctx context.Context, client *k8s.Client) {
 		fmt.Printf("    ✔  emailed to the cluster admins\n\n")
 	default:
 		fmt.Printf("    ⚠  not leaving this cluster\n")
+		if alerts.NowhereReason(ctx, client.Clientset()) == alerts.NoRecipients {
+			fmt.Printf("       An SMTP server is configured, but no cluster admin has an email\n")
+			fmt.Printf("       address, so there is nobody to send to. Give an admin an address\n")
+			fmt.Printf("       under Team access in the console, or add a Slack webhook.\n\n")
+			return
+		}
 		fmt.Printf("       Alerts are stored in the console bell and delivered nowhere. Add a\n")
 		fmt.Printf("       Slack webhook or SMTP server under Settings in the console.\n\n")
 	}
@@ -137,9 +143,14 @@ func checkHost(cluster *config.Cluster, nodes []k8s.NodeInfo) {
 		Options:         []string{"BatchMode=yes"},
 	})
 	if err != nil {
+		// Every host section says it was not checked. A missing section reads
+		// as one that passed, and an unreachable host is not evidence that its
+		// resolvers are right or its volumes writable.
 		fmt.Printf("  DNS resolvers:\n")
 		fmt.Printf("    ⚠  not checked (could not reach the host over SSH: %v)\n\n", err)
 		fmt.Printf("  Pending restarts:\n")
+		fmt.Printf("    ⚠  not checked (could not reach the host over SSH)\n\n")
+		fmt.Printf("  Volume mounts:\n")
 		fmt.Printf("    ⚠  not checked (could not reach the host over SSH)\n\n")
 		return
 	}

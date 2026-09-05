@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"strings"
@@ -33,7 +34,11 @@ func RouteFor(ctx context.Context, client kubernetes.Interface) DeliveryRoute {
 	if SlackConfigured(ctx, client) {
 		return DeliverySlack
 	}
-	if cfg := loadSMTPConfig(ctx, client); cfg != nil && cfg.Host != "" {
+	// A configured server with no admin to send to delivers nothing, so it is
+	// the nowhere case. Calling it email would put "emailed to the cluster
+	// admins" on a screen while every alert stops inside the cluster, which is
+	// the exact false comfort this route exists to remove.
+	if cfg := loadSMTPConfig(ctx, client); cfg != nil && cfg.Host != "" && len(adminRecipients()) > 0 {
 		return DeliveryEmail
 	}
 	return DeliveryNowhere
@@ -109,9 +114,18 @@ func (d batchDelivery) deliver(ctx context.Context, alerts []Alert) {
 func alertEmail(alert Alert) (subject, body string) {
 	subject = fmt.Sprintf("[Kipper %s] %s/%s: %s",
 		strings.ToUpper(alert.Severity), alert.Namespace, alert.App, alert.Action)
+
+	// Every field is escaped, including the ones that look safe. An alert's
+	// reason can quote a line a workload wrote: the read-only detector puts the
+	// log a container produced before it died into this message, and markup in
+	// it would render inside a mail the reader trusts as Kipper's.
 	body = fmt.Sprintf(
 		"<p><strong>%s</strong> in <code>%s/%s</code></p><p>%s</p><p>%s</p><hr><p>Sent by Kipper because no Slack webhook is configured. Configure one in the console under Settings to change where these go.</p>",
-		alert.Action, alert.Namespace, alert.App, alert.Reason, alert.Time)
+		html.EscapeString(alert.Action),
+		html.EscapeString(alert.Namespace),
+		html.EscapeString(alert.App),
+		html.EscapeString(alert.Reason),
+		html.EscapeString(alert.Time))
 	return subject, body
 }
 
@@ -153,6 +167,10 @@ type AlertDelivery struct {
 type alertDeliveryResponse struct {
 	Route        string `json:"route"`
 	GoingNowhere bool   `json:"going_nowhere"`
+	// Reason distinguishes a cluster with no channel configured from one whose
+	// SMTP server has nobody to send to, because the two need different advice
+	// and only one of them is fixed by configuring SMTP.
+	Reason string `json:"reason,omitempty"`
 }
 
 // Get reports the configured route. It names the channel and never the
@@ -166,5 +184,17 @@ func (a *AlertDelivery) Get(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, alertDeliveryResponse{
 		Route:        string(route),
 		GoingNowhere: route == DeliveryNowhere,
+		Reason:       nowhereReason(ctx, a.Client, route),
 	})
+}
+
+// nowhereReason says why alerts are not leaving, or "" when they are.
+func nowhereReason(ctx context.Context, client kubernetes.Interface, route DeliveryRoute) string {
+	if route != DeliveryNowhere {
+		return ""
+	}
+	if cfg := loadSMTPConfig(ctx, client); cfg != nil && cfg.Host != "" {
+		return "no_recipients"
+	}
+	return "no_channel"
 }

@@ -36,7 +36,19 @@ func smtpSecret(t *testing.T, host string) *corev1.Secret {
 	}
 }
 
+// withAdmin gives the cluster somebody to email for the duration of a test.
+// The email route needs a recipient as much as it needs a server, so a test
+// asserting that route has to supply one.
+func withAdmin(t *testing.T) {
+	t.Helper()
+	restore := adminRecipients
+	adminRecipients = func() []string { return []string{"ops@example.com"} }
+	t.Cleanup(func() { adminRecipients = restore })
+}
+
 func TestDeliveryRoute(t *testing.T) {
+	withAdmin(t)
+
 	tests := []struct {
 		name    string
 		objects []runtimeObject
@@ -106,6 +118,7 @@ func TestAlertsGoNowhere(t *testing.T) {
 	})
 
 	t.Run("false once email is configured", func(t *testing.T) {
+		withAdmin(t)
 		client := newFakeClient(smtpSecret(t, "smtp.example.com"))
 		if AlertsGoNowhere(context.Background(), client) {
 			t.Error("AlertsGoNowhere() = true with smtp configured, want false")
@@ -128,5 +141,39 @@ func newFakeClient(objs ...runtimeObject) kubernetes.Interface {
 		return fake.NewClientset(objs[0])
 	default:
 		return fake.NewClientset(objs[0], objs[1])
+	}
+}
+
+// An SMTP server with nobody to send to is the "nowhere" case, not the email
+// case. Reporting email would recreate the property that made the incident last
+// three and a half days: the console and kip status showing outbound coverage
+// while every alert stops inside the cluster.
+func TestRouteForNeedsSomebodyToEmail(t *testing.T) {
+	restore := adminRecipients
+	defer func() { adminRecipients = restore }()
+
+	client := newFakeClient(smtpSecret(t, "smtp.example.com"))
+
+	adminRecipients = func() []string { return nil }
+	if got := RouteFor(context.Background(), client); got != DeliveryNowhere {
+		t.Errorf("RouteFor() = %q with SMTP configured and no admins, want %q", got, DeliveryNowhere)
+	}
+
+	adminRecipients = func() []string { return []string{"ops@example.com"} }
+	if got := RouteFor(context.Background(), client); got != DeliveryEmail {
+		t.Errorf("RouteFor() = %q with an admin to email, want %q", got, DeliveryEmail)
+	}
+}
+
+// Slack does not need an admin list, so the absence of admins must not take a
+// working webhook off the table.
+func TestRouteForSlackDoesNotNeedAdmins(t *testing.T) {
+	restore := adminRecipients
+	defer func() { adminRecipients = restore }()
+	adminRecipients = func() []string { return nil }
+
+	client := newFakeClient(slackSecret("https://hooks.example.com/abc"))
+	if got := RouteFor(context.Background(), client); got != DeliverySlack {
+		t.Errorf("RouteFor() = %q, want %q", got, DeliverySlack)
 	}
 }
