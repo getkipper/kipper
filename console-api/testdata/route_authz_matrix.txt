@@ -131,6 +131,7 @@ GET /api/v1/services/{name}/rollout	anon=401 outsider=403 viewer=404 deployer=40
 GET /api/v1/services/{name}/shares	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 GET /api/v1/settings/ai	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 GET /api/v1/settings/ai/bundle-status	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
+GET /api/v1/settings/alert-delivery	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 GET /api/v1/settings/auth	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 GET /api/v1/settings/git-credentials	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 GET /api/v1/settings/git-credentials/health	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow

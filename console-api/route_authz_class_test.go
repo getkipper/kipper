@@ -312,6 +312,7 @@ var routeAuthz = map[string]authzDeclaration{
 	"GET /api/v1/settings/registries":                                  {class: classGlobalRole},
 	"GET /api/v1/settings/registries/health":                           {class: classGlobalRole},
 	"GET /api/v1/settings/resource-log":                                {class: classAuthenticated},
+	"GET /api/v1/settings/alert-delivery":                              {class: classGlobalRole},
 	"GET /api/v1/settings/slack":                                       {class: classGlobalRole},
 	"GET /api/v1/settings/smtp":                                        {class: classGlobalRole},
 	"GET /api/v1/storage/{service}/buckets":                            {class: classProjectCapability, capability: "storage.read"},
