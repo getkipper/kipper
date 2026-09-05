@@ -83,6 +83,19 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	defer func() { _ = workerClient.Close() }()
 	fmt.Printf("  ✔  Connected to worker\n\n")
 
+	// Before the join, so a failed write cannot leave a node in the cluster
+	// running Longhorn volumes with nothing stopping an unattended upgrade from
+	// restarting iscsid underneath them.
+	fmt.Printf("  Configuring host restarts for storage...\n")
+	if err := installer.ConfigureStorageRestarts(workerClient); err != nil {
+		return fmt.Errorf("configuring storage restarts on %s: %w", workerHost, err)
+	}
+	machineID, err := installer.ReadMachineID(workerClient)
+	if err != nil {
+		fmt.Printf("  ⚠   %s has no machine id: %v\n      The node is configured; kip status cannot confirm it.\n", workerHost, err)
+	}
+	fmt.Printf("  ✔  Storage-path restarts deferred on %s\n\n", workerHost)
+
 	fmt.Printf("  Joining worker node to cluster...\n")
 	if err := installer.JoinWorkerNode(masterClient, workerClient, cluster.Host); err != nil {
 		return err
@@ -110,6 +123,17 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  ⚠   %s has not registered yet: %v\n      Run 'kip upgrade' once it is Ready to add its IP to the build egress policy.\n\n", workerHost, err)
 		return nil
 	}
+	// The stamp goes on after registration, because the node object it annotates
+	// does not exist until then. A failure here leaves the host configured and
+	// the record missing, which reads as uncovered: the safe direction.
+	if machineID != "" {
+		if nodeName, err := installer.NodeNameForMachine(masterClient, machineID); err != nil {
+			fmt.Printf("  ⚠   could not identify %s's node: %v\n      The host is configured; 'kip node repair-host' records it.\n\n", workerHost, err)
+		} else if err := installer.StampStorageRestarts(masterClient, nodeName, machineID); err != nil {
+			fmt.Printf("  ⚠   could not record host configuration for %s: %v\n      The host is configured; 'kip node repair-host' records it.\n\n", nodeName, err)
+		}
+	}
+
 	fmt.Printf("  Updating build isolation for the new node...\n")
 	if err := installer.InstallBuildIsolation(masterClient); err != nil {
 		// The node has already joined, so failing the command now would misreport
