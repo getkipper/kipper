@@ -2,6 +2,7 @@ package installer
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -95,27 +96,44 @@ func ReadMachineID(runner commandRunner) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reading machine id: %w", err)
 	}
+
 	id := strings.TrimSpace(out)
-	if id == "" {
-		// An empty identity would match every node and read as covered forever.
-		return "", fmt.Errorf("host reported an empty machine id")
+	if !machineIDPattern.MatchString(id) {
+		// This value crosses from a worker into a root shell on the control
+		// plane, so it is checked against the one format it can have rather
+		// than merely for being non-empty. An empty identity would also match
+		// every node and read as covered forever.
+		return "", fmt.Errorf("host reported %q, which is not a machine id", id)
 	}
 	return id, nil
 }
+
+// machineIDPattern is the format systemd guarantees: 32 lowercase hex
+// characters. Nothing else is a machine id, and a worker is not the right place
+// to be lenient about what reaches a root command on the control plane.
+var machineIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// nodeNamePattern is the Kubernetes object name format. The name comes from the
+// API rather than from a worker, but it is interpolated into the same root
+// command, so it is checked the same way.
+var nodeNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`)
 
 // StampStorageRestarts records on the Kubernetes node what was written to the
 // host, so the two can be compared later without another SSH connection.
 //
 // Run it on the control plane, after the write it describes has succeeded.
 func StampStorageRestarts(runner commandRunner, nodeName, machineID string) error {
-	if nodeName == "" || machineID == "" {
-		return fmt.Errorf("stamping storage restarts needs both a node name and a machine id")
+	if !nodeNamePattern.MatchString(nodeName) {
+		return fmt.Errorf("%q is not a node name", nodeName)
+	}
+	if !machineIDPattern.MatchString(machineID) {
+		return fmt.Errorf("%q is not a machine id", machineID)
 	}
 
 	cmd := fmt.Sprintf("kubectl annotate node %s %s=%s %s=%s --overwrite",
-		nodeName,
+		shellQuote(nodeName),
 		StorageRestartsVersionAnnotation, StorageRestartConfigVersion,
-		StorageRestartsMachineAnnotation, machineID)
+		StorageRestartsMachineAnnotation, shellQuote(machineID))
 	if _, err := runner.Run(cmd); err != nil {
 		return fmt.Errorf("stamping node %s: %w", nodeName, err)
 	}
@@ -133,9 +151,18 @@ func NodeNameForMachine(runner commandRunner, machineID string) (string, error) 
 		return "", fmt.Errorf("looking up a node needs a machine id")
 	}
 
-	cmd := fmt.Sprintf(
-		`kubectl get nodes -o jsonpath='{range .items[?(@.status.nodeInfo.machineID==%q)]}{.metadata.name}{"\n"}{end}'`,
-		machineID)
+	if !machineIDPattern.MatchString(machineID) {
+		return "", fmt.Errorf("%q is not a machine id", machineID)
+	}
+
+	// The double quotes around the id belong to JSONPath, not to Go, which is
+	// why the value is concatenated rather than formatted: %q would escape it
+	// as a Go string and read as though it were protecting the shell, which it
+	// does not. shellQuote does that, and the validation above is what makes it
+	// safe; the quoting keeps it safe if the validation is ever loosened.
+	jsonpath := `{range .items[?(@.status.nodeInfo.machineID=="` + machineID +
+		`")]}{.metadata.name}{"\n"}{end}`
+	cmd := "kubectl get nodes -o jsonpath=" + shellQuote(jsonpath)
 	out, err := runner.Run(cmd)
 	if err != nil {
 		return "", fmt.Errorf("looking for the node with machine id %s: %w", machineID, err)

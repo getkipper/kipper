@@ -146,13 +146,13 @@ func TestStampStorageRestartsRecordsVersionAndIdentity(t *testing.T) {
 	}
 
 	all := strings.Join(runner.commands, "\n")
-	if !strings.Contains(all, "kubectl annotate node worker-2") {
+	if !strings.Contains(all, "kubectl annotate node 'worker-2'") {
 		t.Errorf("nothing annotated the node; commands were:\n%s", all)
 	}
 	if !strings.Contains(all, StorageRestartsVersionAnnotation+"="+StorageRestartConfigVersion) {
 		t.Error("the stamp does not record which config version was applied")
 	}
-	if !strings.Contains(all, StorageRestartsMachineAnnotation+"=9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d") {
+	if !strings.Contains(all, StorageRestartsMachineAnnotation+"='9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d'") {
 		t.Error("the stamp does not record the machine it was applied to, so a reimage reads as covered")
 	}
 	if !strings.Contains(all, "--overwrite") {
@@ -347,5 +347,72 @@ func TestReadOnlyMountsMatchesTheOptionNotAPrefix(t *testing.T) {
 	}
 	if len(readOnly) != 0 {
 		t.Errorf("reported %v; both of those are read-write", readOnly)
+	}
+}
+
+// The machine id comes from the worker, and every command built from it runs as
+// root on the control plane. A worker that is compromised, or simply has a
+// mangled /etc/machine-id, could otherwise close the shell quote and have the
+// rest of its file run as a command on the node holding the cluster's keys.
+//
+// machine-id has one format: 32 lowercase hex characters. Anything else is not
+// a machine id, and guessing what an operator meant is not worth a root shell.
+func TestReadMachineIDRejectsAnythingButAMachineID(t *testing.T) {
+	for _, bad := range []string{
+		`x'; touch /root/pwned; #`,
+		`9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d; rm -rf /`,
+		"9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d\nrm -rf /",
+		"9A3C1F2E4B5D6A7B8C9D0E1F2A3B4C5D",  // uppercase is not the format
+		"9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c",    // too short
+		"9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5dd", // too long
+		"9a3c1f2e-4b5d-6a7b-8c9d-0e1f2a3b4c",
+		"",
+	} {
+		runner := &storageHostRunner{replies: map[string]string{"/etc/machine-id": bad}}
+		if id, err := ReadMachineID(runner); err == nil {
+			t.Errorf("accepted %q as a machine id (got %q)", bad, id)
+		}
+	}
+}
+
+func TestReadMachineIDAcceptsTheRealFormat(t *testing.T) {
+	runner := &storageHostRunner{replies: map[string]string{"/etc/machine-id": "  9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d \n"}}
+
+	id, err := ReadMachineID(runner)
+	if err != nil {
+		t.Fatalf("ReadMachineID: %v", err)
+	}
+	if id != "9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d" {
+		t.Errorf("machine id = %q", id)
+	}
+}
+
+// Validation is the guard, and quoting is the second one. Neither command may
+// interpolate a value straight into the shell, whatever reached it.
+func TestNodeCommandsQuoteTheirArguments(t *testing.T) {
+	runner := &storageHostRunner{replies: map[string]string{"kubectl get nodes": "worker-2\n"}}
+	if _, err := NodeNameForMachine(runner, "9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d"); err != nil {
+		t.Fatalf("NodeNameForMachine: %v", err)
+	}
+	if err := StampStorageRestarts(runner, "worker-2", "9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d"); err != nil {
+		t.Fatalf("StampStorageRestarts: %v", err)
+	}
+
+	for _, cmd := range runner.commands {
+		if strings.Contains(cmd, "kubectl") && !strings.Contains(cmd, "'") {
+			t.Errorf("a kubectl command built from cluster input carries no quoting: %s", cmd)
+		}
+	}
+}
+
+// A node name comes from the API rather than from the worker, but it is still
+// interpolated into a root command, so it is validated too.
+func TestStampRejectsAnImpossibleNodeName(t *testing.T) {
+	runner := &storageHostRunner{}
+	if err := StampStorageRestarts(runner, "worker-2; rm -rf /", "9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d"); err == nil {
+		t.Error("accepted a node name that is not a Kubernetes object name")
+	}
+	if len(runner.commands) != 0 {
+		t.Errorf("ran %v before rejecting it", runner.commands)
 	}
 }
