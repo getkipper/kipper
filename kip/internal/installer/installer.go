@@ -393,6 +393,12 @@ func Run(opts Options) (*Result, error) {
 		fn   func() error
 	}
 	var steps []installStep
+	// First, before anything installs a package. An unattended upgrade that
+	// touches open-iscsi restarts iscsid, which fails every Longhorn volume's
+	// block device under a mounted filesystem and remounts it read-only.
+	steps = append(steps, installStep{"Deferring storage-path restarts", func() error {
+		return ConfigureStorageRestarts(client)
+	}})
 	if opts.Harden && len(findings) > 0 {
 		steps = append(steps, installStep{"Hardening host OS", func() error {
 			return HardenHost(client)
@@ -442,7 +448,27 @@ func Run(opts Options) (*Result, error) {
 			return InstallCertManager(client, opts.AdminEmail, opts.DNSResolvers)
 		}},
 		{"Setting up storage", func() error {
-			return InstallLonghorn(client)
+			if err := InstallLonghorn(client); err != nil {
+				return err
+			}
+			// The node object exists by now, so the record of what was written
+			// to this host in the first step can go on it. A failure here
+			// leaves the host configured and the record missing, which reads as
+			// uncovered: the safe direction.
+			machineID, err := ReadMachineID(client)
+			if err != nil {
+				fmt.Printf("       (could not record host configuration: %v)\n", err)
+				return nil
+			}
+			nodeName, err := NodeNameForMachine(client, machineID)
+			if err != nil {
+				fmt.Printf("       (could not record host configuration: %v)\n", err)
+				return nil
+			}
+			if err := StampStorageRestarts(client, nodeName, machineID); err != nil {
+				fmt.Printf("       (could not record host configuration: %v)\n", err)
+			}
+			return nil
 		}},
 		{"Installing KEDA autoscaler", func() error {
 			return InstallKEDA(client)
