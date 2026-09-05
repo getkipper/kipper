@@ -1781,34 +1781,37 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) []alertBatch
 	nowStr := now.UTC().Format(time.RFC3339)
 	var batches []alertBatch
 
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		for _, cs := range pod.Status.ContainerStatuses {
-			key := pod.Namespace + "/" + pod.Name + "/" + cs.Name
+	// One observation per workload per tick, not one per pod.
+	//
+	// The episode is keyed by workload, so a Deployment's replicas all write to
+	// the same state. Left per-pod, two failing replicas each raised the first
+	// alert and each committed a whole episode over the other's, and two healthy
+	// replicas with unrelated lifetime restart counts took turns failing each
+	// other's cleanliness check, zeroing the recovery clock every tick so ten
+	// clean minutes could never elapse.
+	for _, obs := range observeWorkloads(pods.Items) {
+		key := obs.key
 
-			// A container with no Waiting state used to be skipped outright,
-			// which meant a crash loop could only ever be observed starting and
-			// never ending. An episode has to see recovery to close, so this
-			// runs first and only then falls through to the problem cases.
-			if cs.State.Waiting == nil {
-				if b, ok := rc.observeCrashLoopRecovery(key, &cs, pod, now, nowStr); ok {
-					batches = append(batches, b)
-				}
-				continue
+		if obs.waiting == "" {
+			if b, ok := rc.observeCrashLoopRecovery(key, obs, now, nowStr); ok {
+				batches = append(batches, b)
 			}
+			continue
+		}
 
-			// Waiting means the container is not running clean, whatever the
-			// reason. An episode already open has its recovery run restarted
-			// here; CrashLoopBackOff sets its own state below.
-			if cs.State.Waiting.Reason != "CrashLoopBackOff" {
-				rc.holdEpisode(key, now)
-			}
+		// Waiting means the container is not running clean, whatever the
+		// reason. An episode already open has its recovery run restarted
+		// here; CrashLoopBackOff sets its own state below.
+		if obs.waiting != "CrashLoopBackOff" {
+			rc.holdEpisode(key, now)
+		}
 
-			switch cs.State.Waiting.Reason {
-			case "ImagePullBackOff", "ErrImagePull":
-				if last, seen := rc.imagePullAlerted[key]; seen && now.Sub(last) < cooldown {
-					continue
-				}
+		// A pull failure and a crash loop are independent, so both are
+		// considered rather than whichever one the reduction called the
+		// workload's reason.
+		if len(obs.pulling) > 0 {
+			if last, seen := rc.imagePullAlerted[key]; !seen || now.Sub(last) >= cooldown {
+				pod, cs := obs.pulling[0].pod, obs.pulling[0].status
 				batches = append(batches, alertBatch{
 					entry: ResourceLogEntry{
 						Time:      nowStr,
@@ -1819,26 +1822,30 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) []alertBatch
 					},
 					marks: []pendingMark{{dst: rc.imagePullAlerted, key: key, at: now}},
 				})
-			case "CrashLoopBackOff":
-				// The OOM path already bumps memory for OOM crash loops;
-				// alerting here too would double-count them.
-				if term := cs.LastTerminationState.Terminated; term != nil && term.Reason == "OOMKilled" {
-					// Alerted through the memory path, but still a crash loop:
-					// an episode already open must not read as recovered when
-					// the container comes back, nor age out of the sweep.
-					rc.holdEpisode(key, now)
-					continue
-				}
-				// The hourly floor still applies to every crash-loop alert,
-				// escalation included, so a flapping container costs no more
-				// than it does today.
-				if last, seen := rc.crashLoopAlerted[key]; seen && now.Sub(last) < cooldown {
-					rc.touchEpisode(key, cs.RestartCount, now)
-					continue
-				}
-				if b, ok := rc.crashLoopAlert(key, &cs, pod, now, nowStr); ok {
-					batches = append(batches, b)
-				}
+			}
+		}
+
+		if len(obs.failing) > 0 {
+			// The OOM path already bumps memory for OOM crash loops;
+			// alerting here too would double-count them. Every failing replica
+			// has to be OOM for that: one replica failing for its own reason
+			// still deserves an alert.
+			if obs.oomOnly() {
+				// Alerted through the memory path, but still a crash loop:
+				// an episode already open must not read as recovered when
+				// the container comes back, nor age out of the sweep.
+				rc.holdEpisode(key, now)
+				continue
+			}
+			// The hourly floor still applies to every crash-loop alert,
+			// escalation included, so a flapping container costs no more
+			// than it does today.
+			if last, seen := rc.crashLoopAlerted[key]; seen && now.Sub(last) < cooldown {
+				rc.touchEpisode(key, obs, now)
+				continue
+			}
+			if b, ok := rc.crashLoopAlert(key, obs, now, nowStr); ok {
+				batches = append(batches, b)
 			}
 		}
 	}

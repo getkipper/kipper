@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -109,52 +110,133 @@ func (rc *ResourceController) readPreviousContainerLog(namespace, pod, container
 // readOnlyVolumeEvidence returns the log line saying this container's
 // filesystem stopped accepting writes, or "" when its log says nothing of the
 // kind or cannot be read.
-func (rc *ResourceController) readOnlyVolumeEvidence(pod *corev1.Pod, cs *corev1.ContainerStatus) string {
+func (rc *ResourceController) readOnlyVolumeEvidence(obs workloadObservation) (string, *corev1.Pod) {
 	if rc.readPreviousLog == nil {
-		return ""
+		return "", nil
 	}
-	// The phrase on its own does not mean a persistent volume remounted. A pod
-	// with a read-only root filesystem, or writing to a ConfigMap or Secret
-	// mount, logs the same errno text for a configuration reason, and
-	// recreating that pod reproduces the mount rather than clearing it. So the
-	// diagnosis is only offered where it can be true.
-	if len(claimsMountedBy(pod, cs.Name)) == 0 {
-		return ""
-	}
-	return readOnlyEvidenceLine(rc.readPreviousLog(pod.Namespace, pod.Name, cs.Name))
-}
 
-// claimsMountedBy lists the persistent volume claims one container mounts.
-//
-// Scoped to the container rather than the pod, because a pod can run a database
-// mounting a volume beside a sidecar mounting none. A sidecar dying on its own
-// read-only config path would otherwise raise a critical alert naming the
-// database's healthy volume and sending the operator to the wrong place.
-func claimsMountedBy(pod *corev1.Pod, container string) []string {
-	claimForVolume := map[string]string{}
-	for _, v := range pod.Spec.Volumes {
-		// A claim the pod asked for read-only did not remount; it was mounted
-		// that way, and recreating the pod would reproduce it.
-		if v.PersistentVolumeClaim != nil && !v.PersistentVolumeClaim.ReadOnly {
-			claimForVolume[v.Name] = v.PersistentVolumeClaim.ClaimName
+	for _, f := range obs.failing {
+		line := readOnlyEvidenceLine(rc.readPreviousLog(f.pod.Namespace, f.pod.Name, f.status.Name))
+		if line == "" {
+			continue
+		}
+		if claim := blamedClaim(f.pod, f.status.Name, obs.kind, line); claim != "" {
+			return line, f.pod
 		}
 	}
+	return "", nil
+}
 
-	var claims []string
-	for _, c := range append(pod.Spec.Containers, pod.Spec.InitContainers...) {
+// containerMount is one place a container can write, and what is behind it.
+type containerMount struct {
+	path string
+	// claim is the persistent volume claim behind this mount, or "" when the
+	// mount is a ConfigMap, a Secret, an emptyDir or anything else.
+	claim    string
+	readOnly bool
+}
+
+// mountsOf lists what one container mounts, deepest path first, so the most
+// specific mount containing a path is the first that matches it.
+func mountsOf(pod *corev1.Pod, container string, kind containerKind) []containerMount {
+	claimForVolume := map[string]string{}
+	readOnlyVolume := map[string]bool{}
+	for _, v := range pod.Spec.Volumes {
+		if v.PersistentVolumeClaim == nil {
+			continue
+		}
+		claimForVolume[v.Name] = v.PersistentVolumeClaim.ClaimName
+		readOnlyVolume[v.Name] = v.PersistentVolumeClaim.ReadOnly
+	}
+
+	containers := pod.Spec.Containers
+	if kind == initContainer {
+		containers = pod.Spec.InitContainers
+	}
+
+	var mounts []containerMount
+	for _, c := range containers {
 		if c.Name != container {
 			continue
 		}
 		for _, m := range c.VolumeMounts {
-			if m.ReadOnly {
-				continue
-			}
-			if claim, ok := claimForVolume[m.Name]; ok {
-				claims = append(claims, claim)
-			}
+			mounts = append(mounts, containerMount{
+				path:     m.MountPath,
+				claim:    claimForVolume[m.Name],
+				readOnly: m.ReadOnly || readOnlyVolume[m.Name],
+			})
 		}
 	}
-	return claims
+
+	sort.Slice(mounts, func(i, j int) bool { return len(mounts[i].path) > len(mounts[j].path) })
+	return mounts
+}
+
+// blamedClaim names the persistent volume a read-only message is about, or ""
+// when it cannot be pinned on one.
+//
+// The phrase on its own does not mean a persistent volume remounted. A container
+// with a read-only root filesystem, or writing to a ConfigMap or Secret mount,
+// logs the same errno text for a configuration reason, and recreating that pod
+// reproduces the mount rather than clearing it.
+//
+// Where the message names a path, the mount it falls under decides. Where it
+// names none, which is what the incident's own line did, the container's mounts
+// decide: if everything it can write to is a persistent volume, a filesystem
+// that stopped accepting writes is one of them.
+func blamedClaim(pod *corev1.Pod, container string, kind containerKind, evidence string) string {
+	mounts := mountsOf(pod, container, kind)
+
+	if path := firstAbsolutePath(evidence); path != "" {
+		for _, m := range mounts {
+			if !underMount(path, m.path) {
+				continue
+			}
+			if m.readOnly || m.claim == "" {
+				// Mounted read-only on request, or not a volume at all.
+				return ""
+			}
+			return m.claim
+		}
+		// Under nothing this container mounts: its image's own filesystem.
+		return ""
+	}
+
+	var only string
+	for _, m := range mounts {
+		if m.readOnly {
+			continue
+		}
+		if m.claim == "" {
+			// It can write somewhere that is not a volume, so a message naming
+			// no path cannot be pinned on one.
+			return ""
+		}
+		only = m.claim
+	}
+	return only
+}
+
+// firstAbsolutePath picks the first absolute path out of a log line, trimming
+// the punctuation a message tends to wrap it in.
+func firstAbsolutePath(line string) string {
+	for _, field := range strings.Fields(line) {
+		trimmed := strings.Trim(field, "\"'`:,;()[]{}<>")
+		if strings.HasPrefix(trimmed, "/") && len(trimmed) > 1 {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// underMount reports whether a path is inside a mount, matching whole segments
+// so /var/lib/postgresqlx does not count as being under /var/lib/postgresql.
+func underMount(path, mount string) bool {
+	if mount == "" {
+		return false
+	}
+	mount = strings.TrimSuffix(mount, "/")
+	return path == mount || strings.HasPrefix(path, mount+"/")
 }
 
 // readOnlyVolumeAlert is the alert for a volume that went read-only underneath a
@@ -164,12 +246,12 @@ func claimsMountedBy(pod *corev1.Pod, container string) []string {
 // escalating: the filesystem does not come back on its own, so waiting six
 // hours to say so only delays the recovery. It carries the log line it found,
 // because an operator should see the evidence rather than trust a matcher.
-func (rc *ResourceController) readOnlyVolumeAlert(key string, pod *corev1.Pod, next episode, now time.Time, nowStr, containerName, evidence string) alertBatch {
+func (rc *ResourceController) readOnlyVolumeAlert(key string, pod *corev1.Pod, next episode, now time.Time, nowStr, containerName string, kind containerKind, evidence string) alertBatch {
 	// Stated as the evidence it is. The log line is what the container wrote;
 	// that a volume remounted is the reading of it, and an operator seeing both
 	// can judge for themselves.
 	reason := fmt.Sprintf("container %q wrote this before it died: %s. That points at %s having remounted read-only, which a container restart cannot clear because the mount belongs to the pod",
-		containerName, evidence, describeClaims(claimsMountedBy(pod, containerName)))
+		containerName, evidence, describeClaims(blamedClaim(pod, containerName, kind, evidence)))
 	if cmd := recoveryCommand(pod.Labels); cmd != "" {
 		reason += ". Recover with: " + cmd
 	}
@@ -188,17 +270,10 @@ func (rc *ResourceController) readOnlyVolumeAlert(key string, pod *corev1.Pod, n
 	}
 }
 
-// describeClaims names the volumes a pod mounts, so an operator knows what to go
-// and look at. A pod usually mounts one; a pod mounting several gets all of
-// them, because narrowing to the right one needs the mount path and the log line
-// rarely gives it.
-func describeClaims(claims []string) string {
-	switch len(claims) {
-	case 0:
+// describeClaims names the volume, so an operator knows what to go and look at.
+func describeClaims(claim string) string {
+	if claim == "" {
 		return "its volume"
-	case 1:
-		return "volume " + claims[0]
-	default:
-		return "one of its volumes (" + strings.Join(claims, ", ") + ")"
 	}
+	return "volume " + claim
 }
