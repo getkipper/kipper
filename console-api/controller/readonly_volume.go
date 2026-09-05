@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -112,7 +113,48 @@ func (rc *ResourceController) readOnlyVolumeEvidence(pod *corev1.Pod, cs *corev1
 	if rc.readPreviousLog == nil {
 		return ""
 	}
+	// The phrase on its own does not mean a persistent volume remounted. A pod
+	// with a read-only root filesystem, or writing to a ConfigMap or Secret
+	// mount, logs the same errno text for a configuration reason, and
+	// recreating that pod reproduces the mount rather than clearing it. So the
+	// diagnosis is only offered where it can be true.
+	if len(claimsMountedBy(pod, cs.Name)) == 0 {
+		return ""
+	}
 	return readOnlyEvidenceLine(rc.readPreviousLog(pod.Namespace, pod.Name, cs.Name))
+}
+
+// claimsMountedBy lists the persistent volume claims one container mounts.
+//
+// Scoped to the container rather than the pod, because a pod can run a database
+// mounting a volume beside a sidecar mounting none. A sidecar dying on its own
+// read-only config path would otherwise raise a critical alert naming the
+// database's healthy volume and sending the operator to the wrong place.
+func claimsMountedBy(pod *corev1.Pod, container string) []string {
+	claimForVolume := map[string]string{}
+	for _, v := range pod.Spec.Volumes {
+		// A claim the pod asked for read-only did not remount; it was mounted
+		// that way, and recreating the pod would reproduce it.
+		if v.PersistentVolumeClaim != nil && !v.PersistentVolumeClaim.ReadOnly {
+			claimForVolume[v.Name] = v.PersistentVolumeClaim.ClaimName
+		}
+	}
+
+	var claims []string
+	for _, c := range append(pod.Spec.Containers, pod.Spec.InitContainers...) {
+		if c.Name != container {
+			continue
+		}
+		for _, m := range c.VolumeMounts {
+			if m.ReadOnly {
+				continue
+			}
+			if claim, ok := claimForVolume[m.Name]; ok {
+				claims = append(claims, claim)
+			}
+		}
+	}
+	return claims
 }
 
 // readOnlyVolumeAlert is the alert for a volume that went read-only underneath a
@@ -122,8 +164,12 @@ func (rc *ResourceController) readOnlyVolumeEvidence(pod *corev1.Pod, cs *corev1
 // escalating: the filesystem does not come back on its own, so waiting six
 // hours to say so only delays the recovery. It carries the log line it found,
 // because an operator should see the evidence rather than trust a matcher.
-func (rc *ResourceController) readOnlyVolumeAlert(key string, pod *corev1.Pod, next episode, now time.Time, nowStr, evidence string) alertBatch {
-	reason := "the filesystem this container writes to has remounted read-only, which a container restart cannot clear: " + evidence
+func (rc *ResourceController) readOnlyVolumeAlert(key string, pod *corev1.Pod, next episode, now time.Time, nowStr, containerName, evidence string) alertBatch {
+	// Stated as the evidence it is. The log line is what the container wrote;
+	// that a volume remounted is the reading of it, and an operator seeing both
+	// can judge for themselves.
+	reason := fmt.Sprintf("container %q wrote this before it died: %s. That points at %s having remounted read-only, which a container restart cannot clear because the mount belongs to the pod",
+		containerName, evidence, describeClaims(claimsMountedBy(pod, containerName)))
 	if cmd := recoveryCommand(pod.Labels); cmd != "" {
 		reason += ". Recover with: " + cmd
 	}
@@ -139,5 +185,20 @@ func (rc *ResourceController) readOnlyVolumeAlert(key string, pod *corev1.Pod, n
 		},
 		marks: []pendingMark{{dst: rc.crashLoopAlerted, key: key, at: now}},
 		apply: []func(){func() { rc.crashLoopEpisode[key] = next }},
+	}
+}
+
+// describeClaims names the volumes a pod mounts, so an operator knows what to go
+// and look at. A pod usually mounts one; a pod mounting several gets all of
+// them, because narrowing to the right one needs the mount path and the log line
+// rarely gives it.
+func describeClaims(claims []string) string {
+	switch len(claims) {
+	case 0:
+		return "its volume"
+	case 1:
+		return "volume " + claims[0]
+	default:
+		return "one of its volumes (" + strings.Join(claims, ", ") + ")"
 	}
 }
