@@ -120,7 +120,7 @@ func (rc *ResourceController) readOnlyVolumeEvidence(obs workloadObservation) (s
 		if line == "" {
 			continue
 		}
-		if claim := blamedClaim(f.pod, f.status.Name, obs.kind, line); claim != "" {
+		if b := blameFor(f.pod, f.status.Name, obs.kind, line); b.alert {
 			return line, f.pod
 		}
 	}
@@ -172,61 +172,115 @@ func mountsOf(pod *corev1.Pod, container string, kind containerKind) []container
 	return mounts
 }
 
-// blamedClaim names the persistent volume a read-only message is about, or ""
-// when it cannot be pinned on one.
+// blame is what can be established about a read-only message, which is usually
+// less than it looks.
+type blame struct {
+	// alert is whether this is worth raising at all.
+	alert bool
+	// certain is whether the message could be placed on one volume. When it is
+	// false the alert says what the container mounts and leaves the attribution
+	// open, because naming a healthy volume sends an operator to the wrong
+	// place and prescribes a recreation that changes nothing.
+	certain bool
+	// claim is the volume the message was placed on, set only when certain.
+	claim string
+	// candidates are the writable volumes the container mounts, for the
+	// uncertain case.
+	candidates []string
+}
+
+// blameFor works out what a read-only message can be pinned on.
 //
-// The phrase on its own does not mean a persistent volume remounted. A container
-// with a read-only root filesystem, or writing to a ConfigMap or Secret mount,
-// logs the same errno text for a configuration reason, and recreating that pod
-// reproduces the mount rather than clearing it.
-//
-// Where the message names a path, the mount it falls under decides. Where it
-// names none, which is what the incident's own line did, the container's mounts
-// decide: if everything it can write to is a persistent volume, a filesystem
-// that stopped accepting writes is one of them.
-func blamedClaim(pod *corev1.Pod, container string, kind containerKind, evidence string) string {
+// The line says a filesystem stopped accepting writes; it does not say which.
+// The container has several: its persistent volumes, whatever it mounts from a
+// ConfigMap or Secret, and its own image, which lives on the node's disk and can
+// go read-only too. Where the message names a path that lands on a writable
+// volume, that settles it. Where it names a path that lands anywhere else, this
+// is a configuration error and recreating the pod would reproduce it. Where it
+// names nothing placeable, the alert still goes out, because the container does
+// write to persistent volumes and a pod recreation is the remedy, but it says
+// what it mounts rather than choosing one.
+func blameFor(pod *corev1.Pod, container string, kind containerKind, evidence string) blame {
 	mounts := mountsOf(pod, container, kind)
 
-	if path := firstAbsolutePath(evidence); path != "" {
+	var writable []string
+	for _, m := range mounts {
+		if !m.readOnly && m.claim != "" {
+			writable = append(writable, m.claim)
+		}
+	}
+	if len(writable) == 0 {
+		// Nothing here a pod recreation would fix.
+		return blame{}
+	}
+	sort.Strings(writable)
+
+	// Every path, not the first. A command with two of them is the common
+	// shape — mv, cp, tar — and the source is often on the image's own
+	// filesystem while the destination is the volume that refused the write.
+	var placed bool
+	for _, path := range absolutePaths(evidence) {
 		for _, m := range mounts {
 			if !underMount(path, m.path) {
 				continue
 			}
-			if m.readOnly || m.claim == "" {
-				// Mounted read-only on request, or not a volume at all.
-				return ""
+			placed = true
+			if !m.readOnly && m.claim != "" {
+				return blame{alert: true, certain: true, claim: m.claim, candidates: writable}
 			}
-			return m.claim
+			break
 		}
-		// Under nothing this container mounts: its image's own filesystem.
-		return ""
+	}
+	if placed {
+		// Every path this line names lands on something mounted read-only by
+		// request, or on something that is not a volume at all.
+		return blame{}
 	}
 
-	var only string
-	for _, m := range mounts {
-		if m.readOnly {
-			continue
-		}
-		if m.claim == "" {
-			// It can write somewhere that is not a volume, so a message naming
-			// no path cannot be pinned on one.
-			return ""
-		}
-		only = m.claim
+	// Nothing placeable. A container whose root filesystem is read-only by
+	// configuration produces this message for ordinary reasons, and none of them
+	// is a broken volume.
+	if rootIsReadOnly(pod, container, kind) {
+		return blame{}
 	}
-	return only
+	return blame{alert: true, candidates: writable}
 }
 
-// firstAbsolutePath picks the first absolute path out of a log line, trimming
-// the punctuation a message tends to wrap it in.
-func firstAbsolutePath(line string) string {
+// rootIsReadOnly reports whether the container asked for a read-only root.
+func rootIsReadOnly(pod *corev1.Pod, container string, kind containerKind) bool {
+	containers := pod.Spec.Containers
+	if kind == initContainer {
+		containers = pod.Spec.InitContainers
+	}
+	for _, c := range containers {
+		if c.Name != container {
+			continue
+		}
+		return c.SecurityContext != nil &&
+			c.SecurityContext.ReadOnlyRootFilesystem != nil &&
+			*c.SecurityContext.ReadOnlyRootFilesystem
+	}
+	return false
+}
+
+// absolutePaths pulls every absolute path out of a log line.
+//
+// A path can arrive glued to a prefix with no space, which is how Java and Node
+// print one, so each field is searched from its first slash rather than only
+// tested at its start.
+func absolutePaths(line string) []string {
+	var paths []string
 	for _, field := range strings.Fields(line) {
-		trimmed := strings.Trim(field, "\"'`:,;()[]{}<>")
-		if strings.HasPrefix(trimmed, "/") && len(trimmed) > 1 {
-			return trimmed
+		slash := strings.Index(field, "/")
+		if slash < 0 {
+			continue
+		}
+		path := strings.Trim(field[slash:], "\"'`:,;()[]{}<>")
+		if len(path) > 1 && strings.HasPrefix(path, "/") {
+			paths = append(paths, path)
 		}
 	}
-	return ""
+	return paths
 }
 
 // underMount reports whether a path is inside a mount, matching whole segments
@@ -248,10 +302,10 @@ func underMount(path, mount string) bool {
 // because an operator should see the evidence rather than trust a matcher.
 func (rc *ResourceController) readOnlyVolumeAlert(key string, pod *corev1.Pod, next episode, now time.Time, nowStr, containerName string, kind containerKind, evidence string) alertBatch {
 	// Stated as the evidence it is. The log line is what the container wrote;
-	// that a volume remounted is the reading of it, and an operator seeing both
-	// can judge for themselves.
-	reason := fmt.Sprintf("container %q wrote this before it died: %s. That points at %s having remounted read-only, which a container restart cannot clear because the mount belongs to the pod",
-		containerName, evidence, describeClaims(blamedClaim(pod, containerName, kind, evidence)))
+	// what it means is the reading of it, and an operator seeing both can judge
+	// for themselves.
+	reason := fmt.Sprintf("container %q wrote this before it died: %s. %s, which a container restart cannot clear because the mount belongs to the pod",
+		containerName, evidence, describeBlame(blameFor(pod, containerName, kind, evidence)))
 	if cmd := recoveryCommand(pod.Labels); cmd != "" {
 		reason += ". Recover with: " + cmd
 	}
@@ -270,10 +324,19 @@ func (rc *ResourceController) readOnlyVolumeAlert(key string, pod *corev1.Pod, n
 	}
 }
 
-// describeClaims names the volume, so an operator knows what to go and look at.
-func describeClaims(claim string) string {
-	if claim == "" {
-		return "its volume"
+// describeBlame says what was established, and no more. A message that could
+// not be placed names the volumes the container mounts rather than choosing one,
+// because the filesystem that stopped accepting writes might equally be the
+// node's own disk under the container's image.
+func describeBlame(b blame) string {
+	switch {
+	case b.certain:
+		return "That points at volume " + b.claim + " having remounted read-only"
+	case len(b.candidates) == 1:
+		return "The container mounts volume " + b.candidates[0] + ". Either that volume or the node's own disk has stopped accepting writes"
+	case len(b.candidates) > 1:
+		return "The container mounts volumes " + strings.Join(b.candidates, " and ") + ". One of those, or the node's own disk, has stopped accepting writes"
+	default:
+		return "A filesystem it writes to has stopped accepting writes"
 	}
-	return "volume " + claim
 }
