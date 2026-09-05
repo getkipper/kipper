@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/getkipper/kipper/kip/internal/alerts"
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/k8s"
@@ -69,11 +70,33 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 
+	reportAlertDelivery(ctx, client)
 	reportCrashLoopingServices(ctx, client)
 
-	checkHostDNSResolvers(cluster)
+	checkHost(cluster)
 
 	return nil
+}
+
+// reportAlertDelivery says how an alert leaves this cluster, and says it loudly
+// when the answer is that it does not.
+//
+// An alert stored in the console bell and nowhere else is only seen by somebody
+// who was already looking. The incident behind this fired hourly for three and a
+// half days into a bell nobody had open.
+func reportAlertDelivery(ctx context.Context, client *k8s.Client) {
+	fmt.Printf("  Alerts:\n")
+
+	switch alerts.RouteFor(ctx, client.Clientset()) {
+	case alerts.Slack:
+		fmt.Printf("    ✔  delivered to Slack\n\n")
+	case alerts.Email:
+		fmt.Printf("    ✔  emailed to the cluster admins\n\n")
+	default:
+		fmt.Printf("    ⚠  not leaving this cluster\n")
+		fmt.Printf("       Alerts are stored in the console bell and delivered nowhere. Add a\n")
+		fmt.Printf("       Slack webhook or SMTP server under Settings in the console.\n\n")
+	}
 }
 
 // reportCrashLoopingServices names every service on the cluster whose container
@@ -97,21 +120,13 @@ func reportCrashLoopingServices(ctx context.Context, client *k8s.Client) {
 	fmt.Println()
 }
 
-// checkHostDNSResolvers reads the curated resolv.conf from the host and
-// audits it against the resolver set the cluster was configured with: an
-// unsafe hand-edit, a divergence from the configured set, and an
-// unreachable resolver each get their own warning. The file lives on the
-// host, outside the K8s API, so this is the one place status reaches for
-// SSH. Best-effort: no SSH key, an unreachable host, or a missing file
-// must not fail status — but each prints a "not checked" line, because a
-// silently absent section would read as "audited and fine". BatchMode
-// keeps the dial from ever blocking on a passphrase prompt.
-func checkHostDNSResolvers(cluster *config.Cluster) {
+// checkHost runs the checks that live on the host rather than in the API, over
+// one SSH connection. Reaching for SSH at all is the exception here, so the two
+// checks that need it share the dial.
+func checkHost(cluster *config.Cluster) {
 	if cluster.Host == "" {
 		return
 	}
-
-	fmt.Printf("  DNS resolvers:\n")
 
 	explicit, fallback := resolveSSHKey("", cluster)
 	client, err := ssh.Dial(ssh.Config{
@@ -122,10 +137,62 @@ func checkHostDNSResolvers(cluster *config.Cluster) {
 		Options:         []string{"BatchMode=yes"},
 	})
 	if err != nil {
+		fmt.Printf("  DNS resolvers:\n")
 		fmt.Printf("    ⚠  not checked (could not reach the host over SSH: %v)\n\n", err)
+		fmt.Printf("  Pending restarts:\n")
+		fmt.Printf("    ⚠  not checked (could not reach the host over SSH)\n\n")
 		return
 	}
 	defer func() { _ = client.Close() }()
+
+	checkHostDNSResolvers(cluster, client)
+	reportPendingRestarts(client)
+}
+
+// reportPendingRestarts says what the host still owes.
+//
+// Kipper tells needrestart to leave the storage path alone, because restarting
+// iscsid fails every Longhorn volume on the node. That trades an availability
+// risk for a security one: the patched library stays unloaded until something
+// restarts the daemon. Reporting it here is what keeps the deferral from
+// becoming drift nobody remembers agreeing to.
+func reportPendingRestarts(client *ssh.Client) {
+	fmt.Printf("  Pending restarts:\n")
+
+	pending, err := installer.PendingRestarts(client)
+	if err != nil {
+		fmt.Printf("    ⚠  not checked (%v)\n\n", err)
+		return
+	}
+	if !pending.Any() {
+		fmt.Printf("    ✔  nothing waiting on a restart\n\n")
+		return
+	}
+
+	if len(pending.Deferred) > 0 {
+		fmt.Printf("    ⚠  deferred by Kipper: %s\n", strings.Join(pending.Deferred, ", "))
+		fmt.Printf("       Patched libraries stay unloaded until these restart. Restarting them\n")
+		fmt.Printf("       drops every Longhorn volume on this node, so reboot the node during a\n")
+		fmt.Printf("       window you choose rather than restarting the units directly.\n")
+	}
+	if len(pending.Other) > 0 {
+		fmt.Printf("    ⚠  waiting on a restart: %s\n", strings.Join(pending.Other, ", "))
+	}
+	if pending.KernelOutdated {
+		fmt.Printf("    ⚠  the installed kernel is not the running one; the node needs a reboot\n")
+	}
+	fmt.Println()
+}
+
+// checkHostDNSResolvers audits the curated resolv.conf against the resolver set
+// the cluster was configured with: an unsafe hand-edit, a divergence from the
+// configured set, and an unreachable resolver each get their own warning.
+//
+// Best-effort: a missing file must not fail status, but it prints a "not
+// checked" line, because a silently absent section would read as "audited and
+// fine".
+func checkHostDNSResolvers(cluster *config.Cluster, client *ssh.Client) {
+	fmt.Printf("  DNS resolvers:\n")
 
 	body, err := client.Run("cat " + installer.ResolvConfPath())
 	if err != nil {
