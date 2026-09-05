@@ -1,11 +1,15 @@
 package controller
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 // A Postgres service crash-looped for three and a half days behind a read-only
@@ -185,19 +189,39 @@ func TestPruneAlertState_KeepsALiveEpisodeOlderThanTheTTL(t *testing.T) {
 func TestEpisodeCrashCounting(t *testing.T) {
 	tests := []struct {
 		name     string
-		episode  int32
-		observed int32
+		baseline map[string]int32
+		observed map[string]int32
 		want     bool
 	}{
-		{"same instance, no new crash", 72, 72, true},
-		{"crashed again", 72, 73, false},
-		{"pod recreated, so the count restarts from zero", 72, 0, true},
-		{"a fresh episode with no crashes yet", 0, 0, true},
+		{
+			name:     "same pod, no new crash",
+			baseline: map[string]int32{"db-0": 72},
+			observed: map[string]int32{"db-0": 72},
+			want:     true,
+		},
+		{
+			name:     "crashed again",
+			baseline: map[string]int32{"db-0": 72},
+			observed: map[string]int32{"db-0": 73},
+			want:     false,
+		},
+		{
+			name:     "pod recreated under the same name, so its count restarts from zero",
+			baseline: map[string]int32{"db-0": 72},
+			observed: map[string]int32{"db-0": 0},
+			want:     true,
+		},
+		{
+			name:     "a fresh episode with no crashes yet",
+			baseline: nil,
+			observed: map[string]int32{"db-0": 0},
+			want:     true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ep := episode{restarts: tc.episode}
+			ep := episode{restartsByPod: tc.baseline}
 			assert.Equal(t, tc.want, ep.stillClean(tc.observed))
 		})
 	}
@@ -206,12 +230,12 @@ func TestEpisodeCrashCounting(t *testing.T) {
 // After a recreation the episode has to take the new count as its baseline, or
 // a container that crashes once post-recovery still reads as clean.
 func TestEpisodeRebaselinesAfterARecreation(t *testing.T) {
-	ep := episode{firstSeen: at(0), escalatedAt: at(6), restarts: 72}
+	ep := episode{firstSeen: at(0), escalatedAt: at(6), restartsByPod: map[string]int32{"db-0": 72}}
 
-	ep.observeClean(at(10), 0)
+	ep.observeClean(at(10), map[string]int32{"db-0": 0}, 0)
 	assert.EqualValues(t, 0, ep.restarts, "the replacement pod's count is the new baseline")
 
-	assert.False(t, ep.stillClean(1), "a crash after the recovery is a crash again")
+	assert.False(t, ep.stillClean(map[string]int32{"db-0": 1}), "a crash after the recovery is a crash again")
 }
 
 // Every Waiting state means the container is not running clean, so every one of
@@ -295,4 +319,124 @@ func TestRecoveryCommandMatchesTheWorkload(t *testing.T) {
 // inventing one would send the operator somewhere wrong.
 func TestRecoveryCommandSaysNothingWhenItCannotName(t *testing.T) {
 	assert.Empty(t, recoveryCommand(map[string]string{"kipper.run/service-type": "postgres"}))
+}
+
+// An episode has to survive the recovery it prescribes. A StatefulSet recreates
+// its pod under the same name, but a Deployment does not: `kip app restart api`
+// replaces api-6d8f with api-7b9c, and an episode keyed by pod name would never
+// see the healthy replacement. The critical alert would be followed by silence
+// rather than an all-clear, and the old episode would age out unnoticed.
+//
+// The key is the workload, which both kinds carry as their app label.
+func TestEpisodeKeyIsStableAcrossAReplacement(t *testing.T) {
+	before := episodeKey("shop-prod", "api-6d8f4c", "api", "app", mainContainer)
+	after := episodeKey("shop-prod", "api-7b9c1a", "api", "app", mainContainer)
+
+	assert.Equal(t, before, after,
+		"a Deployment's replacement pod has a new name; the episode must still be the same episode")
+}
+
+// Two workloads must not share an episode, or one recovering would announce the
+// other's all-clear.
+func TestEpisodeKeySeparatesWorkloads(t *testing.T) {
+	assert.NotEqual(t,
+		episodeKey("shop-prod", "api-1", "api", "app", mainContainer),
+		episodeKey("shop-prod", "web-1", "web", "app", mainContainer))
+	assert.NotEqual(t,
+		episodeKey("shop-prod", "api-1", "api", "app", mainContainer),
+		episodeKey("shop-test", "api-1", "api", "app", mainContainer),
+		"the same workload in two environments is two episodes")
+	assert.NotEqual(t,
+		episodeKey("shop-prod", "api-1", "api", "app", mainContainer),
+		episodeKey("shop-prod", "api-1", "api", "sidecar", mainContainer),
+		"two containers in one pod fail independently")
+}
+
+// A pod with no app label has no workload identity to key on, so it falls back
+// to its own name. Two such pods must not collide.
+func TestEpisodeKeyFallsBackToThePodName(t *testing.T) {
+	assert.NotEqual(t,
+		episodeKey("shop-prod", "loose-pod-1", "", "app", mainContainer),
+		episodeKey("shop-prod", "loose-pod-2", "", "app", mainContainer))
+}
+
+// An episode belongs to a workload, and a Deployment has several pods. A
+// replica running clean beside one that is still crash-looping must not start
+// the ten-minute recovery run, or the workload announces an all-clear while it
+// is still failing.
+//
+// This runs through the real scan rather than the pieces, because the bug it
+// covers is in how the two passes see each other.
+func TestOneHealthyReplicaDoesNotRecoverAWorkloadStillFailing(t *testing.T) {
+	failing := crashLoopingReplica("shop-prod", "api", "api-failing")
+	healthy := healthyReplica("shop-prod", "api", "api-healthy")
+	rc := NewResourceController(fake.NewClientset(failing, healthy), nil)
+	rc.readPreviousLog = func(string, string, string) string { return "" }
+
+	key := episodeKey("shop-prod", "api-failing", "api", "app", mainContainer)
+	rc.crashLoopEpisode[key] = episode{
+		firstSeen:   time.Now().Add(-7 * time.Hour),
+		escalatedAt: time.Now().Add(-time.Hour),
+	}
+	// Inside the hourly floor, which is where the scan spends fifty-nine ticks
+	// out of sixty. The failing replica raises no alert on this tick, so nothing
+	// it does can overwrite what the healthy one wrote.
+	rc.crashLoopAlerted[key] = time.Now()
+
+	rc.commitBatches(rc.checkPodProblems(context.Background()))
+
+	ep, tracked := rc.crashLoopEpisode[key]
+	require.True(t, tracked, "the episode closed while a replica was still crash-looping")
+	assert.True(t, ep.readySince.IsZero(),
+		"a recovery run started while a replica of the same workload is failing")
+}
+
+// Once every replica is healthy the recovery run does start, or a workload that
+// really has recovered would never close.
+func TestEveryReplicaHealthyStartsTheRecoveryRun(t *testing.T) {
+	rc := NewResourceController(fake.NewClientset(
+		healthyReplica("shop-prod", "api", "api-1"),
+		healthyReplica("shop-prod", "api", "api-2"),
+	), nil)
+
+	key := episodeKey("shop-prod", "api-1", "api", "app", mainContainer)
+	rc.crashLoopEpisode[key] = episode{
+		firstSeen:   time.Now().Add(-7 * time.Hour),
+		escalatedAt: time.Now().Add(-time.Hour),
+	}
+
+	rc.commitBatches(rc.checkPodProblems(context.Background()))
+
+	ep := rc.crashLoopEpisode[key]
+	assert.False(t, ep.readySince.IsZero(), "every replica is clean, so the recovery run has begun")
+}
+
+func crashLoopingReplica(namespace, app, name string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels:    map[string]string{"app": app, "app.kubernetes.io/managed-by": "kipper"},
+		},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+			Name:         "app",
+			RestartCount: 20,
+			State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+		}}},
+	}
+}
+
+func healthyReplica(namespace, app, name string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels:    map[string]string{"app": app, "app.kubernetes.io/managed-by": "kipper"},
+		},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+			Name:  "app",
+			Ready: true,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}},
+	}
 }

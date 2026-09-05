@@ -101,7 +101,7 @@ func TestCrashLoopAlertNamesAReadOnlyVolume(t *testing.T) {
 	}
 
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
-	batch, ok := rc.crashLoopAlert("shop-test/db-0/postgres", &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 
 	assert.True(t, ok)
 	assert.Equal(t, "VolumeReadOnly", batch.entry.Action,
@@ -122,7 +122,7 @@ func TestCrashLoopAlertWithoutReadOnlyEvidence(t *testing.T) {
 	}
 
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
-	batch, ok := rc.crashLoopAlert("shop-test/db-0/postgres", &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 
 	assert.True(t, ok)
 	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action)
@@ -135,7 +135,7 @@ func TestCrashLoopAlertWhenTheLogCannotBeRead(t *testing.T) {
 	rc.readPreviousLog = func(string, string, string) string { return "" }
 
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
-	batch, ok := rc.crashLoopAlert("shop-test/db-0/postgres", &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 
 	assert.True(t, ok)
 	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action)
@@ -192,7 +192,7 @@ func TestReadOnlyAlertEscalatesTheEpisode(t *testing.T) {
 
 	key := "shop-test/db-0/postgres"
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
-	batch, ok := rc.crashLoopAlert(key, &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 	require.True(t, ok)
 
 	rc.commitBatches([]alertBatch{batch})
@@ -231,7 +231,7 @@ func TestReadOnlyAlertNeedsAPersistentVolume(t *testing.T) {
 		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}},
 	}}
 
-	batch, ok := rc.crashLoopAlert("shop-test/web-0/nginx", &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 
 	require.True(t, ok)
 	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action,
@@ -246,7 +246,7 @@ func TestReadOnlyAlertFiresForAPodWithAClaim(t *testing.T) {
 
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
 
-	batch, ok := rc.crashLoopAlert("shop-test/db-0/postgres", &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 
 	require.True(t, ok)
 	assert.Equal(t, "VolumeReadOnly", batch.entry.Action)
@@ -270,7 +270,7 @@ func TestReadOnlyAlertNeedsTheFailingContainerToMountTheClaim(t *testing.T) {
 		{Name: "metrics"},
 	}
 
-	batch, ok := rc.crashLoopAlert("shop-test/db/metrics", &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-06T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-06T00:00:00Z")
 
 	require.True(t, ok)
 	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action,
@@ -295,7 +295,7 @@ func TestReadOnlyAlertNamesOnlyTheClaimsTheFailingContainerMounts(t *testing.T) 
 		{Name: "backup-agent", VolumeMounts: []corev1.VolumeMount{{Name: "backups", MountPath: "/backups"}}},
 	}
 
-	batch, ok := rc.crashLoopAlert("shop-test/db/postgres", &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-06T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-06T00:00:00Z")
 
 	require.True(t, ok)
 	assert.Equal(t, "VolumeReadOnly", batch.entry.Action)
@@ -334,12 +334,108 @@ func TestReadOnlyAlertIgnoresAVolumeMountedReadOnlyOnPurpose(t *testing.T) {
 			pod := crashLoopingPodFor("shop-test", "db", "postgres")
 			tc.pod(pod)
 
-			batch, ok := rc.crashLoopAlert("shop-test/db/postgres", &pod.Status.ContainerStatuses[0], pod,
-				pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-06T00:00:00Z")
+			batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-06T00:00:00Z")
 
 			require.True(t, ok)
 			assert.Equal(t, "CrashLoopBackOff", batch.entry.Action,
 				"that volume was mounted read-only on request, so nothing remounted")
 		})
 	}
+}
+
+// soleObservation reduces one pod the way the scan does, so a test can drive the
+// alert path with the same value the controller builds.
+func soleObservation(pod *corev1.Pod) workloadObservation {
+	obs := observeWorkloads([]corev1.Pod{*pod})
+	if len(obs) != 1 {
+		panic("test pod must have exactly one container status")
+	}
+	return obs[0]
+}
+
+// A container can mount a healthy PVC and also write to something that is
+// read-only on purpose: its own root filesystem, a ConfigMap, a Secret. Writing
+// to the wrong one produces the same errno text, and blaming the PVC sends the
+// operator to a volume that is fine and prescribes a recreation that reproduces
+// the problem.
+//
+// Where the log names a path, that decides it.
+func TestReadOnlyEvidenceFollowsThePathTheLogNames(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{
+				{Name: "data", VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data-db-0"}}},
+				{Name: "config", VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{}}},
+			},
+			Containers: []corev1.Container{{
+				Name: "postgres",
+				VolumeMounts: []corev1.VolumeMount{
+					{Name: "data", MountPath: "/var/lib/postgresql"},
+					{Name: "config", MountPath: "/etc/postgresql", ReadOnly: true},
+				},
+			}},
+		},
+	}
+
+	tests := []struct {
+		name  string
+		line  string
+		blame string
+	}{
+		{
+			name:  "the path is under the volume",
+			line:  `could not write /var/lib/postgresql/data/pg_wal/000001: Read-only file system`,
+			blame: "data-db-0",
+		},
+		{
+			name:  "the path is under the config mount, which is read-only on purpose",
+			line:  "cannot write /etc/postgresql/postgresql.conf: read-only file system",
+			blame: "",
+		},
+		{
+			name:  "the path is somewhere else entirely, so it is not the volume",
+			line:  "cannot write /tmp/scratch: read-only file system",
+			blame: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.blame, blamedClaim(pod, "postgres", mainContainer, tc.line))
+		})
+	}
+}
+
+// The line from the incident names a lock file and no path at all, which is the
+// case this whole feature exists for. With nothing to correlate, the container's
+// mounts decide: every writable mount it has is a persistent volume, so a
+// read-only filesystem underneath it is one of them.
+func TestReadOnlyEvidenceWithNoPathInTheLine(t *testing.T) {
+	incident := `FATAL:  could not remove old lock file "postmaster.pid": Read-only file system`
+
+	onlyAVolume := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data-db-0"}}}},
+			Containers: []corev1.Container{{
+				Name:         "postgres",
+				VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/var/lib/postgresql"}},
+			}},
+		},
+	}
+	assert.Equal(t, "data-db-0", blamedClaim(onlyAVolume, "postgres", mainContainer, incident),
+		"the only writable mount it has is the volume")
+
+	alsoWritesElsewhere := onlyAVolume.DeepCopy()
+	alsoWritesElsewhere.Spec.Volumes = append(alsoWritesElsewhere.Spec.Volumes, corev1.Volume{
+		Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+	alsoWritesElsewhere.Spec.Containers[0].VolumeMounts = append(
+		alsoWritesElsewhere.Spec.Containers[0].VolumeMounts,
+		corev1.VolumeMount{Name: "scratch", MountPath: "/scratch"})
+
+	assert.Empty(t, blamedClaim(alsoWritesElsewhere, "postgres", mainContainer, incident),
+		"it writes somewhere that is not a volume, so an unplaced message cannot be pinned on one")
 }
