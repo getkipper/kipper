@@ -593,7 +593,7 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 			ServiceName: svc.Name,
 			Selector:    &metav1.LabelSelector{MatchLabels: map[string]string{"app": svc.Name}},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: restartStamp(svc)},
 				Spec: corev1.PodSpec{
 					InitContainers: initContainers,
 					Containers:     []corev1.Container{container},
@@ -651,6 +651,18 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 			existing.Spec.Template.Spec.Containers[0].Resources,
 			cpuPinned, memPinned,
 		)
+	}
+	// The restart stamp has to reach a StatefulSet that already exists, which is
+	// the only case that matters: a service is restarted because it is running
+	// badly, never because it is new. Merged rather than assigned, so an
+	// annotation somebody else put on the template survives the reconcile.
+	if stamp := restartStamp(svc); stamp != nil {
+		if existing.Spec.Template.Annotations == nil {
+			existing.Spec.Template.Annotations = map[string]string{}
+		}
+		for k, v := range stamp {
+			existing.Spec.Template.Annotations[k] = v
+		}
 	}
 	existing.Spec.Template.Spec.Containers = desired.Spec.Template.Spec.Containers
 	existing.Labels = desired.Labels
@@ -1715,4 +1727,21 @@ func (e *credentialsMissingError) Error() string {
 	}
 	return fmt.Sprintf("service %s has data in %s and %s, and a new one would not be what that data was written under; restore %s from a backup, or delete the service together with its volume and create it again to start empty",
 		e.Service, e.Claim, lost, e.Secret)
+}
+
+// restartStamp carries kipper.run/restartedAt from the Service CR onto the pod
+// template, which is what makes the StatefulSet roll and so recreates the pod.
+//
+// Recreating the pod is the point rather than a side effect. A container
+// restart leaves the volume mounted as it was, so a filesystem that remounted
+// read-only underneath the workload stays read-only however many times the
+// container dies; only a new pod makes kubelet detach and re-attach it.
+//
+// Returns nil rather than an empty map when the service has never been
+// restarted, so an untouched StatefulSet carries no annotation at all.
+func restartStamp(svc *kipperv1.Service) map[string]string {
+	if stamp, ok := svc.Annotations["kipper.run/restartedAt"]; ok && stamp != "" {
+		return map[string]string{"kipper.run/restartedAt": stamp}
+	}
+	return nil
 }
