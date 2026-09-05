@@ -357,6 +357,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 	}}
 
 	slackHandler := &handlers.Slack{Client: clientset, Security: securityNotifier}
+	alertDeliveryHandler := &handlers.AlertDelivery{Client: clientset}
 	smtpHandler := &handlers.SMTP{Client: clientset, Security: securityNotifier}
 	podsHandler := &handlers.Pods{Client: clientset}
 	filesHandler := &handlers.Files{Client: clientset, Config: restConfig}
@@ -860,6 +861,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 			r.Get("/settings/ai/bundle-status", aiBundleStatusHandler.Get)
 			r.Get("/settings/slack", slackHandler.Get)
 			r.Put("/settings/slack", slackHandler.Update)
+			r.Get("/settings/alert-delivery", alertDeliveryHandler.Get)
 			r.Get("/settings/smtp", smtpHandler.Get)
 			r.Put("/settings/smtp", smtpHandler.Update)
 			r.Post("/settings/smtp/test", smtpHandler.Test)

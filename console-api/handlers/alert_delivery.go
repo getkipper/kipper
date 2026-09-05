@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 )
@@ -141,3 +143,28 @@ var adminRecipients = func() []string { return nil }
 // SetAdminRecipients wires the role store in, so an alert with no Slack webhook
 // can reach the people who would otherwise only find it in the bell.
 func SetAdminRecipients(f func() []string) { adminRecipients = f }
+
+// AlertDelivery answers where this cluster's alerts go, so the console can say
+// when the answer is nowhere.
+type AlertDelivery struct {
+	Client kubernetes.Interface
+}
+
+type alertDeliveryResponse struct {
+	Route        string `json:"route"`
+	GoingNowhere bool   `json:"going_nowhere"`
+}
+
+// Get reports the configured route. It names the channel and never the
+// credential, so an operator who cannot read the webhook secret can still be
+// told whether one exists.
+func (a *AlertDelivery) Get(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	route := RouteFor(ctx, a.Client)
+	respondJSON(w, http.StatusOK, alertDeliveryResponse{
+		Route:        string(route),
+		GoingNowhere: route == DeliveryNowhere,
+	})
+}
