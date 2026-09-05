@@ -220,3 +220,48 @@ func PendingRestarts(runner commandRunner) (RestartsPending, error) {
 	}
 	return pending, nil
 }
+
+// ReadOnlyVolumeMounts names the persistent volumes mounted read-only on a host.
+//
+// This is confirmation, not detection. It sees one node's mount namespace, so a
+// cluster with workers has mounts it cannot reach, and the caller has to say
+// which node it asked. The controller's log-based detector is the signal that
+// covers every node.
+func ReadOnlyVolumeMounts(runner commandRunner) ([]string, error) {
+	out, err := runner.Run("cat /proc/mounts")
+	if err != nil {
+		return nil, fmt.Errorf("reading mounts: %w", err)
+	}
+
+	var readOnly []string
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		mountPoint, options := fields[1], fields[3]
+		// A read-only root, a squashfs snap, an EFI partition: normal on a
+		// healthy host, and reporting them would bury the one mount that means
+		// a database has stopped being able to write.
+		if !strings.Contains(mountPoint, "kubernetes.io~csi") {
+			continue
+		}
+		if !mountedReadOnly(options) {
+			continue
+		}
+		readOnly = append(readOnly, mountPoint)
+	}
+	return readOnly, nil
+}
+
+// mountedReadOnly reads the option list, matching "ro" as a whole option. A
+// prefix match would call "rootcontext=" read-only, and a substring match would
+// do the same for "errors=remount-ro" on a perfectly writable filesystem.
+func mountedReadOnly(options string) bool {
+	for _, opt := range strings.Split(options, ",") {
+		if opt == "ro" {
+			return true
+		}
+	}
+	return false
+}

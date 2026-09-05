@@ -73,7 +73,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	reportAlertDelivery(ctx, client)
 	reportCrashLoopingServices(ctx, client)
 
-	checkHost(cluster)
+	checkHost(cluster, nodes)
 
 	return nil
 }
@@ -123,7 +123,7 @@ func reportCrashLoopingServices(ctx context.Context, client *k8s.Client) {
 // checkHost runs the checks that live on the host rather than in the API, over
 // one SSH connection. Reaching for SSH at all is the exception here, so the two
 // checks that need it share the dial.
-func checkHost(cluster *config.Cluster) {
+func checkHost(cluster *config.Cluster, nodes []k8s.NodeInfo) {
 	if cluster.Host == "" {
 		return
 	}
@@ -147,6 +147,55 @@ func checkHost(cluster *config.Cluster) {
 
 	checkHostDNSResolvers(cluster, client)
 	reportPendingRestarts(client)
+	reportReadOnlyVolumes(cluster, client, nodes)
+}
+
+// reportReadOnlyVolumes checks the mounts on the one node this command can
+// reach, and names every node it could not.
+//
+// The connection goes to the cluster host, so on a multi-node cluster this sees
+// the control plane's mount namespace and nothing else. Reporting "no read-only
+// volumes" from that would be a worse answer than reporting nothing: the
+// controller's log-based detector is what covers the other nodes.
+func reportReadOnlyVolumes(cluster *config.Cluster, client *ssh.Client, nodes []k8s.NodeInfo) {
+	fmt.Printf("  Volume mounts:\n")
+
+	readOnly, err := installer.ReadOnlyVolumeMounts(client)
+	if err != nil {
+		fmt.Printf("    ⚠  not checked (could not read the mounts on %s: %v)\n\n", cluster.Host, err)
+		return
+	}
+
+	if len(readOnly) == 0 {
+		fmt.Printf("    ✔  no read-only volumes on %s\n", cluster.Host)
+	} else {
+		for _, mount := range readOnly {
+			fmt.Printf("    ✗  mounted read-only: %s\n", mount)
+		}
+		fmt.Printf("       Whatever writes to it has stopped being able to. Recreate the pod\n")
+		fmt.Printf("       with 'kip service restart <name>'; restarting the container cannot\n")
+		fmt.Printf("       clear a mount.\n")
+	}
+
+	// A node this command never looked at must not be covered by the line above.
+	var unchecked []string
+	for _, node := range nodes {
+		if !nodeIsHost(node, cluster.Host) {
+			unchecked = append(unchecked, node.Name)
+		}
+	}
+	if len(unchecked) > 0 {
+		fmt.Printf("    ⚠  not checked on %s (this command reads mounts on %s only)\n",
+			strings.Join(unchecked, ", "), cluster.Host)
+	}
+	fmt.Println()
+}
+
+// nodeIsHost reports whether a node is the one the status command connected to.
+// Its name and the configured host are often the same string and sometimes an
+// address against a hostname, so both are compared.
+func nodeIsHost(node k8s.NodeInfo, host string) bool {
+	return node.Name == host || node.IP == host
 }
 
 // reportPendingRestarts says what the host still owes.
