@@ -20,6 +20,7 @@ import { useToast } from '@/composables/useToast'
 import { getAISettings, updateAISettings } from '@/api/ai-settings'
 import { getMode, updateMode, getResourceLog, type ResourceLogEntry } from '@/api/mode'
 import { getSlackSettings, updateSlackSettings } from '@/api/slack'
+import { getAlertDelivery } from '@/api/alertDelivery'
 import { getSmtpSettings, updateSmtpSettings, testSmtpSettings } from '@/api/smtp'
 import client from '@/api/client'
 
@@ -67,6 +68,19 @@ async function loadResourceLog() {
 
 const recentLog = computed(() => resourceLog.value.slice(-10).reverse())
 
+// Whether alerts have any way out of the cluster. Shown next to the Slack
+// panel because that is where an operator fixes it.
+const alertsGoNowhere = ref(false)
+
+async function loadAlertDelivery() {
+  try {
+    alertsGoNowhere.value = (await getAlertDelivery()).going_nowhere
+  } catch {
+    // A failed check must not claim the cluster is silent when it may not be.
+    alertsGoNowhere.value = false
+  }
+}
+
 // Slack settings
 const slackWebhookUrl = ref('')
 const slackSaving = ref(false)
@@ -89,6 +103,7 @@ async function handleSlackSave() {
     slackWebhookUrl.value = resp.webhook_url
     showSlackUrl.value = false
     toast.success('Slack webhook saved')
+    loadAlertDelivery()
   } catch {
     toast.error('Failed to save Slack webhook')
   } finally {
@@ -148,6 +163,7 @@ async function handleSmtpSave() {
     smtpPassword.value = resp.password
     showSmtpPassword.value = false
     toast.success('SMTP settings saved')
+    loadAlertDelivery()
   } catch {
     toast.error('Failed to save SMTP settings')
   } finally {
@@ -440,6 +456,7 @@ onMounted(async () => {
   loadResourceLog()
   loadSlackSettings()
   loadSmtpSettings()
+  loadAlertDelivery()
 })
 </script>
 
@@ -630,8 +647,19 @@ onMounted(async () => {
           <Bell class="h-5 w-5 text-kipper-500" :stroke-width="1.75" />
           <div>
             <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-50">Slack Notifications</h2>
-            <p class="text-xs text-slate-500 dark:text-slate-400">Receive alerts in Slack when the auto mode controller adjusts resources, detects OOM kills, or recovers stuck pods</p>
+            <p class="text-xs text-slate-500 dark:text-slate-400">Where alerts go when something breaks: a crash-looping service, an OOM kill, a stuck pod, a resource change made for you</p>
           </div>
+        </div>
+
+        <div
+          v-if="alertsGoNowhere"
+          class="border-b border-amber-200 bg-amber-50 px-6 py-4 dark:border-amber-900/50 dark:bg-amber-950/30"
+        >
+          <p class="text-sm font-medium text-amber-900 dark:text-amber-200">Alerts are not leaving this cluster</p>
+          <p class="mt-1 text-xs text-amber-800 dark:text-amber-300">
+            They are recorded in the bell above and nowhere else, so nobody is told when a service starts failing.
+            Add a Slack webhook below, or configure SMTP under Email, and Kipper will use whichever is set.
+          </p>
         </div>
 
         <div class="space-y-5 p-6">
