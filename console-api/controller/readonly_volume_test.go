@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -100,7 +101,7 @@ func TestCrashLoopAlertNamesAReadOnlyVolume(t *testing.T) {
 	}
 
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
-	batch, ok := rc.crashLoopAlert("shop-test/db-0/postgres", &pod.Status.ContainerStatuses[0], pod, at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert("shop-test/db-0/postgres", &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-05T00:00:00Z")
 
 	assert.True(t, ok)
 	assert.Equal(t, "VolumeReadOnly", batch.entry.Action,
@@ -121,7 +122,7 @@ func TestCrashLoopAlertWithoutReadOnlyEvidence(t *testing.T) {
 	}
 
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
-	batch, ok := rc.crashLoopAlert("shop-test/db-0/postgres", &pod.Status.ContainerStatuses[0], pod, at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert("shop-test/db-0/postgres", &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-05T00:00:00Z")
 
 	assert.True(t, ok)
 	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action)
@@ -134,7 +135,7 @@ func TestCrashLoopAlertWhenTheLogCannotBeRead(t *testing.T) {
 	rc.readPreviousLog = func(string, string, string) string { return "" }
 
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
-	batch, ok := rc.crashLoopAlert("shop-test/db-0/postgres", &pod.Status.ContainerStatuses[0], pod, at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert("shop-test/db-0/postgres", &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-05T00:00:00Z")
 
 	assert.True(t, ok)
 	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action)
@@ -150,6 +151,20 @@ func crashLoopingPodFor(namespace, service, container string) *corev1.Pod {
 				"kipper.run/service-type": "postgres",
 			},
 		},
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{{
+				Name: "data",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "data-" + service + "-0",
+					},
+				},
+			}},
+			Containers: []corev1.Container{{
+				Name:         container,
+				VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/var/lib/data"}},
+			}},
+		},
 		Status: corev1.PodStatus{
 			ContainerStatuses: []corev1.ContainerStatus{{
 				Name:         container,
@@ -162,5 +177,169 @@ func crashLoopingPodFor(namespace, service, container string) *corev1.Pod {
 				},
 			}},
 		},
+	}
+}
+
+// A read-only volume alert is critical from the first sighting, and the episode
+// has to agree. Leaving it at warning stage means the critical repeats hourly
+// instead of daily, and an operator who recreates the pod within six hours gets
+// no all-clear for an alert that woke them.
+func TestReadOnlyAlertEscalatesTheEpisode(t *testing.T) {
+	rc := NewResourceController(nil, nil)
+	rc.readPreviousLog = func(string, string, string) string {
+		return `FATAL:  could not remove old lock file "postmaster.pid": Read-only file system`
+	}
+
+	key := "shop-test/db-0/postgres"
+	pod := crashLoopingPodFor("shop-test", "db", "postgres")
+	batch, ok := rc.crashLoopAlert(key, &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-05T00:00:00Z")
+	require.True(t, ok)
+
+	rc.commitBatches([]alertBatch{batch})
+
+	ep := rc.crashLoopEpisode[key]
+	assert.False(t, ep.escalatedAt.IsZero(),
+		"a critical alert has to leave the episode escalated, or it repeats on the warning cadence")
+	assert.True(t, ep.deservesAllClear(),
+		"somebody was told this was critical; they are owed the news it is over")
+
+	// And the cadence that follows is the daily one, not the hourly one.
+	_, due := ep.stageAt(at(2))
+	assert.False(t, due, "two hours after a critical, there is nothing new to say")
+	stage, due := ep.stageAt(at(25))
+	assert.True(t, due)
+	assert.Equal(t, stageCritical, stage)
+}
+
+// The phrase alone does not mean a persistent volume remounted. A pod with a
+// read-only root filesystem, a ConfigMap mount, or a Secret mount can log the
+// same errno text for a configuration reason, and recreating that pod would
+// reproduce the same intentionally read-only mount.
+//
+// So the alert is scoped to pods that actually have a persistent volume: the
+// only workloads where the diagnosis can be true and where the recovery does
+// anything.
+func TestReadOnlyAlertNeedsAPersistentVolume(t *testing.T) {
+	rc := NewResourceController(nil, nil)
+	rc.readPreviousLog = func(string, string, string) string {
+		return "config error: cannot write /etc/app/settings: read-only file system"
+	}
+
+	pod := crashLoopingPodFor("blog-prod", "web", "nginx")
+	pod.Spec.Volumes = []corev1.Volume{{
+		Name:         "config",
+		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}},
+	}}
+
+	batch, ok := rc.crashLoopAlert("shop-test/web-0/nginx", &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-05T00:00:00Z")
+
+	require.True(t, ok)
+	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action,
+		"a pod with no persistent volume cannot have had one remount read-only")
+}
+
+func TestReadOnlyAlertFiresForAPodWithAClaim(t *testing.T) {
+	rc := NewResourceController(nil, nil)
+	rc.readPreviousLog = func(string, string, string) string {
+		return `FATAL:  could not remove old lock file "postmaster.pid": Read-only file system`
+	}
+
+	pod := crashLoopingPodFor("shop-test", "db", "postgres")
+
+	batch, ok := rc.crashLoopAlert("shop-test/db-0/postgres", &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-05T00:00:00Z")
+
+	require.True(t, ok)
+	assert.Equal(t, "VolumeReadOnly", batch.entry.Action)
+	assert.Contains(t, batch.entry.Reason, "data-db-0",
+		"the alert should name the claim, since that is what an operator goes and looks at")
+}
+
+// The claim has to belong to the container that failed. A pod can run a database
+// mounting a volume alongside a sidecar that mounts none, and a sidecar dying on
+// its own read-only config path would otherwise raise a critical alert naming
+// the database's perfectly healthy volume.
+func TestReadOnlyAlertNeedsTheFailingContainerToMountTheClaim(t *testing.T) {
+	rc := NewResourceController(nil, nil)
+	rc.readPreviousLog = func(string, string, string) string {
+		return "cannot write /etc/sidecar/state: read-only file system"
+	}
+
+	pod := crashLoopingPodFor("shop-test", "db", "metrics")
+	pod.Spec.Containers = []corev1.Container{
+		{Name: "postgres", VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/var/lib/postgresql"}}},
+		{Name: "metrics"},
+	}
+
+	batch, ok := rc.crashLoopAlert("shop-test/db/metrics", &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-06T00:00:00Z")
+
+	require.True(t, ok)
+	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action,
+		"the container that failed mounts no claim, so no volume of its can have remounted")
+}
+
+func TestReadOnlyAlertNamesOnlyTheClaimsTheFailingContainerMounts(t *testing.T) {
+	rc := NewResourceController(nil, nil)
+	rc.readPreviousLog = func(string, string, string) string {
+		return `FATAL:  could not remove old lock file "postmaster.pid": Read-only file system`
+	}
+
+	pod := crashLoopingPodFor("shop-test", "db", "postgres")
+	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+		Name: "backups",
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "backups-db-0"},
+		},
+	})
+	pod.Spec.Containers = []corev1.Container{
+		{Name: "postgres", VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/var/lib/postgresql"}}},
+		{Name: "backup-agent", VolumeMounts: []corev1.VolumeMount{{Name: "backups", MountPath: "/backups"}}},
+	}
+
+	batch, ok := rc.crashLoopAlert("shop-test/db/postgres", &pod.Status.ContainerStatuses[0], pod, pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-06T00:00:00Z")
+
+	require.True(t, ok)
+	assert.Equal(t, "VolumeReadOnly", batch.entry.Action)
+	assert.Contains(t, batch.entry.Reason, "data-db-0")
+	assert.NotContains(t, batch.entry.Reason, "backups-db-0",
+		"the failing container does not mount that claim, so it is not the one to look at")
+}
+
+// A volume the workload asked for read-only did not remount; it was mounted that
+// way. Recreating the pod reproduces it, so the alert would give a wrong
+// diagnosis and a recovery that cannot work.
+func TestReadOnlyAlertIgnoresAVolumeMountedReadOnlyOnPurpose(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pod  func(*corev1.Pod)
+	}{
+		{
+			name: "the mount asks for read-only",
+			pod: func(p *corev1.Pod) {
+				p.Spec.Containers[0].VolumeMounts[0].ReadOnly = true
+			},
+		},
+		{
+			name: "the claim itself is read-only",
+			pod: func(p *corev1.Pod) {
+				p.Spec.Volumes[0].PersistentVolumeClaim.ReadOnly = true
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rc := NewResourceController(nil, nil)
+			rc.readPreviousLog = func(string, string, string) string {
+				return "cannot write /var/lib/data/x: read-only file system"
+			}
+
+			pod := crashLoopingPodFor("shop-test", "db", "postgres")
+			tc.pod(pod)
+
+			batch, ok := rc.crashLoopAlert("shop-test/db/postgres", &pod.Status.ContainerStatuses[0], pod,
+				pod.Status.ContainerStatuses[0].RestartCount, at(0), "2026-09-06T00:00:00Z")
+
+			require.True(t, ok)
+			assert.Equal(t, "CrashLoopBackOff", batch.entry.Action,
+				"that volume was mounted read-only on request, so nothing remounted")
+		})
 	}
 }

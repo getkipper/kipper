@@ -177,7 +177,14 @@ func (rc *ResourceController) crashLoopAlert(key string, cs *corev1.ContainerSta
 	// recreated, and the restarts Kubernetes is already doing cannot clear a
 	// mount.
 	if evidence := rc.readOnlyVolumeEvidence(pod, cs); evidence != "" {
-		return rc.readOnlyVolumeAlert(key, pod, next, now, nowStr, evidence), true
+		// Critical from the first sighting, so the episode is escalated here
+		// rather than at six hours. Left at warning stage the critical would
+		// repeat hourly, and an operator who recreated the pod inside those six
+		// hours would never be told it was over.
+		if next.escalatedAt.IsZero() {
+			next.escalatedAt = now
+		}
+		return rc.readOnlyVolumeAlert(key, pod, next, now, nowStr, cs.Name, evidence), true
 	}
 
 	action := "CrashLoopBackOff"
