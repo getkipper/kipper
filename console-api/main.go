@@ -322,9 +322,26 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 	// wiring; the console hooks route through the admin-editable alert bell,
 	// Slack, and SMTP paths.
 	emailService := &handlers.EmailService{Client: clientset}
+
+	// The addresses an alert falls back to when no Slack webhook is set. One
+	// resolver, shared with the security notifier below, so the two channels
+	// can never disagree about who the admins are.
+	adminAddresses := func() []string {
+		var admins []string
+		for email, role := range roleStore.ListUsers() {
+			if role == middleware.RoleAdmin {
+				admins = append(admins, email)
+			}
+		}
+		return admins
+	}
+	handlers.SetAdminRecipients(adminAddresses)
+
 	securityNotifier := &security.Notifier{Console: security.ConsoleHooks{
+		// Stores only. The Email hook below is this event's delivery, and it
+		// carries the fuller body and the pre-change recipient snapshot.
 		Alert: func(ctx context.Context, kind, reason string) {
-			handlers.AddAlert(ctx, clientset, handlers.Alert{
+			handlers.StoreAlert(ctx, clientset, handlers.Alert{
 				Time:     time.Now().UTC().Format(time.RFC3339),
 				Action:   "security",
 				Severity: "critical",
@@ -336,15 +353,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 		SlackConfigured: func(ctx context.Context) bool {
 			return handlers.SlackConfigured(ctx, clientset)
 		},
-		Admins: func() []string {
-			var admins []string
-			for email, role := range roleStore.ListUsers() {
-				if role == middleware.RoleAdmin {
-					admins = append(admins, email)
-				}
-			}
-			return admins
-		},
+		Admins: adminAddresses,
 	}}
 
 	slackHandler := &handlers.Slack{Client: clientset, Security: securityNotifier}
