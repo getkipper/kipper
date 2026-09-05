@@ -173,40 +173,30 @@ func (rc *ResourceController) tick(ctx context.Context) {
 	// stages its cooldown marks rather than setting them; the marks commit only
 	// once the alert write lands, so a failed write re-fires next tick instead
 	// of being suppressed for the cooldown window.
-	alertEntries, alertMarks := rc.checkPodProblems(ctx)
-	nodeEntries, nodeMarks := rc.checkNodeReady(nodes)
-	alertEntries = append(alertEntries, nodeEntries...)
-	alertMarks = append(alertMarks, nodeMarks...)
-	jobEntries, jobMarks := rc.checkFailedJobs(ctx)
-	alertEntries = append(alertEntries, jobEntries...)
-	alertMarks = append(alertMarks, jobMarks...)
+	batches := rc.checkPodProblems(ctx)
+	batches = append(batches, rc.checkNodeReady(nodes)...)
+	batches = append(batches, rc.checkFailedJobs(ctx)...)
 
 	deployments, deployErr := rc.listManagedDeployments(ctx)
 	if deployErr != nil {
 		log.Printf("resource controller: failed to list deployments: %v", deployErr)
 	} else {
-		rolloutEntries, rolloutMarks := rc.checkStuckRollouts(deployments)
-		alertEntries = append(alertEntries, rolloutEntries...)
-		alertMarks = append(alertMarks, rolloutMarks...)
+		batches = append(batches, rc.checkStuckRollouts(deployments)...)
 	}
 
-	if len(alertEntries) > 0 {
-		// Bound this tick's batch to the same per-write cap the alert store
-		// applies, dropping the oldest overflow so entries and their staged
-		// marks stay aligned. Committing a mark for an alert the store never
-		// wrote would suppress it for its cooldown though the operator never
-		// saw it; the deferred alerts stay eligible on the next tick. Entries
-		// and marks are appended together per problem, so they share an order.
-		if len(alertEntries) > handlers.MaxAlertsPerWrite {
-			drop := len(alertEntries) - handlers.MaxAlertsPerWrite
-			log.Printf("resource controller: %d failure alerts this tick exceeds the per-write cap, deferring the %d oldest", len(alertEntries), drop)
-			alertEntries = alertEntries[drop:]
-			alertMarks = alertMarks[drop:]
+	if len(batches) > 0 {
+		// Bound this tick to the store's per-write cap, dropping the oldest.
+		// A dropped alert must not commit its state changes: it stays eligible
+		// on the next tick, and committing its cooldown would suppress an alert
+		// the operator never saw.
+		kept, dropped := capBatches(batches, handlers.MaxAlertsPerWrite)
+		if dropped > 0 {
+			log.Printf("resource controller: %d failure alerts this tick exceeds the per-write cap, deferring the %d oldest", len(batches), dropped)
 		}
-		if err := rc.createAlerts(ctx, alertEntries); err != nil {
+		if err := rc.createAlerts(ctx, entriesOf(kept)); err != nil {
 			log.Printf("resource controller: failed to persist failure alerts, will retry next tick: %v", err)
 		} else {
-			rc.commitMarks(alertMarks)
+			rc.commitBatches(kept)
 		}
 	}
 
@@ -777,6 +767,59 @@ type pendingMark struct {
 	dst map[string]time.Time
 	key string
 	at  time.Time
+	// del removes the key instead of stamping it, which is how episode state
+	// is forgotten once a service recovers. Deferred for the same reason a
+	// stamp is: if the alert never reaches the store, the state has to survive
+	// so the next tick can try again.
+	del bool
+}
+
+// alertBatch is one problem: the alert it produces, and the state changes that
+// may only be applied once that alert has actually been stored.
+//
+// Entries and marks used to travel as two parallel slices paired by position,
+// which held only while every problem produced exactly one of each. A problem
+// needing two marks, or none, silently misaligned the pair and could commit a
+// mark belonging to an alert the store had dropped, suppressing it for its
+// whole cooldown though nobody ever saw it.
+type alertBatch struct {
+	entry ResourceLogEntry
+	marks []pendingMark
+}
+
+// capBatches bounds a tick to the store's per-write cap, dropping the oldest
+// and returning how many went. Marks leave with the entry they belong to.
+func capBatches(batches []alertBatch, max int) ([]alertBatch, int) {
+	if len(batches) <= max {
+		return batches, 0
+	}
+	drop := len(batches) - max
+	return batches[drop:], drop
+}
+
+// commitBatches applies the state changes of alerts that were stored.
+func (rc *ResourceController) commitBatches(batches []alertBatch) {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	for _, b := range batches {
+		for _, m := range b.marks {
+			if m.del {
+				delete(m.dst, m.key)
+				continue
+			}
+			m.dst[m.key] = m.at
+		}
+	}
+}
+
+// entriesOf pulls the alerts out of a batch for the store, which has no
+// interest in the state changes.
+func entriesOf(batches []alertBatch) []ResourceLogEntry {
+	entries := make([]ResourceLogEntry, 0, len(batches))
+	for _, b := range batches {
+		entries = append(entries, b.entry)
+	}
+	return entries
 }
 
 // commitMarks records staged cooldown marks under the state lock.
@@ -1689,12 +1732,12 @@ func (rc *ResourceController) appendLogEntries(ctx context.Context, newEntries [
 // for a non-OOM reason. OOM crash loops are left to the OOM path, which
 // raises the memory limit. Each pod/container is alerted at most once per
 // hour to avoid alert storms.
-func (rc *ResourceController) checkPodProblems(ctx context.Context) ([]ResourceLogEntry, []pendingMark) {
+func (rc *ResourceController) checkPodProblems(ctx context.Context) []alertBatch {
 	pods, err := rc.client.CoreV1().Pods("").List(ctx, metav1.ListOptions{
 		LabelSelector: labels.KipperManagedSelector,
 	})
 	if err != nil {
-		return nil, nil
+		return nil
 	}
 
 	rc.mu.Lock()
@@ -1703,8 +1746,7 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) ([]ResourceL
 	cooldown := 60 * time.Minute
 	now := time.Now()
 	nowStr := now.UTC().Format(time.RFC3339)
-	var entries []ResourceLogEntry
-	var marks []pendingMark
+	var batches []alertBatch
 
 	for i := range pods.Items {
 		pod := &pods.Items[i]
@@ -1719,13 +1761,15 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) ([]ResourceL
 				if last, seen := rc.imagePullAlerted[key]; seen && now.Sub(last) < cooldown {
 					continue
 				}
-				marks = append(marks, pendingMark{dst: rc.imagePullAlerted, key: key, at: now})
-				entries = append(entries, ResourceLogEntry{
-					Time:      nowStr,
-					App:       pod.Labels["app"],
-					Namespace: pod.Namespace,
-					Action:    "ImagePullBackOff",
-					Reason:    fmt.Sprintf("container %q cannot pull image: registry credentials may be expired", cs.Name),
+				batches = append(batches, alertBatch{
+					entry: ResourceLogEntry{
+						Time:      nowStr,
+						App:       pod.Labels["app"],
+						Namespace: pod.Namespace,
+						Action:    "ImagePullBackOff",
+						Reason:    fmt.Sprintf("container %q cannot pull image: registry credentials may be expired", cs.Name),
+					},
+					marks: []pendingMark{{dst: rc.imagePullAlerted, key: key, at: now}},
 				})
 			case "CrashLoopBackOff":
 				// The OOM path already bumps memory for OOM crash loops;
@@ -1736,35 +1780,36 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) ([]ResourceL
 				if last, seen := rc.crashLoopAlerted[key]; seen && now.Sub(last) < cooldown {
 					continue
 				}
-				marks = append(marks, pendingMark{dst: rc.crashLoopAlerted, key: key, at: now})
 				reason := fmt.Sprintf("container %q is crash-looping", cs.Name)
 				if term := cs.LastTerminationState.Terminated; term != nil {
 					reason += fmt.Sprintf(" (last exit code %d)", term.ExitCode)
 				}
-				entries = append(entries, ResourceLogEntry{
-					Time:      nowStr,
-					App:       pod.Labels["app"],
-					Namespace: pod.Namespace,
-					Action:    "CrashLoopBackOff",
-					Reason:    reason,
+				batches = append(batches, alertBatch{
+					entry: ResourceLogEntry{
+						Time:      nowStr,
+						App:       pod.Labels["app"],
+						Namespace: pod.Namespace,
+						Action:    "CrashLoopBackOff",
+						Reason:    reason,
+					},
+					marks: []pendingMark{pendingMark{dst: rc.crashLoopAlerted, key: key, at: now}},
 				})
 			}
 		}
 	}
 
-	return entries, marks
+	return batches
 }
 
 // checkNodeReady alerts when a node's Ready condition is not True. Each node
 // is alerted at most once per cooldown so a node that stays down does not
 // storm; the marker resets on recovery so the next outage alerts again.
-func (rc *ResourceController) checkNodeReady(nodes []corev1.Node) ([]ResourceLogEntry, []pendingMark) {
+func (rc *ResourceController) checkNodeReady(nodes []corev1.Node) []alertBatch {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 
 	now := time.Now()
-	var entries []ResourceLogEntry
-	var marks []pendingMark
+	var batches []alertBatch
 	for i := range nodes {
 		node := &nodes[i]
 		ready := false
@@ -1781,36 +1826,37 @@ func (rc *ResourceController) checkNodeReady(nodes []corev1.Node) ([]ResourceLog
 		if last, seen := rc.nodeReadyAlerted[node.Name]; seen && now.Sub(last) < nodeAlertCooldown {
 			continue
 		}
-		marks = append(marks, pendingMark{dst: rc.nodeReadyAlerted, key: node.Name, at: now})
-		entries = append(entries, ResourceLogEntry{
-			Time:      now.UTC().Format(time.RFC3339),
-			App:       "cluster",
-			Namespace: "system",
-			Action:    "node NotReady",
-			Reason:    fmt.Sprintf("node %q is not Ready: workloads on it may be disrupted", node.Name),
-			Severity:  "critical",
+		batches = append(batches, alertBatch{
+			entry: ResourceLogEntry{
+				Time:      now.UTC().Format(time.RFC3339),
+				App:       "cluster",
+				Namespace: "system",
+				Action:    "node NotReady",
+				Reason:    fmt.Sprintf("node %q is not Ready: workloads on it may be disrupted", node.Name),
+				Severity:  "critical",
+			},
+			marks: []pendingMark{{dst: rc.nodeReadyAlerted, key: node.Name, at: now}},
 		})
 	}
-	return entries, marks
+	return batches
 }
 
 // checkFailedJobs alerts on Kipper-managed Jobs that ended in failure. This
 // covers app builds, one-off Jobs, and CronJob runs, since all of them are
 // batch Jobs. Each Job is alerted at most once per cooldown.
-func (rc *ResourceController) checkFailedJobs(ctx context.Context) ([]ResourceLogEntry, []pendingMark) {
+func (rc *ResourceController) checkFailedJobs(ctx context.Context) []alertBatch {
 	jobs, err := rc.client.BatchV1().Jobs("").List(ctx, metav1.ListOptions{
 		LabelSelector: labels.KipperManagedSelector,
 	})
 	if err != nil {
-		return nil, nil
+		return nil
 	}
 
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 
 	now := time.Now()
-	var entries []ResourceLogEntry
-	var marks []pendingMark
+	var batches []alertBatch
 	for i := range jobs.Items {
 		job := &jobs.Items[i]
 		failed := false
@@ -1830,30 +1876,31 @@ func (rc *ResourceController) checkFailedJobs(ctx context.Context) ([]ResourceLo
 		if last, seen := rc.jobFailAlerted[key]; seen && now.Sub(last) < jobAlertCooldown {
 			continue
 		}
-		marks = append(marks, pendingMark{dst: rc.jobFailAlerted, key: key, at: now})
-		entries = append(entries, ResourceLogEntry{
-			Time:      now.UTC().Format(time.RFC3339),
-			App:       job.Labels["app"],
-			Namespace: job.Namespace,
-			Action:    "job failed",
-			Reason:    fmt.Sprintf("job %q failed. Check its logs", job.Name),
-			Severity:  "warning",
+		batches = append(batches, alertBatch{
+			entry: ResourceLogEntry{
+				Time:      now.UTC().Format(time.RFC3339),
+				App:       job.Labels["app"],
+				Namespace: job.Namespace,
+				Action:    "job failed",
+				Reason:    fmt.Sprintf("job %q failed. Check its logs", job.Name),
+				Severity:  "warning",
+			},
+			marks: []pendingMark{{dst: rc.jobFailAlerted, key: key, at: now}},
 		})
 	}
-	return entries, marks
+	return batches
 }
 
 // checkStuckRollouts alerts when a Deployment's rollout has stalled
 // (ProgressDeadlineExceeded). The deployment slice is the one already listed
 // for this tick, so no extra API call is made. The marker resets once the
 // rollout recovers.
-func (rc *ResourceController) checkStuckRollouts(deployments []appsv1.Deployment) ([]ResourceLogEntry, []pendingMark) {
+func (rc *ResourceController) checkStuckRollouts(deployments []appsv1.Deployment) []alertBatch {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 
 	now := time.Now()
-	var entries []ResourceLogEntry
-	var marks []pendingMark
+	var batches []alertBatch
 	for i := range deployments {
 		d := &deployments[i]
 		stuck := false
@@ -1871,17 +1918,19 @@ func (rc *ResourceController) checkStuckRollouts(deployments []appsv1.Deployment
 		if last, seen := rc.rolloutAlerted[key]; seen && now.Sub(last) < rolloutAlertCooldown {
 			continue
 		}
-		marks = append(marks, pendingMark{dst: rc.rolloutAlerted, key: key, at: now})
-		entries = append(entries, ResourceLogEntry{
-			Time:      now.UTC().Format(time.RFC3339),
-			App:       d.Labels["app"],
-			Namespace: d.Namespace,
-			Action:    "rollout stuck",
-			Reason:    fmt.Sprintf("deployment %q did not roll out within its progress deadline", d.Name),
-			Severity:  "warning",
+		batches = append(batches, alertBatch{
+			entry: ResourceLogEntry{
+				Time:      now.UTC().Format(time.RFC3339),
+				App:       d.Labels["app"],
+				Namespace: d.Namespace,
+				Action:    "rollout stuck",
+				Reason:    fmt.Sprintf("deployment %q did not roll out within its progress deadline", d.Name),
+				Severity:  "warning",
+			},
+			marks: []pendingMark{{dst: rc.rolloutAlerted, key: key, at: now}},
 		})
 	}
-	return entries, marks
+	return batches
 }
 
 func (rc *ResourceController) createAlerts(ctx context.Context, entries []ResourceLogEntry) error {
@@ -1924,4 +1973,15 @@ func alertSeverity(action string) string {
 	default:
 		return "info"
 	}
+}
+
+// marksOf flattens a batch's state changes. Tests use it to assert what a check
+// would commit; the tick commits through commitBatches instead, which keeps
+// each mark with the alert that earns it.
+func marksOf(batches []alertBatch) []pendingMark {
+	var marks []pendingMark
+	for _, b := range batches {
+		marks = append(marks, b.marks...)
+	}
+	return marks
 }

@@ -25,6 +25,7 @@ func slackSecret(url string) *corev1.Secret {
 
 func smtpSecret(t *testing.T, host string) *corev1.Secret {
 	t.Helper()
+	//nolint:gosec // G117: an SMTP config fixture with no password set; the field is the type's, not a secret.
 	cfg, err := json.Marshal(smtpConfig{Host: host, Port: 587, From: "kipper@example.com"})
 	if err != nil {
 		t.Fatalf("marshalling smtp config: %v", err)
