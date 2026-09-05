@@ -165,13 +165,32 @@ func maskWebhookURL(url string) string {
 	return url[:20] + strings.Repeat("*", len(url)-20)
 }
 
+// slackAlertText renders one alert as Slack message text.
+//
+// The fields that come from the cluster are escaped, because an alert's reason
+// can quote a line a workload wrote: the read-only detector puts the log a
+// container produced before it died into the message. Slack renders
+// <url|text> as a link, so unescaped that is a link the workload chose inside a
+// message the reader trusts as Kipper's.
+//
+// Slack names three characters to escape in message text and no others, which
+// leaves Kipper's own asterisks and underscores doing their formatting job.
+func slackAlertText(alert Alert) string {
+	return fmt.Sprintf("%s *%s* | %s/%s\n%s\n_%s_",
+		severityEmoji(alert.Severity),
+		strings.ToUpper(alert.Severity),
+		escapeSlack(alert.Namespace),
+		escapeSlack(alert.App),
+		escapeSlack(alert.Action),
+		escapeSlack(alert.Reason))
+}
+
+// escapeSlack escapes the three characters Slack reserves in message text.
+var escapeSlack = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace
+
 // SendSlackAlert posts an alert to a Slack webhook.
 func SendSlackAlert(ctx context.Context, webhookURL string, alert Alert) error {
-	emoji := severityEmoji(alert.Severity)
-	text := fmt.Sprintf("%s *%s* | %s/%s\n%s\n_%s_",
-		emoji, strings.ToUpper(alert.Severity), alert.Namespace, alert.App, alert.Action, alert.Reason)
-
-	payload := map[string]string{"text": text}
+	payload := map[string]string{"text": slackAlertText(alert)}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshalling slack payload: %w", err)
