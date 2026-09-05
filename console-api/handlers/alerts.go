@@ -187,6 +187,17 @@ func AddAlert(ctx context.Context, client kubernetes.Interface, alert Alert) {
 	_ = AddAlerts(ctx, client, []Alert{alert})
 }
 
+// StoreAlert writes an alert to the bell and delivers nothing.
+//
+// Security events take this path: the security notifier owns their delivery,
+// with a richer body, a recipient list snapshotted before the change that
+// caused the event, and an env-pinned channel. Sending them again from here
+// would put a second, thinner copy of every security action in every admin's
+// inbox.
+func StoreAlert(ctx context.Context, client kubernetes.Interface, alert Alert) {
+	_ = storeAlerts(ctx, client, []Alert{alert})
+}
+
 // AddAlerts appends alerts to the alerts ConfigMap in one conflict-retried
 // update and delivers them to Slack off the caller's goroutine. Writing the
 // whole batch in a single update avoids a write per alert and keeps the
@@ -195,6 +206,26 @@ func AddAlert(ctx context.Context, client kubernetes.Interface, alert Alert) {
 // tracks alert state (the resource controller's cooldown marks) can hold that
 // state back until the write lands and retry on the next tick.
 func AddAlerts(ctx context.Context, client kubernetes.Interface, alerts []Alert) error {
+	if err := storeAlerts(ctx, client, alerts); err != nil {
+		return err
+	}
+	if len(alerts) == 0 {
+		return nil
+	}
+
+	// Deliver off the controller loop so a slow or failing channel never stalls
+	// the tick, and detach from the caller's context so an in-flight send
+	// survives its cancellation.
+	go func() {
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+		defer cancel()
+		deliveryFor(sctx, client).deliver(sctx, alerts)
+	}()
+	return nil
+}
+
+// storeAlerts appends alerts to the ConfigMap and sends nothing.
+func storeAlerts(ctx context.Context, client kubernetes.Interface, alerts []Alert) error {
 	if len(alerts) == 0 {
 		return nil
 	}
@@ -243,14 +274,6 @@ func AddAlerts(ctx context.Context, client kubernetes.Interface, alerts []Alert)
 		return err
 	}
 
-	// Deliver to Slack off the controller loop so a slow or failing webhook
-	// never stalls the tick, and detach from the caller's context so an
-	// in-flight send survives its cancellation.
-	go func() {
-		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
-		defer cancel()
-		sendSlackBatch(sctx, client, alerts)
-	}()
 	return nil
 }
 
@@ -266,16 +289,4 @@ func capAlerts(alerts []Alert) []Alert {
 		return alerts[len(alerts)-maxAlerts:]
 	}
 	return alerts
-}
-
-func sendSlackBatch(ctx context.Context, client kubernetes.Interface, alerts []Alert) {
-	webhookURL := getSlackWebhookURL(ctx, client)
-	if webhookURL == "" {
-		return
-	}
-	for _, alert := range alerts {
-		if err := SendSlackAlert(ctx, webhookURL, alert); err != nil {
-			log.Printf("alerts: slack send failed for %s/%s: %v", alert.Namespace, alert.App, err)
-		}
-	}
 }
