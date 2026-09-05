@@ -1314,7 +1314,7 @@ func TestCheckImagePullBackOff(t *testing.T) {
 		}
 		rc := NewResourceController(fake.NewClientset(pod), nil)
 
-		entries, _ := rc.checkPodProblems(context.Background())
+		entries := entriesOf(rc.checkPodProblems(context.Background()))
 
 		if len(entries) != 1 {
 			t.Fatalf("expected 1 entry, got %d", len(entries))
@@ -1348,7 +1348,7 @@ func TestCheckImagePullBackOff(t *testing.T) {
 		}
 		rc := NewResourceController(fake.NewClientset(pod), nil)
 
-		entries, _ := rc.checkPodProblems(context.Background())
+		entries := entriesOf(rc.checkPodProblems(context.Background()))
 
 		if len(entries) != 1 {
 			t.Fatalf("expected 1 entry, got %d", len(entries))
@@ -1372,7 +1372,7 @@ func TestCheckImagePullBackOff(t *testing.T) {
 		}
 		rc := NewResourceController(fake.NewClientset(pod), nil)
 
-		entries, _ := rc.checkPodProblems(context.Background())
+		entries := entriesOf(rc.checkPodProblems(context.Background()))
 
 		if len(entries) != 0 {
 			t.Errorf("expected 0 entries for running container, got %d", len(entries))
@@ -1393,7 +1393,7 @@ func TestCheckImagePullBackOff(t *testing.T) {
 		}
 		rc := NewResourceController(fake.NewClientset(pod), nil)
 
-		entries, _ := rc.checkPodProblems(context.Background())
+		entries := entriesOf(rc.checkPodProblems(context.Background()))
 
 		if len(entries) != 0 {
 			t.Errorf("expected 0 entries for ContainerCreating, got %d", len(entries))
@@ -1403,7 +1403,7 @@ func TestCheckImagePullBackOff(t *testing.T) {
 	t.Run("returns empty when no pods exist", func(t *testing.T) {
 		rc := NewResourceController(fake.NewClientset(), nil)
 
-		entries, _ := rc.checkPodProblems(context.Background())
+		entries := entriesOf(rc.checkPodProblems(context.Background()))
 
 		if len(entries) != 0 {
 			t.Errorf("expected 0 entries with no pods, got %d", len(entries))
@@ -1428,14 +1428,15 @@ func TestCheckImagePullBackOff(t *testing.T) {
 		}
 		rc := NewResourceController(fake.NewClientset(pod), nil)
 
-		first, marks := rc.checkPodProblems(context.Background())
+		podBatches := rc.checkPodProblems(context.Background())
+		first, marks := entriesOf(podBatches), marksOf(podBatches)
 		if len(first) != 1 {
 			t.Fatalf("expected 1 entry on first call, got %d", len(first))
 		}
 		rc.commitMarks(marks)
 
 		// Second call immediately after should return nothing (within cooldown)
-		second, _ := rc.checkPodProblems(context.Background())
+		second := entriesOf(rc.checkPodProblems(context.Background()))
 		if len(second) != 0 {
 			t.Errorf("expected 0 entries within cooldown window, got %d", len(second))
 		}
@@ -1463,7 +1464,7 @@ func TestCheckImagePullBackOff(t *testing.T) {
 		}
 		rc := NewResourceController(fake.NewClientset(pod), nil)
 
-		entries, _ := rc.checkPodProblems(context.Background())
+		entries := entriesOf(rc.checkPodProblems(context.Background()))
 
 		if len(entries) != 2 {
 			t.Errorf("expected 1 entry per failing container (2 total), got %d", len(entries))
@@ -1484,7 +1485,7 @@ func TestCheckPodProblemsCrashLoop(t *testing.T) {
 			}}},
 		}
 		rc := NewResourceController(fake.NewClientset(pod), nil)
-		entries, _ := rc.checkPodProblems(context.Background())
+		entries := entriesOf(rc.checkPodProblems(context.Background()))
 		if len(entries) != 1 || entries[0].Action != "CrashLoopBackOff" {
 			t.Fatalf("expected 1 CrashLoopBackOff entry, got %+v", entries)
 		}
@@ -1500,7 +1501,7 @@ func TestCheckPodProblemsCrashLoop(t *testing.T) {
 			}}},
 		}
 		rc := NewResourceController(fake.NewClientset(pod), nil)
-		if entries, _ := rc.checkPodProblems(context.Background()); len(entries) != 0 {
+		if entries := entriesOf(rc.checkPodProblems(context.Background())); len(entries) != 0 {
 			t.Fatalf("expected OOM crash loop to be skipped, got %+v", entries)
 		}
 	})
@@ -1514,12 +1515,13 @@ func TestCheckNodeReady(t *testing.T) {
 	rc := NewResourceController(fake.NewClientset(), nil)
 	nodes := []corev1.Node{notReady}
 
-	entries, marks := rc.checkNodeReady(nodes)
+	batches := rc.checkNodeReady(nodes)
+	entries, marks := entriesOf(batches), marksOf(batches)
 	if len(entries) != 1 || entries[0].Action != "node NotReady" || entries[0].Severity != "critical" {
 		t.Fatalf("expected 1 critical node NotReady entry, got %+v", entries)
 	}
 	rc.commitMarks(marks)
-	if again, _ := rc.checkNodeReady(nodes); len(again) != 0 {
+	if again := entriesOf(rc.checkNodeReady(nodes)); len(again) != 0 {
 		t.Fatalf("expected cooldown to suppress repeat, got %+v", again)
 	}
 }
@@ -1540,12 +1542,13 @@ func TestCheckFailedJobs(t *testing.T) {
 	client := fake.NewClientset(failedJob("uid-1"))
 	rc := NewResourceController(client, nil)
 
-	entries, marks := rc.checkFailedJobs(context.Background())
+	batches := rc.checkFailedJobs(context.Background())
+	entries, marks := entriesOf(batches), marksOf(batches)
 	if len(entries) != 1 || entries[0].Action != "job failed" {
 		t.Fatalf("expected 1 job-failed entry, got %+v", entries)
 	}
 	rc.commitMarks(marks)
-	if again, _ := rc.checkFailedJobs(context.Background()); len(again) != 0 {
+	if again := entriesOf(rc.checkFailedJobs(context.Background())); len(again) != 0 {
 		t.Fatalf("expected cooldown to suppress repeat of the same Job, got %+v", again)
 	}
 
@@ -1557,7 +1560,7 @@ func TestCheckFailedJobs(t *testing.T) {
 	if _, err := client.BatchV1().Jobs("staging").Create(context.Background(), failedJob("uid-2"), metav1.CreateOptions{}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if rerun, _ := rc.checkFailedJobs(context.Background()); len(rerun) != 1 {
+	if rerun := entriesOf(rc.checkFailedJobs(context.Background())); len(rerun) != 1 {
 		t.Fatalf("expected a new failed Job (new UID) to alert, got %+v", rerun)
 	}
 }
@@ -1571,12 +1574,13 @@ func TestCheckStuckRollouts(t *testing.T) {
 	}
 	rc := NewResourceController(nil, nil)
 
-	entries, marks := rc.checkStuckRollouts([]appsv1.Deployment{stuck})
+	batches := rc.checkStuckRollouts([]appsv1.Deployment{stuck})
+	entries, marks := entriesOf(batches), marksOf(batches)
 	if len(entries) != 1 || entries[0].Action != "rollout stuck" {
 		t.Fatalf("expected 1 rollout-stuck entry, got %+v", entries)
 	}
 	rc.commitMarks(marks)
-	if again, _ := rc.checkStuckRollouts([]appsv1.Deployment{stuck}); len(again) != 0 {
+	if again := entriesOf(rc.checkStuckRollouts([]appsv1.Deployment{stuck})); len(again) != 0 {
 		t.Fatalf("expected cooldown to suppress repeat, got %+v", again)
 	}
 }
@@ -1635,15 +1639,16 @@ func TestCheckPodProblemsDefersMarkUntilCommit(t *testing.T) {
 	}
 	rc := NewResourceController(fake.NewClientset(pod), nil)
 
-	first, marks := rc.checkPodProblems(context.Background())
+	podBatches := rc.checkPodProblems(context.Background())
+	first, marks := entriesOf(podBatches), marksOf(podBatches)
 	if len(first) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(first))
 	}
-	if again, _ := rc.checkPodProblems(context.Background()); len(again) != 1 {
+	if again := entriesOf(rc.checkPodProblems(context.Background())); len(again) != 1 {
 		t.Fatalf("an uncommitted mark must not suppress re-alert, got %d", len(again))
 	}
 	rc.commitMarks(marks)
-	if third, _ := rc.checkPodProblems(context.Background()); len(third) != 0 {
+	if third := entriesOf(rc.checkPodProblems(context.Background())); len(third) != 0 {
 		t.Fatalf("a committed mark must suppress within cooldown, got %d", len(third))
 	}
 }

@@ -109,7 +109,7 @@ func TestReconcileStatefulSet_KeepsForeignTemplateAnnotations(t *testing.T) {
 		sts.Spec.Template.Annotations = map[string]string{}
 	}
 	sts.Spec.Template.Annotations["example.com/injected"] = "keep me"
-	sts.ObjectMeta.ResourceVersion = ""
+	sts.ResourceVersion = ""
 	require.NoError(t, r.Update(context.Background(), &sts))
 
 	svc.Annotations = map[string]string{"kipper.run/restartedAt": "2026-09-05T11:00:00Z"}
