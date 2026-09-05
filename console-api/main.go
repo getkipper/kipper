@@ -338,10 +338,11 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 	handlers.SetAdminRecipients(adminAddresses)
 
 	securityNotifier := &security.Notifier{Console: security.ConsoleHooks{
-		// Stores only. The Email hook below is this event's delivery, and it
-		// carries the fuller body and the pre-change recipient snapshot.
+		// The bell and Slack. The Email hook below is this event's mail, and it
+		// carries the fuller body and the pre-change recipient snapshot, so
+		// this path must never send one too.
 		Alert: func(ctx context.Context, kind, reason string) {
-			handlers.StoreAlert(ctx, clientset, handlers.Alert{
+			handlers.StoreSecurityAlert(ctx, clientset, handlers.Alert{
 				Time:     time.Now().UTC().Format(time.RFC3339),
 				Action:   "security",
 				Severity: "critical",
