@@ -88,7 +88,16 @@ func runStatus(cmd *cobra.Command, args []string) error {
 func reportAlertDelivery(ctx context.Context, client *k8s.Client) {
 	fmt.Printf("  Alerts:\n")
 
-	switch alerts.RouteFor(ctx, client.Clientset()) {
+	route, err := alerts.Lookup(ctx, client.Clientset())
+	if err != nil {
+		// Not every operator can read kipper-system. Saying alerts go nowhere
+		// on the strength of a refused read would be a false alarm about the
+		// one thing this section exists to report.
+		fmt.Printf("    ⚠  not checked (%v)\n\n", err)
+		return
+	}
+
+	switch route {
 	case alerts.Slack:
 		fmt.Printf("    ✔  delivered to Slack\n\n")
 	case alerts.Email:

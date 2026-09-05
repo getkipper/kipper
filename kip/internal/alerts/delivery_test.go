@@ -5,10 +5,15 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // The incident ran for three and a half days with an alert firing every hour
@@ -38,15 +43,15 @@ func smtpSecret(t *testing.T, host string) *corev1.Secret {
 func TestRouteFor(t *testing.T) {
 	tests := []struct {
 		name    string
-		objects []runtime
+		objects []secretFixture
 		want    Route
 	}{
-		{"slack carries it", []runtime{slackSecret("https://hooks.example.com/abc")}, Slack},
-		{"email when there is no webhook", []runtime{smtpSecret(t, "smtp.example.com")}, Email},
-		{"slack wins over email", []runtime{slackSecret("https://hooks.example.com/abc"), smtpSecret(t, "smtp.example.com")}, Slack},
+		{"slack carries it", []secretFixture{slackSecret("https://hooks.example.com/abc")}, Slack},
+		{"email when there is no webhook", []secretFixture{smtpSecret(t, "smtp.example.com")}, Email},
+		{"slack wins over email", []secretFixture{slackSecret("https://hooks.example.com/abc"), smtpSecret(t, "smtp.example.com")}, Slack},
 		{"neither, which is what the incident looked like", nil, Nowhere},
-		{"an empty webhook is not a webhook", []runtime{slackSecret(""), smtpSecret(t, "smtp.example.com")}, Email},
-		{"an smtp config with no host is not configured", []runtime{smtpSecret(t, "")}, Nowhere},
+		{"an empty webhook is not a webhook", []secretFixture{slackSecret(""), smtpSecret(t, "smtp.example.com")}, Email},
+		{"an smtp config with no host is not configured", []secretFixture{smtpSecret(t, "")}, Nowhere},
 	}
 
 	for _, tc := range tests {
@@ -63,9 +68,9 @@ func TestRouteFor(t *testing.T) {
 	}
 }
 
-type runtime = *corev1.Secret
+type secretFixture = *corev1.Secret
 
-func toObjects(secrets []runtime) []k8sruntime.Object {
+func toObjects(secrets []secretFixture) []k8sruntime.Object {
 	out := make([]k8sruntime.Object, 0, len(secrets))
 	for _, s := range secrets {
 		out = append(out, s)
@@ -163,4 +168,32 @@ func TestNowhereReasonDistinguishesTheTwoCases(t *testing.T) {
 	if got := NowhereReason(context.Background(), noAdmins); got != NoRecipients {
 		t.Errorf("NowhereReason() = %q, want %q", got, NoRecipients)
 	}
+}
+
+// Not every operator can read kipper-system. A viewer running kip status gets
+// Forbidden on these lookups, and answering "alerts are not leaving this
+// cluster" would be a false alarm about the one thing this is here to report
+// accurately. Not knowing and knowing nothing leaves are different answers.
+func TestRouteForSaysWhenItCannotLook(t *testing.T) {
+	// Only the Slack secret is refused, so swallowing that one error would
+	// produce a confident "nowhere" rather than an honest "cannot tell".
+	client := fake.NewClientset()
+	client.PrependReactor("get", "secrets", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if action.(k8stesting.GetAction).GetName() != "kipper-slack" {
+			return false, nil, nil
+		}
+		return true, nil, apierrors.NewForbidden(
+			schema.GroupResource{Resource: "secrets"}, "kipper-slack", assert.AnError)
+	})
+
+	route, err := Lookup(context.Background(), client)
+	require.Error(t, err, "a refused lookup is not an answer")
+	assert.Equal(t, Unknown, route)
+}
+
+// An absent secret is a real answer: nothing is configured.
+func TestRouteForTreatsAnAbsentSecretAsUnconfigured(t *testing.T) {
+	route, err := Lookup(context.Background(), fake.NewClientset())
+	require.NoError(t, err)
+	assert.Equal(t, Nowhere, route)
 }
