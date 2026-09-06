@@ -31,6 +31,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/getkipper/kipper/console-api/internal/deliver"
+
 	"github.com/getkipper/kipper/console-api/mail"
 )
 
@@ -90,7 +92,7 @@ type Notifier struct {
 	postWebhook func(ctx context.Context, url string, e Event) error
 
 	// perSendTimeout is the budget one recipient gets, defaulting to
-	// defaultPerSendTimeout.
+	// deliver.DefaultBudget.
 	perSendTimeout time.Duration
 
 	// deliveryTimeout is the budget each channel gets, defaulting to
@@ -202,7 +204,7 @@ func (n *Notifier) deliverEnvSMTP(ctx context.Context, id string, e Event) {
 		cfg.From = "kipper-security@" + host
 	}
 	for _, to := range splitRecipients(os.Getenv(envSMTPTo)) {
-		n.perSend(func(ctx context.Context) {
+		n.perSend("env-pinned security email to "+to, func(ctx context.Context) {
 			if err := mail.Send(ctx, cfg, to, "[Kipper security] "+e.Summary, emailBody(id, e)); err != nil {
 				log.Printf("security: env-pinned email to %s failed for event %s: %v", to, id, err)
 			}
@@ -244,7 +246,7 @@ func (n *Notifier) deliverConsoleEmail(ctx context.Context, id string, e Event) 
 	for _, to := range recipients {
 		// A budget per address. The channel's own bounds the channel; one relay
 		// that stalls must not spend the time the next address needs.
-		n.perSend(func(ctx context.Context) {
+		n.perSend("security email to "+to, func(ctx context.Context) {
 			if err := n.Console.Email(ctx, to, "[Kipper security] "+e.Summary, emailBody(id, e)); err != nil {
 				log.Printf("security: console email to %s failed for event %s: %v", to, id, err)
 			}
@@ -370,24 +372,14 @@ func or(replacement, real func(context.Context, string, Event)) func(context.Con
 	return real
 }
 
-// perSend runs one recipient's delivery under a deadline of its own, detached
-// from the channel's.
+// perSend runs one recipient's delivery through the shared primitive.
 //
 // A channel budget cannot also be a per-send budget when the sends are serial:
 // the first address to stall spends it, and every address after it fails its
 // dial against an expired context. So the channel's deadline bounds the channel
-// and each address gets its own from a fresh base. A channel with many
-// recipients can therefore outlive its own budget, which costs nothing: the
-// channels run on separate goroutines and none waits for another.
-func (n *Notifier) perSend(send func(context.Context)) {
-	budget := n.perSendTimeout
-	if budget <= 0 {
-		budget = defaultPerSendTimeout
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
-	defer cancel()
-	send(ctx)
+// and each address gets its own. A channel with many recipients can therefore
+// outlive its own budget, which costs nothing: the channels run on separate
+// goroutines and none waits for another.
+func (n *Notifier) perSend(label string, send func(context.Context)) {
+	deliver.Bounded(context.Background(), n.perSendTimeout, label, send)
 }
-
-// defaultPerSendTimeout is what one recipient gets.
-const defaultPerSendTimeout = 20 * time.Second
