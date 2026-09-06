@@ -28,6 +28,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/getkipper/kipper/console-api/mail"
@@ -79,6 +80,11 @@ type ConsoleHooks struct {
 // only; hooks and the environment add the network channels.
 type Notifier struct {
 	Console ConsoleHooks
+
+	// envSMTP and envWebhook replace the env-pinned channels in tests, which is
+	// how their independence is exercised without a mail server.
+	envSMTP    func(ctx context.Context, id string, e Event)
+	envWebhook func(ctx context.Context, id string, e Event)
 }
 
 // Env-pinned channel configuration. Read per event rather than cached, so a
@@ -91,9 +97,11 @@ const (
 	envSMTPFrom     = "KIPPER_SECURITY_SMTP_FROM"
 	envSMTPTo       = "KIPPER_SECURITY_SMTP_TO"
 	envWebhook      = "KIPPER_SECURITY_WEBHOOK"
-
-	deliveryTimeout = 20 * time.Second
 )
+
+// deliveryTimeout is what each channel gets. A variable so a test can prove the
+// channels are independent without waiting out the real budget.
+var deliveryTimeout = 20 * time.Second
 
 // Emit records the event in the host log and fans it out to every configured
 // channel. The log write is synchronous — it is the audit record — while
@@ -107,10 +115,19 @@ func (n *Notifier) Emit(ctx context.Context, e Event) {
 	// must not be able to cancel the notification fan-out.
 	base := context.WithoutCancel(ctx)
 	go func() {
-		dctx, cancel := context.WithTimeout(base, deliveryTimeout)
-		defer cancel()
-		n.deliverEnvPinned(dctx, id, e)
-		n.deliverConsole(dctx, id, e)
+		// A budget each, and no waiting on each other. These channels exist
+		// because the others can be broken, so a relay that accepts the
+		// connection and then goes quiet, or an API server stalling on the
+		// bell's write, must not be able to spend the time the rest need.
+		var wg sync.WaitGroup
+		for _, deliver := range n.channels() {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				n.withBudget(base, func(ctx context.Context) { deliver(ctx, id, e) })
+			}()
+		}
+		wg.Wait()
 	}()
 }
 
@@ -143,44 +160,57 @@ func envPinnedConfigured() bool {
 		os.Getenv(envWebhook) != ""
 }
 
-func (n *Notifier) deliverEnvPinned(ctx context.Context, id string, e Event) {
-	if host := os.Getenv(envSMTPHost); host != "" {
-		port := 587
-		if p, err := strconv.Atoi(os.Getenv(envSMTPPort)); err == nil && p > 0 {
-			port = p
-		}
-		cfg := mail.Config{
-			Host:     host,
-			Port:     port,
-			Username: os.Getenv(envSMTPUsername),
-			Password: os.Getenv(envSMTPPassword),
-			From:     os.Getenv(envSMTPFrom),
-			TLS:      true,
-		}
-		if cfg.From == "" {
-			cfg.From = "kipper-security@" + host
-		}
-		for _, to := range splitRecipients(os.Getenv(envSMTPTo)) {
-			if err := mail.Send(ctx, cfg, to, "[Kipper security] "+e.Summary, emailBody(id, e)); err != nil {
-				log.Printf("security: env-pinned email to %s failed for event %s: %v", to, id, err)
-			}
-		}
+func (n *Notifier) deliverEnvSMTP(ctx context.Context, id string, e Event) {
+	host := os.Getenv(envSMTPHost)
+	if host == "" {
+		return
 	}
 
-	if url := os.Getenv(envWebhook); url != "" {
-		if err := postWebhook(url, e); err != nil {
-			log.Printf("security: env-pinned webhook failed for event %s: %v", id, err)
+	port := 587
+	if p, err := strconv.Atoi(os.Getenv(envSMTPPort)); err == nil && p > 0 {
+		port = p
+	}
+	cfg := mail.Config{
+		Host:     host,
+		Port:     port,
+		Username: os.Getenv(envSMTPUsername),
+		Password: os.Getenv(envSMTPPassword),
+		From:     os.Getenv(envSMTPFrom),
+		TLS:      true,
+	}
+	if cfg.From == "" {
+		cfg.From = "kipper-security@" + host
+	}
+	for _, to := range splitRecipients(os.Getenv(envSMTPTo)) {
+		if err := mail.Send(ctx, cfg, to, "[Kipper security] "+e.Summary, emailBody(id, e)); err != nil {
+			log.Printf("security: env-pinned email to %s failed for event %s: %v", to, id, err)
 		}
 	}
 }
 
-func (n *Notifier) deliverConsole(ctx context.Context, id string, e Event) {
+func (n *Notifier) deliverEnvWebhook(_ context.Context, id string, e Event) {
+	url := os.Getenv(envWebhook)
+	if url == "" {
+		return
+	}
+	if err := postWebhook(url, e); err != nil {
+		log.Printf("security: env-pinned webhook failed for event %s: %v", id, err)
+	}
+}
+
+func (n *Notifier) deliverBell(ctx context.Context, _ string, e Event) {
 	if n.Console.Alert != nil {
 		n.Console.Alert(ctx, e.Kind, e.Summary)
 	}
+}
+
+func (n *Notifier) deliverConsoleEmail(ctx context.Context, id string, e Event) {
 	if n.Console.Email == nil {
 		return
 	}
+	// The recipients are snapshotted on the event where it carries them, so a
+	// change of admins between the event and its delivery cannot decide who
+	// hears about it.
 	recipients := e.Recipients
 	if len(recipients) == 0 && n.Console.Admins != nil {
 		recipients = n.Console.Admins()
@@ -270,4 +300,30 @@ func eventID() string {
 		return "unknown"
 	}
 	return hex.EncodeToString(b)
+}
+
+// withBudget runs one delivery channel under its own deadline.
+func (n *Notifier) withBudget(base context.Context, deliver func(context.Context)) {
+	ctx, cancel := context.WithTimeout(base, deliveryTimeout)
+	defer cancel()
+	deliver(ctx)
+}
+
+// channels lists every delivery this notifier has, each of which runs on its own
+// budget and none of which waits for another.
+func (n *Notifier) channels() []func(context.Context, string, Event) {
+	return []func(context.Context, string, Event){
+		or(n.envSMTP, n.deliverEnvSMTP),
+		or(n.envWebhook, n.deliverEnvWebhook),
+		n.deliverBell,
+		n.deliverConsoleEmail,
+	}
+}
+
+// or picks a test's replacement where there is one.
+func or(replacement, real func(context.Context, string, Event)) func(context.Context, string, Event) {
+	if replacement != nil {
+		return replacement
+	}
+	return real
 }
