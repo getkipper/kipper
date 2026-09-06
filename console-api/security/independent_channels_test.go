@@ -160,3 +160,43 @@ func TestTheEnvWebhookObservesItsBudget(t *testing.T) {
 		t.Fatal("the webhook was never called")
 	}
 }
+
+// A channel's budget bounds the channel; it cannot also bound each send inside
+// it. Two recipients sharing one deadline means the first relay that stalls
+// spends it, and the second address fails its dial instantly — which is the
+// starvation the channel split was supposed to remove, one level down, on the
+// deliveries that matter most.
+func TestEachSecurityRecipientGetsItsOwnBudget(t *testing.T) {
+	seen := make(chan time.Duration, 4)
+
+	n := &Notifier{
+		deliveryTimeout: testBudget,
+		perSendTimeout:  testBudget,
+		envSMTP:         func(context.Context, string, Event) {},
+		envWebhook:      func(context.Context, string, Event) {},
+		Console: ConsoleHooks{
+			Admins: func() []string { return []string{"first@example.com", "second@example.com"} },
+			Email: func(ctx context.Context, to, _, _ string) error {
+				if to == "first@example.com" {
+					<-ctx.Done()
+					return ctx.Err()
+				}
+				seen <- budgetLeft(ctx)
+				return nil
+			},
+		},
+	}
+
+	n.Emit(context.Background(), Event{Kind: "test", Summary: "a security event"})
+
+	// Both addresses are tried, and whichever is second still has time. The map
+	// the admins come from has no stable order, so this waits for the one that
+	// was not the stalled address.
+	select {
+	case left := <-seen:
+		assert.Greater(t, left, testBudget/2,
+			"the second recipient was handed a budget the first had spent")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second recipient was never reached")
+	}
+}
