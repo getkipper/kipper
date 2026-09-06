@@ -8,6 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 // A log line says a filesystem stopped accepting writes. It does not say which,
@@ -283,4 +285,70 @@ func TestTheReadOnlyDiagnosisIsNotRepeatedEveryTick(t *testing.T) {
 
 	_, again := rc.crashLoopAlert(context.Background(), rc.evidenceBudget(), obs.key, obs, at(8).Add(time.Minute), "t2")
 	assert.False(t, again, "the same disk failure a minute later is not new")
+}
+
+// The budget bounds one tick's log reading, and the scan walks a stable order,
+// so workloads at the front spent it and a read-only workload further down was
+// never reached. Its comment claimed the diagnosis was delayed rather than lost;
+// with nothing carried between ticks, it was lost.
+//
+// This drives the real scan, because the carrying-over is part of it.
+func TestABudgetedOutWorkloadIsReadOnALaterTick(t *testing.T) {
+	restore := evidenceBudgetPerTick
+	evidenceBudgetPerTick = 60 * time.Millisecond
+	defer func() { evidenceBudgetPerTick = restore }()
+
+	var pods []runtime.Object
+	for _, name := range []string{"aaa", "bbb", "zzz"} {
+		pods = append(pods, volumeBackedCrashLoop("shop-test", name))
+	}
+
+	rc := NewResourceController(fake.NewClientset(pods...), nil)
+	var read []string
+	rc.readPreviousLog = func(_ context.Context, _, pod, _ string) string {
+		read = append(read, pod)
+		time.Sleep(50 * time.Millisecond)
+		return ""
+	}
+
+	rc.checkPodProblems(context.Background())
+	require.NotEmpty(t, read, "the first tick read something")
+	firstTick := append([]string(nil), read...)
+	require.Less(t, len(firstTick), 3, "the budget has to run out for this to be testing anything")
+
+	read = nil
+	rc.checkPodProblems(context.Background())
+
+	// Whatever the first tick could not afford is read on the second.
+	for _, name := range []string{"aaa-0", "bbb-0", "zzz-0"} {
+		if !contains(firstTick, name) {
+			assert.Contains(t, read, name,
+				"%s was skipped for budget and must be read on a later tick, or its diagnosis never comes", name)
+		}
+	}
+}
+
+func contains(all []string, want string) bool {
+	for _, s := range all {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// volumeBackedCrashLoop is a service pod whose container mounts a claim and is
+// crash-looping, which is what makes its log worth reading.
+func volumeBackedCrashLoop(namespace, name string) *corev1.Pod {
+	pod := podWith(namespace, name, name+"-0", corev1.ContainerStatus{
+		Name: "postgres", RestartCount: 40, State: crashLooping(),
+	})
+	pod.Spec = corev1.PodSpec{
+		Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data-" + name}}}},
+		Containers: []corev1.Container{{
+			Name: "postgres", VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/var/lib/postgresql"}},
+		}},
+	}
+	return pod
 }

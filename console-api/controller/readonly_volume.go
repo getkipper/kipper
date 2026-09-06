@@ -120,7 +120,7 @@ func (rc *ResourceController) readOnlyVolumeEvidence(ctx context.Context, budget
 			// Nothing here a pod recreation would fix.
 			continue
 		}
-		if !budget.spend() {
+		if !budget.spend(obs.key) {
 			// The tick has read as much as it is allowed to. These workloads
 			// still get their ordinary crash-loop alert, and the next tick
 			// starts with a fresh budget, so the diagnosis is delayed rather
@@ -146,18 +146,44 @@ func (rc *ResourceController) readOnlyVolumeEvidence(ctx context.Context, budget
 var evidenceBudgetPerTick = 10 * time.Second
 
 // evidenceBudget is one tick's allowance for reading logs.
+//
+// It also carries what the last tick could not afford. The scan walks a stable
+// order, so without that the same workloads at the front spend the budget every
+// time and one further down is never read at all — its diagnosis lost rather
+// than delayed, which is what the comment used to claim.
 type evidenceBudget struct {
 	deadline time.Time
+	owed     map[string]bool
+	skipped  map[string]bool
 }
 
-// evidenceBudget starts a fresh allowance.
+// evidenceBudget starts a fresh allowance, owing whatever the last tick skipped.
 func (rc *ResourceController) evidenceBudget() *evidenceBudget {
-	return &evidenceBudget{deadline: time.Now().Add(evidenceBudgetPerTick)}
+	return &evidenceBudget{
+		deadline: time.Now().Add(evidenceBudgetPerTick),
+		owed:     rc.evidenceOwed,
+		skipped:  map[string]bool{},
+	}
 }
 
-// spend reports whether there is time left to read another log.
-func (b *evidenceBudget) spend() bool {
-	return b != nil && time.Now().Before(b.deadline)
+// spend reports whether this workload's log may be read now.
+//
+// A workload the last tick skipped is read even when the budget is gone, so a
+// backlog drains instead of growing. One extra read past the deadline is the
+// price of that, and it is bounded by how many were skipped.
+func (b *evidenceBudget) spend(key string) bool {
+	if b == nil {
+		return false
+	}
+	if b.owed[key] {
+		delete(b.owed, key)
+		return true
+	}
+	if time.Now().Before(b.deadline) {
+		return true
+	}
+	b.skipped[key] = true
+	return false
 }
 
 // writableClaims lists the persistent volumes a container can write to.
