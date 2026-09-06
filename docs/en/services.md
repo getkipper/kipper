@@ -618,7 +618,7 @@ Changing resource limits on a service triggers a pod restart. For databases (Pos
 |---|---|---|
 | Kubernetes resource | Deployment | StatefulSet |
 | Storage | None (stateless) | PersistentVolumeClaim |
-| Restart | Rolling restart, safe | Warns, requires `--force` |
+| Restart | Rolling restart, safe | Pod recreated, volume reattached |
 | Delete | Immediate | Volume kept unless `--delete-data` |
 | Scaling | `kip app scale` | Single replica |
 | External access | Via Ingress (public URL) | Internal only (cluster DNS) |
