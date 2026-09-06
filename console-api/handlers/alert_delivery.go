@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/getkipper/kipper/console-api/internal/deliver"
+
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -75,7 +77,7 @@ type batchDelivery struct {
 	// delivery cannot be made against two different reads of the Secret.
 	webhook string
 	// perSend is what each individual send gets, defaulting to
-	// defaultPerSendTimeout. One address that accepts the connection and then
+	// deliver.DefaultBudget. One address that accepts the connection and then
 	// goes quiet must not spend the time the rest of the batch needs.
 	perSend   time.Duration
 	admins    func() []string
@@ -90,19 +92,13 @@ type batchDelivery struct {
 // next tick. One unreachable address does not stop the others, because during
 // an incident the admin whose mail bounces is rarely the only one on call.
 func (d batchDelivery) deliver(ctx context.Context, alerts []Alert) {
-	// Detached from the caller's own deadline and bounded per send. A shared
-	// one means the first address that hangs spends the whole batch's budget,
-	// and every send after it fails its dial against an expired context, which
-	// is the "one bad address does not stop the others" promise in name only.
-	base := context.WithoutCancel(ctx)
-
 	switch d.route {
 	case DeliverySlack:
 		if d.sendSlack == nil {
 			return
 		}
 		for _, alert := range alerts {
-			d.bounded(base, func(ctx context.Context) {
+			d.bounded(ctx, "slack post for "+alert.Namespace+"/"+alert.App, func(ctx context.Context) {
 				if err := d.sendSlack(ctx, alert); err != nil {
 					log.Printf("alerts: slack send failed for %s/%s: %v", alert.Namespace, alert.App, err)
 				}
@@ -120,7 +116,7 @@ func (d batchDelivery) deliver(ctx context.Context, alerts []Alert) {
 		for _, alert := range alerts {
 			subject, body := alertEmail(alert)
 			for _, to := range recipients {
-				d.bounded(base, func(ctx context.Context) {
+				d.bounded(ctx, "alert email to "+to, func(ctx context.Context) {
 					if err := d.sendEmail(ctx, to, subject, body); err != nil {
 						log.Printf("alerts: email to %s failed for %s/%s: %v", to, alert.Namespace, alert.App, err)
 					}
@@ -132,18 +128,10 @@ func (d batchDelivery) deliver(ctx context.Context, alerts []Alert) {
 	}
 }
 
-// defaultPerSendTimeout is what one send gets when nothing says otherwise.
-const defaultPerSendTimeout = 20 * time.Second
-
-// bounded runs one send under its own deadline.
-func (d batchDelivery) bounded(base context.Context, send func(context.Context)) {
-	budget := d.perSend
-	if budget <= 0 {
-		budget = defaultPerSendTimeout
-	}
-	ctx, cancel := context.WithTimeout(base, budget)
-	defer cancel()
-	send(ctx)
+// bounded runs one send through the shared primitive, so the deadline,
+// detachment and panic rules are the ones every other outbound send uses.
+func (d batchDelivery) bounded(parent context.Context, label string, send func(context.Context)) {
+	deliver.Bounded(parent, d.perSend, label, send)
 }
 
 // alertEmail renders one alert. The subject carries the identity so a phone

@@ -200,3 +200,39 @@ func TestEachSecurityRecipientGetsItsOwnBudget(t *testing.T) {
 		t.Fatal("the second recipient was never reached")
 	}
 }
+
+// Containment is per send now, not per channel. A transport that panics on one
+// address used to abort the whole channel and take every later recipient with
+// it; the recipients after it are as entitled to hear about the event as the
+// one that broke.
+func TestAPanickingRecipientDoesNotStopTheNext(t *testing.T) {
+	reached := make(chan string, 4)
+
+	n := &Notifier{
+		deliveryTimeout: testBudget,
+		perSendTimeout:  testBudget,
+		envSMTP:         func(context.Context, string, Event) {},
+		envWebhook:      func(context.Context, string, Event) {},
+		Console: ConsoleHooks{
+			Admins: func() []string { return []string{"first@example.com", "second@example.com"} },
+			Email: func(_ context.Context, to, _, _ string) error {
+				if to == "first@example.com" {
+					panic("the transport exploded")
+				}
+				reached <- to
+				return nil
+			},
+		},
+	}
+
+	assert.NotPanics(t, func() {
+		n.Emit(context.Background(), Event{Kind: "test", Summary: "a security event"})
+	})
+
+	select {
+	case to := <-reached:
+		assert.Equal(t, "second@example.com", to)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a panic on the first address stopped the second")
+	}
+}
