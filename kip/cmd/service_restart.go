@@ -67,9 +67,13 @@ func runServiceRestart(cmd *cobra.Command, args []string) error {
 	// older console-api ignores the annotation entirely: the write succeeds,
 	// nothing happens, and reporting success here would be a false green at the
 	// exact moment somebody is recovering from one.
-	if err := confirmRestart(ctx, k8sClient.Clientset(), namespace, serviceName, stamp, confirmRestartWithin); err != nil {
+	read := statefulSetStamp(k8sClient.Clientset(), namespace, serviceName)
+	if err := confirmRestart(ctx, read, serviceName, stamp, confirmRestartWithin); err != nil {
 		fmt.Printf("  ✗  %v\n\n", err)
-		return fmt.Errorf("%s was not restarted", serviceName)
+		// "could not confirm", not "was not restarted": a read that failed
+		// throughout the window, or a controller that acted a second later,
+		// both land here and the pod may well have rolled.
+		return fmt.Errorf("could not confirm %s was restarted", serviceName)
 	}
 
 	fmt.Printf("  ✔  Restart triggered\n")
@@ -115,43 +119,57 @@ func findServiceNamespace(ctx context.Context, dyn dynamic.Interface, name strin
 // longer to come back and that is not what is being waited for.
 const confirmRestartWithin = 20 * time.Second
 
+// templateStamp reads the restart stamp currently on a workload's pod template.
+type templateStamp func(ctx context.Context) (string, error)
+
+// statefulSetStamp reads it from the StatefulSet behind a service.
+func statefulSetStamp(client kubernetes.Interface, namespace, name string) templateStamp {
+	return func(ctx context.Context) (string, error) {
+		sts, err := client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		return sts.Spec.Template.Annotations["kipper.run/restartedAt"], nil
+	}
+}
+
 // confirmRestart waits for the restart stamp to reach the workload's pod
 // template, which is the thing that actually recreates the pod.
 //
 // A cluster whose console-api predates this feature writes the annotation to
 // the Service CR and does nothing with it, so without this the command reports
 // a recovery that never happened.
-func confirmRestart(ctx context.Context, client kubernetes.Interface, namespace, name, stamp string, within time.Duration) error {
-	deadline := time.Now().Add(within)
-	var lastErr error
+//
+// The deadline is on the context, not only on the loop: an API server that
+// accepts the connection and then stops answering would otherwise hold this
+// open for good, because the loop's own check is never reached.
+func confirmRestart(parent context.Context, read templateStamp, name string, stamp string, within time.Duration) error {
+	ctx, cancel := context.WithTimeout(parent, within)
+	defer cancel()
 
+	var lastErr error
 	for {
-		sts, err := client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		current, err := read(ctx)
 		switch {
 		case err != nil:
 			lastErr = err
-		case sts.Spec.Template.Annotations["kipper.run/restartedAt"] == stamp:
+		case current == stamp:
 			return nil
 		default:
 			lastErr = nil
 		}
 
-		if time.Now().After(deadline) {
-			break
-		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			if lastErr != nil {
+				return fmt.Errorf("could not read the workload behind %s to confirm the restart: %w", name, lastErr)
+			}
+			// What was observed, then the likely cause, and not the other way
+			// round. A controller that is merely behind produces this same
+			// timeout, and telling somebody mid-incident to upgrade a cluster
+			// that is working would be worse advice than none.
+			return fmt.Errorf("the restart did not reach %s within %s. Most often that is a console-api predating 'kip service restart', which 'kip upgrade' fixes. A busy controller looks the same, so check 'kip status' before upgrading", name, within)
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-
-	if lastErr != nil {
-		return fmt.Errorf("could not read the workload behind %s to confirm the restart: %w", name, lastErr)
-	}
-	// What was observed, then the likely cause, and not the other way round. A
-	// controller that is merely behind produces this same timeout, and telling
-	// somebody mid-incident to upgrade a cluster that is working would be worse
-	// advice than none.
-	return fmt.Errorf("the restart did not reach %s within %s. Most often that is a console-api predating 'kip service restart', which 'kip upgrade' fixes. A busy controller looks the same, so check 'kip status' before upgrading", name, within)
 }
