@@ -1,0 +1,35 @@
+#!/bin/sh
+# Scan every commit about to leave this machine for private data, before it
+# lands on the public remote. Enable once per clone with:
+#
+#     git config core.hooksPath scripts/hooks
+#
+# Set PRIVATE_NAME_PATTERN in the environment for the client-name check; the
+# address and domain checks always run. A maintainer can add a review command
+# of their own with `git config kipper.pushReview /path/to/command`; it runs
+# with the same arguments after a clean scan, and a non-zero exit stops the push.
+set -u
+remote="$1"
+zero=0000000000000000000000000000000000000000
+top="$(git rev-parse --show-toplevel)"
+review="$(git config --get kipper.pushReview || true)"
+status=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue
+  if [ "$remote_sha" = "$zero" ]; then
+    set -- --new "$local_sha" --remote "$remote"
+  else
+    set -- --range "$remote_sha..$local_sha"
+  fi
+  python3 "$top/scripts/private-data-scan.py" "$@" || { status=1; continue; }
+  if [ -n "$review" ]; then
+    "$review" "$@" || status=1
+  fi
+done
+
+if [ "$status" -ne 0 ]; then
+  echo ""
+  echo "pre-push: the push was stopped. Fix the findings above, or add a public value to .private-data-allowlist."
+fi
+exit "$status"

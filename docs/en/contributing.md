@@ -137,6 +137,45 @@ Format: `prefix/short-description`
 
 Prefixes: `feature/`, `bugfix/`, `hotfix/`, `refactor/`, `docs/`, `test/`
 
+## Keeping private data out
+
+Kipper is public, so a server address, a client's name or an internal hostname
+in a commit is published the moment it is pushed, and the only way back is a
+history rewrite. A scan runs in CI on every push and pull request, but by then
+the content is already on GitHub. Run the same scan before the push instead by
+enabling the repository's hooks once per clone:
+
+```bash
+git config core.hooksPath scripts/hooks
+```
+
+The pre-push hook runs `scripts/private-data-scan.py` over every commit about
+to leave your machine, including commits that add a value and remove it again
+in a later commit. It fails on:
+
+- a public IPv4 or IPv6 address that is not in `.private-data-allowlist`.
+  Use the documentation ranges instead: `192.0.2.0/24`, `198.51.100.0/24`,
+  `203.0.113.0/24` and `2001:db8::/32`.
+- a hostname whose domain is not in `.private-data-allowlist`. Use
+  `example.com`, `example.org` or a name under the reserved `.example` TLD.
+- a word from `PRIVATE_NAME_PATTERN`, when that variable is set in your
+  environment. Maintainers keep it outside the repository.
+- text read out of a changed image, GIF, video or PDF, when `tesseract` is
+  installed (`ffmpeg` for recordings, `pdftoppm` from Poppler for PDFs). An
+  asset the tools cannot read stops the push; one the tools are missing for is
+  listed as unscanned and needs a look by eye.
+
+A test fixture or a comment that needs a public value on purpose carries
+`private-data-scan:allow` on that line, which exempts the line from the address
+and domain checks and shows the exemption in the diff. Commit messages, author
+identities and path names are scanned as well as file contents. A value that belongs to a public upstream (a registry, a vendor, a
+resolver) goes into `.private-data-allowlist` with a comment; a client's domain
+never does, replace it in the tree instead.
+
+A maintainer can chain a review command of their own after the scan with
+`git config kipper.pushReview /path/to/command`. It receives the same range
+arguments as the scanner, and a non-zero exit stops the push.
+
 ## PR guidelines
 
 - New features require unit tests covering the happy path and at least two error cases

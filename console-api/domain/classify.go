@@ -47,7 +47,7 @@ func AppRoutePrefix(appName, env string) string {
 // this app, derivedHost (= SubdomainFor(AppRoutePrefix(app, env), sourceBase)).
 // An exact, normalised match means the host is the platform subdomain; anything
 // else the user owns. Suffix membership is deliberately not used: when the base
-// domain is the user's own domain, a real custom domain (app.hrportal.eu) is a
+// domain is the user's own domain, a real custom domain (app.hrportal.example) is a
 // suffix of the base yet must be treated as custom.
 func ClassifyHost(host, derivedHost string) DomainClass {
 	switch {

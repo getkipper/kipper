@@ -14,11 +14,6 @@
 [extend]
 useDefault = true
 
-[[rules]]
-id = "gitleaks-allowlist-placeholder"
-description = "placeholder credentials in docs and tests"
-regex = '''$^'''
-
 [allowlist]
 description = "synthetic values in documentation examples and test fixtures"
 regexes = [
