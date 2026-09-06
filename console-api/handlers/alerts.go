@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -217,7 +218,7 @@ func StoreSecurityAlert(ctx context.Context, client kubernetes.Interface, alert 
 		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 		defer cancel()
 
-		d := securityDelivery(sctx, client)
+		d := securityDeliveryFor(sctx, client)
 		if d.route != DeliverySlack {
 			return
 		}
@@ -226,8 +227,27 @@ func StoreSecurityAlert(ctx context.Context, client kubernetes.Interface, alert 
 }
 
 // securityDelivery is deliveryFor, named so a test can supply transports without
-// a webhook or an SMTP server.
-var securityDelivery = deliveryFor
+// a webhook or an SMTP server. Guarded for the same reason as the admin
+// resolver: the delivery it builds runs after the call that asked for it.
+var (
+	securityDeliveryMu sync.RWMutex
+	securityDelivery   = deliveryFor
+)
+
+// setSecurityDelivery replaces the transport builder. Tests only; production
+// never changes it after startup.
+func setSecurityDelivery(f func(context.Context, kubernetes.Interface) batchDelivery) {
+	securityDeliveryMu.Lock()
+	defer securityDeliveryMu.Unlock()
+	securityDelivery = f
+}
+
+func securityDeliveryFor(ctx context.Context, client kubernetes.Interface) batchDelivery {
+	securityDeliveryMu.RLock()
+	f := securityDelivery
+	securityDeliveryMu.RUnlock()
+	return f(ctx, client)
+}
 
 // AddAlerts appends alerts to the alerts ConfigMap in one conflict-retried
 // update and delivers them to Slack off the caller's goroutine. Writing the

@@ -47,8 +47,8 @@ func smtpSecret(t *testing.T, host string) *corev1.Secret {
 func withAdmin(t *testing.T) {
 	t.Helper()
 	restore := adminRecipients
-	adminRecipients = func() []string { return []string{"ops@example.com"} }
-	t.Cleanup(func() { adminRecipients = restore })
+	SetAdminRecipients(func() []string { return []string{"ops@example.com"} })
+	t.Cleanup(func() { SetAdminRecipients(restore) })
 }
 
 func TestDeliveryRoute(t *testing.T) {
@@ -155,16 +155,16 @@ func newFakeClient(objs ...runtimeObject) kubernetes.Interface {
 // while every alert stops inside the cluster.
 func TestRouteForNeedsSomebodyToEmail(t *testing.T) {
 	restore := adminRecipients
-	defer func() { adminRecipients = restore }()
+	defer func() { SetAdminRecipients(restore) }()
 
 	client := newFakeClient(smtpSecret(t, "smtp.example.com"))
 
-	adminRecipients = func() []string { return nil }
+	SetAdminRecipients(func() []string { return nil })
 	if got := RouteFor(context.Background(), client); got != DeliveryNowhere {
 		t.Errorf("RouteFor() = %q with SMTP configured and no admins, want %q", got, DeliveryNowhere)
 	}
 
-	adminRecipients = func() []string { return []string{"ops@example.com"} }
+	SetAdminRecipients(func() []string { return []string{"ops@example.com"} })
 	if got := RouteFor(context.Background(), client); got != DeliveryEmail {
 		t.Errorf("RouteFor() = %q with an admin to email, want %q", got, DeliveryEmail)
 	}
@@ -174,8 +174,8 @@ func TestRouteForNeedsSomebodyToEmail(t *testing.T) {
 // working webhook off the table.
 func TestRouteForSlackDoesNotNeedAdmins(t *testing.T) {
 	restore := adminRecipients
-	defer func() { adminRecipients = restore }()
-	adminRecipients = func() []string { return nil }
+	defer func() { SetAdminRecipients(restore) }()
+	SetAdminRecipients(func() []string { return nil })
 
 	client := newFakeClient(slackSecret("https://hooks.example.com/abc"))
 	if got := RouteFor(context.Background(), client); got != DeliverySlack {

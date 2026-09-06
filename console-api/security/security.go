@@ -85,6 +85,12 @@ type Notifier struct {
 	// how their independence is exercised without a mail server.
 	envSMTP    func(ctx context.Context, id string, e Event)
 	envWebhook func(ctx context.Context, id string, e Event)
+
+	// deliveryTimeout is the budget each channel gets, defaulting to
+	// defaultDeliveryTimeout. A field rather than a global so a test can
+	// shorten it for its own notifier without writing to something another
+	// test's delivery goroutines are reading.
+	deliveryTimeout time.Duration
 }
 
 // Env-pinned channel configuration. Read per event rather than cached, so a
@@ -99,9 +105,8 @@ const (
 	envWebhook      = "KIPPER_SECURITY_WEBHOOK"
 )
 
-// deliveryTimeout is what each channel gets. A variable so a test can prove the
-// channels are independent without waiting out the real budget.
-var deliveryTimeout = 20 * time.Second
+// defaultDeliveryTimeout is what each channel gets.
+const defaultDeliveryTimeout = 20 * time.Second
 
 // Emit records the event in the host log and fans it out to every configured
 // channel. The log write is synchronous — it is the audit record — while
@@ -304,7 +309,11 @@ func eventID() string {
 
 // withBudget runs one delivery channel under its own deadline.
 func (n *Notifier) withBudget(base context.Context, deliver func(context.Context)) {
-	ctx, cancel := context.WithTimeout(base, deliveryTimeout)
+	budget := n.deliveryTimeout
+	if budget <= 0 {
+		budget = defaultDeliveryTimeout
+	}
+	ctx, cancel := context.WithTimeout(base, budget)
 	defer cancel()
 	deliver(ctx)
 }

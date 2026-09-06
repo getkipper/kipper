@@ -84,7 +84,7 @@ func TestAlertDeliveryHandler_RevealsNoCredential(t *testing.T) {
 // has SMTP and simply has nobody to send to.
 func TestAlertDeliveryHandlerSaysWhyAlertsGoNowhere(t *testing.T) {
 	restore := adminRecipients
-	defer func() { adminRecipients = restore }()
+	defer func() { SetAdminRecipients(restore) }()
 
 	tests := []struct {
 		name       string
@@ -114,7 +114,7 @@ func TestAlertDeliveryHandlerSaysWhyAlertsGoNowhere(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			adminRecipients = func() []string { return tc.admins }
+			SetAdminRecipients(func() []string { return tc.admins })
 			h := &AlertDelivery{Client: newFakeClient(tc.objects...)}
 
 			rec := httptest.NewRecorder()
