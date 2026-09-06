@@ -126,7 +126,8 @@ func TestDescribeClaims(t *testing.T) {
 	one := describeClaims([]string{"data-db-0"}, "kip service restart db")
 	assert.Contains(t, one, "volume data-db-0")
 	assert.Contains(t, one, "If that is the one")
-	assert.Contains(t, one, "kip service restart db is how")
+	assert.Contains(t, one, "'kip service restart db' recreates the pod",
+		"the command is named inside the condition, not appended as an imperative")
 	assert.NotContains(t, one, "points at",
 		"nothing here establishes which filesystem failed")
 

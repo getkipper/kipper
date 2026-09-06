@@ -312,22 +312,22 @@ func (rc *ResourceController) readOnlyVolumeAlert(key string, pod *corev1.Pod, n
 
 // describeClaims names the volumes the container writes to, and stops there.
 func describeClaims(claims []string, recovery string) string {
-	// The command is named inside the condition, never after it. Appended as an
-	// imperative it contradicts the sentence it follows: a container with a
-	// writable volume and a read-only ConfigMap that failed on the ConfigMap
-	// produces this same message, and recreating that pod interrupts the
-	// service and brings back the same configuration.
-	act := ""
+	// The command sits inside the condition, never after it as an imperative: a
+	// container with a writable volume and a read-only ConfigMap that failed on
+	// the ConfigMap produces this same message, and recreating that pod
+	// interrupts the service and brings back the same configuration.
+	act := "recreating the pod"
 	if recovery != "" {
-		act = ", and " + recovery + " is how"
+		act = "'" + recovery + "' recreates the pod and"
 	}
 
-	switch len(claims) {
-	case 1:
-		return "It hit a read-only filesystem. The container mounts volume " + claims[0] +
-			". If that is the one, recreating the pod is what clears it, because the mount belongs to the pod and a container restart does not" + act
-	default:
-		return "It hit a read-only filesystem. The container mounts volumes " + strings.Join(claims, " and ") +
-			". If one of those is the one, recreating the pod is what clears it, because the mount belongs to the pod and a container restart does not" + act
+	mounts := "The container mounts volume " + strings.Join(claims, " and ")
+	which := "If that is the one, "
+	if len(claims) > 1 {
+		mounts = "The container mounts volumes " + strings.Join(claims, " and ")
+		which = "If one of those is the one, "
 	}
+
+	return "It hit a read-only filesystem. " + mounts + ". " + which + act +
+		" clears it, which a container restart cannot do because the mount belongs to the pod"
 }
