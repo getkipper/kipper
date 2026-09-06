@@ -211,12 +211,21 @@ func (p RestartsPending) Any() bool {
 // "nothing pending" and "could not check" are different answers and only one of
 // them is reassuring.
 func PendingRestarts(runner commandRunner) (RestartsPending, error) {
-	out, err := runner.Run("command -v needrestart >/dev/null 2>&1 && needrestart -b || echo NEEDRESTART-ABSENT")
+	// The two failures are told apart on the host, because they send an
+	// operator to different places. Answering "not installed" for a host that
+	// has it, because the tool exited non-zero for its own reasons, is a wrong
+	// diagnosis dressed as a definite one.
+	out, err := runner.Run(
+		"if ! command -v needrestart >/dev/null 2>&1; then echo NEEDRESTART-ABSENT; " +
+			"elif ! needrestart -b; then echo NEEDRESTART-FAILED; fi")
 	if err != nil {
 		return RestartsPending{}, fmt.Errorf("reading pending restarts: %w", err)
 	}
 	if strings.Contains(out, "NEEDRESTART-ABSENT") {
 		return RestartsPending{}, fmt.Errorf("needrestart is not installed on this host")
+	}
+	if strings.Contains(out, "NEEDRESTART-FAILED") {
+		return RestartsPending{}, fmt.Errorf("needrestart is installed but exited with an error")
 	}
 
 	deferred := map[string]bool{}
