@@ -236,7 +236,7 @@ func reportReadOnlyVolumes(cluster *config.Cluster, client *ssh.Client, nodes []
 	// A node this command never looked at must not be covered by the line above.
 	var unchecked []string
 	for _, node := range nodes {
-		if !nodeIsHost(node, cluster.Host) {
+		if !nodeIsHost(node, cluster.Host, nodes) {
 			unchecked = append(unchecked, node.Name)
 		}
 	}
@@ -248,10 +248,26 @@ func reportReadOnlyVolumes(cluster *config.Cluster, client *ssh.Client, nodes []
 }
 
 // nodeIsHost reports whether a node is the one the status command connected to.
-// Its name and the configured host are often the same string and sometimes an
-// address against a hostname, so both are compared.
-func nodeIsHost(node k8s.NodeInfo, host string) bool {
-	return node.Name == host || node.IP == host
+//
+// The node name, the node address and the configured host are three things that
+// usually agree and sometimes do not: a cluster configured by DNS name whose
+// node registered under a bare hostname matches neither comparison, and the
+// node whose mounts were just read then appeared under "not checked".
+//
+// A single-node cluster is the host by definition, which covers most of the
+// fleet without guessing.
+func nodeIsHost(node k8s.NodeInfo, host string, all []k8s.NodeInfo) bool {
+	if len(all) == 1 {
+		return true
+	}
+	if node.Name == host || node.IP == host {
+		return true
+	}
+	// A host given as name.domain against a node registered as name.
+	if base, _, found := strings.Cut(host, "."); found && node.Name == base {
+		return true
+	}
+	return false
 }
 
 // reportPendingRestarts says what the host still owes.
