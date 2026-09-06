@@ -88,15 +88,17 @@ func crashLoopsIn(ctx context.Context, client kubernetes.Interface, namespace st
 }
 
 // crashLoopMessage names the container, how many times it has died, why it last
-// died, and the one command that recovers it.
+// died, and what to do next.
 //
-// The recovery is named because it is not the obvious one: restarting the
-// container is what Kubernetes is already doing, and that cannot clear a mount
-// that went read-only underneath the pod. Only recreating the pod does that.
+// It stops short of calling the restart a recovery. A crash loop is usually the
+// image or the configuration, and a recreated pod comes back with both. Where
+// recreation is the answer is a mount that went read-only underneath the pod,
+// because the mount belongs to the pod and no number of container restarts
+// clears it, and that is worth naming because it is not the obvious one.
 func crashLoopMessage(service string, cs corev1.ContainerStatus) string {
 	msg := fmt.Sprintf("container %q has restarted %d times and is not staying up", cs.Name, cs.RestartCount)
 	if term := cs.LastTerminationState.Terminated; term != nil {
 		msg += fmt.Sprintf(" (last exit code %d)", term.ExitCode)
 	}
-	return msg + fmt.Sprintf(". Recover with: kip service restart %s", service)
+	return msg + fmt.Sprintf(". Check its logs. If the cause is storage rather than its image or configuration, 'kip service restart %s' recreates the pod, which is the one thing a container restart cannot do", service)
 }

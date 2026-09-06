@@ -207,8 +207,13 @@ func (rc *ResourceController) crashLoopAlert(key string, obs workloadObservation
 		reason = fmt.Sprintf(
 			"container %q in namespace %q has been crash-looping for %s (%d restarts). It is not recovering on its own.",
 			cs.Name, pod.Namespace, roundedFor(now.Sub(ep.firstSeen)), obs.restarts)
+		// Not "recover with". A crash loop is usually the image or the
+		// configuration, and a recreated pod comes back with both. Recreation
+		// is the remedy for a mount that went stale underneath the pod, which
+		// has its own alert; here it is one thing to try, and saying otherwise
+		// sends an operator to a command that cannot work.
 		if cmd := recoveryCommand(pod.Labels); cmd != "" {
-			reason += " Recover with: " + cmd
+			reason += " Check its logs first. If the cause is storage rather than its image or configuration, " + cmd + " recreates the pod."
 		}
 	}
 
@@ -493,6 +498,42 @@ func observeWorkloads(pods []corev1.Pod) []workloadObservation {
 
 	for i := range pods {
 		pod := &pods[i]
+
+		// A pod on its way out is not a replica any more. The recovery these
+		// alerts prescribe replaces the pod, and the one being replaced can sit
+		// Terminating behind a finalizer or a volume detach, so counting it
+		// would make following the advice keep the incident open.
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+
+		// A pod that has not started yet has no container statuses at all, and
+		// reducing only what has one made an unschedulable replacement look
+		// clean. The spec says which containers are expected; one with no
+		// status has not been observed running, which is not the same as having
+		// been observed running clean.
+		for _, group := range []struct {
+			kind    containerKind
+			expects []corev1.Container
+		}{
+			{initContainer, pod.Spec.InitContainers},
+			{mainContainer, pod.Spec.Containers},
+		} {
+			for _, c := range group.expects {
+				if hasStatus(pod, c.Name, group.kind) {
+					continue
+				}
+				key := episodeKey(pod.Namespace, pod.Name, pod.Labels["app"], c.Name, group.kind)
+				obs, seen := byKey[key]
+				if !seen {
+					obs = newObservation(key, group.kind, pod, nil)
+					byKey[key] = obs
+					order = append(order, key)
+				}
+				obs.allClean = false
+			}
+		}
+
 		for _, group := range []struct {
 			kind     containerKind
 			statuses []corev1.ContainerStatus
@@ -506,13 +547,13 @@ func observeWorkloads(pods []corev1.Pod) []workloadObservation {
 
 				obs, seen := byKey[key]
 				if !seen {
-					obs = &workloadObservation{
-						key: key, kind: group.kind, pod: pod, status: cs,
-						allClean: true,
-						counts:   map[string]int32{},
-					}
+					obs = newObservation(key, group.kind, pod, cs)
 					byKey[key] = obs
 					order = append(order, key)
+				}
+				if obs.status == nil {
+					// Seeded by a pod that had no status for this container.
+					obs.pod, obs.status = pod, cs
 				}
 				obs.restarts += cs.RestartCount
 				obs.counts[pod.Name] = cs.RestartCount
@@ -562,4 +603,28 @@ func containerIsClean(cs *corev1.ContainerStatus, kind containerKind) bool {
 		}
 	}
 	return cs.State.Running != nil && cs.Ready
+}
+
+// newObservation starts a workload's observation for one tick.
+func newObservation(key string, kind containerKind, pod *corev1.Pod, cs *corev1.ContainerStatus) *workloadObservation {
+	return &workloadObservation{
+		key: key, kind: kind, pod: pod, status: cs,
+		allClean: true,
+		counts:   map[string]int32{},
+	}
+}
+
+// hasStatus reports whether Kubernetes has published a status for a container
+// the pod spec declares.
+func hasStatus(pod *corev1.Pod, container string, kind containerKind) bool {
+	statuses := pod.Status.ContainerStatuses
+	if kind == initContainer {
+		statuses = pod.Status.InitContainerStatuses
+	}
+	for i := range statuses {
+		if statuses[i].Name == container {
+			return true
+		}
+	}
+	return false
 }
