@@ -31,7 +31,13 @@ const (
 // Email is the fallback rather than the equal, because a webhook is what an
 // operator who configured one is watching.
 func RouteFor(ctx context.Context, client kubernetes.Interface) DeliveryRoute {
-	if SlackConfigured(ctx, client) {
+	return routeGiven(ctx, client, getSlackWebhookURL(ctx, client))
+}
+
+// routeGiven picks the route for a webhook already read, so a caller that has to
+// deliver through it decides on the same value it will use.
+func routeGiven(ctx context.Context, client kubernetes.Interface, webhook string) DeliveryRoute {
+	if webhook != "" {
 		return DeliverySlack
 	}
 	// A configured server with no admin to send to delivers nothing, so it is
@@ -63,7 +69,10 @@ var errSendFailed = errors.New("alert delivery failed")
 // The route, the recipients and the transport are injected so the choice can be
 // tested without a webhook or an SMTP server.
 type batchDelivery struct {
-	route     DeliveryRoute
+	route DeliveryRoute
+	// webhook is the URL the route was chosen on, kept so the choice and the
+	// delivery cannot be made against two different reads of the Secret.
+	webhook   string
 	admins    func() []string
 	sendEmail func(ctx context.Context, to, subject, body string) error
 	sendSlack func(ctx context.Context, alert Alert) error
@@ -136,11 +145,16 @@ func alertEmail(alert Alert) (subject, body string) {
 // there. Leaving it nil costs the email route rather than breaking it, which
 // keeps this package usable from a test with no role store at all.
 func deliveryFor(ctx context.Context, client kubernetes.Interface) batchDelivery {
+	// One read, not two. The route was chosen on the strength of a webhook
+	// existing, so it has to be delivered through that same webhook: read
+	// twice, a Secret being created or rotated between them pairs the Slack
+	// route with no URL, and the alert fails without falling back.
 	webhook := getSlackWebhookURL(ctx, client)
 	email := &EmailService{Client: client}
 	return batchDelivery{
-		route:  RouteFor(ctx, client),
-		admins: adminRecipients,
+		route:   routeGiven(ctx, client, webhook),
+		webhook: webhook,
+		admins:  adminRecipients,
 		sendEmail: func(ctx context.Context, to, subject, body string) error {
 			return email.Send(ctx, to, subject, body)
 		},

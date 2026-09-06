@@ -5,10 +5,15 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // The incident this covers: a Postgres service crash-looped for three and a half
@@ -175,5 +180,37 @@ func TestRouteForSlackDoesNotNeedAdmins(t *testing.T) {
 	client := newFakeClient(slackSecret("https://hooks.example.com/abc"))
 	if got := RouteFor(context.Background(), client); got != DeliverySlack {
 		t.Errorf("RouteFor() = %q, want %q", got, DeliverySlack)
+	}
+}
+
+// The route and the webhook used to come from two separate reads of the same
+// Secret. Between them the answer can change: a webhook being saved for the
+// first time, a rotation, or one read failing transiently. The pairing that
+// results is impossible — Slack chosen, with no URL to post to — and delivery
+// then fails without falling back, so the alert stays in the bell.
+func TestDeliveryRouteAndWebhookComeFromOneRead(t *testing.T) {
+	withAdmin(t)
+
+	reads := 0
+	client := fake.NewClientset(smtpSecret(t, "smtp.example.com"))
+	client.PrependReactor("get", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.(k8stesting.GetAction).GetName() != slackSecretName {
+			return false, nil, nil
+		}
+		reads++
+		if reads == 1 {
+			// The first read misses it, as it would while the Secret is being
+			// created.
+			return true, nil, apierrors.NewNotFound(
+				schema.GroupResource{Resource: "secrets"}, slackSecretName)
+		}
+		return true, slackSecret("https://hooks.example.com/abc"), nil
+	})
+
+	d := deliveryFor(context.Background(), client)
+
+	if d.route == DeliverySlack {
+		assert.NotEmpty(t, d.webhook,
+			"Slack was chosen, so the webhook has to be the one that choice was made on")
 	}
 }
