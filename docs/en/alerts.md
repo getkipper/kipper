@@ -60,7 +60,7 @@ owed the news that it is over.
 ### Read-only volumes
 
 When a container with a persistent volume dies, Kipper reads the log it wrote on
-the way out. A line saying the filesystem is read-only raises a `VolumeReadOnly`
+the way out. A line saying the filesystem is read-only raises a `ReadOnlyFilesystem`
 alert rather than another crash-loop warning, quoting the line it found so you
 can see the evidence rather than take the diagnosis on trust.
 
@@ -78,8 +78,8 @@ and offers the recovery as a condition rather than a promise:
 container "postgres" wrote this before it died: FATAL:  could not remove old
 lock file "postmaster.pid": Read-only file system. It hit a read-only
 filesystem. The container mounts volume data-db-0. If that is the one,
-recreating the pod is what clears it, because the mount belongs to the pod and a
-container restart does not. Recover with: kip service restart db
+'kip service restart db' recreates the pod and clears it, which a container
+restart cannot do because the mount belongs to the pod
 ```
 
 Only containers that mount a writable persistent volume raise it, because those

@@ -171,7 +171,7 @@ metric stays green while the database on top of it fails on its first write.
 Kipper covers that from two directions instead:
 
 - The console API reads the log a container wrote before it died. A line saying
-  the filesystem is read-only raises a `VolumeReadOnly` alert quoting that line
+  the filesystem is read-only raises a `ReadOnlyFilesystem` alert quoting that line
   and naming the volumes the container mounts. It runs in the cluster and sees
   pods on every node, and it only considers workloads that mount a writable
   persistent volume.
