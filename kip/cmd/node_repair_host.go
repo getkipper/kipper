@@ -2,11 +2,10 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
+	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/ssh"
 )
@@ -41,21 +40,13 @@ func runNodeRepairHost(cmd *cobra.Command, args []string) error {
 	nodeHost, _ := cmd.Flags().GetString("host")
 	sshKey, _ := cmd.Flags().GetString("ssh-key")
 
-	if sshKey == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("resolving home directory: %w", err)
-		}
-		sshKey = filepath.Join(home, ".ssh", "id_rsa")
-	}
-
 	cluster, _, err := loadCurrentCluster()
 	if err != nil {
 		return err
 	}
 
 	fmt.Printf("\n  Connecting to %s...\n", nodeHost)
-	nodeClient, err := ssh.Dial(ssh.Config{Host: nodeHost, User: "root", KeyPath: sshKey})
+	nodeClient, err := ssh.Dial(repairHostSSH(nodeHost, sshKey, cluster))
 	if err != nil {
 		return fmt.Errorf("connecting to %s: %w", nodeHost, err)
 	}
@@ -74,7 +65,7 @@ func runNodeRepairHost(cmd *cobra.Command, args []string) error {
 
 	// The record goes on the node object, which is reached through the control
 	// plane rather than the node being repaired: a worker holds no kubectl.
-	masterClient, err := ssh.Dial(ssh.Config{Host: cluster.Host, User: "root", KeyPath: sshKey})
+	masterClient, err := ssh.Dial(repairHostSSH(cluster.Host, sshKey, cluster))
 	if err != nil {
 		return fmt.Errorf("connecting to the control plane to record it: %w", err)
 	}
@@ -90,4 +81,18 @@ func runNodeRepairHost(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("  ✔  %s recorded as configured\n\n", nodeName)
 	return nil
+}
+
+// repairHostSSH builds the connection to a node being repaired.
+//
+// It uses the same key resolution as every other command, so an operator who
+// installed the cluster with their own key does not have to name it again here.
+func repairHostSSH(host, flagValue string, cluster *config.Cluster) ssh.Config {
+	explicit, fallback := resolveSSHKey(flagValue, cluster)
+	return ssh.Config{
+		Host:            host,
+		User:            "root",
+		KeyPath:         explicit,
+		FallbackKeyPath: fallback,
+	}
 }
