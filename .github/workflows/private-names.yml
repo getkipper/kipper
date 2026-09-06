@@ -1,0 +1,78 @@
+name: Private names
+
+# Runs on pushes to `main` and `develop` and on pull requests to either, with
+# no path filter: these names have turned up in documentation and in Go
+# fixtures alike, so a docs-only change has to be scanned too.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  private-names:
+    name: no internal names
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # The pattern lives in a repository secret, so this guard does not itself
+      # publish the names it exists to keep out. Matches are reported by file
+      # and line, never by content, which keeps them out of the public run log.
+      #
+      # Every alternative in the pattern needs \b around it. Matching is
+      # case-insensitive, so an unanchored name also matches the middle of a
+      # camelCase identifier or a longer unrelated word, and the build then
+      # fails on a file that is perfectly clean.
+      - name: Scan the tree
+        env:
+          PATTERN: ${{ secrets.PRIVATE_NAME_PATTERN }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        run: |
+          if [ -z "$PATTERN" ]; then
+            if [ "$IS_FORK" = "true" ]; then
+              echo "::warning::A fork cannot read the pattern, so this pull request was NOT scanned. Check it by hand before merging."
+              exit 0
+            fi
+            echo "::error::PRIVATE_NAME_PATTERN is unset, so this guard cannot run."
+            exit 1
+          fi
+
+          # -P, not -E. The pattern is anchored with \b, which GNU grep accepts
+          # as an extension but POSIX ERE does not: on an engine without it
+          # every search returns nothing and this guard passes everything. The
+          # canary is the check that it has not.
+          canary=$(git grep -I -l -P '\bkipper\b' -- . | wc -l)
+          if [ "$canary" -eq 0 ]; then
+            echo "::error::The regex engine does not honour \\b, so this scan would pass anything."
+            exit 1
+          fi
+
+          # git grep exits 0 on a match, 1 on none, and above 1 on an error such
+          # as a malformed pattern. Piping straight into cut would turn that
+          # error into an empty result, which reads exactly like a clean tree.
+          set +e
+          hits=$(git grep -I -n -P -i "$PATTERN" -- .)
+          rc=$?
+          paths=$(git ls-files | grep -P -i "$PATTERN")
+          prc=$?
+          set -e
+          if [ "$rc" -gt 1 ] || [ "$prc" -gt 1 ]; then
+            echo "::error::The scan itself failed (contents $rc, paths $prc). Check the pattern is valid PCRE."
+            exit 1
+          fi
+
+          if [ -n "$hits" ] || [ -n "$paths" ]; then
+            echo "::error::Internal names are present at these locations:"
+            [ -n "$hits" ] && echo "$hits" | cut -d: -f1,2
+            [ -n "$paths" ] && echo "$paths"
+            echo ""
+            echo "Replace them with RFC example values (example.com, and a"
+            echo "placeholder project name) before pushing."
+            exit 1
+          fi
+
+          # -I skips binary files, so an image, a PDF or a terminal recording
+          # can carry a name this scan cannot see.
+          echo "Clean. Binary assets are not covered: check images and recordings by eye."
