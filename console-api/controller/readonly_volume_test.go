@@ -102,10 +102,10 @@ func TestCrashLoopAlertNamesAReadOnlyVolume(t *testing.T) {
 	}
 
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
-	batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), rc.evidenceBudget(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 
 	assert.True(t, ok)
-	assert.Equal(t, "VolumeReadOnly", batch.entry.Action,
+	assert.Equal(t, "ReadOnlyFilesystem", batch.entry.Action,
 		"a read-only volume is a different failure from a container that keeps dying")
 	assert.Equal(t, stageCritical, batch.entry.Severity,
 		"it will not recover on its own, so it does not start as a warning")
@@ -123,7 +123,7 @@ func TestCrashLoopAlertWithoutReadOnlyEvidence(t *testing.T) {
 	}
 
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
-	batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), rc.evidenceBudget(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 
 	assert.True(t, ok)
 	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action)
@@ -136,7 +136,7 @@ func TestCrashLoopAlertWhenTheLogCannotBeRead(t *testing.T) {
 	rc.readPreviousLog = func(context.Context, string, string, string) string { return "" }
 
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
-	batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), rc.evidenceBudget(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 
 	assert.True(t, ok)
 	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action)
@@ -193,7 +193,7 @@ func TestReadOnlyAlertEscalatesTheEpisode(t *testing.T) {
 
 	key := "shop-test/db-0/postgres"
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
-	batch, ok := rc.crashLoopAlert(context.Background(), key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), rc.evidenceBudget(), key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 	require.True(t, ok)
 
 	rc.commitBatches([]alertBatch{batch})
@@ -232,7 +232,7 @@ func TestReadOnlyAlertNeedsAPersistentVolume(t *testing.T) {
 		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}},
 	}}
 
-	batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), rc.evidenceBudget(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 
 	require.True(t, ok)
 	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action,
@@ -247,10 +247,10 @@ func TestReadOnlyAlertFiresForAPodWithAClaim(t *testing.T) {
 
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
 
-	batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), rc.evidenceBudget(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 
 	require.True(t, ok)
-	assert.Equal(t, "VolumeReadOnly", batch.entry.Action)
+	assert.Equal(t, "ReadOnlyFilesystem", batch.entry.Action)
 	assert.Contains(t, batch.entry.Reason, "data-db-0",
 		"the alert should name the claim, since that is what an operator goes and looks at")
 }
@@ -271,7 +271,7 @@ func TestReadOnlyAlertNeedsTheFailingContainerToMountTheClaim(t *testing.T) {
 		{Name: "metrics"},
 	}
 
-	batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-06T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), rc.evidenceBudget(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-06T00:00:00Z")
 
 	require.True(t, ok)
 	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action,
@@ -296,10 +296,10 @@ func TestReadOnlyAlertNamesOnlyTheClaimsTheFailingContainerMounts(t *testing.T) 
 		{Name: "backup-agent", VolumeMounts: []corev1.VolumeMount{{Name: "backups", MountPath: "/backups"}}},
 	}
 
-	batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-06T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), rc.evidenceBudget(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-06T00:00:00Z")
 
 	require.True(t, ok)
-	assert.Equal(t, "VolumeReadOnly", batch.entry.Action)
+	assert.Equal(t, "ReadOnlyFilesystem", batch.entry.Action)
 	assert.Contains(t, batch.entry.Reason, "data-db-0")
 	assert.NotContains(t, batch.entry.Reason, "backups-db-0",
 		"the failing container does not mount that claim, so it is not the one to look at")
@@ -335,7 +335,7 @@ func TestReadOnlyAlertIgnoresAVolumeMountedReadOnlyOnPurpose(t *testing.T) {
 			pod := crashLoopingPodFor("shop-test", "db", "postgres")
 			tc.pod(pod)
 
-			batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-06T00:00:00Z")
+			batch, ok := rc.crashLoopAlert(context.Background(), rc.evidenceBudget(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-06T00:00:00Z")
 
 			require.True(t, ok)
 			assert.Equal(t, "CrashLoopBackOff", batch.entry.Action,

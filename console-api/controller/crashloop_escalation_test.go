@@ -458,7 +458,7 @@ func TestAGenericCrashLoopDoesNotPromiseARecovery(t *testing.T) {
 	obs := soleObservation(pod)
 	rc.crashLoopEpisode[obs.key] = episode{firstSeen: at(0), lastAlerted: at(5)}
 
-	batch, ok := rc.crashLoopAlert(context.Background(), obs.key, obs, at(6), "2026-09-06T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), rc.evidenceBudget(), obs.key, obs, at(6), "2026-09-06T00:00:00Z")
 	require.True(t, ok)
 	require.Equal(t, stageCritical, batch.entry.Severity)
 

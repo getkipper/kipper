@@ -84,6 +84,10 @@ type episode struct {
 	// restarts is the workload's total, carried for the message where it is
 	// worth reading and checkable against the pods.
 	restarts int32
+	// readOnlySeen records that this episode's read-only diagnosis has been
+	// sent. It is asked before the crash-loop cadence, so without it the same
+	// disk failure would be reported on every tick.
+	readOnlySeen bool
 	// restartsByPod is what decides whether a container crashed again, kept per
 	// pod rather than as a total: a replica being replaced drops the total, and
 	// compared against that a different replica crashing afterwards reads as a
@@ -156,7 +160,7 @@ func (e episode) deservesAllClear() bool {
 // nothing was ever delivered, suppressed for good.
 //
 // Caller holds rc.mu.
-func (rc *ResourceController) crashLoopAlert(ctx context.Context, key string, obs workloadObservation, now time.Time, nowStr string) (alertBatch, bool) {
+func (rc *ResourceController) crashLoopAlert(ctx context.Context, budget *evidenceBudget, key string, obs workloadObservation, now time.Time, nowStr string) (alertBatch, bool) {
 	ep := rc.crashLoopEpisode[key]
 	if ep.firstSeen.IsZero() {
 		ep.firstSeen = now
@@ -165,6 +169,26 @@ func (rc *ResourceController) crashLoopAlert(ctx context.Context, key string, ob
 	ep.readySince = time.Time{}
 	ep.restarts = obs.restarts
 	ep.restartsByPod = obs.counts
+
+	// The disk failing is news whatever the crash loop was already saying, so
+	// this is asked before the crash-loop cadence rather than behind it. An
+	// episode that escalated yesterday repeats daily, and a volume that goes
+	// read-only underneath it would otherwise wait for tomorrow's slot — which
+	// is the incident this exists for, arriving a day late.
+	//
+	// Said once. Afterwards the episode's own cadence carries it, and the mark
+	// is what stops a tick-by-tick repeat.
+	if !ep.readOnlySeen {
+		if evidence, pod := rc.readOnlyVolumeEvidence(ctx, budget, obs); evidence != "" {
+			next := ep
+			next.lastAlerted = now
+			next.readOnlySeen = true
+			if next.escalatedAt.IsZero() {
+				next.escalatedAt = now
+			}
+			return rc.readOnlyVolumeAlert(key, pod, next, now, nowStr, obs.status.Name, obs.kind, evidence), true
+		}
+	}
 
 	stage, due := ep.stageAt(now)
 	if !due {
@@ -183,20 +207,6 @@ func (rc *ResourceController) crashLoopAlert(ctx context.Context, key string, ob
 	// up. It gets its own alert because the remedy differs: the pod has to be
 	// recreated, and the restarts Kubernetes is already doing cannot clear a
 	// mount.
-	// Read across every failing replica, not the one that happened to be listed
-	// first: the evidence is in whichever replica's disk went, and which that
-	// is must not depend on the order the API returned the pods.
-	if evidence, pod := rc.readOnlyVolumeEvidence(ctx, obs); evidence != "" {
-		// Critical from the first sighting, so the episode is escalated here
-		// rather than at six hours. Left at warning stage the critical would
-		// repeat hourly, and an operator who recreated the pod inside those six
-		// hours would never be told it was over.
-		if next.escalatedAt.IsZero() {
-			next.escalatedAt = now
-		}
-		return rc.readOnlyVolumeAlert(key, pod, next, now, nowStr, obs.status.Name, obs.kind, evidence), true
-	}
-
 	pod, cs := obs.pod, obs.status
 	action := "CrashLoopBackOff"
 	reason := fmt.Sprintf("container %q is crash-looping", cs.Name)
