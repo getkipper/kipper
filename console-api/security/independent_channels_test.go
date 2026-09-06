@@ -15,13 +15,10 @@ import (
 // budget, so the console bell and a perfectly healthy Slack webhook were both
 // handed an expired context and delivered nothing.
 func TestOneSlowChannelDoesNotStarveTheRest(t *testing.T) {
-	restore := deliveryTimeout
-	deliveryTimeout = 400 * time.Millisecond
-	defer func() { deliveryTimeout = restore }()
-
 	reached := make(chan time.Duration, 1)
 
 	n := &Notifier{
+		deliveryTimeout: testBudget,
 		envSMTP: func(ctx context.Context, _ string, _ Event) {
 			// A relay that takes the whole of its own budget.
 			<-ctx.Done()
@@ -39,7 +36,7 @@ func TestOneSlowChannelDoesNotStarveTheRest(t *testing.T) {
 
 	select {
 	case left := <-reached:
-		assert.Greater(t, left, deliveryTimeout/2,
+		assert.Greater(t, left, testBudget/2,
 			"the console channel was handed a budget already spent by the mail relay")
 	case <-time.After(10 * time.Second):
 		t.Fatal("the console channel was never reached at all")
@@ -51,13 +48,9 @@ func TestOneSlowChannelDoesNotStarveTheRest(t *testing.T) {
 // to hear nothing, and a security event reaching only the process log is the
 // state this whole path exists to avoid.
 func TestASlowBellDoesNotStarveTheOtherConsoleChannels(t *testing.T) {
-	restore := deliveryTimeout
-	deliveryTimeout = 400 * time.Millisecond
-	defer func() { deliveryTimeout = restore }()
-
 	emailed := make(chan time.Duration, 4)
 
-	n := &Notifier{Console: ConsoleHooks{
+	n := &Notifier{deliveryTimeout: testBudget, Console: ConsoleHooks{
 		Alert: func(ctx context.Context, _, _ string) {
 			// The API server stalls on the ConfigMap write.
 			<-ctx.Done()
@@ -75,7 +68,7 @@ func TestASlowBellDoesNotStarveTheOtherConsoleChannels(t *testing.T) {
 
 	select {
 	case left := <-emailed:
-		assert.Greater(t, left, deliveryTimeout/2,
+		assert.Greater(t, left, testBudget/2,
 			"the mail server was handed a budget the bell had already spent")
 	case <-time.After(10 * time.Second):
 		t.Fatal("a working mail server was never reached because the bell was slow")
@@ -85,21 +78,18 @@ func TestASlowBellDoesNotStarveTheOtherConsoleChannels(t *testing.T) {
 // The env-pinned channels are two, and one being broken is not a reason for the
 // other to go unused.
 func TestTheEnvPinnedChannelsAreIndependent(t *testing.T) {
-	restore := deliveryTimeout
-	deliveryTimeout = 400 * time.Millisecond
-	defer func() { deliveryTimeout = restore }()
-
 	posted := make(chan time.Duration, 2)
 	n := &Notifier{
-		envSMTP:    func(ctx context.Context, _ string, _ Event) { <-ctx.Done() },
-		envWebhook: func(ctx context.Context, _ string, _ Event) { posted <- budgetLeft(ctx) },
+		deliveryTimeout: testBudget,
+		envSMTP:         func(ctx context.Context, _ string, _ Event) { <-ctx.Done() },
+		envWebhook:      func(ctx context.Context, _ string, _ Event) { posted <- budgetLeft(ctx) },
 	}
 
 	n.Emit(context.Background(), Event{Kind: "test", Summary: "a security event"})
 
 	select {
 	case left := <-posted:
-		assert.Greater(t, left, deliveryTimeout/2,
+		assert.Greater(t, left, testBudget/2,
 			"the webhook was handed a budget the mail relay had already spent")
 	case <-time.After(10 * time.Second):
 		t.Fatal("the webhook was never reached")
@@ -113,3 +103,7 @@ func budgetLeft(ctx context.Context) time.Duration {
 	}
 	return time.Until(deadline)
 }
+
+// testBudget is short enough that a channel taking all of its own does not slow
+// the suite, and long enough that the assertions have room.
+const testBudget = 400 * time.Millisecond

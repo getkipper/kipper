@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
@@ -44,7 +45,7 @@ func routeGiven(ctx context.Context, client kubernetes.Interface, webhook string
 	// the nowhere case. Calling it email would put "emailed to the cluster
 	// admins" on a screen while every alert stops inside the cluster, which is
 	// the exact false comfort this route exists to remove.
-	if cfg := loadSMTPConfig(ctx, client); cfg != nil && cfg.Host != "" && len(adminRecipients()) > 0 {
+	if cfg := loadSMTPConfig(ctx, client); cfg != nil && cfg.Host != "" && len(admins()) > 0 {
 		return DeliveryEmail
 	}
 	return DeliveryNowhere
@@ -154,7 +155,7 @@ func deliveryFor(ctx context.Context, client kubernetes.Interface) batchDelivery
 	return batchDelivery{
 		route:   routeGiven(ctx, client, webhook),
 		webhook: webhook,
-		admins:  adminRecipients,
+		admins:  admins,
 		sendEmail: func(ctx context.Context, to, subject, body string) error {
 			return email.Send(ctx, to, subject, body)
 		},
@@ -166,11 +167,29 @@ func deliveryFor(ctx context.Context, client kubernetes.Interface) batchDelivery
 
 // adminRecipients returns the addresses the email route delivers to. main.go
 // replaces it at startup with a reader over the role store.
-var adminRecipients = func() []string { return nil }
+//
+// Guarded because delivery runs on its own goroutine and outlives the call that
+// started it, so a replacement and a read genuinely can overlap.
+var (
+	adminsMu        sync.RWMutex
+	adminRecipients = func() []string { return nil }
+)
+
+// admins reads the current resolver.
+func admins() []string {
+	adminsMu.RLock()
+	f := adminRecipients
+	adminsMu.RUnlock()
+	return f()
+}
 
 // SetAdminRecipients wires the role store in, so an alert with no Slack webhook
 // can reach the people who would otherwise only find it in the bell.
-func SetAdminRecipients(f func() []string) { adminRecipients = f }
+func SetAdminRecipients(f func() []string) {
+	adminsMu.Lock()
+	defer adminsMu.Unlock()
+	adminRecipients = f
+}
 
 // AlertDelivery answers where this cluster's alerts go, so the console can say
 // when the answer is nowhere.
