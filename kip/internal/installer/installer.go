@@ -393,9 +393,10 @@ func Run(opts Options) (*Result, error) {
 		fn   func() error
 	}
 	var steps []installStep
-	// First, before anything installs a package. An unattended upgrade that
-	// touches open-iscsi restarts iscsid, which fails every Longhorn volume's
-	// block device under a mounted filesystem and remounts it read-only.
+	// First, before anything installs a package. needrestart restarts daemons
+	// holding a patched library after an unattended upgrade, and restarting
+	// iscsid fails every Longhorn volume's block device under a mounted
+	// filesystem, which remounts it read-only.
 	steps = append(steps, installStep{"Deferring storage-path restarts", func() error {
 		return ConfigureStorageRestarts(client)
 	}})

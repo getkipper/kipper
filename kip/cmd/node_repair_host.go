@@ -15,10 +15,10 @@ var nodeRepairHostCmd = &cobra.Command{
 	Short: "Apply host configuration to a node that predates it",
 	Long: `Writes the host configuration a node should have and records what was applied.
 
-A node added by an older kip has nothing stopping an unattended upgrade from
-restarting iscsid, which fails every Longhorn volume on it: the block device
-goes, the filesystem above it remounts read-only, and whatever was writing to it
-crash-loops until its pod is recreated.
+A node added by an older kip has nothing stopping needrestart from restarting
+iscsid after a library update, which fails every Longhorn volume on it: the
+block device goes, the filesystem above it remounts read-only, and whatever was
+writing to it crash-loops until its pod is recreated.
 
 This applies the same configuration kip install and kip node add now apply,
 using the same connection details. Running it against a node that already has

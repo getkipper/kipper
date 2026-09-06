@@ -194,15 +194,15 @@ func reportStorageRestartCoverage(nodes []k8s.NodeInfo) {
 
 	fmt.Printf("  Host configuration:\n")
 	if len(uncovered) == 0 {
-		fmt.Printf("    ✔  every node is configured to keep security updates off the storage path\n\n")
+		fmt.Printf("    ✔  needrestart leaves the storage path alone on every node\n\n")
 		return
 	}
 
 	for _, node := range uncovered {
 		fmt.Printf("    ⚠  %s\n", node)
 	}
-	fmt.Printf("       An unattended upgrade on these can restart iscsid, which drops every\n")
-	fmt.Printf("       Longhorn volume on the node. Fix one with:\n")
+	fmt.Printf("       needrestart can restart iscsid on these after a library update, which\n")
+	fmt.Printf("       drops every Longhorn volume on the node. Fix one with:\n")
 	fmt.Printf("         kip node repair-host --host <address>\n\n")
 }
 

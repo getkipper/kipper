@@ -162,6 +162,12 @@ The common trigger is a security update. Debian's needrestart restarts daemons
 holding a patched library, and restarting `iscsid` takes every Longhorn session
 on the node with it.
 
+What this covers is needrestart's own restarts, which is what the failure
+behind this feature was. A package upgrade of open-iscsi itself restarts the
+daemon from its own maintainer script, before needrestart runs at all, and no
+drop-in prevents that. `kip status` reporting a green tick here means needrestart
+will leave the storage path alone, not that nothing can ever restart it.
+
 Kipper writes `/etc/needrestart/conf.d/50-kipper-storage.conf` during
 `kip install` and `kip node add` to stop that, leaving `iscsid`,
 `systemd-networkd` and `systemd-resolved` for you to restart at a time you
