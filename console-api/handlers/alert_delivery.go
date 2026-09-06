@@ -73,7 +73,11 @@ type batchDelivery struct {
 	route DeliveryRoute
 	// webhook is the URL the route was chosen on, kept so the choice and the
 	// delivery cannot be made against two different reads of the Secret.
-	webhook   string
+	webhook string
+	// perSend is what each individual send gets, defaulting to
+	// defaultPerSendTimeout. One address that accepts the connection and then
+	// goes quiet must not spend the time the rest of the batch needs.
+	perSend   time.Duration
 	admins    func() []string
 	sendEmail func(ctx context.Context, to, subject, body string) error
 	sendSlack func(ctx context.Context, alert Alert) error
@@ -86,15 +90,23 @@ type batchDelivery struct {
 // next tick. One unreachable address does not stop the others, because during
 // an incident the admin whose mail bounces is rarely the only one on call.
 func (d batchDelivery) deliver(ctx context.Context, alerts []Alert) {
+	// Detached from the caller's own deadline and bounded per send. A shared
+	// one means the first address that hangs spends the whole batch's budget,
+	// and every send after it fails its dial against an expired context, which
+	// is the "one bad address does not stop the others" promise in name only.
+	base := context.WithoutCancel(ctx)
+
 	switch d.route {
 	case DeliverySlack:
 		if d.sendSlack == nil {
 			return
 		}
 		for _, alert := range alerts {
-			if err := d.sendSlack(ctx, alert); err != nil {
-				log.Printf("alerts: slack send failed for %s/%s: %v", alert.Namespace, alert.App, err)
-			}
+			d.bounded(base, func(ctx context.Context) {
+				if err := d.sendSlack(ctx, alert); err != nil {
+					log.Printf("alerts: slack send failed for %s/%s: %v", alert.Namespace, alert.App, err)
+				}
+			})
 		}
 	case DeliveryEmail:
 		if d.sendEmail == nil {
@@ -108,14 +120,30 @@ func (d batchDelivery) deliver(ctx context.Context, alerts []Alert) {
 		for _, alert := range alerts {
 			subject, body := alertEmail(alert)
 			for _, to := range recipients {
-				if err := d.sendEmail(ctx, to, subject, body); err != nil {
-					log.Printf("alerts: email to %s failed for %s/%s: %v", to, alert.Namespace, alert.App, err)
-				}
+				d.bounded(base, func(ctx context.Context) {
+					if err := d.sendEmail(ctx, to, subject, body); err != nil {
+						log.Printf("alerts: email to %s failed for %s/%s: %v", to, alert.Namespace, alert.App, err)
+					}
+				})
 			}
 		}
 	case DeliveryNowhere:
 		log.Printf("alerts: %d alert(s) stored with no delivery channel configured; they reach the console bell and stop there", len(alerts))
 	}
+}
+
+// defaultPerSendTimeout is what one send gets when nothing says otherwise.
+const defaultPerSendTimeout = 20 * time.Second
+
+// bounded runs one send under its own deadline.
+func (d batchDelivery) bounded(base context.Context, send func(context.Context)) {
+	budget := d.perSend
+	if budget <= 0 {
+		budget = defaultPerSendTimeout
+	}
+	ctx, cancel := context.WithTimeout(base, budget)
+	defer cancel()
+	send(ctx)
 }
 
 // alertEmail renders one alert. The subject carries the identity so a phone
