@@ -365,20 +365,21 @@ func (d *Deployer) Scale(ctx context.Context, namespace, name string, replicas i
 
 // Restart triggers a rolling restart by annotating the App CR.
 func (d *Deployer) Restart(ctx context.Context, namespace, name string) error {
-	return d.RestartWorkload(ctx, AppGVR, "app", namespace, name)
+	_, err := d.RestartWorkload(ctx, AppGVR, "app", namespace, name)
+	return err
 }
 
 // RestartWorkload triggers a rolling restart of any workload kind by bumping
 // the restartedAt annotation on its CR, which the workload's controller
 // projects onto the pod template. kind names the workload in the error text,
 // since the GVR carries only the plural resource.
-func (d *Deployer) RestartWorkload(ctx context.Context, gvr schema.GroupVersionResource, kind, namespace, name string) error {
+func (d *Deployer) RestartWorkload(ctx context.Context, gvr schema.GroupVersionResource, kind, namespace, name string) (string, error) {
 	// Nano rather than seconds: the stamp is what makes the pod template
 	// differ, so two restarts inside one second produced the identical value,
 	// the second template matched the running one, and the workload did not
 	// roll — while the command reported that it had.
 	stamp := time.Now().Format(time.RFC3339Nano)
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		workload, err := d.Dynamic.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			if errors.IsNotFound(err) {
@@ -399,6 +400,7 @@ func (d *Deployer) RestartWorkload(ctx context.Context, gvr schema.GroupVersionR
 		}
 		return nil
 	})
+	return stamp, err
 }
 
 // UpdateImage changes the container image on the App CR.
