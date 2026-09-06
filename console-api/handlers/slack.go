@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/getkipper/kipper/console-api/internal/deliver"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -55,17 +57,17 @@ func (s *Slack) notifyConfigChange(ctx context.Context, r *http.Request, previou
 		return
 	}
 	go func() {
-		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
-		defer cancel()
 		alert := Alert{
 			Time:     time.Now().UTC().Format(time.RFC3339),
 			Action:   "security",
 			Severity: "critical",
 			Reason:   fmt.Sprintf("The Slack alert webhook of this cluster was changed by %s. Alerts stop arriving here. If this change is unexpected, treat the cluster as compromised.", user),
 		}
-		if err := SendSlackAlert(sctx, previousURL, alert); err != nil {
-			log.Printf("security: previous-webhook notice failed: %v", err)
-		}
+		deliver.Bounded(ctx, 0, "previous-webhook notice", func(ctx context.Context) {
+			if err := SendSlackAlert(ctx, previousURL, alert); err != nil {
+				log.Printf("security: previous-webhook notice failed: %v", err)
+			}
+		})
 	}()
 }
 
