@@ -56,3 +56,13 @@ presentation/
 # Built binaries
 kip/kip
 kip/cmd/kip
+
+# Session handoffs. Untracked is not enough: these carry server addresses,
+# internal domains and credentials quoted from live output, and one `git add .`
+# would publish them.
+/whats-next.md
+HANDOFF-*.md
+*handoff*.md
+
+# Local working images, never part of the published site
+/kipper-office-background.png
