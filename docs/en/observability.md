@@ -171,10 +171,10 @@ metric stays green while the database on top of it fails on its first write.
 Kipper covers that from two directions instead:
 
 - The console API reads the log a container wrote before it died. A line saying
-  the filesystem is read-only raises a `VolumeReadOnly` alert quoting that line,
-  and naming the volume where the message can be placed on one. It runs in the
-  cluster and sees pods on every node, and it only considers workloads that
-  mount a persistent volume.
+  the filesystem is read-only raises a `VolumeReadOnly` alert quoting that line
+  and naming the volumes the container mounts. It runs in the cluster and sees
+  pods on every node, and it only considers workloads that mount a writable
+  persistent volume.
 - `kip status` reads `/proc/mounts` on the cluster host and names any persistent
   volume mounted read-only. It sees one node, so it lists the nodes it could not
   check rather than implying they are clean.

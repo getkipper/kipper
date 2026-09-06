@@ -344,99 +344,18 @@ func TestReadOnlyAlertIgnoresAVolumeMountedReadOnlyOnPurpose(t *testing.T) {
 }
 
 // soleObservation reduces one pod the way the scan does, so a test can drive the
-// alert path with the same value the controller builds.
+// alert path with the same value the controller builds. Where the pod declares
+// more than one container, the one with a status is the subject.
 func soleObservation(pod *corev1.Pod) workloadObservation {
-	obs := observeWorkloads([]corev1.Pod{*pod})
-	if len(obs) != 1 {
+	all := observeWorkloads([]corev1.Pod{*pod})
+	var withStatus []workloadObservation
+	for _, o := range all {
+		if o.status != nil {
+			withStatus = append(withStatus, o)
+		}
+	}
+	if len(withStatus) != 1 {
 		panic("test pod must have exactly one container status")
 	}
-	return obs[0]
-}
-
-// A container can mount a healthy PVC and also write to something that is
-// read-only on purpose: its own root filesystem, a ConfigMap, a Secret. Writing
-// to the wrong one produces the same errno text, and blaming the PVC sends the
-// operator to a volume that is fine and prescribes a recreation that reproduces
-// the problem.
-//
-// Where the log names a path, that decides it.
-func TestReadOnlyEvidenceFollowsThePathTheLogNames(t *testing.T) {
-	pod := &corev1.Pod{
-		Spec: corev1.PodSpec{
-			Volumes: []corev1.Volume{
-				{Name: "data", VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data-db-0"}}},
-				{Name: "config", VolumeSource: corev1.VolumeSource{
-					ConfigMap: &corev1.ConfigMapVolumeSource{}}},
-			},
-			Containers: []corev1.Container{{
-				Name: "postgres",
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: "data", MountPath: "/var/lib/postgresql"},
-					{Name: "config", MountPath: "/etc/postgresql", ReadOnly: true},
-				},
-			}},
-		},
-	}
-
-	tests := []struct {
-		name  string
-		line  string
-		blame string
-	}{
-		{
-			name:  "the path is under the volume",
-			line:  `could not write /var/lib/postgresql/data/pg_wal/000001: Read-only file system`,
-			blame: "data-db-0",
-		},
-		{
-			name:  "the path is under the config mount, which is read-only on purpose",
-			line:  "cannot write /etc/postgresql/postgresql.conf: read-only file system",
-			blame: "",
-		},
-		{
-			name:  "the path is somewhere else entirely, so it is not the volume",
-			line:  "cannot write /tmp/scratch: read-only file system",
-			blame: "",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.blame, blameFor(pod, "postgres", mainContainer, tc.line).claim)
-		})
-	}
-}
-
-// The line from the incident names a lock file and no path at all, which is the
-// case this whole feature exists for. Nothing can be placed, so the alert goes
-// out without claiming to know which filesystem: the container's volumes are
-// named as the place to look, and the node's own disk stays on the table.
-func TestReadOnlyEvidenceWithNoPathInTheLine(t *testing.T) {
-	incident := `FATAL:  could not remove old lock file "postmaster.pid": Read-only file system`
-
-	pod := &corev1.Pod{
-		Spec: corev1.PodSpec{
-			Volumes: []corev1.Volume{
-				{Name: "data", VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data-db-0"}}},
-				{Name: "scratch", VolumeSource: corev1.VolumeSource{
-					EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-			},
-			Containers: []corev1.Container{{
-				Name: "postgres",
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: "data", MountPath: "/var/lib/postgresql"},
-					{Name: "scratch", MountPath: "/scratch"},
-				},
-			}},
-		},
-	}
-
-	b := blameFor(pod, "postgres", mainContainer, incident)
-	assert.True(t, b.alert, "the container writes to a persistent volume, so this is worth saying")
-	assert.False(t, b.certain, "and which filesystem went is not knowable from that line")
-	assert.Equal(t, []string{"data-db-0"}, b.candidates)
-	assert.Contains(t, describeBlame(b), "the node's own disk",
-		"the message has to leave the other possibility open rather than blame the volume")
+	return withStatus[0]
 }

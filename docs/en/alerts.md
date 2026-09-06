@@ -66,33 +66,24 @@ can see the evidence rather than take the diagnosis on trust.
 
 A log line says a filesystem stopped accepting writes. It rarely says which, and
 a container has several: its persistent volumes, anything mounted from a
-ConfigMap or Secret, and its own image, which lives on the node's disk. So the
-alert says only as much as the line supports.
+ConfigMap or Secret, and its own image, which lives on the node's disk. Nor can
+the path in the message settle it, because a pathname does not identify the
+filesystem behind it. Postgres puts `/var/lib/postgresql/data/pg_wal` on a
+separate volume often enough for that to matter.
 
-Where the message names a path that lands on one of the volumes, it says so:
-
-```
-container "postgres" wrote this before it died: could not write
-/var/lib/postgresql/data/pg_wal/000001: Read-only file system. That points at
-volume data-db-0 having remounted read-only, which a container restart cannot
-clear because the mount belongs to the pod. Recover with: kip service restart db
-```
-
-Where it names no path, which is what the failure behind this feature actually
-produced, the alert names what the container mounts and leaves the rest open:
+So the alert reports what it knows and leaves the rest to you:
 
 ```
 container "postgres" wrote this before it died: FATAL:  could not remove old
 lock file "postmaster.pid": Read-only file system. The container mounts volume
-data-db-0. Either that volume or the node's own disk has stopped accepting
-writes, which a container restart cannot clear because the mount belongs to the
-pod. Recover with: kip service restart db
+data-db-0. Either that volume or the node's own disk stopped accepting writes,
+and a container restart clears neither. Recover with: kip service restart db
 ```
 
-Nothing is raised when the message can be placed somewhere that is read-only by
-design: a mount asked for read-only, a container with a read-only root
-filesystem, or a path under neither. Recreating those pods would reproduce the
-configuration rather than clear it.
+Only containers that mount a writable persistent volume raise it, because those
+are the ones a pod recreation can help. A volume the workload asked for
+read-only is left out: that one did not remount, it was mounted that way, and a
+new pod reproduces it.
 
 It is critical from the first sighting rather than climbing the ladder above.
 The filesystem does not come back on its own, and restarting the container

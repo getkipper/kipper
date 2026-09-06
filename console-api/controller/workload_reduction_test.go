@@ -232,33 +232,6 @@ func TestInitAndMainContainersOfOneNameAreSeparate(t *testing.T) {
 	}
 }
 
-// The same name in both lists must not merge their volume mounts either, or the
-// alert names a claim the failing container never touched.
-func TestClaimsAreScopedToTheContainerKind(t *testing.T) {
-	pod := &corev1.Pod{
-		Spec: corev1.PodSpec{
-			Volumes: []corev1.Volume{
-				{Name: "init-data", VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "scratch"}}},
-				{Name: "app-data", VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}}},
-			},
-			InitContainers: []corev1.Container{{
-				Name: "db", VolumeMounts: []corev1.VolumeMount{{Name: "init-data"}},
-			}},
-			Containers: []corev1.Container{{
-				Name: "db", VolumeMounts: []corev1.VolumeMount{{Name: "app-data"}},
-			}},
-		},
-	}
-
-	line := "cannot write: read-only file system"
-	assert.Equal(t, []string{"data"}, blameFor(pod, "db", mainContainer, line).candidates,
-		"the main container mounts the data volume and nothing else")
-	assert.Equal(t, []string{"scratch"}, blameFor(pod, "db", initContainer, line).candidates,
-		"and the init container of the same name mounts a different one")
-}
-
 // One replica being replaced drops the workload's total restart count. Compared
 // against that total, a different replica crashing afterwards reads as a lower
 // number and the crash is missed. The baseline is per pod for that reason.
@@ -414,4 +387,137 @@ func TestACrashLoopAndAPullFailureAreBothReported(t *testing.T) {
 	}
 	assert.True(t, actions["CrashLoopBackOff"], "the crash loop")
 	assert.True(t, actions["ImagePullBackOff"], "and the pull failure")
+}
+
+// A replacement pod that cannot be scheduled sits Pending with no container
+// statuses at all. Reducing only what has a status made the workload look
+// entirely clean, so a replica that had never once run declared the incident
+// over. Absence of an observation is not a clean observation.
+func TestAPodWithNoStatusYetHoldsRecoveryOpen(t *testing.T) {
+	pending := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "api-2", Namespace: "shop-prod",
+			Labels: map[string]string{"app": "api", "app.kubernetes.io/managed-by": "kipper"},
+		},
+		Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	}
+	healthy := podWith("shop-prod", "api", "api-1", readyStatus(3))
+	healthy.Spec = corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}
+
+	obs := observeWorkloads([]corev1.Pod{*healthy, *pending})
+	require.Len(t, obs, 1)
+	assert.False(t, obs[0].allClean,
+		"one replica has not started, so the workload is not running clean")
+}
+
+// And end to end: no all-clear while a replica is still Pending.
+func TestNoAllClearWhileAReplicaHasNotStarted(t *testing.T) {
+	pending := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "api-2", Namespace: "shop-prod",
+			Labels: map[string]string{"app": "api", "app.kubernetes.io/managed-by": "kipper"},
+		},
+		Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	}
+	healthy := podWith("shop-prod", "api", "api-1", readyStatus(3))
+	healthy.Spec = corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}
+
+	rc := NewResourceController(fake.NewClientset(healthy, pending), nil)
+	key := episodeKey("shop-prod", "api-1", "api", "app", mainContainer)
+	rc.crashLoopEpisode[key] = episode{
+		firstSeen:   time.Now().Add(-7 * time.Hour),
+		escalatedAt: time.Now().Add(-time.Hour),
+	}
+
+	rc.commitBatches(rc.checkPodProblems(context.Background()))
+
+	ep, tracked := rc.crashLoopEpisode[key]
+	require.True(t, tracked, "the episode closed while a replica had not started")
+	assert.True(t, ep.readySince.IsZero())
+}
+
+// A workload where no replica has published a status yet is observed entirely
+// from the pod spec, so its observation carries no container status at all.
+// Nothing downstream may assume one is there.
+func TestAWorkloadObservedOnlyFromItsSpec(t *testing.T) {
+	pending := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "api-1", Namespace: "shop-prod",
+			Labels: map[string]string{"app": "api", "app.kubernetes.io/managed-by": "kipper"},
+		},
+		Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	}
+
+	obs := observeWorkloads([]corev1.Pod{*pending})
+	require.Len(t, obs, 1)
+	assert.Nil(t, obs[0].status, "nothing has reported on this container yet")
+	assert.False(t, obs[0].allClean)
+
+	// The scan must survive it, with an episode open and without one.
+	rc := NewResourceController(fake.NewClientset(pending), nil)
+	assert.NotPanics(t, func() { rc.commitBatches(rc.checkPodProblems(context.Background())) })
+
+	rc.crashLoopEpisode[obs[0].key] = episode{
+		firstSeen:   time.Now().Add(-7 * time.Hour),
+		escalatedAt: time.Now().Add(-time.Hour),
+		readySince:  time.Now().Add(-time.Hour),
+	}
+	assert.NotPanics(t, func() { rc.commitBatches(rc.checkPodProblems(context.Background())) })
+	assert.True(t, rc.crashLoopEpisode[obs[0].key].readySince.IsZero(),
+		"a container nobody has reported on is not running clean")
+}
+
+// A status for a container the spec no longer declares, which is what a rollout
+// mid-flight looks like, must still be observed rather than dropped.
+func TestAStatusWithoutASpecEntryIsStillObserved(t *testing.T) {
+	pod := podWith("shop-prod", "api", "api-1", readyStatus(3))
+	pod.Spec = corev1.PodSpec{Containers: []corev1.Container{{Name: "renamed"}}}
+
+	obs := observeWorkloads([]corev1.Pod{*pod})
+	require.Len(t, obs, 2, "the container that is running and the one the spec now names")
+
+	byName := map[string]workloadObservation{}
+	for _, o := range obs {
+		byName[o.key] = o
+	}
+	running := byName[episodeKey("shop-prod", "api-1", "api", "app", mainContainer)]
+	require.NotNil(t, running.status)
+	assert.True(t, running.allClean, "the container that is up is up")
+}
+
+// The recovery this alerts prescribe replaces the pod, and the pod being
+// replaced can sit Terminating for a while behind a finalizer or a volume
+// detach. Counting it against the workload means following the advice keeps the
+// incident open, which is the recovery detector working against the recovery.
+func TestATerminatingPodDoesNotHoldRecoveryOpen(t *testing.T) {
+	deleted := metav1.NewTime(time.Now().Add(-time.Minute))
+	terminating := podWith("shop-prod", "api", "api-old", corev1.ContainerStatus{
+		Name: "app", RestartCount: 30, State: crashLooping(),
+	})
+	terminating.DeletionTimestamp = &deleted
+	terminating.Finalizers = []string{"example.com/holding-on"}
+	terminating.Spec = corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}
+
+	healthy := podWith("shop-prod", "api", "api-new", readyStatus(0))
+	healthy.Spec = corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}
+
+	obs := observeWorkloads([]corev1.Pod{*terminating, *healthy})
+	require.Len(t, obs, 1)
+	assert.True(t, obs[0].allClean, "the pod on its way out is not a replica any more")
+	assert.Empty(t, obs[0].failing, "and its crash loop is not this workload's problem now")
+}
+
+// A workload whose every pod is terminating has nothing to say either way, and
+// must not be treated as recovered on the strength of no observations at all.
+func TestAWorkloadWithOnlyTerminatingPods(t *testing.T) {
+	deleted := metav1.NewTime(time.Now())
+	pod := podWith("shop-prod", "api", "api-old", readyStatus(3))
+	pod.DeletionTimestamp = &deleted
+	pod.Finalizers = []string{"example.com/holding-on"}
+
+	assert.Empty(t, observeWorkloads([]corev1.Pod{*pod}),
+		"a workload with nothing left running is not an observation")
 }

@@ -440,3 +440,30 @@ func healthyReplica(namespace, app, name string) *corev1.Pod {
 		}}},
 	}
 }
+
+// A crash loop is usually the image or the configuration, and recreating the
+// pod brings back the same image and the same configuration. Presenting that as
+// the recovery sends an operator to run a command that cannot work and then
+// wonder what else is wrong.
+//
+// The read-only case is where a recreation genuinely is the remedy, and that one
+// has its own alert saying so.
+func TestAGenericCrashLoopDoesNotPromiseARecovery(t *testing.T) {
+	rc := NewResourceController(nil, nil)
+	rc.readPreviousLog = func(string, string, string) string {
+		return `FATAL: password authentication failed for user "app"`
+	}
+
+	pod := crashLoopingPodFor("shop-test", "db", "postgres")
+	obs := soleObservation(pod)
+	rc.crashLoopEpisode[obs.key] = episode{firstSeen: at(0), lastAlerted: at(5)}
+
+	batch, ok := rc.crashLoopAlert(obs.key, obs, at(6), "2026-09-06T00:00:00Z")
+	require.True(t, ok)
+	require.Equal(t, stageCritical, batch.entry.Severity)
+
+	assert.NotContains(t, batch.entry.Reason, "Recover with",
+		"nothing here has been established that a pod recreation fixes")
+	assert.Contains(t, batch.entry.Reason, "kip service restart db",
+		"the command is still worth naming, as the thing to try if it looks like storage")
+}
