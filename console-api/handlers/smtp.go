@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/getkipper/kipper/console-api/internal/deliver"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -70,16 +72,16 @@ func (s *SMTP) notifyConfigChange(ctx context.Context, r *http.Request, old *smt
 			"Alert emails now go through %s. If this change is unexpected, treat the cluster as compromised.</p>",
 		html.EscapeString(user), html.EscapeString(updated.Host))
 	go func() {
-		// Detached from the request's cancellation, which has already been
-		// answered, but still bounded: a silent relay must not leave this
-		// running for good.
-		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-		defer cancel()
-
+		// One budget per address, through the same primitive as every other
+		// outbound send. Shared, the first relay to stall spends it and the
+		// remaining admins never hear about a change to the very destination
+		// their alerts were going to.
 		for _, admin := range s.Security.Console.Admins() {
-			if err := mail.Send(sctx, oldCfg, admin, "[Kipper security] SMTP settings changed", body); err != nil {
-				log.Printf("security: previous-destination email to %s failed: %v", admin, err)
-			}
+			deliver.Bounded(ctx, 0, "SMTP-change notice to "+admin, func(ctx context.Context) {
+				if err := mail.Send(ctx, oldCfg, admin, "[Kipper security] SMTP settings changed", body); err != nil {
+					log.Printf("security: previous-destination email to %s failed: %v", admin, err)
+				}
+			})
 		}
 	}()
 }
