@@ -433,15 +433,23 @@ A service whose container Kubernetes has given up restarting reads
 
   !   db (CrashLoopBackOff)
       container "postgres" has restarted 996 times and is not staying up
-      (last exit code 1). Recover with: kip service restart db
+      (last exit code 1). Check its logs. If the cause is storage rather than
+      its image or configuration, 'kip service restart db' recreates the pod,
+      which is the one thing a container restart cannot do
 ```
+
+A crash loop is usually the image or the configuration, and a recreated pod
+comes back with both, so the listing says to look before it says to restart.
+Where recreation genuinely is the remedy is a mount that went read-only
+underneath the pod, and that gets [its own
+alert](/en/alerts#read-only-volumes).
 
 An app bound to it keeps its own status, because the app really is running. Its
 broken dependency is named under `kip app list`:
 
 ```
   !   api depends on db, which is crash-looping
-      kip service list  shows why, and how to recover it
+      kip service list  shows why, and what to try
 ```
 
 ## Restarting a service

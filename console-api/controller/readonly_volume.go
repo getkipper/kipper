@@ -214,12 +214,12 @@ func (rc *ResourceController) readOnlyVolumeAlert(key string, pod *corev1.Pod, n
 func describeClaims(claims []string) string {
 	switch len(claims) {
 	case 0:
-		return "A filesystem it writes to has stopped accepting writes"
+		return "It hit a read-only filesystem"
 	case 1:
-		return "The container mounts volume " + claims[0] +
-			". Either that volume or the node's own disk stopped accepting writes, and a container restart clears neither"
+		return "It hit a read-only filesystem. The container mounts volume " + claims[0] +
+			". If that is the one, recreating the pod is what clears it, because the mount belongs to the pod and a container restart does not"
 	default:
-		return "The container mounts volumes " + strings.Join(claims, " and ") +
-			". One of those or the node's own disk stopped accepting writes, and a container restart clears neither"
+		return "It hit a read-only filesystem. The container mounts volumes " + strings.Join(claims, " and ") +
+			". If one of those is the one, recreating the pod is what clears it, because the mount belongs to the pod and a container restart does not"
 	}
 }
