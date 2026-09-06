@@ -20,7 +20,7 @@ func (e *EmailService) Send(ctx context.Context, to, subject, htmlBody string) e
 	if cfg == nil || cfg.Host == "" {
 		return fmt.Errorf("SMTP not configured")
 	}
-	return mail.Send(mailConfig(cfg), to, subject, htmlBody)
+	return mail.Send(ctx, mailConfig(cfg), to, subject, htmlBody)
 }
 
 // Configured returns true if SMTP settings have been saved.

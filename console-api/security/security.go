@@ -109,7 +109,7 @@ func (n *Notifier) Emit(ctx context.Context, e Event) {
 	go func() {
 		dctx, cancel := context.WithTimeout(base, deliveryTimeout)
 		defer cancel()
-		n.deliverEnvPinned(id, e)
+		n.deliverEnvPinned(dctx, id, e)
 		n.deliverConsole(dctx, id, e)
 	}()
 }
@@ -143,7 +143,7 @@ func envPinnedConfigured() bool {
 		os.Getenv(envWebhook) != ""
 }
 
-func (n *Notifier) deliverEnvPinned(id string, e Event) {
+func (n *Notifier) deliverEnvPinned(ctx context.Context, id string, e Event) {
 	if host := os.Getenv(envSMTPHost); host != "" {
 		port := 587
 		if p, err := strconv.Atoi(os.Getenv(envSMTPPort)); err == nil && p > 0 {
@@ -161,7 +161,7 @@ func (n *Notifier) deliverEnvPinned(id string, e Event) {
 			cfg.From = "kipper-security@" + host
 		}
 		for _, to := range splitRecipients(os.Getenv(envSMTPTo)) {
-			if err := mail.Send(cfg, to, "[Kipper security] "+e.Summary, emailBody(id, e)); err != nil {
+			if err := mail.Send(ctx, cfg, to, "[Kipper security] "+e.Summary, emailBody(id, e)); err != nil {
 				log.Printf("security: env-pinned email to %s failed for event %s: %v", to, id, err)
 			}
 		}
