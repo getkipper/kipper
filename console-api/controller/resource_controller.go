@@ -105,10 +105,11 @@ type ResourceController struct {
 	client   kubernetes.Interface
 	crClient crclient.Client
 
-	// evidenceOwed is the workloads whose logs the last tick could not afford
-	// to read. They are read first next time, so a backlog drains rather than
-	// leaving one workload permanently unexamined.
-	evidenceOwed map[string]bool
+	// evidenceOwed is the workloads whose logs earlier ticks could not afford to
+	// read, oldest first. The queue is what drains a backlog evenly: paying
+	// whichever workload the scan happens to reach first would pay the same one
+	// every tick and leave the rest permanently unexamined.
+	evidenceOwed []string
 
 	// readPreviousLog fetches the log of the container that died, so a crash
 	// loop can be told apart from a volume that went read-only underneath one.
@@ -1783,7 +1784,7 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) []alertBatch
 
 	cooldown := crashLoopCooldown
 	evidence := rc.evidenceBudget()
-	defer func() { rc.evidenceOwed = evidence.skipped }()
+	defer func() { rc.evidenceOwed = evidence.carry() }()
 	now := time.Now()
 	nowStr := now.UTC().Format(time.RFC3339)
 	var batches []alertBatch

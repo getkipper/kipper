@@ -115,18 +115,29 @@ func (rc *ResourceController) readOnlyVolumeEvidence(ctx context.Context, budget
 		return "", nil
 	}
 
+	var candidates []failingContainer
 	for _, f := range obs.failing {
-		if len(writableClaims(f.pod, f.status.Name, obs.kind)) == 0 {
-			// Nothing here a pod recreation would fix.
-			continue
+		// Nothing a pod recreation would fix.
+		if len(writableClaims(f.pod, f.status.Name, obs.kind)) > 0 {
+			candidates = append(candidates, f)
 		}
-		if !budget.spend(obs.key) {
-			// The tick has read as much as it is allowed to. These workloads
-			// still get their ordinary crash-loop alert, and the next tick
-			// starts with a fresh budget, so the diagnosis is delayed rather
-			// than lost.
-			return "", nil
-		}
+	}
+	if len(candidates) == 0 {
+		return "", nil
+	}
+
+	// Admission is per workload, not per read. The evidence can be in any of a
+	// workload's failing replicas, and admitting one read at a time meant a
+	// workload whose second replica held it spent its turn on the first and was
+	// refused again — every tick, for good.
+	if !budget.admit(obs.key) {
+		// The tick has read as much as it is allowed to. This workload still
+		// gets its ordinary crash-loop alert, and the next tick owes it, so the
+		// diagnosis is delayed rather than lost.
+		return "", nil
+	}
+
+	for _, f := range candidates {
 		if line := readOnlyEvidenceLine(rc.readPreviousLog(ctx, f.pod.Namespace, f.pod.Name, f.status.Name)); line != "" {
 			return line, f.pod
 		}
@@ -147,43 +158,76 @@ var evidenceBudgetPerTick = 10 * time.Second
 
 // evidenceBudget is one tick's allowance for reading logs.
 //
-// It also carries what the last tick could not afford. The scan walks a stable
-// order, so without that the same workloads at the front spend the budget every
-// time and one further down is never read at all — its diagnosis lost rather
-// than delayed, which is what the comment used to claim.
+// It also carries what earlier ticks could not afford, oldest first. The scan
+// walks a stable order, so without a queue the same workloads at the front
+// spend the budget every time and one further down is never read at all — its
+// diagnosis lost rather than delayed.
 type evidenceBudget struct {
 	deadline time.Time
-	owed     map[string]bool
-	skipped  map[string]bool
+	// owed is the debt carried in, oldest first. Only its head may overrun the
+	// deadline, which is what makes the queue advance instead of paying the
+	// same workload every tick.
+	owed []string
+	paid map[string]bool
+	// fresh is what this tick could not afford and did not already owe.
+	fresh   []string
+	overran bool
 }
 
-// evidenceBudget starts a fresh allowance, owing whatever the last tick skipped.
+// evidenceBudget starts a fresh allowance, owing whatever earlier ticks skipped.
 func (rc *ResourceController) evidenceBudget() *evidenceBudget {
 	return &evidenceBudget{
 		deadline: time.Now().Add(evidenceBudgetPerTick),
 		owed:     rc.evidenceOwed,
-		skipped:  map[string]bool{},
+		paid:     map[string]bool{},
 	}
 }
 
-// spend reports whether this workload's log may be read now.
+// admit reports whether this workload's logs may be read on this tick.
 //
-// A workload the last tick skipped is read even when the budget is gone, so a
-// backlog drains instead of growing. One extra read past the deadline is the
-// price of that, and it is bounded by how many were skipped.
-func (b *evidenceBudget) spend(key string) bool {
+// Inside the budget, anything goes. Past it, the workload at the head of the
+// debt queue is let through and the rest wait: that drains a backlog at a
+// workload per tick while keeping the overrun to one workload, rather than
+// paying off fifty of them at five seconds each on the tick after an outage,
+// which is the lock-holding this budget exists to prevent.
+func (b *evidenceBudget) admit(key string) bool {
 	if b == nil {
 		return false
 	}
-	if b.owed[key] {
-		delete(b.owed, key)
-		return true
-	}
 	if time.Now().Before(b.deadline) {
+		b.paid[key] = true
 		return true
 	}
-	b.skipped[key] = true
+	if !b.overran && len(b.owed) > 0 && b.owed[0] == key {
+		b.paid[key] = true
+		b.overran = true
+		return true
+	}
+	if !b.isOwed(key) {
+		b.fresh = append(b.fresh, key)
+	}
 	return false
+}
+
+func (b *evidenceBudget) isOwed(key string) bool {
+	for _, k := range b.owed {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+// carry is the debt to hand the next tick: what is still owed, in the order it
+// was incurred, then whatever this tick added.
+func (b *evidenceBudget) carry() []string {
+	var next []string
+	for _, k := range b.owed {
+		if !b.paid[k] {
+			next = append(next, k)
+		}
+	}
+	return append(next, b.fresh...)
 }
 
 // writableClaims lists the persistent volumes a container can write to.
