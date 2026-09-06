@@ -126,7 +126,7 @@ func TestOOMOnOneReplicaDoesNotSilenceAnother(t *testing.T) {
 
 	for _, order := range []([]runtimeObj){{oom, other}, {other, oom}} {
 		rc := NewResourceController(fake.NewClientset(order[0], order[1]), nil)
-		rc.readPreviousLog = func(string, string, string) string { return "" }
+		rc.readPreviousLog = func(context.Context, string, string, string) string { return "" }
 
 		batches := rc.checkPodProblems(context.Background())
 
@@ -151,7 +151,7 @@ func TestEveryReplicaOOMStaysWithTheMemoryPath(t *testing.T) {
 		})
 	}
 	rc := NewResourceController(fake.NewClientset(oom("api-1"), oom("api-2")), nil)
-	rc.readPreviousLog = func(string, string, string) string { return "" }
+	rc.readPreviousLog = func(context.Context, string, string, string) string { return "" }
 
 	for _, b := range rc.checkPodProblems(context.Background()) {
 		assert.NotEqual(t, "CrashLoopBackOff", b.entry.Action,
@@ -184,7 +184,7 @@ func TestReadOnlyEvidenceIsFoundInAnyFailingReplica(t *testing.T) {
 	for _, order := range []([]runtimeObj){{claim("db-0"), claim("db-1")}, {claim("db-1"), claim("db-0")}} {
 		rc := NewResourceController(fake.NewClientset(order[0], order[1]), nil)
 		// Only one replica's disk went read-only.
-		rc.readPreviousLog = func(_, pod, _ string) string {
+		rc.readPreviousLog = func(_ context.Context, _, pod, _ string) string {
 			if pod == "db-1" {
 				return `FATAL:  could not remove old lock file "postmaster.pid": Read-only file system`
 			}
@@ -353,7 +353,7 @@ func TestAnImagePullFailureIsNotHiddenByAnotherReplicasCrashLoop(t *testing.T) {
 
 	for _, order := range []([]runtimeObj){{oom, pulling}, {pulling, oom}} {
 		rc := NewResourceController(fake.NewClientset(order[0], order[1]), nil)
-		rc.readPreviousLog = func(string, string, string) string { return "" }
+		rc.readPreviousLog = func(context.Context, string, string, string) string { return "" }
 
 		actions := map[string]bool{}
 		for _, b := range rc.checkPodProblems(context.Background()) {
@@ -379,7 +379,7 @@ func TestACrashLoopAndAPullFailureAreBothReported(t *testing.T) {
 		},
 	})
 	rc := NewResourceController(fake.NewClientset(looping, pulling), nil)
-	rc.readPreviousLog = func(string, string, string) string { return "" }
+	rc.readPreviousLog = func(context.Context, string, string, string) string { return "" }
 
 	actions := map[string]bool{}
 	for _, b := range rc.checkPodProblems(context.Background()) {

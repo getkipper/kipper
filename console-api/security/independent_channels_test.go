@@ -107,3 +107,56 @@ func budgetLeft(ctx context.Context) time.Duration {
 // testBudget is short enough that a channel taking all of its own does not slow
 // the suite, and long enough that the assertions have room.
 const testBudget = 400 * time.Millisecond
+
+// These channels are best-effort background work, and every one of them calls a
+// hook wired from another package. A nil map, a nil pointer, anything in one of
+// those takes down a goroutine with no caller to recover it, which means the
+// whole console-api process. A security notification failing must not be able to
+// stop the thing it is notifying about.
+func TestAPanickingChannelDoesNotTakeTheProcessWithIt(t *testing.T) {
+	delivered := make(chan struct{}, 1)
+
+	n := &Notifier{
+		deliveryTimeout: testBudget,
+		envSMTP:         func(context.Context, string, Event) { panic("a hook exploded") },
+		envWebhook:      func(context.Context, string, Event) {},
+		Console: ConsoleHooks{
+			Alert: func(context.Context, string, string) { delivered <- struct{}{} },
+		},
+	}
+
+	assert.NotPanics(t, func() {
+		n.Emit(context.Background(), Event{Kind: "test", Summary: "a security event"})
+	})
+
+	select {
+	case <-delivered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("one channel panicking stopped the others")
+	}
+}
+
+// The webhook is a network call like the others and has to observe the budget
+// its channel was given.
+func TestTheEnvWebhookObservesItsBudget(t *testing.T) {
+	seen := make(chan bool, 1)
+	n := &Notifier{
+		deliveryTimeout: testBudget,
+		envSMTP:         func(context.Context, string, Event) {},
+		postWebhook: func(ctx context.Context, _ string, _ Event) error {
+			_, ok := ctx.Deadline()
+			seen <- ok
+			return nil
+		},
+	}
+	t.Setenv("KIPPER_SECURITY_WEBHOOK", "https://hooks.example.com/abc")
+
+	n.Emit(context.Background(), Event{Kind: "test", Summary: "a security event"})
+
+	select {
+	case ok := <-seen:
+		assert.True(t, ok, "the webhook was handed a context with no deadline on it")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the webhook was never called")
+	}
+}

@@ -86,12 +86,12 @@ const previousLogTimeout = 5 * time.Second
 // the running one has usually not got far enough to say anything. Failures are
 // answered with "": a log that cannot be read is not evidence of anything, and
 // the crash loop still deserves its ordinary alert.
-func (rc *ResourceController) readPreviousContainerLog(namespace, pod, container string) string {
+func (rc *ResourceController) readPreviousContainerLog(ctx context.Context, namespace, pod, container string) string {
 	if rc.client == nil {
 		return ""
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), previousLogTimeout)
+	ctx, cancel := context.WithTimeout(ctx, previousLogTimeout)
 	defer cancel()
 
 	tail := int64(previousLogTail)
@@ -110,7 +110,7 @@ func (rc *ResourceController) readPreviousContainerLog(namespace, pod, container
 // readOnlyVolumeEvidence returns the log line saying this container's
 // filesystem stopped accepting writes, or "" when its log says nothing of the
 // kind or cannot be read.
-func (rc *ResourceController) readOnlyVolumeEvidence(obs workloadObservation) (string, *corev1.Pod) {
+func (rc *ResourceController) readOnlyVolumeEvidence(ctx context.Context, obs workloadObservation) (string, *corev1.Pod) {
 	if rc.readPreviousLog == nil {
 		return "", nil
 	}
@@ -120,7 +120,7 @@ func (rc *ResourceController) readOnlyVolumeEvidence(obs workloadObservation) (s
 			// Nothing here a pod recreation would fix.
 			continue
 		}
-		if line := readOnlyEvidenceLine(rc.readPreviousLog(f.pod.Namespace, f.pod.Name, f.status.Name)); line != "" {
+		if line := readOnlyEvidenceLine(rc.readPreviousLog(ctx, f.pod.Namespace, f.pod.Name, f.status.Name)); line != "" {
 			return line, f.pod
 		}
 	}

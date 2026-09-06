@@ -52,7 +52,7 @@ func TestTwoFailingReplicasRaiseOneAlert(t *testing.T) {
 		replicaPod("shop-prod", "api", "api-1", crashLooping(), 8, false),
 		replicaPod("shop-prod", "api", "api-2", crashLooping(), 3, false),
 	), nil)
-	rc.readPreviousLog = func(string, string, string) string { return "" }
+	rc.readPreviousLog = func(context.Context, string, string, string) string { return "" }
 
 	batches := rc.checkPodProblems(context.Background())
 
@@ -105,7 +105,7 @@ func TestOneFailingReplicaHoldsTheWorkloadOpen(t *testing.T) {
 		replicaPod("shop-prod", "api", "api-1", crashLooping(), 8, false),
 		replicaPod("shop-prod", "api", "api-2", running(), 2, true),
 	), nil)
-	rc.readPreviousLog = func(string, string, string) string { return "" }
+	rc.readPreviousLog = func(context.Context, string, string, string) string { return "" }
 
 	key := episodeKey("shop-prod", "api-1", "api", "app", mainContainer)
 	rc.crashLoopEpisode[key] = episode{
@@ -159,7 +159,7 @@ func TestAnInitContainerCrashLoopIsSeen(t *testing.T) {
 		},
 	}
 	rc := NewResourceController(fake.NewClientset(pod), nil)
-	rc.readPreviousLog = func(string, string, string) string { return "" }
+	rc.readPreviousLog = func(context.Context, string, string, string) string { return "" }
 
 	batches := rc.checkPodProblems(context.Background())
 
@@ -215,7 +215,7 @@ func TestTwoWorkloadsFailingAreTwoAlerts(t *testing.T) {
 		replicaPod("shop-prod", "api", "api-2", crashLooping(), 3, false),
 		replicaPod("shop-prod", "worker", "worker-1", crashLooping(), 5, false),
 	), nil)
-	rc.readPreviousLog = func(string, string, string) string { return "" }
+	rc.readPreviousLog = func(context.Context, string, string, string) string { return "" }
 
 	batches := rc.checkPodProblems(context.Background())
 
