@@ -85,8 +85,8 @@ func TestSecurityAlertReachesSlackButNotEmail(t *testing.T) {
 
 	posted := make(chan Alert, 2)
 	emailed := make(chan string, 2)
-	restore := securityDelivery
-	setSecurityDelivery(func(_ context.Context, _ kubernetes.Interface) batchDelivery {
+	restore := deliveryBuilder
+	setDeliveryBuilder(func(_ context.Context, _ kubernetes.Interface) batchDelivery {
 		return batchDelivery{
 			route:     DeliverySlack,
 			admins:    func() []string { return []string{"ops@example.com"} },
@@ -94,7 +94,7 @@ func TestSecurityAlertReachesSlackButNotEmail(t *testing.T) {
 			sendEmail: func(_ context.Context, to, _, _ string) error { emailed <- to; return nil },
 		}
 	})
-	defer func() { setSecurityDelivery(restore) }()
+	defer func() { setDeliveryBuilder(restore) }()
 
 	StoreSecurityAlert(context.Background(), client, Alert{
 		Time:     time.Now().UTC().Format(time.RFC3339),
@@ -125,15 +125,15 @@ func TestSecurityAlertSendsNothingWithoutAWebhook(t *testing.T) {
 	client := fake.NewClientset(smtpSecret(t, "smtp.example.com"))
 
 	touched := make(chan struct{}, 2)
-	restore := securityDelivery
-	setSecurityDelivery(func(_ context.Context, _ kubernetes.Interface) batchDelivery {
+	restore := deliveryBuilder
+	setDeliveryBuilder(func(_ context.Context, _ kubernetes.Interface) batchDelivery {
 		return batchDelivery{
 			route:     DeliveryEmail,
 			admins:    func() []string { touched <- struct{}{}; return []string{"ops@example.com"} },
 			sendEmail: func(context.Context, string, string, string) error { touched <- struct{}{}; return nil },
 		}
 	})
-	defer func() { setSecurityDelivery(restore) }()
+	defer func() { setDeliveryBuilder(restore) }()
 
 	StoreSecurityAlert(context.Background(), client, Alert{
 		Time: time.Now().UTC().Format(time.RFC3339), Action: "security", Reason: "2FA was reset",
@@ -157,15 +157,15 @@ func TestSecurityAlertReachesSlackEvenWhenTheBellWriteFails(t *testing.T) {
 	})
 
 	posted := make(chan Alert, 1)
-	restore := securityDelivery
-	setSecurityDelivery(func(_ context.Context, _ kubernetes.Interface) batchDelivery {
+	restore := deliveryBuilder
+	setDeliveryBuilder(func(_ context.Context, _ kubernetes.Interface) batchDelivery {
 		return batchDelivery{
 			route:     DeliverySlack,
 			admins:    func() []string { return nil },
 			sendSlack: func(_ context.Context, a Alert) error { posted <- a; return nil },
 		}
 	})
-	defer func() { setSecurityDelivery(restore) }()
+	defer func() { setDeliveryBuilder(restore) }()
 
 	StoreSecurityAlert(context.Background(), client, Alert{
 		Time: time.Now().UTC().Format(time.RFC3339), Action: "security", Reason: "2FA was reset",
@@ -192,15 +192,15 @@ func TestSecurityAlertReachesSlackWhileTheBellWriteIsStillHanging(t *testing.T) 
 	defer close(release)
 
 	posted := make(chan Alert, 1)
-	restore := securityDelivery
-	setSecurityDelivery(func(_ context.Context, _ kubernetes.Interface) batchDelivery {
+	restore := deliveryBuilder
+	setDeliveryBuilder(func(_ context.Context, _ kubernetes.Interface) batchDelivery {
 		return batchDelivery{
 			route:     DeliverySlack,
 			admins:    func() []string { return nil },
 			sendSlack: func(_ context.Context, a Alert) error { posted <- a; return nil },
 		}
 	})
-	defer func() { setSecurityDelivery(restore) }()
+	defer func() { setDeliveryBuilder(restore) }()
 
 	go StoreSecurityAlert(context.Background(), client, Alert{
 		Time: time.Now().UTC().Format(time.RFC3339), Action: "security", Reason: "2FA was reset",
