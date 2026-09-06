@@ -216,26 +216,27 @@ func StoreSecurityAlert(ctx context.Context, client kubernetes.Interface, alert 
 	_ = storeAlerts(ctx, client, []Alert{alert})
 }
 
-// securityDelivery is deliveryFor, named so a test can supply transports without
-// a webhook or an SMTP server. Guarded for the same reason as the admin
+// deliveryBuilder is deliveryFor behind a seam, so a test can supply transports
+// without a webhook or an SMTP server. Both the security path and the ordinary
+// alert path build through it. Guarded for the same reason as the admin
 // resolver: the delivery it builds runs after the call that asked for it.
 var (
-	securityDeliveryMu sync.RWMutex
-	securityDelivery   = deliveryFor
+	deliveryBuilderMu sync.RWMutex
+	deliveryBuilder   = deliveryFor
 )
 
-// setSecurityDelivery replaces the transport builder. Tests only; production
+// setDeliveryBuilder replaces the transport builder. Tests only; production
 // never changes it after startup.
-func setSecurityDelivery(f func(context.Context, kubernetes.Interface) batchDelivery) {
-	securityDeliveryMu.Lock()
-	defer securityDeliveryMu.Unlock()
-	securityDelivery = f
+func setDeliveryBuilder(f func(context.Context, kubernetes.Interface) batchDelivery) {
+	deliveryBuilderMu.Lock()
+	defer deliveryBuilderMu.Unlock()
+	deliveryBuilder = f
 }
 
-func securityDeliveryFor(ctx context.Context, client kubernetes.Interface) batchDelivery {
-	securityDeliveryMu.RLock()
-	f := securityDelivery
-	securityDeliveryMu.RUnlock()
+func buildDelivery(ctx context.Context, client kubernetes.Interface) batchDelivery {
+	deliveryBuilderMu.RLock()
+	f := deliveryBuilder
+	deliveryBuilderMu.RUnlock()
 	return f(ctx, client)
 }
 
@@ -346,5 +347,5 @@ const routeLookupTimeout = 20 * time.Second
 // cancel so the caller can release it before sending.
 func deliveryWithin(base context.Context, client kubernetes.Interface, within time.Duration) (batchDelivery, context.CancelFunc) {
 	lookup, cancel := context.WithTimeout(base, within)
-	return securityDeliveryFor(lookup, client), cancel
+	return buildDelivery(lookup, client), cancel
 }
