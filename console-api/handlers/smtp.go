@@ -70,8 +70,14 @@ func (s *SMTP) notifyConfigChange(ctx context.Context, r *http.Request, old *smt
 			"Alert emails now go through %s. If this change is unexpected, treat the cluster as compromised.</p>",
 		html.EscapeString(user), html.EscapeString(updated.Host))
 	go func() {
+		// Detached from the request's cancellation, which has already been
+		// answered, but still bounded: a silent relay must not leave this
+		// running for good.
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+
 		for _, admin := range s.Security.Console.Admins() {
-			if err := mail.Send(oldCfg, admin, "[Kipper security] SMTP settings changed", body); err != nil {
+			if err := mail.Send(sctx, oldCfg, admin, "[Kipper security] SMTP settings changed", body); err != nil {
 				log.Printf("security: previous-destination email to %s failed: %v", admin, err)
 			}
 		}
