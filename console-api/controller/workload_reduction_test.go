@@ -193,7 +193,7 @@ func TestReadOnlyEvidenceIsFoundInAnyFailingReplica(t *testing.T) {
 
 		batches := rc.checkPodProblems(context.Background())
 		require.Len(t, batches, 1)
-		assert.Equal(t, "VolumeReadOnly", batches[0].entry.Action,
+		assert.Equal(t, "ReadOnlyFilesystem", batches[0].entry.Action,
 			"the evidence is in one replica's log; which one must not depend on list order")
 		assert.Contains(t, batches[0].entry.Reason, "data-db-1",
 			"and the claim named must be the one belonging to the replica that has the evidence")

@@ -1777,6 +1777,7 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) []alertBatch
 	defer rc.mu.Unlock()
 
 	cooldown := crashLoopCooldown
+	evidence := rc.evidenceBudget()
 	now := time.Now()
 	nowStr := now.UTC().Format(time.RFC3339)
 	var batches []alertBatch
@@ -1844,7 +1845,7 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) []alertBatch
 				rc.touchEpisode(key, obs, now)
 				continue
 			}
-			if b, ok := rc.crashLoopAlert(ctx, key, obs, now, nowStr); ok {
+			if b, ok := rc.crashLoopAlert(ctx, evidence, key, obs, now, nowStr); ok {
 				batches = append(batches, b)
 			}
 		}

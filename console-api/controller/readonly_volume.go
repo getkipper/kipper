@@ -110,7 +110,7 @@ func (rc *ResourceController) readPreviousContainerLog(ctx context.Context, name
 // readOnlyVolumeEvidence returns the log line saying this container's
 // filesystem stopped accepting writes, or "" when its log says nothing of the
 // kind or cannot be read.
-func (rc *ResourceController) readOnlyVolumeEvidence(ctx context.Context, obs workloadObservation) (string, *corev1.Pod) {
+func (rc *ResourceController) readOnlyVolumeEvidence(ctx context.Context, budget *evidenceBudget, obs workloadObservation) (string, *corev1.Pod) {
 	if rc.readPreviousLog == nil {
 		return "", nil
 	}
@@ -120,11 +120,44 @@ func (rc *ResourceController) readOnlyVolumeEvidence(ctx context.Context, obs wo
 			// Nothing here a pod recreation would fix.
 			continue
 		}
+		if !budget.spend() {
+			// The tick has read as much as it is allowed to. These workloads
+			// still get their ordinary crash-loop alert, and the next tick
+			// starts with a fresh budget, so the diagnosis is delayed rather
+			// than lost.
+			return "", nil
+		}
 		if line := readOnlyEvidenceLine(rc.readPreviousLog(ctx, f.pod.Namespace, f.pod.Name, f.status.Name)); line != "" {
 			return line, f.pod
 		}
 	}
 	return "", nil
+}
+
+// evidenceBudgetPerTick caps how long one scan may spend reading container logs.
+//
+// The reads happen while the controller holds its state lock, and one is
+// bounded at five seconds. A cluster with fifty failing workloads would
+// otherwise hold that lock for minutes on the first tick after a restart.
+// Nothing contends for it today, because it is only ever taken from the tick,
+// and this is what keeps that from becoming a trap for whoever adds a reader
+// off the tick path.
+// A variable so a test can prove the ceiling without waiting ten seconds for it.
+var evidenceBudgetPerTick = 10 * time.Second
+
+// evidenceBudget is one tick's allowance for reading logs.
+type evidenceBudget struct {
+	deadline time.Time
+}
+
+// evidenceBudget starts a fresh allowance.
+func (rc *ResourceController) evidenceBudget() *evidenceBudget {
+	return &evidenceBudget{deadline: time.Now().Add(evidenceBudgetPerTick)}
+}
+
+// spend reports whether there is time left to read another log.
+func (b *evidenceBudget) spend() bool {
+	return b != nil && time.Now().Before(b.deadline)
 }
 
 // writableClaims lists the persistent volumes a container can write to.
@@ -191,17 +224,14 @@ func (rc *ResourceController) readOnlyVolumeAlert(key string, pod *corev1.Pod, n
 	// what it means is the reading of it, and an operator seeing both can judge
 	// for themselves.
 	reason := fmt.Sprintf("container %q wrote this before it died: %s. %s",
-		containerName, evidence, describeClaims(writableClaims(pod, containerName, kind)))
-	if cmd := recoveryCommand(pod.Labels); cmd != "" {
-		reason += ". Recover with: " + cmd
-	}
+		containerName, evidence, describeClaims(writableClaims(pod, containerName, kind), recoveryCommand(pod.Labels)))
 
 	return alertBatch{
 		entry: ResourceLogEntry{
 			Time:      nowStr,
 			App:       pod.Labels["app"],
 			Namespace: pod.Namespace,
-			Action:    "VolumeReadOnly",
+			Action:    "ReadOnlyFilesystem",
 			Severity:  stageCritical,
 			Reason:    reason,
 		},
@@ -211,15 +241,23 @@ func (rc *ResourceController) readOnlyVolumeAlert(key string, pod *corev1.Pod, n
 }
 
 // describeClaims names the volumes the container writes to, and stops there.
-func describeClaims(claims []string) string {
+func describeClaims(claims []string, recovery string) string {
+	// The command is named inside the condition, never after it. Appended as an
+	// imperative it contradicts the sentence it follows: a container with a
+	// writable volume and a read-only ConfigMap that failed on the ConfigMap
+	// produces this same message, and recreating that pod interrupts the
+	// service and brings back the same configuration.
+	act := ""
+	if recovery != "" {
+		act = ", and " + recovery + " is how"
+	}
+
 	switch len(claims) {
-	case 0:
-		return "It hit a read-only filesystem"
 	case 1:
 		return "It hit a read-only filesystem. The container mounts volume " + claims[0] +
-			". If that is the one, recreating the pod is what clears it, because the mount belongs to the pod and a container restart does not"
+			". If that is the one, recreating the pod is what clears it, because the mount belongs to the pod and a container restart does not" + act
 	default:
 		return "It hit a read-only filesystem. The container mounts volumes " + strings.Join(claims, " and ") +
-			". If one of those is the one, recreating the pod is what clears it, because the mount belongs to the pod and a container restart does not"
+			". If one of those is the one, recreating the pod is what clears it, because the mount belongs to the pod and a container restart does not" + act
 	}
 }
