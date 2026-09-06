@@ -177,3 +177,38 @@ func TestSecurityAlertReachesSlackEvenWhenTheBellWriteFails(t *testing.T) {
 		t.Fatal("the bell write failed and took Slack down with it")
 	}
 }
+
+// A stalled API server must not delay the webhook either. Removing the success
+// dependency was not enough: Slack started only after the write returned, so an
+// API server hanging on the ConfigMap held the notification for as long as it
+// hung, and a restart in that window lost it.
+func TestSecurityAlertReachesSlackWhileTheBellWriteIsStillHanging(t *testing.T) {
+	client := fake.NewClientset(slackSecret("https://hooks.example.com/abc"))
+	release := make(chan struct{})
+	client.PrependReactor("*", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		<-release
+		return true, nil, assert.AnError
+	})
+	defer close(release)
+
+	posted := make(chan Alert, 1)
+	restore := securityDelivery
+	setSecurityDelivery(func(_ context.Context, _ kubernetes.Interface) batchDelivery {
+		return batchDelivery{
+			route:     DeliverySlack,
+			admins:    func() []string { return nil },
+			sendSlack: func(_ context.Context, a Alert) error { posted <- a; return nil },
+		}
+	})
+	defer func() { setSecurityDelivery(restore) }()
+
+	go StoreSecurityAlert(context.Background(), client, Alert{
+		Time: time.Now().UTC().Format(time.RFC3339), Action: "security", Reason: "2FA was reset",
+	})
+
+	select {
+	case <-posted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Slack waited for a write that had not returned")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // deliverBatch is what AddAlerts calls once the alerts are stored. These tests
@@ -196,5 +197,78 @@ func TestSlackTextKeepsItsOwnFormatting(t *testing.T) {
 	}
 	if !strings.Contains(text, "shop-test/db") {
 		t.Errorf("the identity is missing:\n%s", text)
+	}
+}
+
+// One address that hangs must not spend the time the others need. The loop
+// already carried on past a failure, but with a shared deadline "carrying on"
+// meant every later send failing its dial instantly against an expired context.
+func TestOneHangingRecipientDoesNotStarveTheRest(t *testing.T) {
+	reached := make(chan time.Duration, 4)
+
+	d := batchDelivery{
+		route:     DeliveryEmail,
+		perSend:   300 * time.Millisecond,
+		admins:    func() []string { return []string{"slow@example.com", "ops@example.com"} },
+		sendSlack: nil,
+		sendEmail: func(ctx context.Context, to, _, _ string) error {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Error("every send needs a bound of its own")
+				return nil
+			}
+			if to == "slow@example.com" {
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			reached <- time.Until(deadline)
+			return nil
+		},
+	}
+
+	go d.deliver(context.Background(), []Alert{{Namespace: "shop-test", App: "db", Action: "x"}})
+
+	select {
+	case left := <-reached:
+		if left < 100*time.Millisecond {
+			t.Errorf("the second address was handed %v, which the first had already spent", left)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second address was never reached")
+	}
+}
+
+// Same for Slack: one alert that hangs must not swallow the rest of the batch.
+func TestOneHangingSlackPostDoesNotStarveTheBatch(t *testing.T) {
+	reached := make(chan time.Duration, 4)
+
+	d := batchDelivery{
+		route:   DeliverySlack,
+		perSend: 300 * time.Millisecond,
+		admins:  func() []string { return nil },
+		sendSlack: func(ctx context.Context, alert Alert) error {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Error("every post needs a bound of its own")
+				return nil
+			}
+			if alert.App == "slow" {
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			reached <- time.Until(deadline)
+			return nil
+		},
+	}
+
+	go d.deliver(context.Background(), []Alert{{App: "slow"}, {App: "db"}})
+
+	select {
+	case left := <-reached:
+		if left < 100*time.Millisecond {
+			t.Errorf("the second alert was handed %v", left)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second alert was never posted")
 	}
 }
