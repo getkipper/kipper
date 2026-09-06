@@ -108,7 +108,7 @@ type ResourceController struct {
 	// readPreviousLog fetches the log of the container that died, so a crash
 	// loop can be told apart from a volume that went read-only underneath one.
 	// It is a field so a test can supply a log without an API server.
-	readPreviousLog  func(namespace, pod, container string) string
+	readPreviousLog  func(ctx context.Context, namespace, pod, container string) string
 	history          map[workloadKey][]usageObservation
 	hpaReplicas      map[string]int32       // namespace/name → last seen replica count
 	changeTimestamps map[string][]time.Time // namespace/name → recent resource or HPA change times
@@ -1844,7 +1844,7 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) []alertBatch
 				rc.touchEpisode(key, obs, now)
 				continue
 			}
-			if b, ok := rc.crashLoopAlert(key, obs, now, nowStr); ok {
+			if b, ok := rc.crashLoopAlert(ctx, key, obs, now, nowStr); ok {
 				batches = append(batches, b)
 			}
 		}

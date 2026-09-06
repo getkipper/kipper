@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -96,12 +97,12 @@ func TestReadOnlyEvidenceLineIsBounded(t *testing.T) {
 // Kubernetes is already doing cannot help.
 func TestCrashLoopAlertNamesAReadOnlyVolume(t *testing.T) {
 	rc := NewResourceController(nil, nil)
-	rc.readPreviousLog = func(string, string, string) string {
+	rc.readPreviousLog = func(context.Context, string, string, string) string {
 		return `FATAL:  could not remove old lock file "postmaster.pid": Read-only file system`
 	}
 
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
-	batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 
 	assert.True(t, ok)
 	assert.Equal(t, "VolumeReadOnly", batch.entry.Action,
@@ -117,12 +118,12 @@ func TestCrashLoopAlertNamesAReadOnlyVolume(t *testing.T) {
 // Everything else stays as it was. Most crash loops are the image or the config.
 func TestCrashLoopAlertWithoutReadOnlyEvidence(t *testing.T) {
 	rc := NewResourceController(nil, nil)
-	rc.readPreviousLog = func(string, string, string) string {
+	rc.readPreviousLog = func(context.Context, string, string, string) string {
 		return `FATAL: password authentication failed for user "app"`
 	}
 
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
-	batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 
 	assert.True(t, ok)
 	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action)
@@ -132,10 +133,10 @@ func TestCrashLoopAlertWithoutReadOnlyEvidence(t *testing.T) {
 // still has to alert on the crash loop it can see.
 func TestCrashLoopAlertWhenTheLogCannotBeRead(t *testing.T) {
 	rc := NewResourceController(nil, nil)
-	rc.readPreviousLog = func(string, string, string) string { return "" }
+	rc.readPreviousLog = func(context.Context, string, string, string) string { return "" }
 
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
-	batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 
 	assert.True(t, ok)
 	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action)
@@ -186,13 +187,13 @@ func crashLoopingPodFor(namespace, service, container string) *corev1.Pod {
 // no all-clear for an alert that woke them.
 func TestReadOnlyAlertEscalatesTheEpisode(t *testing.T) {
 	rc := NewResourceController(nil, nil)
-	rc.readPreviousLog = func(string, string, string) string {
+	rc.readPreviousLog = func(context.Context, string, string, string) string {
 		return `FATAL:  could not remove old lock file "postmaster.pid": Read-only file system`
 	}
 
 	key := "shop-test/db-0/postgres"
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
-	batch, ok := rc.crashLoopAlert(key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 	require.True(t, ok)
 
 	rc.commitBatches([]alertBatch{batch})
@@ -221,7 +222,7 @@ func TestReadOnlyAlertEscalatesTheEpisode(t *testing.T) {
 // anything.
 func TestReadOnlyAlertNeedsAPersistentVolume(t *testing.T) {
 	rc := NewResourceController(nil, nil)
-	rc.readPreviousLog = func(string, string, string) string {
+	rc.readPreviousLog = func(context.Context, string, string, string) string {
 		return "config error: cannot write /etc/app/settings: read-only file system"
 	}
 
@@ -231,7 +232,7 @@ func TestReadOnlyAlertNeedsAPersistentVolume(t *testing.T) {
 		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}},
 	}}
 
-	batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 
 	require.True(t, ok)
 	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action,
@@ -240,13 +241,13 @@ func TestReadOnlyAlertNeedsAPersistentVolume(t *testing.T) {
 
 func TestReadOnlyAlertFiresForAPodWithAClaim(t *testing.T) {
 	rc := NewResourceController(nil, nil)
-	rc.readPreviousLog = func(string, string, string) string {
+	rc.readPreviousLog = func(context.Context, string, string, string) string {
 		return `FATAL:  could not remove old lock file "postmaster.pid": Read-only file system`
 	}
 
 	pod := crashLoopingPodFor("shop-test", "db", "postgres")
 
-	batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-05T00:00:00Z")
 
 	require.True(t, ok)
 	assert.Equal(t, "VolumeReadOnly", batch.entry.Action)
@@ -260,7 +261,7 @@ func TestReadOnlyAlertFiresForAPodWithAClaim(t *testing.T) {
 // the database's perfectly healthy volume.
 func TestReadOnlyAlertNeedsTheFailingContainerToMountTheClaim(t *testing.T) {
 	rc := NewResourceController(nil, nil)
-	rc.readPreviousLog = func(string, string, string) string {
+	rc.readPreviousLog = func(context.Context, string, string, string) string {
 		return "cannot write /etc/sidecar/state: read-only file system"
 	}
 
@@ -270,7 +271,7 @@ func TestReadOnlyAlertNeedsTheFailingContainerToMountTheClaim(t *testing.T) {
 		{Name: "metrics"},
 	}
 
-	batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-06T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-06T00:00:00Z")
 
 	require.True(t, ok)
 	assert.Equal(t, "CrashLoopBackOff", batch.entry.Action,
@@ -279,7 +280,7 @@ func TestReadOnlyAlertNeedsTheFailingContainerToMountTheClaim(t *testing.T) {
 
 func TestReadOnlyAlertNamesOnlyTheClaimsTheFailingContainerMounts(t *testing.T) {
 	rc := NewResourceController(nil, nil)
-	rc.readPreviousLog = func(string, string, string) string {
+	rc.readPreviousLog = func(context.Context, string, string, string) string {
 		return `FATAL:  could not remove old lock file "postmaster.pid": Read-only file system`
 	}
 
@@ -295,7 +296,7 @@ func TestReadOnlyAlertNamesOnlyTheClaimsTheFailingContainerMounts(t *testing.T) 
 		{Name: "backup-agent", VolumeMounts: []corev1.VolumeMount{{Name: "backups", MountPath: "/backups"}}},
 	}
 
-	batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-06T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-06T00:00:00Z")
 
 	require.True(t, ok)
 	assert.Equal(t, "VolumeReadOnly", batch.entry.Action)
@@ -327,14 +328,14 @@ func TestReadOnlyAlertIgnoresAVolumeMountedReadOnlyOnPurpose(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rc := NewResourceController(nil, nil)
-			rc.readPreviousLog = func(string, string, string) string {
+			rc.readPreviousLog = func(context.Context, string, string, string) string {
 				return "cannot write /var/lib/data/x: read-only file system"
 			}
 
 			pod := crashLoopingPodFor("shop-test", "db", "postgres")
 			tc.pod(pod)
 
-			batch, ok := rc.crashLoopAlert(soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-06T00:00:00Z")
+			batch, ok := rc.crashLoopAlert(context.Background(), soleObservation(pod).key, soleObservation(pod), at(0), "2026-09-06T00:00:00Z")
 
 			require.True(t, ok)
 			assert.Equal(t, "CrashLoopBackOff", batch.entry.Action,

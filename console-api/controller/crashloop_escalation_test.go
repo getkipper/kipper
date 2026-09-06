@@ -371,7 +371,7 @@ func TestOneHealthyReplicaDoesNotRecoverAWorkloadStillFailing(t *testing.T) {
 	failing := crashLoopingReplica("shop-prod", "api", "api-failing")
 	healthy := healthyReplica("shop-prod", "api", "api-healthy")
 	rc := NewResourceController(fake.NewClientset(failing, healthy), nil)
-	rc.readPreviousLog = func(string, string, string) string { return "" }
+	rc.readPreviousLog = func(context.Context, string, string, string) string { return "" }
 
 	key := episodeKey("shop-prod", "api-failing", "api", "app", mainContainer)
 	rc.crashLoopEpisode[key] = episode{
@@ -450,7 +450,7 @@ func healthyReplica(namespace, app, name string) *corev1.Pod {
 // has its own alert saying so.
 func TestAGenericCrashLoopDoesNotPromiseARecovery(t *testing.T) {
 	rc := NewResourceController(nil, nil)
-	rc.readPreviousLog = func(string, string, string) string {
+	rc.readPreviousLog = func(context.Context, string, string, string) string {
 		return `FATAL: password authentication failed for user "app"`
 	}
 
@@ -458,7 +458,7 @@ func TestAGenericCrashLoopDoesNotPromiseARecovery(t *testing.T) {
 	obs := soleObservation(pod)
 	rc.crashLoopEpisode[obs.key] = episode{firstSeen: at(0), lastAlerted: at(5)}
 
-	batch, ok := rc.crashLoopAlert(obs.key, obs, at(6), "2026-09-06T00:00:00Z")
+	batch, ok := rc.crashLoopAlert(context.Background(), obs.key, obs, at(6), "2026-09-06T00:00:00Z")
 	require.True(t, ok)
 	require.Equal(t, stageCritical, batch.entry.Severity)
 

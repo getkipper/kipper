@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -155,7 +156,7 @@ func (e episode) deservesAllClear() bool {
 // nothing was ever delivered, suppressed for good.
 //
 // Caller holds rc.mu.
-func (rc *ResourceController) crashLoopAlert(key string, obs workloadObservation, now time.Time, nowStr string) (alertBatch, bool) {
+func (rc *ResourceController) crashLoopAlert(ctx context.Context, key string, obs workloadObservation, now time.Time, nowStr string) (alertBatch, bool) {
 	ep := rc.crashLoopEpisode[key]
 	if ep.firstSeen.IsZero() {
 		ep.firstSeen = now
@@ -185,7 +186,7 @@ func (rc *ResourceController) crashLoopAlert(key string, obs workloadObservation
 	// Read across every failing replica, not the one that happened to be listed
 	// first: the evidence is in whichever replica's disk went, and which that
 	// is must not depend on the order the API returned the pods.
-	if evidence, pod := rc.readOnlyVolumeEvidence(obs); evidence != "" {
+	if evidence, pod := rc.readOnlyVolumeEvidence(ctx, obs); evidence != "" {
 		// Critical from the first sighting, so the episode is escalated here
 		// rather than at six hours. Left at warning stage the critical would
 		// repeat hourly, and an operator who recreated the pod inside those six

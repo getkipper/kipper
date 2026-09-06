@@ -86,6 +86,9 @@ type Notifier struct {
 	envSMTP    func(ctx context.Context, id string, e Event)
 	envWebhook func(ctx context.Context, id string, e Event)
 
+	// postWebhook replaces the webhook transport in tests.
+	postWebhook func(ctx context.Context, url string, e Event) error
+
 	// deliveryTimeout is the budget each channel gets, defaulting to
 	// defaultDeliveryTimeout. A field rather than a global so a test can
 	// shorten it for its own notifier without writing to something another
@@ -129,6 +132,14 @@ func (n *Notifier) Emit(ctx context.Context, e Event) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				// Best-effort background work calling hooks wired from another
+				// package. One of them panicking must not take the process
+				// down, and must not stop the other channels either.
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("security: a delivery channel panicked for event %s: %v", id, r)
+					}
+				}()
 				n.withBudget(base, func(ctx context.Context) { deliver(ctx, id, e) })
 			}()
 		}
@@ -193,12 +204,16 @@ func (n *Notifier) deliverEnvSMTP(ctx context.Context, id string, e Event) {
 	}
 }
 
-func (n *Notifier) deliverEnvWebhook(_ context.Context, id string, e Event) {
+func (n *Notifier) deliverEnvWebhook(ctx context.Context, id string, e Event) {
 	url := os.Getenv(envWebhook)
 	if url == "" {
 		return
 	}
-	if err := postWebhook(url, e); err != nil {
+	post := n.postWebhook
+	if post == nil {
+		post = postWebhook
+	}
+	if err := post(ctx, url, e); err != nil {
 		log.Printf("security: env-pinned webhook failed for event %s: %v", id, err)
 	}
 }
@@ -261,7 +276,7 @@ func emailBody(id string, e Event) string {
 }
 
 // postWebhook delivers a Slack-compatible payload to the pinned webhook.
-func postWebhook(url string, e Event) error {
+func postWebhook(ctx context.Context, url string, e Event) error {
 	var text strings.Builder
 	fmt.Fprintf(&text, ":rotating_light: *Kipper security*: %s", e.Summary)
 	if e.User != "" {
@@ -274,8 +289,16 @@ func postWebhook(url string, e Event) error {
 	if err != nil {
 		return err
 	}
+	// The channel's budget bounds this, with the client's own limit as the
+	// ceiling for a caller that gave no deadline.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload)) //nolint:gosec // G704: the webhook URL is host-operator-set env config, not request input
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(url, "application/json", bytes.NewReader(payload)) //nolint:gosec // G704: the webhook URL is host-operator-set env config, not request input
+	resp, err := client.Do(req) //nolint:gosec // G704: the webhook URL is host-operator-set env config, not request input
 	if err != nil {
 		return err
 	}
