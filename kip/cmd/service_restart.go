@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/getkipper/kipper/kip/internal/deployer"
 	"github.com/getkipper/kipper/kip/internal/manifest"
@@ -52,10 +54,24 @@ func runServiceRestart(cmd *cobra.Command, args []string) error {
 
 	d := &deployer.Deployer{Client: k8sClient.Clientset(), Dynamic: k8sClient.Dynamic()}
 
+	ctx := context.Background()
+
 	fmt.Printf("\n  Restarting %s...\n", serviceName)
-	if err := d.RestartWorkload(context.Background(), manifest.ServiceGVR, "service", namespace, serviceName); err != nil {
+	stamp, err := d.RestartWorkload(ctx, manifest.ServiceGVR, "service", namespace, serviceName)
+	if err != nil {
 		return err
 	}
+
+	// Writing the stamp is not the restart. The reconciler that carries it onto
+	// the pod template is what recreates the pod, and a cluster running an
+	// older console-api ignores the annotation entirely: the write succeeds,
+	// nothing happens, and reporting success here would be a false green at the
+	// exact moment somebody is recovering from one.
+	if err := confirmRestart(ctx, k8sClient.Clientset(), namespace, serviceName, stamp, confirmRestartWithin); err != nil {
+		fmt.Printf("  ✗  %v\n\n", err)
+		return fmt.Errorf("%s was not restarted", serviceName)
+	}
+
 	fmt.Printf("  ✔  Restart triggered\n")
 	fmt.Printf("     The pod is recreated and its volume reattached. Watch it with: kip service list\n\n")
 
@@ -92,4 +108,50 @@ func findServiceNamespace(ctx context.Context, dyn dynamic.Interface, name strin
 		return "", fmt.Errorf("service %q exists in %s; name one with --project (and --environment)",
 			name, strings.Join(found, " and "))
 	}
+}
+
+// confirmRestartWithin is how long the reconciler is given. It watches the CR,
+// so this is one reconcile plus the round trip, not a rollout: the pod takes
+// longer to come back and that is not what is being waited for.
+const confirmRestartWithin = 20 * time.Second
+
+// confirmRestart waits for the restart stamp to reach the workload's pod
+// template, which is the thing that actually recreates the pod.
+//
+// A cluster whose console-api predates this feature writes the annotation to
+// the Service CR and does nothing with it, so without this the command reports
+// a recovery that never happened.
+func confirmRestart(ctx context.Context, client kubernetes.Interface, namespace, name, stamp string, within time.Duration) error {
+	deadline := time.Now().Add(within)
+	var lastErr error
+
+	for {
+		sts, err := client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		switch {
+		case err != nil:
+			lastErr = err
+		case sts.Spec.Template.Annotations["kipper.run/restartedAt"] == stamp:
+			return nil
+		default:
+			lastErr = nil
+		}
+
+		if time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+
+	if lastErr != nil {
+		return fmt.Errorf("could not read the workload behind %s to confirm the restart: %w", name, lastErr)
+	}
+	// What was observed, then the likely cause, and not the other way round. A
+	// controller that is merely behind produces this same timeout, and telling
+	// somebody mid-incident to upgrade a cluster that is working would be worse
+	// advice than none.
+	return fmt.Errorf("the restart did not reach %s within %s. Most often that is a console-api predating 'kip service restart', which 'kip upgrade' fixes. A busy controller looks the same, so check 'kip status' before upgrading", name, within)
 }

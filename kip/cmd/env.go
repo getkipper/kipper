@@ -287,7 +287,7 @@ func restartConfigFlag(cmds ...*cobra.Command) {
 // envFrom once, at start.
 func restartWorkload(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, kind secretname.Kind, ns, name string) error {
 	d := &deployer.Deployer{Client: clientset, Dynamic: dyn}
-	err := d.RestartWorkload(ctx, workloadGVR(kind), string(kind), ns, name)
+	_, err := d.RestartWorkload(ctx, workloadGVR(kind), string(kind), ns, name)
 	if err == nil {
 		return nil
 	}
