@@ -236,3 +236,63 @@ func TestAPanickingRecipientDoesNotStopTheNext(t *testing.T) {
 		t.Fatal("a panic on the first address stopped the second")
 	}
 }
+
+// The env-pinned webhook is Slack-compatible and renders <url|label> as a link.
+// A security event's summary and fields carry text from elsewhere — a peer's
+// self-reported cluster name, a user string — so the ordinary alert path escapes
+// them. This path had not, which puts attacker-chosen markup inside a message
+// presented as a Kipper security event, in the channel meant to survive a
+// compromised admin account.
+func TestTheSecurityWebhookEscapesWhatItDidNotWrite(t *testing.T) {
+	text := webhookText(Event{
+		Summary: `migration from <https://evil.example.com|a trusted cluster> & more`,
+		User:    "<!channel>",
+		Fields:  []Field{{Key: "peer", Value: "<https://evil.example.com|prod>"}},
+	})
+
+	assert.NotContains(t, text, "<https://", "the link markup reached the channel")
+	assert.NotContains(t, text, "<!channel>", "so did the mention")
+	for _, want := range []string{"&lt;https://", "&amp;", "&lt;!channel&gt;"} {
+		assert.Contains(t, text, want, "expected %s in the escaped message", want)
+	}
+}
+
+// Kipper's own formatting still has to work.
+func TestTheSecurityWebhookKeepsItsOwnFormatting(t *testing.T) {
+	text := webhookText(Event{Summary: "a git credential was revoked"})
+	assert.Contains(t, text, "*Kipper security*")
+	assert.Contains(t, text, "a git credential was revoked")
+}
+
+// The primitive keeps the caller's values while dropping its cancellation, so
+// request-scoped logging and tracing follow a delivery that outlives the
+// request. Handing it a bare background context throws that away at the one
+// call site that had any values to keep.
+func TestASendKeepsTheChannelsValues(t *testing.T) {
+	type key struct{}
+	seen := make(chan any, 1)
+
+	n := &Notifier{
+		deliveryTimeout: testBudget,
+		perSendTimeout:  testBudget,
+		envSMTP:         func(context.Context, string, Event) {},
+		envWebhook:      func(context.Context, string, Event) {},
+		Console: ConsoleHooks{
+			Admins: func() []string { return []string{"ops@example.com"} },
+			Email: func(ctx context.Context, _, _, _ string) error {
+				seen <- ctx.Value(key{})
+				return nil
+			},
+		},
+	}
+
+	n.Emit(context.WithValue(context.Background(), key{}, "from the request"), Event{Kind: "test", Summary: "x"})
+
+	select {
+	case got := <-seen:
+		assert.Equal(t, "from the request", got,
+			"the send was handed a context with none of the caller's values")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the send was never reached")
+	}
+}

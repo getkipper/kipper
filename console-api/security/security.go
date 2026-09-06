@@ -204,7 +204,7 @@ func (n *Notifier) deliverEnvSMTP(ctx context.Context, id string, e Event) {
 		cfg.From = "kipper-security@" + host
 	}
 	for _, to := range splitRecipients(os.Getenv(envSMTPTo)) {
-		n.perSend("env-pinned security email to "+to, func(ctx context.Context) {
+		n.perSend(ctx, "env-pinned security email to "+to, func(ctx context.Context) {
 			if err := mail.Send(ctx, cfg, to, "[Kipper security] "+e.Summary, emailBody(id, e)); err != nil {
 				log.Printf("security: env-pinned email to %s failed for event %s: %v", to, id, err)
 			}
@@ -246,7 +246,7 @@ func (n *Notifier) deliverConsoleEmail(ctx context.Context, id string, e Event) 
 	for _, to := range recipients {
 		// A budget per address. The channel's own bounds the channel; one relay
 		// that stalls must not spend the time the next address needs.
-		n.perSend("security email to "+to, func(ctx context.Context) {
+		n.perSend(ctx, "security email to "+to, func(ctx context.Context) {
 			if err := n.Console.Email(ctx, to, "[Kipper security] "+e.Summary, emailBody(id, e)); err != nil {
 				log.Printf("security: console email to %s failed for event %s: %v", to, id, err)
 			}
@@ -289,15 +289,7 @@ func emailBody(id string, e Event) string {
 
 // postWebhook delivers a Slack-compatible payload to the pinned webhook.
 func postWebhook(ctx context.Context, url string, e Event) error {
-	var text strings.Builder
-	fmt.Fprintf(&text, ":rotating_light: *Kipper security*: %s", e.Summary)
-	if e.User != "" {
-		fmt.Fprintf(&text, "\nUser: %s", e.User)
-	}
-	for _, f := range e.Fields {
-		fmt.Fprintf(&text, "\n%s: %s", f.Key, f.Value)
-	}
-	payload, err := json.Marshal(map[string]string{"text": text.String()})
+	payload, err := json.Marshal(map[string]string{"text": webhookText(e)})
 	if err != nil {
 		return err
 	}
@@ -380,6 +372,31 @@ func or(replacement, real func(context.Context, string, Event)) func(context.Con
 // and each address gets its own. A channel with many recipients can therefore
 // outlive its own budget, which costs nothing: the channels run on separate
 // goroutines and none waits for another.
-func (n *Notifier) perSend(label string, send func(context.Context)) {
-	deliver.Bounded(context.Background(), n.perSendTimeout, label, send)
+func (n *Notifier) perSend(parent context.Context, label string, send func(context.Context)) {
+	deliver.Bounded(parent, n.perSendTimeout, label, send)
 }
+
+// webhookText renders a security event as Slack message text.
+//
+// Everything that did not come from this program is escaped. A summary or a
+// field can carry a name a peer reported for itself, and Slack renders
+// <url|label> as a link, so unescaped that is a link somebody else chose inside
+// a message the reader trusts as a Kipper security event — in the channel that
+// exists to be trustworthy when an admin account is not.
+//
+// Slack names three characters to escape in message text and no others, which
+// leaves Kipper's own asterisks doing their formatting job.
+func webhookText(e Event) string {
+	var text strings.Builder
+	fmt.Fprintf(&text, ":rotating_light: *Kipper security*: %s", escapeSlack(e.Summary))
+	if e.User != "" {
+		fmt.Fprintf(&text, "\nUser: %s", escapeSlack(e.User))
+	}
+	for _, f := range e.Fields {
+		fmt.Fprintf(&text, "\n%s: %s", escapeSlack(f.Key), escapeSlack(f.Value))
+	}
+	return text.String()
+}
+
+// escapeSlack escapes the three characters Slack reserves in message text.
+var escapeSlack = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace
