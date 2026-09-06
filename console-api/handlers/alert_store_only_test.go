@@ -5,8 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // A security event already has its own email: a richer body, a recipient
@@ -140,5 +143,37 @@ func TestSecurityAlertSendsNothingWithoutAWebhook(t *testing.T) {
 	case <-touched:
 		t.Error("the bell hook delivered a security event the notifier also delivers")
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// The bell and Slack are two channels, and the bell failing is not a reason for
+// Slack to hear nothing. A ConfigMap write that fails takes the console record
+// with it; the webhook is what reaches somebody who is not looking at the
+// console, which for a security event is the point.
+func TestSecurityAlertReachesSlackEvenWhenTheBellWriteFails(t *testing.T) {
+	client := fake.NewClientset(slackSecret("https://hooks.example.com/abc"))
+	client.PrependReactor("*", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, assert.AnError
+	})
+
+	posted := make(chan Alert, 1)
+	restore := securityDelivery
+	securityDelivery = func(_ context.Context, _ kubernetes.Interface) batchDelivery {
+		return batchDelivery{
+			route:     DeliverySlack,
+			admins:    func() []string { return nil },
+			sendSlack: func(_ context.Context, a Alert) error { posted <- a; return nil },
+		}
+	}
+	defer func() { securityDelivery = restore }()
+
+	StoreSecurityAlert(context.Background(), client, Alert{
+		Time: time.Now().UTC().Format(time.RFC3339), Action: "security", Reason: "2FA was reset",
+	})
+
+	select {
+	case <-posted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the bell write failed and took Slack down with it")
 	}
 }

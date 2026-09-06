@@ -207,9 +207,11 @@ func StoreAlert(ctx context.Context, client kubernetes.Interface, alert Alert) {
 // reaches the console-configured webhook, and sending the email from here as
 // well would put a second thinner copy in every admin's inbox.
 func StoreSecurityAlert(ctx context.Context, client kubernetes.Interface, alert Alert) {
-	if err := storeAlerts(ctx, client, []Alert{alert}); err != nil {
-		return
-	}
+	// The Slack post does not wait on the write and is not conditional on it.
+	// They are two channels, and the console record failing is not a reason for
+	// the webhook to hear nothing: reaching somebody who is not looking at the
+	// console is the whole point of a security event having one.
+	_ = storeAlerts(ctx, client, []Alert{alert})
 
 	go func() {
 		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
