@@ -352,3 +352,97 @@ func volumeBackedCrashLoop(namespace, name string) *corev1.Pod {
 	}
 	return pod
 }
+
+// The debt was remembered per workload while the reads happen per replica, so a
+// workload whose second replica holds the evidence could be admitted, spend its
+// one permitted read on the first replica, and be refused again — for good. The
+// carry-over drained the backlog without ever reaching the log that mattered.
+//
+// Driven through the real scan, because the debt only carries across ticks
+// there.
+func TestAnAdmittedWorkloadReadsEveryFailingReplica(t *testing.T) {
+	restore := evidenceBudgetPerTick
+	evidenceBudgetPerTick = time.Nanosecond // every workload is over budget
+	defer func() { evidenceBudgetPerTick = restore }()
+
+	rc := NewResourceController(fake.NewClientset(
+		replicaOfVolumeBackedWorkload("shop-test", "db", "db-0"),
+		replicaOfVolumeBackedWorkload("shop-test", "db", "db-1"),
+	), nil)
+	var read []string
+	rc.readPreviousLog = func(_ context.Context, _, pod, _ string) string {
+		read = append(read, pod)
+		if pod == "db-1" {
+			return "cannot write /var/lib/postgresql/x: Read-only file system"
+		}
+		return "FATAL: password authentication failed"
+	}
+
+	// Over budget from the start, so the first tick reads nothing and owes it.
+	rc.commitBatches(rc.checkPodProblems(context.Background()))
+	require.Empty(t, read, "the budget was spent before this workload")
+
+	// The debt admits the workload, and admission covers all of its replicas.
+	diagnosed := false
+	for _, b := range rc.checkPodProblems(context.Background()) {
+		if b.entry.Action == "ReadOnlyFilesystem" {
+			diagnosed = true
+		}
+	}
+	assert.Contains(t, read, "db-1", "the replica holding the evidence was never read")
+	assert.True(t, diagnosed, "the evidence is there; the budget must not hide it for good")
+}
+
+// Admitting a whole workload past the deadline has to stay bounded, or a large
+// backlog holds the controller's lock for minutes on the next tick — the trap
+// the budget exists to prevent, reintroduced on alternate ticks.
+func TestOnlyOneOwedWorkloadOverrunsTheDeadline(t *testing.T) {
+	restore := evidenceBudgetPerTick
+	evidenceBudgetPerTick = time.Nanosecond
+	defer func() { evidenceBudgetPerTick = restore }()
+
+	rc := NewResourceController(fake.NewClientset(
+		replicaOfVolumeBackedWorkload("shop-test", "one", "one-0"),
+		replicaOfVolumeBackedWorkload("shop-prod", "two", "two-0"),
+		replicaOfVolumeBackedWorkload("blog-test", "three", "three-0"),
+	), nil)
+	var read []string
+	rc.readPreviousLog = func(_ context.Context, _, pod, _ string) string {
+		read = append(read, pod)
+		return ""
+	}
+
+	rc.commitBatches(rc.checkPodProblems(context.Background()))
+	require.Empty(t, read, "the first tick owes all three")
+
+	read = nil
+	rc.commitBatches(rc.checkPodProblems(context.Background()))
+	assert.Len(t, read, 1, "a backlog drains a workload at a time, not all at once")
+
+	// And the ones still owed are read on later ticks rather than forgotten.
+	seen := map[string]bool{read[0]: true}
+	for i := 0; i < 4; i++ {
+		read = nil
+		rc.commitBatches(rc.checkPodProblems(context.Background()))
+		for _, p := range read {
+			seen[p] = true
+		}
+	}
+	assert.Len(t, seen, 3, "every owed workload is reached eventually")
+}
+
+// replicaOfVolumeBackedWorkload is one crash-looping, claim-bearing pod of a
+// named workload.
+func replicaOfVolumeBackedWorkload(namespace, app, pod string) *corev1.Pod {
+	p := podWith(namespace, app, pod, corev1.ContainerStatus{
+		Name: "postgres", RestartCount: 40, State: crashLooping(),
+	})
+	p.Spec = corev1.PodSpec{
+		Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data-" + app}}}},
+		Containers: []corev1.Container{{
+			Name: "postgres", VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/var/lib/postgresql"}},
+		}},
+	}
+	return p
+}
