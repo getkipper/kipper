@@ -521,3 +521,79 @@ func TestAWorkloadWithOnlyTerminatingPods(t *testing.T) {
 	assert.Empty(t, observeWorkloads([]corev1.Pod{*pod}),
 		"a workload with nothing left running is not an observation")
 }
+
+// The disk failing is news whatever the crash loop was already saying, and the
+// previous fix only got that past the episode's own cadence. The outer hourly
+// floor still held it: a workload that alerted a minute ago, whose volume then
+// goes read-only, waited the rest of the hour.
+//
+// This drives the real scan rather than crashLoopAlert directly, which is how
+// the earlier test missed it.
+func TestReadOnlyEvidenceIsNotHeldBackByTheHourlyFloorEither(t *testing.T) {
+	pod := podWith("shop-test", "db", "db-0", corev1.ContainerStatus{
+		Name: "postgres", RestartCount: 40, State: crashLooping(),
+	})
+	pod.Labels["kipper.run/service-type"] = "postgres"
+	pod.Spec = corev1.PodSpec{
+		Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data-db-0"}}}},
+		Containers: []corev1.Container{{
+			Name: "postgres", VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/var/lib/postgresql"}},
+		}},
+	}
+
+	rc := NewResourceController(fake.NewClientset(pod), nil)
+	rc.readPreviousLog = func(context.Context, string, string, string) string {
+		return `FATAL:  could not remove old lock file "postmaster.pid": Read-only file system`
+	}
+
+	key := episodeKey("shop-test", "db-0", "db", "postgres", mainContainer)
+	rc.crashLoopEpisode[key] = episode{firstSeen: time.Now().Add(-2 * time.Hour)}
+	// It said something a minute ago, so the hourly floor is down.
+	rc.crashLoopAlerted[key] = time.Now().Add(-time.Minute)
+
+	actions := map[string]bool{}
+	for _, b := range rc.checkPodProblems(context.Background()) {
+		actions[b.entry.Action] = true
+	}
+
+	assert.True(t, actions["ReadOnlyFilesystem"],
+		"the volume failed after the last alert; waiting out the hour is the delay this was meant to remove")
+}
+
+// And still only once, through the real scan.
+func TestTheReadOnlyDiagnosisIsSaidOnceThroughTheScan(t *testing.T) {
+	pod := podWith("shop-test", "db", "db-0", corev1.ContainerStatus{
+		Name: "postgres", RestartCount: 40, State: crashLooping(),
+	})
+	pod.Spec = corev1.PodSpec{
+		Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data-db-0"}}}},
+		Containers: []corev1.Container{{
+			Name: "postgres", VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/var/lib/postgresql"}},
+		}},
+	}
+
+	rc := NewResourceController(fake.NewClientset(pod), nil)
+	rc.readPreviousLog = func(context.Context, string, string, string) string {
+		return "cannot write /var/lib/postgresql/x: Read-only file system"
+	}
+
+	first := 0
+	for _, b := range rc.checkPodProblems(context.Background()) {
+		if b.entry.Action == "ReadOnlyFilesystem" {
+			first++
+		}
+	}
+	rc.commitBatches(rc.checkPodProblems(context.Background()))
+
+	second := 0
+	for _, b := range rc.checkPodProblems(context.Background()) {
+		if b.entry.Action == "ReadOnlyFilesystem" {
+			second++
+		}
+	}
+
+	assert.Equal(t, 1, first, "said once on the tick that found it")
+	assert.Equal(t, 0, second, "and not again on the next")
+}

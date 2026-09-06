@@ -105,6 +105,11 @@ type ResourceController struct {
 	client   kubernetes.Interface
 	crClient crclient.Client
 
+	// evidenceOwed is the workloads whose logs the last tick could not afford
+	// to read. They are read first next time, so a backlog drains rather than
+	// leaving one workload permanently unexamined.
+	evidenceOwed map[string]bool
+
 	// readPreviousLog fetches the log of the container that died, so a crash
 	// loop can be told apart from a volume that went read-only underneath one.
 	// It is a field so a test can supply a log without an API server.
@@ -1778,6 +1783,7 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) []alertBatch
 
 	cooldown := crashLoopCooldown
 	evidence := rc.evidenceBudget()
+	defer func() { rc.evidenceOwed = evidence.skipped }()
 	now := time.Now()
 	nowStr := now.UTC().Format(time.RFC3339)
 	var batches []alertBatch
@@ -1838,10 +1844,19 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) []alertBatch
 				rc.holdEpisode(key, now)
 				continue
 			}
-			// The hourly floor still applies to every crash-loop alert,
-			// escalation included, so a flapping container costs no more
-			// than it does today.
+			// The hourly floor applies to the crash-loop alert, which repeats
+			// the same sentence, and not to the read-only diagnosis, which is
+			// a different failure with a recovery behind it. A volume that
+			// goes read-only a minute after the last alert would otherwise
+			// wait out the hour.
+			//
+			// Saying it once is readOnlySeen's job, so lifting the floor here
+			// cannot storm.
 			if last, seen := rc.crashLoopAlerted[key]; seen && now.Sub(last) < cooldown {
+				if b, ok := rc.readOnlyAlert(ctx, evidence, key, obs, now, nowStr); ok {
+					batches = append(batches, b)
+					continue
+				}
 				rc.touchEpisode(key, obs, now)
 				continue
 			}

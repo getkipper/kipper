@@ -178,16 +178,8 @@ func (rc *ResourceController) crashLoopAlert(ctx context.Context, budget *eviden
 	//
 	// Said once. Afterwards the episode's own cadence carries it, and the mark
 	// is what stops a tick-by-tick repeat.
-	if !ep.readOnlySeen {
-		if evidence, pod := rc.readOnlyVolumeEvidence(ctx, budget, obs); evidence != "" {
-			next := ep
-			next.lastAlerted = now
-			next.readOnlySeen = true
-			if next.escalatedAt.IsZero() {
-				next.escalatedAt = now
-			}
-			return rc.readOnlyVolumeAlert(key, pod, next, now, nowStr, obs.status.Name, obs.kind, evidence), true
-		}
+	if b, ok := rc.readOnlyAlert(ctx, budget, key, obs, now, nowStr); ok {
+		return b, true
 	}
 
 	stage, due := ep.stageAt(now)
@@ -638,4 +630,38 @@ func hasStatus(pod *corev1.Pod, container string, kind containerKind) bool {
 		}
 	}
 	return false
+}
+
+// readOnlyAlert raises the read-only diagnosis where the evidence is there and
+// this episode has not already said it.
+//
+// It is asked ahead of both cadences. The disk failing is a different failure
+// from the crash loop that was already being reported, with a recovery behind
+// it, so neither the hourly floor on repeating the crash-loop sentence nor the
+// episode's daily rhythm should hold it. Said once per episode, which is what
+// readOnlySeen is for.
+//
+// Caller holds rc.mu.
+func (rc *ResourceController) readOnlyAlert(ctx context.Context, budget *evidenceBudget, key string, obs workloadObservation, now time.Time, nowStr string) (alertBatch, bool) {
+	ep := rc.crashLoopEpisode[key]
+	if ep.readOnlySeen {
+		return alertBatch{}, false
+	}
+
+	evidence, pod := rc.readOnlyVolumeEvidence(ctx, budget, obs)
+	if evidence == "" {
+		return alertBatch{}, false
+	}
+
+	next := ep
+	if next.firstSeen.IsZero() {
+		next.firstSeen = now
+	}
+	next.lastSeen = now
+	next.lastAlerted = now
+	next.readOnlySeen = true
+	if next.escalatedAt.IsZero() {
+		next.escalatedAt = now
+	}
+	return rc.readOnlyVolumeAlert(key, pod, next, now, nowStr, obs.status.Name, obs.kind, evidence), true
 }
