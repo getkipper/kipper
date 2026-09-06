@@ -17,9 +17,15 @@ import (
 // beside it, and an end-of-day review found a fourth send that had been left
 // out of the primitive entirely.
 //
-// So this walks the source. Every call that puts a message on the network has
-// to sit inside deliver.Bounded, and a new one that does not will fail here
-// rather than in production a year from now.
+// So this walks the source, looking for a call that puts a message on the
+// network without the primitive around it.
+//
+// It is a tripwire rather than a proof, and worth knowing where it stops: it
+// matches text rather than syntax, so it accepts a send whose wrapper is merely
+// nearby, and it will not see a transport passed as a function value or a new
+// transport not named below. What it does catch is the mistake that has
+// actually happened four times here — a send written beside the others without
+// the wrapper.
 func TestEveryOutboundSendGoesThroughThePrimitive(t *testing.T) {
 	// Where a send is defined or handed to something else to perform, rather
 	// than performed here. Keyed by function as well as file, so a different
@@ -80,7 +86,8 @@ type sendSite struct {
 }
 
 // enclosingLines finds each send and returns it with the function it is in and
-// the twelve lines above it, which is where a wrapping deliver.Bounded would be.
+// the six lines above it, which is as far as a wrapping call can sit and still
+// be the one wrapping it.
 func enclosingLines(body string, sends *regexp.Regexp) []sendSite {
 	lines := strings.Split(body, "\n")
 	fnAt := regexp.MustCompile(`^func (?:\([^)]*\) )?(\w+)`)
@@ -94,7 +101,7 @@ func enclosingLines(body string, sends *regexp.Regexp) []sendSite {
 		if !sends.MatchString(line) {
 			continue
 		}
-		from := i - 12
+		from := i - 6
 		if from < 0 {
 			from = 0
 		}
