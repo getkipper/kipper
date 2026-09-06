@@ -183,22 +183,6 @@ func (a *Alerts) readAlerts(ctx context.Context) []Alert {
 	return alerts
 }
 
-// AddAlert writes a single alert. Thin wrapper over AddAlerts.
-func AddAlert(ctx context.Context, client kubernetes.Interface, alert Alert) {
-	_ = AddAlerts(ctx, client, []Alert{alert})
-}
-
-// StoreAlert writes an alert to the bell and delivers nothing.
-//
-// Security events take this path: the security notifier owns their delivery,
-// with a richer body, a recipient list snapshotted before the change that
-// caused the event, and an env-pinned channel. Sending them again from here
-// would put a second, thinner copy of every security action in every admin's
-// inbox.
-func StoreAlert(ctx context.Context, client kubernetes.Interface, alert Alert) {
-	_ = storeAlerts(ctx, client, []Alert{alert})
-}
-
 // StoreSecurityAlert writes a security event to the bell and posts it to Slack,
 // and never emails it.
 //
@@ -214,14 +198,19 @@ func StoreSecurityAlert(ctx context.Context, client kubernetes.Interface, alert 
 	// notification nor delay it, and a restart during that hang must not lose
 	// it.
 	go func() {
-		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
-		defer cancel()
+		base := context.WithoutCancel(ctx)
 
-		d := securityDeliveryFor(sctx, client)
+		// The bound is on the route lookup, which is a handful of API reads,
+		// and not on the delivery. The sends get their own budgets inside
+		// deliver.Bounded: a batch-wide deadline belongs to whichever send
+		// stalls first, and every send after it inherits an expired context.
+		d, cancel := deliveryWithin(base, client, routeLookupTimeout)
+		cancel()
+
 		if d.route != DeliverySlack {
 			return
 		}
-		d.deliver(sctx, []Alert{alert})
+		d.deliver(base, []Alert{alert})
 	}()
 
 	_ = storeAlerts(ctx, client, []Alert{alert})
@@ -269,9 +258,14 @@ func AddAlerts(ctx context.Context, client kubernetes.Interface, alerts []Alert)
 	// the tick, and detach from the caller's context so an in-flight send
 	// survives its cancellation.
 	go func() {
-		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
-		defer cancel()
-		deliveryFor(sctx, client).deliver(sctx, alerts)
+		base := context.WithoutCancel(ctx)
+
+		// As above: the bound is the route lookup's, and each send carries its
+		// own.
+		d, cancel := deliveryWithin(base, client, routeLookupTimeout)
+		cancel()
+
+		d.deliver(base, alerts)
 	}()
 	return nil
 }
@@ -341,4 +335,16 @@ func capAlerts(alerts []Alert) []Alert {
 		return alerts[len(alerts)-maxAlerts:]
 	}
 	return alerts
+}
+
+// routeLookupTimeout bounds the API reads that decide where an alert goes: two
+// Secrets and the role store. It does not bound the delivery, which is what
+// deliver.Bounded does per send.
+const routeLookupTimeout = 20 * time.Second
+
+// deliveryWithin builds the delivery under a bounded context, and hands back the
+// cancel so the caller can release it before sending.
+func deliveryWithin(base context.Context, client kubernetes.Interface, within time.Duration) (batchDelivery, context.CancelFunc) {
+	lookup, cancel := context.WithTimeout(base, within)
+	return securityDeliveryFor(lookup, client), cancel
 }

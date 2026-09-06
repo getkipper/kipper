@@ -128,7 +128,7 @@ func TestAlertEmailEscapesWhatTheWorkloadWrote(t *testing.T) {
 		Time:      "2026-09-05T09:00:00Z",
 		Namespace: "shop-test",
 		App:       "db",
-		Action:    "VolumeReadOnly",
+		Action:    "ReadOnlyFilesystem",
 		Severity:  "critical",
 		Reason:    `disk error: <a href="https://evil.example.com">click here</a> & <img src=x>`,
 	})
@@ -167,7 +167,7 @@ func TestSlackTextEscapesWhatTheWorkloadWrote(t *testing.T) {
 	text := slackAlertText(Alert{
 		Namespace: "shop-test",
 		App:       "db",
-		Action:    "VolumeReadOnly",
+		Action:    "ReadOnlyFilesystem",
 		Severity:  "critical",
 		Reason:    `disk error <https://evil.example.com|click here> & more`,
 	})

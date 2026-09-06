@@ -18,7 +18,7 @@ import (
 // learned to email admins that meant two emails per admin for every security
 // action. The bell stores; the security notifier delivers.
 
-func TestStoreAlertPersistsWithoutDelivering(t *testing.T) {
+func TestStoringAnAlertDeliversNothing(t *testing.T) {
 	client := fake.NewClientset(smtpSecret(t, "smtp.example.com"))
 
 	sent := make(chan string, 4)
@@ -26,12 +26,12 @@ func TestStoreAlertPersistsWithoutDelivering(t *testing.T) {
 	SetAdminRecipients(func() []string { sent <- "admins read"; return []string{"ops@example.com"} })
 	defer func() { SetAdminRecipients(restore) }()
 
-	StoreAlert(context.Background(), client, Alert{
+	_ = storeAlerts(context.Background(), client, []Alert{{
 		Time:     time.Now().UTC().Format(time.RFC3339),
 		Action:   "security",
 		Severity: "critical",
 		Reason:   "a git credential was revoked",
-	})
+	}})
 
 	select {
 	case <-sent:
@@ -47,7 +47,7 @@ func TestStoreAlertPersistsWithoutDelivering(t *testing.T) {
 
 // The ordinary path still delivers. Storing without sending is the exception a
 // caller asks for, never the default.
-func TestAddAlertStillDelivers(t *testing.T) {
+func TestAddAlertsStillDelivers(t *testing.T) {
 	client := fake.NewClientset(smtpSecret(t, "smtp.example.com"))
 
 	reached := make(chan struct{}, 1)
@@ -55,11 +55,11 @@ func TestAddAlertStillDelivers(t *testing.T) {
 	SetAdminRecipients(func() []string { reached <- struct{}{}; return nil })
 	defer func() { SetAdminRecipients(restore) }()
 
-	AddAlert(context.Background(), client, Alert{
+	_ = AddAlerts(context.Background(), client, []Alert{{
 		Time:   time.Now().UTC().Format(time.RFC3339),
 		Action: "CrashLoopBackOff",
 		Reason: "container is crash-looping",
-	})
+	}})
 
 	select {
 	case <-reached:
