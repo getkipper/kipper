@@ -4,6 +4,9 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // A security update to open-iscsi restarts iscsid. Every Longhorn volume on the
@@ -415,4 +418,27 @@ func TestStampRejectsAnImpossibleNodeName(t *testing.T) {
 	if len(runner.commands) != 0 {
 		t.Errorf("ran %v before rejecting it", runner.commands)
 	}
+}
+
+// needrestart exiting non-zero for its own reasons — a Perl warning, a lock, a
+// transient failure — appended the absent marker to whatever it had already
+// printed. Reporting "not installed" for a host that plainly has it sends
+// somebody to install a package that is already there.
+func TestPendingRestartsTellsAFailureFromAnAbsence(t *testing.T) {
+	t.Run("genuinely absent", func(t *testing.T) {
+		runner := &storageHostRunner{replies: map[string]string{"needrestart": "NEEDRESTART-ABSENT\n"}}
+		_, err := PendingRestarts(runner)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not installed")
+	})
+
+	t.Run("present but it failed", func(t *testing.T) {
+		runner := &storageHostRunner{replies: map[string]string{
+			"needrestart": "NEEDRESTART-VER: 3.5\nNEEDRESTART-SVC: iscsid.service\nNEEDRESTART-FAILED\n",
+		}}
+		_, err := PendingRestarts(runner)
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "not installed",
+			"it is installed; it failed, which is a different thing to go and look at")
+	})
 }
