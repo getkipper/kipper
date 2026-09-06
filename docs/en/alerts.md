@@ -71,13 +71,15 @@ the path in the message settle it, because a pathname does not identify the
 filesystem behind it. Postgres puts `/var/lib/postgresql/data/pg_wal` on a
 separate volume often enough for that to matter.
 
-So the alert reports what it knows and leaves the rest to you:
+So the alert reports the fact it has, names the volumes the container mounts,
+and offers the recovery as a condition rather than a promise:
 
 ```
 container "postgres" wrote this before it died: FATAL:  could not remove old
-lock file "postmaster.pid": Read-only file system. The container mounts volume
-data-db-0. Either that volume or the node's own disk stopped accepting writes,
-and a container restart clears neither. Recover with: kip service restart db
+lock file "postmaster.pid": Read-only file system. It hit a read-only
+filesystem. The container mounts volume data-db-0. If that is the one,
+recreating the pod is what clears it, because the mount belongs to the pod and a
+container restart does not. Recover with: kip service restart db
 ```
 
 Only containers that mount a writable persistent volume raise it, because those

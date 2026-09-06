@@ -117,10 +117,28 @@ func TestWritableClaimsAreScopedToTheContainerKind(t *testing.T) {
 
 // The message says what the container mounts and leaves the attribution alone.
 func TestDescribeClaims(t *testing.T) {
-	assert.Contains(t, describeClaims([]string{"data-db-0"}), "volume data-db-0")
-	assert.Contains(t, describeClaims([]string{"data-db-0"}), "the node's own disk",
-		"the volume is not the only filesystem that can go read-only")
-	assert.Contains(t, describeClaims([]string{"data-db-0", "wal-db-0"}), "data-db-0 and wal-db-0")
-	assert.NotContains(t, describeClaims([]string{"data-db-0"}), "points at",
+	one := describeClaims([]string{"data-db-0"})
+	assert.Contains(t, one, "volume data-db-0")
+	assert.NotContains(t, one, "points at",
 		"nothing here establishes which filesystem failed")
+
+	both := describeClaims([]string{"data-db-0", "wal-db-0"})
+	assert.Contains(t, both, "data-db-0 and wal-db-0")
+
+	assert.Contains(t, describeClaims(nil), "read-only filesystem")
+}
+
+// A container mounting a writable volume and a read-only ConfigMap logs the same
+// message either way. That the two coexist does not connect the error to the
+// volume, so the alert states the fact it has and offers the recovery as a
+// conditional rather than asserting a remount.
+func TestDescribeClaimsDoesNotAssertARemount(t *testing.T) {
+	for _, claims := range [][]string{{"data-db-0"}, {"data-db-0", "wal-db-0"}} {
+		msg := describeClaims(claims)
+		assert.Contains(t, msg, "read-only filesystem",
+			"the fact is that it hit one; which one is not established")
+		assert.NotContains(t, msg, "stopped accepting writes",
+			"that phrasing asserts the volume or the node broke")
+		assert.Contains(t, msg, "If", "the recovery is offered on a condition, not promised")
+	}
 }

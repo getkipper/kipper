@@ -473,7 +473,7 @@ func runAppList(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		fmt.Printf("  !   %s depends on %s, which is crash-looping\n", app.Name, app.BrokenDependency)
-		fmt.Printf("      kip service list  shows why, and how to recover it\n\n")
+		fmt.Printf("      kip service list  shows why, and what to try\n\n")
 	}
 
 	return nil
