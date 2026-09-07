@@ -92,13 +92,7 @@ func runCertEmail(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n  ✔  Let's Encrypt email updated to %s\n", email)
 
 	// Check if any certificates are stuck and trigger renewal
-	certGVR := schema.GroupVersionResource{
-		Group:    "cert-manager.io",
-		Version:  "v1",
-		Resource: "certificates",
-	}
-
-	certs, err := dynClient.Resource(certGVR).Namespace("").List(ctx, metav1.ListOptions{})
+	certs, err := dynClient.Resource(certificateGVR).Namespace("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		fmt.Printf("  ⚠  Could not list certificates: %v\n", err)
 		fmt.Printf("  Certificates will renew on their next cycle.\n\n")

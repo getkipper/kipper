@@ -578,6 +578,16 @@ For Deployments, the suggestion uses `kip app deploy` with `--image`, `--port`, 
 
 Workloads in the `kipper-system` namespace are skipped. The console, console-api, and zot legitimately have no owning CR.
 
+## kip cert list
+
+Lists every certificate on the current cluster with its host, current state,
+the age of the last state change, and cert-manager's reason when it is not
+ready. The list includes platform hosts and app routes.
+
+```bash
+kip cert list
+```
+
 ## kip cert email
 
 Shows or updates the Let's Encrypt email used for TLS certificates. This is the email cert-manager uses when registering with Let's Encrypt for automatic certificate issuance.

@@ -269,8 +269,12 @@ When you install with `kip install --domain yourdomain.com`, the email defaults 
 If the email is valid but certificates are still not ready, check the certificate status:
 
 ```bash
-KUBECONFIG=~/.kip/clusters/your-cluster.yaml kubectl get certificates -A
+kip cert list
 ```
+
+The table covers both platform hosts and app routes. A certificate that is not
+ready includes cert-manager's reason and message, so you can see what is holding
+up issuance without dropping to kubectl.
 
 Common causes:
 
