@@ -127,7 +127,14 @@ jobs:
       # currently-committed CRDs (v0.20.1). Bump the pin and the CRDs
       # together when the project upgrades controller-tools.
       - name: Install controller-gen
-        run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1
+        run: |
+          # The module proxy and checksum server drop connections now and then;
+          # three attempts turn that into a pause instead of a red pipeline.
+          for attempt in 1 2 3; do
+            go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1 && break
+            [ "$attempt" = 3 ] && exit 1
+            sleep 20
+          done
       - name: Regenerate CRDs to a temp dir
         working-directory: console-api
         run: |
@@ -234,7 +241,14 @@ jobs:
       # Same controller-gen pin as crd-drift. Bump them together when
       # the project upgrades controller-tools.
       - name: Install controller-gen
-        run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1
+        run: |
+          # The module proxy and checksum server drop connections now and then;
+          # three attempts turn that into a pause instead of a red pipeline.
+          for attempt in 1 2 3; do
+            go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1 && break
+            [ "$attempt" = 3 ] && exit 1
+            sleep 20
+          done
       - name: Regenerate deepcopy methods
         working-directory: console-api
         run: controller-gen object paths=./api/...
@@ -263,7 +277,14 @@ jobs:
       # Pinned to the last x/tools that builds on the pinned Go: v0.50.0 needs
       # Go 1.26, and an unpinned install broke every module at once.
       - name: Install goimports
-        run: go install golang.org/x/tools/cmd/goimports@v0.49.0
+        run: |
+          # The module proxy and checksum server drop connections now and then;
+          # three attempts turn that into a pause instead of a red pipeline.
+          for attempt in 1 2 3; do
+            go install golang.org/x/tools/cmd/goimports@v0.49.0 && break
+            [ "$attempt" = 3 ] && exit 1
+            sleep 20
+          done
       # Generated files (zz_generated*.go) are owned by their generator
       # and intentionally skipped here — they have their own drift gates.
       - name: Check gofmt
@@ -314,7 +335,14 @@ jobs:
         env:
           GOWORK: 'off'
           GOTOOLCHAIN: 'local'
-        run: go mod tidy
+        run: |
+          # The module proxy and checksum server drop connections now and then;
+          # three attempts turn that into a pause instead of a red pipeline.
+          for attempt in 1 2 3; do
+            go mod tidy && break
+            [ "$attempt" = 3 ] && exit 1
+            sleep 20
+          done
       - name: Check for drift
         run: |
           if ! git diff --exit-code -- ${{ matrix.module }}/go.mod ${{ matrix.module }}/go.sum; then
@@ -365,7 +393,14 @@ jobs:
       # Pinned so a new golangci-lint release can't turn a green pipeline
       # red on an unrelated push. Bump deliberately, re-running the linter
       # locally against the new version first.
-      - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+      - run: |
+          # The module proxy and checksum server drop connections now and then;
+          # three attempts turn that into a pause instead of a red pipeline.
+          for attempt in 1 2 3; do
+            go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 && break
+            [ "$attempt" = 3 ] && exit 1
+            sleep 20
+          done
       - run: golangci-lint run ./...
         working-directory: ${{ matrix.module }}
 
@@ -384,7 +419,14 @@ jobs:
       # The vulnerability database is fetched at run time whatever the binary
       # version, so pinning loses nothing. v1.8.0 needs Go 1.26; this is the
       # last release that builds on the pinned Go.
-      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+      - run: |
+          # The module proxy and checksum server drop connections now and then;
+          # three attempts turn that into a pause instead of a red pipeline.
+          for attempt in 1 2 3; do
+            go install golang.org/x/vuln/cmd/govulncheck@v1.7.0 && break
+            [ "$attempt" = 3 ] && exit 1
+            sleep 20
+          done
       - run: govulncheck ./...
         working-directory: ${{ matrix.module }}
 
