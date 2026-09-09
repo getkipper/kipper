@@ -250,8 +250,16 @@ def ocr(data, lower):
 
 # --- what to scan ------------------------------------------------------------
 
-def commits_in_range(old, new):
-    return git("rev-list", "--reverse", f"{old}..{new}").split()
+def commits_in_range(old, new, remote):
+    """Commits in old..new that the remote does not already have on some branch.
+
+    A branch rebuilt from another branch pushes history the remote already
+    serves; scanning it again finds nothing that is not already public.
+    """
+    tip = git("rev-parse", new).strip()
+    refs = [line.split()[1] for line in git("for-each-ref", "--format=%(objectname) %(refname)", f"refs/remotes/{remote}/").splitlines()
+            if line.split()[0] != tip]
+    return git("rev-list", "--reverse", f"{old}..{new}", "--not", *refs).split()
 
 
 def commits_new_to_remote(new, remote):
@@ -304,7 +312,7 @@ def parse_args(argv):
     what.add_argument("--range", metavar="OLD..NEW", help="scan the commits in OLD..NEW")
     what.add_argument("--new", metavar="SHA", help="scan the commits reachable from SHA that no ref of --remote has")
     what.add_argument("--tree", metavar="REV", help="scan every file in the tree at REV")
-    p.add_argument("--remote", default="origin", help="remote used with --new (default origin)")
+    p.add_argument("--remote", default="origin", help="remote whose branches count as already public (default origin)")
     p.add_argument("--redact", action="store_true", help="report locations only, for logs that are public")
     p.add_argument("--require-pattern", action="store_true", help="fail when PRIVATE_NAME_PATTERN is unset")
     p.add_argument("--allowlist", default=None, help=f"allow-list path (default {ALLOWLIST_FILE} at the repository root)")
@@ -351,7 +359,7 @@ def main(argv):
         else:
             if args.range:
                 old, new = args.range.split("..", 1)
-                commits = commits_in_range(old, new)
+                commits = commits_in_range(old, new, args.remote)
             else:
                 commits = commits_new_to_remote(args.new, args.remote)
             for c in commits:
