@@ -260,8 +260,10 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+      # Pinned to the last x/tools that builds on the pinned Go: v0.50.0 needs
+      # Go 1.26, and an unpinned install broke every module at once.
       - name: Install goimports
-        run: go install golang.org/x/tools/cmd/goimports@latest
+        run: go install golang.org/x/tools/cmd/goimports@v0.49.0
       # Generated files (zz_generated*.go) are owned by their generator
       # and intentionally skipped here — they have their own drift gates.
       - name: Check gofmt
@@ -379,9 +381,10 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
-      # Deliberately unpinned: govulncheck must track the latest vuln
-      # database so newly disclosed CVEs surface as soon as they land.
-      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      # The vulnerability database is fetched at run time whatever the binary
+      # version, so pinning loses nothing. v1.8.0 needs Go 1.26; this is the
+      # last release that builds on the pinned Go.
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
       - run: govulncheck ./...
         working-directory: ${{ matrix.module }}
 
