@@ -1,17 +1,21 @@
 name: Private data
 
-# Fails a push or pull request that carries private data: a name from the
+# Fails a push or pull request that adds private data: a name from the
 # PRIVATE_NAME_PATTERN secret, a public server address, a hostname outside
 # .private-data-allowlist, or a credential. Every commit in the push is
-# scanned, then the whole tree, and images and recordings are read by OCR.
-# Every branch, with no path filter: a value is public the moment any branch
-# carries it, and the worst leak so far was in a docs page ci.yml ignores.
+# scanned, and images and recordings are read by OCR. The whole tree is
+# scanned on a weekly schedule and on demand, so that a change to the pattern
+# or the allow-list still finds an old value without turning a push red for
+# content the push did not touch. Every branch, with no path filter: a value
+# is public the moment any branch carries it.
 
 on:
   push:
     branches: ['**']
   pull_request:
     branches: [main, develop]
+  schedule:
+    - cron: '17 5 * * 1'
   workflow_dispatch:
 
 jobs:
@@ -26,7 +30,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq tesseract-ocr ffmpeg poppler-utils > /dev/null
-      - name: Scan the pushed commits, then the whole tree
+      - name: Scan the pushed commits, or the whole tree on a schedule
         env:
           PRIVATE_NAME_PATTERN: ${{ secrets.PRIVATE_NAME_PATTERN }}
           IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
@@ -61,7 +65,7 @@ jobs:
             push)
               # After a force push or on a new branch the old tip is unusable,
               # so scan what this branch has that no other branch on the
-              # remote has. The tree scan below covers the tip either way.
+              # remote has.
               if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
                 scope="--range $BEFORE..$GITHUB_SHA"
               else
@@ -69,14 +73,13 @@ jobs:
               fi ;;
           esac
 
-          status=0
           if [ -n "$scope" ]; then
             echo "=== commits: $scope ==="
-            python3 "$scanner" $scope --redact $require || status=$?
+            python3 "$scanner" $scope --redact $require
+          else
+            echo "=== tree at $GITHUB_SHA ==="
+            python3 "$scanner" --tree HEAD --redact $require
           fi
-          echo "=== tree at $GITHUB_SHA ==="
-          python3 "$scanner" --tree HEAD --redact $require || status=$?
-          exit "$status"
       - name: Scanner tests
         run: python3 scripts/private-data-scan_test.py
 

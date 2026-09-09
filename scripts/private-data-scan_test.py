@@ -251,6 +251,27 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertFinding(out, "address", "new.md")
 
+    def test_range_skips_commits_the_remote_already_has(self):
+        remote = tempfile.mkdtemp(prefix="pds-remote-")
+        self.addCleanup(shutil.rmtree, remote, True)
+        git(remote, "init", "-q", "--bare")
+        git(self.repo.dir, "remote", "add", "origin", remote)
+        git(self.repo.dir, "push", "-q", "origin", "main")
+        git(self.repo.dir, "checkout", "-q", "-b", "develop")
+        git(self.repo.dir, "push", "-q", "origin", "develop")
+        git(self.repo.dir, "checkout", "-q", "main")
+        self.plant("old.md", "already public on main: 93.184.216.34\n", message="on main")  # private-data-scan:allow
+        git(self.repo.dir, "push", "-q", "origin", "main")
+        git(self.repo.dir, "checkout", "-q", "develop")
+        git(self.repo.dir, "merge", "-q", "main")
+        self.plant("new.md", "clean\n", message="rebuilt develop")
+        rc, out = scan(self.repo, "--range", "origin/develop..HEAD")
+        self.assertEqual(rc, 0, out)
+        self.plant("new2.md", "leak 93.184.216.34\n", message="really new")  # private-data-scan:allow
+        rc, out = scan(self.repo, "--range", "origin/develop..HEAD")
+        self.assertEqual(rc, 1, out)
+        self.assertNotIn("old.md", out)
+
     def test_tree_scan_covers_the_whole_tree(self):
         self.plant("deep/old.md", "leak 93.184.216.34\n", message="old")  # private-data-scan:allow
         base2 = self.repo.head()
