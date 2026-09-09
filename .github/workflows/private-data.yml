@@ -3,11 +3,13 @@ name: Private data
 # Fails a push or pull request that adds private data: a name from the
 # PRIVATE_NAME_PATTERN secret, a public server address, a hostname outside
 # .private-data-allowlist, or a credential. Every commit in the push is
-# scanned, and images and recordings are read by OCR. The whole tree is
-# scanned on a weekly schedule and on demand, so that a change to the pattern
-# or the allow-list still finds an old value without turning a push red for
-# content the push did not touch. Every branch, with no path filter: a value
-# is public the moment any branch carries it.
+# scanned. The whole tree is scanned on a weekly schedule and on demand, with
+# OCR over images and recordings, so that a change to the pattern or the
+# allow-list still finds an old value without turning a push red for content
+# the push did not touch. A push carrying an image is reported as unscanned,
+# for the pre-push hook and the weekly run to cover; the push job itself needs
+# nothing beyond the checkout. Every branch, with no path filter: a value is
+# public the moment any branch carries it.
 
 on:
   push:
@@ -27,9 +29,18 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install OCR tools
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq tesseract-ocr ffmpeg poppler-utils > /dev/null
+          # The runner image carries third-party apt sources whose indexes fail
+          # now and then. The packages come from Ubuntu's own repositories, and
+          # the install fails on its own if they cannot be found.
+          sudo apt-get update -qq || true
+          for attempt in 1 2 3; do
+            sudo apt-get install -y -qq tesseract-ocr ffmpeg poppler-utils > /dev/null && break
+            [ "$attempt" = 3 ] && exit 1
+            sleep 20
+          done
+          tesseract --version | head -1
       - name: Scan the pushed commits, or the whole tree on a schedule
         env:
           PRIVATE_NAME_PATTERN: ${{ secrets.PRIVATE_NAME_PATTERN }}
