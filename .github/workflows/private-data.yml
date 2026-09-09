@@ -1,0 +1,101 @@
+name: Private data
+
+# Fails a push or pull request that carries private data: a name from the
+# PRIVATE_NAME_PATTERN secret, a public server address, a hostname outside
+# .private-data-allowlist, or a credential. Every commit in the push is
+# scanned, then the whole tree, and images and recordings are read by OCR.
+# Every branch, with no path filter: a value is public the moment any branch
+# carries it, and the worst leak so far was in a docs page ci.yml ignores.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  scan:
+    name: no private data
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Install OCR tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr ffmpeg poppler-utils > /dev/null
+      - name: Scan the pushed commits, then the whole tree
+        env:
+          PRIVATE_NAME_PATTERN: ${{ secrets.PRIVATE_NAME_PATTERN }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # A fork cannot read the secret, so the name check is skipped there
+          # and the address and domain checks still run. Anywhere else the
+          # pattern must be present, or the guard is not doing its job.
+          require=--require-pattern
+          if [ -z "$PRIVATE_NAME_PATTERN" ] && [ "$IS_FORK" = "true" ]; then
+            echo "::warning::A fork cannot read the name pattern; only the generic checks ran on this pull request. Check names by hand before merging."
+            require=""
+          fi
+
+          # A pull request is scanned by the scanner from its base branch, so a
+          # change to the scanner cannot switch off the check on itself. The
+          # allow-list comes from the pull request, where an addition is
+          # visible to the reviewer.
+          scanner=scripts/private-data-scan.py
+          scope=""
+          case "$EVENT" in
+            pull_request)
+              if git show "$PR_BASE:scripts/private-data-scan.py" > "$RUNNER_TEMP/private-data-scan.py" 2>/dev/null; then
+                scanner="$RUNNER_TEMP/private-data-scan.py"
+              else
+                echo "::warning::The base branch has no scanner yet, so this pull request was scanned with its own copy."
+              fi
+              scope="--range $PR_BASE..$PR_HEAD" ;;
+            push)
+              # After a force push or on a new branch the old tip is unusable,
+              # so scan what this branch has that no other branch on the
+              # remote has. The tree scan below covers the tip either way.
+              if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+                scope="--range $BEFORE..$GITHUB_SHA"
+              else
+                scope="--new $GITHUB_SHA --remote origin"
+              fi ;;
+          esac
+
+          status=0
+          if [ -n "$scope" ]; then
+            echo "=== commits: $scope ==="
+            python3 "$scanner" $scope --redact $require || status=$?
+          fi
+          echo "=== tree at $GITHUB_SHA ==="
+          python3 "$scanner" --tree HEAD --redact $require || status=$?
+          exit "$status"
+      - name: Scanner tests
+        run: python3 scripts/private-data-scan_test.py
+
+  gitleaks:
+    name: no credentials
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: 8.30.1
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          curl -fsSL -o gitleaks.tar.gz "$base/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o checksums.txt "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          awk -v f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" '$2 == f {print $1 "  gitleaks.tar.gz"}' checksums.txt | sha256sum -c --strict -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks version
+      - name: Scan the whole history
+        run: ./gitleaks git --no-banner --redact --config .gitleaks.toml .

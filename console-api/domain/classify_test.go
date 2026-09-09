@@ -4,10 +4,10 @@ import "testing"
 
 func TestNormalizeHost(t *testing.T) {
 	cases := map[string]string{
-		"App.Hrportal.EU":  "app.hrportal.eu",
-		"app.hrportal.eu.": "app.hrportal.eu",
-		"APP.HRPORTAL.EU.": "app.hrportal.eu",
-		"app.hrportal.eu":  "app.hrportal.eu",
+		"App.Hrportal.EXAMPLE":  "app.hrportal.example",
+		"app.hrportal.example.": "app.hrportal.example",
+		"APP.HRPORTAL.EXAMPLE.": "app.hrportal.example",
+		"app.hrportal.example":  "app.hrportal.example",
 	}
 	for in, want := range cases {
 		if got := NormalizeHost(in); got != want {
@@ -23,7 +23,7 @@ func TestIsGatewayHost(t *testing.T) {
 		"foo--acme.kipper.run.": true,
 		"kipper.run":            false,
 		"fakekipper.run":        false,
-		"app.hrportal.eu":       false,
+		"app.hrportal.example":  false,
 	}
 	for host, want := range cases {
 		if got := IsGatewayHost(host); got != want {
@@ -50,12 +50,12 @@ func TestClassifyHost(t *testing.T) {
 	}{
 		{"platform subdomain exact", "hrportal-backend-test.storefront.com", "hrportal-backend-test.storefront.com", DomainClassPlatform},
 		{"platform subdomain case/dot", "Hrportal-Backend-Test.storefront.com.", "hrportal-backend-test.storefront.com", DomainClassPlatform},
-		{"custom domain", "app.hrportal.eu", "hrportal-frontend-prod.storefront.com", DomainClassCustom},
+		{"custom domain", "app.hrportal.example", "hrportal-frontend-prod.storefront.com", DomainClassCustom},
 		// The self-host trap: base domain IS the user's own domain, so a real
 		// custom domain is a suffix of the base. Exact match keeps it custom.
-		{"self-host custom under own base", "app.hrportal.eu", "frontend-prod.hrportal.eu", DomainClassCustom},
+		{"self-host custom under own base", "app.hrportal.example", "frontend-prod.hrportal.example", DomainClassCustom},
 		{"gateway wins over platform", "foo--acme.kipper.run", "foo--acme.kipper.run", DomainClassGateway},
-		{"apex-ish non-match is custom", "hrportal.eu", "hrportal-website-prod.storefront.com", DomainClassCustom},
+		{"apex-ish non-match is custom", "hrportal.example", "hrportal-website-prod.storefront.com", DomainClassCustom},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

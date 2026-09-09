@@ -306,8 +306,8 @@ func TestPlanDigestBindsDomainDisposition(t *testing.T) {
 			TargetCluster: "target.example.com",
 			WillMigrate: []planItem{{
 				Kind: "app", Namespace: "hrportal-prod", Name: "backend", Status: "ok",
-				Host: "app.hrportal.eu", DomainClass: "custom", Disposition: "move",
-				Binding: "route=app.hrportal.eu;disp=move",
+				Host: "app.hrportal.example", DomainClass: "custom", Disposition: "move",
+				Binding: "route=app.hrportal.example;disp=move",
 			}},
 		}
 	}
@@ -315,7 +315,7 @@ func TestPlanDigestBindsDomainDisposition(t *testing.T) {
 
 	flipped := base()
 	flipped.WillMigrate[0].Disposition = "coexist"
-	flipped.WillMigrate[0].Binding = "route=app.hrportal.eu;disp=coexist"
+	flipped.WillMigrate[0].Binding = "route=app.hrportal.example;disp=coexist"
 	if planDigest(flipped) == reference {
 		t.Error("a changed app disposition must move the digest")
 	}
