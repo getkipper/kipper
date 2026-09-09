@@ -101,6 +101,11 @@ bitbucket.org
 contributor-covenant.org
 cal.com
 yaml.in
+plausible.io
+
+# The nginx welcome page shown at the end of the demo recording links here
+nginx.org
+f5.com
 
 # The maintainer's own domain, used for attribution
 labb-consulting.com
