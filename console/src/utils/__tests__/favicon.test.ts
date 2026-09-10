@@ -14,9 +14,6 @@ const ARTWORK = `<svg xmlns="http://www.w3.org/2000/svg">
  <circle class="fil1" r="10"/>
 </svg>`
 
-let created: string[] = []
-let revoked: string[] = []
-
 // The real page offers five icons. A browser picks whichever it likes, so the
 // tests use the same set rather than a single convenient link.
 function setIconLinks() {
@@ -35,18 +32,6 @@ function iconHrefs(): string[] {
 }
 
 beforeEach(() => {
-  created = []
-  revoked = []
-  let n = 0
-  vi.stubGlobal('URL', {
-    ...URL,
-    createObjectURL: () => {
-      const url = `blob:generated-${++n}`
-      created.push(url)
-      return url
-    },
-    revokeObjectURL: (url: string) => revoked.push(url),
-  })
   vi.stubGlobal(
     'fetch',
     vi.fn(async () => ({ ok: true, text: async () => ARTWORK })),
@@ -110,7 +95,9 @@ describe('applyFaviconColour', () => {
     const hrefs = iconHrefs()
     expect(hrefs.length).toBeGreaterThan(0)
     for (const href of hrefs) {
-      expect(href, 'a stale icon left behind keeps the old colour on the tab').toMatch(/^blob:/)
+      // A blob URL is resolved by the page and a browser reads the icon outside
+      // it, so only a data URL actually reaches the tab.
+      expect(href, 'a stale icon left behind keeps the old colour on the tab').toMatch(/^data:image\//)
     }
     expect(fetch).toHaveBeenCalledWith('/logo.svg')
   })
@@ -131,12 +118,12 @@ describe('applyFaviconColour', () => {
     expect(iconHrefs()).toEqual(before)
   })
 
-  it('releases the copies it replaces rather than leaking them', async () => {
+  it('carries the chosen tints in the icon it publishes', async () => {
     setIconLinks()
     await applyFaviconColour('pink')
-    const first = [...created]
-    await applyFaviconColour('brown')
-    expect(revoked).toEqual(first)
+    const href = iconHrefs()[0]
+    expect(decodeURIComponent(href)).toContain(FAVICON_TINTS.pink[0])
+    expect(decodeURIComponent(href)).not.toContain('#0EA5E9')
   })
 
   it('keeps the colour chosen last when two recolours overlap', async () => {

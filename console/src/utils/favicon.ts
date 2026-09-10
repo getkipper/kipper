@@ -37,16 +37,9 @@ export function recolour(svg: string, tints: readonly string[]): string {
 
 let originalIcons: string | null = null
 
-let generatedUrls: string[] = []
-
 // Two recolours can be in flight at once. The tab takes the colour chosen last,
 // not the one that finishes last.
 let generation = 0
-
-function releaseGenerated(): void {
-  for (const url of generatedUrls) URL.revokeObjectURL(url)
-  generatedUrls = []
-}
 
 function iconLinks(): HTMLLinkElement[] {
   return Array.from(document.querySelectorAll<HTMLLinkElement>(ICON_SELECTOR))
@@ -61,7 +54,7 @@ function replaceIcons(markup: string): void {
 }
 
 /** rasterise returns a PNG of the artwork, or null where there is no canvas. */
-async function rasterise(svgUrl: string): Promise<string | null> {
+async function rasterise(svgHref: string): Promise<string | null> {
   const canvas = document.createElement('canvas')
   const context = typeof canvas.getContext === 'function' ? canvas.getContext('2d') : null
   if (!context) return null
@@ -75,15 +68,13 @@ async function rasterise(svgUrl: string): Promise<string | null> {
     image.onerror = done(false)
     // A decode that never settles must not hold the caller.
     setTimeout(() => resolve(false), 3000)
-    image.src = svgUrl
+    image.src = svgHref
   })
   if (!loaded) return null
 
   context.drawImage(image, 0, 0, RASTER_SIZE, RASTER_SIZE)
-  if (typeof canvas.toBlob !== 'function') return null
-  return new Promise<string | null>(resolve => {
-    canvas.toBlob(blob => resolve(blob ? URL.createObjectURL(blob) : null), 'image/png')
-  })
+  if (typeof canvas.toDataURL !== 'function') return null
+  return canvas.toDataURL('image/png')
 }
 
 /** applyFaviconColour repaints every icon the page offers and reports whether
@@ -100,7 +91,6 @@ export async function applyFaviconColour(colour: string): Promise<boolean> {
 
   // Blue is the page's own markup, so hand that back rather than rebuild it.
   if (colour === DEFAULT_FAVICON_COLOUR) {
-    releaseGenerated()
     replaceIcons(originalIcons)
     return true
   }
@@ -111,20 +101,16 @@ export async function applyFaviconColour(colour: string): Promise<boolean> {
     const svg = recolour(await response.text(), FAVICON_TINTS[colour])
     if (mine !== generation) return false
 
-    const svgUrl = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }))
-    const pngUrl = await rasterise(svgUrl)
-    if (mine !== generation) {
-      URL.revokeObjectURL(svgUrl)
-      if (pngUrl) URL.revokeObjectURL(pngUrl)
-      return false
-    }
+    // A data URL, not a blob: a browser resolves the icon outside the page and
+    // cannot read a blob belonging to it, so a blob link leaves the old icon.
+    const svgHref = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
+    const pngHref = await rasterise(svgHref)
+    if (mine !== generation) return false
 
-    releaseGenerated()
-    generatedUrls = pngUrl ? [svgUrl, pngUrl] : [svgUrl]
     replaceIcons(
       [
-        `<link rel="icon" type="image/svg+xml" href="${svgUrl}">`,
-        pngUrl ? `<link rel="icon" type="image/png" sizes="${RASTER_SIZE}x${RASTER_SIZE}" href="${pngUrl}">` : '',
+        `<link rel="icon" type="image/svg+xml" href="${svgHref}">`,
+        pngHref ? `<link rel="icon" type="image/png" sizes="${RASTER_SIZE}x${RASTER_SIZE}" href="${pngHref}">` : '',
       ]
         .filter(Boolean)
         .join('\n'),
