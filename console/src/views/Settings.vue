@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { Sparkles, Eye, EyeOff, Shield, Gauge, AlertTriangle, Bell, Container, GitBranch, Plus, Trash2, Mail } from 'lucide-vue-next'
+import { Sparkles, Eye, EyeOff, Shield, Gauge, AlertTriangle, Bell, Container, GitBranch, Plus, Trash2, Mail, Palette } from 'lucide-vue-next'
 import SaveButton from '@/components/SaveButton.vue'
 import TwoFactorPanel from '@/components/TwoFactorPanel.vue'
 import CredentialHealthBadge from '@/components/CredentialHealthBadge.vue'
@@ -22,6 +22,13 @@ import { getMode, updateMode, getResourceLog, type ResourceLogEntry } from '@/ap
 import { getSlackSettings, updateSlackSettings } from '@/api/slack'
 import { getAlertDelivery } from '@/api/alertDelivery'
 import { getSmtpSettings, updateSmtpSettings, testSmtpSettings } from '@/api/smtp'
+import { getAppearance, updateAppearance } from '@/api/appearance'
+import {
+  applyFaviconColour,
+  DEFAULT_FAVICON_COLOUR,
+  FAVICON_COLOURS,
+  FAVICON_TINTS,
+} from '@/utils/favicon'
 import client from '@/api/client'
 
 const toast = useToast()
@@ -437,6 +444,33 @@ async function disableConnector(type: string) {
   }
 }
 
+const faviconColours = FAVICON_COLOURS
+const faviconTints = FAVICON_TINTS
+const faviconColour = ref<string>(DEFAULT_FAVICON_COLOUR)
+const savingFaviconColour = ref(false)
+
+// The colour is stored on the cluster rather than in the browser, so every
+// operator who opens this console sees the same tab.
+async function handleSaveFaviconColour(colour: string) {
+  if (colour === faviconColour.value || savingFaviconColour.value) return
+  const previous = faviconColour.value
+  savingFaviconColour.value = true
+  faviconColour.value = colour
+  try {
+    await updateAppearance(colour)
+    if (await applyFaviconColour(colour)) {
+      toast.success('Tab colour updated')
+    } else {
+      toast.info('Tab colour saved. This tab shows it after a reload.')
+    }
+  } catch {
+    faviconColour.value = previous
+    toast.error('Failed to save the tab colour')
+  } finally {
+    savingFaviconColour.value = false
+  }
+}
+
 onMounted(async () => {
   loading.value = true
   try {
@@ -444,6 +478,7 @@ onMounted(async () => {
       getAISettings().catch(() => ({ provider: '', api_key: '', model: '', ollama_url: '' })),
       getMode().catch(() => ({ mode: 'auto' as const })),
     ])
+    faviconColour.value = (await getAppearance().catch(() => ({ faviconColour: DEFAULT_FAVICON_COLOUR }))).faviconColour
     provider.value = config.provider || ''
     apiKey.value = config.api_key || ''
     model.value = config.model || ''
@@ -1022,6 +1057,40 @@ onMounted(async () => {
               <SaveButton :saving="savingConnector" label="Enable" @click="saveConnector(editingConnector, true)" />
             </div>
           </div>
+        </div>
+      </div>
+      <!-- Appearance -->
+      <div class="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <div class="flex items-center gap-3 border-b border-slate-200 px-6 py-4 dark:border-slate-800">
+          <Palette class="h-5 w-5 text-kipper-500" :stroke-width="1.75" />
+          <div>
+            <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-50">Appearance</h2>
+            <p class="text-xs text-slate-500 dark:text-slate-400">The colour of this cluster's browser tab icon, so several consoles open at once stay easy to tell apart</p>
+          </div>
+        </div>
+
+        <div class="space-y-4 p-6">
+          <div class="flex flex-wrap gap-3">
+            <button
+              v-for="colour in faviconColours"
+              :key="colour"
+              type="button"
+              :disabled="savingFaviconColour"
+              :aria-pressed="colour === faviconColour"
+              :aria-label="colour"
+              :title="colour"
+              @click="handleSaveFaviconColour(colour)"
+              class="flex h-11 w-11 items-center justify-center rounded-lg border-2 transition disabled:cursor-not-allowed disabled:opacity-50"
+              :class="colour === faviconColour
+                ? 'border-kipper-500 ring-2 ring-kipper-500/30'
+                : 'border-slate-200 hover:border-slate-400 dark:border-slate-700 dark:hover:border-slate-500'"
+            >
+              <span class="h-6 w-6 rounded-full" :style="{ backgroundColor: faviconTints[colour][0] }"></span>
+            </button>
+          </div>
+          <p class="text-xs text-slate-500 dark:text-slate-400">
+            Everyone who opens this console sees the colour picked here, on any machine. Blue is the default.
+          </p>
         </div>
       </div>
       </div>

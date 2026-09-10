@@ -138,6 +138,12 @@ kip cluster remove dev
 
 This removes the cluster from your local config and deletes the stored kubeconfig. It does not affect the server.
 
+### Telling the browser tabs apart
+
+With several consoles open, every tab shows the same blue icon. Give each
+cluster its own colour under **Settings → Appearance** in the console, and the
+tab icon changes to match.
+
 ## Custom console domain
 
 By default, the web console is available at `console--{domain}.kipper.run`. Move the whole serving identity, console, API, and login, onto your own domain:
