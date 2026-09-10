@@ -44,18 +44,20 @@ jobs:
       - name: Scan the pushed commits, or the whole tree on a schedule
         env:
           PRIVATE_NAME_PATTERN: ${{ secrets.PRIVATE_NAME_PATTERN }}
-          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          # A fork cannot read the secret, so the name check is skipped there
-          # and the address and domain checks still run. Anywhere else the
-          # pattern must be present, or the guard is not doing its job.
+          # Neither a fork nor Dependabot can read repository secrets, so a
+          # pull request from either has no name pattern and runs the address
+          # and domain checks alone. A push and a scheduled run always have the
+          # secret, and the guard fails when it is missing. Nothing reaches a
+          # branch except through a push, so the full check still stands in
+          # front of main.
           require=--require-pattern
-          if [ -z "$PRIVATE_NAME_PATTERN" ] && [ "$IS_FORK" = "true" ]; then
-            echo "::warning::A fork cannot read the name pattern; only the generic checks ran on this pull request. Check names by hand before merging."
+          if [ -z "$PRIVATE_NAME_PATTERN" ] && [ "$EVENT" = "pull_request" ]; then
+            echo "::warning::No name pattern is readable from this pull request, so only the generic checks ran. The push to the base branch scans with the pattern."
             require=""
           fi
 
