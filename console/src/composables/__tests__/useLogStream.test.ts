@@ -29,10 +29,12 @@ class MockWebSocket {
 
 let lastWebSocket: MockWebSocket
 
-vi.stubGlobal('WebSocket', vi.fn().mockImplementation(() => {
+// A plain function, not an arrow or vi.fn(): the code under test calls
+// `new WebSocket(...)`, and vitest constructs the stub with `new`.
+vi.stubGlobal('WebSocket', function () {
   lastWebSocket = new MockWebSocket()
   return lastWebSocket
-}))
+})
 
 describe('useLogStream', () => {
   beforeEach(() => {
