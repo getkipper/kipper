@@ -235,6 +235,13 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 	r.Get("/api/v1/storage/{service}/shared", storageHandler.SharedDownload)
 	r.Get("/api/v1/storage/{service}/public/{bucket}/*", storageHandler.PublicDownload)
 
+	// The console's tab-icon colour, unauthenticated: it is not a secret, and
+	// the login page needs it before anyone has signed in, which is when
+	// several cluster tabs are hardest to tell apart. Writing it is admin-only
+	// and lives with the other settings routes below.
+	appearanceHandler := &handlers.Appearance{Client: clientset}
+	r.Get("/api/v1/appearance", appearanceHandler.Get)
+
 	auth := &middleware.Auth{
 		Issuer:   issuer,
 		Audience: audience,
@@ -857,6 +864,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireRole(middleware.RoleAdmin))
 			r.Put("/settings/mode", modeHandler.Update)
+			r.Put("/settings/appearance", appearanceHandler.Update)
 			r.Get("/settings/ai", aiSettingsHandler.Get)
 			r.Put("/settings/ai", aiSettingsHandler.Update)
 			r.Get("/settings/ai/bundle-status", aiBundleStatusHandler.Get)

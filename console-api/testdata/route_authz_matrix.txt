@@ -38,6 +38,7 @@ DELETE /api/v1/storage/{service}/public	anon=401 outsider=403 viewer=403 deploye
 DELETE /api/v1/users/{email}	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 GET /api/v1/alerts	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/alerts/unread-count	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow
+GET /api/v1/appearance	anon=allow outsider=allow viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/auth/2fa/status	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/backups	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=panic
 GET /api/v1/backups/schedules	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=panic
@@ -273,6 +274,7 @@ PUT /api/v1/projects/{name}/route-groups	anon=401 outsider=403 viewer=403 deploy
 PUT /api/v1/projects/{name}/usage-plans	anon=401 outsider=403 viewer=403 deployer=allow owner=allow admin=allow
 PUT /api/v1/services/{name}/resources	anon=401 outsider=403 viewer=403 deployer=404 owner=404 admin=404
 PUT /api/v1/settings/ai	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
+PUT /api/v1/settings/appearance	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 PUT /api/v1/settings/auth	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 PUT /api/v1/settings/mode	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 PUT /api/v1/settings/slack	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
