@@ -12,14 +12,9 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 )
 
-// enforceResourceVersions makes a fake client behave like an API server in the
-// one way that catches a whole class of bug: a create is stamped with a
-// resourceVersion, and an update carrying none is refused.
-//
-// Without it, a handler that builds a fresh object and calls Update passes
-// every test here and then fails on its second save against a real cluster,
-// because the API server rejects an update with no resourceVersion. Two
-// handlers in this package shipped that way.
+// enforceResourceVersions makes a fake client behave like an API server: a
+// create is stamped with a resourceVersion, and an update carrying none is
+// refused. Use it for any handler that writes a ConfigMap or Secret.
 func enforceResourceVersions(client *fake.Clientset, resource string) {
 	var version int64
 

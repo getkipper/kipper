@@ -98,11 +98,8 @@ func (a *AISettings) Update(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
 
-// save writes the settings onto the Secret that is there rather than posting a
-// replacement, because Kubernetes refuses an update carrying no
-// resourceVersion: building a fresh object means the first save creates it and
-// every save after that fails. Two admins saving at once meet either a conflict
-// or each other's create, and both are retried by reading back what won.
+// save mutates the Secret that is there: Kubernetes refuses an update carrying
+// no resourceVersion. A conflict or a lost create is retried.
 func (a *AISettings) save(ctx context.Context, cfg aiConfig) error {
 	secrets := a.Client.CoreV1().Secrets(aiSecretNamespace)
 	fields := map[string][]byte{

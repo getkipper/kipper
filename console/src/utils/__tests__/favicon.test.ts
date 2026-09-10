@@ -17,9 +17,21 @@ const ARTWORK = `<svg xmlns="http://www.w3.org/2000/svg">
 let created: string[] = []
 let revoked: string[] = []
 
-function setIconLink(href = '/logo.svg') {
-  document.head.innerHTML = `<link rel="icon" type="image/svg+xml" href="${href}">`
-  return document.head.querySelector('link') as HTMLLinkElement
+// The real page offers five icons. A browser picks whichever it likes, so the
+// tests use the same set rather than a single convenient link.
+function setIconLinks() {
+  document.head.innerHTML = [
+    '<link rel="icon" type="image/svg+xml" href="/logo.svg">',
+    '<link rel="alternate icon" type="image/x-icon" href="/favicon.ico">',
+    '<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">',
+    '<link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">',
+  ].join('\n')
+}
+
+function iconHrefs(): string[] {
+  return Array.from(
+    document.head.querySelectorAll<HTMLLinkElement>('link[rel="icon"], link[rel="alternate icon"]'),
+  ).map(link => link.getAttribute('href') as string)
 }
 
 beforeEach(() => {
@@ -91,29 +103,44 @@ describe('the palette', () => {
 })
 
 describe('applyFaviconColour', () => {
-  it('points the icon at a recoloured copy', async () => {
-    const link = setIconLink()
+  it('repaints every icon the page offers, not just the SVG one', async () => {
+    setIconLinks()
     expect(await applyFaviconColour('purple')).toBe(true)
-    expect(link.getAttribute('href')).toBe(created[0])
+
+    const hrefs = iconHrefs()
+    expect(hrefs.length).toBeGreaterThan(0)
+    for (const href of hrefs) {
+      expect(href, 'a stale icon left behind keeps the old colour on the tab').toMatch(/^blob:/)
+    }
     expect(fetch).toHaveBeenCalledWith('/logo.svg')
   })
 
-  it('hands back the original file for the default colour', async () => {
-    const link = setIconLink()
-    await applyFaviconColour('orange')
-    expect(await applyFaviconColour(DEFAULT_FAVICON_COLOUR)).toBe(true)
-    expect(link.getAttribute('href')).toBe('/logo.svg')
+  it('leaves no icon behind that still points at the original artwork', async () => {
+    setIconLinks()
+    await applyFaviconColour('red')
+    expect(iconHrefs()).not.toContain('/icon-192.png')
+    expect(iconHrefs()).not.toContain('/favicon.ico')
+    expect(iconHrefs()).not.toContain('/logo.svg')
   })
 
-  it('releases the copy it replaces rather than leaking it', async () => {
-    setIconLink()
+  it('puts the page\'s own icons back for the default colour', async () => {
+    setIconLinks()
+    const before = iconHrefs()
+    await applyFaviconColour('orange')
+    expect(await applyFaviconColour(DEFAULT_FAVICON_COLOUR)).toBe(true)
+    expect(iconHrefs()).toEqual(before)
+  })
+
+  it('releases the copies it replaces rather than leaking them', async () => {
+    setIconLinks()
     await applyFaviconColour('pink')
+    const first = [...created]
     await applyFaviconColour('brown')
-    expect(revoked).toEqual([created[0]])
+    expect(revoked).toEqual(first)
   })
 
   it('keeps the colour chosen last when two recolours overlap', async () => {
-    const link = setIconLink()
+    setIconLinks()
     const finish: Array<() => void> = []
     vi.stubGlobal(
       'fetch',
@@ -131,24 +158,26 @@ describe('applyFaviconColour', () => {
 
     finish[1]()
     expect(await red).toBe(true)
-    const redHref = link.getAttribute('href')
+    const redHrefs = iconHrefs()
 
     // The earlier request answers late. Publishing it now would put the colour
     // nobody asked for last on the tab.
     finish[0]()
     expect(await purple).toBe(false)
-    expect(link.getAttribute('href')).toBe(redHref)
+    expect(iconHrefs()).toEqual(redHrefs)
   })
 
-  it('leaves the icon alone for a colour it cannot draw', async () => {
-    const link = setIconLink()
+  it('leaves the icons alone for a colour it cannot draw', async () => {
+    setIconLinks()
+    const before = iconHrefs()
     expect(await applyFaviconColour('chartreuse')).toBe(false)
-    expect(link.getAttribute('href')).toBe('/logo.svg')
+    expect(iconHrefs()).toEqual(before)
     expect(fetch).not.toHaveBeenCalled()
   })
 
-  it('leaves the icon alone when the artwork cannot be read', async () => {
-    const link = setIconLink()
+  it('leaves the icons alone when the artwork cannot be read', async () => {
+    setIconLinks()
+    const before = iconHrefs()
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => {
@@ -156,17 +185,18 @@ describe('applyFaviconColour', () => {
       }),
     )
     expect(await applyFaviconColour('green')).toBe(false)
-    expect(link.getAttribute('href')).toBe('/logo.svg')
+    expect(iconHrefs()).toEqual(before)
   })
 
-  it('leaves the icon alone when the artwork answers with an error', async () => {
-    const link = setIconLink()
+  it('leaves the icons alone when the artwork answers with an error', async () => {
+    setIconLinks()
+    const before = iconHrefs()
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => ({ ok: false, text: async () => 'nope' })),
     )
     expect(await applyFaviconColour('green')).toBe(false)
-    expect(link.getAttribute('href')).toBe('/logo.svg')
+    expect(iconHrefs()).toEqual(before)
   })
 
   it('does nothing when the page has no icon link', async () => {
