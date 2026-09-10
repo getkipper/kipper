@@ -131,7 +131,7 @@ func certificateRow(certificate unstructured.Unstructured, now time.Time) certif
 		name:      certificate.GetName(),
 		host:      host,
 		state:     state,
-		age:       certificateAge(now, changedAt),
+		age:       humanAge(now, changedAt),
 		reason:    reason,
 	}
 }
@@ -148,25 +148,5 @@ func certificateConditionReason(condition map[string]interface{}) string {
 		return message
 	default:
 		return "Reason unavailable"
-	}
-}
-
-func certificateAge(now, changedAt time.Time) string {
-	if changedAt.IsZero() {
-		return "-"
-	}
-	d := now.Sub(changedAt)
-	if d < 0 {
-		d = 0
-	}
-	switch {
-	case d >= 24*time.Hour:
-		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
-	case d >= time.Hour:
-		return fmt.Sprintf("%dh", int(d/time.Hour))
-	case d >= time.Minute:
-		return fmt.Sprintf("%dm", int(d/time.Minute))
-	default:
-		return fmt.Sprintf("%ds", int(d/time.Second))
 	}
 }
