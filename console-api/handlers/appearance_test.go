@@ -141,25 +141,11 @@ func TestEveryOfferedColourIsAccepted(t *testing.T) {
 	}
 }
 
-// rejectUpdatesWithoutResourceVersion makes the fake client refuse what a real
-// API server refuses. Without it a handler that posts a freshly built object
-// passes every test here and fails on the first save against a cluster.
-func rejectUpdatesWithoutResourceVersion(client *fake.Clientset) {
-	client.PrependReactor("update", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		cm, ok := action.(k8stesting.UpdateAction).GetObject().(*corev1.ConfigMap)
-		if ok && cm.ResourceVersion == "" {
-			return true, nil, apierrors.NewInvalid(
-				schema.GroupKind{Kind: "ConfigMap"}, cm.Name, nil)
-		}
-		return false, nil, nil
-	})
-}
-
 func TestAppearanceUpdateCarriesTheResourceVersionAnAPIServerDemands(t *testing.T) {
 	existing := appearanceConfigMapWith("red")
 	existing.ResourceVersion = "42"
 	client := fake.NewClientset(existing)
-	rejectUpdatesWithoutResourceVersion(client)
+	enforceResourceVersions(client, "configmaps")
 	h := &Appearance{Client: client}
 
 	rec := httptest.NewRecorder()
