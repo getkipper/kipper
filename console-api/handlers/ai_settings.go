@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 )
 
 const (
@@ -89,32 +90,57 @@ func (a *AISettings) Update(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      aiSecretName,
-			Namespace: aiSecretNamespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "kipper",
-			},
-		},
-		Data: map[string][]byte{
-			"provider":   []byte(req.Provider),
-			"api_key":    []byte(req.APIKey),
-			"model":      []byte(req.Model),
-			"ollama_url": []byte(req.OllamaURL),
-		},
-	}
-
-	_, err := a.Client.CoreV1().Secrets(aiSecretNamespace).Update(ctx, secret, metav1.UpdateOptions{})
-	if errors.IsNotFound(err) {
-		_, err = a.Client.CoreV1().Secrets(aiSecretNamespace).Create(ctx, secret, metav1.CreateOptions{})
-	}
-	if err != nil {
+	if err := a.save(ctx, req); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to save AI config")
 		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+}
+
+// save writes the settings onto the Secret that is there rather than posting a
+// replacement, because Kubernetes refuses an update carrying no
+// resourceVersion: building a fresh object means the first save creates it and
+// every save after that fails. Two admins saving at once meet either a conflict
+// or each other's create, and both are retried by reading back what won.
+func (a *AISettings) save(ctx context.Context, cfg aiConfig) error {
+	secrets := a.Client.CoreV1().Secrets(aiSecretNamespace)
+	fields := map[string][]byte{
+		"provider":   []byte(cfg.Provider),
+		"api_key":    []byte(cfg.APIKey),
+		"model":      []byte(cfg.Model),
+		"ollama_url": []byte(cfg.OllamaURL),
+	}
+	retriable := func(err error) bool { return errors.IsConflict(err) || errors.IsAlreadyExists(err) }
+
+	return retry.OnError(retry.DefaultRetry, retriable, func() error {
+		existing, err := secrets.Get(ctx, aiSecretName, metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			_, err = secrets.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      aiSecretName,
+					Namespace: aiSecretNamespace,
+					Labels: map[string]string{
+						"app.kubernetes.io/managed-by": "kipper",
+					},
+				},
+				Data: fields,
+			}, metav1.CreateOptions{})
+			return err
+		}
+		if err != nil {
+			return err
+		}
+
+		if existing.Data == nil {
+			existing.Data = map[string][]byte{}
+		}
+		for name, value := range fields {
+			existing.Data[name] = value
+		}
+		_, err = secrets.Update(ctx, existing, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 // GetRaw returns the unmasked AI config for internal use by the chat handler.

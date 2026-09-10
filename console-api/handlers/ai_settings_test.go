@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -217,5 +218,69 @@ func TestHealthEndpoint(t *testing.T) {
 
 	if resp["status"] != "ok" {
 		t.Errorf("expected status 'ok', got %q", resp["status"])
+	}
+}
+
+// TestAISettingsUpdateSavesTwice pins the shape of the write. A handler that
+// posts a freshly built Secret creates it the first time and is refused every
+// time after, because an update carrying no resourceVersion is invalid. The
+// reactor below makes the fake client refuse what an API server refuses.
+func TestAISettingsUpdateSavesTwice(t *testing.T) {
+	client := fake.NewClientset()
+	enforceResourceVersions(client, "secrets")
+	h := &AISettings{Client: client}
+
+	save := func(model string) int {
+		rec := httptest.NewRecorder()
+		body := bytes.NewBufferString(`{"provider":"claude","api_key":"sk-ant-secret","model":"` + model + `","ollama_url":""}`)
+		h.Update(rec, httptest.NewRequest(http.MethodPut, "/api/v1/settings/ai", body))
+		return rec.Code
+	}
+
+	if code := save("claude-opus-5"); code != http.StatusOK {
+		t.Fatalf("first save: got %d, want %d", code, http.StatusOK)
+	}
+	if code := save("claude-sonnet-5"); code != http.StatusOK {
+		t.Fatalf("second save: got %d, want %d; a settings page that saves once is not a settings page", code, http.StatusOK)
+	}
+
+	secret, err := client.CoreV1().Secrets(aiSecretNamespace).Get(context.Background(), aiSecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reading the secret back: %v", err)
+	}
+	if got := string(secret.Data["model"]); got != "claude-sonnet-5" {
+		t.Errorf("model = %q, want the second save to have landed", got)
+	}
+	if got := string(secret.Data["api_key"]); got != "sk-ant-secret" {
+		t.Errorf("api_key = %q, want it carried through both saves", got)
+	}
+}
+
+// TestAISettingsUpdateKeepsKeysItDoesNotOwn guards the read-modify-write: the
+// Secret is fetched and mutated, so anything else stored alongside survives.
+func TestAISettingsUpdateKeepsKeysItDoesNotOwn(t *testing.T) {
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: aiSecretName, Namespace: aiSecretNamespace, ResourceVersion: "9"},
+		Data:       map[string][]byte{"provider": []byte("claude"), "somethingElse": []byte("left alone")},
+	}
+	client := fake.NewClientset(existing)
+	h := &AISettings{Client: client}
+
+	rec := httptest.NewRecorder()
+	body := bytes.NewBufferString(`{"provider":"ollama","api_key":"","model":"llama3","ollama_url":"http://localhost:11434"}`)
+	h.Update(rec, httptest.NewRequest(http.MethodPut, "/api/v1/settings/ai", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	secret, err := client.CoreV1().Secrets(aiSecretNamespace).Get(context.Background(), aiSecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reading the secret back: %v", err)
+	}
+	if got := string(secret.Data["provider"]); got != "ollama" {
+		t.Errorf("provider = %q, want ollama", got)
+	}
+	if got := string(secret.Data["somethingElse"]); got != "left alone" {
+		t.Errorf("somethingElse = %q, want it untouched", got)
 	}
 }
