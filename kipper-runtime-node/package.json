@@ -3,5 +3,9 @@
   "private": true,
   "dependencies": {
     "express": "^4.21.0"
+  },
+  "//": "express and body-parser both cap qs at ~6.15, which is below the 6.16.0 that fixes two denial-of-service advisories reachable through query-string parsing. Drop this override once express ships a release that allows 6.16 on its own.",
+  "overrides": {
+    "qs": "^6.16.0"
   }
 }
