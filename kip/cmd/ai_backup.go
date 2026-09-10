@@ -224,7 +224,7 @@ func runAIBackupList(_ *cobra.Command, _ []string) error {
 	_, _ = fmt.Fprintln(w, "NAME\tPHASE\tAGE\tITEMS\tERRORS")
 	for _, s := range summaries {
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\n",
-			s.Name, s.Phase, humanAge(s.CreatedAt), s.ItemsBackedUp, s.Errors)
+			s.Name, s.Phase, humanAge(time.Now(), s.CreatedAt), s.ItemsBackedUp, s.Errors)
 	}
 	if err := w.Flush(); err != nil {
 		return fmt.Errorf("rendering table: %w", err)
@@ -285,23 +285,4 @@ func runAIBackupDelete(cmd *cobra.Command, _ []string) error {
 		fmt.Printf("      Confirm completion: kip ai backup list\n\n")
 	}
 	return nil
-}
-
-// humanAge renders a duration as e.g. "2d", "3h", "5m", "12s". Output
-// is approximate, sized for the backup-list table.
-func humanAge(t time.Time) string {
-	if t.IsZero() {
-		return "-"
-	}
-	d := time.Since(t)
-	switch {
-	case d >= 24*time.Hour:
-		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
-	case d >= time.Hour:
-		return fmt.Sprintf("%dh", int(d/time.Hour))
-	case d >= time.Minute:
-		return fmt.Sprintf("%dm", int(d/time.Minute))
-	default:
-		return fmt.Sprintf("%ds", int(d/time.Second))
-	}
 }
