@@ -25,6 +25,9 @@ import (
 type Jobs struct {
 	Client   kubernetes.Interface
 	CRClient crclient.Client
+	// Resources serves the job's own resource verbs, so what a job runs with is
+	// read and written the same way an app's and a function's are.
+	Resources *Resources
 }
 
 type createJobRequest struct {

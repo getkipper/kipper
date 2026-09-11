@@ -117,6 +117,7 @@ spec:
                 - app
                 - service
                 - function
+                - job
                 type: string
               to:
                 description: To is the limit just applied. Always populated.

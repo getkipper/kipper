@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -46,6 +47,7 @@ type ResourceKind string
 const (
 	ResourceKindApp      ResourceKind = "app"
 	ResourceKindFunction ResourceKind = "function"
+	ResourceKindJob      ResourceKind = "job"
 )
 
 // GetByParam returns a handler that reads the resource name from the
@@ -81,6 +83,13 @@ func (res *Resources) getResources(w http.ResponseWriter, r *http.Request, proje
 	resp, err := res.readResources(ctx, project, name, kind)
 	if err != nil {
 		if errors.IsNotFound(err) {
+			// A job route names its CR outright, so a missing one is a missing
+			// job. For the others an absent CR still reads as nothing set,
+			// which is the answer those screens have always had.
+			if kind == ResourceKindJob {
+				respondError(w, http.StatusNotFound, fmt.Sprintf("job %q not found", name))
+				return
+			}
 			respondJSON(w, http.StatusOK, resourcesResponse{})
 			return
 		}
@@ -140,12 +149,24 @@ func (res *Resources) updateResources(w http.ResponseWriter, r *http.Request, pr
 			change.MemoryLimit = dMemLim
 		}
 	}
-	if pf, err := quotapkg.PreflightDeployment(ctx, res.Client, project, name, change); err == nil && !pf.Fits {
-		respondError(w, http.StatusConflict, fmt.Sprintf("resource change needs %s of %s but the namespace quota caps at %s; raise the project tier or environment quota, or reduce other workloads", pf.Projected, pf.Dimension, pf.Hard))
-		return
+	// A job has no Deployment and no steady-state footprint: it runs one
+	// transient pod at a time, which admission handles when the pod is created.
+	if kind != ResourceKindJob {
+		if pf, err := quotapkg.PreflightDeployment(ctx, res.Client, project, name, change); err == nil && !pf.Fits {
+			respondError(w, http.StatusConflict, fmt.Sprintf("resource change needs %s of %s but the namespace quota caps at %s; raise the project tier or environment quota, or reduce other workloads", pf.Projected, pf.Dimension, pf.Hard))
+			return
+		}
 	}
 
 	if err := res.writeResources(ctx, project, name, kind, cpuReq, cpuLim, memReq, memLim); err != nil {
+		if stderrors.Is(err, errJobRunsOnce) {
+			respondError(w, http.StatusConflict, fmt.Sprintf("job %q runs once and uses the resources it was created with; create a new job to run it with different ones", name))
+			return
+		}
+		if errors.IsConflict(err) {
+			respondError(w, http.StatusConflict, fmt.Sprintf("this %s changed while the limits were being saved; read it again and reapply them", kind))
+			return
+		}
 		if errors.IsNotFound(err) {
 			respondError(w, http.StatusNotFound, string(kind)+" not found")
 			return
@@ -154,10 +175,7 @@ func (res *Resources) updateResources(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	scope := "app"
-	if kind == ResourceKindFunction {
-		scope = "function"
-	}
+	scope := adjustmentScope(kind)
 	subject := SubjectFromRequest(r)
 	if memLim != "" {
 		res.Adjustments.Record(ctx, scope, project, name, "memory",
@@ -171,11 +189,51 @@ func (res *Resources) updateResources(w http.ResponseWriter, r *http.Request, pr
 	respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
+// errJobRunsOnce says a job's resources cannot reach what it runs.
+//
+// A scheduled job is rebuilt from the CR on every reconcile, so a change always
+// reaches the next run. A one-off job's native Job is created from the CR once
+// and never patched afterwards, and its pod template is immutable, so the only
+// change that could reach it is one landing before the reconciler creates it.
+// That window is not one a caller can see or be held to: the reconciler may
+// already be mid-pass with an older snapshot when the write is accepted, and
+// answering "updated" for a run that used the old values is the false success
+// this exists to remove. So a one-off is refused, which is also what the
+// trigger verb does with one.
+var errJobRunsOnce = stderrors.New("a one-off job runs with the resources it was created with")
+
+// adjustmentScope is the scope a resource change is recorded under. The values
+// are a closed set in the ResourceAdjustment CRD, so a kind added here without
+// the schema is a write the API server refuses.
+func adjustmentScope(kind ResourceKind) string {
+	switch kind {
+	case ResourceKindFunction:
+		return "function"
+	case ResourceKindJob:
+		return "job"
+	default:
+		return "app"
+	}
+}
+
 // readResources collapses the CR-specific GET path into one place so
 // the kind switch happens in exactly one spot. Returns the canonical
 // response shape regardless of which CR backed it.
 func (res *Resources) readResources(ctx context.Context, project, name string, kind ResourceKind) (resourcesResponse, error) {
 	switch kind {
+	case ResourceKindJob:
+		var job kipperv1.Job
+		if err := res.CRClient.Get(ctx, crclient.ObjectKey{Namespace: project, Name: name}, &job); err != nil {
+			return resourcesResponse{}, err
+		}
+		// jobResources in the reconciler falls back to the same pair, so an
+		// unpinned job reads as what it will actually run with.
+		cpuReq, cpuLim := controllers.ResolveResourcePair(job.Spec.Resources.CPURequest, job.Spec.Resources.CPULimit, jobDefaultCPU, jobDefaultCPU)
+		memReq, memLim := controllers.ResolveResourcePair(job.Spec.Resources.MemoryRequest, job.Spec.Resources.MemoryLimit, jobDefaultMemory, jobDefaultMemory)
+		return resourcesResponse{
+			MemoryLimit: memLim, MemoryRequest: memReq,
+			CPULimit: cpuLim, CPURequest: cpuReq,
+		}, nil
 	case ResourceKindFunction:
 		var fn kipperv1.Function
 		if err := res.CRClient.Get(ctx, crclient.ObjectKey{Namespace: project, Name: name}, &fn); err != nil {
@@ -212,6 +270,22 @@ func (res *Resources) readResources(ctx context.Context, project, name string, k
 
 func (res *Resources) writeResources(ctx context.Context, project, name string, kind ResourceKind, cpuReq, cpuLim, memReq, memLim string) error {
 	switch kind {
+	case ResourceKindJob:
+		var job kipperv1.Job
+		if err := res.CRClient.Get(ctx, crclient.ObjectKey{Namespace: project, Name: name}, &job); err != nil {
+			return err
+		}
+		// Decided on the object that is about to be written, and written back
+		// carrying its resourceVersion, so a job that becomes a one-off between
+		// the two cannot slip through as a scheduled one.
+		if job.Spec.Schedule == "" {
+			return errJobRunsOnce
+		}
+		job.Spec.Resources.CPURequest = cpuReq
+		job.Spec.Resources.CPULimit = cpuLim
+		job.Spec.Resources.MemoryRequest = memReq
+		job.Spec.Resources.MemoryLimit = memLim
+		return res.CRClient.Update(ctx, &job)
 	case ResourceKindFunction:
 		var fn kipperv1.Function
 		if err := res.CRClient.Get(ctx, crclient.ObjectKey{Namespace: project, Name: name}, &fn); err != nil {
@@ -235,6 +309,12 @@ func (res *Resources) writeResources(ctx context.Context, project, name string, 
 		return res.CRClient.Update(ctx, &app)
 	}
 }
+
+// The job reconciler's fallback when nothing is pinned, from jobResources.
+const (
+	jobDefaultCPU    = "100m"
+	jobDefaultMemory = "128Mi"
+)
 
 // functionDefaults mirrors the controller's default for a Function
 // container when no resources are set explicitly. Keep these in sync

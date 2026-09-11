@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -8,6 +10,9 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 )
 
 // A Function's cron trigger creates a CronJob called <function>-cron, which is
@@ -47,37 +52,63 @@ func TestTriggerRefusesAChildAnotherWorkloadOwns(t *testing.T) {
 	}
 }
 
-func TestGetResourcesRefusesAChildAnotherWorkloadOwns(t *testing.T) {
-	// Answering 200 with an empty body here shows a job that cannot reconcile
-	// as a healthy one with nothing pinned.
+func TestGetResourcesReadsTheCRWhenAnotherWorkloadHoldsTheChildKey(t *testing.T) {
+	// Resources live on the Job CR, which says what the job is configured to
+	// run with whether or not its child can be built. The blocked child is a
+	// reconcile problem, and trigger is where the caller meets it.
 	withCollisionResolver(t, "deployer", "")
+	job := jobCR(shopNS, functionChildName, "0 3 * * *")
+	job.Spec.Resources = kipperv1.JobResources{MemoryLimit: "512Mi", CPULimit: "500m"}
+	crClient := testCRClient(job)
 	h := &Jobs{
-		Client:   fake.NewClientset(functionCronJob(shopNS, functionChildName)),
-		CRClient: testCRClient(jobCR(shopNS, functionChildName, "0 3 * * *")),
+		Client:    fake.NewClientset(functionCronJob(shopNS, functionChildName)),
+		CRClient:  crClient,
+		Resources: &Resources{Client: fake.NewClientset(), CRClient: crClient},
 	}
 
 	rec := httptest.NewRecorder()
 	h.GetResources(rec, jobRequest("GET", "/api/v1/jobs/"+functionChildName+"/resources",
 		"dev@test.com", functionChildName, ""))
 
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	var got resourcesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding resources: %v", err)
+	}
+	if got.MemoryLimit != "512Mi" {
+		t.Fatalf("memory limit = %q, want the CR's 512Mi", got.MemoryLimit)
 	}
 }
 
-func TestUpdateResourcesRefusesAChildAnotherWorkloadOwns(t *testing.T) {
+func TestUpdateResourcesWritesTheCRWhenAnotherWorkloadHoldsTheChildKey(t *testing.T) {
+	// The write lands on the CR, so it is what the job runs with as soon as the
+	// name collision is resolved. Refusing it would leave the job unfixable
+	// from the console.
 	withCollisionResolver(t, "deployer", "")
+	crClient := testCRClient(jobCR(shopNS, functionChildName, "0 3 * * *"))
 	h := &Jobs{
-		Client:   fake.NewClientset(functionCronJob(shopNS, functionChildName)),
-		CRClient: testCRClient(jobCR(shopNS, functionChildName, "0 3 * * *")),
+		Client:    fake.NewClientset(functionCronJob(shopNS, functionChildName)),
+		CRClient:  crClient,
+		Resources: &Resources{Client: fake.NewClientset(), CRClient: crClient},
 	}
 
 	rec := httptest.NewRecorder()
 	h.UpdateResources(rec, jobRequest("PUT", "/api/v1/jobs/"+functionChildName+"/resources",
 		"dev@test.com", functionChildName, `{"memory_limit":"512Mi","cpu_limit":"500m"}`))
 
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+
+	var job kipperv1.Job
+	if err := crClient.Get(context.Background(),
+		crclient.ObjectKey{Namespace: shopNS, Name: functionChildName}, &job); err != nil {
+		t.Fatalf("reading the job back: %v", err)
+	}
+	if job.Spec.Resources.MemoryLimit != "512Mi" {
+		t.Fatalf("memory limit on the CR = %q, want 512Mi", job.Spec.Resources.MemoryLimit)
 	}
 }
 

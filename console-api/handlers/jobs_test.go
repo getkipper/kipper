@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,9 +12,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
-	k8stesting "k8s.io/client-go/testing"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/middleware"
@@ -358,63 +355,6 @@ func TestTriggerRefusesACronJobKipperDoesNotOwn(t *testing.T) {
 	}
 	if got := triggeredJobNamespaces(t, client); len(got) != 0 {
 		t.Errorf("a cronjob Kipper does not own must not be copied, ran in %v", got)
-	}
-}
-
-func TestUpdateResourcesRefusesACronJobKipperDoesNotOwn(t *testing.T) {
-	withCollisionResolver(t, "deployer", "")
-	h := &Jobs{
-		Client:   fake.NewClientset(unmanagedCronJob(shopNS)),
-		CRClient: testCRClient(jobCR(shopNS, collidingJob, "0 3 * * *")),
-	}
-
-	rec := httptest.NewRecorder()
-	h.UpdateResources(rec, jobRequest("PUT", "/api/v1/jobs/"+collidingJob+"/resources",
-		"dev@test.com", collidingJob, `{"memory_limit":"512Mi","cpu_limit":"500m"}`))
-
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body %s", rec.Code, rec.Body.String())
-	}
-}
-
-// failingCronJobReads makes every CronJob read fail with something other than
-// NotFound, which is an outage rather than an absent child.
-func failingCronJobReads(objects ...runtime.Object) *fake.Clientset {
-	client := fake.NewClientset(objects...)
-	client.PrependReactor("get", "cronjobs", func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, fmt.Errorf("etcd is unreachable")
-	})
-	return client
-}
-
-func TestResourceReadsReportAnOutageRatherThanEmptiness(t *testing.T) {
-	withCollisionResolver(t, "deployer", "")
-	h := &Jobs{
-		Client:   failingCronJobReads(collidingCronJob(shopNS)),
-		CRClient: testCRClient(jobCR(shopNS, collidingJob, "0 3 * * *")),
-	}
-
-	rec := httptest.NewRecorder()
-	h.GetResources(rec, jobRequest("GET", "/api/v1/jobs/"+collidingJob+"/resources", "dev@test.com", collidingJob, ""))
-
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500; an unread cronjob is not an unset one. body %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestResourceWritesReportAnOutageRatherThanAbsence(t *testing.T) {
-	withCollisionResolver(t, "deployer", "")
-	h := &Jobs{
-		Client:   failingCronJobReads(collidingCronJob(shopNS)),
-		CRClient: testCRClient(jobCR(shopNS, collidingJob, "0 3 * * *")),
-	}
-
-	rec := httptest.NewRecorder()
-	h.UpdateResources(rec, jobRequest("PUT", "/api/v1/jobs/"+collidingJob+"/resources",
-		"dev@test.com", collidingJob, `{"memory_limit":"512Mi","cpu_limit":"500m"}`))
-
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500; body %s", rec.Code, rec.Body.String())
 	}
 }
 

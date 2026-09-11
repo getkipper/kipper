@@ -299,13 +299,13 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 	secrets := &handlers.Secrets{Client: clientset}
 	routes := &handlers.Routes{Client: clientset, CRClient: crClient, Domain: os.Getenv("CLUSTER_DOMAIN")}
 	svcHandler := &handlers.Services{Client: clientset, CRClient: crClient, RESTConfig: restConfig, Adjustments: adjustmentsHandler, Domain: os.Getenv("CLUSTER_DOMAIN")}
-	jobHandler := &handlers.Jobs{Client: clientset, CRClient: crClient}
 	fnHandler := &handlers.Functions{Client: clientset, Dynamic: dynClient, CRClient: crClient}
 	apiGatewayHandler := &handlers.APIGateway{CRClient: crClient}
 	logsHandler := &handlers.Logs{}
 	autoscaleHandler := &handlers.Autoscale{Client: clientset, CRClient: crClient}
 	recommendationHandler := &handlers.Recommendations{CRClient: crClient}
 	resourcesHandler := &handlers.Resources{Client: clientset, CRClient: crClient, Adjustments: adjustmentsHandler}
+	jobHandler := &handlers.Jobs{Client: clientset, CRClient: crClient, Resources: resourcesHandler}
 	volumeHandler := &handlers.Volumes{Client: clientset, CRClient: crClient}
 	inlineFnHandler := &handlers.InlineFunctions{Client: clientset, CRClient: crClient, Services: svcHandler, Domain: os.Getenv("CLUSTER_DOMAIN")}
 	fnConfig := &handlers.FunctionConfig{Client: clientset, CRClient: crClient}
@@ -730,8 +730,8 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 				r.Route("/jobs/{job}", func(r chi.Router) {
 					r.Post("/trigger", cap("kipper.write")(jobHandler.TriggerInNamespace))
 					r.Get("/history", cap("kipper.read")(jobHandler.HistoryInNamespace))
-					r.Get("/resources", cap("kipper.read")(jobHandler.GetResourcesInNamespace))
-					r.Put("/resources", cap("kipper.write")(jobHandler.UpdateResourcesInNamespace))
+					r.Get("/resources", cap("kipper.read")(resourcesHandler.GetByParam("job", handlers.ResourceKindJob)))
+					r.Put("/resources", cap("kipper.write")(resourcesHandler.UpdateByParam("job", handlers.ResourceKindJob)))
 				})
 
 				r.Get("/volumes", cap("kipper.read")(volumeHandler.List))
