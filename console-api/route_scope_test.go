@@ -137,17 +137,25 @@ func TestEachProjectRouteResolvesTheDeclaredPrincipal(t *testing.T) {
 		"{vol}", "v", "{key}", "k", "{schema}", "public", "{table}", "t", "{indexName}", "i",
 		"{snippetName}", "sn", "{email}", sprOwner, "{transfer}", "tr", "{session}", "se",
 		"{plan}", "p", "{id}", "id", "{host}", "h", "{backup}", "b", "{token}", "tk",
-		"{username}", "u", "{namespace}", "shop-prod", "{bucket}", "bk", "{schedule}", "sc", "*", "w")
+		"{username}", "u", "{namespace}", "shop-prod", "{bucket}", "bk", "{schedule}", "sc",
+		"{job}", "j", "*", "w")
 	cr := router.(consoleRouter)
+	walked := map[string]bool{}
 	checked := 0
 	err := chi.Walk(cr.api, func(method, pattern string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
-		if !strings.HasPrefix(pattern, "/api/v1/projects/{name}") {
-			return nil
-		}
 		route := method + " " + pattern
 		declared, ok := routeAuthz[route]
 		if !ok {
 			return nil // the totality test reports this
+		}
+		// The subtree under /projects/{name} carries its principal in a path
+		// segment, and every route there is walked, including the admin ones
+		// that resolve no project at all. A route outside it carries its
+		// principal in ?namespace=, which the probe already sends, so the ones
+		// that declare a scope are walked too. Whether the principal rides in
+		// the path or the query changes nothing about what has to be proved.
+		if !strings.HasPrefix(pattern, "/api/v1/projects/{name}") && declared.scope == scopeNone {
+			return nil
 		}
 
 		p := fill.Replace(pattern)
@@ -172,6 +180,7 @@ func TestEachProjectRouteResolvesTheDeclaredPrincipal(t *testing.T) {
 		}
 
 		checked++
+		walked[route] = true
 		if declared.scope != resolved {
 			t.Errorf("%s is declared %s-scoped and resolves the %s (shop=%d shop-prod=%d)",
 				route, declared.scope, resolved, shopCode, sprCode)
@@ -184,5 +193,15 @@ func TestEachProjectRouteResolvesTheDeclaredPrincipal(t *testing.T) {
 	if checked == 0 {
 		t.Fatal("no project routes were walked, so this proves nothing")
 	}
-	t.Logf("checked %d routes under /projects/{name}", checked)
+	// A route that declares a principal and is never walked is a route this
+	// proves nothing about, which is the state all 38 query-scoped ones were in
+	// before they were enrolled. Counting is not enough: the count is satisfied
+	// by any 147 routes.
+	for route, declared := range routeAuthz {
+		if declared.scope == scopeNone || walked[route] {
+			continue
+		}
+		t.Errorf("%s declares itself %s-scoped and the walk never reached it", route, declared.scope)
+	}
+	t.Logf("checked %d routes that name a principal", checked)
 }

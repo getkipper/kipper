@@ -105,8 +105,9 @@ func (c authzClass) String() string {
 	return "unknown"
 }
 
-// routeScope is which principal a route's {name} segment names, for the routes
-// under /api/v1/projects/{name}.
+// routeScope is which principal a route resolves: the {name} segment for the
+// routes under /api/v1/projects/{name}, and ?namespace= for the services and
+// storage routes that carry it there instead.
 //
 // Two projects can put the same string there: a project called shop-prod, and
 // project shop's prod environment, whose namespace is also shop-prod. A route
@@ -115,8 +116,9 @@ func (c authzClass) String() string {
 type routeScope int
 
 const (
-	// scopeNone is every route outside /api/v1/projects/{name}, and the
-	// admin-only routes under it, which resolve no project at all.
+	// scopeNone is every route that resolves no project at all: the admin-only
+	// ones under /api/v1/projects/{name}, and everything that names no
+	// namespace anywhere.
 	scopeNone routeScope = iota
 	// scopeProject means {name} is a Project: the route acts on the project
 	// itself, its members, its quota, its environments.
@@ -193,16 +195,16 @@ var routeAuthz = map[string]authzDeclaration{
 	"DELETE /api/v1/projects/{name}/route-groups/{host}":              {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
 	"DELETE /api/v1/projects/{name}/usage-plans/{plan}":               {class: classProjectCapability, capability: "apikeys.manage", scope: scopeNamespace},
 	"DELETE /api/v1/projects/{name}/volumes/{vol}":                    {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
-	"DELETE /api/v1/services/{name}":                                  {class: classProjectCapability, capability: "kipper.write"},
-	"DELETE /api/v1/services/{name}/db/indexes/{schema}/{indexName}":  {class: classProjectCapability, capability: "database.write"},
-	"DELETE /api/v1/services/{name}/db/snippets/{snippetName}":        {class: classProjectCapability, capability: "database.write"},
-	"DELETE /api/v1/services/{name}/db/tables/{schema}/{table}/rows":  {class: classProjectCapability, capability: "database.write"},
+	"DELETE /api/v1/services/{name}":                                  {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"DELETE /api/v1/services/{name}/db/indexes/{schema}/{indexName}":  {class: classProjectCapability, capability: "database.write", scope: scopeNamespace},
+	"DELETE /api/v1/services/{name}/db/snippets/{snippetName}":        {class: classProjectCapability, capability: "database.write", scope: scopeNamespace},
+	"DELETE /api/v1/services/{name}/db/tables/{schema}/{table}/rows":  {class: classProjectCapability, capability: "database.write", scope: scopeNamespace},
 	"DELETE /api/v1/services/{name}/shares/{id}":                      {class: classGlobalRole},
 	"DELETE /api/v1/settings/git-credentials/*":                       {class: classGlobalRole},
 	"DELETE /api/v1/settings/registries/*":                            {class: classGlobalRole},
 	"DELETE /api/v1/shares":                                           {class: classGlobalRole},
-	"DELETE /api/v1/storage/{service}/objects":                        {class: classProjectCapability, capability: "storage.write"},
-	"DELETE /api/v1/storage/{service}/public":                         {class: classProjectCapability, capability: "storage.write"},
+	"DELETE /api/v1/storage/{service}/objects":                        {class: classProjectCapability, capability: "storage.write", scope: scopeNamespace},
+	"DELETE /api/v1/storage/{service}/public":                         {class: classProjectCapability, capability: "storage.write", scope: scopeNamespace},
 	"DELETE /api/v1/users/{email}":                                    {class: classGlobalRole},
 	"GET /api/v1/alerts":                                              {class: classAuthenticated},
 	"GET /api/v1/alerts/unread-count":                                 {class: classAuthenticated},
@@ -293,18 +295,18 @@ var routeAuthz = map[string]authzDeclaration{
 	"GET /api/v1/routes":                                               {class: classAuthenticated},
 	"GET /api/v1/service-types":                                        {class: classAuthenticated},
 	"GET /api/v1/services":                                             {class: classAuthenticated},
-	"GET /api/v1/services/{name}":                                      {class: classProjectCapability, capability: "kipper.read"},
-	"GET /api/v1/services/{name}/db/databases":                         {class: classProjectCapability, capability: "database.read"},
-	"GET /api/v1/services/{name}/db/history":                           {class: classProjectCapability, capability: "database.read"},
-	"GET /api/v1/services/{name}/db/schema":                            {class: classProjectCapability, capability: "database.read"},
-	"GET /api/v1/services/{name}/db/snippets":                          {class: classProjectCapability, capability: "database.read"},
-	"GET /api/v1/services/{name}/db/tables/{schema}/{table}/rows":      {class: classProjectCapability, capability: "database.read"},
-	"GET /api/v1/services/{name}/db/tables/{schema}/{table}/structure": {class: classProjectCapability, capability: "database.read"},
-	"GET /api/v1/services/{name}/logs":                                 {class: classProjectCapability, capability: "pods.logs.read"},
-	"GET /api/v1/services/{name}/migrate-data/status":                  {class: classProjectCapability, capability: "pods.logs.read"},
-	"GET /api/v1/services/{name}/rabbitmq/vhosts":                      {class: classProjectCapability, capability: "database.read"},
-	"GET /api/v1/services/{name}/resources":                            {class: classProjectCapability, capability: "workloads.read"},
-	"GET /api/v1/services/{name}/rollout":                              {class: classProjectCapability, capability: "workloads.read"},
+	"GET /api/v1/services/{name}":                                      {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
+	"GET /api/v1/services/{name}/db/databases":                         {class: classProjectCapability, capability: "database.read", scope: scopeNamespace},
+	"GET /api/v1/services/{name}/db/history":                           {class: classProjectCapability, capability: "database.read", scope: scopeNamespace},
+	"GET /api/v1/services/{name}/db/schema":                            {class: classProjectCapability, capability: "database.read", scope: scopeNamespace},
+	"GET /api/v1/services/{name}/db/snippets":                          {class: classProjectCapability, capability: "database.read", scope: scopeNamespace},
+	"GET /api/v1/services/{name}/db/tables/{schema}/{table}/rows":      {class: classProjectCapability, capability: "database.read", scope: scopeNamespace},
+	"GET /api/v1/services/{name}/db/tables/{schema}/{table}/structure": {class: classProjectCapability, capability: "database.read", scope: scopeNamespace},
+	"GET /api/v1/services/{name}/logs":                                 {class: classProjectCapability, capability: "pods.logs.read", scope: scopeNamespace},
+	"GET /api/v1/services/{name}/migrate-data/status":                  {class: classProjectCapability, capability: "pods.logs.read", scope: scopeNamespace},
+	"GET /api/v1/services/{name}/rabbitmq/vhosts":                      {class: classProjectCapability, capability: "database.read", scope: scopeNamespace},
+	"GET /api/v1/services/{name}/resources":                            {class: classProjectCapability, capability: "workloads.read", scope: scopeNamespace},
+	"GET /api/v1/services/{name}/rollout":                              {class: classProjectCapability, capability: "workloads.read", scope: scopeNamespace},
 	"GET /api/v1/services/{name}/shares":                               {class: classGlobalRole},
 	"GET /api/v1/settings/ai":                                          {class: classGlobalRole},
 	"GET /api/v1/settings/ai/bundle-status":                            {class: classGlobalRole},
@@ -318,10 +320,10 @@ var routeAuthz = map[string]authzDeclaration{
 	"GET /api/v1/settings/alert-delivery":                              {class: classGlobalRole},
 	"GET /api/v1/settings/slack":                                       {class: classGlobalRole},
 	"GET /api/v1/settings/smtp":                                        {class: classGlobalRole},
-	"GET /api/v1/storage/{service}/buckets":                            {class: classProjectCapability, capability: "storage.read"},
-	"GET /api/v1/storage/{service}/download":                           {class: classProjectCapability, capability: "storage.read"},
-	"GET /api/v1/storage/{service}/objects":                            {class: classProjectCapability, capability: "storage.read"},
-	"GET /api/v1/storage/{service}/public":                             {class: classProjectCapability, capability: "storage.read"},
+	"GET /api/v1/storage/{service}/buckets":                            {class: classProjectCapability, capability: "storage.read", scope: scopeNamespace},
+	"GET /api/v1/storage/{service}/download":                           {class: classProjectCapability, capability: "storage.read", scope: scopeNamespace},
+	"GET /api/v1/storage/{service}/objects":                            {class: classProjectCapability, capability: "storage.read", scope: scopeNamespace},
+	"GET /api/v1/storage/{service}/public":                             {class: classProjectCapability, capability: "storage.read", scope: scopeNamespace},
 	"GET /api/v1/storage/{service}/public/{bucket}/*":                  {class: classPublic},
 	"GET /api/v1/storage/{service}/shared":                             {class: classPublic},
 	"GET /api/v1/users/":                                               {class: classGlobalRole},
@@ -343,8 +345,8 @@ var routeAuthz = map[string]authzDeclaration{
 	"PATCH /api/v1/migrate-target/{session}/transfer/{transfer}/*":     {class: classForeignCredential, reason: "the per-transfer token derived for this transfer, not a user identity"},
 	"PATCH /api/v1/platform/components/{name}":                         {class: classGlobalRole},
 	"PATCH /api/v1/projects/{name}/api-keys/{key}":                     {class: classProjectCapability, capability: "apikeys.manage", scope: scopeNamespace},
-	"PATCH /api/v1/services/{name}/db/tables/{schema}/{table}":         {class: classProjectCapability, capability: "database.write"},
-	"PATCH /api/v1/services/{name}/db/tables/{schema}/{table}/rows":    {class: classProjectCapability, capability: "database.write"},
+	"PATCH /api/v1/services/{name}/db/tables/{schema}/{table}":         {class: classProjectCapability, capability: "database.write", scope: scopeNamespace},
+	"PATCH /api/v1/services/{name}/db/tables/{schema}/{table}/rows":    {class: classProjectCapability, capability: "database.write", scope: scopeNamespace},
 	"POST /api/v1/ai/analyse-logs":                                     {class: classHandlerInternal, reason: "the namespace comes from the request body, and the handler admits the cluster role or pods.logs.read on it"},
 	"POST /api/v1/ai/chat":                                             {class: classGlobalRole, globalRank: globalDeployer},
 	"POST /api/v1/alerts/dismiss":                                      {class: classAuthenticated},
@@ -403,14 +405,14 @@ var routeAuthz = map[string]authzDeclaration{
 	"POST /api/v1/projects/{name}/volumes/mount":                     {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
 	"POST /api/v1/projects/{name}/volumes/unmount":                   {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
 	"POST /api/v1/services":                                          {class: classHandlerInternal, reason: "the namespace comes from the request body"},
-	"POST /api/v1/services/{name}/db/ddl/preview":                    {class: classProjectCapability, capability: "database.write"},
-	"POST /api/v1/services/{name}/db/indexes":                        {class: classProjectCapability, capability: "database.write"},
-	"POST /api/v1/services/{name}/db/query":                          {class: classProjectCapability, capability: "database.write"},
-	"POST /api/v1/services/{name}/db/snippets":                       {class: classProjectCapability, capability: "database.write"},
-	"POST /api/v1/services/{name}/db/tables":                         {class: classProjectCapability, capability: "database.write"},
-	"POST /api/v1/services/{name}/db/tables/{schema}/{table}/rows":   {class: classProjectCapability, capability: "database.write"},
-	"POST /api/v1/services/{name}/diagnose":                          {class: classProjectCapability, capability: "kipper.write"},
-	"POST /api/v1/services/{name}/migrate-data":                      {class: classProjectCapability, capability: "kipper.write"},
+	"POST /api/v1/services/{name}/db/ddl/preview":                    {class: classProjectCapability, capability: "database.write", scope: scopeNamespace},
+	"POST /api/v1/services/{name}/db/indexes":                        {class: classProjectCapability, capability: "database.write", scope: scopeNamespace},
+	"POST /api/v1/services/{name}/db/query":                          {class: classProjectCapability, capability: "database.write", scope: scopeNamespace},
+	"POST /api/v1/services/{name}/db/snippets":                       {class: classProjectCapability, capability: "database.write", scope: scopeNamespace},
+	"POST /api/v1/services/{name}/db/tables":                         {class: classProjectCapability, capability: "database.write", scope: scopeNamespace},
+	"POST /api/v1/services/{name}/db/tables/{schema}/{table}/rows":   {class: classProjectCapability, capability: "database.write", scope: scopeNamespace},
+	"POST /api/v1/services/{name}/diagnose":                          {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/services/{name}/migrate-data":                      {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
 	"POST /api/v1/services/{name}/shares":                            {class: classGlobalRole},
 	"POST /api/v1/sessions/revoke-all":                               {class: classGlobalRole},
 	"POST /api/v1/settings/git-credentials":                          {class: classGlobalRole},
@@ -419,10 +421,10 @@ var routeAuthz = map[string]authzDeclaration{
 	"POST /api/v1/settings/registries/{name}/reveal":                 {class: classGlobalRole},
 	"POST /api/v1/settings/smtp/test":                                {class: classGlobalRole},
 	"POST /api/v1/shares/rotate-key":                                 {class: classGlobalRole},
-	"POST /api/v1/storage/{service}/buckets":                         {class: classProjectCapability, capability: "storage.write"},
-	"POST /api/v1/storage/{service}/folder":                          {class: classProjectCapability, capability: "storage.write"},
-	"POST /api/v1/storage/{service}/share":                           {class: classProjectCapability, capability: "storage.write"},
-	"POST /api/v1/storage/{service}/upload":                          {class: classProjectCapability, capability: "storage.write"},
+	"POST /api/v1/storage/{service}/buckets":                         {class: classProjectCapability, capability: "storage.write", scope: scopeNamespace},
+	"POST /api/v1/storage/{service}/folder":                          {class: classProjectCapability, capability: "storage.write", scope: scopeNamespace},
+	"POST /api/v1/storage/{service}/share":                           {class: classProjectCapability, capability: "storage.write", scope: scopeNamespace},
+	"POST /api/v1/storage/{service}/upload":                          {class: classProjectCapability, capability: "storage.write", scope: scopeNamespace},
 	"POST /api/v1/unbind":                                            {class: classHandlerInternal, reason: "the namespace comes from the request body"},
 	"POST /api/v1/unlink":                                            {class: classHandlerInternal, reason: "the caller's namespace comes from the request body"},
 	"POST /api/v1/users/":                                            {class: classGlobalRole},
@@ -459,14 +461,14 @@ var routeAuthz = map[string]authzDeclaration{
 	"PUT /api/v1/projects/{name}/quota":                              {class: classGlobalRole},
 	"PUT /api/v1/projects/{name}/route-groups":                       {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
 	"PUT /api/v1/projects/{name}/usage-plans":                        {class: classProjectCapability, capability: "apikeys.manage", scope: scopeNamespace},
-	"PUT /api/v1/services/{name}/resources":                          {class: classProjectCapability, capability: "kipper.write"},
+	"PUT /api/v1/services/{name}/resources":                          {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
 	"PUT /api/v1/settings/ai":                                        {class: classGlobalRole},
 	"PUT /api/v1/settings/appearance":                                {class: classGlobalRole},
 	"PUT /api/v1/settings/auth":                                      {class: classGlobalRole},
 	"PUT /api/v1/settings/mode":                                      {class: classGlobalRole},
 	"PUT /api/v1/settings/slack":                                     {class: classGlobalRole},
 	"PUT /api/v1/settings/smtp":                                      {class: classGlobalRole},
-	"PUT /api/v1/storage/{service}/public":                           {class: classProjectCapability, capability: "storage.write"},
+	"PUT /api/v1/storage/{service}/public":                           {class: classProjectCapability, capability: "storage.write", scope: scopeNamespace},
 	"PUT /api/v1/users/{email}/role":                                 {class: classGlobalRole},
 	"TRACE /api/v1/migrate-target/{session}/transfer/{transfer}/*":   {class: classForeignCredential, reason: "the per-transfer token derived for this transfer, not a user identity"},
 }
@@ -728,8 +730,10 @@ func TestAuthenticatedRoutesDoNotDiscriminate(t *testing.T) {
 func TestOnlyAdminRoutesUnderAProjectResolveNoPrincipal(t *testing.T) {
 	for route, d := range routeAuthz {
 		if !strings.HasPrefix(routePattern(route), "/api/v1/projects/{name}") {
-			if d.scope != scopeNone {
-				t.Errorf("%s is outside /projects/{name} and declares a scope; the segment it would apply to does not exist there", route)
+			// Outside the subtree the principal rides in ?namespace=, which
+			// names a namespace and can never name a Project.
+			if d.scope == scopeProject {
+				t.Errorf("%s is outside /projects/{name} and declares itself project-scoped; nothing there names a Project", route)
 			}
 			continue
 		}
@@ -739,6 +743,41 @@ func TestOnlyAdminRoutesUnderAProjectResolveNoPrincipal(t *testing.T) {
 		if d.class != classGlobalRole {
 			t.Errorf("%s is under /projects/{name} and resolves neither a Project nor a namespace, but is declared %s rather than admin-only",
 				route, d.class)
+		}
+	}
+}
+
+// gatedInsideTheHandler names the capability routes that resolve their project
+// without a path segment or a namespace query the walker can fill. They are the
+// exceptions to the rule below, and each one is a route
+// TestEachProjectRouteResolvesTheDeclaredPrincipal cannot reach.
+var gatedInsideTheHandler = map[string]string{
+	"GET /api/v1/resources/usage": "the handler filters the cluster-wide answer to the caller's namespaces",
+	"GET ws /api/v1/projects/":    "a WebSocket handshake, not a route chi.Walk enumerates",
+	"GET ws /api/v1/terminal/":    "a WebSocket handshake, not a route chi.Walk enumerates",
+}
+
+// TestEveryCapabilityRouteDeclaresWhichPrincipalItResolves is what makes the
+// collision walker's coverage a rule rather than a snapshot.
+//
+// The walker reaches a route outside /projects/{name} when its declaration says
+// which principal it resolves. Without this, a new ?namespace= route declared
+// with no scope is simply skipped, which is the state all 38 of them were in
+// before they were enrolled, and nothing would say so.
+func TestEveryCapabilityRouteDeclaresWhichPrincipalItResolves(t *testing.T) {
+	for route, d := range routeAuthz {
+		if d.class != classProjectCapability || d.scope != scopeNone {
+			continue
+		}
+		if _, ok := gatedInsideTheHandler[route]; ok {
+			continue
+		}
+		t.Errorf("%s is gated on a project capability and declares no scope, so the collision walker skips it; declare the principal it resolves or record why it cannot be walked",
+			route)
+	}
+	for route := range gatedInsideTheHandler {
+		if _, ok := routeAuthz[route]; !ok {
+			t.Errorf("%s is listed as gated inside its handler but is no longer declared at all", route)
 		}
 	}
 }
