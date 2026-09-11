@@ -159,9 +159,16 @@ Types: `feat:`, `fix:`, `docs:`, `style:`, `refactor:`, `test:`, `chore:`, `perf
 
 ### Branches
 
+Branch off `main`, and open the pull request against `main`. There is no
+long-lived integration branch, and a branch is deleted once it merges.
+
 Format: `prefix/short-description`
 
 Prefixes: `feature/`, `bugfix/`, `hotfix/`, `refactor/`, `docs/`, `test/`
+
+`main` keeps a linear history and merges by rebase, so keep a branch to one
+piece of work and let it go when it lands. Checks run on pull requests against
+`main`, so a request aimed anywhere else gets none.
 
 ## Keeping private data out
 
