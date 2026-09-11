@@ -65,6 +65,7 @@ async function handleCreate() {
     })
     toast.success(`Job ${newName.value} created`)
     const createdName = newName.value
+    const createdNamespace = newNamespace.value
     newName.value = ''
     newImage.value = ''
     newCommand.value = ''
@@ -74,7 +75,7 @@ async function handleCreate() {
     showCreate.value = false
     for (let i = 0; i < 10; i++) {
       await loadJobs()
-      if (jobs.value.some(j => j.name === createdName)) break
+      if (jobs.value.some(j => j.name === createdName && j.namespace === createdNamespace)) break
       await new Promise(r => setTimeout(r, 500))
     }
   } catch {
@@ -247,7 +248,7 @@ function statusDot(status: string): string {
     <div v-else-if="jobs.length" class="space-y-3">
       <div
         v-for="job in jobs"
-        :key="job.name + job.type + job.last"
+        :key="job.namespace + '/' + job.name + job.type"
         class="group flex items-center justify-between rounded-xl border border-slate-200 bg-white p-5 cursor-pointer transition-colors hover:border-kipper-300 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-kipper-700"
         @click="selectedJob = job"
       >
@@ -264,6 +265,7 @@ function statusDot(status: string): string {
               </span>
             </div>
             <div class="mt-0.5 flex items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
+              <span class="shrink-0">{{ job.namespace }}</span>
               <span v-if="job.schedule" class="flex shrink-0 items-center gap-1">
                 <Clock class="h-3 w-3" />
                 {{ job.schedule }}
