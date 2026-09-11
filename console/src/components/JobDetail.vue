@@ -33,11 +33,13 @@ const jobTabs = [
 ]
 const history = ref<Job[]>([])
 const historyLoading = ref(false)
+const historyError = ref('')
 const triggering = ref(false)
 
 // Resources
 const jobResources = ref<JobResources>({ memory_limit: '', memory_request: '', cpu_limit: '', cpu_request: '' })
 const jobResourcesLoading = ref(false)
+const jobResourcesError = ref('')
 const jobResourcesSaving = ref(false)
 const jobMemoryLimit = ref('')
 const jobCPULimit = ref('')
@@ -46,59 +48,104 @@ const { lines, connected, connect, disconnect, clear } = useLogStream()
 
 const jobLogsText = computed(() => lines.value.join('\n'))
 
+// Which job the panel is showing. A load carries the value it started with, so
+// a response that arrives after the selected row changed can be dropped instead
+// of writing one job's numbers under another job's heading.
+let showing = 0
+
+/**
+ * The reason the server gave, or the caller's wording when it gave none.
+ *
+ * A 404 with no reason in it is the one case worth naming. Every 404 the job
+ * routes raise goes through respondError and carries an error field, so a bare
+ * one on one of these requests means it reached no handler: usually a cluster
+ * whose API is older than the console talking to it. Usually rather than
+ * always, because a proxy in front of the API can answer 404 itself, which is
+ * why the wording hedges rather than claiming proof.
+ */
+function serverReason(e: unknown, fallback: string): string {
+  const response = (e as { response?: { status?: number; data?: { error?: string } } })?.response
+  const reason = response?.data?.error
+  if (reason) return reason
+  if (response?.status === 404) {
+    return `${fallback}. The cluster's API did not recognise this request, which usually means it is older than this console. Run kip upgrade.`
+  }
+  return fallback
+}
+
 async function loadHistory() {
+  const mine = showing
   historyLoading.value = true
+  historyError.value = ''
   try {
-    history.value = await fetchJobHistory(props.jobName)
-  } catch {
-    // ignore
+    const runs = await fetchJobHistory(props.namespace, props.jobName)
+    if (mine !== showing) return
+    history.value = runs
+  } catch (e) {
+    // A read that failed is not a job that has never run, and the two look
+    // identical once the error is swallowed.
+    if (mine !== showing) return
+    historyError.value = serverReason(e, `Could not read the runs of ${props.jobName}`)
   } finally {
-    historyLoading.value = false
+    if (mine === showing) historyLoading.value = false
   }
 }
 
 async function handleTrigger() {
+  const namespace = props.namespace
+  const name = props.jobName
   triggering.value = true
   try {
-    await triggerJob(props.jobName)
-    toast.success(`${props.jobName} triggered, running now`)
+    await triggerJob(namespace, name)
+    toast.success(`${name} triggered, running now`)
     emit('refresh')
     await loadHistory()
-  } catch {
-    toast.error(`Failed to trigger ${props.jobName}`)
+  } catch (e) {
+    toast.error(serverReason(e, `Failed to trigger ${name}`))
   } finally {
     triggering.value = false
   }
 }
 
 function connectLogs() {
-  // Jobs run in various namespaces — try to find the pod
   connect(props.namespace, props.jobName)
 }
 
 async function loadJobResources() {
+  const mine = showing
   jobResourcesLoading.value = true
+  jobResourcesError.value = ''
   try {
-    jobResources.value = await fetchJobResources(props.jobName)
-    jobMemoryLimit.value = jobResources.value.memory_limit || ''
-    jobCPULimit.value = jobResources.value.cpu_limit || ''
-  } catch {
+    const limits = await fetchJobResources(props.namespace, props.jobName)
+    if (mine !== showing) return
+    jobResources.value = limits
+    jobMemoryLimit.value = limits.memory_limit || ''
+    jobCPULimit.value = limits.cpu_limit || ''
+  } catch (e) {
+    if (mine !== showing) return
+    // The fields blank themselves here, and saving that blank writes it to the
+    // CR, where the reconciler reads it as nothing pinned and falls back to its
+    // own defaults. So the form stays shut until a read has succeeded.
     jobResources.value = { memory_limit: '', memory_request: '', cpu_limit: '', cpu_request: '' }
+    jobMemoryLimit.value = ''
+    jobCPULimit.value = ''
+    jobResourcesError.value = serverReason(e, `Could not read the limits of ${props.jobName}`)
   } finally {
-    jobResourcesLoading.value = false
+    if (mine === showing) jobResourcesLoading.value = false
   }
 }
 
 async function saveJobResources() {
+  if (jobResourcesError.value) return
   jobResourcesSaving.value = true
   try {
-    await updateJobResources(props.jobName, {
+    await updateJobResources(props.namespace, props.jobName, {
       memory_limit: jobMemoryLimit.value,
       cpu_limit: jobCPULimit.value,
     })
     toast.success('Resources updated: next job run will use new limits')
-  } catch {
-    toast.error('Failed to update resources')
+  } catch (e) {
+    toast.error(serverReason(e, 'Failed to update resources'))
   } finally {
     jobResourcesSaving.value = false
   }
@@ -114,10 +161,20 @@ watch(activeTab, (tab) => {
   if (tab === 'resources') loadJobResources()
 })
 
-watch(() => props.jobName, () => {
+watch(() => [props.jobName, props.namespace], () => {
+  // The panel is reused when the selected row changes, so whatever is held here
+  // belongs to the job that was showing a moment ago. A tab opened before its
+  // own load returns would otherwise render the previous job's numbers, and
+  // Save would write them to the job now named.
+  showing++
   clear()
+  history.value = []
+  jobResources.value = { memory_limit: '', memory_request: '', cpu_limit: '', cpu_request: '' }
+  jobMemoryLimit.value = ''
+  jobCPULimit.value = ''
+
+  loadHistory()
   if (activeTab.value === 'logs') connectLogs()
-  if (activeTab.value === 'history') loadHistory()
   if (activeTab.value === 'resources') loadJobResources()
 })
 
@@ -173,6 +230,7 @@ function statusColor(status: string): string {
       <!-- History tab -->
       <div v-if="activeTab === 'history'" class="p-5">
         <div v-if="historyLoading" class="text-sm text-slate-500 dark:text-slate-400">Loading...</div>
+        <div v-else-if="historyError" class="text-sm text-red-600 dark:text-red-400">{{ historyError }}</div>
 
         <div v-else-if="history.length" class="space-y-2">
           <div
@@ -208,7 +266,7 @@ function statusColor(status: string): string {
           <LogAnalysis
             :logs="jobLogsText"
             :app-name="jobName"
-            namespace="default"
+            :namespace="props.namespace"
           />
         </div>
         <div class="flex-1 overflow-y-auto bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-300">
@@ -224,6 +282,11 @@ function statusColor(status: string): string {
     <!-- Resources tab -->
     <div v-if="activeTab === 'resources'" class="flex-1 overflow-y-auto p-5">
       <div v-if="jobResourcesLoading" class="text-sm text-slate-500 dark:text-slate-400">Loading...</div>
+      <div v-else-if="jobResourcesError" class="text-sm text-red-600 dark:text-red-400">{{ jobResourcesError }}</div>
+      <div v-else-if="jobType !== 'cronjob'" class="space-y-2 text-sm text-slate-500 dark:text-slate-400">
+        <p>This job runs once and uses the resources it was created with.</p>
+        <p class="text-xs">Memory {{ jobResources.memory_limit || '—' }}, CPU {{ jobResources.cpu_limit || '—' }}.</p>
+      </div>
       <div v-else class="space-y-4">
         <p class="text-xs text-slate-500 dark:text-slate-400">Resource limits apply to the next job run.</p>
         <div>
