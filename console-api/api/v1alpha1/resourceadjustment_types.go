@@ -16,7 +16,7 @@ type ResourceAdjustmentSpec struct {
 	Component string `json:"component"`
 
 	// Scope is the surface the adjustment came from.
-	// +kubebuilder:validation:Enum=platform;app;service;function
+	// +kubebuilder:validation:Enum=platform;app;service;function;job
 	Scope string `json:"scope"`
 
 	// Namespace identifies the project for app / service scope. Empty

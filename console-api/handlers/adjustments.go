@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -43,10 +44,15 @@ type adjustmentsListResponse struct {
 }
 
 // Record writes a ResourceAdjustment if PlatformConfig.spec.telemetry
-// has it switched on. Failure is best-effort and silent — telemetry
-// must never block a user-facing apply.
+// has it switched on. A failure never blocks the apply it describes, but it is
+// logged: the CRD delivers the set of allowed scopes through the kip binary
+// while this code arrives in an image, so a cluster can run a console-api that
+// writes a scope its own schema refuses, and swallowing that loses the audit
+// record without a trace.
 //
-// scope is one of: "platform", "app", "service", "function".
+// scope is one of: "platform", "app", "service", "function", "job". The
+// ResourceAdjustment CRD holds the same set as an enum, and a value outside it
+// is refused by admission.
 // kind is "memory" or "cpu".
 func (a *Adjustments) Record(ctx context.Context, scope, namespace, component, kind, from, to, reason, appliedBy string) {
 	if a == nil || a.CRClient == nil {
@@ -75,7 +81,9 @@ func (a *Adjustments) Record(ctx context.Context, scope, namespace, component, k
 			AppliedBy: appliedBy,
 		},
 	}
-	_ = a.CRClient.Create(ctx, obj)
+	if err := a.CRClient.Create(ctx, obj); err != nil {
+		log.Printf("telemetry: recording the %s adjustment for %s/%s failed: %v", scope, namespace, component, err)
+	}
 }
 
 func (a *Adjustments) telemetryEnabled(ctx context.Context) (bool, error) {
