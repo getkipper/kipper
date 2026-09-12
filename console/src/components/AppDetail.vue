@@ -255,6 +255,10 @@ const visibleTabs = computed<Tab[]>(() => {
 // downgrade leaves the plaintext readable for as long as the panel stays open.
 watch(canRevealEnv, (mayReveal) => {
   if (mayReveal) return
+  // Clearing the screen is half of it. A read issued a moment ago, under the
+  // role that still held the capability, publishes into the panel it was
+  // cleared from unless the epoch retires it too.
+  readEpoch++
   revealedSecrets.value = {}
   showJsonView.value = false
   revealGitTokenOpen.value = false
@@ -1276,8 +1280,14 @@ async function revealSecret(key: string) {
     delete revealedSecrets.value[key]
     return
   }
+  // Per key rather than through loadGuard: revealing two secrets at once is
+  // ordinary, and a shared generation would let the second retire the first.
+  // What has to retire a reveal is the panel moving or the capability going.
+  const onPanel = samePanel()
+  const epoch = readEpoch
   try {
     const value = await api.revealSecret(project.value, props.appName, key)
+    if (!onPanel() || epoch !== readEpoch) return
     revealedSecrets.value[key] = value
   } catch {
     // ignore
@@ -1323,10 +1333,16 @@ function startEditSecret(key: string) {
     editingSecret.value = key
     editSecretValue.value = currentValue
   } else {
-    // Reveal first, then enable edit
+    // Reveal first, then enable edit. The reveal may have been retired while
+    // it was in flight, and opening the editor on an empty value would offer a
+    // write the caller no longer holds.
+    const onPanel = samePanel()
+    const epoch = readEpoch
     revealSecret(key).then(() => {
+      if (!onPanel() || epoch !== readEpoch) return
+      if (!revealedSecrets.value[key]) return
       editingSecret.value = key
-      editSecretValue.value = revealedSecrets.value[key] || ''
+      editSecretValue.value = revealedSecrets.value[key]
     })
   }
 }
