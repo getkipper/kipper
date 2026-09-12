@@ -48,8 +48,8 @@ GET /api/v1/dashboard/usage-history	anon=401 outsider=allow viewer=allow deploye
 GET /api/v1/invites	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 GET /api/v1/invites/{token}	anon=404 outsider=404 viewer=404 deployer=404 owner=404 admin=404
 GET /api/v1/jobs	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow
-GET /api/v1/jobs/{name}/history	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow
-GET /api/v1/jobs/{name}/resources	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow
+GET /api/v1/jobs/{name}/history	anon=401 outsider=404 viewer=404 deployer=404 owner=404 admin=404
+GET /api/v1/jobs/{name}/resources	anon=401 outsider=404 viewer=404 deployer=404 owner=404 admin=404
 GET /api/v1/me	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/migrate-target/capacity	anon=401 outsider=401 viewer=401 deployer=401 owner=401 admin=401
 GET /api/v1/migrate-target/projects	anon=401 outsider=401 viewer=401 deployer=401 owner=401 admin=401
@@ -105,6 +105,8 @@ GET /api/v1/projects/{name}/functions/{fn}/secrets	anon=401 outsider=403 viewer=
 GET /api/v1/projects/{name}/functions/{fn}/secrets/{key}	anon=401 outsider=403 viewer=403 deployer=404 owner=404 admin=404
 GET /api/v1/projects/{name}/functions/{fn}/settings	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/projects/{name}/inline-functions/{fn}/code	anon=401 outsider=403 viewer=404 deployer=404 owner=404 admin=404
+GET /api/v1/projects/{name}/jobs/{job}/history	anon=401 outsider=403 viewer=404 deployer=404 owner=404 admin=404
+GET /api/v1/projects/{name}/jobs/{job}/resources	anon=401 outsider=403 viewer=404 deployer=404 owner=404 admin=404
 GET /api/v1/projects/{name}/link-consent	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/projects/{name}/members	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/projects/{name}/quota	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
@@ -211,6 +213,7 @@ POST /api/v1/projects/{name}/functions	anon=401 outsider=403 viewer=403 deployer
 POST /api/v1/projects/{name}/functions/{fn}/diagnose	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
 POST /api/v1/projects/{name}/functions/{fn}/test	anon=401 outsider=403 viewer=403 deployer=404 owner=404 admin=404
 POST /api/v1/projects/{name}/inline-functions	anon=401 outsider=403 viewer=403 deployer=allow owner=allow admin=allow
+POST /api/v1/projects/{name}/jobs/{job}/trigger	anon=401 outsider=403 viewer=403 deployer=404 owner=404 admin=404
 POST /api/v1/projects/{name}/promote	anon=401 outsider=403 viewer=403 deployer=allow owner=allow admin=allow
 POST /api/v1/projects/{name}/route-groups	anon=401 outsider=403 viewer=403 deployer=allow owner=allow admin=allow
 POST /api/v1/projects/{name}/volumes	anon=401 outsider=403 viewer=403 deployer=allow owner=allow admin=allow
@@ -267,6 +270,7 @@ PUT /api/v1/projects/{name}/functions/{fn}/resources	anon=401 outsider=403 viewe
 PUT /api/v1/projects/{name}/functions/{fn}/secrets	anon=401 outsider=403 viewer=403 deployer=allow owner=allow admin=allow
 PUT /api/v1/projects/{name}/functions/{fn}/settings	anon=401 outsider=403 viewer=403 deployer=404 owner=404 admin=404
 PUT /api/v1/projects/{name}/inline-functions/{fn}/code	anon=401 outsider=403 viewer=403 deployer=allow owner=allow admin=allow
+PUT /api/v1/projects/{name}/jobs/{job}/resources	anon=401 outsider=403 viewer=403 deployer=404 owner=404 admin=404
 PUT /api/v1/projects/{name}/link-consent	anon=401 outsider=403 viewer=403 deployer=403 owner=allow admin=allow
 PUT /api/v1/projects/{name}/members	anon=401 outsider=403 viewer=403 deployer=403 owner=allow admin=allow
 PUT /api/v1/projects/{name}/quota	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow

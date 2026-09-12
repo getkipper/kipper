@@ -43,12 +43,26 @@ func enforceCapability(w http.ResponseWriter, r *http.Request, namespace string,
 		respondError(w, http.StatusUnauthorized, "unauthorized")
 		return false
 	}
-	access, ok := projectResolver.Resolve(r.Context(), claims.Email, namespace)
-	if !ok || !access.Allows(required) {
+	if !holdsCapability(r, namespace, required) {
 		respondError(w, http.StatusForbidden, "you do not have access to this project")
 		return false
 	}
 	return true
+}
+
+// holdsCapability answers the same question as enforceCapability without
+// writing a response, for callers weighing several namespaces before they know
+// which one the request means.
+func holdsCapability(r *http.Request, namespace string, required capability.Name) bool {
+	if projectResolver == nil {
+		return true
+	}
+	claims := middleware.UserFromContext(r.Context())
+	if claims == nil {
+		return false
+	}
+	access, ok := projectResolver.Resolve(r.Context(), claims.Email, namespace)
+	return ok && access.Allows(required)
 }
 
 // canAccessNamespace reports whether the caller may read the namespace, used to
