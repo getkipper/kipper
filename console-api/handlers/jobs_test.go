@@ -445,3 +445,26 @@ func TestAnAdminSeesEveryCollision(t *testing.T) {
 		t.Errorf("an ambiguous name must trigger nothing, ran in %v", got)
 	}
 }
+
+func TestCreateReturnsTheNamespaceItUsed(t *testing.T) {
+	// An empty namespace defaults to "default" on the way in. Echoing the empty
+	// string back leaves the client holding a job it cannot address.
+	withCollisionResolver(t, "deployer", "deployer")
+	h := &Jobs{Client: fake.NewClientset(), CRClient: testCRClient()}
+
+	req := jobRequest("POST", "/api/v1/jobs", "root@test.com", "",
+		`{"name":"backup","image":"busybox"}`)
+	rec := httptest.NewRecorder()
+	h.Create(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body %s", rec.Code, rec.Body.String())
+	}
+	var got jobResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding the created job: %v", err)
+	}
+	if got.Namespace != "default" {
+		t.Fatalf("namespace = %q, want %q", got.Namespace, "default")
+	}
+}

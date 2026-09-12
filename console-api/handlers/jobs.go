@@ -223,7 +223,7 @@ func (j *Jobs) Create(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusCreated, jobResponse{
 		Name:      req.Name,
 		Type:      jobType,
-		Namespace: req.Namespace,
+		Namespace: namespace,
 		Schedule:  req.Schedule,
 		Status:    "pending",
 		Image:     req.Image,
