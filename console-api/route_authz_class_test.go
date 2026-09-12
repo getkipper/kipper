@@ -345,7 +345,7 @@ var routeAuthz = map[string]authzDeclaration{
 	"PATCH /api/v1/projects/{name}/api-keys/{key}":                     {class: classProjectCapability, capability: "apikeys.manage", scope: scopeNamespace},
 	"PATCH /api/v1/services/{name}/db/tables/{schema}/{table}":         {class: classProjectCapability, capability: "database.write"},
 	"PATCH /api/v1/services/{name}/db/tables/{schema}/{table}/rows":    {class: classProjectCapability, capability: "database.write"},
-	"POST /api/v1/ai/analyse-logs":                                     {class: classGlobalRole, globalRank: globalDeployer},
+	"POST /api/v1/ai/analyse-logs":                                     {class: classHandlerInternal, reason: "the namespace comes from the request body, and the handler admits the cluster role or pods.logs.read on it"},
 	"POST /api/v1/ai/chat":                                             {class: classGlobalRole, globalRank: globalDeployer},
 	"POST /api/v1/alerts/dismiss":                                      {class: classAuthenticated},
 	"POST /api/v1/auth/2fa/confirm":                                    {class: classAuthenticated},

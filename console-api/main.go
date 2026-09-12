@@ -833,8 +833,19 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 		r.Put("/storage/{service}/public", nsCap("storage.write")(storageHandler.MakePublic))
 		r.Delete("/storage/{service}/public", nsCap("storage.write")(storageHandler.MakePrivate))
 
+		// The AI provider and its key are cluster configuration only an admin
+		// sets, so the cluster role decided both of these. That refused the
+		// people the feature is for: a project invite from the console makes
+		// the account a cluster viewer, and the Analyse button is offered to
+		// anyone who can read a workload's logs.
+		//
+		// Analyse-logs names its namespace in the request body, so it gates on
+		// that the way bind and link do, admitting project standing as well as
+		// the cluster role. Chat names nothing: it is a free-form assistant
+		// with no workload behind it, so the cluster role is all there is to
+		// gate it on.
 		r.Post("/ai/chat", deployer(aiChatHandler.Chat))
-		r.Post("/ai/analyse-logs", deployer(aiLogsHandler.AnalyseLogs))
+		r.Post("/ai/analyse-logs", aiLogsHandler.AnalyseLogs)
 
 		// Migration source endpoints (authenticated via Dex JWT). Migration
 		// exports whole projects to another cluster and reshapes routes on
