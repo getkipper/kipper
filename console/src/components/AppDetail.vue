@@ -839,6 +839,12 @@ const previewByKey = computed(() => {
   return byKey
 })
 
+/** Whether the server refused a read, as opposed to failing to answer it. */
+function refusal(e: unknown): boolean {
+  const status = (e as { response?: { status?: number } })?.response?.status
+  return status === 401 || status === 403
+}
+
 const beginEnvPreviewLoad = loadGuard()
 async function loadEnvPreview() {
   const current = beginEnvPreviewLoad()
@@ -1400,6 +1406,7 @@ async function toggleJsonView() {
 
 // Scale
 const replicaCount = ref(1)
+const replicaCountUnreadable = ref(false)
 const scaling = ref(false)
 
 async function loadScale() {
@@ -1407,10 +1414,14 @@ async function loadScale() {
     const apps = await api.fetchApps(project.value)
     const app = apps.find(a => a.name === props.appName)
     if (app) {
+      replicaCountUnreadable.value = false
       replicaCount.value = app.replicas
     }
-  } catch {
-    // ignore
+  } catch (e) {
+    // The scale controls send an absolute count, so acting on a number nothing
+    // measured scales by the difference between it and the truth. A refused
+    // read leaves the initial 1, and "+" then takes a five-replica app to two.
+    replicaCountUnreadable.value = refusal(e)
   }
   await loadAutoscale()
   loadRecommendation()
@@ -2177,6 +2188,7 @@ async function handleDeleteBasicAuthUser(username: string) {
 
 // Webhook
 const webhookEnabled = ref(false)
+const webhookUnreadable = ref(false)
 const webhookToken = ref('')
 const webhookLoading = ref(false)
 const webhookTokenVisible = ref(false)
@@ -2190,9 +2202,14 @@ async function loadWebhookConfig() {
   webhookLoading.value = true
   try {
     const config = await api.fetchWebhookConfig(project.value, props.appName)
+    webhookUnreadable.value = false
     webhookEnabled.value = config.enabled
     webhookToken.value = config.token || ''
-  } catch {
+  } catch (e) {
+    // A refusal is not an answer. Rendering it as "not configured" put Generate
+    // in front of a caller who could not see the token it would replace, and
+    // regenerating breaks whatever is already calling the old one.
+    webhookUnreadable.value = refusal(e)
     webhookEnabled.value = false
     webhookToken.value = ''
   } finally {
@@ -3335,7 +3352,7 @@ function openOptimise() {
                     class="rounded-full px-2 py-0.5 text-[10px] font-medium"
                     :class="webhookEnabled ? 'bg-kipper-100 text-kipper-700 dark:bg-kipper-900 dark:text-kipper-300'
                       : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400'"
-                  >{{ webhookEnabled ? 'active' : 'not configured' }}</span>
+                  >{{ webhookUnreadable ? 'not visible to you' : webhookEnabled ? 'active' : 'not configured' }}</span>
                 </div>
                 <div v-if="webhookEnabled && canWriteApp" class="flex shrink-0 gap-2">
                   <button
@@ -3349,7 +3366,12 @@ function openOptimise() {
                 </div>
               </div>
 
-              <div v-if="!webhookEnabled" class="flex items-center justify-between gap-3 text-xs">
+              <div v-if="webhookUnreadable" class="text-xs text-slate-500 dark:text-slate-400">
+                You cannot see whether this app has a webhook, so generating one here is withheld: it would replace a
+                token you cannot check, and anything already calling it would stop working.
+              </div>
+
+              <div v-else-if="!webhookEnabled" class="flex items-center justify-between gap-3 text-xs">
                 <span class="text-slate-500 dark:text-slate-400">Trigger deploys from your CI pipeline.</span>
                 <button
                   v-if="canWriteApp"
@@ -4306,7 +4328,7 @@ function openOptimise() {
             <label class="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-300">Manual replicas</label>
             <div class="flex items-center gap-4">
               <button
-                v-if="canWriteApp"
+                v-if="canWriteApp && !replicaCountUnreadable"
                 @click="setScale(replicaCount - 1)"
                 :disabled="scaling || replicaCount <= 0 || autoscaleEnabled"
                 class="rounded-lg border border-slate-300 p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-800"
@@ -4314,10 +4336,10 @@ function openOptimise() {
                 <Minus class="h-4 w-4" />
               </button>
               <span class="font-mono text-3xl font-bold text-slate-900 dark:text-slate-50">
-                {{ replicaCount }}
+                {{ replicaCountUnreadable ? '—' : replicaCount }}
               </span>
               <button
-                v-if="canWriteApp"
+                v-if="canWriteApp && !replicaCountUnreadable"
                 @click="setScale(replicaCount + 1)"
                 :disabled="scaling || autoscaleEnabled"
                 class="rounded-lg border border-slate-300 p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-800"
