@@ -540,9 +540,11 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 		r.Put("/backups/schedules/{schedule}", admin(backupHandler.ToggleSchedule))
 		r.Post("/backups/{backup}/restore", admin(backupHandler.Restore))
 
-		// Jobs identify their cronjob by name across namespaces, so each handler
-		// resolves the owning project and enforces membership itself. List
-		// filters to the caller's projects.
+		// These reach a job by name alone. The handler resolves which namespace
+		// the name means, enforces the capability on that one, and refuses with
+		// 409 when the name reaches more than one job the caller may act on.
+		// /projects/{name}/jobs/{job} is the address that never has to guess.
+		// List filters to the caller's projects.
 		r.Get("/jobs", jobHandler.List)
 		r.Post("/jobs", jobHandler.Create)
 		r.Post("/jobs/{name}/trigger", jobHandler.Trigger)
@@ -719,6 +721,17 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 					r.Get("/dependencies", cap("kipper.read")(fnConfig.GetDependencies))
 					r.Put("/dependencies", cap("kipper.write")(fnConfig.UpdateDependencies))
 					r.Get("/bindings", cap("kipper.read")(fnConfig.ListBindings))
+				})
+
+				// A job name is unique within a namespace and nowhere wider, so
+				// this is the address that names one job. The cluster-wide
+				// /jobs/{name} routes still answer, and refuse when the name
+				// reaches more than one.
+				r.Route("/jobs/{job}", func(r chi.Router) {
+					r.Post("/trigger", cap("kipper.write")(jobHandler.TriggerInNamespace))
+					r.Get("/history", cap("kipper.read")(jobHandler.HistoryInNamespace))
+					r.Get("/resources", cap("kipper.read")(jobHandler.GetResourcesInNamespace))
+					r.Put("/resources", cap("kipper.write")(jobHandler.UpdateResourcesInNamespace))
 				})
 
 				r.Get("/volumes", cap("kipper.read")(volumeHandler.List))

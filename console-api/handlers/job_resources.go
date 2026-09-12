@@ -11,98 +11,148 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	quotapkg "github.com/getkipper/kipper/console-api/quota"
 )
 
-// GetJobResources returns the resource limits for a CronJob.
+// GetResources returns the resource limits for a job.
 // GET /api/v1/jobs/{name}/resources
 func (j *Jobs) GetResources(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
-
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
+	job, ok := j.resolveJob(ctx, w, r, chi.URLParam(r, "name"), "kipper.read")
+	if !ok {
+		return
+	}
+	j.getResources(ctx, w, job)
+}
+
+// GetResourcesInNamespace returns the resource limits for a job named by its project.
+// GET /api/v1/projects/{name}/jobs/{job}/resources
+func (j *Jobs) GetResourcesInNamespace(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	job, ok := j.jobInNamespace(ctx, w, chi.URLParam(r, "name"), chi.URLParam(r, "job"))
+	if !ok {
+		return
+	}
+	j.getResources(ctx, w, job)
+}
+
+func (j *Jobs) getResources(ctx context.Context, w http.ResponseWriter, job *kipperv1.Job) {
 	resp := resourcesResponse{}
 
-	cj, err := j.Client.BatchV1().CronJobs("").List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/managed-by=kipper",
-	})
+	cj, occupied, err := j.jobCronJob(ctx, job)
 	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to read job resources")
+		return
+	}
+	// A conflict shown as an unset field is how a job that cannot reconcile
+	// reads as a healthy one with nothing pinned.
+	if occupied {
+		respondError(w, http.StatusConflict, occupiedChildMessage(job.Name))
+		return
+	}
+	// A job the reconciler has not backed with a CronJob yet, and a one-off job
+	// that never will be, both read as unset. Services answer the same way.
+	if cj == nil {
 		respondJSON(w, http.StatusOK, resp)
 		return
 	}
 
-	for _, c := range cj.Items {
-		if c.Name != name || !canAccessNamespace(r, c.Namespace) {
-			continue
-		}
-		containers := c.Spec.JobTemplate.Spec.Template.Spec.Containers
-		if len(containers) > 0 {
-			resp = extractResources(containers[0])
-		}
-		break
+	containers := cj.Spec.JobTemplate.Spec.Template.Spec.Containers
+	if len(containers) > 0 {
+		resp = extractResources(containers[0])
 	}
 
 	respondJSON(w, http.StatusOK, resp)
 }
 
-// UpdateJobResources sets resource limits for a CronJob.
+// UpdateResources sets resource limits for a job.
 // PUT /api/v1/jobs/{name}/resources
 func (j *Jobs) UpdateResources(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
-
-	var req resourcesRequest
-	if err := decodeJSON(r, &req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if err := validateResourceQuantities(req); err != nil {
-		respondError(w, http.StatusBadRequest, err.Error())
+	req, ok := decodeResourcesRequest(w, r)
+	if !ok {
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	// Find the CronJob across all namespaces
-	cjList, err := j.Client.BatchV1().CronJobs("").List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/managed-by=kipper",
-	})
+	job, ok := j.resolveJob(ctx, w, r, chi.URLParam(r, "name"), "kipper.write")
+	if !ok {
+		return
+	}
+	j.updateResources(ctx, w, job, req)
+}
+
+// UpdateResourcesInNamespace sets resource limits for a job named by its project.
+// PUT /api/v1/projects/{name}/jobs/{job}/resources
+func (j *Jobs) UpdateResourcesInNamespace(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeResourcesRequest(w, r)
+	if !ok {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	job, ok := j.jobInNamespace(ctx, w, chi.URLParam(r, "name"), chi.URLParam(r, "job"))
+	if !ok {
+		return
+	}
+	j.updateResources(ctx, w, job, req)
+}
+
+func (j *Jobs) updateResources(ctx context.Context, w http.ResponseWriter, job *kipperv1.Job, req resourcesRequest) {
+	cj, occupied, err := j.jobCronJob(ctx, job)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to list cronjobs")
+		respondError(w, http.StatusInternalServerError, "failed to read job resources")
+		return
+	}
+	if occupied {
+		respondError(w, http.StatusConflict, occupiedChildMessage(job.Name))
+		return
+	}
+	if cj == nil {
+		respondError(w, http.StatusNotFound, "cronjob not found")
 		return
 	}
 
-	for _, cj := range cjList.Items {
-		if cj.Name != name || !canAccessNamespace(r, cj.Namespace) {
-			continue
-		}
-		if !enforceCapability(w, r, cj.Namespace, "kipper.write") {
-			return
-		}
-
-		containers := cj.Spec.JobTemplate.Spec.Template.Spec.Containers
-		if len(containers) == 0 {
-			respondError(w, http.StatusInternalServerError, "cronjob has no containers")
-			return
-		}
-
-		// No quota preflight for CronJobs: a scheduled job runs one transient
-		// pod at a time with no persistent footprint in the quota's used total,
-		// so there is no steady-state projection to check. Admission handles the
-		// job pod when it is created.
-		applyResources(&cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0], req)
-
-		if _, err := j.Client.BatchV1().CronJobs(cj.Namespace).Update(ctx, &cj, metav1.UpdateOptions{}); err != nil {
-			respondError(w, http.StatusInternalServerError, "failed to update cronjob resources")
-			return
-		}
-
-		respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+	if len(cj.Spec.JobTemplate.Spec.Template.Spec.Containers) == 0 {
+		respondError(w, http.StatusInternalServerError, "cronjob has no containers")
 		return
 	}
 
-	respondError(w, http.StatusNotFound, "cronjob not found")
+	// No quota preflight for CronJobs: a scheduled job runs one transient
+	// pod at a time with no persistent footprint in the quota's used total,
+	// so there is no steady-state projection to check. Admission handles the
+	// job pod when it is created.
+	applyResources(&cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0], req)
+
+	if _, err := j.Client.BatchV1().CronJobs(job.Namespace).Update(ctx, cj, metav1.UpdateOptions{}); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to update cronjob resources")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// decodeResourcesRequest reads and validates a resource change, writing the 400
+// itself so every caller reads the same body for the same malformed request.
+func decodeResourcesRequest(w http.ResponseWriter, r *http.Request) (resourcesRequest, bool) {
+	var req resourcesRequest
+	if err := decodeJSON(r, &req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid request body")
+		return req, false
+	}
+	if err := validateResourceQuantities(req); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return req, false
+	}
+	return req, true
 }
 
 // GetServiceResources returns the resource limits for a service StatefulSet.

@@ -86,6 +86,16 @@ func childProvenance(obj client.Object, owner workloadOwner) (bool, string) {
 	return true, ""
 }
 
+// JobOwnsChild reports whether obj is the child this Job's reconciler builds,
+// rather than another workload's object sitting on the same key. A Function's
+// cron trigger creates a CronJob named after the function with "-cron" on the
+// end, which is a name a Job CR can also have, so the managed-by label alone
+// does not separate them.
+func JobOwnsChild(obj client.Object, job *kipperv1.Job) bool {
+	owned, _ := childProvenance(obj, jobOwner(job))
+	return owned
+}
+
 // adoptChild takes ownership of an object this workload reconciles, and refuses
 // one that is not Kipper's.
 //
