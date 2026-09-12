@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { AlertTriangle, Database, Loader2, RefreshCw } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
+import { useCapabilities } from '@/composables/useCapabilities'
 import {
   fetchServices,
   startServiceMigration,
@@ -17,6 +18,7 @@ const props = defineProps<{
 }>()
 
 const toast = useToast()
+const { canInNamespace } = useCapabilities()
 
 const SUPPORTED_TYPES = ['postgres']
 const supported = computed(() => SUPPORTED_TYPES.includes(props.serviceType))
@@ -172,6 +174,7 @@ onBeforeUnmount(() => stopPolling())
               </div>
             </div>
             <button
+              v-if="canInNamespace(props.targetNamespace, 'kipper.write')"
               @click="startConfirm(peer)"
               :disabled="isRunning"
               class="rounded-md bg-kipper-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-kipper-700 disabled:opacity-50"

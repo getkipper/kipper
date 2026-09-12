@@ -17,6 +17,7 @@ import { oneDark } from '@codemirror/theme-one-dark'
 import { keymap, EditorView } from '@codemirror/view'
 import { Prec } from '@codemirror/state'
 import { useToast } from '@/composables/useToast'
+import { useCapabilities } from '@/composables/useCapabilities'
 import {
   fetchDBDatabases,
   fetchDBSchema,
@@ -57,6 +58,13 @@ const serviceName = computed(() => route.params.name as string)
 // projects (e.g. postgres "db" and mysql "db"). The Services list and
 // the side panel both populate it on the link.
 const namespace = computed(() => (route.query.namespace as string) || '')
+
+const { canInNamespace } = useCapabilities()
+
+// Browsing takes database.read and everything that changes anything takes
+// database.write, including running a statement: the editor cannot tell a
+// SELECT from an UPDATE, so the route does not try.
+const canWriteData = computed(() => canInNamespace(namespace.value, 'database.write'))
 
 // --- Database picker ---
 // A postgres/mysql service can host many databases (the service's
@@ -1608,7 +1616,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
           <span v-if="!schemaCollapsed" class="text-xs font-semibold uppercase tracking-wide text-slate-500 px-1">Schema</span>
           <div class="flex items-center gap-1">
             <button
-              v-if="!schemaCollapsed"
+              v-if="!schemaCollapsed && canWriteData"
               class="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-800 text-kipper-600"
               title="Create a new table"
               @click="startCreateTable"
@@ -1712,19 +1720,20 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
             <!-- Toolbar -->
             <div class="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950">
               <button
+                v-if="canWriteData"
                 class="inline-flex items-center gap-1 px-2.5 py-1 rounded text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
                 @click="startInsert"
               >
                 <Plus class="w-4 h-4" /> Insert row
               </button>
               <button
-                v-if="selectedRows.size > 0"
+                v-if="selectedRows.size > 0 && canWriteData"
                 class="inline-flex items-center gap-1 px-2.5 py-1 rounded text-sm bg-rose-600 text-white hover:bg-rose-700"
                 @click="deleteSelected"
               >
                 <Trash2 class="w-4 h-4" /> Delete {{ selectedRows.size }}
               </button>
-              <template v-if="dirtyCount > 0">
+              <template v-if="dirtyCount > 0 && canWriteData">
                 <button
                   class="inline-flex items-center gap-1 px-2.5 py-1 rounded text-sm bg-kipper-600 text-white hover:bg-kipper-700"
                   @click="saveEdits"
@@ -2032,7 +2041,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
           <div v-else-if="!selectedRelation || !browseData" class="flex-1 flex items-center justify-center text-sm text-slate-500 p-8">
             <div class="text-center">
               <p>Pick a table from the sidebar to design its schema.</p>
-              <button class="mt-3 inline-flex items-center gap-1 px-3 py-1.5 rounded text-sm bg-kipper-600 text-white hover:bg-kipper-700" @click="startCreateTable">
+              <button v-if="canWriteData" class="mt-3 inline-flex items-center gap-1 px-3 py-1.5 rounded text-sm bg-kipper-600 text-white hover:bg-kipper-700" @click="startCreateTable">
                 <Plus class="w-4 h-4" /> New table
               </button>
             </div>
@@ -2209,7 +2218,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                       <button class="text-kipper-600 hover:underline mr-3" @click="startRenameEdit(col)">Rename</button>
                       <button class="text-kipper-600 hover:underline mr-3" @click="startTypeEdit(col)">Type…</button>
                       <button class="text-kipper-600 hover:underline mr-3" @click="queueToggleNullable(col)">Toggle null</button>
-                      <button class="text-rose-600 hover:underline" @click="queueDropColumn(col.name)">Drop</button>
+                      <button v-if="canWriteData" class="text-rose-600 hover:underline" @click="queueDropColumn(col.name)">Drop</button>
                     </td>
                   </tr>
                 </tbody>
@@ -2233,6 +2242,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
             <div class="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950">
               <span class="text-sm font-medium">{{ selectedRelation.schema }}.{{ selectedRelation.name }}</span>
               <button
+                v-if="canWriteData"
                 class="ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
                 @click="showAddIndex = !showAddIndex"
               >
@@ -2356,7 +2366,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                       <span v-else class="text-slate-500">NO</span>
                     </td>
                     <td class="px-3 py-1 border-b border-slate-100 dark:border-slate-800/50 whitespace-nowrap text-right">
-                      <button v-if="!idx.primary" class="text-rose-600 hover:underline" @click="dropIndexByName(idx)">Drop</button>
+                      <button v-if="!idx.primary && canWriteData" class="text-rose-600 hover:underline" @click="dropIndexByName(idx)">Drop</button>
                       <span v-else class="text-slate-400">—</span>
                     </td>
                   </tr>
@@ -2408,10 +2418,10 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                       <Pin v-if="s.pinned" class="w-3 h-3 text-amber-500" />
                       <button class="font-medium truncate text-left" :title="s.sql" @click="loadSnippet(s)">{{ s.name }}</button>
                       <span class="ml-auto md:opacity-0 group-hover:opacity-100 flex items-center gap-1">
-                        <button class="p-0.5 hover:text-kipper-600" :title="s.pinned ? 'Unpin' : 'Pin'" @click.stop="pinSnippet(s)">
+                        <button v-if="canWriteData" class="p-0.5 hover:text-kipper-600" :title="s.pinned ? 'Unpin' : 'Pin'" @click.stop="pinSnippet(s)">
                           <Pin class="w-3 h-3" :class="s.pinned ? 'text-amber-500' : ''" />
                         </button>
-                        <button class="p-0.5 hover:text-rose-600" title="Delete" @click.stop="removeSnippet(s)">
+                        <button v-if="canWriteData" class="p-0.5 hover:text-rose-600" title="Delete" @click.stop="removeSnippet(s)">
                           <Trash2 class="w-3 h-3" />
                         </button>
                       </span>
@@ -2452,6 +2462,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
           <div class="flex-1 flex flex-col min-w-0">
           <div class="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950">
             <button
+              v-if="canWriteData"
               class="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-kipper-600 text-white text-sm hover:bg-kipper-700 disabled:opacity-50 whitespace-nowrap"
               :disabled="running || !sqlText.trim()"
               @click="runQuery"
@@ -2462,6 +2473,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
               Run
             </button>
             <button
+              v-if="canWriteData"
               class="inline-flex items-center gap-1 px-2 py-1.5 rounded text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap"
               :disabled="running || !sqlText.trim()"
               @click="runQueryAll"
@@ -2476,6 +2488,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
               <Wand2 class="w-4 h-4" /> Format
             </button>
             <button
+              v-if="canWriteData"
               class="inline-flex items-center gap-1 px-2 py-1.5 rounded text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap"
               :disabled="!sqlText.trim()"
               @click="showSaveSnippet = true; newSnippetName = ''; newSnippetPinned = false"

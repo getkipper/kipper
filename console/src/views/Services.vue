@@ -684,7 +684,7 @@ function typeIcon(type: string): string {
           <FileCode2 class="h-4 w-4" :stroke-width="1.75" />
         </button>
         <button
-          v-if="selectedService"
+          v-if="selectedService && canInNamespace(selectedNamespace, 'kipper.write')"
           @click="openServiceDiagnose(selectedService.name, selectedNamespace)"
           class="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
           title="AI Diagnose"
@@ -810,6 +810,7 @@ function typeIcon(type: string): string {
                 :usage="svcPerPodMemoryBytes"
                 :limit="svcMemoryLimitBytes"
                 :applying="svcResourcesSaving || svcRolloutPhase !== 'idle'"
+                :readonly="!canInNamespace(selectedNamespace, 'kipper.write')"
                 size="md"
                 @apply="requestSvcMemoryApply"
               />
@@ -829,6 +830,7 @@ function typeIcon(type: string): string {
                 :limit="svcCpuLimitMillis"
                 :throttling-pct="svcCpuThrottlingPct"
                 :applying="svcResourcesSaving || svcRolloutPhase !== 'idle'"
+                :readonly="!canInNamespace(selectedNamespace, 'kipper.write')"
                 size="md"
                 @apply="requestSvcCpuApply"
               />
