@@ -201,6 +201,8 @@ func Run(opts Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	preflight.Warnings = append(preflight.Warnings,
+		CheckCustomDomainDNS(opts.Domain, opts.ConsoleDomain, opts.ConsoleAPIDomain, opts.DexDomain, nil)...)
 	fmt.Printf("  ✔  OS: %s %s\n", sysInfo.OS, sysInfo.OSVersion)
 	fmt.Printf("  ✔  RAM: %dMB available\n", sysInfo.RAMMB)
 	fmt.Printf("  ✔  Disk: %dMB available\n", sysInfo.DiskMB)

@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -269,4 +270,78 @@ func assertIngressTLSPolicy(t *testing.T, manifest, domain string, secrets ...st
 			t.Errorf("a custom-domain ingress must carry secretName %s", secret)
 		}
 	}
+}
+
+func TestCheckCustomDomainDNS(t *testing.T) {
+	lookupFail := func(string) ([]string, error) { return nil, fmt.Errorf("no such host") }
+
+	t.Run("skips empty domain", func(t *testing.T) {
+		if got := CheckCustomDomainDNS("", "", "", "", lookupFail); got != nil {
+			t.Fatalf("got %v, want nil", got)
+		}
+	})
+
+	t.Run("skips kipper.run gateway names", func(t *testing.T) {
+		if got := CheckCustomDomainDNS("lab.kipper.run", "", "", "", lookupFail); got != nil {
+			t.Fatalf("got %v, want nil", got)
+		}
+	})
+
+	t.Run("no warning when all three resolve", func(t *testing.T) {
+		seen := map[string]bool{}
+		lookup := func(host string) ([]string, error) {
+			seen[host] = true
+			return []string{"203.0.113.10"}, nil
+		}
+		if got := CheckCustomDomainDNS("example.com", "", "", "", lookup); got != nil {
+			t.Fatalf("got %v, want nil", got)
+		}
+		for _, host := range []string{"console.example.com", "console-api.example.com", "dex.example.com"} {
+			if !seen[host] {
+				t.Errorf("did not look up %s", host)
+			}
+		}
+	})
+
+	t.Run("warns when hosts are missing and mentions wildcard", func(t *testing.T) {
+		lookup := func(host string) ([]string, error) {
+			if host == "dex.example.com" {
+				return []string{"203.0.113.10"}, nil
+			}
+			return nil, fmt.Errorf("no such host")
+		}
+		got := CheckCustomDomainDNS("example.com", "", "", "", lookup)
+		if len(got) != 1 {
+			t.Fatalf("got %v, want one warning", got)
+		}
+		w := got[0]
+		for _, want := range []string{"console.example.com", "console-api.example.com", "*.example.com", "cert-manager"} {
+			if !strings.Contains(w, want) {
+				t.Errorf("warning missing %q: %s", want, w)
+			}
+		}
+		if strings.Contains(w, "dex.example.com") {
+			t.Errorf("warning should not list a host that resolved: %s", w)
+		}
+	})
+
+	t.Run("honours per-host overrides", func(t *testing.T) {
+		seen := map[string]bool{}
+		lookup := func(host string) ([]string, error) {
+			seen[host] = true
+			return nil, fmt.Errorf("no such host")
+		}
+		got := CheckCustomDomainDNS("example.com", "ui.example.com", "api.example.com", "login.example.com", lookup)
+		if len(got) != 1 {
+			t.Fatalf("got %v, want one warning", got)
+		}
+		for _, host := range []string{"ui.example.com", "api.example.com", "login.example.com"} {
+			if !seen[host] {
+				t.Errorf("did not look up override %s", host)
+			}
+			if !strings.Contains(got[0], host) {
+				t.Errorf("warning missing override %s: %s", host, got[0])
+			}
+		}
+	})
 }
