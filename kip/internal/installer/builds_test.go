@@ -197,6 +197,25 @@ func TestWaitForNodeAddress_RetriesOnRunError(t *testing.T) {
 	}
 }
 
+// A kubectl that fails for the whole timeout must surface that failure in the
+// timeout error, not only "did not publish its address".
+func TestWaitForNodeAddress_WrapsLastError(t *testing.T) {
+	run := func(string) (string, error) {
+		return "", fmt.Errorf("connection refused")
+	}
+
+	err := waitForNodeAddress(run, "203.0.113.20", 20*time.Millisecond, time.Millisecond)
+	if err == nil {
+		t.Fatal("expected a timeout when kubectl never succeeds")
+	}
+	if !strings.Contains(err.Error(), "did not publish its address") {
+		t.Errorf("expected a registration timeout error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("timeout should wrap the last kubectl error, got %v", err)
+	}
+}
+
 // nodesJSON renders a `kubectl get nodes -o json` snapshot from per-node pod
 // CIDRs and addresses, so the tests below read as the cluster state they mean.
 func nodesJSON(nodes ...map[string][]string) string {

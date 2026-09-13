@@ -776,51 +776,16 @@ func JoinWorkerNode(masterClient *ssh.Client, workerClient *ssh.Client, masterHo
 		return fmt.Errorf("running k3s agent installer: %w", err)
 	}
 
-	// Confirm the worker registered under its hostname. The previous check
-	// piped through `wc -l` and discarded the count, so a kubectl failure or
-	// an absent worker still looked like success. k3s names the node after the
-	// host's hostname by default (no --node-name is set above).
-	nodeName, err := workerClient.Run("hostname")
+	// Confirm the worker joined by waiting until its node IP appears on the master.
+	workerIP, err := WorkerNodeIP(workerClient)
 	if err != nil {
-		return fmt.Errorf("reading worker hostname: %w", err)
+		return fmt.Errorf("verifying worker node joined: %w", err)
 	}
-	if err := waitForWorkerJoined(masterClient.Run, strings.TrimSpace(nodeName), 2*time.Minute, 3*time.Second); err != nil {
-		return err
+	if err := WaitForNodeAddress(masterClient, workerIP, 2*time.Minute); err != nil {
+		return fmt.Errorf("verifying worker node joined: %w", err)
 	}
 
 	return nil
-}
-
-// waitForWorkerJoined polls until nodeName appears in the master's node list
-// or the deadline passes. Split out so the check is testable without a live
-// SSH host (see waitForNodeReady).
-//
-// `kubectl get node <name>` fails when the node is absent and when kubectl
-// itself fails, so neither case can be reported as a successful join. The
-// agent installer returns before registration finishes, which is why this
-// polls rather than checking once.
-func waitForWorkerJoined(run func(command string) (string, error), nodeName string, timeout, interval time.Duration) error {
-	if nodeName == "" {
-		return fmt.Errorf("verifying worker node joined: empty node name")
-	}
-	cmd := "kubectl get node " + shellQuote(nodeName) + " --no-headers"
-	deadline := time.Now().Add(timeout)
-	var last error
-	for {
-		out, err := run(cmd)
-		if err == nil && strings.TrimSpace(out) != "" {
-			return nil
-		}
-		if err != nil {
-			last = err
-		} else {
-			last = fmt.Errorf("node %s not found in cluster", nodeName)
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("verifying worker node joined: %w", last)
-		}
-		time.Sleep(interval)
-	}
 }
 
 // FetchKubeconfig retrieves the k3s kubeconfig from the remote server

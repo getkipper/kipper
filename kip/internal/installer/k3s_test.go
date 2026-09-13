@@ -1,9 +1,11 @@
 package installer
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -548,4 +550,24 @@ func TestAgentKubeletConfigHasProtectKernelDefaults(t *testing.T) {
 	// Guard the shared invariant: server config and the agent drop-in use the
 	// same flag string.
 	assert.Contains(t, fmt.Sprintf(k3sConfig, "h"), "protect-kernel-defaults=true")
+}
+
+// JoinWorkerNode verifies registration with WaitForNodeAddress. When no node
+// ever publishes the worker IP, that wait must fail so kip node add does not
+// report a successful join.
+func TestJoinWorkerVerificationFailsWhenAddressNeverAppears(t *testing.T) {
+	run := func(string) (string, error) {
+		return "InternalIP=10.0.0.1\nHostname=worker-1\n", nil
+	}
+	err := waitForNodeAddress(run, "203.0.113.20", 20*time.Millisecond, time.Millisecond)
+	if err == nil {
+		t.Fatal("expected join verification to fail when the worker address never appears")
+	}
+	wrapped := fmt.Errorf("verifying worker node joined: %w", err)
+	if !strings.Contains(wrapped.Error(), "verifying worker node joined") {
+		t.Fatalf("JoinWorkerNode must identify the check, got %v", wrapped)
+	}
+	if !errors.Is(wrapped, err) {
+		t.Fatalf("JoinWorkerNode must wrap the wait error, got %v", wrapped)
+	}
 }

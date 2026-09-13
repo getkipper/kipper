@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -102,27 +101,10 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("  ✔  Worker node %s joined the cluster\n\n", workerHost)
 
-	// Read the worker's own node IP so the registration wait can match this
-	// specific node by address, which also works on an idempotent re-run against
-	// an already-registered worker. The join has already succeeded, so a failure
-	// here is a warning, not an abort.
-	workerIP, err := installer.WorkerNodeIP(workerClient)
-	if err != nil {
-		fmt.Printf("  ⚠   could not determine %s's node IP: %v\n      Run 'kip upgrade' once it is Ready to add its IP to the build egress policy.\n\n", workerHost, err)
-		return nil
-	}
-
 	// Re-apply build isolation so the new node's IP joins the egress
 	// NetworkPolicy's deny list: a build pod must not reach the new node's
 	// public IP on 80/443 (its ingress, host-port, or management services).
-	// Wait for the node to publish an address first — join, registration, and
-	// address publication are asynchronous, so refreshing immediately would race
-	// and omit its IP.
-	fmt.Printf("  Waiting for %s to register with the cluster...\n", workerHost)
-	if err := installer.WaitForNodeAddress(masterClient, workerIP, 120*time.Second); err != nil {
-		fmt.Printf("  ⚠   %s has not registered yet: %v\n      Run 'kip upgrade' once it is Ready to add its IP to the build egress policy.\n\n", workerHost, err)
-		return nil
-	}
+	// JoinWorkerNode already waited until the worker published its address.
 	// The stamp goes on after registration, because the node object it annotates
 	// does not exist until then. A failure here leaves the host configured and
 	// the record missing, which reads as uncovered: the safe direction.

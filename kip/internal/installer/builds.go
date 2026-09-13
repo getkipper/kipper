@@ -309,13 +309,19 @@ func WaitForNodeAddress(client *ssh.Client, address string, timeout time.Duratio
 // testable without a live SSH host.
 func waitForNodeAddress(run func(command string) (string, error), address string, timeout, interval time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	var last error
 	for {
 		out, err := run(nodeAddressTypeQuery)
 		if err == nil && nodeReportsAddress(out, address) {
 			return nil
 		}
+		if err != nil {
+			last = err
+		} else {
+			last = fmt.Errorf("address not reported yet")
+		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("node %s did not publish its address within %s", address, timeout)
+			return fmt.Errorf("node %s did not publish its address within %s: %w", address, timeout, last)
 		}
 		time.Sleep(interval)
 	}
