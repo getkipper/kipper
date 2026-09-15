@@ -201,8 +201,6 @@ func Run(opts Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	preflight.Warnings = append(preflight.Warnings,
-		CheckCustomDomainDNS(opts.Domain, opts.ConsoleDomain, opts.ConsoleAPIDomain, opts.DexDomain, nil)...)
 	fmt.Printf("  ✔  OS: %s %s\n", sysInfo.OS, sysInfo.OSVersion)
 	fmt.Printf("  ✔  RAM: %dMB available\n", sysInfo.RAMMB)
 	fmt.Printf("  ✔  Disk: %dMB available\n", sysInfo.DiskMB)
@@ -374,6 +372,15 @@ func Run(opts Options) (*Result, error) {
 		ConsoleHost:    pickHost(opts.ConsoleDomain, "console", domainName),
 		ConsoleAPIHost: pickHost(opts.ConsoleAPIDomain, "console-api", domainName),
 		DexHost:        pickHost(opts.DexDomain, "dex", domainName),
+	}
+
+	// DNS preflight runs after identity adoption so it looks up the hosts
+	// the install settled on, not the flags as typed. A re-run with a
+	// matching --domain and no host flags inherits the cluster's existing
+	// hosts; a re-run with no --domain at all still checks a custom-domain
+	// cluster. Warnings only: the install still proceeds.
+	for _, w := range CheckCustomDomainDNS(domainName, resolvedHosts.ConsoleHost, resolvedHosts.ConsoleAPIHost, resolvedHosts.DexHost, nil) {
+		fmt.Printf("  ⚠  %s\n", w)
 	}
 
 	// The registered *.kipper.run domain the gateway heartbeat keeps alive.

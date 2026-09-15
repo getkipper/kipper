@@ -34,9 +34,10 @@ func UIDomainFor(domain string) string {
 // CheckCustomDomainDNS looks up the three platform hosts for a custom-domain
 // install (console, console-api, dex, honouring per-host overrides). Missing
 // records become warnings — the install still proceeds, because DNS may only
-// be minutes from propagating. Free *.kipper.run names are skipped: the
-// gateway owns that DNS. lookup is injected so tests can stub resolution;
-// pass nil to use net.LookupHost.
+// be minutes from propagating. The lookup only asks whether each name
+// resolves somewhere; it does not check that the answers point at the server.
+// Free *.kipper.run names are skipped: the gateway owns that DNS. lookup is
+// injected so tests can stub resolution; pass nil to use net.LookupHost.
 func CheckCustomDomainDNS(domain, consoleOverride, consoleAPIOverride, dexOverride string, lookup func(string) ([]string, error)) []string {
 	domain = NormaliseDomain(domain)
 	if domain == "" || claimsGatewayName(domain) {
@@ -53,26 +54,42 @@ func CheckCustomDomainDNS(domain, consoleOverride, consoleAPIOverride, dexOverri
 	}
 
 	var missing []string
+	var lookupErr error
 	for _, host := range hosts {
 		if _, err := lookup(host); err != nil {
 			missing = append(missing, host)
+			if lookupErr == nil {
+				lookupErr = err
+			}
 		}
 	}
 	if len(missing) == 0 {
 		return nil
 	}
 
-	return []string{fmt.Sprintf(
-		"%s %s not resolve yet. cert-manager needs those hosts to point at the server before certificates can issue. A wildcard A record (*.%s → the server) covers the platform hosts and every app you deploy later.",
-		strings.Join(missing, ", "),
-		dnsVerb(len(missing)),
-		domain,
-	)}
+	msg := fmt.Sprintf("%s: DNS does not resolve yet", strings.Join(missing, ", "))
+	if lookupErr != nil {
+		msg += " (" + lookupErr.Error() + ")"
+	}
+	msg += ". cert-manager needs those names to resolve before certificates can issue."
+	if wildcardCovers(domain, hosts) {
+		msg += fmt.Sprintf(" A wildcard A record (*.%s) covers the platform hosts derived from this domain and every app you deploy later.", domain)
+	}
+	return []string{msg}
 }
 
-func dnsVerb(n int) string {
-	if n == 1 {
-		return "does"
+// wildcardCovers reports whether a *.domain record would name every host in
+// the set. Overrides are used verbatim, so a host outside the cluster domain
+// is not covered by that wildcard.
+func wildcardCovers(domain string, hosts []string) bool {
+	if domain == "" {
+		return false
 	}
-	return "do"
+	suffix := "." + domain
+	for _, host := range hosts {
+		if host != domain && !strings.HasSuffix(host, suffix) {
+			return false
+		}
+	}
+	return true
 }

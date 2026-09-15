@@ -315,7 +315,7 @@ func TestCheckCustomDomainDNS(t *testing.T) {
 			t.Fatalf("got %v, want one warning", got)
 		}
 		w := got[0]
-		for _, want := range []string{"console.example.com", "console-api.example.com", "*.example.com", "cert-manager"} {
+		for _, want := range []string{"console.example.com", "console-api.example.com", "*.example.com", "cert-manager", "DNS does not resolve", "no such host"} {
 			if !strings.Contains(w, want) {
 				t.Errorf("warning missing %q: %s", want, w)
 			}
@@ -323,25 +323,106 @@ func TestCheckCustomDomainDNS(t *testing.T) {
 		if strings.Contains(w, "dex.example.com") {
 			t.Errorf("warning should not list a host that resolved: %s", w)
 		}
+		if strings.Contains(w, "point at the server") {
+			t.Errorf("warning must not claim the lookup checked the server address: %s", w)
+		}
 	})
 
-	t.Run("honours per-host overrides", func(t *testing.T) {
+	t.Run("includes lookup error so resolver failure is distinct from NXDOMAIN", func(t *testing.T) {
+		lookup := func(string) ([]string, error) { return nil, fmt.Errorf("server misbehaving") }
+		got := CheckCustomDomainDNS("example.com", "", "", "", lookup)
+		if len(got) != 1 {
+			t.Fatalf("got %v, want one warning", got)
+		}
+		if !strings.Contains(got[0], "server misbehaving") {
+			t.Errorf("warning missing lookup error: %s", got[0])
+		}
+	})
+
+	t.Run("drops wildcard advice when an override sits outside the domain", func(t *testing.T) {
+		lookup := func(string) ([]string, error) { return nil, fmt.Errorf("no such host") }
+		got := CheckCustomDomainDNS("example.com", "", "", "login.example.net", lookup)
+		if len(got) != 1 {
+			t.Fatalf("got %v, want one warning", got)
+		}
+		w := got[0]
+		if !strings.Contains(w, "login.example.net") {
+			t.Errorf("warning missing override host: %s", w)
+		}
+		if strings.Contains(w, "*.example.com") {
+			t.Errorf("wildcard advice must not claim to cover an out-of-domain override: %s", w)
+		}
+	})
+
+	t.Run("console override only", func(t *testing.T) {
 		seen := map[string]bool{}
 		lookup := func(host string) ([]string, error) {
 			seen[host] = true
 			return nil, fmt.Errorf("no such host")
 		}
-		got := CheckCustomDomainDNS("example.com", "ui.example.com", "api.example.com", "login.example.com", lookup)
+		got := CheckCustomDomainDNS("example.com", "ui.example.com", "", "", lookup)
 		if len(got) != 1 {
 			t.Fatalf("got %v, want one warning", got)
 		}
-		for _, host := range []string{"ui.example.com", "api.example.com", "login.example.com"} {
+		want := []string{"ui.example.com", "console-api.example.com", "dex.example.com"}
+		for _, host := range want {
 			if !seen[host] {
-				t.Errorf("did not look up override %s", host)
+				t.Errorf("did not look up %s; seen %v", host, seen)
 			}
 			if !strings.Contains(got[0], host) {
-				t.Errorf("warning missing override %s: %s", host, got[0])
+				t.Errorf("warning missing %s: %s", host, got[0])
 			}
+		}
+		if seen["console.example.com"] {
+			t.Errorf("looked up derived console host despite override: %v", seen)
+		}
+	})
+
+	t.Run("console-api override only", func(t *testing.T) {
+		seen := map[string]bool{}
+		lookup := func(host string) ([]string, error) {
+			seen[host] = true
+			return nil, fmt.Errorf("no such host")
+		}
+		got := CheckCustomDomainDNS("example.com", "", "api.example.com", "", lookup)
+		if len(got) != 1 {
+			t.Fatalf("got %v, want one warning", got)
+		}
+		want := []string{"console.example.com", "api.example.com", "dex.example.com"}
+		for _, host := range want {
+			if !seen[host] {
+				t.Errorf("did not look up %s; seen %v", host, seen)
+			}
+			if !strings.Contains(got[0], host) {
+				t.Errorf("warning missing %s: %s", host, got[0])
+			}
+		}
+		if seen["console-api.example.com"] {
+			t.Errorf("looked up derived console-api host despite override: %v", seen)
+		}
+	})
+
+	t.Run("dex override only", func(t *testing.T) {
+		seen := map[string]bool{}
+		lookup := func(host string) ([]string, error) {
+			seen[host] = true
+			return nil, fmt.Errorf("no such host")
+		}
+		got := CheckCustomDomainDNS("example.com", "", "", "login.example.com", lookup)
+		if len(got) != 1 {
+			t.Fatalf("got %v, want one warning", got)
+		}
+		want := []string{"console.example.com", "console-api.example.com", "login.example.com"}
+		for _, host := range want {
+			if !seen[host] {
+				t.Errorf("did not look up %s; seen %v", host, seen)
+			}
+			if !strings.Contains(got[0], host) {
+				t.Errorf("warning missing %s: %s", host, got[0])
+			}
+		}
+		if seen["dex.example.com"] {
+			t.Errorf("looked up derived dex host despite override: %v", seen)
 		}
 	})
 }
