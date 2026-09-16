@@ -3,7 +3,6 @@ package installer
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"strings"
 	"time"
 
@@ -212,134 +211,48 @@ spec:
 // buildNamespace is the namespace build pods run in.
 const buildNamespace = "kipper-builds"
 
-// nodeAddressTypeQuery lists every "type=address" of every node, one per line.
-const nodeAddressTypeQuery = `kubectl get nodes -o jsonpath='{range .items[*]}{range .status.addresses[*]}{.type}={.address}{"` + "\n" + `"}{end}{end}'`
-
-// WorkerNodeIP returns the worker's effective node IP: the address it will be
-// registered under in Kubernetes, read from the worker itself. This identifies
-// the specific worker without guessing its k3s node name and without a shared
-// bridge/container address (e.g. docker0's 172.17.0.1) that several hosts report
-// identically.
-//
-// An explicit node-ip in the k3s config is authoritative: on a multi-homed host
-// the default route can differ from the cluster-facing address k3s publishes. A
-// fresh kip join sets none, so the config value is absent for the common case
-// and the source of the default route is used, which is the address k3s selects
-// as the node's InternalIP by default and is routable and host-unique.
-func WorkerNodeIP(client *ssh.Client) (string, error) {
-	// Read the config files in k3s load order (main file, then drop-ins in the
-	// shell's sorted glob order). A newline is emitted after each file so a file
-	// without a trailing newline does not fuse its last line into the next
-	// file's first, which would hide a later overriding node-ip.
-	cfg, _ := client.Run(`for f in /etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml; do [ -f "$f" ] && { cat "$f"; echo; }; done 2>/dev/null`)
-	if ip := parseConfigNodeIP(cfg); ip != "" {
-		return ip, nil
-	}
-	// A routing-table lookup (no packets sent) toward a public address returns
-	// the default route's source address whenever a default route exists.
-	out, err := client.Run("ip -o route get 1.1.1.1")
-	if err != nil {
-		return "", fmt.Errorf("reading worker node IP: %w", err)
-	}
-	ip := parseRouteSrc(out)
-	if ip == "" {
-		return "", fmt.Errorf("could not determine the worker's node IP from %q", strings.TrimSpace(out))
-	}
-	return ip, nil
+// nodeAddressQuery lists one node's "type=address" pairs, one per line.
+func nodeAddressQuery(nodeName string) string {
+	return "kubectl get node " + shellQuote(nodeName) +
+		` -o jsonpath='{range .status.addresses[*]}{.type}={.address}{"` + "\n" + `"}{end}'`
 }
 
-// parseConfigNodeIP returns the effective explicit scalar node-ip in k3s config
-// text, or "" if none applies. k3s loads config.yaml then config.yaml.d/*.yaml
-// in order and the last assignment of a key wins; callers concatenate the files
-// in that order, so the last node-ip line is authoritative. A later assignment
-// overrides an earlier one even to a form this parser does not model (a block
-// sequence or a non-IP), which then falls through to the default-route source
-// rather than resurrecting a superseded value.
-func parseConfigNodeIP(config string) string {
-	result := ""
-	for _, line := range strings.Split(config, "\n") {
-		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "node-ip:")
-		if !ok {
-			continue
-		}
-		// This assignment overrides any earlier one; clear first so an
-		// unparsable later value does not fall back to an earlier IP.
-		result = ""
-		if i := strings.IndexByte(rest, '#'); i >= 0 {
-			rest = rest[:i]
-		}
-		// Accept a scalar, a comma list, or an inline YAML list; take the first
-		// entry and strip surrounding brackets or quotes.
-		rest = strings.TrimPrefix(strings.TrimSpace(rest), "[")
-		if first, _, found := strings.Cut(rest, ","); found {
-			rest = first
-		}
-		rest = strings.Trim(strings.TrimSpace(rest), `[]"'`)
-		if net.ParseIP(rest) != nil {
-			result = rest
-		}
-	}
-	return result
+// WaitForNodeToPublishAddress polls for an IPv4 InternalIP or ExternalIP
+// that build isolation can include in its egress exclusions. Address publication
+// can lag node registration.
+func WaitForNodeToPublishAddress(client *ssh.Client, nodeName string, timeout time.Duration) error {
+	return waitForNodeToPublishAddress(client.Run, nodeName, timeout, 3*time.Second)
 }
 
-// parseRouteSrc extracts the address after "src" in `ip route get` output.
-func parseRouteSrc(out string) string {
-	fields := strings.Fields(out)
-	for i, f := range fields {
-		if f == "src" && i+1 < len(fields) {
-			return fields[i+1]
-		}
-	}
-	return ""
-}
-
-// WaitForNodeAddress polls the API server until some node reports the given
-// address as its InternalIP or ExternalIP, so build isolation can then be
-// refreshed with that address actually present in the egress deny-list. Matching
-// the worker's own node IP handles both a fresh registration and an idempotent
-// re-run against an already-registered worker, and waits for the address kubelet
-// publishes (not mere Node existence, which precedes it). An unrelated node
-// cannot satisfy the match because the address is the worker's routable node IP.
-// Returns an error if no node reports the address within timeout.
-func WaitForNodeAddress(client *ssh.Client, address string, timeout time.Duration) error {
-	return waitForNodeAddress(client.Run, address, timeout, 3*time.Second)
-}
-
-// waitForNodeAddress is the pollable core, split out so the poll behaviour is
-// testable without a live SSH host.
-func waitForNodeAddress(run func(command string) (string, error), address string, timeout, interval time.Duration) error {
+func waitForNodeToPublishAddress(run func(command string) (string, error), nodeName string, timeout, interval time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var last error
 	for {
-		out, err := run(nodeAddressTypeQuery)
-		if err == nil && nodeReportsAddress(out, address) {
+		out, err := run(nodeAddressQuery(nodeName))
+		if err == nil && reportsARoutableAddress(out) {
 			return nil
 		}
-		if err != nil {
-			last = err
-		} else {
-			last = fmt.Errorf("address not reported yet")
-		}
+		// Report the latest poll result at the deadline, including recovery from errors.
+		last = err
 		if time.Now().After(deadline) {
-			return fmt.Errorf("node %s did not publish its address within %s: %w", address, timeout, last)
+			if last == nil {
+				return fmt.Errorf("node %s did not publish an address within %s", nodeName, timeout)
+			}
+			return fmt.Errorf("node %s did not publish an address within %s: %w", nodeName, timeout, last)
 		}
 		time.Sleep(interval)
 	}
 }
 
-// nodeReportsAddress reports whether out (lines of "type=address") contains an
-// InternalIP or ExternalIP — the address types buildEgressExcepts consumes —
-// whose value equals address.
-func nodeReportsAddress(out, address string) bool {
-	if address == "" {
-		return false
-	}
+// reportsARoutableAddress checks for an IPv4 InternalIP or ExternalIP
+// in type=address lines, matching buildEgressExcepts.
+func reportsARoutableAddress(out string) bool {
 	for _, line := range strings.Split(out, "\n") {
 		typ, addr, ok := strings.Cut(strings.TrimSpace(line), "=")
 		if !ok {
 			continue
 		}
-		if (typ == "InternalIP" || typ == "ExternalIP") && strings.TrimSpace(addr) == address {
+		if (typ == "InternalIP" || typ == "ExternalIP") && podnet.IsIPv4Address(strings.TrimSpace(addr)) {
 			return true
 		}
 	}

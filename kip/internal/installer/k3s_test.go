@@ -3,6 +3,7 @@ package installer
 import (
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -552,22 +553,255 @@ func TestAgentKubeletConfigHasProtectKernelDefaults(t *testing.T) {
 	assert.Contains(t, fmt.Sprintf(k3sConfig, "h"), "protect-kernel-defaults=true")
 }
 
-// JoinWorkerNode verifies registration with WaitForNodeAddress. When no node
-// ever publishes the worker IP, that wait must fail so kip node add does not
-// report a successful join.
-func TestJoinWorkerVerificationFailsWhenAddressNeverAppears(t *testing.T) {
-	run := func(string) (string, error) {
-		return "InternalIP=10.0.0.1\nHostname=worker-1\n", nil
+// machineNodeRunner supplies control-plane responses for polling tests.
+type machineNodeRunner struct {
+	run func(command string) (string, error)
+}
+
+func (r machineNodeRunner) Run(command string) (string, error) { return r.run(command) }
+
+func (r machineNodeRunner) RunStdin(command string, _ io.Reader) (string, error) {
+	return r.run(command)
+}
+
+const testMachineID = "9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d"
+const testBootID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+
+var testHostID = HostIdentity{MachineID: testMachineID, BootID: testBootID}
+
+func nodeLine(name, machineID, bootID string) string {
+	return name + "|" + machineID + "|" + bootID + "\n"
+}
+
+func TestWaitForHostNodeRetriesUntilTheNodeAppears(t *testing.T) {
+	calls := 0
+	runner := machineNodeRunner{run: func(string) (string, error) {
+		calls++
+		if calls < 3 {
+			return "", nil
+		}
+		return nodeLine("worker-1", testMachineID, testBootID), nil
+	}}
+
+	name, err := waitForHostNode(runner, testHostID, time.Second, time.Millisecond)
+	if err != nil {
+		t.Fatalf("a node that appears on the third look should satisfy the wait: %v", err)
 	}
-	err := waitForNodeAddress(run, "203.0.113.20", 20*time.Millisecond, time.Millisecond)
+	if name != "worker-1" {
+		t.Fatalf("the wait should hand back the node it found, got %q", name)
+	}
+	if calls != 3 {
+		t.Fatalf("expected the wait to keep asking until the node appeared, got %d calls", calls)
+	}
+}
+
+// Regression for issue #41: registration is required for a successful join.
+func TestWaitForHostNodeFailsWhenNoNodeReportsTheMachine(t *testing.T) {
+	runner := machineNodeRunner{run: func(string) (string, error) { return "", nil }}
+
+	_, err := waitForHostNode(runner, testHostID, 20*time.Millisecond, time.Millisecond)
 	if err == nil {
-		t.Fatal("expected join verification to fail when the worker address never appears")
+		t.Fatal("expected an absent worker to fail the wait")
 	}
-	wrapped := fmt.Errorf("verifying worker node joined: %w", err)
-	if !strings.Contains(wrapped.Error(), "verifying worker node joined") {
-		t.Fatalf("JoinWorkerNode must identify the check, got %v", wrapped)
+	if !strings.Contains(err.Error(), testMachineID) {
+		t.Fatalf("the failure should name the machine it looked for, got %v", err)
 	}
-	if !errors.Is(wrapped, err) {
-		t.Fatalf("JoinWorkerNode must wrap the wait error, got %v", wrapped)
+}
+
+func TestWaitForHostNodeWrapsAKubectlFailure(t *testing.T) {
+	refused := errors.New("exit status 1: The connection to the server was refused")
+	runner := machineNodeRunner{run: func(string) (string, error) { return "", refused }}
+
+	_, err := waitForHostNode(runner, testHostID, 20*time.Millisecond, time.Millisecond)
+	if err == nil {
+		t.Fatal("expected a failing kubectl to fail the wait")
+	}
+	if !errors.Is(err, refused) {
+		t.Fatalf("the failure should carry the kubectl error, got %v", err)
+	}
+}
+
+func TestWaitForHostNodeAsksAboutThisMachine(t *testing.T) {
+	var asked []string
+	runner := machineNodeRunner{run: func(command string) (string, error) {
+		asked = append(asked, command)
+		return "", nil
+	}}
+
+	_, _ = waitForHostNode(runner, testHostID, 5*time.Millisecond, time.Millisecond)
+	if len(asked) == 0 {
+		t.Fatal("expected the wait to ask the control plane something")
+	}
+	// Check that the lookup reads both identity fields.
+	for _, command := range asked {
+		for _, field := range []string{"status.nodeInfo.machineID", "status.nodeInfo.bootID"} {
+			if !strings.Contains(command, field) {
+				t.Fatalf("every lookup should read %s, got %q", field, command)
+			}
+		}
+	}
+}
+
+// Simulate a cloned host sharing the original's machine ID but using a new boot ID.
+func TestWaitForHostNodeIgnoresATwinThatSharesTheMachineID(t *testing.T) {
+	twin := nodeLine("worker-origin", testMachineID, "11111111-2222-3333-4444-555555555555")
+	calls := 0
+	runner := machineNodeRunner{run: func(string) (string, error) {
+		calls++
+		return twin, nil
+	}}
+
+	_, err := waitForHostNode(runner, testHostID, 20*time.Millisecond, time.Millisecond)
+	if err == nil {
+		t.Fatal("the registered twin is a different boot, so it must not satisfy the wait")
+	}
+	if errors.Is(err, errSharedMachineID) {
+		t.Fatalf("one node matching the id on a different boot is not a shared identity: %v", err)
+	}
+	if calls < 2 {
+		t.Errorf("the wait should keep looking for the host it installed, got %d calls", calls)
+	}
+}
+
+// Pending nodes can have empty status.nodeInfo fields.
+func TestWaitForHostNodeIgnoresANodeWithNoPublishedIdentity(t *testing.T) {
+	pending := nodeLine("pending-node", "", "")
+	calls := 0
+	runner := machineNodeRunner{run: func(string) (string, error) {
+		calls++
+		if calls < 3 {
+			return pending, nil
+		}
+		return pending + nodeLine("worker-1", testMachineID, testBootID), nil
+	}}
+
+	name, err := waitForHostNode(runner, testHostID, time.Second, time.Millisecond)
+	if err != nil {
+		t.Fatalf("a node with no published identity must not fail the poll: %v", err)
+	}
+	if name != "worker-1" {
+		t.Fatalf("the wait returned %q", name)
+	}
+}
+
+func TestWaitForHostNodeDoesNotMatchEmptyIdentities(t *testing.T) {
+	runner := machineNodeRunner{run: func(string) (string, error) {
+		return nodeLine("worker-1", "", ""), nil
+	}}
+
+	if _, err := waitForHostNode(runner, testHostID, 20*time.Millisecond, time.Millisecond); err == nil {
+		t.Fatal("empty ids match nothing, so the wait must not end on them")
+	}
+}
+
+func TestWaitForHostNodeRecoversFromATransientFailure(t *testing.T) {
+	calls := 0
+	runner := machineNodeRunner{run: func(string) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("exit status 1: The connection to the server was refused")
+		}
+		return nodeLine("worker-1", testMachineID, testBootID), nil
+	}}
+
+	name, err := waitForHostNode(runner, testHostID, time.Second, time.Millisecond)
+	if err != nil {
+		t.Fatalf("the second poll answered, so the wait should end: %v", err)
+	}
+	if name != "worker-1" {
+		t.Fatalf("the wait returned %q", name)
+	}
+}
+
+// An already registered node supports rerunning kip node add.
+func TestWaitForHostNodeEndsAtOnceOnAnAlreadyRegisteredNode(t *testing.T) {
+	calls := 0
+	runner := machineNodeRunner{run: func(string) (string, error) {
+		calls++
+		return nodeLine("worker-1", testMachineID, testBootID), nil
+	}}
+
+	if _, err := waitForHostNode(runner, testHostID, time.Second, time.Millisecond); err != nil {
+		t.Fatalf("an already-registered node should satisfy the wait: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("asked %d times about a node that was already there", calls)
+	}
+}
+
+// Malformed output should produce a parse error, not a duplicate-identity error.
+func TestWaitForHostNodeRefusesAWarningBesideAMatch(t *testing.T) {
+	runner := machineNodeRunner{run: func(string) (string, error) {
+		return "E0916 couldn't get resource list for metrics.k8s.io/v1beta1: the server is unable to handle the request\n" +
+			nodeLine("worker-1", testMachineID, testBootID), nil
+	}}
+
+	_, err := waitForHostNode(runner, testHostID, 20*time.Millisecond, time.Millisecond)
+	if err == nil {
+		t.Fatal("a warning line must refuse the answer")
+	}
+	if errors.Is(err, errSharedMachineID) {
+		t.Errorf("a warning line was counted as a second node: %v", err)
+	}
+}
+
+func TestWaitForHostNodeIgnoresADifferentMachineOnThisBootID(t *testing.T) {
+	other := nodeLine("worker-other", "0123456789abcdef0123456789abcdef", testBootID)
+	runner := machineNodeRunner{run: func(string) (string, error) { return other, nil }}
+
+	if _, err := waitForHostNode(runner, testHostID, 20*time.Millisecond, time.Millisecond); err == nil {
+		t.Fatal("a different machine must not satisfy the wait, whatever boot id it reports")
+	}
+}
+
+func TestWaitForHostNodeTakesTheNodeOnThisBoot(t *testing.T) {
+	twin := nodeLine("worker-origin", testMachineID, "11111111-2222-3333-4444-555555555555")
+	calls := 0
+	runner := machineNodeRunner{run: func(string) (string, error) {
+		calls++
+		if calls < 3 {
+			return twin, nil
+		}
+		return twin + nodeLine("worker-clone", testMachineID, testBootID), nil
+	}}
+
+	name, err := waitForHostNode(runner, testHostID, time.Second, time.Millisecond)
+	if err != nil {
+		t.Fatalf("the host registered on the third look: %v", err)
+	}
+	if name != "worker-clone" {
+		t.Fatalf("the wait returned %q, which is the twin rather than the host installed", name)
+	}
+}
+
+// Exercise parser validation independently of the query's stderr redirect.
+func TestWaitForHostNodeRefusesAWarningLine(t *testing.T) {
+	runner := machineNodeRunner{run: func(string) (string, error) {
+		return "E0916 couldn't get resource list for metrics.k8s.io/v1beta1: the server is currently unable to handle the request\n", nil
+	}}
+
+	name, err := waitForHostNode(runner, testHostID, 20*time.Millisecond, time.Millisecond)
+	if err == nil {
+		t.Fatalf("a stderr warning was accepted as the node %q", name)
+	}
+}
+
+// Two Node objects with the same machine and boot IDs require disambiguation.
+func TestWaitForHostNodeStopsWhenTwoNodesShareTheID(t *testing.T) {
+	calls := 0
+	runner := machineNodeRunner{run: func(string) (string, error) {
+		calls++
+		return nodeLine("worker-2", testMachineID, testBootID) + nodeLine("worker-3", testMachineID, testBootID), nil
+	}}
+
+	_, err := waitForHostNode(runner, testHostID, time.Minute, time.Millisecond)
+	if err == nil {
+		t.Fatal("expected a shared machine id to fail the wait")
+	}
+	if !errors.Is(err, errSharedMachineID) {
+		t.Fatalf("the failure should name the shared identity, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("a shared id should end the wait on the first look, got %d calls", calls)
 	}
 }

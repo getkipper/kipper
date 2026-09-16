@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -220,6 +221,54 @@ func TestResolveNodeByMachineIDFindsNothing(t *testing.T) {
 
 	if _, err := NodeNameForMachine(runner, "9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d"); err == nil {
 		t.Error("an unmatched machine id must be an error rather than an empty node name")
+	}
+}
+
+func TestReadBootIDRefusesWhatIsNotABootID(t *testing.T) {
+	for _, reply := range []string{"", "not-a-uuid", "9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d", "f47ac10b-58cc-4372-a567-0e02b2c3d479 ; rm -rf /"} {
+		runner := &storageHostRunner{replies: map[string]string{"cat /proc/sys/kernel/random/boot_id": reply + "\n"}}
+		if _, err := ReadBootID(runner); err == nil {
+			t.Errorf("accepted %q as a boot id", reply)
+		}
+	}
+}
+
+func TestReadBootIDReadsTheKernelValue(t *testing.T) {
+	runner := &storageHostRunner{replies: map[string]string{
+		"cat /proc/sys/kernel/random/boot_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479\n",
+	}}
+
+	id, err := ReadBootID(runner)
+	if err != nil {
+		t.Fatalf("ReadBootID: %v", err)
+	}
+	if id != "f47ac10b-58cc-4372-a567-0e02b2c3d479" {
+		t.Errorf("boot id = %q", id)
+	}
+}
+
+// Regression for issue #41: validate output even with stderr redirected.
+func TestResolveNodeByMachineIDRefusesAWarningAsANodeName(t *testing.T) {
+	runner := &storageHostRunner{replies: map[string]string{
+		"kubectl get nodes": "E0916 couldn't get resource list for metrics.k8s.io/v1beta1: the server is currently unable to handle the request\n",
+	}}
+
+	name, err := NodeNameForMachine(runner, "9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d")
+	if err == nil {
+		t.Fatalf("a stderr warning was accepted as the node %q", name)
+	}
+}
+
+// Malformed output should produce a parse error, not a duplicate-identity error.
+func TestResolveNodeByMachineIDRefusesAWarningBesideAMatch(t *testing.T) {
+	runner := &storageHostRunner{replies: map[string]string{
+		"kubectl get nodes": "E0916 couldn't get resource list for metrics.k8s.io/v1beta1: the server is currently unable to handle the request\nworker-2\n",
+	}}
+
+	if _, err := NodeNameForMachine(runner, "9a3c1f2e4b5d6a7b8c9d0e1f2a3b4c5d"); err == nil {
+		t.Error("a warning line beside a match must be refused, not counted as a second node")
+	} else if errors.Is(err, errSharedMachineID) {
+		t.Errorf("a warning line was read as a second node sharing the id: %v", err)
 	}
 }
 
