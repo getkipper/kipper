@@ -1,6 +1,6 @@
 ---
 title: 'Dev, test and production environments on one cluster'
-description: 'A project gives each stage its own namespace, quota and members, so the apps and databases you create in one never touch another, and promotion moves an app between them.'
+description: 'Group workloads and members in projects, give each environment its own namespace, and promote app images from test to production.'
 ---
 
 # Projects & Environments
@@ -36,22 +36,11 @@ From the web console, go to the **Projects** screen and click **New project**. E
 
 The Project CR is the source of truth. Deleting it cascades to all namespaces and resources inside the project.
 
-### The environment you get without asking for one
+### The default environment {#the-environment-you-get-without-asking-for-one}
 
-`kip project create myapp` without `--environments` creates one called `default`, and a `default`
-environment is the one case where the namespace is not suffixed: apps land in `myapp`, not
-`myapp-default`. The same is true of the console's New project screen. That is why the simple case
-reads as "just a project" with no environment in sight. There is one, it is called `default`, and
-it shares the project's name.
+`kip project create myapp` creates a `default` environment in namespace `myapp`. Adding `prod` creates a second namespace, `myapp-prod`.
 
-Adding a second environment starts suffixing: `kip project add-env myapp prod` gives you
-`myapp-prod` beside the original `myapp`.
-
-A Project whose environment list is genuinely empty is a different thing, and neither the CLI nor
-the console makes one. It can arrive by applying a CR directly or restoring from a backup, and the
-reconciler gives it an environment called `test` in namespace `myapp-test`. If you are looking at a
-project whose namespace ends in `-test` but whose environment list reads empty, that is what
-happened.
+The console uses the same default. A Project resource with an empty environment list, created directly or restored from a backup, uses the reconciler's compatibility default: `test` in namespace `myapp-test`.
 
 ### Organisation prefix
 
@@ -74,7 +63,7 @@ This prevents naming conflicts when multiple teams share a cluster. The org is s
   Promotion pipeline: test → acc → prod
 ```
 
-Each environment becomes a separate Kubernetes namespace. Apps deployed to different environments are fully isolated.
+Each environment has a separate Kubernetes namespace and an outbound network policy. Use [app links](/en/routing#linking-apps) for connections between environments; links within one project need no cross-project approval. See [network isolation](/en/security#network-isolation-between-namespaces).
 
 ## Adding and removing environments
 
@@ -153,9 +142,7 @@ The five steps:
 4. **Resources.** Per-app replicas, memory limit, CPU limit. Pre-filled from source. The "Apply prod defaults" button bumps replicas to at least 2 and memory limit by 1.5x as a starting point.
 5. **Review.** Summary of what's about to be copied and how many apps have overrides. Click Create.
 
-Secret rotation isn't in the wizard. Use the existing per-app secrets handler after the copy if a secret needs different values in the new environment.
-
-Database content migration isn't in the wizard either. The new environment's databases start empty.
+After copying, set environment-specific secrets on each app and [copy database contents](/en/services#copying-data-between-environments) if needed. The new databases start empty.
 
 ## Deploying to an environment
 
@@ -180,7 +167,7 @@ kip project list
 
 ## Setting an active project
 
-Most kip commands take `--project` and `--environment` flags. Typing both on every command gets old fast, especially when you're working in one project for an afternoon. Set the active project once and the rest of the commands pick it up automatically.
+Set an active project and environment to use them as defaults for subsequent commands:
 
 ```bash
 kip project use blog/test
@@ -216,7 +203,7 @@ The web console has the same idea built in. The project switcher in the top-left
 
 ## Promotion
 
-Promotion copies an app's container image tag from one environment to the next, nothing else. Resource requests, resource limits, replica counts, volumes, environment variables, and secrets are **not** copied. Each environment keeps its own configuration, so test can run one replica with 256 MB while production runs three replicas with 1 GB. This is intentional: test uses the test database, production uses the production database, and each environment is right-sized independently.
+Promotion updates the target app's image to match the source environment. The target keeps its own resources, replicas, volumes, variables, secrets, and service bindings. For example, test can run one replica with a test database while production runs three replicas with its production database.
 
 ### Promote a single app
 
@@ -245,19 +232,11 @@ if any were left behind.
 
 ### What promotion needs
 
-The app has to exist in the target environment already. Promotion sets an image
-on it and copies nothing else, so creating it here would give you an app with no
-route, no resources and no bindings. Create it with `kip app deploy` in that
-environment first.
+Create the target app before promoting, using `kip app deploy` or an environment copy. Its configuration supplies the route, resources, and bindings for that environment.
 
-An app that builds from git in the target cannot be promoted onto, because its
-image is build output the build controller owns and writing one would be undone
-by the next build. Promote into an image-based app, or deploy the branch you want
-in that environment.
+The target must be image-based. For a target that builds from Git, deploy the desired branch there or [detach its Git source](/en/deploying-apps#moving-an-app-off-git) before promoting.
 
-The tick follows the cluster: `kip` writes the image to the app's desired state
-and reads back what was stored before reporting success. A promotion that did not
-land is reported as a failure rather than as a tick.
+The CLI confirms the stored image after writing it. This verifies the desired state; check the target workload's readiness to follow the rollout.
 
 ### How it works
 
@@ -280,9 +259,7 @@ Promotion records are stored as annotations on the app in the target environment
 - `kipper.run/promoted-from`: source environment
 - `kipper.run/promoted-at`: timestamp
 
-The image itself is not recorded separately, because it is the app's own
-`spec.image`. `kip app list` shows it in the IMAGE column, and `kip export`
-writes it into the manifest.
+The promoted image is stored in the app's `spec.image`. View it in `kip app list` or include it in a manifest with `kip export`.
 
 ## Database strategy
 

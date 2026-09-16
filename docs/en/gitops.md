@@ -92,14 +92,14 @@ included, are manifest or console.
 | `host` | The hostname this app serves. Leave it out on a `*.kipper.run` cluster and the app gets a derived subdomain. |
 | `redirectFrom` | Other hostnames that answer `301` to `host`, same path and query. Up to 10, each needing its own DNS record. See [redirect domains](/en/domains#redirect-domains). |
 | `path` | The path prefix this app answers on, for sharing a hostname through `group`. |
-| `group` | Serves several apps on one hostname, each on its own `path`. See [route groups](/en/domains#route-groups). |
+| `group` | Serves several apps on one hostname, each on its own `path`. See [route groups](/en/routing#route-groups-path-based-routing). |
 | `redirects` | URL rewrite rules within the hostname this app already serves. See [Redirects](/en/redirects). |
 | `rateLimit` | Requests per second per client IP before Traefik starts refusing. |
 | `requireApiKey` | Gates the route behind an API key. See [API keys](/en/api-keys). |
 | `basicAuth` | Gates the route behind HTTP basic auth. See [Security](/en/security). |
 | `cspAllowlist` | Extra origins to permit in the Content-Security-Policy header. |
 | `noSecurityHeaders` | Drops the security header middleware, for an app that sets its own. |
-| `internalPaths` | Path prefixes refused at the ingress with a 404, on every route the app has. The match is literal and case-sensitive; see [what the refusal reaches, and what it does not](/en/deploying-apps#what-the-refusal-reaches-and-what-it-does-not). |
+| `internalPaths` | Path prefixes refused at the ingress with a 404, on every route the app has. The match is literal and case-sensitive; see [what the refusal reaches, and what it does not](/en/routing#what-the-refusal-reaches-and-what-it-does-not). |
 | `publicPaths` | One path each, matched exactly, that stays public even though a refusal covers it, for a scraper that needs one endpoint. |
 | `noInstanceHeader` | Drops the header naming which pod answered. |
 
@@ -159,9 +159,7 @@ kip apply -f kipper.yaml
 
 Kipper creates the Project CR and namespaces if they don't exist, then creates or updates the corresponding Custom Resources. For apps, services, volumes, functions and jobs, the update replaces the live spec, so the manifest is the desired state and a field you leave out is removed.
 
-If you know `kubectl`, note that this is closer to `kubectl replace` than to `kubectl apply`. `kubectl apply` merges against a record of what it last applied, so a field set some other way and never named in your YAML survives. `kip apply` writes the spec wholesale, so it does not: anything the manifest does not carry is gone, whether or not the manifest ever carried it. `terraform apply` is the nearer comparison: the config is the whole desired state and drift is reverted.
-
-The practical consequence is that a change made with `kip app update`, `kip app env set` or the console does not survive the next apply unless the manifest knows about it. `kip export` is the way to fold live state back in rather than transcribing it.
+Keep the manifest complete: applying it removes workload spec fields that are absent and restores defaults where applicable. Changes made through the CLI or console should be added to the manifest before the next apply. Use `kip export` to capture the live configuration and `kip diff` to review what applying it would change.
 
 `kip diff` names what would go, field by field:
 
@@ -297,7 +295,7 @@ variable, a build argument, a command line, a function's source) and any of it
 can hold a token. This output ends up in terminal scrollback and, from a CI job,
 in durable logs. The path tells you which field is affected, which is the part
 you need. A git URL is the one thing shown in part: it keeps its host and
-repository and loses whatever came before the `@`.
+repository while redacting embedded credentials, query parameters, and fragments.
 
 The `-` lines are the ones to read closely. A spec is replaced rather than merged, so
 a value set through `kip app update` or the console and never written into the

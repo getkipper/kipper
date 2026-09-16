@@ -47,15 +47,17 @@ flowchart TB
     K3S --> Dex
 ```
 
-## Two modes of operation
+## Workload management and host maintenance {#two-modes-of-operation}
 
-**During install:** The CLI connects to the server via SSH, runs commands remotely to install k3s and all components, then fetches the kubeconfig. SSH is only used during installation. Each kip release installs one pinned k3s version, so every cluster built with the same kip runs the same Kubernetes version, and worker nodes always join with the exact version the control plane runs.
+**Day-to-day management uses APIs.** Creating and managing apps, functions, services, jobs, and configuration happens through the Kubernetes and Kipper console APIs. Developers can deploy and operate their workloads with their Kipper account and assigned permissions.
+
+**SSH handles the underlying servers:** installation, upgrades, adding nodes, and host maintenance or recovery. `kip status` can also use SSH for supplementary host checks; its API-based checks work independently.
+
+During installation, the CLI connects to the server via SSH, runs commands remotely to install k3s and all components, then fetches the kubeconfig. Each kip release installs one pinned k3s version, so every cluster built with the same kip runs the same Kubernetes version, and worker nodes always join with the exact version the control plane runs.
 
 The built-in image registry (Zot) is installed with authentication and TLS from a cluster-internal CA. Builds push with a write credential, nodes pull with a separate read-only credential, and anonymous access is refused. The install verifies this before finishing: a registry that accepts unauthenticated requests fails the install.
 
-**Operator identity.** The Kubernetes API server authenticates operators through the cluster's own identity provider (Dex). Each person logs in with `kip auth login` and holds a token valid for a few minutes, renewed silently from their session; project membership maps onto namespaced Kubernetes roles (viewer, deployer, owner), and the API audit log attributes every action to the person who made it, shipped to Loki and queryable in Grafana. The k3s admin certificate never leaves the server in this model: it is the break-glass credential, retrieved over SSH from `/etc/rancher/k3s/k3s.yaml` when the identity provider itself is unavailable, and it is the reason a Dex outage degrades cluster access rather than bricking it. The API server reaches Dex through a loopback pin on the server itself, so cluster authentication keeps working when public DNS or the external network path do not; automatic certificate renewal is the one external dependency that remains load-bearing.
-
-**After install:** All operations go through the Kubernetes API using the kubeconfig stored locally. The CLI never uses SSH again.
+**Operator identity.** The Kubernetes API server authenticates operators through the cluster's own identity provider (Dex). Each person logs in with `kip auth login` and holds a token valid for a few minutes, renewed silently from their session; project membership maps onto namespaced Kubernetes roles (viewer, deployer, owner), and the API audit log attributes every action to the person who made it, shipped to Loki and queryable in Grafana. The k3s admin certificate in `/etc/rancher/k3s/k3s.yaml` provides recovery access over SSH when the identity provider is unavailable. Fresh installs normally leave it on the server; [installation recovery and `--admin-kubeconfig`](/en/installation#what-install-writes-to-your-machine) can copy it locally. The API server reaches Dex through a loopback pin on the server itself, so cluster authentication keeps working when public DNS or the external network path do not; automatic certificate renewal is the one external dependency that remains load-bearing.
 
 ```mermaid
 sequenceDiagram
@@ -67,10 +69,13 @@ sequenceDiagram
     CLI->>Server: SSH: install components
     Server->>CLI: kubeconfig
 
-    Note over CLI,Server: Everything after (K8s API)
+    Note over CLI,Server: Workload operations (APIs)
     CLI->>Server: K8s API: deploy app
     CLI->>Server: K8s API: list pods
     CLI->>Server: K8s API: stream logs
+    CLI->>Server: Console API: rebuild app
+    Note over CLI,Server: Host maintenance (SSH)
+    CLI->>Server: SSH: upgrade and host checks
 ```
 
 ## Repository structure
@@ -89,7 +94,7 @@ kipper/
 │       ├── git/            # GitProvider interface (GitHub, GitLab)
 │       ├── domain/         # Gateway client (subdomain registration)
 │       ├── config/         # Config file management
-│       └── ai/             # AI provider interface (future)
+│       └── ai/             # AI providers and local bundles
 │
 ├── console/                # Web console (Vue 3 + TypeScript)
 │   └── src/

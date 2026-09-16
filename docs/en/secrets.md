@@ -54,9 +54,7 @@ The same applies to `kip app env delete`, `kip app secret set`, `kip app secret
 delete` and `kip app secret rollback`, and to `kip function env set`,
 `kip function env delete`, `kip function secret set` and `kip function secret
 delete`. There is no `kip function secret rollback`.
-Restarting drops the connections the workload is serving, which is why it is
-something you ask for rather than something a configuration change does on its
-own.
+Choose a suitable time to restart: replacing pods can interrupt active connections.
 
 ## Referencing another variable
 
@@ -75,8 +73,7 @@ kip app env set docuseal \
   'DATABASE_URL=postgres://${DB_USERNAME}:${DB_PASSWORD:urlencode}@${DB_HOST}:${DB_PORT}/${DB_NAME}'
 ```
 
-Single quotes matter. Without them the shell expands `${DB_HOST}` first, finds
-nothing, and stores an address with a hole in it.
+Use single quotes to pass `${DB_HOST}` and the other references literally to Kipper, ready for resolution against the app's environment.
 
 ### What you can reference
 
@@ -107,9 +104,7 @@ wrong host.
 several template languages use the same `${}` syntax, so this is how you keep a
 value that only looks like a reference.
 
-**A name nothing defines is left exactly as written.** `${DB_HSOT}` reaches the
-process as `${DB_HSOT}`, so the connection error names the typo. Substituting an
-empty string would produce a connection to no host and a worse error.
+**Unresolved names remain literal.** For example, `${DB_HSOT}` reaches the process unchanged, making a missing or mistyped name visible.
 
 **Substitution happens once.** A value referenced by another is used as it was
 written, so a reference inside it is not followed:
@@ -125,34 +120,15 @@ variables referencing each other terminate rather than loop.
 **Only the values you set are templates.** A secret or a credential containing
 `${...}` is passed through as text.
 
-**`$(NAME)` is not a Kipper reference.** Kubernetes uses that form in a pod
-spec, and it is easy to reach for by habit, but Kipper resolves `${NAME}` and
-leaves everything else alone. Nor does Kubernetes expand it here: your
-environment arrives through an `envFrom` reference, and those values are handed
-to the container exactly as they are. `$(NAME)` is expanded only in a
-container's own `env`, `command` and `args`, which is not where your variables
-go. A value written `$(DB_HOST)` therefore arrives at your app as that literal
-text. The console flags it when you type it, so the mistake is visible before
-you go looking for it in a connection error.
+**Use `${NAME}` for Kipper references.** The Kubernetes-style `$(NAME)` form remains literal in Kipper's published environment. The console flags this form so you can correct it before restarting.
 
 ### When a reference does not resolve
 
-An unresolved reference reaches the app as written, so the failure names itself:
-a connection error mentioning `${DB_HSOT}` is a typo, and one mentioning
-`${DB_PASSWORD}` is a binding that never arrived.
+Check the variable name and its source. A reference such as `${DB_HSOT}` may contain a typo; a missing `${DB_PASSWORD}` may indicate a missing or unusable binding.
 
-For the second case, `kip service credentials` reports whether each service's
-credentials are where a bound workload can read them, and repairs them if not.
+`kip service credentials` audits service credentials. Review the report before using its `--repair` option; see [credential recovery](/en/services#checking-that-a-service-owns-its-credentials).
 
-The workload also records the answer as an `EnvResolved` condition on its own
-resource, covering unresolved names, a variable you set that a binding or link
-overrides, and a reference to another template that a single pass cannot follow.
-
-The console's Env tab shows the same three against the variable that causes
-each, along with what every value resolves to. Anything drawn from a secret or a
-credential is masked there, so the preview shows the shape of the result without
-handing back what it was built from. It needs the deploy permission, because the
-resolved value is a different thing from the reference you wrote.
+The workload's `EnvResolved` condition and the console's Env tab report unresolved names, overridden variables, and references to other templates. The preview shows resolved values with secret-derived parts masked. Access requires the `env.reveal` capability, held by built-in deployers and owners.
 
 ## Secrets
 
@@ -197,7 +173,7 @@ Both forms write the same `app-<app>-secrets` Secret as `kip app secret set`, wi
 
 ### Automatic previous version
 
-Every time you update a secret, Kipper automatically preserves the previous value (inspired by AWS Secrets Manager). The `list` command shows which keys have a previous version available:
+Every time you update a secret, Kipper preserves the previous value. The `list` command shows which keys have a previous version available:
 
 ```
 $ kip app secret list api
@@ -229,7 +205,7 @@ $ kip app secret reveal api DB_CONFIG
   }
 ```
 
-### Why the separation?
+### Variables and secrets at a glance
 
 | | Environment variables | Secrets |
 |---|---|---|
@@ -259,45 +235,16 @@ field, so what you see is what you set. Your secrets live in `app-<app>-secrets`
 and a service binding's credentials live in a Secret of their own. Those three
 are the inputs.
 
-The controller reads them, resolves any `${NAME}` references, and writes the
-result as a single Secret whose name ends in a digest of its own contents:
-`app-api-env-9f2c1a7b40de`. That Secret is immutable, and the pod reads it and
-nothing else. Change any value and the contents change, so the digest changes,
-so it is a different Secret with a different name.
+The controller resolves `${NAME}` references and publishes an immutable Secret named from a digest of its contents, such as `app-api-env-9f2c1a7b40de`. The pod template refers to that exact version, keeping related values—such as a password and a connection string—together.
 
-That is the whole point of the digest. The pod template names one exact object,
-so a pod either reads the environment as it was before your change or as it is
-after, and never a mixture of the two. When a service password rotates, the new
-password and the connection string you composed from it arrive together.
+Names include the workload kind (`app`, `function`, or `job`). This also keeps configuration separate for same-name workloads on older clusters. New workloads follow the [shared naming rule](/en/functions#names-are-shared-across-workload-kinds).
 
-The name carries the workload kind because Secret names are unique per namespace
-while the Kubernetes API indexes workload names per kind. Kipper reserves a
-workload name across all three kinds, so an app, a function and a job called
-`api` cannot coexist in one environment today. Clusters that predate that rule
-can still hold such a pair, and the kind-qualified names are what keep those
-apart: `app-api-env-…` beside `function-api-env-…`, and `app-api-secrets` beside
-`function-api-secrets`, so setting one workload's password leaves the other's
-alone. See [names are shared across workload kinds](/en/functions#names-are-shared-across-workload-kinds).
-
-From the application's perspective these are all standard environment variables.
-They behave identically at runtime.
+Inside the container, the resolved values are ordinary environment variables.
 
 ### When a change reaches the pod
 
-Setting a variable publishes a new environment straight away, and the console
-shows a banner saying a restart is needed to apply it. Your running pods keep
-serving the environment they started with until you restart them:
+An environment-only edit publishes a new version while preserving the Deployment's current template. Apply it with the console's **Restart** button, `kip app restart api`, or `--restart` on the configuration command.
 
-```bash
-kip app restart api
-```
+Other changes that replace pods, such as an image update or a service-credential rotation, also pick up the latest environment. The restart banner compares the published version with the version referenced by the Deployment template; it is not a health check for every running pod.
 
-Anything that replaces the pods anyway picks the new environment up on the way:
-a deploy, an image change, or a service credential rotating. So a restart is
-only needed when the environment is the only thing that changed.
-
-That also means env values show up in `kip export` output and in a committed `kipper.yaml`, and anyone with read access to App resources can see them. Keep sensitive values out of `kip app env set` and use `kip app secret set` instead, or reference a credential Kipper already injects, since a `${DB_PASSWORD}` reference exports as a reference. Secrets stay in `app-<app>-secrets` and never touch the App resource or an export.
-
-A pod reads its environment and secrets once, at startup, so a running app keeps its current values until it restarts. Nothing restarts it for you. The web console saves the change and shows a "restart to apply" banner with a Restart button; `kip app env set` and `kip app secret set` save it and say the same thing in their output. Click Restart, run `kip app restart <app>`, or pass `--restart` to the command, when you are ready for the new values to take effect. A live service is never cycled without you asking.
-
-The banner reflects the running pods, whichever way the change was made. A `kip apply` that updates an app's `env:` block also leaves the pods on their old values, and the console shows the same banner for that app until it restarts.
+Plain environment values remain visible in the App resource and in `kip export`. Store sensitive values with `kip app secret set`, or use a reference such as `${DB_PASSWORD}` so the manifest contains the reference. Secret values are kept out of the export.

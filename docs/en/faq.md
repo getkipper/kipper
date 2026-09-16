@@ -4,11 +4,11 @@
 
 ### What is Kipper?
 
-Kipper is an open source Kubernetes platform that takes you from zero to production in one command. You get a production-ready cluster on standard Linux infrastructure, with a web console, automatic SSL, and one-command app deployments, without needing Kubernetes expertise on your team.
+Kipper is an open source platform that installs and manages Kubernetes on Ubuntu and Debian servers. It includes a web console, automatic TLS, persistent storage, and commands for deploying apps.
 
 ### Who is Kipper for?
 
-Kipper is for small and mid-sized teams, agencies, SaaS products, internal platforms, and independent operators who want production Kubernetes without enterprise platform complexity. You don't need a Kubernetes specialist on staff. If you have one, Kipper handles the boring 80% so they can focus on the parts that matter to your business.
+Kipper is for teams and independent operators who want to run apps on their own Kubernetes infrastructure. It brings installation, deployment, and day-to-day management into one CLI and console.
 
 ### How is Kipper different from managed Kubernetes (EKS, GKE)?
 
@@ -62,7 +62,7 @@ Yes, but not as a general way to catch a cluster up. Parts of it are idempotent 
 
 It is the documented way to rotate backup credentials, and it moves k3s and cert-manager onto the versions your `kip` pins. It also re-renders the Dex configuration from install-time values, which removes every user account created through the console since, and it re-runs the rest of the install.
 
-For routine updates use `kip upgrade`, which is designed for a running cluster. See [what an upgrade moves](/en/installation#what-an-upgrade-moves-and-what-it-does-not) for the full list of what each one covers.
+For routine updates use `kip upgrade`, which is designed for a running cluster. See [what an upgrade moves](/en/maintenance#what-an-upgrade-moves-and-what-it-does-not) for the full list of what each one covers.
 
 ## Apps
 
@@ -82,11 +82,11 @@ You can also update the image from the web console using the package icon in the
 
 ### Can I deploy an image I built locally?
 
-Only after pushing it somewhere the cluster can pull from. `kip app deploy --image` pulls from a registry, and `kip registry add` stores credentials for a private one. There is no local-image import and no pull-policy control, so an image that exists only on your machine will not deploy. `kip app deploy --git` avoids the question, because Kipper builds the image in the cluster.
+Push the image to a registry the cluster can reach, then use `kip app deploy --image`. For private registries, add credentials with `kip registry add`. Alternatively, `kip app deploy --git` builds the image in the cluster.
 
 ### Can two projects share one database?
 
-Not directly. A service belongs to the project and environment it was created in, and apps and functions there bind to it. Another project gets its own instance. [Cross-project links](/en/deploying-apps#linking-across-projects) join an app to another app rather than to a service, so either put the workloads that share data in one project, or put an app in front of the database and link to that.
+Apps and functions bind to services in their own project and environment. To share a database, place the workloads in the same environment, or expose a data API through an app and use [cross-project links](/en/routing#linking-across-projects) to reach it.
 
 ### Where are my secrets stored?
 
@@ -139,7 +139,7 @@ This creates a PostgreSQL instance with persistent storage and auto-generated cr
 kip upgrade
 ```
 
-This pulls the latest console images and restarts system components. Your apps and services are not affected.
+This updates the console and reconciles system components. System component upgrades can briefly disrupt workloads. See the [upgrade reference](/en/maintenance#kip-upgrade) for scope and options.
 
 ### What does "stopped" mean?
 
@@ -159,4 +159,4 @@ After install, `kip cluster domain yourdomain.com` moves the whole serving ident
 
 ### Is traffic encrypted?
 
-Yes. For `*.kipper.run` routes, TLS is terminated at the kipper.run gateway using a Let's Encrypt wildcard certificate, and the gateway-to-cluster hop also uses HTTPS. For routes on a custom domain, traffic goes directly to your cluster and cert-manager terminates TLS in-cluster with a per-host Let's Encrypt certificate.
+Yes. For `*.kipper.run` routes, TLS is terminated at the kipper.run gateway using a Let's Encrypt wildcard certificate, and the gateway-to-cluster hop also uses HTTPS. For routes on a custom domain, traffic goes directly to your cluster and Traefik terminates TLS in-cluster using a per-host Let's Encrypt certificate issued by cert-manager.

@@ -1,6 +1,6 @@
 # Project Members
 
-A project groups related apps, services, and environments. Membership decides who can see a project and what they can do inside it. Someone who is not a member of a project cannot see it at all.
+A project groups related apps, services, and environments. Project membership gives a person access to that project and defines what they can do there. Cluster admins can access every project.
 
 ## Roles
 
@@ -10,7 +10,7 @@ The **cluster admin** runs the whole cluster. Admins see every project, create n
 
 Everyone else gets access one project at a time, with a role that decides what they can do there:
 
-- **Viewer** reads the project. They can look at apps, logs, and settings, but cannot change anything.
+- **Viewer** reads apps, logs, and settings.
 - **Deployer** does the day-to-day work: deploy apps, edit environment variables and secrets, restart, roll back, open a terminal.
 - **Owner** is a deployer who also manages the project. Owners add and remove members, change roles, and edit the project itself.
 
@@ -105,17 +105,9 @@ kip project members add acme-shop jordan@acme.com deployer
   ✔  jordan@acme.com is now deployer on acme-shop
 ```
 
-**Use `--role viewer` on the invite.** That flag sets the role across the whole cluster, not the
-project. `--role deployer` would let them deploy to every project on the cluster, and the project
-role you add afterwards would not take anything away. Viewer plus a project role is what the
-console's project invite creates, and it is what you want here: they sign in with no cluster-wide
-powers and act only where you added them.
+Use **`--role viewer` on the invite**, then assign the project role with `kip project members add`. The invite's role applies to the cluster; project membership controls access within that project.
 
-Invite first, and add them once they have accepted. Membership is recorded as an address and
-nothing later checks that it belongs to anyone, so both the console and the CLI refuse an address
-with no account behind it. Otherwise a typo becomes a member who can never sign in, looks correct
-in `members list`, and counts as an owner in the rule that keeps a project from being left
-ownerless.
+The account must exist before you add it as a member. This catches mistyped or unregistered addresses before they become project owners.
 
 If a project has already ended up owned by an address nobody can sign in as, add a real owner and
 then remove the bad one. No flag is needed, and it ends with the project owned:
@@ -125,9 +117,7 @@ kip project members add acme-shop sam@acme.com owner
 kip project members remove acme-shop typo@acme.com
 ```
 
-The rule only ever refused one order of doing it. `kip project members remove --force` removes a
-last owner outright, leaving the project with none, and a cluster admin can do the same from the
-console. Use those when the phantom should go before a replacement is chosen.
+For recovery, `kip project members remove --force` can remove the last owner. A cluster admin can also do this from the console. The project remains ownerless until a replacement is added.
 
 ## Creating projects
 

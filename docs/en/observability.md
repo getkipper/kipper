@@ -152,9 +152,9 @@ curl http://console-api.kipper-system:8080/health/controllers
 }
 ```
 
-When everything is up the endpoint returns `200`. When the manager is still starting, its caches haven't synced, or any controller failed to register, it returns `503` and `healthy` is `false`. Point an uptime monitor at it and read a `503` as "controllers are degraded, deploys may be stuck", not as "the API is down". The console API answers requests either way.
+When everything is up the endpoint returns `200`. When the manager is still starting, its caches haven't synced, or any controller failed to register, it returns `503` and `healthy` is `false`. A `503` indicates degraded controllers and potentially stalled deployments. The console API can still answer requests, allowing you to investigate.
 
-This is a reporting endpoint, not the pod readiness probe. console-api usually runs a single replica, so gating readiness on a controller would pull the whole console out of rotation over one broken reconciler. Keeping it separate means a degraded controller shows up as a warning while the console stays reachable.
+This health report is separate from pod readiness, keeping the console reachable while you investigate a degraded controller.
 
 ## What the metrics do not cover
 
@@ -273,7 +273,7 @@ flowchart LR
 
 All components run in the `monitoring` namespace and are managed by Helm charts via k3s.
 
-### When a reconcile keeps failing
+## When a reconcile keeps failing
 
 `/health/controllers` answers whether a controller started. It says nothing about whether its passes succeed, and a controller can be registered, running, and failing on the same workload every time.
 

@@ -62,7 +62,7 @@ Two cards show real-time memory and CPU utilisation for the cluster:
 
 When memory exceeds 80%, the resource controller generates a warning alert with the top consumers and any anomalies. At 90%+, alerts are marked critical.
 
-If Prometheus is unreachable, the dashboard shows a "Metrics are unavailable" banner above these cards. That tells you the charts are stale or empty because monitoring is down, so an empty chart reads as an outage to fix rather than an idle cluster.
+A **Metrics are unavailable** banner means Prometheus could not be reached. Treat the charts as stale or incomplete until monitoring recovers.
 
 ### Workload memory trends
 

@@ -42,11 +42,9 @@ ai:
 
 ## Kubeconfig
 
-Each cluster's kubeconfig is stored separately in `~/.kip/clusters/<domain>.yaml`. This file provides full admin access to the Kubernetes API.
+Each cluster's kubeconfig is stored in `~/.kip/clusters/<domain>.yaml`. Current installs use `kip auth kubectl-token` to authenticate as the signed-in operator. Kubernetes bindings determine that operator's permissions.
 
-::: warning
-The kubeconfig grants full cluster admin access. Treat it like a root password.
-:::
+Older kubeconfigs may contain an admin certificate. Use [`kip auth kubeconfig`](/en/cli-reference#kip-auth-kubeconfig) to inspect and convert them, and protect any file that still contains credentials.
 
 ## Multiple clusters
 
@@ -160,59 +158,49 @@ Point DNS A records for `console.`, `console-api.`, and `dex.` under your domain
 
 ## AI provider settings
 
-Kipper's AI features (code assistant, log analysis, diagnostics, and resource optimisation) are all optional and disabled by default. To enable them, configure an AI provider in the web console under **Settings** → **AI Configuration**, or edit the `ai` section in `~/.kip/config.yaml` directly.
+Configure an AI provider to enable code assistance, log analysis, and diagnostics. You can use Claude, OpenAI, or a self-hosted Ollama server.
 
-### Supported providers
+### Configure in the console
 
-| Provider | `provider` value | Requirements |
+Open **Settings → AI Configuration**, choose a provider, enter the model and connection details, and click **Save**. The console stores these settings in the `kipper-ai-config` Kubernetes Secret in `kipper-system` and masks the API key when displaying it.
+
+### Configure from the CLI
+
+```bash
+kip ai configure
+kip ai status
+```
+
+The interactive setup saves the configuration in `~/.kip/config.yaml` and attempts to sync it to the current cluster. Check the output for a sync warning. Editing the local YAML alone changes the local configuration; use the console to update the cluster settings directly.
+
+| Provider | CLI value | Required connection details |
 |---|---|---|
-| OpenAI | `openai` | API key, model name (e.g. `gpt-4o`) |
-| Anthropic | `anthropic` | API key, model name (e.g. `claude-sonnet-4-20250514`) |
-| Ollama (self-hosted) | `ollama` | Ollama URL, model name, no API key needed |
+| Claude (Anthropic) | `claude` | API key and model |
+| OpenAI | `openai` | API key and model |
+| Ollama | `ollama` | Server URL and model |
 
-### Configuration example
+For Ollama, use an address reachable by the component making the request. In cluster settings, `localhost` refers to the console API container. See [AI Bundle](/en/ai) to run Ollama inside the cluster.
 
-```yaml
-ai:
-  provider: anthropic
-  api_key: sk-ant-...
-  model: claude-sonnet-4-20250514
-  ollama_url: ""
-  features:
-    log_analysis: true
-    anomaly_detection: true
-    dockerfile_generation: true
-```
+### Local AI configuration fields
 
-For Ollama, set `provider: ollama` and provide the URL where Ollama is running:
+These keys live under `ai` in `~/.kip/config.yaml`:
 
-```yaml
-ai:
-  provider: ollama
-  api_key: ""
-  model: llama3
-  ollama_url: http://192.168.1.50:11434
-  features:
-    log_analysis: true
-    anomaly_detection: true
-    dockerfile_generation: true
-```
-
-### Feature flags
-
-Each AI feature can be toggled independently:
-
-| Feature | Description |
+| Key | Purpose |
 |---|---|
-| `log_analysis` | Analyse button in log viewers (apps, functions, jobs) |
-| `anomaly_detection` | Diagnose button and resource optimisation in app detail panels |
-| `dockerfile_generation` | AI-assisted Dockerfile generation (planned) |
+| `provider` | `claude`, `openai`, or `ollama`; `none` disables the local AI configuration |
+| `api_key` | Provider credential for Claude or OpenAI |
+| `model` | Model name |
+| `ollama_url` | Ollama server address |
 
-Set `provider: none` to disable all AI features. API keys are stored locally in `~/.kip/config.yaml` and are never sent to Kipper infrastructure.
+The config format also accepts `features.log_analysis`, `features.anomaly_detection`, and `features.dockerfile_generation`. These fields are currently unused: they do not control the console’s Analyse button or enable and disable individual AI features.
 
-### Settings page
+To disable AI through the CLI, run `kip ai configure` and choose **None**. This saves `provider: none` locally and attempts to sync it to the cluster. Check for sync warnings; editing the local file alone leaves the console’s settings unchanged.
 
-The web console Settings page (gear icon in the sidebar) provides a UI for configuring the AI provider without editing YAML. Select your provider, enter the API key and model, toggle individual features, and click **Save**. Changes take effect immediately.
+### API key storage and use
+
+CLI setup stores the API key in `~/.kip/config.yaml`, which Kipper writes with user-only permissions (`0600`). A successful sync also copies the key into the cluster’s `kipper-ai-config` Secret. Console setup stores it directly in that Secret.
+
+The console API uses the key to authenticate requests to the selected AI provider. Those requests include the code, logs, or diagnostic context supplied by the feature you use. Protect both the local config and access to the cluster Secret, and review what you share with your provider.
 
 ## Resource management mode
 

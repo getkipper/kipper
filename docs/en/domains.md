@@ -49,7 +49,7 @@ todo-app--lab.kipper.run
 console--lab.kipper.run
 ```
 
-So `lab` is the cluster's name, not each app's. That is what keeps every hostname a single label under the wildcard certificate, and what guarantees two clusters can never claim the same URL. If you want `todo-app.example.com` instead, use a custom domain.
+The cluster name `lab` forms the shared suffix for these app URLs. For a hostname such as `todo-app.example.com`, configure a custom app domain.
 
 ### Changing the name later
 
@@ -155,7 +155,7 @@ kip cluster domain --repair     # rewrite ~/.kip/config.yaml from the cluster
 
 - `--sync` resumes whatever change is in flight, or, on a cluster that already converged, finishes anything an interrupted run left behind: releasing the old kipper.run subdomain and refreshing your local config.
 - `--rollback` returns to the previous serving identity recorded at the last change. It runs as a normal cutover in the opposite direction, with the same checks, so sessions sign in again on the old hosts once it completes.
-- `--repair` only touches your local `~/.kip/config.yaml`. It rewrites the entry from the cluster's identity record, which is useful after switching machines or when local state drifted.
+- `--repair` refreshes the local cluster entry and kubeconfig from the cluster's identity record. Use it after switching machines or when local connection settings have drifted.
 
 See [Configuration: Custom console domain](/en/configuration#custom-console-domain) for more details.
 
@@ -204,8 +204,9 @@ hostnames. Pass the flag with no value to remove them all.
 `redirectFrom` removes the redirect domains, the same as for any other field you leave out. Either
 add them to the manifest, or run `kip export --project <project> --environment <env> -o <file>`
 afterwards, which captures the live state including the redirects.
-::: The same list can be set when the app is first
-created, alongside the other route flags:
+:::
+
+You can also set the list when creating the app:
 
 ```bash
 kip app deploy --name shop --image registry.git.example.com/shop:latest --port 3000 \

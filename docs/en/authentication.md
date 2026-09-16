@@ -4,7 +4,7 @@ Kipper uses browser-based authentication for both the web console and the CLI. T
 
 ## CLI authentication
 
-Before using commands that interact with the console API (like `kip app rebuild` or `kip service bind`), authenticate with your cluster:
+After installing or importing a cluster, sign in to use its Kubernetes and console APIs:
 
 ```bash
 kip auth login
@@ -25,7 +25,7 @@ Your browser opens the Dex login page. After signing in, you'll see a confirmati
 ### How it works
 
 1. The CLI starts a temporary local HTTP server on `localhost:18741`
-2. Your browser opens the Dex authorization page at `dex-{cluster-domain}.kipper.run`
+2. Your browser opens the cluster's Dex authorization page (for example, `https://dex--mycluster.kipper.run/dex`)
 3. You sign in with your Kipper credentials (the same ones you use for the web console)
 4. Dex redirects back to the local server with an authorization code
 5. The CLI exchanges the code directly with Dex for an ID token and refresh token
@@ -37,9 +37,12 @@ When you set a custom domain with `kip cluster domain`, the Dex URL moves with i
 
 ### Token lifetime
 
-- **ID tokens** expire after 24 hours (Dex's default)
-- The CLI refreshes ID tokens automatically using the refresh token, so you stay signed in without logging in again
-- **Refresh tokens** don't expire on their own with the default install, so a session lasts until you run `kip auth logout` or an admin revokes your access
+A default Kipper installation configures:
+
+- **ID tokens:** 15 minutes. The CLI refreshes them automatically while its refresh session remains valid.
+- **Refresh sessions:** expire after 7 days of inactivity or 30 days in total. Sign in again after expiry.
+
+These values come from Kipper's Dex configuration; an administrator may change them.
 
 Run `kip auth login` again whenever you want a fresh session.
 

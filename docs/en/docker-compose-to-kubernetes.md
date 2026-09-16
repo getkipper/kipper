@@ -19,7 +19,7 @@ The mapping is manual and you do it once: read the compose file, and what comes 
 | `ports: "80:3000"` | `--port 3000`. The public side is HTTPS on a hostname, and you never publish a port |
 | `environment:` and `env_file:` | [Environment variables](/en/secrets): `kip app env set app KEY=VALUE` or `--from-file` |
 | A `DATABASE_URL` you wrote by hand | `kip service bind db app`, which injects the credentials it generated |
-| `depends_on:` | Nothing, and your app needs to cope. Start order is not guaranteed, and a container that stays alive while its database is missing is never restarted for you |
+| `depends_on:` | Add connection retries and readiness checks to the app; dependencies can start or restart independently |
 | A named volume shared between containers | A [shared volume](/en/shared-storage): `kip volume create` then `kip volume mount` |
 | A bind mount of a host directory | Either a shared volume, or object storage. There is no host path to mount |
 | Another container reached by its compose name | `kip app link`, which injects the target's internal URL |
@@ -56,7 +56,7 @@ services:
       - ./nginx.conf:/etc/nginx/nginx.conf
 ```
 
-That becomes four commands and no nginx.
+Create the project, databases, and app with these four commands. Kipper supplies the ingress proxy.
 
 ```bash
 kip project create shop --environments test,prod
@@ -142,7 +142,7 @@ volumes:
 
 An app declared with a `git` block is created holding a placeholder image, because the manifest describes a repository rather than a build. `kip app rebuild web --project shop --environment prod` runs the first one. `kip app rebuild` takes the default project when you leave the scope off, so pass it here. Set up a [webhook](/en/webhooks) if you want a push to build without you.
 
-## What does not carry across
+## Adapting the remaining configuration {#what-does-not-carry-across}
 
 - **Bind mounts of host paths.** `./nginx.conf:/etc/nginx/nginx.conf` and friends assume a filesystem your containers share with the host. Configuration belongs in the image or in environment variables; files your app writes belong in a volume or in object storage.
 - **A reverse proxy container.** Routing, TLS, redirects, rate limiting and the security headers are the platform's job. Keeping your own proxy in front means maintaining certificates it will not renew for you.

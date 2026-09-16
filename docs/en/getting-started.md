@@ -1,160 +1,56 @@
 ---
-title: 'Install Kubernetes on a Linux server in one command'
-description: 'Install a production k3s cluster on an Ubuntu or Debian server with one command, then deploy your first app over HTTPS.'
+title: 'Install Kipper and deploy your first app'
+description: 'Set up Kipper on a Linux server, sign in, and deploy a container with a public HTTPS URL.'
 ---
 
 # Getting Started
 
-This guide walks you through installing Kipper on a fresh Linux server and deploying your first application. By the end, you will have a running Kubernetes cluster with automatic SSL and a web console.
+This guide takes you from a fresh Linux server to a running app with HTTPS and a web console. Run the commands on your own computer. Kipper uses SSH to install the server, then APIs to deploy and manage your workloads.
+
+To join a cluster someone has already installed, follow [Team Access](/en/team-access).
 
 ## Prerequisites
 
-- A Linux server with root SSH access (Ubuntu 20.04, 22.04, 24.04, 26.04, or Debian 11, 12). `kip` signs in as `root`, so if your provider gave you a `sudo` user instead, put your key on the root account before you start
-- 2 GB RAM and 30 GB free disk are enforced by the installer, which refuses less. Plan on 2 vCPU alongside them as a practical minimum, and 4 vCPU / 8 GB / 80 GB for a cluster you will enjoy using
-- Ports 80, 443, and 6443 allowed through your provider's firewall (see below). Leave the server's own firewall alone, Kipper sets that one up for you
-- An SSH key on your local machine. No key yet? `ssh-keygen -t ed25519` makes one, and most providers have a field for the public half when you create the server. For a server that already exists, `ssh-copy-id root@your-server` installs it. If your provider forces a password change on first login, `ssh-copy-id` cannot drive that prompt because it allocates no terminal: log in once with `ssh root@your-server`, change the password, `exit`, then copy the key
-- DNS records, if you are installing on a domain of your own. Kipper serves the console, the API and the login on subdomains of it and gives every app another one, so point a wildcard (`*.example.com`) at the server before you install and every one of them is covered. Records named host by host work too. A record on the bare domain alone looks right and then fails when certificates are issued. Clusters on a free `*.kipper.run` name need no DNS from you. See [DNS for a domain you run](/en/installation#dns-for-a-domain-you-run)
+- **A supported server:** Ubuntu 20.04, 22.04, 24.04, or 26.04; or Debian 11 or 12, with a public IP address and root SSH access.
+- **Capacity:** the installer requires at least 2 GB RAM and 30 GB free disk. Allow additional capacity for your apps and databases; see [sizing guidance](/en/installation#preflight-checks).
+- **An SSH key:** install its public half on the server's root account. You should be able to connect with `ssh root@your-server`.
+- **Provider firewall rules:** allow SSH and ports 80 and 443. Allow port 6443 from the addresses that will use the Kubernetes API, including your own computer.
 
-::: tip Two firewalls, and only one of them is yours
-Your provider gives you a firewall in front of the server, called a security group, cloud firewall or network ACL depending on who you bought it from. That is the one the ports above refer to. Allow 80 and 443 so the world can reach your apps, and 6443 so you can reach the cluster with `kip` and `kubectl`. Nothing but your own machine needs 6443, so scope that rule to your address if your provider lets you.
+Kipper configures the server's UFW firewall during installation. If an existing firewall is already active and managed separately, Kipper preserves it and reports that you need to maintain its rules. See [host security](/en/security#host-hardening) for details.
 
-The firewall on the server is Kipper's job. `kip install` installs UFW and writes the ruleset k3s needs, which includes internal rules for metrics and monitoring that are easy to get wrong by hand. If it finds a firewall already running that it did not set up, it leaves your rules untouched and says so, and maintaining them becomes yours from then on. So resist the urge to SSH in and configure ufw first: that is exactly what makes Kipper skip its own rules.
-:::
-
-::: tip Any Linux VPS will work, but pick a generous one
-Any cloud provider or hosting company works, so long as the VM runs one of the Ubuntu or Debian versions listed above with a public IP and root SSH access. The installer checks the distribution and version and stops if it finds something else. The install command enforces the RAM and disk figures above and leaves CPU to you; none of it is what makes Kipper pleasant to use. For a side-project box that will host an app or two, a database, and Kipper's own backups: pick **8 GB RAM, 4 vCPU, 80 GB SSD or larger**. If you're going to run the [AI Bundle](/en/ai), aim for **16 GB RAM, 4+ vCPU, 100+ GB SSD** at minimum. See [Installation → recommended sizing in practice](/en/installation#preflight-checks) for the full table.
-:::
+The free `*.kipper.run` address works with Kipper-managed DNS. To use your own domain at install time, configure its [DNS records](/en/installation#dns-for-a-domain-you-run) first.
 
 ## Step 1: Install the CLI
 
-**Quick install (Linux/macOS):**
+On Linux or macOS:
+
 ```bash
 curl -sL https://getkipper.com/install | sh
-```
-
-**Windows:**
-
-Download `kip-windows-amd64.exe` from the [latest release](https://github.com/getkipper/kipper/releases), rename to `kip.exe`, and add the directory to your PATH.
-
-::: tip Windows and kip install
-Install from [WSL](https://learn.microsoft.com/en-us/windows/wsl/), where SSH reuses one connection for the hundreds of commands an install sends. PowerShell opens one per command, which works and leaves less margin on a server already fielding SSH traffic. Deploying, logs, secrets, scaling and the rest talk to the Kubernetes API and run from the native binary; the handful of commands that maintain the server go over SSH and belong in WSL too. See [Installing from Windows](/en/windows).
-
-[Installing from Windows](/en/windows) walks through the whole path: WSL setup, the install, and handing the finished cluster back to PowerShell.
-:::
-
-**Or build from source:**
-```bash
-git clone https://github.com/getkipper/kipper
-cd kipper/kip && go build -o kip .
-sudo mv kip /usr/local/bin/
-```
-
-Verify it works:
-```bash
 kip --version
 ```
 
+On Windows, follow [Installing from Windows](/en/windows). That guide uses WSL for installation and the native Windows CLI for daily work.
+
+To build the CLI from source, see [Contributing](/en/contributing).
+
 ## Step 2: Install the cluster
 
-Point Kipper at your server's IP address. It will SSH in, run preflight checks, and install everything automatically.
+Replace the example IP, key path, and email with your own:
 
 ```bash
 kip install --host 203.0.113.10 --ssh-key ~/.ssh/id_ed25519 --admin-email admin@example.com
 ```
 
-You will see output like this:
+Kipper checks the server, installs the platform, and prints the console URL and admin sign-in details. The free cluster address is derived from the server's IP; in this example it is `203-0-113-10.kipper.run`.
 
+**Save the printed admin password.** Kipper stores its hash. If you lose the password, `kip auth reset-password` generates a replacement.
+
+The final step opens a browser. Sign in with the admin address and password from the output so the installer can verify your Kubernetes access. If you skip sign-in, or install with `--no-login`, finish it later:
+
+```bash
+kip auth login
+kip auth verify
 ```
-  Connecting to 203.0.113.10...
-  ✔  Connected
-
-  Running preflight checks...
-  ✔  OS: ubuntu 24.04
-  ✔  RAM: 3820MB available
-  ✔  Disk: 35370MB available
-  ✔  Ports: 80, 443, 6443 open
-  ✔  Platform profile: small
-
-  Auditing host security...
-  ✔  No surplus services detected
-  ✔  No existing host firewall
-
-  Registering subdomain...
-  ✔  Subdomain assigned: 203-0-113-10.kipper.run
-
-  Installing cluster...
-  ...  Installing k3s
-  ✔  Installing k3s
-  ...  Configuring firewall
-  ✔  Configuring firewall
-  ...  Registering Kipper CRDs
-  ✔  Registering Kipper CRDs
-  ...  Recording platform sizing profile
-  ✔  Recording platform sizing profile
-  ...  Installing Traefik ingress
-  ✔  Installing Traefik ingress
-  ...  Applying security hardening
-  ✔  Applying security hardening
-  ...  Configuring cert-manager
-  ✔  Configuring cert-manager
-  ...  Setting up storage
-  ✔  Setting up storage
-  ...  Installing KEDA autoscaler
-  ✔  Installing KEDA autoscaler
-  ...  Installing log aggregation (Loki)
-  ✔  Installing log aggregation (Loki)
-  ...  Installing metrics and dashboards (Prometheus + Grafana)
-  ✔  Installing metrics and dashboards (Prometheus + Grafana)
-  ...  Setting up backup and restore (Velero)
-  ✔  Setting up backup and restore (Velero)
-  ...  Creating kipper-system namespace
-  ✔  Creating kipper-system namespace
-  ...  Storing gateway credentials
-  ✔  Storing gateway credentials
-  ...  Minting the cluster certificate authority
-  ✔  Minting the cluster certificate authority
-  ...  Installing container registry (Zot)
-  ✔  Installing container registry (Zot)
-  ...  Configuring identity provider
-  ✔  Configuring identity provider
-  ...  Staging operator access
-  ✔  Staging operator access
-  ...  Enabling operator authentication
-  ✔  Enabling operator authentication
-  ...  Deploying console
-  ✔  Deploying console
-  ...  Recording serving identity
-  ✔  Recording serving identity
-  ...  Deploying API key service
-  ✔  Deploying API key service
-  ...  Isolating image builds
-  ✔  Isolating image builds
-
-  Admin sign-in
-  Email:      admin@203-0-113-10.kipper.run
-  Password:   02026a371f24a488a86e654cada6e1c6
-
-  Save these credentials now. They will not be shown again.
-  If lost, run: kip auth reset-password
-
-  waiting for the identity provider to accept connections
-  Sign in to finish setup (a browser will open; Ctrl+C to skip and finish later with: kip auth login)
-  Opening browser for authentication...
-  kubectl authenticates as admin@203-0-113-10.kipper.run: the admin certificate never left the server (break-glass: ssh, then sudo k3s kubectl)
-
-  Cluster ready.
-  Console:    https://console--203-0-113-10.kipper.run
-  Kubeconfig: /Users/you/.kip/clusters/203-0-113-10.kipper.run.yaml
-```
-
-The admin password is printed before the sign-in because the browser asks for
-it. Save it then: only its hash is stored, so `kip auth reset-password` is the
-only way back if you lose it.
-
-A browser opens on the last step. Sign in as the admin address above, and the
-installer confirms your identity works against the cluster before it finishes.
-Installs with no terminal, or with `--no-login`, skip that step and print the
-credentials at the end instead.
 
 ## Step 3: Verify the cluster
 
@@ -162,32 +58,9 @@ credentials at the end instead.
 kip status
 ```
 
-```
-  Cluster: 203-0-113-10.kipper.run
-  Host:    203.0.113.10
-  Config:  /Users/you/.kip/clusters/203-0-113-10.kipper.run.yaml
+Check that the node and platform components are ready. Components may take a little longer to become ready after installation; wait a minute and check again if needed.
 
-  Nodes:
-    ✔  ubuntu-server-1    master   Ready    v1.34.5+k3s1
-
-  Components:
-    ✔  k3s              1 node(s)
-    ✔  Traefik          1/1 replicas available
-    ✔  cert-manager     1/1 replicas available
-    ✔  Longhorn         1/1 replicas available
-    ✔  Dex              1/1 replicas available
-    ✔  Console API      1/1 replicas available
-    ✔  Console          1/1 replicas available
-
-  DNS resolvers:
-    ✔  1.1.1.1, 8.8.8.8, 9.9.9.9
-```
-
-::: tip A cross straight after the install is often a slow starter
-`kip status` reports how many replicas of each component the cluster counts as ready at that moment, so a component whose pods are still failing their readiness checks while they start shows as `✗` until they pass. Promtail has been seen doing it on a fresh install, failing its probe twice before settling. Wait a minute and run the command again before you go looking for a fault.
-:::
-
-The DNS resolvers section reads the curated resolver file on the server and audits it. If someone hand-edits it into something the cluster can't use (an IPv6 entry, more than three nameservers, a hostname), if the entries drift from the set the cluster was configured with, or if a resolver stops accepting connections from the server, `kip status` warns you here before it turns into a DNS outage. `kip cluster dns repair` puts the configured resolvers back. The check is best-effort: if the server can't be reached over SSH, the section reports that it could not check instead of silently passing, and the rest of the status still prints.
+The output also includes a DNS resolver audit. For resolver warnings, see [`kip cluster dns repair`](/en/cli-reference#kip-cluster-dns-repair).
 
 ## Step 4: Deploy your first app
 
@@ -195,89 +68,67 @@ The DNS resolvers section reads the curated resolver file on the server and audi
 kip app deploy --name hello --image nginx:latest --port 80
 ```
 
-```
-  Deploying hello...
-  ✔  Deployment created
-  ✔  Service created
-  ✔  Ingress created
-  ✔  Live at https://hello--203-0-113-10.kipper.run
-```
+Open the HTTPS URL printed by the command. Once the deployment is ready, you should see the nginx welcome page.
 
-Open the URL in your browser. You should see the nginx welcome page, served over HTTPS with a valid Let's Encrypt certificate.
-
-## Step 5: Manage your app
+Check the app and stream its logs:
 
 ```bash
-# List all deployed apps
 kip app list
-
-# Stream logs
 kip app logs hello
-
-# Set environment variables
-kip app env set hello LOG_LEVEL=debug
-
-# Set a secret (prompts for hidden input)
-kip app secret set hello DATABASE_URL
-
-# Update the image
-kip app update hello --image nginx:1.27
-
-# Restart the app
-kip app restart hello
-
-# Delete the app
-kip app delete hello
 ```
 
-## Step 6: Add a database
+Visit the console URL printed during installation and sign in with the same account. The dashboard shows your cluster, apps, and services.
+
+## Step 5: Try configuration and secrets
+
+Save an environment variable or a secret:
+
+```bash
+kip app env set hello LOG_LEVEL=debug
+kip app secret set hello EXAMPLE_TOKEN
+```
+
+The secret command prompts for hidden input. These commands save values for the app; they take effect when its pods restart:
+
+```bash
+kip app restart hello
+```
+
+Nginx does not use these example variables. Your own app can read them through its normal environment-variable API. See [Secrets & Environment Variables](/en/secrets) for templates, previews, and rollback.
+
+## Step 6: Add a database when your app needs one
 
 ```bash
 kip service add postgres --name mydb
+kip service info mydb
 ```
 
-```
-  Creating postgres service "mydb"...
-  ✔  StatefulSet created
-  ✔  Persistent storage provisioned
-  ✔  Credentials generated
-
-  Connection details:
-    Host:     mydb.default.svc.cluster.local
-    Port:     5432
-    Username: kipper
-    Password: a1b2c3d4e5f6...
-    Database: app
-
-  To bind to an app:
-    kip service bind mydb <app>
-```
-
-Bind the database to your app so it receives connection details as environment variables:
+Bind the service to an app that uses PostgreSQL:
 
 ```bash
-kip service bind mydb hello
+kip service bind mydb myapp
 ```
 
-## Step 7: Open the console
+Replace `myapp` with that app's name. The binding supplies connection details as environment variables. See [Stateful Services](/en/services) for supported services and binding names.
 
-Visit the console URL from the install output (e.g. `https://console--203-0-113-10.kipper.run`) and sign in with your admin credentials. The dashboard shows cluster health, nodes, deployed apps, and services.
-
-## Step 8: Upgrade Kipper
-
-When a new version of the Kipper console is available, upgrade with:
+## Keeping Kipper up to date
 
 ```bash
 kip upgrade
 ```
 
-This pulls the latest console images and restarts the system components. Your apps and services are not affected.
+The command updates Kipper and offers to reconcile system components. System upgrades can briefly disrupt workloads, so review the confirmation before proceeding. See [upgrade options](/en/maintenance#kip-upgrade), including `--skip-system` for keeping component versions in place.
 
 ## What's next?
 
-- [Deploy a real application](/en/deploying-apps) from a container image
-- [Add a database or cache](/en/services) with persistent storage
-- [Manage projects](/en/environments) to organize your apps
-- [Configure secrets](/en/secrets) for database URLs and API keys
-- [Share access with your team](/en/team-access) so developers can deploy and debug
-- [Set up a custom domain](/en/domains) instead of using kipper.run
+- [Deploy your application](/en/deploying-apps) from an image or Git repository.
+- [Create projects and environments](/en/environments) for test and production.
+- [Invite your team](/en/team-access) and assign project roles.
+- [Configure backups](/en/backups) for recovery.
+- [Use your own domain](/en/domains).
+
+To remove the example app:
+
+```bash
+kip app delete hello
+```

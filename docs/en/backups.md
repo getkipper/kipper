@@ -1,11 +1,11 @@
 ---
 title: 'Back up a Kubernetes cluster to S3 and restore it'
-description: 'Daily and on-demand backups of every resource and volume, with Velero, kept on the cluster by default or in an S3-compatible bucket, and restored into the same namespace or another.'
+description: 'Daily and on-demand backups of user resources and volumes, with Velero, kept on the cluster by default or in an S3-compatible bucket, and restored into the same namespace or another.'
 ---
 
 # Backup & Restore
 
-Kipper includes automatic backup and restore powered by [Velero](https://velero.io). Every cluster gets daily backups of all Kubernetes resources and persistent volume data (databases, file storage) out of the box.
+Kipper includes automatic backup and restore powered by [Velero](https://velero.io). The default daily schedule backs up user resources and persistent volume data, with the namespace exclusions described below.
 
 There are two storage modes:
 
@@ -35,7 +35,7 @@ kip backup schedules
 kip backup create
 ```
 
-This skips the system namespaces (`kube-system`, `kube-public`, `kube-node-lease`, `traefik`, `longhorn-system`, `keda`, `monitoring`, `velero`) and captures everything else. The exclusion is the same one the daily and weekly schedules use. Skipping `velero` is load-bearing: if Velero is asked to back up its own namespace, it tries to capture the MinIO PVC that hosts its backup bucket and the backup hangs forever.
+This skips the system namespaces (`kube-system`, `kube-public`, `kube-node-lease`, `traefik`, `longhorn-system`, `keda`, `monitoring`, `velero`) and captures everything else. The exclusion is the same one the daily and weekly schedules use. Excluding `velero` prevents the backup from capturing the MinIO volume that stores its own output.
 
 ### Back up the system namespaces too
 
@@ -43,9 +43,9 @@ This skips the system namespaces (`kube-system`, `kube-public`, `kube-node-lease
 kip backup create everything --include-system
 ```
 
-You almost never want this. Use it only when you have a specific reason to capture system namespaces, for example a disaster-recovery snapshot of an entire cluster you are about to retire.
+Use this when your recovery plan requires system resources. Review the storage warning above before including Velero’s own namespace.
 
-Even here, cert-manager's transient issuance objects (CertificateRequests, Orders, Challenges) stay out of the backup. cert-manager recreates them on demand, and restoring them stops certificates renewing, so they are always excluded.
+Even here, cert-manager's transient issuance objects (CertificateRequests, Orders, Challenges) stay out of the backup. cert-manager recreates them on demand; restoring stale issuance state can interfere with renewal.
 
 ### Back up a specific project
 
@@ -96,7 +96,7 @@ kip backup restore pre-migration --namespace-mapping blog-test:blog-restored
 |---|---|---|
 | Deployments, Services, Ingresses | Yes | Kubernetes resource definitions |
 | ConfigMaps, Secrets | Yes | Kubernetes resource definitions |
-| Environment variables and app secrets | Yes | Stored as Kubernetes Secrets |
+| Environment variables and app secrets | Yes | Workload specs and Kubernetes Secrets |
 | PostgreSQL data | Yes | PVC data via Kopia file-system backup |
 | Redis data | Yes | PVC data via Kopia file-system backup |
 | Longhorn volumes | Yes | Full file-system backup of volume contents |
@@ -136,7 +136,7 @@ flowchart LR
 - The Velero HelmChart references the Secret by name; the credentials never appear in any HelmChart CR or kubectl-apply output
 - Local `~/.kip/config.yaml` records mode + bucket + region + endpoint, never the keys
 
-To rotate keys later, run `kip install` again with the updated credentials file pointing at the same host. That replaces the Secret in place. Note it re-runs the rest of the install too, which is not free: see [what an upgrade moves](/en/installation#what-an-upgrade-moves-and-what-it-does-not).
+To rotate keys later, run `kip install` again with the updated credentials file pointing at the same host. That replaces the Secret in place. Note it re-runs the rest of the install too, which is not free: see [what an upgrade moves](/en/maintenance#what-an-upgrade-moves-and-what-it-does-not).
 
 ## Retention
 

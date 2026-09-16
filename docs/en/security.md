@@ -5,21 +5,15 @@ description: 'The firewall rules, host hardening, tenant boundaries and security
 
 # Security
 
-Kipper takes security seriously. Every cluster is hardened by default with production-grade security controls, no configuration required.
+Kipper configures host hardening, TLS at the ingress, workload network policies, and access controls. This page explains those defaults and the boundaries they protect.
 
-::: warning Shared responsibility
-Kipper provides a strong baseline of infrastructure-level security: encrypted traffic, security headers, rate limiting, isolated namespaces, and automatic backups. However, **security is ultimately the responsibility of the development and operations teams** building on top of Kipper.
-
-No platform can protect against insecure application code, weak passwords, leaked credentials, or misconfigured services. Kipper gives you the foundation, and you are responsible for building securely on top of it. This includes writing secure application code, managing secrets carefully, keeping dependencies updated, and following the principle of least privilege.
-
-We encourage you to treat Kipper's security features as a baseline, not a guarantee. Review your own application security regularly and follow the best practices documented below.
-:::
+Your team manages application security, dependencies, credentials, and access. See [Your responsibilities](#your-responsibilities) for the operational checklist.
 
 ## What Kipper provides out of the box
 
-### TLS everywhere
+### TLS at the ingress {#tls-everywhere}
 
-All traffic is encrypted with TLS certificates issued automatically by Let's Encrypt via cert-manager. HTTP requests are redirected to HTTPS at the ingress entrypoint, before any route or API key is processed.
+Public app routes use HTTPS. On custom domains, cert-manager obtains Let's Encrypt certificates for Traefik; shared `*.kipper.run` routes terminate public TLS at the gateway. HTTP requests redirect to HTTPS at the ingress entrypoint. Internal service connections use the protocol configured by the service.
 
 `X-Forwarded-*` headers are honoured only from trusted proxies: the kipper.run gateway (trusted automatically when your cluster uses a kipper.run domain) and any addresses you pass with `--trusted-proxy`. From anyone else they are dropped. On the kipper.run path the gateway drops any client-supplied `X-Forwarded-For` and sets it to the address it measured, so the source IP in your logs is trustworthy. If you put your own load balancer in front and trust it with `--trusted-proxy`, the logged source is only as trustworthy as that balancer: most append to the client-supplied chain rather than replacing it, so treat the leftmost address as a claim and cross-check the `forwarded_for` chain that kipper-authz logs. Source IP is used for logging only, never to decide whether a key is valid.
 
@@ -53,19 +47,11 @@ The kubelet runs with `protect-kernel-defaults`, so it refuses to start unless t
 
 **Existing firewall detected**
 
-If `kip install` finds a firewall already active on the host, what happens next depends on whose it is. A firewall you set up is left alone: Kipper skips its own firewall step rather than layer rules on top of someone else's policy, and prints a notice that your firewall configuration is now your responsibility, with 22, 80, 443, and 6443 needing to stay reachable. A firewall Kipper set up earlier is Kipper's to bring back in line, so it gets reconfigured.
+Kipper preserves an existing firewall you manage. It reconfigures UFW only when the host carries its ownership marker, `/etc/kipper/firewall-managed`. Active firewalld is always left to you.
 
-Kipper tells the two apart by a file at `/etc/kipper/firewall-managed`, written as the last step of the first configuration command it runs against UFW. The file records that this command completed, which is what makes the ruleset Kipper's. A run that fails before then leaves no file, so it never vouches for a firewall you set up afterwards, and a run that fails after it leaves the file over the half-built firewall, so the retry recognises the wreckage and puts it right. Without this, an install that failed after enabling UFW would leave a host whose retry silently inherited the half-finished ruleset.
+`--firewall=false` skips firewall configuration. To take over an existing Kipper-managed firewall, remove the marker and maintain the rules yourself. Avoid changing firewall policy during an installation.
 
-Nothing rolls back if the file write itself fails: the change stays and the host is left unclaimed, which errs the safe way, since Kipper then reads the host as yours and keeps its hands off. The file is written under a temporary name of that run's own and moved into place, so a half-written one never appears, and two Kipper runs on the same host cannot publish each other's partial writes.
-
-The file only ever speaks for UFW. If firewalld is running, Kipper leaves the host alone whatever the file says, because firewalld is not something Kipper manages.
-
-Kipper also re-checks the host immediately before it starts work, since the first check happens before host hardening and the k3s install and can be minutes old by then. A firewall that comes up in that gap is still read as yours. The re-check narrows the window rather than removing it: a firewall enabled in the moment between that check and the first change would still be taken as Kipper's, which is why the file is worth knowing about if you configure firewalls on a host while an install is running.
-
-`--firewall=false` stops the step either way, on your firewall and on Kipper's own.
-
-Delete the file to take the firewall over yourself, and Kipper treats it as yours from then on. Firewalls set up before this file existed carry no claim, so they read as yours and keep their rules.
+For a firewall you manage, allow the SSH port and ports 80, 443, and 6443 from the clients that need them.
 
 Cloud-side firewalls (Hetzner Cloud Firewall, AWS Security Groups, etc.) are external to the host and are not detected by Kipper. If you use one, make sure those four ports are reachable on the server.
 
@@ -133,7 +119,7 @@ kip app update api --public-path /actuator/prometheus
 
 A new cluster installs with the default list refused. A cluster upgraded from an earlier release keeps serving what it served until an operator turns it on, because the change is visible to whatever is calling those paths today.
 
-The refusal is an ingress rule matching the path as written, so it closes the accidental exposure rather than filtering what reaches your app: case, path parameters on a servlet container, and encoded separators are spellings it can miss. An endpoint that must never be public belongs on a port the Service does not publish. [What a path prefix publishes](/en/deploying-apps#what-a-path-prefix-publishes) has the detail, including the Spring Boot setting that moves the actuator off the app port entirely.
+The refusal is an ingress rule matching the path as written, so it closes the accidental exposure rather than filtering what reaches your app: case, path parameters on a servlet container, and encoded separators are spellings it can miss. An endpoint that must never be public belongs on a port the Service does not publish. [What a path prefix publishes](/en/routing#what-a-path-prefix-publishes) has the detail, including the Spring Boot setting that moves the actuator off the app port entirely.
 
 ### CSP allowlist
 
@@ -162,21 +148,15 @@ The rate limit applies at the ingress level before traffic reaches your applicat
 
 ### Pod Security Standards
 
-Kipper enforces the Kubernetes [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) baseline profile on all user namespaces. This warns when deployments attempt to:
+User namespaces enforce the `baseline` Pod Security Standard and warn and audit against `restricted`. Baseline enforcement rejects settings such as privileged containers, host networking, and host-path volumes. The stricter warnings help identify workloads that could further restrict privileges, including running as a non-root user.
 
-- Run containers as root
-- Use privileged mode
-- Access the host network or host PID namespace
-- Use host path volumes
-- Escalate privileges
-
-System namespaces (kube-system, monitoring, etc.) are excluded from enforcement to allow infrastructure components to function.
+System components use their own namespaces and security settings.
 
 ### Authentication
 
 The web console is protected by Dex (OAuth2/OIDC identity provider) with bcrypt-hashed passwords. API access requires a valid JWT token.
 
-Service-UI share links are the one deliberate exception: an admin can mint a signed, expiring link that opens a single browseable service UI without a Dex login. Each link is a bearer capability backed by a server-side grant, structurally separate from Dex tokens, and it reaches nothing but that one UI. If a link leaks, revoke it (or revoke every link) and rotate the signing key twice. See [Sharing a UI without a login](/en/services#sharing-a-ui-without-a-login) for the full model and the leak runbook.
+Service-UI share links are the one deliberate exception: an admin can mint a signed, expiring link that opens a single browseable service UI without a Dex login. Each link is a bearer capability backed by a server-side grant, structurally separate from Dex tokens, and it reaches nothing but that one UI. If a link leaks, revoke it (or revoke every link) and rotate the signing key twice. See [Sharing a UI without a login](/en/service-uis#sharing-a-ui-without-a-login) for the full model and the leak runbook.
 
 ### Secrets management
 
@@ -221,7 +201,7 @@ Two limits worth knowing:
   cannot be read, the namespace still gets the deny baseline of DNS and same-namespace traffic, and
   public egress is left out rather than opened.
 
-Cross-namespace access that you *want* is arranged explicitly with [app links](/en/deploying-apps),
+Cross-namespace access that you *want* is arranged explicitly with [app links](/en/routing#linking-apps),
 which open a path between two named workloads rather than between whole namespaces.
 
 ::: tip Per-project resource quotas
@@ -232,35 +212,21 @@ On shared clusters, assign each project a tier: every environment namespace then
 
 Runtime isolation is separate from who is allowed to touch a project. Access is decided by membership: a person only sees and works on projects they belong to, with a per-project role (Viewer, Deployer, or Owner) that sets what they can do. Cluster admins see and manage everything. See [Project Members](/en/project-members) for the full model.
 
-### Membership is not the same as owning the namespace
+### Namespace ownership {#membership-is-not-the-same-as-owning-the-namespace}
 
-A project's members are recorded on the Project. Which namespace a project *has* is recorded on the
-namespace itself, as a `kipper.run/project` label, and that label is what every request is checked
-against.
+Project membership grants access to namespaces owned by that project. Kipper checks ownership using the namespace’s `kipper.run/project` label.
 
-The two agree except in one state: two projects can resolve to the same namespace name. Project
-`shop` with an environment `prod` and a project called `shop-prod` both point at `shop-prod`, and
-whichever reconciled first holds it. The other is left with a declaration it does not own, recorded
-as a conflict rather than resolved, because renaming somebody's live namespace out from under them
-is worse than saying so.
-
-So a member of the losing project gets `403` on that environment despite being a genuine member of
-the project that names it. Nothing is broken and nothing needs repairing except the collision:
-rename one of the two projects, or the environment. `kip project list` shows both, and the Project's
-own status carries the conflict.
-
-The same rule is why copying an environment refuses a namespace that is not the project's, rather
-than writing into it.
+Two project/environment combinations can resolve to the same namespace name. The first project to claim it keeps ownership; the other reports a conflict and its members receive `403` for that environment. Resolve the name collision before using or copying the environment. Check the Project’s status for the conflicting namespace.
 
 ### Platform service account scope
 
-Project roles are enforced by the console API, not by Kubernetes RBAC. The console API runs with a service account that can read and write Secrets in every namespace and open exec sessions in application pods. That breadth is inherent to what the console does: it creates each project's secrets, injects service credentials, and runs the database console, file browser, and data migration inside service pods.
+The console API checks project membership before operating with its platform service account. That account can manage Secrets and execute commands in pods across namespaces to support deployment, database tools, and migration. Protect its credentials and administrative access to `kipper-system`.
 
-Project isolation therefore holds for console users, because every request passes the membership check first. It places no limit on anyone who can reach the Kubernetes API directly with a kubeconfig or with the console API's service account token. Treat kubeconfig access and the `kipper-system` namespace as equivalent to cluster admin and guard them accordingly.
+Direct Kubernetes access uses the operator’s own Kubernetes role bindings. A kubeconfig identifies the connection and authentication method; its permissions depend on the identity it uses. The server’s k3s admin kubeconfig grants cluster-admin access. See [Team Access](/en/team-access).
 
 ### Automatic backups
 
-Daily backups at 3:00 AM include all Kubernetes resources and persistent volume data (databases). Backups are retained for 7 days with one-click restore.
+The daily backup schedule runs at 3:00 AM with seven-day retention. It covers user resources and persistent volume data, with system namespace exclusions. See [Backups & Restore](/en/backups) for coverage and storage options.
 
 ## Docker image best practices
 
@@ -305,16 +271,16 @@ CMD ["java", "-jar", "app.jar"]
 
 Prefer Alpine-based images (`node:20-alpine`, `eclipse-temurin:21-jre-alpine`) over full Debian images. Smaller images have fewer packages and a smaller attack surface.
 
-### Don't store secrets in images
+### Supply secrets at runtime {#don-t-store-secrets-in-images}
 
-Never bake secrets, API keys, or passwords into Docker images. Use Kipper's secret management instead:
+Supply passwords and API keys through Kipper’s secret management:
 
 ```bash
 kip app secret set my-app DATABASE_URL
 kip app secret set my-app API_KEY
 ```
 
-These are injected as environment variables at runtime, not stored in the image.
+Kipper injects these values as environment variables at runtime. Keep credentials out of Dockerfiles and files copied into images: anyone who can pull the image may be able to recover them.
 
 ### Pin image versions
 
@@ -343,7 +309,7 @@ Kipper does not run image scanning automatically. Build scanning into your CI pi
 
 You can password-protect any app with HTTP basic auth. This is useful for staging environments, internal tools, or documentation sites that aren't ready for public access yet.
 
-Basic auth is not a substitute for proper authentication (Dex, SSO). It's a simple access gate. Use it when you need a quick way to keep casual visitors out, not for production security.
+Basic auth applies one access rule to the whole app. Applications that need user roles, sessions, or account management should implement those features in their own authentication flow.
 
 ### Enabling via the console
 
@@ -361,8 +327,8 @@ Your app never sees the authentication. Traefik handles it at the ingress level.
 
 ### Limitations
 
-- No per-user access control. All users with valid credentials see the same content.
-- No session management. The browser sends credentials on every request.
+- All users with valid credentials have the same access.
+- The browser sends credentials on every request.
 - Credentials are sent base64-encoded (not encrypted) in the Authorization header. Always use HTTPS.
 - For proper user authentication with sessions, tokens, and roles, use Dex and the built-in auth system.
 

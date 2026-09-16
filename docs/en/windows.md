@@ -10,8 +10,7 @@ of commands that maintain the server itself, run from WSL. This page covers the
 whole path from a fresh Windows machine to a working cluster you manage from
 PowerShell.
 
-If someone on your team has already installed the cluster, you need none of this.
-Ask them for a `kip cluster export` file, then read [Team Access](/en/team-access).
+To connect to an existing cluster, ask an administrator for a `kip cluster export` file and follow [Team Access](/en/team-access).
 
 ## Why the install runs from WSL
 
@@ -20,18 +19,7 @@ multiplexes, so they all share one connection. Windows OpenSSH does not, and Git
 Bash's ssh comes from the same family, so from PowerShell each command opens its
 own.
 
-The difference shows up on a busy server. sshd stops accepting new
-unauthenticated connections once ten are in flight, and a public IP collecting
-the usual background scans can sit close to that line, so one of those hundreds
-of connections gets refused and the install stops partway through. A single
-reused connection never meets the limit.
-
-Both routes install the same cluster. WSL is the one this page takes, and the
-one that gets tested.
-
-Deploying, logs, secrets, scaling and the rest run from `kip.exe`, talking to
-the Kubernetes API over HTTPS. A short list of commands maintains the server
-itself and goes over SSH; they are named at the end of this page.
+Reusing a connection reduces SSH handshakes and helps installs stay within the server's connection limits. This guide uses WSL for installation and host maintenance, then the native `kip.exe` for daily work over HTTPS.
 
 ## 1. Set up WSL
 
@@ -44,15 +32,13 @@ wsl --install -d Ubuntu
 Reboot when it asks, then open Ubuntu from the Start menu and set a username and
 password.
 
-::: warning Use Ubuntu, not Alpine
-A minimal distro costs more time than it saves here. Alpine ships without `sudo`,
-`curl`, `apt` or `ssh-keygen`, all of which the steps below need.
+::: tip Use Ubuntu for this walkthrough
+The commands below assume Ubuntu and its package tools.
 :::
 
 If `wsl --install` fails, the usual causes are virtualization disabled in the
 UEFI firmware, the Virtual Machine Platform Windows feature being off, or device
-management policy on a corporate machine. The last one is worth checking early,
-because no amount of retrying gets past it.
+management policy on a corporate machine. Check your organisation's WSL policy if you use a managed device.
 
 ## 2. Install kip inside WSL
 
@@ -94,11 +80,7 @@ Around ten minutes. It prints the console URL and an admin email and password.
 **Copy the password now**, it is shown once. If it goes missing, `kip auth
 reset-password` issues a new one.
 
-`--no-login` keeps the install self-contained. Left off, the install ends by
-waiting for a browser sign-in to come back to `localhost:18741` on the machine
-running kip, which puts your WSL networking in the path for no gain here. The
-cluster is fully installed either way, and you sign in from Windows in the next
-step, where the browser is already to hand.
+`--no-login` completes installation without waiting for a browser sign-in in WSL. You will sign in from Windows in the next step.
 
 ## 5. Hand the cluster to Windows
 
@@ -129,22 +111,11 @@ In `kip exec`, a remote shell keeps drawing to the size the window had when the
 session opened, because Windows reports a resize as console input rather than as a
 signal. Size the window before you connect, or reconnect after resizing.
 
-These reach the server over SSH: `kip install`, `kip upgrade`, `kip cluster
-domain` (except `--repair`, which is local), `kip cluster ca status`, `kip cluster auth sync`, `kip cluster dns
-repair`, `kip cluster harden`, `kip cluster uninstall` and `kip node add`.
-Everything else talks to the Kubernetes API. `kip status` sits in between: it opens a connection to audit the
-server's DNS resolver file, but that check is best-effort, so from PowerShell it
-reports that it could not read the file and prints the rest of the status as
-normal.
+Host maintenance commands use SSH, including upgrades, domain changes, host repair, hardening, and node management. Run them from WSL to reuse SSH connections.
 
-Keep those in WSL too, for the same reason the install goes there. The install
-protects the server's SSH port with a rate limit of six connections per thirty
-seconds from any one address, which one multiplexed connection sits comfortably
-inside. Run the heavier ones from PowerShell and they can cross it on their own:
-`kip cluster ca status` makes a series of independent reads and probes. Lighter
-ones like `kip cluster dns repair` stay under it, though the limit counts every
-connection from your address in that window, so a colleague behind the same
-address counts towards yours.
+Routine workload commands use the Kubernetes or console API. `kip status` also attempts SSH host checks; if that connection fails, it reports the unchecked sections and continues with the API results.
+
+The UFW SSH rate limit counts new connections from the same source address, including colleagues behind a shared VPN or office connection.
 
 If you would rather run everything from PowerShell, install with
 `--no-ssh-rate-limit` and the rule is left off. That changes Kipper's firewall

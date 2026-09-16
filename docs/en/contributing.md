@@ -90,7 +90,7 @@ cd kip && go build -o kip . && cd ..
 
 `kip install` sets up k3s, Traefik, cert-manager, Longhorn, Dex, and the console, then prints the admin login. See [Installation](/en/installation) for the full flag reference.
 
-Sign in to the console with those admin credentials. Authentication is a real Dex login, the same as production. There is no local bypass, so a running cluster with Dex is what you authenticate against.
+Sign in to the console with those admin credentials. Local development uses the cluster’s Dex login, the same authentication path as production.
 
 ### Console-only iteration
 
@@ -145,8 +145,8 @@ When adding a new feature, decide whether it needs a new CRD (owns Kubernetes re
 
 ### Vue / TypeScript
 
-- Composition API with `<script setup lang="ts">`, never Options API
-- No `any`, define proper types
+- Composition API with `<script setup lang="ts">`
+- Define specific TypeScript types
 - Pinia stores with loading and error state
 - Tailwind utility classes only, no inline styles
 - `lucide-vue-next` for icons
@@ -214,7 +214,7 @@ arguments as the scanner, and a non-zero exit stops the push.
 - New features require unit tests covering the happy path and at least two error cases
 - Bug fixes require a test that would have caught the bug
 - Documentation changes are required in the same PR as feature changes
-- Every example must use realistic names, not `foo` or `bar`
+- Use realistic names in examples
 
 ## Licensing
 

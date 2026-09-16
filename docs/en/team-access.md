@@ -5,95 +5,67 @@ description: 'Invite people, give each a role per project, and let them deploy a
 
 # Team Access
 
-Kipper is designed for teams. There are two ways to give someone access to a cluster, and the right one depends on how much they should be able to do. Neither shares SSH keys or server passwords.
+Give each person a Kipper account, then assign the access they need. Project members can work in selected projects; cluster admins manage users and platform settings.
 
-**Scoped access, for most people.** Invite a developer or contractor into specific projects with a role that limits what they can do. They log in as themselves and only see the projects you added them to. This is the right choice for team members, and the full model is in [Project Members](/en/project-members). The short version is below.
-
-**Full cluster access, for another admin or your own machines.** Export the cluster credentials and share the file. Whoever imports it can run every `kip` command against the cluster, the same as you. Use this for a co-admin, or to set up the CLI on a second machine of your own. It is not a way to hand out limited access.
+To use the CLI, everyone follows the same connection setup: import the cluster details and sign in with their own account. The export contains connection settings and the cluster's public CA certificate. **Importing it grants no permissions**; access comes from the signed-in user's roles and Kubernetes bindings.
 
 ## Scoped access for a team member
 
-First invite them. On the **Users** screen click **Invite**, choose the project and their role, and send the link. When they accept and set a password, their Kipper account is created and they land in that project with no cluster-wide powers. From the CLI it is two commands, because an invite carries a cluster-wide role and the project role
-is set separately:
+On the **Users** screen, click **Invite**, choose the project and role, and share the invitation link. Accepting the invite creates the account and project membership together.
+
+From the CLI, invite first:
 
 ```bash
 kip user invite --email jordan@acme.com --role viewer
-# once they have opened the link and set a password:
+```
+
+After Jordan accepts the invite and sets a password, add the project membership:
+
+```bash
 kip project members add acme-shop jordan@acme.com deployer
 ```
 
-The second command needs their account to exist, which happens when they accept, so it is refused
-until then. Keep the invite at `--role viewer`. That flag applies across the whole cluster, so `--role deployer`
-would let them deploy to every project and the project role would take nothing back. See
-[Project Members](/en/project-members) for the longer version.
+Use the cluster `viewer` role for this setup and assign working permissions through project membership. See [Project Members](/en/project-members) for the available roles.
 
-They then point the `kip` CLI at the cluster and log in as themselves:
+## Set up CLI access {#full-cluster-access}
 
-```bash
-kip auth login
-```
+Use these steps for a team member or another machine of your own.
 
-This opens a browser to the cluster's login (Dex) and stores a session token, refreshed automatically until the refresh token expires. From then on their commands run with their own identity, and their per-project role decides what they can do: a viewer reads apps, logs, and settings; a deployer deploys and edits; an owner also manages members. See [Project Members](/en/project-members) for the full model.
+### Step 1: Export the connection details
 
-## Full cluster access
-
-To give another admin complete CLI access, or to set up `kip` on a second machine of your own, export the credentials and import them on the other machine.
-
-### Step 1: Export the cluster (admin)
-
-The admin runs:
+On a machine already configured for the cluster:
 
 ```bash
 kip cluster export > acme-production.kip
 ```
 
-This creates a file called `acme-production.kip` containing the cluster connection details and credentials.
+Share the file with the recipient through your team's usual channel. It contains cluster addresses and trust information, so the recipient should obtain it from a trusted administrator.
 
-### Step 2: Share the file
+### Step 2: Import and sign in
 
-Send the `.kip` file to your team member however you normally share files: Slack, email, a shared drive. The file is sensitive (it grants cluster access), so use a secure channel when possible.
-
-### Step 3: Import and connect (team member)
-
-The team member installs the `kip` CLI, then imports the file:
+After installing the CLI, the recipient runs:
 
 ```bash
 kip cluster add acme-production.kip --set-current
+kip auth login
 ```
 
-The `--set-current` flag makes this the active cluster immediately. Without it, the cluster is saved but not selected.
+`--set-current` selects the imported cluster. The login command opens a browser for the recipient to sign in as themselves.
 
-They can verify it worked:
+### Step 3: Verify access
 
 ```bash
-kip status
+kip auth verify
 ```
 
-```
-  Cluster: acme.kipper.run
-  Host:    203.0.113.10
-
-  Nodes:
-    ✔  ubuntu-server-1    master   Ready    v1.34.5+k3s1
-
-  Components:
-    ✔  k3s              1 node(s)
-    ✔  Traefik          1/1 replicas available
-    ✔  cert-manager     1/1 replicas available
-    ✔  Longhorn         1/1 replicas available
-    ✔  Dex              1/1 replicas available
-    ✔  Console API      1/1 replicas available
-    ✔  Console          1/1 replicas available
-```
-
-Whoever imported the file now has the same full access to the cluster as you and can run every `kip` command. For access limited to certain projects, use the scoped path above instead.
+Console roles and Kubernetes permissions are separate. Project membership is projected into namespaced Kubernetes bindings; full Kubernetes administration requires a cluster-admin binding. Administrators can use `kip user list` to inspect the reported cluster access. See [Authentication](/en/authentication) for sessions and [CLI reference](/en/cli-reference#kip-auth-verify) for verification.
 
 ## Managing multiple clusters
 
 If you manage multiple servers (your own product, a client project, a separate cluster for a different region), each gets its own cluster entry. Import as many as you need and switch between them.
 
 ::: tip Clusters vs environments
-You do not need a separate cluster for each environment. A single cluster can have test, acc, and prod environments using [project environments](/en/environments). Use `kip app promote` to move code between them. Multiple clusters are for genuinely separate infrastructure: different servers, different customers, different regions.
+Use [project environments](/en/environments) for test, acc, and prod within one cluster, and `kip app promote` to promote app images between them. Use separate clusters when you need separate infrastructure, such as different servers, customers, or regions.
 :::
 
 ### List all clusters
@@ -132,7 +104,7 @@ When you no longer need access to a cluster:
 kip cluster remove client-project
 ```
 
-This only removes the local credentials. It does not affect the cluster itself or anyone else's access.
+This removes the local cluster entry and kubeconfig. The server and other users' access remain in place.
 
 ## Connecting to databases
 
@@ -221,14 +193,14 @@ kip tunnel api --project blog --environment prod --kind service
 ```
 
 Where the name still matches several workloads, both commands list the matches
-and stop. See [Naming one workload](/en/installation#naming-one-workload).
+and stop. See [Naming one workload](/en/cli-reference#naming-one-workload).
 
 ## Quick reference
 
 | Task | Command |
 |---|---|
 | Export a cluster to share | `kip cluster export > file.kip` |
-| Import cluster credentials | `kip cluster add file.kip --set-current` |
+| Import cluster connection details | `kip cluster add file.kip --set-current` |
 | List clusters | `kip cluster list` |
 | Switch cluster | `kip cluster use <name>` |
 | Remove local cluster config | `kip cluster remove <name>` |

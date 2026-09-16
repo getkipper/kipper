@@ -44,53 +44,15 @@ When a new app has no resource requests configured, the controller applies profi
 
 ### Crash loops
 
-A container Kubernetes has given up restarting produces a warning every hour for
-six hours. If it is still going at six hours, one critical alert says it is not
-recovering on its own and names the command that recreates the pod. After that
-it repeats once a day for as long as the loop lasts.
+A crash-looping container generates hourly warnings for six hours, then a critical alert and daily reminders. This keeps recurring failures visible while preserving space in the 50-alert history.
 
-The ladder exists because the bell holds fifty alerts. An hourly warning that
-never changes fills it in two days and evicts the alert that would have told you
-when the trouble started.
-
-An episode closes when the container has run clean for ten minutes. If it had
-escalated, an all-clear says so, because the people who were told about it are
-owed the news that it is over.
+After ten minutes of healthy running, the episode closes. An escalated episode also produces an all-clear alert.
 
 ### Read-only volumes
 
-When a container with a persistent volume dies, Kipper reads the log it wrote on
-the way out. A line saying the filesystem is read-only raises a `ReadOnlyFilesystem`
-alert rather than another crash-loop warning, quoting the line it found so you
-can see the evidence rather than take the diagnosis on trust.
+When a container with a writable persistent volume fails, Kipper checks its previous logs for read-only filesystem errors. A matching message produces a critical `ReadOnlyFilesystem` alert containing the log evidence and mounted volumes.
 
-A log line says a filesystem stopped accepting writes. It rarely says which, and
-a container has several: its persistent volumes, anything mounted from a
-ConfigMap or Secret, and its own image, which lives on the node's disk. Nor can
-the path in the message settle it, because a pathname does not identify the
-filesystem behind it. Postgres puts `/var/lib/postgresql/data/pg_wal` on a
-separate volume often enough for that to matter.
-
-So the alert reports the fact it has, names the volumes the container mounts,
-and offers the recovery as a condition rather than a promise:
-
-```
-container "postgres" wrote this before it died: FATAL:  could not remove old
-lock file "postmaster.pid": Read-only file system. It hit a read-only
-filesystem. The container mounts volume data-db-0. If that is the one,
-'kip service restart db' recreates the pod and clears it, which a container
-restart cannot do because the mount belongs to the pod
-```
-
-Only containers that mount a writable persistent volume raise it, because those
-are the ones a pod recreation can help. A volume the workload asked for
-read-only is left out: that one did not remount, it was mounted that way, and a
-new pod reproduces it.
-
-It is critical from the first sighting rather than climbing the ladder above.
-The filesystem does not come back on its own, and restarting the container
-cannot clear a mount. See [Recovering a read-only
-volume](#recovering-a-read-only-volume).
+The message identifies a write failure, but may not identify which filesystem failed. Check the affected mount before recreating the pod. See [Recovering a read-only volume](#recovering-a-read-only-volume).
 
 ## Where alerts go
 
@@ -118,7 +80,7 @@ Configure a channel under **Settings** in the console. See
 
 Click **Dismiss** in the alerts panel to mark all current alerts as read. The unread count on the bell icon resets to zero. Dismiss is per-user, so each team member has their own read/unread state.
 
-Dismissed alerts are not deleted. They remain visible in the alerts panel but no longer contribute to the unread count. New alerts that arrive after dismissal will increment the badge again.
+Dismissed alerts remain in the panel’s history. New alerts increase the unread count again.
 
 ## Storage
 
@@ -162,11 +124,7 @@ The common trigger is a security update. Debian's needrestart restarts daemons
 holding a patched library, and restarting `iscsid` takes every Longhorn session
 on the node with it.
 
-What this covers is needrestart's own restarts, which is what the failure
-behind this feature was. A package upgrade of open-iscsi itself restarts the
-daemon from its own maintainer script, before needrestart runs at all, and no
-drop-in prevents that. `kip status` reporting a green tick here means needrestart
-will leave the storage path alone, not that nothing can ever restart it.
+Kipper’s protection covers restarts initiated by needrestart. An upgrade of the open-iscsi package can restart `iscsid` through its own package script, so plan storage-related package upgrades carefully.
 
 Kipper writes `/etc/needrestart/conf.d/50-kipper-storage.conf` during
 `kip install` and `kip node add` to stop that, leaving `iscsid`,
@@ -177,8 +135,7 @@ choose. A node added by an older `kip` does not have the file:
 kip node repair-host --host <address>
 ```
 
-That trade has a cost, and `kip status` reports it rather than letting it become
-drift nobody agreed to:
+`kip status` reports services that still need a restart to load updated libraries:
 
 ```
   Pending restarts:

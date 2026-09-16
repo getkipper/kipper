@@ -5,9 +5,11 @@ description: 'Copy projects, apps, databases and volumes from one Kipper cluster
 
 # Cluster Migration
 
-Kipper can migrate entire projects (apps, services, databases with data, volumes, functions, jobs, and secrets) from one cluster to another. No kubectl, no manual exports.
+Use the console to copy projects, workloads, secrets, and supported database and volume data between Kipper clusters. Review the transfer plan and skipped items before starting.
 
-**Migration copies. Your source cluster keeps running untouched until you decommission it yourself.** Nothing on the source is deleted, scaled, or reconfigured by a migration; the cutover only writes route updates on the target. If anything goes wrong before writes land on the target's databases, point DNS back and you are exactly where you started. Once new writes have landed on the target, rolling back means losing them, so treat the cutover as the moment of commitment.
+Migration copies resources to the target and leaves the source cluster available for rollback. Some storage transfers temporarily pause services on both clusters; see [Limitations](#limitations).
+
+Plan the write freeze and DNS cutover together. Once applications write to the target, returning traffic to the source also requires a plan for those new writes.
 
 ## When to use migration
 
@@ -50,7 +52,7 @@ Migration is a console feature with visual progress. The flow:
 
 Before anything moves, the source checks the target has enough free CPU, memory, and disk for the selected projects and refuses the migration with a clear message if the box is too small. The disk check compares the projects' volume claims against the target's storage headroom, so treat it as a sanity check rather than a guarantee. Both clusters must also run the same major Kipper version.
 
-### What is NOT migrated
+### Resources to recreate separately {#what-is-not-migrated}
 
 - System components (Traefik, cert-manager, Longhorn, Dex), which already exist on the target from `kip install`
 - User accounts (Dex). The migration shows a reminder with the `kip user import` steps; the target starts with only its bootstrap admin
@@ -135,7 +137,7 @@ kip app scale worker --replicas 0 --project shop --environment prod
 Autoscaled apps need one step first: the HPA keeps them running whatever the replica count says, so `kip app scale` refuses them until autoscaling is off. Disable it, scale down, and re-enable it on the target after the cutover:
 
 ```bash
-kip app autoscale api --off
+kip app autoscale api --off --project shop --environment prod
 kip app scale api --replicas 0 --project shop --environment prod
 ```
 
