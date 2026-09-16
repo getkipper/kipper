@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"regexp"
@@ -675,13 +676,13 @@ func RepairHostDNS(client *ssh.Client, resolvers []string) ([]string, error) {
 	return cleaned, nil
 }
 
-// JoinWorkerNode joins a new worker node to an existing k3s cluster.
-// The token is read from the master node.
-func JoinWorkerNode(masterClient *ssh.Client, workerClient *ssh.Client, masterHost string) error {
+// JoinWorkerNode joins a worker using the master's token and returns its node name
+// after confirming registration against id. Read id before changing the host.
+func JoinWorkerNode(masterClient *ssh.Client, workerClient *ssh.Client, masterHost string, id HostIdentity) (string, error) {
 	// Get the join token from the master
 	token, err := masterClient.Run("cat /var/lib/rancher/k3s/server/node-token")
 	if err != nil {
-		return fmt.Errorf("reading node token from master: %w", err)
+		return "", fmt.Errorf("reading node token from master: %w", err)
 	}
 
 	// Mirror the server's curated resolvers onto the worker and point the
@@ -699,18 +700,18 @@ func JoinWorkerNode(masterClient *ssh.Client, workerClient *ssh.Client, masterHo
 	// often sits behind different egress rules than the master.
 	warnUnreachableResolvers(probeDNSResolvers(workerClient, resolvers), resolvers)
 	if err := writeResolvConf(workerClient, renderResolvConf(resolvers)); err != nil {
-		return err
+		return "", err
 	}
 	if err := writeAgentDNSConfig(workerClient); err != nil {
-		return err
+		return "", err
 	}
 	// Match the server's kubelet hardening: sysctls (applied live) before the
 	// agent starts, then the protect-kernel-defaults drop-in.
 	if err := writeKubeletSysctls(workerClient); err != nil {
-		return err
+		return "", err
 	}
 	if err := writeAgentKubeletConfig(workerClient); err != nil {
-		return err
+		return "", err
 	}
 
 	// The agent is pinned to the master's exact k3s version, not kip's own
@@ -719,10 +720,10 @@ func JoinWorkerNode(masterClient *ssh.Client, workerClient *ssh.Client, masterHo
 	// tag is regex-validated by the parse, so interpolating it is shell-safe.
 	serverVersion, err := installedK3sVersion(masterClient)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if serverVersion == "" {
-		return fmt.Errorf("reading k3s version from master: k3s is not installed")
+		return "", fmt.Errorf("reading k3s version from master: k3s is not installed")
 	}
 
 	// The worker gets the same probe: a re-run of node add against a host
@@ -730,10 +731,10 @@ func JoinWorkerNode(masterClient *ssh.Client, workerClient *ssh.Client, masterHo
 	// decideK3sAgentJoin documents the policy.
 	workerVersion, err := installedK3sVersion(workerClient)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := decideK3sAgentJoin(workerVersion, serverVersion); err != nil {
-		return err
+		return "", err
 	}
 
 	// The worker's containerd pulls app images from the cluster registry,
@@ -743,28 +744,28 @@ func JoinWorkerNode(masterClient *ssh.Client, workerClient *ssh.Client, masterHo
 	// copies.
 	zotIP, err := masterClient.Run(`kubectl get svc zot -n kipper-system -o jsonpath='{.spec.clusterIP}'`)
 	if err != nil {
-		return fmt.Errorf("reading zot ClusterIP from master: %w", err)
+		return "", fmt.Errorf("reading zot ClusterIP from master: %w", err)
 	}
 	zotIP = strings.TrimSpace(zotIP)
 	if zotIP == "" {
-		return fmt.Errorf("zot service has no ClusterIP on the master")
+		return "", fmt.Errorf("zot service has no ClusterIP on the master")
 	}
 	pullPassword, err := readSecretValue(masterClient, zotNamespace, zotPullSecret, "password")
 	if err != nil {
-		return err
+		return "", err
 	}
 	if pullPassword == "" {
-		return fmt.Errorf("registry pull credential missing on the master")
+		return "", fmt.Errorf("registry pull credential missing on the master")
 	}
 	caPEM, err := readSecretValue(masterClient, zotNamespace, zotTLSSecret, `ca\.crt`)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if caPEM == "" {
-		return fmt.Errorf("registry CA missing on the master")
+		return "", fmt.Errorf("registry CA missing on the master")
 	}
 	if err := writeZotNodeFiles(workerClient, caPEM, zotIP, pullPassword); err != nil {
-		return err
+		return "", err
 	}
 
 	// Install k3s agent on the worker — idempotent within the join policy
@@ -773,19 +774,38 @@ func JoinWorkerNode(masterClient *ssh.Client, workerClient *ssh.Client, masterHo
 		serverVersion, masterHost, strings.TrimSpace(token),
 	)
 	if _, err := workerClient.Run(installCmd); err != nil {
-		return fmt.Errorf("running k3s agent installer: %w", err)
+		return "", fmt.Errorf("running k3s agent installer: %w", err)
 	}
 
-	// Confirm the worker joined by waiting until its node IP appears on the master.
-	workerIP, err := WorkerNodeIP(workerClient)
+	// Confirm registration using the host's machine and boot IDs.
+	nodeName, err := waitForHostNode(masterClient, id, 2*time.Minute, 3*time.Second)
 	if err != nil {
-		return fmt.Errorf("verifying worker node joined: %w", err)
-	}
-	if err := WaitForNodeAddress(masterClient, workerIP, 2*time.Minute); err != nil {
-		return fmt.Errorf("verifying worker node joined: %w", err)
+		return "", fmt.Errorf("verifying worker node joined: %w", err)
 	}
 
-	return nil
+	return nodeName, nil
+}
+
+// waitForHostNode polls for registration matching both machine and boot IDs.
+// Duplicate matches fail immediately; lookup errors are retried until timeout.
+// A reboot after the identity read changes the boot ID and causes a timeout.
+func waitForHostNode(master commandRunner, id HostIdentity, timeout, interval time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	var last error
+	for {
+		name, err := NodeForMachineBoot(master, id)
+		if err == nil {
+			return name, nil
+		}
+		if errors.Is(err, errSharedMachineID) {
+			return "", err
+		}
+		last = err
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("could not confirm the worker registered within %s: %w", timeout, last)
+		}
+		time.Sleep(interval)
+	}
 }
 
 // FetchKubeconfig retrieves the k3s kubeconfig from the remote server

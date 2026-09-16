@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -118,6 +119,98 @@ var machineIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 // command, so it is checked the same way.
 var nodeNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`)
 
+// HostIdentity pairs the persistent machine ID with the current boot ID.
+type HostIdentity struct {
+	MachineID string
+	BootID    string
+}
+
+// ReadHostIdentity reads the machine and boot IDs. The boot ID distinguishes
+// a running host from clones that share its machine ID.
+func ReadHostIdentity(runner commandRunner) (HostIdentity, error) {
+	machineID, err := ReadMachineID(runner)
+	if err != nil {
+		return HostIdentity{}, err
+	}
+	bootID, err := ReadBootID(runner)
+	if err != nil {
+		return HostIdentity{}, err
+	}
+	return HostIdentity{MachineID: machineID, BootID: bootID}, nil
+}
+
+// ReadBootID reads the kernel boot ID that kubelet publishes as nodeInfo.bootID.
+func ReadBootID(runner commandRunner) (string, error) {
+	out, err := runner.Run("cat /proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return "", fmt.Errorf("reading boot id: %w", err)
+	}
+
+	id := strings.TrimSpace(out)
+	if !bootIDPattern.MatchString(id) {
+		// Validate the format before polling for registration.
+		return "", fmt.Errorf("host reported %q, which is not a boot id", id)
+	}
+	return id, nil
+}
+
+// bootIDPattern is the UUID the kernel writes to /proc/sys/kernel/random/boot_id.
+var bootIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// nodeIdentityQuery lists name|machineID|bootID rows for matching in Go.
+// The delimiter preserves empty identity fields on pending nodes.
+//
+// Suppress stderr to keep kubectl warnings out of the parsed output. Failed
+// commands still return an exit status, but their diagnostic text is lost.
+func nodeIdentityQuery() string {
+	return "kubectl get nodes -o jsonpath=" + shellQuote(
+		`{range .items[*]}{.metadata.name}|{.status.nodeInfo.machineID}|{.status.nodeInfo.bootID}{"\n"}{end}`) +
+		" 2>/dev/null"
+}
+
+// NodeForMachineBoot finds a unique node matching both machine and boot IDs.
+// Run it on the control plane to confirm this host's current registration.
+func NodeForMachineBoot(runner commandRunner, id HostIdentity) (string, error) {
+	if !machineIDPattern.MatchString(id.MachineID) {
+		return "", fmt.Errorf("%q is not a machine id", id.MachineID)
+	}
+	if !bootIDPattern.MatchString(id.BootID) {
+		return "", fmt.Errorf("%q is not a boot id", id.BootID)
+	}
+
+	out, err := runner.Run(nodeIdentityQuery())
+	if err != nil {
+		return "", fmt.Errorf("looking for the node running machine %s: %w", id.MachineID, err)
+	}
+
+	var names []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		// Validate every row before accepting a match.
+		fields := strings.Split(strings.TrimSpace(line), "|")
+		if len(fields) != 3 || !nodeNamePattern.MatchString(fields[0]) {
+			return "", fmt.Errorf("looking for the node running machine %s: kubectl answered with %q, which is not a node", id.MachineID, strings.TrimSpace(line))
+		}
+		// Empty IDs are valid for pending nodes and remain unmatched.
+		if fields[1] == id.MachineID && fields[2] == id.BootID {
+			names = append(names, fields[0])
+		}
+	}
+
+	switch len(names) {
+	case 0:
+		return "", fmt.Errorf("no node is running machine %s on boot %s", id.MachineID, id.BootID)
+	case 1:
+		return names[0], nil
+	default:
+		// Duplicate matches may follow a rename or re-registration. The caller
+		// must resolve the ambiguity before stamping a node.
+		return "", fmt.Errorf("%w: nodes %s both report machine id %s on boot %s; remove the stale node object", errSharedMachineID, strings.Join(names, " and "), id.MachineID, id.BootID)
+	}
+}
+
 // StampStorageRestarts records on the Kubernetes node what was written to the
 // host, so the two can be compared later without another SSH connection.
 //
@@ -140,12 +233,12 @@ func StampStorageRestarts(runner commandRunner, nodeName, machineID string) erro
 	return nil
 }
 
-// NodeNameForMachine finds the Kubernetes node a host registered as, by the
-// identity the kubelet published from that host.
-//
-// A worker's SSH address, its hostname and its node name are three things that
-// usually agree and occasionally do not, so the match is made on the one value
-// that came from the machine itself. Run it on the control plane.
+// errSharedMachineID signals ambiguous matches that polling cannot resolve.
+var errSharedMachineID = errors.New("more than one node reports this machine id")
+
+// NodeNameForMachine finds a unique node by machine ID for host-configuration
+// stamping. Run it on the control plane. For join verification, use
+// NodeForMachineBoot to match the current boot as well.
 func NodeNameForMachine(runner commandRunner, machineID string) (string, error) {
 	if machineID == "" {
 		return "", fmt.Errorf("looking up a node needs a machine id")
@@ -162,17 +255,25 @@ func NodeNameForMachine(runner commandRunner, machineID string) (string, error) 
 	// safe; the quoting keeps it safe if the validation is ever loosened.
 	jsonpath := `{range .items[?(@.status.nodeInfo.machineID=="` + machineID +
 		`")]}{.metadata.name}{"\n"}{end}`
-	cmd := "kubectl get nodes -o jsonpath=" + shellQuote(jsonpath)
+	// Keep kubectl warnings out of the node-name list. The stderr redirect
+	// also suppresses diagnostic text when kubectl fails.
+	cmd := "kubectl get nodes -o jsonpath=" + shellQuote(jsonpath) + " 2>/dev/null"
 	out, err := runner.Run(cmd)
 	if err != nil {
 		return "", fmt.Errorf("looking for the node with machine id %s: %w", machineID, err)
 	}
 
+	// Validate node names before counting matches.
 	var names []string
 	for _, line := range strings.Split(out, "\n") {
-		if name := strings.TrimSpace(line); name != "" {
-			names = append(names, name)
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
 		}
+		if !nodeNamePattern.MatchString(name) {
+			return "", fmt.Errorf("looking for the node with machine id %s: kubectl answered with %q, which is not a node name", machineID, name)
+		}
+		names = append(names, name)
 	}
 
 	switch len(names) {
@@ -183,7 +284,7 @@ func NodeNameForMachine(runner commandRunner, machineID string) (string, error) 
 	default:
 		// A cloned image gives two machines one identity, and stamping either
 		// would record a write that never happened on the other.
-		return "", fmt.Errorf("nodes %s share machine id %s", strings.Join(names, " and "), machineID)
+		return "", fmt.Errorf("%w: nodes %s share machine id %s", errSharedMachineID, strings.Join(names, " and "), machineID)
 	}
 }
 

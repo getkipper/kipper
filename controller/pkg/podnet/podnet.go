@@ -69,7 +69,7 @@ func EgressExcepts(nodes []Node) ([]string, error) {
 			// Only a parseable IPv4 address can go in an IPv4 ipBlock. Skipping
 			// anything else is safe for IPv6 — an IPv4-only pod cannot reach it —
 			// and the pod-CIDR check above is what establishes that.
-			if !isIPv4Address(addr) {
+			if !IsIPv4Address(addr) {
 				continue
 			}
 			excepts = append(excepts, addr+"/32")
@@ -87,7 +87,8 @@ func isIPv4CIDR(s string) bool {
 	return err == nil && ip.To4() != nil
 }
 
-func isIPv4Address(s string) bool {
+// IsIPv4Address reports whether s parses as IPv4, as required by EgressExcepts.
+func IsIPv4Address(s string) bool {
 	ip := net.ParseIP(s)
 	return ip != nil && ip.To4() != nil
 }
