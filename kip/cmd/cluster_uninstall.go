@@ -364,26 +364,10 @@ func confirmDestroy(r io.Reader, clusterName string) bool {
 // acted on, so it was left alone.
 var ErrEntryChanged = errors.New("the local entry changed while this command was running")
 
-// removeLocalClusterEntry deletes the cluster from ~/.kip/config.yaml and
-// removes its cached kubeconfig. Idempotent: a cluster that is not there is not
-// an error.
-//
-// ownedToken is the gateway credential the caller acted on, and the removal only
-// happens while the entry still holds exactly that. The gap between reading the
-// token and getting here is a wipe or a human answer long, and another kip run
-// moving a domain in that gap leaves a live registration under this name —
-// deleting it would discard the only local copy of a credential nobody agreed to
-// give up.
-//
-// Empty has to match empty rather than match anything. A caller holding no
-// credential read one from this entry and found none, so an entry holding one
-// now is by definition an entry that changed. Letting empty pass unchecked would
-// leave the guard open in one of the two cases it exists for: a wipe the
-// operator consented to without a readable token, running for minutes while
-// another command registers a name into the entry it is about to delete.
-//
-// The check and the delete are one locked operation because as two they are just
-// a smaller version of the same race.
+// removeLocalClusterEntry removes the config entry and best-effort deletes its
+// kubeconfig only while GatewayToken still equals ownedToken, including empty.
+// The check and removal share the config lock to protect concurrent domain moves.
+// An absent entry is a successful no-op.
 func removeLocalClusterEntry(name, ownedToken string) error {
 	return config.Update(func(cfg *config.Config) error {
 		var remaining []config.Cluster

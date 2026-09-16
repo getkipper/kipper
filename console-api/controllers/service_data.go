@@ -73,17 +73,9 @@ func (r *ServiceReconciler) destroyData(ctx context.Context, svc *kipperv1.Servi
 	return destroyed, nil
 }
 
-// objectIsOurs refuses an object of this service's name that is somebody else's.
-//
-// Everything a service owns is found by name, so every path that writes to one
-// has to ask this first. An owner settles it. Without one the management label
-// has to, because a StatefulSet called db with a claim called data-db-0 is what
-// anybody's database looks like, and the services made before these records
-// existed have no owner but do carry the label.
-//
-// It runs before the first write and not only at deletion, because adopting an
-// object is what stamps the label, and a label this stamped would then be the
-// evidence that lets the delete destroy it.
+// objectIsOurs accepts this Service's controller UID or, for unowned legacy
+// objects, the Kipper management label. Check before any write: adoption must
+// not create the provenance later used to authorize deletion.
 func objectIsOurs(kind string, object metav1.Object, svc *kipperv1.Service) error {
 	owner := metav1.GetControllerOf(object)
 	switch {

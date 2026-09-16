@@ -1,21 +1,8 @@
 package main
 
-// gateway_heartbeat keeps the cluster's kipper.run subdomain alive and pins
-// the gateway→cluster hop.
-//
-// The kipper.run gateway expires registrations after 30 days of inactivity.
-// Without a heartbeat, every Kipper cluster using a kipper.run subdomain
-// would lose its routing once a month — Dex auth would 404, every
-// console-api--<x>.kipper.run URL would 404, and the only fix is to manually
-// re-register.
-//
-// The heartbeat also carries the hop-certificate SPKI fingerprint (see
-// internal/hopcert), authenticated by the gateway management token from the
-// gateway-credentials Secret. The gateway pins that fingerprint and verifies
-// every proxied handshake against it, closing the MITM window on the public
-// gateway→cluster hop. The token rides WebPKI-verified TLS to kipper.run, so
-// an on-path attacker between gateway and cluster can delay the pin but
-// never poison it.
+// The gateway heartbeat renews the cluster's kipper.run registration and
+// asserts its hop-certificate fingerprint using the gateway-credentials token.
+// It also renews proof of key possession so the gateway can continue routing.
 
 import (
 	"bytes"

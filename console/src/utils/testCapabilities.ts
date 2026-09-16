@@ -1,17 +1,8 @@
 import type { Capability, ProjectRole } from '@/api/projects'
 
 /**
- * What each built-in role may do, for tests that need a Project fixture.
- *
- * This is a fixture, not a second copy of the model: production code never
- * derives capabilities from a role name, it is told them by the server. What
- * this encodes is the expectation a test is asserting against, and if the
- * server's catalogue and this disagree the console's own behaviour is
- * unaffected — only the test's premise would be wrong.
- *
- * It mirrors the catalogue's own built-in sets exactly. A fixture that carried
- * a subset would have tests asserting against a member who cannot do things
- * the real one can, which is how a passing test comes to mean nothing.
+ * Built-in capability sets for Project test fixtures. Keep these aligned with
+ * controller/pkg/capability; production UI uses the server-supplied lists.
  */
 const byRole: Record<string, Capability[]> = {
   viewer: [

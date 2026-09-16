@@ -455,24 +455,10 @@ func IndexAppLinkNamespaces(ctx context.Context, indexer crclient.FieldIndexer) 
 	return indexer.IndexField(ctx, &kipperv1.App{}, linkTargetNamespaceIndex, LinkTargetNamespaceKeys)
 }
 
-// setLinksOpenCondition reports whether every link this app declares carries
-// traffic. It says so on the app itself because that is where somebody looks
-// after a connection is refused: the link is recorded, both surfaces show it,
-// and otherwise the only account of why it opened nothing is a line in the
-// controller log.
-//
-// An app declaring no links carries no condition — there is nothing to report.
-// One whose links all opened carries it as true, so "no complaint" and "not
-// evaluated yet" are distinguishable.
-//
-// The status write happens here rather than at the end of the reconcile. Link
-// policy is reconciled first precisely because the steps after it can fail, and
-// a condition left in memory until the end would go missing on exactly the app
-// that could not finish reconciling — the one whose operator most needs to know
-// why its link is dead. Only a real change is written, so a healthy app is not
-// updated every pass, and a failed write is logged rather than returned: the
-// policy it describes is already correct, and failing the reconcile over the
-// note about it would undo nothing and retry everything.
+// setLinksOpenCondition records the resolved link-policy result on the App.
+// Write changes here so later reconcile failures preserve this status. Status
+// write failures are logged; they do not change the policy already applied.
+// Apps with no links have no condition.
 func (r *AppReconciler) setLinksOpenCondition(ctx context.Context, app *kipperv1.App, blocked []string) {
 	var changed bool
 	switch {

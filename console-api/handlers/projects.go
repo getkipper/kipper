@@ -239,37 +239,10 @@ func (p *Projects) List(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, projects)
 }
 
-// getAppSummaries lists the apps in one project environment. The environment
-// name comes from the Project spec the caller is already iterating: the
-// reconciler and the Routes handler read the same value back off the
-// namespace's kipper.run/environment label (which the project reconciler
-// stamps from this spec), so passing it through keeps implicit-host
-// derivation in agreement without a namespace read per environment on every
-// Projects poll.
-// namespaceOwners maps each live namespace to the project that owns it.
-//
-// Through the shared owner lookup, because what this gates is reading what is
-// inside the namespace: app names, images, replica counts, readiness and route
-// hosts. Reading the label here answered that from a value anyone who can write
-// a namespace can set. A namespace nothing owns maps to the empty string, which
-// no project name matches.
-//
-// The projects it resolves against are the ones the caller has already listed,
-// so the whole map costs one namespace list and no project reads at all. What
-// the lookup requires, and the release it starts requiring the claim, is stated
-// once in nsowner.Of.
-//
-// Every namespace, not only the Kipper-managed ones. A namespace that exists
-// without Kipper's managed-by label still occupies the name, the reconciler
-// refuses to adopt it, and ProjectAccessResolver resolves a request to it
-// regardless of that label — so selecting on managed-by would leave the one
-// case this exists for looking like a free name.
-//
-// The second return says whether the answer is known at all. A failed list
-// leaves every claim reported as standing, which is the pre-existing behaviour
-// and only affects which tab the console offers; it must not be read as
-// permission to list what is inside those namespaces, so the caller stops
-// reading them instead.
+// namespaceOwners resolves all live namespaces through nsowner using the
+// already-listed projects. Empty owner values mean unowned namespaces.
+// A false second result means ownership could not be established; callers
+// must skip namespace contents rather than treating that as permission.
 func (p *Projects) namespaceOwners(ctx context.Context, projects []kipperv1.Project) (map[string]string, bool) {
 	list, err := p.Client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {

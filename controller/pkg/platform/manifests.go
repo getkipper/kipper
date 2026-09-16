@@ -283,22 +283,9 @@ spec:
 `
 }
 
-// KipperControllerAlerts alerts on reconcilers that keep failing.
-//
-// The window is an hour, and that is the whole difficulty. controller-runtime
-// retries a failed reconcile on an exponential backoff capped at 1000 seconds
-// (client-go's DefaultTypedControllerRateLimiter), so a workload that has been
-// failing for a while errors roughly three or four times an hour and nothing at
-// all in most five-minute windows. A rate over five minutes would read zero for
-// the very case these alerts exist to catch, and would never hold long enough
-// to fire. Counting over an hour and requiring three errors distinguishes a
-// workload stuck at the backoff ceiling from one transient conflict.
-//
-// The second alert asks a different question. A queue depth above zero means
-// work is arriving, which a busy cluster does honestly; it says nothing about a
-// reconcile that went in and never came out. longest_running_processor_seconds
-// is the one that notices a pass wedged mid-flight, and depth cannot, because a
-// wedged item has already left the queue.
+// KipperControllerAlerts detects repeated reconcile errors over an hour,
+// covering retries spaced by exponential backoff. A separate longest-running
+// processor alert detects stuck reconciles that have already left the queue.
 func KipperControllerAlerts() string {
 	return `apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule

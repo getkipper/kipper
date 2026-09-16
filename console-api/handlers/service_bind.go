@@ -216,22 +216,9 @@ func (s *Services) Unbind(w http.ResponseWriter, r *http.Request) {
 	if !enforceCapability(w, r, appNamespace, "kipper.write") {
 		return
 	}
-	// The type lookup only feeds the default env-var prefix, but it must
-	// still resolve in the binding's own namespace — a same-named service in
-	// another tenant's namespace must never influence which env vars get
-	// removed here.
-	//
-	// A service that has gone is not a reason to refuse. Unbinding is exactly
-	// what a workload left pointing at a deleted service needs: it fails its
-	// reconcile outright until the binding goes, so refusing here would leave
-	// the only way out locked.
-	//
-	// What the missing service costs is the prefix its type would have given,
-	// and the injected variables can only be identified by it. So the cleanup
-	// runs when the binding names its own prefix and is skipped otherwise,
-	// rather than run against the "_" that an empty service type derives —
-	// which names nothing this binding injected and could take an unrelated
-	// key with it.
+	// Resolve service type within the binding's namespace. A deleted service
+	// still permits unbinding; clean injected env keys only when the type or
+	// an explicit binding prefix identifies them.
 	svcType, err := s.findServiceInNamespace(ctx, req.Service, appNamespace)
 	serviceGone := errors.Is(err, errBindServiceNotFound)
 	if err != nil && !serviceGone {

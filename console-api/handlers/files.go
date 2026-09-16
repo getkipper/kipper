@@ -83,34 +83,13 @@ func refusalMessage(err error, p, restricted string) string {
 	return restricted
 }
 
-// refuseBlockedTarget resolves p inside the container and reports whether what
-// it actually names may be read or written.
+// refuseBlockedTarget resolves p with readlink inside the container, then
+// applies the blocked-path list to the canonical target. Resolution failures
+// are rejected, protecting against symlinks into mounted credentials.
 //
-// The lexical check above authorises the spelling the caller sent. It cannot see
-// a symlink, so `/app/logs/current -> /var/run/secrets/kubernetes.io/serviceaccount`
-// passes it, and stat, cat and tee all follow the link. That matters because
-// listing, reading and downloading are open to a project viewer while a shell is
-// not: a viewer with no other route to the ServiceAccount token could read it
-// through a link the image already contains.
-//
-// So the target is canonicalised in the pod and the denylist applied to the
-// answer. On a real workload `/var/run/secrets/kubernetes.io/serviceaccount/token`
-// comes back as `/run/secrets/kubernetes.io/serviceaccount/..2026_.../token`,
-// which is why both spellings are on the list — resolution rewrites the /var one
-// away.
-//
-// A path that will not resolve is refused rather than allowed through on the
-// lexical answer. readlink -f needs every component but the last to exist, so a
-// read of something absent fails here instead of failing at cat, and a write
-// into a directory that is not there fails here instead of at tee. Letting an
-// unresolvable path fall back to the lexical check would hand back the bypass
-// for any image that lacks readlink.
-//
-// There is a race between resolving and reading: a link swapped in between the
-// two would be followed. Closing it needs a single in-pod operation that opens
-// beneath a root rather than two commands. Under the threat this exists for it
-// does not help — a viewer cannot write to the pod, and anything that can swap
-// the link is already running in the container with the credential mounted.
+// Resolution and the later file operation are separate commands, so a concurrent
+// symlink swap remains possible. Closing that race requires a single in-pod
+// operation that opens beneath a constrained root.
 func (f *Files) refuseBlockedTarget(ctx context.Context, namespace, pod, container, p string) error {
 	out, err := f.execInPod(ctx, namespace, pod, container, []string{"readlink", "-f", "--", p})
 	if err != nil {

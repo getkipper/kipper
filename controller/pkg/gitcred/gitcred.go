@@ -13,25 +13,11 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/labels"
 )
 
-// Claim prepares a credential Secret that already exists to be the one appName
-// clones with, and reports why it cannot be. It lives here because kip and
-// console-api both write credentials, and a check only one of them makes
-// protects only the apps deployed through that one.
-//
-// A credential is named after a digest of the token and the clone host, so two
-// writers of the same pair converge on one object rather than overwriting what
-// an app is cloning with. That name is not a proof of what is at it: sixteen
-// hex characters can collide, and anything able to write a Secret in the
-// namespace can put something else there. So the contents are checked before an
-// App is pointed at them, or the app clones with a token nobody supplied.
-//
-// owner is the App committing to the credential, and nil where the writer has
-// no App yet and the reconciler binds one later. claimedAt is the writer's own
-// clock, which holds the controller's sweep off an object a commit is still in
-// flight for.
-//
-// live is prepared in place, and left as it was found when this returns an
-// error.
+// Claim validates a credential's token, bound authority, and ownership before
+// preparing live in place. Errors leave live unchanged. A digest-derived name
+// alone does not establish credential contents.
+// owner may be nil before the App exists; claimedAt delays sweeping while the
+// writer commits the reference. Both CLI and API writers use this check.
 func Claim(live *corev1.Secret, appName, token, authority string, owner *metav1.OwnerReference, claimedAt time.Time) error {
 	if string(live.Data["token"]) != token {
 		return refuse("the credential %s already exists and does not hold the token given, so it was not used. Remove that Secret if it is stale, or use a different token", live.Name)

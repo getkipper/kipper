@@ -166,24 +166,10 @@ func runAuthResetPassword(cmd *cobra.Command, args []string) error {
 	return resetAdminPassword(context.Background(), k8sClient.Clientset(), cmd.OutOrStdout())
 }
 
-// resetAdminPassword generates a new admin password, writes its bcrypt hash to
-// the Dex config, discloses the credentials, and restarts Dex.
-//
-// The order is the contract. The ConfigMap write is the durable half of the
-// change, exactly as it is for the ClusterIdentity reconciler's writeDexConfig,
-// so the credentials are printed the moment it succeeds. The restart can fail
-// and still leave a truthful cluster: the password is set, the operator has read
-// it, and it takes effect the next time Dex restarts. Printing last is what
-// locked an operator out of a cluster whose restart lost a race. Disclosure is
-// the one step after the write that is not allowed to fail quietly, because a
-// live hash nobody has read is the same lockout by another route.
-//
-// The restart is a patch rather than a get-modify-update because the reconciler
-// rolls Dex too, via its own config-hash annotation. A patch carries no
-// resourceVersion, so that concurrent write cannot make this one fail. This
-// command stays independent of the reconciler because it is the break-glass
-// path and has to work on a cluster whose control plane is degraded; the
-// reconciler stamping its hash as well costs at most one extra rollout.
+// resetAdminPassword persists a new bcrypt hash, discloses credentials, then
+// patches Dex to restart. Print immediately after the durable write so a failed
+// restart still leaves the operator with the password that will take effect.
+// This recovery path works independently of the reconciler.
 func resetAdminPassword(ctx context.Context, clientset kubernetes.Interface, out io.Writer) error {
 	pwBytes := make([]byte, 16)
 	if _, err := rand.Read(pwBytes); err != nil {

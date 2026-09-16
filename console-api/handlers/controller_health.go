@@ -40,18 +40,10 @@ func SetControllerCacheSynced(synced bool) {
 	controllerHealth.cacheSynced = synced
 }
 
-// ControllerHealthHandler reports whether the CRD controllers are healthy.
-// GET /health/controllers
-//
-// This is a reporting endpoint for observability and alerting, not the pod
-// readiness probe. console-api keeps serving the API even when a controller is
-// down, so the console can surface the degradation rather than the whole UI
-// going dark over one broken reconciler. It returns 503 when degraded so
-// external monitors can alert on it.
-//
-// The endpoint is unauthenticated (external monitors need it), so the response
-// is a single boolean. The controller inventory, manager, and cache-sync state
-// are internal topology an anonymous caller has no business fingerprinting.
+// ControllerHealthHandler reports manager startup, cache sync, and controller
+// registration health at GET /health/controllers, returning 503 when degraded.
+// It is separate from pod readiness so the API can still report controller issues.
+// The unauthenticated response exposes only a boolean.
 func ControllerHealthHandler(w http.ResponseWriter, r *http.Request) {
 	controllerHealth.mu.RLock()
 	allRegistered := len(controllerHealth.controllers) > 0

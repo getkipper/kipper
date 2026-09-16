@@ -134,25 +134,11 @@ func RenderExecFromAdmin(domain, adminKubeconfig, execCommand string) (content, 
 	return execFromAPIConfig(domain, cfg, execCommand)
 }
 
-// RewriteKubeconfigToExec replaces the kubeconfig at path with the exec-based
-// one, keeping its server address and cluster CA. domain names the rendered
-// objects and the auth-store identity; path is the cluster's actual
-// kubeconfig (config.Cluster.Kubeconfig), which after a rename or import is
-// not the domain-derived default. The file it replaces typically carries the
-// shared k3s admin certificate; after this, that certificate exists only on
-// the server, as break-glass.
-//
-// snapshot is the content the caller read and acted on, and the rewrite is
-// rendered from it rather than from a second read. The caller spends up to a
-// minute proving the operator's login against the server that content names,
-// so re-reading here would let a file replaced during that minute be converted
-// on the strength of a proof made against the cluster it used to name.
-//
-// The file is re-read to refuse when it no longer holds those bytes, which
-// covers a replacement made while the proof was in flight. A replacement
-// landing between that read and the rename is not covered: POSIX has no
-// compare-and-swap on file content, so closing it needs a lock every writer of
-// a cluster kubeconfig takes, which is a wider change than this one.
+// RewriteKubeconfigToExec converts the caller's verified snapshot to exec auth,
+// preserving its server and CA. path is the actual kubeconfig; domain identifies
+// the auth-store entry. It rejects a file changed since that snapshot.
+// The final read and rename are not atomic against other writers; closing that
+// race requires a shared writer lock.
 func RewriteKubeconfigToExec(domain, path string, snapshot []byte) (string, error) {
 	existing, err := clientcmd.Load(snapshot)
 	if err != nil {

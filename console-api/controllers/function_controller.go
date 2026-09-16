@@ -1868,21 +1868,10 @@ func toInterfaceMap(m map[string]string) map[string]interface{} {
 	return result
 }
 
-// BuildBatchPodSpec produces the pod spec used to run a Function in
-// batch mode. It's shared between the cron reconciler (which wraps it
-// in a CronJob) and the on-demand test handler in the handlers
-// package (which wraps it in a one-off Job). The trigger string ends
-// up as KIPPER_TRIGGER so the runtime image can dispatch on it —
-// "cron" for scheduled runs, "test" for manual test invocations.
-//
-// Exposed as a package-level function so callers outside the
-// reconciler (notably the handlers package) don't need to instantiate
-// a FunctionReconciler just to build the spec.
-//
-// pullSecrets comes from the caller's staging call (ensureImagePullSecret /
-// StageFunctionPullSecret), so the spec references exactly what that single
-// credential read staged — the spec never re-reads the credential list and can
-// never reach a different authorization decision than the staging did.
+// BuildBatchPodSpec builds the shared pod spec for scheduled and manual
+// Function runs, setting KIPPER_TRIGGER from trigger. It derives bindings and
+// publishes the environment generation. pullSecrets must come from the caller's
+// staging operation so the spec uses the credentials that operation authorized.
 func BuildBatchPodSpec(ctx context.Context, c client.Client, fn *kipperv1.Function, trigger string, pullSecrets []corev1.LocalObjectReference) (corev1.PodSpec, error) {
 	// No reconcile behind this call, so nothing has been resolved for it. The
 	// bindings are derived here through the same function the reconciler uses,

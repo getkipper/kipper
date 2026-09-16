@@ -29,18 +29,10 @@ import (
 // an attacker's throwaway hosts age out instead of pinning memory or sockets.
 const maxCachedProxies = 4096
 
-// idlePerTransport is how many idle upstream connections one cached transport
-// keeps. A transport is cached per request host plus the authorisation state
-// that admitted it, so this is the keep-alive depth for one such backend, and
-// it is what saves a handshake and a pin check per request.
-//
-// It is chosen against a process-wide budget, not per transport: every cache
-// entry can hold this many sockets, so the ceiling is
-// idlePerTransport × maxCachedProxies, and that has to stay well inside the
-// container's descriptor limit (nofile in docker-compose.yml) with room left for
-// the two descriptors every in-flight exchange holds. TestIdlePoolFitsTheDescriptorBudget
-// checks that arithmetic, so raising either side alone fails rather than
-// producing EMFILE on the shared data plane.
+// idlePerTransport bounds idle upstream sockets per cached authorization state.
+// Keep idlePerTransport × maxCachedProxies within the container's descriptor
+// budget, allowing two more descriptors per in-flight exchange.
+// TestIdlePoolFitsTheDescriptorBudget checks this bound.
 const idlePerTransport = 16
 
 // graceLogInterval spaces the unpinned-grace log lines per subdomain, so an
@@ -273,16 +265,9 @@ func (p *Proxy) enterCluster(subdomain string) (release func(), ok bool) {
 	return func() { counter.Add(-1) }, true
 }
 
-// forgetCluster drops the per-subdomain state a registration accumulated: the
-// two log throttles and the in-flight counter. Called when a registration goes
-// away, so a process that has seen a long tail of registrations does not carry
-// an entry for every label it ever served.
-//
-// The counter is removed only while it reads zero, under the same lock that
-// installs one. A counter with a live holder is left alone: deleting it would
-// let the next arrival install a second counter for the same cluster and route
-// past the ceiling, and the holder's release would then decrement an object
-// nothing consults.
+// forgetCluster removes log-throttle state and an idle in-flight counter.
+// A live counter must remain shared until its holders release it; replacing it
+// would let new arrivals bypass the per-cluster limit.
 func (p *Proxy) forgetCluster(subdomain string) {
 	p.proofSkipLogged.Delete(subdomain)
 	p.graceLogged.Delete(subdomain)
@@ -338,22 +323,11 @@ func normaliseHost(host string) string {
 	return host
 }
 
-// proxyFor returns the cached reverse proxy for a cluster IP, host, and the
-// state that authorises the hop, building and caching one on first use. host must
-// already be normalised. Returns nil if the target IP cannot be parsed into a URL.
-//
-// Everything that decides which leaf may be accepted rides in the cache key,
-// because TLS verification happens once per connection, not once per request: a
-// pooled keep-alive connection would otherwise keep carrying requests to a key
-// that is no longer accepted. So the key carries the whole deadline-filtered
-// accepted set (current, pending, previous), the first-pin settle tolerance, and
-// the proven key. Any change — a rotation, a re-proof, a lease lapsing, a pending
-// or previous slot reaching its deadline, grace ended by a re-assertion — moves
-// later requests onto a transport that must handshake, and so re-pass both gates,
-// before it carries anything; the superseded transport's idle connections lapse
-// with IdleConnTimeout. A state that recurs (a key pinned, displaced, then pinned
-// back) does select its earlier transport again, which is correct: those
-// connections were authenticated as exactly the key that is accepted once more.
+// proxyFor caches a reverse proxy by normalized host, IP, and authorization state.
+// The key includes accepted pins, first-pin tolerance, and the proven key because
+// TLS authenticates a connection once. Policy changes select a transport that
+// must handshake under the new state; idle connections on old transports expire.
+// A recurring state may reuse connections authenticated under that same state.
 func (p *Proxy) proxyFor(host string, entry *registry.Entry) *httputil.ReverseProxy {
 	pins := p.Registry.PinState(entry.Subdomain)
 	pinned := pins.Pinned()
@@ -388,31 +362,12 @@ func (p *Proxy) buildProxy(host string, entry *registry.Entry, pinned bool) *htt
 		return nil
 	}
 
-	// Clone the default transport so cached, long-lived transports inherit
-	// sane idle-connection limits and timeouts (IdleConnTimeout, MaxIdleConns,
-	// TLSHandshakeTimeout). Set the TLS ServerName to the request host so
-	// Traefik matches the correct Ingress via SNI even though we connect to
-	// the raw IP.
-	//
-	// Clusters serve a self-signed hop certificate on this hop (see
-	// app_controller reconcileIngress and console-api/internal/hopcert), so
-	// WebPKI chain and hostname checks can never pass and stay disabled.
-	// VerifyConnection replaces them: it enforces the cluster's
-	// token-asserted SPKI pin on every handshake, reading the registry live
-	// so cached transports never hold a stale pin. It runs per connection, so
-	// which transport a request lands on is the other half of the guarantee —
-	// see proxyFor's cache key.
+	// Clone the default transport for its timeouts and connection limits.
+	// SNI uses the request host while dialing the cluster IP. VerifyConnection
+	// checks live SPKI pins in place of WebPKI validation for the self-signed hop
+	// certificate; proxyFor's cache key controls reuse of verified connections.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	// The default keeps 2 idle connections per host, so under any real load the
-	// pool is exhausted immediately and nearly every request opens a fresh
-	// connection: a TLS handshake and a pin verification each time, against a
-	// backend a network hop away.
-	//
-	// The value cannot simply match MaxIdleConns, which bounds one transport
-	// rather than this process: there is a transport per cache key, so the
-	// process-wide worst case is idlePerTransport × maxCachedProxies and it has to
-	// leave room for the two descriptors every in-flight exchange holds. See
-	// idlePerTransport.
+	// Size the idle pool within the process-wide descriptor budget above.
 	transport.MaxIdleConnsPerHost = idlePerTransport
 	transport.MaxIdleConns = idlePerTransport
 	transport.TLSClientConfig = &tls.Config{
@@ -434,13 +389,8 @@ func (p *Proxy) buildProxy(host string, entry *registry.Entry, pinned bool) *htt
 
 	return &httputil.ReverseProxy{
 		Transport: transport,
-		// Rewrite rather than Director so X-Forwarded-For is fully ours: the
-		// legacy Director path would append the measured peer to any inbound
-		// chain, letting a spoofed leftmost entry survive to the cluster,
-		// which trusts this gateway's forwarded headers. The cluster must see
-		// only the client we measured — the one Caddy put in X-Real-IP and the
-		// trusted-header middleware recovered — so set the header from that and
-		// never call SetXForwarded, which would trust the inbound value.
+		// Rewrite replaces inbound forwarded headers with the client address measured
+		// by trusted-header middleware. Avoid SetXForwarded, which preserves inbound XFF.
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = target.Scheme
 			pr.Out.URL.Host = target.Host
@@ -450,12 +400,7 @@ func (p *Proxy) buildProxy(host string, entry *registry.Entry, pinned bool) *htt
 			// but leaving a client-supplied value in place would be a spoofable
 			// channel the moment something does.
 			pr.Out.Header.Del("Forwarded")
-			// Rewrite has already dropped the inbound X-Forwarded-For, so
-			// setting it from the measured client is enough. The client comes
-			// from the trusted-header middleware, which fails closed: with no
-			// measurable client the header is left off entirely rather than
-			// carrying this proxy's own address, which the cluster would log as
-			// if it were the caller.
+			// Forward the trusted client address when available.
 			if clientIP := chimw.GetClientIP(pr.In.Context()); clientIP != "" {
 				pr.Out.Header.Set("X-Forwarded-For", clientIP)
 			}
@@ -463,21 +408,10 @@ func (p *Proxy) buildProxy(host string, entry *registry.Entry, pinned bool) *htt
 	}
 }
 
-// verifyPin returns the VerifyConnection hook that decides whether the key a
-// cluster serves may receive this connection. It closes over the registry, never
-// over a fingerprint value, so every handshake — including ones on transports
-// cached long ago — evaluates the state current at handshake time. It runs once
-// per connection, so proxyFor's cache key keeps later requests off a connection
-// whose authorising state has since changed. The checks are pure in-memory
-// compares; no network IO happens on the handshake path.
-//
-// Two gates, in order. The pin set (checkPin) admits the leaf B5-style. Then,
-// under proof-before-route, the observed leaf must be the key whose possession
-// the cluster proved: the pin set deliberately accepts several fingerprints — a
-// pending rotation, the previous key, an unknown leaf inside the first-pin settle
-// window — and a routing decision taken at the gate can be overtaken by a pin
-// change before the handshake. Authorising the leaf itself here is what makes
-// the proof lease bind to the key that actually serves the request.
+// verifyPin checks live registry state on every TLS handshake. It first checks
+// the accepted pin set, then, when proof enforcement is enabled, verifies that
+// the observed leaf is the proven key. All checks use in-memory registry state.
+// proxyFor's cache key handles policy changes between connections.
 func (p *Proxy) verifyPin(subdomain string) func(tls.ConnectionState) error {
 	return func(cs tls.ConnectionState) error {
 		if len(cs.PeerCertificates) == 0 {
@@ -522,16 +456,9 @@ func (p *Proxy) checkPin(subdomain, observed string) error {
 	if registry.FingerprintsEqual(observed, pins.Current) || registry.FingerprintsEqual(observed, pins.Prev) {
 		return nil
 	}
-	// Right after the FIRST activation, a lagging Traefik replica can
-	// still serve the pre-hop-cert fallback until its dynamic-config
-	// watch catches up; failing closed there would 502 a cluster that
-	// was fully fail-open moments before. Tolerate (and log) the
-	// mismatch for the settle window only — the observed leaf is never
-	// pinned from here. The window is anchored to the FIRST activation
-	// and nothing extends it, so once it has elapsed every mismatch —
-	// including during rotation, where the old key rides in Prev —
-	// fails closed above. Under proof-before-route the proof gate in
-	// verifyPin refuses the tolerated leaf anyway, since no proof covers it.
+	// Allow fallback certificates during the first-pin settle window while
+	// Traefik replicas converge. The window stays anchored to first activation;
+	// rotation uses Prev instead. The proof gate still rejects an unproven leaf.
 	if pins.InFirstPinSettle() {
 		log.Printf("first-pin settle for %s: accepted SPKI %s (does not match the pin yet); enforcement begins when the settle window ends", subdomain, observed)
 		return nil

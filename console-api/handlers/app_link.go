@@ -158,21 +158,9 @@ func (a *Apps) Link(w http.ResponseWriter, r *http.Request) {
 		url = fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", req.Target, ns, targetCR.Spec.Port)
 	}
 
-	// A public link is a plain environment variable and nothing more. The URL it
-	// sets is for a browser, which no egress policy applies to, and there is no
-	// declaration to derive it from — so this one is stored, and it withdraws
-	// any internal link the app had to the same target.
-	//
-	// An internal link stores nothing. spec.links is the declaration and the
-	// reconciler derives the address from it on every pass, so a target that
-	// moves takes its callers with it instead of leaving them on an address that
-	// was true once.
-	//
-	// If the operator already set that variable themselves, the link is refused
-	// rather than taking the name. Deleting it destroys a value somebody chose —
-	// a proxy, a path, an https endpoint — and leaving it is worse, because the
-	// derived one is an explicit container env entry and would silently win over
-	// the Secret while the editor went on showing theirs.
+	// Public links store a URL in spec.env and remove the internal declaration.
+	// Internal links use spec.links so reconciliation derives the current address;
+	// reject a conflicting operator-supplied env value before taking that name.
 	if req.Public {
 		if appCR.Spec.Env == nil {
 			appCR.Spec.Env = make(map[string]string)

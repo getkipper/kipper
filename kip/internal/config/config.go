@@ -11,26 +11,10 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/hostnames"
 )
 
-// Cluster holds the configuration for a single Kipper cluster.
-//
-// CurrentProject and CurrentEnvironment carry the persistent per-cluster
-// project context, so that `kip <verb>` commands do not require the user
-// to repeat --project/--environment on every invocation. They default to
-// empty (meaning "no preference"); commands fall back to the standard flag
-// default ("default" project, no environment) when both the flag and the
-// persisted context are empty.
-//
-// GatewayToken mirrors the kipper.run gateway credential whose source of
-// truth is the gateway-credentials Secret on the cluster. The local copy
-// is the disaster-recovery fallback: it lets the operator deregister the
-// public route when the cluster itself is gone. That is why the config
-// file is written owner-only (see SaveTo).
-//
-// HostWiped records that `kip cluster uninstall` destroyed the host but the
-// gateway refused to take its name back. The entry survives so the token
-// does, and this flag is what lets the retry skip the host: a wiped server
-// is often decommissioned before anyone re-runs the command, and connecting
-// to it first would make the name unreleasable.
+// Cluster stores connection details and per-cluster CLI project context.
+// GatewayToken is the local recovery copy used to release a registration after
+// the cluster is lost; keep config files owner-readable. HostWiped lets a pending
+// release retry use that token without reconnecting to the wiped host.
 type Cluster struct {
 	Name               string            `mapstructure:"name"                yaml:"name"`
 	Provider           string            `mapstructure:"provider"            yaml:"provider"`

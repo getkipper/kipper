@@ -189,17 +189,8 @@ func (res *Resources) updateResources(w http.ResponseWriter, r *http.Request, pr
 	respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
-// errJobRunsOnce says a job's resources cannot reach what it runs.
-//
-// A scheduled job is rebuilt from the CR on every reconcile, so a change always
-// reaches the next run. A one-off job's native Job is created from the CR once
-// and never patched afterwards, and its pod template is immutable, so the only
-// change that could reach it is one landing before the reconciler creates it.
-// That window is not one a caller can see or be held to: the reconciler may
-// already be mid-pass with an older snapshot when the write is accepted, and
-// answering "updated" for a run that used the old values is the false success
-// this exists to remove. So a one-off is refused, which is also what the
-// trigger verb does with one.
+// errJobRunsOnce rejects resource edits to one-off jobs. Their native Job
+// template is created once; accepting an edit cannot guarantee it reaches the run.
 var errJobRunsOnce = stderrors.New("a one-off job runs with the resources it was created with")
 
 // adjustmentScope is the scope a resource change is recorded under. The values

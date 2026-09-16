@@ -301,20 +301,9 @@ func (e *Env) RestartStatus(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]bool{"restartPending": pending})
 }
 
-// envRestartPending is true when the app's pods are not on the environment the
-// controller last published.
-//
-// A workload's whole environment is one immutable object whose name is a
-// fingerprint of its contents, so this is two names compared: the one the last
-// pass published, and the one the running pod template asks for. Anything that
-// changes what the app should read — spec.env, its own secrets, a binding's
-// credentials — changes the first without changing the second, because they are
-// all inside the published object.
-//
-// It used to compare a data-updated-at stamp across several Secrets against each
-// pod's start time. That was the only question available when a pod's
-// environment came from several mutable objects, and it had to reason about when
-// a stamp was written relative to when a kubelet started a container.
+// envRestartPending compares the published environment generation with the
+// Deployment template's first container. Generation names fingerprint immutable
+// environment contents; this checks template adoption rather than pod readiness.
 func (e *Env) envRestartPending(ctx context.Context, namespace, app string) (bool, error) {
 	var workload kipperv1.App
 	if err := e.CRClient.Get(ctx, crclient.ObjectKey{Name: app, Namespace: namespace}, &workload); err != nil {

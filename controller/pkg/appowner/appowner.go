@@ -31,23 +31,10 @@ func Reference(apiVersion, name string, uid types.UID) metav1.OwnerReference {
 	}
 }
 
-// Take returns the owner references an object should carry once the named App
-// owns it, and whether the App may own it at all.
-//
-// Only an object nothing owns, or one this same App already owns. Anything else
-// is refused, including an object owned by an App of this name under a
-// different UID: that is the incarnation before a delete and recreate, and
-// garbage collection is already entitled to remove the object by that dangling
-// reference. Installing a live owner does not recall a deletion it may have
-// issued, so taking it over would report success on an object that can vanish
-// straight afterwards. Refusing lets the collection finish, and the next
-// attempt makes the object fresh.
-//
-// A reference that does not control counts as an owner too. Garbage collection
-// follows every reference and removes a dependent once its owners are gone, so
-// an object somebody else's lifetime governs is refused whether or not their
-// reference claims to control it. Take and Unowned therefore draw the line in
-// the same place, which is the point of them being one decision.
+// Take accepts unowned objects or references exclusively to want.UID, returning
+// the controller reference to install. References to another UID, including
+// non-controller references and earlier App incarnations, prevent adoption
+// because garbage collection may already be deleting those objects.
 func Take(refs []metav1.OwnerReference, want metav1.OwnerReference) ([]metav1.OwnerReference, bool) {
 	ours := false
 	for _, ref := range refs {
@@ -87,20 +74,9 @@ func OnlyOwnedBy(refs []metav1.OwnerReference, uid types.UID) bool {
 	return true
 }
 
-// Unowned reports whether a writer holding no App may use an object.
-//
-// Only an object nothing owns. Garbage collection follows every owner
-// reference and removes a dependent once its owners are gone, and a writer with
-// no App cannot add one in the same write to keep the object alive, so
-// committing an App onto anything owned hands that owner the credential's
-// lifetime.
-//
-// A reference to an App that no longer exists is refused too, which looks
-// over-careful and is not: the object is one garbage collection is already
-// entitled to remove, and stripping the reference does not recall a deletion it
-// may have issued already. The deploy stops, the collection completes, and the
-// next attempt creates the object fresh. Take is the path with a live App,
-// because it can add that App beside whatever else names the object.
+// Unowned permits use only when an object has no owner references. Even a
+// stale reference can trigger garbage collection; removing it cannot recall
+// a deletion already issued. Writers with a live App can use Take.
 func Unowned(refs []metav1.OwnerReference) bool {
 	return len(refs) == 0
 }

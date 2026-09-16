@@ -35,20 +35,11 @@ func registryPullSecretName(owner client.Object) string {
 	return fmt.Sprintf("%s-%s-registry-pull", owner.GetName(), kind)
 }
 
-// ensureImagePullSecret stages a scoped image-pull Secret for a workload whose
-// image is a private third-party registry configured in kipper-registries, and
-// returns the imagePullSecrets refs to attach to the Pod. The Secret carries
-// only the single registry the image pulls from, is staged only when the
-// workload's project is on the credential's allow-list, is owned by the
-// workload (so it is garbage-collected with it), and is created in the
-// workload's own namespace on demand — never fanned out across namespaces. A
-// public image, the cluster registry (which the node trusts via the k3s
-// registries mirror), or a project without a grant needs no credential, so a
-// stale pull Secret is removed and nil returned.
-//
-// A read or stage failure returns an error so the caller aborts the reconcile
-// and retries with backoff — a transient failure must never strip a working
-// pull Secret from the pod template.
+// ensureImagePullSecret stages one registry's credentials in the workload's
+// namespace when its project has a grant, and returns the Pod references.
+// Cluster-registry images use node credentials after namespace authorization.
+// If no credential applies, remove the stale Secret; read or stage errors abort
+// reconciliation so transient failures preserve the current pod configuration.
 func ensureImagePullSecret(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, image string) ([]corev1.LocalObjectReference, error) {
 	name := registryPullSecretName(owner)
 

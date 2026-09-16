@@ -425,26 +425,10 @@ func (h *Handler) exportProjectSpec(ctx context.Context, name string) (map[strin
 	return spec, nil
 }
 
-// getProjectNamespaces returns the namespaces a migration moves for a project.
-//
-// This is the migration's scope, not a hint towards it: what it returns is
-// inventoried, planned, and sent to the target cluster, apps and Secrets and
-// volume data included. The label gathers the candidates and does not decide
-// which are the project's, because anyone who can write a namespace can write
-// the label, and pointing one at a project being migrated would carry another
-// tenant's secrets to a different cluster.
-//
-// A candidate whose ownership cannot be read is an error rather than a
-// namespace left out. Silently migrating less than the operator asked for is
-// the one outcome worse than refusing.
-//
-// The label is still what finds the candidates, so a namespace a project holds
-// on record but whose label has been stripped is not one of them and does not
-// move. That predates this and is not made worse by it: the same namespace is
-// invisible to every other label query on the cluster, including the one the
-// `kip upgrade` readiness report runs, so nothing on the cluster currently
-// reports it. Finding those needs a sweep that starts from what the projects
-// record rather than from the namespaces, which is its own piece of work.
+// getProjectNamespaces selects labeled namespaces whose ownership nsowner
+// confirms, propagating lookup errors. This defines migration scope, including
+// Secrets and volumes, so labels alone cannot authorize inclusion.
+// Namespaces with stripped project labels remain outside this candidate set.
 func (h *Handler) getProjectNamespaces(ctx context.Context, projectName string) ([]string, error) {
 	labelled, err := h.Client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("kipper.run/project=%s", projectName),

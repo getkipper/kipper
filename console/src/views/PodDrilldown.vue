@@ -24,12 +24,8 @@ const scope = computed<Scope>(() => {
 
 const name = computed(() => String(route.params.name ?? ''))
 
-// Namespace resolution:
-//   - platform: static lookup in PLATFORM_COMPONENTS — every supported
-//     system component lives in a known namespace.
-//   - apps / services: the caller passes ?ns=<namespace> because the
-//     list views show entries across projects. Without ns we can't
-//     scope the metrics fetch.
+// Resolve platform namespaces from component config; app and service links
+// carry their namespace in the ns query parameter.
 const namespace = computed(() => {
   if (scope.value === 'platform') {
     return platformConfig(name.value)?.namespace ?? ''

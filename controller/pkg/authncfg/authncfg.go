@@ -52,23 +52,9 @@ func ValidateAdminEmail(email string) error {
 	return nil
 }
 
-// Render builds the AuthenticationConfiguration for one or more Dex issuer
-// hosts. Multiple hosts produce a union authenticator set — the primitive a
-// domain cutover uses to trust the old and new issuer at once and drain
-// sessions across the flip. Callers must ValidateDexHost every host first.
-// Render builds the API server's AuthenticationConfiguration for dexHosts.
-//
-// A gateway-fronted host is given caPEM as its issuer's trust anchor. It has to
-// be: the cluster serves that host with its own hop certificate, which no public
-// authority signed, so the API server verifies it against the cluster's CA or
-// not at all. A custom domain is left without one, because it carries a real
-// WebPKI certificate and pinning it to a cluster CA would break the moment
-// cert-manager renewed it.
-//
-// The anchor is per issuer rather than global on purpose. A cutover config
-// legitimately carries both kinds at once, and Go replaces the system pool when
-// a root pool is set, so one global anchor would stop every WebPKI issuer
-// verifying.
+// Render builds authenticators for each Dex host, supporting both issuers
+// during cutover. Callers must ValidateDexHost first. Gateway hosts use caPEM
+// as a per-issuer trust anchor; custom domains use the system trust store.
 func Render(caPEM string, dexHosts ...string) string {
 	var b strings.Builder
 	b.WriteString("apiVersion: apiserver.config.k8s.io/v1\nkind: AuthenticationConfiguration\njwt:\n")

@@ -23,32 +23,10 @@ import (
 	"github.com/getkipper/kipper/kip/internal/deployer"
 )
 
-// seedSharedCredentialGrants writes the credential/project pairs the operator
-// approved onto the entries that still have no allow-list, before the rollout.
-//
-// A shared credential names the projects that may build with it, and one with no
-// projects named allows none. Credentials written before that list existed have
-// none, so upgrading such a cluster stops every build that used one, and the
-// operator meets it as a refused rebuild rather than as anything the upgrade
-// said. What the cluster is already doing is written down here instead — but
-// only what the operator consented to, and only for entries nobody has decided.
-//
-// Only a list nobody has decided is filled. A list somebody has curated is their
-// decision and an upgrade does not get to widen it.
-//
-// It runs once per cluster, recorded on the kipper-system namespace by
-// recordGrantsSeeded once the upgrade has replaced the writer that made the
-// seeding necessary. Per-entry the question cannot be answered
-// honestly for long: while the old writer is still serving, what it creates
-// carries no list either, so a later upgrade would read an app's reference to it
-// as a grant nobody made.
-//
-// Seeding itself is idempotent and safe to run more than once in an upgrade,
-// which is what repairs a grant the old writer erased while it was still up.
-//
-// grants carries what credentialSeedConsent decided before the rollout. Only
-// its approved pairs are used here, and an empty set writes nothing, which is
-// both the declined path and the one where nothing was referenced.
+// seedSharedCredentialGrants fills undecided allowlists with the credential/
+// project pairs approved before rollout. Existing decisions stay intact.
+// Seeding can repeat while the old writer runs; closeSharedCredentialGrants
+// finishes the migration after rollout.
 func seedSharedCredentialGrants(ctx context.Context, clientset kubernetes.Interface, out io.Writer, grants credentialGrants) error {
 	if len(grants.approved) == 0 {
 		return nil
@@ -61,28 +39,10 @@ func seedSharedCredentialGrants(ctx context.Context, clientset kubernetes.Interf
 	return fillSharedCredentialGrants(ctx, clientset, out, grants.approved, grants.shownAs, nil, false)
 }
 
-// closeSharedCredentialGrants fills the approved grants a second time, then
-// decides everything still undecided, which ends the migration for this
-// cluster.
-//
-// Only this pass decides, and only when the console-api serving the cluster is
-// one that keeps an allow-list. Deciding is what Seed will not revisit, so
-// deciding against a console-api that still allows every build freezes a
-// snapshot of a cluster that is still changing: an app pointed at an undecided
-// credential the next day was building perfectly well, and would be refused by
-// the upgrade that finally does replace the writer.
-//
-// Without that evidence the pass still fills, since repairing a grant the old
-// writer erased is wanted either way, and says why it stopped there.
-//
-// grants.mayClose is false when consent was declined; the migration then stays
-// open, the lists recorded before the rollout are still written back, and
-// reportConsentDeclined names what is still waiting and how to grant it.
-//
-// Live app usage is not read here. What can be granted is exactly what the
-// operator saw and approved at consent time: an app that arrived during the
-// rollout is a reference under the new rules, and the plan this pass belongs
-// to exists to stop a reference becoming a grant on its own.
+// closeSharedCredentialGrants repairs allowlists and closes the migration
+// after consent, a grant-preserving rollout stamp, and old-pod quiescence.
+// It uses the approved snapshot; references added during rollout grant no access.
+// Without closure evidence, it reports the reason and leaves migration open.
 func closeSharedCredentialGrants(ctx context.Context, clientset kubernetes.Interface, out io.Writer, grants credentialGrants) error {
 	done, err := grantsAlreadySeeded(ctx, clientset)
 	if err != nil {
@@ -296,20 +256,9 @@ func fillSharedCredentialGrants(
 	return nil
 }
 
-// approvedForTheSameCredential drops an approved grant whose credential is no
-// longer the one the operator was shown, and says which way it went.
-//
-// What the preview showed was a credential at a host holding a token, and what
-// a grant lets a project do is present that token to that host. An entry that
-// changed hands during the rollout is a different credential to allow, so the
-// approval does not carry to it, exactly as a recorded decision does not.
-//
-// Everything it cannot confirm is dropped rather than kept. A name the record
-// does not cover, or one the list no longer holds, is a credential this run
-// cannot show is the one that was approved, and an approval is permission for a
-// particular credential rather than for a name. Neither is reachable from
-// consent, which draws its approvals from the same read as its record; they are
-// dropped because the alternative is a rule that grants when it cannot tell.
+// approvedForTheSameCredential retains approvals only when the server and
+// token identity still match the consent snapshot. It separately reports
+// missing entries and entries whose identity changed or cannot be confirmed.
 func approvedForTheSameCredential(entries []sharedcred.Entry, approved map[string][]string, shownAs map[string]sharedcred.Identity) (grantable map[string][]string, handed, gone []string) {
 	if len(approved) == 0 {
 		return approved, nil, nil
@@ -544,20 +493,9 @@ func reportConsentDeclined(ctx context.Context, clientset kubernetes.Interface, 
 	return nil
 }
 
-// reportClearedAllowLists names a credential on a migrated cluster whose
-// allow-list has gone back to nobody having decided.
-//
-// Every writer since the migration records a decision, so this state means an
-// older console-api edited the credential or an older copy of the list was
-// restored. Saying so is all this does. Filling it from the apps that reference
-// it would be the fail-open half of the same coin: a project revoked while its
-// app still names the credential is exactly this shape, and would be granted
-// again by a repair.
-//
-// explained is what this run has already accounted for: a credential the repair
-// looked at and either wrote back or refused by name. Following that with this
-// notice would give the same credential a second and contradicting cause in the
-// same breath, so what is left here is a list cleared before the upgrade began.
+// reportClearedAllowLists reports absent allowlists after migration, skipping
+// credentials already covered by repair. Recovery requires an explicit grant;
+// inferring one from app references could restore revoked access.
 func reportClearedAllowLists(ctx context.Context, clientset kubernetes.Interface, out io.Writer, explained map[string]sharedcred.Decision) error {
 	stored, err := sharedcred.Load(ctx, clientset)
 	if err != nil {
@@ -589,20 +527,10 @@ func reportClearedAllowLists(ctx context.Context, clientset kubernetes.Interface
 	return nil
 }
 
-// consoleAPIKeepsGrants reports whether the console-api serving this cluster now
-// is one that leaves a shared credential's allow-list alone. It stamps its build
-// on the namespace when it starts, and the release that stopped replacing the
-// list is the first that does, so the stamp being there is the answer.
-//
-// A completed rollout does not answer it: the image is a moving tag, so an
-// upgrade run before the release it belongs to is published pulls the old image
-// and rolls it happily.
-//
-// The stamp is cleared before the rollout, which is what makes it evidence about
-// the pod serving now rather than about one that served at some point. An
-// operator who pins an older console-api back during an incident leaves a stamp
-// that would otherwise still be vouching for a writer that has been gone for
-// weeks.
+// consoleAPIKeepsGrants waits for the build stamp written by grant-preserving
+// console-api versions. Callers clear it before rollout so a previous version's
+// stamp cannot satisfy the check. Rollout completion alone is insufficient
+// when image tags are mutable.
 func consoleAPIKeepsGrants(ctx context.Context, clientset kubernetes.Interface) (bool, error) {
 	deadline := time.Now().Add(stampWait)
 	for {
@@ -691,30 +619,10 @@ func recordGrantsSeeded(ctx context.Context, clientset kubernetes.Interface) err
 	return nil
 }
 
-// sharedCredentialUsage maps each shared credential to the projects whose apps
-// reference it, and lists the namespaces whose ownership could not be proven.
-//
-// It reads the apps because the cluster this runs for has no other record: the
-// grant it is reconstructing is exactly what was never written down. A
-// reference is what can be observed; whether the app has ever built with the
-// credential is not, so the caller is the consent wrapper, which describes the
-// pairs it returns as references rather than as grants.
-//
-// Which project each namespace belongs to is decided from that project's own
-// records rather than from the namespace's label. What this builds is written
-// into a shared credential's allow-list and stays there, so a namespace pointed
-// at a project by anyone who can write namespace metadata would hand that
-// project a standing grant to build with another tenant's credential.
-//
-// The cost of that strictness, which is why the drop is reported rather than
-// passed over in silence: this runs before the console-api that fixes the
-// records has rolled, so on a cluster where the released reconciler has been
-// refusing a namespace it is exactly that namespace whose record is missing.
-// Its project is left off the preview, and an unreported miss arrives as a
-// refused build months later with nothing connecting it to this.
-//
-// Only names on the shared list count, so an app's own credential cannot
-// invent a grant nobody asked for.
+// sharedCredentialUsage collects app references to listed shared credentials
+// for the consent preview. Namespace labels must be corroborated by Project
+// records; references with unproven ownership are reported separately.
+// References indicate requested access, not proof of a previous successful build.
 func sharedCredentialUsage(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, shared map[string]bool) (map[string][]string, []missedGrant, error) {
 	namespaces, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
 		LabelSelector: labels.ManagedBy + "=" + labels.Kipper,
@@ -870,37 +778,12 @@ const (
 	deploymentRevisionAnnotation = "deployment.kubernetes.io/revision"
 )
 
-// waitForConsoleAPIQuiescence waits until no console-api pod from before the
-// rollout can still write.
-//
-// A completed rollout does not prove this. rollout.Ready compares updated and
-// available replicas against the desired count, and a pod that has been sent
-// SIGTERM stops being available long before it stops running: it keeps serving
-// whatever request it already had for the rest of its termination grace. The
-// console-api it replaces writes the whole allow-list from a Secret it builds
-// fresh, with no resourceVersion, so that late write conflicts with nothing and
-// silently replaces everything this pass just decided.
-//
-// What it waits for is four things, all of them about the pods rather than
-// about what any of them is: none on the way out, none carrying another
-// revision's pod-template-hash, at least as many of this revision as the
-// Deployment asks for, and one image across them with none unreported. The
-// revision is read from the ReplicaSet rather than counted, because a count says
-// how many pods there should be and not which ones are there; the replica count
-// is checked as well, so a replacement that has not arrived cannot read as a
-// rollout that has finished; and the image is checked because the build stamp is
-// written once for the namespace by whichever pod started first, so on its own
-// it vouches for that pod and not for its neighbour.
-//
-// It also refuses to follow a different rollout than the one it started on. The
-// stamp is an annotation that outlives the pod that wrote it, so a rollback to
-// the console-api being replaced, landing while this waits, would otherwise
-// converge on the old build with the stamp still vouching for it.
-//
-// What it cannot do is prove which build a pod of the current revision is
-// running. That needs evidence from the pod itself, which is a console-api
-// change rather than one here; the image check narrows it to pods that disagree
-// with each other, which is as far as the API reaches.
+// waitForConsoleAPIQuiescence waits for the pinned rollout's pods to replace
+// old writers before restoring credential grants. Deployment readiness alone
+// can leave terminating pods processing writes.
+// Require no terminating/old-revision pods, the desired current replica count,
+// and consistent reported images. A changed Deployment or revision aborts.
+// Image agreement does not prove the binary each pod is running.
 func waitForConsoleAPIQuiescence(ctx context.Context, clientset kubernetes.Interface, pinned consoleAPIRollout) error {
 	// The Deployment is what says which pods are the console-api's and which
 	// revision is current, so without it there is nothing to ask. It is not
@@ -997,24 +880,10 @@ func currentConsoleAPIRevision(ctx context.Context, clientset kubernetes.Interfa
 	return hash, nil
 }
 
-// consoleAPIBuildsInPlay is the set of images the console-api pods of this
-// revision are actually running.
-//
-// The revision says which template a pod was made from. The image is a mutable
-// tag, so two pods of one ReplicaSet can have resolved it to different builds,
-// and the build stamp is written once for the namespace by whichever started
-// first: it vouches for that pod and not for its neighbour. One image across
-// them all is what makes the stamp cover the fleet rather than one pod of it.
-//
-// A container that has not reported its image counts as its own answer, so a pod
-// nobody can identify holds the wait open rather than passing through it.
-//
-// What this cannot rule out is one image legitimately reporting two ids. The
-// runtime prefix is stripped, which is the difference that shows up between
-// container runtimes; a fleet whose nodes resolved one tag to per-architecture
-// digests would still wait this out and leave the migration open, loudly, with
-// its builds unaffected. Kipper installs k3s and one containerd on every node,
-// and pins an amd64 platform image, so that is not a shape it produces today.
+// consoleAPIBuildsInPlay collects image IDs for nonterminating, nonterminal
+// pods of the requested revision. Mutable tags may resolve to different builds;
+// an unknown ID keeps the caller waiting. Runtime prefixes are normalized,
+// but per-architecture digest differences can still leave migration open.
 func consoleAPIBuildsInPlay(pods []corev1.Pod, hash string) map[string]bool {
 	running := map[string]bool{}
 	for i := range pods {
@@ -1045,25 +914,10 @@ func consoleAPIImage(pod corev1.Pod) string {
 	return ""
 }
 
-// consoleAPIPodsInPlay counts what is running under the Deployment's selector:
-// the pods that are not this revision's or are on their way out, and the pods
-// that are this revision's and staying.
-//
-// A pod carrying another revision's hash is one the Deployment has replaced and
-// which is still running, which is exactly the writer this waits for. A pod on
-// its way out is counted whatever its revision, because a terminating pod of the
-// current revision is still a pod that can finish the request it holds.
-//
-// Only Succeeded and Failed are passed over, because only those two say the
-// containers have stopped. Unknown in particular is counted: it means the
-// control plane has lost touch with the node, which is the absence of an answer
-// rather than the answer that nothing is running there, and what this has to
-// establish is that nothing can write.
-//
-// The second count is what the caller compares against the replica count. A
-// replacement that has not appeared yet leaves the pods this revision is
-// supposed to have short, and waiting for them is what stops the pass reading a
-// half-finished rollout as a finished one.
+// consoleAPIPodsInPlay counts nonterminal pods as lingering when terminating
+// or from another revision, and current otherwise. Unknown-phase pods still
+// count because their containers may be running. The caller also requires the
+// expected current replica count before closing migration.
 func consoleAPIPodsInPlay(pods []corev1.Pod, hash string) (lingering, current int) {
 	for i := range pods {
 		if pods[i].Status.Phase == corev1.PodSucceeded || pods[i].Status.Phase == corev1.PodFailed {

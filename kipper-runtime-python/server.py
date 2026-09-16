@@ -1,19 +1,8 @@
 """Kipper Python function runtime.
 
-Two modes, dispatched on the KIPPER_MODE env var:
-
-    http  (default) -- start an HTTP server that exposes the user's
-                       handler at /, /event, and /health. Used by HTTP-
-                       triggered functions and the kipper-poll sidecar.
-
-    batch           -- import the handler, invoke it once with a
-                       synthetic event ({type: cron, timestamp: <ISO>}),
-                       and exit. Used by cron-triggered functions
-                       running as a Kubernetes CronJob -- no HTTP
-                       server, no scale-to-zero overlap, no stacked
-                       timeouts. Exit code is 0 on success, 1 if the
-                       handler raises or returns a dict with an "error"
-                       key.
+HTTP mode invokes the handler for POST requests and GET requests other than
+/health. Batch mode invokes it once with a trigger event and exits with status 1
+on load failure, an exception, or a result containing an "error" key.
 """
 
 import importlib.util

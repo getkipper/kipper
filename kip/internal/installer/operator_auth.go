@@ -308,27 +308,10 @@ func readHopCA(client commandRunner) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// probeCommand builds the retrying probe for one host, verifying it the way the
-// API server will. A gateway-fronted host is served the cluster's own hop
-// certificate and so is verified against the cluster CA; a custom domain carries
-// a WebPKI certificate and keeps the system trust store, which is the gate that
-// protects a cutover from proceeding on an unverified certificate.
-//
-// A gateway-fronted host with no anchor is refused outright rather than probed
-// against a trust store that can never accept it: that produces a certificate
-// error naming a cause that was never involved, which is exactly how this cost
-// an afternoon of diagnosis.
-//
-// The anchor arrives on stdin rather than being re-read from hopCAPath, so the
-// probe attests to the exact bytes the caller is about to render into the
-// authentication config. Verifying against the file instead would let an anchor
-// that changed after the caller read it satisfy a probe for a config built from
-// the superseded one, which ends with the API server trusting an authority the
-// cluster no longer serves.
-// Both host classes set pipefail. Without it `curl | grep -q` reports the
-// grep's status, so a curl that died part-way through the body reads as a
-// certificate failure. The two classes must fail for the same reasons as each
-// other, or the same server appears healthy on one path and broken on the other.
+// probeCommand retries discovery using the API server's trust model: the
+// supplied cluster anchor for gateway hosts, system roots for custom domains.
+// Pass the anchor on stdin so the probe verifies the exact snapshot rendered
+// into the authentication config. pipefail propagates curl failures.
 func probeCommand(host, caPEM string) (string, error) {
 	fetch := fmt.Sprintf(
 		`for i in $(seq 1 24); do curl -fsS %%s--max-time 5 https://%s/dex/.well-known/openid-configuration | grep -q '"issuer"' && exit 0; sleep 5; done; exit 1`,
@@ -382,22 +365,9 @@ func anchorMovedError() error {
 			"    Re-run once whatever is changing the anchor has finished", hopCAPath)
 }
 
-// writeAuthnConfigFenced installs the rendered config only while the anchor is
-// still the one the probes verified, with the comparison and the write in a
-// single remote command.
-//
-// One command is the point. Re-reading the anchor over one SSH connection and
-// writing over another leaves exactly the window this exists to remove: the
-// anchor can move after the check and the stale config lands anyway, which puts
-// the API server on an authority the cluster no longer serves. That is operator
-// lockout, and it is the failure that ended four attempts at automating the
-// replacement.
-//
-// What remains is the interval inside the script itself, between reading the
-// anchor and renaming the config into place. A file takes no compare-and-swap,
-// so that cannot be closed, only made small. An operator editing the anchor by
-// hand is outside any fence this could build, which is why the documented
-// procedure tells them to do one thing at a time.
+// writeAuthnConfigFenced compares the anchor and installs the config in one
+// remote command. A mismatch preserves the current config. The read and rename
+// still leave a race with concurrent anchor edits; operators must serialize them.
 func writeAuthnConfigFenced(client *ssh.Client, desired, probed string) error {
 	out, err := client.Run(fencedWriteScript(hopCAPath, authnConfigPath, desired, probed))
 	if err == nil {
@@ -409,25 +379,10 @@ func writeAuthnConfigFenced(client *ssh.Client, desired, probed string) error {
 	return fmt.Errorf("writing authentication config: %w", err)
 }
 
-// fencedWriteScript is the remote half of the fence, taking its paths as
-// arguments so the shell that ships can be run against real files in a test.
-// Its correctness matters beyond this command: every install writes the
-// authentication config through it.
-//
-// The config is staged beside its destination and renamed, so the API server
-// never reads a half-written file. The delimiters cannot collide with the
-// content: a heredoc ends only on a line equal to the delimiter, and neither a
-// PEM body line nor a rendered config line is ever exactly one of these.
-// Both sides of the comparison have every whitespace character removed, which
-// is the same normalisation CAState.anchorHas uses on the Go side. Comparing
-// raw bytes looked right and was not: readHopCA trims both ends while the
-// shell's $(cat) strips trailing newlines only, so an anchor beginning with a
-// blank line compared unequal to itself and refused every write, permanently,
-// naming a concurrent writer that did not exist.
-//
-// The staging file is unique. A fixed name is shared by every install, cutover
-// and sync on the node, so two of them truncate each other's staged config and
-// one renames the other's bytes into place.
+// fencedWriteScript compares whitespace-normalized anchors and atomically
+// renames a uniquely staged config beside its destination. Base64 carries the
+// payloads through the shell. Paths are parameters so tests execute the same
+// script against local files.
 func fencedWriteScript(anchorPath, configPath, desired, probed string) string {
 	return fmt.Sprintf(`set -e
 probed=$(printf %%s %s | base64 -d | tr -d '[:space:]')
@@ -519,24 +474,9 @@ func EnsureOperatorAuth(client *ssh.Client, dexHosts ...string) error {
 		return err
 	}
 
-	// 2. Probe each requested host through the pin with a verifying TLS
-	// handshake, retrying for ~2 minutes because a fresh cluster or a cutover
-	// reaches here right as the ingress and its certificate come up.
-	//
-	// The probe verifies the way the API server will, which is the only thing
-	// that makes it a gate rather than a formality: it is about to be told to
-	// trust this issuer, and it fetches discovery and JWKS from it moments
-	// later over the same loopback pin. The two host classes are verified
-	// differently because they are served differently. A custom domain carries
-	// a WebPKI certificate, so the system trust store is the right verifier and
-	// this is the certificate gate firing before anything session-affecting. A
-	// gateway-fronted host is served the cluster's own hop certificate, which no
-	// public authority signed, so it verifies against the cluster CA — the same
-	// anchor written into the authentication config below.
-	//
-	// Pre-flip a new host legitimately still advertises the old issuer, so only
-	// reachability and certificate validity are checked, never the advertised
-	// issuer value.
+	// 2. Verify discovery through each loopback pin using the API server's
+	// trust roots. Before cutover a new host may still advertise the old issuer,
+	// so the probe requires an issuer field but permits its current value.
 	for _, h := range dexHosts {
 		probeCmd, cerr := probeCommand(h, caPEM)
 		if cerr != nil {

@@ -23,28 +23,10 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 )
 
-// The same promise as the existing no-restart test, but against a Deployment
-// shaped the way an API server stores one.
-//
-// applyDeployment holds the running environment generation when nothing but the
-// generation would change, which is what lets an env edit publish without
-// rolling the app. It decides that by comparing the live pod template against a
-// freshly built one. The live template has been through admission and the fresh
-// one has not, so on a cluster they differ in fields neither the controller nor
-// the operator ever set, the hold never engages, and every env edit restarts the
-// app — against the banner that says it will not.
-//
-// Nothing afterwards shows it: envRestartPending compares Status.PublishedEnv
-// with the template's generation, and once the roll has happened they agree. Admission fills in restartPolicy,
-// dnsPolicy, terminationGracePeriodSeconds, schedulerName, the container's
-// terminationMessagePath/Policy and imagePullPolicy, and a port's protocol.
-// The fake client stores whatever it is handed, so every existing test compares
-// an undefaulted live object against an undefaulted desired one.
-// defaultPodTemplate fills in what admission fills in, so a fake client can
-// stand in for an API server on the one question this file asks.
-//
-// The list is deliberately here rather than in the controller: the controller
-// must not need to know it, which is the whole point of asking the server.
+// defaultPodTemplate models admission defaults that the fake client omits.
+// The tests verify that an environment-only edit holds the running generation
+// when comparing a defaulted live template with the desired template.
+// Production code obtains defaults through a server dry-run.
 func defaultPodTemplate(t *corev1.PodTemplateSpec) {
 	t.Spec.RestartPolicy = corev1.RestartPolicyAlways
 	t.Spec.DNSPolicy = corev1.DNSClusterFirst

@@ -175,21 +175,10 @@ func (r *ProjectAccessResolver) Resolve(ctx context.Context, email, namespace st
 	return r.resolveProject(ctx, email, project, globalRole)
 }
 
-// ResolveProject returns the user's access to a project named directly, as the
-// project-level /projects/{name} routes name it. ok is false for an unknown
-// user, or for a user who is not a member of that project — including when the
-// project does not exist, which is indistinguishable from it by design, so a
-// probe cannot tell one from the other. A cluster admin passes for any name,
-// existing or not, exactly as they do on any namespace.
-//
-// The name is taken as the project's own and never traced through a namespace
-// label. Namespace names are not unique across projects — project "shop" with
-// an environment "prod" and project "shop-prod" with a default environment both
-// resolve to the namespace "shop-prod" — so reading the label would answer with
-// whichever project owns the namespace of that name while the handler behind
-// the route goes on to act on the Project of that name. Those are different
-// resources, and the gap between them is one project's owner holding authority
-// over another's. Routes whose {name} is a namespace want Resolve.
+// ResolveProject resolves a Project name directly; namespace-scoped routes
+// use Resolve. Mixing them can authorize a different project when names collide.
+// Unknown users, nonmembers and missing projects all return ok=false; cluster
+// admins pass for any name.
 func (r *ProjectAccessResolver) ResolveProject(ctx context.Context, email, project string) (ProjectAccess, bool) {
 	return r.resolveProject(ctx, email, project, r.roles.GetRole(email))
 }
@@ -221,27 +210,10 @@ func (r *ProjectAccessResolver) resolveProject(ctx context.Context, email, proje
 	return ProjectAccess{Project: project, Role: role}, true
 }
 
-// projectForName maps a namespace to the project that owns it.
-//
-// An existing namespace is resolved through the shared owner lookup, because
-// the label that used to answer this is writable by anyone who can write a
-// namespace, which made every gated route's authority rest on a value the
-// caller might have set. What that lookup requires, and the release it starts
-// requiring the claim, is stated once in nsowner.Of.
-//
-// When no namespace by that name exists the name is returned unchanged, which
-// is what a caller naming a project by its own name before its namespace exists
-// relies on. Nothing is being trusted there: no metadata was read, and the
-// caller named the project outright.
-//
-// This keeps no cache of its own. The TTL map that used to sit here held an
-// answer for a minute, so a namespace whose ownership had been withdrawn kept
-// authorising for the rest of it, and carrying the claim in the cached value
-// would not have helped because nothing invalidated it.
-//
-// The reader underneath may be an informer, which is a cache with a watch on
-// it: it goes stale only for as long as a watch takes to deliver, and it is
-// swapped back to a live client if the manager driving it stops.
+// projectForName resolves namespace ownership through nsowner, retrying if
+// the ownership reader changes. An absent namespace falls back to a project
+// with the supplied name. Existing unowned namespaces resolve to empty.
+// There is no additional TTL cache at this layer.
 func (r *ProjectAccessResolver) projectForName(ctx context.Context, name string) (string, error) {
 	// Read, then check the reader has not been swapped underneath. Taking it is
 	// atomic and the lookup is not: a request that took the manager's cache and

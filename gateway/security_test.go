@@ -23,11 +23,6 @@ func postRegister(t *testing.T, handler http.HandlerFunc, body string) (int, reg
 	return w.Code, resp
 }
 
-// An anonymous request naming an existing registration must not echo the
-// management token. The label and the address are both readable from public
-// DNS, so anyone could otherwise ask for the token and then deregister or
-// repoint the cluster. Such a request proves nothing: it refreshes no
-// inactivity clock and moves no address.
 func TestAnonymousRegisterDoesNotDiscloseToken(t *testing.T) {
 	handler := handleRegister(registry.New(), "kipper.run", neverObserve)
 
@@ -145,11 +140,6 @@ func TestIsPublicIP(t *testing.T) {
 	}
 }
 
-// A label shaped like an address belongs to that address. Without this, anyone
-// can hold the default name of a server they do not run: the operator who later
-// installs on 203.0.113.77 finds their name taken, and until they do, every link
-// under it points wherever the squatter chose. The name is only worth taking now
-// that a chosen label is a documented install option.
 func TestRegisterRefusesAnIPShapedLabelFromAnotherAddress(t *testing.T) {
 	handler := handleRegister(registry.New(), "kipper.run", neverObserve)
 
@@ -218,12 +208,7 @@ func TestStartupPruneAppliesTheLabelRule(t *testing.T) {
 	}
 }
 
-// Reserving a name must not evict a cluster already serving under it. Expanding
-// the reserved list is a rule for new claims; applying it retroactively to a live
-// registration deletes its token, takes it off the air on a restart it did not
-// ask for, and breaks the promise that a minor upgrade leaves a working cluster
-// working. A name nobody ever served is a different matter: nothing is running,
-// so the reservation takes effect.
+// Existing proven labels retain their registration when reserved names expand.
 func TestStartupPruneSparesALabelThatHasServed(t *testing.T) {
 	served := &registry.Entry{Subdomain: "docs", IP: "203.0.113.1", FirstProvenAt: time.Now().Add(-72 * time.Hour)}
 	if prunableEntry(served) {
@@ -252,12 +237,8 @@ func TestStartupPruneSparesALabelThatHasServed(t *testing.T) {
 	}
 }
 
-// The reserved and address guards decide who may CREATE a name. Applied to an
-// authenticated renewal they starve a registration the gateway has already
-// decided to keep: startup grandfathers a proven cluster on a now-reserved label
-// and logs that a restart will not take it away, while every heartbeat gets a 409,
-// its proof lease dies within the week and the name lapses anyway. Same for a
-// cluster that moved servers keeping its address-derived name.
+// Grandfathered and moved registrations need authenticated renewals to retain
+// their proof leases, even when new claims would fail the name guards.
 func TestGuardsDoNotRefuseAnAuthenticatedRenewal(t *testing.T) {
 	reg := registry.New()
 	handler := handleRegister(reg, "kipper.run", neverObserve)

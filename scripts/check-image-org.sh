@@ -1,38 +1,15 @@
 #!/usr/bin/env bash
-# Reports every reference to a container-image organisation across a cluster's
-# workload specs, not just its running pods.
+# Check literal image-organisation references in workload specs and Kipper CRs.
+# Usage: scripts/check-image-org.sh <image-org> [kubeconfig]
+# Exit 0: no blocking references; 1: references remain; 2: check failed.
 #
-# Running pods are the wrong thing to check before retiring a registry: a
-# Deployment whose pods are up but whose template still names the old org
-# breaks on its next rollout, and a CronJob breaks on its next schedule, hours
-# after anyone was watching. This walks the specs that decide what gets pulled
-# next, including the Kipper custom resources that controllers materialise
-# those specs from.
+# Desired-state and unfinished-Job references block registry retirement.
+# Derived Pod/ReplicaSet references and completed Jobs are reported separately;
+# rolling back to an old ReplicaSet may still require the old registry.
 #
-# Usage:
-#   scripts/check-image-org.sh oldorg            # current KUBECONFIG
-#   scripts/check-image-org.sh oldorg ~/.kip/clusters/example.yaml
-#
-# Exit 0 when nothing that will pull again names the org, 1 when something
-# does, 2 when the check could not run. The distinction is the point: this
-# gates the deletion of a registry, so "I could not check" must never read as
-# "all clear".
-#
-# Known limits, both erring towards reporting too much rather than too little,
-# because a false blocker is visible and a false clean deletes a registry:
-#
-#   - A reference reached through valueFrom (a ConfigMap or Secret key rather
-#     than a literal) cannot be resolved from the object alone and is not
-#     followed. Retiring a registry that a ConfigMap names is not covered here.
-#   - An untagged path such as "<org>/name" under a key that is not a known path
-#     field is reported, because it is grammatically identical to an untagged
-#     Docker Hub reference. Keys that can only hold a filesystem path, and paths
-#     ending in a recognised file extension, are excluded; what remains is
-#     reported so a human decides rather than skipped so nobody does.
-#   - A reference assembled at runtime from parts ("ghcr.io/" + org + "/name")
-#     is invisible to any check that reads strings, including this one. The
-#     repository test in kip/internal/installer guards the shipped constants,
-#     which is where such a reference would have to be built.
+# Limits: valueFrom references and strings assembled at runtime are not resolved.
+# Ambiguous untagged paths can be reported as images; known path fields, file
+# extensions and source hosts are excluded by the heuristics below.
 set -euo pipefail
 
 ORG="${1:-}"
@@ -108,15 +85,8 @@ def looks_like_a_path(token):
     _, dot, ext = last.rpartition(".")
     return bool(dot) and ext.lower() in FILE_EXTENSIONS
 
-# Schemes that name an image to pull, as `skopeo` and `crane` take them. The
-# scheme is stripped and what remains is judged as a reference, because
-# "docker://ghcr.io/org/tool:v2" in a CronJob's args pulls exactly as an image
-# field does. Every other scheme names a source, not an image.
-# Only the transports that name a remote registry. dir:, oci-archive:,
-# docker-archive:, docker-daemon: and containers-storage: read a local directory,
-# archive or store, so a reference behind one of them does not contact the
-# registry being retired and must not hold the gate shut. They are left
-# unstripped, which is enough: the leading "dir:" keeps the token from matching.
+# Strip remote-registry transports before matching image references. Local
+# transports are filtered separately so names like dir:8080/org/app stay local.
 IMAGE_TRANSPORTS = ("docker://", "oci://")
 
 # Transports that read a local directory, archive or daemon store. These are

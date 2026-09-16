@@ -20,22 +20,8 @@ const hostnameLabel = "kubernetes.io/hostname"
 // installed and Available before allowing a RAG install.
 const ollamaDeploymentName = "ollama"
 
-// ragRequiredHeadroom is the additional free RAM Phase 2 requires on
-// the node where Phase 1's Ollama is pinned. Phase 2 colocates Qdrant
-// and AnythingLLM with Ollama so embedding traffic stays node-local;
-// the headroom budget covers the three new memory consumers:
-//
-//   - Qdrant ~512 MiB resident at a few thousand vectors (mmap-friendly
-//     and grows gently; 1M vectors fit in ~135 MiB with full mmap).
-//   - AnythingLLM ~2 GiB. The project's documented minimum, and the
-//     Node.js process is OOM-prone above the 2 GiB ceiling under agent
-//     workloads.
-//   - nomic-embed-text loaded in the existing Ollama process: ~1 GiB
-//     including the KV cache for the 8K-token context window.
-//
-// Plus ~512 MiB of slack for query-time spikes. Web-verified
-// 2026-05-10 against qdrant.tech, docs.anythingllm.com, and the
-// nomic-embed-text Ollama model card.
+// ragRequiredHeadroom budgets 4 GiB on the Ollama node for Qdrant, AnythingLLM,
+// the embedding model, and query-time overhead.
 const ragRequiredHeadroom int64 = 4 * 1024 * 1024 * 1024
 
 // RAGReport summarises whether the cluster can host the Phase 2 RAG

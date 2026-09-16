@@ -180,20 +180,8 @@ func (h *Quota) quotaView(ctx context.Context, name string, project *kipperv1.Pr
 			entry.Hard = toDimensions(kipperv1.TierQuota(project.Spec.Tier))
 		}
 
-		// The caps above come from the Project's own spec and are the caller's
-		// to see. What is running against them does not: a declared environment
-		// whose namespace another project holds would otherwise report that
-		// project's usage.
-		// Ownership decides whether the read happens at all. Reading first and
-		// discarding the result on a condition would still have issued the
-		// request: a Go if-statement runs its initializer before it evaluates
-		// the condition, so the privileged GET went out either way.
-		//
-		// A namespace that is absent or somebody else's is skipped and the
-		// environment still reported, with its declared caps and no usage. A
-		// check that could not run is neither of those: answering 200 there
-		// would report a healthy environment with no usage, which is what a
-		// namespace whose quota has not published status yet looks like.
+		// Establish ownership before fetching usage; declared quota caps alone are
+		// safe to report. Skip foreign namespaces and propagate lookup failures.
 		ownErr := error(nil)
 		if withUsage {
 			ownErr = namespaceBelongsTo(ctx, h.Client, h.CRClient, ns, name)

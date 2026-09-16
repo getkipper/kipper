@@ -54,14 +54,8 @@ const jobLogsText = computed(() => lines.value.join('\n'))
 let showing = 0
 
 /**
- * The reason the server gave, or the caller's wording when it gave none.
- *
- * A 404 with no reason in it is the one case worth naming. Every 404 the job
- * routes raise goes through respondError and carries an error field, so a bare
- * one on one of these requests means it reached no handler: usually a cluster
- * whose API is older than the console talking to it. Usually rather than
- * always, because a proxy in front of the API can answer 404 itself, which is
- * why the wording hedges rather than claiming proof.
+ * Prefer the server's error message. A bare 404 suggests an API version
+ * mismatch, though a proxy can produce the same response.
  */
 function serverReason(e: unknown, fallback: string): string {
   const response = (e as { response?: { status?: number; data?: { error?: string } } })?.response

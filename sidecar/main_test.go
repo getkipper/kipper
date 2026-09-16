@@ -85,12 +85,6 @@ func TestProxyAddsInstanceHeader(t *testing.T) {
 	}
 }
 
-// A client that goes away mid-request is not the app behind this proxy
-// failing. Answering 502 puts a gateway error in the logs and in anything
-// counting 5xx, and sends whoever is debugging to the wrong side of the
-// connection — which is exactly what happened while proving a cross-project
-// link worked: the link was fine, the shell client closed its socket when its
-// input ended, and the 502 read as the target being down.
 func TestAVanishedClientIsNotAGatewayError(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()

@@ -112,15 +112,9 @@ func (r *Registry) Prune(keep func(ip string) bool) int {
 	return removed
 }
 
-// PruneEntries drops every entry whose subdomain and address fail keep, and
-// returns how many were removed.
-//
-// It takes the whole entry because admissibility depends on more than the label:
-// whether the name spells an address other than its own, and whether anything
-// ever served under it, both decide what may be done with it. Startup is where a policy tightened
-// after a snapshot was written gets applied, so a rule added to the registration
-// guard alone would protect unused names while every name already taken under
-// the old rule kept serving.
+// PruneEntries removes entries for which drop returns true and returns the count.
+// The predicate receives the whole entry so startup policy can consider serving
+// history as well as the label and address.
 func (r *Registry) PruneEntries(drop func(*Entry) bool) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -164,15 +158,8 @@ func (r *Registry) LoadFrom(path string) error {
 
 	for i := range snap.Entries {
 		entry := snap.Entries[i]
-		// FirstProvenAt arrived with the tombstone, so a registration persisted
-		// before it carries no value while its proof record shows the label
-		// served. Reading that as never-proven would free the name the moment it
-		// lapsed or was released, taking the tombstone away from exactly the
-		// oldest clusters. A proof already recorded is the evidence the field
-		// exists to hold, so adopt it.
-		// The condition mirrors everProvenLocked: a lease naming no key
-		// authorises nothing and must not buy a tombstone either, or a
-		// half-written proof record becomes a 90-day hold.
+		// Backfill serving history in older snapshots from a proof with a key,
+		// preserving tombstone eligibility for existing clusters.
 		if entry.FirstProvenAt.IsZero() && !entry.ProvenAt.IsZero() && entry.ProofKeySPKI != "" {
 			entry.FirstProvenAt = entry.ProvenAt
 			// Mark it so the next flush records the migration. Left in memory it

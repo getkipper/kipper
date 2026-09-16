@@ -1,17 +1,8 @@
-// Package share issues and validates capability tokens that let a
-// non-Dex user open exactly one browseable service UI for a bounded
-// time. A share token is deliberately unlike a Dex token: HS256 signed
-// with a dedicated key, its own issuer and subject, and an audience
-// pinned to a single UI host. Those structural differences are what
-// keep it from ever satisfying the RS256/Dex validators that guard the
-// REST API and the WebSocket endpoints.
-//
-// Every token is backed by a server-side grant Secret (see grants.go):
-// the token names its signing key by kid and its grant by jti, and it
-// carries the Service object's immutable UID. Validation checks the
-// signature, the claims, the grant's existence (revocation), and the
-// live Service UID, so revoking a grant or rotating the key kills a link
-// without touching the others.
+// Package share issues HS256 capability tokens for one service UI and a bounded
+// lifetime, using a dedicated issuer, subject, and host audience. Each token
+// identifies its signing key, server-side grant, and immutable Service UID.
+// Validation combines signature and claim checks with grant and live-service
+// checks; these tokens are separate from Dex credentials for the REST API.
 package share
 
 import (

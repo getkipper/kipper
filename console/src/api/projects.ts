@@ -27,15 +27,8 @@ export interface Environment {
 }
 
 /**
- * A project role name.
- *
- * It is a string rather than a union of the three built-ins, because the set of
- * roles is the cluster's to decide and not this build's. A role this console
- * does not enumerate reaches a Project through kubectl, a restore, or a cluster
- * newer than the browser, and the panel has to render what is actually stored.
- *
- * Nothing is gated on the name. What a member may do arrives as `capabilities`,
- * which is the same thing the API gates its own routes on.
+ * Role names remain open-ended so the console can display roles introduced by
+ * the cluster. Capability lists determine permitted actions.
  */
 export type ProjectRole = string
 

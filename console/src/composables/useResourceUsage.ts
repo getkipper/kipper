@@ -13,13 +13,9 @@ const DEFAULT_POLL_MS = 15000
 type MaybeScope = UsageScope | null | undefined
 type ScopeInput = MaybeScope | Ref<MaybeScope>
 
-// useResourceUsage fetches /api/v1/resources/usage on mount and at a
-// regular cadence. The scope may be a plain object (static) or a Ref
-// (reactive — a null value pauses polling, useful when the consumer
-// needs to wait for config to resolve or for a component to be enabled).
-//
-// Polling pauses while the browser tab is hidden so an idle window does
-// not hammer the API. The interval is cleared on unmount.
+// useResourceUsage fetches on mount and polls while a scope is present.
+// Reactive scopes restart polling when changed; hidden tabs skip interval
+// fetches and unmount clears the timer. Options control initial fetch and cadence.
 export function useResourceUsage(scope: ScopeInput, options: UseResourceUsageOptions = {}) {
   const data = shallowRef<UsageResponse | null>(null)
   const loading = ref(false)

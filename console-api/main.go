@@ -625,30 +625,11 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 		r.Post("/projects", admin(projects.Create))
 
 		r.Route("/projects/{name}", func(r chi.Router) {
-			// Every route below is scoped to the caller's membership of this
-			// project, and each names the capability it takes. This replaces
-			// the cluster-wide role checks for project-scoped routes so a user
-			// only reaches their own projects.
-			//
-			// The {name} segment does not mean the same thing throughout, so the
-			// subtree is split into two groups with the matching gate. Routes
-			// acting on the Project itself take a project name; routes acting on
-			// workloads take one of its environment namespaces. The two can
-			// collide — project "shop" with an environment "prod" and project
-			// "shop-prod" both answer to "shop-prod" — and resolving one as the
-			// other hands whoever owns the namespace authority over the Project,
-			// or the reverse.
-			// Each route names the capability it takes rather than a role, so
-			// what admits a caller is a thing the catalogue defines and a
-			// custom role can carry.
-			//
-			// Which capability each route takes is also declared in routeAuthz.
-			// Nothing checks the router against that declaration: the wrappers
-			// are closures and chi.Walk cannot see inside them, so the two are
-			// kept in step by review. The matrix catches a route wired to a
-			// capability of a different level; one wired to another capability
-			// of the same level it cannot see, and neither can anything else
-			// until a member can hold exactly one.
+			// ProjectScope interprets {name} as a Project; NamespaceScope interprets it
+			// as an environment namespace. Keep these separate because the names can
+			// collide across projects. Routes declare capabilities here and in routeAuthz.
+			// Keep both declarations aligned: the role matrix cannot distinguish
+			// capabilities shared by the same built-in roles.
 			cap := func(name capability.Name) func(http.HandlerFunc) http.HandlerFunc {
 				return func(h http.HandlerFunc) http.HandlerFunc {
 					return middleware.RequireCapability(name)(h).ServeHTTP

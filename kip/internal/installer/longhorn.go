@@ -91,22 +91,9 @@ const stripKipperMultipathBlockAwk = `awk '
   !skip                                { print }
 ' /etc/multipath.conf > /tmp/multipath.conf.kipper && mv /tmp/multipath.conf.kipper /etc/multipath.conf`
 
-// configureMultipathForLonghorn installs a blacklist for Longhorn's
-// iSCSI-backed block devices into /etc/multipath.conf and reloads
-// multipathd. Without this, multipathd claims every Longhorn iSCSI LUN
-// as an mpath member, kubelet cannot run mkfs on the underlying device,
-// and freshly-provisioned PVCs hang in ContainerCreating with a
-// "device apparently in use by the system" error.
-//
-// The blacklist targets the IET (iSCSI Enterprise Target) vendor that
-// Longhorn uses, so it does not affect any real multipathed SAN devices
-// the host may have. On hosts without multipath-tools installed the
-// function is a no-op — multipathd absent means there is nothing to
-// fight kubelet for the device.
-//
-// Safe to re-run: any prior kipper-managed block (including the
-// mangled single-line variant from earlier versions) is stripped
-// before the fresh block is appended.
+// configureMultipathForLonghorn blacklists IET VIRTUAL-DISK devices so
+// kubelet can format Longhorn volumes without multipathd claiming them.
+// It replaces the previous Kipper block and reloads multipathd when installed.
 func configureMultipathForLonghorn(client *ssh.Client) error {
 	out, err := client.Run("command -v multipathd >/dev/null 2>&1 && echo present || echo absent")
 	if err != nil {

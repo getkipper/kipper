@@ -205,24 +205,9 @@ func workloadGVR(kind secretname.Kind) schema.GroupVersionResource {
 	return manifest.AppGVR
 }
 
-// applyConfigChange puts a saved configuration change in front of the running
-// pods, or says that it has not been.
-//
-// Saving without restarting is the default because restarting is the
-// destructive half: it drops every connection the workload is serving, and
-// doing that as a side effect of setting a variable is not what the person
-// typing it asked for. The console has always worked this way — it writes the
-// change and raises a banner — and the platform is built for it, since an
-// environment is published as its own immutable generation and the pods move to
-// it when they restart rather than when it is written.
-//
-// What the CLI owed was not the restart but the sentence: a container reads
-// envFrom once, at start, so a command that saves and says nothing leaves
-// someone believing a change took effect that has not.
-// A restart that was asked for and did not happen fails the command. Exit 0
-// would tell automation the new values are live while the pods still run the
-// old ones, which is exactly wrong during a credential rotation — the same rule
-// `kip app deploy` applies to the secrets it stores.
+// applyConfigChange restarts the workload when --restart is set and propagates
+// restart failures. Otherwise it reports that the saved environment will take
+// effect on restart, preserving running pods by default.
 func applyConfigChange(cmd *cobra.Command, ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, kind secretname.Kind, ns, name string) error {
 	if restart, _ := cmd.Flags().GetBool("restart"); restart {
 		if err := restartWorkload(ctx, clientset, dyn, kind, ns, name); err != nil {

@@ -931,18 +931,10 @@ func collectDeploySecrets(entries []string, env map[string]string) (map[string]s
 	return secrets, nil
 }
 
-// cleanupDeploySecrets removes Secrets this deploy invocation created when the
-// App CR never materialised. Without an App there is no owner to adopt them,
-// so a failed deploy would otherwise leave plaintext credentials in the
-// namespace indefinitely. Secrets that pre-existed the invocation are kept:
-// they belong to an earlier deploy or another writer, and so is everything
-// when the CR does exist, because the reconciler will adopt it. Deletion is
-// best-effort; a failure is reported so the user can remove the Secret by
-// hand.
-// gitCredentialVersion is what the credential looked like when this run wrote
-// it. A credential is named after the pair it holds, so another run writing the
-// same token converges on the same object and may have claimed it since; the
-// delete carries this so it fails rather than taking that run's credential.
+// cleanupDeploySecrets best-effort deletes Secrets created by this invocation
+// only after confirming the App is absent. Existing or unreadable App state
+// preserves them. gitCredentialVersion fences deletion against a concurrent
+// writer claiming the same digest-named credential.
 func cleanupDeploySecrets(ctx context.Context, clientset kubernetes.Interface, d *deployer.Deployer, namespace, name, gitCredential, gitCredentialVersion string, secretsCreated, gitCredsCreated bool) {
 	if !secretsCreated && !gitCredsCreated {
 		return

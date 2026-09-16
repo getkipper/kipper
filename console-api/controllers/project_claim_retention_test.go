@@ -16,19 +16,9 @@ import (
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 )
 
-// The claim's whole promise is that ownership rests on something a relabel does
-// not touch. The end-of-pass write is where that promise was broken: it replaced
-// the list with what this pass reached, and the one thing that stops a pass
-// reaching a namespace it already holds is somebody rewriting the label. So the
-// write that exists to record ownership was released by exactly the edit the
-// record defends against.
-//
-// It keeps rather than replaces now, and what it keeps is bounded: the object
-// has to still be there under the same UID, and the project has to still be
-// asking for it. Liveness alone would let a claim outlive the project's right to
-// the namespace and block anyone else from ever adopting it.
-// The contested namespace in every fixture here, and the project it gets
-// relabelled to, which is any project that is not the one holding it.
+// Fixtures for retaining ownership evidence when a namespace is relabelled.
+// The recorded UID must survive until the namespace or declared environment
+// is removed, or a successful adoption replaces it.
 const (
 	retentionNamespace = "shop-prod"
 	rivalProject       = "grocer"
@@ -180,20 +170,8 @@ func TestADeletedNamespaceLeavesTheRecord(t *testing.T) {
 		"a namespace that no longer exists stayed on the project's record")
 }
 
-// Retention is bounded by what the project still asks for, and not by the object
-// merely existing.
-//
-// Keeping a name on existence alone let the record outlive the project's right
-// to it, and the record authorises deletion. A project that stops declaring an
-// environment whose namespace has been relabelled away keeps neither the claim
-// nor any other tie to it, but an unbounded record would hold that name for
-// good. Another project then legitimately adopts and claims the namespace, and
-// the day somebody points the label back at the first project, its stale record
-// authorises deleting a live namespace that now belongs to somebody else.
-//
-// The label is not the guard against that. Rewriting the label is the move the
-// whole deletion gate exists to survive, so it cannot also be the thing that
-// makes the stale record safe.
+// Prune the legacy name record when the project releases an environment,
+// so later relabelling cannot revive obsolete deletion authority.
 func TestARecordIsDroppedOnceTheProjectStopsAskingForTheNamespace(t *testing.T) {
 	shop := projectHolding([]string{"test", "prod"}, "shop-test", "shop-prod")
 	c := claimFixture(t, shop, heldNamespace("shop-test"), heldNamespace("shop-prod"))
@@ -212,20 +190,8 @@ func TestARecordIsDroppedOnceTheProjectStopsAskingForTheNamespace(t *testing.T) 
 		"a project kept a namespace on its record after it stopped declaring it and lost it to another project, and that record is what authorises deleting it")
 }
 
-// The claim that no longer matches the live object is the evidence, so it has to
-// outlive the pass that noticed the mismatch.
-//
-// A namespace deleted and recreated unlabelled is somebody else's until a pass
-// adopts it, and the reconcile refuses it and says so. What makes the refusal
-// stick is the project's own claim naming the object that went away: the
-// unlabelled backstop asks for the object, and the stale claim is what tells it
-// the live one is not ours. Dropping that claim on the mismatch leaves only the
-// name-only record, which answers yes, and the third party's namespace is
-// collected on the next cleanup that runs.
-//
-// One pass hides this. The claim is still there while the pass that saw the
-// mismatch is running, so a single-pass test passes and the second pass erases
-// what it proved.
+// Keep the old UID through subsequent passes: it prevents the legacy name
+// record from authorizing cleanup of an unlabelled replacement namespace.
 func TestTheClaimOnAReplacedObjectSurvivesThePassThatNoticed(t *testing.T) {
 	shop := projectHolding([]string{"test", "prod"}, "shop-test", "shop-prod")
 	c := claimFixture(t, shop, heldNamespace("shop-test"), heldNamespace("shop-prod"))

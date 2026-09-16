@@ -1,21 +1,6 @@
-// Package secretname holds the names of the Secrets a workload's controller
-// derives for it, because more than one module has to agree about them.
-//
-// Secret names are namespace-global while workload names are unique only within
-// a kind, so an App, a Function and a Job may all be called "api" in one
-// namespace. Naming their Secrets after the workload alone gives all three the
-// same object: two controllers author it in turn and a third reads whatever
-// happens to be there. That is why the kind is part of every name here.
-//
-// It matters more than it looks. These Secrets carry resolved service
-// credentials, so a workload reading the wrong one reads another workload's
-// database password, and `writerSecretAmbiguous` existed in the App controller
-// only to detect this collision rather than prevent it.
-//
-// The CLI names the same Secrets to read, write and delete them, and it is a
-// separate module from the reconcilers that create them. One of them spelling a
-// name differently means writing a Secret the workload never reads, so the rule
-// lives here rather than in each of them.
+// Package secretname shares credential and environment Secret naming between
+// CLI writers and reconcilers. Workload-derived environment names include kind
+// to separate Apps, Functions, and Jobs, including legacy same-name workloads.
 package secretname
 
 import (

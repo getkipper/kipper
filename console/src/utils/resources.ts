@@ -1,9 +1,5 @@
-// Pure helpers shared by the <ResourceControl> primitive and any caller that
-// needs to talk about Kubernetes-style resource quantities.
-//
-// Memory is carried as raw bytes throughout the UI. CPU is carried as raw
-// millicores. The API returns these as numbers; format* are only used for
-// display.
+// Shared Kubernetes resource helpers. UI values use bytes for memory and
+// millicores for CPU; formatters convert them for display.
 
 export type ResourceKind = 'memory' | 'cpu'
 

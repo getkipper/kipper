@@ -197,24 +197,10 @@ func withoutController(refs []metav1.OwnerReference) []metav1.OwnerReference {
 	return kept
 }
 
-// RepairCredentials gives an unowned credentials Secret back to its service and
-// removes per-binding projections nothing owns.
-//
-// The operator asserts here what the platform will not infer. A controller that
-// claimed an ownerless Secret on its name would hand whatever sits under that
-// name to anything able to create a Service CR, so the reconciler refuses and
-// this exists instead: a person, holding cluster credentials, saying that this
-// object belongs to that service.
-//
-// It claims a Secret with no controller, and one whose controller reference
-// names an object that is not there. Nothing is taken from an owner that exists:
-// liveness is decided again here rather than trusted from the audit, because the
-// two are separate reads and a Secret can be claimed in between.
-//
-// Projections are deleted rather than claimed. They are rendered from the
-// service's shared credentials on the next reconcile, so the workload's own
-// controller writes a replacement it owns, whereas a claimed one would keep
-// whatever values it happens to hold.
+// RepairCredentials assigns unowned or abandoned Secrets to their services
+// on the operator's authority, rechecking ownership and service liveness.
+// Unowned projections are deleted so controllers rebuild them from shared
+// credentials instead of retaining their existing values.
 func (m *Manager) RepairCredentials(ctx context.Context, namespace string, audit CredentialAudit) ([]string, error) {
 	var done []string
 

@@ -1,17 +1,6 @@
-// Package envtemplate resolves ${NAME} references inside environment variable
-// values, so an operator can compose a connection string from credentials
-// Kipper already injects instead of pasting the password into spec.env.
-//
-//	DATABASE_URL=postgresql://${DB_USERNAME}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
-//
-// The CR keeps the template and only the rendered Secret and the pod hold the
-// credential, so `kip export` and the console Env tab show the reference.
-//
-// The grammar lives here alone. It was previously spelled out in two regexes —
-// one in the CLI's plain-text warning, one in the console's — and the two
-// drifting apart is a silent failure in both directions: a broader pattern
-// reports a real embedded password as safe, a narrower one warns about the
-// templated form this package exists to encourage.
+// Package envtemplate resolves ${NAME} references in environment values.
+// Rendering and credential warnings share this grammar so they agree on which
+// parts are references and which are literal text.
 package envtemplate
 
 import (
@@ -23,28 +12,11 @@ import (
 // value. Values come back raw and are never themselves resolved.
 type Lookup func(name string) (string, bool)
 
-// Resolve substitutes every ${NAME} in value, in one pass, left to right.
-//
-// Four rules, all of them deliberate:
-//
-//   - One pass. Lookup values are substituted as they are, so A=${B} with
-//     B=${A} terminates with a literal rather than looping, and a reference
-//     inside a resolved value stays literal.
-//   - An unknown name is left exactly as written, so a typo reaches the process
-//     as ${DB_HSOT} and the connection error names it. Substituting empty would
-//     produce a connection to no host and a worse error.
-//   - $${NAME} yields the literal ${NAME}. Without an escape, "I meant this
-//     literally" is not expressible, and LOG_FORMAT=${LEVEL} ${MSG} is a
-//     harmless literal right up until a key named LEVEL appears somewhere in
-//     scope, at which point it silently becomes something else. Only a pair of
-//     dollars touching a placeholder escapes it: in "$$${NAME}" a third dollar
-//     separates them, so the pair is literal and the placeholder resolves.
-//   - Anything that is not a well-formed placeholder is left alone. A value
-//     with no placeholder in it comes back byte for byte, which is what makes
-//     this safe to run over every existing value.
-//
-// Returns the resolved string and the names that were referenced but had no
-// value, sorted and deduplicated, for the caller to report.
+// Resolve substitutes ${NAME} once, left to right, preserving unknown and
+// malformed placeholders. Substituted values stay literal rather than expanding
+// recursively. $${NAME} escapes a placeholder; $$${NAME} retains the dollar
+// pair and resolves the following placeholder.
+// It also returns sorted, deduplicated names with no lookup value.
 func Resolve(value string, lookup Lookup) (string, []string) {
 	return resolve(value, func(name string) (Value, bool) {
 		text, ok := lookup(name)
@@ -190,21 +162,9 @@ func ResolveAll(values map[string]string, lookup Lookup) (map[string]string, []s
 	return out, names
 }
 
-// StripPlaceholders removes every reference from a value, leaving the literal
-// text around them.
-//
-// It exists for the credential warnings, which ask whether what remains after
-// the templating still carries a password of its own. A templated URL resolves
-// its credential out of a Secret at render time and never stores one on the CR,
-// so warning about it would argue against the safe construction and teach people
-// to ignore the warning.
-//
-// Both callers used to spell the grammar out again as a regex, one in the CLI
-// and one in the console. Answering "is this a reference?" anywhere other than
-// here means two definitions that drift, and drift is silent in both directions:
-// a broader pattern erases a URL's own delimiters and reports a real embedded
-// password as safe, a narrower one warns about the templated form this package
-// exists to encourage.
+// StripPlaceholders returns the literal text around references, using the
+// same grammar as rendering. Credential warnings inspect that text for embedded
+// passwords while accepting credentials supplied through references.
 func StripPlaceholders(value string) string {
 	var out strings.Builder
 	walk(value,
@@ -230,23 +190,9 @@ func Names(value string) []string {
 	return names
 }
 
-// ShellStyleRefs returns the names a value references in Kubernetes' own
-// $(NAME) form, in order of appearance and deduplicated.
-//
-// Kipper resolves ${NAME} and nothing else, so these are reported rather than
-// expanded. The point is that they are inert and stay that way: a workload's
-// rendered environment reaches its pod through envFrom, and the kubelet copies
-// envFrom values into the container without expanding anything in them. $(NAME)
-// is expanded only in a container's own env, command and args, which is not
-// where spec.env goes.
-//
-// So a value written as $(DB_HOST) reaches the process exactly as typed. That is
-// worth telling an operator, because it looks like it should work and the
-// failure it produces names the wrong thing.
-//
-// Accepting it as an alias was considered and rejected: it would put two
-// grammars on one field, and it would substitute into values that hold $(...)
-// for their own reasons, such as a stored command template.
+// ShellStyleRefs returns deduplicated $(NAME) references in appearance order
+// for diagnostics. Kipper resolves ${NAME}; its rendered envFrom values carry
+// $(NAME) literally to the process.
 func ShellStyleRefs(value string) []string {
 	var names []string
 	seen := map[string]bool{}

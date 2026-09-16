@@ -495,18 +495,9 @@ func (inv *Invites) loadInvite(ctx context.Context, token string) (*invite, erro
 	return &i, nil
 }
 
-// claimInvite removes an invite and reports whether this caller is the one that
-// removed it. Exactly one concurrent caller can be told true.
-//
-// The invites live in one ConfigMap, so the claim is a compare-and-set on that
-// object: the write carries the resourceVersion it was read at, and the API
-// server rejects it if anything changed in between. A rejection means someone
-// else wrote — so the map is read again and the token looked for afresh, and a
-// caller that no longer finds it lost the race rather than hit an error.
-//
-// RetryOnConflict is not enough on its own. It would retry the write, but a
-// retry that reapplied a stale map would put back invites another request had
-// just claimed, which is the same lost update in the other direction.
+// claimInvite removes a token using the ConfigMap's resourceVersion so only
+// one concurrent caller succeeds. Each conflict retry rereads the full map,
+// preserving invites claimed by other callers.
 func (inv *Invites) claimInvite(ctx context.Context, token string) (bool, error) {
 	claimed := false
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {

@@ -224,20 +224,9 @@ func clusterGatewayToken(clientset kubernetes.Interface) string {
 // the caller expected, so nothing was written over it.
 var ErrMirrorHolds = errors.New("the local entry records a different gateway credential")
 
-// mirrorGatewayTokenToConfig records a token in the local entry, replacing
-// expected.
-//
-// It is a compare-and-swap rather than a plain write because "this came off the
-// cluster, so it wins" is not true for long. It is authoritative for the
-// registration that was read, at the moment it was read; a `kip cluster domain`
-// move finishing in the gap between that read and this write leaves a newer
-// credential under the same name, and overwriting it discards the only local
-// copy of a live one. The config lock cannot help — it orders writers, and the
-// stale value came from a Kubernetes secret nothing here locks.
-//
-// expected is what the caller saw before it went looking, so an empty expected
-// means "write only into an entry holding nothing", which is what the retry
-// after a refused release needs.
+// mirrorGatewayTokenToConfig replaces expected with token under the config
+// lock. Comparing the caller's earlier value preserves credentials written by
+// a concurrent domain move. Empty expected matches only an empty stored token.
 func mirrorGatewayTokenToConfig(clusterName, expected, token string) error {
 	return config.Update(func(cfg *config.Config) error {
 		c := cfg.GetCluster(clusterName)

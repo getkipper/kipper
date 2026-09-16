@@ -868,11 +868,6 @@ func TestVerifyPinPromotionServesWhenNotEnforcing(t *testing.T) {
 	}
 }
 
-// Each cached transport serves exactly one cluster, so the default of two idle
-// connections per host means a burst re-handshakes TLS and re-runs the pin
-// check for nearly every request. This is the whole throughput ceiling of the
-// data plane, so it is worth an explicit assertion rather than trusting the
-// clone to carry a sensible value.
 func TestProxyTransportPoolsConnectionsPerCluster(t *testing.T) {
 	p := &Proxy{Registry: registry.New(), BaseDomain: "kipper.run"}
 	entry := &registry.Entry{Subdomain: "203-0-113-12", IP: "203.0.113.12"}
@@ -897,11 +892,7 @@ func TestProxyTransportPoolsConnectionsPerCluster(t *testing.T) {
 	}
 }
 
-// The proxy middleware short-circuits the chain for every registered host, so
-// the API limiter registered after it never runs on proxied traffic. This test
-// drives the real router rather than the middleware alone: a unit test of
-// Middleware cannot see someone reordering the chain, and that ordering is the
-// whole reason the data plane was unmetered.
+// Exercise the real router so middleware ordering is part of the test.
 func TestDataPlaneIsMeteredThroughTheRealStack(t *testing.T) {
 	reg := registry.New()
 	// 127.0.0.1 refuses instantly, so a proxied request fails fast instead of

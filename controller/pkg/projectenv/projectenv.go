@@ -1,16 +1,6 @@
-// Package projectenv holds the rule that decides which environments a project
-// has, as opposed to which ones it declares.
-//
-// A Project that declares none still has one, and the difference is not
-// cosmetic: the reconciler creates a namespace for it and workloads run there.
-// Every surface that appends to or removes from that list has to start from the
-// effective set, because the reconciler builds its keep-list the same way and
-// deletes any namespace the list no longer accounts for.
-//
-// Getting that wrong deletes a live namespace and everything in it. It has
-// already happened at two surfaces independently — the console's add-environment
-// handler and the CLI's — which is why the rule lives here rather than beside
-// either of them.
+// Package projectenv resolves declared environments, supplying test when empty.
+// Mutations must start from this effective set so adding or removing an explicit
+// environment preserves existing namespaces intended to remain.
 package projectenv
 
 // Default is the environment a project gets when it declares none.

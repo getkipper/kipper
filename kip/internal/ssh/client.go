@@ -1,24 +1,7 @@
-// Package ssh wraps OpenSSH (`ssh` on PATH) so kip behaves identically to the
-// ssh command admins already configure for their workflow: ~/.ssh/config is
-// honoured, agents work, ProxyJump works, passphrase-protected keys prompt or
-// pull from the agent the way users expect, and any -o option that ssh accepts
-// can be passed through.
-//
-// `ssh` is the only executable required. Upload streams into `cat > path` over
-// the same session rather than calling scp, so the remote side needs no more
-// than a POSIX shell and the local side needs no second binary.
-//
-// All of kip's installer code targets a small surface — open a
-// connection, run a command, stream output, upload a file — so we
-// shell out per command rather than holding a Go-side SSH connection.
-//
-// Those calls share one connection. OpenSSH's ControlMaster carries every
-// command after the first over a socket, which turns an install's few hundred
-// handshakes into one. That is not an optimisation: a `kip install` against a
-// host being brute-forced on port 22 failed at cert-manager with
-// `kex_exchange_identification: read: Connection reset by peer`, because sshd's
-// MaxStartups randomly drops unauthenticated connections once ten are in flight
-// and the installer was making hundreds of them into a flood.
+// Package ssh wraps OpenSSH, honoring SSH configuration, agents and options.
+// Commands share a ControlMaster connection to reduce handshakes and exposure
+// to sshd's unauthenticated-connection limits. Uploads stream through remote
+// cat, using the same transport.
 package ssh
 
 import (
@@ -110,20 +93,8 @@ type Client struct {
 func Dial(cfg Config) (*Client, error) {
 	c := &Client{cfg: cfg, controlPath: controlSocket(cfg)}
 
-	// The handshake is the only thing retried, and `true` is why that is safe.
-	//
-	// Every earlier attempt at this tried to work out, after the fact, whether
-	// a command that failed had already run — from the exit status, from the
-	// shape of the diagnostic, from a token the remote shell wrote. None of it
-	// holds, because ssh carries stdout and stderr as separate streams and a
-	// connection lost after the remote side wrote can deliver one without the
-	// other. There is no way to read provenance out of a merged stream.
-	//
-	// So nothing that changes the host is ever repeated. What is repeated is a
-	// command that does nothing, whose only job is to get the shared connection
-	// up — and running `true` twice is the same as running it once whatever the
-	// network did. Every command afterwards rides that connection and makes no
-	// handshake, which is what the flood was dropping in the first place.
+	// Retry only the harmless connection probe. A failed SSH command may
+	// already have changed the host, so subsequent commands run once.
 	var err error
 	for attempt := 1; ; attempt++ {
 		var out string
@@ -156,21 +127,10 @@ func (c *Client) masterIsServing() bool {
 	return exec.Command("ssh", c.sshArgsWith("-O", "check")...).Run() == nil
 }
 
-// controlSocket returns the multiplexing socket path for this connection, or ""
-// when the directory cannot be prepared.
-//
-// The name hashes everything that decides where the connection lands and who it
-// authenticates as, not merely the address. Two clients addressing
-// root@10.0.0.10 through different ProxyJump hosts reach different machines, and
-// a socket keyed on the address alone would let the second reuse the first's
-// authenticated connection and run an installer against the wrong host — with
-// Dial's own `true` succeeding against it first. Options and key selection are
-// in the digest for the same reason.
-//
-// It is a digest rather than OpenSSH's %C token because a Unix socket path is
-// limited to about 104 characters on macOS and %C alone spends 64 of them; and
-// it lives under the user's own kip directory rather than a shared temp
-// directory, so no other local account can sit on the path.
+// controlSocket hashes connection options and key selection as well as the
+// destination, preventing reuse across distinct routes or identities. It uses
+// the private kip directory and returns empty when multiplexing is unsupported,
+// the directory is unavailable, or the socket path would exceed the limit.
 func controlSocket(cfg Config) string {
 	// Windows OpenSSH has no connection multiplexing, and asking for it there
 	// is worse than going without: ssh treats a ControlPath it cannot bind as
@@ -207,20 +167,8 @@ func controlSocket(cfg Config) string {
 		// A hash.Hash never reports a write error, per its own contract.
 		_, _ = fmt.Fprintf(h, "%d:%s", len(part), part)
 	}
-	// The process id is part of the name, and it is what makes aliasing
-	// impossible rather than merely unlikely.
-	//
-	// A digest can only cover what Config holds. OpenSSH also consults the
-	// agent, ~/.ssh/config and the bytes of the key file itself, none of which
-	// are visible here — so two processes with identical Config can still be
-	// asking for different connections, and the loser of a ControlMaster race
-	// would inherit the winner's authenticated session. Scoping the socket to
-	// one process removes the question.
-	//
-	// It costs nothing: Close tears the master down when the command ends, so
-	// nothing was being shared between invocations anyway. What multiplexing is
-	// for is the hundreds of commands inside one install, and those are all in
-	// this process.
+	// Scope sockets to this process: SSH configuration, agent state and key
+	// contents can differ between invocations with identical Config values.
 	path := filepath.Join(dir, fmt.Sprintf("%s-%d", hex.EncodeToString(h.Sum(nil))[:16], os.Getpid()))
 	// A deep home directory is unusual, but it has to degrade to a connection
 	// per command rather than to no connection: ssh treats a path it cannot
@@ -263,30 +211,9 @@ func (c *Client) attempt(command string, stdin []byte, stream io.Writer) (string
 	return string(out), err
 }
 
-// neverReachedHost reports whether a failure is the kind another attempt could
-// clear.
-//
-// It guards only the `true` probe in Dial, so nothing here decides whether a
-// command that changes the host gets repeated — that question no longer exists.
-// What it decides is how quickly a hopeless connection gives up: a wrong key or
-// a changed host key fails once rather than three times.
-//
-// Two things must hold, and neither is sufficient alone.
-//
-// The exit status must be 255, which is what ssh returns for its own failures;
-// anything else is the remote command's own status and means it ran.
-//
-// And the output must carry a diagnostic in ssh's own message format. Bare
-// substrings are not enough, because CombinedOutput merges ssh's stderr with
-// the remote command's: a remote `curl` reporting "Connection refused" against
-// some other service would otherwise look exactly like a connection that never
-// opened, and the command it followed would be run again. Matching
-// `ssh: connect to host ` rather than `Connection refused` is what separates
-// them.
-//
-// Authentication and host-key failures are deliberately absent: they are
-// configuration rather than weather, and retrying them only delays a clear
-// error.
+// neverReachedHost recognizes retryable Dial-probe failures by SSH's exit
+// status and diagnostic format. Authentication and host-key failures return
+// immediately. Only the harmless connection probe uses this retry decision.
 func neverReachedHost(err error, output string) bool {
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != sshTransportExit {

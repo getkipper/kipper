@@ -7,19 +7,9 @@ import (
 	"testing"
 )
 
-// Reading `kipper.run/project` off a namespace and believing it is how nine
-// separate places each ended up making an authorization decision from a value
-// the caller could set. They now go through nsowner, which treats the label as
-// a hint the named project has to back with a claim.
-//
-// Nothing stops the tenth. This is what stops the tenth: the label may be
-// mentioned only where it is written, where it is displayed, or where it is
-// used as a selector to gather candidates that something else then checks.
-// Anywhere else, resolve through nsowner.
-//
-// The list is by file rather than by package, because a package that writes the
-// label usually also reads it, and a package-wide exemption blinds this exactly
-// where the misses happened.
+// Keep namespace ownership decisions in nsowner. This per-file allowlist
+// permits label writers, display code and candidate selectors while catching
+// new direct readers for review. Package-wide exemptions would hide them.
 var mayMentionTheLabel = map[string]string{
 	// Writers: these stamp the label onto objects they create.
 	"controllers/project_controller.go": "writes the label onto namespaces it creates",

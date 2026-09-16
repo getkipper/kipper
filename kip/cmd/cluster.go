@@ -72,19 +72,9 @@ func resolveClusterName(cfg *config.Config) string {
 	return cfg.CurrentCluster
 }
 
-// resolveSSHKey returns the explicit SSH key to pass to ssh -i (or
-// empty when no caller-controlled key is set) plus the fallback hint
-// for the default key file. Lookup precedence for the explicit key:
-//
-//  1. --ssh-key flag (caller passes flagValue from cmd.Flags)
-//  2. KIP_SSH_KEY env var
-//  3. cluster.SSHKey from ~/.kip/config.yaml
-//
-// When all three are empty, the explicit key is "" and ssh is allowed
-// to consult ssh-agent / ~/.ssh/config / default identity files. The
-// fallback hint is ~/.ssh/id_ed25519 (Kipper's historical default);
-// it is passed only as a soft -i without IdentitiesOnly so it cannot
-// lock out users whose key lives elsewhere.
+// resolveSSHKey selects an explicit key from flag, KIP_SSH_KEY, then cluster
+// config. It also returns ~/.ssh/id_ed25519 as a fallback hint. An empty explicit
+// key lets OpenSSH use its normal agent, config, and identity selection.
 func resolveSSHKey(flagValue string, cluster *config.Cluster) (explicit, fallback string) {
 	switch {
 	case flagValue != "":

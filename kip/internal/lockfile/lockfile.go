@@ -1,16 +1,6 @@
-// Package lockfile serialises kip invocations that would otherwise overwrite
-// each other's changes to a shared file.
-//
-// Two of them need it. The auth store holds a refresh token that Dex rotates on
-// use, so two racing refreshes leave one process with a revoked one. The local
-// config holds gateway credentials, and an uninstall keeps one across a wipe
-// that takes minutes, long enough for another command to replace the entry it
-// is about to delete.
-//
-// Both follow the same rule, which is the reason this is one package rather than
-// two copies: the lock goes on a file of its own, never on the file being
-// guarded. Both of those are replaced by writing a temp file and renaming over
-// them, and a lock held on the replaced inode tells the next process nothing.
+// Package lockfile serializes writes to shared auth and configuration files.
+// Lock a separate file: atomic replacement changes the protected file's inode,
+// so a lock on that inode would no longer coordinate subsequent writers.
 package lockfile
 
 import (

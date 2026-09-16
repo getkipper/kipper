@@ -7,20 +7,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// ComponentPaths locates a single platform component's memory request and
-// limit fields inside a HelmChart's valuesContent, and supplies the default
-// values used when the user has not set a per-component override.
-//
-// Multiple components can live in one HelmChart — for example the
-// kube-prometheus-stack chart carries both Prometheus and Grafana, each at
-// its own path. The reconciler groups patches by ChartName so a single
-// HelmChart Update covers every component that lives inside it.
-//
-// Profile-sensitive components (Prometheus, Loki) leave the default fields
-// empty: their resolved value comes from ResourcesForProfile via
-// EffectiveLimit / EffectiveRequest. Flat components (Grafana, Promtail,
-// Traefik, KEDA, Velero) declare fixed defaults that mirror the values the
-// installer seeded into the chart's valuesContent.
+// ComponentPaths locates a component's memory fields in Helm values. Components
+// may share ChartName so reconciliation can group their updates. Profile-based
+// components resolve defaults through EffectiveLimit/EffectiveRequest; others
+// carry fixed defaults matching installer values.
 type ComponentPaths struct {
 	// ChartName is the HelmChart resource name in HelmChartNamespace.
 	ChartName string

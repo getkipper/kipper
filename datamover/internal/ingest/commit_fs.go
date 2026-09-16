@@ -356,21 +356,11 @@ func hashFile(p string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// deletionPass removes entries under root that are absent from the manifest,
-// then prunes emptied directories the manifest does not list. Manifest
-// directories and symlinks count as present; the state dir is excluded when it
-// lives under root. Symlinks are never followed: each entry is classified by
-// lstat, so a link is removed as a link and its target directory is never
-// descended into.
+// deletionPass removes files and symlinks absent from the manifest, preserving
+// the state directory. It uses lstat so symlink targets remain untouched.
 //
-// The full-sync contract is correctness, not cleanup: a completed transfer
-// means the target equals the source, so a stray file that cannot be removed
-// fails the transfer rather than being reported as a clean sync. Every walk,
-// stat, and remove retries transient NFS I/O errors (EIO/EREMOTEIO) first,
-// since those clear on retry; only a persistent failure, after retries, is
-// returned as an error. The caller then keeps resume state and the transfer
-// re-runs instead of committing to a target tree that is neither the source
-// nor a known snapshot. Context cancellation also aborts.
+// Walk, stat, and file-removal failures abort after transient I/O retries.
+// Pruning empty directories is best-effort. Context cancellation aborts the walk.
 func (c FSCommitter) deletionPass(ctx context.Context, root, stateDir string, m *manifest.Manifest) ([]string, error) {
 	keep := make(map[string]struct{}, len(m.Entries))
 	for _, e := range m.Entries {

@@ -112,31 +112,10 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	// Before any ownership-dependent write. Only the finalizer above comes
-	// earlier on this path, and that one is about this object rather than about
-	// a namespace, so a stale incarnation cannot land it: the API server holds
-	// the UID immutable across an update. The deletion branch returns rather
-	// than reaching here and carries its own check. The loop below creates namespaces
-	// and their egress policy, and both are ownership-dependent:
-	// claimable skips every project sharing this one's name, so a successor
-	// standing in the name never registers as a rival and a stale pass is free
-	// to create a namespace the successor never declared. Nothing then collects
-	// it, because the claim is what makes a namespace collectable and a pass
-	// that ends at publishClaim has written none.
-	//
-	// The window this leaves is one pass wide rather than one cache lag wide: a
-	// project replaced between this read and the create still lands there.
-	//
-	// Deletion can finish inside that window too, and that one does not repair
-	// itself. Another replica handling the delete finds no record of a namespace
-	// this pass has not created yet, takes the finalizer off, and the project is
-	// gone; this pass then creates the namespace, and publishClaim finds nothing
-	// to write the claim onto. What is left is a namespace labelled for a
-	// project that no longer exists, named by neither record, which no later
-	// pass can collect because there is no project to run one. Closing it needs
-	// the acquisition and the deletion to coordinate, which this design has no
-	// means to do, so `kip upgrade` names those namespaces separately from the
-	// ones merely waiting to be recorded, and says nothing will collect them.
+	// Confirm the Project's UID before namespace acquisition and policy writes.
+	// Replacement or deletion can still race this pass: a namespace created after
+	// finalization may be left without a claim or a Project to collect it. Closing
+	// that window requires coordination between acquisition and deletion.
 	standing, err := r.confirmIncarnation(ctx, &project)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -358,33 +337,10 @@ func declaredEnvNames(project *kipperv1.Project) []string {
 	return names
 }
 
-// keepLiveNamespaces merges what this pass held into the namespaces already
-// recorded, instead of replacing them.
-//
-// The list is the pre-claims record of what a project holds, and on a cluster
-// upgrading from a release that wrote no claims it is the only evidence there
-// is. Rebuilding it from what this pass reached meant one skipped namespace
-// erased that evidence for good, and a skip is the ordinary case rather than a
-// rare one: a namespace whose label somebody rewrote is skipped, and so is one
-// whose pass failed. Everything then reads the record the skip destroyed.
-// Nothing prunes the namespace, deleting the project strands it, and no later
-// pass can take it back, because adoption reads the record too.
-//
-// What is kept is bounded the same way a claim is, and by the same rule: the
-// object still has to be there, and the project still has to be asking for the
-// namespace. Existence alone was not enough, because this record authorises
-// deletion and an unbounded one outlives the project's right to the namespace.
-// A project that stops declaring an environment whose namespace was relabelled
-// away would hold that name for good; another project then adopts and claims the
-// namespace, and the day somebody points the label back, the stale record
-// authorises deleting a live namespace belonging to somebody else. The label
-// cannot be the guard against that, because rewriting the label is the move the
-// deletion gate exists to survive.
-//
-// A namespace that is already terminating is kept, so the record goes when the
-// object does rather than one pass earlier, and a namespace that cannot be read
-// is kept, because a read that failed is not evidence it is gone. Both for the
-// same reasons as the claims.
+// keepLiveNamespaces merges this pass's holdings with the legacy ownership
+// record used for adoption and cleanup. Keep recorded names while requested
+// and present, during termination, or when a read fails. This preserves evidence
+// across skipped reconciles while pruning names the project has released.
 func (r *ProjectReconciler) keepLiveNamespaces(ctx context.Context, recorded, held, envNames []string, project string) []string {
 	wanted := make(map[string]struct{}, len(envNames))
 	for _, env := range envNames {
@@ -412,29 +368,10 @@ func (r *ProjectReconciler) keepLiveNamespaces(ctx context.Context, recorded, he
 	return out
 }
 
-// keepLiveClaims merges what this pass recorded into the claims already
-// standing, instead of replacing them.
-//
-// Replacing dropped the claim to any namespace the pass did not reach, and the
-// one thing that stops a pass reaching a namespace this project already holds is
-// somebody rewriting its label. So the record whose whole promise is that it
-// survives a relabel was erased by a relabel. Keeping is what makes the promise
-// true.
-//
-// What is kept is bounded, because "never prune" is its own bug. A prior claim
-// survives only while the object it names is still there under the same UID and
-// the project is still asking for that namespace. Liveness on its own would let
-// a claim outlive the project's right to the namespace: relabel it away, drop
-// the environment from the spec, and a claim nothing will ever revisit sits
-// there refusing the namespace to whoever does hold it.
-//
-// A namespace that is already terminating is kept too, so the claim goes when
-// the object does rather than one pass earlier, while workloads are still
-// winding down inside it.
-//
-// A namespace that cannot be read is kept. Dropping a claim is the direction
-// that loses somebody their project, and a read that failed is not evidence the
-// namespace is gone; the next pass prunes it once the answer is known.
+// keepLiveClaims merges new claims with recorded claims, retaining skipped
+// entries while their namespace is requested, terminating, or unreadable.
+// It prunes missing namespaces and released environments. Existing claims keep
+// their recorded UID; successful acquisition supplies a replacement UID.
 func (r *ProjectReconciler) keepLiveClaims(ctx context.Context, project *kipperv1.Project, claimed []kipperv1.NamespaceClaim, envNames []string) []kipperv1.NamespaceClaim {
 	wanted := make(map[string]struct{}, len(envNames))
 	for _, env := range envNames {
@@ -458,19 +395,9 @@ func (r *ProjectReconciler) keepLiveClaims(ctx context.Context, project *kipperv
 			out = append(out, claim)
 			continue
 		}
-		// A claim whose UID no longer matches is kept, not dropped, while the
-		// project still asks for the name. It stops being a claim to the live
-		// object and becomes the evidence that the live object is not this
-		// project's, which is what the unlabelled cleanup path asks for: without
-		// it only the name-only record answers, and it says yes about a
-		// namespace somebody else recreated under a name this project used to
-		// hold. Dropping it made the refusal the reconcile had just reported
-		// last exactly one pass.
-		//
-		// Nothing lingers. A pass that genuinely adopts the replacement
-		// republishes the claim against the new object, so this loop never sees
-		// the old one; the object going away drops it above; and the project no
-		// longer wanting the name drops it below.
+		// Retain a mismatched UID as evidence that a recreated namespace is a
+		// different object. Dropping it would let the legacy name record authorize
+		// unlabelled cleanup. Successful adoption republishes the new UID.
 		if _, want := wanted[claim.Name]; !want && ns.DeletionTimestamp.IsZero() {
 			continue
 		}
@@ -512,57 +439,13 @@ func (r *ProjectReconciler) setEnvLimitCondition(project *kipperv1.Project, over
 	}
 }
 
-// ownedNamespaces lists the namespaces this project is answerable for: the ones
-// it has a record of having held, whether they still carry its label or have
-// lost it altogether.
+// ownedNamespaces returns namespaces eligible for this project's cleanup.
+// Labels require corroboration from NamespaceClaims or recorded environment
+// status; spec declarations alone never authorize deletion.
 //
-// A record is required, and the label alone is never one. This list is what
-// pruning and project deletion delete from, and the label is writable by anyone
-// who can write a namespace, so accepting it on its own makes pointing a
-// victim's namespace at another project a way to have that namespace destroyed:
-// the project it now names has no reason to keep a namespace it never declared,
-// and its next pass deletes it with everything inside. A wrong answer elsewhere
-// in this file discloses something; a wrong answer here cannot be undone.
-//
-// Two records count, and they differ in when they are written. A claim naming
-// the object is published as early as it can be, which is once the namespace is
-// proven this project's and isolated, so it covers a pass that adopted a
-// namespace and then failed at anything after that. The status this project
-// last wrote is the older record, and the one that is already there on a
-// cluster upgrading from a build that wrote no claims. Neither is reachable by
-// writing a label.
-//
-// The claim is matched on the object and not on the name, through the same rule
-// the owner lookup answers from: a namespace deleted and recreated is a
-// different namespace, and a claim naming the one that is gone must not
-// authorise deleting its replacement.
-//
-// Both records are read a second time as the backstop. A namespace whose label
-// was removed is invisible to the label query, so deleting the project would
-// remove the finalizer and leave that namespace standing with its workloads and
-// its member bindings and nothing left to collect them — the Project is
-// cluster-scoped, so no owner reference reaches down to them. With no label to
-// corroborate it, that path asks for the object and not just the name.
-//
-// A namespace whose label now names a different project is left out. It answers
-// to them, and taking it on the strength of this project's own stale status
-// would delete a live namespace out from under a project that legitimately
-// holds it.
-//
-// Neither record is derived from the spec, and that is the point. Deriving
-// candidates from what a project asks for would name namespaces it was refused
-// — a pre-existing unlabelled "blog" that reconcileNamespace declines to adopt
-// would be deleted along with a project called "blog" that never owned it. Both
-// records say what the reconcile actually took.
-//
-// The reach is bounded by the records rather than by the pass. A namespace the
-// project still declares an environment for stays in both records for as long
-// as the object exists, whether or not the pass reached it, so one whose label
-// somebody rewrote remains collectable until it goes or the project stops
-// asking for the name. Past that the records let go: a namespace the project no
-// longer declares and whose label now names somebody else is left alone,
-// because keeping it would authorise deleting a live namespace another project
-// legitimately holds.
+// Namespaces whose project label was removed require a matching object UID.
+// A different project label or a competing recorded claim excludes the namespace,
+// protecting replacements and namespaces now held by another project.
 func (r *ProjectReconciler) ownedNamespaces(ctx context.Context, project *kipperv1.Project) ([]corev1.Namespace, error) {
 	// From the API server, like everything else this decision rests on: a
 	// cached list can hold a namespace whose label has since moved, and the
@@ -601,24 +484,11 @@ func (r *ProjectReconciler) ownedNamespaces(ctx context.Context, project *kipper
 		seen[ns.Name] = struct{}{}
 	}
 
-	// The backstop, for what the label query cannot see. Candidates come from
-	// both records rather than only the namespace list: the claim is written far
-	// earlier in the pass than the status is, so a pass that adopted a namespace
-	// and then failed leaves a claim and no list entry, and stripping that
-	// namespace's label would otherwise put it beyond every cleanup path there
-	// is.
-	//
-	// One window is not covered, and both records are silent inside it. A
-	// namespace is taken by the create or the label write, and the claim to it
-	// is published two steps later, after the egress policy. A pass that fails
-	// in between leaves the namespace labelled for this project and named by
-	// neither record, so this function does not see it. The next pass takes the
-	// update path and publishes the claim, which closes it; it stays open only
-	// while the pass keeps failing, and it becomes permanent if the project
-	// stops declaring that environment first, because then no pass ever reaches
-	// the namespace again. Publishing the claim earlier is not the fix: it
-	// resolves the namespace to the project, and handing it out before its
-	// egress policy is in place is what that ordering exists to prevent.
+	// Check both claims and legacy records for namespaces whose labels vanished.
+	// Acquisition followed by failure before claim publication leaves no record;
+	// removing the environment then can strand the namespace permanently. Claims
+	// are published after egress policy setup so ownership is exposed only once
+	// the policy is in place.
 	for _, name := range recordedNames(project.Status) {
 		if _, ok := seen[name]; ok {
 			continue
@@ -664,22 +534,10 @@ func recordedNames(status kipperv1.ProjectStatus) []string {
 	return names
 }
 
-// deleteProjectNamespaces deletes the namespaces this project owns.
-//
-// keepDeclared keeps the ones the project still declares an environment for,
-// which is pruning; false keeps none, which is what project deletion wants.
-//
-// The environments come from the project this function reads, not from a list
-// the caller worked out, because the caller worked it out from the cache. An
-// environment removed and immediately added back leaves one replica holding the
-// intermediate spec, and a keep set built from it is missing a namespace the
-// API server says to keep. Every namespace beyond the tier's limit is kept too,
-// the same as before: they are declared, so pruning never removes a live
-// namespace because somebody lowered a tier.
-//
-// It returns the project it decided from, so a caller that has to agree with
-// this decision agrees with it exactly rather than reading again. Nil means the
-// project has gone.
+// deleteProjectNamespaces deletes owned namespaces using UID preconditions.
+// With keepDeclared, it preserves environments in the freshly read Project,
+// including those above its tier limit. Returning that same snapshot keeps
+// subsequent status updates consistent; nil means the Project has gone.
 func (r *ProjectReconciler) deleteProjectNamespaces(ctx context.Context, project *kipperv1.Project, keepDeclared bool) (*kipperv1.Project, error) {
 	// Re-read the project from the API server before deleting anything.
 	//
@@ -1064,20 +922,9 @@ func (r *ProjectReconciler) setNamespaceConflictCondition(project *kipperv1.Proj
 	}
 }
 
-// claimable reports whether this project may hold the namespace, and refuses
-// with a conflict naming whoever does hold it.
-//
-// It reads the claims rather than the label because the label is what drifts:
-// anyone who can write a namespace can rewrite it, and it is the thing an
-// attacker rewrites. A claim is what a project's own reconcile recorded taking.
-//
-// Matching is on the UID as well as the name. A name outlives the object it
-// named, so a namespace deleted and recreated is a different namespace, and a
-// claim naming the old UID says nothing about the new one.
-//
-// Two projects resolving to one name, with nobody holding it, is refused to
-// both. Handing it to whichever reconciles first decides ownership by a race,
-// and the loser is a tenant whose workloads the winner's members can then read.
+// claimable checks namespace UID claims and competing environment names.
+// An existing claim or corroborated legacy holding permits continued ownership;
+// unsettled collisions return a conflict rather than choosing by reconcile order.
 func (r *ProjectReconciler) claimable(ctx context.Context, project *kipperv1.Project, ns *corev1.Namespace) error {
 	// From the API server. This decides whether one project may take a
 	// namespace another holds, and a cached list can be missing the claim that
@@ -1119,27 +966,10 @@ func (r *ProjectReconciler) claimable(ctx context.Context, project *kipperv1.Pro
 	}
 
 	if rivalDerives != "" {
-		// A collision the previous release already settled is adopted rather
-		// than reopened. Refusing both is the right answer for a new one, where
-		// deciding by whoever reconciles first decides ownership by a race. It
-		// is the wrong answer for a pair that has been running for months: the
-		// holder would be refused the namespace it is already in, no claim would
-		// be written, the namespace would drop out of its own record, and once
-		// the claim is what resolves ownership its members could not reach it.
-		// The upgrade would break a cluster that worked.
-		//
-		// Adoption takes the evidence the previous release left, and takes both
-		// halves of it. The label says which project this namespace answered to,
-		// and this project's own record says it held it. A relabel supplies the
-		// first and cannot supply the second, so the label alone still adopts
-		// nothing. An object with no UID is the create path below, where nothing
-		// exists yet and there is no settled anything to adopt.
-		//
-		// EverHeld is the cleanup rule rather than the resolver's, and for the
-		// same reason: what is being decided is whether this project ever took
-		// the name, not whether it holds the object it took last time. A
-		// namespace recreated under a contested name it already held is still
-		// its own.
+		// Adopt a settled collision using both the namespace's project label and
+		// the project's ownership record. EverHeld permits adoption of a recreated
+		// namespace through the legacy name record; a new namespace has no UID and
+		// must pass the competing-project check.
 		settled := ns.UID != "" &&
 			ns.Labels[kipperlabels.Project] == project.Name &&
 			nsowner.EverHeld(project.Status, ns.Name, ns.UID)

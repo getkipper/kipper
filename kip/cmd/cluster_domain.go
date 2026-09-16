@@ -700,17 +700,9 @@ func writeLocalDomainConfig() error {
 	return runClusterDomainRepair()
 }
 
-// refuseDomainChangeDuringCAReplacement stops any of the three domain paths
-// while the cluster's certificate authority is mid-replacement, or while the
-// trust anchor on the host disagrees with the authorities the cluster holds.
-//
-// All three go through the same cutover driver and the same gate, so all three
-// need the same refusal. Guarding only the forward path left the resync — the
-// very command the parked cutover tells an operator to run — as the way in.
-//
-// The SSH connection is opened for the check and closed again. A cluster that
-// cannot be reached is not blocked: this prevents a deadlock, and refusing to
-// act because the check could not run would be worse than the deadlock.
+// refuseDomainChangeDuringCAReplacement shares the CA-replacement gate across
+// domain operations. It opens SSH for the host-anchor check when available;
+// SSH failure leaves the Kubernetes-side check in place.
 func refuseDomainChangeDuringCAReplacement(ctx context.Context, cluster *config.Cluster, k8sClient *k8s.Client) error {
 	var client *ssh.Client
 	if cluster.Host != "" {

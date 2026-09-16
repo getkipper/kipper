@@ -168,22 +168,9 @@ func (m *Members) Remove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A cluster admin may remove a project's last owner; nobody else may.
-	//
-	// The guard below counts owners by their role in the member list, and it
-	// cannot know whether an address belongs to anyone. An owner added under a
-	// mistyped address therefore counts, and the real owner can be removed
-	// against it — leaving the project owned by somebody who will never sign in,
-	// with the guard then refusing every attempt to put it right.
-	//
-	// Adding a valid owner and removing the bad one needs no exemption and is
-	// the better repair, because it ends with the project owned. This exists for
-	// the case where the phantom should go before a replacement is chosen. A
-	// project owner is still held to the rule, since an owner removing the last
-	// owner is the accident it is for.
-	//
-	// The route already resolved the caller's authority, so it is read back
-	// rather than derived a second time from the cluster role.
+	// Cluster admins may remove the last owner to repair invalid memberships.
+	// Other callers must leave an owner. Use the authority already resolved by
+	// the route middleware.
 	access, _ := middleware.ProjectAccessFromContext(r.Context())
 	isClusterAdmin := access.IsAdmin
 

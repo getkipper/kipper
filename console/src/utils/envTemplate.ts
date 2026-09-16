@@ -1,16 +1,6 @@
 /**
- * The `${NAME}` grammar, as the console has to read it to render a value.
- *
- * This mirrors `controller/pkg/envtemplate`, which is where the grammar is
- * defined and where the reconciler resolves against it. The browser cannot call
- * Go, so this is the one restatement that has to exist; everything else routes
- * through the package. Keeping the two in step matters in both directions: a
- * broader grammar here reports a real embedded password as safe, a narrower one
- * warns about the templated form the feature exists to encourage.
- *
- * The regex this replaced could not express the `$${NAME}` escape at all, because
- * JavaScript could do it and Go's RE2 has no lookbehind, so both sides carried
- * the same known gap rather than diverging. A parser has no such limit.
+ * Browser implementation of the grammar in controller/pkg/envtemplate.
+ * Keep parsing and escapes aligned so rendering and credential warnings agree.
  */
 
 /** A stretch of a value: text as written, or a reference to be resolved. */
@@ -34,12 +24,8 @@ function validName(name: string): boolean {
 }
 
 /**
- * Reads a placeholder at the start of `s`, which must begin with `$`.
- *
- * The only modifier is `:urlencode`. A colon introduces one, so `${NAME:}` is a
- * modifier that is not one rather than a plain reference, and it is left literal
- * like `${NAME:unknown}` — a typo should be visible instead of quietly dropping
- * an encoding a credential needed.
+ * Parse a leading ${NAME} placeholder with an optional :urlencode modifier.
+ * Invalid names and unknown or empty modifiers remain literal.
  */
 function parsePlaceholder(s: string): ParsedReference | null {
   if (s.length < 4 || s[0] !== '$' || s[1] !== '{') return null
@@ -58,12 +44,8 @@ function parsePlaceholder(s: string): ParsedReference | null {
 }
 
 /**
- * Splits a value into the stretches that make it up, so the editor can show
- * which parts of it are references without guessing at the boundaries.
- *
- * `$${NAME}` is the escape and yields the literal `${NAME}`, and only directly
- * before a well-formed placeholder: leaving every other `$$` alone keeps this a
- * no-op on values that were never templates, such as `$$10` or an awk snippet.
+ * Split literal text and references for the editor. $${NAME} escapes a valid
+ * placeholder to literal ${NAME}; other $$ sequences remain unchanged.
  */
 export function parseTemplate(value: string): TemplateSegment[] {
   const segments: TemplateSegment[] = []
@@ -126,12 +108,7 @@ export function isTemplate(value: string): boolean {
 }
 
 /**
- * Removes every reference, leaving the literal text around them.
- *
- * The credential warning asks whether what remains still carries a password of
- * its own. A templated URL resolves its credential at render time and never
- * stores one on the CR, so warning about it would argue against the safe
- * construction.
+ * Return literal text for credential checks, preserving escaped placeholders.
  */
 export function stripPlaceholders(value: string): string {
   return parseTemplate(value)
@@ -141,14 +118,8 @@ export function stripPlaceholders(value: string): string {
 }
 
 /**
- * The names a value references in Kubernetes' own `$(NAME)` form.
- *
- * Kipper resolves none of them, and neither does the kubelet: a workload's
- * environment reaches its pod through envFrom, and envFrom values are copied in
- * without expansion. `$(NAME)` is expanded only in a container's own env,
- * command and args, which is not where spec.env goes. So the value arrives at
- * the process exactly as typed, which is worth saying, because it looks like it
- * should work.
+ * Return deduplicated $(NAME) references for diagnostics. They remain literal
+ * in Kipper's envFrom values; ${NAME} is the supported template syntax.
  */
 export function shellStyleRefs(value: string): string[] {
   const names = new Set<string>()

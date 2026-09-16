@@ -108,13 +108,7 @@ const sectionOpen = ref<Record<string, boolean>>({
   logs: false,
 })
 
-// --- Test run (cron triggers only) ---
-// Lets the user kick off a one-off run of the function with the cron
-// pod template. Useful for cron schedules that fire infrequently
-// (e.g. nightly at 02:00 UTC) where you want to confirm the function
-// works without waiting hours for the next scheduled run. The
-// resulting pod logs are visible in the Logs section like any other
-// run, since they share the same `app=<fn>` Loki label.
+// Run an edited cron function once using its job template.
 const testRunning = ref(false)
 const lastTestJob = ref<string>('')
 
@@ -230,14 +224,7 @@ const eventTriggerCapableServices = computed(() =>
     .filter((s) => ['postgres', 'mysql', 'redis', 'minio'].includes(s.type)),
 )
 
-// Services that can be bound (database/cache/queue/storage).
-// Restricted to the function's own namespace: two services in
-// different namespaces can share a name (e.g. one `db` in each
-// project), and the native <select> matches v-model by value alone,
-// so duplicate names would visually flip the selection between the
-// matching options. The server's bind handler already hints with the
-// app/function namespace first, so cross-namespace binding never
-// worked reliably from this form anyway.
+// Offer unbound services in the function's namespace, where names are unique.
 const bindableServices = computed(() =>
   services.value
     .filter((s) => s.namespace === namespace.value)
@@ -417,14 +404,7 @@ function scanCodeForImports() {
 // --- Binding actions ---
 const bindServiceName = ref('')
 const bindPrefix = ref('')
-// bindDbMode picks one of two paths for the database the binding
-// connects to:
-//   existing — pick from the dropdown of databases that already
-//             exist on the service. The service's own default DB is
-//             pre-selected and tagged "(service default)" so the
-//             common case (just attach to the data) is one click.
-//   new — explicitly create a new empty database with this name.
-//             Carries an amber warning so it's hard to do by accident.
+// Choose an existing database or request a new one explicitly.
 const bindDbMode = ref<'existing' | 'new'>('existing')
 const bindDatabaseExisting = ref('')
 const bindDatabaseNew = ref('')
@@ -543,12 +523,8 @@ watch(bindServiceName, (next) => {
   loadBindDatabases()
 })
 
-// Mirror of kipperv1.CredentialKeys (console-api/api/v1alpha1/service_bindings.go).
-// Keep these aligned — the Go side is the source of truth for what
-// the credentials Secret actually contains, and this preview is what
-// the user (and our AI code-suggestion path) reads to know which
-// env vars will exist on the function. Drift here would advertise
-// env vars the runtime never gets.
+// Keep this credential preview aligned with kipperv1.CredentialKeys in
+// console-api/api/v1alpha1/service_bindings.go.
 function credentialKeysFor(svcType: string): string[] {
   switch (svcType) {
     case 'postgres':
@@ -587,21 +563,11 @@ function resetBindForm() {
 
 async function applyBinding() {
   if (!bindServiceName.value) return
-  // The namespace picker only renders for services that have a
-  // logical-namespace concept (postgres/mysql databases, rabbitmq
-  // vhost). For redis/mongodb/minio the picker is hidden and
-  // bindDbMode is just a stale default from the last reset — must
-  // not block the bind. Validation is also opt-in: a binding with
-  // an empty namespace value is the explicit "use the service
-  // default" path, the same as omitting --database on the CLI.
+  // Validate namespace choices only for services that expose a namespace picker.
   if (bindPickerSupportsNamespace.value) {
     const label = bindNamespaceLabel.value
-    // For services with a "Pick existing" mode (postgres/mysql),
-    // typing nothing in "Create new" is an error — the user has the
-    // dropdown if they want the service default. For services
-    // without listing (rabbitmq today), a blank input is the
-    // explicit "share the service default" path, which the help
-    // text advertises and the backend treats as a no-op bind.
+    // Services with a database list require an explicit selection or new name.
+    // For services without a list, an empty name uses the service default.
     if (bindDbMode.value === 'new' && !bindDatabaseNew.value.trim() && bindPickerCanListNamespaces.value) {
       toast.error(`Type a ${label} name, or switch to "Pick existing"`)
       return

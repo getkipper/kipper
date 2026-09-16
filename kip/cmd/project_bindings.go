@@ -47,25 +47,10 @@ func runProjectBindings(cmd *cobra.Command, _ []string) error {
 	return reportUnclaimedBindings(ctx, k8sClient.Clientset(), k8sClient.Dynamic(), os.Stdout)
 }
 
-// reportUnclaimedBindings names every membership binding no live project
-// explains.
-//
-// Explaining one takes two things, not one. The project that wrote it has to
-// still exist, and it has to still hold the namespace the binding sits in: a
-// namespace that changed hands, or an environment removed while cleanup was
-// interrupted, leaves the writer alive and the grant behind somewhere it no
-// longer has any say. That is the case this exists for, so the project
-// existing is not on its own an answer.
-//
-// It enumerates by shape and applies no label selector. The label is what
-// drifts — it is the first thing an edit or a restore loses — and selecting on
-// it would let exactly the bindings this exists to find hide from it.
-//
-// Two things can explain a binding. A generated name carries its project's
-// digest, so the name alone attributes it even after every mutable trail back
-// has gone. A legacy name carries no digest and is identical in every
-// namespace, so the only thing that can explain one is the namespace it sits
-// in being held by a project at all.
+// reportUnclaimedBindings finds managed bindings by name shape, including
+// those with missing labels. Generated names must identify the namespace's
+// current project; legacy names require a current namespace owner. A live
+// project alone does not justify a binding in a namespace it no longer holds.
 func reportUnclaimedBindings(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, out io.Writer) error {
 	bindings, err := clientset.RbacV1().RoleBindings("").List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -178,26 +163,10 @@ func reportDisputedNamespaces(disputed map[string]string, out io.Writer) {
 		"      upgrading past the release that stops reading the label.\n")
 }
 
-// namespaceOwner is the project the live namespace belongs to, as the
-// console-api's own gate answers that question, and whether the project's
-// records confirm it.
-//
-// It is written out here rather than reused, for the reason the credential
-// seeding says the same thing: nsowner lives in console-api's internal
-// packages and no other module can import it. What it must not do is borrow a
-// helper whose contract is something else. heldByProject is the project delete
-// path's rule, and that path feeds it namespaces it has already selected by
-// label; handed every namespace on the cluster instead, it answers from a claim
-// alone and calls a namespace held by a project the resolver would say has no
-// claim on it at all.
-//
-// So: the label names a candidate, and the candidate has to exist. A claim
-// naming this namespace at a different object means the project took a
-// different object of that name, and the records and the label disagree. In
-// release 1 the gate answers with the labelled project either way, so this
-// does too, and returns the disagreement alongside. Reporting a binding the
-// gate still honours as nobody's would send an operator to delete a grant that
-// is working; the disagreement is real, and it is reported as itself.
+// namespaceOwner mirrors nsowner's compatibility behavior: an existing project
+// named by the namespace label remains the owner, while a mismatched claim UID
+// is reported separately. Keep aligned with the API resolver when its fallback
+// changes; the cleanup-specific heldByProject rule answers a different question.
 func namespaceOwner(ns corev1.Namespace, projects []unstructured.Unstructured) (owner string, claimNamesAnotherObject bool) {
 	candidate := ns.Labels[labels.Project]
 	if candidate == "" {

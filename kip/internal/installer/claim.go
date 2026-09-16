@@ -181,32 +181,12 @@ type claim struct {
 	Created bool
 }
 
-// claimGatewayName registers a *.kipper.run name for a host and guarantees its
-// token is recorded before returning.
-//
-// The gateway discloses a registration's token exactly once, at creation. Three
-// things follow, and each of them was a defect before it was a rule:
-//
-//   - A token already held must be presented. Arriving anonymously against a
-//     name this host previously claimed gets an answer with no token, which the
-//     refusal below then turns into a dead end — a single failed attempt locking
-//     an operator out of their own host's name until the gateway frees it.
-//   - A registration without a token must fail the install, unless the gateway
-//     issued a challenge — which it does only for a token it recognised, and is
-//     therefore the only evidence a renewal was authorised rather than turned
-//     away. Such a cluster can never prove possession, so the gateway will not
-//     route it and the console URL printed at the end would never answer.
-//   - The token must be durable before this returns. Until it is, the only copy
-//     is in memory; and a claim that cannot be recorded is handed straight back,
-//     because failing with it unrecorded strands the name exactly as the wipe
-//     without a release used to.
-//
-// address is what the gateway registers and must be a public IP. hostKey is what
-// the operator gave as --host, and is the key every local lookup uses: the
-// cluster entry, the wiped marker, the token mirror. Since 0.11.1 those differ
-// whenever --host is a hostname, and using one for both wrote the token under the
-// resolved address while later lookups searched for the name, leaving two entries
-// for one cluster and a re-run that could not prove its own subdomain.
+// claimGatewayName registers or renews a gateway name using any stored token.
+// A renewal must return a challenge to confirm acceptance of that token.
+// Persist newly disclosed tokens before success; if saving fails, attempt to
+// release a newly created registration.
+// address is the public destination IP; hostKey is the operator's original
+// --host spelling used for local credential lookup and storage.
 func claimGatewayName(gw registrar, store tokenStore, subdomain, address, hostKey string) (claim, error) {
 	known := store.tokenFor(hostKey)
 

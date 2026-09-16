@@ -28,16 +28,9 @@ const projects: Project[] = [
 // The API gates the env routes on this role rather than on the cluster-wide
 // one, so reading the cluster role here denied people access the server grants.
 
-// Two projects can emit one namespace: project "shop" with an environment
-// "prod", and a project "shop-prod" with a default one. The reconciler records
-// that as a conflict rather than resolving it, and the server decides from the
-// live namespace's own kipper.run/project label — which is not in this
-// response. Picking a claimant here would be guessing, and the tab would either
-// hide from someone entitled to it or 403 when they used it.
-// Zero and two claimants both resolve to no project, and they mean different
-// things: nothing the caller belongs to owns this namespace, against a response
-// that could not settle who owns it. The count is what tells them apart, and
-// AppDetail shows a different thing for each.
+// Namespace claims can collide: shop/prod and shop-prod/default both name
+// shop-prod. Count claimants so the UI can distinguish missing from ambiguous
+// ownership while projectInNamespace returns null for either.
 describe('claimantsInNamespace', () => {
   it('counts the projects whose claim the server has not contradicted', () => {
     expect(claimantsInNamespace(projects, 'shop-prod')).toBe(1)

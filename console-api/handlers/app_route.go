@@ -212,18 +212,9 @@ type dnsStatusResponse struct {
 	ResolvedIPs []string `json:"resolved_ips"`
 }
 
-// GetRouteDNSStatus tells the user whether the public route's hostname is
-// reaching this cluster. Three categories:
-//
-//   - *.kipper.run: routed through the shared kipper.run gateway, no
-//     per-app DNS to verify. Reported as "gateway".
-//   - Subdomain of the operator's own CLUSTER_DOMAIN: covered by the
-//     wildcard A record set up at install time. Reported as "wildcard"
-//     unless the caller passes ?verify=true to force a lookup.
-//   - Anything else: full net.LookupHost against the cluster node IPs.
-//
-// GET /api/v1/projects/{name}/apps/{app}/route/dns-status
-// GET .../route/dns-status?verify=true   (force lookup for wildcard)
+// GetRouteDNSStatus reports gateway routing, assumed wildcard coverage, or
+// DNS lookup results against cluster node IPs. ?verify=true forces a lookup
+// for hosts otherwise covered by the cluster wildcard.
 func (a *Apps) GetRouteDNSStatus(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "name")
 	appName := chi.URLParam(r, "app")

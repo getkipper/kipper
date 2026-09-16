@@ -317,25 +317,12 @@ func main() {
 // and the shutdown flush never runs.
 const shutdownGrace = 20 * time.Second
 
-// serve runs srv on ln until ctx is cancelled, drains in-flight requests, then
-// flushes. It returns only a serving failure. A drain that overruns is reported
-// and closed out rather than raised, because by then the process is leaving
-// either way; flush runs on the shutdown path, which is the path where unwritten
-// state exists to lose.
+// serve runs srv until cancellation, then drains requests and flushes state.
+// It returns serving errors; drain and flush errors are logged. disarmSignals
+// restores default signal handling so a second signal can end the drain.
 //
-// The flush matters as much as the drain: the registry holds ping-driven
-// LastSeen updates the periodic flush has not written yet, and losing them ages
-// registrations towards expiry that were in fact alive.
-//
-// disarmSignals restores default signal handling once the first signal has been
-// taken, so a second Ctrl-C or SIGTERM during the drain kills the process
-// instead of being swallowed.
-//
-// Known gap: hijacked connections — what the proxied WebSocket log and terminal
-// streams become — are outside all of this. Shutdown neither waits for them nor
-// closes them, and neither does Close, so they end when the process does. They
-// get no grace period, which is what they had before any of this existed;
-// covering them needs per-connection tracking through ConnState.
+// Hijacked connections, including WebSockets, are outside http.Server shutdown
+// tracking and end with the process rather than receiving a grace period.
 func serve(ctx context.Context, srv *http.Server, ln net.Listener, disarmSignals func(), flush func() error) error {
 	serveErr := make(chan error, 1)
 	go func() {
@@ -368,15 +355,8 @@ func serve(ctx context.Context, srv *http.Server, ln net.Listener, disarmSignals
 			log.Printf("closing listeners: %v", err)
 		}
 	}
-	// Wait for the serving goroutine to actually leave before flushing, so
-	// nothing is still writing to the registry, and keep what it reported rather
-	// than discarding it. A real failure and the cancellation can become ready
-	// together and the select above picks between ready arms at random, so the
-	// cancellation arm can win with a genuine failure already buffered; throwing
-	// it away here would report a clean exit for a server that broke. There is
-	// no deterministic test for that ordering through this seam: forcing the
-	// failure first makes the select take the other arm, and cancelling first
-	// makes Serve return ErrServerClosed, which is filtered out by design.
+	// Collect the serving result before flushing. A serving error may arrive
+	// at the same time as cancellation and must still reach the caller.
 	failure := <-serveErr
 
 	if flush != nil {
@@ -549,14 +529,9 @@ func handleRegister(reg *registry.Registry, baseDomain string, observe observeFu
 			return
 		}
 
-		// Both guards below decide who may TAKE a name, so neither applies to
-		// whoever already holds it. Applied to an authenticated renewal they
-		// starve a registration the gateway has otherwise decided to keep: a
-		// cluster that moved servers keeps its address-derived name, and a label
-		// reserved after it was claimed is grandfathered at startup. Refusing
-		// their heartbeats kills the proof lease within the week and lapses the
-		// name anyway, by a slower route. The shape rules above stay
-		// unconditional, because nothing legitimate ever held those.
+		// Apply reservation and address-derived-name rules to new claims.
+		// Authenticated renewals preserve grandfathered labels and names retained
+		// across server moves. Label shape validation still applies to every request.
 		renewal := reg.HeldBy(req.Subdomain, req.Token)
 
 		if !renewal && hostnames.ReservedLabels[req.Subdomain] {
@@ -854,34 +829,10 @@ func boolEnvDefaultTrue(name string) bool {
 	return true
 }
 
-// noDerivedSeparator reports whether a subdomain is free of the derived-route
-// separator. A label containing it would shadow a per-cluster service route.
-// registrableEntry reports whether a persisted registration still satisfies the
-// label rule: shape, no derived-route separator, not reserved. Startup is where
-// a rule tightened after a snapshot was written gets applied, so a name reserved
-// by a later build stops serving on the next restart instead of being protected
-// only against new registrations.
-//
-// The address guard handleRegister applies is left out here on purpose. In
-// persisted state a label spelling an address it no longer points at has two
-// causes that look identical: a cluster that moved to a new server and kept the
-// name its links were published under, and a squatter who took another server's
-// default name before the guard existed. Nothing recorded distinguishes them,
-// and the costs are not symmetric — dropping the entry takes a live cluster off
-// the air on a restart, while keeping it costs one operator their default name,
-// which choosing another name resolves. New registrations cannot create either
-// case, so this is confined to entries written before the guard and shrinks to
-// nothing. addressMismatch names them in the log rather than acting on them.
-// prunableEntry reports whether a persisted registration should be dropped at
-// startup: its label fails the current rule AND nothing ever served under it.
-//
-// The second half is what keeps this from being a breaking migration. Expanding
-// the reserved list governs new claims; applying it to a name a cluster is
-// already serving would delete that registration and its token on a restart the
-// operator did not ask for, taking a working cluster off the air and leaving it
-// unable to authenticate a renewal. That is precisely what a minor upgrade must
-// not do. A label nothing ever served has no such cost, so the reservation takes
-// effect there, which is what stops a squatter keeping a newly reserved name.
+// prunableEntry drops labels that fail current validation and have never been
+// proven. Previously proven labels are grandfathered to preserve published URLs.
+// Address-derived labels may have moved legitimately; addressMismatch reports
+// those for operator review instead of deleting them at startup.
 func prunableEntry(e *registry.Entry) bool {
 	return hostnames.ValidateClusterLabel(e.Subdomain) != nil && e.FirstProvenAt.IsZero()
 }

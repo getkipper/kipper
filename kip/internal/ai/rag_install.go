@@ -190,26 +190,10 @@ exit 1
 	}
 }
 
-// InstallRAG applies the Phase 2 RAG bundle (Qdrant + AnythingLLM)
-// against a cluster that already runs Phase 1 (Ollama + LibreChat).
-// The flow:
-//
-//  1. Preflight (DetectRAG): refuses if Phase 1 is missing or the
-//     target node lacks RAG headroom.
-//  2. Read Phase 1's chat model from the bundle state ConfigMap so
-//     AnythingLLM defaults to the same model the operator already
-//     trusts.
-//  3. Load or generate the AnythingLLM credentials Secret. Re-installs
-//     reuse existing values to avoid invalidating logged-in sessions
-//     and rotating the bootstrap AUTH_TOKEN out from under the
-//     operator.
-//  4. Apply the Qdrant and AnythingLLM HelmCharts. Both kicked off
-//     before either wait blocks so chart pulls run in parallel.
-//  5. Wait for chart-controller Jobs, then for Qdrant (StatefulSet)
-//     and AnythingLLM (Deployment) to be Ready.
-//  6. Pull the embedding model into the running Ollama via the
-//     waitForEmbeddingModelLoaded Job.
-//  7. Record RAG bundle state.
+// InstallRAG adds Qdrant and AnythingLLM to an existing Ollama/LibreChat bundle.
+// It checks prerequisites, reuses credentials, applies both charts before waiting,
+// loads the embedding model, and records bundle state. New installs require
+// additional node headroom; reinstalls preserve existing credentials.
 func (i *Installer) InstallRAG(ctx context.Context, opts RAGOptions) error {
 	if opts.Host == "" {
 		return fmt.Errorf("host is required: pass --host ask.<your-domain>")

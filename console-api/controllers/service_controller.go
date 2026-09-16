@@ -105,25 +105,9 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if err := r.reconcileCredentialsSecret(ctx, &svc); err != nil {
-		// Said on the object, not only in the controller's log. A service whose
-		// credentials Secret belongs to something else never reaches
-		// updateStatus, so without this it sits at Pending with the reason
-		// visible only to whoever thinks to read the log. That state is reached
-		// by a name collision the create-time checks cannot see, a restore among
-		// them, so it has to explain itself.
-		//
-		// Only the refusals no retry clears are reported. Everything else out of
-		// this reconcile is transient — a stale cache answering AlreadyExists to
-		// the create, a Get that failed — and stamping those on the object would
-		// put a permanent false condition on a healthy service, which teaches an
-		// operator to ignore the condition before the real case arrives.
-		//
-		// There are two permanent ones, and the second is reached by following
-		// the first one's own advice: told the Secret belongs to something else
-		// and offered "remove it if the service holds no data yet", an operator
-		// who removes it lands on a volume with no credentials. Reporting only
-		// the first would leave the object describing a Secret that is no longer
-		// there while the real reason went to the log.
+		// Record permanent credential failures on the Service before returning,
+		// since this path exits before updateStatus. Transient API failures remain
+		// retryable errors rather than operator-action conditions.
 		if reason, permanent := permanentCredentialsFailure(err); permanent {
 			r.reportCredentialsBlocked(ctx, &svc, err, reason)
 		}
@@ -280,23 +264,10 @@ func secretCredentialKey(svcType string) string {
 	return "PASSWORD"
 }
 
-// refuseToMintOverExistingData stops the reconciler generating a password for a
-// service that already has a database, which would come back holding a
-// credential its own data does not know.
-//
-// A service's data outlives its credentials Secret. The Secret can go while the
-// volume stays: garbage collection deletes a dependent whose owner UID no longer
-// resolves, which is what a Velero restore leaves behind when the Service CR
-// comes back with a new UID, and an operator can delete one by hand just as
-// easily. Minting a replacement is silent and irreversible from the engine's
-// side, because postgres, mysql, mongodb and rabbitmq only read the password
-// when they initialise, so the database keeps the old one and every bound
-// workload starts failing to authenticate with no indication of why.
-//
-// The claim rests on the volume rather than on any metadata: a data volume for
-// this service means an engine has already initialised and made up its mind. A
-// genuinely new service has none, and a deleted one has its volumes removed
-// alongside it, so this only refuses where the two have come apart.
+// refuseToMintOverExistingData treats an existing data PVC as evidence that
+// an authenticated service may already be initialized. Require credential
+// recovery in that case: generating a new password would leave the database
+// and its bound workloads using different credentials.
 func (r *ServiceReconciler) refuseToMintOverExistingData(ctx context.Context, svc *kipperv1.Service, missing string) error {
 	// A server that asks for no credential cannot be locked out by one. Its
 	// Secret is HOST and PORT, both derived from the service's own name and its

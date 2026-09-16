@@ -6,22 +6,10 @@ import (
 	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
-// UninstallHost removes Kipper and its underlying k3s cluster from the
-// remote server. It runs k3s's own uninstall script (which removes the
-// k3s binary, systemd units, containers, and CNI state) and then sweeps
-// the data directories Kipper writes outside k3s's purview: Longhorn
-// volumes, Rancher state, k3s config, Zot blobs, and the optional AI
-// bundle data.
-//
-// The function is best-effort about missing files: a host with no k3s
-// installed yields no error from the killall/uninstall steps, and a
-// missing data directory is also not an error. Real SSH transport
-// failures bubble up.
-//
-// Host firewall rules and OS hardening (rpcbind disabling etc.) are
-// intentionally not reverted. k3s-uninstall.sh already removes its own
-// UFW entries; anything the user added by hand or for other workloads
-// stays alone.
+// UninstallHost runs k3s's uninstall scripts, removes Kipper's Longhorn
+// integration and Dex hosts pin, and deletes cluster and optional AI data.
+// Missing scripts and directories are tolerated. Host firewall policy and
+// OS hardening remain configured.
 func UninstallHost(client *ssh.Client) error {
 	// k3s-killall.sh stops k3s cleanly before uninstall. If the script
 	// does not exist, k3s was not installed via the standard installer

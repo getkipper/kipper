@@ -477,21 +477,9 @@ func (a *Apps) effectiveGitToken(ctx context.Context, namespace, appName, creden
 	return string(secret.Data["token"]), true
 }
 
-// sharedCredentialApplies re-applies the builder's gates before a shared token
-// is used for anything.
-//
-// The clone URL on an app is writable by any deployer in the project, and this
-// check sends the token to whatever host it names. Without the gates a
-// deployer could point an app at a host they control, leave the token field
-// empty, and have the preflight hand them an admin-managed credential
-// belonging to another project — a disclosure the builder's own binding
-// (resolveGitToken) exists to prevent, and one RevealGitToken already refuses
-// to make.
-//
-// The two gates are the builder's: the credential is bound to one host, and it
-// is allow-listed to particular projects. Anything unresolvable fails closed,
-// because the caller then skips the check rather than probing with a token it
-// should not hold.
+// sharedCredentialApplies requires a matching canonical git authority and
+// a grant for the namespace's verified project before using a shared token.
+// Unresolvable authority or ownership fails closed.
 func (a *Apps) sharedCredentialApplies(ctx context.Context, namespace string, entry *sharedcred.Entry, cloneURL string) bool {
 	credentialAuthority, err := giturl.CanonicalAuthority(entry.Server)
 	if err != nil {

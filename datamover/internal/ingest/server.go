@@ -243,11 +243,8 @@ func (s *Server) receiveChunk(st *State, n int, wantSum string, body io.Reader) 
 		_ = f.Close()
 		return &chunkError{msg: fmt.Sprintf("chunk %d: sha256 mismatch", n)}
 	}
-	// Data must reach stable storage before the completion bit does: a crash
-	// after a persisted bit but before the data blocks would make resume skip
-	// the chunk forever. The file is a fresh create, so its directory entry
-	// is fsynced too or the bitmap could outlive a chunk the directory never
-	// recorded.
+	// Sync the chunk and its directory entry before marking it complete, so
+	// resume only skips durable data.
 	if err := syncFile(f); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("syncing chunk %d: %w", n, err)

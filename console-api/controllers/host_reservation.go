@@ -19,34 +19,12 @@ import (
 	"github.com/getkipper/kipper/console-api/domain"
 )
 
-// A route's hostname is a cluster-wide property, but an Ingress is unique only
-// per (name, namespace), so nothing stopped a workload in one project from
-// declaring another project's hostname and having Traefik route that host to
-// it. Even a distinct path would capture a subset of the victim's traffic,
-// because Traefik prefers the more specific PathPrefix.
+// Hostnames are reserved cluster-wide by a ConfigMap named from the canonical
+// host. Its owning namespace may share the host across path-based routes.
 //
-// Ownership is therefore at the HOST level and belongs to the first namespace
-// to claim it: the claim is a ConfigMap whose NAME is derived from the
-// canonical host, so etcd's name uniqueness makes exactly one namespace win.
-// A workload whose namespace does not own the host is refused; workloads in the
-// OWNING namespace share the host freely (the path-based routing feature).
-//
-// A claim is STICKY: it is held by the owning namespace for that namespace's
-// whole lifetime and is never explicitly released. Releasing a claim while its
-// namespace is alive would be unsafe — a scan that looked "unused" could race a
-// workload the same project is about to serve, and once freed another project
-// could take the host mid-flight. Instead an abandoned host is reclaimed
-// lazily: reserveHost takes over a claim whose owner namespace no longer exists.
-// A live owner (including one whose namespace is still terminating) is never
-// displaced, so two projects can never serve the host at once; the takeover only
-// happens once the old project, and its Ingresses, are fully gone.
-//
-// The cost is that abandoning a host (deleting the app, changing its route, or
-// deleting the project) leaves the claim ConfigMap behind until some project
-// reserves that host again. Nothing reads the full claim set — every lookup is a
-// Get by name — so these leftovers cost only a little etcd storage. Reaping
-// claims whose owner namespace is gone is a possible future janitor, not a
-// correctness requirement.
+// Claims persist for the namespace's lifetime, including termination. reserveHost
+// reclaims a host only after the owner namespace disappears, avoiding races with
+// new routes in a live project. Abandoned claim objects remain until reuse.
 const (
 	routeClaimNamespace = "kipper-system"
 	routeClaimPrefix    = "route-claim-"

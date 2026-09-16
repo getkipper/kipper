@@ -27,16 +27,8 @@ const (
 // legitimately have no owning Kipper CR.
 const orphanSystemNamespace = "kipper-system"
 
-// RunOrphanWarner starts a periodic loop that scans for workloads carrying
-// managed-by=kipper without an owning Kipper CR (App, Service, Function,
-// Volume) and surfaces each as a log warning and a Kubernetes Warning event
-// on the offending workload.
-//
-// CRs are the source of truth: a Kipper-labelled workload that no CR claims
-// is drift. It may have been added by a manual kubectl apply, left behind by
-// a partial delete, or imported from somewhere else. The warner surfaces
-// these so the operator can either delete the orphan or wrap it in a CR
-// rather than letting it sit invisibly between the CLI and the console.
+// RunOrphanWarner periodically reports Kipper-labeled Deployments, StatefulSets,
+// and PVCs lacking their expected workload CR, through logs and Warning events.
 func RunOrphanWarner(ctx context.Context, c client.Client, recorder record.EventRecorder) {
 	log.Printf("orphan warner started (interval: %s)", orphanScanInterval)
 	ticker := time.NewTicker(orphanScanInterval)

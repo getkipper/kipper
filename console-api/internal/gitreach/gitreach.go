@@ -55,23 +55,9 @@ var errUnsafeRedirect = errors.New("the host redirected the request somewhere th
 // front of an interactive create, so it fails fast rather than correctly.
 const timeout = 5 * time.Second
 
-// transport is the round tripper every check uses.
-//
-// It refuses to connect to a non-public address. The URL this probes is
-// supplied by whoever configures an app, and this runs inside console-api,
-// which reaches the whole cluster — so without the guard a deployer could name
-// a cluster service or a metadata endpoint and have the control plane fetch it
-// for them, and read the outcome from whether the write was accepted. The same
-// boundary is already drawn for the Dockerfile probe.
-//
-// A genuinely private git host therefore fails to connect and reports Unknown,
-// which callers allow: the build itself is not subject to this guard, so a
-// self-hosted repository on a private network still deploys. It simply does
-// not get the benefit of the check.
-//
-// A seam as well, so a test can trust a self-signed server: the token path only
-// runs over TLS, and a test cannot exercise it against a certificate nothing
-// trusts.
+// transport limits repository preflight requests to public addresses through
+// netguard. Private-host connection failures produce Unknown, leaving the build
+// to establish reachability. Tests replace the transport to trust local TLS.
 var transport http.RoundTripper = &http.Transport{
 	DialContext: netguard.Dialer(timeout).DialContext,
 }

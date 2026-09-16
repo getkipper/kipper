@@ -1,25 +1,7 @@
-// Package memberbinding names the RoleBindings that project membership
-// projects onto.
-//
-// Names are **generated, never parsed**. The reconcile can produce every name
-// it would ever have used, which is what lets it find a binding for a role the
-// project no longer lists: parsing a name to work out whose it is needs a
-// separator that survives every project and role name, and no separator does.
-// A project called `acme` and one called `acme-support` produce the same
-// hyphenated string, and the two would take each other's bindings apart
-// forever.
-//
-// So the name is two fixed-length digests, one for the project and one for the
-// role. Fixed length is the whole point: it makes the project half a prefix the
-// reconcile can list by, and it makes one project's prefix unable to be
-// another's. That is a different claim from collisions being impossible, which
-// no hash gives. At 128 bits, hitting a chosen project's prefix is a
-// second-preimage search and hitting any two at random is a birthday problem
-// over 2^64 names.
-//
-// It also puts the role name somewhere safe. A role name reaches this, and a
-// digest is what stops a role called "Support Team!" producing an object name
-// nothing can address.
+// Package memberbinding derives RoleBinding names from fixed-length project
+// and role digests. Generate expected names to identify bindings; original
+// project and role names cannot be recovered from them. The project digest
+// forms a stable prefix, avoiding ambiguity from hyphens in source names.
 package memberbinding
 
 import (

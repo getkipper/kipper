@@ -32,19 +32,8 @@ export function looksLikeSecretName(key: string): boolean {
 }
 
 /**
- * Reports whether a value carries a credential whatever its key is called.
- * `looksLikeSecretName` matches none of DATABASE_URL, so a URL with an embedded
- * password would otherwise be stored in silence.
- *
- * Placeholders are removed before the test, because a templated URL resolves its
- * credential into a Secret and never stores one on the CR. Flagging it would warn
- * against the safe construction and teach people to ignore the warning.
- *
- * The stripping goes through the parser in `envTemplate.ts`, so the warning and
- * the resolver read one grammar. It used to be a regex here, which could not
- * express the `$${NAME}` escape: an escaped placeholder is literal text and its
- * `:` and `@` belong to the value, so stripping it hid a delimiter that is
- * really there.
+ * Check literal URL text for an embedded password, regardless of the variable
+ * name. The shared parser removes references while preserving escaped text.
  */
 export function valueLooksLikeCredential(value: string): boolean {
   return EMBEDDED_USERINFO.test(stripPlaceholders(value))

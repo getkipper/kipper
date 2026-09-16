@@ -2056,21 +2056,9 @@ func TestTheProjectIndexHidesProjectsFromAnUnrecognisedRole(t *testing.T) {
 	}
 }
 
-// During a rolling upgrade this handler runs beside a controller whose status
-// struct has no claims field. That controller creates and configures the
-// namespace perfectly well and writes no claim, and a later whole-status write
-// from it drops any claim a newer pod recorded.
-//
-// So this release accepts either record: the claim, or the namespace carrying
-// this project's label. Requiring the claim now would fail an AddEnvironment
-// that has in fact succeeded, which is the compatibility boundary the whole
-// two-release split exists to hold.
-//
-// Release 2 deletes `fallbackToLabel` and this is one of the five tests that
-// fails when it goes. What it becomes then is the opposite assertion: a project
-// carrying the label and no claim owns nothing, so AddEnvironment refuses and
-// this test expects the refusal. A failure here after that flip is the expected
-// inversion and not a regression in the handler.
+// During mixed-version rollout, the label fallback accepts namespaces created
+// by controllers that write no claims. Update this expectation when retiring
+// fallbackToLabel; ownership records will then be required.
 func TestAddEnvironmentSucceedsWhenAnOlderControllerWroteNoClaim(t *testing.T) {
 	project := &kipperv1.Project{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo"},

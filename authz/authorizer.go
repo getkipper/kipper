@@ -135,13 +135,9 @@ func (a *Authorizer) Authorize(ctx context.Context, namespace, app, rawKey strin
 
 	day := now.Format("2006-01-02")
 
-	// Check the longer-window quota before spending a rate-bucket token. A
-	// usage-store read failure then returns gate_unavailable without having
-	// consumed a token, so a burst of 503 retries during an outage cannot
-	// drain the bucket and spuriously rate-limit legitimate traffic once the
-	// store recovers. The rate limiter still sheds after: the common allowed
-	// path runs both checks regardless, so only excess traffic on a quota'd
-	// key pays for the (indexed, in-memory) usage read before being shed.
+	// Check quota before spending a rate token so usage-read failures preserve
+	// the bucket during retries. Quota-limited traffic pays for this cached read
+	// before the rate limiter sheds excess requests.
 	if q := plan.Spec.Quota; q != nil {
 		used, err := a.periodUsage(ctx, namespace, prefix, q.Period, now)
 		if err != nil {

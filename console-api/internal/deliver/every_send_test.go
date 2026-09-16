@@ -11,21 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Four places used to implement "deliver a thing with a deadline", and the
-// consequence was that a fix applied to one of them was not a fix: a per-send
-// budget added to the alert batch was absent from the two equivalent loops
-// beside it, and an end-of-day review found a fourth send that had been left
-// out of the primitive entirely.
-//
-// So this walks the source, looking for a call that puts a message on the
-// network without the primitive around it.
-//
-// It is a tripwire rather than a proof, and worth knowing where it stops: it
-// matches text rather than syntax, so it accepts a send whose wrapper is merely
-// nearby, and it will not see a transport passed as a function value or a new
-// transport not named below. What it does catch is the mistake that has
-// actually happened four times here — a send written beside the others without
-// the wrapper.
+// Check known outbound sends for a nearby delivery wrapper. This textual
+// guard catches direct calls but cannot prove nesting or recognize transports
+// passed as function values; add new transport names to the pattern.
 func TestEveryOutboundSendGoesThroughThePrimitive(t *testing.T) {
 	// Where a send is defined or handed to something else to perform, rather
 	// than performed here. Keyed by function as well as file, so a different

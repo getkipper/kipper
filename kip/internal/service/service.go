@@ -559,23 +559,8 @@ func (m *Manager) Update(ctx context.Context, namespace, name string, opts Optio
 	return result, nil
 }
 
-// List returns all stateful services in a namespace by reading Service CRs.
-//
-// The CR is the source of truth for what services exist; the StatefulSet is
-// only consulted to enrich each entry with live workload status (READY
-// count, storage). A CR with no StatefulSet yet (controller has not
-// reconciled) still appears in the list with phase from the CR.
-// Snapshot is one read of a service's CR: everything a caller decides from, taken
-// at a single moment.
-//
-// Type and the blockage are read together because the info command needs both
-// and has to agree with itself. Asking twice lets the condition change between
-// the reads, and then it prints credentials the reconciler has just refused,
-// which is the one outcome it exists to prevent.
-//
-// The blockage is whichever refusal the service is standing on, not the
-// credentials one alone: a name that belongs to something else stops a service
-// just as surely.
+// Snapshot holds a service's type and credential or name blockage from one
+// CR read, so callers make their decisions from a consistent snapshot.
 type Snapshot struct {
 	Type           string
 	BlockedReason  string
@@ -645,6 +630,8 @@ func blockage(obj map[string]interface{}, wanted string) (string, string) {
 	return "", ""
 }
 
+// List reads Service CRs and enriches them with live workload status.
+// Services awaiting their first StatefulSet remain visible.
 func (m *Manager) List(ctx context.Context, namespace string) ([]Status, error) {
 	if m.Dynamic == nil {
 		return nil, fmt.Errorf("service manager is not configured with a dynamic client")

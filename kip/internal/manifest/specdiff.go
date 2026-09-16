@@ -56,26 +56,10 @@ type Change struct {
 // worth knowing the shape of rather than the whole of.
 const maxRenderedValue = 60
 
-// DiffSpec reports what replacing live with desired would do, field by field.
-//
-// Cleared is the reason this exists. `kip apply` assigns a spec wholesale, so
-// every field the manifest does not carry is removed, and nothing said so at
-// the point it mattered: the old diff printed "exists, will be updated" and
-// named nothing. Two people worked that rule out from behaviour rather than
-// from the tool.
-//
-// defaults are the CRD's own, by dotted path. A field the manifest omits whose
-// live value is the schema default is not going anywhere — assigning a spec
-// without it makes admission write the same value back — so it is not reported
-// at all. One whose live value differs from the default is reported as taking
-// that default rather than as being cleared, because that is what happens.
-// Without this, a manifest that leaves an optional field out is told it is
-// about to destroy one, and apply refuses work that is entirely ordinary.
-//
-// preserved names paths apply carries forward rather than replacing, so they
-// are not reported as cleared. A git app's built image is one: it is build
-// output the controller owns, and apply keeps it precisely so an apply of a
-// git-only spec cannot reset a running app to the build placeholder.
+// DiffSpec reports sorted field changes when replacing live with desired.
+// For omitted fields, CRD defaults distinguish unchanged values from resets;
+// fields without defaults are reported as cleared. Preserved paths are skipped
+// because apply carries them forward.
 func DiffSpec(live, desired map[string]interface{}, preserved []string, defaults map[string]interface{}) []Change {
 	keep := make(map[string]struct{}, len(preserved))
 	for _, p := range preserved {
@@ -191,27 +175,10 @@ const hidden = "(value hidden)"
 // tell a scrubbed URL from one that never carried anything.
 const redacted = "***"
 
-// ScrubURLCredential removes what an http(s) URL can carry a credential in,
-// leaving the scheme, host and path legible. A git URL is worth reading in a
-// diff; the userinfo, the query and the fragment are not.
-//
-// The whole userinfo goes, not just the password. A token is a valid username
-// on its own — https://ghp_xxxx@github.com/acme/shop.git is what a personal
-// access token looks like in a URL — so a rule that needs a colon to find a
-// credential prints the ones carried without one.
-//
-// The query and the fragment go for the same reason one step further along: a
-// provider that takes a token as a parameter puts it after the path, where
-// removing the userinfo finds nothing. Neither carries anything a diff needs, so
-// they are marked rather than parsed — deciding which parameter is the secret
-// means keeping a list of every provider's spelling, and the one not on the list
-// is the one that gets printed.
-//
-// ssh:// and the scp-style git@host:path are left alone. Their username is the
-// remote's convention rather than a secret, and ssh does not carry one here.
-//
-// A string that will not parse is hidden rather than printed. Failing to parse
-// is not evidence that there is nothing in it.
+// ScrubURLCredential redacts HTTP(S) userinfo, query and fragment while
+// keeping the scheme, host and path readable. Usernames may themselves be tokens.
+// Other schemes pass through. Parse failures are hidden only when the input
+// contains both :// and @.
 func ScrubURLCredential(raw string) string {
 	parsed, err := url.Parse(raw)
 	if err != nil {

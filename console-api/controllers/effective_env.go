@@ -305,20 +305,9 @@ func bindingEnvSources(ctx context.Context, c client.Client, owner client.Object
 	return sources, refused, nil
 }
 
-// bindingServiceType is the type of the Service a binding names, or "" when it
-// cannot be read. It decides both the Secret the binding injects and, when the
-// binding sets no prefix of its own, the prefix its variables carry — the same
-// contract the bind handler and the console preview (InjectedEnvNames) honour,
-// so all of them agree on the names a binding injects.
-// bindingServiceType is the type of the Service a binding names. found is false
-// when there is no such Service; a read that fails for any other reason is
-// returned as an error.
-//
-// The three answers are distinct on purpose. The type decides both the Secret a
-// binding injects and the prefix its variables carry, so guessing when the read
-// failed means a transient error silently changes which Secret the pod is told
-// to read — and the render, which resolved the same question from a Service it
-// read successfully, would then disagree with it.
+// bindingServiceType returns the bound Service's type. A missing Service
+// returns found=false; other read failures return an error so callers preserve
+// the distinction when selecting credentials and environment prefixes.
 func bindingServiceType(ctx context.Context, c client.Client, serviceName, namespace string) (svcType string, found bool, err error) {
 	var svc kipperv1.Service
 	if getErr := c.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: namespace}, &svc); getErr != nil {

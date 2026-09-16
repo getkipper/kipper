@@ -1,12 +1,5 @@
-// Python 3.12 standard library modules. Used by the scan-imports and
-// AI-assist features to keep stdlib out of the dependency list — pip
-// can't install most of these, and even when it can the result is an
-// empty placeholder package masking the real stdlib import.
-//
-// The server-side equivalent lives in
-// console-api/controllers/function_controller.go::pythonStdlib. Keep
-// the two in sync — both are loaded into the same conversation, so a
-// drift would be immediately visible during testing.
+// Python standard-library module names used to filter dependency suggestions.
+// Keep aligned with pythonStdlib in console-api/controllers/function_controller.go.
 
 export const PYTHON_STDLIB: ReadonlySet<string> = new Set([
   'abc', 'argparse', 'array', 'ast', 'asyncio',
