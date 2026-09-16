@@ -25,6 +25,8 @@ kipper.sh
 getkipper.com
 
 # Upstream projects, registries and vendors the code and docs refer to
+# Official MySQL reference linked by the database console guide
+dev.mysql.com
 github.com
 github.io
 githubusercontent.com

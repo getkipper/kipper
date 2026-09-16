@@ -5,7 +5,7 @@ description: 'A terminal into any running pod from the console or the CLI, with 
 
 # Web Terminal
 
-The Connect tab in the app detail panel opens an interactive shell session inside a running pod directly in your browser. No CLI, no SSH keys, no `kubectl` knowledge required.
+Use the app detail panel's **Connect** tab to open an interactive shell in a running pod from your browser.
 
 ## Opening a terminal
 

@@ -61,9 +61,9 @@ spec:
 
 ## Permanent vs temporary
 
-Use **301 (permanent)** when the old URL will never come back. Browsers and search engines cache 301s aggressively, so the redirect happens instantly on repeat visits.
+Use **301 (permanent)** for a lasting move to a new URL.
 
-Use **302 (temporary)** when the redirect might change. Browsers won't cache it, so they check every time. Good for A/B testing, maintenance pages, or redirects you're still experimenting with.
+Use **302 (temporary)** for a temporary destination, such as a maintenance page, or while testing a redirect. Avoid a permanent redirect until you are ready for clients to retain the new destination.
 
 ## How it works
 

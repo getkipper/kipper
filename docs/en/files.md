@@ -1,6 +1,6 @@
 # Browsing Files in Running Containers
 
-The Files tab in the app detail panel lets you browse the filesystem inside a running pod directly from the web console. No terminal access or `kubectl` knowledge required.
+Use the app detail panel's **Files** tab to browse, download, upload, and edit files in a running pod.
 
 ## Opening the file browser
 
@@ -34,8 +34,8 @@ Every file row has a download button on the right side. Click it to download the
 
 Click a file to open a preview, then click **Edit** to modify it in the built-in editor. When you save, Kipper writes the updated content to all running pods for that app, not just the one you are browsing. This keeps configuration changes consistent across replicas.
 
-::: warning Edits do not survive deployments
-Changes made through the file editor are written directly to the running container filesystem. They will be lost when the pod restarts or a new deployment rolls out. For permanent changes, update your source code or configuration and redeploy.
+::: warning File persistence
+Changes to the container’s writable layer are lost when the container is replaced. Files on mounted persistent volumes follow the volume’s lifecycle. For reproducible application changes, update your source or configuration and redeploy.
 :::
 
 Files larger than 1MB cannot be edited in the browser. Download the file, modify it locally, and upload it back.
@@ -69,4 +69,4 @@ The file browser connects to the first pod with a `Running` status that matches 
 - **1MB preview/edit limit:** files larger than 1MB must be downloaded to view or edit
 - **10MB upload limit:** files larger than 10MB cannot be uploaded through the browser
 - **Container filesystem only:** shows the container's filesystem, including mounted volumes but not the host filesystem
-- **Edits are ephemeral:** file changes do not persist across deployments
+- **Persistence:** use source-controlled configuration or persistent volumes for changes that must survive container replacement

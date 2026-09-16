@@ -9,7 +9,7 @@ When multiple replicas of an app need to access the same files (uploads, media, 
 
 ## MinIO (recommended)
 
-MinIO provides S3-compatible object storage. Applications use the S3 API to read and write files. This is the modern approach and the one used by AWS, GCP, and most cloud platforms.
+MinIO provides S3-compatible object storage. Choose it when your application reads and writes files through an S3 API or plugin.
 
 ```bash
 kip service add minio --name media --project blog --environment prod
@@ -24,7 +24,7 @@ kip service add minio --name media --project blog --environment prod
 
 ### Why MinIO is recommended
 
-- **Scales with any number of replicas:** no filesystem contention
+- **Shared access:** multiple replicas use the same object store
 - **Works with any S3-compatible SDK:** AWS SDK, MinIO SDK, boto3
 - **Survives pod restarts:** data stored independently from pods
 - **Web console included:** browse and manage files at port 9001
@@ -52,9 +52,7 @@ This injects `S3_ENDPOINT`, `S3_ACCESS_KEY`, and `S3_SECRET_KEY` into the app. `
 
 For apps that need a traditional shared filesystem (e.g. legacy apps that read/write files to disk), Kipper provides shared volumes backed by Longhorn with ReadWriteMany (RWX) access.
 
-::: warning Use MinIO when possible
-Shared volumes work but have limitations: NFS overhead affects performance, and they create a dependency between pods and the volume. MinIO is faster, more resilient, and the industry standard for multi-pod file sharing.
-:::
+Shared volumes provide a filesystem path through Longhorn's RWX storage. Choose this approach when your app expects filesystem access, and account for the shared storage service when planning capacity and availability.
 
 ### Create a shared volume
 
@@ -137,9 +135,8 @@ The Volumes page gives you a clear overview of which volumes exist, their status
 | Criteria | MinIO (S3) | Shared Volume |
 |---|---|---|
 | Multi-pod access | Yes (via API) | Yes (via filesystem) |
-| Performance | High (direct API) | Moderate (NFS overhead) |
-| Scalability | Excellent | Limited by NFS |
-| App compatibility | Needs S3 SDK/plugin | Works with any app |
+| Access method | S3 requests | Shared filesystem operations |
+| App compatibility | S3 SDK or plugin | App supports a shared filesystem |
 | Survives pod restart | Yes | Yes |
 | Use case | Modern apps, uploads, media | Legacy apps, WordPress without S3 plugin |
 | Recommendation | **Preferred** | Use when S3 is not an option |

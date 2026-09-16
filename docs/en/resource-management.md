@@ -15,7 +15,7 @@ A background controller monitors resource usage via metrics-server every 60 seco
 | OOM kill | Immediate | Double memory (capped, see [OOM memory cap](#oom-memory-cap)) |
 | Stuck pod | In `ContainerCreating` for 5+ minutes | Delete pod to trigger recreation |
 
-The controller only acts when usage is **consistently** high or low. A single spike does not trigger a scale-up, and a brief idle period does not trigger a scale-down. That way, temporary load changes don't cause thrashing.
+Routine adjustments use sustained readings to smooth out temporary load changes. OOM recovery and the saturation override below handle urgent increases.
 
 ### Profile-based minimums
 
@@ -76,43 +76,17 @@ Autoscaling adjusts the **number of pods** based on CPU and memory utilisation. 
 
 When autoscaling is enabled, the App reconciler stops writing `spec.replicas` to the Deployment and lets the HPA own that field. When autoscaling is disabled, the App reconciler owns replicas again.
 
-### When to use what
+### Choosing a setup {#when-to-use-what}
 
-The resource controller and autoscaling solve different problems. They complement each other, but you don't always need both.
-
-**Resource management only (auto mode, no autoscaling)**
-
-Best for apps with predictable traffic where you don't know the right CPU and memory values yet. Kipper figures out the right size over time. A small internal tool, a staging environment, a service that handles a steady number of background jobs. You don't need multiple replicas, you just need the pod to be the right size.
-
-**Autoscaling only (expert mode with HPA)**
-
-Best when you know exactly how much CPU and memory each pod needs, but traffic varies. A public API that gets 10 requests per second at night and 500 during business hours. You've profiled the app and set the resources yourself. You just need Kubernetes to add and remove pods as load changes.
-
-**Both together**
-
-Best for production apps where traffic varies AND you want Kipper to handle the right-sizing automatically. The resource controller finds the right CPU and memory per pod over time. The HPA handles traffic spikes by adding pods quickly, without any restarts. When a traffic spike hits, the HPA responds in seconds by adding pods. The resource controller only adjusts resources after sustained changes over minutes.
-
-Here's a typical sequence with both enabled:
-
-1. App starts with standard profile defaults (250m CPU, 256Mi memory)
-2. Resource controller watches usage over a few minutes and adjusts. Maybe the app actually needs 500m CPU. That triggers one rolling restart, but the HPA ensures 2+ pods, so there's no downtime.
-3. A traffic spike hits. CPU goes above 70% across all pods.
-4. The HPA adds pods within seconds. No restarts, just more pods handling requests.
-5. The resource controller still watches per-pod usage. While the HPA has scaled out, the controller will not **decrease** per-pod resources (more pods doesn't justify shrinking each one), but it can still increase CPU or memory if pods are saturated. This handles the case where horizontal scaling alone is not enough, for example JVM apps stuck at a too-low per-pod CPU ceiling.
-6. Traffic drops. The HPA removes the extra pods.
-7. If baseline usage is still higher than before, the resource controller will eventually adjust. But only after sustained readings, not from a temporary spike.
-
-**Common scenarios**
-
-| Your situation | Recommended setup |
+| Workload | Starting point |
 |---|---|
-| Small internal tool, one user | Auto mode only, 1 replica |
-| Staging environment, testing | Auto mode only, 1 replica |
-| Production API, steady traffic | Auto mode, 2 replicas (no autoscaling) |
-| Production API, variable traffic | Auto mode + autoscaling, min 2 / max 5 |
-| JVM app you've already tuned | Expert mode + autoscaling |
-| Database or cache | Auto mode only (databases should not be horizontally scaled) |
-| Batch worker, periodic spikes | Auto mode + autoscaling based on CPU |
+| Small internal tool or staging app | Auto mode, one replica |
+| App with steady traffic | Auto mode; use multiple replicas for availability during updates |
+| App with variable traffic | Auto mode plus HPA |
+| App with measured per-pod requirements | Expert mode plus HPA |
+| Managed database or cache | Auto mode, single service replica |
+
+With both controllers enabled, the HPA adjusts replica count and the resource controller adjusts per-pod allocations. While the HPA has scaled out, the resource controller can increase per-pod resources but holds off on decreases. Resource changes trigger a rollout; allow capacity for replacement pods.
 
 ### Enabling autoscaling
 
@@ -310,13 +284,7 @@ spec:
 
 Open a project's settings with the gear icon on its card in the **Projects** screen. The **Quota** tab shows the project's tier and, per environment, the four caps with live usage bars. An environment running with an explicit override carries an **Override** badge; one that has hit a cap shows **Over quota**.
 
-An environment can also show neither state. Whether a namespace is over its cap is a comparison
-against live usage, and that comparison does not always run: a namespace whose ResourceQuota has not
-published usage yet has nothing to compare, and a read that fails leaves the question unanswered.
-The API reports that as `over_quota: null` rather than `false`, and the console shows no badge, which
-is the difference between "measured and within the cap" and "not measured". A quota change that
-commits while usage cannot be read still succeeds and still reports the new caps; the usage fills in
-on the next read.
+The **Over quota** badge appears after a live usage comparison. While usage is unavailable, the console leaves the badge unset and the API reports `over_quota: null`. Saving a quota can succeed while usage is unavailable; the next successful read supplies it.
 
 Cluster admins can change the tier from the dropdown and edit or reset per-environment overrides with the pencil and reset buttons. Raising a quota hands out cluster capacity, so this stays with admins; project owners and members see the panel read-only. When a new cap would land below what an environment currently uses, the console shows exactly which values are affected and asks for confirmation before applying.
 

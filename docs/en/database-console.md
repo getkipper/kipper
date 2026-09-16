@@ -5,7 +5,7 @@ description: 'Run SQL against a Kipper-managed database from the console, browse
 
 # Database Console
 
-Kipper has a built-in database client in the web console for Postgres and MySQL services. You can browse tables, edit rows, design schema, manage indexes, run SQL with autocomplete, and ask the AI assistant to write queries that actually use your real schema. No desktop tool needed.
+Kipper has a built-in database client in the web console for Postgres and MySQL services. You can browse tables, edit rows, design schema, manage indexes, run SQL with autocomplete, and ask the AI assistant to draft queries using your schema.
 
 To open it: go to **Services** in the sidebar, hover any Postgres or MySQL row, click the code-icon button on the right (or open the side panel and click the same button next to AI Diagnose). You can also navigate directly to `/services/<name>/data`.
 
@@ -70,11 +70,11 @@ The SQL editor is a CodeMirror pane with PostgreSQL or MySQL syntax highlighting
 - **Cmd / Ctrl + Shift + Enter:** runs everything in the editor.
 - **Run all** button: same as the shortcut above.
 
-If there are multiple statements separated by `;`, the cursor's position picks which one runs. Selecting a fragment with the mouse forces that exact text. Naive split-on-semicolons handles 95% of cases; for the awkward 5% (semicolons inside string literals) just select the statement explicitly.
+If there are multiple statements separated by `;`, the cursor's position picks which one runs. Selecting a fragment with the mouse forces that exact text. The editor splits statements on semicolons. If a string literal contains a semicolon, select the complete statement explicitly.
 
 ### Toolbar toggles
 
-- **Run as transaction** wraps the executed SQL in `BEGIN ... COMMIT`. Multi-statement scripts commit or roll back together.
+- **Run as transaction** wraps the executed SQL in `BEGIN ... COMMIT`. Rollback support depends on the database and statement type; see [DDL safety](#ddl-safety).
 - **No auto-limit** disables the automatic `LIMIT 1000` that's added to bare `SELECT *`. Use it when you want all rows.
 
 ### Save snippet, Explain
@@ -103,8 +103,8 @@ Click a table in the sidebar, switch to Designer. Each column is a row showing N
 
 Each action queues an op into a pending list shown above the column rows. The **DDL preview** at the bottom regenerates server-side on every change, so you see the exact `ALTER TABLE` statements before applying.
 
-- **Apply N changes** runs everything in one transaction. If any statement fails, the whole batch rolls back.
-- **Take a backup first** (toggle): future hook for triggering a Kipper Backup before running the DDL.
+- **Apply N changes** submits the queued statements in a transaction. Check the database-specific limits under [DDL safety](#ddl-safety).
+- **Take a backup first** is currently a placeholder control. Create and verify a backup separately before destructive changes.
 - **Discard** clears the queue.
 
 ### Creating a new table
@@ -144,7 +144,7 @@ What the AI gets in its system prompt:
 - Other tables ship shape-only so the model can write joins.
 - The current SQL editor contents, so "Explain this query" or "Make this faster" prompts have something to work with.
 
-Secret values, env values, and row data are never sent. Names only.
+The assistant receives schema metadata, your messages, and the current SQL editor contents. Query results are not added automatically. SQL and messages can contain sensitive values, so review them before sending them to the configured AI provider.
 
 When the AI returns a SQL block, **Apply to editor** drops it into the SQL tab and switches focus there. **Copy** copies it.
 
@@ -163,7 +163,7 @@ History is per-user (keyed by your JWT email). Snippets are shared across the te
 Several rails to keep destructive changes deliberate:
 
 - **Confirm dialog** on `DROP`, `TRUNCATE`, and `DELETE` without `WHERE` from the SQL tab.
-- **Run as transaction** toggle so multi-statement DDL commits or rolls back together.
+- **Run as transaction** groups supported statements in a transaction. MySQL DDL such as `ALTER TABLE` commits implicitly, so a failed batch can leave earlier changes applied. See [MySQL’s implicit-commit reference](https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html).
 - **DDL preview pane** in the Designer and Indexes editors so you see the SQL before pressing Apply.
 - **Auto-refresh**: when the SQL tab runs DDL (`CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `COMMENT ON`, `GRANT`, `REVOKE`), the schema sidebar, the open table's structure, and the autocomplete cache all reload automatically. Designer and Indexes tabs reflect reality on the next click.
 - **Audit log**: every query emits a stdout line on the console-api with `service`, `user`, `sql_hash` (SHA-256 prefix), `duration_ms`, and `status`. Loki picks it up. SQL values are never logged.
@@ -172,8 +172,8 @@ Several rails to keep destructive changes deliberate:
 
 The database console runs SQL through the console-api using the service's existing credentials Secret. The browser never sees credentials.
 
-- **Read-only operations** (schema browsing, row reads, query history) need any authenticated role.
-- **Write operations** (rows, DDL, snippets) require the deployer role.
+- **Schema browsing, row reads, and query history** require `database.read` in the service’s project.
+- **Running SQL, editing rows or schema, and saving snippets** require `database.write`, held by project deployers and owners. Cluster admins also have access.
 - **Audit** of past queries is admin-visible via Loki.
 
 ## Supported services
@@ -185,7 +185,7 @@ For other database types (MongoDB, Redis, OpenSearch, RabbitMQ), connect a deskt
 ## Tips
 
 - **Multi-statement scripts.** Leave several queries in the editor separated by `;`. Cmd+Enter runs the one your cursor is in. Useful for iterating on a JOIN while the seed INSERT stays at the top.
-- **Schema-aware AI.** If the AI invents a column name, it'll usually be because that column wasn't in the open table or the cache hadn't loaded yet. Click the table in the sidebar so its full schema is sent.
+- **Schema-aware AI.** Click a table in the sidebar to include its full schema, and review generated SQL before running it.
 - **Cmd+Enter on a single query.** Works the same as the Run button. No need to select.
 - **Cancel a filter.** Esc inside the filter input clears it. Saves a click.
-- **Take a backup before destructive DDL.** For production-shaped changes, run `kip backup create <service>` from the CLI before applying.
+- **Take a backup before destructive DDL.** Run `kip backup create pre-schema-change --project <project> --environment <environment>` and check `kip backup list` for completion before applying.

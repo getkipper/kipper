@@ -1,6 +1,6 @@
 # API Keys & Usage Plans
 
-Kipper can gate an app's route behind API keys, the way AWS API Gateway gates an API: you issue keys to your consumers, attach a usage plan (rate limit, burst, and an optional monthly quota), and see per-key usage. Everything runs inside your cluster; there is no external gateway service.
+Protect an app’s public route with API keys. Issue a key to each consumer, attach a usage plan with rate limits and an optional quota, and view per-key usage in the console. The key checker runs in your cluster.
 
 ## How it fits together
 
@@ -14,7 +14,7 @@ Plans and keys live per environment, like apps. A key issued in `shop-prod` open
 
 Open the app in the console, go to **Settings**, and switch on **Require API key**. Requests without a valid key get `401`; requests over their plan's rate or quota get `429`.
 
-The gate is applied a moment after you flip the toggle, while Kipper wires the forwardAuth middleware onto the route. During that short window the Settings panel shows an amber notice that the gate isn't in place yet, so you can tell an engaged gate apart from one that is still being applied. It usually clears within a minute.
+After enabling the gate, wait for the amber notice in Settings to clear. The notice means Kipper is still applying the middleware and the route is not yet protected.
 
 The check runs in a small in-cluster service (`kipper-authz`) that Traefik consults on every request to a gated route. It fails closed: if the service is down or cannot prove its view of the keys is current, gated routes answer `503` instead of letting unverified traffic through. Ungated apps are never affected. The key header is stripped before the request reaches your app, so your logs and backends never see key material.
 
@@ -66,7 +66,7 @@ On an allowed request, the gate adds two headers identifying the caller before i
 - `X-Kipper-Key-Prefix` is the key's stable public handle, for example `ab12cd34`. Use this as the consumer identifier in your own logs and per-tenant logic.
 - `X-Kipper-Key-Name` is the display name you gave the key, when it has one.
 
-Any copies of these headers a client sends are stripped before the gate sets its own, so your backend can trust them. The secret half of the key is never forwarded.
+On the ingress route, client-supplied copies of these headers are stripped before the gate sets them. Direct connections to the pod bypass that protection; restrict those connections before relying on the headers for authorization.
 
 ## Expiry
 
@@ -86,7 +86,7 @@ Revoking takes effect within the 90-second freshness ceiling. Until you revoke i
 
 ## Rate limits and quotas
 
-Rate and burst are enforced per authz replica, so they are best-effort ceilings in the AWS style: with two replicas, a key can briefly exceed its nominal rate. Treat them as protection, not billing-grade accounting.
+Rate and burst limits apply per authz replica. With multiple replicas, a key can exceed the plan’s nominal rate. Use these limits for traffic control; billing needs separate accounting.
 
 Quotas count against calendar periods (UTC; weeks start on Monday). Counters are collected in memory and written out in batches, so a quota can over-admit by a few seconds' worth of traffic around the boundary. Usage history is kept for 92 days.
 

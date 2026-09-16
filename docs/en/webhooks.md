@@ -83,7 +83,7 @@ deploy:
 
 With `--image` apps the webhook payload usually carries `"image": "..."` so Kipper just rolls out the new tag. With `--git` apps, POST `"commit": "..."` from your CI to fire a rebuild from the configured git source, or let Kipper notice the change itself.
 
-Posting an `"image"` to an app that builds from git returns **409 Conflict**. The next build would overwrite whatever the pipeline pushed, so accepting it would mean the deploy silently did nothing. Pick one: either drop the `"image"` field and let Kipper build, or detach the git source so the app deploys what your pipeline builds.
+For a Git-built app, send a commit to trigger a build. To deploy images built by your pipeline, detach the Git source first. Sending an `image` while Git is configured returns **409 Conflict**.
 
 ```bash
 kip app git remove checkout --project shop --environment production
@@ -114,7 +114,7 @@ Content-Type: application/json
 
 | Field | Required | Description |
 |---|---|---|
-| `image` | Yes | Full image reference including tag |
+| `image` | For image-based apps | Full image reference including tag; omit for Git-built apps |
 | `commit` | No | Git commit SHA (shown in deploy history) |
 
 ## Deploy history

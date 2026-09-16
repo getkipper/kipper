@@ -91,7 +91,7 @@ kip init --blueprint wordpress --set projectName=my-blog
      Edit it, then run: kip apply -f kipper.yaml
 ```
 
-This creates a standard `kipper.yaml` file, not a special blueprint format, just a regular manifest. Edit it to add routes, environment variables, resource profiles, or any other configuration. Then apply:
+This creates a standard `kipper.yaml` manifest. Edit it to add routes, environment variables, resource profiles, or any other configuration. Then apply:
 
 ```bash
 kip apply -f kipper.yaml
@@ -161,7 +161,7 @@ Workflow automation platform (Zapier alternative).
 
 ### Uptime Kuma
 
-Monitoring and status page. No database required. Data stored on a persistent volume.
+Monitoring and status page with data stored on a persistent volume.
 
 | Component | Details |
 |---|---|
@@ -249,7 +249,7 @@ A blueprint file contains two YAML documents separated by `---`:
 1. **Metadata:** name, description, version, parameters
 2. **Template:** a `kipper.yaml` with Go template placeholders (e.g. `.projectName`)
 
-The file has two YAML documents separated by `---`. The first document defines the metadata and parameters. The second document is the manifest template using Go `text/template` syntax. Placeholders like `.projectName` and `.replicas` are replaced with parameter values at render time.
+Placeholders like `.projectName` and `.replicas` are replaced with parameter values at render time.
 
 After rendering with `--set projectName=acme --set replicas=3`, the template produces:
 
@@ -270,4 +270,4 @@ services:
 
 All parameter values are strings. Use quotes in the template for numeric fields that YAML might interpret differently.
 
-Parameters use Go `text/template` syntax. All parameter values are strings. Use quotes in the template for numeric fields that YAML might interpret differently.
+Parameters use Go `text/template` syntax.

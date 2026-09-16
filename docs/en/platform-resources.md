@@ -2,21 +2,23 @@
 
 Kipper's cluster runs a small set of system components alongside your apps: Prometheus and Grafana for metrics, Loki for logs, Longhorn for storage, Traefik for ingress, Dex for identity, Zot for the local registry, and the console plus its API. The platform resource layer keeps those components sized appropriately for the box they're running on, and reacts when something runs short of memory.
 
-This page explains how that works and what knobs you have.
+Use sizing profiles for initial allocations and overrides for individual components.
 
 ## Sizing profiles
 
 At install time, `kip install` looks at the node's total RAM and picks one of five profiles. Each profile maps to a set of memory limits for the system components.
 
-| Profile  | Node RAM | Prometheus | Loki   | What it's for |
+| Profile  | Detected RAM (MB) | Prometheus | Loki   | What it's for |
 |----------|----------|------------|--------|---------------|
-| `nano`   | < 4 GB   | off        | off    | Demos, dev boxes. Monitoring disabled to give apps room to breathe. |
-| `small`  | 4–8 GB   | 512 Mi     | 384 Mi | Side projects and small workloads. Monitoring runs but with tight limits. |
-| `medium` | 8–16 GB  | 1 Gi       | 512 Mi | Real production for a small team. Sensible defaults across the board. |
-| `large`  | 16–32 GB | 1 Gi       | 512 Mi | Same limits as medium, more headroom for apps. |
-| `xlarge` | > 32 GB  | 2 Gi       | 1 Gi   | Mature production with many services. |
+| `nano`   | < 3500 | off        | off    | Demos, dev boxes. Monitoring disabled to give apps room to breathe. |
+| `small`  | 3500–7499 | 512 Mi     | 384 Mi | Side projects and small workloads. Monitoring runs but with tight limits. |
+| `medium` | 7500–14999 | 1 Gi       | 512 Mi | Real production for a small team. Sensible defaults across the board. |
+| `large`  | 15000–29999 | 1 Gi       | 512 Mi | Same limits as medium, more headroom for apps. |
+| `xlarge` | ≥ 30000 | 2 Gi       | 1 Gi   | Mature production with many services. |
 
-The total system overhead across all profiles stays well under 8 GB, even at the top. Kipper deliberately ships a small platform layer so the box you pay for goes to your apps, not to operators and dashboards.
+These ranges use the RAM value printed by the installer (`MemTotal` from `/proc/meminfo`, divided by 1024). The cutoffs allow a margin below advertised 4, 8, 16, and 32 GB server sizes.
+
+Actual memory use depends on the enabled components and workload. Check usage after installation and leave capacity for startup, backups, and updates.
 
 ## Auto-bump on OOM
 
@@ -30,7 +32,7 @@ A few invariants:
 - The bump never lowers a manual override. If you set Prometheus to 6 Gi yourself and it OOMs, Kipper leaves your value alone and reports the ceiling instead.
 - The auto-bump is recorded on the CR's status (`LastBumpAt`, `LastBumpFrom`, `LastBumpTo`, `LastBumpReason`), visible in the Platform section of the console.
 
-## Components sized for their peak, not their average
+## Memory for startup and resync peaks {#components-sized-for-their-peak-not-their-average}
 
 Some components use far more memory for a moment than they do at rest, and the limit has to cover the moment.
 
@@ -46,7 +48,7 @@ kip platform resize kube-state-metrics --memory 384Mi
 
 You can set a memory limit yourself, either through the Platform page in the console or with `kip platform resize`. The override is stored on the `PlatformConfig` CR and the reconciler applies it to the HelmChart on the next pass.
 
-If your override lowers the limit below the profile's default memory request, Kipper clamps the request down to match. Kubernetes rejects pods where `request > limit`, so this guard means a fat-fingered resize cannot break the rollout. A user lowering the limit implicitly accepts a lower request too.
+When an override lowers the limit below the profile’s memory request, Kipper lowers the request to match. This keeps the request within the limit; the component still needs enough memory to start and run.
 
 ## Console
 
@@ -93,19 +95,11 @@ The console's Platform page has the same toggle. The HelmCharts are deleted; hel
 
 Forwarding metrics and logs from this cluster to your central stack (Prometheus remote-write, Loki client) is a separate feature on the roadmap. For now the supported pattern is "scrape from outside, run thin here."
 
-## Footprint, in context
+## Planning capacity {#footprint-in-context}
 
-Kipper deliberately ships a small platform layer. The total system overhead is roughly:
+Profiles set initial allocations. They are a starting point for capacity planning: leave room for applications, storage, backups, and overlapping pods during updates. Monitor actual usage and adjust component limits as the cluster grows.
 
-| Profile  | System total | What's left for apps on the min node |
-|----------|--------------|---------------------------------------|
-| `nano`   | ~1.8 GB      | ~2 GB on a 4 GB node                  |
-| `small`  | ~3.2 GB      | ~5 GB on an 8 GB node                 |
-| `medium` | ~4.5 GB      | ~11 GB on a 16 GB node                |
-| `large`  | ~4.5 GB      | ~27 GB on a 32 GB node                |
-| `xlarge` | ~5.5 GB      | 58+ GB on a 64 GB node                |
-
-For comparison, enterprise Kubernetes distributions typically require three or more nodes with 16 GB each (48 GB+ total) just for the control plane. Kipper runs the whole thing on one box at the low end and stays under an 8 GB platform budget even at the top. The bargain is "no HA, simpler operations, small footprint". Fine for the audience Kipper exists for. Less fine for a regulated bank that needs five nines.
+See [Installation sizing](/en/installation#preflight-checks) for the installer’s minimums and [Resource Management](/en/resource-management) for app resources.
 
 ## How it's wired
 

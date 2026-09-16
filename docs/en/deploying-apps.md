@@ -9,7 +9,7 @@ Kipper deploys applications as Kubernetes Deployments with a Service and Ingress
 
 ## Three ways to deploy
 
-An app can receive new versions through any of three independent mechanisms. Pick whichever fits how your team already works.
+Deploy from an image or a Git repository. Add a webhook to automate updates from your existing CI workflow.
 
 | Mechanism | When to use | Command |
 |---|---|---|
@@ -230,11 +230,11 @@ Builds are separate. The build container runs your Dockerfile's `RUN` steps, so 
 
 The **Source** tab in the web console shows the current build status, commit SHA, timestamps, and error messages. You can also trigger rebuilds and cancel active builds from there.
 
-A build reports one of `Pending`, `Building`, `Succeeded`, `Failed` or `Discarded`. **Discarded** means the build finished but its image was not deployed, because by then it no longer matched the source the app declares. Editing the repository URL, the branch, the Dockerfile path, the build context or a build argument does not start a build, so a build already running when you make that edit would otherwise finish and deploy an artefact built from the settings you just changed. Kipper refuses it and says so on the Source tab. Deploy again to build from the current source.
+Build states are `Pending`, `Building`, `Succeeded`, `Failed`, and `Discarded`. A **Discarded** build used source settings that no longer match the app. This can happen when you edit the repository, branch, Dockerfile, build context, or build arguments during a build. Source edits alone do not trigger a build; start a new build to deploy the current source.
 
 ### Moving an app off git
 
-An app that builds from git ignores images your pipeline pushes, because the next build overwrites them. Detach the source when the pipeline should own the image:
+Detach the Git source when you want an external pipeline to manage the app's image. Otherwise, a later Kipper build can replace that image:
 
 ```bash
 kip app git remove checkout --project shop --environment production
@@ -250,28 +250,11 @@ The app keeps running the image it has. The stored access token and the last bui
 
 See the [Source tab](/en/deploying-apps#from-a-git-repository) in the web console for a visual overview.
 
-## Path-based routing (microservices)
+## Routing
 
-For microservices architectures, multiple services can share a single domain with different path prefixes. Use the `--route` flag:
+<span id="path-based-routing-microservices"></span>
 
-```bash
-kip app deploy --name frontend --image registry.git.example.com/frontend:latest --port 80 --route blog/
-kip app deploy --name users-api --image registry.git.example.com/users-api:latest --port 3000 --route blog/api/users
-kip app deploy --name dns-api --image registry.git.example.com/dns-api:latest --port 3001 --route blog/api/dns
-```
-
-All three share the same subdomain (`blog--<cluster>.kipper.run` on a free kipper.run cluster, `blog.<your-domain>` on a custom domain) but route by path:
-
-```mermaid
-flowchart LR
-    Browser -->|/| frontend
-    Browser -->|/api/users| users-api
-    Browser -->|/api/dns| dns-api
-```
-
-Services in the same route group share a single Ingress and TLS certificate. Traefik handles the path-based routing, so no separate API gateway is needed.
-
-Without `--route`, each app gets its own subdomain (the default behaviour).
+See [Route groups](/en/routing#route-groups-path-based-routing) to serve several apps under one hostname.
 
 ## Scaling
 
@@ -316,346 +299,27 @@ Autoscaling is also configurable from the web console via the Scale tab. Toggle 
 For CPU-based autoscaling to work, your deployment must have CPU resource requests set. Kipper sets sensible defaults, but if you override them, ensure requests are defined.
 :::
 
-## Linking apps
-
-When one app needs to call another, link them to inject the target's URL as an environment variable.
-
-### Internal linking (backend-to-backend)
-
-By default, links use the Kubernetes internal DNS. Fast, secure, and no external networking required:
-
-```bash
-kip app link domain-service api-gateway
-```
-
-```
-  ✔  Linked domain-service → api-gateway
-     DOMAIN_SERVICE_URL=http://domain-service.blog-test.svc.cluster.local:8081
-```
-
-### Linking across projects
-
-Apps in different projects are isolated from each other by default. A workload can reach the internet
-and its own project, and nothing else on the cluster: not by service name, not by pod address, and
-not through a public route. That is what keeps one project's database out of another project's reach.
-
-It takes two steps, because it takes two projects. **The project being reached decides first**, since
-a link goes past the ingress and so past anything enforced on a public route: an API key, forward
-auth, a rate limit. The project asking cannot grant itself that.
-
-Whoever owns the target project allows the caller in:
-
-```bash
-kip project allow-links hrportal --project docuseal
-```
-
-```
-  ✔  hrportal may link to docuseal
-     Apps in docuseal can now be linked to, one at a time, with:
-       kip app link docuseal/<app> <their-app> --project hrportal
-```
-
-Then the calling side names the app it needs:
-
-```bash
-kip app link docuseal/docuseal hrportal-backend --environment test
-```
-
-```
-  ✔  Linked docuseal → hrportal-backend
-     DOCUSEAL_URL=http://docuseal.docuseal-test.svc.cluster.local:3000
-     Egress opened to docuseal in docuseal-test
-```
-
-`--environment` names the environment the target runs in. Without it the target resolves to the
-project's default namespace, so `docuseal/docuseal` would be looked for in `docuseal` rather than
-`docuseal-test`. The same flag picks the calling app's environment when `--project` is set, so a
-caller and a target in differently named environments cannot both be addressed in one command yet.
-
-Consent is per project pair and granted once. Each individual link still names the app it reaches, and
-opens nothing else: not the rest of that project, and not the target's own outbound traffic. If the
-target changes its port the allowance follows it, and if the target is deleted the allowance goes with
-it.
-
-`DOCUSEAL_URL` is not stored on your app. The link is what is recorded, and the address is worked out
-from it every time the app is reconciled, so a target that moves to another port takes its callers
-with it rather than leaving them dialling a number that was right once. Your app's pods restart onto
-the new address by themselves. You will not find the variable in the environment editor for the same
-reason: that page is what you typed, and this is not. It shows under Linked apps instead, with the
-address your app is currently given.
-
-You also need read access to the target's project. The CLI looks the target app up with your own
-credentials, so a project you cannot see reports the app as not found even after its owner has
-consented. Ask them for a role in it, or have someone who holds one create the link.
-
-Run it in the other order and the link is recorded but carries no traffic, and the command says so
-rather than leaving you to find out. It starts working the moment consent is granted.
-
-Check a link is doing what it says:
-
-```bash
-kip app links hrportal-backend --project hrportal --environment test
-```
-
-```
-  Links for hrportal-backend in hrportal-test
-
-  ✔  docuseal in docuseal-test
-       DOCUSEAL_URL=http://docuseal.docuseal-test.svc.cluster.local:3000
-       consent      docuseal allows hrportal
-       target       serving on port 3000
-       allowance    egress to docuseal on port 13000, which is where its Service sends 3000
-       address      in the running pod
-       connection   reachable — nc connected to docuseal.docuseal-test.svc.cluster.local:3000 from hrportal-backend-7999dfd5-29qhl
-```
-
-A link is several things at once, and this reports each of them in the order the traffic depends
-on it. The last line is the one that matters: it opens the connection from inside your app's own
-pod, which is the only place the allowance applies and so the only place worth testing from.
-
-The two port numbers differing is correct. The address names the port the target's Service
-publishes, which is what your app dials; the allowance names the port its pods listen on, which is
-10000 higher whenever the target serves a public route and so runs the instance-id proxy.
-
-If your app's image carries no tool to open a connection with, as a distroless image has no shell at
-all, the last line says the check could not be run rather than claiming the link is shut. Those
-are different answers and only one of them is worth acting on.
-
-See who may link to a project:
-
-```bash
-kip project links --project docuseal
-```
-
-Withdraw it with `kip project allow-links hrportal --project docuseal --remove`. Each calling app is
-reconciled as the consent changes and loses the egress it was granted. If one of those notifications
-is dropped by a cache error at the wrong moment or a controller restart, the app is swept within thirty
-minutes and loses it then, so the outside edge of a withdrawal is half an hour rather than instant.
-
-Two environments of the same project reach each other without any of this. The project already owns
-both ends, so there is nobody else to ask.
-
-Both apps are on the same cluster, so this is a direct pod-to-pod call. It does not go out to the
-internet and back through the gateway, which means no public DNS, no second TLS handshake, and one
-less thing to be down.
-
-### Public linking (frontend-to-backend)
-
-Frontend apps run in the browser and cannot reach internal cluster URLs. Use `--public` to inject the target's public HTTPS URL instead:
-
-```bash
-kip app link domain-service webapp --public
-```
-
-```
-  ✔  Linked domain-service → webapp
-     DOMAIN_SERVICE_URL=https://domain-service-test--203-0-113-10.kipper.run
-```
-
-The target app must have a public route configured. If it doesn't, the command will tell you to create one first.
-
-### Env var naming
-
-The env var name is derived from the target app name, uppercased with hyphens converted to underscores and `_URL` appended:
-
-| Target app | Env var |
-|---|---|
-| `domain-service` | `DOMAIN_SERVICE_URL` |
-| `dns-service` | `DNS_SERVICE_URL` |
-| `email-service` | `EMAIL_SERVICE_URL` |
-| `payments` | `PAYMENTS_URL` |
-
-### Managing links
-
-Link multiple apps:
-
-```bash
-kip app link domain-service webapp --public
-kip app link identity-service webapp --public
-kip app link exchange-service webapp --public
-```
-
-Remove a link:
-
-```bash
-kip app unlink domain-service webapp
-```
-
-For a cross-project link, unlinking also withdraws the egress:
-
-```bash
-kip app unlink docuseal/docuseal hrportal-backend
-```
-
-```
-  ✔  Unlinked docuseal from hrportal-backend
-     Removed DOCUSEAL_URL
-     Egress to docuseal withdrawn
-```
-
-Deleting an app removes any egress its own links opened, and closes the paths other apps had to it: a
-link whose target is gone opens nothing on the next reconcile, so its callers lose the address along
-with the allowance. The link stays declared until someone runs `kip app unlink`, and the caller
-reports it as a `LinksOpen` condition in the meantime, which is what tells you a dependency you still
-declare is not there any more.
-
-In the web console, links are managed from the app's Env tab. Select an app from the dropdown, check "public" if needed, and click Link. Existing links appear with an unlink button.
-
-## Route groups (path-based routing)
-
-For microservices architectures, multiple apps can share a single domain with different path prefixes. Requests are routed by path, and the path prefix is automatically stripped before reaching the backend.
-
-### Creating a route group
-
-From the **Routes** page in the web console, click **+ Create route**:
-
-1. Set the domain (or leave empty for auto-generated)
-2. Add path mappings, where each path points to an app
-3. Save
-
-```
-Domain: webapp-test--203-0-113-10.kipper.run
-
-/              → webapp
-/domains-api   → domain-service
-/identity-api  → identity-service
-/exchange-api  → exchange-service
-```
-
-All apps share one TLS certificate. Traefik routes by path prefix and strips it before forwarding, so `domain-service` receives `/api/v1/...` not `/domains-api/api/v1/...`.
-
-### What a path prefix publishes
-
-A path prefix publishes everything the app answers below it. `/domains-api` does not mean "the domains API", it means every URL starting with `/domains-api`, including whatever else the container serves on that port.
-
-Two things end up there without anyone deciding. The first is files that came along in the image: a `Dockerfile` with `COPY . .` in it ships the repository, so `https://yourhost/domains-api/.git/config` serves the remote URL and the history behind it, and a `.env` next to the source serves the credentials in it. The second is endpoints a framework mounts for you on the application port, which is how a Spring Boot app publishes `/actuator/metrics` and a Go binary that imports `net/http/pprof` publishes heap and goroutine dumps.
-
-Kipper refuses a short list of well-known internal prefixes at the ingress:
-
-| Prefix | Why it is on the list | Where it turns up |
-|---|---|---|
-| `/.git` | A source tree copied into the image. It serves the repository's history and whatever that holds. | Any stack. Common wherever the Dockerfile copies the working directory. |
-| `/.env` | A dotenv file copied into the image, which is credentials by definition. | Laravel, Rails, Django, Node. |
-| `/internal` | The conventional name for an API an app serves for itself. | Any stack. An app using it means it. |
-| `/actuator` | Spring Boot's management endpoints. They are on by default, on the app port, and publish health, info, metrics and prometheus. | Spring Boot. This is the one that produced the bug report. |
-| `/debug/pprof` | Go's profiling endpoints, mounted on the default mux by importing `net/http/pprof`. They hand out heap and goroutine dumps, and the CPU profiler holds a request open for as long as it is asked to. | Go. |
-
-The list is short on purpose: every entry is a path some app may legitimately want, so each one has to be worth the refusal. Two near misses show where the line is. `/metrics` is what the Prometheus client libraries mount by default in Go, Python and Node, but it is also an ordinary name for an ordinary endpoint, and refusing it for everyone would break more than it protects. `/debug/vars` is expvar, the same accident as pprof, on a path an app is more likely to have meant. Both are one line of `internalPaths` away.
-
-A refused path answers 404 rather than 403, so it does not advertise that something is there. The match stops at a segment boundary, so refusing `/actuator` leaves a path like `/actuators` alone.
-
-### What the refusal reaches, and what it does not
-
-The refusal is an ingress rule, and it matches the path as written. That covers the case this exists for, which is an endpoint published by accident and found by anyone who guesses the URL. It is not a filter in front of your app, and three spellings get past it:
-
-- **Case.** `/Admin` is a different path to the rule. A backend that routes case-insensitively, which Express and ASP.NET Core do by default, serves it.
-- **Path parameters.** A servlet container strips `;name=value` from every segment before it maps the request, so `/;x/actuator/metrics` arrives at a Spring app as `/actuator/metrics`. The rules catch the parameter directly after a refused prefix and cannot catch one in an earlier segment. This one is specific to the stacks that do that stripping, which is mainly the Java servlet containers.
-- **Encoded separators.** `%2F` stays encoded at the ingress. The rules refuse the encoded spelling of a refused prefix, so `/.git%2Fconfig` is caught, but a backend that decodes deeper paths can be reached by one the rules do not name. nginx decodes before matching its own locations, so a static image is the one to think about here.
-
-So treat the refusal as the thing that closes the accident. An endpoint that must never be public belongs on a port the Service does not publish, whatever the stack.
-
-Whether the list is refused is a cluster setting:
-
-```bash
-kip platform internal-paths show
-kip platform internal-paths on
-```
-
-A new cluster installs with it on. A cluster upgraded from an earlier release has it off, because turning it on changes what a running route serves and that is the operator's call to make. `show` lists the apps with a route, so you can see what turning it on would cover.
-
-### Paths your own app keeps to itself
-
-The default list covers what images and frameworks carry by accident. Anything else, the app author knows about and names, and the entries are ordinary paths rather than anything Kipper knows the meaning of:
-
-```bash
-kip app update domain-service --internal-path /admin,/ops
-```
-
-Or in `kipper.yaml`:
-
-```yaml
-apps:
-  domain-service:
-    image: registry.git.example.com/domain:latest
-    port: 8080
-    route:
-      group: blog
-      path: /domains-api
-      internalPaths:
-        - /admin
-      publicPaths:
-        - /actuator/prometheus
-```
-
-`internalPaths` are refused whatever the cluster setting says, because the app author's declaration is the app author's decision. They are refused on every route the app has, including one somebody adds later.
-
-### Letting one path back through
-
-Something usually needs `/actuator/prometheus` reachable, and `publicPaths` names exactly that one path:
-
-```bash
-kip app update domain-service --public-path /actuator/prometheus
-```
-
-The named path is served like any other, with the route's own strip-prefix, rate limit and auth. The rest of `/actuator` stays refused. It names one path rather than reopening the prefix, so `/actuator/env` does not come back with it.
-
-Both lists are settable on the app's **Settings** tab in the console, and the **Routes** page prints the refused prefixes under each path mapping.
-
-### Looking at a refused path yourself
-
-A refusal is an ingress rule. The endpoint is not switched off and the app has not changed: the path is simply not published, and inside the cluster it answers exactly as it did.
-
-The quickest way to it is a tunnel, which port-forwards to the pod and so meets no ingress rule on the way:
-
-```bash
-kip tunnel domain-service --port 8080
-# then browse http://localhost:8080/actuator, or curl it
-```
-
-Where the image has a shell, you can also ask the container directly:
-
-```bash
-kip exec domain-service -- curl -s localhost:8080/actuator/health
-```
-
-Both reach the endpoint whether or not the route refuses it, and neither publishes anything. The console's web terminal on the app's page is the same thing without the CLI.
-
-If something outside the cluster has to reach one of these paths for good, that is what `publicPaths` is for, and it makes the path public. A reopened path is served through the route's own middleware chain, so where the route already has `basicAuth` or `requireApiKey` on it, the reopened path is behind that gate too. Reopening a path on an ungated route puts it on the public internet.
-
-### Moving the endpoints instead
-
-Where a framework lets you put its management endpoints on a second port, that is the better fix, and it is an app change rather than a platform one. Kipper publishes one port per app, so an endpoint on any other port is unreachable through a route whatever anyone configures later, and no spelling of the path reaches it.
-
-Spring Boot does it with one property:
-
-```properties
-management.server.port=8081
-```
-
-The same shape works elsewhere. A Go service can register `net/http/pprof` on its own `http.ServeMux` and serve that on a second listener rather than leaving it on `DefaultServeMux`; a Node app can mount its admin router on a separate `app.listen`. Kipper special-cases none of them.
-
-Where you can do this, do it, and let the refusals cover what is left.
-
-### CLI equivalent
-
-```bash
-kip app deploy --name webapp --image registry.git.example.com/webapp:latest --port 3000 --route blog/
-kip app deploy --name domain-service --image registry.git.example.com/domain:latest --port 8080 --route blog/domains-api
-```
-
-### Editing and deleting
-
-Click the pencil icon on any route group to add, remove, or change path mappings. Click the trash icon to remove all routes in the group.
-
-### Environment-aware domains
-
-Auto-generated domains include the environment name to prevent collisions:
-
-| App | Environment | Domain |
-|---|---|---|
-| `webapp` | `test` | `webapp-test--203-0-113-10.kipper.run` |
-| `webapp` | `acc` | `webapp-acc--203-0-113-10.kipper.run` |
-| `webapp` | `prod` | `webapp-prod--203-0-113-10.kipper.run` |
+## App connections and internal paths
+
+<span id="linking-apps"></span>
+<span id="internal-linking-backend-to-backend"></span>
+<span id="linking-across-projects"></span>
+<span id="public-linking-frontend-to-backend"></span>
+<span id="env-var-naming"></span>
+<span id="managing-links"></span>
+<span id="route-groups-path-based-routing"></span>
+<span id="creating-a-route-group"></span>
+<span id="what-a-path-prefix-publishes"></span>
+<span id="what-the-refusal-reaches-and-what-it-does-not"></span>
+<span id="paths-your-own-app-keeps-to-itself"></span>
+<span id="letting-one-path-back-through"></span>
+<span id="looking-at-a-refused-path-yourself"></span>
+<span id="moving-the-endpoints-instead"></span>
+<span id="cli-equivalent"></span>
+<span id="editing-and-deleting"></span>
+<span id="environment-aware-domains"></span>
+
+See [Routing & App Links](/en/routing) for app connections, route groups, and internal path protection.
 
 ## Managing apps
 

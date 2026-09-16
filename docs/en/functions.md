@@ -5,9 +5,9 @@ description: 'Deploy a function from source, scale it to zero between requests a
 
 # Functions
 
-Kipper functions are serverless workloads that scale to zero when idle and wake up automatically on demand. No traffic means no pods running and no resources consumed. When a request arrives, the function starts in seconds, handles the request, and scales back down after an idle period.
+Kipper functions run code on HTTP requests, schedules, or service events. HTTP and event-driven functions can scale to zero between invocations; scheduled functions run as CronJobs.
 
-Under the hood, functions use the [KEDA HTTP Add-on](https://github.com/kedacore/http-add-on), an interceptor proxy that queues incoming requests while the function pod starts. No requests are lost, even during cold starts.
+HTTP functions use the KEDA HTTP Add-on to queue requests while a pod starts. Cold-start time depends on image downloads, dependencies, and application startup. Callers should allow for that delay and handle timeouts.
 
 ## Building a function in the browser
 
@@ -37,7 +37,7 @@ A single **Save & deploy** button at the top commits everything. On create, the 
 
 ## Code
 
-Inline code is the fastest way to get something running. Pick a runtime (Node 22 or Python 3.12), write a handler, hit Save & deploy. Kipper builds a runtime container around your code, mounts the source as a ConfigMap, and installs any dependencies you've declared.
+Inline code is the fastest way to get something running. Pick a runtime (Node 22 or Python 3.12), write a handler, hit Save & deploy. Kipper uses a prebuilt runtime image, mounts your source as a ConfigMap, and installs the dependencies you declare.
 
 ### Node.js handler
 
@@ -100,7 +100,7 @@ Default. The function gets a public URL and scales based on request rate via the
 https://fn-<name>--<cluster>.kipper.run
 ```
 
-For example: `https://fn-webhook-handler--203-0-113-12.kipper.run`. Cold start is typically 2-3 seconds.
+For example: `https://fn-webhook-handler--203-0-113-12.kipper.run`. Allow for a cold-start delay on the first request.
 
 ### Cron
 
@@ -175,9 +175,8 @@ Two key/value tables on the function form.
 
 A value may reference another by name, the same [`${NAME}` syntax apps use](/en/secrets#referencing-another-variable), so a function composes a connection string from a binding's credentials instead of carrying the password. One Secret serves the HTTP pod and every batch run, so `KIPPER_MODE` and `KIPPER_TRIGGER` are the two names a reference cannot resolve: they mean different things in each.
 
-**Secrets** are sensitive values (API keys, tokens, encrypted things). Values are write-only. Once stored they never round-trip back through the API. The list endpoint returns key names plus a `has_previous` flag so you can tell when a secret has been rotated. Stored in `function-<function>-secrets`, which the controller publishes into the function's environment. An app of the same name, on a cluster old enough to have both, keeps its own `app-<app>-secrets`, so the two never cross.
+**Secrets** store sensitive values separately from ordinary environment variables. Lists show key names and whether a previous value is available; revealing a value requires explicit permission. Kipper publishes them into the function’s environment. See [Secrets & Environment](/en/secrets).
 
-CLI parity:
 
 ```bash
 kip function env set domain-sync REGISTRAR_HOST=api.registrar.example.com
@@ -256,7 +255,7 @@ the name "checkout" is already used by an app in this environment; an app, a fun
 
 If a collision does reach the cluster anyway, the function that lost reports it instead of looking idle with a URL that 404s. `kip function list` and the console both show it as `failed`. The function's `ChildrenAdopted` condition carries the detail, naming the object and the kind that owns it.
 
-A cluster upgrading from a version before reservations can already contain a collision, with both workloads running. Kipper gives the name to the older one and stops the other, and it does not delete what that one already built: an upgrade that tore down a running workload would be worse than the collision it fixes. The stopped workload keeps serving until you delete or rename that workload, which its status says, so check for `failed` workloads after an upgrade.
+On older clusters, existing workloads may already share a name. The older workload keeps the reservation; the other reports `failed` and stops reconciling. Existing resources remain, so it may still serve traffic. Resolve the collision by renaming or deleting the affected workload.
 
 Each environment has its own namespace and its own names, so `checkout` in `shop-staging` and `checkout` in `shop-prod` are fine whether they are two environments of one project or two separate projects.
 
@@ -348,9 +347,9 @@ The KEDA HTTP interceptor proxy sits between Traefik and your function. When the
 2. The interceptor holds the connection (the browser waits).
 3. KEDA scales the function from 0 to 1.
 4. Once the pod is ready, the interceptor forwards the request.
-5. The response is returned. No errors, no lost requests.
+5. The interceptor returns the function’s response to the caller.
 
-Cold start time is typically 2-3 seconds depending on the image size. Subsequent requests while the function is warm are instant. After the idle timeout (default 5 minutes), KEDA scales the function back to zero.
+A warm function handles subsequent requests directly. After the idle timeout (default five minutes), KEDA scales it back to zero.
 
 ## Auto-scaling under load
 
@@ -423,7 +422,7 @@ def handle_event():
 | Always running | Yes | No (scale-to-zero) | No (run once or scheduled) |
 | Triggered by | HTTP traffic | HTTP, cron, events | Schedule or manual |
 | Scaling | Manual or HPA | Automatic (KEDA) | N/A |
-| Cold start | None | 2-3 seconds | N/A |
+| Cold start | Already running | Depends on image and startup | N/A |
 | Cost when idle | Full pod cost | Zero | Zero |
 | Source | Container image | Inline code or container image | Container image |
 | Use case | Web servers, APIs, frontends | Webhooks, event handlers, scheduled scripts | Batch tasks, migrations, ETL |
@@ -458,7 +457,7 @@ POST /event
 }
 ```
 
-The `--mark-done` flag is optional. When set, Kipper runs the query after your function returns 200 so the same row isn't processed twice. The `{{id}}` placeholder is substituted with the row's id.
+The optional `--mark-done` query updates rows after successful delivery to the function. The `{{id}}` placeholder is replaced with the row’s ID. Delivery and the database update are separate operations, so handlers should tolerate repeated delivery if processing succeeds but the update fails.
 
 ## Security settings
 

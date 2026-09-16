@@ -34,7 +34,7 @@ kip service add postgres --name db --project blog --environment acc --storage 2G
 kip service add postgres --name db --project blog --environment prod --storage 10Gi
 ```
 
-Each environment's database is fully isolated. Test data never touches production. Test and acc can use smaller storage allocations to save resources.
+Each environment has separate database storage and credentials. Size test and acceptance databases for their workloads.
 
 ### What this creates
 
@@ -62,229 +62,6 @@ flowchart TD
 | `--environment` | — | Target environment (e.g. test, acc, prod) |
 | `--storage` | `5Gi` (postgres/mysql/mongodb/opensearch), `1Gi` (redis/rabbitmq), `10Gi` (minio) | Storage size |
 
-## Connection details
-
-After creating a service, the connection details are displayed:
-
-```
-  Host:     mydb.default.svc.cluster.local
-  Port:     5432
-  Username: kipper
-  Password: a1b2c3d4e5f6...
-  Database: app
-```
-
-Retrieve them later:
-
-```bash
-kip service info mydb
-```
-
-The hostname (`mydb.default.svc.cluster.local`) is a Kubernetes internal DNS name. Apps running on the same cluster can connect to it directly.
-
-## MinIO (S3-compatible object storage)
-
-MinIO provides S3-compatible object storage for file uploads, media, documents, and other binary data.
-
-```bash
-kip service add minio --name storage --project blog --environment test
-```
-
-```
-  Connection details:
-    Endpoint:   http://storage.blog-test.svc.cluster.local:9000
-    Access Key: kipper
-    Secret Key: a1b2c3d4e5f6...
-```
-
-Bind MinIO to your app to inject credentials automatically:
-
-```bash
-kip service bind storage api --project blog --environment test
-```
-
-This injects `S3_ENDPOINT`, `S3_ACCESS_KEY`, and `S3_SECRET_KEY` into the app. Use them with any S3-compatible SDK (AWS SDK, MinIO SDK, boto3). See the [Storage](/en/storage) page for mc CLI examples and SDK code samples.
-
-### File explorer
-
-MinIO services include a built-in file explorer in the web console. Navigate to **Storage** in the sidebar to browse buckets, upload and download files, delete objects, and generate share links (presigned URLs). See the [Storage](/en/storage) page for full details.
-
-## Browser-based database console
-
-Postgres and MySQL services have a built-in client in the web console: SQL editor with schema-aware autocomplete, table browser with inline row editing, visual table and index designer, AI assistant that knows your schema, and per-user query history. No desktop tool needed.
-
-Click the code icon on a Postgres or MySQL service row in the Services list (or open the side panel and click the same icon next to AI Diagnose) to open it. See the [Database Console](/en/database-console) page for the full tour.
-
-For other database types (MongoDB, Redis, OpenSearch, RabbitMQ), use a desktop client through `kip tunnel` as described below.
-
-## Browseable service UIs
-
-Some service types ship a web UI of their own. MailHog has an inbox viewer, RabbitMQ Management has a queue inspector, and so on. Kipper exposes these at `https://<service>-<namespace>.<cluster-domain>` once the service is running.
-
-The hostname is gated by your console login. Open the URL and one of two things happens:
-
-- If you're signed into the console, the console mints a one-time sign-in code for that host and the page loads with a session already in place. The Open UI button does this for you.
-- If you're not signed in, the browser bounces to the console login. After you authenticate, it lands back on the service UI with a fresh session.
-
-Each service UI gets its own session cookie, scoped to that one hostname (a `__Host-` cookie, so it never carries a domain and never travels to another host). No Dex token is ever placed in a cookie. Anonymous requests never reach the backend: the kipper user with their generated password sits on the inside of the auth gate, and a Kubernetes NetworkPolicy restricts the UI port to traffic from the cluster's ingress controller, so pods in the same cluster can't bypass the sign-in and read the UI directly.
-
-The Open UI button on each service's detail page opens the right URL with a fresh sign-in code. From the CLI:
-
-```bash
-kip service info mailhog --project blog --environment test
-# UI:  https://mailhog-blog-test.example.com
-```
-
-On a custom domain the console and every service UI are real subdomains of the cluster domain, so this sign-in works out of the box. On a free `*.kipper.run` cluster the hosts are flat sibling labels under the shared apex, so per-host service-UI sign-in is off there for now; use a share link (below) to hand out access.
-
-Today's caveat: any user who can log into the console can open any service UI. There's no per-team RBAC yet; treat dev tools that have access to sensitive data accordingly (MailHog, for example, holds whatever mail your apps tried to send).
-
-### How the session behaves
-
-A service-UI session slides on a 30-minute idle window: every visit within that window keeps it alive, and the console re-mints the cookie in the background once less than 15 minutes remain. It caps out 12 hours after you first signed in, at which point you re-sign-in (silently, if your console session is still alive). Signing out of the console, or an admin removing your account, ends every service-UI session within about 30 seconds.
-
-What a stolen session cookie grants, and nothing more: one service UI, as you, for up to the idle window (extendable by activity to the 12-hour cap), only while you still hold a role, and killed within about 30 seconds of a logout, an account removal, or a key reset. It opens no other UI (each cookie is pinned to a single host), and it fails the console API and the Kubernetes API outright.
-
-Two behaviours worth knowing:
-
-- If your browser is blocking cookies for a service-UI host, the sign-in can't complete and the console stops after a few attempts with a message naming the host to allow. Allow cookies for that host and reload.
-- A UI that only talks to its backend through background requests (not full page loads) can freeze once its session lapses past the idle window. Reload the page and the sign-in re-runs.
-
-### Revoking service-UI sessions
-
-Three levers, in order of blast radius:
-
-- **Sign out.** `kip auth logout` (or the console's sign-out) ends your own service-UI sessions along with the console session.
-- **Remove the user.** Deleting a user from the console's Users screen ends their service-UI sessions within about 30 seconds, no other action needed.
-- **Revoke everything.** After a suspected cookie or key compromise, rotate the signing key and drop every session at once:
-
-  ```bash
-  kip auth sessions revoke-all
-  ```
-
-  Every open service UI signs out within about 30 seconds and outstanding sign-in codes stop working. The console session is untouched; people just open their UIs again.
-
-Break-glass, if the CLI is unavailable: delete the signing secret directly over the server-side admin kubeconfig.
-
-```bash
-kubectl delete secret kipper-ui-session-signing -n kipper-system
-```
-
-Every session dies within about 30 seconds and the next sign-in recreates the key automatically.
-
-### Sharing a UI without a login
-
-Sometimes you want to show a service UI to someone who should not have a Kipper account at all, like a client watching magic-link emails arrive during a demo. `kip service share` mints a signed link that opens one service UI for a set time, no login required:
-
-```bash
-kip service share mailhog --project blog --environment test --expires 72h --label "PO review"
-```
-
-```
-  Share link for mailhog (valid until 18 Jul 2026 14:32):
-
-  https://mailhog-blog-test.example.com/?kipper_share=eyJhbGci...
-
-  Anyone with this link can open the UI until it expires.
-  Revoke it:      kip service share mailhog --revoke 9f3c1a...
-  Revoke all:     kip service share --revoke-all
-```
-
-The recipient clicks the link, their browser trades the token for a cookie scoped to that one hostname, and the UI opens. The link works only for that service's UI. It reaches nothing else: not the console, not the API, not any other service.
-
-Treat the link like a password. It is a bearer capability, so anyone who gets hold of it can open the UI until it expires. Keep the expiry short, and remember that mail scanners and chat link previews may open a link the moment you send it. `--expires` accepts a Go duration (`24h`, `72h`); the maximum is `720h` (30 days). The optional `--label` is a note that shows up in the listing, so you can tell links apart later.
-
-Each link is backed by a grant the cluster stores server-side, so you can list and revoke individual links:
-
-```bash
-kip service share mailhog --project blog --environment test --list
-```
-
-```
-  Share links for mailhog:
-
-  ID                                  EXPIRES               CREATED BY                LABEL
-  9f3c1a2b4d5e6f7a8b9c0d1e2f3a4b5c    18 Jul 2026 14:32     alice@example.com         PO review
-```
-
-Revoke one link by its id. The recipient loses access immediately:
-
-```bash
-kip service share mailhog --project blog --environment test --revoke 9f3c1a2b4d5e6f7a8b9c0d1e2f3a4b5c
-```
-
-You can do all of this from the console too. Open a service with a browseable UI and pick the **Share** tab (admins only). It mints links, lists them with their labels and expiry, and revokes them, plus the emergency controls below.
-
-Revocation takes effect within about 30 seconds (console-api caches the grant lookup that briefly). A freshly minted link can likewise take up to 30 seconds to start working right after the very first link on a cluster.
-
-#### If a link leaks
-
-A share link is a capability URL, so once it is out you can't un-send it. Two levers contain a leak:
-
-```bash
-# Pull every live share link in the cluster at once.
-kip service share --revoke-all
-
-# Retire the signing key so even links that dodged the sweep stop verifying.
-# Run it twice — one rotation keeps old links alive until they expire, two
-# rotations retire the key completely.
-kip service share --rotate-key
-kip service share --rotate-key
-```
-
-`--revoke-all` clears the grant store; `--rotate-key` is the guaranteed kill switch for a leaked or stolen signing key. For a full compromise, run both: revoke all, then rotate twice. The same two buttons live under **If a link leaked** in the console's Share tab.
-
-### Ingress controller selector
-
-The UI port is locked down with a NetworkPolicy that only lets the cluster's ingress controller talk to it. By default Kipper expects a stock Traefik install: pods labelled `app.kubernetes.io/name: traefik`, in any namespace. If your cluster ships Traefik under a non-standard label, or runs a different ingress controller (Nginx, HAProxy), create a ConfigMap to override:
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: ingress-controller
-  namespace: kipper-system
-data:
-  # Pod label that identifies the ingress controller. Required.
-  labelKey: app.kubernetes.io/name
-  labelValue: traefik
-
-  # Optional: restrict the policy to a specific namespace.
-  # Leave unset to match the label in any namespace.
-  namespace: traefik
-```
-
-Apply with `kubectl apply -f` and the next reconcile of any service-UI NetworkPolicy picks it up, with no console-api restart and no Kipper rebuild. If the ConfigMap is missing the defaults apply, so existing clusters keep working unchanged.
-
-## Connecting from your machine
-
-Services run inside the cluster and are not exposed to the internet. To connect with a desktop database client (DBeaver, TablePlus, pgAdmin, RedisInsight, or any other tool), use `kip tunnel` to open a secure connection from your machine to the service:
-
-```bash
-kip tunnel mydb
-```
-
-```
-  ✔  Tunnel open: localhost:5432 → mydb (postgres)
-  Press Ctrl+C to close
-```
-
-Open your database client and connect to `localhost:5432` with the credentials from `kip service info mydb`.
-
-If the default port is already in use on your machine, pick a different one:
-
-```bash
-kip tunnel mydb --local-port 15432
-```
-
-For services in a specific environment:
-
-```bash
-kip tunnel db --project blog --environment staging
-```
-
-See [Team Access](/en/team-access) for the full tunnel documentation, including Redis examples and troubleshooting.
-
 ## Binding to apps and functions
 
 Bind a service to inject its connection details as environment variables. Both apps and functions accept bindings; the same prefix scheme applies.
@@ -308,7 +85,7 @@ kip service bind db identity-service --database identity_service_prod --project 
 
 A manifest binding takes the same value as `database:`. Each app then reads its own `DB_NAME` and shares everything else: the instance, the storage, and the credentials.
 
-That last one is worth being clear about. Every binding connects as the service's own user, so naming a database decides where an app's tables live rather than what it is allowed to reach, and an app that goes looking can still open a sibling's database with the credentials it already has. Take it as tidiness on one instance. Anything that needs a boundary someone cannot step over gets a service of its own.
+Bindings share the service’s credentials, so an app can also access sibling databases on that instance. Use separate services when apps need separate access boundaries.
 
 PostgreSQL, MySQL, MongoDB and RabbitMQ can be divided this way. RabbitMQ calls it a vhost and takes the name in the same place, where `/` means the service's own. Redis, OpenSearch and MinIO have nothing to divide, so a binding there always points at the whole service.
 
@@ -377,11 +154,11 @@ In the console, the bind picker lists every existing vhost on the service (the d
 
 A binding that takes the service default draws on the service's own `<service>-credentials` Secret. A binding with its own database or vhost gets a Secret of its own, named for the service and the workload it belongs to: an app called `api` bound to `db` gets `db-app-api-credentials`, and a function called `api` in the same project gets `db-function-api-credentials`, so the two never read each other's database.
 
-That Secret is derived, not a copy. The controller rebuilds it from the service's shared credentials on every reconcile, overriding only the database or vhost name, so rotating the service password reaches every binding without anyone re-binding. Anything you write into it by hand is overwritten on the next pass; change the service's credentials instead.
+The controller rebuilds that Secret from the service's shared credentials on every reconcile, overriding only the database or vhost name, so rotating the service password reaches every binding without anyone re-binding. Anything you write into it by hand is overwritten on the next pass; change the service's credentials instead.
 
 Neither Secret is read by your pods directly. The controller folds them into the workload's [published environment](/en/secrets#how-it-works-internally) along with everything else, which is what lets a connection string you composed from `${DB_PASSWORD}` stay in step with the password itself.
 
-**Rotating a password restarts the workloads bound to it.** The new credentials are a new published environment, and a pod has to start to read one. Kipper rolls them for you, one pod at a time, so an app with more than one replica keeps serving throughout. This is the one environment change that does not wait for a restart you ask for, because the alternative is a workload still authenticating with a password the service has stopped accepting.
+**Rotating a service password restarts the workloads bound to it.** Kipper publishes the updated environment and rolls the workloads so they load the new credentials. Check rollout status after rotation.
 
 **MailHog** (test SMTP server), prefix `MAIL_`:
 
@@ -409,6 +186,101 @@ kip service unbind db domain-service --project blog --environment test
 Deleting a service automatically unbinds it from all apps. The per-app databases are not dropped. They remain in the PostgreSQL instance for manual cleanup if needed.
 
 The app restarts automatically when a binding is added or removed.
+
+## Connection details
+
+After creating a service, the connection details are displayed:
+
+```
+  Host:     mydb.default.svc.cluster.local
+  Port:     5432
+  Username: kipper
+  Password: a1b2c3d4e5f6...
+  Database: app
+```
+
+Retrieve them later:
+
+```bash
+kip service info mydb
+```
+
+The hostname (`mydb.default.svc.cluster.local`) is an internal Kubernetes DNS name. Apps in the same namespace can connect directly; [network policies](/en/security#network-isolation-between-namespaces) restrict access from other namespaces.
+
+## MinIO (S3-compatible object storage)
+
+MinIO provides S3-compatible object storage for file uploads, media, documents, and other binary data.
+
+```bash
+kip service add minio --name storage --project blog --environment test
+```
+
+```
+  Connection details:
+    Endpoint:   http://storage.blog-test.svc.cluster.local:9000
+    Access Key: kipper
+    Secret Key: a1b2c3d4e5f6...
+```
+
+Bind MinIO to your app to inject credentials automatically:
+
+```bash
+kip service bind storage api --project blog --environment test
+```
+
+This injects `S3_ENDPOINT`, `S3_ACCESS_KEY`, and `S3_SECRET_KEY` into the app. Use them with any S3-compatible SDK (AWS SDK, MinIO SDK, boto3). See the [Storage](/en/storage) page for mc CLI examples and SDK code samples.
+
+### File explorer
+
+MinIO services include a built-in file explorer in the web console. Navigate to **Storage** in the sidebar to browse buckets, upload and download files, delete objects, and generate share links (presigned URLs). See the [Storage](/en/storage) page for full details.
+
+## Browser-based database console
+
+Postgres and MySQL services have a built-in client in the web console: SQL editor with schema-aware autocomplete, table browser with inline row editing, visual table and index designer, AI assistant that knows your schema, and per-user query history. No desktop tool needed.
+
+Click the code icon on a Postgres or MySQL service row in the Services list (or open the side panel and click the same icon next to AI Diagnose) to open it. See the [Database Console](/en/database-console) page for the full tour.
+
+For other database types (MongoDB, Redis, OpenSearch, RabbitMQ), use a desktop client through `kip tunnel` as described below.
+
+## Service web interfaces
+
+<span id="browseable-service-uis"></span>
+<span id="how-the-session-behaves"></span>
+<span id="revoking-service-ui-sessions"></span>
+<span id="sharing-a-ui-without-a-login"></span>
+<span id="if-a-link-leaks"></span>
+<span id="ingress-controller-selector"></span>
+
+See [Service UIs & Sharing](/en/service-uis) to open web interfaces such as MailHog and RabbitMQ, manage sessions, or share a temporary access link.
+
+## Connecting from your machine
+
+Services run inside the cluster and are not exposed to the internet. To connect with a desktop database client (DBeaver, TablePlus, pgAdmin, RedisInsight, or any other tool), use `kip tunnel` to open a secure connection from your machine to the service:
+
+```bash
+kip tunnel mydb
+```
+
+```
+  ✔  Tunnel open: localhost:5432 → mydb (postgres)
+  Press Ctrl+C to close
+```
+
+Open your database client and connect to `localhost:5432` with the credentials from `kip service info mydb`.
+
+If the default port is already in use on your machine, pick a different one:
+
+```bash
+kip tunnel mydb --local-port 15432
+```
+
+For services in a specific environment:
+
+```bash
+kip tunnel db --project blog --environment staging
+```
+
+See [Team Access](/en/team-access) for the full tunnel documentation, including Redis examples and troubleshooting.
 
 ## Listing services
 
@@ -596,9 +468,9 @@ The `--clean --if-exists` makes re-runs safe. Every object is dropped before bei
 A few things worth knowing:
 
 - **The target database is wiped.** Tables, sequences, views, everything. The wizard's confirm modal asks you to type the service name on purpose.
-- **Source credentials are mirrored, not exposed.** The job mounts a temporary copy of the source service's credentials secret in the target namespace. The mirror is owned by the job and gets garbage-collected when the job is cleaned up (one hour after completion).
+- **Temporary source credentials.** The job mounts a temporary copy of the source service's credentials secret in the target namespace. The mirror is owned by the job and gets garbage-collected when the job is cleaned up (one hour after completion).
 - **No retries.** If the dump or restore fails, the job stops there. Re-run it after fixing the underlying issue. Re-runs overwrite cleanly.
-- **Postgres only for now.** MySQL, MongoDB, Redis, MinIO, RabbitMQ and OpenSearch follow in upcoming releases.
+- **Supported engine:** PostgreSQL.
 
 The status panel polls every couple of seconds while a migration is running and tails the last 50 lines of pod logs so you can see `pg_dump` progress as it happens.
 
@@ -617,8 +489,8 @@ Changing resource limits on a service triggers a pod restart. For databases (Pos
 | | Apps | Services |
 |---|---|---|
 | Kubernetes resource | Deployment | StatefulSet |
-| Storage | None (stateless) | PersistentVolumeClaim |
-| Restart | Rolling restart, safe | Pod recreated, volume reattached |
+| Storage | Optional volume mounts | PersistentVolumeClaim |
+| Restart | Rolling update | Pod recreated, volume reattached |
 | Delete | Immediate | Volume kept unless `--delete-data` |
 | Scaling | `kip app scale` | Single replica |
 | External access | Via Ingress (public URL) | Internal only (cluster DNS) |
