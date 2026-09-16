@@ -3,6 +3,8 @@ package manifest
 import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/getkipper/kipper/controller/pkg/internalpath"
 )
 
 var (
@@ -140,6 +142,13 @@ func convertApp(name, namespace string, app AppSpec) Resource {
 		if app.Route.RequireAPIKey {
 			route["requireApiKey"] = true
 		}
+		// Store canonical paths as required by the CRD schema.
+		if paths := internalpath.Clean(app.Route.InternalPaths); len(paths) > 0 {
+			route["internalPaths"] = toInterfaceSlice(paths)
+		}
+		if paths := internalpath.Clean(app.Route.PublicPaths); len(paths) > 0 {
+			route["publicPaths"] = toInterfaceSlice(paths)
+		}
 		if len(route) > 0 {
 			spec["route"] = route
 		}
@@ -268,6 +277,14 @@ func convertApp(name, namespace string, app AppSpec) Resource {
 			},
 		},
 	}
+}
+
+func toInterfaceSlice(values []string) []interface{} {
+	out := make([]interface{}, len(values))
+	for i, v := range values {
+		out[i] = v
+	}
+	return out
 }
 
 func convertService(name, namespace string, svc SvcSpec) Resource {

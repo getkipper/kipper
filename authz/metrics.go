@@ -25,6 +25,11 @@ var (
 		return globalFreshness.Age()
 	})
 
+	metricInternalPathRefusals = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "authz_internal_path_refusals_total",
+		Help: "Requests refused at the ingress because they named an internal path.",
+	})
+
 	metricFlushFailures = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "authz_rollup_flush_failures_total",
 		Help: "UsageRollup batches that failed to flush and were requeued.",

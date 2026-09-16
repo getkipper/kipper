@@ -120,6 +120,21 @@ kip app deploy --name public-api --image myimg --port 8080 --rate-limit 500
 
 Apps without these flags use the cluster defaults (security headers enabled, 100 req/s rate limit).
 
+### Internal paths
+
+A route publishes everything its app answers under the path prefix, so a repository copied into the image and any endpoint a framework mounts on the application port are published with it. Kipper refuses `/actuator`, `/debug/pprof`, `/internal`, `/.git` and `/.env` at the ingress, and an app names anything further in `route.internalPaths`. The endpoints are not switched off, only unpublished: `kip tunnel <app>` still reaches them, because a tunnel port-forwards to the pod and meets no ingress rule.
+
+```bash
+kip platform internal-paths show     # what the cluster refuses, and on which routes
+kip platform internal-paths on       # refuse the default list everywhere
+kip app update api --internal-path /admin
+kip app update api --public-path /actuator/prometheus
+```
+
+A new cluster installs with the default list refused. A cluster upgraded from an earlier release keeps serving what it served until an operator turns it on, because the change is visible to whatever is calling those paths today.
+
+The refusal is an ingress rule matching the path as written, so it closes the accidental exposure rather than filtering what reaches your app: case, path parameters on a servlet container, and encoded separators are spellings it can miss. An endpoint that must never be public belongs on a port the Service does not publish. [What a path prefix publishes](/en/deploying-apps#what-a-path-prefix-publishes) has the detail, including the Spring Boot setting that moves the actuator off the app port entirely.
+
 ### CSP allowlist
 
 The default Content Security Policy blocks external resources. If your app loads fonts, stylesheets, scripts, or connects to APIs on other domains, add them to the CSP allowlist.

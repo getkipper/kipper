@@ -149,6 +149,8 @@ func fullApp() AppSpec {
 			},
 			BasicAuth:     true,
 			RequireAPIKey: true,
+			InternalPaths: []string{"/admin", "/internal"},
+			PublicPaths:   []string{"/actuator/prometheus"},
 		},
 		Resources: &ResourceSpec{
 			Profile:       "jvm",

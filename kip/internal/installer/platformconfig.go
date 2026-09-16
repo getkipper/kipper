@@ -46,6 +46,8 @@ func pickProfile(ramMB int) string {
 // of the installer never clobber user overrides applied via the console or
 // `kip platform`.
 //
+// Enable the route guard on new clusters; preserve existing settings on upgrade.
+//
 // Must run after InstallCRDs so the CRD schema is registered first. Even then,
 // `kubectl apply` on a CRD can return before the API server is ready to serve
 // the new kind, so we wait for the CRD to be Established before creating the
@@ -64,6 +66,8 @@ metadata:
   name: platform
 spec:
   profile: %s
+  routeGuard:
+    blockInternalPaths: true
 `, profile)
 
 	cmd := fmt.Sprintf(

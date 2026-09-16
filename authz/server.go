@@ -44,6 +44,14 @@ func (s *Server) Routes(mux *http.ServeMux) {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("GET /readyz", s.handleReady)
+	mux.HandleFunc("/deny", handleDeny)
+}
+
+// handleDeny returns an empty 404 through Traefik forwardAuth.
+// The /deny registration applies to every HTTP method.
+func handleDeny(w http.ResponseWriter, _ *http.Request) {
+	metricInternalPathRefusals.Inc()
+	w.WriteHeader(http.StatusNotFound)
 }
 
 // denialBody is the stable error contract clients program against: code

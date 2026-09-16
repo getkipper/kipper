@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 
+	"github.com/getkipper/kipper/controller/pkg/internalpath"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/kip/internal/workload"
 )
@@ -43,7 +44,10 @@ type Options struct {
 	NoSecurityHeaders bool
 	RateLimit         int // requests per second, 0 = use cluster default
 	// RedirectFrom are hostnames that answer 301 to this app's own hostname.
-	RedirectFrom   []string
+	RedirectFrom []string
+	// InternalPaths blocks prefixes; PublicPaths allows exact exceptions.
+	InternalPaths  []string
+	PublicPaths    []string
 	MemoryLimit    string
 	CPULimit       string
 	Profile        string // named resource profile; empty with --cpu/--memory (those mean custom)
@@ -274,7 +278,8 @@ func buildSpec(opts Options, creating bool) map[string]interface{} {
 	// (or on create). host/group/path are written only when the route itself was
 	// given, so toggling --no-security-headers, --rate-limit or --redirect-from
 	// on an existing app does not overwrite a console-set custom host.
-	if creating || changed("route") || changed("no-security-headers") || changed("rate-limit") || changed("redirect-from") {
+	if creating || changed("route") || changed("no-security-headers") || changed("rate-limit") ||
+		changed("redirect-from") || changed("internal-path") || changed("public-path") {
 		route := map[string]interface{}{}
 		if (creating || changed("route")) && opts.Domain != "" {
 			route["host"] = opts.Domain
@@ -298,12 +303,26 @@ func buildSpec(opts Options, creating bool) map[string]interface{} {
 			}
 			route["redirectFrom"] = hosts
 		}
+		if changed("internal-path") || (creating && len(opts.InternalPaths) > 0) {
+			route["internalPaths"] = toInterfaces(internalpath.Clean(opts.InternalPaths))
+		}
+		if changed("public-path") || (creating && len(opts.PublicPaths) > 0) {
+			route["publicPaths"] = toInterfaces(internalpath.Clean(opts.PublicPaths))
+		}
 		if len(route) > 0 {
 			spec["route"] = route
 		}
 	}
 
 	return spec
+}
+
+func toInterfaces(values []string) []interface{} {
+	out := make([]interface{}, len(values))
+	for i, v := range values {
+		out[i] = v
+	}
+	return out
 }
 
 // mergeInto recursively merges src into dst. Leaf values in src overwrite
@@ -446,6 +465,42 @@ func (d *Deployer) UpdateProfile(ctx context.Context, namespace, name, profile s
 		resources := map[string]interface{}{"profile": profile}
 		if err := unstructured.SetNestedMap(app.Object, resources, "spec", "resources"); err != nil {
 			return fmt.Errorf("setting resources: %w", err)
+		}
+		if _, err := d.Dynamic.Resource(AppGVR).Namespace(namespace).Update(ctx, app, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("updating app: %w", err)
+		}
+		return nil
+	})
+}
+
+// UpdateInternalPaths replaces the route's blocked prefixes; an empty list clears them.
+func (d *Deployer) UpdateInternalPaths(ctx context.Context, namespace, name string, paths []string) error {
+	return d.updateRoutePathList(ctx, namespace, name, "internalPaths", paths)
+}
+
+// UpdatePublicPaths replaces the route's public exceptions; an empty list clears them.
+func (d *Deployer) UpdatePublicPaths(ctx context.Context, namespace, name string, paths []string) error {
+	return d.updateRoutePathList(ctx, namespace, name, "publicPaths", paths)
+}
+
+// Update only spec.route so path policy changes preserve running pods.
+func (d *Deployer) updateRoutePathList(ctx context.Context, namespace, name, field string, paths []string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		app, err := d.Dynamic.Resource(AppGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return fmt.Errorf("app %q not found", name)
+			}
+			return fmt.Errorf("getting app: %w", err)
+		}
+		if _, found, _ := unstructured.NestedMap(app.Object, "spec", "route"); !found {
+			return fmt.Errorf("app %q has no route, so there is nothing published to refuse; give it one first", name)
+		}
+		paths = internalpath.Clean(paths)
+		if len(paths) == 0 {
+			unstructured.RemoveNestedField(app.Object, "spec", "route", field)
+		} else if err := unstructured.SetNestedStringSlice(app.Object, paths, "spec", "route", field); err != nil {
+			return fmt.Errorf("setting route.%s: %w", field, err)
 		}
 		if _, err := d.Dynamic.Resource(AppGVR).Namespace(namespace).Update(ctx, app, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("updating app: %w", err)

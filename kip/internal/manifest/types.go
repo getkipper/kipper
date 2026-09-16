@@ -42,6 +42,8 @@ type RouteSpec struct {
 	Redirects         []RedirectSpec `yaml:"redirects,omitempty"`
 	BasicAuth         bool           `yaml:"basicAuth,omitempty"`
 	RequireAPIKey     bool           `yaml:"requireApiKey,omitempty"`
+	InternalPaths     []string       `yaml:"internalPaths,omitempty"`
+	PublicPaths       []string       `yaml:"publicPaths,omitempty"`
 }
 
 // RedirectSpec defines a URL redirect rule on a route.

@@ -14,6 +14,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/controller/pkg/internalpath"
 )
 
 // Settings provides handlers for per-app security and configuration settings.
@@ -30,6 +31,10 @@ type appSettings struct {
 	CSPAllowlist    []string       `json:"csp_allowlist"`
 	Redirects       []redirectRule `json:"redirects"`
 	BasicAuth       bool           `json:"basic_auth"`
+	// Pointers distinguish an omitted list (preserve) from an empty list (clear),
+	// so older console bundles preserve the existing policy on unrelated saves.
+	InternalPaths *[]string `json:"internal_paths,omitempty"`
+	PublicPaths   *[]string `json:"public_paths,omitempty"`
 	// APIKeyGatePending is true when RequireAPIKey is on but the forwardAuth
 	// gate has not been confirmed in place, so the console can warn the route
 	// may still be reachable without a key.
@@ -70,6 +75,8 @@ func (s *Settings) Get(w http.ResponseWriter, r *http.Request) {
 		settings.RequireAPIKey = appCR.Spec.Route.RequireAPIKey
 		settings.CSPAllowlist = appCR.Spec.Route.CSPAllowlist
 		settings.BasicAuth = appCR.Spec.Route.BasicAuth
+		settings.InternalPaths = &appCR.Spec.Route.InternalPaths
+		settings.PublicPaths = &appCR.Spec.Route.PublicPaths
 		for _, r := range appCR.Spec.Route.Redirects {
 			settings.Redirects = append(settings.Redirects, redirectRule{
 				Source: r.Source, Target: r.Target, Permanent: r.Permanent,
@@ -88,6 +95,13 @@ func (s *Settings) Get(w http.ResponseWriter, r *http.Request) {
 	if settings.Redirects == nil {
 		settings.Redirects = []redirectRule{}
 	}
+	// Return both lists as arrays for a consistent response shape.
+	if settings.InternalPaths == nil || *settings.InternalPaths == nil {
+		settings.InternalPaths = &[]string{}
+	}
+	if settings.PublicPaths == nil || *settings.PublicPaths == nil {
+		settings.PublicPaths = &[]string{}
+	}
 
 	respondJSON(w, http.StatusOK, settings)
 }
@@ -102,6 +116,19 @@ func (s *Settings) Update(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(r, &req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+
+	if req.InternalPaths != nil {
+		if err := internalpath.Validate(*req.InternalPaths); err != nil {
+			respondError(w, http.StatusBadRequest, fmt.Sprintf("internal path: %s", err))
+			return
+		}
+	}
+	if req.PublicPaths != nil {
+		if err := internalpath.Validate(*req.PublicPaths); err != nil {
+			respondError(w, http.StatusBadRequest, fmt.Sprintf("public path: %s", err))
+			return
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
@@ -127,6 +154,13 @@ func (s *Settings) Update(w http.ResponseWriter, r *http.Request) {
 	appCR.Spec.Route.RequireAPIKey = req.RequireAPIKey
 	appCR.Spec.Route.CSPAllowlist = req.CSPAllowlist
 	appCR.Spec.Route.BasicAuth = req.BasicAuth
+	// Validate before Clean so invalid entries produce an error instead of being dropped.
+	if req.InternalPaths != nil {
+		appCR.Spec.Route.InternalPaths = internalpath.Clean(*req.InternalPaths)
+	}
+	if req.PublicPaths != nil {
+		appCR.Spec.Route.PublicPaths = internalpath.Clean(*req.PublicPaths)
+	}
 
 	appCR.Spec.Route.Redirects = nil
 	for _, r := range req.Redirects {

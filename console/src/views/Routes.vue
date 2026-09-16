@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, watch } from 'vue'
-import { Globe, ShieldCheck, ArrowRight, ExternalLink, RefreshCw, Plus, Trash2, X, Pencil } from 'lucide-vue-next'
+import { Globe, ShieldCheck, ShieldOff, ArrowRight, ExternalLink, RefreshCw, Plus, Trash2, X, Pencil } from 'lucide-vue-next'
 import SaveButton from '@/components/SaveButton.vue'
 import NoticeCallout from '@/components/NoticeCallout.vue'
 import { useToast } from '@/composables/useToast'
@@ -432,12 +432,53 @@ function envColor(env: string): string {
                 <div
                   v-for="route in group.routes"
                   :key="route.path"
-                  class="flex items-center gap-4 px-5 py-2.5"
+                  class="px-5 py-2.5"
                 >
-                  <span class="w-40 font-mono text-xs text-slate-900 dark:text-slate-50">{{ route.path }}</span>
-                  <ArrowRight class="h-3 w-3 text-slate-400" :stroke-width="1.75" />
-                  <span class="font-mono text-xs text-slate-600 dark:text-slate-400">{{ route.service }}</span>
-                  <span class="text-xs text-slate-400 dark:text-slate-500">:{{ route.port }}</span>
+                  <div class="flex items-center gap-4">
+                    <span class="w-40 font-mono text-xs text-slate-900 dark:text-slate-50">{{ route.path }}</span>
+                    <ArrowRight class="h-3 w-3 text-slate-400" :stroke-width="1.75" />
+                    <span class="font-mono text-xs text-slate-600 dark:text-slate-400">{{ route.service }}</span>
+                    <span class="text-xs text-slate-400 dark:text-slate-500">:{{ route.port }}</span>
+                  </div>
+
+                  <div
+                    v-if="route.refused_paths?.length"
+                    data-testid="route-refused-paths"
+                    class="mt-1.5 flex flex-wrap items-center gap-1.5 pl-1 text-xs text-slate-500 dark:text-slate-400"
+                  >
+                    <ShieldOff class="h-3 w-3 flex-shrink-0" :stroke-width="1.75" />
+                    <span v-if="route.refusal_ready" :title="'Matched literally and case-sensitively at the ingress'">Refused:</span>
+                    <span v-else data-testid="route-refusal-pending" class="text-amber-700 dark:text-amber-400">
+                      Refusal not confirmed:
+                    </span>
+                    <code
+                      v-for="p in route.refused_paths"
+                      :key="p"
+                      class="rounded bg-slate-100 px-1 py-0.5 font-mono text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                    >{{ p }}</code>
+                  </div>
+                  <div
+                    v-else
+                    data-testid="route-publishes-everything"
+                    class="mt-1.5 pl-1 text-xs text-slate-500 dark:text-slate-400"
+                  >
+                    Everything this app answers under {{ route.path }} is published.
+                    <span v-if="!group.route_guard">
+                      Run <code class="font-mono">kip platform internal-paths on</code> to refuse the well-known internal prefixes.
+                    </span>
+                  </div>
+                  <div
+                    v-if="route.public_paths?.length"
+                    data-testid="route-public-paths"
+                    class="mt-1 flex flex-wrap items-center gap-1.5 pl-1 text-xs text-slate-500 dark:text-slate-400"
+                  >
+                    <span>Published anyway:</span>
+                    <code
+                      v-for="p in route.public_paths"
+                      :key="p"
+                      class="rounded bg-slate-100 px-1 py-0.5 font-mono text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                    >{{ p }}</code>
+                  </div>
                 </div>
               </div>
             </div>
