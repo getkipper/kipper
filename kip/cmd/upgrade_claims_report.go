@@ -18,32 +18,10 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/labels"
 )
 
-// reportNamespacesWithoutAClaim names every namespace labelled for a project
-// whose records do not cover it.
-//
-// A namespace resolves to its project through the label today and through the
-// project's own records in the release after this one. While both are true the
-// difference is invisible; once only the records count, a namespace on this list
-// is one whose members cannot reach it, whose builds lose their shared
-// credentials and whose workloads lose their pull secrets. Printing it here is
-// what turns "will the next upgrade lock anyone out" from a guess into a command
-// somebody already ran.
-//
-// The records are the two the resolver reads, and the older one is why a cluster
-// that never ran this upgrade is not reported as broken: a project carries the
-// namespaces it took long before claims existed. Listing only the unclaimed ones
-// would name every namespace on such a cluster and say its members were about to
-// lose them, which is the opposite of true.
-//
-// It writes nothing, arms nothing and gates nothing, and returns nothing for
-// the same reason: an upgrade must not fail over an advisory, and a function
-// that can return an error is one a later edit will make fail. The console
-// publishes the claims on its own; this only says whether it has.
-//
-// settle is how long to wait for the controller to publish claims before
-// reporting. An upgrade can finish in seconds, and the first pass over every
-// project has not run by then, so reporting immediately would name the whole
-// cluster and teach the operator that the list means nothing.
+// reportNamespacesWithoutAClaim reports labeled namespaces missing ownership
+// records and labels naming deleted projects. It waits up to settle for records
+// to converge and remains advisory: read failures are printed, not returned.
+// This prepares operators for retiring nsowner's label fallback.
 func reportNamespacesWithoutAClaim(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, out io.Writer, settle time.Duration) {
 	deadline := time.Now().Add(settle)
 	// What has already been named, so a later poll reports what it newly finds

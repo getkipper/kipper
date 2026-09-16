@@ -104,49 +104,14 @@ func (r *BuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	if superseded {
 		return ctrl.Result{}, nil
 	}
-	// A build for a source the app no longer has writes nothing. Detaching git
-	// is how an operator moves an app onto prebuilt images, and a job still
-	// running at that moment would otherwise finish afterwards and put the app
-	// back on an artefact built from the source they just removed — over the
-	// image they chose, with a succeeded build status and a history entry for a
-	// source that is gone.
-	//
-	// Supersession does not cover this: it asks whether a newer build exists,
-	// and after a detach there is no newer build and never will be. The check
-	// lives here rather than at detach time on purpose. Cancelling the job would
-	// race a reconcile that has already read it, so cancellation could never be
-	// the guarantee; this can. A job left running is swept by the build janitor
-	// on age, and writes nothing when it lands.
-	// The invariant is not "the app has a source" but "this job belongs to the
-	// source the app declares now". Detaching then attaching a different
-	// repository, or editing the URL in place, leaves an older job running whose
-	// artefact belongs to a repository nobody asked for any more — and the app
-	// UID covers only a delete and recreate, while supersession covers only a
-	// newer job, which a source edit does not create.
-	//
-	// A job written before the annotation existed carries none, so it cannot
-	// prove which source it built either. The presence check it used to fall
-	// back on asks the wrong question: the app still has a source, just not
-	// necessarily the one this job used. That window is open during the rollout
-	// of the change that adds the annotation, when jobs from the previous
-	// console-api are still finishing.
+	// Only publish artifacts from the app's current git source. Check the job's
+	// source fingerprint here, since a source edit can leave an older job running
+	// without creating a newer one. Legacy jobs lacking the fingerprint are also
+	// discarded; eligible completed jobs receive Discarded status.
 	if reason := staleSourceReason(&job, app.Spec.Git); reason != "" {
-		// Supersession is checked above, so no newer build exists to overwrite
-		// here. A build still running is not discarded yet and Building remains
-		// the truth; the terminal phase belongs at the point it lands, because
-		// otherwise nothing ever writes one and the app sits on Building for
-		// ever while the pipeline that pushed it reports success.
-		//
-		// A detached app is the exception: it has no source panel to show this
-		// against, and the App reconciler clears its build status, so writing
-		// one here would fight that sweep for ever.
-		//
-		// Only a phase that is not terminal is replaced. A Succeeded or Failed
-		// already on the app is the record of a completion that was applied,
-		// and a later refusal must not relabel it — the informer replays every
-		// job inside its TTL when the controller restarts, so on the upgrade
-		// that introduces the fingerprint that would rewrite every app which
-		// built in the preceding hour.
+		// Record discarded completions once the job finishes. Detached apps leave
+		// build-status cleanup to the App reconciler; already applied completions
+		// retain their terminal status when old jobs are replayed.
 		if app.Spec.Git != nil && (job.Status.Succeeded > 0 || job.Status.Failed > 0) &&
 			!completionAlreadyApplied(app.Status.Build, &job) {
 			// The job is terminal, so no further job event will arrive and
@@ -248,22 +213,10 @@ func (r *BuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	return ctrl.Result{}, nil
 }
 
-// supersededByNewerBuild reports whether another build Job for the same App
-// generation (source namespace + app + UID) was created after this one. A
-// build that finishes late must not overwrite a newer build's image or status,
-// now that each attempt is a distinct Job (no delete-before-create).
-//
-// The list uses the uncached API reader: the manager's Job cache can lag behind
-// a just-created newer Job, and reconciling an older completion against a stale
-// snapshot would miss the newer build and wrongly proceed. With the direct read
-// there is no durable older-over-newer overwrite: if a newer Job is created
-// after this list and its reconcile writes the App first, the older reconcile's
-// own Update then fails on the App's resource-version conflict and requeues, and
-// the requeue's fresh list sees the newer Job and stops. The newer build is
-// always the final writer.
-//
-// A list error is returned to the caller (not swallowed as "not superseded"),
-// so the reconcile requeues without mutating rather than risking a stale write.
+// supersededByNewerBuild checks jobs for the same namespace, app and UID,
+// ordered by creation time and then name. Prefer the direct API reader to see
+// new jobs promptly; propagate list errors before mutating the App.
+// App resource-version conflicts guard concurrent completion writes.
 func (r *BuildReconciler) supersededByNewerBuild(ctx context.Context, job *batchv1.Job) (bool, error) {
 	reader := client.Reader(r.Client)
 	if r.APIReader != nil {

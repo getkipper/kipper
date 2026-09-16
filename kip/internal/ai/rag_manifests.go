@@ -211,47 +211,14 @@ spec:
 	)
 }
 
-// AnythingLLMManifest returns the YAML for AnythingLLM: a Secret
-// carrying the boot-required credentials, a HelmChart wired to the
-// in-cluster Ollama (LLM + embeddings) and Qdrant (vector store), and
-// a Kipper-owned Ingress on the user-supplied host with cert-manager
-// TLS. The chart's bundled Ingress is left disabled; we own routing.
+// AnythingLLMManifest renders credentials, an Ollama/Qdrant-connected HelmChart,
+// and a Kipper-managed TLS Ingress. AUTH_TOKEN protects initial setup.
 //
-// AUTH_TOKEN gates every UI request behind a bootstrap password so a
-// scanner cannot claim the first-admin slot before the operator does.
-// strategy.type: Recreate is pinned even though the chart's current
-// default already matches; an upstream flip to RollingUpdate would
-// surge a second AnythingLLM pod that competes for the 4 GiB RAG
-// headroom budget AND races on the same SQLite/uploads PVC.
-//
-// The chart at version 1.0.0 has two defaults that need overriding:
-//
-//   - Probes target port 8888 with path /v1/api/health. The container
-//     actually serves on port 3001 and the AnythingLLM health route is
-//     /api/ping (server/endpoints/system.js mounts /ping under the
-//     /api router prefix at server/index.js: app.use("/api", apiRouter)).
-//     We override both path and port so the install does not hang at
-//     0/1 Ready.
-//
-//   - persistentVolume.size defaults to 8Gi. We size it by tier in the
-//     installer; AnythingLLM's PVC holds uploaded documents, the SQLite
-//     database, and per-workspace state.
-//
-// Plain (non-secret) env goes into chart `config:` which renders as a
-// ConfigMap and is applied via envFrom. Secret-derived env goes into
-// chart `env:` as a list with valueFrom.secretKeyRef pointing at our
-// Secret.
-//
-// OLLAMA_BASE_PATH and EMBEDDING_BASE_PATH take the bare host:port URL.
-// AnythingLLM appends /api or /v1 internally; including either path
-// segment here breaks the connection silently and the UI falls back to
-// "could not reach LLM" without surfacing a useful error.
-//
-// Env var names verified against server/.env.example at AnythingLLM
-// v1.9.0 (the appVersion the chart pins). OLLAMA_HOST, OLLAMA_API_BASE,
-// and OLLAMA_URL are common community guesses that AnythingLLM does
-// NOT read; only OLLAMA_BASE_PATH (LLM) and EMBEDDING_BASE_PATH
-// (when EMBEDDING_ENGINE=ollama) are honoured.
+// Keep Recreate to serialize access to the SQLite/uploads PVC and avoid surge
+// memory. Override probes to /api/ping on port 3001 and size the PVC from cfg.
+// Use config for plain env and env secretKeyRef entries for credentials.
+// OLLAMA_BASE_PATH and EMBEDDING_BASE_PATH use the bare origin; the application
+// adds its API paths.
 func AnythingLLMManifest(cfg AnythingLLMConfig) string {
 	embeddingModel := cfg.EmbeddingModel
 	if embeddingModel == "" {

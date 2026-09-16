@@ -123,12 +123,7 @@ const expandedDbs = ref<Record<string, boolean>>({})
 const expandedSchemas = ref<Record<string, boolean>>({})
 const schemaCollapsed = ref(false)
 
-// Per-table column cache for SQL autocomplete. The schema endpoint
-// returns table names only (cheap); this cache stores the column list
-// for each table so cross-table joins benefit from column suggestions
-// without forcing the user to open every table first.
-//
-// Keyed by `<schema>.<table>` to avoid collisions between schemas.
+// Cache columns by schema.table for SQL autocomplete. Clear on database changes.
 const tableColumnsCache = ref<Record<string, string[]>>({})
 
 async function ensureTableColumns(schemaName: string, tableName: string) {
@@ -145,12 +140,7 @@ async function ensureTableColumns(schemaName: string, tableName: string) {
   }
 }
 
-// loadAllTableColumns walks the loaded schema and lazy-loads structure
-// for every table whose columns we don't yet have cached. Runs in
-// parallel with no explicit concurrency cap because the typical
-// project's schema has dozens of tables, not thousands, and the
-// browser plus console-api connection pool already throttle in
-// practice.
+// Fetch uncached column lists for all loaded tables concurrently.
 async function loadAllTableColumns() {
   const tasks: Promise<void>[] = []
   for (const db of schema.value.databases) {
@@ -323,17 +313,9 @@ function onEditorReady(payload: { view: EditorView }) {
   editorView.value = payload.view
 }
 
-// statementToRun returns the SQL the user wants to execute on the
-// next Run / Cmd+Enter. Order of precedence:
-//   1. If there's a non-empty selection in the editor, that's it.
-//   2. Otherwise, the statement spanning the cursor (text between the
-//      previous and next semicolons).
-//   3. If the editor isn't ready or the document has no semicolons,
-//      the whole editor contents.
-//
-// Naive boundary detection — semicolons inside string literals are
-// not honoured. The user can work around that by selecting the
-// statement explicitly, which path 1 catches.
+// Run the selection, otherwise the semicolon-delimited statement at the cursor.
+// Fall back to the whole editor text when the editor or delimiters are absent.
+// Semicolons in quoted SQL are not parsed; explicit selection handles that case.
 function statementToRun(): string {
   const view = editorView.value
   if (!view) return sqlText.value.trim()
@@ -804,12 +786,7 @@ watch(serviceName, () => {
   loadSchema()
 })
 
-// React to URL-driven database switches (back/forward buttons, the
-// picker, or programmatic router pushes from elsewhere) so the schema
-// sidebar stays in sync with the active database. We also flush the
-// per-table column cache — its keys are `<schema>.<table>` and would
-// otherwise serve DB A's columns to DB B if both have, say,
-// public.users with different shapes.
+// Reload schema and clear schema.table cache entries when the database changes.
 watch(activeDatabase, async (next, prev) => {
   if (next === prev) return
   selectedRelation.value = null
@@ -1035,12 +1012,7 @@ function explainQuery() {
   aiChatRef.value?.submitPrompt('Explain this query in plain English. Walk me through what it does, list the indexes it touches, and call out anything obviously slow.')
 }
 
-// --- Create new table (G3.5b) ---
-//
-// Sits next to the Alter Designer; both share the same column-spec
-// row UI. Clicking "+ New table" in the schema sidebar drops into
-// this mode and the Designer tab renders the create form instead of
-// the alter form.
+// Create-table state shares the Designer tab with table alterations.
 const creatingTable = ref(false)
 const newTableSchema = ref('public')
 const newTableName = ref('')
@@ -1194,12 +1166,7 @@ async function applyCreateTable() {
   }
 }
 
-// --- Designer (G3) ---
-//
-// The designer holds an ordered list of "ops" that the user has built
-// up via add-column / drop-column / etc. The DDL preview pane is
-// driven by a debounced server-side preview call; the user can read
-// what's about to run before clicking Apply.
+// Queue schema operations and preview their DDL before Apply.
 const designerOps = ref<DBTableOp[]>([])
 const designerPreview = ref<string[]>([])
 const designerApplying = ref(false)

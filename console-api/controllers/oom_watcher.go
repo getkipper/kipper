@@ -335,23 +335,10 @@ func oomEventIdentity(pod *corev1.Pod) (string, bool) {
 	return fmt.Sprintf("%s/%s/%d", pod.UID, bestContainer, bestRestart), true
 }
 
-// Annotation keys on PlatformConfig used by the OOM watcher. Both live in
-// metadata.annotations so they get written atomically with spec.components
-// in the single Update call that records a bump — no split-write window
-// where status loss could lead to a re-bump.
-//
-// lastOOMAnnotation:    most recent OOM event identity handled per component.
-//
-//	Drives event-level dedup so the same OOMKilled
-//	container status can't trigger two bumps.
-//
-// lastBumpAtAnnotation: timestamp of the most recent bump per component.
-//
-//	Drives the 10-minute cooldown that prevents
-//	*different* OOM events from cascading bumps.
-//	Status.components[i].LastBumpAt mirrors this for
-//	user-facing audit; the annotation is authoritative
-//	because it survives a failed Status write.
+// OOM event IDs and bump timestamps live in PlatformConfig annotations so
+// they are written atomically with spec.components. Event IDs deduplicate OOMs;
+// bump timestamps enforce cooldown across distinct events. Status mirrors the
+// timestamp for display, while the annotation remains authoritative.
 func lastOOMAnnotation(component string) string {
 	return "platform.kipper.run/last-oom-" + component
 }

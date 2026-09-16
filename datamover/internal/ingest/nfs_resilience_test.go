@@ -152,11 +152,7 @@ func TestDeletionPassRetriesTransientReaddir(t *testing.T) {
 	}
 }
 
-// TestDeletionPassPersistentIOFailsTransfer asserts that a permanently failing
-// deletion walk fails finalize rather than reporting a clean sync it did not
-// achieve. Full-sync is a correctness contract: a stray file that cannot be
-// removed means the target is not the source, so the transfer must not
-// complete and resume state must survive for a retry.
+// A failed deletion walk leaves resume state available for another attempt.
 func TestDeletionPassPersistentIOFailsTransfer(t *testing.T) {
 	withFastIORetry(t)
 	src := t.TempDir()

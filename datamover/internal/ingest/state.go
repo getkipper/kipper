@@ -33,23 +33,13 @@ func DefaultStateDir(root string) string {
 	return filepath.Join(root, wire.StateDirName)
 }
 
-// State is the durable per-transfer state: the manifest, the completed-chunk
-// bitmap, and received chunk data as flat chunk-indexed files. It survives
-// process restarts so transfers resume instead of starting over.
+// State stores the manifest, completion bitmap, and chunk-indexed files for
+// resuming transfers. --state-dir controls persistence independently of the
+// import root, allowing flat chunk staging off an NFS-backed data volume.
+// Ephemeral storage loses resume state with its node.
 //
-// The state dir is configurable and independent of the import root. Chunk
-// data is staged flat (chunks/<n>), never mirroring the source tree: NFS
-// backed roots (Longhorn RWX) wedge on many-small-files nested-dir churn, so
-// transient state must be placeable off the data volume. The caller chooses
-// the crash-resume tradeoff through that placement: node-local ephemeral
-// storage loses state when the import pod's node is gone, persistent storage
-// survives. The datamover does not decide this; the --state-dir flag does.
-//
-// Resume covers the export side's own retries against a live import server
-// (a dropped connection, a chunk that failed its hash). It does NOT recover
-// a lost import pod: the pod is created once per transfer and is not
-// rescheduled, so if it dies the transfer fails cleanly and the operator
-// re-runs the migration. Resume within a run, not survival of the receiver.
+// The migration workflow retries against a live import server; it does not
+// reschedule a lost import pod. The operator must rerun that migration.
 type State struct {
 	root string
 	dir  string
@@ -239,11 +229,9 @@ func syncDir(path string) error {
 	return nil
 }
 
-// persistBitmap writes the bitmap durably: tmp file, fsync, rename, then
-// fsync of the state dir. Chunk data must already be synced before the bit is
-// persisted, or a crash could leave the bitmap claiming data that never hit
-// disk and resume would skip it forever. Callers hold s.mu, except InitState
-// before the state is shared.
+// persistBitmap writes and syncs a temporary bitmap, renames it, then syncs
+// the state directory. Chunk data must already be durable. Callers hold s.mu,
+// except InitState before the state is shared.
 func (s *State) persistBitmap() error {
 	tmp := filepath.Join(s.dir, bitmapFileName+".tmp")
 	fh, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)

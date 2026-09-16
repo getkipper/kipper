@@ -40,22 +40,9 @@ const ConditionCleanupComplete = "CleanupComplete"
 // called something else.
 const ConditionNameFree = "NameFree"
 
-// HasAuth reports whether the server this service type runs asks a connecting
-// client for a credential.
-//
-// Three types answer false, each for its own reason: redis starts with no
-// --requirepass, opensearch with DISABLE_SECURITY_PLUGIN=true, and mailhog has
-// no authentication in the image at all. A credentials Secret for any of them
-// carries HOST and PORT alone.
-//
-// Writing a password anyway is worse than leaving it out. It reaches every
-// bound workload, ${REDIS_PASSWORD} resolves against it, and redis answers AUTH
-// with an error when no password is set — so a connection string built from it
-// fails, and names the wrong cause when it does.
-//
-// An unknown type answers false. The catalogs fall back to a plain image with
-// no credentials configured, so claiming otherwise would mint a password
-// nothing reads.
+// HasAuth reports which service types Kipper configures with credentials.
+// Only those types should receive generated passwords; the remaining configured
+// services and unknown types use unauthenticated defaults.
 func HasAuth(serviceType string) bool {
 	switch serviceType {
 	case "postgres", "mysql", "mongodb", "rabbitmq", "minio":

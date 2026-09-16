@@ -75,21 +75,9 @@ func (e *UnknownCredentialError) Error() string {
 	return fmt.Sprintf("no shared git credential named %q is configured", e.Name)
 }
 
-// Seed fills an allow-list nobody has ever decided with the projects already
-// building with that credential. It reports which credentials it granted, and
-// whether it changed anything at all.
-//
-// A credential written before allow-lists existed carries no list, so on a
-// cluster upgraded into the guard the first build of an app that was working
-// fails. Seeding writes down what the cluster was already doing.
-//
-// What it must not do is read every empty list as that. An admin who revokes the
-// last project leaves an empty list too, and so does a credential added and not
-// yet granted, and seeding either from the apps that reference it would hand
-// back exactly what somebody had withheld. So the two are stored apart: a list
-// nobody has decided is absent, and one decided to be empty is an empty list.
-// Seed only fills. What is left undecided is closed by CloseUndecided, once the
-// upgrade has replaced the writer whose absent lists caused all this.
+// Seed fills absent allowlists from the supplied project map and reports
+// which credentials changed. An explicit empty list is a decision and stays
+// empty. CloseUndecided finalizes remaining absent lists after migration.
 func Seed(entries []Entry, usage map[string][]string) ([]Entry, []string, bool) {
 	var seeded []string
 	for i := range entries {
@@ -171,29 +159,13 @@ func copyOf(projects []string) []string {
 	return out
 }
 
-// Restore puts a recorded allow-list back onto a credential whose list has gone
-// absent, and sorts what it did into three answers.
+// Restore fills absent allow-lists from recorded decisions when server and
+// credential identity still match. Existing lists are preserved. It reports
+// restored, moved-server, and replaced-credential names separately.
 //
-// The console-api an upgrade replaces writes a credential without its allowed
-// projects, and it writes the whole list at once, so editing any one credential
-// reads back as every credential having been decided by nobody. Writing the
-// record back is a repair: every project in it was already allowed when the
-// record was taken, against the same credential.
-//
-// It writes only into an absent list, so a decision recorded after the record
-// was taken is left alone. One case escapes that and is worth stating rather
-// than implying: a revocation the old writer then erased reads as absent like
-// anything else, so a project revoked during the rollout can come back. The
-// upgrade names every list it writes back for that reason.
-//
-// A credential whose server or token has changed is refused. The build hands a
-// project the credential's token against the credential's host, so a grant
-// authorises a project against that pair, and an entry carrying a different one
-// is a credential nobody granted anything about. The name cannot tell a token
-// rotation from a credential deleted and recreated under its old name, and the
-// two mean opposite things, so the ambiguous case fails closed and is named with
-// the command that puts it right. Writing first and warning afterwards would
-// hand out the access before anybody read the warning.
+// An old writer can erase a revocation made during rollout, leaving an absent
+// list indistinguishable from lost state. Restoration can then reinstate access,
+// so callers must report every restored list for operator review.
 func Restore(entries []Entry, decided map[string]Decision) (updated []Entry, restored, moved, replaced []string) {
 	for i := range entries {
 		if entries[i].AllowedProjects != nil {

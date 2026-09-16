@@ -149,17 +149,10 @@ func receiptUser(claims *middleware.Claims) string {
 	return claims.Issuer + "\x00" + claims.Subject
 }
 
-// planDigest fingerprints the material facts of the displayed report, so a
-// receipt stops matching when what the operator saw no longer describes what
-// would happen: the target's identity and version, everything that migrates
-// or gets skipped — identity, status, and semantic detail — the demand being
-// sent, warnings, conflicts, and the notification posture.
-//
-// Two exclusions, both live-checked at start instead: blockers, because the
-// start refuses on any current blocker with its own message, and the
-// target's free-capacity figures, because unrelated scheduling on a live
-// target moves them constantly — the shortfall check re-runs against the
-// fresh numbers, so a fit that still holds needs no re-consent.
+// planDigest binds a receipt to target identity, migration items, demand,
+// warnings, conflicts, and notification/domain choices. Numeric runs in item
+// details are normalized. Blockers and available capacity are checked afresh
+// at start rather than included in the digest.
 func planDigest(resp *planResponse) string {
 	// A row's status and detail carry material semantics — the rebuild note
 	// on a git app, a size that could not be measured, the service type —

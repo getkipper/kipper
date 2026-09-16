@@ -20,19 +20,10 @@ func LoadKeyring(ctx context.Context, client kubernetes.Interface) (*Keyring, er
 	return parseKeyring(secret.Data)
 }
 
-// KeyCache serves the UI-session signing keyring to the forwardAuth gate
-// without a Kubernetes read per request. It refreshes at most once per
-// ttl, so a key rotation (revoke-all) takes effect within ttl.
-//
-// Unlike the share-link cache, its loader is LoadOrCreateKeyring: a
-// missing signing Secret self-heals rather than failing closed, because
-// UI sessions are the primary way operators reach service UIs and a
-// deleted Secret must not lock every UI out permanently. Recreating the
-// keyring is equivalent to a bulk revocation (every prior cookie fails on
-// an unknown kid), which is the correct answer to a lost signing key. A
-// corrupt Secret is likewise replaced with a fresh keyring. A transient
-// API error keeps the last-good keyring only until its trust window ends,
-// then fails closed.
+// KeyCache supplies UI-session signing keys with a bounded trust window.
+// LoadOrCreateKeyring replaces missing or corrupt signing Secrets, revoking
+// cookies signed by the lost key. Refresh errors retain cached keys only until
+// validThru; subsequent requests fail closed until loading succeeds.
 type KeyCache struct {
 	client kubernetes.Interface
 	ttl    time.Duration

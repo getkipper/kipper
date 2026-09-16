@@ -53,22 +53,10 @@ func (p *Projects) LinkConsent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// SetLinkConsent grants or withdraws another project's ability to link into this
-// one.
-//
+// SetLinkConsent updates inbound project-link consent behind project.settings
+// authorization. The handler writes the cluster-scoped Project on the owner's
+// behalf. Links target individual apps directly and bypass public ingress gates.
 // PUT /api/v1/projects/{name}/link-consent
-//
-// This exists as a server-side operation rather than a direct edit of the
-// Project because the decision belongs to whoever owns the project being
-// reached, and a Kipper project owner holds a namespaced role — they have no
-// access to the cluster-scoped Project resource, and granting them one would
-// hand them every project on the cluster. The route's own middleware resolves
-// membership of this project and requires project.settings, so the authority
-// to decide sits exactly where the decision does.
-//
-// What is being granted is not small: a link opens a direct route to a backend
-// in this project, past the ingress and so past anything enforced on a public
-// route. Each individual link still names the one app it reaches.
 func (p *Projects) SetLinkConsent(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 

@@ -15,30 +15,13 @@ import (
 // canary object.
 const canaryAnnotationPrefix = "authz.kipper.run/probe-"
 
-// Freshness is this replica's cache-health clock, the mechanism behind the
-// fail-closed contract. Informer HasSynced only proves the initial LIST, a
-// quiet watch is ambiguous, and a successful direct LIST proves only that
-// the API server answers — none of those prove that the informer cache the
-// authorizer reads has observed recent events. A wedged watch behind healthy
-// LISTs would serve revoked keys forever.
+// Freshness tracks successful canary writes observed through the authorizer's
+// informer cache. Each probe checks ApiKey, UsagePlan, and UsageRollup watches;
+// the clock advances only after all three deliver their writes. Direct API reads
+// alone cannot establish cache freshness.
 //
-// So the clock is advanced by a write-through-canary round trip: each probe
-// writes a fresh timestamp annotation onto a dedicated canary ApiKey with a
-// direct request, then waits until that exact value is visible through the
-// informer cache. Only when the watch pipeline demonstrably delivered the
-// event does the clock advance. Once the clock exceeds the stale bound, the
-// replica reports unready (Traefik stops routing to it) and denies whatever
-// still arrives.
-//
-// The stale bound is the maximum time a revoked key may keep working
-// through this replica.
-//
-// The authorizer reads three types from the cache — ApiKey (validity), UsagePlan
-// (limits), and UsageRollup (quota counts) — each behind its own watch. A single
-// canary would only prove one of them, leaving a wedged plan or rollup watch to
-// serve stale limits or quota counts on a replica that still reports fresh. So
-// the probe round-trips one canary per type and advances the clock only when
-// every watch delivered its write.
+// Once staleBound expires, Fresh returns false so the replica reports unready
+// and rejects authorization requests until the cache recovers.
 type Freshness struct {
 	direct     client.Reader // uncached reads for the read-modify-write
 	cached     client.Client // the informer-backed client the authorizer uses

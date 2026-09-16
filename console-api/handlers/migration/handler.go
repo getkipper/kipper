@@ -804,19 +804,10 @@ func (h *Handler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// workloadsWithNothingRunning names the CRs on this cluster that have produced
-// no workload at all.
-//
-// Readiness alone answers the wrong question. Both loops above inspect the
-// workloads that exist, so a CR whose reconcile fails before it creates one is
-// invisible to them and the whole namespace reports healthy. That is exactly
-// what a refused service binding does: the App controller returns before it
-// writes its Deployment, and a migration that lost an app could report success.
-// Comparing against the CRs is what turns a missing workload into a failure.
-//
-// Apps map to a Deployment and Services to a StatefulSet, both by name.
-// Functions are left out because their mode decides what they produce, and a
-// guess here would report a healthy namespace as broken.
+// workloadsWithNothingRunning finds App CRs missing a named Deployment and
+// Service CRs missing a named StatefulSet. This catches reconciliation failures
+// before workload creation, which readiness checks on existing objects miss.
+// Functions are excluded because their workload kind depends on execution mode.
 func (h *Handler) workloadsWithNothingRunning(ctx context.Context, namespace string, statefulSets *appsv1.StatefulSetList, deployments *appsv1.DeploymentList) ([]string, error) {
 	running := make(map[string]bool, len(statefulSets.Items)+len(deployments.Items))
 	for _, sts := range statefulSets.Items {

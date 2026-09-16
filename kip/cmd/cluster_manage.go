@@ -474,24 +474,9 @@ func refuseToReplaceACredential(path string) error {
 	return nil
 }
 
-// carriesCredential reports whether an entry holds something that authenticates
-// on its own, as opposed to a plugin invocation or nothing at all.
-//
-// Every form kubeconfig supports counts, not only the obvious ones. A refresh
-// token sitting in auth-provider config, or a basic-auth password, is as much a
-// credential as a client certificate, and missing one means both callers get it
-// wrong in opposite directions: an export carrying it is accepted as
-// credential-free, and a local file holding it is replaced as if empty.
-// irreplaceableAccess reports whether replacing an entry costs access this
-// machine cannot get back.
-//
-// A credential of any form counts even when kip's own plugin sits beside it:
-// the plugin can be re-rendered, the credential cannot. Another tool's plugin
-// counts too, because kip never issued it — nothing here can write a
-// cloud provider's exec stanza back.
-//
-// Both writers that replace a whole kubeconfig ask this, so an import and a
-// conversion cannot disagree about what is safe to destroy.
+// irreplaceableAccess protects embedded credentials, other tools' exec
+// configuration and impersonation settings when replacing a kubeconfig.
+// Kip's own exec configuration can be rendered again.
 func irreplaceableAccess(authInfo *clientcmdapi.AuthInfo) bool {
 	return carriesCredential(authInfo) ||
 		(authInfo.Exec != nil && !installer.IsExactlyKipExec(authInfo)) ||
@@ -1156,25 +1141,12 @@ func runClusterDomainRepair() error {
 	return nil
 }
 
-// persistRepairedCluster writes a repaired cluster entry to disk: the config
-// itself, and the pin in its kubeconfig that has to name the same domain.
+// repairedFields limits repair writes to serving identity and an available
+// gateway credential, preserving unrelated concurrent config changes.
 //
-// The kubeconfig goes first, because the credential plugin asks for a session
-// by domain and a failure part-way must leave the file that still works alone.
-// Two files cannot be written as one transaction, so the remaining case is
-// reported rather than papered over: a repin that lands while the config save
-// fails leaves kubectl asking for a domain the config does not list yet, which
-// refuses rather than serving the wrong session, and re-running the repair
-// settles it.
-// repairedFields is what a repair owns: the serving identity read off the
-// cluster, and the gateway credential when the cluster still had one to give.
-//
-// It is a field list rather than a whole config.Cluster because a repair takes
-// seconds of network round trips, and writing back an entry captured before them
-// would restore everything else as it looked then — a token a concurrent
-// uninstall mirrored in the meantime included, which by then can be its only
-// copy. Repair's job is to rewrite this cluster's identity from the CR, not to
-// have an opinion about the rest of its entry.
+// persistRepairedCluster repins the kubeconfig before saving these fields.
+// The two-file update is non-atomic; if config saving fails after repinning,
+// rerunning repair restores consistency.
 type repairedFields struct {
 	Domain           string
 	ConsoleDomain    string
@@ -1261,24 +1233,10 @@ func displayOrConvention(override, resolved string) string {
 	return resolved + " (override)"
 }
 
-// pinsDomain reports that the exec kubeconfig at path asks kip for the session
-// of exactly this cluster and no other.
-//
-// Two things have to hold. No user may name a different cluster — the same test
-// rejectMismatchedClusterPin applies to an import, because a file where one user
-// names this cluster and another names a different one reaches whichever the
-// context selects. And the user the live context selects must name this one: a
-// matching pin sitting in a user nothing uses proves only that the file has been
-// near this cluster, while kubectl follows the context.
-//
-// "Live" is installer.ActiveContext's answer — the current context, or the only
-// one when the file names none, because a single-context file is not ambiguous
-// about which entry is live and the rewriter has always read it that way.
-//
-// Unreadable, unparsable, no resolvable context, a context selecting no user or
-// one with no exec stanza, or a pin naming anything else all answer no. The only
-// question being asked is whether adopting the file is safe, and every one of
-// those is a reason it is not.
+// pinsDomain checks that the active kubeconfig user has exactly one matching
+// cluster pin and that other users carry no conflicting pins. ActiveContext
+// accepts the sole context when current-context is unset. Read or parse
+// failures return false.
 func pinsDomain(path, domain string) bool {
 	if domain == "" {
 		return false

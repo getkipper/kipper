@@ -120,20 +120,8 @@ func (a *AILogs) AnalyseLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// admitAnalyseLogs reports whether the caller may spend the cluster's AI
-// provider on a workload in this namespace.
-//
-// The cluster role used to decide it alone, which refused the people the
-// feature is for. The console's project invite gives every project member a
-// cluster role of viewer, and the Analyse button is offered to anyone who can
-// read a workload's logs, so a project owner met a 403 on a button the docs
-// promise them. Project standing admits them now, on the same capability that
-// released the logs in the first place.
-//
-// Standing is still required. An account that belongs to no project is not
-// admitted to something that spends the operator's provider budget, which is
-// the one thing the project-scoped diagnose routes never established. The
-// cluster arm stays so that nobody admitted before this is refused after it.
+// admitAnalyseLogs allows cluster admins/deployers or project members with
+// pods.logs.read to use AI log analysis in the namespace.
 func admitAnalyseLogs(w http.ResponseWriter, r *http.Request, namespace string) bool {
 	switch middleware.RoleFromContext(r.Context()) {
 	case middleware.RoleAdmin, middleware.RoleDeployer:

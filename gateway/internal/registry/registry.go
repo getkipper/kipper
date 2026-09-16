@@ -40,19 +40,9 @@ const (
 	unprovenReservationTTL = 2 * time.Hour
 )
 
-// defaultTombstoneTTL is how long a lapsed label stays held for its previous
-// token holder after it stops routing, before anyone else may register it.
-//
-// A label does not become free the moment it stops serving. The gateway
-// terminates TLS for *.kipper.run with its own wildcard certificate, so a
-// stranger who picks up an abandoned name serves the previous operator's
-// published links, bookmarked console URL and OIDC issuer host behind a valid
-// padlock, with nothing for a visitor to notice. Claiming "lab" claims
-// console--lab, dex--lab and every app route with it.
-//
-// Ninety days past the thirty of inactivity covers an operator returning to a
-// cluster they left off for a season, and still returns an abandoned name
-// inside four months.
+// defaultTombstoneTTL reserves a lapsed label for its previous token holder
+// for 90 days. Published app, console, and issuer URLs can outlive the cluster;
+// reassigning the label would serve those URLs under the gateway's certificate.
 const defaultTombstoneTTL = 90 * 24 * time.Hour
 
 // Entry represents a registered subdomain mapping.
@@ -63,45 +53,24 @@ type Entry struct {
 	CreatedAt time.Time `json:"created_at"`
 	LastSeen  time.Time `json:"last_seen"`
 
-	// Certificate pin state for the gateway→cluster hop. Fingerprints are
-	// SPKI SHA-256 in lowercase hex; pinning the public key rather than the
-	// leaf means a certificate reissue with an unchanged key never touches
-	// this state. CertFingerprint is enforced on every proxied handshake.
-	// PendingFingerprint was token-asserted but not yet observed on a live
-	// connection; it is accepted alongside the current pin, never alone.
-	// PrevFingerprint keeps the pre-rotation pin accepted while a rotation
-	// propagates. All transitions mark the registry dirty so a restart can
-	// never fall back to weaker pin state.
+	// Hop-certificate pins are lowercase SPKI SHA-256 fingerprints, so certificate
+	// reissues with the same key preserve the pin. PendingFingerprint holds a
+	// token-authenticated assertion awaiting observation; PrevFingerprint covers
+	// rotation propagation. Transitions mark the registry dirty for persistence.
 	CertFingerprint    string    `json:"cert_fingerprint,omitempty"`
 	PendingFingerprint string    `json:"pending_fingerprint,omitempty"`
 	PendingSince       time.Time `json:"pending_since,omitzero"`
 	PrevFingerprint    string    `json:"prev_fingerprint,omitempty"`
 	PrevSince          time.Time `json:"prev_since,omitzero"`
 	PinUpdatedAt       time.Time `json:"pin_updated_at,omitzero"`
-	// FirstPinnedAt records when the entry left unpinned grace for the first
-	// time. For a short settle window after that moment the proxy accepts a
-	// non-matching leaf (logged, never re-pinned): with multiple Traefik
-	// replicas, one replica can serve the hop certificate — activating the
-	// pin — while another still serves the pre-hop-cert fallback until its
-	// dynamic-config watch catches up. Failing closed there would 502 a
-	// cluster that was fully fail-open moments before. Rotation neither
-	// resets nor extends the window: past the original deadline every
-	// rotation mismatch fails closed, with the old key accepted only via
-	// Prev.
+	// FirstPinnedAt anchors the one-time settle window for Traefik replicas
+	// still serving their fallback certificate. Rotation preserves this deadline.
+	// The proof gate independently requires the observed key to be proven.
 	FirstPinnedAt time.Time `json:"first_pinned_at,omitzero"`
 
-	// Registration proof-of-possession state (B16). ProvenAt/ProofExpiry/
-	// ProofKeySPKI are the durable proof record: the token holder demonstrated
-	// possession of the private key served at IP:443 by signing a fresh
-	// gateway nonce. Kept separate from the pin fields above — a pin records
-	// what SPKI is served, a proof records who holds its key. The proof is a
-	// renewable lease (ProofExpiry), refreshed by the heartbeat; an entry is
-	// routable only while proven, unexpired, and — once pinned — pinned to the
-	// very key ProofKeySPKI names, so a pin that moves to another key must be
-	// re-proven before it carries traffic and a decommissioned or reassigned IP
-	// converges to suspension. ChallengeNonce/ChallengeExpiry hold the
-	// single-use nonce currently issued to the token holder; they are
-	// short-lived and simply re-issued after a restart.
+	// Proof state binds a renewable lease to possession of the key served at
+	// IP:443. ChallengeNonce is a short-lived, single-use signing challenge.
+	// ProofExpiry and ProofKeySPKI determine whether the proof authorizes routing.
 	ProvenAt        time.Time `json:"proven_at,omitzero"`
 	ProofExpiry     time.Time `json:"proof_expiry,omitzero"`
 	ProofKeySPKI    string    `json:"proof_key_spki,omitempty"`
@@ -109,15 +78,8 @@ type Entry struct {
 	ChallengeNonce  string    `json:"challenge_nonce,omitempty"`
 	ChallengeExpiry time.Time `json:"challenge_expiry,omitzero"`
 
-	// FirstProvenAt is the durable fact that this label once served: the moment
-	// it completed its first proof. Nothing clears it, which is what separates it
-	// from ProvenAt and ProofKeySPKI beside it. Those carry the current
-	// authorisation and are cleared on a move on purpose, since nothing has
-	// demonstrated control at the new address yet. Tombstone eligibility asks a
-	// question about the past instead, so it reads this: a cluster that moved and
-	// then failed before proving the new address has still published links under
-	// its name, and reading the mutable fields handed that name straight to the
-	// next caller.
+	// FirstProvenAt records the first successful proof and survives address moves.
+	// Tombstone eligibility uses this history even when the current proof is cleared.
 	FirstProvenAt time.Time `json:"first_proven_at,omitzero"`
 }
 
@@ -181,16 +143,8 @@ func New() *Registry {
 	}
 }
 
-// SetRandomSourcesForTest replaces this registry's token and nonce sources. A
-// nil source keeps the current one. It exists because the failures it models —
-// the process running out of entropy mid-registration — decide what a caller is
-// told, and a caller that misreads "the gateway failed" as "the name is taken"
-// abandons a name that is free. Only the HTTP handler can show that, and the
-// handler is in another package.
-//
-// Exported for that reason and no other, which is why this package sits under
-// internal/: a mutator for a security-relevant randomness source has no business
-// being callable from outside the gateway.
+// SetRandomSourcesForTest replaces token and nonce sources for gateway handler
+// tests. A nil source preserves the current one.
 func (r *Registry) SetRandomSourcesForTest(token, nonce func() (string, error)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -229,21 +183,13 @@ const (
 // random bytes, and watching them rename a cluster over it.
 var ErrSubdomainTaken = errors.New("subdomain is already registered")
 
-// Register assigns a subdomain to an IP address.
+// Register assigns a subdomain to an IP and returns its registration outcome.
+// An existing registration requires its token for renewal or an address change.
+// An unauthenticated same-address request returns the entry without refreshing it;
+// an unauthenticated address change returns ErrSubdomainTaken.
 //
-// The token decides everything about an existing registration. Holding it means
-// being the cluster: the address may move (Moved) and the inactivity clock
-// resets (Renewed). Without it a request naming an existing registration is
-// Unauthenticated — answered, but it refreshes nothing, because anyone can learn
-// a label and an address from public DNS and an anonymous refresh would let them
-// hold a label forever. Only a different address without the token is refused.
-//
-// A move clears pin and proof state. Both are statements about a specific
-// machine: a pin records which SPKI is served at that address, a proof records
-// that someone held its private key. Carrying either to a new address would let
-// a registration inherit a proof made for a different host, which is the exact
-// property the proof exists to establish. After a move the cluster must assert
-// its pin and prove possession again at the new address.
+// Moving an address clears pin and proof state, requiring a fresh assertion and
+// proof at the destination. FirstProvenAt preserves the label's serving history.
 func (r *Registry) Register(subdomain, ip, token string) (*Entry, Outcome, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -337,18 +283,9 @@ func (r *Registry) clearProofLocked(entry *Entry) {
 	entry.ChallengeExpiry = time.Time{}
 }
 
-// Deregister removes a subdomain by its management token and returns the
-// subdomain, so callers can drop whatever per-registration state they hold
-// alongside the registry.
-//
-// A deliberate release frees the label outright, with no tombstone. The
-// tombstone exists for the accident — a cluster that went quiet and lapsed,
-// where nobody decided anything — and holding a released name for its previous
-// holder is worse than useless: `kip cluster uninstall` deletes the local entry
-// and its token, and the wiped cluster takes its copy with it, so the name would
-// be held for ninety days with nothing anywhere able to reclaim it. Releasing is
-// also how an operator rebuilds a box under the same name, which a hold would
-// block for a season.
+// Deregister releases a subdomain immediately using its management token and
+// returns the label for caller cleanup. Deliberate releases bypass tombstones,
+// allowing an operator to rebuild under the same name after uninstalling.
 func (r *Registry) Deregister(token string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -396,14 +333,9 @@ func (r *Registry) Lookup(subdomain string) *Entry {
 	return &snapshot
 }
 
-// isExpiredLocked reports whether an entry has stopped serving. Beyond the
-// normal inactivity TTL, a never-proven registration is released after the much
-// shorter unprovenReservationTTL once EnforceProof is on, so a squatter cannot
-// hold a label for the full retention window without ever proving control; and a
-// deliberate release stops serving the moment it is made.
-//
-// Expired means the registration carries no traffic. It does not mean the label
-// is available, which isReleasableLocked answers. Caller holds r.mu.
+// isExpiredLocked reports whether inactivity or the initial proof deadline
+// has lapsed. isReleasableLocked separately decides when the label becomes
+// available to another holder. Caller holds r.mu.
 func (r *Registry) isExpiredLocked(entry *Entry) bool {
 	_, expired := r.lapsedAtLocked(entry)
 	return expired
@@ -433,22 +365,10 @@ func (r *Registry) lapsedAtLocked(entry *Entry) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// isReleasableLocked reports whether a lapsed label may be handed to somebody
-// else. A label that stopped serving is held for its previous token holder
-// through TombstoneTTL first, because the operator's published links outlive
-// their cluster and a stranger inheriting them is invisible behind the gateway's
-// own certificate.
-//
-// A label that never served earns no tombstone and is free the moment it lapses.
-// That keeps unprovenReservationTTL doing its job: its whole purpose is denying
-// a squatter a label they never serve, and a tombstone laid on top would hand
-// back the window it was written to take away. Reading the registration's own
-// history rather than EnforceProof makes it hold in both regimes, which matters
-// while proof-before-route is still off.
-//
-// FirstProvenAt rather than the current lease, because a move clears the lease
-// by design: a cluster that moved and then failed before proving its new address
-// has still published links under its name. Caller holds r.mu.
+// isReleasableLocked permits reuse after a lapsed label's tombstone expires.
+// Labels that have never been proven are released immediately on expiry.
+// FirstProvenAt preserves this distinction across moves that clear the current
+// proof. Caller holds r.mu.
 func (r *Registry) isReleasableLocked(entry *Entry) bool {
 	at, lapsed := r.lapsedAtLocked(entry)
 	if !lapsed {
@@ -460,16 +380,9 @@ func (r *Registry) isReleasableLocked(entry *Entry) bool {
 	return time.Since(at) > r.TombstoneTTL
 }
 
-// everProvenLocked reports whether the registration currently holds a proof that
-// can be attributed to a key. Every authorisation check reads a lease this way,
-// so the unproven-reservation release has to as well: a lease naming no key
-// authorises nothing, and must not buy a label the full retention window either.
-//
-// A rotation leaves both fields set, so it cannot make a live cluster look like
-// a squatter. A move clears them, which is the point: nothing has demonstrated
-// control at the new address yet, and the entry has the reservation window to do
-// so. Tombstone eligibility asks about the past instead and reads FirstProvenAt,
-// which a move leaves alone. Caller holds r.mu.
+// everProvenLocked checks for a recorded proof timestamp and key, independently
+// of lease expiry. A move clears both; FirstProvenAt retains historical proof
+// for tombstone decisions. Caller holds r.mu.
 func everProvenLocked(entry *Entry) bool {
 	return !entry.ProvenAt.IsZero() && entry.ProofKeySPKI != ""
 }
@@ -730,18 +643,9 @@ func (r *Registry) PromoteOnObserve(subdomain, observed string) bool {
 	return true
 }
 
-// activateLocked installs fp as the enforced pin. Caller holds r.mu.
-//
-// The displaced pin keeps bridging rotation propagation as PrevFingerprint only
-// when it is the key possession was proven for. A pin that reached this entry
-// without a proof — a token-asserted key promoted on observation — is dropped
-// instead, so it cannot keep serving traffic for the whole previous-pin window
-// after the proven key is pinned back. An entry with no proof record at all
-// (nothing has proven this registration yet) keeps the unconditional grace: the
-// proof regime is not in effect for it, and a rotation must not 502 a lagging
-// Traefik replica. The rule carries weight while proof-before-route is off,
-// where the pin set is the only guard; with it on, every handshake is separately
-// authorised against the proof lease whichever slot admitted the leaf.
+// activateLocked installs fp as the current pin. Caller holds r.mu.
+// The displaced key becomes PrevFingerprint if it matches the proven key or
+// the entry has no proof key yet. Otherwise its grace period ends immediately.
 func (r *Registry) activateLocked(entry *Entry, fp string) {
 	if FingerprintsEqual(entry.CertFingerprint, fp) {
 		return
@@ -802,18 +706,12 @@ func (r *Registry) UnpinnedSummary() (count int, oldest time.Duration) {
 // bytes — and on a move, after the registration has already been changed.
 var ErrChallengeUnavailable = errors.New("could not mint a proof challenge")
 
-// IssueChallenge mints a fresh single-use nonce for the token holder to sign,
-// stores it on the entry with a short expiry, and returns it. Token-gated so a
-// random caller cannot churn a live entry's nonce.
+// IssueChallenge returns an unexpired challenge or mints a single-use nonce
+// for an authenticated, active registration. Check err before accepted:
 //
-// Three outcomes, and a caller must read them in this order:
-//
-//   - err non-nil: the token was accepted but no nonce could be minted. Answer
-//     the caller an error. Reporting this as a refusal tells a cluster its name
-//     belongs to someone else because this process could not read random bytes.
-//   - err nil, accepted false: the subdomain is unknown or the token does not
-//     match. There is nothing to issue and the caller proved nothing.
-//   - err nil, accepted true: nonce is the challenge to return.
+//   - err != nil: nonce creation failed after authentication.
+//   - accepted == false: the registration is unknown, expired, or unauthorized.
+//   - accepted == true: nonce is the challenge to return.
 func (r *Registry) IssueChallenge(subdomain, token string) (string, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -934,14 +832,9 @@ func (r *Registry) Routable(subdomain string) bool {
 	return r.proofValidLocked(entry)
 }
 
-// ProofAuthorizes reports whether the entry's proof lease covers the key
-// observed on a live handshake. This is the authorisation the data plane needs:
-// the handshake, not the registry's pin, decides which key receives an exchange,
-// and the pin set deliberately accepts more than one fingerprint (a pending
-// rotation, the previous key, an unknown leaf inside the first-pin settle
-// window). Checking the observed leaf against the proven key closes every one of
-// those as a route for an unproven key, and it cannot be raced by a pin change
-// between the routing gate and the handshake.
+// ProofAuthorizes checks that the current proof lease covers the key observed
+// on this handshake. Checking the leaf itself protects against pin changes
+// between the routing decision and TLS verification.
 func (r *Registry) ProofAuthorizes(subdomain, observed string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -956,16 +849,9 @@ func (r *Registry) ProofAuthorizes(subdomain, observed string) bool {
 	return FingerprintsEqual(entry.ProofKeySPKI, observed)
 }
 
-// proofValidLocked reports whether the entry's proof lease authorises routing
-// right now. Beyond being present and unexpired, the lease must cover the key
-// the hop is pinned to: possession was proven for ProofKeySPKI, so once a pin is
-// enforced it must name that same key. Without this binding a pin that moved to
-// another key — a token-asserted candidate promoted the moment it appears on the
-// wire, with no proof of its own — would keep routing on the previous key's
-// lease, which is interception by whoever holds the token and sits on the path.
-// While unpinned there is no pin to bind to (the hop is in B5 grace), so the
-// lease alone admits the entry at the gate; ProofAuthorizes still holds the
-// served key to the proven one. Caller holds r.mu.
+// proofValidLocked requires a current proof lease and, when pinned, a pin
+// matching the proven key. ProofAuthorizes also checks the key actually served
+// on each handshake. Caller holds r.mu.
 func (r *Registry) proofValidLocked(entry *Entry) bool {
 	if !r.leaseCurrentLocked(entry) {
 		return false

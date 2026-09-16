@@ -18,20 +18,9 @@ import (
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 )
 
-// Deletion is the one decision a namespace's label must never be able to make
-// on its own.
-//
-// Pruning reaches every namespace carrying the project's label that the project
-// does not currently declare, and the label is writable by anyone who can write
-// a namespace. Pointing a victim's namespace at another project therefore hands
-// that project's next pass a namespace it never held and no reason to keep it,
-// and the pass deletes it with everything inside. Disclosure can be undone;
-// this cannot.
-//
-// So a candidate needs evidence that this project actually held the namespace,
-// and the evidence is the same record the rest of the reconcile already keeps:
-// a claim naming the object, or the namespace in the status this project last
-// wrote. Neither is reachable by writing a label.
+// Namespace deletion requires Project-held evidence in addition to a label.
+// These fixtures relabel a victim namespace without giving the other Project
+// a claim or legacy record for it.
 func relabelledFixture(t *testing.T, attacker *kipperv1.Project) *ProjectReconciler {
 	t.Helper()
 	scheme := testScheme()
@@ -261,20 +250,8 @@ func TestAnUnlabelledReplacementUnderARecordedNameIsNotCollected(t *testing.T) {
 		"a namespace that is not this project's, carrying no label and a name the project used to hold, was destroyed with everything in it")
 }
 
-// A project's own record is evidence about the project, not about the object,
-// and another project's claim is evidence about the object.
-//
-// Two projects can both have a namespace on record: one held it, lost it, and
-// still declares the environment whose name resolves to it, which is exactly
-// the state claim retention keeps alive so a relabel cannot erase it. The other
-// holds it now and has published a claim naming the live object. If the label
-// is then pointed back at the first, its name-only record says "mine" and
-// nothing consults the claim that says otherwise, so cleanup deletes a live
-// namespace belonging to somebody else.
-//
-// Rewriting the label is the move every gate here exists to survive, so it
-// cannot be what tips this. An exact claim on the object outranks any name-only
-// record, whoever holds it.
+// An exact UID claim from another Project protects its namespace even when
+// the label and a stale legacy name record point to the deleting Project.
 func TestANamespaceAnotherProjectClaimsIsNeverCollected(t *testing.T) {
 	scheme := testScheme()
 	contested := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{

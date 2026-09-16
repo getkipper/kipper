@@ -23,25 +23,10 @@ import (
 	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
-// Replacing a cluster's certificate authority is a two-sided swap: the API
-// server trusts an authority, and Traefik serves a certificate that authority
-// signed. Neither side can change at the same instant as the other, so the
-// order is forced — widen trust, move the signature, narrow trust — and the
-// cluster must never serve a certificate signed by an authority the API server
-// does not trust. That state locks every operator out of the OIDC login path.
-//
-// Kipper does not automate that swap, and this file is what remains after four
-// attempts to. The transaction spans the CA Secret, the hop TLS Secret and two
-// files on the host: Kubernetes has no cross-object commit and host files take
-// no compare-and-swap, so no fence can cover the writes that cause the lockout.
-// A process suspended between proving a gate and acting on it will act on a
-// cluster that has since moved. The reasoning and the review history are in
-// plans/ca-rollover-design.md and plans/ca-rotate-plan.md.
-//
-// What is left is the part that is sound: reading the material, saying whether
-// the two sides agree, and repairing the API server's half. The replacement
-// itself is an operator procedure with verification gates, documented in
-// docs/en/certificate-authority.md.
+// CA replacement must widen API-server trust, change the served certificate,
+// then narrow trust. These Kubernetes and host-file writes are non-atomic.
+// This file inspects replacement state and supports trust-anchor repair; the
+// operator performs replacement through docs/en/certificate-authority.md.
 
 const (
 	pendingCACertKey = "pending.crt"
@@ -465,25 +450,10 @@ func anchorIsActive(client *ssh.Client, state CAState) (loaded, known bool, err 
 	return loaded, true, nil
 }
 
-// SyncOperatorAuth re-renders the API server's authentication config from the
-// anchor currently on disk, keeping exactly the issuers it already trusts, and
-// waits for the API server to report the new config active.
-//
-// Taking the hosts from the running config rather than from the caller bounds
-// what this can do: it can change which authority is trusted but never which
-// issuer is, so it cannot silently redirect authentication.
-//
-// Running it beside another writer of the anchor is still something to avoid.
-// It reads that file, verifies the issuers against what it read, and installs a
-// config rendered from it; those are three moments, and installing a config
-// built from an anchor that has since been replaced puts the API server on an
-// authority the cluster no longer serves, which is operator lockout.
-//
-// The comparison and the write are one remote command, so an anchor that moves
-// between them is refused rather than installed. What that cannot cover is the
-// interval inside the command itself: a file takes no compare-and-swap. So the
-// window is small and the failure is a refusal, but an operator editing the
-// anchor by hand at the same moment remains outside anything this can enforce.
+// SyncOperatorAuth refreshes the API server's trust config using its existing
+// issuer hosts and the anchor on disk, then waits for activation. The fenced
+// write detects anchor changes before rename, but concurrent manual edits can
+// still race it; serialize anchor replacement with this operation.
 func SyncOperatorAuth(client *ssh.Client) error {
 	hosts, err := readAuthnHosts(client)
 	if err != nil {
@@ -636,21 +606,9 @@ func shortFingerprint(certPEM string) string {
 	return hex.EncodeToString(sum[:4])
 }
 
-// RefuseDuringCAReplacement stops an operation while the cluster's certificate
-// authority is part-way through being replaced.
-//
-// A domain cutover and an authority replacement rewrite the same two files on
-// the host, and they disagree about what the trust anchor should hold. The
-// cutover's gate renders the anchor it expects from the CA Secret — the active
-// signer plus a retained one — while a replacement in progress has an operator
-// writing that file by hand, carrying an incoming authority the gate has no
-// concept of. The rendered hashes differ, so the gate never matches: the
-// cutover parks mid-transaction and tells the operator to resync, which reads
-// the same file and produces the same rejected hash.
-//
-// The certificate status already refuses to start a replacement during a
-// cutover. This is that rule in the other direction, which is the one that was
-// missing.
+// RefuseDuringCAReplacement guards operations that share the API server's
+// trust files with CA replacement. It checks pending/retained authorities and,
+// when SSH is available, disagreement between the host anchor and CA Secret.
 func RefuseDuringCAReplacement(ctx context.Context, clientset kubernetes.Interface, client *ssh.Client) error {
 	secret, err := clientset.CoreV1().Secrets(hopNamespace).Get(ctx, hopCASecret, metav1.GetOptions{})
 	if k8serrors.IsNotFound(err) {

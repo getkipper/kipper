@@ -21,33 +21,12 @@ type SystemComponent struct {
 	Apply func(client *ssh.Client) error
 }
 
-// SystemComponents returns the list of cluster components that
-// kip upgrade reconciles. Only components whose install functions
-// are safely re-runnable are included.
-//
-// The following are intentionally excluded:
-//   - cert-manager: install function needs the admin email, which is
-//     not persisted in cluster config. Upgrade-safe variant pending.
-//   - Dex: re-rendering its manifest rewrites the ConfigMap, including
-//     staticPasswords, which would drop every user added after install.
-//     (The older reason recorded here, that the install mints a new OAuth
-//     client secret each call, is no longer true: ensureDexClientSecret
-//     reuses the existing one. The exclusion stands on the user data.)
-//   - Console: depends on Dex's client secret. Upgrade for the console
-//     image happens via the existing kubectl-rollout path in kip upgrade.
-//   - k3s: control-plane upgrade has its own blast radius. Separate flag.
-//
-// `domain` is threaded into the Traefik trusted-proxy resolution.
-// `dnsResolvers` is the cluster's persisted resolver list, threaded into
-// the cert-manager DNS patch so an upgrade keeps it consistent with the
-// resolvers chosen at install (empty falls back to the public defaults).
-// `state` carries the active profile plus any per-component overrides and
-// the user's explicit enable/disable choices. On a nano cluster (or when
-// the user has disabled them explicitly), Loki and kube-prometheus-stack
-// are omitted entirely so the upgrade does not undo state the CR records.
-// `trustedProxies` is the operator's persisted --trusted-proxy list; the
-// kipper.run gateway addresses are re-resolved here on every upgrade so a
-// gateway IP change cannot pin stale forwarded-header trust.
+// SystemComponents returns components reconciled by kip upgrade, honoring
+// profile overrides and explicit enable/disable choices. It reuses saved DNS
+// settings and refreshes gateway addresses for trusted-proxy configuration.
+// Dex's full manifest would overwrite users; cert-manager's full install needs
+// the admin email. Only cert-manager's DNS settings are reconciled here.
+// Console and k3s upgrades have separate paths.
 func SystemComponents(domain string, dnsResolvers, trustedProxies []string, state PlatformState) []SystemComponent {
 	components := []SystemComponent{
 		{Name: "traefik", Apply: func(c *ssh.Client) error {

@@ -260,21 +260,9 @@ func (i *Installer) listBrokenBackupRepositories(ctx context.Context) ([]string,
 	return broken, nil
 }
 
-// listMinIOBackupDirs runs a one-shot Pod with the mc client and
-// returns the top-level entry names under `velero/backups/`. Each
-// entry corresponds to a Kopia repo holding a single backup's data.
-//
-// The Pod prints `mc ls --json` output to stdout; the function reads
-// the Pod logs after completion, parses each line as a minioListEntry,
-// strips the trailing slash, and returns the names sorted.
-//
-// The shell script uses `set -e` and does not swallow errors from
-// `mc alias set` or `mc ls`. If MinIO is unreachable, credentials are
-// wrong, or the bucket is missing, the Pod ends in PodFailed and
-// runMinIOLister returns a non-nil error. DetectOrphans then leaves
-// MinIOReachable=false and the caller knows orphan-in-storage data is
-// missing rather than treating "no entries listed" as "bucket empty".
-// An empty bucket is fine: `mc ls` exits 0 and the Pod logs are empty.
+// listMinIOBackupDirs runs mc ls --json in a temporary Pod and returns sorted
+// entry names under velero/backups. Command or Pod failures propagate so callers
+// can distinguish inaccessible storage from an empty listing.
 func (i *Installer) listMinIOBackupDirs(ctx context.Context) ([]string, error) {
 	pod, err := i.runMinIOLister(ctx, []string{
 		"sh", "-c",

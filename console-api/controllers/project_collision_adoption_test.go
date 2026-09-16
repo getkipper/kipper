@@ -16,22 +16,9 @@ import (
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 )
 
-// Two projects can resolve to one namespace name: project shop with an
-// environment prod, and project shop-prod with an environment that resolves to
-// the project's own name, both derive shop-prod. A new collision is refused to both, because deciding it by
-// whoever reconciles first decides ownership by a race.
-//
-// A collision that a previous release already settled is a different thing. One
-// of the two has been running in that namespace for months, and refusing it now
-// takes the namespace away from the project that legitimately holds it: no claim
-// is written, so the namespace drops out of the project's own record, and once
-// the claim is what resolves ownership its members cannot reach it at all. The
-// upgrade would break a cluster that worked.
-//
-// So a settled collision is adopted rather than reopened, on the evidence the
-// previous release left: the namespace carries this project's label and this
-// project's own record says it held it. A relabel supplies the first and cannot
-// supply the second.
+// shop/prod and shop-prod/default both resolve to shop-prod. A settled
+// holder can adopt the namespace using its label and legacy record; a new
+// collision requires resolution instead of choosing by reconcile order.
 func contested(t *testing.T, holder string) crclient.Client {
 	t.Helper()
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{

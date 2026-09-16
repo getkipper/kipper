@@ -66,20 +66,10 @@ type shareResponse struct {
 // so an API-server outage is not reported to the caller as a missing service.
 var errStorageServiceNotFound = errors.New("minio storage service not found")
 
-// getMinioStatefulSet resolves a MinIO service to its immutable StatefulSet UID
-// by an EXACT lookup in the given namespace. The namespace is always supplied by
-// the caller — the ?namespace= query the ProjectScopeQuery middleware authorized
-// on the authenticated routes, or the explicit request parameter on the
-// unauthenticated public/shared routes — so storage never guesses a namespace by
-// a cluster-wide name search, and a service name that collides across tenants can
-// never resolve to another tenant's namespace.
-//
-// It queries AppsV1().StatefulSets (never CoreV1().Services), so the target must
-// be a real workload physically residing in that namespace: an ExternalName
-// Service cannot alias into another tenant's network path. The
-// kipper.run/service-type=minio label check rejects an unrelated same-named
-// workload. Returns errStorageServiceNotFound on a miss and a wrapped error on a
-// Kubernetes API failure — never a fallback.
+// getMinioStatefulSet returns the UID of the named MinIO-labeled StatefulSet
+// in the supplied namespace. The caller supplies authorized namespace scope.
+// Looking up the workload directly avoids Service aliases. Missing or mismatched
+// workloads return errStorageServiceNotFound; API errors propagate.
 func (s *Storage) getMinioStatefulSet(ctx context.Context, namespace, service string) (uid string, err error) {
 	if namespace == "" || service == "" {
 		return "", errStorageServiceNotFound

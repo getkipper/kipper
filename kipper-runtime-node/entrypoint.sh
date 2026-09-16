@@ -1,15 +1,6 @@
 #!/bin/sh
-# Kipper Node runtime entrypoint.
-#
-# When the user has declared third-party dependencies (Phase 3), the
-# Function controller writes a package.json into the code ConfigMap.
-# That mount is read-only, so we copy the code into a writable /tmp/fn
-# and run npm install there. The server then loads the handler from
-# /tmp/fn instead of /app/function.
-#
-# Image-based functions (no inline source, no ConfigMap mount) skip
-# this entirely — they are a single container with whatever bundle
-# the user shipped.
+# When package.json is mounted, copy the read-only function source to
+# /tmp/fn, install dependencies with npm, and load the handler there.
 
 set -e
 

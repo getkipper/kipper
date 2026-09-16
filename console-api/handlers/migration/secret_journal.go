@@ -51,17 +51,9 @@ type journaledMeta struct {
 	Immutable       *bool                   `json:"immutable,omitempty"`
 }
 
-// journalMAC authenticates a backup as this migration's own. The structural
-// fields of an entry — its name, session label, and backup-of annotation — are
-// all derivable from public identifiers and writable by anyone who can create a
-// Secret in the namespace, so they cannot show who wrote it. This MAC is keyed
-// on the migration session secret, which a namespace principal does not hold,
-// and covers the whole restorable record so no part of it can be swapped.
-//
-// Every field is written length-prefixed. A separator byte would be ambiguous
-// because Secret values are arbitrary bytes: {"a":"x","b":"y"} and
-// {"a":"x\x00b\x00y"} would otherwise hash identically, letting a namespace
-// writer move a genuine entry between colliding shapes and keep its MAC.
+// journalMAC authenticates the restorable record using the migration session
+// secret. Public labels and annotations alone cannot prove backup provenance.
+// Length-prefix fields and sort data keys to encode arbitrary bytes unambiguously.
 func journalMAC(sessionSecret, sessionID, namespace, name, secretType, meta string, data map[string][]byte) string {
 	mac := hmac.New(sha256.New, []byte(sessionSecret))
 	write := func(b []byte) {

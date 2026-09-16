@@ -18,18 +18,7 @@ import (
 // alert store caps at fifty, so the flood evicted the first alert of the
 // incident — the one whose timestamp said when the volume went read-only.
 const (
-	// escalateAfter is how long an unresolved crash loop runs before it stops
-	// being a warning.
-	//
-	// Six hours is past every slow operation this platform performs (a restore,
-	// a migration, a node drain, an instance-manager restart, all minutes) and
-	// past the point where waiting is reasonable: kubelet's backoff caps at
-	// five minutes, and nothing recovers on the seventy-third attempt that
-	// would not have on the tenth. It also keeps escalation inside waking hours
-	// from either end. A failure at 07:00 escalates at 13:00 and one at 23:00
-	// at 05:00, where four hours would make 03:00 the common escalation time
-	// for an evening failure, and the second 3am alert for something unfixable
-	// is the one that gets escalation switched off for good.
+	// escalateAfter sets the warning-to-critical threshold for unresolved crash loops.
 	escalateAfter = 6 * time.Hour
 
 	// escalatedRepeat is how often it repeats once escalated. Daily still

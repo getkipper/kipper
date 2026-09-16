@@ -230,22 +230,9 @@ func (b *evidenceBudget) carry() []string {
 	return append(next, b.fresh...)
 }
 
-// writableClaims lists the persistent volumes a container can write to.
-//
-// This is the whole of the test. A log line says a filesystem stopped accepting
-// writes and does not say which, and no amount of parsing can settle it: a
-// pathname cannot establish its backing filesystem without resolving the
-// container's mount namespace and its symlinks, and the ordinary Postgres layout
-// puts /var/lib/postgresql/data/pg_wal on a different volume from the path it is
-// written as.
-//
-// Four rounds of review were spent trying to attribute the failure from the
-// line, and the attempt was wrong in both directions: naming a healthy volume
-// with confidence, and suppressing a real incident because a path looked like it
-// pointed elsewhere. So the alert reports what it knows. The container writes to
-// these volumes, one of them or the node's disk stopped accepting writes, and
-// here is the line it wrote. An operator reading that has everything the parser
-// was trying to guess, and none of the guesses.
+// writableClaims returns the PVCs mounted writable by the named container.
+// These are candidates for a read-only-filesystem alert; a log path alone
+// cannot identify the failed volume across mount points and symlinks.
 func writableClaims(pod *corev1.Pod, container string, kind containerKind) []string {
 	claimForVolume := map[string]string{}
 	readOnlyVolume := map[string]bool{}

@@ -9,17 +9,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// RunBuildJanitor periodically deletes build Jobs and their ephemeral secrets
-// in the build namespace once they are older than maxAge, regardless of state.
-//
-// The normal cleanup path is the Job's TTLSecondsAfterFinished plus ownerRef
-// garbage collection of the secrets it owns. The janitor is the backstop for
-// what that path misses: a Job that hangs and never finishes (so its TTL never
-// fires), and a credential-bearing ephemeral secret orphaned because
-// console-api died between creating it and creating (or cleaning up) its Job.
-// It uses the server-set creationTimestamp, so it works across a console-api
-// restart. maxAge must exceed the longest legitimate build so a running build
-// is never swept.
+// RunBuildJanitor deletes build-labeled Jobs and Secrets older than maxAge.
+// It supplements finished-Job TTL cleanup by covering hung Jobs and orphaned
+// credentials. Age uses creationTimestamp, so cleanup survives restarts.
+// Set maxAge beyond the longest legitimate build; active Jobs are eligible too.
 func RunBuildJanitor(ctx context.Context, client kubernetes.Interface, interval, maxAge time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

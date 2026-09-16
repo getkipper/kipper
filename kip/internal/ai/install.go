@@ -392,23 +392,10 @@ func (i *Installer) helmChartGeneration(ctx context.Context, chartName string) (
 	return chart.GetGeneration(), nil
 }
 
-// waitForHelmChartJob waits until the helm-install Job that
-// helm-controller spawned for `chartName` reaches Succeeded > 0, or
-// fails loudly on Failed > 0.
-//
-// k3s helm-controller's HelmChartStatus has no observedGeneration
-// field, so there is no straightforward "ready when ObservedGeneration
-// == Generation" check. Instead we anchor on the Job: helm-controller
-// deletes and recreates `helm-install-<chartName>` whenever the chart
-// spec changes (verified against k3s-io/helm-controller chart.go's
-// reconcileJob → ErrReplace path). A new UID after our apply means
-// helm-controller has reconciled the new spec; we then poll the new
-// Job to terminal state. If the apply was a no-op (generation
-// unchanged) the existing Succeeded Job satisfies us immediately.
-//
-// Without this gate, waitForDeployment can return success against the
-// pre-upgrade Deployment that is still Available because helm-controller
-// has not yet rolled out the new chart-rendered manifests.
+// waitForHelmChartJob waits for JobComplete and reports JobFailed. When a
+// chart update requires replacement, the Job UID must differ from prevJobUID;
+// a no-op apply can reuse the completed Job. This prevents an old available
+// Deployment from satisfying readiness before Helm applies the new spec.
 func (i *Installer) waitForHelmChartJob(ctx context.Context, chartName string, prevJobUID types.UID, expectNewJob bool) error {
 	deadline := time.Now().Add(i.timeout())
 	jobName := helmInstallJobName(chartName)

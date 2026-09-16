@@ -8,26 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Step 6: backup integration verification.
-//
-// Phase 2 deliberately ships no new backup machinery. The existing
-// 'kip ai backup' (Phase 1 follow-ups Step 5) already covers any PVC
-// in the kipper-ai namespace via the primary Velero filesystem
-// backup, and any Kipper-owned HelmChart CR in kube-system via the
-// config backup's label selector. Phase 2 puts Qdrant and AnythingLLM
-// in kipper-ai with the same labels Phase 1 charts use, so backups
-// extend automatically.
-//
-// The tests below pin that cross-step invariant. If anyone:
-//   - Narrows primaryBackupSpec.includedNamespaces away from
-//     kipper-ai, or
-//   - Adds an excludedResources clause that drops Qdrant or
-//     AnythingLLM PVCs, or
-//   - Removes managed-by=kipper or part-of=kipper-ai from the RAG
-//     HelmChart manifests, or
-//   - Changes configBackupSpec's label selector,
-// these tests fail loudly so 'kip ai backup' does not silently stop
-// covering the RAG bundle.
+// RAG backups rely on the shared kipper-ai namespace and HelmChart labels.
+// These tests verify that backup selection continues to cover RAG data and config.
 
 // TestPrimaryBackupCoversRAGNamespace pins the namespace inclusion
 // that gives Phase 2 backup coverage for free. The primary backup

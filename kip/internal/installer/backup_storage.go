@@ -45,22 +45,9 @@ type AWSCredentials struct {
 	SecretAccessKey string
 }
 
-// LoadAWSCredentials reads the named profile from an AWS-style INI
-// credentials file (typically `~/.aws/credentials`) and returns the
-// access key + secret key it contains. The file format follows the
-// AWS CLI convention:
-//
-//	[default]
-//	aws_access_key_id = AKIA...
-//	aws_secret_access_key = ...
-//
-//	[acme]
-//	aws_access_key_id = AKIA...
-//	aws_secret_access_key = ...
-//
-// Section headers wrapped in `[profile NAME]` (the form `~/.aws/config`
-// uses) are also accepted, so the same file can be shared between the
-// two AWS CLI files without surprises.
+// LoadAWSCredentials reads access and secret keys from an INI profile, using
+// default when profile is empty. Both [NAME] and [profile NAME] headers are
+// accepted; missing key fields return an error.
 func LoadAWSCredentials(path, profile string) (*AWSCredentials, error) {
 	if profile == "" {
 		profile = "default"

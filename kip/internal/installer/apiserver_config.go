@@ -39,22 +39,10 @@ const (
 	apiServerArgsPartial
 )
 
-// EnsureAPIServerConfig brings the API server arguments on an existing cluster
-// up to what this version of kip installs, and reports whether it changed
-// anything. It is the upgrade path for operator login: a cluster installed
-// before those arguments existed has no authenticator at all, so its API server
-// rejects every Dex token while accepting the admin certificate, and nothing
-// inside the cluster can fix that because the flags live on the host.
-//
-// The order is the safety argument. The files the flags name are written before
-// anything else, including before a refusal, because a refusal tells the
-// operator to add those flags by hand and an API server pointed at a missing
-// file does not start. The authentication config lands as the
-// zero-authenticator stub, which leaves the cluster exactly as authenticated as
-// it was: the issuer is configured afterwards, by EnsureOperatorAuth, which
-// verifies the API server loaded it.
-//
-// notify, when given, is called before anything restarts.
+// EnsureAPIServerConfig updates host-side API-server arguments and reports
+// whether it changed configuration. It prepares referenced files before adding
+// flags or advising repair of a partial configuration. EnsureOperatorAuth later
+// installs and verifies the issuer configuration. notify runs before a restart.
 func EnsureAPIServerConfig(client commandRunner, notify func(string)) (changed bool, err error) {
 	if err := refuseANodeThatRunsNoServer(client); err != nil {
 		return false, err

@@ -66,21 +66,9 @@ func Claim(ctx context.Context, c crclient.Client, namespace, name, creating str
 	return false, "", workload.NameTakenError{Name: name, Kind: existing.Spec.Kind}
 }
 
-// Release drops a reservation this caller made when the workload it was for
-// could not be written, so a failed create does not park a name for ever.
-//
-// The delete is conditional on the uid this caller created, so it can only ever
-// remove its own reservation. Without that precondition a reservation deleted
-// out of band and re-made by somebody else in the meantime would be deleted by
-// this rollback, handing the name away while its new holder was still writing.
-//
-// It runs on a context detached from the caller's, because the usual reason a
-// workload write failed is that the request was cancelled or timed out, and a
-// rollback on that same context does nothing at all.
-//
-// A delete that fails is not worth failing the request over: the caller is
-// already answering an error, and the reservation it leaves behind is the
-// follow-up case where a name is parked until someone removes it.
+// Release rolls back only the reservation with the caller's UID, using a
+// detached, time-limited context so cancellation still permits cleanup.
+// Deletion errors leave a reservation requiring later cleanup.
 func Release(ctx context.Context, c crclient.Client, namespace, name string, uid types.UID) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
@@ -89,16 +77,10 @@ func Release(ctx context.Context, c crclient.Client, namespace, name string, uid
 	}, crclient.Preconditions{UID: &uid})
 }
 
-// EnsureFree reports whether name is available for a workload of kind creating
-// in namespace, failing with a workload.NameTakenError when another kind holds
-// it.
-//
-// This is the fallback for a cluster with no WorkloadName resource, and it is
-// what every caller did before claims existed: it reads the other kinds and
-// then the caller creates, so two concurrent creates of different kinds both
-// pass. Callers reach it only through Reserve.
-//
-// A name this kind already holds is free for it, since the callers upsert.
+// EnsureFree checks competing workload kinds and permits a same-kind redeploy
+// when that workload is incumbent. Reserve also acquires a WorkloadName claim;
+// on clusters lacking that resource, this read-only check leaves a race between
+// concurrent creates of different kinds.
 func EnsureFree(ctx context.Context, c crclient.Client, namespace, name, creating string) error {
 	key := types.NamespacedName{Name: name, Namespace: namespace}
 

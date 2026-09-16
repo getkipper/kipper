@@ -218,28 +218,10 @@ func publishedStatus(err error) metav1.ConditionStatus {
 	return metav1.ConditionTrue
 }
 
-// templateSettlesAs reports whether writing candidate onto live would leave the
-// stored pod template as it already is.
-//
-// It asks the API server, because only the API server knows. A pod template
-// built in this package carries the fields the controller sets and nothing
-// else, while the one that comes back from a Get has been through admission:
-// restartPolicy, dnsPolicy, schedulerName, terminationGracePeriodSeconds, an
-// empty securityContext, and per container terminationMessagePath,
-// terminationMessagePolicy, imagePullPolicy and a port's protocol. Comparing
-// those two directly is false on every real cluster and true in every test that
-// stores what it is handed, which is the worst pair of answers available — the
-// promise that an env edit does not restart a running app held in the suite and
-// nowhere else.
-//
-// A dry-run update returns exactly what the write would store, defaulted and
-// admitted, so the comparison is between two objects of the same shape. It runs
-// only where a generation is being held, which is while an edit is pending and
-// unapplied rather than on every reconcile.
-//
-// Listing the fields admission fills in would work until Kubernetes defaults
-// something new, and the list would be wrong before anybody noticed. This asks
-// instead of remembering.
+// templateSettlesAs compares live with an API-defaulted, dry-run candidate.
+// Admission defaults make raw controller templates differ from stored templates.
+// If dry-run is unsupported, compare the raw candidate and return answered=false;
+// other errors propagate.
 func templateSettlesAs(ctx context.Context, c client.Client, live *appsv1.Deployment, candidate corev1.PodTemplateSpec) (settles, answered bool, err error) {
 	probe := live.DeepCopy()
 	probe.Spec.Template = candidate
@@ -259,27 +241,9 @@ func templateSettlesAs(ctx context.Context, c client.Client, live *appsv1.Deploy
 	}
 }
 
-// dryRunRefused reports whether the cluster declined to simulate the write at
-// all, as opposed to answering that the write itself is unacceptable.
-//
-// Kubernetes rejects a dry-run that would reach an admission webhook declaring
-// side effects it cannot promise are safe to simulate. That says nothing about
-// whether the ordinary update would be accepted, it is a property of the cluster
-// rather than of the moment, and retrying cannot help — so the caller carries on
-// without an answer.
-//
-// It is recognised by what the API server says rather than by the status it
-// says it with. A webhook can reject this particular candidate with a 400 for a
-// policy reason that would reject the ordinary update too, and reading that as
-// "this cluster cannot dry-run" would tell the operator something untrue and
-// then attempt a write already known to fail. The message is the API server's
-// own, from the admission dispatcher that declines to call a webhook whose
-// side effects it cannot simulate.
-//
-// Everything else is returned: a permission denial, an invalid candidate, a
-// timeout, a server error, and any refusal whose wording this does not know.
-// A reconcile that fails and says why is diagnosable; one that quietly decides
-// the cluster is incapable and restarts an app is not.
+// dryRunRefused recognizes the API server's unsupported-dry-run response
+// by both status and message. Other admission, permission and transient errors
+// propagate so callers can distinguish an invalid write from an unavailable simulation.
 func dryRunRefused(err error) bool {
 	return errors.IsBadRequest(err) &&
 		strings.Contains(strings.ToLower(err.Error()), "does not support dry run")

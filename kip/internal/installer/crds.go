@@ -217,30 +217,10 @@ func crdNameFromManifest(manifest []byte) (string, error) {
 // never seen this annotation is the ordinary case on a fresh install and on
 // every cluster written before stamping existed.
 func liveCRDWriterVersion(client commandRunner, name string) (string, error) {
-	// The jsonpath yields nothing rather than failing when the annotation is
-	// absent, so an unstamped CRD and a missing one both read as empty. The
-	// error is reserved for a cluster that could not be asked.
-	//
-	// The key's dots are escaped and its slash is left bare. This is the form
-	// kubectl's parser accepts, verified against a live cluster rather than
-	// assumed: reading controller-gen.kubebuilder.io/version this way returns
-	// the value, while the bracket-quoted spelling
-	// {.metadata.annotations["controller-gen\.kubebuilder\.io/version"]} is
-	// rejected with `invalid array index`. A test with a fake runner cannot
-	// tell these apart, so changing this line needs a real kubectl to confirm.
-	// --ignore-not-found makes an absent CRD an empty success, so the only
-	// remaining non-zero exit is a cluster that could not be asked: a timeout, a
-	// transport reset, an authentication or authorization failure. Swallowing
-	// those with `|| true` made every one of them read as "unstamped", which is
-	// the one answer that waves the apply through — a safety gate that fails
-	// open on exactly the conditions it should refuse under.
-	// stderr is discarded but the exit status is not. The runner returns
-	// combined output, so a successful kubectl that also emits an API warning
-	// would otherwise hand back "Warning: ...\nv0.11.0" — which parses as no
-	// version at all, and an unparseable stamp reads as an unstamped cluster.
-	// That is the same fail-open this redirect used to cause with `|| true`,
-	// reached from the opposite direction, and no fake runner can show it
-	// because a fake returns one clean stream.
+	// Escape dots in the annotation key for kubectl JSONPath. Missing CRDs
+	// and annotations yield empty output; API failures retain their exit status.
+	// Discard stderr so warnings cannot corrupt the version string returned by
+	// the runner's combined-output API.
 	cmd := fmt.Sprintf(
 		"kubectl get crd %s --ignore-not-found -o jsonpath='{.metadata.annotations.%s}' 2>/dev/null",
 		name, strings.ReplaceAll(CRDWrittenByAnnotation, ".", `\.`))

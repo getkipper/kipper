@@ -44,14 +44,8 @@ const phaseClass = computed(() => {
   }
 })
 
-// Slider denominator priority:
-//   1. override_memory_limit — the user's most recent intent. After a
-//      successful PATCH this is what comes back, so the ResourceControl's
-//      "userMoved" flag clears and Apply disables itself again. Without
-//      this prop changing, the slider would stay dirty until the helm
-//      rollout completes and the status block updates current_*.
-//   2. current_memory_limit — what the cluster is actually running.
-//   3. profile_memory_limit — fallback while the status block is empty.
+// Prefer the saved override so Apply resets as soon as PATCH succeeds.
+// Fall back to the running limit, then the profile while status is loading.
 const memoryLimitBytes = computed(() => {
   const raw =
     props.component.override_memory_limit ||
@@ -109,13 +103,8 @@ const usage = useResourceUsage(usageScope)
 
 const memorySparkline = computed(() => usage.data.value?.memory_sparkline ?? [])
 
-// Match the gauge numerator to the slider's denominator: only containers
-// whose name matches the platform component get summed. Without this
-// filter, sidecars (config-reloader, thanos, etc.) inflate the numerator
-// while the limit covers just the managed container, painting a
-// misleadingly hot gauge that the slider cannot fix. Falls back to the
-// totals when no container matches by name, so an unknown component still
-// renders a rough gauge.
+// Use containers matching the component name so usage and limits cover the
+// same workload. Fall back to totals when the component name has no match.
 const usageMatches = computed(() => {
   const rows = usage.data.value?.containers ?? []
   return rows.filter((c) => c.name === props.component.name)
@@ -159,16 +148,8 @@ async function applyLimit(newLimit: number) {
   }
 }
 
-// Components that ride along with another chart, and always-on ones, have no
-// enable/disable of their own: the API rejects the update, so offering the
-// button only produces an error the operator can do nothing about.
-//
-// An API build that omits the field is treated as "cannot toggle" rather than
-// "can". That build already rejects the action, so trusting the absence would
-// keep showing the buttons this exists to remove, for the minutes a rollout has
-// the new console in front of the old API. Hiding prometheus and loki's real
-// toggles for that window costs an operator one retry; showing six invalid ones
-// costs them a 400 they can do nothing about.
+// Offer toggles only when the API explicitly supports them, including during
+// rollouts where an older API may omit the capability field.
 const canToggle = computed(() => props.component.toggleable === true)
 
 async function toggleEnabled() {

@@ -1,15 +1,6 @@
-// Per-component config for the Platform page's ResourceControl sliders.
-//
-// Each entry pins:
-//  - where the component's pods live (namespace + label selector for
-//    the usage gauge), and
-//  - the slider's allowed memory range for that component.
-//
-// Selectors follow the upstream charts' standard `app.kubernetes.io/name`
-// label. If a chart's pods don't carry that label, set `selector` to
-// whatever the chart actually uses (some charts only set `app=<name>`).
-// The gauge degrades to "no metrics" if the selector misses, so a wrong
-// selector is recoverable without breaking the slider's write path.
+// Platform resource sliders use each component's namespace, pod selector,
+// and memory range. Keep selectors aligned with the installed chart's labels
+// so usage gauges receive metrics.
 
 const Mi = 1024 ** 2
 const Gi = 1024 ** 3

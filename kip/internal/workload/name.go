@@ -22,20 +22,10 @@ var gvrByKind = map[string]schema.GroupVersionResource{
 	"job":      manifest.JobGVR,
 }
 
-// EnsureNameFree reports whether name is available for a workload of kind
-// creating in namespace, failing with a workload.NameTakenError when another
-// kind holds it. See workload.Kinds for why the kinds compete.
-//
-// A name this kind already holds is free for it: every caller here upserts, so
-// refusing would block the redeploy of the workload that got there first. In a
-// namespace where a collision already exists that is the legitimate holder, and
-// telling it to rename over a name it owns would break the working half. The
-// intruder's own re-apply still reaches the controller, which refuses it and now
-// says so on its status.
-//
-// A same-kind clash on a create-only caller is left to the API's own
-// AlreadyExists. A lookup that fails is reported as a lookup failure rather than
-// as a taken name.
+// EnsureNameFree checks competing workload kinds, allowing redeploy when
+// the same-kind workload is incumbent. It returns workload.NameTakenError
+// for another holder and propagates lookup failures. Same-kind create
+// collisions are left to the API's AlreadyExists check.
 func EnsureNameFree(ctx context.Context, dyn dynamic.Interface, namespace, name, creating string) error {
 	mine, err := dyn.Resource(gvrByKind[creating]).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	switch {

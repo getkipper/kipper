@@ -96,28 +96,9 @@ func JobOwnsChild(obj client.Object, job *kipperv1.Job) bool {
 	return owned
 }
 
-// adoptChild takes ownership of an object this workload reconciles, and refuses
-// one that is not Kipper's.
-//
-// Adopting on name alone is not safe. A Deployment, Service, CronJob or
-// autoscaler named after the workload may have been created by GitOps, an
-// operator or a human, and taking ownership turns it into a child that dies
-// with the workload. adoptWriterSecrets already writes this reasoning down for
-// Secrets — "a name collision with an object created by GitOps, an operator, or
-// a human must not convert that object into an App child" — and requires the
-// writer's labels rather than the conventional name.
-//
-// The child objects never got the same treatment: only the Create path carried
-// a controller reference, so an object that already existed was reconciled for
-// ever and garbage-collected never. Deleting an app in production removed
-// the CR and left the workload serving, and a Function's HTTPScaledObject
-// outlived its Function by hours while KEDA rebuilt the ScaledObject
-// underneath it.
-//
-// Ownership is re-asserted on every pass rather than set once, for the reason
-// reconcileDerivedEnvSecret does the same: a reference lost to a direct write
-// or a restore is repaired on the next pass instead of surviving until
-// something happens to recreate the object.
+// adoptChild validates Kipper provenance before setting the controller reference.
+// Reassert ownership on each reconcile to repair lost references and keep
+// garbage collection working. Name alone is insufficient evidence of ownership.
 func adoptChild(kind string, obj client.Object, owner workloadOwner, scheme *runtime.Scheme) error {
 	if ok, why := childProvenance(obj, owner); !ok {
 		return fmt.Errorf("%s %q in %s %s; rename the %s or remove that object",

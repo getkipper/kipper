@@ -1,17 +1,7 @@
-// Package datavolume decides which PersistentVolumeClaims hold a service's
-// data, because more than one module deletes them.
-//
-// The CLI destroys them on `kip service delete --delete-data`, and the Service
-// finalizer destroys them when the console asks for it. Deleting a volume
-// cannot be undone, so the two must not drift on which ones they mean.
-//
-// Two conditions have to hold. The label narrows the set to the service: the
-// StatefulSet controller stamps its own selector, app=<service>, onto every
-// claim it creates from the template, so a service's claims carry it whether or
-// not the template does. The name then has to be one a StatefulSet would have
-// built from a claim template called "data", which is what both writers of a
-// Kipper service use. A volume that merely carries the label belongs to whoever
-// made it, and an App of the same name carries it too.
+// Package datavolume shares service-data PVC selection between the CLI and
+// Service finalizer. Callers combine the app=<service> selector with Belongs,
+// which requires a data-<service>-<ordinal> name. A label alone is insufficient
+// for destructive cleanup.
 package datavolume
 
 import (

@@ -8,64 +8,18 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/capability"
 )
 
-// Every route the console serves declares how it is authorized. The table is
-// the inventory step 2 of the RBAC plan calls for, and the tests below hold it
-// to the router and to the recorded matrix.
-//
-// It exists because a route added without a gate does not look like anything.
-// It answers 200, the reviewer sees a handler, and nothing in the suite objects.
-// With this table an unclassified route fails the build, and a route whose
-// declaration disagrees with the answers the matrix recorded fails too.
-//
-// What no test here can check is whether the capability a route names describes
-// what the handler actually hands over. Several capabilities are held by exactly
-// the same built-in roles, so naming the wrong one of those reproduces every
-// column and passes. Four review rounds each found entries of that shape, in
-// routes nobody had questioned: a file listing under "read apps and services", a
-// diagnosis route that ships pod logs to an external provider, a token that is
-// really a deploy. They were found by reading handlers, and the next one will be
-// too.
-//
-// So this table is reviewed rather than proven, and the release that makes it
-// the gate has to re-read it rather than trust that the build is green. It will
-// have a better tool than a re-read: once a capability is what admits a caller,
-// a probe holding exactly one capability separates the ten that share built-in
-// membership, the way a column with a lower cluster role would separate the
-// global ranks below. Both are fixtures that cannot exist while role ranks are
-// still the gate.
+// The authorization inventory is checked against the router and response
+// matrix. Review each capability against its handler: capabilities shared
+// by the same built-in roles produce identical matrix results.
 type authzClass int
 
 const (
 	// classPublic is reachable without credentials, deliberately.
 	classPublic authzClass = iota
-	// classAuthenticated needs a valid token and nothing more at the router.
-	//
-	// Many of these act on the caller themselves or expose nothing
-	// project-specific. The rest serve project-scoped content and are filtered
-	// item by item inside the handler, and their gate is real and is not here.
-	//
-	// Find that family by its gate rather than by any list, including this one:
-	// it is the callers of canAccessNamespace, whether directly or through
-	// filterPodsByAccess, accessibleAlerts or filterSeriesByAccess. Today that
-	// is the cluster-wide routes, services and jobs lists, resource adjustments,
-	// the resource log, the usage summary, both alerts routes, the dashboard and
-	// its usage history. An earlier version of this comment counted six, and the
-	// count was the wrong thing to write down: the four it missed were found by
-	// following the helper's callers, which is what the next reader should do.
-	//
-	// GET /api/v1/projects is in the family and outside that gate. It filters on
-	// projectMemberRole directly and serves app names, images, replica counts,
-	// readiness and route hosts, so converting only canAccessNamespace's callers
-	// leaves it behind.
-	//
-	// The gate asks whether the caller is a member and nothing else, with no
-	// capability attached, so the release that makes capabilities the gate has
-	// to convert it along with this table: a role refused
-	// GET /projects/{name}/apps would otherwise read the same summaries off the
-	// projects list, and that project's hostnames, services and jobs off the
-	// cluster-wide ones. The matrix cannot see any of this, because every column
-	// answers 200 and the difference is in the body, which is also why
-	// TestAuthenticatedRoutesDoNotDiscriminate passes.
+	// classAuthenticated requires a valid token at the router. Some handlers
+	// also filter project data through canAccessNamespace or projectMemberRole.
+	// Review those filters when changing capability rules: status-only probes
+	// cannot verify which items an authenticated response contains.
 	classAuthenticated
 	// classGlobalRole is gated on a cluster-wide role, which is a different axis
 	// from project membership and is not a capability. globalRank says which
@@ -599,22 +553,8 @@ func TestEachRouteBehavesLikeItsClass(t *testing.T) {
 	}
 }
 
-// TestDeclaredCapabilitiesMatchTodaysAccess is what makes the capability
-// mapping worth having.
-//
-// For every project route it compares three independent things: the capability
-// the route declares, whether each built-in role holds that capability, and
-// whether the recorded matrix says that role reaches the route today. All three
-// must agree.
-//
-// Without it the declarations are an opinion. With it they are a claim that the
-// capability model reproduces the role model exactly, which is the property the
-// migration needs and the one that is easy to believe and wrong. Writing this
-// test found 49 disagreements in the first draft: viewers reach environment
-// variables and project settings that the viewer capability set did not carry,
-// deployers write app secrets and open terminals that the deployer set did not,
-// and project updates were declared kipper.write, which deployers hold and
-// which would have widened them.
+// Compare route declarations, built-in capability sets and recorded access
+// for each project role. Agreement preserves the matrix's authorization rules.
 func TestDeclaredCapabilitiesMatchTodaysAccess(t *testing.T) {
 	cells := matrixCells(t)
 	roles := map[string]capability.Role{
@@ -650,21 +590,9 @@ func TestDeclaredCapabilitiesMatchTodaysAccess(t *testing.T) {
 	}
 }
 
-// TestHandlerInternalRoutesAreActuallyUnreachedByTheProbe separates the two
-// classes the matrix cannot tell apart.
-//
-// classAuthenticated and classHandlerInternal both answer the same thing to
-// every member, so the behaviour test asserts the same weak property of both
-// and one could quietly become the other. That is not hypothetical: deriving
-// the table from the matrix classified POST /api/v1/jobs/{name}/trigger as
-// authenticated, because the fixture has no such job and the 404 lands before
-// its project gate. A route that needs project standing declared as needing
-// only a token is a hole nobody would see.
-//
-// So the two are held apart from the other side: a handler-internal route must
-// in fact answer every member identically, because that is the symptom of a
-// gate the probe never reached. One that discriminates has a reachable gate and
-// belongs in classProjectCapability, where the capability cross-check applies.
+// Handler-internal routes should answer all member probes identically when
+// the fixture stops before their gate. A discriminating response makes the gate
+// reachable and requires capability classification and cross-checking.
 func TestHandlerInternalRoutesAreActuallyUnreachedByTheProbe(t *testing.T) {
 	cells := matrixCells(t)
 	for route, d := range routeAuthz {

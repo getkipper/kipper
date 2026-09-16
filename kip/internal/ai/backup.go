@@ -1116,34 +1116,11 @@ func (i *Installer) allTargetsGone(ctx context.Context, started *StartedDelete) 
 	return true, nil
 }
 
-// stuckDeleteRequests returns the names of DeleteBackupRequest CRs
-// that cannot make further progress for their paired target Backup:
-//
-//   - phase=="" or "New" with no other related request InProgress →
-//     Velero controller never picked any of our requests up.
-//   - request gone but target still present and no rival active
-//     request exists → request was deleted (by a human, or stripped
-//     of progress with no replacement) leaving no controller work.
-//
-// A New/empty request whose sibling is currently InProgress is not
-// flagged: Velero may be processing requests serially, so the
-// sibling is queued behind active work, not actually stuck. Pairing
-// is by parallel index in started.Requests/Targets, matching the
-// order StartDelete creates them.
-//
-// Limitation: a request whose status is patched to InProgress and
-// then never progresses (e.g. Velero crashes after acknowledging
-// the request) is NOT classified as stuck by this function — its
-// presence makes any related New/empty siblings count as "queued
-// behind active work" too. `kip ai backup list` shows snapshots by
-// Backup CR phase, not DeleteBackupRequest phase, so it does not
-// expose this case directly. Operators investigate with
-// `kubectl describe deletebackuprequests -n velero -l velero.io/backup-name=<name>`
-// when a delete is taking unusually long. Building CLI-level
-// liveness probing for the Velero controller is out of scope.
-//
-// Per Velero's API (https://github.com/vmware-tanzu/velero/blob/main/pkg/apis/velero/v1/delete_backup_request_types.go),
-// DeleteBackupRequestPhase is one of: "" / "New" / "InProgress" / "Processed".
+// stuckDeleteRequests identifies missing or unstarted deletion requests whose
+// target backups remain, accounting for other in-progress requests. Requests
+// and targets are paired by index in StartedDelete.
+// An InProgress request counts as active even if its controller has stalled;
+// this helper checks recorded phases rather than controller liveness.
 func (i *Installer) stuckDeleteRequests(ctx context.Context, started *StartedDelete) ([]string, error) {
 	type info struct {
 		target  string

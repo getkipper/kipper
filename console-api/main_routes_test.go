@@ -28,26 +28,10 @@ import (
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 )
 
-// Under /projects/{name} the segment means a project name on the routes that
-// act on the Project and an environment namespace on the routes that act on
-// workloads inside one. The two take different gates, and putting a route in
-// the wrong group is not a subtle failure: it either locks a project out of its
-// own environment or lets a same-named project reach into it.
-//
-// This drives the router main() actually serves. Mounting the two groups again
-// in a test proves only that the test agrees with itself — the classification
-// lives in buildRouter, so that is what has to be exercised.
-//
-// The collision under test: project "shop" owns namespace "shop-prod" for its
-// prod environment, and a Project called "shop-prod" exists beside it. Their
-// members are disjoint.
-//
-// Every GET under /projects/{name} that needs no further path segment is
-// listed. The ones that do — /apps/{app}, /functions/{fn} and their descendants
-// — inherit their group from the parent, so the parent standing in for them is
-// sound; a route moved between groups on its own would still escape this, which
-// enumerating the tree would catch and this cannot, because buildRouter returns
-// a closure over the mux rather than the mux itself.
+// Exercise the production router with disjoint members of project shop
+// (namespace shop-prod) and project shop-prod. These GET probes check the
+// Project/namespace scope split; descendant routes rely on their parent group
+// and are not individually exercised here.
 func TestTheRouterGatesEachProjectRouteByWhatItsNameMeans(t *testing.T) {
 	const (
 		shopOwner = "shopowner@test.com"

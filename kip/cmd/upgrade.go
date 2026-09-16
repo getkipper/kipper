@@ -1075,39 +1075,11 @@ func parseYesNo(line string) bool {
 	return answer == "y" || answer == "yes"
 }
 
-// storedVersionsDroppedBy reports the API versions the live CRD still has
-// objects stored under that the incoming CRD no longer declares.
-//
-// The apiserver already refuses that update, so this is an earlier and clearer
-// refusal rather than the only thing standing between an older CLI and data
-// loss. It earns its place by naming the cause before any CRD is written, and
-// by covering the case where storedVersions is not reported at all.
-//
-// storedVersions is the exact question, and comparing served versions was the
-// wrong one: it blocked the deprecation path the versioning plan prescribes,
-// because a release that legitimately retires an old served version looks
-// identical to an older CLI carrying older CRDs. Kubernetes already draws this
-// line — a version may only leave spec.versions once nothing is stored under it
-// — so honouring storedVersions permits a real retirement and still refuses the
-// change that strands data.
-//
-// Comparison is against every declared version, served or not, because the
-// schema has to remain present for Kubernetes to decode what is stored.
-//
-// This answers only whether a version *name* disappears, which leaves two ways
-// an older kip could still overwrite a newer cluster: a field or validation
-// rule added to an existing version, where no name changes at all; and a served
-// version that has not yet become the storage version, which never appears in
-// storedVersions and so looks like nothing was dropped.
-//
-// Both are the same question — is this binary older than what it is about to
-// overwrite — and neither is answerable from the schema. They are covered by
-// the version stamp instead, which is checked alongside this one in applyCRDs.
-// See crd_version_stamp.go.
-//
-// Comparing openAPIV3Schema deeply enough to tell a regression from a
-// legitimate field removal was considered and rejected: it would block real
-// upgrades more often than it caught this, and the stamp answers directly.
+// storedVersionsDroppedBy finds stored API versions absent from the incoming
+// CRD's declared versions, including unserved versions. If storedVersions is
+// unavailable, compare all existing declarations conservatively.
+// This checks version names only; the version stamp separately guards against
+// an older binary replacing newer fields or validation rules.
 func storedVersionsDroppedBy(existing, incoming *unstructured.Unstructured) []string {
 	declared := map[string]bool{}
 	for _, v := range crdDeclaredVersions(incoming) {

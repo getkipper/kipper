@@ -36,22 +36,10 @@ const MaxLabelLength = 63
 // definition instead of a copy per component.
 var LabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// ReservedLabels are service and platform names that must never be registered
-// as a standalone cluster label, so nobody can squat a login or platform
-// hostname. Enforced by both the gateway registration guard and the
-// ClusterIdentity CRD validation.
-//
-// The rule for what belongs here: a name that, standing alone under the gateway
-// domain, reads as the platform's own rather than as somebody's cluster.
-// login.kipper.run and status.kipper.run read that way; acme.kipper.run and
-// lab.kipper.run do not, and stay registrable. Every entry costs an operator a
-// name they might legitimately want, which is what keeps the list to names that
-// meet the rule.
-//
-// The ClusterIdentity CRD carries the same list as a CEL literal, because a CEL
-// rule cannot call into Go. A lockstep test in console-api compares the two, so
-// an entry added here without the CRD regenerated fails the suite rather than
-// leaving the API server accepting what the gateway refuses.
+// ReservedLabels protects platform-like names from new cluster registrations.
+// Keep this list narrow: every entry removes an operator's naming choice.
+// The ClusterIdentity CEL rule carries the same list; a console-api test checks
+// it against this map after CRD generation.
 var ReservedLabels = map[string]bool{
 	// Platform surface.
 	"console": true, "console-api": true, "dex": true, "api": true,

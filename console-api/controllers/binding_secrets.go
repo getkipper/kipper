@@ -33,27 +33,10 @@ import (
 // chances for a selector to quietly match nothing.
 const derivedBindingLabel = labels.Binding
 
-// bindingSecretName is the Secret a binding injects into its workload.
-//
-// A binding that pins a logical namespace gets a Secret of its own, derived
-// from the service's shared credentials with that one key overridden. Every
-// other binding reads the shared credentials directly, so there is nothing to
-// derive and nothing to keep in step.
-//
-// The derived name carries the workload kind: an App and a Function may share a
-// name in one namespace, and without it both would bind to one object and the
-// second reconciler to run would overwrite the first's database name.
-//
-// The service type decides this as much as the binding does, and leaving it out
-// was a defect: a `database` on a service type that has no logical namespace —
-// redis, mailhog — named a derived Secret that reconcileBindingSecrets never
-// renders, because it takes the shared-credentials branch for exactly those
-// types. The pod then referenced an object nothing creates and the binding was
-// refused. Both now ask the same question.
-//
-// A type that could not be read falls back to what the binding says, which is
-// how this behaved before the type was consulted at all. Inside a reconcile it
-// cannot happen — a binding naming a service that will not read fails earlier.
+// bindingSecretName selects a derived Secret for a binding with a database
+// when the service supports logical namespaces, or its type is unknown. Other
+// bindings use shared service credentials. Derived names include workload kind
+// to keep App and Function credentials distinct.
 func bindingSecretName(b kipperv1.ServiceBinding, svcType string, typeKnown bool, kind secretname.Kind, workloadName string) string {
 	return BindingSecretName(b, svcType, typeKnown, kind, workloadName)
 }
@@ -80,23 +63,9 @@ func bindingIsDerived(b kipperv1.ServiceBinding, svcType string, typeKnown bool)
 	return b.Database != "" && (!typeKnown || kipperv1.HasLogicalNamespace(svcType))
 }
 
-// reconcileBindingSecrets renders the per-binding credentials Secret for every
-// binding that pins a logical namespace, projecting the service's shared
-// credentials with that binding's database or vhost substituted in.
-//
-// The bind handler used to write this object once, when the binding was
-// created, and nothing revisited it. A service password rotated afterwards left
-// every bound workload holding the old one until someone re-bound by hand.
-// Deriving it on each pass makes the shared credentials the single source and
-// this Secret a projection, which is what lets `${DB_PASSWORD}` resolve to a
-// credential that still works.
-//
-// A declared binding that cannot be rendered fails the reconcile. Skipping it
-// would have the injection gate refuse it moments later, and the pod template
-// would then be rewritten without credentials the workload is already running
-// with — the envFrom is optional, so the pod would start and fail on its first
-// connection instead. Stopping here keeps the last working template while the
-// cause is reported and the reconcile retries.
+// reconcileBindingSecrets projects shared credentials into bindings with
+// logical namespaces, keeping rotations current. A rendering failure stops
+// reconciliation before the pod template can lose its existing credentials.
 func reconcileBindingSecrets(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, kind secretname.Kind, bindings []kipperv1.ServiceBinding) (renderedBindings, map[string]bool, string, error) {
 	desired := map[string]bool{}
 	rendered := renderedBindings{}
@@ -259,20 +228,9 @@ func ClearBindingsToService(ctx context.Context, c client.Client, service, names
 	return nil
 }
 
-// derivedSecretBelongsTo reports whether this Secret is the projection this
-// workload rendered.
-//
-// The controller-owner UID is the ordinary test and the one that matters for a
-// name collision: an object somebody else created never carries it.
-//
-// A restore breaks that test without changing what the object is. The workload
-// comes back with a new UID while its Secret keeps the old reference, or loses
-// the reference altogether. Refusing there strands a credential nobody can
-// clear: the render will not overwrite an object it does not own, unbinding
-// will not delete it, the pruner will not either, and rebinding needs that
-// exact name. So a Secret carrying the label this render stamps — which nothing
-// else writes — and a surviving reference naming this same workload is treated
-// as ours. A foreign object at a colliding name has neither.
+// derivedSecretBelongsTo accepts the workload's controller UID. For restored
+// projections, the derived-binding label also permits an absent controller or
+// a controller naming the same workload kind and name with an older UID.
 func derivedSecretBelongsTo(secret *corev1.Secret, owner client.Object, kind secretname.Kind) bool {
 	ref := metav1.GetControllerOf(secret)
 	if ref != nil && ref.UID == owner.GetUID() {
@@ -309,21 +267,9 @@ func dropBindingsToService(service string, bindings []kipperv1.ServiceBinding) (
 	return remaining, changed
 }
 
-// hashBindingShape folds everything about a binding that changes what the pod
-// reads, short of the credential values themselves.
-//
-// The digest used to cover only the credentials, because the rest of the shape
-// was carried by the pod template: the prefix appeared in the container's
-// EnvFrom entry, and the declared order was the order of those entries. Once
-// the environment is published as one flattened generation neither is on the
-// template, so a binding renamed from DB_ to POSTGRES_, or two bindings
-// swapping places and with them which one wins a name they share, would leave
-// the workload running the old environment with nothing to say it had changed.
-//
-// The declared index is part of it, which is why the bindings are no longer
-// sorted before the walk: sorting is what discarded the order. Two reconciles
-// over the same state still produce the same hash, because a CR's slice order
-// is as stable as the values in it.
+// hashBindingShape includes prefix, logical namespace and declared order in
+// the environment digest. Order determines precedence when bindings share keys;
+// these inputs are no longer visible in the flattened pod environment.
 func hashBindingShape(digest hash.Hash, index int, b kipperv1.ServiceBinding, serviceType string) {
 	prefix := b.Prefix
 	if prefix == "" {

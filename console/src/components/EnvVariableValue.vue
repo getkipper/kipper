@@ -75,15 +75,8 @@ const list = (names: string[]) => names.join(', ')
       </template>
     </div>
 
-    <!-- What this resolves to. Deliberately not described as what the pod is
-         running: a source can change before the reconciler republishes, and the
-         restart banner does not close that window because it compares the last
-         published environment against the pods rather than against these
-         sources.
-
-         Keyed on isTemplate rather than on the string having content, so a
-         template resolving to nothing shows that it resolved to nothing.
-         Secret-derived parts arrive masked from the server. -->
+    <!-- Preview current sources, which may differ from the running environment.
+         Show empty resolutions too; the server masks secret-derived values. -->
     <div
       v-if="preview?.isTemplate"
       class="mt-1 flex items-start gap-1 text-xs text-slate-500 dark:text-slate-400"

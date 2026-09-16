@@ -569,20 +569,10 @@ func plural(n int, one, many string) string {
 	return many
 }
 
-// applyResource creates the resource if it is absent, or replaces its spec if
-// it already exists. kip apply is declarative: the manifest is the desired
-// spec, so a field left out of the manifest is cleared. Metadata and status are
-// preserved. It returns "created" or "updated". The update retries on conflict
-// because the reconciler bumps the object's resourceVersion (finalizers,
-// status) between the Get and the Update.
-//
-// Unless force is set, it refuses to write a spec that would clear a field of
-// the object it just read. The preflight scan in runApply is a separate read
-// from this write, so anything the console, another CLI run or a controller
-// added in between was invisible to it — including a resource that did not
-// exist at scan time and lost the create race below. Re-checking against the
-// object actually being replaced is what makes the refusal a property of the
-// write rather than of a read that preceded it.
+// applyResource creates or replaces a manifest's spec, preserving live metadata
+// and status on update. It returns created or updated and retries conflicts.
+// Unless forced, each write rechecks destructive field removal against the latest
+// object, covering changes and create races after preflight.
 func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string, res manifest.Resource, force bool, defaults map[string]interface{}, schemaUnread bool) (string, error) {
 	name := res.Object.GetName()
 	if _, getErr := dyn.Resource(res.GVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{}); getErr != nil {

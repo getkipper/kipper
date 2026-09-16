@@ -110,18 +110,9 @@ func isClaimUnavailable(err error) bool {
 	return goerrors.As(err, &unavailable)
 }
 
-// releaseClaim drops a reservation this caller made when the workload it was for
-// could not be written.
-//
-// The delete is conditional on the uid this caller created, so it can only ever
-// remove its own reservation: one deleted out of band and re-made by somebody
-// else in the meantime would otherwise be deleted by this rollback, handing the
-// name away while its new holder was still writing.
-//
-// It runs on a context detached from the caller's, because the usual reason a
-// workload write failed is that the command was interrupted, and a rollback on
-// that same context does nothing at all. A delete that fails leaves the
-// follow-up case where a name is parked until someone removes it.
+// releaseClaim rolls back only the reservation with the caller's UID.
+// A detached, time-limited context allows cleanup after caller cancellation.
+// Failed deletion leaves a reservation requiring later cleanup.
 func releaseClaim(ctx context.Context, dyn dynamic.Interface, namespace, name string, uid types.UID) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()

@@ -19,34 +19,10 @@ var CRDGVR = schema.GroupVersionResource{
 	Resource: "customresourcedefinitions",
 }
 
-// SpecDefaults reports the spec fields a kind's CRD gives a default value, by
-// dotted path.
-//
-// These are the reason a diff cannot be read off the manifest alone. Admission
-// writes a default into the stored object, so a manifest that omits `replicas`
-// produces a live App carrying `replicas: 1` that the manifest never mentioned.
-// Comparing the two directly calls that a field the apply would remove, which
-// it is not: assigning a spec without it makes admission put the same default
-// straight back, and treating it as a loss made `kip apply` refuse manifests
-// that are entirely ordinary.
-//
-// The schemas come from the cluster, because only the cluster's own copy says
-// what the cluster will do. Reading the CLI's embedded copies instead looked
-// cheaper and is unsafe in one direction: a binary newer than the cluster would
-// believe in a default the cluster does not apply, suppress the warning for a
-// field the operator had set, and let the replacement drop it.
-//
-// A caller who cannot read them gets no defaults rather than a guess, and the
-// second return value says so, because "we could not tell" and "this field is
-// being destroyed" are different things to put in front of someone deciding
-// whether to pass --force.
-//
-// A project-scoped operator is in that position. A CRD is cluster-scoped and the
-// binding the Project reconciler creates for project members is a namespaced
-// RoleBinding, which cannot authorise one whatever role it names, and no shipped
-// role grants it — so they are asked about fields that are not going anywhere,
-// and told why. Widening that is a change to who may read what: see
-// plans/apply-shows-what-it-clears-plan-2026-08-03.md.
+// SpecDefaults reads dotted-path defaults from the cluster's CRD version.
+// Apply uses them to distinguish admission-restored defaults from removed fields.
+// Use the live schema: a newer embedded default may not exist on the cluster.
+// Missing or forbidden CRDs return known=false; other read errors propagate.
 func SpecDefaults(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource) (defaults map[string]interface{}, known bool, err error) {
 	crd, err := dyn.Resource(CRDGVR).Get(ctx, gvr.Resource+"."+gvr.Group, metav1.GetOptions{})
 	switch {

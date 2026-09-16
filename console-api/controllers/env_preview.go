@@ -84,35 +84,13 @@ type EnvPreview struct {
 	Refused []string `json:"refused,omitempty"`
 }
 
-// BuildEnvPreview resolves an App's spec.env against the sources its
-// environment is built from, and reports the result with every secret-derived
-// value masked.
+// BuildEnvPreview resolves the App's proposed environment using the same source
+// precedence as pod construction and masks secret-derived values. It only reads;
+// binding Secrets and link policies are prepared by reconciliation.
 //
-// **This is what the next render will produce, not what a running pod holds.**
-// The two differ, and the difference is not an edge case: a pod reads one
-// immutable generation Secret, and the reconciler deliberately leaves it there
-// when a binding stops being readable rather than publishing an environment
-// with a hole in it. So a refused binding shows here as an unresolved
-// reference while the pod goes on serving the value it was given. Refused
-// names it, so the console can say which of the two is happening.
-//
-// Reading the published generation instead would answer the other question and
-// lose the one the preview exists for: that Secret holds the resolved values
-// already flattened, with no record of which source each came from, so nothing
-// could be masked without inspecting the text — which is the approach D13 rules
-// out. The generation is where the restart banner gets its answer.
-//
-// It reads. The controller's own path derives the per-binding Secrets and the
-// link policy before building this table, and neither happens here.
-//
-// The table comes from the same builder pod construction uses, so the preview
-// cannot disagree with the pod about precedence, prefixes or which bindings are
-// injectable. Answering from a second implementation is how a preview ends up
-// showing a value the process never receives.
-//
-// The caller must gate this on env.reveal. Env GET only takes env.read, so an
-// unmasked-by-default preview behind that would widen who can read a
-// credential (D13).
+// The preview describes the next render. Running pods may retain an older
+// generation when a binding is unavailable; Refused identifies those sources.
+// Callers must require env.reveal because templates can contain literal secrets.
 func BuildEnvPreview(ctx context.Context, c client.Client, app *kipperv1.App) (*EnvPreview, error) {
 	links, _, err := ResolveLinks(ctx, c, app)
 	if err != nil {
@@ -209,26 +187,8 @@ func previewNames(table map[string]envEntry) []EnvPreviewName {
 	return out
 }
 
-// entrySecret says whether a value should be masked rather than shown.
-//
-// The decision is made from where the value came from, never from what it looks
-// like. D13 rules the second one out and the reason is concrete:
-// BASE64_KEY=${SECRET_KEY} produces a value that no longer resembles the
-// credential it was built from, so searching the resolved text finds nothing to
-// hide.
-//
-// Everything in the workload's own Secrets is a secret: that is what the
-// Secrets tab is for, and Kipper never decides what an operator put there.
-//
-// A binding is not masked wholesale, because it carries an address and an
-// identity beside the credential and hiding those would leave a preview reading
-// ••••://••••:••••@••••, which tells an operator less than the template already
-// did. Which of its keys are safe to show is kipperv1.IsSensitiveCredentialKey's
-// question rather than this one's, and it answers with an allowlist so a key
-// nobody anticipated is masked rather than shown.
-//
-// The key is the one the source itself uses. Reading the prefixed name instead
-// would make the decision depend on what an operator called the binding.
+// entrySecret classifies values by origin: workload Secrets are sensitive;
+// binding keys use the source key's allowlist, independent of binding prefixes.
 func entrySecret(entry envEntry) bool {
 	switch entry.origin {
 	case originWriterSecret:

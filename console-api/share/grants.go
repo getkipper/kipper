@@ -301,18 +301,9 @@ func (s *GrantStore) RevokeAll(ctx context.Context) error {
 // pass; the bound only matters under a pathological mint storm.
 const maxRevokeSweeps = 4
 
-// deleteBySelector lists and deletes grant by grant, re-sweeping until a
-// list returns nothing. It only reports success once it has observed an
-// empty pass, so a caller that treats the error as fail-closed (the service
-// finalizer) never releases while grants may remain. If the store won't
-// converge within maxRevokeSweeps — sustained concurrent minting, or grants
-// that keep reappearing — it returns an error rather than falsely reporting
-// a clean sweep. Per-object deletes keep behaviour identical across real
-// clusters and test fakes.
-//
-// The guaranteed kill switch for a leaked signing key is still key rotation
-// (two rotations retire a key); revoke-all clears the grant store and pairs
-// with rotation in the compromise runbook.
+// deleteBySelector revokes matching grants and repeats until it observes an
+// empty list, failing after maxRevokeSweeps if concurrent writes prevent cleanup.
+// A compromised signing key also requires rotation; two rotations retire a key.
 func (s *GrantStore) deleteBySelector(ctx context.Context, selector string) error {
 	for sweep := 0; ; sweep++ {
 		secrets, err := s.client.CoreV1().Secrets(SigningSecretNamespace).List(ctx, metav1.ListOptions{LabelSelector: selector})

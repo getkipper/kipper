@@ -707,34 +707,13 @@ func namespaceProject(ctx context.Context, reader nsowner.Reader, namespace stri
 	return project, nil
 }
 
-// cloneCommand builds the git clone argv with a credential helper scoped to
-// exactly one host. git records the remote URL verbatim in /workspace/.git/config
-// and /workspace is the Kaniko build context, so a URL-embedded token would be
-// readable by any Dockerfile (`RUN cat .git/config`) and baked into a published
-// image layer by a plain `COPY . .`. The helper keeps the token off disk and
-// out of argv, and binds it to authority in two ways:
+// cloneCommand builds a shallow clone with an HTTPS credential helper scoped
+// to a canonical authority. The helper checks protocol and host and reads its
+// token from GIT_TOKEN, keeping credentials out of argv and .git/config.
 //
-//   - The config key credential.https://<authority>.helper means git only asks
-//     this helper for that host; a clone that redirects elsewhere gets no token.
-//   - The helper body answers only the `get` operation, parses git's request,
-//     and emits the token only when the request's protocol is https and its host
-//     equals $GIT_EXPECTED_HOST — belt-and-braces if the scope match misfires.
-//
-// The empty credential.helper= (and the empty scoped reset) first clear any
-// helper inherited from the image's git config: credential.helper is
-// multi-valued and git calls every helper's `store` after a successful auth, so
-// an inherited persisting helper could write the token to disk. The resets make
-// the no-disk invariant a property of this Job, not of the image.
-//
-// The token and the bound host reach the helper only as the $GIT_TOKEN and
-// $GIT_EXPECTED_HOST env values its shell expands at run time; neither the token
-// nor a shell-interpolated authority appears in argv. authority is a validated
-// canonical authority (giturl.CanonicalAuthority), so the config key is a safe
-// host[:port] token.
-//
-// `x-access-token` as the username works for every provider Kipper supports:
-// GitHub fine-grained PATs (`github_pat_*`) require a username component, and
-// GitHub classic (`ghp_*`) and GitLab (`glpat-*`) PATs accept any non-empty one.
+// Clear inherited helpers before installing this get-only helper: Git can call
+// their store operations after authentication, persisting a token in the build
+// context. authority must come from giturl.CanonicalAuthority.
 func cloneCommand(authority, branch, cloneURL string) []string {
 	scoped := "credential.https://" + authority + ".helper"
 	const helper = `!f() { [ "$1" = get ] || exit 0; h=; p=; while IFS='=' read -r k v; do case "$k" in host) h=$v;; protocol) p=$v;; esac; done; [ "$p" = https ] && [ "$h" = "$GIT_EXPECTED_HOST" ] && printf 'username=x-access-token\npassword=%s\n' "$GIT_TOKEN"; }; f`
@@ -1116,27 +1095,12 @@ func noPrivEscSecurityContext() *corev1.SecurityContext {
 // of the same key in another package is how the two would drift apart.
 const SourceFingerprintAnnotation = "kipper.run/git-source"
 
-// GitSourceFingerprint identifies the source an artefact is built from.
-//
-// Derived from the whole source rather than a list of fields, because listing
-// them is how the last version of this went wrong: it named the four it knew
-// about and omitted BuildArgs, which Kaniko is given directly and which
-// therefore decides what the image contains.
-//
-// Only the fields that demonstrably cannot change the artefact are cleared
-// first. Everything else counts, so a field added to this type later is
-// included by default — and the two ways of being wrong are not equal. A field
-// wrongly included discards a build that was in flight, which costs a rebuild.
-// A field wrongly omitted deploys an artefact the app did not ask for.
-//
-// A nil source fingerprints as empty, which is what a detached app compares
-// against and never matches a job built from a real one.
-// UnfingerprintableSource is stamped in place of a fingerprint that could not
-// be computed. The reconciler treats it as belonging to no source at all: a
-// sentinel that compared equal to itself would let exactly the completions it
-// exists to catch deploy unchecked, since both sides compute it the same way.
+// UnfingerprintableSource marks a fingerprint failure. The reconciler rejects
+// it even when both sides carry the sentinel.
 const UnfingerprintableSource = "unfingerprintable"
 
+// GitSourceFingerprint hashes all source fields except credentials and build
+// resources, including newly added fields by default. A nil source returns empty.
 func GitSourceFingerprint(git *kipperv1.AppGitSource) string {
 	if git == nil {
 		return ""

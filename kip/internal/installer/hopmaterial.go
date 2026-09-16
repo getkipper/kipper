@@ -61,21 +61,9 @@ func EnsureHopMaterial(client commandRunner) error {
 	return nil
 }
 
-// ensureAnchorCovers adds the active signer to the trust anchor if it is not
-// already there, and changes nothing otherwise.
-//
-// The anchor is only ever added to. What it holds are an operator's trust
-// decisions — widened by hand partway through replacing an authority, narrowed
-// by hand at the end — and an install has no business reversing either.
-// Rebuilding it from the Secret reversed both: it dropped an incoming authority
-// the operator had just widened trust to, and it re-added an outgoing one they
-// had just narrowed away from, silently rewinding a replacement that the
-// documentation says is safe to leave part-finished.
-//
-// What an install actually has to guarantee is narrower: that the API server
-// can verify what this cluster serves, which means the anchor names whatever is
-// signing. Adding is always safe. Removing is the operation that locks people
-// out, and nothing here does it.
+// ensureAnchorCovers adds the active signer while preserving the existing
+// trust bundle. Rebuilding from the Secret alone could undo an operator's
+// staged CA replacement.
 func ensureAnchorCovers(client commandRunner, activePEM string) error {
 	existing, err := readHopCA(client)
 	if err != nil {

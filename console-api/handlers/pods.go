@@ -92,21 +92,9 @@ type workloadHealth struct {
 	Pods []podHealth `json:"pods"`
 }
 
-// Health returns the container-level state of every pod belonging to an app,
-// including the pods that are not running — which are the ones an operator
-// opens this for.
-//
-// List above deliberately reports only Running pods, because it feeds the
-// shell and log pickers where a dead pod is no use. That filter is why a
-// crashing app looked like an app with no pods at all, so this endpoint exists
-// beside it rather than changing it.
-//
-// A container's reason lives in one of two places depending on whether it is
-// between restarts: the waiting state carries CrashLoopBackOff or
-// ImagePullBackOff, while the exit code and the process's own message are in
-// LastTerminationState. Reporting only the first tells an operator that a
-// container is restarting without ever saying what killed it.
-//
+// Health reports current and last-terminated container state for every pod
+// selected by the app label, including non-running pods. This complements the
+// running-pod list used by shell and log pickers.
 // GET /api/v1/projects/{name}/apps/{app}/health
 func (p *Pods) Health(w http.ResponseWriter, r *http.Request) {
 	namespace := chi.URLParam(r, "name")

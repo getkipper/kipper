@@ -16,34 +16,13 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/workload"
 )
 
-// reconcileNameClaim keeps the workload's name reservation in step with the
-// workload itself.
+// reconcileNameClaim backfills a workload's reservation and sets ownership for
+// garbage collection. It returns a conflicting holder kind for the caller to
+// reject before creating children. This also covers CRs restored or written
+// directly, which bypass create-time reservation.
 //
-// It backfills, and it releases. Backfills, because a claim only exists for a
-// workload created through a path that makes one: everything that predates
-// reservations holds none, and a migration restore writes CRs directly. Until
-// the claim exists the name is guarded by the weaker lookup, so making it here
-// is what converts a cluster to the invariant as its workloads reconcile.
-// Releases, because the claim is owned by the workload, so deleting the
-// workload garbage-collects the claim and frees the name.
-//
-// A claim another kind holds is left alone. That collision is real and the
-// caller is about to refuse the child objects over it; taking the claim would
-// only hide which workload got there first.
-//
-// Failing to establish the reservation fails the pass. Not knowing whether the
-// name is this workload's is not permission to use it, and a controller that
-// treated a transient API error as ownership would build children under a name
-// somebody else may hold. Only two things are not errors: a cluster with no
-// WorkloadName resource at all, and losing the create to a claim that turns out
-// to be this workload's own.
-//
-// It returns the kind holding the name when that is not this workload's, and
-// the caller must then stop: a CR written straight to the API server (GitOps,
-// kubectl, a restore) never passed a reservation, so the loser of that race is
-// the only thing standing between a collision and two live workloads. An App and
-// a Job do not contend on a child object, so nothing further down would refuse
-// them, and the App's Service selects `app=<name>`, which the Job's pods carry.
+// A missing WorkloadName API is tolerated for compatibility; other read/write
+// failures abort reconciliation. Create races are resolved through an uncached read.
 func reconcileNameClaim(ctx context.Context, c client.Client, uncached client.Reader, scheme *runtime.Scheme, owner client.Object, kind string) (heldBy string, err error) {
 	key := types.NamespacedName{Name: owner.GetName(), Namespace: owner.GetNamespace()}
 

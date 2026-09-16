@@ -8,11 +8,7 @@ import (
 	"github.com/getkipper/kipper/gateway/internal/registry"
 )
 
-// The defect this pins was never in the registry: it was the handler turning a
-// valid-token mint failure into a 201 with neither token nor challenge, which a
-// caller reads as "that name belongs to someone else". Testing IssueChallenge
-// alone leaves that reintroducible — drop the error check here and the registry
-// tests all stay green while /register lies again.
+// Inject entropy failure through the HTTP handler to verify its error response.
 var errTestMintFailure = errors.New("entropy source unavailable")
 
 func failingSource() (string, error) { return "", errTestMintFailure }

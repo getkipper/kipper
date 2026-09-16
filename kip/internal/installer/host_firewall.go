@@ -237,23 +237,9 @@ func configureFirewall(client *ssh.Client, rateLimitSSH bool) error {
 	// silently breaks pod-to-pod and pod-to-service connectivity.
 	forwardCmd := `sed -i 's|^DEFAULT_FORWARD_POLICY=.*|DEFAULT_FORWARD_POLICY="ACCEPT"|' /etc/default/ufw`
 
-	// The claim is attempted in this same command, sequenced behind the policy
-	// edit by `&&`. That placement is what the ownership question needs. A claim
-	// written earlier outlives a run that got no further and then vouches for
-	// whatever firewall an admin raises next; a claim written at the end misses
-	// a run that died holding a half-built firewall, which is the case this
-	// whole thing exists to catch. Once this command completes, every later
-	// failure leaves both behind, so a retry recognizes the wreckage as Kipper's.
-	//
-	// What the claim attests is that this command completed, not that the edit
-	// changed a line: sed exits zero having matched nothing. That is the useful
-	// fact anyway, since it says Kipper got as far as configuring ufw here.
-	//
-	// `&&` sequences, it does not make the pair atomic and nothing rolls back.
-	// The edit can land while the claim fails, leaving the host unclaimed. That
-	// errs the safe way: kip reads it as an admin's and keeps its hands off, and
-	// a retry that finds ufw still inactive configures it from the start. The
-	// error names both halves because either can be the one that failed.
+	// Record ownership after the forward-policy command succeeds so retries
+	// recognize partially configured firewalls. The command and claim are
+	// sequenced, not atomic: claim failure can leave an unclaimed policy edit.
 	if _, err := client.Run(forwardCmd + " && " + claimCommand(firewallClaimPath)); err != nil {
 		return fmt.Errorf("setting the ufw forward policy and claiming the firewall: %w", err)
 	}

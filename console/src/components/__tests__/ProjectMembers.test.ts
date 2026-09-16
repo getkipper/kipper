@@ -28,15 +28,8 @@ describe('ProjectMembers', () => {
     vi.clearAllMocks()
   })
 
-  // A role this build does not know reaches a Project through kubectl, a
-  // restore, or a migration from a cluster that had it. The member holds
-  // nothing, and the panel has to say both halves of that: the role exactly as
-  // stored, so somebody can find it, and that it grants no access.
-  //
-  // The failure this guards against is quiet. The role select only ever holds
-  // the three built-ins, so an unknown role matches no option and renders as
-  // whatever the browser picks — usually the first one, which reads as though
-  // the member were an owner.
+  // An unknown role must render its stored value and access status explicitly;
+  // a select with only built-in options can otherwise display a misleading default.
   it('shows a member holding an unrecognised role as having no access', async () => {
     fetchMembers.mockResolvedValue([
       { email: 'lead@test.com', role: 'owner' },

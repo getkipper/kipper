@@ -1,25 +1,7 @@
-// Package hopca mints the certificate authority a cluster anchors its own hop
-// certificate on, and the leaves signed under it.
-//
-// The hop certificate serves two consumers that verify it in incompatible ways.
-// The kipper.run gateway pins its SPKI and ignores everything else, so for the
-// gateway the certificate's names and issuer are irrelevant. The cluster's own
-// API server, fetching OIDC discovery and JWKS from the Dex host through the
-// loopback pin, does ordinary verification: it needs a name that matches and a
-// chain it trusts. A self-signed leaf with no names satisfies the first and can
-// never satisfy the second, which is what deadlocked fresh installs on a default
-// *.kipper.run domain.
-//
-// A CA resolves it without changing what the gateway sees. Signing a key under a
-// CA does not alter its SPKI, so the pin is untouched and no registration has to
-// be re-observed; the leaf gains a wildcard name that matches every host a
-// cluster is reached by; and the API server is handed the CA, which stays valid
-// across leaf reissues and key rotations where a leaf anchor would not.
-//
-// This package is deliberately crypto only. It holds no Kubernetes types so the
-// installer, which talks to a cluster over SSH, and the console-api reconciler,
-// which talks to the API, can share one definition of what this material is
-// instead of keeping a copy each.
+// Package hopca creates the cluster's hop CA and signed leaves for use by the
+// installer and reconciler. The gateway verifies SPKI pins; the API server uses
+// the CA and certificate names for Dex verification. Signing an existing key
+// preserves its SPKI, while a stable CA supports leaf renewal and rotation.
 package hopca
 
 import (

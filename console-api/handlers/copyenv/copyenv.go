@@ -583,21 +583,10 @@ func copyByteMap(in map[string][]byte) map[string][]byte {
 	return out
 }
 
-// rewriteLinksForTarget moves this app's links into the environment it was
-// copied into, dropping the ones it cannot bring along.
-//
-// A link into the source environment is the same dependency one environment
-// over, so it follows the copy. Anything else is dropped: another project's app
-// may not exist over here and may not have consented, and a sibling environment
-// of this project is a deliberate cross-environment dependency that the copy has
-// no basis to reproduce. Left alone, a fresh prod environment would quietly
-// depend on a test-side backend and look healthy doing it.
-//
-// A dropped link takes any stored address with it. Nothing stores one now — the
-// reconciler derives it — but an app linked before that carries one in spec.env
-// and nothing migrates it, so the copy would arrive holding an address for a
-// dependency it no longer declares, with no allowance to reach it and nothing
-// on either surface saying why.
+// rewriteLinksForTarget retargets links within the source environment to the
+// copy's destination. It drops cross-project and cross-environment links, along
+// with any legacy stored URL, so the copy requires explicit consent to those
+// dependencies.
 func rewriteLinksForTarget(app *kipperv1.App, opts Options) []string {
 	if len(app.Spec.Links) == 0 {
 		return nil

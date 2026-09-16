@@ -104,13 +104,9 @@ function withSSOCode(rawURL: string, code: string): string {
   }
 }
 
-// openServiceUI pre-mints a single-use SSO code and opens the service UI with
-// it appended, so the new tab lands already signed in. The tab is opened
-// synchronously (before the async mint) to stay out of the popup blocker; a
-// mint failure falls back to the plain URL, where the gate's redirect dance
-// signs the user in with one extra hop. If the synchronous open was itself
-// blocked, we navigate the current tab instead — a second window.open after
-// the await has lost the user-activation and would be blocked too.
+// Open the tab synchronously to retain browser user activation, then attach
+// a single-use SSO code when available. Fall back to the current tab if blocked
+// and to the plain service URL if minting fails.
 async function openServiceUI() {
   const uiURL = selectedService.value?.ui_url
   if (!uiURL) return
@@ -658,15 +654,7 @@ function typeIcon(type: string): string {
         <span class="text-xs text-slate-500 dark:text-slate-400">{{ selectedService ? typeIcon(selectedService.type) : '' }}</span>
       </template>
       <template #actions>
-        <!--
-          Opens the service's browseable web UI (e.g. MailHog
-          inbox). Pre-mints a single-use SSO code so the new tab
-          lands already signed in through the forwardAuth gate,
-          which seats a per-host session cookie. Only shown when
-          the server-side ServiceInfo response carries a ui_url,
-          the single source of truth for whether a service ships a
-          UI and what hostname it lives at.
-        -->
+        <!-- Use the server-provided UI URL and a single-use SSO code for the new tab. -->
         <button
           v-if="selectedService?.ui_url"
           @click="openServiceUI"

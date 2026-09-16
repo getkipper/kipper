@@ -213,25 +213,10 @@ func libreChatConfigHash(cfg LibreChatConfig) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// LibreChatManifest returns the YAML for LibreChat: a Secret carrying the
-// chart's required credentials, the HelmChart wired to the in-cluster
-// Ollama service, and a Kipper-owned Ingress on the user-supplied host
-// with cert-manager TLS. The chart's bundled Ingress is disabled since
-// we own the routing layer here.
-//
-// The chart's deployment template envFroms `global.librechat.existingSecretName`
-// (verified against danny-avila/LibreChat helm/librechat/templates/deployment.yaml)
-// and the bundled Meilisearch subchart reads MEILI_MASTER_KEY from the
-// same Secret via `meilisearch.auth.existingMasterKeySecret`. Setting
-// the secret name only under `librechat:` (without `global:`) silently
-// no-ops, so the chart would fall back to defaults.
-//
-// The mongodb subchart's image is overridden to `bitnamilegacy/mongodb`
-// because Bitnami removed the original `bitnami/mongodb` tags from
-// Docker Hub in late 2025 and republished the same images under the
-// legacy namespace. Without this override the install hangs in
-// Init:ImagePullBackOff and LibreChat itself crash-loops on a Mongo it
-// can never reach.
+// LibreChatManifest renders credentials, an Ollama-connected HelmChart, and
+// a Kipper-managed TLS Ingress. The chart reads credentials through
+// global.librechat.existingSecretName and meilisearch.auth.existingMasterKeySecret.
+// MongoDB uses the pinned bitnamilegacy image repository.
 func LibreChatManifest(cfg LibreChatConfig) string {
 	ollamaURL := fmt.Sprintf("http://ollama.%s.svc.cluster.local:11434/v1", Namespace)
 	return fmt.Sprintf(`apiVersion: v1

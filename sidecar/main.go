@@ -62,18 +62,8 @@ func newProxy(target *url.URL, instanceID string) *httputil.ReverseProxy {
 	return proxy
 }
 
-// clientAwareErrorHandler answers a failed proxy attempt, telling a client that
-// went away apart from an upstream that fell over.
-//
-// The default handler cannot: it logs every failure and answers 502, so a
-// browser navigating mid-request, a health probe closing its socket, or a shell
-// client that shuts the connection when its input ends all read as the app
-// behind this proxy having failed. That is a gateway status nobody can act on
-// and a log line that sends whoever is debugging to the wrong side — and any
-// alerting counting 5xx counts disconnects as outages.
-//
-// Nothing is written back when the client is gone, because there is nobody left
-// to read it.
+// clientAwareErrorHandler ignores client cancellations and reports upstream
+// failures as 502, keeping disconnects out of upstream error logs.
 func clientAwareErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled) {
 		return

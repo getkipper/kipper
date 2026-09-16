@@ -862,17 +862,9 @@ func (rc *ResourceController) commitMarks(marks []pendingMark) {
 	}
 }
 
-// pruneAlertState drops cooldown/dedup entries older than alertStateTTL,
-// keeping the churny per-pod and per-job maps bounded over a long-running
-// controller. Each stored time is the last alert time, so an entry older than
-// the TTL is for a pod/job/deployment/node that is long gone; a live problem
-// re-adds its key on the next tick.
-//
-// oomHandledAt is deliberately excluded: its value is the OOM event's finish
-// time, not an activity time, so a TTL sweep would resurrect an already
-// handled OOM whenever a pod keeps a >TTL-old OOM in its lingering
-// LastTerminationState. Its keys are per-workload/container, a small stable
-// set, so it does not need TTL pruning.
+// pruneAlertState bounds alert, episode, and CPU-tracking maps by activity age.
+// Keep oomHandledAt: it stores event timestamps, and pruning it could reprocess
+// an old OOM still present in LastTerminationState.
 func (rc *ResourceController) pruneAlertState() {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()

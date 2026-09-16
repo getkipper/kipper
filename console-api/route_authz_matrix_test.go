@@ -92,20 +92,9 @@ var matrixParams = map[string]string{
 
 const matrixProject = "shop-prod"
 
-// TestRouteAuthorizationMatrix records what every route in the mux answers to
-// every identity, and fails when a cell moves.
-//
-// It exists for the capability migration: replacing the three-value role rank
-// with capability checks touches every gate in console-api, and a silent
-// widening or narrowing there is an access change nobody sees. A diff in this
-// file is the review.
-//
-// The cells are the authorization decision and nothing downstream of it, which
-// is why a route that let the caller through records "allow" rather than what
-// the handler went on to answer. Several of those answers are certainly wrong
-// and some are 500s from a handler a fake client cannot satisfy; none of that is
-// what this file is for. What matters is that a cell does not change for a
-// reason nobody intended: a 403 becoming an allow is the failure this catches.
+// TestRouteAuthorizationMatrix records each route's response classification
+// for every fixture identity. Review changes as authorization changes;
+// non-401/403 handler responses map to allow, including downstream failures.
 func TestRouteAuthorizationMatrix(t *testing.T) {
 	rows := map[string][]string{}
 	var order []string

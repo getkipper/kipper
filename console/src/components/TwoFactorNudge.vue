@@ -5,12 +5,8 @@ import { RouterLink } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { getTwoFactorStatus } from '@/api/twofa'
 
-// Nudges admins without a 2FA factor towards enrolling. Gentle and
-// dismissible at first; after two weeks the dismissal only lasts the
-// session, so the banner returns until a factor exists. Enrolling early
-// matters: the factor must be a week old before it can authorise a
-// migration, and an unenrolled account is the one an attacker can enroll
-// their own device on.
+// Prompt unenrolled admins to add 2FA. After 14 days, dismissal lasts only
+// for the current session.
 const FIRST_SEEN_KEY = 'kipper_2fa_nudge_first_seen'
 const DISMISSED_KEY = 'kipper_2fa_nudge_dismissed'
 const ESCALATE_AFTER_DAYS = 14

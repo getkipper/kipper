@@ -1,9 +1,5 @@
-// depsScan extracts third-party imports from inline function code and
-// translates them into PyPI/npm package names suitable for the
-// Function CR's dependency map. The mapping isn't 1:1 — many Python
-// packages use a different name when imported vs installed, and on
-// slim runtime images the binary-wheel variant is the right default
-// for anything that would otherwise compile C from source.
+// Extract imports from inline functions and map them to PyPI/npm dependency
+// names. Python aliases and preferred distributions are listed below.
 
 import { PYTHON_STDLIB, NODE_BUILTINS } from './pythonStdlib'
 
@@ -26,21 +22,14 @@ const PYTHON_PACKAGE_MAP: Record<string, string> = {
   yaml: 'PyYAML',
   // scikit-learn
   sklearn: 'scikit-learn',
-  // Microsoft SQL Server — pyodbc needs unixODBC, prefer pymssql.
-  // (User can override if they really need pyodbc.)
+  // Microsoft SQL Server via pyodbc.
   pyodbc: 'pyodbc',
   // MySQL — mysqlclient compiles against libmysqlclient. PyMySQL is
   // pure Python and works out of the box on slim images.
   MySQLdb: 'pymysql',
 }
 
-// PYTHON_SIBLING_PAIRS lists package pairs that install the same
-// Python module under the same import name. Having both in the
-// dependency list means pip installs both and the resulting behaviour
-// is undefined (and on slim images the source build usually fails).
-//
-// Format: [keep, drop] — when both are present in deps, the form
-// surfaces a warning suggesting the user remove the second.
+// Dependency pairs that trigger a replacement suggestion, in [keep, drop] order.
 export const PYTHON_SIBLING_PAIRS: ReadonlyArray<readonly [string, string]> = [
   ['psycopg2-binary', 'psycopg2'],
   ['pymysql', 'mysqlclient'],
@@ -52,9 +41,8 @@ export interface ScannedImport {
   version: string
 }
 
-// scanPythonImports walks the source for top-level imports, filters
-// out stdlib and the local handler module, and applies the package
-// map. Returns the list ordered as encountered for stable diffs.
+// Scan import statements, exclude stdlib modules, and map distribution names.
+// Results are deduplicated, with import matches followed by from matches.
 export function scanPythonImports(code: string): ScannedImport[] {
   const found = new Map<string, string>()
   const re1 = /^\s*import\s+([a-zA-Z0-9_]+)/gm

@@ -48,12 +48,8 @@ type usageCounts struct {
 type UsageBuffer struct {
 	mu     sync.Mutex
 	counts map[usageKey]*usageCounts
-	// floors holds the absolute allowed total this replica last wrote to
-	// each rollup. The informer cache observes our own writes with a lag;
-	// until it catches up, the quota check would see neither the drained
-	// buffer nor the updated rollup and under-count. Reading
-	// max(cachedRollup, floor) closes that window; writes are monotonic,
-	// so the floor self-heals once the cache catches up.
+	// floors records the allowed totals this replica last flushed. Quota checks
+	// use max(cachedRollup, floor) while the informer catches up with those writes.
 	floors map[usageKey]int64
 }
 
@@ -103,12 +99,8 @@ func (b *UsageBuffer) UnflushedAllowed(namespace, prefix string, start time.Time
 	return total
 }
 
-// floorRetention bounds how long a floor is kept. Floors only bridge the
-// informer cache-lag window for the current quota period (the longest is a
-// month), so a day older than this can never affect a live quota check. Well
-// past a month gives margin without letting the map grow for the life of the
-// process — which would also slow every quota check, since AllowedFloors scans
-// the whole map under the lock.
+// floorRetention keeps floors beyond the longest quota period (one month)
+// while bounding memory use and the scan cost of AllowedFloors.
 const floorRetention = 40 * 24 * time.Hour
 
 // pruneFloors drops floor entries whose day is older than before, or is

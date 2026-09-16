@@ -1,13 +1,6 @@
 #!/bin/sh
-# Kipper Python runtime entrypoint.
-#
-# When the user has declared third-party dependencies (Phase 3), the
-# Function controller writes a requirements.txt into the code ConfigMap.
-# That mount is read-only, so we copy the code into a writable /tmp/fn
-# and pip install there. The server then loads the handler from
-# /tmp/fn instead of /app/function.
-#
-# Image-based functions (no inline source) skip this entirely.
+# When requirements.txt is mounted, copy the read-only function source to
+# /tmp/fn, install dependencies with pip, and load the handler there.
 
 set -e
 

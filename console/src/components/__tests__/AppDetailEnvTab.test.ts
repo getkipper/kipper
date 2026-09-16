@@ -42,19 +42,8 @@ beforeEach(() => {
   vi.mocked(appsApi.fetchLogs).mockResolvedValue([])
 })
 
-// Markers that actually render. An earlier version of this test looked for
-// handler names like "handleBind", which Vue compiles into bound listeners and
-// never emits into the DOM — so it passed with every guard removed.
-//
-// Each of these needs its data seeded in mountEnvTab, or it does not render for
-// a deployer either and the assertion proves nothing about the role. Five of
-// them were in exactly that state: the fixtures had no services, links,
-// injected variables or conflicts, so bind, link, unbind, unlink and the
-// conflict fix were absent for a viewer whatever the guards said.
-//
-// They are grouped by the capability the route behind them takes, because the
-// three do not travel together: a role can carry env.write without kipper.write
-// and the console then has to offer one set and withhold the other.
+// Use rendered controls as markers and seed their data in mountEnvTab so
+// authorized roles can see them. Group by the capability each API route requires.
 const ENV_WRITE_MARKERS = [
   'placeholder="LOG_LEVEL"',  // the add-variable form
   'title="Edit"',

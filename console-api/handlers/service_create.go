@@ -227,25 +227,10 @@ func credentialNameFree(ctx context.Context, c crclient.Client, namespace, name 
 	if err != nil {
 		return fmt.Errorf("checking whether %s is free: %w", secretname.ServiceCredentials(name), err)
 	}
-	// A live controller is what makes this final: that Secret is one this service
-	// can never take, no repair claims it away, and the only way out is another
-	// name. Nothing else here is permanent, so nothing else is refused.
-	//
-	// With no owner at all, `kip service credentials --repair` hands the Secret
-	// to the service that should have it, which is how a password gets back to
-	// the volume it was written under.
-	//
-	// An owner that has gone is a weaker case, and it is allowed rather than
-	// recommended. The reconciler will report SecretNotOwned and ask for the
-	// reference to be pointed at this Service, which does keep the password, but
-	// no kip command does that yet: the audit calls a Secret with any controller
-	// reference foreign and repair claims only an unowned one. Garbage collection
-	// is entitled to delete the Secret by that dangling reference in the
-	// meantime. Refusing would not save it, and would take away the one window
-	// where an operator can act.
-	//
-	// A Secret this very service already owns is not a collision at all: the
-	// service exists, and saying so is the other check's job.
+	// Reject credentials owned by another live controller. Unowned Secrets can
+	// be repaired, while stale owner references are allowed through for operator
+	// recovery. Those references still risk garbage collection and require repair
+	// before the reconciler can adopt the credentials.
 	ref := metav1.GetControllerOf(&existing)
 	if ref == nil {
 		return nil

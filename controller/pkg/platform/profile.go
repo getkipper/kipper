@@ -29,21 +29,10 @@ type Resources struct {
 	LokiMemoryLimit         string
 }
 
-// EffectiveResources combines profile defaults with per-component overrides
-// to produce the limits that should actually be applied. Memory overrides
-// win over profile defaults; an empty override falls through to the default.
-//
-// When an override lowers the limit below the profile default request, the
-// request is clamped down to match the new limit. Kubernetes rejects pods
-// where request > limit, so without this clamp a single user resize
-// (`kip platform resize prometheus --memory 128Mi` on a profile whose
-// request is 256Mi) would break the next install or upgrade. Both the
-// runtime reconciler (PlatformConfigReconciler) and the upgrade-time
-// renderer (PlatformState.EffectiveResources via kip upgrade) call through
-// here, so the clamping lives in exactly one place.
-//
-// overrides maps component name (e.g. "prometheus", "loki") to its
-// MemoryLimit. Pass nil for the install path where no overrides exist.
+// EffectiveResources applies non-empty memory-limit overrides to profile
+// defaults and clamps requests to the new limits. Both reconciliation and upgrade
+// rendering use this rule. overrides maps component names to limits; nil uses
+// profile defaults.
 func EffectiveResources(profile string, overrides map[string]string) Resources {
 	res := ResourcesForProfile(profile)
 	if v, ok := overrides[ComponentPrometheus]; ok && v != "" {

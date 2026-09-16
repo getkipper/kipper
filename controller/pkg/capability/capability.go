@@ -1,22 +1,7 @@
-// Package capability holds the catalogue of things a project role may grant,
-// because three components have to agree on it: console-api authorizes its
-// routes from it, the reconciler renders Kubernetes rules from it, and kip
-// prints it.
-//
-// A capability names an ability rather than a permission. Some of them exist
-// only inside console-api, where the actor is known, and grant nothing a
-// kubeconfig can use; the rest also render RBAC rules into a project's
-// namespaces. The two are separate planes because a member holding a
-// console-only capability must not be able to reach the same thing with
-// kubectl, and a member holding a Kubernetes one keeps it whether or not the
-// console is running.
-//
-// What a capability may claim is bounded by two manifests: console-api cannot
-// grant what it does not itself hold, and a project owner cannot grant more
-// than the owner ClusterRole. Both bounds are checked against the real
-// manifests by tests in kip/internal/installer, which is the only package that
-// can see them and this catalogue at once. Hand-copying a verb from a manifest
-// into this file is the mistake those tests exist to catch.
+// Package capability shares project abilities across API authorization, RBAC
+// rendering, and CLI descriptions. PlaneC controls console API access; PlaneK
+// also produces Kubernetes rules. Installer tests check the catalog against
+// console-api and project-owner permissions in the real manifests.
 package capability
 
 import (

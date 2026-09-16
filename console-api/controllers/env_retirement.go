@@ -257,21 +257,10 @@ func retireEnvSecrets(ctx context.Context, c client.Client, reader client.Reader
 	return soonest, legacyReaders, nil
 }
 
-// deleteAfterRecheck looks once more, immediately before each delete.
-//
-// The hour a mark has to mature proves that an earlier pass found no reference.
-// It does not make a set of LIST calls and a DELETE one operation, and it cannot:
-// a CronJob controller holding a template version read before the scan can
-// create a Job in between, and that Job would name an environment that no longer
-// exists. Looking again does not close that window either, it narrows it to the
-// gap between the last read and the write, which is the smallest it can be made
-// without a lock nothing here can take.
-//
-// The scan is per candidate rather than per batch, because one scan for a batch
-// puts the whole of every earlier deletion inside the window of every later one,
-// and that part is avoidable.
-// It reports whether it spared anything, because a candidate spared here is one
-// the caller's own scan did not see and therefore did not schedule a rescan for.
+// deleteAfterRecheck scans consumers before each candidate deletion, narrowing
+// the race with controllers that may create consumers from older templates.
+// The read/delete gap remains non-atomic. It returns true when a candidate was
+// spared so the caller can schedule another scan.
 func deleteAfterRecheck(ctx context.Context, c client.Client, reader client.Reader,
 	namespace string, doomed []*corev1.Secret) (bool, error) {
 	spared := false

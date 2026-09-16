@@ -25,24 +25,9 @@ spec:
             class: traefik
 `
 
-// InstallCertManager installs cert-manager from its upstream manifest
-// and creates a Let's Encrypt ClusterIssuer for automatic TLS.
-//
-// Also patches the cert-manager controller Deployment's `dnsConfig` so
-// HTTP-01 self-checks resolve through the cluster's configured DNS
-// resolvers directly, bypassing CoreDNS's forward chain and negative
-// cache. On a freshly-created A record CoreDNS can serve a cached
-// NXDOMAIN long enough to make the self-check fail even though Let's
-// Encrypt reaches the challenge URL from outside. Witnessed on
-// acme-tools 2026-05-17 when adding DNS for grafana.console.example.com.
-// Using the same resolvers the operator chose (via --dns-resolver, or
-// the public defaults) keeps this consistent with cluster DNS policy for
-// private and corporate setups.
-//
-// Giving cert-manager its own dnsConfig + dnsPolicy=None bypasses
-// CoreDNS for this one pod's outbound lookups, so the self-check
-// succeeds as soon as the DNS record is live. Other workloads keep using
-// CoreDNS — the smallest possible surface that fixes the bug.
+// InstallCertManager installs the controller and a Let's Encrypt ClusterIssuer.
+// It gives cert-manager the configured DNS resolvers directly so HTTP-01
+// self-checks bypass CoreDNS's negative cache during new-record propagation.
 func InstallCertManager(client *ssh.Client, email string, dnsResolvers []string) error {
 	url := fmt.Sprintf(
 		"https://github.com/cert-manager/cert-manager/releases/download/%s/cert-manager.yaml",

@@ -84,24 +84,10 @@ func DefaultBackupExcludedNamespaces() []string {
 	}
 }
 
-// DefaultBackupExcludedResources returns the cert-manager resource kinds
-// every backup and restore must skip. These are the transient objects
-// cert-manager creates while issuing a certificate (the CertificateRequest
-// and the ACME Order/Challenge). They carry no desired state worth keeping
-// and cert-manager recreates them on demand, so backing them up only
-// causes harm.
-//
-// Capturing them wedges renewal after a restore: Velero recreates the old
-// CertificateRequest objects while the Certificate's status.revision is
-// lost (reset to none). cert-manager derives the next request name from
-// the revision, collides with the restored name that already exists, and
-// can never issue a fresh certificate. The certificate then silently
-// expires ~90 days after the restore. Excluding these kinds lets the
-// restored Certificate reconcile cleanly and renew on its own.
-//
-// The Certificate and its TLS Secret are deliberately kept — those are
-// the desired state we want back. Returns a fresh slice on every call so
-// callers can mutate it safely.
+// DefaultBackupExcludedResources returns transient certificate-issuance kinds
+// to omit from backups and restores. Preserving CertificateRequests can collide
+// with request names generated after a restored Certificate loses revision state.
+// Certificates and TLS Secrets remain included. Each call returns a fresh slice.
 func DefaultBackupExcludedResources() []string {
 	return []string{
 		"certificaterequests.cert-manager.io",

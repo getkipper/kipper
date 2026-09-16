@@ -1,18 +1,8 @@
-// Kipper Node.js function runtime.
+// Kipper Node.js function runtime. KIPPER_MODE selects:
 //
-// Two modes, dispatched on the KIPPER_MODE env var:
-//
-//   http  (default) — start an Express server that exposes the user's
-//                     handler at /, /event, and /health. Used by HTTP-
-//                     triggered functions and the kipper-poll sidecar.
-//
-//   batch          — import the handler, invoke it once with a synthetic
-//                     event ({type: cron, timestamp: <ISO>}), and exit.
-//                     Used by cron-triggered functions running as a
-//                     Kubernetes CronJob — no HTTP server, no scale-to-
-//                     zero overlap, no stacked timeouts. Exit code is 0
-//                     on success, 1 if the handler throws or returns a
-//                     truthy `error` field.
+//   http (default): serve the handler over HTTP, with /health for readiness.
+//   batch: invoke once with {type: KIPPER_TRIGGER || 'cron', timestamp}, then
+//          exit 0 on success or 1 for a thrown error or truthy result.error.
 
 const fnPath = process.env.KIPPER_FUNCTION_PATH || '/app/function/index.js'
 const mode = process.env.KIPPER_MODE || 'http'

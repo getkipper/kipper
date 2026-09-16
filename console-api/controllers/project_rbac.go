@@ -32,28 +32,9 @@ var memberClusterRoles = map[kipperv1.ProjectMemberRole]string{
 	kipperv1.ProjectRoleOwner:    "kipper:project-owner",
 }
 
-// memberBindingProjects routes a member binding to the Project that owns it.
-//
-// Three ways, in order of how much they can be trusted, because a map function
-// runs backwards from an object and the object may have lost the thing that
-// says whose it is.
-//
-// The label, when it is there. Console-api writes it on every binding it
-// creates, so this is the ordinary case and the other two are drift.
-//
-// Failing that, generation. A generated name carries a project digest, and a
-// digest does not run backwards: nothing recovers a project name from a
-// SHA-256. So it walks the Projects it can see and generates each one's prefix,
-// which is forward and needs no parsing. The walk is bounded by the number of
-// projects and only runs for a binding whose label has gone.
-//
-// Failing that, the namespace. A fixed name carries no digest at all, so a
-// stripped label leaves nothing on the object; the containing namespace's own
-// label is the last thing that says whose it is.
-//
-// A reader is only needed for the last two, and the watch passes the manager's,
-// so a binding stripped of its label is still routed. An event on a labelled
-// binding answers from the label and reads nothing.
+// memberBindingProjects routes managed binding events using the project
+// label, a generated-name prefix matched against Projects, or the namespace
+// label. The fallback lookups recover ownership when binding labels drift.
 func memberBindingProjects(ctx context.Context, reader client.Reader, obj client.Object) []reconcile.Request {
 	if !memberbinding.IsManaged(obj.GetName()) {
 		return nil
@@ -263,32 +244,13 @@ func IndexMemberBindings(ctx context.Context, indexer client.FieldIndexer) error
 	return indexer.IndexField(ctx, &rbacv1.RoleBinding{}, memberBindingProjectIndex, MemberBindingProjectKeys)
 }
 
-// revokeStaleMemberBindings takes access away and can do nothing else.
+// revokeStaleMemberBindings removes obsolete subjects from this project's
+// managed bindings, including namespaces whose ownership has drifted. It finds
+// bindings by project label and generated-name index.
 //
-// The ordinary reconcile refuses a namespace whose ownership it cannot prove
-// and skips it, which is correct for granting and leaves revocation unreachable
-// exactly where it matters: a namespace whose project label has drifted still
-// holds the bindings this project wrote, and a member removed from the project
-// keeps them. Nothing else visits that namespace, because nothing else is
-// allowed to.
-//
-// So this pass exists, and it is a separate one rather than a reordering.
-// reconcileMemberBindings writes desired bindings, so running it before
-// ownership is proven would let a project whose environment resolves to a
-// namespace it does not own put its own members into that namespace's bindings,
-// and the later refusal would leave the grant standing. Two projects can
-// resolve to one namespace name, so that is not hypothetical.
-//
-// The rule is that the desired subject set here is the existing set minus
-// whoever the project no longer grants. Never a union, never an addition. A
-// binding it empties is deleted, and a RoleRef is never written: it is
-// immutable in Kubernetes, so a binding pointing at the wrong role is deleted
-// rather than corrected.
-//
-// It is scoped to bindings carrying this project's own label, so it cannot
-// reach another tenant's, and it records nothing: writing the namespace into
-// status would widen the Project finalizer's deletion backstop onto a namespace
-// whose ownership was never proven.
+// Keep this separate from grant reconciliation: intersect existing subjects with
+// current grants, delete empty or wrong-role bindings, and leave namespace
+// ownership records untouched. Revocation must never establish new access.
 func (r *ProjectReconciler) revokeStaleMemberBindings(ctx context.Context, project *kipperv1.Project) error {
 	// Two ways in, because either can be the one that survives.
 	//
