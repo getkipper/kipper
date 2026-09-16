@@ -468,6 +468,10 @@ export interface AppSettings {
   csp_allowlist: string[]
   redirects: Array<{ source: string; target: string; permanent: boolean }>
   basic_auth: boolean
+  // Literal, case-sensitive prefixes blocked at ingress.
+  internal_paths: string[]
+  // Exact paths allowed through blocked prefixes.
+  public_paths: string[]
   // Set by the API only: the key gate is on but not yet confirmed in place, so
   // the route may still be reachable without a key. Read-only for the console.
   api_key_gate_pending?: boolean

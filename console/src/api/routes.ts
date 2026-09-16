@@ -12,6 +12,11 @@ export interface RouteEntry {
   port: number
   app: string
   health: RouteHealth
+  // Configured refused prefixes and public exceptions, including the route base path.
+  refused_paths: string[]
+  public_paths: string[]
+  // Whether guard Ingresses match the requested policy.
+  refusal_ready: boolean
 }
 
 export interface RouteGroup {
@@ -23,6 +28,8 @@ export interface RouteGroup {
   environment: string
   routes: RouteEntry[]
   health: RouteHealth
+  // Whether the cluster refuses the well-known internal paths on every route.
+  route_guard: boolean
 }
 
 export async function fetchRoutes(): Promise<RouteGroup[]> {

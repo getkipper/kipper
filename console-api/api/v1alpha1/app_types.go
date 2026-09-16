@@ -251,6 +251,24 @@ type AppRoute struct {
 	// Credentials are stored in a Secret named {app}-basic-auth.
 	// +optional
 	BasicAuth bool `json:"basicAuth,omitempty"`
+
+	// InternalPaths are absolute path prefixes blocked with a 404 on every app route,
+	// including the prefix itself and its descendants. Matching is literal and
+	// case-sensitive; backend path rewriting can bypass it. For strict isolation,
+	// serve private endpoints on a port the Service does not expose.
+	// +kubebuilder:validation:MaxItems=20
+	// +kubebuilder:validation:items:MaxLength=256
+	// +kubebuilder:validation:items:Pattern=`^(/(\.{3,}|\.*[A-Za-z0-9_~-][A-Za-z0-9._~-]*))+$`
+	// +optional
+	InternalPaths []string `json:"internalPaths,omitempty"`
+
+	// PublicPaths are exact path exceptions to blocked prefixes,
+	// e.g. /actuator/prometheus. The trailing-slash form is also allowed.
+	// +kubebuilder:validation:MaxItems=20
+	// +kubebuilder:validation:items:MaxLength=256
+	// +kubebuilder:validation:items:Pattern=`^(/(\.{3,}|\.*[A-Za-z0-9_~-][A-Za-z0-9._~-]*))+$`
+	// +optional
+	PublicPaths []string `json:"publicPaths,omitempty"`
 }
 
 // MaxRedirectFromHosts caps route.redirectFrom, matching the MaxItems marker

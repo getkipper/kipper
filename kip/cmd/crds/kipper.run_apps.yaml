@@ -247,6 +247,18 @@ spec:
                     description: Host is the fully qualified domain for custom domain
                       routing.
                     type: string
+                  internalPaths:
+                    description: |-
+                      InternalPaths are absolute path prefixes blocked with a 404 on every app route,
+                      including the prefix itself and its descendants. Matching is literal and
+                      case-sensitive; backend path rewriting can bypass it. For strict isolation,
+                      serve private endpoints on a port the Service does not expose.
+                    items:
+                      maxLength: 256
+                      pattern: ^(/(\.{3,}|\.*[A-Za-z0-9_~-][A-Za-z0-9._~-]*))+$
+                      type: string
+                    maxItems: 20
+                    type: array
                   noInstanceHeader:
                     description: |-
                       NoInstanceHeader disables the X-Instance-ID response header sidecar.
@@ -261,6 +273,16 @@ spec:
                   path:
                     description: Path is the URL path prefix for path-based routing.
                     type: string
+                  publicPaths:
+                    description: |-
+                      PublicPaths are exact path exceptions to blocked prefixes,
+                      e.g. /actuator/prometheus. The trailing-slash form is also allowed.
+                    items:
+                      maxLength: 256
+                      pattern: ^(/(\.{3,}|\.*[A-Za-z0-9_~-][A-Za-z0-9._~-]*))+$
+                      type: string
+                    maxItems: 20
+                    type: array
                   rateLimit:
                     description: RateLimit sets the maximum requests per second (0
                       = cluster default).

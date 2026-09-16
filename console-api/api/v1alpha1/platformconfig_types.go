@@ -27,6 +27,19 @@ type PlatformConfigSpec struct {
 	// (everything off).
 	// +optional
 	Telemetry *TelemetrySpec `json:"telemetry,omitempty"`
+
+	// RouteGuard configures the refusals applied to every app route.
+	// +optional
+	RouteGuard *RouteGuardSpec `json:"routeGuard,omitempty"`
+}
+
+// RouteGuardSpec holds the cluster-wide route refusals.
+type RouteGuardSpec struct {
+	// BlockInternalPaths blocks the default internal prefixes on every app route.
+	// New installations enable it; existing clusters opt in with
+	// `kip platform internal-paths on`. App-declared internalPaths apply either way.
+	// +optional
+	BlockInternalPaths bool `json:"blockInternalPaths,omitempty"`
 }
 
 // TelemetrySpec gates per-feature telemetry collection. Each flag is

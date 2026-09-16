@@ -84,7 +84,8 @@ jobs:
 
 `route` is the largest block an app can carry. Every field is optional, and the manifest is the only
 place several of them can be set at all. `kip app deploy` covers `group` and `path` through `--route`,
-plus `redirectFrom`, `rateLimit` and `noSecurityHeaders`. The rest, `host` included, are manifest or console.
+plus `redirectFrom`, `rateLimit`, `noSecurityHeaders`, `internalPaths` and `publicPaths`. The rest, `host`
+included, are manifest or console.
 
 | Field | What it does |
 |---|---|
@@ -98,6 +99,8 @@ plus `redirectFrom`, `rateLimit` and `noSecurityHeaders`. The rest, `host` inclu
 | `basicAuth` | Gates the route behind HTTP basic auth. See [Security](/en/security). |
 | `cspAllowlist` | Extra origins to permit in the Content-Security-Policy header. |
 | `noSecurityHeaders` | Drops the security header middleware, for an app that sets its own. |
+| `internalPaths` | Path prefixes refused at the ingress with a 404, on every route the app has. The match is literal and case-sensitive; see [what the refusal reaches, and what it does not](/en/deploying-apps#what-the-refusal-reaches-and-what-it-does-not). |
+| `publicPaths` | One path each, matched exactly, that stays public even though a refusal covers it, for a scraper that needs one endpoint. |
 | `noInstanceHeader` | Drops the header naming which pod answered. |
 
 ```yaml

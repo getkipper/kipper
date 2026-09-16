@@ -25,6 +25,7 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/appowner"
 	"github.com/getkipper/kipper/controller/pkg/gitcred"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
+	"github.com/getkipper/kipper/controller/pkg/internalpath"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 
 	"github.com/getkipper/kipper/controller/pkg/secretname"
@@ -75,7 +76,7 @@ var appDeleteCmd = &cobra.Command{
 
 var appUpdateCmd = &cobra.Command{
 	Use:   "update [app-name]",
-	Short: "Update an application's image, resource profile or redirect domains",
+	Short: "Update an application's image, resource profile, redirect domains or refused paths",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runAppUpdate,
 }
@@ -118,6 +119,8 @@ func init() {
 	appDeployCmd.Flags().Bool("no-security-headers", false, "disable default security headers for this app")
 	appDeployCmd.Flags().Int("rate-limit", 0, "custom rate limit in requests per second (0 = cluster default of 100)")
 	appDeployCmd.Flags().StringSlice("redirect-from", nil, "hostnames that 301 to this app's own hostname (e.g. www.example.com); repeat or comma-separate, max 10")
+	appDeployCmd.Flags().StringSlice("internal-path", nil, "path prefixes refused at the ingress on every route this app has (e.g. /admin, /debug/pprof); matched literally, so an endpoint that must never be public belongs on an unpublished port")
+	appDeployCmd.Flags().StringSlice("public-path", nil, "paths that stay public even though a refusal covers them (e.g. /actuator/prometheus)")
 	appDeployCmd.Flags().String("environment", "", "target environment (e.g. test, acc, prod)")
 	appDeployCmd.Flags().String("memory", "", "memory limit (e.g. 256Mi, 1Gi)")
 	appDeployCmd.Flags().String("cpu", "", "CPU limit (e.g. 500m, 1)")
@@ -137,6 +140,8 @@ func init() {
 	appUpdateCmd.Flags().String("image", "", "new container image (e.g. registry.git.example.com/app:v2)")
 	appUpdateCmd.Flags().String("profile", "", "resource profile: lightweight, standard, compute-heavy, memory-heavy, or jvm")
 	appUpdateCmd.Flags().StringSlice("redirect-from", nil, "hostnames that 301 to this app's hostname (e.g. www.example.com); pass empty to clear, max 10")
+	appUpdateCmd.Flags().StringSlice("internal-path", nil, "path prefixes refused at the ingress on every route this app has, matched literally; pass empty to clear")
+	appUpdateCmd.Flags().StringSlice("public-path", nil, "paths that stay public even though a refusal covers them; pass empty to clear")
 	appUpdateCmd.Flags().String("project", "", "project name")
 	appUpdateCmd.Flags().String("environment", "", "target environment")
 
@@ -269,6 +274,14 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 	if err := manifest.ValidateRedirectFromHosts(redirectFrom); err != nil {
 		return err
 	}
+	internalPaths, _ := cmd.Flags().GetStringSlice("internal-path")
+	publicPaths, _ := cmd.Flags().GetStringSlice("public-path")
+	if err := internalpath.Validate(internalPaths); err != nil {
+		return fmt.Errorf("--internal-path: %w", err)
+	}
+	if err := internalpath.Validate(publicPaths); err != nil {
+		return fmt.Errorf("--public-path: %w", err)
+	}
 	memory, _ := cmd.Flags().GetString("memory")
 	cpu, _ := cmd.Flags().GetString("cpu")
 	profile, _ := cmd.Flags().GetString("profile")
@@ -286,7 +299,7 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 	// so setting an image on an app that builds from git is refused rather than
 	// silently overwritten by the next build.
 	changed := map[string]bool{}
-	for _, f := range []string{"image", "git", "branch", "port", "replicas", "env", "route", "no-security-headers", "rate-limit", "redirect-from", "memory", "cpu", "profile", "build-memory", "build-cpu"} {
+	for _, f := range []string{"image", "git", "branch", "port", "replicas", "env", "route", "no-security-headers", "rate-limit", "redirect-from", "internal-path", "public-path", "memory", "cpu", "profile", "build-memory", "build-cpu"} {
 		if cmd.Flags().Changed(f) {
 			changed[f] = true
 		}
@@ -372,6 +385,8 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 			NoSecurityHeaders: noSecurityHeaders,
 			RateLimit:         rateLimit,
 			RedirectFrom:      redirectFrom,
+			InternalPaths:     internalPaths,
+			PublicPaths:       publicPaths,
 			MemoryLimit:       memory,
 			CPULimit:          cpu,
 			Profile:           profile,
@@ -551,8 +566,18 @@ func runAppUpdate(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	if image == "" && profile == "" && !redirectSet {
-		return fmt.Errorf("nothing to update. Pass --image, --profile, --redirect-from, or a combination")
+	internalSet := cmd.Flags().Changed("internal-path")
+	internalPaths, _ := cmd.Flags().GetStringSlice("internal-path")
+	publicSet := cmd.Flags().Changed("public-path")
+	publicPaths, _ := cmd.Flags().GetStringSlice("public-path")
+	if err := internalpath.Validate(internalPaths); err != nil {
+		return fmt.Errorf("--internal-path: %w", err)
+	}
+	if err := internalpath.Validate(publicPaths); err != nil {
+		return fmt.Errorf("--public-path: %w", err)
+	}
+	if image == "" && profile == "" && !redirectSet && !internalSet && !publicSet {
+		return fmt.Errorf("nothing to update. Pass --image, --profile, --redirect-from, --internal-path, --public-path, or a combination")
 	}
 
 	ns, k8sClient, err := resolveAppNamespace(cmd, appName)
@@ -582,6 +607,28 @@ func runAppUpdate(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Printf("\n  ✔  Redirecting %s. No restart: the route is rebuilt in place\n", strings.Join(redirectFrom, ", "))
 			fmt.Printf("     Each needs its own A record pointing at this cluster.\n")
+		}
+	}
+
+	if internalSet {
+		if err := d.UpdateInternalPaths(ctx, ns, appName, internalPaths); err != nil {
+			return err
+		}
+		if len(internalPaths) == 0 {
+			fmt.Printf("\n  ✔  Refused paths cleared. No restart: the route is rebuilt in place\n")
+		} else {
+			fmt.Printf("\n  ✔  Refusing %s. No restart: the route is rebuilt in place\n", strings.Join(internalPaths, ", "))
+		}
+	}
+
+	if publicSet {
+		if err := d.UpdatePublicPaths(ctx, ns, appName, publicPaths); err != nil {
+			return err
+		}
+		if len(publicPaths) == 0 {
+			fmt.Printf("\n  ✔  Published paths cleared. No restart: the route is rebuilt in place\n")
+		} else {
+			fmt.Printf("\n  ✔  Publishing %s despite the refusals. No restart: the route is rebuilt in place\n", strings.Join(publicPaths, ", "))
 		}
 	}
 

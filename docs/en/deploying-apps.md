@@ -524,6 +524,118 @@ Domain: webapp-test--203-0-113-10.kipper.run
 
 All apps share one TLS certificate. Traefik routes by path prefix and strips it before forwarding, so `domain-service` receives `/api/v1/...` not `/domains-api/api/v1/...`.
 
+### What a path prefix publishes
+
+A path prefix publishes everything the app answers below it. `/domains-api` does not mean "the domains API", it means every URL starting with `/domains-api`, including whatever else the container serves on that port.
+
+Two things end up there without anyone deciding. The first is files that came along in the image: a `Dockerfile` with `COPY . .` in it ships the repository, so `https://yourhost/domains-api/.git/config` serves the remote URL and the history behind it, and a `.env` next to the source serves the credentials in it. The second is endpoints a framework mounts for you on the application port, which is how a Spring Boot app publishes `/actuator/metrics` and a Go binary that imports `net/http/pprof` publishes heap and goroutine dumps.
+
+Kipper refuses a short list of well-known internal prefixes at the ingress:
+
+| Prefix | Why it is on the list | Where it turns up |
+|---|---|---|
+| `/.git` | A source tree copied into the image. It serves the repository's history and whatever that holds. | Any stack. Common wherever the Dockerfile copies the working directory. |
+| `/.env` | A dotenv file copied into the image, which is credentials by definition. | Laravel, Rails, Django, Node. |
+| `/internal` | The conventional name for an API an app serves for itself. | Any stack. An app using it means it. |
+| `/actuator` | Spring Boot's management endpoints. They are on by default, on the app port, and publish health, info, metrics and prometheus. | Spring Boot. This is the one that produced the bug report. |
+| `/debug/pprof` | Go's profiling endpoints, mounted on the default mux by importing `net/http/pprof`. They hand out heap and goroutine dumps, and the CPU profiler holds a request open for as long as it is asked to. | Go. |
+
+The list is short on purpose: every entry is a path some app may legitimately want, so each one has to be worth the refusal. Two near misses show where the line is. `/metrics` is what the Prometheus client libraries mount by default in Go, Python and Node, but it is also an ordinary name for an ordinary endpoint, and refusing it for everyone would break more than it protects. `/debug/vars` is expvar, the same accident as pprof, on a path an app is more likely to have meant. Both are one line of `internalPaths` away.
+
+A refused path answers 404 rather than 403, so it does not advertise that something is there. The match stops at a segment boundary, so refusing `/actuator` leaves a path like `/actuators` alone.
+
+### What the refusal reaches, and what it does not
+
+The refusal is an ingress rule, and it matches the path as written. That covers the case this exists for, which is an endpoint published by accident and found by anyone who guesses the URL. It is not a filter in front of your app, and three spellings get past it:
+
+- **Case.** `/Admin` is a different path to the rule. A backend that routes case-insensitively, which Express and ASP.NET Core do by default, serves it.
+- **Path parameters.** A servlet container strips `;name=value` from every segment before it maps the request, so `/;x/actuator/metrics` arrives at a Spring app as `/actuator/metrics`. The rules catch the parameter directly after a refused prefix and cannot catch one in an earlier segment. This one is specific to the stacks that do that stripping, which is mainly the Java servlet containers.
+- **Encoded separators.** `%2F` stays encoded at the ingress. The rules refuse the encoded spelling of a refused prefix, so `/.git%2Fconfig` is caught, but a backend that decodes deeper paths can be reached by one the rules do not name. nginx decodes before matching its own locations, so a static image is the one to think about here.
+
+So treat the refusal as the thing that closes the accident. An endpoint that must never be public belongs on a port the Service does not publish, whatever the stack.
+
+Whether the list is refused is a cluster setting:
+
+```bash
+kip platform internal-paths show
+kip platform internal-paths on
+```
+
+A new cluster installs with it on. A cluster upgraded from an earlier release has it off, because turning it on changes what a running route serves and that is the operator's call to make. `show` lists the apps with a route, so you can see what turning it on would cover.
+
+### Paths your own app keeps to itself
+
+The default list covers what images and frameworks carry by accident. Anything else, the app author knows about and names, and the entries are ordinary paths rather than anything Kipper knows the meaning of:
+
+```bash
+kip app update domain-service --internal-path /admin,/ops
+```
+
+Or in `kipper.yaml`:
+
+```yaml
+apps:
+  domain-service:
+    image: registry.git.example.com/domain:latest
+    port: 8080
+    route:
+      group: blog
+      path: /domains-api
+      internalPaths:
+        - /admin
+      publicPaths:
+        - /actuator/prometheus
+```
+
+`internalPaths` are refused whatever the cluster setting says, because the app author's declaration is the app author's decision. They are refused on every route the app has, including one somebody adds later.
+
+### Letting one path back through
+
+Something usually needs `/actuator/prometheus` reachable, and `publicPaths` names exactly that one path:
+
+```bash
+kip app update domain-service --public-path /actuator/prometheus
+```
+
+The named path is served like any other, with the route's own strip-prefix, rate limit and auth. The rest of `/actuator` stays refused. It names one path rather than reopening the prefix, so `/actuator/env` does not come back with it.
+
+Both lists are settable on the app's **Settings** tab in the console, and the **Routes** page prints the refused prefixes under each path mapping.
+
+### Looking at a refused path yourself
+
+A refusal is an ingress rule. The endpoint is not switched off and the app has not changed: the path is simply not published, and inside the cluster it answers exactly as it did.
+
+The quickest way to it is a tunnel, which port-forwards to the pod and so meets no ingress rule on the way:
+
+```bash
+kip tunnel domain-service --port 8080
+# then browse http://localhost:8080/actuator, or curl it
+```
+
+Where the image has a shell, you can also ask the container directly:
+
+```bash
+kip exec domain-service -- curl -s localhost:8080/actuator/health
+```
+
+Both reach the endpoint whether or not the route refuses it, and neither publishes anything. The console's web terminal on the app's page is the same thing without the CLI.
+
+If something outside the cluster has to reach one of these paths for good, that is what `publicPaths` is for, and it makes the path public. A reopened path is served through the route's own middleware chain, so where the route already has `basicAuth` or `requireApiKey` on it, the reopened path is behind that gate too. Reopening a path on an ungated route puts it on the public internet.
+
+### Moving the endpoints instead
+
+Where a framework lets you put its management endpoints on a second port, that is the better fix, and it is an app change rather than a platform one. Kipper publishes one port per app, so an endpoint on any other port is unreachable through a route whatever anyone configures later, and no spelling of the path reaches it.
+
+Spring Boot does it with one property:
+
+```properties
+management.server.port=8081
+```
+
+The same shape works elsewhere. A Go service can register `net/http/pprof` on its own `http.ServeMux` and serve that on a second listener rather than leaving it on `DefaultServeMux`; a Node app can mount its admin router on a separate `app.listen`. Kipper special-cases none of them.
+
+Where you can do this, do it, and let the refusals cover what is left.
+
 ### CLI equivalent
 
 ```bash

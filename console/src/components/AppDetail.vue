@@ -1911,6 +1911,8 @@ const rateLimit = ref(0)
 const requireApiKey = ref(false)
 const apiKeyGatePending = ref(false)
 const cspAllowlist = ref('')
+const internalPaths = ref('')
+const publicPaths = ref('')
 const redirects = ref<Array<{ source: string; target: string; permanent: boolean }>>([])
 const basicAuthEnabled = ref(false)
 const basicAuthUsers = ref<string[]>([])
@@ -1939,6 +1941,8 @@ async function loadSettings() {
     requireApiKey.value = s.require_api_key || false
     apiKeyGatePending.value = s.api_key_gate_pending || false
     cspAllowlist.value = (s.csp_allowlist || []).join(', ')
+    internalPaths.value = (s.internal_paths || []).join(', ')
+    publicPaths.value = (s.public_paths || []).join(', ')
     redirects.value = s.redirects || []
     basicAuthEnabled.value = s.basic_auth || false
   } catch {
@@ -1947,6 +1951,8 @@ async function loadSettings() {
     rateLimit.value = 0
     requireApiKey.value = false
     apiKeyGatePending.value = false
+    internalPaths.value = ''
+    publicPaths.value = ''
     redirects.value = []
     basicAuthEnabled.value = false
   } finally {
@@ -2122,13 +2128,21 @@ async function saveSettings() {
         : [],
       redirects: redirects.value,
       basic_auth: basicAuthEnabled.value,
+      internal_paths: splitPaths(internalPaths.value),
+      public_paths: splitPaths(publicPaths.value),
     })
     toast.success('Settings updated')
-  } catch {
-    toast.error('Failed to update settings')
+  } catch (e) {
+    // Show the API validation error so the operator can identify the invalid entry.
+    const detail = (e as { response?: { data?: { error?: string } } })?.response?.data?.error
+    toast.error(detail || 'Failed to update settings')
   } finally {
     settingsSaving.value = false
   }
+}
+
+function splitPaths(value: string): string[] {
+  return value ? value.split(',').map(p => p.trim()).filter(Boolean) : []
 }
 
 function addRedirect() {
@@ -3893,6 +3907,47 @@ function openOptimise() {
               />
               <span class="text-xs text-slate-500 dark:text-slate-400">req/s (0 = cluster default of 100)</span>
             </div>
+          </div>
+
+          <!-- Internal paths -->
+          <div class="rounded-lg border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
+            <div class="flex items-center gap-3 mb-3">
+              <Shield class="h-5 w-5 text-kipper-500" :stroke-width="1.75" />
+              <div>
+                <p class="text-sm font-medium text-slate-900 dark:text-slate-50">Internal paths</p>
+                <p class="text-xs text-slate-500 dark:text-slate-400">
+                  A route publishes everything this app answers under its path. Name the prefixes that should not be public and they answer 404 at the ingress, on every route this app has.
+                </p>
+              </div>
+            </div>
+            <input
+              v-model="internalPaths"
+              data-testid="app-internal-paths"
+              type="text"
+              placeholder="/admin, /debug/pprof"
+              class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
+            />
+            <p class="mt-1.5 text-[10px] text-slate-400 dark:text-slate-500">
+              Comma-separated, each starting with a slash. The cluster refuses /actuator, /debug/pprof, /internal, /.git and /.env on top of these when its route guard is on.
+            </p>
+            <p class="mt-1.5 text-[10px] text-slate-400 dark:text-slate-500">
+              The match is literal and case-sensitive, so this closes the accidental exposure rather than filtering what reaches the app. An endpoint that must never be public belongs on a port the service does not publish. The routes docs list the spellings it does not catch.
+            </p>
+            <p class="mt-1.5 text-[10px] text-slate-400 dark:text-slate-500">
+              A refused path is unpublished rather than switched off. To look at one yourself, run <span class="font-mono">kip tunnel {{ props.appName }}</span> and browse it on localhost, or open a terminal on this app.
+            </p>
+
+            <p class="mt-3 text-xs font-medium text-slate-900 dark:text-slate-50">Published anyway</p>
+            <input
+              v-model="publicPaths"
+              data-testid="app-public-paths"
+              type="text"
+              placeholder="/actuator/prometheus"
+              class="mt-1.5 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
+            />
+            <p class="mt-1.5 text-[10px] text-slate-400 dark:text-slate-500">
+              Paths that stay public even though a refusal covers them, for a metrics scraper that needs one endpoint. Each names one path, matched exactly, so the prefix around it stays refused.
+            </p>
           </div>
 
           <!-- API key gate -->

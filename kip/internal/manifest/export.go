@@ -168,6 +168,12 @@ func exportRoute(spec map[string]interface{}) *RouteSpec {
 	if v, ok := route["requireApiKey"].(bool); ok {
 		r.RequireAPIKey = v
 	}
+	if paths := extractStringSlice(route, "internalPaths"); len(paths) > 0 {
+		r.InternalPaths = paths
+	}
+	if paths := extractStringSlice(route, "publicPaths"); len(paths) > 0 {
+		r.PublicPaths = paths
+	}
 	return r
 }
 

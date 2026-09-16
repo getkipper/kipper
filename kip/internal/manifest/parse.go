@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/getkipper/kipper/controller/pkg/internalpath"
 )
 
 // redirectFromHostPattern is the shape a route.redirectFrom entry must have:
@@ -134,6 +136,12 @@ func Validate(m *Manifest) error {
 		if app.Route != nil {
 			if err := ValidateRedirectFromHosts(app.Route.RedirectFrom); err != nil {
 				return fmt.Errorf("app %q: %w", name, err)
+			}
+			if err := internalpath.Validate(app.Route.InternalPaths); err != nil {
+				return fmt.Errorf("app %q: route.internalPaths: %w", name, err)
+			}
+			if err := internalpath.Validate(app.Route.PublicPaths); err != nil {
+				return fmt.Errorf("app %q: route.publicPaths: %w", name, err)
 			}
 		}
 	}

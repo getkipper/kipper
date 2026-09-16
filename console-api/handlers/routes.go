@@ -6,6 +6,8 @@ import (
 	"sort"
 	"time"
 
+	networkingv1 "k8s.io/api/networking/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,6 +41,12 @@ type routeEntry struct {
 	Port    int32       `json:"port"`
 	App     string      `json:"app"`
 	Health  RouteHealth `json:"health"`
+	// RefusedPaths lists configured refused prefixes including the route base path.
+	RefusedPaths []string `json:"refused_paths"`
+	// PublicPaths lists covered public exceptions including the route base path.
+	PublicPaths []string `json:"public_paths"`
+	// RefusalReady reports whether the guard Ingresses match the requested policy.
+	RefusalReady bool `json:"refusal_ready"`
 }
 
 type routeGroupResponse struct {
@@ -49,6 +57,8 @@ type routeGroupResponse struct {
 	Project     string       `json:"project"`
 	Environment string       `json:"environment"`
 	Routes      []routeEntry `json:"routes"`
+	// RouteGuard reports whether cluster-wide default refusals are enabled.
+	RouteGuard bool `json:"route_guard"`
 	// Health is the aggregate state for the host. Group is ready only
 	// when every member app's Ingress is ready; group TLS is ready only
 	// when every member's certificate is issued. This way the host-level
@@ -69,6 +79,13 @@ func (rt *Routes) List(w http.ResponseWriter, r *http.Request) {
 	var appList kipperv1.AppList
 	if err := rt.CRClient.List(ctx, &appList); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to list apps")
+		return
+	}
+
+	// Use one guard setting snapshot for the whole listing.
+	guardOn, err := controllers.RouteGuardEnabled(ctx, rt.CRClient)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to read the platform config")
 		return
 	}
 
@@ -117,6 +134,7 @@ func (rt *Routes) List(w http.ResponseWriter, r *http.Request) {
 		group, exists := grouped[key]
 		if !exists {
 			group = &routeGroupResponse{
+				RouteGuard:  guardOn,
 				Name:        app.Name,
 				Namespace:   app.Namespace,
 				Host:        host,
@@ -129,10 +147,13 @@ func (rt *Routes) List(w http.ResponseWriter, r *http.Request) {
 		}
 
 		group.Routes = append(group.Routes, routeEntry{
-			Path:    path,
-			Service: app.Name,
-			Port:    app.Spec.Port,
-			App:     app.Name,
+			Path:         path,
+			Service:      app.Name,
+			Port:         app.Spec.Port,
+			App:          app.Name,
+			RefusedPaths: controllers.RefusedRoutePaths(route, guardOn),
+			PublicPaths:  controllers.ReopenedRoutePaths(route, guardOn),
+			RefusalReady: rt.refusalInstalled(ctx, app, host, guardOn),
 		})
 	}
 
@@ -161,6 +182,34 @@ func (rt *Routes) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, groups)
+}
+
+// refusalInstalled checks both guard Ingresses against the requested policy.
+// Stale public exceptions take priority over deny rules.
+func (rt *Routes) refusalInstalled(ctx context.Context, app *kipperv1.App, host string, guardOn bool) bool {
+	if rt.Client == nil {
+		return false
+	}
+	// Treat read errors as unconfirmed protection: a stale exception may still exist.
+	read := func(name string) (*networkingv1.Ingress, bool) {
+		ing, err := rt.Client.NetworkingV1().Ingresses(app.Namespace).Get(ctx, name, metav1.GetOptions{})
+		if kerrors.IsNotFound(err) {
+			return nil, true
+		}
+		if err != nil {
+			return nil, false
+		}
+		return ing, true
+	}
+	deny, ok := read(controllers.InternalPathsIngressName(app.Name))
+	if !ok {
+		return false
+	}
+	allow, ok := read(controllers.PublicPathsIngressName(app.Name))
+	if !ok {
+		return false
+	}
+	return controllers.RefusalInstalled(deny, allow, app, host, guardOn)
 }
 
 // resolveRouteHost returns the effective host for an app's route. When

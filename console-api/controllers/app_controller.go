@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -1172,6 +1173,19 @@ func (r *AppReconciler) deleteOwnedIngress(ctx context.Context, app *kipperv1.Ap
 	return nil
 }
 
+func (r *AppReconciler) deleteOwnedRouteIngresses(ctx context.Context, app *kipperv1.App) error {
+	if err := r.deleteOwnedIngress(ctx, app); err != nil {
+		return err
+	}
+	if err := r.deleteOwnedIngressNamed(ctx, app, InternalPathsIngressName(app.Name)); err != nil {
+		return err
+	}
+	if err := r.deleteOwnedIngressNamed(ctx, app, PublicPathsIngressName(app.Name)); err != nil {
+		return err
+	}
+	return r.reconcileInternalPathsMiddleware(ctx, app, false)
+}
+
 func (r *AppReconciler) reconcileIngress(ctx context.Context, app *kipperv1.App) error {
 	route := app.Spec.Route
 
@@ -1191,7 +1205,7 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *kipperv1.App)
 		// The host claim is sticky and stays held by the project; only the
 		// Ingress is torn down when the route goes away.
 		if route == nil {
-			return r.deleteOwnedIngress(ctx, app)
+			return r.deleteOwnedRouteIngresses(ctx, app)
 		}
 		return nil
 	}
@@ -1200,6 +1214,12 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *kipperv1.App)
 	path := "/"
 	if route.Path != "" {
 		path = route.Path
+	}
+
+	// Use one setting snapshot for guard reconciliation and enforcement checks.
+	blockDefaults, err := RouteGuardEnabled(ctx, r.Client)
+	if err != nil {
+		return err
 	}
 
 	// Claim the host cluster-wide before creating the Ingress. A host the
@@ -1213,7 +1233,7 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *kipperv1.App)
 	}
 	if reserved {
 		r.setRouteConflict(app, host, "reserved for a platform service")
-		return r.deleteOwnedIngress(ctx, app)
+		return r.deleteOwnedRouteIngresses(ctx, app)
 	}
 	owned, err := reserveHost(ctx, r.hostReader(), r.Client, app.Namespace, host)
 	if err != nil {
@@ -1221,7 +1241,7 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *kipperv1.App)
 	}
 	if !owned {
 		r.setRouteConflict(app, host, "already claimed by another project")
-		return r.deleteOwnedIngress(ctx, app)
+		return r.deleteOwnedRouteIngresses(ctx, app)
 	}
 	apimeta.RemoveStatusCondition(&app.Status.Conditions, kipperv1.ConditionRouteReady)
 
@@ -1274,11 +1294,11 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *kipperv1.App)
 	if !route.NoSecurityHeaders {
 		middlewareParts = append(middlewareParts, app.Namespace+"-"+app.Name+"-security@kubernetescrd")
 	}
+	rateLimitRef := "traefik-rate-limit@kubernetescrd"
 	if route.RateLimit > 0 {
-		middlewareParts = append(middlewareParts, app.Namespace+"-"+app.Name+"-rate-limit@kubernetescrd")
-	} else {
-		middlewareParts = append(middlewareParts, "traefik-rate-limit@kubernetescrd")
+		rateLimitRef = app.Namespace + "-" + app.Name + "-rate-limit@kubernetescrd"
 	}
+	middlewareParts = append(middlewareParts, rateLimitRef)
 	// Redirect-source hosts 301 immediately after the rate limit: the
 	// redirect stays metered, but fires ahead of strip-prefix and the path
 	// redirect rules so a path-based route never rewrites a URL the host
@@ -1393,25 +1413,33 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *kipperv1.App)
 		},
 	}
 
-	if err := controllerutil.SetControllerReference(app, desired, r.Scheme); err != nil {
-		return fmt.Errorf("setting owner reference: %w", err)
-	}
-
-	var existing networkingv1.Ingress
-	err = r.Get(ctx, types.NamespacedName{Name: app.Name, Namespace: app.Namespace}, &existing)
-	if errors.IsNotFound(err) {
-		return r.Create(ctx, desired)
-	}
-	if err != nil {
+	// Withdraw the old host before moving its guard.
+	if err := r.withdrawSupersededPublication(ctx, app, host); err != nil {
 		return err
 	}
 
-	if err := adoptChild("Ingress", &existing, appOwner(app), r.Scheme); err != nil {
+	// Install the guard before publishing the route, using the same host and TLS.
+	// Aliases redirect to the guarded canonical host before reaching the backend.
+	if err := r.reconcileGuard(ctx, app, host, tlsEntry, backend, path, blockDefaults, middlewareParts, rateLimitRef); err != nil {
+		withdrawn := ""
+		// Keep serving after a failed reconcile only if the installed guard still
+		// enforces the requested refusals.
+		if !r.guardEnforcing(ctx, app, host, blockDefaults) {
+			if delErr := r.deleteOwnedRouteIngresses(ctx, app); delErr != nil {
+				return fmt.Errorf("withdrawing a route whose refusals are not in place: %w", delErr)
+			}
+			withdrawn = " The route has been withdrawn."
+		}
+		apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
+			Type:    kipperv1.ConditionRouteReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  "InternalPathsNotRefused",
+			Message: fmt.Sprintf("the internal paths on this route cannot be refused: %v.%s", err, withdrawn),
+		})
 		return err
 	}
-	existing.Spec = desired.Spec
-	existing.Annotations = desired.Annotations
-	return r.Update(ctx, &existing)
+
+	return r.applyOwnedIngress(ctx, app, desired)
 }
 
 func (r *AppReconciler) shouldInjectSidecar(app *kipperv1.App) bool {
@@ -2327,6 +2355,9 @@ func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// reconcile the App happens to get for another reason.
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.enqueueAppsForGitCredential)).
 		Watches(&kipperv1.ClusterIdentity{}, handler.EnqueueRequestsFromMapFunc(r.enqueueAppsForClusterIdentity)).
+		// Reconcile routed apps when the guard changes; ignore component sizing updates.
+		Watches(&kipperv1.PlatformConfig{}, handler.EnqueueRequestsFromMapFunc(r.enqueueAppsForRouteGuard),
+			builder.WithPredicates(routeGuardChanged())).
 		Watches(&kipperv1.App{}, handler.EnqueueRequestsFromMapFunc(r.enqueueCallersOfLinkTarget)).
 		// Consent is the target project's decision, and withdrawing it has to
 		// actually close the paths it authorised rather than wait for something

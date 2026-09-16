@@ -103,6 +103,17 @@ spec:
                 - large
                 - xlarge
                 type: string
+              routeGuard:
+                description: RouteGuard configures the refusals applied to every app
+                  route.
+                properties:
+                  blockInternalPaths:
+                    description: |-
+                      BlockInternalPaths blocks the default internal prefixes on every app route.
+                      New installations enable it; existing clusters opt in with
+                      `kip platform internal-paths on`. App-declared internalPaths apply either way.
+                    type: boolean
+                type: object
               telemetry:
                 description: |-
                   Telemetry toggles cluster-wide telemetry collection that feeds the

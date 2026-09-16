@@ -27,6 +27,8 @@ var withheld = map[string]struct{}{
 	"secretRefs": {}, "serviceBindings": {}, "volumes": {}, "mounts": {},
 	"triggers": {}, "route.redirects": {}, "route.cspAllowlist": {},
 	"cspAllowlist": {}, "route.basicAuth": {}, "labels": {}, "config": {},
+	// Paths may contain secret tokens; redact them like route.path.
+	"route.internalPaths": {}, "route.publicPaths": {},
 }
 
 // isWithheld reports whether a path, or a block it sits inside, is withheld.
@@ -76,6 +78,7 @@ func TestRedaction_ClassifiesEveryPathConvertEmits(t *testing.T) {
 				NoInstanceHeader: true, RateLimit: 100, CSPAllowlist: []string{"cdn.example.com"},
 				Redirects: []RedirectSpec{{Source: "/old", Target: "/new", Permanent: true}},
 				BasicAuth: true, RequireAPIKey: true,
+				InternalPaths: []string{"/admin"}, PublicPaths: []string{"/actuator/prometheus"},
 			},
 			Resources: &ResourceSpec{
 				Profile: "standard", CPURequest: "100m", CPULimit: "500m",
