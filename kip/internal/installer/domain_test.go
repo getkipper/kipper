@@ -354,6 +354,62 @@ func TestCheckCustomDomainDNS(t *testing.T) {
 		}
 	})
 
+	t.Run("keeps wildcard advice for the hosts it names when a resolving override sits outside the domain", func(t *testing.T) {
+		lookup := func(host string) ([]string, error) {
+			if host == "login.example.net" {
+				return []string{"203.0.113.9"}, nil
+			}
+			return nil, fmt.Errorf("no such host")
+		}
+		got := CheckCustomDomainDNS("example.com", "", "", "login.example.net", lookup)
+		if len(got) != 1 {
+			t.Fatalf("got %v, want one warning", got)
+		}
+		w := got[0]
+		if !strings.Contains(w, "*.example.com") {
+			t.Errorf("wildcard covers every host named here, so the advice belongs: %s", w)
+		}
+		if strings.Contains(w, "login.example.net") {
+			t.Errorf("warning should not list a host that resolved: %s", w)
+		}
+	})
+
+	t.Run("drops wildcard advice for a host at the domain apex", func(t *testing.T) {
+		lookup := func(host string) ([]string, error) {
+			if host == "example.com" {
+				return nil, fmt.Errorf("no such host")
+			}
+			return []string{"203.0.113.9"}, nil
+		}
+		got := CheckCustomDomainDNS("example.com", "example.com", "", "", lookup)
+		if len(got) != 1 {
+			t.Fatalf("got %v, want one warning", got)
+		}
+		w := got[0]
+		if !strings.Contains(w, "example.com: DNS does not resolve") {
+			t.Errorf("warning missing the apex host: %s", w)
+		}
+		if strings.Contains(w, "*.example.com") {
+			t.Errorf("a wildcard answers for descendants, never for the apex it sits under: %s", w)
+		}
+	})
+
+	t.Run("drops wildcard advice for an apex host even when an outside override resolves", func(t *testing.T) {
+		lookup := func(host string) ([]string, error) {
+			if host == "login.example.net" {
+				return []string{"203.0.113.9"}, nil
+			}
+			return nil, fmt.Errorf("no such host")
+		}
+		got := CheckCustomDomainDNS("example.com", "example.com", "", "login.example.net", lookup)
+		if len(got) != 1 {
+			t.Fatalf("got %v, want one warning", got)
+		}
+		if strings.Contains(got[0], "*.example.com") {
+			t.Errorf("the apex is still in the warning, so the wildcard advice is still wrong: %s", got[0])
+		}
+	})
+
 	t.Run("console override only", func(t *testing.T) {
 		seen := map[string]bool{}
 		lookup := func(host string) ([]string, error) {

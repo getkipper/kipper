@@ -72,22 +72,25 @@ func CheckCustomDomainDNS(domain, consoleOverride, consoleAPIOverride, dexOverri
 		msg += " (" + lookupErr.Error() + ")"
 	}
 	msg += ". cert-manager needs those names to resolve before certificates can issue."
-	if wildcardCovers(domain, hosts) {
-		msg += fmt.Sprintf(" A wildcard A record (*.%s) covers the platform hosts derived from this domain and every app you deploy later.", domain)
+	if wildcardCovers(domain, missing) {
+		msg += fmt.Sprintf(" A wildcard A record (*.%s) covers these hosts and every app you deploy later. Where the zone already has a name at or above one of them, that host needs a record of its own.", domain)
 	}
 	return []string{msg}
 }
 
 // wildcardCovers reports whether a *.domain record would name every host in
 // the set. Overrides are used verbatim, so a host outside the cluster domain
-// is not covered by that wildcard.
+// falls outside that wildcard, and so does the domain apex: *.example.com
+// answers for descendants of example.com, never for example.com itself. Pass
+// the hosts the message names, so advice that holds for them survives an
+// override that sits elsewhere and already resolves.
 func wildcardCovers(domain string, hosts []string) bool {
 	if domain == "" {
 		return false
 	}
 	suffix := "." + domain
 	for _, host := range hosts {
-		if host != domain && !strings.HasSuffix(host, suffix) {
+		if !strings.HasSuffix(host, suffix) {
 			return false
 		}
 	}
