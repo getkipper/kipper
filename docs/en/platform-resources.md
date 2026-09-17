@@ -12,7 +12,7 @@ At install time, `kip install` looks at the node's total RAM and picks one of fi
 |----------|----------|------------|--------|---------------|
 | `nano`   | < 3500 | off        | off    | Demos, dev boxes. Monitoring disabled to give apps room to breathe. |
 | `small`  | 3500–7499 | 512 Mi     | 384 Mi | Side projects and small workloads. Monitoring runs but with tight limits. |
-| `medium` | 7500–14999 | 1 Gi       | 512 Mi | Real production for a small team. Sensible defaults across the board. |
+| `medium` | 7500–14999 | 1 Gi       | 512 Mi | Higher monitoring limits than the small profile, with capacity for apps depending on workload. |
 | `large`  | 15000–29999 | 1 Gi       | 512 Mi | Same limits as medium, more headroom for apps. |
 | `xlarge` | ≥ 30000 | 2 Gi       | 1 Gi   | Mature production with many services. |
 

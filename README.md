@@ -27,7 +27,7 @@
 
 ## What is Kipper?
 
-Kipper turns a Linux server into a Kubernetes platform with a web console, automatic HTTPS, and one-command app deployments. It brings together the tools small teams need to run apps, functions, and databases on their own infrastructure, so you can focus on what you’re building.
+Kipper turns a Linux server into a Kubernetes platform with a web console, automatic HTTPS, and one-command app deployments. It brings together the tools teams need to run apps, functions, and databases on their own infrastructure, so you can focus on what you’re building.
 
 Start with a container image and a server. Kipper handles the Kubernetes setup, routing, certificates, and storage.
 
