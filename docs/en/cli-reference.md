@@ -201,11 +201,18 @@ The resolvers come from `dns_resolvers` in `~/.kip/config.yaml` (set via `--dns-
 
 ## kip node add {#kip-node-add}
 
-Joins a worker node to an existing cluster.
+Kipper supports single-server clusters. This unsupported command remains callable but is hidden from help.
 
 ```bash
 kip node add --host <ip> [--ssh-key <path>]
 ```
+
+The command joins the host as a k3s worker using the control plane's k3s version. Worker operation requires additional setup and manual maintenance:
+
+- **Networking:** the server's default firewall lacks rules for cross-node overlay traffic, which can disrupt pod connectivity.
+- **Host setup:** the command applies kubelet hardening and storage restart safeguards, but skips firewall configuration and installation of Longhorn's host dependencies (`open-iscsi` and `nfs-common`).
+- **Maintenance:** `kip upgrade`, `kip cluster harden`, and `kip cluster uninstall` perform host operations on the configured server only. Worker maintenance and removal are manual.
+- **Availability:** ingress remains on the control-plane node, and the registry uses one replica with single-replica storage. Adding a worker alone does not provide high availability.
 
 ## kip node list {#kip-node-list}
 

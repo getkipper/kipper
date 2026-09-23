@@ -51,9 +51,9 @@ flowchart TB
 
 **Day-to-day management uses APIs.** Creating and managing apps, functions, services, jobs, and configuration happens through the Kubernetes and Kipper console APIs. Developers can deploy and operate their workloads with their Kipper account and assigned permissions.
 
-**SSH handles the underlying servers:** installation, upgrades, adding nodes, and host maintenance or recovery. `kip status` can also use SSH for supplementary host checks; its API-based checks work independently.
+**SSH handles the underlying servers:** installation, upgrades, and host maintenance or recovery. `kip status` can also use SSH for supplementary host checks; its API-based checks work independently.
 
-During installation, the CLI connects to the server via SSH, runs commands remotely to install k3s and all components, then fetches the kubeconfig. Each kip release installs one pinned k3s version, so every cluster built with the same kip runs the same Kubernetes version, and worker nodes always join with the exact version the control plane runs.
+During installation, the CLI connects to the server via SSH, runs commands remotely to install k3s and all components, then fetches the kubeconfig. Each kip release pins a k3s version for new installations. Kipper supports single-server clusters; see the [worker-node limitations](./cli-reference#kip-node-add).
 
 The built-in image registry (Zot) is installed with authentication and TLS from a cluster-internal CA. Builds push with a write credential, nodes pull with a separate read-only credential, and anonymous access is refused. The install verifies this before finishing: a registry that accepts unauthenticated requests fails the install.
 
