@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	stderrors "errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -196,7 +197,13 @@ func TestPlatformConfigReconciler_PatchesPrometheusForXLarge(t *testing.T) {
 	values, _, _ := unstructured.NestedString(gotProm.Object, "spec", "valuesContent")
 	assert.Contains(t, values, "memory: 1Gi", "xlarge should request 1Gi for Prometheus")
 	assert.Contains(t, values, "memory: 2Gi", "xlarge should limit Prometheus at 2Gi")
-	assert.NotContains(t, values, "memory: 512Mi", "old 512Mi limit should be gone")
+	// Scoped to Prometheus's block, since other components carry 512Mi limits of their own.
+	var rendered map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(values), &rendered))
+	promRes, found, err := unstructured.NestedMap(rendered, "prometheus", "prometheusSpec", "resources")
+	require.NoError(t, err)
+	require.True(t, found, "the rendered chart has no Prometheus resources block")
+	assert.NotContains(t, fmt.Sprint(promRes), "512Mi", "old 512Mi Prometheus limit should be gone")
 
 	gotLoki := &unstructured.Unstructured{}
 	gotLoki.SetGroupVersionKind(helmChartGVK)
@@ -560,7 +567,7 @@ func TestPlatformConfigReconciler_NoStatusWriteAtSteadyState(t *testing.T) {
 			Profile: platform.ProfileMedium,
 			Components: []kipperv1.ComponentStatus{
 				{Name: componentPrometheus, CurrentMemoryLimit: "1Gi"},
-				{Name: platform.ComponentGrafana, CurrentMemoryLimit: "128Mi"},
+				{Name: platform.ComponentGrafana, CurrentMemoryLimit: "512Mi"},
 				{Name: platform.ComponentKubeStateMetrics, CurrentMemoryLimit: "192Mi"},
 				{Name: componentLoki, CurrentMemoryLimit: "512Mi"},
 				{Name: platform.ComponentPromtail, CurrentMemoryLimit: "128Mi"},

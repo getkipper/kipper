@@ -4,6 +4,8 @@ import (
 	"sort"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,6 +52,25 @@ func TestComponentsByChart_GroupsMultiComponentCharts(t *testing.T) {
 	assert.Equal(t, []string{ComponentVelero}, groups[chartVelero])
 }
 
+// Grafana idles near 136Mi and peaks near 336Mi on real clusters.
+func TestGrafanaDefaultClearsMeasuredUsage(t *testing.T) {
+	paths := componentPathsByName[ComponentGrafana]
+
+	limit := resource.MustParse(paths.DefaultMemoryLimit)
+	highWater := resource.MustParse("336Mi")
+	assert.Greater(t, limit.Value(), highWater.Value(),
+		"the default limit must clear the highest usage measured on a real cluster")
+
+	request := resource.MustParse(paths.DefaultMemoryRequest)
+	idle := resource.MustParse("136Mi")
+	assert.GreaterOrEqual(t, request.Value(), idle.Value(),
+		"the request should reserve at least the idle footprint")
+
+	max := resource.MustParse(paths.MemoryMax)
+	assert.Greater(t, max.Value(), limit.Value(),
+		"a default equal to the ceiling leaves an operator nowhere to tune")
+}
+
 func TestEffectiveLimit_OverrideWins(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -62,8 +83,9 @@ func TestEffectiveLimit_OverrideWins(t *testing.T) {
 		{"prom medium default", ComponentPrometheus, ProfileMedium, "", "1Gi"},
 		{"prom xlarge default", ComponentPrometheus, ProfileXLarge, "", "2Gi"},
 		{"loki medium default", ComponentLoki, ProfileMedium, "", "512Mi"},
-		{"grafana flat default", ComponentGrafana, ProfileMedium, "", "128Mi"},
-		{"grafana ignores profile", ComponentGrafana, ProfileXLarge, "", "128Mi"},
+		{"grafana flat default", ComponentGrafana, ProfileMedium, "", "512Mi"},
+		{"grafana ignores profile", ComponentGrafana, ProfileXLarge, "", "512Mi"},
+		{"grafana small is the same", ComponentGrafana, ProfileSmall, "", "512Mi"},
 		{"promtail flat default", ComponentPromtail, ProfileMedium, "", "128Mi"},
 		{"traefik flat default", ComponentTraefik, ProfileMedium, "", "256Mi"},
 		{"keda flat default", ComponentKeda, ProfileMedium, "", "256Mi"},
@@ -90,7 +112,7 @@ func TestEffectiveRequest_ClampsAgainstLimit(t *testing.T) {
 
 	// Flat components surface their declared default request.
 	got = EffectiveRequest(ComponentGrafana, ProfileMedium, "")
-	assert.Equal(t, "64Mi", got)
+	assert.Equal(t, "192Mi", got)
 
 	// Unknown components return "" — caller must check PathFor first.
 	got = EffectiveRequest("dex", ProfileMedium, "")
@@ -169,7 +191,8 @@ func TestValidateMemoryLimit(t *testing.T) {
 		{"prom at max", ComponentPrometheus, "8Gi", ""},
 		{"prom below min", ComponentPrometheus, "128Mi", "below"},
 		{"prom above max", ComponentPrometheus, "16Gi", "above"},
-		{"grafana above max", ComponentGrafana, "1Gi", "above"},
+		{"grafana at max", ComponentGrafana, "1Gi", ""},
+		{"grafana above max", ComponentGrafana, "2Gi", "above"},
 		{"keda above max", ComponentKeda, "1Gi", "above"},
 		{"malformed quantity", ComponentLoki, "twelve gigs", "valid Kubernetes quantity"},
 		{"unknown component", "dex", "1Gi", "unknown component"},

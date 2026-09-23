@@ -97,14 +97,15 @@ var componentPathsByName = map[string]ComponentPaths{
 		MemoryMax:         "8Gi",
 		Toggle:            ToggleSelf,
 	},
+	// Flat across profiles: Grafana's memory follows dashboards and query load, not cluster size.
 	ComponentGrafana: {
 		ChartName:            chartKubePrometheusStack,
 		MemoryRequestPath:    []string{"grafana", "resources", "requests", "memory"},
 		MemoryLimitPath:      []string{"grafana", "resources", "limits", "memory"},
-		DefaultMemoryRequest: "64Mi",
-		DefaultMemoryLimit:   "128Mi",
+		DefaultMemoryRequest: "192Mi",
+		DefaultMemoryLimit:   "512Mi",
 		MemoryMin:            "64Mi",
-		MemoryMax:            "512Mi",
+		MemoryMax:            "1Gi",
 		Toggle:               ToggleFollowsPrometheus,
 	},
 	// Sized for the re-list an API server restart forces, not for the steady
