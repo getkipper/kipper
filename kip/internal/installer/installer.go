@@ -204,7 +204,7 @@ func Run(opts Options) (*Result, error) {
 	fmt.Printf("  ✔  OS: %s %s\n", sysInfo.OS, sysInfo.OSVersion)
 	fmt.Printf("  ✔  RAM: %dMB available\n", sysInfo.RAMMB)
 	fmt.Printf("  ✔  Disk: %dMB available\n", sysInfo.DiskMB)
-	fmt.Printf("  ✔  Ports: 80, 443, 6443 open\n")
+	fmt.Printf("  ✔  Ports: 80, 443, 6443 not held by another service\n")
 
 	platformProfile := pickProfile(sysInfo.RAMMB)
 	fmt.Printf("  ✔  Platform profile: %s\n", platformProfile)

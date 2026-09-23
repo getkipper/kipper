@@ -104,7 +104,7 @@ Before installing, Kipper verifies:
 - **OS:** Ubuntu 20.04, 22.04, 24.04, 26.04, or Debian 11, 12
 - **RAM:** 2 GB minimum. The `nano` sizing profile disables monitoring. The installer recommends at least 8 GB for production workloads.
 - **Disk:** 30 GB free space minimum; allow additional space for images, data, and backups.
-- **Ports:** 80 (HTTP), 443 (HTTPS), and 6443 (Kubernetes API) must be available
+- **Ports:** 80 (HTTP), 443 (HTTPS), and 6443 (Kubernetes API) must not be in use by another service. The installer stops if something other than k3s, such as nginx or a Docker container, already listens on one of them
 
 Kipper selects a system sizing profile from detected RAM. The cutoffs are 3500, 7500, 15000, and 30000 MB as reported by the installer, allowing a margin below advertised server sizes. See [Sizing profiles](/en/platform-resources#sizing-profiles) for the ranges and component allocations.
 
