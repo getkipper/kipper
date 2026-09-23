@@ -38,7 +38,6 @@ Start with a container image and a server. Kipper handles the Kubernetes setup, 
 - **Web console.** Dashboard with cluster health, app management, and real-time logs.
 - **Free subdomains.** Get a `*.kipper.run` address with automatic HTTPS, or use your own domain.
 - **Secrets management.** Separate commands for env vars and secrets, with hidden input.
-- **Multi-node.** Add worker nodes with `kip node add`.
 - **Open source.** Apache 2.0, built on standard Kubernetes.
 
 Kipper is pre-1.0. See [operating considerations](#operating-considerations) before running production workloads.

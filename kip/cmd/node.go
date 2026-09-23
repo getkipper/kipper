@@ -19,9 +19,10 @@ var nodeCmd = &cobra.Command{
 }
 
 var nodeAddCmd = &cobra.Command{
-	Use:   "add",
-	Short: "Add a worker node to the cluster",
-	RunE:  runNodeAdd,
+	Use:    "add",
+	Short:  "Add a worker node to the cluster (not supported)",
+	Hidden: true,
+	RunE:   runNodeAdd,
 }
 
 var nodeListCmd = &cobra.Command{
@@ -29,6 +30,15 @@ var nodeListCmd = &cobra.Command{
 	Short: "List all nodes in the cluster",
 	RunE:  runNodeList,
 }
+
+const nodeAddUnsupportedWarning = `
+  ⚠   kip node add is not supported.
+      It registers the host as a k3s worker, but Kipper's default firewall has no
+      rule for traffic between nodes, so pods scheduled on the worker are likely to
+      fail. The worker gets no firewall and none of the packages Longhorn needs, and
+      kip upgrade, harden and uninstall never connect to it. A second node does not
+      make the platform highly available.
+`
 
 func init() {
 	nodeAddCmd.Flags().String("host", "", "IP address or hostname of the node to add")
@@ -41,6 +51,8 @@ func init() {
 }
 
 func runNodeAdd(cmd *cobra.Command, args []string) error {
+	fmt.Print(nodeAddUnsupportedWarning)
+
 	workerHost, _ := cmd.Flags().GetString("host")
 	sshKey, _ := cmd.Flags().GetString("ssh-key")
 
@@ -57,7 +69,6 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Connect to the master node
 	fmt.Printf("\n  Connecting to master (%s)...\n", cluster.Host)
 	masterClient, err := ssh.Dial(ssh.Config{
 		Host:    cluster.Host,
@@ -70,7 +81,6 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	defer func() { _ = masterClient.Close() }()
 	fmt.Printf("  ✔  Connected to master\n")
 
-	// Connect to the worker node
 	fmt.Printf("  Connecting to worker (%s)...\n", workerHost)
 	workerClient, err := ssh.Dial(ssh.Config{
 		Host:    workerHost,
@@ -83,15 +93,14 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	defer func() { _ = workerClient.Close() }()
 	fmt.Printf("  ✔  Connected to worker\n\n")
 
-	// Read the identity used to confirm registration before changing the host.
+	// Capture the host identity before setup so registration can be verified.
 	identity, err := installer.ReadHostIdentity(workerClient)
 	if err != nil {
 		return fmt.Errorf("reading what %s reports about itself: %w", workerHost, err)
 	}
 
-	// Before the join, so a failed write cannot leave a node in the cluster
-	// running Longhorn volumes with nothing stopping an unattended upgrade from
-	// restarting iscsid underneath them.
+	// Defer storage-service restarts before joining so unattended upgrades
+	// preserve active Longhorn sessions once this node starts hosting volumes.
 	fmt.Printf("  Configuring host restarts for storage...\n")
 	if err := installer.ConfigureStorageRestarts(workerClient); err != nil {
 		return fmt.Errorf("configuring storage restarts on %s: %w", workerHost, err)
@@ -105,16 +114,13 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("  ✔  Worker node %s joined the cluster as %s\n\n", workerHost, nodeName)
 
-	// The stamp goes on after registration, because the node object it annotates
-	// does not exist until then. A failure here leaves the host configured and
-	// the record missing, which reads as uncovered: the safe direction.
+	// Stamp after registration, when the node object is available to annotate.
 	if err := installer.StampStorageRestarts(masterClient, nodeName, identity.MachineID); err != nil {
 		fmt.Printf("  ⚠   could not record host configuration for %s: %v\n      The host is configured; 'kip node repair-host' records it.\n\n", nodeName, err)
 	}
 
-	// Wait for a published IPv4 address so the refreshed build egress policy
-	// can block access to this node. Address publication can lag registration.
-	// On timeout, refresh the available exclusions and return an error.
+	// Address publication can lag registration. Wait for IPv4 so build egress
+	// can exclude this node; on timeout, refresh the known exclusions anyway.
 	addressMissing := false
 	fmt.Printf("  Waiting for %s to publish its address...\n", nodeName)
 	if err := installer.WaitForNodeToPublishAddress(masterClient, nodeName, 120*time.Second); err != nil {
@@ -124,11 +130,10 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("  Updating build isolation for the new node...\n")
 	if err := installer.InstallBuildIsolation(masterClient); err != nil {
-		// The node has already joined, so failing the command now would misreport
-		// what happened. The egress policy is closed rather than left permissive
-		// when this fails (see installer.InstallBuildIsolation), so the message
-		// has to say that builds stop until it is fixed.
-		fmt.Printf("  ⚠   could not update build isolation: %v\n      Builds stay blocked until this is resolved. Fix the cause, then run 'kip upgrade'.\n\n", err)
+		// Report isolation repair separately from the completed node join.
+		// InstallBuildIsolation attempts to seal egress if address discovery fails;
+		// an apply failure can leave the previous policy in place.
+		fmt.Printf("  ⚠   could not update build isolation: %v\n      Build pods may be able to reach %s until this is resolved. Fix the cause, then run 'kip upgrade'.\n\n", err, nodeName)
 	} else {
 		fmt.Printf("  ✔  Build isolation updated\n\n")
 	}
