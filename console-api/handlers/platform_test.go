@@ -147,9 +147,9 @@ func TestPlatform_ComponentsIncludesProfileDefaultAndOverride(t *testing.T) {
 
 	// New chart-managed components surface too, with flat defaults.
 	grafana := byName["grafana"]
-	assert.Equal(t, "128Mi", grafana.ProfileMemoryLimit)
+	assert.Equal(t, "512Mi", grafana.ProfileMemoryLimit)
 	assert.Equal(t, "64Mi", grafana.MemoryMin)
-	assert.Equal(t, "512Mi", grafana.MemoryMax)
+	assert.Equal(t, "1Gi", grafana.MemoryMax)
 }
 
 func TestPlatform_UpdateComponentSetsOverride(t *testing.T) {
@@ -243,7 +243,7 @@ func TestPlatform_UpdateComponentRejectsAboveMax(t *testing.T) {
 	pc := newPlatformConfig(platform.ProfileMedium, nil, kipperv1.PlatformConfigStatus{})
 	h := &Platform{CRClient: testCRClient(pc)}
 
-	// Grafana's max is 512Mi.
+	// Grafana's max is 1Gi.
 	body := bytes.NewReader([]byte(`{"memory_limit": "4Gi"}`))
 	req := httptest.NewRequest("PATCH", "/api/v1/platform/components/grafana", body)
 	req.Header.Set("Content-Type", "application/json")
