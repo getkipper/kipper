@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -508,23 +509,32 @@ func handleStatus(reg *registry.Registry, token string) http.HandlerFunc {
 // the network.
 type observeFunc func(ip, sni string) (string, error)
 
+// refuseRegistration answers a refused registration and logs it against the
+// requested name, which must already match hostnames.LabelPattern.
+func refuseRegistration(w http.ResponseWriter, status int, subdomain, reason string) {
+	log.Printf("refused registration of %s: %s", subdomain, reason)
+	respondError(w, status, reason)
+}
+
 func handleRegister(reg *registry.Registry, baseDomain string, observe observeFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 		var req registerRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("refused a registration: invalid request body")
 			respondError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
 
 		if !hostnames.LabelPattern.MatchString(req.Subdomain) {
+			log.Printf("refused a registration: malformed subdomain")
 			respondError(w, http.StatusBadRequest,
 				"subdomain must be lowercase alphanumeric with optional hyphens, 1-63 characters")
 			return
 		}
 
 		if strings.Contains(req.Subdomain, derivedRouteSeparator) {
-			respondError(w, http.StatusBadRequest,
+			refuseRegistration(w, http.StatusBadRequest, req.Subdomain,
 				"subdomain must not contain '--' (reserved for per-cluster service routes)")
 			return
 		}
@@ -535,12 +545,12 @@ func handleRegister(reg *registry.Registry, baseDomain string, observe observeFu
 		renewal := reg.HeldBy(req.Subdomain, req.Token)
 
 		if !renewal && hostnames.ReservedLabels[req.Subdomain] {
-			respondError(w, http.StatusConflict, "subdomain is reserved")
+			refuseRegistration(w, http.StatusConflict, req.Subdomain, "subdomain is reserved")
 			return
 		}
 
 		if !isPublicIP(req.IP) {
-			respondError(w, http.StatusBadRequest, "ip must be a public address")
+			refuseRegistration(w, http.StatusBadRequest, req.Subdomain, "ip must be a public address")
 			return
 		}
 
@@ -552,7 +562,7 @@ func handleRegister(reg *registry.Registry, baseDomain string, observe observeFu
 		// public-IP guard, so the address compared against is one the gateway
 		// would route to.
 		if !renewal && hostnames.IPShapedLabel(req.Subdomain) && req.Subdomain != hostnames.LabelForIP(req.IP) {
-			respondError(w, http.StatusConflict,
+			refuseRegistration(w, http.StatusConflict, req.Subdomain,
 				"a subdomain that spells an IP address may only be registered by that address")
 			return
 		}
@@ -560,7 +570,7 @@ func handleRegister(reg *registry.Registry, baseDomain string, observe observeFu
 		entry, outcome, err := reg.Register(req.Subdomain, req.IP, req.Token)
 		if err != nil {
 			if errors.Is(err, registry.ErrSubdomainTaken) {
-				respondError(w, http.StatusConflict, err.Error())
+				refuseRegistration(w, http.StatusConflict, req.Subdomain, err.Error())
 				return
 			}
 			// The registry failed at its own job — running out of entropy while
@@ -588,6 +598,7 @@ func handleRegister(reg *registry.Registry, baseDomain string, observe observeFu
 		// this request was authenticated by nothing, so the cluster must
 		// assert the pin in a second call carrying the token returned here.
 		if outcome == registry.Created {
+			log.Printf("registered %s for %s", entry.Subdomain, entry.IP)
 			resp.Token = entry.Token
 			resp.Pin = pinNone
 			if err := reg.SaveTo(dataPath); err != nil {
@@ -772,6 +783,7 @@ func handleProof(reg *registry.Registry, baseDomain string, observe observeKeyFu
 
 		entry := reg.Lookup(req.Subdomain)
 		if entry == nil {
+			log.Printf("refused proof for %.63q: unknown subdomain", req.Subdomain)
 			respondJSON(w, http.StatusNotFound, proofResponse{Error: "unknown subdomain"})
 			return
 		}
@@ -779,6 +791,7 @@ func handleProof(reg *registry.Registry, baseDomain string, observe observeKeyFu
 		// constant time before doing any network work. RecordProof re-checks
 		// under the write lock to close the dial-window TOCTOU.
 		if !reg.ChallengeMatches(req.Subdomain, req.Token, req.Nonce) {
+			log.Printf("refused proof for %q: invalid token or no matching outstanding challenge", entry.Subdomain)
 			respondJSON(w, http.StatusConflict, proofResponse{Error: "invalid token or no matching outstanding challenge"})
 			return
 		}
@@ -882,6 +895,7 @@ func handleDeregister(reg *registry.Registry, proxy *Proxy) http.HandlerFunc {
 			respondError(w, http.StatusInternalServerError, "the release could not be recorded; retry")
 			return
 		}
+		log.Printf("released %q at its holder's request", subdomain)
 
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -910,22 +924,33 @@ func cleanupLoop(reg *registry.Registry, proxy *Proxy) {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		removed := reg.Cleanup()
-		for _, subdomain := range removed {
-			proxy.forgetCluster(subdomain)
+		sweep(reg, proxy)
+	}
+}
+
+// sweep releases lapsed registrations, persists the result, and reports any
+// registration still without a certificate pin.
+func sweep(reg *registry.Registry, proxy *Proxy) {
+	removed := reg.Cleanup()
+	for _, subdomain := range removed {
+		proxy.forgetCluster(subdomain)
+	}
+	if len(removed) > 0 {
+		sort.Strings(removed)
+		quoted := make([]string, len(removed))
+		for i, subdomain := range removed {
+			quoted[i] = strconv.Quote(subdomain)
 		}
-		if len(removed) > 0 {
-			log.Printf("cleaned up %d expired subdomain(s)", len(removed))
-			if err := reg.SaveTo(dataPath); err != nil {
-				log.Printf("failed to persist registry after cleanup: %v", err)
-			}
+		log.Printf("released %d lapsed registration(s): %s", len(removed), strings.Join(quoted, ", "))
+		if err := reg.SaveTo(dataPath); err != nil {
+			log.Printf("failed to persist registry after cleanup: %v", err)
 		}
-		// A cluster stuck in unpinned grace proxies unverified; surface it
-		// periodically so drift is visible without per-handshake logs.
-		if count, oldest := reg.UnpinnedSummary(); count > 0 {
-			log.Printf("%d active registration(s) have no certificate pin (oldest %s); their hops proxy unverified until the cluster asserts a fingerprint",
-				count, oldest.Round(time.Minute))
-		}
+	}
+	// A cluster stuck in unpinned grace proxies unverified; surface it
+	// periodically so drift is visible without per-handshake logs.
+	if count, oldest := reg.UnpinnedSummary(); count > 0 {
+		log.Printf("%d active registration(s) have no certificate pin (oldest %s); their hops proxy unverified until the cluster asserts a fingerprint",
+			count, oldest.Round(time.Minute))
 	}
 }
 
