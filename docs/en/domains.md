@@ -81,6 +81,16 @@ sequenceDiagram
 
 A wildcard DNS record (`*.kipper.run`) points all subdomains to the Kipper Gateway. The gateway looks up the cluster IP from its registry and reverse-proxies the request. TLS is terminated at the gateway using a Let's Encrypt wildcard certificate.
 
+### What the gateway records
+
+The gateway stores what it needs to route and to check who holds a name: each registered name, the address of its cluster, the name's management token, its certificate fingerprints, and the state of its proof of control. It logs each registration with the name and address, each release with the name, and a refused registration with the name once that name has passed validation. An unknown name sent in a proof request is logged quoted and cut to 63 characters.
+
+It keeps no access log, so it does not record which pages are requested, who visits them, or what your apps send back. Error logs are the exception. A request that fails at the gateway can leave an error line, and that line can include the visitor's address and browser, the requested URL and headers, or part of what your cluster sent back.
+
+The kipper.run gateway keeps all of these logs in its host's journal, which deletes entries once they are about 30 days old. The [gateway operating guide](https://github.com/getkipper/kipper/blob/main/gateway/OPERATING.md#logs-and-retention) shows the configuration, so you can set up the same limit if you run a gateway of your own.
+
+TLS for `*.kipper.run` ends at the gateway, which decrypts each request and forwards it over a separate HTTPS connection to your cluster. Apart from the error lines above, the gateway keeps no copy of that traffic. To route traffic straight to your server instead, install with a domain of your own, `kip install --domain yourdomain.com`, and point its DNS records at the server. Your cluster then serves its own certificates.
+
 ### Subdomain expiry
 
 A free subdomain keeps its place on the gateway for as long as its cluster keeps proving it holds it, and a live cluster does that without being asked: the console API heartbeats once a day, and each beat renews a proof of control good for seven days. A few missed beats during an outage therefore change nothing. Once the proof lapses the gateway stops routing the name at all and answers 404, which is about a week after a cluster is switched off. Its apps stop answering the moment the server does, of course; what changes at the week is that the name itself goes dark. The registration lasts longer again, and lapses after 30 days without contact.

@@ -79,8 +79,74 @@ alone do not distinguish.
   expired, or the pin moved to a key no proof covers. Each leads somewhere different.
 - `registration <sub> moved to <ip>: pin and proof cleared` — a token holder changed address. Expected
   after a cluster migration, and worth a look if you were not migrating anything.
-- `no client address on a request` — the reverse proxy in front stopped setting the client header. Rate
-  limiting degrades to per-destination budgets while this is true.
+- `no client address on an API request` — API requests whose client address is missing or unparseable
+  share one 30-per-minute bucket. Check the reverse proxy in front: when it stops setting the header,
+  every API caller ends up in that bucket.
+- `refused registration of <sub>: <reason>` — a rejected claim. Occasional refusals can result from
+  choosing a taken or reserved name. A burst across many names may indicate automated probing.
+
+## Logs and retention
+
+The registration handlers and hourly cleanup produce these log messages:
+
+- `registered <sub> for <ip>`
+- `refused registration of <sub>: <reason>`, or `refused a registration: <reason>` for an invalid request body
+  or malformed label
+- `released "<sub>" at its holder's request`
+- `refused proof for "<sub>": <reason>` for an unknown name, invalid token, or missing, expired, or mismatched challenge
+- `released <n> lapsed registration(s): "<sub>", …` from the hourly sweep
+
+Routine renewals are silent; pin changes and completed proofs have separate log messages. Requests
+rejected by the rate limiter stop before the registration handlers.
+
+These messages log names, cluster addresses, and outcomes rather than credential fields or client
+addresses. Names are caller-controlled: an unknown name in a proof request is truncated to 63
+characters and quoted, which escapes control characters.
+
+Error diagnostics can include request data. Go's reverse proxy may log fragments of a cluster's
+response. Caddy's handler-error logs can include the method, URL and query string, headers, client
+address, and user agent. With the supplied configuration, handler errors use error level for 5xx
+responses and debug level otherwise. Caddy redacts `Authorization`, `Proxy-Authorization`, `Cookie`,
+and `Set-Cookie` by default; other headers and query parameters may contain sensitive values. See
+[Caddy's error logging](https://github.com/caddyserver/caddy/blob/master/modules/caddyhttp/server.go)
+and [header redaction defaults](https://caddyserver.com/docs/caddyfile/directives/log).
+
+Configure retention on the deployment host. The repository's Compose file leaves logging to Docker's
+configured default; it includes no retention settings. To retain logs for approximately 30 days, add
+Docker's [journald logging driver](https://docs.docker.com/engine/logging/drivers/journald/) to both
+services in the deployment's Compose file:
+
+```yaml
+services:
+  gateway:
+    logging:
+      driver: journald
+      options:
+        tag: kipper-gateway
+  caddy:
+    logging:
+      driver: journald
+      options:
+        tag: kipper-caddy
+```
+
+Create `/etc/systemd/journald.conf.d/retention.conf` on the host:
+
+```ini
+[Journal]
+MaxRetentionSec=30day
+MaxFileSec=1day
+```
+
+journald removes archived files. `MaxFileSec=1day` rotates the active file as new entries arrive, so
+steady logging keeps retention near 30 days. Quiet hosts can retain entries longer. See the
+[journald retention settings](https://www.freedesktop.org/software/systemd/man/latest/journald.conf.html#MaxRetentionSec=).
+
+Apply the settings with `systemctl restart systemd-journald`, then `docker compose up -d` to recreate both
+containers. Recreating Caddy drops live connections, WebSockets included, until it is back. The limit
+applies to the entire host journal, and journald's space limits can remove entries sooner.
+`docker compose logs` keeps working. `journalctl CONTAINER_TAG=kipper-gateway` also includes retained
+entries from earlier containers with that tag.
 
 ## Configuration
 
