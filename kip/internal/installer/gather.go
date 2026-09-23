@@ -3,6 +3,8 @@ package installer
 import (
 	"fmt"
 	"net"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -34,7 +36,11 @@ func GatherSystemInfo(client *ssh.Client) (SystemInfo, error) {
 	}
 	info.DiskMB = disk
 
-	info.Ports = probeOpenPorts(client)
+	listeners, err := gatherPortListeners(client)
+	if err != nil {
+		return info, fmt.Errorf("checking ports: %w", err)
+	}
+	info.PortListeners = listeners
 
 	return info, nil
 }
@@ -93,33 +99,50 @@ func gatherDisk(client *ssh.Client) (int, error) {
 	return mb, nil
 }
 
-// probeOpenPorts checks whether the required ports are reachable on the
-// remote host by attempting a TCP connection from the local machine.
-// Ports that accept connections are returned.
-func probeOpenPorts(client *ssh.Client) []int {
-	// We check from the remote side whether the ports are not already
-	// bound by another service. A port is "available" if nothing is
-	// listening on it — which means our connection will be refused.
-	// However, for the preflight check we actually want to verify that
-	// these ports CAN be used (i.e. not blocked by a firewall).
-	//
-	// The simplest reliable check: try to bind each port briefly on the
-	// remote host. If we can bind it, the port is available.
-	var open []int
-	for _, port := range requiredPorts {
-		cmd := fmt.Sprintf(
-			"timeout 1 bash -c 'echo | nc -l -p %d &>/dev/null &' 2>/dev/null; "+
-				"sleep 0.2; "+
-				"timeout 1 bash -c 'echo | nc -z 127.0.0.1 %d' 2>/dev/null && echo open || echo closed; "+
-				"kill %%1 2>/dev/null",
-			port, port)
-		output, _ := client.Run(cmd)
-		if strings.TrimSpace(output) == "open" {
-			open = append(open, port)
+// gatherPortListeners lists the processes listening on each required port,
+// keyed by port. A listener ss cannot attribute to a process maps to "".
+func gatherPortListeners(client *ssh.Client) (map[int][]string, error) {
+	filters := make([]string, 0, len(requiredPorts))
+	for _, p := range requiredPorts {
+		filters = append(filters, fmt.Sprintf("sport = :%d", p))
+	}
+	output, err := client.Run(fmt.Sprintf("ss -tlnpH '( %s )'", strings.Join(filters, " or ")))
+	if err != nil {
+		return nil, err
+	}
+	return parsePortListeners(output), nil
+}
+
+var ssProcessName = regexp.MustCompile(`\("([^"]*)"`)
+
+// parsePortListeners reads `ss -tlnpH` output into the process names listening
+// on each port. Lines other than LISTEN rows are ignored.
+func parsePortListeners(output string) map[int][]string {
+	listeners := map[int][]string{}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 || fields[0] != "LISTEN" {
+			continue
+		}
+		local := fields[3]
+		port, err := strconv.Atoi(local[strings.LastIndex(local, ":")+1:])
+		if err != nil {
+			continue
+		}
+		names := []string{""}
+		if matches := ssProcessName.FindAllStringSubmatch(line, -1); len(matches) > 0 {
+			names = names[:0]
+			for _, m := range matches {
+				names = append(names, m[1])
+			}
+		}
+		for _, name := range names {
+			if !slices.Contains(listeners[port], name) {
+				listeners[port] = append(listeners[port], name)
+			}
 		}
 	}
-
-	return open
+	return listeners
 }
 
 // ProbePortFromLocal checks if a port is reachable on a remote host

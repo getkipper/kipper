@@ -19,7 +19,6 @@ func TestRunPreflightChecks(t *testing.T) {
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "22.04",
 				RAMMB: 8192, DiskMB: 40960,
-				Ports: []int{80, 443, 6443},
 			},
 		},
 		{
@@ -27,7 +26,6 @@ func TestRunPreflightChecks(t *testing.T) {
 			system: SystemInfo{
 				OS: "debian", OSVersion: "12",
 				RAMMB: 8192, DiskMB: 40960,
-				Ports: []int{80, 443, 6443, 8080},
 			},
 		},
 		{
@@ -35,7 +33,6 @@ func TestRunPreflightChecks(t *testing.T) {
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "22.04",
 				RAMMB: 2048, DiskMB: 40960,
-				Ports: []int{80, 443, 6443},
 			},
 			wantWarningContains: "'nano' profile",
 		},
@@ -44,7 +41,6 @@ func TestRunPreflightChecks(t *testing.T) {
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "22.04",
 				RAMMB: 3000, DiskMB: 40960,
-				Ports: []int{80, 443, 6443},
 			},
 			wantWarningContains: "monitoring (Prometheus, Loki, Grafana) is disabled by default",
 		},
@@ -53,7 +49,6 @@ func TestRunPreflightChecks(t *testing.T) {
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "20.04",
 				RAMMB: 4096, DiskMB: 40960,
-				Ports: []int{80, 443, 6443},
 			},
 			wantWarningContains: "'small' profile",
 		},
@@ -62,7 +57,6 @@ func TestRunPreflightChecks(t *testing.T) {
 			system: SystemInfo{
 				OS: "centos", OSVersion: "9",
 				RAMMB: 8192, DiskMB: 40960,
-				Ports: []int{80, 443, 6443},
 			},
 			wantError: "unsupported OS: centos (supported: ubuntu, debian)",
 		},
@@ -71,7 +65,6 @@ func TestRunPreflightChecks(t *testing.T) {
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "18.04",
 				RAMMB: 8192, DiskMB: 40960,
-				Ports: []int{80, 443, 6443},
 			},
 			wantError: "unsupported ubuntu version: 18.04 (supported: 20.04, 22.04, 24.04, 26.04)",
 		},
@@ -80,7 +73,6 @@ func TestRunPreflightChecks(t *testing.T) {
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "26.04",
 				RAMMB: 8192, DiskMB: 40960,
-				Ports: []int{80, 443, 6443},
 			},
 		},
 		{
@@ -88,7 +80,6 @@ func TestRunPreflightChecks(t *testing.T) {
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "22.04",
 				RAMMB: 1024, DiskMB: 40960,
-				Ports: []int{80, 443, 6443},
 			},
 			wantError: "insufficient RAM: 1024MB available, 2048MB required",
 		},
@@ -97,34 +88,66 @@ func TestRunPreflightChecks(t *testing.T) {
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "22.04",
 				RAMMB: 8192, DiskMB: 20480,
-				Ports: []int{80, 443, 6443},
 			},
 			wantError: "insufficient disk: 20480MB available, 30720MB required",
 		},
 		{
-			name: "fails with missing single port",
+			name: "fails when another service holds a port",
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "22.04",
 				RAMMB: 8192, DiskMB: 40960,
-				Ports: []int{80, 443},
+				PortListeners: map[int][]string{443: {"nginx"}},
 			},
-			wantError: "required ports unavailable: 6443",
+			wantError: "required ports already in use: 443 (nginx). Stop the service holding them, or install on a clean server",
 		},
 		{
-			name: "fails with multiple missing ports",
+			name: "names every held port and its process",
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "22.04",
 				RAMMB: 8192, DiskMB: 40960,
-				Ports: []int{6443},
+				PortListeners: map[int][]string{80: {"nginx"}, 443: {"nginx"}, 6443: {""}},
 			},
-			wantError: "required ports unavailable: 80, 443",
+			wantError: "required ports already in use: 80 (nginx), 443 (nginx), 6443 (an unidentified process). Stop the service holding them, or install on a clean server",
+		},
+		{
+			name: "passes when k3s already holds the API port",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 40960,
+				PortListeners: map[int][]string{6443: {"k3s-server"}},
+			},
+		},
+		{
+			name: "passes when an older k3s holds the API port",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 40960,
+				PortListeners: map[int][]string{6443: {"k3s"}},
+			},
+		},
+		{
+			name: "fails when a process only resembles k3s",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 40960,
+				PortListeners: map[int][]string{443: {"k3s-proxy"}},
+			},
+			wantError: "required ports already in use: 443 (k3s-proxy). Stop the service holding them, or install on a clean server",
+		},
+		{
+			name: "fails when k3s shares a port with another process",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 40960,
+				PortListeners: map[int][]string{6443: {"k3s-server", "haproxy"}},
+			},
+			wantError: "required ports already in use: 6443 (haproxy). Stop the service holding them, or install on a clean server",
 		},
 		{
 			name: "no warning at exactly the recommended floor",
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "22.04",
 				RAMMB: 8192, DiskMB: 40960,
-				Ports: []int{80, 443, 6443},
 			},
 		},
 		{
@@ -132,7 +155,6 @@ func TestRunPreflightChecks(t *testing.T) {
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "22.04",
 				RAMMB: 64253, DiskMB: 1024000,
-				Ports: []int{80, 443, 6443},
 			},
 		},
 		{
@@ -140,7 +162,6 @@ func TestRunPreflightChecks(t *testing.T) {
 			system: SystemInfo{
 				OS: "windows", OSVersion: "11",
 				RAMMB: 512, DiskMB: 1024,
-				Ports: []int{},
 			},
 			wantError: "unsupported OS: windows (supported: ubuntu, debian)",
 		},

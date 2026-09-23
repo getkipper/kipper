@@ -2,6 +2,7 @@ package installer
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -24,14 +25,14 @@ var supportedOS = map[string][]string{
 // SystemInfo holds the remote server's system information
 // gathered before installation.
 type SystemInfo struct {
-	OS        string
-	OSVersion string
-	RAMMB     int
-	DiskMB    int
-	Ports     []int
+	OS            string
+	OSVersion     string
+	RAMMB         int
+	DiskMB        int
+	PortListeners map[int][]string
 }
 
-// requiredPorts are the ports that must be available for a Kipper cluster.
+// requiredPorts are the ports that must be free of other services for a Kipper cluster.
 var requiredPorts = []int{80, 443, 6443}
 
 // PreflightResult contains the outcome of preflight checks.
@@ -100,21 +101,35 @@ func checkDisk(sys SystemInfo) error {
 }
 
 func checkPorts(sys SystemInfo) error {
-	available := make(map[int]bool)
-	for _, p := range sys.Ports {
-		available[p] = true
-	}
-
-	var missing []string
+	var held []string
 	for _, p := range requiredPorts {
-		if !available[p] {
-			missing = append(missing, fmt.Sprintf("%d", p))
+		var foreign []string
+		for _, name := range sys.PortListeners[p] {
+			if isK3s(name) {
+				continue
+			}
+			if name == "" {
+				name = "an unidentified process"
+			}
+			if !slices.Contains(foreign, name) {
+				foreign = append(foreign, name)
+			}
+		}
+		if len(foreign) > 0 {
+			held = append(held, fmt.Sprintf("%d (%s)", p, strings.Join(foreign, ", ")))
 		}
 	}
 
-	if len(missing) > 0 {
-		return fmt.Errorf("required ports unavailable: %s", strings.Join(missing, ", "))
+	if len(held) > 0 {
+		return fmt.Errorf("required ports already in use: %s. Stop the service holding them, or install on a clean server",
+			strings.Join(held, ", "))
 	}
 
 	return nil
+}
+
+// isK3s reports whether a listener belongs to k3s itself, which holds 6443 on a
+// host where kip install is being re-run.
+func isK3s(process string) bool {
+	return process == "k3s-server" || process == "k3s"
 }
