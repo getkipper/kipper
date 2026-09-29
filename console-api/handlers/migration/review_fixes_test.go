@@ -125,11 +125,11 @@ func TestTargetCreators_ReplayConverges(t *testing.T) {
 		"image": "registry.example.com/shop/web:v1",
 		"port":  8080,
 	}
-	if err := h.createApp(ctx, "web", "shop-prod", appSpec); err != nil {
+	if err := h.createApp(ctx, "web", "shop-prod", appSpec, nil); err != nil {
 		t.Fatalf("first createApp: %v", err)
 	}
 	appSpec["image"] = "registry.example.com/shop/web:v2"
-	if err := h.createApp(ctx, "web", "shop-prod", appSpec); err != nil {
+	if err := h.createApp(ctx, "web", "shop-prod", appSpec, nil); err != nil {
 		t.Fatalf("replayed createApp must not fail: %v", err)
 	}
 	var app kipperv1.App

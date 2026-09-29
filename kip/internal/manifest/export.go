@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/getkipper/kipper/controller/pkg/provenance"
+
 	"gopkg.in/yaml.v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
@@ -99,7 +101,7 @@ func exportApps(ctx context.Context, dynClient dynamic.Interface, namespace stri
 			app.SecretRefs = refs
 		}
 		app.Route = exportRoute(spec)
-		app.Resources = exportResources(spec)
+		app.Resources = exportAppResources(spec, item.GetManagedFields(), name, m)
 		app.ServiceBindings = exportBindings(spec)
 		app.Volumes = exportVolumeMounts(spec)
 		app.Autoscale = exportAutoscale(spec)
@@ -202,6 +204,32 @@ func exportResources(spec map[string]interface{}) *ResourceSpec {
 	// otherwise-empty block still represents valid intent ("override
 	// nothing"). Emit even if all fields are zero so round-trips don't
 	// drop the resources stanza entirely.
+	return r
+}
+
+// exportAppResources includes user and held values and omits automatic ones.
+// Held values get a note because applying the export claims them as the user's.
+func exportAppResources(spec map[string]interface{}, owners []metav1.ManagedFieldsEntry, appName string, m *Manifest) *ResourceSpec {
+	r := exportResources(spec)
+	if r == nil {
+		return nil
+	}
+	for _, q := range []struct {
+		field string
+		value *string
+	}{
+		{"cpuRequest", &r.CPURequest},
+		{"cpuLimit", &r.CPULimit},
+		{"memoryRequest", &r.MemoryRequest},
+		{"memoryLimit", &r.MemoryLimit},
+	} {
+		switch provenance.ClassifyApp(*q.value, owners, q.field) {
+		case provenance.Automatic:
+			*q.value = ""
+		case provenance.Held:
+			m.Notes = append(m.Notes, fmt.Sprintf("app %q: %s %s was set by nobody Kipper can name; applying this file makes it yours", appName, q.field, *q.value))
+		}
+	}
 	return r
 }
 

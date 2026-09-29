@@ -405,20 +405,33 @@ func TestUpdateImageVersion(t *testing.T) {
 	assert.Equal(t, "postgres:15-alpine", ss.Spec.Template.Spec.Containers[0].Image)
 }
 
-func TestUpdateResourceLimits(t *testing.T) {
-	client := fake.NewSimpleClientset() //nolint:staticcheck
-	mgr := &Manager{Client: client}
+// Resources land on the Service CR, whose reconciler is the only writer of
+// the StatefulSet's resources. Writing the StatefulSet directly would be
+// undone on the reconciler's next pass.
+func TestUpdateResourceLimitsWritesTheService(t *testing.T) {
 	ctx := context.Background()
-
+	svc := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": manifest.ServiceGVR.GroupVersion().String(), "kind": "Service",
+		"metadata": map[string]interface{}{"name": "db", "namespace": "default"},
+		"spec":     map[string]interface{}{"type": "postgres"},
+	}}
+	mgr := managerWith(nil, svc)
 	_, _ = mgr.Add(ctx, Options{Name: "db", Namespace: "default", Type: "postgres"})
+	before, _ := mgr.Client.AppsV1().StatefulSets("default").Get(ctx, "db", metav1.GetOptions{})
 
 	result, err := mgr.Update(ctx, "default", "db", Options{MemoryLimit: "2Gi", CPULimit: "1"})
 	require.NoError(t, err)
 	assert.True(t, result.ResourcesChanged)
 	assert.True(t, result.NeedsRestart)
 
-	ss, _ := client.AppsV1().StatefulSets("default").Get(ctx, "db", metav1.GetOptions{})
-	assert.Equal(t, "2Gi", ss.Spec.Template.Spec.Containers[0].Resources.Limits.Memory().String())
+	got, err := mgr.Dynamic.Resource(manifest.ServiceGVR).Namespace("default").Get(ctx, "db", metav1.GetOptions{})
+	require.NoError(t, err)
+	res, _, _ := unstructured.NestedStringMap(got.Object, "spec", "resources")
+	assert.Equal(t, map[string]string{"memoryRequest": "2Gi", "memoryLimit": "2Gi", "cpuRequest": "1", "cpuLimit": "1"}, res)
+
+	after, _ := mgr.Client.AppsV1().StatefulSets("default").Get(ctx, "db", metav1.GetOptions{})
+	assert.Equal(t, before.Spec.Template.Spec.Containers[0].Resources, after.Spec.Template.Spec.Containers[0].Resources,
+		"the StatefulSet's resources are the reconciler's to write")
 }
 
 func TestUpdateNotFoundErrors(t *testing.T) {

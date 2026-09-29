@@ -225,7 +225,7 @@ The volume is also mounted into the cron CronJob's pod for cron-triggered functi
 
 ## Resources
 
-CPU and memory limits per function pod, edited from the Resources section in the form. The defaults work for most lightweight handlers; bump them for CPU- or memory-heavy work. Changes take effect on the next scale-up.
+Set CPU and memory per function pod in the Resources section of the form. Equal request and limit values set a fixed size. A request below its limit defines a range for tuning the function Deployment. Saved changes update its pod template; cron and one-off runs use the configured values when new pods start. See [Your own CPU and memory values](/en/resource-management#your-own-values).
 
 ## Logs
 

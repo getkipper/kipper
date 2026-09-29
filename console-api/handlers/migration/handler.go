@@ -362,6 +362,10 @@ func (h *Handler) ReceiveResourceHandler(w http.ResponseWriter, r *http.Request)
 		Namespace   string                  `json:"namespace,omitempty"`
 		Spec        map[string]interface{}  `json:"spec"`
 		Credentials *transferredCredentials `json:"credentials,omitempty"`
+		// UserResources names the carried App resource values that are the
+		// user's. An older source does not send it, and then nothing is
+		// claimed: every carried value stays held until the user confirms it.
+		UserResources *map[string]string `json:"userResources,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body")
@@ -408,7 +412,7 @@ func (h *Handler) ReceiveResourceHandler(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	case "App":
-		if err := h.createApp(ctx, req.Name, req.Namespace, req.Spec); err != nil {
+		if err := h.createApp(ctx, req.Name, req.Namespace, req.Spec, req.UserResources); err != nil {
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("creating app: %v", err))
 			return
 		}

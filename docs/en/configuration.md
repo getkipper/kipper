@@ -204,7 +204,7 @@ The console API uses the key to authenticate requests to the selected AI provide
 
 ## Resource management mode
 
-Kipper automatically manages CPU and memory for your apps. A background controller monitors usage and adjusts allocations to match. It scales up under load, scales down when idle, and recovers from OOM kills.
+Kipper automatically manages CPU and memory for your apps. A background controller monitors usage, adjusts allocations and responds to OOM kills. When you set resource bounds, it adjusts requests within those bounds and preserves your limits.
 
 See [Resource Management](/en/resource-management) for full details on how the auto controller works, resource profiles, expert mode, and the resource log.
 

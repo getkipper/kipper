@@ -67,6 +67,7 @@ func exportSingle(ctx context.Context, dynClient dynamic.Interface, cluster *con
 	if err != nil {
 		return err
 	}
+	printExportNotes(m)
 
 	data, err := manifest.Marshal(m)
 	if err != nil {
@@ -152,4 +153,12 @@ func projectEnvironments(ctx context.Context, dynClient dynamic.Interface, crNam
 		}
 	}
 	return envs, nil
+}
+
+// printExportNotes writes an export's notes to stderr, so they reach the user
+// without ending up in a manifest printed to stdout.
+func printExportNotes(m *manifest.Manifest) {
+	for _, note := range m.Notes {
+		fmt.Fprintf(os.Stderr, "  !  %s\n", note)
+	}
 }

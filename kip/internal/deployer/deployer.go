@@ -163,12 +163,6 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) error {
 				delete(merged, "git")
 			}
 		}
-		// A profile switch replaces the resources block wholesale: merging
-		// would keep the old explicit request/limit values, which override
-		// the profile in the reconciler.
-		if opts.Changed["profile"] && opts.Profile != "" {
-			delete(merged, "resources")
-		}
 		// Setting an image on an app that builds from git used to detach the
 		// repository as a side effect. That is data loss wearing the clothes of
 		// convenience: the stored token goes with it, and nothing said so.
@@ -191,6 +185,20 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) error {
 			release()
 		}
 		return err
+	}
+	// Updates only claim fields whose values change. Explicitly claim repeated
+	// --memory and --cpu values too, so they become user bounds.
+	if existed {
+		var edits ResourceEdits
+		if opts.Changed["memory"] && opts.MemoryLimit != "" {
+			edits.Memory = &PairEdit{Request: opts.MemoryLimit, Limit: opts.MemoryLimit}
+		}
+		if opts.Changed["cpu"] && opts.CPULimit != "" {
+			edits.CPU = &PairEdit{Request: opts.CPULimit, Limit: opts.CPULimit}
+		}
+		if edits.Memory != nil || edits.CPU != nil {
+			return d.UpdateResources(ctx, opts.Namespace, opts.Name, edits)
+		}
 	}
 	return nil
 }
@@ -449,10 +457,7 @@ func (d *Deployer) UpdateImage(ctx context.Context, namespace, name, image strin
 	return nil
 }
 
-// UpdateResources changes CPU and memory on the App CR.
-// UpdateProfile switches the app onto a named resource profile. The
-// resources block is replaced wholesale — leftover custom request/limit
-// values would override the profile in the reconciler.
+// UpdateProfile changes the named profile while preserving explicit bounds.
 func (d *Deployer) UpdateProfile(ctx context.Context, namespace, name, profile string) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		app, err := d.Dynamic.Resource(AppGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
@@ -462,9 +467,8 @@ func (d *Deployer) UpdateProfile(ctx context.Context, namespace, name, profile s
 			}
 			return fmt.Errorf("getting app: %w", err)
 		}
-		resources := map[string]interface{}{"profile": profile}
-		if err := unstructured.SetNestedMap(app.Object, resources, "spec", "resources"); err != nil {
-			return fmt.Errorf("setting resources: %w", err)
+		if err := unstructured.SetNestedField(app.Object, profile, "spec", "resources", "profile"); err != nil {
+			return fmt.Errorf("setting profile: %w", err)
 		}
 		if _, err := d.Dynamic.Resource(AppGVR).Namespace(namespace).Update(ctx, app, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("updating app: %w", err)
@@ -540,43 +544,6 @@ func (d *Deployer) UpdateRedirectFrom(ctx context.Context, namespace, name strin
 		}
 		return nil
 	})
-}
-
-func (d *Deployer) UpdateResources(ctx context.Context, namespace, name, memoryLimit, cpuLimit string) error {
-	app, err := d.Dynamic.Resource(AppGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return fmt.Errorf("app %q not found", name)
-		}
-		return fmt.Errorf("getting app: %w", err)
-	}
-
-	resources, _, _ := unstructured.NestedMap(app.Object, "spec", "resources")
-	if resources == nil {
-		resources = map[string]interface{}{}
-	}
-
-	// The App CRD keys resources as request/limit pairs. Mirror the request to
-	// the limit for Guaranteed QoS, matching how buildSpec writes --memory/--cpu.
-	if memoryLimit != "" {
-		resources["memoryRequest"] = memoryLimit
-		resources["memoryLimit"] = memoryLimit
-	}
-	if cpuLimit != "" {
-		resources["cpuRequest"] = cpuLimit
-		resources["cpuLimit"] = cpuLimit
-	}
-	resources["profile"] = "custom"
-
-	if err := unstructured.SetNestedField(app.Object, resources, "spec", "resources"); err != nil {
-		return fmt.Errorf("setting resources: %w", err)
-	}
-
-	if _, err := d.Dynamic.Resource(AppGVR).Namespace(namespace).Update(ctx, app, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("updating app: %w", err)
-	}
-
-	return nil
 }
 
 // GetResources returns current resource limits from the Deployment (reads actual state).

@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	"github.com/getkipper/kipper/console-api/serviceui"
 	"github.com/getkipper/kipper/console-api/share"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
@@ -151,9 +152,8 @@ func TestReconcileStatefulSet_PartialOverrideMirrorsToStayValid(t *testing.T) {
 	assert.Equal(t, "500m", res.Limits.Cpu().String())
 }
 
-// The resource controller's OOM bumps live on the StatefulSet, not the CR. A
-// reconcile of a resource-less service must keep those live values rather than
-// resetting them to the profile default.
+// Without a recommendation, preserve the live allocation of an automatic
+// resource, including a previous OOM increase.
 func TestReconcileStatefulSet_PreservesResourceControllerBumps(t *testing.T) {
 	svc := bareService("postgres")
 	r := &ServiceReconciler{
@@ -162,8 +162,7 @@ func TestReconcileStatefulSet_PreservesResourceControllerBumps(t *testing.T) {
 	}
 	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
 
-	// Simulate an OOM bump: the controller raised the memory limit on the
-	// running workload well above the profile default.
+	// Simulate an OOM increase already applied to the StatefulSet.
 	var sts appsv1.StatefulSet
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &sts))
 	sts.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = resource.MustParse("4Gi")
@@ -200,6 +199,41 @@ func TestReconcileStatefulSet_PartialOverrideKeepsUnpinnedBump(t *testing.T) {
 	assert.Equal(t, "4Gi", res.Limits.Memory().String(), "unpinned memory bump must survive a CPU-only override")
 	assert.Equal(t, "2", res.Limits.Cpu().String(), "pinned CPU limit must come from the CR")
 	assert.Equal(t, "2", res.Requests.Cpu().String(), "one-sided CPU limit mirrors to the request")
+}
+
+// The user's values are bounds: the auto-sizer's recommendation moves the
+// request between them and never past either.
+func TestReconcileStatefulSet_AppliesTheRecommendationInsideTheBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name, recommended, wantRequest string
+	}{
+		{"a busy recommendation raises the request", "768Mi", "768Mi"},
+		{"a quiet recommendation stops at the floor", "256Mi", "512Mi"},
+		{"a large recommendation stops at the ceiling", "4Gi", "2Gi"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := bareService("postgres")
+			svc.Spec.Resources.MemoryRequest = "512Mi"
+			svc.Spec.Resources.MemoryLimit = "2Gi"
+			rec := &kipperv1.ResourceTuning{
+				ObjectMeta: metav1.ObjectMeta{Name: resourcebounds.TuningName("Service", svc.Name), Namespace: svc.Namespace, OwnerReferences: controlledBy("Service", svc.Name, svc.UID)},
+				Spec:       kipperv1.ResourceTuningSpec{Kind: "Service", Name: svc.Name},
+				Status: kipperv1.ResourceTuningStatus{Recommendation: kipperv1.TunedResources{
+					MemoryRequest: tc.recommended, MemoryLimit: tc.recommended,
+				}},
+			}
+			r := &ServiceReconciler{
+				Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc, rec).Build(),
+				Scheme: testScheme(),
+			}
+			require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+			require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+			res := statefulSetContainer(t, r).Resources
+			assert.Equal(t, tc.wantRequest, res.Requests.Memory().String())
+			assert.Equal(t, "2Gi", res.Limits.Memory().String(), "the limit is always the user's ceiling")
+		})
+	}
 }
 
 func TestRepairCredentials_RabbitMQAddsVHOSTAndDropsNAME(t *testing.T) {

@@ -77,11 +77,13 @@ kip app deploy \
 | `--secret` | No | — | Secret (repeatable). `KEY=VALUE` inline, or a bare `KEY` for a hidden prompt that stays out of shell history. See [secrets](/en/secrets) |
 | `--route` | No | — | Path route group (e.g. `blog/api/users`) |
 | `--profile` | No | `standard` | Resource profile: `lightweight`, `standard`, `compute-heavy`, `memory-heavy`, `jvm` |
-| `--cpu` / `--memory` | No | — | Explicit CPU/memory limit (sets the `custom` profile) |
+| `--cpu` / `--memory` | No | — | Fixed CPU/memory size: sets request and limit to the same value and selects the `custom` profile |
 
 Secrets passed at deploy time are written before the app starts, so the first pod boot already sees them. A key set via `--secret` behaves exactly like one set with `kip app secret set` afterwards: masked in the console and CLI listings, kept out of `kip export`, with the previous value retained for `kip app secret rollback`. Passing the same key through both `--env` and `--secret` fails the deploy.
 
-Pick `--profile jvm` for Java, Spring, and other slow-boot runtimes: it gives the pod a high CPU ceiling for cold-start JIT compilation without reserving a full core permanently. `--profile` and `--cpu`/`--memory` are mutually exclusive: explicit values mean the `custom` profile, and switching an app to a named profile replaces them with the profile's defaults. See [Resource Management](/en/resource-management) for what each profile allocates.
+Use `--profile jvm` for Java, Spring and other runtimes with high startup CPU demand. It allows bursts of CPU during startup without reserving a full core permanently. At deploy time, choose either `--profile` or explicit `--cpu`/`--memory` values, which select the `custom` profile.
+
+Explicit values set a fixed size. Switching to a named profile later preserves those values, which take precedence over the profile defaults. Use `kip app update <app> --tuning auto` to return CPU and memory to automatic sizing. See [Resource Management](/en/resource-management#your-own-values) for fixed sizes, ranges and profiles.
 
 ## From a Git repository
 

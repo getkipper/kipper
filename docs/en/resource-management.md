@@ -2,6 +2,8 @@
 
 Kipper automatically manages CPU and memory for your apps so you do not have to think about Kubernetes resource requests and limits. It monitors actual usage and adjusts allocations to match. It scales up when apps need more and scales down when they are over-provisioned.
 
+You can set CPU and memory bounds for each workload. The request sets the minimum allocation and the limit sets the maximum. Kipper adjusts the request within that range and keeps the limit fixed. See [Your own CPU and memory values](#your-own-values).
+
 ## Auto mode (default)
 
 A background controller monitors resource usage via metrics-server every 60 seconds. When it detects sustained high or low usage, it adjusts CPU and memory requests and limits automatically.
@@ -10,16 +12,20 @@ A background controller monitors resource usage via metrics-server every 60 seco
 
 | Condition | Threshold | Action |
 |---|---|---|
-| High usage | Above 80% for 3 consecutive checks | Increase by 50% |
+| High usage | Above 80% throughout the current observation window (up to 3 checks) | Increase by 50% |
 | Low usage | Below 20% for 3 consecutive checks | Halve (with minimums) |
 | OOM kill | Immediate | Double memory (capped, see [OOM memory cap](#oom-memory-cap)) |
 | Stuck pod | In `ContainerCreating` for 5+ minutes | Delete pod to trigger recreation |
 
-Routine adjustments use sustained readings to smooth out temporary load changes. OOM recovery and the saturation override below handle urgent increases.
+Routine adjustments use recent readings to smooth out temporary load changes. With a fresh history, an increase can follow one high reading for an app or function, or two for a service. Decreases require three low readings. OOM recovery and the saturation override below handle urgent increases.
+
+The table describes automatic sizing. For a resource with user bounds, Kipper adjusts only the request and keeps it within the range you set. See [Your own CPU and memory values](#your-own-values).
+
+After Kipper recommends a memory increase to recover from an OOM kill, it pauses automatic CPU and memory decreases for that workload for 24 hours. This prevents low usage after a restart from immediately undoing the increase. Any resource change also resets the usage history, so future decisions use readings taken at the new size.
 
 ### Profile-based minimums
 
-The controller never scales below the resource profile defaults. This prevents databases and heavy applications from being starved:
+For automatically sized resources, the controller uses profile minimums when proposing adjustments:
 
 | Profile | Min CPU | Min memory |
 |---|---|---|
@@ -38,7 +44,7 @@ Database services (PostgreSQL, MySQL, MongoDB, OpenSearch) automatically get the
 
 OOM doubling is capped at 50% of total node allocatable memory (minimum 8 Gi). On a 16 GB node, the cap is 8 Gi. If an OOM-killed pod is already at the cap, the controller creates a critical alert instead of doubling further.
 
-All values are rounded to clean boundaries: CPU to the nearest 50m, memory to the nearest 64 Mi. If rounding would produce the same value as the current setting, the controller skips the update.
+Automatic adjustments round CPU up to the nearest 50m and memory up to the nearest 64 Mi. User bounds still take precedence. If the resulting allocation is unchanged, the controller skips the adjustment.
 
 ### Startup grace period
 
@@ -54,7 +60,7 @@ Pods younger than 2 minutes don't count towards the override. A booting app legi
 
 Stateful services get extra caution. Restarting a database mid-operation can kill a running restore or bulk import, so a service only receives a saturation bump after staying pinned for 90 seconds of continuous observations, and never from a single hot reading.
 
-The override only triggers an increase, never a decrease. The hysteresis still applies to scale-downs.
+The saturation override raises the CPU limit only when CPU is sized automatically. User-set CPU limits stay fixed. Decreases still require three low readings.
 
 ### Single-replica apps
 
@@ -144,9 +150,11 @@ Toggle autoscaling off in the Scale tab and click **Save autoscaling**. The HPA 
 
 ### OOM recovery
 
-When a pod is terminated by the kernel for exceeding its memory limit (OOMKilled), the controller doubles the memory immediately, without waiting for 3 consecutive checks. This handles cases where an app needs significantly more memory than its initial allocation, such as a Java application starting with 64 Mi but requiring 512 Mi+ for the JVM.
+When a pod exceeds its memory limit and is killed (OOMKilled), the controller recommends a memory increase on the next check, without waiting for usage history. For automatic memory, it doubles the current allocation up to the OOM cap. The workload reconciler then applies the recommendation.
 
 The controller detects OOM kills even when the pod is in a crash loop and has no metrics. It checks the pod's termination state directly from the Kubernetes API, not just from metrics data.
+
+Automatic memory doubling applies only to memory managed by Kipper. For user-set or held memory, Kipper keeps the limit and raises a critical **OOMKilled at your limit** alert. You can then decide whether to increase it.
 
 ### Resource profiles
 
@@ -165,26 +173,63 @@ The `jvm` profile is the only burstable profile by default. Most workloads run w
 
 If no profile label is set, `standard` is used. Database services automatically get the `database` profile.
 
-### Custom resources
+### Your own CPU and memory values {#your-own-values}
 
-For workloads that don't fit any profile (like a Java application with `-Xms 4G` or a data pipeline needing 8 Gi), you can set explicit CPU and memory values at deploy time.
+Profiles provide starting values. If an app needs specific resources, set a fixed size or a range. Kipper preserves the values you configure and uses them as bounds:
+
+| You set | What the app gets |
+|---|---|
+| Nothing | Kipper sizes it on its own, as described under [Auto mode](#auto-mode-default) |
+| One size (`--memory 1Gi`, or request equal to limit) | The same value for request and limit, with no automatic adjustments |
+| A request below a limit (`512Mi` and `2Gi`) | Kipper adjusts the request within this range and keeps the container limit at your limit |
+
+CPU and memory are independent: you can set a CPU range and leave memory automatic. Your bounds take precedence over profile minimums and the [OOM cap](#oom-memory-cap).
+
+For example, a memory request of `512Mi` and limit of `2Gi` lets Kipper reserve between 512 Mi and 2 Gi while the container can use up to 2 Gi. The request falls only when the usual scale-down conditions are met; a single-replica app keeps its allocation. A proposal that clamps to the current allocation produces no resize alert or resource-log entry. Alerts describe recommended changes; the reconciler applies them afterwards.
 
 **From the CLI:**
 
 ```bash
-kip app deploy --name exchange-service --image registry.git.example.com/exchange:latest \
-  --port 8080 --memory 4Gi --cpu 1
+kip app update api --memory-request 512Mi --memory-limit 2Gi   # a range
+kip app update api --cpu 500m                                  # a fixed size
+kip app update api --tuning auto                               # hand both back to Kipper
 ```
 
-The CLI's `--memory` and `--cpu` flags set request and limit to the same value (Guaranteed QoS). If you need burstable CPU (a different request and limit), set them in the web console or by editing the App CR directly.
+`--memory` and `--cpu` set the request and limit to the same value. Use the separate request and limit flags for a range. Supplying just one of those flags also sets a fixed size. The CLI rejects a request above its limit.
+
+`kip app deploy` accepts `--memory <size>` and `--cpu <size>` for fixed sizes. Switching profiles with `--profile` preserves your explicit values. For services, use `kip service update <service> --memory <size> --cpu <size>` to set fixed sizes.
 
 **From the web console:**
 
-Select **Custom...** from the resource profile dropdown when deploying an app. Two fields appear for memory and CPU. Use Kubernetes resource notation: `256Mi`, `1Gi`, `4Gi` for memory; `250m`, `500m`, `1`, `2` for CPU.
+When deploying an app, select **Custom...** from the resource profile dropdown and enter memory and CPU in Kubernetes notation: `256Mi`, `1Gi`, `4Gi` for memory; `250m`, `500m`, `1`, `2` for CPU. That sets a fixed size.
 
-For an existing app, open the Settings tab and click **Advanced (request & limit)** in the resource limits panel. Four fields appear: CPU request, CPU limit, memory request, memory limit. Set request lower than limit for burstable workloads. The form opens in advanced mode automatically when an app already has different request and limit values.
+For an existing app, open the **Resources** tab. Each resource shows whether it is automatic, bounded, fixed or held. The panel also shows the current allocation where available. During a rollout, the reported allocation can reach the new size before all pods are ready.
 
-Custom values override the profile defaults. The auto controller still adjusts from there based on actual usage. Your values are the starting point, not a ceiling.
+The sliders set a fixed size by default. **Show request controls (advanced)** opens all four fields so you can enter a range and choose **Save request & limit**. With these controls open, a slider changes the limit and keeps the request. Saving sends only the resource pairs you edited, so changing memory preserves automatic CPU sizing. **Size automatically** returns one resource to automatic sizing.
+
+The service **Resources** tab shows the sizing mode and provides sliders for fixed sizes. To configure a service range, set its request and limit in `kipper.yaml` or the Service custom resource. Functions provide all four fields in the Resources section of the function form.
+
+**From `kipper.yaml` or a custom resource:**
+
+```yaml
+resources:
+  memoryRequest: 512Mi
+  memoryLimit: 2Gi
+  cpuRequest: 250m
+  cpuLimit: 250m
+```
+
+`kip apply` treats every resource value in the manifest as an explicit user setting, even when it matches the current value.
+
+#### Values Kipper cannot attribute {#held-values}
+
+Kipper identifies explicit App values from Kubernetes field ownership (`metadata.managedFields`). Values set through kip, the current console, `kip apply`, direct CR edits or GitOps tools count as user settings. Values owned only by the old `console-api` field manager remain automatic.
+
+An App value whose owner cannot be identified as a user or the old auto-sizer is **held**. This can happen if a restore fails to recover field ownership. Kipper preserves the value and reports OOM kills without increasing memory. In the console, **Keep this value** confirms it as your setting; **Size automatically** returns it to automatic sizing.
+
+Service and function values are always yours, because earlier versions of the auto-sizer never wrote them.
+
+Environment copies and project migrations preserve user settings and held values. They omit automatic values so the target can size itself. `kip export` also omits automatic values, but includes held values with a message on stderr. Applying the exported file confirms those held values as your settings.
 
 ### Resource log
 
@@ -235,16 +280,24 @@ See [Alerts](/en/alerts) for details on the alerting system and Slack integratio
 
 Resource changes can be forwarded to Slack. See [Configuration](/en/configuration#slack-notifications) for setup.
 
+## Upgrading from 0.19 or earlier {#upgrading-to-bounds}
+
+Earlier versions stored automatic allocations in the same App fields as user settings. This release stores tuning recommendations separately and preserves user bounds. When upgrading:
+
+- **Save existing console-set App values again.** The old console and auto-sizer shared a field manager, so Kipper treats those values as automatic until you save them after upgrading. Values owned by kip, `kip apply` or GitOps tools are recognised immediately. Service and function spec values count as user settings.
+- **Wait for the upgrade to finish before setting bounds.** The old auto-sizer can still overwrite newly saved values while console-api rolls out.
+- **Check your values after a rollback and subsequent upgrade.** The old auto-sizer can overwrite them while it runs.
+- **Upgrade kip as well.** Older versions clear explicit App values when changing profiles and update service StatefulSets directly, where the reconciler can overwrite them. An older kip also cannot claim an unchanged automatic App value as a user setting.
+
 ## What Kipper manages
 
-The auto controller manages resources for Kipper workloads defined as Custom Resources (`kipper.run/v1alpha1`):
+The auto-sizer tunes Deployments and StatefulSets owned by these Kipper custom resources (`kipper.run/v1alpha1`):
 
 - **Apps:** web apps, APIs, frontends
 - **Services:** databases, caches, message queues
-- **Functions:** serverless workloads (resources set at creation, not auto-tuned while idle)
-- **Jobs:** scheduled and one-off batch tasks
+- **Functions:** running function Deployments
 
-It does not manage system components (Traefik, cert-manager, Longhorn) or the KEDA autoscaler itself.
+Jobs, cron-triggered function runs and one-off function runs use their configured resources when each pod starts. They are not auto-tuned. The auto-sizer also leaves system components such as Traefik, cert-manager, Longhorn and KEDA unchanged.
 
 ## Project quotas
 

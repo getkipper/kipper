@@ -139,6 +139,13 @@ func init() {
 
 	appUpdateCmd.Flags().String("image", "", "new container image (e.g. registry.git.example.com/app:v2)")
 	appUpdateCmd.Flags().String("profile", "", "resource profile: lightweight, standard, compute-heavy, memory-heavy, or jvm")
+	appUpdateCmd.Flags().String("memory", "", "fixed memory size, request and limit alike (e.g. 1Gi)")
+	appUpdateCmd.Flags().String("memory-request", "", "memory the app is always guaranteed; the auto-sizer never goes below it (e.g. 512Mi)")
+	appUpdateCmd.Flags().String("memory-limit", "", "most memory the app may use; the auto-sizer never goes above it (e.g. 2Gi)")
+	appUpdateCmd.Flags().String("cpu", "", "fixed CPU size, request and limit alike (e.g. 500m)")
+	appUpdateCmd.Flags().String("cpu-request", "", "CPU the app is always guaranteed; the auto-sizer never goes below it (e.g. 250m)")
+	appUpdateCmd.Flags().String("cpu-limit", "", "most CPU the app may use; the auto-sizer never goes above it (e.g. 1)")
+	appUpdateCmd.Flags().String("tuning", "", `"auto" clears the CPU and memory values so Kipper sizes the app on its own`)
 	appUpdateCmd.Flags().StringSlice("redirect-from", nil, "hostnames that 301 to this app's hostname (e.g. www.example.com); pass empty to clear, max 10")
 	appUpdateCmd.Flags().StringSlice("internal-path", nil, "path prefixes refused at the ingress on every route this app has, matched literally; pass empty to clear")
 	appUpdateCmd.Flags().StringSlice("public-path", nil, "paths that stay public even though a refusal covers them; pass empty to clear")
@@ -576,8 +583,12 @@ func runAppUpdate(cmd *cobra.Command, args []string) error {
 	if err := internalpath.Validate(publicPaths); err != nil {
 		return fmt.Errorf("--public-path: %w", err)
 	}
-	if image == "" && profile == "" && !redirectSet && !internalSet && !publicSet {
-		return fmt.Errorf("nothing to update. Pass --image, --profile, --redirect-from, --internal-path, --public-path, or a combination")
+	resourceEdits, err := readResourceFlags(cmd).edits()
+	if err != nil {
+		return err
+	}
+	if image == "" && profile == "" && !redirectSet && !internalSet && !publicSet && resourceEdits == nil {
+		return fmt.Errorf("nothing to update. Pass --image, --profile, --memory, --cpu, their -request/-limit forms, --tuning auto, --redirect-from, --internal-path, --public-path, or a combination")
 	}
 
 	ns, k8sClient, err := resolveAppNamespace(cmd, appName)
@@ -596,6 +607,13 @@ func runAppUpdate(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		fmt.Printf("\n  ✔  Resource profile set to %s: rollout in progress\n", profile)
+	}
+
+	if resourceEdits != nil {
+		if err := d.UpdateResources(ctx, ns, appName, *resourceEdits); err != nil {
+			return err
+		}
+		fmt.Printf("\n  ✔  %s\n", describeResourceEdits(*resourceEdits))
 	}
 
 	if redirectSet {

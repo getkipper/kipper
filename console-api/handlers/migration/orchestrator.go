@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	goerrors "errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/builder"
 	"github.com/getkipper/kipper/console-api/internal/nsowner"
+	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
@@ -858,7 +860,10 @@ func claimableAfterConflict(written, fresh map[string][]byte, serviceType string
 	return true
 }
 
-func (h *Handler) createApp(ctx context.Context, name, namespace string, spec map[string]interface{}) error {
+// createApp imports an App under the held field manager, then claims values
+// identified by the source as user-owned. An older source supplies no such
+// list, so newly imported values remain held.
+func (h *Handler) createApp(ctx context.Context, name, namespace string, spec map[string]interface{}, user *map[string]string) error {
 	specJSON, err := json.Marshal(spec)
 	if err != nil {
 		return err
@@ -886,7 +891,7 @@ func (h *Handler) createApp(ctx context.Context, name, namespace string, spec ma
 	}
 
 	app := &kipperv1.App{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, h.CRClient, app, func() error {
+	if _, err := controllerutil.CreateOrUpdate(ctx, crclient.WithFieldOwner(h.CRClient, resourcebounds.HeldManager), app, func() error {
 		setLabel(&app.ObjectMeta, "app", name)
 		setLabel(&app.ObjectMeta, "app.kubernetes.io/managed-by", "kipper")
 		if rebuild {
@@ -902,6 +907,14 @@ func (h *Handler) createApp(ctx context.Context, name, namespace string, spec ma
 		return nil
 	}); err != nil {
 		return err
+	}
+	if user != nil {
+		if err := resourcebounds.ClaimQuantities(ctx, h.CRClient, &kipperv1.App{}, namespace, name,
+			resourcebounds.MigrationManager, app.ResourceVersion, *user); err != nil {
+			// The values stay held, which is safe; the user confirms them.
+			slog.Warn("migration: the app keeps its CPU and memory values held until the user confirms them",
+				"app", namespace+"/"+name, "error", err)
+		}
 	}
 
 	if rebuild {

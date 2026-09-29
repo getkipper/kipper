@@ -12,6 +12,8 @@ type Manifest struct {
 	Volumes      map[string]VolSpec  `yaml:"volumes,omitempty"`
 	Jobs         map[string]JobSpec  `yaml:"jobs,omitempty"`
 	Functions    map[string]FuncSpec `yaml:"functions,omitempty"`
+	// Notes are export messages printed to stderr, outside the manifest.
+	Notes []string `yaml:"-"`
 }
 
 // AppSpec defines an application in the manifest.

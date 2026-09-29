@@ -35,6 +35,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
+	quotapkg "github.com/getkipper/kipper/console-api/quota"
 	"github.com/getkipper/kipper/controller/pkg/appowner"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
@@ -556,19 +558,26 @@ func (r *AppReconciler) applyDeployment(ctx context.Context, app *kipperv1.App, 
 		return err
 	}
 
-	// Adjustments made directly on the Deployment (a VPA, an operator, a manual
-	// edit) live on the workload, not the App CR. Keep them for any resource
-	// type the CR does not pin, so pinning CPU alone doesn't reset a raised
-	// memory limit back to the profile baseline.
-	cpuPinned := app.Spec.Resources.CPURequest != "" || app.Spec.Resources.CPULimit != ""
-	memPinned := app.Spec.Resources.MemoryRequest != "" || app.Spec.Resources.MemoryLimit != ""
-	if (!cpuPinned || !memPinned) &&
-		len(existing.Spec.Template.Spec.Containers) > 0 && len(desired.Spec.Template.Spec.Containers) > 0 {
-		preserveUnpinnedResources(
-			&desired.Spec.Template.Spec.Containers[0].Resources,
-			existing.Spec.Template.Spec.Containers[0].Resources,
-			cpuPinned, memPinned,
-		)
+	// Apply recommendations within user bounds. If a quantity cannot be parsed,
+	// preserve the live Deployment values for resources omitted from the spec.
+	if len(existing.Spec.Template.Spec.Containers) > 0 && len(desired.Spec.Template.Spec.Containers) > 0 {
+		desiredRes := &desired.Spec.Template.Spec.Containers[0].Resources
+		liveRes := &existing.Spec.Template.Spec.Containers[0].Resources
+		if spec, err := resourcebounds.AppSpec(app); err == nil {
+			replicas := rolloutReplicas(desired.Spec.Replicas, existing.Spec.Replicas)
+			if applyTunedResources(ctx, r.hostReader(), tunedWorkload{
+				Namespace: app.Namespace, Kind: "App", Name: app.Name, UID: app.UID, Spec: spec,
+				Desired: desiredRes, Live: liveRes, LiveAnnotations: existing.Annotations,
+				Replicas: replicas, SurgePods: quotapkg.DeploymentSurgePods(desired, replicas), PodSpec: &desired.Spec.Template.Spec,
+			}) && r.Recorder != nil {
+				r.Recorder.Event(app, corev1.EventTypeWarning, "ResourceRequestAboveLimit",
+					"a CPU or memory request is above its limit, so the container runs at the limit")
+			}
+		} else {
+			cpuPinned := app.Spec.Resources.CPURequest != "" || app.Spec.Resources.CPULimit != ""
+			memPinned := app.Spec.Resources.MemoryRequest != "" || app.Spec.Resources.MemoryLimit != ""
+			preserveUnpinnedResources(desiredRes, *liveRes, cpuPinned, memPinned)
+		}
 	}
 
 	// When autoscaling is active, let the HPA own the replica count.
@@ -2333,8 +2342,8 @@ func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := IndexAppLinkNamespaces(context.Background(), mgr.GetFieldIndexer()); err != nil {
 		return err
 	}
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&kipperv1.App{}).
+	return ownTuningRecords(mgr, ctrl.NewControllerManagedBy(mgr).
+		For(&kipperv1.App{})).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).

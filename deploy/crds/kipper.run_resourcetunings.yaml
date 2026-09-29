@@ -1,0 +1,129 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: resourcetunings.kipper.run
+spec:
+  group: kipper.run
+  names:
+    kind: ResourceTuning
+    listKind: ResourceTuningList
+    plural: resourcetunings
+    singular: resourcetuning
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.kind
+      name: Kind
+      type: string
+    - jsonPath: .spec.name
+      name: Workload
+      type: string
+    - jsonPath: .status.recommendation.memoryRequest
+      name: Memory
+      type: string
+    - jsonPath: .status.recommendation.cpuRequest
+      name: CPU
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ResourceTuning holds the auto-sizer's recommendation, OOM record and
+          cooldown for one App, Service or Function. It is owned by that workload
+          and deleted with it.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ResourceTuningSpec names the workload a ResourceTuning belongs
+              to.
+            properties:
+              kind:
+                description: Kind is the kind of the owning workload.
+                enum:
+                - App
+                - Service
+                - Function
+                type: string
+              name:
+                description: Name is the owning workload's name in the same namespace.
+                type: string
+            required:
+            - kind
+            - name
+            type: object
+          status:
+            description: |-
+              ResourceTuningStatus is the auto-sizer's state for one workload. Only the
+              auto-sizer writes it; the owning reconciler reads the recommendation and
+              applies it inside the user's bounds.
+            properties:
+              decreaseBlockedUntil:
+                description: |-
+                  DecreaseBlockedUntil stops CPU and memory decreases until this time,
+                  set after an OOM kill raised memory.
+                format: date-time
+                type: string
+              lastOOM:
+                description: LastOOM is the last OOM kill the auto-sizer acted on.
+                properties:
+                  alerted:
+                    description: |-
+                      Alerted marks an OOM handled by an increase or a stored alert.
+                      An increase is recorded before its alert is persisted.
+                    type: boolean
+                  at:
+                    description: At is when the container was killed.
+                    format: date-time
+                    type: string
+                  identity:
+                    description: |-
+                      Identity combines the container name and OOM finish time, preserving
+                      nanoseconds for deduplication across restarts.
+                    type: string
+                required:
+                - at
+                - identity
+                type: object
+              recommendation:
+                description: |-
+                  Recommendation is what the auto-sizer wants the container to get,
+                  already kept inside the user's bounds.
+                properties:
+                  cpuLimit:
+                    type: string
+                  cpuRequest:
+                    type: string
+                  memoryLimit:
+                    type: string
+                  memoryRequest:
+                    type: string
+                type: object
+              recommendedAt:
+                description: RecommendedAt is when the recommendation last changed.
+                format: date-time
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

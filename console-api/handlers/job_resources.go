@@ -8,9 +8,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	quotapkg "github.com/getkipper/kipper/console-api/quota"
 )
 
@@ -55,7 +58,7 @@ func (s *Services) GetResources(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	resp := resourcesResponse{}
+	resp := resourcesResponse{PartialEdits: true}
 
 	ss, err := s.Client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
@@ -64,12 +67,22 @@ func (s *Services) GetResources(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(ss.Spec.Template.Spec.Containers) > 0 {
 		resp = extractResources(ss.Spec.Template.Spec.Containers[0])
+		resp.PartialEdits = true
+		var svc kipperv1.Service
+		if s.CRClient != nil && s.CRClient.Get(ctx, crclient.ObjectKey{Namespace: namespace, Name: name}, &svc) == nil {
+			r := svc.Spec.Resources
+			if spec, err := resourcebounds.OwnedSpec(r.CPURequest, r.CPULimit, r.MemoryRequest, r.MemoryLimit); err == nil {
+				resp.CPU, resp.Memory = describeResources(spec, &ss.Spec.Template.Spec.Containers[0].Resources,
+					tuningRecommendation(ctx, s.CRClient, "Service", &svc))
+			}
+		}
 	}
 
 	respondJSON(w, http.StatusOK, resp)
 }
 
-// UpdateServiceResources sets resource limits for a service StatefulSet.
+// UpdateResources saves a service's bounds on its Service CR. The reconciler
+// applies them to the StatefulSet; direct edits there would be overwritten.
 // PUT /api/v1/services/{name}/resources?namespace={ns}
 func (s *Services) UpdateResources(w http.ResponseWriter, r *http.Request) {
 	name, namespace, ok := requireService(w, r)
@@ -83,6 +96,10 @@ func (s *Services) UpdateResources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := validateResourceQuantities(req); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateRequestWithinLimit(req); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -100,46 +117,51 @@ func (s *Services) UpdateResources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Snapshot the pre-update limits so the telemetry log can record
-	// "from". Service StatefulSets carry resources on the first
-	// container by convention.
+	// Snapshot the running limits so the telemetry log can record "from".
+	// Service StatefulSets carry resources on the first container by convention.
 	prev := ss.Spec.Template.Spec.Containers[0].Resources
-	prevMem := ""
+	prevMem, prevCPU := "", ""
 	if v, ok := prev.Limits[corev1.ResourceMemory]; ok {
 		prevMem = v.String()
 	}
-	prevCPU := ""
 	if v, ok := prev.Limits[corev1.ResourceCPU]; ok {
 		prevCPU = v.String()
 	}
 
+	edits := resourcebounds.Edits{
+		CPU:    pairEdit(req.CPURequest, req.CPULimit),
+		Memory: pairEdit(req.MemoryRequest, req.MemoryLimit),
+	}
+	_, cpuLim := setValues(edits.CPU)
+	_, memLim := setValues(edits.Memory)
+
 	// Preflight against the namespace quota (StatefulSets replace in place, no
 	// surge) so an over-quota change returns 409 here instead of stalling the
-	// rollout at admission. Mirror single-sided values the way applyResources
-	// does before projecting.
-	memReq, memLim := pairOrPassThrough(req.MemoryRequest, req.MemoryLimit)
-	cpuReq, cpuLim := pairOrPassThrough(req.CPURequest, req.CPULimit)
-	change := quotapkg.Change{CPURequest: cpuReq, CPULimit: cpuLim, MemoryRequest: memReq, MemoryLimit: memLim}
+	// rollout at admission. Bounds are priced at the size the container keeps.
+	change := projectedChange(edits, prev)
 	if pf, err := quotapkg.PreflightStatefulSet(ctx, s.Client, namespace, name, change); err == nil && !pf.Fits {
 		respondError(w, http.StatusConflict, fmt.Sprintf("resource change needs %s of %s but the namespace quota caps at %s; raise the project tier or environment quota, or reduce other workloads", pf.Projected, pf.Dimension, pf.Hard))
 		return
 	}
 
-	applyResources(&ss.Spec.Template.Spec.Containers[0], req)
-
-	if _, err := s.Client.AppsV1().StatefulSets(namespace).Update(ctx, ss, metav1.UpdateOptions{}); err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to update service resources")
+	if err := resourcebounds.WriteQuantities(ctx, s.CRClient, &kipperv1.Service{}, namespace, name, resourcebounds.ConsoleManager, edits); err != nil {
+		switch {
+		case errors.IsNotFound(err):
+			respondError(w, http.StatusNotFound, "service not found")
+		case errors.IsConflict(err):
+			respondError(w, http.StatusConflict, "this service changed while the limits were being saved; read it again and reapply them")
+		default:
+			respondError(w, http.StatusInternalServerError, "failed to update service resources")
+		}
 		return
 	}
 
 	subject := SubjectFromRequest(r)
-	if req.MemoryLimit != "" {
-		s.Adjustments.Record(ctx, "service", namespace, name, "memory",
-			prevMem, req.MemoryLimit, "", subject)
+	if memLim != "" {
+		s.Adjustments.Record(ctx, "service", namespace, name, "memory", prevMem, memLim, "", subject)
 	}
-	if req.CPULimit != "" {
-		s.Adjustments.Record(ctx, "service", namespace, name, "cpu",
-			prevCPU, req.CPULimit, "", subject)
+	if cpuLim != "" {
+		s.Adjustments.Record(ctx, "service", namespace, name, "cpu", prevCPU, cpuLim, "", subject)
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
@@ -167,7 +189,8 @@ func (s *Services) RolloutStatus(w http.ResponseWriter, r *http.Request) {
 		desired = *ss.Spec.Replicas
 	}
 
-	ready := ss.Status.ReadyReplicas == desired &&
+	ready := ss.Status.ObservedGeneration >= ss.Generation &&
+		ss.Status.ReadyReplicas == desired &&
 		ss.Status.UpdatedReplicas == desired &&
 		ss.Status.CurrentRevision == ss.Status.UpdateRevision
 
@@ -199,45 +222,4 @@ func extractResources(container corev1.Container) resourcesResponse {
 		}
 	}
 	return resp
-}
-
-// applyResources sets resource limits and requests on a container. If the
-// client only sends one side of a request/limit pair, the other inherits
-// from it (preserves Guaranteed QoS for callers that don't know about
-// burstable resources).
-func applyResources(container *corev1.Container, req resourcesRequest) {
-	limits := container.Resources.Limits
-	requests := container.Resources.Requests
-	if limits == nil {
-		limits = corev1.ResourceList{}
-	}
-	if requests == nil {
-		requests = corev1.ResourceList{}
-	}
-
-	memReq, memLim := pairOrPassThrough(req.MemoryRequest, req.MemoryLimit)
-	if memLim != "" {
-		limits[corev1.ResourceMemory] = resource.MustParse(memLim)
-	} else {
-		delete(limits, corev1.ResourceMemory)
-	}
-	if memReq != "" {
-		requests[corev1.ResourceMemory] = resource.MustParse(memReq)
-	} else {
-		delete(requests, corev1.ResourceMemory)
-	}
-
-	cpuReq, cpuLim := pairOrPassThrough(req.CPURequest, req.CPULimit)
-	if cpuLim != "" {
-		limits[corev1.ResourceCPU] = resource.MustParse(cpuLim)
-	} else {
-		delete(limits, corev1.ResourceCPU)
-	}
-	if cpuReq != "" {
-		requests[corev1.ResourceCPU] = resource.MustParse(cpuReq)
-	} else {
-		delete(requests, corev1.ResourceCPU)
-	}
-
-	container.Resources = corev1.ResourceRequirements{Limits: limits, Requests: requests}
 }

@@ -21,6 +21,17 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 )
 
+// WithContainerResources returns a copy of podSpec whose first container,
+// the one Kipper sizes, has res. Fits expects the pod spec at the new size.
+func WithContainerResources(podSpec *corev1.PodSpec, res corev1.ResourceRequirements) *corev1.PodSpec {
+	if podSpec == nil || len(podSpec.Containers) == 0 {
+		return podSpec
+	}
+	out := podSpec.DeepCopy()
+	out.Containers[0].Resources = *res.DeepCopy()
+	return out
+}
+
 // Fits projects the namespace usage a resource change needs and compares it
 // against the quota's hard caps, returning the first dimension that does not
 // fit. Two projections matter:

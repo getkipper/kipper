@@ -2,7 +2,11 @@ package deployer
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/types"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,8 +31,42 @@ func testDeployer() (*Deployer, *dynamicfake.FakeDynamicClient) {
 
 	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
 	k8sClient := fake.NewSimpleClientset() //nolint:staticcheck
+	simulateResourceApply(dynClient)
 
 	return &Deployer{Client: k8sClient, Dynamic: dynClient}, dynClient
+}
+
+// simulateResourceApply stands in for the API server's server-side apply,
+// which the dynamic fake cannot do on an unstructured object: it merges the
+// applied spec.resources into the stored App.
+func simulateResourceApply(dyn *dynamicfake.FakeDynamicClient) {
+	dyn.PrependReactor("patch", "apps", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		p := a.(k8stesting.PatchAction)
+		if p.GetPatchType() != types.ApplyPatchType {
+			return false, nil, nil
+		}
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(p.GetPatch(), &cfg); err != nil {
+			return true, nil, err
+		}
+		stored, err := dyn.Tracker().Get(AppGVR, p.GetNamespace(), p.GetName())
+		if err != nil {
+			return true, nil, err
+		}
+		app := stored.(*unstructured.Unstructured).DeepCopy()
+		applied, _, _ := unstructured.NestedMap(cfg, "spec", "resources")
+		current, _, _ := unstructured.NestedMap(app.Object, "spec", "resources")
+		if current == nil {
+			current = map[string]interface{}{}
+		}
+		for k, v := range applied {
+			current[k] = v
+		}
+		if err := unstructured.SetNestedMap(app.Object, current, "spec", "resources"); err != nil {
+			return true, nil, err
+		}
+		return true, app, dyn.Tracker().Update(AppGVR, app, p.GetNamespace())
+	})
 }
 
 func TestDeployCreatesAppCR(t *testing.T) {
@@ -617,10 +655,7 @@ func TestDeployWithProfileSetsNamedProfile(t *testing.T) {
 	assert.Len(t, resources, 1, "a named profile must not carry explicit request/limit values")
 }
 
-// TestRedeployProfileReplacesCustomResources pins the profile-switch
-// semantics: leftover custom request/limit values would override the
-// profile in the reconciler, so the switch replaces the resources block.
-func TestRedeployProfileReplacesCustomResources(t *testing.T) {
+func TestRedeployProfileKeepsTheUsersValues(t *testing.T) {
 	d, dynClient := testDeployer()
 	ctx := context.Background()
 
@@ -644,7 +679,7 @@ func TestRedeployProfileReplacesCustomResources(t *testing.T) {
 	require.NoError(t, err)
 
 	resources, _, _ := unstructured.NestedMap(app.Object, "spec", "resources")
-	assert.Equal(t, map[string]interface{}{"profile": "jvm"}, resources)
+	assert.Equal(t, map[string]interface{}{"profile": "jvm", "cpuRequest": "750m", "cpuLimit": "750m"}, resources)
 }
 
 // TestRedeployCPUOntoProfileMeansCustom: explicit values switch the app off
@@ -678,8 +713,8 @@ func TestRedeployCPUOntoProfileMeansCustom(t *testing.T) {
 	assert.Equal(t, "750m", cpuLimit)
 }
 
-// TestUpdateProfileReplacesResources covers the kip app update path.
-func TestUpdateProfileReplacesResources(t *testing.T) {
+// kip app update --profile changes the profile and keeps the user's values.
+func TestUpdateProfileKeepsTheUsersValues(t *testing.T) {
 	d, dynClient := testDeployer()
 	ctx := context.Background()
 
@@ -697,7 +732,7 @@ func TestUpdateProfileReplacesResources(t *testing.T) {
 	app, err := dynClient.Resource(AppGVR).Namespace("default").Get(ctx, "api", metav1.GetOptions{})
 	require.NoError(t, err)
 	resources, _, _ := unstructured.NestedMap(app.Object, "spec", "resources")
-	assert.Equal(t, map[string]interface{}{"profile": "memory-heavy"}, resources)
+	assert.Equal(t, map[string]interface{}{"profile": "memory-heavy", "cpuRequest": "750m", "cpuLimit": "750m"}, resources)
 }
 
 // Redirect domains were settable from kipper.yaml and the console but not from

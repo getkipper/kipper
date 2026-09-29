@@ -216,6 +216,10 @@ const (
 	FinalizerVolume   = "kipper.run/volume-cleanup"
 )
 
+// ExcludeFromBackup keeps a resource out of every Velero backup, whichever
+// schedule or command created the backup.
+const ExcludeFromBackup = "velero.io/exclude-from-backup"
+
 // KipperManagedSelector is the label selector used to list every resource
 // Kipper owns of a given Kubernetes kind. Callers that need a more specific
 // filter should append additional selectors (e.g. ServiceType=postgres).

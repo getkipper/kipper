@@ -85,7 +85,7 @@ func TestServices_UpdateResourcesBlockedByQuota(t *testing.T) {
 // A CPU-only Function change omits memory, but the Function reconciler defaults
 // unpinned memory to 64Mi. The preflight must project that default, so a change
 // whose CPU fits but whose implied memory default does not still returns 409.
-func TestResources_FunctionUpdateProjectsDefaultedMemory(t *testing.T) {
+func TestResources_FunctionCPUOnlyEditKeepsItsMemory(t *testing.T) {
 	fnDeploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "fn1", Namespace: "shop"},
 		Spec: appsv1.DeploymentSpec{
@@ -100,8 +100,8 @@ func TestResources_FunctionUpdateProjectsDefaultedMemory(t *testing.T) {
 			}}}},
 		},
 	}
-	// Room for the small CPU bump, but not for memory rising from 16Mi to the
-	// 64Mi function default (used 40Mi + 48Mi delta = 88Mi over the 64Mi cap).
+	// Room for the small CPU bump. Memory stays at its live 16Mi: an omitted
+	// value is left as it is, so the edit is not priced at the 64Mi default.
 	rq := &corev1.ResourceQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: kipperv1.ProjectQuotaName, Namespace: "shop"},
 		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
@@ -123,8 +123,46 @@ func TestResources_FunctionUpdateProjectsDefaultedMemory(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
+	if rec.Code == http.StatusConflict {
+		t.Errorf("a CPU-only change was refused over memory it does not touch: %s", rec.Body.String())
+	}
+}
+
+// A CPU-only edit still rolls the pod, and the old pod keeps its tuned memory
+// until the new one is up. The preflight must count that, not a default.
+func TestResources_FunctionCPUOnlyEditCountsTheRolloutAtTheLiveMemory(t *testing.T) {
+	fnDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "fn1", Namespace: "shop"},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: func() *int32 { r := int32(1); return &r }(),
+			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: "fn1",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m"), corev1.ResourceMemory: resource.MustParse("512Mi")},
+					Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m"), corev1.ResourceMemory: resource.MustParse("512Mi")},
+				},
+			}}}},
+		},
+	}
+	rq := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: kipperv1.ProjectQuotaName, Namespace: "shop"},
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+			corev1.ResourceLimitsMemory: resource.MustParse("768Mi"),
+		}},
+		Status: corev1.ResourceQuotaStatus{Used: corev1.ResourceList{
+			corev1.ResourceLimitsMemory: resource.MustParse("512Mi"),
+		}},
+	}
+	fn := &kipperv1.Function{ObjectMeta: metav1.ObjectMeta{Name: "fn1", Namespace: "shop"}}
+	res := &Resources{Client: fake.NewClientset(fnDeploy, rq), CRClient: testCRClient(fn)}
+	r := chi.NewRouter()
+	r.Put("/api/v1/projects/{name}/functions/{fn}/resources", res.UpdateByParam("fn", ResourceKindFunction))
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("PUT", "/api/v1/projects/shop/functions/fn1/resources", strings.NewReader(`{"cpu_limit":"100m"}`)))
+	// The new pod plus the old 512Mi one need 1024Mi of a 768Mi quota.
 	if rec.Code != http.StatusConflict {
-		t.Errorf("expected 409 from the memory default a CPU-only function change implies, got %d; body %s", rec.Code, rec.Body.String())
+		t.Errorf("expected 409 for a rollout the quota cannot admit, got %d; body %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -145,5 +183,41 @@ func TestResources_UpdateWithinQuotaNotBlocked(t *testing.T) {
 
 	if rec.Code == http.StatusConflict {
 		t.Errorf("within-quota change must not be blocked by the quota preflight; body %s", rec.Body.String())
+	}
+}
+
+// With bounds, a submitted request is a floor, not the new size: the running
+// request stays where it is inside the new range. The preflight prices what
+// the container will actually get.
+func TestResources_BoundsArePricedAtTheSizeTheContainerKeeps(t *testing.T) {
+	fnDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "fn1", Namespace: "shop"},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: func() *int32 { r := int32(1); return &r }(),
+			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: "fn1",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m"), corev1.ResourceMemory: resource.MustParse("512Mi")},
+					Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m"), corev1.ResourceMemory: resource.MustParse("512Mi")},
+				},
+			}}}},
+		},
+	}
+	rq := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: kipperv1.ProjectQuotaName, Namespace: "shop"},
+		Spec:       corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{corev1.ResourceRequestsMemory: resource.MustParse("768Mi")}},
+		Status:     corev1.ResourceQuotaStatus{Used: corev1.ResourceList{corev1.ResourceRequestsMemory: resource.MustParse("512Mi")}},
+	}
+	fn := &kipperv1.Function{ObjectMeta: metav1.ObjectMeta{Name: "fn1", Namespace: "shop"}}
+	res := &Resources{Client: fake.NewClientset(fnDeploy, rq), CRClient: testCRClient(fn)}
+	r := chi.NewRouter()
+	r.Put("/api/v1/projects/{name}/functions/{fn}/resources", res.UpdateByParam("fn", ResourceKindFunction))
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("PUT", "/api/v1/projects/shop/functions/fn1/resources",
+		strings.NewReader(`{"cpu_limit":"100m","memory_request":"128Mi","memory_limit":"512Mi"}`)))
+	// The request stays at 512Mi, so the rollout needs 1024Mi of a 768Mi quota.
+	if rec.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d; body %s", rec.Code, rec.Body.String())
 	}
 }

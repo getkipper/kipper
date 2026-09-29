@@ -19,10 +19,9 @@ import (
 // quotes, semicolons, spaces, or shell metacharacters can appear).
 var adminEmailPattern = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
 
-// ConsoleRBACManifest is the ServiceAccount, ClusterRole, and
-// ClusterRoleBinding for console-api. It lives outside the deployment
-// template because kip upgrade must re-apply it: a permission added for a
-// new feature has to reach existing clusters, not only fresh installs.
+// ConsoleRBACManifest defines console-api's service account and cluster-wide
+// and namespaced permissions. kip upgrade reapplies it so new permissions
+// reach existing clusters.
 const ConsoleRBACManifest = `apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -107,10 +106,10 @@ rules:
     verbs: ["get", "list"]
   # Kipper custom resources and their status subresources.
   - apiGroups: ["kipper.run"]
-    resources: ["apps", "services", "functions", "jobs", "volumes", "projects", "datatransfers", "workloadnames"]
+    resources: ["apps", "services", "functions", "jobs", "volumes", "projects", "datatransfers", "workloadnames", "resourcetunings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["kipper.run"]
-    resources: ["apps/status", "services/status", "functions/status", "jobs/status", "volumes/status", "projects/status", "platformconfigs/status", "datatransfers/status"]
+    resources: ["apps/status", "services/status", "functions/status", "jobs/status", "volumes/status", "projects/status", "platformconfigs/status", "datatransfers/status", "resourcetunings/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["kipper.run"]
     resources: ["platformconfigs"]
@@ -174,6 +173,31 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
+  name: console-api
+subjects:
+  - kind: ServiceAccount
+    name: console-api
+    namespace: kipper-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: console-api
+  namespace: kipper-system
+rules:
+  # The Lease that keeps the resource auto-sizer to one console-api pod at a time.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: console-api
+  namespace: kipper-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
   name: console-api
 subjects:
   - kind: ServiceAccount

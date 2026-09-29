@@ -1,4 +1,5 @@
 import client from './client'
+import type { ResourceDetail } from './resources'
 import type { SecretKeyInfo } from './types'
 
 export interface FunctionInfo {
@@ -48,6 +49,11 @@ export interface FunctionResources {
   memory_request: string
   cpu_limit: string
   cpu_request: string
+  // partial_edits permits omitting a whole CPU or memory pair.
+  // Older servers require all four values on every PUT.
+  memory?: ResourceDetail
+  cpu?: ResourceDetail
+  partial_edits?: boolean
 }
 
 export async function fetchFunctionResources(project: string, name: string): Promise<FunctionResources> {

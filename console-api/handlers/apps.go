@@ -22,6 +22,7 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/builder"
 	"github.com/getkipper/kipper/console-api/internal/gitreach"
+	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	"github.com/getkipper/kipper/controller/pkg/appowner"
 	"github.com/getkipper/kipper/controller/pkg/gitcred"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
@@ -276,7 +277,9 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := a.CRClient.Create(ctx, app); err != nil {
+	// Created under the console's own field manager, so resource values chosen
+	// here count as the user's bounds.
+	if err := crclient.WithFieldOwner(a.CRClient, resourcebounds.ConsoleManager).Create(ctx, app); err != nil {
 		// AlreadyExists means the workload is there and owns the credential.
 		// AlreadyExists is not a create that wrote nothing: it proves the
 		// same-kind workload is there, and the reservation just made is that
