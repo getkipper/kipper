@@ -34,7 +34,7 @@ const (
 
 	// dexOIDCClientSecret is the Secret console-api reads the Dex client secret
 	// from, replacing the value baked into env at install time.
-	dexOIDCClientSecretName = "dex-oidc-client"
+	dexOIDCClientSecretName = "dex-oidc-client" //nolint:gosec // G101: the Secret's name, not its value
 	dexOIDCClientSecretKey  = "secret"
 )
 

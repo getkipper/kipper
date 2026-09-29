@@ -1,6 +1,7 @@
 package hopproof
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -85,7 +86,7 @@ func TestVerifyRejectsMalformedSignature(t *testing.T) {
 func TestDigestIsStable(t *testing.T) {
 	a := Digest(nonce, label, ip, origin, token)
 	b := Digest(nonce, label, ip, origin, token)
-	if string(a) != string(b) {
+	if !bytes.Equal(a, b) {
 		t.Error("the digest must be deterministic for the same inputs")
 	}
 	if len(a) != 32 {

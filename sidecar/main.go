@@ -49,11 +49,9 @@ func shortHash(s string) string {
 	return fmt.Sprintf("%x", h[:4])
 }
 
-// newProxy builds the reverse proxy this sidecar serves. Assembled here rather
-// than inline in main so a test drives the same construction the pod runs,
-// instead of a second one that agrees with itself.
+// newProxy shares proxy construction between main and tests.
 func newProxy(target *url.URL, instanceID string) *httputil.ReverseProxy {
-	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy := httputil.NewSingleHostReverseProxy(target) //nolint:gosec // G704: main constructs the target from localhost and UPSTREAM_PORT
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		resp.Header.Set("X-Instance-ID", instanceID)
 		return nil
