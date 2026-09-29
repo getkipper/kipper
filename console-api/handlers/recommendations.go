@@ -117,12 +117,8 @@ func (h *Recommendations) Apply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Apply the profile and clear custom overrides
+	// Keep explicit bounds when changing the profile.
 	app.Spec.Resources.Profile = profile
-	app.Spec.Resources.CPURequest = ""
-	app.Spec.Resources.CPULimit = ""
-	app.Spec.Resources.MemoryRequest = ""
-	app.Spec.Resources.MemoryLimit = ""
 	if err := h.CRClient.Update(r.Context(), &app); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to apply recommendation")
 		return

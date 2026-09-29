@@ -90,6 +90,12 @@ Useful for testing a restore without affecting the live environment:
 kip backup restore pre-migration --namespace-mapping blog-test:blog-restored
 ```
 
+### CPU and memory after a restore
+
+A restore recovers resource settings and their field ownership. User-set CPU and memory values therefore remain user settings. If ownership cannot be restored for an App value, Kipper holds it unchanged until you confirm it or enable automatic sizing. See [Values Kipper cannot attribute](/en/resource-management#held-values).
+
+Resource tuning records are excluded from backups. After a restore, Kipper creates new records from the current workload allocation, collects fresh usage readings and starts without the previous OOM cooldown or pending recommendation.
+
 ## What gets backed up
 
 | Resource | Backed up? | How |
@@ -100,6 +106,7 @@ kip backup restore pre-migration --namespace-mapping blog-test:blog-restored
 | PostgreSQL data | Yes | PVC data via Kopia file-system backup |
 | Redis data | Yes | PVC data via Kopia file-system backup |
 | Longhorn volumes | Yes | Full file-system backup of volume contents |
+| Resource tuning records | No | The auto-sizer rebuilds them from the running workloads |
 
 ## Architecture
 

@@ -228,6 +228,8 @@ kip export --project blog --environment test -o kipper.yaml
 
 The export includes all apps, services, volumes, jobs, functions, project metadata (display name, environments list), resource profiles, autoscale config, service bindings, and routes. Secrets are excluded by design.
 
+For Apps, `kip export` includes explicit CPU and memory settings and omits values written by the old auto-sizer. It includes held values with a message on stderr. Applying the file confirms every declared resource value as a user setting, including held values. See [Your own CPU and memory values](/en/resource-management#your-own-values).
+
 Use this to bootstrap a GitOps workflow from an existing cluster, or to replicate a cluster on a new server.
 
 ### Replicating a cluster

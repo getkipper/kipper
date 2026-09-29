@@ -1,4 +1,6 @@
 import client from './client'
+import type { ResourceDetail } from './resources'
+import type { ResourceEdit } from '@/utils/resourceEdits'
 
 export interface ServiceStatus {
   name: string
@@ -141,6 +143,11 @@ export interface ServiceResources {
   memory_request: string
   cpu_limit: string
   cpu_request: string
+  // partial_edits permits omitting a whole CPU or memory pair.
+  // Older servers require all four values on every PUT.
+  memory?: ResourceDetail
+  cpu?: ResourceDetail
+  partial_edits?: boolean
 }
 
 export async function fetchServiceResources(name: string, namespace: string): Promise<ServiceResources> {
@@ -148,7 +155,7 @@ export async function fetchServiceResources(name: string, namespace: string): Pr
   return data
 }
 
-export async function updateServiceResources(name: string, namespace: string, resources: { memory_limit: string; cpu_limit: string }): Promise<void> {
+export async function updateServiceResources(name: string, namespace: string, resources: ResourceEdit): Promise<void> {
   await client.put(`/services/${name}/resources?namespace=${encodeURIComponent(namespace)}`, resources)
 }
 

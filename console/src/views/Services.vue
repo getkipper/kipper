@@ -26,6 +26,9 @@ import {
 import { useProjectsStore } from '@/stores/projects'
 import { useAuthStore } from '@/stores/auth'
 import { useCapabilities } from '@/composables/useCapabilities'
+import ResourceMode from '@/components/ResourceMode.vue'
+import { automatic, confirm, fixedSize, forLegacyApi, isEmptyEdit, resourcesPending, type ResourceEdit } from '@/utils/resourceEdits'
+import type { ResourceKind } from '@/utils/resources'
 import { fetchServices, fetchServiceInfo, fetchServiceResources, updateServiceResources, fetchRolloutStatus, fetchServiceLogs, createService, deleteService, type ServiceStatus, type ServiceInfo, type ServiceResources, type ServiceLogEntry } from '@/api/services'
 import { fetchProjects, type Project } from '@/api/projects'
 import LogAnalysis from '@/components/LogAnalysis.vue'
@@ -148,6 +151,31 @@ const svcResources = ref<ServiceResources>({ memory_limit: '', memory_request: '
 const svcResourcesLoading = ref(false)
 const svcResourcesSaving = ref(false)
 const svcMemoryLimit = ref('')
+const svcResourcesLoaded = ref(false)
+// Bind loaded resource state to the selected service.
+const svcResourcesFor = ref('')
+// Only the latest read may update resource state. Clearing the panel also
+// invalidates pending reads.
+let svcReadSeq = 0
+
+function svcKey(): string {
+  return `${selectedNamespace.value}/${selectedService.value?.name ?? ''}`
+}
+
+function svcResourcesKnown(): boolean {
+  return svcResourcesLoaded.value && svcResourcesFor.value === svcKey()
+}
+
+// Clear the inputs, loaded state and pending resize when switching services.
+function forgetSvcResources() {
+  svcReadSeq++
+  svcResources.value = { memory_limit: '', memory_request: '', cpu_limit: '', cpu_request: '' }
+  svcMemoryLimit.value = ''
+  svcCPULimit.value = ''
+  svcResourcesLoaded.value = false
+  svcResourcesFor.value = ''
+  pendingSvcResize.value = null
+}
 const svcCPULimit = ref('')
 
 onMounted(async () => {
@@ -244,6 +272,7 @@ async function refreshList() {
 }
 
 async function showInfo(name: string, namespace: string) {
+  forgetSvcResources()
   try {
     selectedService.value = await fetchServiceInfo(name, namespace)
     selectedNamespace.value = namespace
@@ -256,6 +285,7 @@ async function showInfo(name: string, namespace: string) {
 function closeInfo() {
   selectedService.value = null
   selectedNamespace.value = ''
+  forgetSvcResources()
 }
 
 async function switchSvcTab(tab: typeof svcDetailTab.value) {
@@ -289,17 +319,32 @@ function formatLogTime(nsTimestamp: string): string {
   return new Date(ms).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
-async function loadSvcResources() {
-  if (!selectedService.value) return
+// loadSvcResources reports whether its response was accepted by the panel.
+async function loadSvcResources(): Promise<boolean> {
+  if (!selectedService.value) return false
+  const key = svcKey()
+  if (svcResourcesFor.value !== key) forgetSvcResources()
+  const seq = ++svcReadSeq
   svcResourcesLoading.value = true
+  svcResourcesLoaded.value = false
   try {
-    svcResources.value = await fetchServiceResources(selectedService.value.name, selectedNamespace.value)
-    svcMemoryLimit.value = svcResources.value.memory_limit || ''
-    svcCPULimit.value = svcResources.value.cpu_limit || ''
+    const r = await fetchServiceResources(selectedService.value.name, selectedNamespace.value)
+    // A newer read started, or the panel moved on, while this one was in flight.
+    if (seq !== svcReadSeq || svcKey() !== key) return false
+    svcResources.value = r
+    svcMemoryLimit.value = r.memory_limit || ''
+    svcCPULimit.value = r.cpu_limit || ''
+    svcResourcesLoaded.value = true
+    svcResourcesFor.value = key
+    return true
   } catch {
+    if (seq !== svcReadSeq) return false
     svcResources.value = { memory_limit: '', memory_request: '', cpu_limit: '', cpu_request: '' }
+    svcResourcesLoaded.value = false
+    svcResourcesFor.value = ''
+    return false
   } finally {
-    svcResourcesLoading.value = false
+    if (seq === svcReadSeq) svcResourcesLoading.value = false
   }
 }
 
@@ -373,31 +418,61 @@ const svcPerPodUsage = computed(() => {
 })
 
 // pendingSvcResize captures the values that a confirmed Apply will push.
-// The confirm modal exists because every service resize causes downtime
-// (StatefulSet rolling restart with a single replica). We don't want the
-// slider's Apply to start a restart without the user understanding that.
-const pendingSvcResize = ref<{ memoryLimit: string; cpuLimit: string; kindLabel: string } | null>(null)
+// Confirm service resizes because a single-replica StatefulSet restart causes
+// downtime. Each edit carries only the resource being changed.
+const pendingSvcResize = ref<{ edit: ResourceEdit; kindLabel: string; key: string } | null>(null)
 
-function requestSvcMemoryApply(bytes: number) {
-  if (!selectedService.value) return
-  const quantity = toKubernetesMemoryQuantity(bytes)
-  pendingSvcResize.value = {
-    memoryLimit: quantity,
-    cpuLimit: svcCPULimit.value,
-    kindLabel: `Memory limit → ${quantity}`,
+// Require a successful load for this service before saving. If a load is
+// needed, show the current values and ask the user to retry the edit.
+async function readSvcResourcesFirst(): Promise<boolean> {
+  if (svcResourcesKnown()) return true
+  await loadSvcResources()
+  if (svcResourcesKnown()) {
+    toast.info('The current CPU and memory were just loaded. Check them and apply your change again.')
+  } else {
+    toast.error("Couldn't read this service's current CPU and memory, so nothing was changed. Try again.")
   }
+  return false
+}
+
+async function requestSvcEdit(edit: ResourceEdit, kindLabel: string) {
+  if (!selectedService.value) return
+  if (!(await readSvcResourcesFirst())) return
+  pendingSvcResize.value = { edit, kindLabel, key: svcKey() }
   showSvcConfirm.value = true
 }
 
+function requestSvcMemoryApply(bytes: number) {
+  const quantity = toKubernetesMemoryQuantity(bytes)
+  requestSvcEdit(fixedSize('memory', quantity), `Memory limit → ${quantity}`)
+}
+
 function requestSvcCpuApply(millis: number) {
-  if (!selectedService.value) return
   const quantity = toKubernetesCpuQuantity(millis)
-  pendingSvcResize.value = {
-    memoryLimit: svcMemoryLimit.value,
-    cpuLimit: quantity,
-    kindLabel: `CPU limit → ${quantity}`,
+  requestSvcEdit(fixedSize('cpu', quantity), `CPU limit → ${quantity}`)
+}
+
+function requestSvcAutomatic(kind: ResourceKind) {
+  requestSvcEdit(automatic(kind), `${kind === 'memory' ? 'Memory' : 'CPU'} → sized automatically`)
+}
+
+function requestSvcKeep(kind: ResourceKind) {
+  const detail = kind === 'memory' ? svcResources.value.memory : svcResources.value.cpu
+  if (!detail) return
+  requestSvcEdit(confirm(kind, detail), `${kind === 'memory' ? 'Memory' : 'CPU'} → kept as yours`)
+}
+
+// svcLimitEdits turns the limit inputs into an edit for the resources whose
+// limit changed; an emptied input hands that resource back to automatic sizing.
+function svcLimitEdits(): ResourceEdit {
+  const edit: ResourceEdit = {}
+  if (svcMemoryLimit.value !== (svcResources.value.memory_limit || '')) {
+    Object.assign(edit, svcMemoryLimit.value ? fixedSize('memory', svcMemoryLimit.value) : automatic('memory'))
   }
-  showSvcConfirm.value = true
+  if (svcCPULimit.value !== (svcResources.value.cpu_limit || '')) {
+    Object.assign(edit, svcCPULimit.value ? fixedSize('cpu', svcCPULimit.value) : automatic('cpu'))
+  }
+  return edit
 }
 
 async function saveSvcResources() {
@@ -408,21 +483,45 @@ async function saveSvcResources() {
   svcResourcesSaving.value = true
   svcRolloutPhase.value = 'updating'
 
-  // pendingSvcResize is set by the slider-driven path; the Save-button
-  // path leaves it nil and falls through to the text-input values.
-  const payload = pendingSvcResize.value ?? {
-    memoryLimit: svcMemoryLimit.value,
-    cpuLimit: svcCPULimit.value,
+  // Slider and mode actions supply a pending edit; the Save button builds one
+  // from changed inputs. Both require values loaded for the selected service.
+  const stale = pendingSvcResize.value ? pendingSvcResize.value.key !== svcKey() : false
+  if (stale || !svcResourcesKnown()) {
+    svcResourcesSaving.value = false
+    svcRolloutPhase.value = 'idle'
+    pendingSvcResize.value = null
+    if (!stale) await readSvcResourcesFirst()
+    else toast.error('That change was for another service, so nothing was changed.')
+    return
   }
+  const edit = pendingSvcResize.value?.edit ?? svcLimitEdits()
   pendingSvcResize.value = null
+  if (isEmptyEdit(edit)) {
+    svcResourcesSaving.value = false
+    svcRolloutPhase.value = 'idle'
+    toast.success('Nothing to save')
+    return
+  }
 
+  // Older servers require all four values, including the untouched pair.
+  const r = svcResources.value
+  const legacyApi = svcResourcesKnown() && !r.partial_edits
+  const loaded = { memoryRequest: r.memory_request, memoryLimit: r.memory_limit, cpuRequest: r.cpu_request, cpuLimit: r.cpu_limit }
+  // The wait below belongs to the service saved here. Opening another one
+  // ends it, since the panel then shows that service instead.
+  const target = svcKey()
+  const shown = () => svcKey() === target
+  const stopWaiting = () => {
+    svcRolloutPhase.value = 'idle'
+    toast.success('Resources updated')
+  }
   try {
-    await updateServiceResources(serviceName, namespace, {
-      memory_limit: payload.memoryLimit,
-      cpu_limit: payload.cpuLimit,
-    })
-    svcMemoryLimit.value = payload.memoryLimit
-    svcCPULimit.value = payload.cpuLimit
+    await updateServiceResources(serviceName, namespace, legacyApi ? forLegacyApi(edit, loaded) : edit)
+    if (!shown()) return stopWaiting()
+    // Wait for the saved allocation to reach the StatefulSet template before
+    // checking readiness; until then, readiness still describes the old rollout.
+    const stillApplying = async () => !(await loadSvcResources()) || resourcesPending(svcResources.value)
+    await loadSvcResources()
 
     svcRolloutPhase.value = 'restarting'
 
@@ -430,8 +529,11 @@ async function saveSvcResources() {
     const maxAttempts = 24
     for (let i = 0; i < maxAttempts; i++) {
       await new Promise(resolve => setTimeout(resolve, 5000))
+      if (!shown()) return stopWaiting()
       try {
+        if (await stillApplying()) continue
         const status = await fetchRolloutStatus(serviceName, namespace)
+        if (!shown()) return stopWaiting()
         if (status.ready) {
           svcRolloutPhase.value = 'done'
           toast.success('Service restarted with new resource limits')
@@ -444,6 +546,8 @@ async function saveSvcResources() {
     }
 
     // Timeout — still not ready after 2 minutes
+    if (!shown()) return stopWaiting()
+    await loadSvcResources()
     toast.error('Service is still restarting. Check the dashboard')
     svcRolloutPhase.value = 'idle'
   } catch {
@@ -806,9 +910,14 @@ function typeIcon(type: string): string {
                 <span class="uppercase tracking-wide">Last hour</span>
                 <MetricSparkline :data="svcMemorySparkline" :width="180" :height="28" color="#0ea5e9" />
               </div>
-              <p v-if="svcResources.memory_request" class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                Current request: {{ svcResources.memory_request }}
-              </p>
+              <ResourceMode
+                kind="memory"
+                :detail="svcResources.memory"
+                :can-write="canInNamespace(selectedNamespace, 'kipper.write')"
+                :busy="svcResourcesSaving || svcRolloutPhase !== 'idle'"
+                @confirm="requestSvcKeep('memory')"
+                @automatic="requestSvcAutomatic('memory')"
+              />
             </div>
             <div>
               <h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">CPU</h4>
@@ -826,9 +935,14 @@ function typeIcon(type: string): string {
                 <span class="uppercase tracking-wide">Last hour</span>
                 <MetricSparkline :data="svcCpuSparkline" :width="180" :height="28" color="#a855f7" />
               </div>
-              <p v-if="svcResources.cpu_request" class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                Current request: {{ svcResources.cpu_request }}
-              </p>
+              <ResourceMode
+                kind="cpu"
+                :detail="svcResources.cpu"
+                :can-write="canInNamespace(selectedNamespace, 'kipper.write')"
+                :busy="svcResourcesSaving || svcRolloutPhase !== 'idle'"
+                @confirm="requestSvcKeep('cpu')"
+                @automatic="requestSvcAutomatic('cpu')"
+              />
             </div>
           </div>
 

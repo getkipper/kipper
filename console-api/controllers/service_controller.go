@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	"github.com/getkipper/kipper/console-api/serviceui"
 	"github.com/getkipper/kipper/console-api/share"
 	"github.com/getkipper/kipper/console-api/uisession"
@@ -46,7 +47,10 @@ const ServiceFinalizer = "kipper.run/service-cleanup"
 // ServiceReconciler reconciles a Service CR.
 type ServiceReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	// APIReader is an uncached reader, used for the resource recommendation so
+	// a missing permission never starts a cache that cannot sync.
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
 	// Domain is the cluster's base domain (e.g. "example.com"). Used
 	// to build per-service UI hostnames as <svc>-<namespace>.<Domain>.
 	// Empty disables UI ingress reconciliation — services still come
@@ -610,18 +614,26 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 		return err
 	}
 
-	// Adjustments made directly on the StatefulSet (a VPA, an operator, a
-	// manual edit) live on the workload, not the CR. Keep them for any
-	// resource type the CR does not pin, so pinning CPU alone doesn't reset a
-	// raised memory limit back to the profile baseline.
-	cpuPinned := svc.Spec.Resources.CPURequest != "" || svc.Spec.Resources.CPULimit != ""
-	memPinned := svc.Spec.Resources.MemoryRequest != "" || svc.Spec.Resources.MemoryLimit != ""
-	if (!cpuPinned || !memPinned) && len(existing.Spec.Template.Spec.Containers) > 0 {
-		preserveUnpinnedResources(
-			&desired.Spec.Template.Spec.Containers[0].Resources,
-			existing.Spec.Template.Spec.Containers[0].Resources,
-			cpuPinned, memPinned,
-		)
+	// Apply recommendations within user bounds. If a quantity cannot be parsed,
+	// preserve the live StatefulSet values for resources omitted from the spec.
+	if len(existing.Spec.Template.Spec.Containers) > 0 {
+		desiredRes := &desired.Spec.Template.Spec.Containers[0].Resources
+		liveRes := &existing.Spec.Template.Spec.Containers[0].Resources
+		res := svc.Spec.Resources
+		if spec, err := resourcebounds.OwnedSpec(res.CPURequest, res.CPULimit, res.MemoryRequest, res.MemoryLimit); err == nil {
+			// StatefulSets replace pods in place, so there is no surge.
+			if applyTunedResources(ctx, r.hostReader(), tunedWorkload{
+				Namespace: svc.Namespace, Kind: "Service", Name: svc.Name, UID: svc.UID, Spec: spec,
+				Desired: desiredRes, Live: liveRes, LiveAnnotations: existing.Annotations,
+				Replicas: replicasOf(desired.Spec.Replicas),
+			}) {
+				log.FromContext(ctx).Info("a CPU or memory request is above its limit, so the container runs at the limit", "service", svc.Name)
+			}
+		} else {
+			cpuPinned := res.CPURequest != "" || res.CPULimit != ""
+			memPinned := res.MemoryRequest != "" || res.MemoryLimit != ""
+			preserveUnpinnedResources(desiredRes, *liveRes, cpuPinned, memPinned)
+		}
 	}
 	// The restart stamp has to reach a StatefulSet that already exists, which is
 	// the only case that matters: a service is restarted because it is running
@@ -1198,8 +1210,8 @@ func (r *ServiceReconciler) retractCredentialsBlocked(ctx context.Context, svc *
 }
 
 func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&kipperv1.Service{}).
+	return ownTuningRecords(mgr, ctrl.NewControllerManagedBy(mgr).
+		For(&kipperv1.Service{})).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
@@ -1715,4 +1727,11 @@ func restartStamp(svc *kipperv1.Service) map[string]string {
 		return map[string]string{"kipper.run/restartedAt": stamp}
 	}
 	return nil
+}
+
+func (r *ServiceReconciler) hostReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }

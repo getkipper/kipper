@@ -1258,6 +1258,8 @@ var consoleRBACGVRs = map[string]schema.GroupVersionResource{
 	"ServiceAccount":     {Group: "", Version: "v1", Resource: "serviceaccounts"},
 	"ClusterRole":        {Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterroles"},
 	"ClusterRoleBinding": {Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterrolebindings"},
+	"Role":               {Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "roles"},
+	"RoleBinding":        {Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings"},
 }
 
 // progressf writes a progress line. A failed write to the operator's terminal

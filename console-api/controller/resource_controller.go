@@ -23,13 +23,14 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	quotapkg "github.com/getkipper/kipper/console-api/quota"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 )
 
 const (
-	modeConfigMapName      = "kipper-mode"
-	modeConfigMapNamespace = "kipper-system"
+	modeConfigMapName      = resourcebounds.ModeConfigMapName
+	modeConfigMapNamespace = resourcebounds.ModeConfigMapNamespace
 	resourceLogConfigMap   = "kipper-resource-log"
 	maxLogEntries          = 50
 	checkInterval          = 60 * time.Second
@@ -52,10 +53,9 @@ type workloadKey struct {
 	Name      string
 }
 
-// pendingOOMMark records an OOM event evaluateAndAdjust acted on. The caller
-// commits it to oomHandledAt only after the workload update succeeds, so a
-// failed update leaves the OOM eligible for retry rather than permanently
-// suppressed.
+// pendingOOMMark records an OOM handled by evaluate. The caller commits it
+// after saving the recommendation, so a failed save leaves the OOM eligible
+// for retry.
 type pendingOOMMark struct {
 	key string
 	at  time.Time
@@ -116,10 +116,13 @@ type ResourceController struct {
 	// It is a field so a test can supply a log without an API server.
 	readPreviousLog  func(ctx context.Context, namespace, pod, container string) string
 	history          map[workloadKey][]usageObservation
-	hpaReplicas      map[string]int32       // namespace/name → last seen replica count
-	changeTimestamps map[string][]time.Time // namespace/name → recent resource or HPA change times
-	imagePullAlerted map[string]time.Time   // namespace/pod/container → last ImagePullBackOff alert time
-	crashLoopAlerted map[string]time.Time   // namespace/pod/container → last CrashLoopBackOff alert time
+	historySize      map[workloadKey]string  // the resources history was sampled at
+	skippedLogged    map[string]bool         // namespace/name of ownerless workloads already logged
+	stagedAcks       []func(context.Context) // acknowledgements waiting for this tick's alerts to be stored
+	hpaReplicas      map[string]int32        // namespace/name → last seen replica count
+	changeTimestamps map[string][]time.Time  // namespace/name → recent resource or HPA change times
+	imagePullAlerted map[string]time.Time    // namespace/pod/container → last ImagePullBackOff alert time
+	crashLoopAlerted map[string]time.Time    // namespace/pod/container → last CrashLoopBackOff alert time
 	// crashLoopEpisode tracks one unresolved crash loop per container, which is
 	// what escalation is measured from. Separate from crashLoopAlerted, which
 	// stays the hard floor of one alert per container per hour whatever else
@@ -135,6 +138,7 @@ type ResourceController struct {
 	updateFailAlert  map[string]time.Time    // namespace/app → last failed-workload-update alert time
 	cpuPinned        map[string]pinnedWindow // namespace/app → CPU-saturation observation window
 	mu               sync.Mutex
+	leader           leaderWorker
 	oomCapBytes      int64
 	nodePressureAt   time.Time // last node-pressure alert time
 	nodePressureSev  string    // severity of the last node-pressure alert
@@ -158,6 +162,8 @@ func NewResourceController(client kubernetes.Interface, crClient crclient.Client
 		client:           client,
 		crClient:         crClient,
 		history:          make(map[workloadKey][]usageObservation),
+		historySize:      make(map[workloadKey]string),
+		skippedLogged:    make(map[string]bool),
 	}
 	rc.readPreviousLog = rc.readPreviousContainerLog
 	return rc
@@ -263,12 +269,15 @@ func (rc *ResourceController) tick(ctx context.Context) {
 	pressureEntries := rc.checkNodePressure(ctx, podMetrics, nodes)
 	logEntries = append(logEntries, pressureEntries...)
 
+	stored := true
 	if len(logEntries) > 0 {
 		rc.appendLogEntries(ctx, logEntries)
 		if err := rc.createAlerts(ctx, logEntries); err != nil {
 			log.Printf("resource controller: failed to persist tuning alerts: %v", err)
+			stored = false
 		}
 	}
+	rc.commitStagedAcks(ctx, stored)
 
 	rc.detectAndRecommend(ctx)
 }
@@ -279,15 +288,7 @@ func (rc *ResourceController) tick(ctx context.Context) {
 // bounds the pause when the client never cleans up. A malformed timestamp
 // counts as not paused so a bad write cannot switch tuning off silently.
 func tuningPaused(annotations map[string]string) bool {
-	raw, ok := annotations[labels.AnnoTuningPausedUntil]
-	if !ok {
-		return false
-	}
-	until, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return false
-	}
-	return time.Now().Before(until)
+	return resourcebounds.TuningPaused(annotations)
 }
 
 // listNodes lists all nodes once so a single tick can share the result across
@@ -479,7 +480,7 @@ func (rc *ResourceController) fetchPodMetrics(ctx context.Context) (map[string][
 // "namespace/app". Crash-looping pods are absent from metrics-server, so
 // surfacing their OOM here lets a memory bump still fire without a per-app pod
 // list. Only OOM-carrying pods are added, and each is flagged Synthetic so
-// evaluateAndAdjust drops it before the CPU/memory averaging — its zero usage
+// evaluate drops it before the CPU/memory averaging — its zero usage
 // must never skew an adjustment.
 func oomEntriesForUncovered(podInfo map[string]*corev1.Pod, covered map[string]bool) map[string][]podMetricsEntry {
 	out := make(map[string][]podMetricsEntry)
@@ -583,25 +584,8 @@ func (rc *ResourceController) processDeployment(ctx context.Context, deploy *app
 		replicas = *deploy.Spec.Replicas
 	}
 	blockDecrease := scaledOut[deploy.Namespace+"/"+appName]
-	before := container.Resources.DeepCopy()
-	entries, oomMark := rc.evaluateAndAdjust(deploy.Namespace, appName, container, podEntries, deploy.Labels, replicas, blockDecrease, 0)
-	entries, quotaBlocked := rc.applyQuotaCeiling(ctx, deploy.Namespace, appName, container, *before,
-		replicas, quotapkg.DeploymentSurgePods(deploy, replicas), &deploy.Spec.Template.Spec, entries)
-
-	if len(entries) > 0 && !quotaBlocked {
-		if _, err := rc.client.AppsV1().Deployments(deploy.Namespace).Update(ctx, deploy, metav1.UpdateOptions{}); err != nil {
-			log.Printf("resource controller: failed to update deployment %s/%s: %v", deploy.Namespace, deploy.Name, err)
-			return rc.workloadUpdateFailed(deploy.Namespace, appName, err)
-		}
-		rc.commitOOMMark(oomMark)
-		log.Printf("resource controller: updated deployment %s/%s", deploy.Namespace, deploy.Name)
-
-		// Sync the new resources back to the App CR so the app reconciler
-		// doesn't overwrite them on the next reconcile.
-		rc.syncAppCRResources(ctx, deploy.Namespace, appName, container)
-
-		rc.recordChange(deploy.Namespace, appName)
-	}
+	entries := rc.tuneWorkload(ctx, deploy, appName, container, replicas,
+		quotapkg.DeploymentSurgePods(deploy, replicas), &deploy.Spec.Template.Spec, podEntries, blockDecrease, 0)
 
 	// Handle stuck pods
 	for _, pe := range podEntries {
@@ -643,20 +627,7 @@ func (rc *ResourceController) processStatefulSet(ctx context.Context, sts *appsv
 	}
 	// StatefulSets replace pods one at a time with no surge, so the
 	// steady-state projection is also the admission peak.
-	before := container.Resources.DeepCopy()
-	entries, oomMark := rc.evaluateAndAdjust(sts.Namespace, appName, container, podEntries, sts.Labels, replicas, false, statefulSetSaturationWindow)
-	entries, quotaBlocked := rc.applyQuotaCeiling(ctx, sts.Namespace, appName, container, *before, replicas, 0, nil, entries)
-
-	if len(entries) > 0 && !quotaBlocked {
-		if _, err := rc.client.AppsV1().StatefulSets(sts.Namespace).Update(ctx, sts, metav1.UpdateOptions{}); err != nil {
-			log.Printf("resource controller: failed to update statefulset %s/%s: %v", sts.Namespace, sts.Name, err)
-			return rc.workloadUpdateFailed(sts.Namespace, appName, err)
-		}
-		rc.commitOOMMark(oomMark)
-		log.Printf("resource controller: updated statefulset %s/%s", sts.Namespace, sts.Name)
-	}
-
-	return entries
+	return rc.tuneWorkload(ctx, sts, appName, container, replicas, 0, nil, podEntries, false, statefulSetSaturationWindow)
 }
 
 // quotaBlockCooldown keeps a persistently blocked increase from re-alerting
@@ -903,52 +874,6 @@ func (rc *ResourceController) pruneAlertState() {
 	}
 }
 
-// syncAppCRResources updates the App CR's resource fields to match what the
-// resource controller set on the Deployment. This prevents the app reconciler
-// from overwriting the adjusted resources on its next reconcile.
-func (rc *ResourceController) syncAppCRResources(ctx context.Context, namespace, appName string, container *corev1.Container) {
-	if rc.crClient == nil {
-		return
-	}
-
-	var app kipperv1.App
-	if err := rc.crClient.Get(ctx, crclient.ObjectKey{Namespace: namespace, Name: appName}, &app); err != nil {
-		return
-	}
-
-	cpuReq := stringFromResource(container.Resources.Requests, corev1.ResourceCPU)
-	cpuLim := stringFromResource(container.Resources.Limits, corev1.ResourceCPU)
-	memReq := stringFromResource(container.Resources.Requests, corev1.ResourceMemory)
-	memLim := stringFromResource(container.Resources.Limits, corev1.ResourceMemory)
-
-	if app.Spec.Resources.CPURequest == cpuReq && app.Spec.Resources.CPULimit == cpuLim &&
-		app.Spec.Resources.MemoryRequest == memReq && app.Spec.Resources.MemoryLimit == memLim {
-		return
-	}
-
-	app.Spec.Resources.CPURequest = cpuReq
-	app.Spec.Resources.CPULimit = cpuLim
-	app.Spec.Resources.MemoryRequest = memReq
-	app.Spec.Resources.MemoryLimit = memLim
-	if app.Spec.Resources.Profile == "" {
-		app.Spec.Resources.Profile = "custom"
-	}
-
-	if err := rc.crClient.Update(ctx, &app); err != nil {
-		log.Printf("resource controller: failed to sync App CR resources for %s/%s: %v", namespace, appName, err)
-	}
-}
-
-func stringFromResource(list corev1.ResourceList, name corev1.ResourceName) string {
-	if list == nil {
-		return ""
-	}
-	if v, ok := list[name]; ok {
-		return v.String()
-	}
-	return ""
-}
-
 // scaledOutApps returns the set of "namespace/name" apps whose autoscaling is
 // enabled and whose HPA has scaled above minReplicas — pods under genuine load
 // whose resources should not be decreased. Computing it once from a single App
@@ -1179,7 +1104,10 @@ func (rc *ResourceController) checkHPAScaling(ctx context.Context) []ResourceLog
 	return entries
 }
 
-func (rc *ResourceController) evaluateAndAdjust(
+// evaluate proposes resources from usage by modifying container in place.
+// cpuLimitMovable enables the saturation shortcut for automatic CPU sizing.
+// Otherwise, ordinary evaluation can still adjust bounded CPU and memory.
+func (rc *ResourceController) evaluate(
 	namespace, appName string,
 	container *corev1.Container,
 	podEntries []podMetricsEntry,
@@ -1187,6 +1115,7 @@ func (rc *ResourceController) evaluateAndAdjust(
 	replicas int32,
 	blockDecrease bool,
 	sustainSaturationFor time.Duration,
+	cpuLimitMovable bool,
 ) (entries []ResourceLogEntry, oomMark *pendingOOMMark) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
@@ -1239,8 +1168,8 @@ func (rc *ResourceController) evaluateAndAdjust(
 	isNewOOM := !oomAt.IsZero() && oomAt.After(rc.oomHandledAt[oomKey])
 	rc.mu.Unlock()
 	if isNewOOM && time.Since(oomAt) < oomActionableWindow {
-		// Stage the mark; the caller commits it once the workload update
-		// succeeds so a failed update is retried instead of suppressed.
+		// Commit this mark only after the recommendation is saved, so failed
+		// saves leave the OOM eligible for retry.
 		oomMark = &pendingOOMMark{key: oomKey, at: oomAt}
 		if container.Resources.Requests == nil {
 			container.Resources.Requests = corev1.ResourceList{}
@@ -1316,9 +1245,11 @@ func (rc *ResourceController) evaluateAndAdjust(
 	// bottleneck. Bump CPU now, before the 5-minute grace period and 3-tick
 	// hysteresis would otherwise delay action by 8+ minutes (long enough that
 	// HPA reacts first and never lets a single pod mature past grace).
-	if entry := rc.maybeBumpForSaturation(namespace, appName, container, podEntries, sustainSaturationFor); entry != nil {
-		entries = append(entries, *entry)
-		return
+	if cpuLimitMovable {
+		if entry := rc.maybeBumpForSaturation(namespace, appName, container, podEntries, sustainSaturationFor); entry != nil {
+			entries = append(entries, *entry)
+			return
+		}
 	}
 
 	// Filter out pods still in the startup grace period to avoid reacting

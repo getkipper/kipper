@@ -31,6 +31,8 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/domain"
+	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
+	quotapkg "github.com/getkipper/kipper/console-api/quota"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/controller/pkg/workload"
 )
@@ -651,6 +653,23 @@ func (r *FunctionReconciler) reconcileDeployment(ctx context.Context, fn *kipper
 	}
 	if err != nil {
 		return err
+	}
+
+	// Preserve the tuned size within user bounds when rebuilding the container.
+	if len(existing.Spec.Template.Spec.Containers) > 0 {
+		res := fn.Spec.Resources
+		if spec, err := resourcebounds.OwnedSpec(res.CPURequest, res.CPULimit, res.MemoryRequest, res.MemoryLimit); err == nil {
+			replicas := rolloutReplicas(desired.Spec.Replicas, existing.Spec.Replicas)
+			if applyTunedResources(ctx, r.hostReader(), tunedWorkload{
+				Namespace: fn.Namespace, Kind: "Function", Name: fn.Name, UID: fn.UID, Spec: spec,
+				Desired: &desired.Spec.Template.Spec.Containers[0].Resources, Live: &existing.Spec.Template.Spec.Containers[0].Resources,
+				LiveAnnotations: existing.Annotations,
+				Replicas:        replicas, SurgePods: quotapkg.DeploymentSurgePods(desired, replicas), PodSpec: &desired.Spec.Template.Spec,
+			}) && r.Recorder != nil {
+				r.Recorder.Event(fn, corev1.EventTypeWarning, "ResourceRequestAboveLimit",
+					"a CPU or memory request is above its limit, so the container runs at the limit")
+			}
+		}
 	}
 
 	// The same hold the App applies, and for the same promise: an env edit shows
@@ -1830,8 +1849,8 @@ func (r *FunctionReconciler) updateStatus(ctx context.Context, fn *kipperv1.Func
 }
 
 func (r *FunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&kipperv1.Function{}).
+	return ownTuningRecords(mgr, ctrl.NewControllerManagedBy(mgr).
+		For(&kipperv1.Function{})).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		// The Secrets this controller derives, so a binding refused because its

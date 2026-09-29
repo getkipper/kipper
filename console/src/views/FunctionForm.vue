@@ -34,6 +34,7 @@ import { createInlineFunction, getInlineFunctionCode, updateInlineFunctionCode, 
 import type { SecretKeyInfo } from '@/api/types'
 import { fetchServices, fetchServiceInfo, fetchFunctionBindings, fetchRabbitMQVhosts, bindService, unbindService, type ServiceStatus, type FunctionBinding } from '@/api/services'
 import { fetchDBSchema } from '@/api/database'
+import { useResourceForm } from '@/composables/useResourceForm'
 import { describeCron, commonCronPresets } from '@/utils/cron'
 import {
   scanPythonImports,
@@ -78,15 +79,9 @@ const deps = ref<Array<{ name: string; version: string }>>([])
 const bindings = ref<FunctionBinding[]>([])
 const services = ref<ServiceStatus[]>([])
 
-const memoryLimit = ref('')
-const cpuLimit = ref('')
-const memoryRequest = ref('')
-const cpuRequest = ref('')
-// Advanced toggle exposes the four request/limit fields. Off by
-// default — most users want one number per dimension. On automatically
-// when the function is already running with request != limit (e.g.
-// a JVM-style burstable config someone set via kubectl).
-const resourcesAdvanced = ref(false)
+// Open request controls for unequal pairs and save only edited resources.
+const resourceForm = useResourceForm()
+const { memoryLimit, cpuLimit, memoryRequest, cpuRequest, advanced: resourcesAdvanced } = resourceForm
 
 // UI state
 const loading = ref(false)
@@ -264,7 +259,7 @@ async function loadExisting() {
     fetchFunctionSecretKeys(namespace.value, fnName.value).catch(() => []),
     fetchFunctionDependencies(namespace.value, fnName.value).catch(() => ({})),
     fetchFunctionBindings(namespace.value, fnName.value).catch(() => []),
-    fetchFunctionResources(namespace.value, fnName.value).catch(() => ({ memory_limit: '', memory_request: '', cpu_limit: '', cpu_request: '' })),
+    fetchFunctionResources(namespace.value, fnName.value).catch(() => null),
   ])
 
   name.value = fnName.value
@@ -290,13 +285,7 @@ async function loadExisting() {
   secretKeys.value = secretsList
   deps.value = Object.entries(depsMap).map(([n, v]) => ({ name: n, version: v }))
   bindings.value = fnBindings
-  memoryLimit.value = resources.memory_limit || ''
-  cpuLimit.value = resources.cpu_limit || ''
-  memoryRequest.value = resources.memory_request || ''
-  cpuRequest.value = resources.cpu_request || ''
-  resourcesAdvanced.value =
-    (resources.cpu_request !== resources.cpu_limit && resources.cpu_request !== '') ||
-    (resources.memory_request !== resources.memory_limit && resources.memory_request !== '')
+  resourceForm.load(resources)
 }
 
 // --- Env table actions ---
@@ -684,6 +673,7 @@ async function save() {
     // Edit flow — fan out PUTs in parallel; the controller picks each up.
     // The inline function PUT carries code, runtime, and trigger config
     // so changes to any of them survive a page refresh.
+    const pendingResources = resourceForm.pendingEdit()
     await Promise.all([
       updateInlineFunctionCode(namespace.value, fnName.value, {
         code: code.value,
@@ -701,27 +691,18 @@ async function save() {
       Object.keys(secretsObj).length
         ? setFunctionSecrets(namespace.value, fnName.value, secretsObj)
         : Promise.resolve(),
-      (memoryLimit.value || cpuLimit.value || memoryRequest.value || cpuRequest.value)
-        ? updateFunctionResources(
-            namespace.value,
-            fnName.value,
-            resourcesAdvanced.value
-              ? {
-                  memory_request: memoryRequest.value,
-                  memory_limit: memoryLimit.value,
-                  cpu_request: cpuRequest.value,
-                  cpu_limit: cpuLimit.value,
-                }
-              : {
-                  memory_limit: memoryLimit.value,
-                  cpu_limit: cpuLimit.value,
-                },
-          )
+      typeof pendingResources === 'object'
+        ? updateFunctionResources(namespace.value, fnName.value, pendingResources.edit)
         : Promise.resolve(),
     ])
+    if (typeof pendingResources === 'object') resourceForm.saved(pendingResources.values)
     secretsToSet.value = []
     secretKeys.value = await fetchFunctionSecretKeys(namespace.value, fnName.value)
-    toast.success('Function saved: controller is rolling out')
+    if (pendingResources === 'unknown') {
+      toast.error("The function was saved, but its CPU and memory could not be read earlier, so they were not changed. Reload the page and set them again.")
+    } else {
+      toast.success('Function saved: controller is rolling out')
+    }
   } catch {
     toast.error('Failed to save function')
   } finally {

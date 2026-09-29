@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
@@ -507,34 +508,16 @@ func (m *Manager) Update(ctx context.Context, namespace, name string, opts Optio
 		}
 	}
 
-	// Update resource limits
+	// Save resource bounds on the Service CR for its reconciler to apply.
 	if opts.MemoryLimit != "" || opts.CPULimit != "" {
-		limits := container.Resources.Limits
-		requests := container.Resources.Requests
-		if limits == nil {
-			limits = corev1.ResourceList{}
-		}
-		if requests == nil {
-			requests = corev1.ResourceList{}
-		}
-		if opts.MemoryLimit != "" {
-			limits[corev1.ResourceMemory] = resource.MustParse(opts.MemoryLimit)
-			requests[corev1.ResourceMemory] = resource.MustParse(opts.MemoryLimit)
-		}
-		if opts.CPULimit != "" {
-			limits[corev1.ResourceCPU] = resource.MustParse(opts.CPULimit)
-			requests[corev1.ResourceCPU] = resource.MustParse(opts.CPULimit)
-		}
-		container.Resources = corev1.ResourceRequirements{
-			Limits:   limits,
-			Requests: requests,
+		if err := m.setServiceResources(ctx, namespace, name, opts.MemoryLimit, opts.CPULimit); err != nil {
+			return nil, err
 		}
 		result.ResourcesChanged = true
 		result.NeedsRestart = true
 	}
 
-	// Apply StatefulSet changes (image + resources)
-	if result.ImageChanged || result.ResourcesChanged {
+	if result.ImageChanged {
 		if _, err := m.Client.AppsV1().StatefulSets(namespace).Update(ctx, ss, metav1.UpdateOptions{}); err != nil {
 			return nil, fmt.Errorf("updating statefulset: %w", err)
 		}
@@ -1055,4 +1038,34 @@ func generatePassword(length int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b)[:length], nil
+}
+
+// setServiceResources writes fixed memory and CPU sizes to a Service CR. A
+// Service's values are always the user's.
+func (m *Manager) setServiceResources(ctx context.Context, namespace, name, memory, cpu string) error {
+	services := m.Dynamic.Resource(manifest.ServiceGVR).Namespace(namespace)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		svc, err := services.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return fmt.Errorf("service %q not found", name)
+			}
+			return fmt.Errorf("getting service: %w", err)
+		}
+		resources, _, _ := unstructured.NestedMap(svc.Object, "spec", "resources")
+		if resources == nil {
+			resources = map[string]interface{}{}
+		}
+		if memory != "" {
+			resources["memoryRequest"], resources["memoryLimit"] = memory, memory
+		}
+		if cpu != "" {
+			resources["cpuRequest"], resources["cpuLimit"] = cpu, cpu
+		}
+		if err := unstructured.SetNestedMap(svc.Object, resources, "spec", "resources"); err != nil {
+			return fmt.Errorf("setting resources: %w", err)
+		}
+		_, err = services.Update(ctx, svc, metav1.UpdateOptions{})
+		return err
+	})
 }

@@ -8,13 +8,16 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/controllers"
+	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	quotapkg "github.com/getkipper/kipper/console-api/quota"
 )
 
@@ -30,13 +33,52 @@ type resourcesResponse struct {
 	MemoryRequest string `json:"memory_request"`
 	CPULimit      string `json:"cpu_limit"`
 	CPURequest    string `json:"cpu_request"`
+	// CPU and Memory say who set each value, how Kipper sizes the resource,
+	// what the container runs with and what the auto-sizer recommends.
+	CPU    *resourceDetail `json:"cpu,omitempty"`
+	Memory *resourceDetail `json:"memory,omitempty"`
+	// PartialEdits tells clients they can omit an entire CPU or memory pair.
+	// Older servers replace all four values on every PUT.
+	PartialEdits bool `json:"partial_edits"`
 }
 
+// resourcesRequest edits CPU and memory independently. Omitting both fields
+// for a resource preserves it. A single nonempty value sets a fixed size;
+// sending an empty pair returns that resource to automatic sizing.
 type resourcesRequest struct {
-	MemoryRequest string `json:"memory_request"`
-	MemoryLimit   string `json:"memory_limit"`
-	CPURequest    string `json:"cpu_request"`
-	CPULimit      string `json:"cpu_limit"`
+	MemoryRequest *string `json:"memory_request"`
+	MemoryLimit   *string `json:"memory_limit"`
+	CPURequest    *string `json:"cpu_request"`
+	CPULimit      *string `json:"cpu_limit"`
+}
+
+// pairEdit returns nil for an omitted resource, clears an empty pair,
+// and mirrors a single value to set a fixed size.
+func pairEdit(req, lim *string) *resourcebounds.PairEdit {
+	if req == nil && lim == nil {
+		return nil
+	}
+	r, l := pairOrPassThrough(deref(req), deref(lim))
+	if r == "" {
+		return &resourcebounds.PairEdit{Clear: true}
+	}
+	return &resourcebounds.PairEdit{Request: r, Limit: l}
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// setValues returns an edit's request and limit, empty when it leaves the
+// resource alone or clears it.
+func setValues(e *resourcebounds.PairEdit) (string, string) {
+	if e == nil || e.Clear {
+		return "", ""
+	}
+	return e.Request, e.Limit
 }
 
 // ResourceKind picks which CR type the handler operates on. Apps and
@@ -90,12 +132,14 @@ func (res *Resources) getResources(w http.ResponseWriter, r *http.Request, proje
 				respondError(w, http.StatusNotFound, fmt.Sprintf("job %q not found", name))
 				return
 			}
-			respondJSON(w, http.StatusOK, resourcesResponse{})
+			respondJSON(w, http.StatusOK, resourcesResponse{PartialEdits: true})
 			return
 		}
 		respondError(w, http.StatusInternalServerError, "failed to get resources")
 		return
 	}
+	res.describeWorkload(ctx, project, name, kind, &resp)
+	resp.PartialEdits = true
 	respondJSON(w, http.StatusOK, resp)
 }
 
@@ -109,6 +153,10 @@ func (res *Resources) updateResources(w http.ResponseWriter, r *http.Request, pr
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := validateRequestWithinLimit(req); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
@@ -116,49 +164,29 @@ func (res *Resources) updateResources(w http.ResponseWriter, r *http.Request, pr
 	// Capture previous values so the telemetry log can show "from" → "to".
 	previous, _ := res.readResources(ctx, project, name, kind)
 
-	// If the client sent only a limit, mirror it to the request (and vice versa)
-	// so a single-value setting still produces Guaranteed QoS as before.
-	cpuReq, cpuLim := pairOrPassThrough(req.CPURequest, req.CPULimit)
-	memReq, memLim := pairOrPassThrough(req.MemoryRequest, req.MemoryLimit)
-
-	// Preflight the change against the namespace quota with the same projection
-	// the auto resource controller uses, so an over-quota request gets a
-	// deterministic 409 here instead of a rollout that wedges at admission. The
-	// App and Function reconcilers both back the workload with a Deployment
-	// named after the CR.
-	change := quotapkg.Change{CPURequest: cpuReq, CPULimit: cpuLim, MemoryRequest: memReq, MemoryLimit: memLim}
-	if kind == ResourceKindFunction {
-		// The Function reconciler replaces the pod template and defaults any
-		// unpinned dimension (functionResources), so an omitted dimension
-		// reconciles to the function default rather than the live value. The
-		// App reconciler preserves unpinned live values, so its omitted
-		// dimensions correctly project as unchanged. Fill the function defaults
-		// here so a CPU-only change still accounts for the memory the rollout
-		// will actually request.
-		dCPUReq, dCPULim, dMemReq, dMemLim := functionDefaults()
-		if change.CPURequest == "" {
-			change.CPURequest = dCPUReq
-		}
-		if change.CPULimit == "" {
-			change.CPULimit = dCPULim
-		}
-		if change.MemoryRequest == "" {
-			change.MemoryRequest = dMemReq
-		}
-		if change.MemoryLimit == "" {
-			change.MemoryLimit = dMemLim
-		}
+	edits := resourcebounds.Edits{
+		CPU:    pairEdit(req.CPURequest, req.CPULimit),
+		Memory: pairEdit(req.MemoryRequest, req.MemoryLimit),
 	}
-	// A job has no Deployment and no steady-state footprint: it runs one
-	// transient pod at a time, which admission handles when the pod is created.
+	_, cpuLim := setValues(edits.CPU)
+	_, memLim := setValues(edits.Memory)
+
+	// Check the projected rollout against quota before saving the edit. App
+	// and Function Deployments preserve omitted resources at their live size.
+	// Jobs have no steady Deployment; admission checks their transient pods.
 	if kind != ResourceKindJob {
+		var live corev1.ResourceRequirements
+		if deploy, err := res.Client.AppsV1().Deployments(project).Get(ctx, name, metav1.GetOptions{}); err == nil && len(deploy.Spec.Template.Spec.Containers) > 0 {
+			live = deploy.Spec.Template.Spec.Containers[0].Resources
+		}
+		change := projectedChange(edits, live)
 		if pf, err := quotapkg.PreflightDeployment(ctx, res.Client, project, name, change); err == nil && !pf.Fits {
 			respondError(w, http.StatusConflict, fmt.Sprintf("resource change needs %s of %s but the namespace quota caps at %s; raise the project tier or environment quota, or reduce other workloads", pf.Projected, pf.Dimension, pf.Hard))
 			return
 		}
 	}
 
-	if err := res.writeResources(ctx, project, name, kind, cpuReq, cpuLim, memReq, memLim); err != nil {
+	if err := res.writeResources(ctx, project, name, kind, edits); err != nil {
 		if stderrors.Is(err, errJobRunsOnce) {
 			respondError(w, http.StatusConflict, fmt.Sprintf("job %q runs once and uses the resources it was created with; create a new job to run it with different ones", name))
 			return
@@ -259,7 +287,10 @@ func (res *Resources) readResources(ctx context.Context, project, name string, k
 	}
 }
 
-func (res *Resources) writeResources(ctx context.Context, project, name string, kind ResourceKind, cpuReq, cpuLim, memReq, memLim string) error {
+// writeResources applies the edits. App and Function values are written as the
+// console's own field manager, which is what marks them as the user's bounds
+// for the auto-sizer.
+func (res *Resources) writeResources(ctx context.Context, project, name string, kind ResourceKind, edits resourcebounds.Edits) error {
 	switch kind {
 	case ResourceKindJob:
 		var job kipperv1.Job
@@ -272,33 +303,25 @@ func (res *Resources) writeResources(ctx context.Context, project, name string, 
 		if job.Spec.Schedule == "" {
 			return errJobRunsOnce
 		}
-		job.Spec.Resources.CPURequest = cpuReq
-		job.Spec.Resources.CPULimit = cpuLim
-		job.Spec.Resources.MemoryRequest = memReq
-		job.Spec.Resources.MemoryLimit = memLim
+		if edits.CPU != nil {
+			job.Spec.Resources.CPURequest, job.Spec.Resources.CPULimit = setValues(edits.CPU)
+		}
+		if edits.Memory != nil {
+			job.Spec.Resources.MemoryRequest, job.Spec.Resources.MemoryLimit = setValues(edits.Memory)
+		}
 		return res.CRClient.Update(ctx, &job)
 	case ResourceKindFunction:
-		var fn kipperv1.Function
-		if err := res.CRClient.Get(ctx, crclient.ObjectKey{Namespace: project, Name: name}, &fn); err != nil {
-			return err
-		}
-		fn.Spec.Resources.CPURequest = cpuReq
-		fn.Spec.Resources.CPULimit = cpuLim
-		fn.Spec.Resources.MemoryRequest = memReq
-		fn.Spec.Resources.MemoryLimit = memLim
-		return res.CRClient.Update(ctx, &fn)
+		return resourcebounds.WriteQuantities(ctx, res.CRClient, &kipperv1.Function{}, project, name, resourcebounds.ConsoleManager, edits)
 	default:
-		var app kipperv1.App
-		if err := res.CRClient.Get(ctx, crclient.ObjectKey{Namespace: project, Name: name}, &app); err != nil {
-			return err
+		if sets(edits.CPU) || sets(edits.Memory) {
+			edits.Profile = "custom"
 		}
-		app.Spec.Resources.CPURequest = cpuReq
-		app.Spec.Resources.CPULimit = cpuLim
-		app.Spec.Resources.MemoryRequest = memReq
-		app.Spec.Resources.MemoryLimit = memLim
-		app.Spec.Resources.Profile = "custom"
-		return res.CRClient.Update(ctx, &app)
+		return resourcebounds.WriteQuantities(ctx, res.CRClient, &kipperv1.App{}, project, name, resourcebounds.ConsoleManager, edits)
 	}
+}
+
+func sets(e *resourcebounds.PairEdit) bool {
+	return e != nil && !e.Clear
 }
 
 // The job reconciler's fallback when nothing is pinned, from jobResources.
@@ -345,10 +368,10 @@ func validateResourceQuantities(req resourcesRequest) error {
 		name string
 		raw  string
 	}{
-		{"cpu_request", req.CPURequest},
-		{"cpu_limit", req.CPULimit},
-		{"memory_request", req.MemoryRequest},
-		{"memory_limit", req.MemoryLimit},
+		{"cpu_request", deref(req.CPURequest)},
+		{"cpu_limit", deref(req.CPULimit)},
+		{"memory_request", deref(req.MemoryRequest)},
+		{"memory_limit", deref(req.MemoryLimit)},
 	} {
 		if f.raw == "" {
 			continue
@@ -361,6 +384,57 @@ func validateResourceQuantities(req resourcesRequest) error {
 		// or limit and would only fail later at pod admission.
 		if q.Sign() < 0 {
 			return fmt.Errorf("%s cannot be negative: %q", f.name, f.raw)
+		}
+	}
+	return nil
+}
+
+// projectedChange estimates the allocation after the edit for quota checks.
+// Bounds clamp the live request, so lowering a floor alone does not count as
+// a reduction. Omitted or cleared resources keep their live size.
+func projectedChange(edits resourcebounds.Edits, live corev1.ResourceRequirements) quotapkg.Change {
+	var ch quotapkg.Change
+	ch.CPURequest, ch.CPULimit = projectedPair(edits.CPU, live, corev1.ResourceCPU)
+	ch.MemoryRequest, ch.MemoryLimit = projectedPair(edits.Memory, live, corev1.ResourceMemory)
+	return ch
+}
+
+func projectedPair(e *resourcebounds.PairEdit, live corev1.ResourceRequirements, name corev1.ResourceName) (string, string) {
+	if e == nil || e.Clear {
+		return "", ""
+	}
+	req, errReq := resource.ParseQuantity(e.Request)
+	lim, errLim := resource.ParseQuantity(e.Limit)
+	if errReq != nil || errLim != nil {
+		return e.Request, e.Limit
+	}
+	livePair, ok := resourcebounds.PairOf(&live, name)
+	if !ok {
+		livePair = resourcebounds.Pair{Request: req, Limit: lim}
+	}
+	p, _ := resourcebounds.Resolve(
+		resourcebounds.Quantity{Value: req, Source: resourcebounds.User},
+		resourcebounds.Quantity{Value: lim, Source: resourcebounds.User},
+		nil, livePair, resourcebounds.AutoRange{})
+	return p.Request.String(), p.Limit.String()
+}
+
+// validateRequestWithinLimit rejects a request above its limit: the request is
+// the floor the auto-sizer keeps to and the limit the ceiling.
+func validateRequestWithinLimit(req resourcesRequest) error {
+	for _, p := range []struct {
+		name     string
+		req, lim *string
+	}{
+		{"cpu", req.CPURequest, req.CPULimit},
+		{"memory", req.MemoryRequest, req.MemoryLimit},
+	} {
+		if deref(p.req) == "" || deref(p.lim) == "" {
+			continue
+		}
+		r, l := resource.MustParse(*p.req), resource.MustParse(*p.lim)
+		if r.Cmp(l) > 0 {
+			return fmt.Errorf("%s_request %s is above %s_limit %s; the request is the floor and the limit the ceiling", p.name, *p.req, p.name, *p.lim)
 		}
 	}
 	return nil

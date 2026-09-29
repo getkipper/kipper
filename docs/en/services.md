@@ -476,9 +476,11 @@ The status panel polls every couple of seconds while a migration is running and 
 
 ## Resource limits
 
-Configure CPU and memory limits for your services from the **Resources** tab in the service detail panel. Click a service in the web console, switch to the **Resources** tab, and adjust the CPU and memory requests and limits.
+Open a service in the web console and select the **Resources** tab to adjust its CPU and memory size.
 
 Resource limits control how much CPU and memory the service pod is allowed to consume. Databases under heavy query load or caches handling high throughput may need higher limits than the defaults.
+
+The console sliders and `kip service update <service> --memory <size> --cpu <size>` set fixed sizes, with request equal to limit. To define a range, set a request below its limit in `kipper.yaml` or the Service custom resource. Kipper then tunes the request within that range and keeps the limit fixed. See [Your own CPU and memory values](/en/resource-management#your-own-values).
 
 ::: warning
 Changing resource limits on a service triggers a pod restart. For databases (PostgreSQL, MySQL, MongoDB), this means a brief period of downtime while the pod restarts with the new limits. Plan resource changes during a maintenance window or low-traffic period.

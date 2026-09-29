@@ -24,11 +24,15 @@ expert mode makes no such changes.
 
 ### Resource adjustments
 
-When CPU or memory usage stays above 80% or below 20% for 3 consecutive checks (each check runs every 60 seconds), the controller adjusts resources and creates an alert. The alert records the old and new values so you can see exactly what changed.
+The controller checks CPU and memory usage every 60 seconds. High usage must exceed 80% throughout the current observation window, which holds up to three checks; a fresh window needs one reading for an app or function, or two for a service. Decreases require usage below 20% for three consecutive checks. Resource-change alerts show the current and recommended values.
+
+For a resource with user bounds, the controller adjusts only the request within that range. A proposal that resolves to the current allocation produces no resize alert, so an idle app at its floor stays quiet. See [Your own CPU and memory values](/en/resource-management#your-own-values).
 
 ### OOM kills
 
-When a pod is terminated due to an out-of-memory condition, the controller immediately doubles the memory limit and creates a critical alert. OOM recovery does not require multiple consecutive checks. It acts on the first detection.
+For automatically sized memory, an out-of-memory (OOM) kill triggers a recommendation to double memory, subject to the [OOM cap](/en/resource-management#oom-memory-cap), and a critical alert. Recovery starts on the first detection, without waiting for usage readings.
+
+For user-set or [held memory](/en/resource-management#held-values), Kipper preserves the limit and raises a critical **OOMKilled at your limit** alert. You decide whether to increase it.
 
 ### Stuck pods
 

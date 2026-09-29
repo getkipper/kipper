@@ -442,21 +442,29 @@ kip ai restore --name pre-upgrade        # requires kipper-ai uninstalled first
 
 ## kip app update {#kip-app-update}
 
-Updates the container image or resource profile of a deployed application and triggers a rolling update.
+Updates the container image, resource profile or CPU and memory of a deployed application and triggers a rolling update.
 
 ```bash
 kip app update api --image ghcr.io/acme/api:v2.1.0
 kip app update api --profile jvm
+kip app update api --memory-request 512Mi --memory-limit 2Gi
+kip app update api --tuning auto
 ```
 
 | Flag | Required | Description |
 |---|---|---|
 | `--image` | No* | New container image |
 | `--profile` | No* | Resource profile: `lightweight`, `standard`, `compute-heavy`, `memory-heavy`, or `jvm` |
+| `--memory` / `--cpu` | No* | Set request and limit to the same value |
+| `--memory-request` / `--cpu-request` | No* | Minimum request for automatic tuning |
+| `--memory-limit` / `--cpu-limit` | No* | Container limit and maximum request for automatic tuning |
+| `--tuning auto` | No* | Clear the CPU and memory values so Kipper sizes the app on its own |
 | `--project` | No | Project name |
 | `--environment` | No | Target environment |
 
-*At least one of `--image` or `--profile` is required. Setting a profile replaces any custom CPU/memory values with the profile's defaults.
+\* Supply at least one update flag: `--image`, `--profile`, a CPU or memory flag, `--tuning auto`, `--redirect-from`, `--internal-path` or `--public-path`.
+
+A request below its limit defines a range for automatic tuning. A request or limit supplied alone sets a fixed size; a request above its limit is rejected. Use either `--memory` or the separate memory request/limit flags. The same rule applies to CPU. `--tuning auto` cannot be combined with CPU or memory values. Changing the profile preserves explicit resource values. See [Your own CPU and memory values](/en/resource-management#your-own-values).
 
 ## kip app scale {#kip-app-scale}
 

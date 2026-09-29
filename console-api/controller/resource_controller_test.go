@@ -265,7 +265,7 @@ func TestEvaluateAndAdjustAppliesDefaults(t *testing.T) {
 		labels.ResourceProfile: "standard",
 	}
 
-	entries, _ := rc.evaluateAndAdjust("default", "web", container, nil, labels, 2, false, 0)
+	entries, _ := rc.evaluate("default", "web", container, nil, labels, 2, false, 0, true)
 
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 log entry, got %d", len(entries))
@@ -317,7 +317,7 @@ func TestEvaluateAndAdjustOOMKill(t *testing.T) {
 		},
 	}
 
-	entries, mark := rc.evaluateAndAdjust("default", "web", container, podEntries, map[string]string{}, 2, false, 0)
+	entries, mark := rc.evaluate("default", "web", container, podEntries, map[string]string{}, 2, false, 0, true)
 
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 log entry, got %d", len(entries))
@@ -327,12 +327,10 @@ func TestEvaluateAndAdjustOOMKill(t *testing.T) {
 		t.Errorf("expected action 'doubled memory (OOMKilled)', got %q", entries[0].Action)
 	}
 
-	// The mark is committed only after the workload update succeeds; do that
-	// now. The same stale OOM event on the next tick must then be a no-op:
-	// the kubelet's LastTerminationState lingers, so re-acting would storm
-	// alerts and re-double memory. The dedup keys on the OOM finish time.
+	// Simulate a saved recommendation. The kubelet retains LastTerminationState,
+	// so the same finish time must not trigger another increase or alert.
 	rc.commitOOMMark(mark)
-	repeat, _ := rc.evaluateAndAdjust("default", "web", container, podEntries, map[string]string{}, 2, false, 0)
+	repeat, _ := rc.evaluate("default", "web", container, podEntries, map[string]string{}, 2, false, 0, true)
 	if len(repeat) != 0 {
 		t.Errorf("expected no entries for an already-handled OOM, got %d", len(repeat))
 	}
@@ -387,21 +385,21 @@ func TestScaleDownRequiresThreeConsecutiveChecks(t *testing.T) {
 
 	// First observation: should not scale down
 	container1 := makeContainer()
-	entries1, _ := rc.evaluateAndAdjust("default", "scaledown", container1, lowUsagePods, labels, 2, false, 0)
+	entries1, _ := rc.evaluate("default", "scaledown", container1, lowUsagePods, labels, 2, false, 0, true)
 	if len(entries1) != 0 {
 		t.Errorf("expected no entries after 1 low observation, got %d", len(entries1))
 	}
 
 	// Second observation: should not scale down
 	container2 := makeContainer()
-	entries2, _ := rc.evaluateAndAdjust("default", "scaledown", container2, lowUsagePods, labels, 2, false, 0)
+	entries2, _ := rc.evaluate("default", "scaledown", container2, lowUsagePods, labels, 2, false, 0, true)
 	if len(entries2) != 0 {
 		t.Errorf("expected no entries after 2 low observations, got %d", len(entries2))
 	}
 
 	// Third observation: should trigger scale-down
 	container3 := makeContainer()
-	entries3, _ := rc.evaluateAndAdjust("default", "scaledown", container3, lowUsagePods, labels, 2, false, 0)
+	entries3, _ := rc.evaluate("default", "scaledown", container3, lowUsagePods, labels, 2, false, 0, true)
 	if len(entries3) == 0 {
 		t.Error("expected entries after 3 consecutive low observations, got 0")
 	}
@@ -440,7 +438,7 @@ func TestScaleUpTriggersOnConsistentHighUsage(t *testing.T) {
 		Age:         10 * time.Minute,
 	}}
 
-	entries, _ := rc.evaluateAndAdjust("default", "scaleup", container, highUsagePods, map[string]string{}, 2, false, 0)
+	entries, _ := rc.evaluate("default", "scaleup", container, highUsagePods, map[string]string{}, 2, false, 0, true)
 	if len(entries) == 0 {
 		t.Error("expected scale-up entries on first consistently high observation, got 0")
 	}
@@ -473,7 +471,7 @@ func TestScaleUpPreservesBurstableLimit(t *testing.T) {
 		Age:         10 * time.Minute,
 	}}
 
-	entries, _ := rc.evaluateAndAdjust("default", "jvm-app", container, highUsagePods, map[string]string{}, 2, false, 0)
+	entries, _ := rc.evaluate("default", "jvm-app", container, highUsagePods, map[string]string{}, 2, false, 0, true)
 	if len(entries) == 0 {
 		t.Fatal("expected scale-up entries on consistently high usage")
 	}
@@ -538,13 +536,13 @@ func TestScaleDownResetByNormalUsage(t *testing.T) {
 	labels := map[string]string{}
 
 	// Low, normal, low — history is [low, normal, low], should not trigger scale-down
-	rc.evaluateAndAdjust("default", "reset-test", makeContainer(), lowPods, labels, 2, false, 0)
-	rc.evaluateAndAdjust("default", "reset-test", makeContainer(), normalPods, labels, 2, false, 0)
-	rc.evaluateAndAdjust("default", "reset-test", makeContainer(), lowPods, labels, 2, false, 0)
+	rc.evaluate("default", "reset-test", makeContainer(), lowPods, labels, 2, false, 0, true)
+	rc.evaluate("default", "reset-test", makeContainer(), normalPods, labels, 2, false, 0, true)
+	rc.evaluate("default", "reset-test", makeContainer(), lowPods, labels, 2, false, 0, true)
 
 	// History now has 3 entries but they are not all low — no scale-down
 	container := makeContainer()
-	entries, _ := rc.evaluateAndAdjust("default", "reset-test", container, lowPods, labels, 2, false, 0)
+	entries, _ := rc.evaluate("default", "reset-test", container, lowPods, labels, 2, false, 0, true)
 	// History is now [normal, low, low] — still not all low
 	if len(entries) != 0 {
 		t.Errorf("expected no entries when low usage is interrupted by normal usage, got %d", len(entries))
@@ -654,7 +652,7 @@ func TestEvaluateAndAdjustAppliesLightweightProfile(t *testing.T) {
 	container := &corev1.Container{Name: "worker"}
 	labels := map[string]string{labels.ResourceProfile: "lightweight"}
 
-	entries, _ := rc.evaluateAndAdjust("default", "worker", container, nil, labels, 2, false, 0)
+	entries, _ := rc.evaluate("default", "worker", container, nil, labels, 2, false, 0, true)
 
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 log entry, got %d", len(entries))
@@ -706,13 +704,13 @@ func TestNoOpWhenAlreadyAtMinimum(t *testing.T) {
 	labels := map[string]string{}
 
 	// Build up 3 observations so scale-down logic is eligible
-	rc.evaluateAndAdjust("default", "min-test", makeContainer(), lowPods, labels, 2, false, 0)
-	rc.evaluateAndAdjust("default", "min-test", makeContainer(), lowPods, labels, 2, false, 0)
-	rc.evaluateAndAdjust("default", "min-test", makeContainer(), lowPods, labels, 2, false, 0)
+	rc.evaluate("default", "min-test", makeContainer(), lowPods, labels, 2, false, 0, true)
+	rc.evaluate("default", "min-test", makeContainer(), lowPods, labels, 2, false, 0, true)
+	rc.evaluate("default", "min-test", makeContainer(), lowPods, labels, 2, false, 0, true)
 
 	// Fourth tick — should produce no entries since values can't decrease further
 	container := makeContainer()
-	entries, _ := rc.evaluateAndAdjust("default", "min-test", container, lowPods, labels, 2, false, 0)
+	entries, _ := rc.evaluate("default", "min-test", container, lowPods, labels, 2, false, 0, true)
 	if len(entries) != 0 {
 		t.Errorf("expected no entries when already at minimum, got %d: %v", len(entries), entries)
 	}
@@ -818,7 +816,7 @@ func TestStartupGracePeriodIgnoresYoungPods(t *testing.T) {
 		Age:         2 * time.Minute,
 	}}
 
-	entries, _ := rc.evaluateAndAdjust("default", "young-pods", container, youngPods, map[string]string{}, 2, false, 0)
+	entries, _ := rc.evaluate("default", "young-pods", container, youngPods, map[string]string{}, 2, false, 0, true)
 	if len(entries) != 0 {
 		t.Errorf("expected no entries for young pods, got %d: %v", len(entries), entries)
 	}
@@ -863,7 +861,7 @@ func TestSaturationBypassesStartupGrace(t *testing.T) {
 		Age:       3 * time.Minute,
 	}}
 
-	entries, _ := rc.evaluateAndAdjust("default", "stuck-jvm", container, pinned, map[string]string{}, 1, false, 0)
+	entries, _ := rc.evaluate("default", "stuck-jvm", container, pinned, map[string]string{}, 1, false, 0, true)
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 saturation bump, got %d: %v", len(entries), entries)
 	}
@@ -910,7 +908,7 @@ func TestSaturationWarmupIgnoresBootingPods(t *testing.T) {
 		Age:       1 * time.Minute,
 	}}
 
-	entries, _ := rc.evaluateAndAdjust("default", "booting-jvm", container, booting, map[string]string{}, 1, false, 0)
+	entries, _ := rc.evaluate("default", "booting-jvm", container, booting, map[string]string{}, 1, false, 0, true)
 	if len(entries) != 0 {
 		t.Fatalf("expected no bump for a booting pod, got %d: %v", len(entries), entries)
 	}
@@ -934,7 +932,7 @@ func TestStatefulSetSaturationNeedsSustainedHeat(t *testing.T) {
 
 	// First hot tick: starts the window, no bump.
 	container := saturatedContainer()
-	entries, _ := rc.evaluateAndAdjust("default", "mongodb", container, pinned, map[string]string{}, 1, false, statefulSetSaturationWindow)
+	entries, _ := rc.evaluate("default", "mongodb", container, pinned, map[string]string{}, 1, false, statefulSetSaturationWindow, true)
 	if len(entries) != 0 {
 		t.Fatalf("expected no bump on the first hot tick, got %d: %v", len(entries), entries)
 	}
@@ -949,7 +947,7 @@ func TestStatefulSetSaturationNeedsSustainedHeat(t *testing.T) {
 		CPUMillis: 10,
 		Age:       20 * time.Minute,
 	}}
-	rc.evaluateAndAdjust("default", "mongodb", saturatedContainer(), idle, map[string]string{}, 1, false, statefulSetSaturationWindow)
+	rc.evaluate("default", "mongodb", saturatedContainer(), idle, map[string]string{}, 1, false, statefulSetSaturationWindow, true)
 	if _, tracked := rc.cpuPinned["default/mongodb"]; tracked {
 		t.Error("expected the pinned window to reset after a cool tick")
 	}
@@ -961,7 +959,7 @@ func TestStatefulSetSaturationNeedsSustainedHeat(t *testing.T) {
 		since:   time.Now().Add(-statefulSetSaturationWindow),
 		lastHot: time.Now().Add(-time.Minute),
 	}
-	entries, _ = rc.evaluateAndAdjust("default", "mongodb", container, pinned, map[string]string{}, 1, false, statefulSetSaturationWindow)
+	entries, _ = rc.evaluate("default", "mongodb", container, pinned, map[string]string{}, 1, false, statefulSetSaturationWindow, true)
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 bump after sustained saturation, got %d: %v", len(entries), entries)
 	}
@@ -992,7 +990,7 @@ func TestStatefulSetSaturationWindowNeedsContinuity(t *testing.T) {
 	rc.cpuPinned["default/mongodb"] = pinnedWindow{since: staleHot, lastHot: staleHot}
 
 	container := saturatedContainer()
-	entries, _ := rc.evaluateAndAdjust("default", "mongodb", container, pinned, map[string]string{}, 1, false, statefulSetSaturationWindow)
+	entries, _ := rc.evaluate("default", "mongodb", container, pinned, map[string]string{}, 1, false, statefulSetSaturationWindow, true)
 	if len(entries) != 0 {
 		t.Fatalf("expected no bump across an observation gap, got %d: %v", len(entries), entries)
 	}
@@ -1042,7 +1040,7 @@ func TestSingleReplicaSkipsScaleDown(t *testing.T) {
 	// With replicas=1, scale-down should never trigger
 	rc1 := NewResourceController(nil, nil)
 	for i := 0; i < 4; i++ {
-		entries, _ := rc1.evaluateAndAdjust("default", "single-replica", makeContainer(), lowPods, labels, 1, false, 0)
+		entries, _ := rc1.evaluate("default", "single-replica", makeContainer(), lowPods, labels, 1, false, 0, true)
 		if len(entries) != 0 {
 			t.Errorf("replicas=1: expected no scale-down entries on tick %d, got %d: %v", i+1, len(entries), entries)
 		}
@@ -1050,10 +1048,10 @@ func TestSingleReplicaSkipsScaleDown(t *testing.T) {
 
 	// With replicas=2, scale-down should trigger after 3 observations
 	rc2 := NewResourceController(nil, nil)
-	rc2.evaluateAndAdjust("default", "multi-replica", makeContainer(), lowPods, labels, 2, false, 0)
-	rc2.evaluateAndAdjust("default", "multi-replica", makeContainer(), lowPods, labels, 2, false, 0)
+	rc2.evaluate("default", "multi-replica", makeContainer(), lowPods, labels, 2, false, 0, true)
+	rc2.evaluate("default", "multi-replica", makeContainer(), lowPods, labels, 2, false, 0, true)
 	container3 := makeContainer()
-	entries, _ := rc2.evaluateAndAdjust("default", "multi-replica", container3, lowPods, labels, 2, false, 0)
+	entries, _ := rc2.evaluate("default", "multi-replica", container3, lowPods, labels, 2, false, 0, true)
 	if len(entries) == 0 {
 		t.Error("replicas=2: expected scale-down entries after 3 low observations, got 0")
 	}
@@ -1089,7 +1087,7 @@ func TestScaleUpStillWorksForSingleReplica(t *testing.T) {
 		Age:         10 * time.Minute,
 	}}
 
-	entries, _ := rc.evaluateAndAdjust("default", "single-scaleup", container, highPods, map[string]string{}, 1, false, 0)
+	entries, _ := rc.evaluate("default", "single-scaleup", container, highPods, map[string]string{}, 1, false, 0, true)
 	if len(entries) == 0 {
 		t.Error("expected scale-up entries for single replica with high usage, got 0")
 	}
@@ -1134,7 +1132,7 @@ func TestOOMHandlingIgnoresReplicaCount(t *testing.T) {
 		Age:         10 * time.Minute,
 	}}
 
-	entries, _ := rc.evaluateAndAdjust("default", "oom-single", container, oomPods, map[string]string{}, 1, false, 0)
+	entries, _ := rc.evaluate("default", "oom-single", container, oomPods, map[string]string{}, 1, false, 0, true)
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 log entry, got %d", len(entries))
 	}
@@ -1183,7 +1181,7 @@ func TestProfileFloorPreventsScaleDown(t *testing.T) {
 	// Build up 3+ observations so scale-down logic is eligible
 	for i := 0; i < 4; i++ {
 		container := makeContainer()
-		entries, _ := rc.evaluateAndAdjust("default", "db-floor", container, lowPods, labels, 2, false, 0)
+		entries, _ := rc.evaluate("default", "db-floor", container, lowPods, labels, 2, false, 0, true)
 		if len(entries) != 0 {
 			t.Errorf("tick %d: expected no entries when at profile floor, got %d: %v", i+1, len(entries), entries)
 		}
@@ -1198,99 +1196,6 @@ func testScheme() *runtime.Scheme {
 
 func testCRClient(objs ...crclient.Object) crclient.Client {
 	return crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).Build()
-}
-
-func TestSyncAppCRResources(t *testing.T) {
-	app := &kipperv1.App{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "myapp",
-			Namespace: "default",
-		},
-		Spec: kipperv1.AppSpec{
-			Image: "nginx:latest",
-			Port:  8080,
-			Resources: kipperv1.AppResources{
-				Profile:       "standard",
-				CPURequest:    "100m",
-				CPULimit:      "100m",
-				MemoryRequest: "128Mi",
-				MemoryLimit:   "128Mi",
-			},
-		},
-	}
-
-	crClient := testCRClient(app)
-	rc := NewResourceController(nil, crClient)
-
-	// Simulate the resource controller having adjusted the container
-	container := &corev1.Container{
-		Name: "myapp",
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("200m"),
-				corev1.ResourceMemory: resource.MustParse("256Mi"),
-			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("200m"),
-				corev1.ResourceMemory: resource.MustParse("256Mi"),
-			},
-		},
-	}
-
-	rc.syncAppCRResources(context.TODO(), "default", "myapp", container)
-
-	// Verify the App CR was updated
-	var updated kipperv1.App
-	err := crClient.Get(context.TODO(), crclient.ObjectKey{Namespace: "default", Name: "myapp"}, &updated)
-	if err != nil {
-		t.Fatalf("failed to get updated App CR: %v", err)
-	}
-
-	if updated.Spec.Resources.CPURequest != "200m" {
-		t.Errorf("expected CPURequest 200m, got %s", updated.Spec.Resources.CPURequest)
-	}
-	if updated.Spec.Resources.CPULimit != "200m" {
-		t.Errorf("expected CPULimit 200m, got %s", updated.Spec.Resources.CPULimit)
-	}
-	if updated.Spec.Resources.MemoryRequest != "256Mi" {
-		t.Errorf("expected MemoryRequest 256Mi, got %s", updated.Spec.Resources.MemoryRequest)
-	}
-	if updated.Spec.Resources.MemoryLimit != "256Mi" {
-		t.Errorf("expected MemoryLimit 256Mi, got %s", updated.Spec.Resources.MemoryLimit)
-	}
-	// Profile stays "standard" because the code only sets "custom" when profile is empty
-	if updated.Spec.Resources.Profile != "standard" {
-		t.Errorf("expected Profile 'standard' (unchanged), got %s", updated.Spec.Resources.Profile)
-	}
-
-	// Also verify that an App with no profile gets set to "custom"
-	appNoProfile := &kipperv1.App{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "noprefix",
-			Namespace: "default",
-		},
-		Spec: kipperv1.AppSpec{
-			Image: "nginx:latest",
-			Port:  8080,
-			Resources: kipperv1.AppResources{
-				CPURequest:    "100m",
-				CPULimit:      "100m",
-				MemoryRequest: "128Mi",
-				MemoryLimit:   "128Mi",
-			},
-		},
-	}
-	crClient2 := testCRClient(appNoProfile)
-	rc2 := NewResourceController(nil, crClient2)
-	rc2.syncAppCRResources(context.TODO(), "default", "noprefix", container)
-
-	var updated2 kipperv1.App
-	if err := crClient2.Get(context.TODO(), crclient.ObjectKey{Namespace: "default", Name: "noprefix"}, &updated2); err != nil {
-		t.Fatalf("failed to get updated App CR: %v", err)
-	}
-	if updated2.Spec.Resources.Profile != "custom" {
-		t.Errorf("expected Profile 'custom' when originally empty, got %s", updated2.Spec.Resources.Profile)
-	}
 }
 
 func TestCheckImagePullBackOff(t *testing.T) {
@@ -1675,7 +1580,7 @@ func TestEvaluateAndAdjustStaleOOMNotReactioned(t *testing.T) {
 		OOMAt:       time.Now().Add(-oomActionableWindow - time.Minute),
 	}}
 
-	entries, mark := rc.evaluateAndAdjust("default", "web", container, podEntries, map[string]string{}, 2, false, 0)
+	entries, mark := rc.evaluate("default", "web", container, podEntries, map[string]string{}, 2, false, 0, true)
 
 	if mark != nil {
 		t.Errorf("a stale OOM must not stage a mark, got %+v", mark)
@@ -1719,7 +1624,7 @@ func TestEvaluateAndAdjustHandledSyntheticOOMDoesNotTuneDown(t *testing.T) {
 		Age:       time.Hour, // past the startup grace, so zeros would otherwise average in
 	}}
 
-	entries, mark := rc.evaluateAndAdjust("default", "web", container, podEntries, map[string]string{}, 2, false, 0)
+	entries, mark := rc.evaluate("default", "web", container, podEntries, map[string]string{}, 2, false, 0, true)
 
 	if mark != nil {
 		t.Errorf("an already-handled OOM must not stage a mark, got %+v", mark)
@@ -1736,9 +1641,8 @@ func TestEvaluateAndAdjustHandledSyntheticOOMDoesNotTuneDown(t *testing.T) {
 }
 
 func TestEvaluateAndAdjustOOMRetriesUntilCommitted(t *testing.T) {
-	// If the workload update fails, the caller never commits the OOM mark, so
-	// the same OOM event must stay actionable on the next tick rather than
-	// being permanently suppressed.
+	// A failed recommendation save leaves the OOM mark uncommitted and eligible
+	// for retry.
 	rc := NewResourceController(nil, nil)
 	mk := func() *corev1.Container {
 		q := resource.MustParse("128Mi")
@@ -1752,16 +1656,15 @@ func TestEvaluateAndAdjustOOMRetriesUntilCommitted(t *testing.T) {
 	}
 	pods := []podMetricsEntry{{Namespace: "default", PodName: "web-1", OOMKilled: true, OOMAt: time.Now()}}
 
-	// First tick doubles memory but the (simulated) update fails, so the mark
-	// is left uncommitted.
-	first, mark := rc.evaluateAndAdjust("default", "web", mk(), pods, map[string]string{}, 2, false, 0)
+	// Simulate a failed recommendation save by leaving the mark uncommitted.
+	first, mark := rc.evaluate("default", "web", mk(), pods, map[string]string{}, 2, false, 0, true)
 	if len(first) != 1 || mark == nil {
 		t.Fatalf("expected a doubling entry and a pending mark, got entries=%d mark=%v", len(first), mark)
 	}
 
 	// Next tick: same OOM finish time, mark still uncommitted, so it must act
 	// again instead of being suppressed.
-	second, _ := rc.evaluateAndAdjust("default", "web", mk(), pods, map[string]string{}, 2, false, 0)
+	second, _ := rc.evaluate("default", "web", mk(), pods, map[string]string{}, 2, false, 0, true)
 	if len(second) != 1 {
 		t.Fatalf("expected the OOM to remain actionable until the mark is committed, got %d entries", len(second))
 	}
@@ -2109,9 +2012,13 @@ func TestTuningPausedSkipsWorkload(t *testing.T) {
 		CPUMillis: 100,
 		Age:       20 * time.Minute,
 	}}
+	controllerRef := true
 	makeSTS := func(anno map[string]string) *appsv1.StatefulSet {
 		return &appsv1.StatefulSet{
-			ObjectMeta: metav1.ObjectMeta{Name: "mongodb", Namespace: "default", Annotations: anno},
+			ObjectMeta: metav1.ObjectMeta{Name: "mongodb", Namespace: "default", Annotations: anno,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: kipperv1.GroupVersion.String(), Kind: "Service", Name: "mongodb", UID: "uid-mongodb", Controller: &controllerRef,
+				}}},
 			Spec: appsv1.StatefulSetSpec{
 				Template: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{Containers: []corev1.Container{*saturatedContainer()}},
@@ -2121,7 +2028,8 @@ func TestTuningPausedSkipsWorkload(t *testing.T) {
 	}
 	metrics := map[string][]podMetricsEntry{"default/mongodb": pinned}
 
-	rc := NewResourceController(fake.NewSimpleClientset(), nil)
+	mongodb := &kipperv1.Service{ObjectMeta: metav1.ObjectMeta{Name: "mongodb", Namespace: "default", UID: "uid-mongodb"}}
+	rc := NewResourceController(fake.NewSimpleClientset(), tuningCRClient(mongodb))
 	entries := rc.processStatefulSet(context.Background(), makeSTS(map[string]string{
 		"kipper.run/tuning-paused-until": future,
 	}), metrics)

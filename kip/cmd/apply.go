@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/util/retry"
 
 	"github.com/getkipper/kipper/controller/pkg/secretname"
+	"github.com/getkipper/kipper/kip/internal/deployer"
 	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/manifest"
 	"github.com/getkipper/kipper/kip/internal/workload"
@@ -658,7 +659,27 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 	if err != nil {
 		return "", err
 	}
+	// Claim unchanged resource values too: every value declared in the
+	// manifest is an explicit user choice.
+	if res.Object.GetKind() == "App" {
+		d := &deployer.Deployer{Dynamic: dyn}
+		if err := d.ClaimResources(ctx, namespace, name, declaredResources(res.Object.Object)); err != nil {
+			return "", err
+		}
+	}
 	return "updated", nil
+}
+
+// declaredResources returns the CPU and memory values a manifest's spec sets.
+func declaredResources(obj map[string]interface{}) map[string]string {
+	resources, _, _ := unstructured.NestedStringMap(obj, "spec", "resources")
+	declared := map[string]string{}
+	for _, f := range []string{"cpuRequest", "cpuLimit", "memoryRequest", "memoryLimit"} {
+		if v := resources[f]; v != "" {
+			declared[f] = v
+		}
+	}
+	return declared
 }
 
 // unionEnvironments returns the live environment entries plus any manifest

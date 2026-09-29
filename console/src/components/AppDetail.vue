@@ -27,6 +27,10 @@ import {
   toKubernetesCpuQuantity,
   toKubernetesMemoryQuantity,
 } from '@/utils/resources'
+import type { ResourceKind } from '@/utils/resources'
+import { automatic, changedResources, confirm, fixedSize, forLegacyApi, isEmptyEdit, resourcesPending, type ResourceEdit, type ResourceValues } from '@/utils/resourceEdits'
+import type { ResourceDetail } from '@/api/resources'
+import ResourceMode from '@/components/ResourceMode.vue'
 import * as api from '@/api/apps'
 import type { AppLink } from '@/api/apps'
 import { gitCardState as deriveGitCardState, imageCardState as deriveImageCardState } from '@/utils/deployMethods'
@@ -1925,6 +1929,35 @@ const cpuLimit = ref('')
 const cpuRequest = ref('')
 const resourcesAdvanced = ref(false)
 const resourcesSaving = ref(false)
+const memoryDetail = ref<ResourceDetail | undefined>()
+const cpuDetail = ref<ResourceDetail | undefined>()
+// Baseline for identifying which resource pairs the user edited.
+const loadedResources = ref<ResourceValues>({ memoryRequest: '', memoryLimit: '', cpuRequest: '', cpuLimit: '' })
+// A successful load establishes whether the server supports partial edits.
+// Older servers need the untouched resource included in every save.
+const resourcesKnown = ref(false)
+const resourcesLegacyApi = ref(false)
+// Bind loaded state to its app because this panel is reused across apps.
+const resourcesFor = ref('')
+
+function resourcesIdentity(): string {
+  return `${project.value}/${props.appName}`
+}
+
+// Clear inputs and resource state before displaying another app.
+function forgetResources() {
+  memoryRequest.value = ''
+  memoryLimit.value = ''
+  cpuRequest.value = ''
+  cpuLimit.value = ''
+  resourcesAdvanced.value = false
+  memoryDetail.value = undefined
+  cpuDetail.value = undefined
+  loadedResources.value = { memoryRequest: '', memoryLimit: '', cpuRequest: '', cpuLimit: '' }
+  resourcesKnown.value = false
+  resourcesLegacyApi.value = false
+  resourcesFor.value = ''
+}
 
 const resourcesLoading = ref(false)
 
@@ -1961,50 +1994,166 @@ async function loadSettings() {
   loadWebhookConfig()
 }
 
-async function loadResources() {
+// Only the latest resource read may update the panel.
+let resourcesReadSeq = 0
+
+// loadResources reports whether its response was accepted. wanted rejects
+// responses for an obsolete save. When saved is supplied, only replaceable
+// fields that still match their saved values are updated; the baseline always
+// advances. Ordinary loads replace all inputs.
+async function loadResources(wanted: () => boolean = () => true, saved?: SavedFields): Promise<boolean> {
+  if (!wanted()) return false
+  const identity = resourcesIdentity()
+  if (resourcesFor.value !== identity) forgetResources()
+  const seq = ++resourcesReadSeq
   resourcesLoading.value = true
   try {
     const r = await api.fetchResources(project.value, props.appName)
-    memoryLimit.value = r.memory_limit || ''
-    memoryRequest.value = r.memory_request || ''
-    cpuLimit.value = r.cpu_limit || ''
-    cpuRequest.value = r.cpu_request || ''
+    // A newer read started, or the panel moved on, while this one was in flight.
+    if (seq !== resourcesReadSeq || resourcesIdentity() !== identity || !wanted()) return false
+    const read: ResourceValues = {
+      memoryRequest: r.memory_request || '',
+      memoryLimit: r.memory_limit || '',
+      cpuRequest: r.cpu_request || '',
+      cpuLimit: r.cpu_limit || '',
+    }
+    const fields = { memoryRequest, memoryLimit, cpuRequest, cpuLimit }
+    let typed = false
+    for (const key of Object.keys(fields) as (keyof ResourceValues)[]) {
+      if (saved && (!saved.replaceable[key] || fields[key].value !== saved.values[key])) typed = true
+      else {
+        fields[key].value = read[key]
+        const record = saved ?? latestSaved
+        if (record) record.values[key] = read[key]
+      }
+    }
     // If request and limit differ, the user is already using burstable mode —
     // open the advanced controls automatically so they can see and edit both.
-    resourcesAdvanced.value =
-      (r.cpu_request !== r.cpu_limit && r.cpu_request !== '') ||
-      (r.memory_request !== r.memory_limit && r.memory_request !== '')
+    if (!typed) {
+      resourcesAdvanced.value =
+        (r.cpu_request !== r.cpu_limit && r.cpu_request !== '') ||
+        (r.memory_request !== r.memory_limit && r.memory_request !== '')
+    }
+    memoryDetail.value = r.memory
+    cpuDetail.value = r.cpu
+    loadedResources.value = read
+    resourcesLegacyApi.value = !r.partial_edits
+    resourcesKnown.value = true
+    resourcesFor.value = identity
+    return true
   } catch {
     // leave values as-is
+    return false
   } finally {
-    resourcesLoading.value = false
+    if (seq === resourcesReadSeq) resourcesLoading.value = false
+  }
+}
+
+// SavedFields protects unsaved edits during reads after a save. Only fields
+// sent by that save or unchanged from the baseline may be replaced.
+interface SavedFields {
+  values: ResourceValues
+  replaceable: Record<keyof ResourceValues, boolean>
+}
+
+const editKeys: Record<keyof ResourceValues, keyof ResourceEdit> = {
+  memoryRequest: 'memory_request', memoryLimit: 'memory_limit', cpuRequest: 'cpu_request', cpuLimit: 'cpu_limit',
+}
+
+// Track values populated by reads so later reads for this save still recognise
+// them as untouched.
+let latestSaved: SavedFields | undefined
+
+function savedFields(edit: ResourceEdit): SavedFields {
+  const values = currentResources()
+  const replaceable = {} as Record<keyof ResourceValues, boolean>
+  for (const key of Object.keys(values) as (keyof ResourceValues)[]) {
+    replaceable[key] = editKeys[key] in edit || values[key] === loadedResources.value[key]
+  }
+  return { values, replaceable }
+}
+
+function currentResources(): ResourceValues {
+  return {
+    memoryRequest: memoryRequest.value,
+    memoryLimit: memoryLimit.value,
+    cpuRequest: cpuRequest.value,
+    cpuLimit: cpuLimit.value,
   }
 }
 
 async function saveResources() {
+  const edit = changedResources(loadedResources.value, currentResources())
+  if (isEmptyEdit(edit)) {
+    toast.success('Nothing to save')
+    return
+  }
+  await sendResourceEdit(edit, 'Resources updated: pod will restart', 'Failed to update resources')
+}
+
+async function sendResourceEdit(edit: ResourceEdit, done: string, failed: string) {
+  const identity = resourcesIdentity()
+  const [targetProject, targetApp] = [project.value, props.appName]
+  // Require a successful load for this app before saving. Otherwise, refresh
+  // the inputs and let the user retry with the current values.
+  if (!resourcesKnown.value || resourcesFor.value !== identity) {
+    await loadResources()
+    if (resourcesKnown.value && resourcesFor.value === identity) {
+      toast.info('The current CPU and memory were just loaded. Check them and apply your change again.')
+    } else {
+      toast.error("Couldn't read this app's current CPU and memory, so nothing was changed. Try again.")
+    }
+    return
+  }
   resourcesSaving.value = true
+  const run = ++appliedReadSeq
+  const saved = savedFields(edit)
+  latestSaved = saved
+  // Stop polling when another save starts or the panel changes apps.
+  const current = () => run === appliedReadSeq && resourcesIdentity() === identity
   try {
-    // In simple mode, the limit doubles as the request (Guaranteed QoS).
-    // In advanced mode, both fields are sent independently — request can be
-    // lower than limit for burstable workloads (e.g. JVM cold start).
-    const payload = resourcesAdvanced.value
-      ? {
-          memory_request: memoryRequest.value,
-          memory_limit: memoryLimit.value,
-          cpu_request: cpuRequest.value,
-          cpu_limit: cpuLimit.value,
-        }
-      : {
-          memory_limit: memoryLimit.value,
-          cpu_limit: cpuLimit.value,
-        }
-    await api.updateResources(project.value, props.appName, payload)
-    toast.success('Resources updated: pod will restart')
+    await api.updateResources(targetProject, targetApp, resourcesLegacyApi.value ? forLegacyApi(edit, loadedResources.value) : edit)
+    toast.success(done)
+    const observed = await loadResources(current, saved)
+    usage.refresh()
+    void readUntilApplied(current, saved, observed)
   } catch {
-    toast.error('Failed to update resources')
+    toast.error(failed)
+    // Resume polling for any earlier resize while preserving the rejected input.
+    latestSaved = savedFields({})
+    void readUntilApplied(current, latestSaved, false)
   } finally {
     resourcesSaving.value = false
   }
+}
+
+// appliedReadSeq ends an earlier readUntilApplied when a newer save starts,
+// or when the panel closes.
+let appliedReadSeq = 0
+onUnmounted(() => { appliedReadSeq++ })
+
+// Poll for up to two minutes until a successful read shows that the Deployment
+// pod template satisfies the spec. current stops obsolete polls; saved protects
+// unsaved input. This checks allocation, not pod readiness.
+async function readUntilApplied(current: () => boolean, saved: SavedFields, observed: boolean) {
+  const pending = () => resourcesPending({
+    partial_edits: !resourcesLegacyApi.value, memory: memoryDetail.value, cpu: cpuDetail.value,
+  })
+  for (let i = 0; i < 40 && current() && (!observed || pending()); i++) {
+    await new Promise(resolve => setTimeout(resolve, 3000))
+    if (!current()) return
+    observed = await loadResources(current, saved)
+  }
+}
+
+async function setAutomatic(kind: ResourceKind) {
+  await sendResourceEdit(automatic(kind), `${kind === 'memory' ? 'Memory' : 'CPU'} is now sized automatically`, 'Failed to update resources')
+}
+
+async function keepHeld(kind: ResourceKind) {
+  const detail = kind === 'memory' ? memoryDetail.value : cpuDetail.value
+  if (!detail) return
+  await sendResourceEdit(confirm(kind, detail), 'Value kept as yours', 'Failed to update resources')
 }
 
 // Live usage scoped to this app's pods. Selector matches the convention
@@ -2025,18 +2174,23 @@ const cpuThrottlingPct = computed(() => usage.data.value?.cpu_throttling_pct ?? 
 // for ResourceControl. Empty / unparseable values fall through to 0 so
 // the gauge renders with an honest "no limit set" denominator instead of
 // silently rounding.
+// The gauges show the limit the container runs with, which may be none; only
+// a console-api without per-resource details falls back to the spec's
+// resolved value.
 const memoryLimitBytes = computed(() => {
-  if (!memoryLimit.value) return 0
+  const shown = memoryDetail.value ? memoryDetail.value.live.limit : memoryLimit.value
+  if (!shown) return 0
   try {
-    return parseMemoryQuantity(memoryLimit.value)
+    return parseMemoryQuantity(shown)
   } catch {
     return 0
   }
 })
 const cpuLimitMillis = computed(() => {
-  if (!cpuLimit.value) return 0
+  const shown = cpuDetail.value ? cpuDetail.value.live.limit : cpuLimit.value
+  if (!shown) return 0
   try {
-    return parseCpuQuantity(cpuLimit.value)
+    return parseCpuQuantity(shown)
   } catch {
     return 0
   }
@@ -2070,49 +2224,23 @@ const perPodUsage = computed(() => {
   return Array.from(byPod.entries()).map(([pod, v]) => ({ pod, ...v }))
 })
 
-// applyResourceLimit writes one side (memory or CPU) without disturbing
-// the other. The gauges emit bytes/millicores; the API expects K8s
-// quantity strings.
+// Sliders edit one resource at a time. Simple mode sets a fixed size; advanced
+// mode changes the limit while retaining the request. Convert gauge units
+// (bytes or millicores) to Kubernetes quantities before sending.
 async function applyMemoryLimit(bytes: number) {
-  resourcesSaving.value = true
-  try {
-    const quantity = toKubernetesMemoryQuantity(bytes)
-    await api.updateResources(project.value, props.appName, {
-      memory_limit: quantity,
-      memory_request: resourcesAdvanced.value ? memoryRequest.value : quantity,
-      cpu_limit: cpuLimit.value,
-      cpu_request: resourcesAdvanced.value ? cpuRequest.value : cpuLimit.value,
-    })
-    memoryLimit.value = quantity
-    if (!resourcesAdvanced.value) memoryRequest.value = quantity
-    toast.success(`Memory limit set to ${quantity}: pod will restart`)
-    usage.refresh()
-  } catch {
-    toast.error('Failed to update memory limit')
-  } finally {
-    resourcesSaving.value = false
-  }
+  const quantity = toKubernetesMemoryQuantity(bytes)
+  const edit = resourcesAdvanced.value && memoryRequest.value
+    ? { memory_request: memoryRequest.value, memory_limit: quantity }
+    : fixedSize('memory', quantity)
+  await sendResourceEdit(edit, `Memory limit set to ${quantity}: pod will restart`, 'Failed to update memory limit')
 }
 
 async function applyCpuLimit(millis: number) {
-  resourcesSaving.value = true
-  try {
-    const quantity = toKubernetesCpuQuantity(millis)
-    await api.updateResources(project.value, props.appName, {
-      cpu_limit: quantity,
-      cpu_request: resourcesAdvanced.value ? cpuRequest.value : quantity,
-      memory_limit: memoryLimit.value,
-      memory_request: resourcesAdvanced.value ? memoryRequest.value : memoryLimit.value,
-    })
-    cpuLimit.value = quantity
-    if (!resourcesAdvanced.value) cpuRequest.value = quantity
-    toast.success(`CPU limit set to ${quantity}: pod will restart`)
-    usage.refresh()
-  } catch {
-    toast.error('Failed to update CPU limit')
-  } finally {
-    resourcesSaving.value = false
-  }
+  const quantity = toKubernetesCpuQuantity(millis)
+  const edit = resourcesAdvanced.value && cpuRequest.value
+    ? { cpu_request: cpuRequest.value, cpu_limit: quantity }
+    : fixedSize('cpu', quantity)
+  await sendResourceEdit(edit, `CPU limit set to ${quantity}: pod will restart`, 'Failed to update CPU limit')
 }
 
 async function saveSettings() {
@@ -2299,6 +2427,7 @@ onMounted(() => {
 // environment it had been asked to leave.
 watch(() => [props.appName, props.namespace], () => {
   clear()
+  forgetResources()
   // An operation in flight belongs to the panel that started it, so its result
   // will not clear these. Reset them here, or a switch away mid-restart leaves
   // the button disabled for every app this panel goes on to show.
@@ -3510,7 +3639,7 @@ function openOptimise() {
 
       <!-- Resources tab -->
       <div v-if="showsTab('resources')" class="p-5">
-        <div v-if="resourcesLoading" class="text-sm text-slate-500 dark:text-slate-400">Loading...</div>
+        <div v-if="resourcesLoading && !resourcesKnown" class="text-sm text-slate-500 dark:text-slate-400">Loading...</div>
         <div v-else class="space-y-6">
           <div class="rounded-lg border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
             <div class="mb-3 flex items-start justify-between gap-3">
@@ -3538,6 +3667,14 @@ function openOptimise() {
                   size="md"
                   @apply="applyMemoryLimit"
                 />
+                <ResourceMode
+                  kind="memory"
+                  :detail="memoryDetail"
+                  :can-write="canWriteApp"
+                  :busy="resourcesSaving"
+                  @confirm="keepHeld('memory')"
+                  @automatic="setAutomatic('memory')"
+                />
                 <div v-if="memorySparkline.length > 1" class="mt-2 flex items-center justify-center gap-2 text-[10px] text-slate-400 dark:text-slate-500">
                   <span class="uppercase tracking-wide">Last hour</span>
                   <MetricSparkline :data="memorySparkline" :width="180" :height="28" color="#0ea5e9" />
@@ -3554,6 +3691,14 @@ function openOptimise() {
                   size="md"
                   @apply="applyCpuLimit"
                 />
+                <ResourceMode
+                  kind="cpu"
+                  :detail="cpuDetail"
+                  :can-write="canWriteApp"
+                  :busy="resourcesSaving"
+                  @confirm="keepHeld('cpu')"
+                  @automatic="setAutomatic('cpu')"
+                />
                 <div v-if="cpuSparkline.length > 1" class="mt-2 flex items-center justify-center gap-2 text-[10px] text-slate-400 dark:text-slate-500">
                   <span class="uppercase tracking-wide">Last hour</span>
                   <MetricSparkline :data="cpuSparkline" :width="180" :height="28" color="#a855f7" />
@@ -3567,7 +3712,7 @@ function openOptimise() {
 
             <div v-if="resourcesAdvanced" class="mt-4 border-t border-slate-200 pt-4 dark:border-slate-700">
               <p class="mb-3 text-xs text-slate-500 dark:text-slate-400">
-                Request is reserved on the node. Limit is the cap. For JVM apps, set request low (e.g. 100m) and limit high (e.g. 1000m) so cold-start JIT can finish without reserving a full core. Saving here updates request and limit independently.
+                The request is what the app is always guaranteed and the limit is the most it may use. Set a request below the limit and Kipper tunes the running request between the two, never outside them; set them equal for a fixed size. Only the resource you change is saved.
               </p>
               <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>

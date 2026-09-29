@@ -80,3 +80,26 @@ export async function fetchClusterResourceSummary(): Promise<ClusterResourceSumm
   const { data } = await client.get<ClusterResourceSummary>('/resources/usage/summary')
   return data
 }
+
+// ResourceValue is a spec value and who set it.
+export interface ResourceValue {
+  value: string
+  source: 'user' | 'automatic' | 'held' | 'unset'
+}
+
+export interface ResourcePair {
+  request: string
+  limit: string
+}
+
+// ResourceDetail separates configured bounds, ownership, the current pod
+// template allocation and the auto-sizer's recommendation.
+export interface ResourceDetail {
+  mode: 'automatic' | 'bounded' | 'fixed' | 'held'
+  request: ResourceValue
+  limit: ResourceValue
+  live: ResourcePair
+  recommended?: ResourcePair
+  // pending tracks whether the pod template satisfies the spec, not pod readiness.
+  pending: boolean
+}

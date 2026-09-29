@@ -12,6 +12,7 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/builder"
+	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 )
 
 // migrateApps exports App CRs from the source cluster, strips custom domains
@@ -40,6 +41,9 @@ func (h *Handler) migrateApps(ctx context.Context, session *Session, token *Toke
 			return fmt.Errorf("migration cancelled")
 		}
 
+		// Carry user and held values. The target claims the userResources subset.
+		carried, user := resourcebounds.CarriedQuantities(&appList.Items[i])
+		app.Spec.Resources = carried
 		specJSON, _ := json.Marshal(app.Spec)
 		var specMap map[string]interface{}
 		_ = json.Unmarshal(specJSON, &specMap)
@@ -83,10 +87,11 @@ func (h *Handler) migrateApps(ctx context.Context, session *Session, token *Toke
 		}
 
 		if err := h.sendToTarget(token, fmt.Sprintf("/api/v1/migrate-target/%s/resource", session.ID), map[string]interface{}{
-			"kind":      "App",
-			"name":      app.Name,
-			"namespace": namespace,
-			"spec":      specMap,
+			"kind":          "App",
+			"name":          app.Name,
+			"namespace":     namespace,
+			"spec":          specMap,
+			"userResources": user,
 		}); err != nil {
 			session.UpdateStep(stepName, func(s *Step) {
 				s.Status = StepFailed

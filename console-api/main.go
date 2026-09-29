@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log"
 	"log/slog"
@@ -117,9 +118,14 @@ func main() {
 		log.Fatalf("failed to create controller-runtime client: %v", err)
 	}
 
-	// Start the autonomous resource management controller
+	// Start the autonomous resource management controller. It runs in one
+	// console-api pod at a time; the pod name is the hostname.
 	resCtrl := controller.NewResourceController(clientset, crClient)
-	go resCtrl.Run(context.Background())
+	podName, err := os.Hostname()
+	if err != nil {
+		podName = "console-api-" + rand.Text()
+	}
+	go resCtrl.RunAsLeader(context.Background(), podName)
 
 	// Age out per-key usage history beyond the retention window.
 	go handlers.RunRollupRetention(context.Background(), crClient)
@@ -1005,6 +1011,7 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client) {
 		{"App", (&controllers.AppReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Domain: domain, SidecarImage: sidecarImage, Recorder: mgr.GetEventRecorderFor("app-controller")}).SetupWithManager}, //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
 		{"Service", (&controllers.ServiceReconciler{
 			Client:              mgr.GetClient(),
+			APIReader:           mgr.GetAPIReader(),
 			Scheme:              mgr.GetScheme(),
 			Domain:              os.Getenv("CLUSTER_DOMAIN"),
 			ConsoleAuthCheckURL: serviceUIAuthCheckURL(),

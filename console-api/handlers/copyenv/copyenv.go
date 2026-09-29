@@ -31,6 +31,7 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/domain"
+	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	"github.com/getkipper/kipper/console-api/internal/workloadname"
 	"github.com/getkipper/kipper/controller/pkg/applink"
 	"github.com/getkipper/kipper/controller/pkg/labels"
@@ -203,7 +204,14 @@ func (c *Copier) copyApps(ctx context.Context, opts Options) (int, []string, err
 			warnings = append(warnings, err.Error())
 			continue
 		}
-		if err := c.CRClient.Create(ctx, copied); err != nil {
+		// Create copied values as held until their ownership is claimed below.
+		// Explicit wizard overrides count as user values immediately.
+		user, overridden := userValuesForTarget(&src.Items[i], opts)
+		creator := resourcebounds.HeldManager
+		if overridden {
+			creator = resourcebounds.CopyManager
+		}
+		if err := crclient.WithFieldOwner(c.CRClient, creator).Create(ctx, copied); err != nil {
 			// AlreadyExists means the target already has this workload, so the
 			// reservation just made is its own first claim and stands.
 			if !errors.IsAlreadyExists(err) {
@@ -222,9 +230,23 @@ func (c *Copier) copyApps(ctx context.Context, opts Options) (int, []string, err
 				"%s no longer links to %s: a link outside this project's environment is not copied; re-link it if the new environment needs it",
 				copied.Name, strings.Join(dropped, ", ")))
 		}
+		if err := resourcebounds.ClaimQuantities(ctx, c.CRClient, &kipperv1.App{}, copied.Namespace, copied.Name,
+			resourcebounds.CopyManager, copied.ResourceVersion, user); err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: its CPU and memory values are held until you confirm them in the new environment: %v", copied.Name, err))
+		}
 		count++
 	}
 	return count, warnings, nil
+}
+
+// userValuesForTarget returns values to claim on the target. An explicit
+// resource override already belongs to the user and needs no separate claim.
+func userValuesForTarget(src *kipperv1.App, opts Options) (map[string]string, bool) {
+	if override, ok := opts.AppOverrides[src.Name]; ok && override.Resources != nil {
+		return nil, true
+	}
+	_, user := resourcebounds.CarriedQuantities(src)
+	return user, false
 }
 
 func newAppForTarget(src *kipperv1.App, opts Options) (*kipperv1.App, []string) {
@@ -237,6 +259,8 @@ func newAppForTarget(src *kipperv1.App, opts Options) (*kipperv1.App, []string) 
 		},
 		Spec: *src.Spec.DeepCopy(),
 	}
+	// Carry user and held values; let the target choose automatic values.
+	out.Spec.Resources, _ = resourcebounds.CarriedQuantities(src)
 
 	override, hasOverride := opts.AppOverrides[src.Name]
 

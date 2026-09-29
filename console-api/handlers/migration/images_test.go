@@ -136,7 +136,7 @@ func TestCreateApp_GitAppGetsPlaceholderAndBuild(t *testing.T) {
 			"branch": "main",
 		},
 	}
-	if err := h.createApp(context.Background(), "backend", "shop-prod", spec); err != nil {
+	if err := h.createApp(context.Background(), "backend", "shop-prod", spec, nil); err != nil {
 		t.Fatalf("createApp: %v", err)
 	}
 
@@ -172,7 +172,7 @@ func TestCreateApp_ImageAppUnchanged(t *testing.T) {
 		"image": "registry.example.com/docs:v3",
 		"port":  8080,
 	}
-	if err := h.createApp(context.Background(), "docs", "shop-prod", spec); err != nil {
+	if err := h.createApp(context.Background(), "docs", "shop-prod", spec, nil); err != nil {
 		t.Fatalf("createApp: %v", err)
 	}
 

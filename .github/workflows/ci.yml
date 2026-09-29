@@ -72,6 +72,12 @@ jobs:
           cache-dependency-path: |
             console-api/go.sum
             controller/go.mod
+      # A real kube-apiserver and etcd for the tests that pin field-ownership behaviour.
+      - name: Install envtest binaries
+        run: |
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20260305142021-f9589b9f2b9d
+          assets="$(setup-envtest use 1.35.0 -p path)"
+          echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
       - run: go test ./...
         working-directory: console-api
 
