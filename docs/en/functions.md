@@ -11,29 +11,9 @@ HTTP functions use the KEDA HTTP Add-on to queue requests while a pod starts. Co
 
 ## Building a function in the browser
 
-The web console has a single-page form for both creating and editing functions. Go to **Functions** in the sidebar and click **New function** (or click any existing function row to edit it). The form is a one-page accordion. Every aspect of the function lives in a collapsible section on the same page so you can see the whole shape at a glance.
+Open **Functions** in the console sidebar, then choose **New function** or an existing function to edit. The form groups code, triggers, bindings, environment variables, secrets, dependencies, resources, and logs into collapsible sections.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  ◀  domain-sync             [Save & deploy] ▾   │
-│     cron · bound to eventdb · last run 12m ago          │
-├─────────────────────────────────────────────────────────┤
-│  ▼  Code                                  Node 22 ⌄     │
-│     [editor]                  AI Assistant              │
-│  ▼  Trigger                                             │
-│     ◯ HTTP   ●  Cron   ◯ Postgres   ◯ Redis   ◯ MinIO   │
-│     0 2 * * *      Every day at 02:00 UTC               │
-│  ▼  Service bindings                          + Bind    │
-│     eventdb (postgres)  →  DB_HOST DB_PORT DB_USERNAME ...  │
-│  ▼  Environment variables                     + Add     │
-│  ▼  Secrets                                   + Add     │
-│  ▼  Dependencies                              + Add     │
-│  ▶  Resources                                           │
-│  ▶  Logs                                                │
-└─────────────────────────────────────────────────────────┘
-```
-
-A single **Save & deploy** button at the top commits everything. On create, the function CR plus its env / secrets / bindings / dependencies are written in one round trip and the page navigates to the edit URL so you keep working with server-side state.
+Use **Save & deploy** to save your code and configuration. When creating a function, bindings and secrets are saved with it. When editing, binding changes take effect as you add or remove them.
 
 ## Code
 
@@ -43,9 +23,6 @@ Inline code is the fastest way to get something running. Pick a runtime (Node 22
 
 ```javascript
 module.exports = async (event, context) => {
-  // HTTP trigger: event is the request body, context has method/headers/path.
-  // Event trigger: event is the row/item from the data source.
-  // Cron trigger: event is empty, just runs on schedule.
   console.log('Processing:', event)
 
   return {
@@ -56,6 +33,12 @@ module.exports = async (event, context) => {
 }
 ```
 
+For HTTP routes other than the reserved `/health` and `POST /event`, `event` contains `method`, `path`, `headers`, `query`, and `body`. The runtime uses the returned `statusCode`, `headers`, and `body` to build the response.
+
+For `POST /event`, `event` is the JSON request body and `context` contains `method`, `headers`, and `path`. The return value becomes a JSON response with status 200; throw an error to return 500.
+
+For cron and test runs, `event` contains `type` (`cron` or `test`) and `timestamp`, and `context.mode` is `batch`.
+
 ### Python handler
 
 ```python
@@ -64,6 +47,8 @@ def handler(event, context=None):
     return {'processed': True}
 ```
 
+For POST requests, `event` is the parsed JSON body and `context` contains the request method, path, and headers. GET requests other than `/health` pass those fields in `event`. Cron and test runs receive the same batch event shape as Node.js.
+
 ### AI assistant in the editor
 
 Click **AI Assistant** in the Code section header to open a side panel beside the editor. The chat is context-aware. It sees:
@@ -71,10 +56,10 @@ Click **AI Assistant** in the Code section header to open a side panel beside th
 - The runtime (Node 22 or Python 3.12)
 - Service bindings with their injected env var names (e.g. `eventdb (postgres) → DB_HOST DB_PORT DB_USERNAME DB_PASSWORD DB_NAME`)
 - Environment variable keys (names only)
-- Secret keys (names only, values never leave the cluster)
+- Secret keys (names only; the context excludes stored secret values)
 - Installed dependencies and their versions
 
-The "Kipper knows" block at the top of the panel shows exactly what the AI can see. So when you ask "write me a domain sync that pulls domains from a registrar API and writes them to the database", the model uses your real env var names (`process.env.REGISTRAR_API_KEY`, `process.env.DB_HOST`) and the packages you've actually installed instead of guessing.
+The **Kipper knows** block lists this configuration context. The assistant also receives your code, conversation, and any attachments, so avoid including secret values in them.
 
 When the AI suggests code that imports a package not in your dependencies, a small `+ pkg` button appears next to the **Apply to editor** button. Click it to add the package and the Dependencies section opens for you to set a version.
 
@@ -119,30 +104,30 @@ The function controller renders cron triggers as a Kubernetes `CronJob`. No HTTP
 
 #### Test run
 
-Cron schedules that fire infrequently are awkward to verify. Waiting for 02:00 UTC to find out you got the timezone wrong is a long feedback loop. The cron section has a **Test run** button that runs the function once, right now, with the same image, env, bindings, and volumes the scheduled run would use. The CronJob and its schedule stay untouched.
+Use **Test run** in the Cron section to run the saved function immediately with its image, environment, bindings, and volumes. This creates an independent run and leaves the schedule unchanged.
 
 The test run sets `KIPPER_TRIGGER=test` instead of `cron`, so your handler can branch on it:
 
 ```python
 import os
 
-def main():
+def handler(event, context=None):
     is_test = os.environ.get("KIPPER_TRIGGER") == "test"
     if is_test:
         print("test run, skipping outbound notifications")
     # ... rest of the logic
 ```
 
-A few caveats:
+Before starting a test run:
 
-- Tests run the **deployed** image, not unsaved local edits. Save first.
+- Save your changes first; test runs use the saved function configuration.
 - The test pod's logs land in the same Loki stream as scheduled runs, filtered by the `app=<function>` label. The Logs section pops open and refreshes automatically when you click Test run.
 - Each test creates a separate `batch/v1.Job` named `<function>-test-<hex>` that self-cleans 10 minutes after completion. Failures show as a failed Job (no retry).
 - A test launched within a couple of minutes of the scheduled run can race with the cron pod. Both will run; if the function isn't safe to run twice, hold off near the schedule.
 
 ### Postgres / MySQL / Redis / MinIO
 
-Event triggers. KEDA watches the source (a SQL query result, a Redis list, an S3 bucket) and scales the function up when there's work to do. The `kipper-poll` sidecar polls the source and forwards each event to your handler as `POST /event`. See [How event triggers work](#how-event-triggers-work) below.
+For Postgres, MySQL, and Redis, KEDA watches query results or list length and scales the function when work is pending. The `kipper-poll` sidecar reads that work and sends it to your handler as `POST /event`. MinIO uses a webhook receiver and scheduled scaling. See [How event triggers work](#how-event-triggers-work) for delivery behavior and MinIO setup limits.
 
 ## Service bindings
 
@@ -156,7 +141,7 @@ Injects:  DB_HOST  DB_PORT  DB_USERNAME  DB_PASSWORD  DB_NAME
 
 The injected names depend on the service type. Database services (Postgres, MySQL, MongoDB) use `DB_` by default; Redis uses `REDIS_`; MinIO uses `S3_`. Override the prefix when binding if you need to.
 
-For database services, Kipper auto-creates a per-function database (`<service>_<function>_<env>`) on bind so functions don't have to share the default `app` database with the rest of the project.
+For Postgres and MySQL, the console lets you select an existing database or name a new one when binding. Choose a separate database when the function should own its data.
 
 CLI:
 
@@ -165,7 +150,7 @@ kip function bind domain-sync eventdb --project domains --environment prod
 kip function unbind domain-sync eventdb --project domains --environment prod
 ```
 
-The binding also accepts `--prefix` and `--database` overrides. The same `target=function` flag flows through the API for the console UI.
+Use `--prefix` to change the injected variable prefix and `--database` to choose the database.
 
 ## Environment variables and secrets
 
@@ -208,7 +193,7 @@ kip function create domain-sync \
   --dependency axios@1.6.7
 ```
 
-Pin exact versions to avoid lockfile drift across pod restarts.
+Pin exact versions to keep direct dependencies consistent across pod restarts. Transitive dependencies can still change.
 
 ## Volume mounts
 
@@ -332,7 +317,7 @@ sequenceDiagram
     Traefik->>Interceptor: Forward request
     Interceptor->>KEDA: Signal: request pending
     KEDA->>Function: Scale 0 → 1
-    Note over Function: Starting... (~2-3s)
+    Note over Function: Starting (duration varies)
     Function->>Interceptor: Pod ready
     Interceptor->>Browser: Forward response
     Note over Function: Handling requests...
@@ -349,60 +334,45 @@ The KEDA HTTP interceptor proxy sits between Traefik and your function. When the
 4. Once the pod is ready, the interceptor forwards the request.
 5. The interceptor returns the function’s response to the caller.
 
-A warm function handles subsequent requests directly. After the idle timeout (default five minutes), KEDA scales it back to zero.
+The interceptor also forwards requests to warm function pods. After the idle timeout (default five minutes), KEDA scales it back to zero.
 
 ## Auto-scaling under load
 
-Functions don't just scale between 0 and 1. They scale up to 10 replicas based on request rate.
+HTTP functions scale from 0 to 10 replicas. Kipper configures a request-rate target of 5 over a one-minute window and a five-minute scale-down period. Replica counts depend on observed traffic and KEDA's scaling decisions.
 
-| Request rate | Replicas |
-|---|---|
-| No traffic (5 min) | 0 |
-| Low traffic | 1 |
-| Moderate traffic | 2-5 |
-| High traffic | Up to 10 |
+Postgres, MySQL, and Redis functions also allow up to 10 replicas, using pending rows or list length as the scaling signal.
 
 ## How event triggers work
 
-For non-HTTP triggers, Kipper injects a lightweight sidecar called **kipper-poll** into the function pod:
+For Postgres, MySQL, and Redis triggers, Kipper runs a **kipper-poll** sidecar alongside the function:
 
 ```mermaid
 flowchart LR
-    A[Data Source] -->|polls/listens| B[kipper-poll sidecar]
+    B[kipper-poll sidecar] -->|reads work| A[Data source]
     B -->|POST /event| C[Your function]
     D[KEDA] -->|watches source| E{Events pending?}
     E -->|yes| F[Scale to 1+]
     E -->|no for 5 min| G[Scale to 0]
 ```
 
-1. **KEDA** watches the data source (query result count, list length, bucket events).
+1. **KEDA** checks the query result count or Redis list length every 10 seconds.
 2. When events appear, KEDA scales the function from 0 to 1.
 3. **kipper-poll** connects to the data source and polls for work.
 4. Each event is forwarded as `POST /event` to your function on `localhost`.
-5. Your function processes the event and returns 200.
-6. When no events remain, KEDA scales back to 0.
+5. Your function processes the event and returns a successful HTTP response.
+6. When the source stays idle for the five-minute cooldown, KEDA can scale back to 0.
 
 An event-triggered function has no public URL. The sidecar reaches your handler
 over `localhost` inside the pod, so nothing needs to be exposed. Give the
 function an `http` trigger as well if you want to call it from outside too.
 
-Your handler doesn't need to know about the data source, connection strings, or polling logic. It just receives events as HTTP requests:
+Inline handlers receive the event as described in [Code](#code). A custom image must serve `POST /event` on its configured port.
 
-```javascript
-// Node.js
-app.post('/event', (req, res) => {
-  console.log('Processing:', req.body)
-  res.json({ ok: true })
-})
-```
+Delivery behavior depends on the source:
 
-```python
-# Python / Flask
-@app.post('/event')
-def handle_event():
-    process(request.json)
-    return {'ok': True}
-```
+- **Postgres / MySQL:** each selected row becomes a JSON object. The poller attempts `--mark-done` only after successful delivery. Make handlers safe to run more than once: multiple replicas can select the same row, and a failed update can leave a delivered row pending.
+- **Redis:** the poller removes each item with `LPOP` before delivery. JSON items are passed as parsed values; other items are wrapped as `{"data": "..."}`. Failed deliveries are logged, and the item is not requeued.
+- **MinIO:** the sidecar listens for webhook POSTs on port 9090 and forwards their JSON body. Kipper currently configures a KEDA cron scaler requesting one replica from minute 0 to minute 59 of every hour, rather than watching bucket activity. The function controller does not configure bucket notifications or expose the webhook port; those require separate setup. Setting `--bucket` alone does not establish event delivery.
 
 ## All trigger types
 
@@ -413,7 +383,7 @@ def handle_event():
 | `postgres` | PostgreSQL query | Row count > 0 | Process new orders, sync data |
 | `mysql` | MySQL query | Row count > 0 | Same as PostgreSQL |
 | `redis` | Redis list | List length > 0 | Job queues, message processing |
-| `minio` | S3 bucket events | File uploaded/deleted | Image processing, file conversion |
+| `minio` | Bucket notification webhooks | Scheduled replica window | Image processing, file conversion; requires webhook setup |
 
 ## Functions vs apps vs jobs
 
@@ -423,7 +393,7 @@ def handle_event():
 | Triggered by | HTTP traffic | HTTP, cron, events | Schedule or manual |
 | Scaling | Manual or HPA | Automatic (KEDA) | N/A |
 | Cold start | Already running | Depends on image and startup | N/A |
-| Cost when idle | Full pod cost | Zero | Zero |
+| Workload compute when idle | Running pods | Zero when scaled to zero | Zero between runs |
 | Source | Container image | Inline code or container image | Container image |
 | Use case | Web servers, APIs, frontends | Webhooks, event handlers, scheduled scripts | Batch tasks, migrations, ETL |
 
@@ -445,10 +415,9 @@ kip function create process-orders \
   --port 8080
 ```
 
-Your function receives each row as a JSON `POST /event`:
+Your function receives each row in the JSON body of `POST /event`:
 
 ```json
-POST /event
 {
   "id": 42,
   "customer": "acme",
@@ -457,7 +426,26 @@ POST /event
 }
 ```
 
-The optional `--mark-done` query updates rows after successful delivery to the function. The `{{id}}` placeholder is replaced with the row’s ID. Delivery and the database update are separate operations, so handlers should tolerate repeated delivery if processing succeeds but the update fails.
+### Mark rows as processed
+
+Use `--mark-done` to update a row after the function accepts it. Each `{{column}}` placeholder binds the matching row value as a database parameter, keeping row data separate from SQL. Include every referenced column in your `--query` result; a placeholder for a missing column stays unchanged.
+
+Placeholders work in value positions and ordinary single-quoted strings:
+
+| Template fragment | Meaning |
+|---|---|
+| `WHERE id = {{id}}` | Bind the row's `id` as a value |
+| `WHERE id = '{{id}}'` | Bind one value; the surrounding quotes are removed |
+| `SET reference = 'order-{{id}}'` | Concatenate fixed text with the bound value |
+| `WHERE name LIKE '%{{name}}%'` | Concatenate wildcard text with the bound value |
+
+Use literal table and column names in the SQL. Parameters represent values, so a placeholder in an identifier position cannot select a table or column.
+
+The poller validates the template at startup. Use one statement and write parameters as `{{column}}`, rather than native PostgreSQL `$1` or MySQL `?` markers. Placeholders are rejected inside comments, double quotes, backticks, dollar-quoted strings, and prefixed strings such as PostgreSQL `E'...'` or MySQL `_utf8mb4'...'`. If adjacent string literals contain a placeholder, combine them into one literal.
+
+For PostgreSQL, add an explicit cast when the surrounding SQL cannot determine a parameter's type, for example `{{created}}::timestamptz` or `jsonb_build_object('id', {{id}}::int)`. A placeholder mixed with fixed text produces a text concatenation. Ordinary PostgreSQL strings are parsed assuming `standard_conforming_strings=on`.
+
+Delivery and the update are separate operations. A delivery error skips the update; an update error is logged and can leave the row eligible for delivery again. During shutdown, a row already delivered gets an update attempt with a ten-second timeout. Design the handler to tolerate repeated delivery.
 
 ## Security settings
 
