@@ -24,7 +24,7 @@ func TestResolve_ComposesAConnectionString(t *testing.T) {
 			"DB_USERNAME": "kipper", "DB_PASSWORD": "s3cret",
 			"DB_HOST": "db.shop-test.svc", "DB_PORT": "5432", "DB_NAME": "docuseal",
 		}))
-	want := "postgresql://kipper:s3cret@db.shop-test.svc:5432/docuseal"
+	want := "postgresql://kipper:s3cret@db.shop-test.svc:5432/docuseal" //nolint:gosec // G101: invented fixture credentials
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -157,11 +157,11 @@ func TestResolve_NoEncodingWithoutTheModifier(t *testing.T) {
 func TestResolve_EncodedCredentialsInAWholeURL(t *testing.T) {
 	got, missing := Resolve(
 		"postgresql://${DB_USERNAME:urlencode}:${DB_PASSWORD:urlencode}@${DB_HOST}:${DB_PORT}/${DB_NAME}",
-		from(map[string]string{
+		from(map[string]string{ //nolint:gosec // G101: invented fixture credentials
 			"DB_USERNAME": "kipper", "DB_PASSWORD": "p@ss:w/rd 1%",
 			"DB_HOST": "db.internal", "DB_PORT": "5432", "DB_NAME": "app",
 		}))
-	want := "postgresql://kipper:p%40ss%3Aw%2Frd%201%25@db.internal:5432/app"
+	want := "postgresql://kipper:p%40ss%3Aw%2Frd%201%25@db.internal:5432/app" //nolint:gosec // G101: invented fixture credentials
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -261,7 +261,7 @@ func TestStripPlaceholders(t *testing.T) {
 			value: "postgresql://${DB_USERNAME}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}",
 			want:  "postgresql://:@:/",
 		},
-		{
+		{ //nolint:gosec // G101: invented fixture credentials
 			name:  "a literal password survives",
 			value: "postgresql://kipper:s3cret@host:5432/app",
 			want:  "postgresql://kipper:s3cret@host:5432/app",

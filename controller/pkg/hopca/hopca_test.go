@@ -1,6 +1,7 @@
 package hopca
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -126,7 +127,7 @@ func TestRotatedLeafStillVerifiesAgainstTheSameCA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLeaf: %v", err)
 	}
-	if string(rotatedKeyPEM) == string(m.LeafKeyPEM) {
+	if bytes.Equal(rotatedKeyPEM, m.LeafKeyPEM) {
 		t.Fatal("a rotation must mint a new key")
 	}
 	if !SignedBy(rotatedPEM, m.CACertPEM) {
@@ -288,18 +289,18 @@ func TestBundleIsByteCanonical(t *testing.T) {
 
 	first := Bundle(a.CACertPEM, b.CACertPEM)
 	second := Bundle(a.CACertPEM, b.CACertPEM)
-	if string(first) != string(second) {
+	if !bytes.Equal(first, second) {
 		t.Error("the same inputs must render the same bytes")
 	}
 
 	// Order is part of the canonical form, so the two directions differ.
-	if string(Bundle(a.CACertPEM, b.CACertPEM)) == string(Bundle(b.CACertPEM, a.CACertPEM)) {
+	if bytes.Equal(Bundle(a.CACertPEM, b.CACertPEM), Bundle(b.CACertPEM, a.CACertPEM)) {
 		t.Error("active and retained are distinct positions")
 	}
 
 	// Padding on the way in must not change the result.
 	padded := append(append([]byte("\n"), a.CACertPEM...), '\n', '\n')
-	if string(Bundle(padded, nil)) != string(Bundle(a.CACertPEM, nil)) {
+	if !bytes.Equal(Bundle(padded, nil), Bundle(a.CACertPEM, nil)) {
 		t.Error("surrounding whitespace must be normalised away, or the hash moves for no reason")
 	}
 
@@ -308,7 +309,7 @@ func TestBundleIsByteCanonical(t *testing.T) {
 	if _, err := ParseCert(steady); err != nil {
 		t.Errorf("a single-authority bundle must still be one parseable certificate: %v", err)
 	}
-	if string(Bundle(nil, nil)) != "" {
+	if len(Bundle(nil, nil)) != 0 {
 		t.Error("no authorities is an empty bundle, which renders as no anchor at all")
 	}
 }

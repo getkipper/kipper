@@ -106,7 +106,7 @@ const (
 	// created, and its age then says nothing about whether a commit is in
 	// flight. The sweep waits out its grace from this or from creation,
 	// whichever is later.
-	AnnoGitCredentialClaimed = "kipper.run/git-credential-claimed"
+	AnnoGitCredentialClaimed = "kipper.run/git-credential-claimed" //nolint:gosec // G101: an annotation name, not a credential
 
 	// AnnoGitCredentialGrantsSeeded records that a cluster has had the projects
 	// already building with a shared git credential written onto that
@@ -114,7 +114,7 @@ const (
 	// than on the credential list itself, because what it dates is the list: a
 	// marker stored beside the data would roll back with it, and the inference
 	// it stops would run again over entries written long after the migration.
-	AnnoGitCredentialGrantsSeeded = "kipper.run/git-credential-grants-seeded"
+	AnnoGitCredentialGrantsSeeded = "kipper.run/git-credential-grants-seeded" //nolint:gosec // G101: an annotation name, not a credential
 
 	// AnnoConsoleAPIBuild is the console-api build serving a cluster, stamped on
 	// the kipper-system namespace when it starts.
