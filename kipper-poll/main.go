@@ -5,12 +5,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -31,9 +34,16 @@ func main() {
 		}
 	}
 
+	switch triggerType {
+	case "postgres", "mysql", "redis", "minio":
+	default:
+		log.Fatalf("unknown trigger type: %s", triggerType)
+	}
+
 	log.Printf("kipper-poll starting: trigger=%s target=%s interval=%s", triggerType, targetURL, pollInterval)
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
 
 	switch triggerType {
 	case "postgres", "mysql":
@@ -41,9 +51,7 @@ func main() {
 	case "redis":
 		pollRedis(ctx, targetURL, pollInterval)
 	case "minio":
-		listenMinIO(targetURL)
-	default:
-		log.Fatalf("unknown trigger type: %s", triggerType)
+		listenMinIO(ctx, targetURL)
 	}
 }
 
@@ -56,11 +64,23 @@ func pollSQL(ctx context.Context, driver, targetURL string, interval time.Durati
 		log.Fatal("KIPPER_SOURCE_URL and KIPPER_QUERY are required for SQL triggers")
 	}
 
+	var markDoneQuery *markDoneTemplate
+	if markDone != "" {
+		parsed, err := parseMarkDone(driver, markDone)
+		if err != nil {
+			log.Fatalf("KIPPER_MARK_DONE: %v", err)
+		}
+		markDoneQuery = parsed
+	}
+
 	dbDriver := "postgres"
 	if driver == "mysql" {
 		dbDriver = "mysql"
-		// Convert postgres-style URL to MySQL DSN if needed
-		dsn = convertMySQLDSN(dsn)
+		converted, err := mysqlDSN(dsn)
+		if err != nil {
+			log.Fatalf("KIPPER_SOURCE_URL is not a valid MySQL URL: %v", err)
+		}
+		dsn = converted
 	}
 
 	db, err := sql.Open(dbDriver, dsn)
@@ -69,32 +89,38 @@ func pollSQL(ctx context.Context, driver, targetURL string, interval time.Durati
 	}
 	defer func() { _ = db.Close() }()
 
-	// Wait for database to be ready
+	// Allow the database to start before entering the polling loop.
 	for i := 0; i < 30; i++ {
 		if err := db.PingContext(ctx); err == nil {
 			break
 		}
-		time.Sleep(time.Second)
+		if !wait(ctx, time.Second) {
+			return
+		}
 	}
 
 	log.Printf("connected to %s, polling with: %s", driver, query)
 
 	for {
-		rows, err := db.QueryContext(ctx, query)
+		rows, err := db.QueryContext(ctx, query) //nolint:gosec // G701: the operator's own configured query
 		if err != nil {
 			log.Printf("query error: %v", err)
-			time.Sleep(interval)
+			if !wait(ctx, interval) {
+				return
+			}
 			continue
 		}
 
 		columns, err := rows.Columns()
 		if err != nil {
 			_ = rows.Close()
-			time.Sleep(interval)
+			if !wait(ctx, interval) {
+				return
+			}
 			continue
 		}
 
-		for rows.Next() {
+		for ctx.Err() == nil && rows.Next() {
 			values := make([]interface{}, len(columns))
 			valuePtrs := make([]interface{}, len(columns))
 			for i := range values {
@@ -116,19 +142,20 @@ func pollSQL(ctx context.Context, driver, targetURL string, interval time.Durati
 				}
 			}
 
-			if err := sendEvent(targetURL, event); err != nil {
+			if err := sendEvent(ctx, targetURL, event); err != nil {
 				log.Printf("failed to send event: %v", err)
 				continue
 			}
 
-			// Mark as done if configured
-			if markDone != "" {
-				execMarkDone(db, markDone, event)
+			if markDoneQuery != nil {
+				execMarkDone(ctx, db, markDoneQuery, event)
 			}
 		}
 		_ = rows.Close()
 
-		time.Sleep(interval)
+		if !wait(ctx, interval) {
+			return
+		}
 	}
 }
 
@@ -140,32 +167,34 @@ func pollRedis(ctx context.Context, targetURL string, interval time.Duration) {
 		log.Fatal("KIPPER_SOURCE_URL and KIPPER_REDIS_LIST are required for Redis triggers")
 	}
 
-	// Strip redis:// prefix
 	addr := strings.TrimPrefix(redisAddr, "redis://")
 
 	log.Printf("connected to Redis at %s, watching list: %s", addr, listName)
 
-	for {
-		// Use raw RESP protocol for LPOP — no external dependency needed
-		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	for ctx.Err() == nil {
+		conn, err := dialer.DialContext(ctx, "tcp", addr) //nolint:gosec // G704: the operator's own configured Redis address
 		if err != nil {
 			log.Printf("Redis connection error: %v", err)
-			time.Sleep(interval)
+			if !wait(ctx, interval) {
+				return
+			}
 			continue
 		}
 
-		// Send LPOP command in RESP format
+		// Encode LPOP directly in RESP to avoid a Redis client dependency.
 		cmd := fmt.Sprintf("*2\r\n$4\r\nLPOP\r\n$%d\r\n%s\r\n", len(listName), listName)
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 		_, _ = conn.Write([]byte(cmd))
 
-		// Read response
 		buf := make([]byte, 4096)
-		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		n, err := conn.Read(buf)
 		_ = conn.Close()
 
 		if err != nil || n == 0 {
-			time.Sleep(interval)
+			if !wait(ctx, interval) {
+				return
+			}
 			continue
 		}
 
@@ -173,7 +202,9 @@ func pollRedis(ctx context.Context, targetURL string, interval time.Duration) {
 
 		// RESP nil bulk string = "$-1\r\n" (empty list)
 		if strings.HasPrefix(response, "$-1") {
-			time.Sleep(interval)
+			if !wait(ctx, interval) {
+				return
+			}
 			continue
 		}
 
@@ -183,39 +214,56 @@ func pollRedis(ctx context.Context, targetURL string, interval time.Duration) {
 			if len(parts) >= 2 {
 				data := parts[1]
 
-				// Try to parse as JSON
 				var event interface{}
 				if json.Unmarshal([]byte(data), &event) == nil {
-					if err := sendEvent(targetURL, event); err != nil {
+					if err := sendEvent(ctx, targetURL, event); err != nil {
 						log.Printf("failed to send event: %v", err)
 					} else {
 						log.Printf("processed Redis event from %s", listName)
 					}
 				} else {
-					// Not JSON — send as string
-					if err := sendEvent(targetURL, map[string]string{"data": data}); err != nil {
+					if err := sendEvent(ctx, targetURL, map[string]string{"data": data}); err != nil {
 						log.Printf("failed to send event: %v", err)
 					}
 				}
 			}
 		}
 
-		// Don't sleep between items — process quickly
-		continue
+		// Drain queued items immediately; idle and error paths wait above.
 	}
 }
 
-func listenMinIO(targetURL string) {
-	// MinIO sends bucket notifications as HTTP webhooks
-	// kipper-poll runs a small HTTP server that receives them and forwards to the function
+// wait returns true when the timer fires, or false when cancellation is selected.
+func wait(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func listenMinIO(ctx context.Context, targetURL string) {
 	port := os.Getenv("KIPPER_MINIO_WEBHOOK_PORT")
 	if port == "" {
 		port = "9090"
 	}
 
 	log.Printf("listening for MinIO bucket notifications on :%s", port)
+	if err := serveMinIO(ctx, ":"+port, targetURL); err != nil {
+		log.Fatalf("webhook server failed: %v", err)
+	}
+}
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+var webhookShutdownGrace = 10 * time.Second
+
+// serveMinIO forwards MinIO webhooks to the function until ctx ends, then
+// lets requests in flight finish for webhookShutdownGrace before closing them.
+func serveMinIO(ctx context.Context, addr, targetURL string) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -228,7 +276,7 @@ func listenMinIO(targetURL string) {
 			return
 		}
 
-		if err := sendEvent(targetURL, event); err != nil {
+		if err := sendEvent(r.Context(), targetURL, event); err != nil {
 			log.Printf("failed to forward MinIO event: %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -237,18 +285,38 @@ func listenMinIO(targetURL string) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	if err := http.ListenAndServe(":"+port, nil); err != nil { //nolint:gosec
-		log.Fatalf("webhook server failed: %v", err)
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	done := make(chan error, 1)
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), webhookShutdownGrace)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("closing webhook requests still open after %s", webhookShutdownGrace)
+			done <- srv.Close()
+			return
+		}
+		done <- nil
+	}()
+
+	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		return err
 	}
+	return <-done
 }
 
-func sendEvent(targetURL string, event interface{}) error {
+func sendEvent(ctx context.Context, targetURL string, event interface{}) error {
 	body, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("marshalling event: %w", err)
 	}
 
-	resp, err := http.Post(targetURL, "application/json", bytes.NewReader(body)) //nolint:gosec
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body)) //nolint:gosec // G704: the operator's own configured function URL
+	if err != nil {
+		return fmt.Errorf("building request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // G704: the operator's own configured function URL
 	if err != nil {
 		return fmt.Errorf("posting event: %w", err)
 	}
@@ -261,14 +329,15 @@ func sendEvent(targetURL string, event interface{}) error {
 	return nil
 }
 
-func execMarkDone(db *sql.DB, template string, event map[string]interface{}) {
-	query := template
-	for k, v := range event {
-		placeholder := "{{" + k + "}}"
-		query = strings.ReplaceAll(query, placeholder, fmt.Sprintf("%v", v))
-	}
+// markDoneTimeout limits the update attempt after successful delivery, including
+// during shutdown, to reduce duplicate delivery on restart.
+const markDoneTimeout = 10 * time.Second
 
-	if _, err := db.Exec(query); err != nil {
+func execMarkDone(ctx context.Context, db *sql.DB, template *markDoneTemplate, event map[string]interface{}) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), markDoneTimeout)
+	defer cancel()
+	query, args := template.bind(event)
+	if _, err := db.ExecContext(ctx, query, args...); err != nil { //nolint:gosec // G701: the operator's template; row values are bound as parameters
 		log.Printf("mark-done error: %v", err)
 	}
 }
