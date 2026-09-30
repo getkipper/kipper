@@ -101,6 +101,9 @@ func (r *PlatformConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		)
 		limitByComponent[name] = limit
 	}
+	// Grafana's CPU request follows the profile too; the loop above covers memory.
+	pathsByChart["kube-prometheus-stack"] = append(pathsByChart["kube-prometheus-stack"],
+		memoryPath{path: []string{"grafana", "resources", "requests", "cpu"}, value: res.GrafanaCPURequest})
 
 	applied := map[string]string{}
 	var patchErrs []error

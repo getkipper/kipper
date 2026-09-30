@@ -27,6 +27,7 @@ type Resources struct {
 	PrometheusMemoryLimit   string
 	LokiMemoryRequest       string
 	LokiMemoryLimit         string
+	GrafanaCPURequest       string
 }
 
 // EffectiveResources applies non-empty memory-limit overrides to profile
@@ -88,6 +89,7 @@ func ResourcesForProfile(profile string) Resources {
 			PrometheusMemoryLimit:   "2Gi",
 			LokiMemoryRequest:       "512Mi",
 			LokiMemoryLimit:         "1Gi",
+			GrafanaCPURequest:       "250m",
 		}
 	case ProfileMedium, ProfileLarge:
 		return Resources{
@@ -95,6 +97,7 @@ func ResourcesForProfile(profile string) Resources {
 			PrometheusMemoryLimit:   "1Gi",
 			LokiMemoryRequest:       "256Mi",
 			LokiMemoryLimit:         "512Mi",
+			GrafanaCPURequest:       "250m",
 		}
 	default:
 		return Resources{
@@ -102,6 +105,7 @@ func ResourcesForProfile(profile string) Resources {
 			PrometheusMemoryLimit:   "512Mi",
 			LokiMemoryRequest:       "128Mi",
 			LokiMemoryLimit:         "384Mi",
+			GrafanaCPURequest:       "100m",
 		}
 	}
 }

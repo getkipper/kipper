@@ -116,3 +116,18 @@ func TestKubePrometheusStackHelmChart_ReleaseNameMatchesGrafanaPolicy(t *testing
 	require.NoError(t, yaml.Unmarshal([]byte(KubePrometheusStackHelmChart(ResourcesForProfile(ProfileMedium))), &doc))
 	assert.Equal(t, KubePrometheusStackRelease, doc.Metadata.Name, "the HelmChart name is the release name the policy selects on")
 }
+
+func TestKubePrometheusStackHelmChart_GrafanaCPURequestFollowsProfile(t *testing.T) {
+	// No CPU limit: the request only sets Grafana's share when the node is
+	// busy, and a small server should not reserve a quarter core for it.
+	for profile, want := range map[string]string{
+		ProfileSmall:  "100m",
+		ProfileMedium: "250m",
+		ProfileLarge:  "250m",
+		ProfileXLarge: "250m",
+	} {
+		g := seededValues(t, KubePrometheusStackHelmChart(ResourcesForProfile(profile)))["grafana"].(map[string]interface{})
+		assert.Equal(t, want, nested(t, g, "resources", "requests", "cpu"), profile)
+		assert.Nil(t, nested(t, g, "resources", "limits").(map[string]interface{})["cpu"], "%s: Grafana must not get a CPU limit", profile)
+	}
+}

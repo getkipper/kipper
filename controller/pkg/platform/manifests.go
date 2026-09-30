@@ -257,7 +257,7 @@ spec:
         `+GrafanaAuthAnnotation+`: `+GrafanaAuthVersion+`
       resources:
         requests:
-          cpu: 50m
+          cpu: `+res.GrafanaCPURequest+`
           memory: 192Mi
         limits:
           memory: 512Mi

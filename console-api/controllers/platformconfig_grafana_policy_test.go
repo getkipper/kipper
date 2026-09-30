@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/yaml"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/controller/pkg/platform"
@@ -112,4 +113,38 @@ func TestPlatformConfigReconciler_NoChartWithoutGrafanaPolicy(t *testing.T) {
 
 	assert.Error(t, err, "a failed policy write must requeue")
 	assert.False(t, prometheusChartExists(t, c), "the chart must not be created without the policy")
+}
+
+func TestPlatformConfigReconciler_GrafanaCPUFollowsProfileOnAnExistingChart(t *testing.T) {
+	// A profile change patches an existing chart; it must move Grafana's CPU
+	// request too, not only the memory paths.
+	for profile, want := range map[string]string{platform.ProfileMedium: "250m", platform.ProfileSmall: "100m"} {
+		t.Run(profile, func(t *testing.T) {
+			pc := mediumPlatformConfig()
+			pc.Spec.Profile = profile
+			chart := newHelmChart("kube-prometheus-stack", `grafana:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      memory: 512Mi
+`)
+			c := crfake.NewClientBuilder().WithScheme(testScheme()).
+				WithObjects(pc, chart).WithStatusSubresource(&kipperv1.PlatformConfig{}).Build()
+
+			_ = reconcilePlatform(t, c)
+
+			got := &unstructured.Unstructured{}
+			got.SetGroupVersionKind(helmChartGVK)
+			require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: helmChartNamespace, Name: "kube-prometheus-stack"}, got))
+			values, _, _ := unstructured.NestedString(got.Object, "spec", "valuesContent")
+			var rendered map[string]any
+			require.NoError(t, yaml.Unmarshal([]byte(values), &rendered))
+			cpu, _, _ := unstructured.NestedString(rendered, "grafana", "resources", "requests", "cpu")
+			assert.Equal(t, want, cpu)
+			_, hasLimit, _ := unstructured.NestedFieldNoCopy(rendered, "grafana", "resources", "limits", "cpu")
+			assert.False(t, hasLimit, "Grafana must not get a CPU limit")
+		})
+	}
 }
