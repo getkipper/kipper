@@ -209,4 +209,54 @@ describe('ResourceControl', () => {
     await wrapper.get('[data-testid="apply-button"]').trigger('click')
     expect(wrapper.emitted('apply')).toBeUndefined()
   })
+
+  describe('request marker', () => {
+    function markerAngle(wrapper: ReturnType<typeof mountMemory>): number {
+      const group = wrapper.get('[data-testid="request-marker"]').element.parentElement!
+      const match = (group.getAttribute('transform') || '').match(/rotate\(([-0-9.]+)/)
+      return match ? parseFloat(match[1]) : NaN
+    }
+
+    it('marks the request on the arc at its share of the limit', () => {
+      const wrapper = mountMemory({ usage: 25 * 1024 ** 2, request: 0.5 * Gi, limit: 1 * Gi })
+      expect(markerAngle(wrapper)).toBeCloseTo(0, 5)
+    })
+
+    it('shows the reserved amount beside the usage', () => {
+      const wrapper = mountMemory({ request: 0.5 * Gi, limit: 1 * Gi })
+      expect(wrapper.get('[data-testid="reserved-label"]').text()).toBe('512 Mi reserved')
+      expect(wrapper.get('svg').attributes('aria-label')).toContain('512 Mi reserved')
+    })
+
+    it('moves the marker with a previewed limit', async () => {
+      const wrapper = mountMemory({ request: 0.5 * Gi, limit: 1 * Gi })
+      await wrapper.get('[data-testid="slider"]').setValue('4') // 2Gi
+      expect(markerAngle(wrapper)).toBeCloseTo(-45, 5)
+    })
+
+    it('drops the marker when the previewed limit is at or below the request', async () => {
+      const wrapper = mountMemory({ request: 0.5 * Gi, limit: 1 * Gi })
+      await wrapper.get('[data-testid="slider"]').setValue('1') // 256Mi
+      expect(wrapper.find('[data-testid="request-marker"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="reserved-label"]').text()).toBe('512 Mi reserved')
+    })
+
+    it('shows no marker for a fixed size, where the request equals the limit', () => {
+      const wrapper = mountMemory({ request: 1 * Gi, limit: 1 * Gi })
+      expect(wrapper.find('[data-testid="request-marker"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="reserved-label"]').text()).toBe('1 Gi reserved')
+    })
+
+    it('shows neither marker nor reserved label without a request', () => {
+      const wrapper = mountMemory({ limit: 1 * Gi })
+      expect(wrapper.find('[data-testid="request-marker"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="reserved-label"]').exists()).toBe(false)
+      expect(wrapper.get('svg').attributes('aria-label')).not.toContain('reserved')
+    })
+
+    it('formats a CPU request in millicores', () => {
+      const wrapper = mount(ResourceControl, { props: { kind: 'cpu', usage: 1, request: 350, limit: 500 } })
+      expect(wrapper.get('[data-testid="reserved-label"]').text()).toBe('350m reserved')
+    })
+  })
 })

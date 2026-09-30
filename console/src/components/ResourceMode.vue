@@ -58,14 +58,14 @@ const summary = computed(() => {
         type="button"
         data-testid="resource-mode-confirm"
         :disabled="busy"
-        class="font-medium text-kipper-600 hover:text-kipper-700 disabled:opacity-50 dark:text-kipper-400 dark:hover:text-kipper-300"
+        class="font-medium text-kipper-700 underline decoration-kipper-700/40 underline-offset-2 hover:text-kipper-800 hover:decoration-current disabled:cursor-not-allowed disabled:opacity-50 dark:text-kipper-400 dark:decoration-kipper-400/40 dark:hover:text-kipper-300"
         @click="emit('confirm')"
       >Keep this value</button>
       <button
         type="button"
         data-testid="resource-mode-automatic"
         :disabled="busy"
-        class="font-medium text-slate-600 hover:text-slate-900 disabled:opacity-50 dark:text-slate-400 dark:hover:text-slate-100"
+        class="font-medium text-kipper-700 underline decoration-kipper-700/40 underline-offset-2 hover:text-kipper-800 hover:decoration-current disabled:cursor-not-allowed disabled:opacity-50 dark:text-kipper-400 dark:decoration-kipper-400/40 dark:hover:text-kipper-300"
         @click="emit('automatic')"
       >Size automatically</button>
     </div>
