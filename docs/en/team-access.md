@@ -27,6 +27,16 @@ kip project members add acme-shop jordan@acme.com deployer
 
 Use the cluster `viewer` role for this setup and assign working permissions through project membership. See [Project Members](/en/project-members) for the available roles.
 
+### Optional: Grafana access
+
+For a team member who needs metrics and logs, enable **Monitoring** on the **Users** screen or run:
+
+```bash
+kip user monitoring grant jordan@acme.com
+```
+
+This access includes **every project**, regardless of project membership. Grant it only to users who need visibility across the cluster. See [Accessing Grafana](/en/observability#accessing-grafana) for permissions and revocation.
+
 ## Set up CLI access {#full-cluster-access}
 
 Use these steps for a team member or another machine of your own.

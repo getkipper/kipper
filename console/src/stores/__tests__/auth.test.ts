@@ -93,6 +93,20 @@ describe('silent refresh', () => {
     expect(store.token).toBe(renewed)
   })
 
+  it('never asks setTimeout for a delay it cannot represent', () => {
+    // Check the requested delay directly: fake timers cannot establish that
+    // it fits the native timer limit and avoids overflow-driven refresh loops.
+    const spy = vi.spyOn(globalThis, 'setTimeout')
+    const store = useAuthStore()
+
+    store.login(jwtWithExp(365 * 24 * 60 * 60), 'user@test.com')
+
+    const delays = spy.mock.calls.map((call) => Number(call[1]))
+    expect(delays.length).toBeGreaterThan(0)
+    expect(Math.max(...delays)).toBeLessThanOrEqual(2_147_483_647)
+    spy.mockRestore()
+  })
+
   it('logs out when the refresh is rejected', async () => {
     const store = useAuthStore()
     postMock.mockRejectedValue(new Error('401'))

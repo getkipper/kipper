@@ -224,6 +224,18 @@ The console API checks project membership before operating with its platform ser
 
 Direct Kubernetes access uses the operator’s own Kubernetes role bindings. A kubeconfig identifies the connection and authentication method; its permissions depend on the identity it uses. The server’s k3s admin kubeconfig grants cluster-admin access. See [Team Access](/en/team-access).
 
+### Grafana access {#grafana-access}
+
+Grafana requires a Kipper session for its hostname and monitoring access. Cluster admins receive Grafana's Admin role; other users with monitoring access receive its Editor role. Both can see every project's logs and metrics. Service-UI share links cannot grant Grafana access.
+
+The public route removes client-supplied identity and authorization headers before Kipper authenticates the request. Kipper then supplies the verified user and role, and the route removes cookies before forwarding to Grafana. This prevents a Grafana session from replacing the Kipper access check. The route also blocks Grafana's `/login` path, and Grafana checks cross-site requests even without a login cookie.
+
+Grafana trusts these forwarded identity headers, so direct network access must be restricted. Kipper's NetworkPolicy allows the ingress controller and Prometheus pods, selected by namespace and labels, to reach Grafana. The cluster must enforce NetworkPolicies for this protection to work. Kipper applies the policy before submitting the monitoring chart during installation, upgrades, and monitoring enablement. For a custom ingress controller, configure the [ingress controller selector](/en/service-uis#ingress-controller-selector).
+
+Every request checks cached roles and grants. Requests refresh the cache when it is at least 30 seconds old. If the grant list is malformed or the last successful read is more than one minute old, Grafana access is denied for everyone, including admins.
+
+Use a current kip version when removing and re-adding users. Older versions can leave a monitoring grant attached to an email address, restoring that access if the account is added again.
+
 ### Automatic backups
 
 The daily backup schedule runs at 3:00 AM with seven-day retention. It covers user resources and persistent volume data, with system namespace exclusions. See [Backups & Restore](/en/backups) for coverage and storage options.

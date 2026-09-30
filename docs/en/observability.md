@@ -9,23 +9,35 @@ Kipper includes a built-in observability stack for production monitoring: **Loki
 
 All three are installed automatically during `kip install` on every profile except `nano`, which ships without monitoring to save memory. You can turn monitoring off (or back on) later per component, see [Disabling monitoring](#disabling-monitoring).
 
-## Accessing Grafana
+## Accessing Grafana {#accessing-grafana}
 
-Grafana's data source spans every tenant's logs and metrics, so it is an admin-only tool with no public URL. Reach it over the Kubernetes API with a port-forward:
+Open **Grafana** in the console sidebar to sign in with your Kipper account. The link appears when Grafana is ready and your account has access.
 
-```
-kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
-```
+You can also open `grafana.<your domain>`, or `grafana--<label>.kipper.run` on a free domain. Kipper asks you to sign in when needed. Use your Kipper account; the public address does not accept Grafana passwords.
 
-Then open `http://localhost:3000`.
+### Grant or revoke access
 
-The admin password is generated randomly when Grafana is first installed (at `kip install`, or when you enable monitoring later) and stored in the `grafana-admin` Secret. Read it with:
+Cluster admins have access automatically. To give another user access, enable **Monitoring** beside their account on the **Users** screen, or run:
 
-```
-kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d
+```bash
+kip user monitoring grant dev@example.com
 ```
 
-Log in with username `admin` and that password.
+**Monitoring access covers every project's metrics and logs**, regardless of project membership. These users receive Grafana's Editor role and can use Explore, read logs, and create and edit dashboards. Cluster admins receive Grafana's Admin role.
+
+To remove a user's grant, clear **Monitoring** or run:
+
+```bash
+kip user monitoring revoke dev@example.com
+```
+
+Changes take effect as cached permissions refresh, normally within 30 seconds. Cluster admins retain access through their role. See [Grafana access](/en/security#grafana-access) for authentication and network protections.
+
+### After upgrading from an earlier release {#grafana-after-upgrading}
+
+Run a full `kip upgrade` to apply Grafana's new login settings. Wait for Grafana to finish restarting before opening it from the sidebar. An upgrade with `--skip-system` leaves the old monitoring chart in place, so it cannot enable the new public address.
+
+The existing `grafana-admin` Secret remains configured for the chart's built-in admin account. Users sign in through Kipper instead.
 
 ## What's included
 

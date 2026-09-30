@@ -31,8 +31,8 @@ const namespaceOptions = computed(() => {
 
 const backups = ref<Backup[]>([])
 const schedules = ref<BackupSchedule[]>([])
-// Match SubdomainFor: hyphen on kipper.run, dot on custom domains.
-const grafanaLokiUrl = `https://${window.location.hostname.replace(/^console(--|\.)/, 'grafana$1')}/explore?orgId=1&left=%7B%22datasource%22:%22Loki%22,%22queries%22:%5B%7B%22expr%22:%22%7Bnamespace%3D%5C%22velero%5C%22%7D%22%7D%5D%7D`
+// Velero's logs in Grafana Explore.
+const grafanaLokiPath = '/explore?orgId=1&left=%7B%22datasource%22:%22Loki%22,%22queries%22:%5B%7B%22expr%22:%22%7Bnamespace%3D%5C%22velero%5C%22%7D%22%7D%5D%7D'
 
 const loading = ref(false)
 const refreshing = ref(false)
@@ -304,9 +304,11 @@ function statusIcon(status: string) {
                 <div v-if="b.reason" class="mt-1 flex items-center gap-2 text-xs text-red-600 dark:text-red-400">
                   <span>{{ b.reason }}</span>
                   <a
-                    :href="grafanaLokiUrl"
+                    v-if="authStore.grafanaUrl"
+                    :href="authStore.grafanaUrl + grafanaLokiPath"
                     target="_blank"
                     rel="noopener"
+                    @click.prevent="authStore.openGrafana(grafanaLokiPath)"
                     class="inline-flex items-center gap-1 text-kipper-600 hover:text-kipper-700 dark:text-kipper-400"
                   >
                     Investigate in Grafana

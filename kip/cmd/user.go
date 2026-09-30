@@ -21,7 +21,12 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/yaml"
 
+	"errors"
+
+	"k8s.io/client-go/util/retry"
+
 	"github.com/getkipper/kipper/controller/pkg/authncfg"
+	"github.com/getkipper/kipper/controller/pkg/usergrants"
 )
 
 var userCmd = &cobra.Command{
@@ -59,6 +64,32 @@ var userRoleCmd = &cobra.Command{
 	RunE:  runUserRole,
 }
 
+var userMonitoringCmd = &cobra.Command{
+	Use:   "monitoring",
+	Short: "Grant or revoke access to Grafana",
+	Long: `Monitoring lets a user open Grafana from the console with their Kipper login.
+Users with monitoring access can view every project's metrics and logs, use
+Explore, and create and edit dashboards. Cluster admins have access automatically.
+
+Examples:
+  kip user monitoring grant dev@example.com
+  kip user monitoring revoke dev@example.com`,
+}
+
+var userMonitoringGrantCmd = &cobra.Command{
+	Use:   "grant [email]",
+	Short: "Let a user see every project's metrics and logs in Grafana",
+	Args:  cobra.ExactArgs(1),
+	RunE:  func(_ *cobra.Command, args []string) error { return runUserMonitoring(args[0], true) },
+}
+
+var userMonitoringRevokeCmd = &cobra.Command{
+	Use:   "revoke [email]",
+	Short: "Remove a user's monitoring grant (admins retain access)",
+	Args:  cobra.ExactArgs(1),
+	RunE:  func(_ *cobra.Command, args []string) error { return runUserMonitoring(args[0], false) },
+}
+
 var userRemoveCmd = &cobra.Command{
 	Use:   "remove [email]",
 	Short: "Remove a user from the cluster",
@@ -74,6 +105,9 @@ func init() {
 	userCmd.AddCommand(userListCmd)
 	userCmd.AddCommand(userRoleCmd)
 	userCmd.AddCommand(userRemoveCmd)
+	userMonitoringCmd.AddCommand(userMonitoringGrantCmd)
+	userMonitoringCmd.AddCommand(userMonitoringRevokeCmd)
+	userCmd.AddCommand(userMonitoringCmd)
 	rootCmd.AddCommand(userCmd)
 }
 
@@ -131,9 +165,10 @@ func runUserList(_ *cobra.Command, _ []string) error {
 	}
 
 	access, accessErr := clusterAccessByEmail(ctx, k8sClient.Clientset(), k8sClient.Dynamic())
+	monitoring := monitoringHolders(ctx, k8sClient.Clientset())
 
 	fmt.Println()
-	fmt.Printf("  %-40s %-10s %s\n", "EMAIL", "CONSOLE", "CLUSTER ACCESS")
+	fmt.Printf("  %-40s %-10s %-11s %s\n", "EMAIL", "CONSOLE", "MONITORING", "CLUSTER ACCESS")
 	emails := make([]string, 0, len(roles))
 	for email := range roles {
 		emails = append(emails, email)
@@ -146,7 +181,11 @@ func runUserList(_ *cobra.Command, _ []string) error {
 		} else if held, ok := access[email]; ok {
 			grant = held
 		}
-		fmt.Printf("  %-40s %-10s %s\n", email, roles[email], grant)
+		held := "no"
+		if monitoring[email] {
+			held = "yes"
+		}
+		fmt.Printf("  %-40s %-10s %-11s %s\n", email, roles[email], held, grant)
 	}
 	fmt.Println()
 
@@ -307,6 +346,64 @@ func runUserRemove(_ *cobra.Command, args []string) error {
 	return nil
 }
 
+func runUserMonitoring(email string, granted bool) error {
+	_, k8sClient, err := loadCurrentCluster()
+	if err != nil {
+		return err
+	}
+	if err := setMonitoring(context.Background(), k8sClient.Clientset(), email, granted); err != nil {
+		if errors.Is(err, usergrants.ErrUnknownUser) {
+			return fmt.Errorf("%s has no console role; add the user first with 'kip user add'", email)
+		}
+		return err
+	}
+	if granted {
+		fmt.Printf("\n  ✔  %s can now open Grafana and see every project's metrics and logs\n\n", email)
+	} else {
+		fmt.Printf("\n  ✔  Monitoring grant removed for %s; cluster admins retain access\n\n", email)
+	}
+	return nil
+}
+
+// setMonitoring grants or revokes monitoring in kipper-users, retrying on conflict.
+func setMonitoring(ctx context.Context, cs kubernetes.Interface, email string, granted bool) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cm, err := cs.CoreV1().ConfigMaps(usergrants.Namespace).Get(ctx, usergrants.ConfigMapName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+		if err := usergrants.SetMonitoring(cm.Data, email, granted); err != nil {
+			return err
+		}
+		_, err = cs.CoreV1().ConfigMaps(usergrants.Namespace).Update(ctx, cm, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+// monitoringHolders returns every user who may open Grafana: admins and
+// grant holders with a role.
+func monitoringHolders(ctx context.Context, cs kubernetes.Interface) map[string]bool {
+	holders := map[string]bool{}
+	cm, err := cs.CoreV1().ConfigMaps(usergrants.Namespace).Get(ctx, usergrants.ConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		return holders
+	}
+	var roles map[string]string
+	if err := json.Unmarshal([]byte(cm.Data[usergrants.UsersKey]), &roles); err != nil {
+		return holders
+	}
+	grants, grantsErr := usergrants.Monitoring(cm.Data)
+	for email, role := range roles {
+		if role == "admin" || (grantsErr == nil && grants[email]) {
+			holders[email] = true
+		}
+	}
+	return holders
+}
+
 func getRoles(ctx context.Context, cs kubernetes.Interface) map[string]string {
 	cm, err := cs.CoreV1().ConfigMaps("kipper-system").Get(ctx, "kipper-users", metav1.GetOptions{})
 	if err != nil {
@@ -338,9 +435,15 @@ func setRole(ctx context.Context, cs kubernetes.Interface, email, role string) e
 	if err := json.Unmarshal([]byte(cm.Data["users"]), &roles); err != nil {
 		roles = map[string]string{}
 	}
+	_, existed := roles[email]
 	roles[email] = role
 	data, _ := json.Marshal(roles)
 	cm.Data["users"] = string(data)
+	if !existed {
+		// A removed email can linger in the grant list; a new user starts
+		// without it. A malformed list is left for console-api to refuse.
+		_ = usergrants.SetMonitoring(cm.Data, email, false)
+	}
 	_, err = cs.CoreV1().ConfigMaps("kipper-system").Update(ctx, cm, metav1.UpdateOptions{})
 	return err
 }
@@ -357,6 +460,8 @@ func removeRole(ctx context.Context, cs kubernetes.Interface, email string) erro
 	delete(roles, email)
 	data, _ := json.Marshal(roles)
 	cm.Data["users"] = string(data)
+	// A malformed grant list is left for console-api to refuse.
+	_ = usergrants.SetMonitoring(cm.Data, email, false)
 	_, err = cs.CoreV1().ConfigMaps("kipper-system").Update(ctx, cm, metav1.UpdateOptions{})
 	return err
 }

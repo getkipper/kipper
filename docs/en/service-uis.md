@@ -145,3 +145,5 @@ data:
 ```
 
 Apply with `kubectl apply -f` and the next reconcile of any service-UI NetworkPolicy picks it up, with no console-api restart and no Kipper rebuild. If the ConfigMap is missing the defaults apply, so existing clusters keep working unchanged.
+
+Grafana uses the same ConfigMap to identify ingress-controller pods, but defaults to the `traefik` namespace when `namespace` is unset. If your ingress controller runs elsewhere, set its namespace explicitly so it can reach Grafana. Grafana's policy separately allows Prometheus pods in the `monitoring` namespace.

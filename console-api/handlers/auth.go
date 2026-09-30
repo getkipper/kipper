@@ -77,6 +77,24 @@ type AuthHandler struct {
 	// Gates who may mint an SSO code and backs the session role check as
 	// defense-in-depth. Nil disables the UI-session path entirely.
 	RoleOf func(email string) string
+	// MonitoringAccess reports whether email may use Grafana, and its role.
+	// Nil refuses every Grafana request.
+	MonitoringAccess func(email string) (role string, allowed bool)
+	// GrafanaHosts returns the hosts Grafana is served on: one, or two during
+	// a domain transition. Nil or empty refuses every Grafana request.
+	GrafanaHosts func() []string
+}
+
+func (a *AuthHandler) isGrafanaHost(host string) bool {
+	if a.GrafanaHosts == nil || host == "" {
+		return false
+	}
+	for _, h := range a.GrafanaHosts() {
+		if strings.EqualFold(strings.TrimSuffix(h, "."), host) {
+			return true
+		}
+	}
+	return false
 }
 
 // shareCookieName is the browser cookie that carries a validated share
@@ -316,6 +334,11 @@ func (a *AuthHandler) redirectHostAllowed(host string) bool {
 	if ch := a.consoleHost(); ch != "" && host == ch {
 		return true
 	}
+	// Grafana is allowed by exact host, which is what makes it work on free
+	// kipper.run clusters where UIDomain is empty.
+	if a.isGrafanaHost(host) {
+		return true
+	}
 	if base := strings.TrimPrefix(a.UIDomain, "."); base != "" {
 		base = strings.ToLower(base)
 		if host == base || strings.HasSuffix(host, "."+base) {
@@ -386,6 +409,49 @@ func (a *AuthHandler) Check(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	a.redirectToLogin(w, r)
+}
+
+// CheckGrafana requires a host-bound UI session and monitoring access, then
+// supplies Grafana's identity and role headers. Share links cannot authorize Grafana.
+// GET /auth/check/grafana
+func (a *AuthHandler) CheckGrafana(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if a.GrafanaHosts == nil || a.MonitoringAccess == nil {
+		http.Error(w, "Grafana sign-in is not configured", http.StatusInternalServerError)
+		return
+	}
+	host, err := share.CanonicalHost(r.Header.Get("X-Forwarded-Host"))
+	if err != nil || !a.isGrafanaHost(host) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	email, done := a.uiSessionFor(w, r, host)
+	if !done {
+		a.redirectToLogin(w, r)
+		return
+	}
+	if email == "" {
+		// An SSO code was redeemed; the redirect is already written.
+		return
+	}
+	role, allowed := a.MonitoringAccess(email)
+	if !allowed {
+		http.Error(w, "Access denied. Ask a cluster admin for monitoring access.", http.StatusForbidden)
+		return
+	}
+	grafanaRole := "Editor"
+	if role == middleware.RoleAdmin {
+		grafanaRole = "Admin"
+	}
+	w.Header().Set("X-WEBAUTH-USER", email)
+	w.Header().Set("X-WEBAUTH-ROLE", grafanaRole)
+	w.WriteHeader(http.StatusOK)
+}
+
+// redirectToLogin sends an unauthenticated gate request to the console login.
+func (a *AuthHandler) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	// Not authenticated → redirect to console login with `next`
 	// pointing back at the original URL. Traefik forwards the
 	// X-Forwarded-{Proto,Host,Uri} headers so we can reconstruct it.
@@ -510,16 +576,21 @@ func (a *AuthHandler) validShareClaims(ctx context.Context, kr *share.Keyring, t
 // through to the login redirect. Every failure is refused
 // indistinguishably — no oracle for why a credential was rejected.
 func (a *AuthHandler) tryUISession(w http.ResponseWriter, r *http.Request) (string, bool) {
+	host, err := share.CanonicalHost(r.Header.Get("X-Forwarded-Host"))
+	if err != nil {
+		return "", false
+	}
+	return a.uiSessionFor(w, r, host)
+}
+
+// uiSessionFor validates a UI session or redeems an SSO code for a canonical host.
+func (a *AuthHandler) uiSessionFor(w http.ResponseWriter, r *http.Request, host string) (string, bool) {
 	if a.UISessionKeyring == nil || a.UISessions == nil || a.RoleOf == nil {
 		return "", false
 	}
 	// The session cookie is __Host-prefixed and Secure; never accept a UI
 	// credential or mint one on a plaintext hop.
 	if !strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
-		return "", false
-	}
-	host, err := share.CanonicalHost(r.Header.Get("X-Forwarded-Host"))
-	if err != nil {
 		return "", false
 	}
 	kr, ok := a.UISessionKeyring()
@@ -643,6 +714,16 @@ func (a *AuthHandler) UISessionCode(w http.ResponseWriter, r *http.Request) {
 	if herr != nil || !a.redirectHostAllowed(host) || host == a.consoleHost() {
 		respondError(w, http.StatusBadRequest, "invalid host")
 		return
+	}
+	if a.isGrafanaHost(host) {
+		if a.MonitoringAccess == nil {
+			respondError(w, http.StatusForbidden, "Ask a cluster admin for monitoring access")
+			return
+		}
+		if _, allowed := a.MonitoringAccess(claims.Email); !allowed {
+			respondError(w, http.StatusForbidden, "Ask a cluster admin for monitoring access")
+			return
+		}
 	}
 	kr, ok := a.UISessionKeyring()
 	if !ok {

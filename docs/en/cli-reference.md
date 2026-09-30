@@ -680,10 +680,25 @@ kip user add pm@example.com --role viewer --password secret123
 kip user invite --email dev@example.com --role deployer      # invite a developer
 kip user invite --email ops@example.com --role admin --expires 24h
 kip user role dev@example.com admin                # change role
+kip user monitoring grant dev@example.com          # let them open Grafana
+kip user monitoring revoke dev@example.com
 kip user remove dev@example.com
 kip user import dex-snapshot.yaml                  # bulk-import Dex users from a snapshot
 kip user import dex-snapshot.yaml --restart-dex    # also roll Dex so the new config takes effect
 ```
+
+### kip user monitoring {#kip-user-monitoring}
+
+Grant or revoke Grafana access for an existing Kipper user:
+
+```bash
+kip user monitoring grant <email>
+kip user monitoring revoke <email>
+```
+
+This grants access to **every project's metrics and logs**, plus Explore and dashboard editing. Cluster admins have access automatically; revoking an explicit grant does not remove their access.
+
+Use `kip user list` to check the **MONITORING** column. See [Accessing Grafana](/en/observability#accessing-grafana) for sign-in and permission details.
 
 ### kip user import {#kip-user-import}
 

@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import NoticeCallout from '@/components/NoticeCallout.vue'
 import { useAuthStore } from '@/stores/auth'
+import { hostOf, withSSOCode } from '@/utils/sso'
 import axios from 'axios'
 
 const route = useRoute()
@@ -14,30 +15,14 @@ const loading = ref(false)
 // When set, the browser is dropping the per-host session cookie for this UI
 // host, so the silent SSO keeps bouncing. We stop and tell the user.
 const cookieBlockedHost = ref('')
+// Stop login redirects when the signed-in user lacks access to the target host.
+const forbiddenHost = ref('')
 
 const authClient = axios.create({ baseURL: '/' })
 
 function firstQuery(value: unknown): string {
   if (Array.isArray(value)) return typeof value[0] === 'string' ? value[0] : ''
   return typeof value === 'string' ? value : ''
-}
-
-function hostOf(rawURL: string): string {
-  try {
-    return new URL(rawURL).host
-  } catch {
-    return ''
-  }
-}
-
-function withSSOCode(rawURL: string, code: string): string {
-  try {
-    const u = new URL(rawURL)
-    u.searchParams.set('kipper_sso', code)
-    return u.toString()
-  } catch {
-    return rawURL
-  }
 }
 
 // The silent SSO can loop when a browser refuses the per-host session
@@ -98,7 +83,12 @@ async function openServiceUI(nextURL: string) {
     return
   }
   if (host) recordBounce(host)
-  const code = host ? await auth.mintUICode(host) : null
+  const { code, forbidden } = host ? await auth.requestUICode(host) : { code: null, forbidden: false }
+  if (forbidden) {
+    forbiddenHost.value = host
+    loading.value = false
+    return
+  }
   window.location.href = code ? withSSOCode(nextURL, code) : nextURL
 }
 
@@ -157,6 +147,10 @@ onMounted(async () => {
 
       <NoticeCallout v-if="error" tone="danger" class="mb-4 px-4 py-3 text-sm text-red-700 dark:text-slate-300">
         {{ error }}
+      </NoticeCallout>
+
+      <NoticeCallout v-if="forbiddenHost" tone="warning" class="mb-4 px-4 py-3 text-sm text-amber-700 dark:text-slate-300" data-testid="forbidden-host">
+        Your account can't open {{ forbiddenHost }}. Ask a cluster admin for access.
       </NoticeCallout>
 
       <NoticeCallout v-if="cookieBlockedHost" tone="warning" class="mb-4 px-4 py-3 text-sm text-amber-700 dark:text-slate-300">
