@@ -55,6 +55,17 @@ export function parseCpuQuantity(s: string): number {
   return cores * 1000
 }
 
+// Parse a Kubernetes quantity into bytes (memory) or millicores (CPU). Returns
+// 0 for an empty, missing or malformed value.
+export function parseQuantityOrZero(value: string | undefined, kind: ResourceKind): number {
+  if (!value) return 0
+  try {
+    return kind === 'memory' ? parseMemoryQuantity(value) : parseCpuQuantity(value)
+  } catch {
+    return 0
+  }
+}
+
 // Format raw bytes as a binary quantity ("128 Mi", "1.5 Gi"). Picks the
 // largest unit that produces a value >= 1.
 export function formatMemory(bytes: number): string {

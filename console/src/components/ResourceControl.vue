@@ -16,6 +16,8 @@ import {
 interface Props {
   usage: number
   limit: number
+  // Same unit as limit; 0 or unset means no request is shown.
+  request?: number
   kind: ResourceKind
   stops?: number[]
   min?: number
@@ -33,6 +35,7 @@ const props = withDefaults(defineProps<Props>(), {
   readonly: false,
   applying: false,
   throttlingPct: null,
+  request: 0,
   label: '',
   bands: () => DEFAULT_BANDS,
   stops: undefined,
@@ -154,6 +157,13 @@ const arcPath = computed(() => {
 // 100% usage → +90° (points right toward red).
 const needleRotation = computed(() => -90 + clampedRatio.value * 180)
 
+const hasRequest = computed(() => props.request > 0)
+
+// A request at or above the limit would sit on the arc's end, where it says nothing.
+const showRequestMarker = computed(() => hasRequest.value && props.request < pendingLimit.value)
+
+const requestRotation = computed(() => -90 + (props.request / pendingLimit.value) * 180)
+
 // Stable per-instance gradient id so multiple ResourceControls on the same
 // page do not share a gradient definition.
 const uid = Math.random().toString(36).slice(2, 9)
@@ -187,6 +197,12 @@ const usageLabel = computed(() => formatQuantity(props.usage, props.kind))
 const limitLabel = computed(() => formatQuantity(pendingLimit.value, props.kind))
 const currentLimitLabel = computed(() => formatQuantity(props.limit, props.kind))
 const ratioPct = computed(() => Math.round(clampedRatio.value * 100))
+const requestLabel = computed(() => formatQuantity(props.request, props.kind))
+
+const gaugeLabel = computed(() => {
+  const base = `${kindLabel.value} usage ${ratioPct.value} percent of ${limitLabel.value}`
+  return hasRequest.value ? `${base}, ${requestLabel.value} reserved` : base
+})
 
 function onApply() {
   if (!hasChange.value || props.applying) return
@@ -225,7 +241,7 @@ const kindLabel = computed(() => (props.kind === 'memory' ? 'Memory' : 'CPU'))
         :height="geometry.viewBoxH"
         class="max-w-full"
         role="img"
-        :aria-label="`${kindLabel} usage ${ratioPct} percent of ${limitLabel}`"
+        :aria-label="gaugeLabel"
       >
         <defs>
           <linearGradient
@@ -257,6 +273,23 @@ const kindLabel = computed(() => (props.kind === 'memory' ? 'Memory' : 'CPU'))
             v-for="t in tickPositions"
             :key="t"
             v-bind="tickCoords(t)"
+          />
+        </g>
+
+        <g
+          v-if="showRequestMarker"
+          :transform="`rotate(${requestRotation} ${geometry.cx} ${geometry.cy})`"
+          class="text-slate-700 dark:text-slate-100"
+        >
+          <line
+            :x1="geometry.cx"
+            :y1="geometry.cy - geometry.r + geometry.stroke / 2 + 3"
+            :x2="geometry.cx"
+            :y2="geometry.cy - geometry.r - geometry.stroke / 2 - 3"
+            stroke="currentColor"
+            :stroke-width="Math.max(2, geometry.stroke / 4)"
+            stroke-linecap="round"
+            data-testid="request-marker"
           />
         </g>
 
@@ -303,6 +336,14 @@ const kindLabel = computed(() => (props.kind === 'memory' ? 'Memory' : 'CPU'))
         >
           <AlertTriangle class="h-3 w-3" /> over
         </span>
+      </div>
+      <div
+        v-if="hasRequest"
+        class="mt-0.5 flex items-center gap-1 text-slate-500 dark:text-slate-400"
+        :style="{ fontSize: `${geometry.unitFont}px` }"
+      >
+        <span v-if="showRequestMarker" class="inline-block h-2.5 w-0.5 rounded-full bg-slate-700 dark:bg-slate-100" aria-hidden="true" />
+        <span data-testid="reserved-label">{{ requestLabel }} reserved</span>
       </div>
     </div>
 

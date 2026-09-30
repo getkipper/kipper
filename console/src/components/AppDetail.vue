@@ -22,8 +22,7 @@ import { useLogStream } from '@/composables/useLogStream'
 import { useToast } from '@/composables/useToast'
 import { useResourceUsage } from '@/composables/useResourceUsage'
 import {
-  parseCpuQuantity,
-  parseMemoryQuantity,
+  parseQuantityOrZero,
   toKubernetesCpuQuantity,
   toKubernetesMemoryQuantity,
 } from '@/utils/resources'
@@ -2177,24 +2176,18 @@ const cpuThrottlingPct = computed(() => usage.data.value?.cpu_throttling_pct ?? 
 // The gauges show the limit the container runs with, which may be none; only
 // a console-api without per-resource details falls back to the spec's
 // resolved value.
-const memoryLimitBytes = computed(() => {
-  const shown = memoryDetail.value ? memoryDetail.value.live.limit : memoryLimit.value
-  if (!shown) return 0
-  try {
-    return parseMemoryQuantity(shown)
-  } catch {
-    return 0
-  }
-})
-const cpuLimitMillis = computed(() => {
-  const shown = cpuDetail.value ? cpuDetail.value.live.limit : cpuLimit.value
-  if (!shown) return 0
-  try {
-    return parseCpuQuantity(shown)
-  } catch {
-    return 0
-  }
-})
+const memoryLimitBytes = computed(() =>
+  parseQuantityOrZero(memoryDetail.value ? memoryDetail.value.live.limit : memoryLimit.value, 'memory'),
+)
+const cpuLimitMillis = computed(() =>
+  parseQuantityOrZero(cpuDetail.value ? cpuDetail.value.live.limit : cpuLimit.value, 'cpu'),
+)
+const memoryRequestBytes = computed(() =>
+  parseQuantityOrZero(memoryDetail.value ? memoryDetail.value.live.request : memoryRequest.value, 'memory'),
+)
+const cpuRequestMillis = computed(() =>
+  parseQuantityOrZero(cpuDetail.value ? cpuDetail.value.live.request : cpuRequest.value, 'cpu'),
+)
 
 const memoryUsageBytes = computed(() => usage.data.value?.totals.memory_bytes ?? 0)
 const cpuUsageMillis = computed(() => usage.data.value?.totals.cpu_millis ?? 0)
@@ -3662,6 +3655,7 @@ function openOptimise() {
                 <ResourceControl
                   kind="memory"
                   :usage="perPodMemoryBytes"
+                  :request="memoryRequestBytes"
                   :limit="memoryLimitBytes"
                   :applying="resourcesSaving"
                   size="md"
@@ -3685,6 +3679,7 @@ function openOptimise() {
                 <ResourceControl
                   kind="cpu"
                   :usage="perPodCpuMillis"
+                  :request="cpuRequestMillis"
                   :limit="cpuLimitMillis"
                   :throttling-pct="cpuThrottlingPct"
                   :applying="resourcesSaving"
@@ -3779,6 +3774,7 @@ function openOptimise() {
                     <ResourceControl
                       kind="memory"
                       :usage="row.memory"
+                      :request="memoryRequestBytes"
                       :limit="memoryLimitBytes"
                       size="sm"
                       readonly
@@ -3786,6 +3782,7 @@ function openOptimise() {
                     <ResourceControl
                       kind="cpu"
                       :usage="row.cpu"
+                      :request="cpuRequestMillis"
                       :limit="cpuLimitMillis"
                       size="sm"
                       readonly

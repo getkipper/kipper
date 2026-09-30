@@ -18,8 +18,7 @@ import { useModal } from '@/composables/useModal'
 import { useToast } from '@/composables/useToast'
 import { useResourceUsage } from '@/composables/useResourceUsage'
 import {
-  parseCpuQuantity,
-  parseMemoryQuantity,
+  parseQuantityOrZero,
   toKubernetesCpuQuantity,
   toKubernetesMemoryQuantity,
 } from '@/utils/resources'
@@ -370,21 +369,16 @@ const svcMemorySparkline = computed(() => svcUsage.data.value?.memory_sparkline 
 const svcCpuSparkline = computed(() => svcUsage.data.value?.cpu_sparkline ?? [])
 const svcCpuThrottlingPct = computed(() => svcUsage.data.value?.cpu_throttling_pct ?? null)
 
-const svcMemoryLimitBytes = computed(() => {
-  if (!svcMemoryLimit.value) return 0
-  try {
-    return parseMemoryQuantity(svcMemoryLimit.value)
-  } catch {
-    return 0
-  }
+const svcMemoryLimitBytes = computed(() => parseQuantityOrZero(svcMemoryLimit.value, 'memory'))
+const svcCpuLimitMillis = computed(() => parseQuantityOrZero(svcCPULimit.value, 'cpu'))
+// The request the pods run with, which the auto-sizer may have moved inside the bounds.
+const svcMemoryRequestBytes = computed(() => {
+  const r = svcResources.value
+  return parseQuantityOrZero(r.memory ? r.memory.live.request : r.memory_request, 'memory')
 })
-const svcCpuLimitMillis = computed(() => {
-  if (!svcCPULimit.value) return 0
-  try {
-    return parseCpuQuantity(svcCPULimit.value)
-  } catch {
-    return 0
-  }
+const svcCpuRequestMillis = computed(() => {
+  const r = svcResources.value
+  return parseQuantityOrZero(r.cpu ? r.cpu.live.request : r.cpu_request, 'cpu')
 })
 
 const svcUsagePodCount = computed(() => svcUsage.data.value?.totals.pod_count ?? 0)
@@ -900,6 +894,7 @@ function typeIcon(type: string): string {
               <ResourceControl
                 kind="memory"
                 :usage="svcPerPodMemoryBytes"
+                :request="svcMemoryRequestBytes"
                 :limit="svcMemoryLimitBytes"
                 :applying="svcResourcesSaving || svcRolloutPhase !== 'idle'"
                 :readonly="!canInNamespace(selectedNamespace, 'kipper.write')"
@@ -924,6 +919,7 @@ function typeIcon(type: string): string {
               <ResourceControl
                 kind="cpu"
                 :usage="svcPerPodCpuMillis"
+                :request="svcCpuRequestMillis"
                 :limit="svcCpuLimitMillis"
                 :throttling-pct="svcCpuThrottlingPct"
                 :applying="svcResourcesSaving || svcRolloutPhase !== 'idle'"
@@ -973,6 +969,7 @@ function typeIcon(type: string): string {
                   <ResourceControl
                     kind="memory"
                     :usage="row.memory"
+                    :request="svcMemoryRequestBytes"
                     :limit="svcMemoryLimitBytes"
                     size="sm"
                     readonly
@@ -980,6 +977,7 @@ function typeIcon(type: string): string {
                   <ResourceControl
                     kind="cpu"
                     :usage="row.cpu"
+                    :request="svcCpuRequestMillis"
                     :limit="svcCpuLimitMillis"
                     size="sm"
                     readonly

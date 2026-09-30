@@ -9,6 +9,7 @@ import {
   nearestStop,
   parseCpuQuantity,
   parseMemoryQuantity,
+  parseQuantityOrZero,
   ratioBand,
   toKubernetesCpuQuantity,
   toKubernetesMemoryQuantity,
@@ -53,6 +54,19 @@ describe('parseCpuQuantity', () => {
   it('throws on malformed input', () => {
     expect(() => parseCpuQuantity('')).toThrow()
     expect(() => parseCpuQuantity('many')).toThrow()
+  })
+})
+
+describe('parseQuantityOrZero', () => {
+  it('parses by kind', () => {
+    expect(parseQuantityOrZero('500Mi', 'memory')).toBe(500 * 1024 ** 2)
+    expect(parseQuantityOrZero('350m', 'cpu')).toBe(350)
+  })
+
+  it('returns 0 for an empty, missing or malformed value', () => {
+    expect(parseQuantityOrZero('', 'memory')).toBe(0)
+    expect(parseQuantityOrZero(undefined, 'cpu')).toBe(0)
+    expect(parseQuantityOrZero('lots', 'memory')).toBe(0)
   })
 })
 

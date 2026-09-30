@@ -10,6 +10,7 @@ interface Demo {
   title: string
   kind: 'memory' | 'cpu'
   usage: number
+  request?: number
   limit: number
   size?: 'sm' | 'md' | 'lg'
   throttlingPct?: number
@@ -28,6 +29,9 @@ const demos: Demo[] = [
   { title: 'Large (lg)', kind: 'memory', usage: 5 * Gi, limit: 8 * Gi, size: 'lg' },
   { title: 'CPU with throttling', kind: 'cpu', usage: 850, limit: 1000, throttlingPct: 18.4 },
   { title: 'CPU healthy', kind: 'cpu', usage: 80, limit: 500 },
+  { title: 'Idle below its request', kind: 'memory', usage: 25.6 * Mi, request: 500 * Mi, limit: 1 * Gi },
+  { title: 'CPU idle below its request', kind: 'cpu', usage: 1, request: 350, limit: 500 },
+  { title: 'Fixed size', kind: 'memory', usage: 300 * Mi, request: 1 * Gi, limit: 1 * Gi },
   { title: 'Read-only (dashboard)', kind: 'memory', usage: 6.2 * Gi, limit: 16 * Gi, readonly: true, size: 'sm' },
   {
     title: 'Bounded slider (1–4 Gi)',
@@ -81,6 +85,7 @@ function onApply(i: number, newLimit: number) {
         <ResourceControl
           :kind="d.kind"
           :usage="d.usage"
+          :request="d.request"
           :limit="applied[i] ?? d.limit"
           :size="d.size"
           :throttling-pct="d.throttlingPct ?? null"
