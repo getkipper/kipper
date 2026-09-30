@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -18,8 +19,11 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/yaml"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
@@ -114,6 +118,12 @@ func (r *PlatformConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if promEnabled {
 		if err := r.ensureGrafanaAdminSecret(ctx); err != nil {
 			patchErrs = append(patchErrs, fmt.Errorf("grafana admin secret: %w", err))
+			secretReady = false
+		}
+		// Apply the policy before enabling auth-proxy mode: Grafana trusts
+		// identity headers from clients that can reach its port.
+		if err := r.ensureGrafanaNetworkPolicy(ctx); err != nil {
+			patchErrs = append(patchErrs, fmt.Errorf("grafana network policy: %w", err))
 			secretReady = false
 		}
 	}
@@ -521,5 +531,43 @@ func (r *PlatformConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// against the singleton PlatformConfig CR on every cluster.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kipperv1.PlatformConfig{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(&networkingv1.NetworkPolicy{}, handler.EnqueueRequestsFromMapFunc(mapGrafanaPolicy)).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(mapIngressControllerConfig)).
 		Complete(r)
+}
+
+func platformConfigRequest(match bool) []reconcile.Request {
+	if !match {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: PlatformConfigName}}}
+}
+
+func mapGrafanaPolicy(_ context.Context, o client.Object) []reconcile.Request {
+	return platformConfigRequest(o.GetNamespace() == platform.MonitoringNamespace && o.GetName() == platform.GrafanaNetworkPolicyName)
+}
+
+func mapIngressControllerConfig(_ context.Context, o client.Object) []reconcile.Request {
+	return platformConfigRequest(o.GetNamespace() == ingressControllerConfigMapNamespace && o.GetName() == ingressControllerConfigMapName)
+}
+
+// ensureGrafanaNetworkPolicy allows the configured ingress controller and
+// Prometheus to reach Grafana. ensureGrafanaAdminSecret creates its namespace.
+func (r *PlatformConfigReconciler) ensureGrafanaNetworkPolicy(ctx context.Context) error {
+	peer := platform.IngressPeer{}
+	var cm corev1.ConfigMap
+	err := r.Get(ctx, types.NamespacedName{Namespace: ingressControllerConfigMapNamespace, Name: ingressControllerConfigMapName}, &cm)
+	switch {
+	case err == nil:
+		peer = platform.IngressPeer{Namespace: cm.Data["namespace"], LabelKey: cm.Data["labelKey"], LabelValue: cm.Data["labelValue"]}
+	case !errors.IsNotFound(err):
+		return err
+	}
+	desired := platform.GrafanaNetworkPolicyObject(peer)
+	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: desired.Namespace, Name: desired.Name}}
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
+		np.Spec = desired.Spec
+		return nil
+	})
+	return err
 }

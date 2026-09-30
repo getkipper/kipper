@@ -36,6 +36,7 @@ DELETE /api/v1/shares	anon=401 outsider=403 viewer=403 deployer=403 owner=403 ad
 DELETE /api/v1/storage/{service}/objects	anon=401 outsider=403 viewer=403 deployer=404 owner=404 admin=404
 DELETE /api/v1/storage/{service}/public	anon=401 outsider=403 viewer=403 deployer=allow owner=allow admin=allow
 DELETE /api/v1/users/{email}	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
+DELETE /api/v1/users/{email}/monitoring	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 GET /api/v1/alerts	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/alerts/unread-count	anon=401 outsider=allow viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/appearance	anon=allow outsider=allow viewer=allow deployer=allow owner=allow admin=allow
@@ -152,6 +153,7 @@ GET /api/v1/storage/{service}/public/{bucket}/*	anon=404 outsider=404 viewer=404
 GET /api/v1/storage/{service}/shared	anon=allow outsider=allow viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/users/	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 GET /auth/check	anon=401 outsider=401 viewer=401 deployer=401 owner=401 admin=401
+GET /auth/check/grafana	anon=401 outsider=401 viewer=401 deployer=401 owner=401 admin=401
 GET /auth/login	anon=allow outsider=allow viewer=allow deployer=allow owner=allow admin=allow
 GET /health	anon=allow outsider=allow viewer=allow deployer=allow owner=allow admin=allow
 GET /health/controllers	anon=allow outsider=allow viewer=allow deployer=allow owner=allow admin=allow
@@ -284,5 +286,6 @@ PUT /api/v1/settings/mode	anon=401 outsider=403 viewer=403 deployer=403 owner=40
 PUT /api/v1/settings/slack	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 PUT /api/v1/settings/smtp	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 PUT /api/v1/storage/{service}/public	anon=401 outsider=403 viewer=403 deployer=allow owner=allow admin=allow
+PUT /api/v1/users/{email}/monitoring	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=404
 PUT /api/v1/users/{email}/role	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
 TRACE /api/v1/migrate-target/{session}/transfer/{transfer}/*	anon=401 outsider=401 viewer=401 deployer=401 owner=401 admin=401

@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import axios from 'axios'
 import client from '@/api/client'
+import { openWithSSO } from '@/utils/sso'
 
 // Separate axios instance for the unauthenticated auth routes (/auth/login,
 // /auth/callback, /auth/refresh, /auth/logout) which live at the chi router
@@ -20,14 +21,18 @@ function tokenExpiryMs(token: string): number | null {
   }
 }
 
-// refreshLeadMs is how long before expiry the silent refresh fires. Two
-// minutes leaves room for a retry within the token's lifetime.
+// Start refreshing two minutes before expiry to allow time for the request.
 const refreshLeadMs = 2 * 60 * 1000
+
+// Cap delays at the signed 32-bit timer limit to prevent overflow and rapid refresh loops.
+const maxTimerDelayMs = 2_147_483_647
 
 export const useAuthStore = defineStore('auth', () => {
   const token = ref<string | null>(localStorage.getItem('kipper_token'))
   const email = ref<string | null>(localStorage.getItem('kipper_email'))
   const role = ref<string | null>(localStorage.getItem('kipper_role'))
+  // Set only for admins and monitoring holders while Grafana's route is live.
+  const grafanaUrl = ref<string | null>(localStorage.getItem('kipper_grafana_url'))
 
   const isAuthenticated = computed(() => !!token.value)
   const isAdmin = computed(() => role.value === 'admin')
@@ -42,10 +47,8 @@ export const useAuthStore = defineStore('auth', () => {
     scheduleRefresh()
   }
 
-  // scheduleRefresh arms one timer for shortly before the current token
-  // expires. ID tokens are minutes-lived, so without this every console
-  // session would end mid-work; with it the session lives as long as the
-  // HttpOnly refresh cookie stays valid.
+  // Refresh before expiry, with a five-second minimum delay to avoid rapid
+  // retries and a timer-safe maximum for tokens with distant expiry dates.
   function scheduleRefresh() {
     if (refreshTimer) {
       clearTimeout(refreshTimer)
@@ -54,7 +57,7 @@ export const useAuthStore = defineStore('auth', () => {
     if (!token.value) return
     const expiry = tokenExpiryMs(token.value)
     if (expiry === null) return
-    const delay = Math.max(expiry - Date.now() - refreshLeadMs, 5_000)
+    const delay = Math.min(Math.max(expiry - Date.now() - refreshLeadMs, 5_000), maxTimerDelayMs)
     refreshTimer = setTimeout(() => {
       void refresh()
     }, delay)
@@ -82,14 +85,40 @@ export const useAuthStore = defineStore('auth', () => {
     setToken(newToken)
   }
 
+  function setGrafanaUrl(url: string | null | undefined) {
+    grafanaUrl.value = url || null
+    if (grafanaUrl.value) {
+      localStorage.setItem('kipper_grafana_url', grafanaUrl.value)
+    } else {
+      localStorage.removeItem('kipper_grafana_url')
+    }
+  }
+
   async function fetchRole() {
     try {
-      const { data } = await client.get<{ email: string; role: string }>('/me')
+      const { data } = await client.get<{ email: string; role: string; grafanaUrl?: string }>('/me')
       role.value = data.role
       localStorage.setItem('kipper_role', data.role)
+      setGrafanaUrl(data.grafanaUrl)
     } catch {
       role.value = 'admin' // fallback for pre-RBAC installs
     }
+  }
+
+  // fetchGrafanaUrl picks up a monitoring grant or revocation without a new
+  // login. Any failure hides the link.
+  async function fetchGrafanaUrl() {
+    try {
+      const { data } = await client.get<{ grafanaUrl?: string }>('/me')
+      setGrafanaUrl(data.grafanaUrl)
+    } catch {
+      setGrafanaUrl(null)
+    }
+  }
+
+  async function openGrafana(path = '/') {
+    if (!grafanaUrl.value) return
+    await openWithSSO(grafanaUrl.value.replace(/\/$/, '') + path, mintUICode)
   }
 
   function logout() {
@@ -103,6 +132,7 @@ export const useAuthStore = defineStore('auth', () => {
     token.value = null
     email.value = null
     role.value = null
+    setGrafanaUrl(null)
     localStorage.removeItem('kipper_token')
     localStorage.removeItem('kipper_email')
     localStorage.removeItem('kipper_role')
@@ -127,22 +157,26 @@ export const useAuthStore = defineStore('auth', () => {
     })
   }
 
-  // mintUICode requests a single-use SSO code for a service-UI host. The
-  // code rides once in the kipper_sso query param and the gate exchanges it
-  // for a per-host session cookie. Returns null on failure so the caller can
-  // fall back to the bookmarkable redirect dance.
-  async function mintUICode(host: string): Promise<string | null> {
-    if (!token.value) return null
+  // Distinguish access denial from other SSO failures so callers can explain
+  // the denial instead of repeatedly redirecting to login.
+  async function requestUICode(host: string): Promise<{ code: string | null; forbidden: boolean }> {
+    if (!token.value) return { code: null, forbidden: false }
     try {
       const { data } = await authClient.post<{ code: string }>(
         'auth/ui-code',
         { host },
         { headers: { Authorization: `Bearer ${token.value}` } },
       )
-      return data.code
-    } catch {
-      return null
+      return { code: data.code, forbidden: false }
+    } catch (err) {
+      const status = (err as { response?: { status?: number } })?.response?.status
+      return { code: null, forbidden: status === 403 }
     }
+  }
+
+  // Return null on failure so callers can fall back to the login redirect.
+  async function mintUICode(host: string): Promise<string | null> {
+    return (await requestUICode(host)).code
   }
 
   // A page load with a stored token arms the refresh cycle immediately, so
@@ -150,5 +184,5 @@ export const useAuthStore = defineStore('auth', () => {
   // token's expiry.
   scheduleRefresh()
 
-  return { token, email, role, isAuthenticated, isAdmin, isDeployer, isViewer, login, fetchRole, logout, refresh, mintUICode }
+  return { token, email, role, grafanaUrl, isAuthenticated, isAdmin, isDeployer, isViewer, login, fetchRole, fetchGrafanaUrl, openGrafana, logout, refresh, mintUICode, requestUICode }
 })

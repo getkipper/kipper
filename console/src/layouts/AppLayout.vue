@@ -84,6 +84,7 @@ function closeOnDesktop(e: MediaQueryListEvent) {
 
 onMounted(() => {
   projectsStore.loadProjects()
+  void auth.fetchGrafanaUrl()
   window.addEventListener('keydown', onKeydown)
   desktopQuery?.addEventListener('change', closeOnDesktop)
 })
@@ -136,13 +137,6 @@ const bottomNav: NavItem[] = [
   { name: 'Functions', to: '/functions', icon: Zap },
 ]
 
-const grafanaUrl = (() => {
-  const host = window.location.hostname
-  // Match the SubdomainFor convention: kipper.run uses a double-dash
-  // separator (`console--foo.kipper.run` → `grafana--foo.kipper.run`),
-  // custom domains use a dot (`console.example.com` → `grafana.example.com`).
-  return `https://${host.replace(/^console(--|\.)/, 'grafana$1')}`
-})()
 
 function isActive(path: string): boolean {
   if (path === '/') return route.path === '/'
@@ -214,11 +208,12 @@ function handleLogout() {
             {{ item.name }}
           </RouterLink>
         </div>
-        <!-- Grafana external link -->
         <a
-          :href="grafanaUrl"
+          v-if="auth.grafanaUrl"
+          :href="auth.grafanaUrl"
           target="_blank"
           rel="noopener"
+          @click.prevent="auth.openGrafana()"
           class="flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
         >
           <BarChart3 class="h-5 w-5" :stroke-width="1.75" />

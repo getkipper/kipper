@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -27,6 +28,7 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/controller/pkg/dexcfg"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/controller/pkg/serving"
 )
 
@@ -116,6 +118,7 @@ func (r *ClusterIdentityReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&networkingv1.Ingress{}, handler.EnqueueRequestsFromMapFunc(mapServingIngress)).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(mapServingConfigMap)).
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(mapServingDeployment)).
+		Watches(&networkingv1.NetworkPolicy{}, handler.EnqueueRequestsFromMapFunc(mapGrafanaNetworkPolicy)).
 		Complete(r)
 }
 
@@ -131,18 +134,26 @@ func mapServingIngress(_ context.Context, o client.Object) []reconcile.Request {
 	ns, name := o.GetNamespace(), o.GetName()
 	return singletonRequest(
 		(ns == kipperSystemNamespace && (name == "console" || name == consoleAPIDeploymentName)) ||
-			(ns == dexNamespace && name == dexDeploymentName))
+			(ns == dexNamespace && name == dexDeploymentName) ||
+			(ns == grafanaNamespace && o.GetLabels()[serving.GrafanaRouteLabel] == "true"))
+}
+
+func mapGrafanaNetworkPolicy(_ context.Context, o client.Object) []reconcile.Request {
+	return singletonRequest(o.GetNamespace() == grafanaNamespace && o.GetName() == platform.GrafanaNetworkPolicyName)
 }
 
 func mapServingConfigMap(_ context.Context, o client.Object) []reconcile.Request {
-	return singletonRequest(o.GetNamespace() == dexNamespace && o.GetName() == dexConfigMapName)
+	return singletonRequest(
+		(o.GetNamespace() == dexNamespace && o.GetName() == dexConfigMapName) ||
+			(o.GetNamespace() == grafanaNamespace && o.GetName() == grafanaServerConfigMapName))
 }
 
 func mapServingDeployment(_ context.Context, o client.Object) []reconcile.Request {
 	ns, name := o.GetNamespace(), o.GetName()
 	return singletonRequest(
 		(ns == dexNamespace && name == dexDeploymentName) ||
-			(ns == kipperSystemNamespace && name == consoleAPIDeploymentName))
+			(ns == kipperSystemNamespace && name == consoleAPIDeploymentName) ||
+			(ns == grafanaNamespace && name == grafanaDeploymentName))
 }
 
 // Reconcile drives the singleton ClusterIdentity named "cluster".
@@ -157,7 +168,12 @@ func (r *ClusterIdentityReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 		return ctrl.Result{}, err
 	}
-	return r.reconcile(ctx, &ci)
+	res, err := r.reconcile(ctx, &ci)
+	// Check Grafana's route even if another part of the identity failed to reconcile.
+	if gerr := r.reconcileGrafana(ctx, &ci); gerr != nil {
+		err = errors.Join(err, gerr)
+	}
+	return res, err
 }
 
 func (r *ClusterIdentityReconciler) reconcile(ctx context.Context, ci *kipperv1.ClusterIdentity) (ctrl.Result, error) {
@@ -328,6 +344,10 @@ func (r *ClusterIdentityReconciler) servingSpec(ci *kipperv1.ClusterIdentity) se
 			Phase: servingPhaseFor(t.Phase),
 			From:  hostSetOf(t.From),
 			To:    hostSetOf(t.To),
+		}
+		if t.FromIdentity != nil && t.ToIdentity != nil {
+			spec.Transition.FromDomain = t.FromIdentity.Domain
+			spec.Transition.ToDomain = t.ToIdentity.Domain
 		}
 	}
 	return spec

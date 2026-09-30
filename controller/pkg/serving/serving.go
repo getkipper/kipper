@@ -81,6 +81,10 @@ type Transition struct {
 	Phase Phase
 	From  HostSet
 	To    HostSet
+	// FromDomain and ToDomain are the base domains of the two identities, for
+	// hosts derived from the domain rather than carried in the host sets.
+	FromDomain string
+	ToDomain   string
 }
 
 // Spec is the desired serving identity plus any in-flight transition.

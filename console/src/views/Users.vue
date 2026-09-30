@@ -7,7 +7,7 @@ import NoticeCallout from '@/components/NoticeCallout.vue'
 import { usePasswordStrength } from '@/composables/usePasswordStrength'
 import { useModal } from '@/composables/useModal'
 import { useToast } from '@/composables/useToast'
-import { fetchUsers, createUser, updateUserRole, deleteUser, resetUserPassword, type User } from '@/api/users'
+import { fetchUsers, createUser, updateUserRole, deleteUser, resetUserPassword, setUserMonitoring, type User } from '@/api/users'
 import { fetchProjects, type Project } from '@/api/projects'
 import { useAuthStore } from '@/stores/auth'
 import client from '@/api/client'
@@ -178,6 +178,16 @@ async function handleRoleChange(email: string, role: string) {
   } catch {
     toast.error('Failed to update role')
   }
+}
+
+async function handleMonitoringChange(email: string, granted: boolean) {
+  try {
+    await setUserMonitoring(email, granted)
+    toast.success(granted ? `${email} can now open Grafana` : `Monitoring grant removed for ${email}`)
+  } catch {
+    toast.error('Failed to update monitoring access')
+  }
+  await loadUsers()
 }
 
 function requestDelete(email: string) {
@@ -464,6 +474,20 @@ function roleColor(role: string): string {
         </div>
 
         <div class="flex items-center gap-3">
+          <label
+            class="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-400"
+            :title="user.role === 'admin' ? 'Cluster admins have monitoring access automatically' : 'Can see every project\'s metrics and logs in Grafana'"
+          >
+            <input
+              type="checkbox"
+              :checked="user.monitoring"
+              :disabled="user.role === 'admin'"
+              data-testid="monitoring-toggle"
+              class="rounded border-slate-300 text-kipper-600 dark:border-slate-600"
+              @change="handleMonitoringChange(user.email, ($event.target as HTMLInputElement).checked)"
+            />
+            Monitoring
+          </label>
           <select
             :value="user.role"
             @change="handleRoleChange(user.email, ($event.target as HTMLSelectElement).value)"

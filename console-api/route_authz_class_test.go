@@ -282,6 +282,7 @@ var routeAuthz = map[string]authzDeclaration{
 	"GET /api/v1/storage/{service}/shared":                             {class: classPublic},
 	"GET /api/v1/users/":                                               {class: classGlobalRole},
 	"GET /auth/check":                                                  {class: classForeignCredential, reason: "the forward-auth cookie the gateway presents"},
+	"GET /auth/check/grafana":                                          {class: classForeignCredential, reason: "the Grafana host's forward-auth cookie, then the monitoring grant"},
 	"GET /auth/login":                                                  {class: classPublic},
 	"GET /health":                                                      {class: classPublic},
 	"GET /health/controllers":                                          {class: classPublic},
@@ -424,6 +425,8 @@ var routeAuthz = map[string]authzDeclaration{
 	"PUT /api/v1/settings/smtp":                                      {class: classGlobalRole},
 	"PUT /api/v1/storage/{service}/public":                           {class: classProjectCapability, capability: "storage.write", scope: scopeNamespace},
 	"PUT /api/v1/users/{email}/role":                                 {class: classGlobalRole},
+	"PUT /api/v1/users/{email}/monitoring":                           {class: classGlobalRole},
+	"DELETE /api/v1/users/{email}/monitoring":                        {class: classGlobalRole},
 	"TRACE /api/v1/migrate-target/{session}/transfer/{transfer}/*":   {class: classForeignCredential, reason: "the per-transfer token derived for this transfer, not a user identity"},
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -37,6 +38,8 @@ type Users struct {
 	// defense-in-depth), so removing a user must delete their session
 	// records. Nil skips it (record deletion is best effort).
 	UISessions *uisession.RecordStore
+	// GrafanaURL returns the public Grafana URL while its route is live, "" otherwise. Nil means no route.
+	GrafanaURL func(ctx context.Context) string
 }
 
 // recipientSnapshot captures who must hear about an account mutation,
@@ -76,6 +79,20 @@ type userResponse struct {
 	Role  string `json:"role"`
 }
 
+type userListEntry struct {
+	Email      string `json:"email"`
+	Role       string `json:"role"`
+	Monitoring bool   `json:"monitoring"`
+}
+
+type meResponse struct {
+	Email      string `json:"email"`
+	Name       string `json:"name"`
+	Role       string `json:"role"`
+	Monitoring bool   `json:"monitoring"`
+	GrafanaURL string `json:"grafanaUrl,omitempty"`
+}
+
 type createUserRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
@@ -86,14 +103,15 @@ type updateRoleRequest struct {
 	Role string `json:"role"`
 }
 
-// List returns all users with their roles.
+// List returns users, roles, and monitoring access for display.
 // GET /api/v1/users
 func (u *Users) List(w http.ResponseWriter, _ *http.Request) {
 	users := u.RoleStore.ListUsers()
+	holders := u.RoleStore.MonitoringHolders()
 
-	result := make([]userResponse, 0, len(users))
+	result := make([]userListEntry, 0, len(users))
 	for email, role := range users {
-		result = append(result, userResponse{Email: email, Role: role})
+		result = append(result, userListEntry{Email: email, Role: role, Monitoring: holders[email]})
 	}
 
 	sort.Slice(result, func(i, j int) bool {
@@ -236,6 +254,42 @@ func (u *Users) Delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// GrantMonitoring lets a user see every project's metrics and logs in Grafana.
+// PUT /api/v1/users/{email}/monitoring
+func (u *Users) GrantMonitoring(w http.ResponseWriter, r *http.Request) {
+	u.setMonitoring(w, r, true)
+}
+
+// RevokeMonitoring removes the explicit grant; admins retain access through their role.
+// DELETE /api/v1/users/{email}/monitoring
+func (u *Users) RevokeMonitoring(w http.ResponseWriter, r *http.Request) {
+	u.setMonitoring(w, r, false)
+}
+
+func (u *Users) setMonitoring(w http.ResponseWriter, r *http.Request, granted bool) {
+	email, _ := url.PathUnescape(chi.URLParam(r, "email"))
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	recipients := u.recipientSnapshot(email)
+	if err := u.RoleStore.SetMonitoring(ctx, email, granted); err != nil {
+		if errors.Is(err, middleware.ErrUnknownUser) {
+			respondError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, "failed to update monitoring access")
+		return
+	}
+
+	kind, summary := "user_monitoring_granted", fmt.Sprintf("%s can now see every project's metrics and logs in Grafana", email)
+	if !granted {
+		kind, summary = "user_monitoring_revoked", fmt.Sprintf("Monitoring grant removed for %s; cluster admins retain access", email)
+	}
+	u.emitUserEvent(r, recipients, kind, summary, security.Field{Key: "user", Value: email})
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ResetPassword generates a new password for a user.
 // POST /api/v1/users/{email}/reset-password
 func (u *Users) ResetPassword(w http.ResponseWriter, r *http.Request) {
@@ -279,13 +333,14 @@ func (u *Users) Me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	role := middleware.RoleFromContext(r.Context())
-
-	respondJSON(w, http.StatusOK, map[string]string{
-		"email": claims.Email,
-		"name":  claims.Name,
-		"role":  role,
-	})
+	resp := meResponse{Email: claims.Email, Name: claims.Name, Role: middleware.RoleFromContext(r.Context())}
+	if _, allowed := u.RoleStore.MonitoringAccess(claims.Email); allowed {
+		resp.Monitoring = true
+		if u.GrafanaURL != nil {
+			resp.GrafanaURL = u.GrafanaURL(r.Context())
+		}
+	}
+	respondJSON(w, http.StatusOK, resp)
 }
 
 // addDexUser adds a static password entry to the Dex ConfigMap.

@@ -288,10 +288,14 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 	authHandler.UISessions = uisession.NewRecordStore(clientset, uisession.SigningSecretNamespace)
 	authHandler.UISessionReset = func(ctx context.Context) error { return uisession.ResetKeyring(ctx, clientset) }
 	authHandler.RoleOf = roleStore.GetRole
+	authHandler.MonitoringAccess = roleStore.MonitoringAccess
+	grafanaRoute := controllers.NewGrafanaRouteCache(crClient, 10*time.Second)
+	authHandler.GrafanaHosts = grafanaRoute.Hosts
 	r.Get("/auth/login", authHandler.LoginURL)
 	r.Post("/auth/callback", authHandler.Callback)
 	r.Post("/auth/refresh", authHandler.Refresh)
 	r.Get("/auth/check", authHandler.Check)
+	r.Get("/auth/check/grafana", authHandler.CheckGrafana)
 	r.Post("/auth/ui-code", authHandler.UISessionCode)
 	r.Post("/auth/logout", authHandler.Logout)
 
@@ -378,7 +382,8 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 	dashboardHandler := &handlers.Dashboard{Client: clientset}
 	usageHistoryHandler := &handlers.UsageHistory{CRClient: crClient}
 	platformHandler := &handlers.Platform{CRClient: crClient, Adjustments: adjustmentsHandler}
-	users := &handlers.Users{Client: clientset, RoleStore: roleStore, Security: securityNotifier}
+	users := &handlers.Users{Client: clientset, RoleStore: roleStore, Security: securityNotifier,
+		GrafanaURL: func(context.Context) string { return grafanaRoute.URL() }}
 	// Removing a user revokes their service-UI sessions: the record store's
 	// DeleteBySubject is the authoritative revocation, not role staleness.
 	users.UISessions = authHandler.UISessions
@@ -865,6 +870,8 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 			r.Get("/", users.List)
 			r.Post("/", users.Create)
 			r.Put("/{email}/role", users.UpdateRole)
+			r.Put("/{email}/monitoring", users.GrantMonitoring)
+			r.Delete("/{email}/monitoring", users.RevokeMonitoring)
 			r.Post("/{email}/reset-password", users.ResetPassword)
 			r.Delete("/{email}", users.Delete)
 		})

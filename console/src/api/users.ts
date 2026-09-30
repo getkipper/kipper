@@ -3,6 +3,7 @@ import client from './client'
 export interface User {
   email: string
   role: string
+  monitoring?: boolean
 }
 
 export interface CreateUserPayload {
@@ -32,6 +33,15 @@ export async function resetUserPassword(email: string): Promise<{ password: stri
 
 export async function deleteUser(email: string): Promise<void> {
   await client.delete(`/users/${encodeURIComponent(email)}`)
+}
+
+export async function setUserMonitoring(email: string, granted: boolean): Promise<void> {
+  const path = `/users/${encodeURIComponent(email)}/monitoring`
+  if (granted) {
+    await client.put(path)
+  } else {
+    await client.delete(path)
+  }
 }
 
 export async function fetchMe(): Promise<{ email: string; role: string }> {

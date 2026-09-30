@@ -26,6 +26,15 @@ const HelmChartNamespace = "kube-system"
 const (
 	// MonitoringNamespace is the target namespace for the monitoring stack.
 	MonitoringNamespace = "monitoring"
+	// GrafanaDeploymentName is the Grafana Deployment the chart creates.
+	GrafanaDeploymentName = "kube-prometheus-stack-grafana"
+	// GrafanaAuthAnnotation marks a Grafana pod template rendered with the
+	// auth-proxy settings; its value is GrafanaAuthVersion. Grafana's public
+	// route is published only once pods carrying it have rolled out.
+	GrafanaAuthAnnotation = "kipper.run/grafana-auth"
+	GrafanaAuthVersion    = "v1"
+	// GrafanaServerConfigMapName holds GF_SERVER_ROOT_URL, read by Grafana through envFrom.
+	GrafanaServerConfigMapName = "grafana-server"
 	// GrafanaAdminSecretName is the Kipper-owned Secret holding the admin
 	// credentials. Distinct from the chart's own grafana Secret so the two
 	// never collide.
@@ -162,8 +171,9 @@ spec:
 
 // KubePrometheusStackHelmChart renders the kube-prometheus-stack HelmChart
 // for the given memory resources. Grafana carries a datasource spanning every
-// tenant's logs and metrics, so it is deployed without a public ingress and is
-// reached over the cluster API instead.
+// tenant's logs and metrics, so it runs in auth-proxy mode behind Kipper's
+// login gate, and GrafanaNetworkPolicy must be in place before this chart is
+// submitted.
 // kube-state-metrics holds every object it watches in memory, so its peak is
 // not its steady state: an API server restart makes it re-list the lot at once.
 // A 64Mi limit carried a 23Mi steady state comfortably and still OOM-killed the
@@ -179,7 +189,7 @@ func KubePrometheusStackHelmChart(res Resources) string {
 	return fmt.Sprintf(`apiVersion: helm.cattle.io/v1
 kind: HelmChart
 metadata:
-  name: kube-prometheus-stack
+  name: `+KubePrometheusStackRelease+`
   namespace: %s
 spec:
   repo: https://prometheus-community.github.io/helm-charts
@@ -211,11 +221,40 @@ spec:
         existingSecret: %s
         userKey: %s
         passwordKey: %s
-      # Grafana is an admin tool with a datasource spanning every tenant's
-      # logs and metrics, so it is not exposed on a public ingress. Reach it
-      # over the cluster API (kubectl port-forward svc/kube-prometheus-stack-grafana).
+      # Grafana's datasources span every tenant's logs and metrics. The chart's
+      # own ingress stays off; Kipper publishes a route behind its login gate,
+      # which passes the user and role in the X-WEBAUTH headers.
       ingress:
         enabled: false
+      grafana.ini:
+        auth.proxy:
+          enabled: true
+          header_name: X-WEBAUTH-USER
+          header_property: email
+          auto_sign_up: true
+          # Apply the role header on every request, so a demotion takes effect at once.
+          sync_ttl: 0
+          headers: "Role:X-WEBAUTH-ROLE"
+          enable_login_token: false
+        auth:
+          disable_login_form: true
+          disable_signout_menu: true
+        auth.anonymous:
+          enabled: false
+        users:
+          allow_sign_up: false
+        # A long-lived WebSocket would outlive a revoked grant.
+        live:
+          max_connections: 0
+        # The public route strips every cookie, so the Origin check must not
+        # wait for a login cookie to be present.
+        security:
+          csrf_always_check: true
+      envFromConfigMaps:
+        - name: `+GrafanaServerConfigMapName+`
+          optional: true
+      podAnnotations:
+        `+GrafanaAuthAnnotation+`: `+GrafanaAuthVersion+`
       resources:
         requests:
           cpu: 50m

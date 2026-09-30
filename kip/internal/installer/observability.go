@@ -53,6 +53,10 @@ func InstallPrometheusGrafanaWithResources(client *ssh.Client, res platform.Reso
 	if err := ensureGrafanaAdminSecret(client); err != nil {
 		return err
 	}
+	// Restrict access to Grafana before starting it in auth-proxy mode.
+	if err := applyGrafanaNetworkPolicy(client); err != nil {
+		return err
+	}
 
 	manifest := platform.KubePrometheusStackHelmChart(res)
 	applyCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", manifest)

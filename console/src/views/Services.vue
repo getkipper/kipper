@@ -24,6 +24,7 @@ import {
 } from '@/utils/resources'
 import { useProjectsStore } from '@/stores/projects'
 import { useAuthStore } from '@/stores/auth'
+import { openWithSSO } from '@/utils/sso'
 import { useCapabilities } from '@/composables/useCapabilities'
 import ResourceMode from '@/components/ResourceMode.vue'
 import { automatic, confirm, fixedSize, forLegacyApi, isEmptyEdit, resourcesPending, type ResourceEdit } from '@/utils/resourceEdits'
@@ -88,40 +89,10 @@ const svcDetailTab = ref<'connection' | 'logs' | 'resources' | 'migrate' | 'shar
 // only to admins — minting a link hands out non-Dex access to that UI.
 const canShare = computed(() => authStore.isAdmin && !!selectedService.value?.ui_url)
 
-function uiHostOf(rawURL: string): string {
-  try {
-    return new URL(rawURL).host
-  } catch {
-    return ''
-  }
-}
-
-function withSSOCode(rawURL: string, code: string): string {
-  try {
-    const u = new URL(rawURL)
-    u.searchParams.set('kipper_sso', code)
-    return u.toString()
-  } catch {
-    return rawURL
-  }
-}
-
-// Open the tab synchronously to retain browser user activation, then attach
-// a single-use SSO code when available. Fall back to the current tab if blocked
-// and to the plain service URL if minting fails.
 async function openServiceUI() {
   const uiURL = selectedService.value?.ui_url
   if (!uiURL) return
-  const tab = window.open('about:blank', '_blank')
-  if (tab) tab.opener = null
-  const host = uiHostOf(uiURL)
-  const code = host ? await authStore.mintUICode(host) : null
-  const target = code ? withSSOCode(uiURL, code) : uiURL
-  if (tab) {
-    tab.location.href = target
-  } else {
-    window.location.href = target
-  }
+  await openWithSSO(uiURL, authStore.mintUICode)
 }
 const svcTabs = computed(() => {
   const tabs = [
