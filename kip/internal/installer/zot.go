@@ -4,19 +4,20 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
-// Registry accounts and the objects that carry them. Two accounts implement
-// least privilege: builds hold the push credential, nodes hold only the pull
-// credential in their registries.yaml, so a compromised node stays short of
-// push access. console-api duplicates the names it consumes (separate module,
-// see console-api/builder/builder.go).
+// Builds use the push account; nodes use the read-only pull account.
+// console-api defines the account and secret names it uses separately
+// (see console-api/builder/builder.go).
 const (
 	zotPushUser = "kipper-push"
 	zotPullUser = "kipper-pull"
@@ -31,14 +32,10 @@ const (
 	zotCAFilePath   = "/etc/rancher/k3s/zot-ca.crt"
 )
 
-// zotBaseManifest carries what must exist before the TLS certificate can be
-// issued: the Service, because its ClusterIP becomes an IP SAN (containerd
-// verifies the mirror endpoint by IP), and the storage. Deliberately not the
-// ConfigMap: on an upgrade from an earlier install, nothing that changes the
-// running registry's effective configuration is applied until certificates
-// and credentials are ready, so a failure in those stages leaves the old
-// registry exactly as it was instead of half-migrated.
-const zotBaseManifest = `apiVersion: v1
+// zotBaseManifestTemplate creates storage and the Service before certificate
+// issuance, which needs the Service's ClusterIP. The ConfigMap and Deployment
+// are applied later, once credentials and certificates are ready.
+const zotBaseManifestTemplate = `apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: zot-data
@@ -52,7 +49,7 @@ spec:
   storageClassName: longhorn-single
   resources:
     requests:
-      storage: 10Gi
+      storage: %s
 ---
 apiVersion: v1
 kind: Service
@@ -70,15 +67,56 @@ spec:
       targetPort: 5000
 `
 
-// zotConfigJSON is the registry configuration. It enforces authenticated
-// access only: htpasswd is the only auth method, defaultPolicy is empty and
-// no anonymousPolicy exists, so every request must present one of the two
-// accounts. bcrypt is the only hash zot accepts for htpasswd.
-//
-// accessControl belongs under http, as a peer of auth. At the root, zot rejects
-// the whole config with an "invalid keys: accesscontrol" decode error, and since
-// the Deployment uses a Recreate strategy that rejection is a registry outage
-// rather than a failed apply.
+const zotDefaultStorage = "10Gi"
+
+// zotStorageQuery wraps the requested size and capacity in zot-size[...]
+// so the parser can separate them from surrounding SSH output.
+// A missing claim produces no output.
+const zotStorageQuery = `kubectl -n kipper-system get pvc zot-data --ignore-not-found ` +
+	`-o jsonpath='{"zot-size["}{.spec.resources.requests.storage}{"|"}{.status.capacity.storage}{"]"}' 2>/dev/null`
+
+const zotStorageMarker = "zot-size["
+
+var zotStoragePayload = regexp.MustCompile(`zot-size\[([^|\]]*)\|([^|\]]*)\]`)
+
+func renderZotBaseManifest(storage string) string {
+	return fmt.Sprintf(zotBaseManifestTemplate, storage)
+}
+
+// zotStorageRequest preserves expanded volumes by choosing the largest of
+// the default size, requested size, and capacity. Output without a marker
+// uses the default; marked output must contain a valid size record.
+func zotStorageRequest(out string) (string, error) {
+	if !strings.Contains(out, zotStorageMarker) {
+		return zotDefaultStorage, nil
+	}
+	matches := zotStoragePayload.FindAllStringSubmatch(out, -1)
+	if len(matches) == 0 {
+		return "", fmt.Errorf("could not read registry volume size from %q", out)
+	}
+	request, capacity := matches[len(matches)-1][1], matches[len(matches)-1][2]
+	if request == "" {
+		return "", fmt.Errorf("registry volume has no requested size")
+	}
+	size := resource.MustParse(zotDefaultStorage)
+	for _, f := range []string{request, capacity} {
+		if f == "" {
+			continue
+		}
+		q, err := resource.ParseQuantity(f)
+		if err != nil {
+			return "", fmt.Errorf("reading registry volume size %q: %w", f, err)
+		}
+		if q.Cmp(size) > 0 {
+			size = q
+		}
+	}
+	return size.String(), nil
+}
+
+// zotConfigJSON gives the push account read/write access and the pull account
+// read-only access. Other users have no permissions.
+// Keep accessControl under http, alongside auth.
 const zotConfigJSON = `{
   "storage": {
     "rootDirectory": "/var/lib/registry",
@@ -120,25 +158,17 @@ const zotConfigJSON = `{
   }
 }`
 
-// zotConfigMapName derives the registry ConfigMap's name from its content.
-// Config changes therefore create a new object instead of mutating one a
-// running pod references, which is what makes the cutover below fail
-// closed: nothing the old registry uses is ever touched before the
-// Deployment update is accepted.
+// zotConfigMapName includes a content hash so configuration changes create
+// a separate ConfigMap for the new Deployment revision.
 func zotConfigMapName() string {
 	sum := sha256.Sum256([]byte(zotConfigJSON))
 	return "zot-config-" + hex.EncodeToString(sum[:])[:10]
 }
 
-// renderZotRuntimeManifest builds the registry's configuration and workload
-// stage: an immutable content-named ConfigMap and the Deployment referencing
-// it. kubectl applies the documents sequentially, not atomically — the
-// sequence is safe anyway because the ConfigMap is a new object the running
-// pod does not reference. The Deployment update is the single cutover point:
-// if it is rejected, the old registry keeps running untouched (the orphan
-// ConfigMap is cleaned up on the next successful run); once it is accepted,
-// the Recreate strategy stops the old pod first, so a rollout failure leaves
-// the registry stopped, never serving unauthenticated.
+// renderZotRuntimeManifest pairs an immutable ConfigMap with its Deployment.
+// Applying a changed configuration creates a new ConfigMap before updating
+// the Deployment, preserving the running pod's ConfigMap until rollout.
+// Recreate stops the old pod before starting its replacement.
 func renderZotRuntimeManifest(configMapName string) string {
 	indented := "    " + strings.ReplaceAll(zotConfigJSON, "\n", "\n    ")
 	return fmt.Sprintf(`apiVersion: v1
@@ -164,13 +194,7 @@ metadata:
     app.kubernetes.io/managed-by: kipper
 spec:
   replicas: 1
-  # zot is a singleton with an RWO PVC and a boltdb cache that takes an
-  # exclusive file lock. The default RollingUpdate strategy spawns the
-  # new pod alongside the old one, and the new pod crash-loops trying
-  # to open the locked cache.db until ProgressDeadlineExceeded fires.
-  # Recreate kills the old pod first so the lock is free when the new
-  # pod starts — which is also what makes the auth/TLS cutover fail
-  # closed on upgrades.
+  # Stop the old pod before its replacement accesses the shared registry data.
   strategy:
     type: Recreate
   selector:
@@ -202,10 +226,7 @@ spec:
             limits:
               cpu: 200m
               memory: 256Mi
-          # tcpSocket rather than an HTTP probe of /v2/, which answers
-          # 401 without credentials, and the kubelet counts anything
-          # outside 2xx/3xx as failure. Embedding the credential in the
-          # probe would put it in the pod spec.
+          # A TCP probe checks the listener without putting credentials in the pod spec.
           readinessProbe:
             tcpSocket:
               port: 5000
@@ -227,13 +248,10 @@ spec:
 `, configMapName, indented, configMapName)
 }
 
-// zotCertManifestTemplate issues the registry's TLS material from a
-// cluster-internal CA: selfsigned issuer, CA certificate, CA issuer, leaf.
-// The single %s is the Service ClusterIP. The ten-year durations remove the
-// renewal cliff from the component every image pull depends on (a silently
-// expired internal cert is the cert-manager/Velero deadlock failure class
-// again); k3s's own internal CAs have the same horizon. localhost and
-// 127.0.0.1 are included for kip tunnel access.
+// zotCertManifestTemplate creates an internal CA and registry certificate,
+// both with a requested lifetime of ten years to reduce renewal frequency.
+// The %s placeholder is the Service ClusterIP; localhost and 127.0.0.1
+// support access through kip tunnel.
 const zotCertManifestTemplate = `apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
@@ -300,11 +318,8 @@ spec:
     kind: Issuer
 `
 
-// renderZotHtpasswd produces the bcrypt htpasswd file zot requires. MinCost
-// is a deliberate choice: both passwords are 128-bit random values whose
-// strength is their entropy, not their hash cost, and containerd presents
-// basic auth on every registry request, so a default-cost hash would add
-// tens of milliseconds of bcrypt to each blob fetch of every image pull.
+// renderZotHtpasswd uses bcrypt.MinCost to limit authentication overhead.
+// Generated passwords contain 128 bits of randomness.
 func renderZotHtpasswd(pushPassword, pullPassword string) (string, error) {
 	pushHash, err := bcrypt.GenerateFromPassword([]byte(pushPassword), bcrypt.MinCost)
 	if err != nil {
@@ -317,12 +332,9 @@ func renderZotHtpasswd(pushPassword, pullPassword string) (string, error) {
 	return fmt.Sprintf("%s:%s\n%s:%s\n", zotPushUser, pushHash, zotPullUser, pullHash), nil
 }
 
-// renderZotRegistriesConfig builds the k3s registries.yaml that lets every
-// node pull from the registry: the mirror redirects the in-cluster name to
-// the ClusterIP over TLS, and configs (keyed by the endpoint's host:port,
-// which is how containerd looks credentials up) carries the pull credential
-// and the CA. Passwords are hex from generateSecret, so quoting them is
-// enough for YAML safety.
+// renderZotRegistriesConfig routes registry pulls to the ClusterIP over TLS.
+// Credentials and the CA are configured under the mirror endpoint's host:port.
+// Generated passwords are hexadecimal, so they are safe in quoted YAML.
 func renderZotRegistriesConfig(clusterIP, pullPassword string) string {
 	return fmt.Sprintf(`mirrors:
   "%s":
@@ -338,12 +350,9 @@ configs:
 `, zotRegistryHost, clusterIP, clusterIP, zotPullUser, pullPassword, zotCAFilePath)
 }
 
-// ensureZotCredentials creates the registry accounts on first install and
-// leaves them untouched afterwards: nodes keep the pull password in their
-// registries.yaml, so a re-run (kip upgrade re-invokes InstallZot) must
-// never rotate credentials as a side effect. The htpasswd is re-derived only
-// when it is missing or a password was just generated. Returns the pull
-// password for the node configuration.
+// ensureZotCredentials reuses existing passwords because nodes store the
+// pull password locally. It creates missing passwords and rebuilds htpasswd
+// when it is missing or a password was generated, then returns the pull password.
 func ensureZotCredentials(client *ssh.Client) (string, error) {
 	pushPassword, err := readSecretValue(client, zotNamespace, zotPushSecret, "password")
 	if err != nil {
@@ -390,11 +399,9 @@ func ensureZotCredentials(client *ssh.Client) (string, error) {
 	return pullPassword, nil
 }
 
-// writeZotNodeFiles places the registry CA and the authenticated mirror
-// config on one node. containerd reads both from node-local paths, so every
-// node needs its own copy. Both files travel over stdin and land with mode
-// 600: registries.yaml carries the pull password, and it must never appear
-// in a command string, where /proc makes it world-readable while it runs.
+// writeZotNodeFiles writes the registry CA and pull configuration on one node
+// with mode 600. Passing file contents through stdin keeps the pull password
+// out of command arguments.
 func writeZotNodeFiles(client *ssh.Client, caPEM, clusterIP, pullPassword string) error {
 	if _, err := client.Run("mkdir -p /etc/rancher/k3s"); err != nil {
 		return fmt.Errorf("creating k3s config directory: %w", err)
@@ -411,11 +418,9 @@ func writeZotNodeFiles(client *ssh.Client, caPEM, clusterIP, pullPassword string
 	return nil
 }
 
-// verifyZotAuth checks from the host that the registry actually enforces
-// what was configured: anonymous /v2/ must be refused with 401 and the pull
-// credential must be accepted over verified TLS. An unauthenticated registry
-// must fail the install rather than survive silently. The credential goes to
-// curl through a config file on stdin (-K), never through argv.
+// verifyZotAuth requires /v2/ to return 401 for anonymous requests and 200
+// with the pull credential, both over verified TLS. The credential reaches
+// curl through stdin to keep it out of command arguments.
 func verifyZotAuth(client *ssh.Client, clusterIP, pullPassword string) error {
 	anonCmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --cacert %s https://%s:5000/v2/", zotCAFilePath, clusterIP)
 	anon, err := client.Run(anonCmd)
@@ -423,7 +428,7 @@ func verifyZotAuth(client *ssh.Client, clusterIP, pullPassword string) error {
 		return fmt.Errorf("probing zot anonymously: %w", err)
 	}
 	if code := strings.TrimSpace(anon); code != "401" {
-		return fmt.Errorf("zot answered anonymous /v2/ with %s instead of 401: the registry is not enforcing authentication", code)
+		return fmt.Errorf("zot returned HTTP %s for an anonymous request to /v2/; expected 401 to confirm authentication is required", code)
 	}
 
 	authedCmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --cacert %s -K /dev/stdin https://%s:5000/v2/", zotCAFilePath, clusterIP)
@@ -433,15 +438,12 @@ func verifyZotAuth(client *ssh.Client, clusterIP, pullPassword string) error {
 		return fmt.Errorf("probing zot with the pull credential: %w", err)
 	}
 	if code := strings.TrimSpace(authed); code != "200" {
-		return fmt.Errorf("zot answered authenticated /v2/ with %s instead of 200", code)
+		return fmt.Errorf("zot returned HTTP %s for an authenticated request to /v2/; expected 200", code)
 	}
 	return nil
 }
 
-// zotRolloutDiagnosis asks the registry's pod why it is not running and returns
-// a sentence to append to a rollout failure. It reads only — the cluster is
-// already in the failed state and the operator needs the reason, not a second
-// mutation.
+// zotRolloutDiagnosis reads recent pod logs to add context to rollout errors.
 func zotRolloutDiagnosis(client *ssh.Client) string {
 	out, err := client.Run("kubectl -n kipper-system logs -l app=zot --tail=5 --all-containers=true 2>&1 || true")
 	if err != nil {
@@ -450,9 +452,8 @@ func zotRolloutDiagnosis(client *ssh.Client) string {
 	return formatZotDiagnosis(out)
 }
 
-// formatZotDiagnosis condenses the registry's last log lines into one
-// parenthesised clause. A rejected config is the likely cause and zot names the
-// offending key, so the first non-empty line is usually the whole answer.
+// formatZotDiagnosis includes the first non-empty log line in a rollout error,
+// truncated after 300 bytes to keep the message readable.
 func formatZotDiagnosis(logs string) string {
 	for _, line := range strings.Split(logs, "\n") {
 		line = strings.TrimSpace(line)
@@ -463,28 +464,32 @@ func formatZotDiagnosis(logs string) string {
 		if len(line) > limit {
 			line = line[:limit] + "…"
 		}
-		return " (the registry pod says: " + line + ")"
+		return " (registry pod log: " + line + ")"
 	}
 	return ""
 }
 
-// InstallZot deploys the Zot OCI registry with htpasswd authentication and
-// TLS from a cluster-internal CA, and configures k3s to pull from it with
-// the read-only credential. Zot provides internal image storage for
-// Git-based builds via Kaniko; builds authenticate with a separate push
-// credential read by console-api. Safe to re-run: credentials are created
-// once and reused, manifests apply idempotently.
+// InstallZot deploys the Zot OCI registry with authentication and TLS, then
+// configures k3s to use the pull account. Builds use a separate push account.
+// Repeated installs reuse existing credentials.
 func InstallZot(client *ssh.Client) error {
-	// Service, config, and storage first: the Service's ClusterIP becomes an
-	// IP SAN in the certificate, so it has to exist before issuance.
-	applyBase := fmt.Sprintf("cat << 'KIPEOF' | kubectl apply -f -\n%sKIPEOF", zotBaseManifest)
+	// Preserve the existing volume size before applying the storage manifest.
+	// Stop on lookup errors to avoid requesting a smaller volume.
+	existing, err := client.Run(zotStorageQuery)
+	if err != nil {
+		return fmt.Errorf("reading the registry volume size: %w", err)
+	}
+	storage, err := zotStorageRequest(existing)
+	if err != nil {
+		return err
+	}
+	applyBase := fmt.Sprintf("cat << 'KIPEOF' | kubectl apply -f -\n%sKIPEOF", renderZotBaseManifest(storage))
 	if _, err := client.Run(applyBase); err != nil {
 		return fmt.Errorf("applying zot manifests: %w", err)
 	}
 
-	// containerd runs on the host and cannot resolve cluster-internal DNS
-	// names like zot.kipper-system.svc.cluster.local, so the mirror endpoint
-	// (and therefore the certificate) uses the ClusterIP directly.
+	// Use the ClusterIP for the mirror endpoint and certificate so host-side
+	// image pulls work without cluster DNS.
 	clusterIP, err := client.Run(`kubectl get svc zot -n kipper-system -o jsonpath='{.spec.clusterIP}'`)
 	if err != nil {
 		return fmt.Errorf("getting zot ClusterIP: %w", err)
@@ -507,29 +512,21 @@ func InstallZot(client *ssh.Client) error {
 		return fmt.Errorf("waiting for zot certificate: %w", err)
 	}
 
-	// Config and Deployment land only now, as the last stage: every earlier
-	// failure leaves an existing registry untouched, and the content-named
-	// ConfigMap keeps that true through this stage too (see
-	// renderZotRuntimeManifest for the cutover semantics). The Deployment
-	// also needs the TLS secret to exist, or its pod would sit in
-	// CreateContainerConfigError until the step times out.
+	// Apply the runtime configuration once credentials and the TLS certificate
+	// are ready, so the new pod can mount its required secrets.
 	configMapName := zotConfigMapName()
 	applyRuntime := fmt.Sprintf("cat << 'KIPEOF' | kubectl apply -f -\n%sKIPEOF", renderZotRuntimeManifest(configMapName))
 	if _, err := client.Run(applyRuntime); err != nil {
 		return fmt.Errorf("applying zot config and deployment: %w", err)
 	}
 	if _, err := client.Run("kubectl -n kipper-system rollout status deployment/zot --timeout=180s"); err != nil {
-		// Recreate means the old pod is already gone, so a pod that will not
-		// start leaves no registry at all, and the rollout status says only that
-		// it timed out. Carry the pod's own complaint into the error instead —
-		// rolling back would restore the previous revision, which on the upgrade
-		// that introduces auth and TLS is the unauthenticated registry.
+		// Include pod logs to help diagnose the rollout failure. Avoid rollback:
+		// an older revision may allow unauthenticated access.
 		return fmt.Errorf("waiting for zot: %w%s", err, zotRolloutDiagnosis(client))
 	}
 
-	// Drop superseded config objects (including the pre-auth zot-config and
-	// orphans from failed earlier runs). Cleanup only — the live config is
-	// excluded by name, and a failure here must not fail the install.
+	// Remove old ConfigMaps after a successful rollout, preserving the current
+	// one. Cleanup failures are warnings so installation can continue.
 	cleanupCmd := fmt.Sprintf(
 		"kubectl -n kipper-system delete configmap -l app=zot,app.kubernetes.io/managed-by=kipper --field-selector 'metadata.name!=%s' --ignore-not-found",
 		configMapName)
@@ -542,19 +539,17 @@ func InstallZot(client *ssh.Client) error {
 		return err
 	}
 	if caPEM == "" {
-		return fmt.Errorf("zot TLS secret carries no ca.crt")
+		return fmt.Errorf("zot TLS secret is missing ca.crt")
 	}
 	if err := writeZotNodeFiles(client, caPEM, clusterIP, pullPassword); err != nil {
 		return err
 	}
 
-	// Restart k3s to pick up the registries config. containerd and the
-	// running pods survive the restart, so zot stays up through it.
+	// Restart k3s to load the registry configuration.
 	if _, err := client.Run("systemctl restart k3s"); err != nil {
 		return fmt.Errorf("restarting k3s: %w", err)
 	}
-	// The restart takes the node out of the API for a moment, so the wait has
-	// to tolerate it being absent rather than treat that as a failure.
+	// Allow time for the node to become ready after the restart.
 	if err := WaitForNodeReady(client, 5*time.Minute); err != nil {
 		return fmt.Errorf("waiting for k3s after restart: %w", err)
 	}
