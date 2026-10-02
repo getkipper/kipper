@@ -57,10 +57,9 @@ func (p *RepairPlan) IsClean() bool {
 	return len(p.OrphanInCluster) == 0 && len(p.OrphanInStorage) == 0 && len(p.BrokenRepos) == 0
 }
 
-// minioListerImage is the mc client image used by the one-shot lister
-// Pod. Pinned to match the bucket bootstrap step in
+// Keep minioListerImage aligned with the bucket bootstrap client in
 // kip/internal/installer/backup.go.
-const minioListerImage = "minio/mc:RELEASE.2025-08-13T08-35-41Z"
+const minioListerImage = "ghcr.io/getkipper/mc:RELEASE.2025-08-13T08-35-41Z"
 
 // minioBackupBucket is the bucket Velero writes to. Matches the install
 // path in kip/internal/installer/backup.go.

@@ -21,6 +21,7 @@ import (
 
 	"github.com/getkipper/kipper/controller/pkg/datavolume"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
+	"github.com/getkipper/kipper/controller/pkg/servicecatalog"
 	"github.com/getkipper/kipper/kip/internal/auth"
 	"github.com/getkipper/kipper/kip/internal/deployer"
 	"github.com/getkipper/kipper/kip/internal/manifest"
@@ -204,9 +205,11 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 	cpu, _ := cmd.Flags().GetString("cpu")
 	version, _ := cmd.Flags().GetString("version")
 
-	// Validate service type
 	if !service.IsSupported(serviceType) {
 		return fmt.Errorf("unsupported service type %q (supported: %v)", serviceType, service.SupportedTypes())
+	}
+	if err := servicecatalog.CheckNewVersion(serviceType, version); err != nil {
+		return err
 	}
 
 	_, k8sClient, err := loadCurrentCluster()

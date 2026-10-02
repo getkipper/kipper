@@ -200,10 +200,8 @@ var catalog = map[string]serviceSpec{
 		},
 	},
 	"minio": { //nolint:gosec // env var names, not actual credentials
-		// MinIO tags a release rather than a version line, so there is no
-		// patch-floating tag to sit on the way postgres:16-alpine does.
-		// Upstream has published nothing since this release.
-		Image:          "minio/minio:RELEASE.2025-09-07T16-13-09Z",
+		// Keep the default aligned with the server release built in images/minio.
+		Image:          servicecatalog.MinIOImage(servicecatalog.MinIORelease),
 		Port:           9000,
 		DefaultStorage: "10Gi",
 		EnvVars:        map[string]string{},
@@ -494,9 +492,11 @@ func (m *Manager) Update(ctx context.Context, namespace, name string, opts Optio
 
 	container := &ss.Spec.Template.Spec.Containers[0]
 
-	// Update image version
 	if opts.ImageVersion != "" {
 		serviceType := ss.Labels[labels.ServiceType]
+		if err := servicecatalog.CheckNewVersion(serviceType, opts.ImageVersion); err != nil {
+			return nil, err
+		}
 		spec, ok := catalog[serviceType]
 		if ok {
 			newImage := imageWithVersion(spec.Image, opts.ImageVersion)

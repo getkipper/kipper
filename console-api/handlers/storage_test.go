@@ -47,7 +47,7 @@ func newMinioStatefulSet() *appsv1.StatefulSet {
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
-						{Name: "minio", Image: "minio/minio:RELEASE.2025-09-07T16-13-09Z"},
+						{Name: "minio", Image: "ghcr.io/getkipper/minio:RELEASE.2025-09-07T16-13-09Z"},
 					},
 				},
 			},

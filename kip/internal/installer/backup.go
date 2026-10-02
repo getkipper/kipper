@@ -11,13 +11,10 @@ import (
 
 const veleroChartVersion = "12.0.0"
 
-// In-cluster MinIO image pins. minio/minio is archived upstream as of
-// 2026; these are the last standard (non-cpuv1) community RELEASE tags
-// and are pinned so installs are reproducible instead of drifting with
-// :latest.
+// Keep these pins aligned with the server and client releases built in images/minio.
 const (
-	minioServerImage = "minio/minio:RELEASE.2025-09-07T16-13-09Z"
-	minioClientImage = "minio/mc:RELEASE.2025-08-13T08-35-41Z"
+	minioServerImage = "ghcr.io/getkipper/minio:RELEASE.2025-09-07T16-13-09Z"
+	minioClientImage = "ghcr.io/getkipper/mc:RELEASE.2025-08-13T08-35-41Z"
 )
 
 // MinIO credential Secret coordinates. The root password is generated
