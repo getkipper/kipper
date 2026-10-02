@@ -7,6 +7,10 @@ Its distributed binaries and container images include the third-party open-sourc
 
 `github.com/go-sql-driver/mysql` is licensed under the Mozilla Public License 2.0 (MPL-2.0) and is included unmodified. Under MPL-2.0 section 3.2, its Source Code Form is available at https://github.com/go-sql-driver/mysql/tree/v1.9.3. Kipper's own code is not covered by the MPL-2.0; the licence applies only to that component's own files. The full licence text is included in the Go components section below.
 
+## GNU Affero General Public License 3.0 components
+
+Kipper's registry serves container images of the MinIO server (`ghcr.io/getkipper/minio`, release RELEASE.2025-09-07T16-13-09Z) and the MinIO client (`ghcr.io/getkipper/mc`, release RELEASE.2025-08-13T08-35-41Z). Both are licensed under the GNU Affero General Public License 3.0 (AGPL-3.0) and are built unmodified from their upstream source. Under AGPL-3.0, the Corresponding Source is available at https://github.com/minio/minio/tree/RELEASE.2025-09-07T16-13-09Z and https://github.com/minio/mc/tree/RELEASE.2025-08-13T08-35-41Z, and the build recipe is `images/minio` in this repository. Each image carries, under `/licenses`, the full licence text, the attributions and licences of the dependencies built into it (upstream's `CREDITS`), and these source directions. Kipper's own code is not covered by the AGPL-3.0; it runs these images as separate programs.
+
 ## Go components (92)
 
 ### filippo.io/edwards25519 v1.1.1
