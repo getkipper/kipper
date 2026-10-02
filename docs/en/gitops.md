@@ -146,7 +146,7 @@ automatic inference; see [Health checks and rollouts](/en/deploying-apps#health-
 | `type` | `http`, `tcp` or `none`. Required when the block is present. `none` disables the app readiness check |
 | `path` | The path an `http` check requests. Starts with `/`, no spaces, up to 1024 characters. Supported only for `http` |
 | `port` | The port to check. Defaults to the app port, and cannot be the instance proxy's port (app port + 10000) |
-| `startupTimeoutSeconds` | Time allowed for a running pod to become ready before it is reported as stuck: 10-3600 seconds, default 300 |
+| `startupTimeoutSeconds` | Time from pod creation to readiness before the pod is reported as stuck, including image pulls: 10-3600 seconds, default 300 |
 | `timeoutSeconds` | Timeout for each check: 1-60 seconds, default 2 |
 
 `none` accepts `startupTimeoutSeconds` but no path, port, or check timeout.

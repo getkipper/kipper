@@ -463,7 +463,7 @@ kip app update api --health-path /actuator/health/readiness --health-startup-tim
 | `--health` | No* | Health check type: `http`, `tcp`, `none` (disable the app readiness check), or `auto` to remove a declared check |
 | `--health-path` | No* | Path for an `http` check, e.g. `/ready`. Selects `http` when `--health` is not given |
 | `--health-port` | No* | Port to check, when it is not the app port |
-| `--health-startup-timeout` | No* | Time allowed for a running pod to become ready before it is reported as stuck, in seconds (default 300) |
+| `--health-startup-timeout` | No* | Seconds from pod creation to readiness before the pod is reported as stuck, including image pulls (default 300) |
 | `--health-timeout` | No* | Timeout for each check in seconds (default 2) |
 | `--project` | No | Project name |
 | `--environment` | No | Target environment |
