@@ -160,6 +160,24 @@ def render(go, npm):
                    "applies only to that component's own files. The full licence "
                    "text is included in the Go components section below.")
         out.append("")
+    out.append("## GNU Affero General Public License 3.0 components")
+    out.append("")
+    out.append("Kipper's registry serves container images of the MinIO server "
+               "(`ghcr.io/getkipper/minio`, release RELEASE.2025-09-07T16-13-09Z) "
+               "and the MinIO client (`ghcr.io/getkipper/mc`, release "
+               "RELEASE.2025-08-13T08-35-41Z). Both are licensed under the GNU "
+               "Affero General Public License 3.0 (AGPL-3.0) and are built "
+               "unmodified from their upstream source. Under AGPL-3.0, the "
+               "Corresponding Source is available at "
+               "https://github.com/minio/minio/tree/RELEASE.2025-09-07T16-13-09Z "
+               "and https://github.com/minio/mc/tree/RELEASE.2025-08-13T08-35-41Z, "
+               "and the build recipe is `images/minio` in this repository. Each "
+               "image carries, under `/licenses`, the full licence text, the "
+               "attributions and licences of the dependencies built into it "
+               "(upstream's `CREDITS`), and these source directions. Kipper's "
+               "own code is not covered by the AGPL-3.0; it runs these images "
+               "as separate programs.")
+    out.append("")
     out.append(f"## Go components ({len(go)})")
     out.append("")
     for c in go:

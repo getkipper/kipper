@@ -1,0 +1,97 @@
+name: Build and publish the MinIO images
+
+# Preserve published release tags so existing pins keep the same image.
+# Publishing a changed build requires a new tag.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'images/minio/**'
+      - '.github/workflows/build-minio-images.yml'
+  workflow_dispatch:
+
+# Serialize workflow runs across refs to avoid racing the tag check and push.
+concurrency:
+  group: build-minio-images
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  ORG: getkipper
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The image name doubles as the upstream repository name (minio/minio,
+          # minio/mc), which the labels below link to.
+          - image: minio
+            dockerfile: images/minio/minio.Dockerfile
+            release: RELEASE.2025-09-07T16-13-09Z
+          - image: mc
+            dockerfile: images/minio/mc.Dockerfile
+            release: RELEASE.2025-08-13T08-35-41Z
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check whether ${{ matrix.image }}:${{ matrix.release }} is published
+        id: published
+        # Treat only "not found" as an absent tag; retry other errors and fail
+        # if publication status stays unknown to protect existing releases.
+        run: |
+          ref="$REGISTRY/$ORG/${{ matrix.image }}:${{ matrix.release }}"
+          for attempt in 1 2 3; do
+            if out="$(docker buildx imagetools inspect "$ref" 2>&1)"; then
+              echo "$ref is published"
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if echo "$out" | grep -q 'not found'; then
+              echo "$ref is not published yet"
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "$out"
+            sleep $((attempt * 10))
+          done
+          echo "::error::could not tell whether $ref is published"
+          exit 1
+
+      - name: Build and push ${{ matrix.image }}
+        if: steps.published.outputs.exists == 'false'
+        uses: docker/build-push-action@v7
+        with:
+          context: images/minio
+          file: ${{ matrix.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            RELEASE=${{ matrix.release }}
+            KIPPER_REVISION=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/getkipper/kipper
+            org.opencontainers.image.licenses=AGPL-3.0-only
+            org.opencontainers.image.version=${{ matrix.release }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.url=https://github.com/minio/${{ matrix.image }}/tree/${{ matrix.release }}
+            org.opencontainers.image.documentation=https://github.com/getkipper/kipper/tree/${{ github.sha }}/images/minio
+            org.opencontainers.image.description=MinIO ${{ matrix.image }} ${{ matrix.release }}, built unmodified from https://github.com/minio/${{ matrix.image }}/tree/${{ matrix.release }}; build recipe in getkipper/kipper images/minio; source directions in /licenses/SOURCE.md
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.ORG }}/${{ matrix.image }}:${{ matrix.release }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
