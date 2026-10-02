@@ -1,9 +1,5 @@
-// Package rollout answers whether a Deployment has finished rolling the spec it
-// was last given. The console-api reconciler gates a host cutover on it and kip
-// gates an upgrade step on it, and both have to mean the same thing by "ready":
-// an upgrade that reported success on a weaker condition than the cutover
-// requires would hand the operator a green tick over a cluster that never
-// started the new code.
+// Package rollout shares Deployment readiness and progress checks between
+// the CLI and controllers.
 package rollout
 
 import (
@@ -29,10 +25,45 @@ func Ready(dep *appsv1.Deployment) bool {
 		st.UnavailableReplicas == 0
 }
 
-// Failed reports whether Kubernetes has given up on the rollout. This is the
-// signal that waiting longer is pointless: a pod that cannot be admitted or
-// keeps crashing never becomes available, and with a surge-only strategy the old
-// pod keeps serving, so nothing else makes the failure visible.
+// Settled requires Ready and a total replica count matching the desired
+// count, so old replicas still reported during scale-down keep it false.
+func Settled(dep *appsv1.Deployment) bool {
+	if !Ready(dep) {
+		return false
+	}
+	want := int32(1)
+	if dep.Spec.Replicas != nil {
+		want = *dep.Spec.Replicas
+	}
+	return dep.Status.Replicas == want
+}
+
+// Finished accepts a settled Deployment or a current generation with the
+// desired replica counts and a NewReplicaSetAvailable condition. This keeps
+// later pod failures separate from rollout progress.
+func Finished(dep *appsv1.Deployment) bool {
+	if Settled(dep) {
+		return true
+	}
+	if dep == nil || dep.Status.ObservedGeneration < dep.Generation {
+		return false
+	}
+	want := int32(1)
+	if dep.Spec.Replicas != nil {
+		want = *dep.Spec.Replicas
+	}
+	if dep.Status.UpdatedReplicas != want || dep.Status.Replicas != want {
+		return false
+	}
+	for _, c := range dep.Status.Conditions {
+		if c.Type == appsv1.DeploymentProgressing {
+			return c.Reason == "NewReplicaSetAvailable"
+		}
+	}
+	return false
+}
+
+// Failed reports whether Kubernetes recorded ProgressDeadlineExceeded.
 func Failed(dep *appsv1.Deployment) bool {
 	if dep == nil {
 		return false

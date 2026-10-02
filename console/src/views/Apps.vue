@@ -10,6 +10,7 @@ import { useToast } from '@/composables/useToast'
 import { useModal } from '@/composables/useModal'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import type { CreateAppPayload } from '@/api/types'
+import { rolloutLabel } from '@/utils/rollout'
 
 const apps = useAppsStore()
 const projects = useProjectsStore()
@@ -384,6 +385,12 @@ function openApp(appName: string, namespace?: string) {
             <span class="inline-block h-2 w-2 rounded-full" :class="statusColor(app.status)" />
             <span :class="statusTextColor(app.status)">{{ app.status }}</span>
           </span>
+
+          <span
+            v-if="rolloutLabel(app)"
+            class="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-400"
+            :title="app.rollout_waiting"
+          >{{ rolloutLabel(app) }}</span>
 
           <!-- Replicas -->
           <span class="font-mono text-xs text-slate-500 dark:text-slate-400">

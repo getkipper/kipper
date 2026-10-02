@@ -1,0 +1,21 @@
+metadata:
+  labels:
+    app: shop
+    app.kubernetes.io/managed-by: kipper
+spec:
+  containers:
+  - envFrom:
+    - secretRef:
+        name: gen-1
+        optional: false
+    image: registry.example.com/shop:1.2.3
+    name: shop
+    ports:
+    - containerPort: 8080
+    resources:
+      limits:
+        cpu: 100m
+        memory: 128Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi

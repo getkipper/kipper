@@ -597,8 +597,11 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 				return "", reserveErr
 			}
 		}
-		_, err := dyn.Resource(res.GVR).Namespace(namespace).Create(ctx, objectForCreate(name, res.Object), metav1.CreateOptions{})
+		written, err := dyn.Resource(res.GVR).Namespace(namespace).Create(ctx, objectForCreate(name, res.Object), metav1.CreateOptions{})
 		if err == nil {
+			if err := deployer.RequireHealthStored(written, sendsHealth(res)); err != nil {
+				return "", err
+			}
 			return "created", nil
 		}
 		// AlreadyExists proves the workload is there, so the reservation just
@@ -653,8 +656,11 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 			}
 		}
 		existing.Object["spec"] = newSpec
-		_, err = dyn.Resource(res.GVR).Namespace(namespace).Update(ctx, existing, metav1.UpdateOptions{})
-		return err
+		written, err := dyn.Resource(res.GVR).Namespace(namespace).Update(ctx, existing, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+		return deployer.RequireHealthStored(written, sendsHealth(res))
 	})
 	if err != nil {
 		return "", err
@@ -795,4 +801,12 @@ func workloadKindOf(gvr schema.GroupVersionResource) string {
 	default:
 		return ""
 	}
+}
+
+func sendsHealth(res manifest.Resource) bool {
+	if res.Object.GetKind() != "App" {
+		return false
+	}
+	_, found, _ := unstructured.NestedMap(res.Object.Object, "spec", "health")
+	return found
 }

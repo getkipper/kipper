@@ -806,12 +806,13 @@ func mergeEnv(c *corev1.Container, envs []corev1.EnvVar) bool {
 // ensureSurgeOnlyStrategy sets a maxUnavailable:0, maxSurge:1 rolling update so a
 // rollout never drops below full capacity. It reports whether it changed the spec.
 func ensureSurgeOnlyStrategy(dep *appsv1.Deployment) bool {
-	zero := intstr.FromInt(0)
-	one := intstr.FromInt(1)
+	zero := intstr.FromInt32(0)
+	one := intstr.FromInt32(1)
 	cur := dep.Spec.Strategy
+	// Compared as values, not with IntValue, which reads "25%" as 0.
 	if cur.Type == appsv1.RollingUpdateDeploymentStrategyType && cur.RollingUpdate != nil &&
-		cur.RollingUpdate.MaxUnavailable != nil && cur.RollingUpdate.MaxUnavailable.IntValue() == 0 &&
-		cur.RollingUpdate.MaxSurge != nil && cur.RollingUpdate.MaxSurge.IntValue() == 1 {
+		cur.RollingUpdate.MaxUnavailable != nil && *cur.RollingUpdate.MaxUnavailable == zero &&
+		cur.RollingUpdate.MaxSurge != nil && *cur.RollingUpdate.MaxSurge == one {
 		return false
 	}
 	dep.Spec.Strategy = appsv1.DeploymentStrategy{

@@ -65,9 +65,10 @@ func TestAutomaticAppFollowsItsRecommendation(t *testing.T) {
 	c := crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(app, appTuning(app, "384Mi")).Build()
 	r := &AppReconciler{Client: c, Scheme: testScheme()}
 
-	for pass := 0; pass < 2; pass++ {
-		require.NoError(t, r.reconcileDeployment(ctx, app, nil, "gen-1", ""))
-	}
+	require.NoError(t, r.reconcileDeployment(ctx, app, nil, "gen-1", ""))
+	// The tuner waits for the first rollout to finish.
+	settleDeployment(t, c, types.NamespacedName{Namespace: app.Namespace, Name: app.Name})
+	require.NoError(t, r.reconcileDeployment(ctx, app, nil, "gen-1", ""))
 	req, lim := appMemory(t, c, app)
 	assert.Equal(t, "384Mi", req)
 	assert.Equal(t, "384Mi", lim)
@@ -89,9 +90,10 @@ func TestAppValueFromTheOldAutoSizerFollowsTheRecommendation(t *testing.T) {
 	require.Equal(t, resourcebounds.Automatic, spec.MemoryRequest.Source, "the value must read as written by the old auto-sizer")
 	r := &AppReconciler{Client: c, Scheme: testScheme()}
 
-	for pass := 0; pass < 2; pass++ {
-		require.NoError(t, r.reconcileDeployment(ctx, &stored, nil, "gen-1", ""))
-	}
+	require.NoError(t, r.reconcileDeployment(ctx, &stored, nil, "gen-1", ""))
+	// The tuner waits for the first rollout to finish.
+	settleDeployment(t, c, types.NamespacedName{Namespace: app.Namespace, Name: app.Name})
+	require.NoError(t, r.reconcileDeployment(ctx, &stored, nil, "gen-1", ""))
 	req, lim := appMemory(t, c, &stored)
 	assert.Equal(t, "256Mi", req)
 	assert.Equal(t, "256Mi", lim)

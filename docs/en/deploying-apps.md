@@ -78,6 +78,7 @@ kip app deploy \
 | `--route` | No | — | Path route group (e.g. `blog/api/users`) |
 | `--profile` | No | `standard` | Resource profile: `lightweight`, `standard`, `compute-heavy`, `memory-heavy`, `jvm` |
 | `--cpu` / `--memory` | No | — | Fixed CPU/memory size: sets request and limit to the same value and selects the `custom` profile |
+| `--health` and `--health-*` | No | automatic | How Kipper checks whether a pod is ready for traffic. See [Health checks and rollouts](#health-checks-and-rollouts) |
 
 Secrets passed at deploy time are written before the app starts, so the first pod boot already sees them. A key set via `--secret` behaves exactly like one set with `kip app secret set` afterwards: masked in the console and CLI listings, kept out of `kip export`, with the previous value retained for `kip app secret rollback`. Passing the same key through both `--env` and `--secret` fails the deploy.
 
@@ -371,7 +372,7 @@ Kipper keeps the 3 most recent versions of each deployment. Kubernetes can roll 
 kip app restart api
 ```
 
-Triggers a rolling restart. Pods are replaced one at a time with zero downtime. Useful when you need to pick up new environment variables or pull a fresh `:latest` image.
+Triggers a rolling restart, which replaces the pods as described in [How pods are replaced](#how-pods-are-replaced). With a [health check](#health-checks-and-rollouts) in place, a new pod counts as ready once your app passes the check. Without one, Kubernetes counts a pod as ready as soon as its container starts. Useful when you need to pick up new environment variables or pull a fresh `:latest` image.
 
 ### Delete an app
 
@@ -380,6 +381,100 @@ kip app delete api
 ```
 
 Removes the Deployment, Service, Ingress, and all associated Secrets.
+
+## Health checks and rollouts
+
+Kipper uses rollouts to deploy apps and apply image, resource, or readiness changes. A health check determines when a pod is ready to receive traffic. How many old pods remain available during the rollout depends on the replica count; see [How pods are replaced](#how-pods-are-replaced).
+
+A failed readiness check keeps traffic away from the pod and can delay the rollout. It does not restart the container.
+
+### What Kipper checks on its own
+
+If you omit the check, Kipper infers one during a rollout, such as an image update, restart, or resource change. It tries a TCP connection to the app port on up to three running pods, prioritizing ready pods and older app containers.
+
+- **A ready pod accepts a connection:** new pods get a TCP check on the app port. Kipper keeps this choice for later rollouts.
+- **No ready pod accepts, and an app container running for at least 10 minutes refuses a connection:** Kipper adds no app check and tries again on the next rollout.
+- **Results are inconclusive**, such as timeouts or refusals only from younger containers: the rollout proceeds without an app check, and Kipper tries again next time.
+
+A background worker that never listens on a port can therefore deploy without a check. A new app has no running pods to inspect, so its first deploy has no automatic app check. A later rollout gets one if a ready pod accepts connections on the app port.
+
+Checks connect to the pod's IP address. An app listening only on `127.0.0.1` can receive traffic through the [instance proxy](#instance-id-header), but neither an automatic nor a declared check can reach that listener. To use a check, make the checked endpoint listen on `0.0.0.0`. A separate health endpoint can use `--health-port`.
+
+### Declaring a check
+
+Declare an HTTP check when an open port does not mean the app is ready, for example when it still needs to warm caches or connect to a database. A declared check also lets you allow more startup time.
+
+```bash
+kip app update api --health-path /actuator/health/readiness --health-startup-timeout 600
+kip app update queue-worker --health none
+kip app update api --health auto      # remove the declared check and let Kipper decide
+```
+
+| Type | What a pod must do |
+|---|---|
+| `http` | Respond to a `GET` on the configured path with HTTP 200-399 |
+| `tcp` | Accept a TCP connection on the configured port |
+| `none` | No app readiness check; intended for apps that serve no traffic |
+
+| Flag | `kipper.yaml` field | Default | What it sets |
+|---|---|---|---|
+| `--health` | `type` | automatic | `http`, `tcp` or `none`. `auto` removes a declared check |
+| `--health-path` | `path` | — | HTTP check path: starts with `/`, contains no whitespace, and is at most 1024 characters. Implies `http` when `--health` is omitted |
+| `--health-port` | `port` | the app port | Port to check, such as a separate management port. Cannot be the instance proxy's port (app port + 10000) |
+| `--health-startup-timeout` | `startupTimeoutSeconds` | 300 | Time allowed for a running pod to become ready before it is reported as stuck: 10-3600 seconds |
+| `--health-timeout` | `timeoutSeconds` | 2 | Timeout for each check: 1-60 seconds |
+
+These flags work with both `kip app deploy` and `kip app update`. Updates merge into the existing check, so `--health-timeout 5` preserves its path. Switching types clears unsupported settings: `none` accepts a startup timeout but no path, port, or check timeout. Changes to the readiness probe trigger a rollout. Changing only the startup timeout does not restart pods.
+
+Older clusters may silently discard health settings. The CLI and console verify that the cluster stored a declared check and ask you to run `kip upgrade` if it was dropped. In a manifest, put the settings under `health:`; see [The health block](/en/gitops#the-health-block).
+
+Kipper configures checks every 5 seconds. Three consecutive failures mark a pod unready and remove it from traffic; one successful check makes it ready again. Detection time depends on the check timeout.
+
+Git apps run a placeholder page until their first build is deployed. While it runs, any declared HTTP or TCP check uses a TCP check on the app port.
+
+In the console, open the app's **Settings** tab and use **Health check**. Choose Automatic, Port check (TCP), HTTP path, or None, then click **Save health check**. The status line shows the current check or whether a saved change is still being applied.
+
+### How pods are replaced
+
+New apps use Kubernetes' default rolling-update strategy. With one to three replicas, Kubernetes adds one extra pod at a time and waits for a replacement to become ready before stopping an old pod. With four or more replicas, it may also stop up to a quarter of the pods before replacements are ready. This can free capacity for the rollout. Existing Deployments retain their configured strategy.
+
+With a health check, a pod becomes ready after passing it. Without an app check, the app container counts as ready once it starts; the instance proxy has its own check.
+
+A single-replica app temporarily needs capacity for a second pod. If no node has room, the rollout waits while the existing pod continues serving, provided it remains healthy.
+
+On supported clusters running Kubernetes 1.30 or newer, each container waits 10 seconds before receiving the termination signal. This gives routing changes time to propagate. The pod has a total shutdown grace period of 40 seconds, including that delay. The instance proxy waits for active HTTP requests to finish within the remaining time.
+
+### When a rollout waits
+
+The App's `RolloutComplete` condition reports rollout progress separately from pod health. A rollout is complete when all replicas have been updated and are available, or Kubernetes has recorded the current revision as available with the expected replica counts. A pod that crashes afterwards affects app health but does not reopen the rollout. A scale-up can still show a waiting rollout if a new pod cannot be scheduled or created.
+
+| Reason | What it means | What to do |
+|---|---|---|
+| `InProgress` | Pods are being replaced or scaled | Wait for the rollout to finish |
+| `Unschedulable` | A new pod cannot be scheduled; the message includes the scheduler's reason | Follow the message. For insufficient CPU or memory, lower the request or add capacity |
+| `QuotaExceeded` | The project quota blocks new pods | Lower the request or raise the project quota |
+| `PodsRefused` | The cluster rejected a new pod, for example because of an admission policy | Resolve the error in the message |
+| `NotBecomingReady` | A running pod has not become ready within the startup timeout | Inspect its logs and check settings. For a slow starter, increase `--health-startup-timeout`; for an inferred check, use `--health tcp --health-startup-timeout 600` |
+| `DeadlineExceeded` | Kubernetes reported no progress within the deadline: at least 10 minutes, or the startup timeout plus 5 minutes | Inspect the message and pod logs |
+| `NotApplied` | Kipper could not apply the latest change | Resolve the reported error; the App's other conditions may provide more detail |
+
+`kip app list` prints a note for each app still rolling out:
+
+```
+  !   api is still rolling out: A new pod cannot be placed: 0/1 nodes are available: 1 Insufficient memory. Any healthy current pods continue serving. Lower the CPU or memory request, or add capacity.
+```
+
+In the console, the Apps list shows **Rolling out** or **Rollout waiting**, with details on hover. The app panel shows an amber banner when a pod cannot be scheduled. Kipper records a `RolloutWaitingForCapacity` warning event when this state begins. A rollout that exceeds its progress deadline also raises an [alert](/en/alerts#stalled-rollouts) with the available diagnostic details.
+
+Automatic resource sizing normally waits during a rollout. See [Resource Management](/en/resource-management#rollouts) for the exceptions.
+
+### Existing apps after an upgrade
+
+These platform changes do not restart existing apps during an upgrade. Apps adopt the new readiness and shutdown settings on their next image change, restart, or other pod-template change. Run `kip app restart <app>` to apply them immediately.
+
+If Kipper selects a check, the first rollout uses it for the new pods. Pods created before the upgrade lack the shutdown delay; their replacements use it on supported clusters. See [Upgrade scope](/en/maintenance#what-an-upgrade-moves-and-what-it-does-not) for downgrade behavior.
+
+These app rollout settings do not apply to functions, jobs, or services.
 
 ## Browsing files
 
@@ -406,6 +501,8 @@ Client → Traefik → Service:8080 → Sidecar(:18080) → Your app(:8080)
 ```
 
 The sidecar listens on an offset port (your app's port + 10000). The Kubernetes Service routes traffic to the sidecar via `targetPort`, and the sidecar forwards it to your app on localhost. Your app keeps listening on its original port and never knows the sidecar is there.
+
+The sidecar has its own TCP readiness check. A pod receives traffic when both containers are ready; without an app check, the app container counts as ready once it starts. On shutdown, the sidecar waits for active HTTP requests to finish within the pod's [shutdown grace period](#how-pods-are-replaced).
 
 The header value is a short hash of the pod name (8 hex characters). It doesn't reveal the full pod name or any infrastructure details. For example:
 

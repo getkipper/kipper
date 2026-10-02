@@ -56,6 +56,8 @@ type Options struct {
 	GitCredentials string // name of the K8s Secret with git credentials
 	BuildMemory    string // build container memory limit override, e.g. "6Gi"
 	BuildCPU       string // build container CPU limit override, e.g. "2"
+	// Health updates the declared check; the zero value preserves it.
+	Health HealthEdit
 
 	// Changed marks which deploy flags the user explicitly set (keyed by flag
 	// name: "image", "replicas", "route", "no-security-headers", "rate-limit",
@@ -109,6 +111,12 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) error {
 		}
 
 		if errors.IsNotFound(getErr) {
+			spec := buildSpec(opts, true)
+			if opts.Health.Any() {
+				if err := applyHealthEdit(spec, opts.Health); err != nil {
+					return err
+				}
+			}
 			app := &unstructured.Unstructured{
 				Object: map[string]interface{}{
 					"apiVersion": "kipper.run/v1alpha1",
@@ -121,12 +129,13 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) error {
 							labels.ManagedBy: labels.Kipper,
 						},
 					},
-					"spec": buildSpec(opts, true),
+					"spec": spec,
 				},
 			}
-			_, err := apps.Create(ctx, app, metav1.CreateOptions{})
+			written, err := apps.Create(ctx, app, metav1.CreateOptions{})
 			if err == nil {
-				return nil
+				_, sent := spec["health"]
+				return RequireHealthStored(written, sent)
 			}
 			if !errors.IsAlreadyExists(err) {
 				return fmt.Errorf("creating app: %w", err)
@@ -173,11 +182,18 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) error {
 			}
 		}
 		mergeInto(merged, buildSpec(opts, false))
+		if opts.Health.Any() {
+			if err := applyHealthEdit(merged, opts.Health); err != nil {
+				return err
+			}
+		}
 		existing.Object["spec"] = merged
-		if _, err := apps.Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
+		written, err := apps.Update(ctx, existing, metav1.UpdateOptions{})
+		if err != nil {
 			return fmt.Errorf("updating app: %w", err)
 		}
-		return nil
+		_, sent := merged["health"]
+		return RequireHealthStored(written, sent && opts.Health.Any())
 	}); err != nil {
 		// See function.Create: a reservation backfilled for an app that exists
 		// must not be rolled back.
@@ -638,6 +654,10 @@ type AppStatus struct {
 	// every respect it reports about itself while the database it cannot run
 	// without has been down for days.
 	BrokenDependency string
+
+	// RolloutWaiting explains an incomplete rollout. It can report a stalled
+	// update even when the existing pods are healthy.
+	RolloutWaiting string
 }
 
 // appStatusFromCR derives the CLI's display status from an App CR. Status
@@ -667,12 +687,26 @@ func appStatusFromCR(cr *unstructured.Unstructured) AppStatus {
 	}
 
 	return AppStatus{
-		Name:     cr.GetName(),
-		Status:   strings.ToLower(phase),
-		Image:    image,
-		Replicas: replicas,
-		Ready:    ready,
+		Name:           cr.GetName(),
+		Status:         strings.ToLower(phase),
+		Image:          image,
+		Replicas:       replicas,
+		Ready:          ready,
+		RolloutWaiting: rolloutWaiting(cr),
 	}
+}
+
+func rolloutWaiting(cr *unstructured.Unstructured) string {
+	conditions, _, _ := unstructured.NestedSlice(cr.Object, "status", "conditions")
+	for _, c := range conditions {
+		cond, ok := c.(map[string]interface{})
+		if !ok || cond["type"] != "RolloutComplete" || cond["status"] != "False" {
+			continue
+		}
+		message, _ := cond["message"].(string)
+		return message
+	}
+	return ""
 }
 
 // RemoveGitSource detaches an app's git repository, and reports whether there

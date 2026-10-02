@@ -492,6 +492,33 @@ export async function updateSettings(project: string, app: string, settings: App
   await client.put(`/projects/${project}/apps/${app}/settings`, settings)
 }
 
+export type HealthCheckType = 'auto' | 'http' | 'tcp' | 'none'
+
+export interface HealthCheck {
+  type: HealthCheckType
+  path?: string
+  port?: number
+  startup_timeout_seconds?: number
+  timeout_seconds?: number
+}
+
+// The check Kipper applies to new pods, and where it came from.
+export interface HealthCheckStatus {
+  type: 'http' | 'tcp' | 'none'
+  port?: number
+  path?: string
+  source: 'declared' | 'applying' | 'inferred' | 'pending' | 'building'
+}
+
+export async function fetchHealthCheck(project: string, app: string): Promise<{ health: HealthCheck; status: HealthCheckStatus | null }> {
+  const { data } = await client.get<{ health: HealthCheck; status: HealthCheckStatus | null }>(`/projects/${project}/apps/${app}/health-check`)
+  return data
+}
+
+export async function updateHealthCheck(project: string, app: string, health: HealthCheck): Promise<void> {
+  await client.put(`/projects/${project}/apps/${app}/health-check`, health)
+}
+
 export interface BasicAuthStatus {
   enabled: boolean
   users: string[]
@@ -558,6 +585,8 @@ export interface ContainerHealth {
 export interface PodHealth {
   name: string
   phase: string
+  // The scheduler's explanation when a pod has not been scheduled.
+  message?: string
   init_containers: ContainerHealth[]
   containers: ContainerHealth[]
 }

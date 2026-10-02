@@ -105,6 +105,7 @@ func exportApps(ctx context.Context, dynClient dynamic.Interface, namespace stri
 		app.ServiceBindings = exportBindings(spec)
 		app.Volumes = exportVolumeMounts(spec)
 		app.Autoscale = exportAutoscale(spec)
+		app.Health = exportHealth(spec)
 
 		m.Apps[name] = app
 	}
@@ -312,6 +313,27 @@ func exportAutoscale(spec map[string]interface{}) *AutoscaleSpec {
 		a.MemoryTarget = int32(v) //nolint:gosec // bounded by K8s
 	}
 	return a
+}
+
+// exportHealth exports declared checks only; automatic checks have no block.
+func exportHealth(spec map[string]interface{}) *HealthSpec {
+	h := extractMap(spec, "health")
+	if h == nil {
+		return nil
+	}
+	out := &HealthSpec{}
+	out.Type, _ = h["type"].(string)
+	out.Path, _ = h["path"].(string)
+	if v, ok := h["port"].(int64); ok {
+		out.Port = int32(v) //nolint:gosec // the CRD bounds it to a port
+	}
+	if v, ok := h["startupTimeoutSeconds"].(int64); ok {
+		out.StartupTimeoutSeconds = int32(v) //nolint:gosec // the CRD bounds it to an hour
+	}
+	if v, ok := h["timeoutSeconds"].(int64); ok {
+		out.TimeoutSeconds = int32(v) //nolint:gosec // the CRD bounds it to a minute
+	}
+	return out
 }
 
 // appName decides which credential names are the app's own. Those are machine

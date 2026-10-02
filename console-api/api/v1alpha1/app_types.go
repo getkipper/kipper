@@ -72,6 +72,10 @@ const ConditionEnvPublished = "EnvPublished"
 // created would make it die with the workload. Refusing it silently was not.
 const ConditionChildrenAdopted = "ChildrenAdopted"
 
+// ConditionRolloutComplete reports rollout progress separately from pod health.
+// A False condition explains why the latest change has not finished rolling out.
+const ConditionRolloutComplete = "RolloutComplete"
+
 // DataUpdatedAtAnnotation is stamped on a workload's env and secrets Secrets
 // whenever their data changes. A pod reads both via envFrom only at startup, so
 // comparing this to a pod's start time tells the console whether a restart is
@@ -80,6 +84,7 @@ const ConditionChildrenAdopted = "ChildrenAdopted"
 const DataUpdatedAtAnnotation = "kipper.run/data-updated-at"
 
 // AppSpec defines the desired state of a deployed application.
+// +kubebuilder:validation:XValidation:rule="!has(self.health) || !has(self.health.port) || self.health.port != self.port + 10000",message="health.port must not be port + 10000, which Kipper uses for the instance proxy"
 type AppSpec struct {
 	// Image is the container image to deploy.
 	Image string `json:"image"`
@@ -136,6 +141,63 @@ type AppSpec struct {
 	// +kubebuilder:validation:MaxItems=64
 	// +optional
 	Links []AppLink `json:"links,omitempty"`
+
+	// Health declares how Kipper checks whether a pod is ready for traffic.
+	// If omitted, Kipper infers a check; status.healthCheck reports the result.
+	// +optional
+	Health *AppHealth `json:"health,omitempty"`
+}
+
+// AppHealth declares the readiness check and rollout startup timeout.
+// +kubebuilder:validation:XValidation:rule="self.type == 'http' ? has(self.path) : !has(self.path)",message="path is required for an http check and allowed only there"
+// +kubebuilder:validation:XValidation:rule="self.type != 'none' || (!has(self.port) && !has(self.timeoutSeconds))",message="a check of type none takes no port or timeout"
+type AppHealth struct {
+	// Type is http (a GET returning 200-399), tcp (a successful connection),
+	// or none (no readiness check on the app container).
+	// +kubebuilder:validation:Enum=http;tcp;none
+	Type string `json:"type"`
+
+	// Path is the HTTP path to request, for an http check.
+	// +kubebuilder:validation:Pattern=`^/\S*$`
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	Path string `json:"path,omitempty"`
+
+	// Port is the port to check. It defaults to spec.port.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +optional
+	Port *int32 `json:"port,omitempty"`
+
+	// StartupTimeoutSeconds is the time allowed for a running pod to become
+	// ready before it is reported as stuck. The default is 300 seconds.
+	// +kubebuilder:validation:Minimum=10
+	// +kubebuilder:validation:Maximum=3600
+	// +optional
+	StartupTimeoutSeconds *int32 `json:"startupTimeoutSeconds,omitempty"`
+
+	// TimeoutSeconds is how long one check may take. It defaults to 2.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=60
+	// +optional
+	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
+}
+
+// AppHealthCheckStatus is the check Kipper applies to new pods, and where it
+// came from.
+type AppHealthCheckStatus struct {
+	// Type is http, tcp or none.
+	Type string `json:"type"`
+	// Port is the checked port, when there is a check.
+	// +optional
+	Port int32 `json:"port,omitempty"`
+	// Path is the HTTP path, for an http check.
+	// +optional
+	Path string `json:"path,omitempty"`
+	// Source is declared (spec.health), applying (the declared probe is not
+	// in the Deployment template yet), inferred (based on TCP connections),
+	// pending (inconclusive observations), or building (the Git placeholder).
+	Source string `json:"source"`
 }
 
 // AppLink is one app this app reaches.
@@ -456,6 +518,10 @@ type AppStatus struct {
 	// written relative to when a kubelet started a container.
 	// +optional
 	PublishedEnv string `json:"publishedEnv,omitempty"`
+
+	// HealthCheck is the check new pods must pass, as Kipper applies it.
+	// +optional
+	HealthCheck *AppHealthCheckStatus `json:"healthCheck,omitempty"`
 
 	// Conditions represent the latest available observations.
 	// +optional

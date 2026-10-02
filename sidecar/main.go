@@ -6,10 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
 func main() {
@@ -38,10 +42,37 @@ func main() {
 	proxy := newProxy(target, instanceID)
 
 	addr := ":" + listenPort
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("listen on %s: %v", addr, err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	log.Printf("sidecar listening on %s, forwarding to %s, instance-id=%s", addr, target, instanceID)
-	if err := http.ListenAndServe(addr, proxy); err != nil { //nolint:gosec // localhost-only sidecar
+	err = serve(ctx, ln, proxy)
+	stop()
+	if err != nil {
 		log.Fatalf("server failed: %v", err)
 	}
+}
+
+// serve answers on ln until ctx is cancelled, then stops accepting and waits
+// for in-flight requests to finish. The kubelet's grace period bounds the wait.
+func serve(ctx context.Context, ln net.Listener, handler http.Handler) error {
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	errs := make(chan error, 1)
+	go func() { errs <- srv.Serve(ln) }()
+	select {
+	case err := <-errs:
+		return err
+	case <-ctx.Done():
+	}
+	if err := srv.Shutdown(context.WithoutCancel(ctx)); err != nil {
+		return err
+	}
+	if err := <-errs; !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 func shortHash(s string) string {

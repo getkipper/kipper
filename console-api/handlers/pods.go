@@ -83,6 +83,7 @@ type containerHealth struct {
 type podHealth struct {
 	Name           string            `json:"name"`
 	Phase          string            `json:"phase"`
+	Message        string            `json:"message,omitempty"`
 	InitContainers []containerHealth `json:"init_containers"`
 	Containers     []containerHealth `json:"containers"`
 }
@@ -90,6 +91,16 @@ type podHealth struct {
 // workloadHealth answers "why is this workload not running".
 type workloadHealth struct {
 	Pods []podHealth `json:"pods"`
+}
+
+// schedulingMessage is the scheduler's reason a pod is not placed, or "".
+func schedulingMessage(pod *corev1.Pod) string {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse {
+			return c.Message
+		}
+	}
+	return ""
 }
 
 // Health reports current and last-terminated container state for every pod
@@ -116,6 +127,7 @@ func (p *Pods) Health(w http.ResponseWriter, r *http.Request) {
 		entry := podHealth{
 			Name:           pod.Name,
 			Phase:          string(pod.Status.Phase),
+			Message:        schedulingMessage(&pod),
 			InitContainers: containerHealthFor(pod.Status.InitContainerStatuses),
 			Containers:     containerHealthFor(pod.Status.ContainerStatuses),
 		}

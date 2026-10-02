@@ -1,0 +1,14 @@
+# Filled in by tests/e2e/rollout-gate-test.sh. The cluster builds the image
+# from this directory; no locally built image is required.
+project: rollout-gate
+environment: test
+apps:
+  slowstart:
+    port: 8080
+    replicas: 2
+    git:
+      url: ${REPO_URL}
+      branch: ${REPO_BRANCH}
+      context: tests/e2e/slowstart
+    route:
+      host: ${ROUTE_HOST}

@@ -173,6 +173,13 @@ func fullApp() AppSpec {
 			CPUTarget:    70,
 			MemoryTarget: 80,
 		},
+		Health: &HealthSpec{
+			Type:                  "http",
+			Path:                  "/actuator/health/readiness",
+			Port:                  8081,
+			StartupTimeoutSeconds: 600,
+			TimeoutSeconds:        3,
+		},
 	}
 }
 

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -1098,4 +1099,54 @@ func TestRefuseDuplicateResources_CatchesTheSameThingTwice(t *testing.T) {
 			resources: []manifest.Resource{appResource("api", map[string]interface{}{"image": "nginx"})}},
 	}
 	assert.NoError(t, refuseDuplicateResources(fine))
+}
+
+// Omitting a declared health check must appear in the list of fields
+// that apply would clear.
+func TestScanClears_ReportsADroppedHealthCheck(t *testing.T) {
+	dyn := fakeWorkloadDynamic()
+	seeded := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "kipper.run/v1alpha1",
+		"kind":       "App",
+		"metadata":   map[string]interface{}{"name": "shop", "namespace": "default"},
+		"spec": map[string]interface{}{
+			"image":  "shop:v1",
+			"port":   int64(8080),
+			"health": map[string]interface{}{"type": "http", "path": "/ready"},
+		},
+	}}
+	_, err := dyn.Resource(deployer.AppGVR).Namespace("default").Create(context.Background(), seeded, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	res := appResource("shop", map[string]interface{}{"image": "shop:v1", "port": int64(8080)})
+
+	changes, err := scanChanges(context.Background(), dyn, "default", []manifest.Resource{res})
+	require.NoError(t, err)
+	clears := clearsOf(changes)
+	require.NotEmpty(t, clears)
+	var paths []string
+	for _, c := range clears {
+		paths = append(paths, c.change.Path)
+	}
+	assert.Contains(t, strings.Join(paths, " "), "health", "the dropped check is named")
+}
+
+// Report an error if the API server silently discards a declared check.
+func TestApplyResource_NoticesAnOlderSchemaDroppingHealth(t *testing.T) {
+	dyn := fakeWorkloadDynamic()
+	dyn.PrependReactor("create", "apps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if u, ok := action.(k8stesting.CreateAction).GetObject().(*unstructured.Unstructured); ok {
+			unstructured.RemoveNestedField(u.Object, "spec", "health")
+		}
+		return false, nil, nil
+	})
+	res := appResource("shop", map[string]interface{}{
+		"image": "shop:v1", "port": int64(8080),
+		"health": map[string]interface{}{"type": "tcp"},
+	})
+
+	_, err := applyResource(context.Background(), dyn, "default", res, false, nil, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kip upgrade")
 }

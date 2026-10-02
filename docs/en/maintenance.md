@@ -88,8 +88,19 @@ Check this table before upgrading to see which components are included and which
 | **k3s** | **No** | Re-run `kip install` |
 | API server arguments and operator login | Yes, over SSH, even with `--skip-system` | — |
 | **Host firewall, kernel sysctls** | **No** | Fresh install only |
+| Running apps | No rollout for these platform changes | New readiness and shutdown settings apply on the next pod rollout |
 
-Four of those need more than a row.
+The following components need additional explanation.
+
+**Apps** adopt new [readiness and shutdown settings](/en/deploying-apps#health-checks-and-rollouts)
+on their next pod rollout. These settings alone do not restart apps during an upgrade.
+Run `kip app restart <app>` to apply them immediately. If a check is selected, new pods must
+pass it before receiving traffic. Pods created before the upgrade lack the shutdown delay;
+replacement pods use it on supported clusters.
+
+Downgrading to a controller that removes these settings can trigger app rollouts. If the cluster
+rejects the server-side dry run used to identify rollout changes, Kipper preserves the existing
+platform settings and records an `AdoptionUnavailable` warning event on the App.
 
 **The CRD schemas** move unless this kip is older than the cluster. Two things
 stop that, and both refuse before anything is written, so nothing is ever

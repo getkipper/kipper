@@ -221,6 +221,21 @@ func convertApp(name, namespace string, app AppSpec) Resource {
 		spec["autoscale"] = as
 	}
 
+	if app.Health != nil {
+		health := map[string]interface{}{"type": app.Health.Type}
+		if app.Health.Path != "" {
+			health["path"] = app.Health.Path
+		}
+		for key, v := range map[string]int32{
+			"port": app.Health.Port, "startupTimeoutSeconds": app.Health.StartupTimeoutSeconds, "timeoutSeconds": app.Health.TimeoutSeconds,
+		} {
+			if v != 0 {
+				health[key] = int64(v)
+			}
+		}
+		spec["health"] = health
+	}
+
 	if app.Git != nil {
 		git := map[string]interface{}{
 			"url": app.Git.URL,

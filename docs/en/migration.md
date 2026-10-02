@@ -45,7 +45,7 @@ Migration is a console feature with visual progress. The flow:
 | Volumes | PVC data tarred, transferred, extracted on target |
 | Git-built apps | Rebuilt from their git source on the target; the branch head is built, exactly like a fresh deploy |
 | Apps from external registries | Pulled by the target directly; their pull secrets migrate with the namespace |
-| App CRs | Created on target with temporary routes (route flags like rate limits stay active) |
+| App CRs | Created on target with temporary routes (route flags like rate limits stay active). Declared health checks are copied, but older target clusters whose App schema lacks `health` silently discard them |
 | Function CRs | Created on target |
 | Job CRs | Created on target |
 | Custom domain routes | Applied after user verifies apps work |
@@ -186,7 +186,7 @@ Typical steps:
 7. Creating apps (with temporary URLs; git apps start rebuilding)
 8. Verifying health
 
-The health check waits up to 10 minutes for the target's deployments to come up. A fresh server pulling large images can need longer; set `KIPPER_MIGRATION_HEALTH_TIMEOUT` (a duration like `20m`) on the source's console-api to extend it.
+Migration waits up to 10 minutes for the target's deployments to become ready. Apps with a [health check](/en/deploying-apps#health-checks-and-rollouts) must pass it before their pods count as ready. A fresh server pulling large images can need longer; set `KIPPER_MIGRATION_HEALTH_TIMEOUT` (a duration like `20m`) on the source's console-api to extend it.
 
 A run that skipped data (an oversized database) finishes as **completed with skipped items**, and the completion screen repeats every skip. The skipped data lives only on the source until the manual steps are done, so move it before decommissioning anything.
 

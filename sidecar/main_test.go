@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"testing"
+	"time"
 )
 
 func TestShortHash(t *testing.T) {
@@ -137,5 +140,56 @@ func TestTheProxyMainBuildsHandlesBothFailures(t *testing.T) {
 	if rec.Code != http.StatusOK || rec.Body.Len() != 0 {
 		t.Errorf("a vanished client got status %d body %q; want nothing written",
 			rec.Code, rec.Body.String())
+	}
+}
+
+func TestServeDrainsInFlightRequestsOnShutdown(t *testing.T) {
+	arrived := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(arrived)
+		time.Sleep(300 * time.Millisecond)
+		_, _ = w.Write([]byte("done"))
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- serve(ctx, ln, newProxy(target, "abcd1234")) }()
+
+	type result struct {
+		code int
+		body string
+		err  error
+	}
+	got := make(chan result, 1)
+	go func() {
+		resp, err := http.Get("http://" + ln.Addr().String() + "/slow")
+		if err != nil {
+			got <- result{err: err}
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		b, _ := io.ReadAll(resp.Body)
+		got <- result{code: resp.StatusCode, body: string(b)}
+	}()
+
+	<-arrived
+	cancel()
+
+	r := <-got
+	if r.err != nil || r.code != http.StatusOK || r.body != "done" {
+		t.Fatalf("in-flight request = %d %q %v, want 200 done", r.code, r.body, r.err)
+	}
+	if err := <-served; err != nil {
+		t.Fatalf("serve returned %v after a clean shutdown", err)
+	}
+	if conn, err := net.DialTimeout("tcp", ln.Addr().String(), time.Second); err == nil {
+		_ = conn.Close()
+		t.Error("the listener still accepts connections after shutdown")
 	}
 }

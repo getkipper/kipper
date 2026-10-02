@@ -9,6 +9,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/getkipper/kipper/controller/pkg/healthcheck"
 	"github.com/getkipper/kipper/controller/pkg/internalpath"
 )
 
@@ -132,6 +133,14 @@ func Validate(m *Manifest) error {
 		}
 		if app.Git != nil && app.Git.URL == "" {
 			return fmt.Errorf("app %q: git.url is required", name)
+		}
+		if app.Health != nil {
+			if app.Health.Type == healthcheck.Auto {
+				return fmt.Errorf("app %q: health: leave the health block out to let Kipper decide", name)
+			}
+			if err := app.Health.check().Validate(app.Port); err != nil {
+				return fmt.Errorf("app %q: health: %w", name, err)
+			}
 		}
 		if app.Route != nil {
 			if err := ValidateRedirectFromHosts(app.Route.RedirectFrom); err != nil {

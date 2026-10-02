@@ -328,3 +328,48 @@ describe('the Git source card', () => {
     expect(document.body.innerHTML).toContain('remove-git-source')
   })
 })
+
+// Show scheduling errors even when the existing containers are healthy.
+describe('AppDetail unplaced pod banner', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(appsApi.fetchLogs).mockResolvedValue([])
+    document.body.innerHTML = ''
+  })
+
+  it('says why a new pod cannot be placed and that the healthy current pods continue serving', async () => {
+    await mountWithHealth([
+      pod([running('checkout'), running('kipper-instance-proxy')]),
+      { name: 'checkout-new', phase: 'Pending', message: '0/1 nodes are available: 1 Insufficient cpu.', init_containers: [], containers: [] },
+    ])
+
+    expect(rendered()).toContain('app-unplaced-banner')
+    expect(renderedText()).toContain('Insufficient cpu')
+    expect(renderedText()).toContain('healthy current pods continue serving')
+  })
+
+  it('notices a stall that begins while the panel is open', async () => {
+    vi.useFakeTimers()
+    try {
+      await mountWithHealth([pod([running('checkout')])])
+      expect(rendered()).not.toContain('app-unplaced-banner')
+
+      vi.mocked(appsApi.fetchAppHealth).mockResolvedValue([
+        pod([running('checkout')]),
+        { name: 'checkout-new', phase: 'Pending', message: '0/1 nodes are available: 1 Insufficient cpu.', init_containers: [], containers: [] },
+      ])
+      await vi.advanceTimersByTimeAsync(16000)
+      await flushPromises()
+
+      expect(rendered()).toContain('app-unplaced-banner')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('says nothing when every pod is placed', async () => {
+    await mountWithHealth([pod([running('checkout')])])
+
+    expect(rendered()).not.toContain('app-unplaced-banner')
+  })
+})

@@ -84,6 +84,7 @@ GET /api/v1/projects/{name}/apps/{app}/files/content	anon=401 outsider=403 viewe
 GET /api/v1/projects/{name}/apps/{app}/files/download	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/projects/{name}/apps/{app}/git	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/projects/{name}/apps/{app}/health	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
+GET /api/v1/projects/{name}/apps/{app}/health-check	anon=401 outsider=403 viewer=404 deployer=404 owner=404 admin=404
 GET /api/v1/projects/{name}/apps/{app}/history	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/projects/{name}/apps/{app}/links	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/projects/{name}/apps/{app}/logs	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
@@ -260,6 +261,7 @@ PUT /api/v1/projects/{name}/apps/{app}/basic-auth	anon=401 outsider=403 viewer=4
 PUT /api/v1/projects/{name}/apps/{app}/env	anon=401 outsider=403 viewer=403 deployer=404 owner=404 admin=404
 PUT /api/v1/projects/{name}/apps/{app}/files/content	anon=401 outsider=403 viewer=403 deployer=allow owner=allow admin=allow
 PUT /api/v1/projects/{name}/apps/{app}/git	anon=401 outsider=403 viewer=403 deployer=404 owner=404 admin=404
+PUT /api/v1/projects/{name}/apps/{app}/health-check	anon=401 outsider=403 viewer=403 deployer=404 owner=404 admin=404
 PUT /api/v1/projects/{name}/apps/{app}/image	anon=401 outsider=403 viewer=403 deployer=allow owner=allow admin=allow
 PUT /api/v1/projects/{name}/apps/{app}/resources	anon=401 outsider=403 viewer=403 deployer=404 owner=404 admin=404
 PUT /api/v1/projects/{name}/apps/{app}/route	anon=401 outsider=403 viewer=403 deployer=404 owner=404 admin=404

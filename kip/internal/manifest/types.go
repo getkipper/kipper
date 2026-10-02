@@ -1,5 +1,7 @@
 package manifest
 
+import "github.com/getkipper/kipper/controller/pkg/healthcheck"
+
 // Manifest represents a kipper.yaml file that declares the desired state
 // of apps, services, volumes, jobs, and functions for a project environment.
 type Manifest struct {
@@ -29,6 +31,30 @@ type AppSpec struct {
 	Volumes         []VolumeMountSpec `yaml:"volumes,omitempty"`
 	Autoscale       *AutoscaleSpec    `yaml:"autoscale,omitempty"`
 	Git             *GitSpec          `yaml:"git,omitempty"`
+	Health          *HealthSpec       `yaml:"health,omitempty"`
+}
+
+// HealthSpec is the check a new pod must pass before it takes traffic. Leaving
+// it out lets Kipper decide; type none says the app serves no traffic.
+type HealthSpec struct {
+	Type                  string `yaml:"type"`
+	Path                  string `yaml:"path,omitempty"`
+	Port                  int32  `yaml:"port,omitempty"`
+	StartupTimeoutSeconds int32  `yaml:"startupTimeoutSeconds,omitempty"`
+	TimeoutSeconds        int32  `yaml:"timeoutSeconds,omitempty"`
+}
+
+func (h *HealthSpec) check() healthcheck.Check {
+	set := func(v int32) *int32 {
+		if v == 0 {
+			return nil
+		}
+		return &v
+	}
+	return healthcheck.Check{
+		Type: h.Type, Path: h.Path, Port: set(h.Port),
+		StartupTimeoutSeconds: set(h.StartupTimeoutSeconds), TimeoutSeconds: set(h.TimeoutSeconds),
+	}
 }
 
 // RouteSpec configures ingress routing.

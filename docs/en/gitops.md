@@ -136,6 +136,35 @@ The `environments` and `displayName` fields are optional. When present, `kip app
 
 The Project itself is merged, not replaced. A Project also holds fields the manifest never carries, such as members, tier, quota and shared storage, which admins manage through the console or dedicated commands. Applying a manifest updates the Project's `displayName` and adds any new environments, and leaves those other fields untouched. Apply never removes an environment, because dropping one deletes its namespace and everything in it. That stays an explicit, confirmed action: `kip project remove-env <project> <env>` for one, or `kip project delete <project>` for the whole project.
 
+### The health block
+
+`health` declares how Kipper checks whether a pod is ready for traffic. Omit it to use
+automatic inference; see [Health checks and rollouts](/en/deploying-apps#health-checks-and-rollouts).
+
+| Field | What it does |
+|---|---|
+| `type` | `http`, `tcp` or `none`. Required when the block is present. `none` disables the app readiness check |
+| `path` | The path an `http` check requests. Starts with `/`, no spaces, up to 1024 characters. Supported only for `http` |
+| `port` | The port to check. Defaults to the app port, and cannot be the instance proxy's port (app port + 10000) |
+| `startupTimeoutSeconds` | Time allowed for a running pod to become ready before it is reported as stuck: 10-3600 seconds, default 300 |
+| `timeoutSeconds` | Timeout for each check: 1-60 seconds, default 2 |
+
+`none` accepts `startupTimeoutSeconds` but no path, port, or check timeout.
+
+```yaml
+apps:
+  api:
+    image: registry.git.example.com/api:latest
+    port: 8080
+    health:
+      type: http
+      path: /actuator/health/readiness
+      startupTimeoutSeconds: 600
+```
+
+`kip export` includes this block only for declared checks. To use automatic inference, omit
+the block; `type: auto` is not valid in a manifest.
+
 ## Applying a manifest
 
 ```bash
@@ -196,6 +225,10 @@ that access today, so an operator with one is asked about fields that are not
 really going anywhere. Running the same apply as a cluster admin shows the shorter,
 accurate list.
 
+Removing a declared `health` block requires confirmation, like removing any other spec field.
+To return to automatic inference, remove the block and apply with `--force`, or run
+`kip app update <app> --health auto`.
+
 Pass `--force` when clearing is what you meant. A git app's built image is never reported, because apply preserves it. Nor is the app's own git credential: the token you set with `--git-token` or in the console is stored in a Secret named after the token and the host it is for, so rotating writes a new one and the app moves onto it. A manifest that pinned that name would name a Secret that is gone as soon as you rotate, so `kip export` leaves it out and apply carries the live one forward. A shared credential is different, and is reported and cleared like any other field, because you chose it. The Project is the exception and is merged, as described above. If you also set fields in the web console, for example API-key gating on a route, include them in the manifest or the next apply clears them. Run `kip export` to capture the live state into a manifest that round-trips.
 
 ### Overriding project and environment
@@ -226,7 +259,7 @@ This outputs the manifest to stdout. Save it to a file:
 kip export --project blog --environment test -o kipper.yaml
 ```
 
-The export includes all apps, services, volumes, jobs, functions, project metadata (display name, environments list), resource profiles, autoscale config, service bindings, and routes. Secrets are excluded by design.
+The export includes all apps, services, volumes, jobs, functions, project metadata (display name, environments list), resource profiles, autoscale config, service bindings, routes, and declared health checks. Secrets are excluded by design.
 
 For Apps, `kip export` includes explicit CPU and memory settings and omits values written by the old auto-sizer. It includes held values with a message on stderr. Applying the file confirms every declared resource value as a user setting, including held values. See [Your own CPU and memory values](/en/resource-management#your-own-values).
 
@@ -289,8 +322,8 @@ A resource whose fields all match is not listed at all, so an empty comparison m
 the manifest already describes the cluster.
 
 Only ordinary configuration is printed with its value: the image, replicas, the
-route's hostname, resource requests and limits, autoscaling, the schedule, and
-the like. A route's path is withheld along with the rest, because an unguessable
+route's hostname, resource requests and limits, autoscaling, every `health` field, the
+schedule, and the like. A route's path is withheld along with the rest, because an unguessable
 prefix is a normal way to protect a webhook. Everything else is named and its
 value withheld, because a spec carries the operator's own text (an environment
 variable, a build argument, a command line, a function's source) and any of it

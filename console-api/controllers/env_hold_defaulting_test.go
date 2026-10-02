@@ -31,8 +31,10 @@ func defaultPodTemplate(t *corev1.PodTemplateSpec) {
 	t.Spec.RestartPolicy = corev1.RestartPolicyAlways
 	t.Spec.DNSPolicy = corev1.DNSClusterFirst
 	t.Spec.SchedulerName = "default-scheduler"
-	grace := int64(30)
-	t.Spec.TerminationGracePeriodSeconds = &grace
+	if t.Spec.TerminationGracePeriodSeconds == nil {
+		grace := int64(30)
+		t.Spec.TerminationGracePeriodSeconds = &grace
+	}
 	t.Spec.SecurityContext = &corev1.PodSecurityContext{}
 	for i := range t.Spec.Containers {
 		t.Spec.Containers[i].TerminationMessagePath = "/dev/termination-log"
