@@ -77,9 +77,9 @@ describe('AppHealthCheck', () => {
     expect(w.text()).toContain('could not be read')
   })
 
-  it('warns that saving restarts the app', async () => {
+  it('explains that changing the check triggers a rolling restart', async () => {
     const w = await mountWith({ type: 'auto' }, null)
-    expect(w.text()).toContain('restarts the app')
+    expect(w.text()).toContain('triggers a rolling restart')
   })
 
   it('offers no save to a reader', async () => {

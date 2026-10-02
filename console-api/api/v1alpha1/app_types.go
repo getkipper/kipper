@@ -169,8 +169,8 @@ type AppHealth struct {
 	// +optional
 	Port *int32 `json:"port,omitempty"`
 
-	// StartupTimeoutSeconds is the time allowed for a running pod to become
-	// ready before it is reported as stuck. The default is 300 seconds.
+	// StartupTimeoutSeconds is the readiness deadline measured from pod
+	// creation, including image pulls. The default is 300 seconds.
 	// +kubebuilder:validation:Minimum=10
 	// +kubebuilder:validation:Maximum=3600
 	// +optional

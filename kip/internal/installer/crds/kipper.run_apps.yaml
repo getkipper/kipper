@@ -157,8 +157,8 @@ spec:
                     type: integer
                   startupTimeoutSeconds:
                     description: |-
-                      StartupTimeoutSeconds is the time allowed for a running pod to become
-                      ready before it is reported as stuck. The default is 300 seconds.
+                      StartupTimeoutSeconds is the readiness deadline measured from pod
+                      creation, including image pulls. The default is 300 seconds.
                     format: int32
                     maximum: 3600
                     minimum: 10

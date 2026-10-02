@@ -241,6 +241,7 @@ func TestRolloutPhaseFor(t *testing.T) {
 		rollout.Unschedulable:    phaseUnschedulable,
 		rollout.QuotaExceeded:    phaseUnschedulable,
 		rollout.PodsRefused:      phaseFailed,
+		rollout.PodsNotStarting:  phaseInFlight,
 		rollout.NotBecomingReady: phaseInFlight,
 		rollout.DeadlineExceeded: phaseFailed,
 	}

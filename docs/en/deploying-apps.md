@@ -421,8 +421,10 @@ kip app update api --health auto      # remove the declared check and let Kipper
 | `--health` | `type` | automatic | `http`, `tcp` or `none`. `auto` removes a declared check |
 | `--health-path` | `path` | — | HTTP check path: starts with `/`, contains no whitespace, and is at most 1024 characters. Implies `http` when `--health` is omitted |
 | `--health-port` | `port` | the app port | Port to check, such as a separate management port. Cannot be the instance proxy's port (app port + 10000) |
-| `--health-startup-timeout` | `startupTimeoutSeconds` | 300 | Time allowed for a running pod to become ready before it is reported as stuck: 10-3600 seconds |
+| `--health-startup-timeout` | `startupTimeoutSeconds` | 300 | Time from pod creation to readiness before the pod is reported as stuck, including image pulls: 10-3600 seconds |
 | `--health-timeout` | `timeoutSeconds` | 2 | Timeout for each check: 1-60 seconds |
+
+The startup timeout includes scheduling and image pulls. Kipper can report specific scheduling, image, configuration, or repeated-crash errors before it expires.
 
 These flags work with both `kip app deploy` and `kip app update`. Updates merge into the existing check, so `--health-timeout 5` preserves its path. Switching types clears unsupported settings: `none` accepts a startup timeout but no path, port, or check timeout. Changes to the readiness probe trigger a rollout. Changing only the startup timeout does not restart pods.
 
@@ -446,7 +448,7 @@ On supported clusters running Kubernetes 1.30 or newer, each container waits 10 
 
 ### When a rollout waits
 
-The App's `RolloutComplete` condition reports rollout progress separately from pod health. A rollout is complete when all replicas have been updated and are available, or Kubernetes has recorded the current revision as available with the expected replica counts. A pod that crashes afterwards affects app health but does not reopen the rollout. A scale-up can still show a waiting rollout if a new pod cannot be scheduled or created.
+The App's `RolloutComplete` condition reports rollout progress separately from pod health. A rollout is complete when all replicas have been updated and are available, or Kubernetes has recorded the current revision as available with the expected replica counts. A pod that crashes afterwards affects app health but does not reopen the rollout. A scale-up or replacement pod can still show a waiting rollout if it cannot be scheduled or created, or encounters a startup error before any of its containers have run.
 
 | Reason | What it means | What to do |
 |---|---|---|
@@ -454,7 +456,8 @@ The App's `RolloutComplete` condition reports rollout progress separately from p
 | `Unschedulable` | A new pod cannot be scheduled; the message includes the scheduler's reason | Follow the message. For insufficient CPU or memory, lower the request or add capacity |
 | `QuotaExceeded` | The project quota blocks new pods | Lower the request or raise the project quota |
 | `PodsRefused` | The cluster rejected a new pod, for example because of an admission policy | Resolve the error in the message |
-| `NotBecomingReady` | A running pod has not become ready within the startup timeout | Inspect its logs and check settings. For a slow starter, increase `--health-startup-timeout`; for an inferred check, use `--health tcp --health-startup-timeout 600` |
+| `PodsNotStarting` | A pod has an image, configuration, or crash-loop error, or has not started running within the startup timeout. The message includes container details when available, otherwise the pod phase | Inspect the pod status, events, and logs. Fix the reported error; for an out-of-memory failure, review the memory limit |
+| `NotBecomingReady` | A pod is running but remains unready after the startup timeout, measured from pod creation | Inspect its logs and check settings. For a slow starter, increase `--health-startup-timeout`; for an inferred check, use `--health tcp --health-startup-timeout 600` |
 | `DeadlineExceeded` | Kubernetes reported no progress within the deadline: at least 10 minutes, or the startup timeout plus 5 minutes | Inspect the message and pod logs |
 | `NotApplied` | Kipper could not apply the latest change | Resolve the reported error; the App's other conditions may provide more detail |
 

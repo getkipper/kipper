@@ -13,7 +13,7 @@ func addHealthFlags(cmd *cobra.Command) {
 	cmd.Flags().String("health", "", `readiness check: http, tcp, none (disable the app check), or auto to let Kipper decide`)
 	cmd.Flags().String("health-path", "", "path for an http check, e.g. /actuator/health/readiness; implies --health http")
 	cmd.Flags().Int32("health-port", 0, "port to check, when it is not the app port (e.g. a management port)")
-	cmd.Flags().Int32("health-startup-timeout", 0, "seconds a new pod may take to pass its check before the rollout is reported as stuck (default 300)")
+	cmd.Flags().Int32("health-startup-timeout", 0, "seconds from pod creation to readiness before it is reported as stuck, including image pulls (default 300)")
 	cmd.Flags().Int32("health-timeout", 0, "timeout for each check in seconds (default 2)")
 }
 

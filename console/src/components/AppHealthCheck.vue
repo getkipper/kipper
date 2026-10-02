@@ -29,13 +29,13 @@ const current = computed(() => {
     case 'inferred':
       return s.type === 'tcp'
         ? `Automatic: port check on ${s.port}, chosen because the port accepted connections.`
-        : 'Automatic: no check. An older pod refused connections on the app port. Kipper will check again on the next rollout.'
+        : 'Automatic: no check. A pod running for at least 10 minutes refused connections on the app port. Kipper will check again on the next rollout.'
     case 'pending':
       return 'Automatic: no check yet. On the next rollout, Kipper will test whether running pods accept connections on the app port.'
     case 'applying':
       return `Saved, but not applied to new pods yet: ${check}. Check the app panel for rollout details.`
     case 'building':
-      return `While the first build runs: ${check}.`
+      return `Until the first build is deployed: ${check}.`
     default:
       return `In use: ${check}.`
   }
@@ -98,12 +98,12 @@ onMounted(load)
     </div>
     <div class="space-y-3">
       <div>
-        <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Check</label>
+        <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Check type</label>
         <select v-model="type" data-testid="health-type" :disabled="!canWrite" :class="inputClass">
           <option value="auto">Automatic</option>
           <option value="tcp">Port check (TCP)</option>
-          <option value="http">HTTP path</option>
-          <option value="none">None: this app serves no traffic</option>
+          <option value="http">HTTP check</option>
+          <option value="none">None (disable the app check)</option>
         </select>
       </div>
       <div v-if="type === 'http'">
@@ -122,12 +122,12 @@ onMounted(load)
       <div v-if="type !== 'auto'">
         <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Startup timeout (seconds)</label>
         <input v-model="startup" data-testid="health-startup" type="number" placeholder="300" :disabled="!canWrite" :class="inputClass" />
-        <p class="mt-1 text-[10px] text-slate-400 dark:text-slate-500">Time allowed for a running pod to become ready before the rollout is reported as stuck</p>
+        <p class="mt-1 text-[10px] text-slate-400 dark:text-slate-500">Time allowed for a new pod to become ready, including image downloads. After this, it is reported as stuck.</p>
       </div>
       <p v-if="readError" class="text-xs text-amber-700 dark:text-amber-400">{{ readError }}</p>
       <p v-if="current" data-testid="health-current" class="text-xs text-slate-600 dark:text-slate-400">{{ current }}</p>
       <div v-if="canWrite && loaded" class="flex items-center justify-end gap-3">
-        <span class="text-[10px] text-slate-400 dark:text-slate-500">Changing the check restarts the app; changing only the startup timeout does not</span>
+        <span class="text-[10px] text-slate-400 dark:text-slate-500">Changing the check triggers a rolling restart. Changing only the startup timeout leaves pods running.</span>
         <SaveButton data-testid="health-save" :saving="saving" label="Save health check" @click="save" />
       </div>
     </div>
