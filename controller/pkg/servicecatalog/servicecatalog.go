@@ -10,6 +10,8 @@
 // than a matching pair.
 package servicecatalog
 
+import "fmt"
+
 // ConditionCredentialsReady is the status condition a service carries while its
 // credentials Secret cannot be used, under one of two reasons that no retry
 // clears: SecretNotOwned, where the object belongs to something else, and
@@ -49,4 +51,25 @@ func HasAuth(serviceType string) bool {
 		return true
 	}
 	return false
+}
+
+// MinIORelease is the MinIO server release built by images/minio.
+const MinIORelease = "RELEASE.2025-09-07T16-13-09Z"
+
+// MinIOImage selects Kipper's image for MinIORelease and an upstream image
+// for other releases, preserving upstream references for existing version pins.
+func MinIOImage(release string) string {
+	if release == MinIORelease {
+		return "ghcr.io/getkipper/minio:" + release
+	}
+	return "minio/minio:" + release
+}
+
+// CheckNewVersion restricts explicit MinIO versions to the release Kipper builds.
+// An empty version selects the catalog default; other service types pass through.
+func CheckNewVersion(serviceType, version string) error {
+	if serviceType == "minio" && version != "" && version != MinIORelease {
+		return fmt.Errorf("minio %s is not available: MinIO no longer publishes images, and Kipper builds %s only", version, MinIORelease)
+	}
+	return nil
 }

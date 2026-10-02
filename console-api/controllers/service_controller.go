@@ -496,6 +496,9 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	}
 
 	image := fmt.Sprintf("%s:%s", catalog.image, version)
+	if svc.Spec.Type == "minio" {
+		image = servicecatalog.MinIOImage(version)
+	}
 
 	containerPorts := []corev1.ContainerPort{{Name: "main", ContainerPort: catalog.port}}
 	if catalog.ui != nil {
@@ -1324,10 +1327,8 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 		}
 	case "minio":
 		return serviceCatalogEntry{
-			// MinIO tags a release rather than a version line, so there is no
-			// patch-floating tag to sit on the way postgres:16-alpine does.
-			// Upstream has published nothing since this release.
-			image: "minio/minio", defaultVersion: "RELEASE.2025-09-07T16-13-09Z", port: 9000, resourceProfile: "standard",
+			// Keep the default aligned with the server release built in images/minio.
+			image: "ghcr.io/getkipper/minio", defaultVersion: servicecatalog.MinIORelease, port: 9000, resourceProfile: "standard",
 			dataPath: "/data", defaultStorage: "10Gi",
 			command: []string{"minio"},
 			args:    []string{"server", "/data", "--console-address", ":9001"},

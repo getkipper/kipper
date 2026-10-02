@@ -471,6 +471,12 @@ func TestImageWithVersion(t *testing.T) {
 			"RELEASE.2026-01-15T10-00-00Z",
 			"minio/minio:RELEASE.2026-01-15T10-00-00Z",
 		},
+		{
+			"a registry host is not mistaken for a tag",
+			"ghcr.io/getkipper/minio:RELEASE.2025-09-07T16-13-09Z",
+			"RELEASE.2026-01-15T10-00-00Z",
+			"ghcr.io/getkipper/minio:RELEASE.2026-01-15T10-00-00Z",
+		},
 		{"an image with no tag at all still gets one", "someregistry.io/thing", "1.2", "someregistry.io/thing:1.2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -743,4 +749,22 @@ func TestListSaysAServiceIsDeletingAndWhyItIsStuck(t *testing.T) {
 	assert.Equal(t, "deleting", services[0].Status, "a service on its way out was listed as though nothing had happened")
 	assert.Equal(t, "DataNotDestroyed", services[0].BlockedReason, "nothing said why the delete is stuck")
 	assert.Contains(t, services[0].BlockedMessage, "not Kipper's")
+}
+
+func TestMinIOServiceImageComesFromKippersRegistry(t *testing.T) {
+	assert.Equal(t, "ghcr.io/getkipper/minio:RELEASE.2025-09-07T16-13-09Z", catalog["minio"].Image)
+}
+
+func TestUpdateRefusesAMinIOReleaseKipperDoesNotBuild(t *testing.T) {
+	client := fake.NewSimpleClientset() //nolint:staticcheck
+	mgr := &Manager{Client: client}
+	ctx := context.Background()
+	_, err := mgr.Add(ctx, Options{Name: "storage", Namespace: "default", Type: "minio"})
+	require.NoError(t, err)
+
+	_, err = mgr.Update(ctx, "default", "storage", Options{ImageVersion: "RELEASE.2024-06-13T22-53-53Z"})
+	require.ErrorContains(t, err, "RELEASE.2025-09-07T16-13-09Z")
+
+	ss, _ := client.AppsV1().StatefulSets("default").Get(ctx, "storage", metav1.GetOptions{})
+	assert.Equal(t, "ghcr.io/getkipper/minio:RELEASE.2025-09-07T16-13-09Z", ss.Spec.Template.Spec.Containers[0].Image)
 }
