@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
@@ -50,6 +51,10 @@ type appResponse struct {
 	Image    string `json:"image"`
 	Replicas int32  `json:"replicas"`
 	Ready    int32  `json:"ready"`
+	// RolloutReason and RolloutWaiting say why the latest change has not
+	// finished rolling out; both are empty once it has.
+	RolloutReason  string `json:"rollout_reason,omitempty"`
+	RolloutWaiting string `json:"rollout_waiting,omitempty"`
 }
 
 type createAppRequest struct {
@@ -603,13 +608,17 @@ func appCRToResponse(app kipperv1.App) appResponse {
 		status = "pending"
 	}
 
-	return appResponse{
+	resp := appResponse{
 		Name:     app.Name,
 		Status:   status,
 		Image:    app.Spec.Image,
 		Replicas: replicas,
 		Ready:    app.Status.ReadyReplicas,
 	}
+	if c := apimeta.FindStatusCondition(app.Status.Conditions, kipperv1.ConditionRolloutComplete); c != nil && c.Status == metav1.ConditionFalse {
+		resp.RolloutReason, resp.RolloutWaiting = c.Reason, c.Message
+	}
+	return resp
 }
 
 var exposePattern = regexp.MustCompile(`(?i)^EXPOSE\s+(\d+)`)

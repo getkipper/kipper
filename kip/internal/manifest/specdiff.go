@@ -240,6 +240,10 @@ var printable = map[string]struct{}{
 	"resources.profile":      {},
 	"git.buildResources.cpu": {}, "git.buildResources.memory": {},
 
+	// Health check.
+	"health.type": {}, "health.path": {}, "health.port": {},
+	"health.startupTimeoutSeconds": {}, "health.timeoutSeconds": {},
+
 	// Scaling.
 	"autoscale.enabled": {}, "autoscale.minReplicas": {}, "autoscale.maxReplicas": {},
 	"autoscale.cpuTarget": {}, "autoscale.memoryTarget": {},

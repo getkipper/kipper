@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/getkipper/kipper/console-api/handlers"
+	"github.com/getkipper/kipper/controller/pkg/rollout"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -208,7 +209,7 @@ func (rc *ResourceController) tick(ctx context.Context) {
 	if deployErr != nil {
 		log.Printf("resource controller: failed to list deployments: %v", deployErr)
 	} else {
-		batches = append(batches, rc.checkStuckRollouts(deployments)...)
+		batches = append(batches, rc.checkStuckRollouts(deployments, rc.explainStuckRollout(ctx))...)
 	}
 
 	if len(batches) > 0 {
@@ -1883,46 +1884,70 @@ func (rc *ResourceController) checkFailedJobs(ctx context.Context) []alertBatch 
 	return batches
 }
 
-// checkStuckRollouts alerts when a Deployment's rollout has stalled
-// (ProgressDeadlineExceeded). The deployment slice is the one already listed
-// for this tick, so no extra API call is made. The marker resets once the
-// rollout recovers.
-func (rc *ResourceController) checkStuckRollouts(deployments []appsv1.Deployment) []alertBatch {
-	rc.mu.Lock()
-	defer rc.mu.Unlock()
-
+// checkStuckRollouts alerts on ProgressDeadlineExceeded, subject to the
+// alert cooldown. It calls explain outside the lock only for alerts that
+// are due, and clears the cooldown when the rollout recovers.
+func (rc *ResourceController) checkStuckRollouts(deployments []appsv1.Deployment, explain func(*appsv1.Deployment) string) []alertBatch {
 	now := time.Now()
-	var batches []alertBatch
+	var due []*appsv1.Deployment
+	rc.mu.Lock()
 	for i := range deployments {
 		d := &deployments[i]
-		stuck := false
-		for _, c := range d.Status.Conditions {
-			if c.Type == appsv1.DeploymentProgressing && c.Status == corev1.ConditionFalse && c.Reason == "ProgressDeadlineExceeded" {
-				stuck = true
-				break
-			}
-		}
 		key := d.Namespace + "/" + d.Name
-		if !stuck {
+		if !rollout.Failed(d) {
 			delete(rc.rolloutAlerted, key)
 			continue
 		}
 		if last, seen := rc.rolloutAlerted[key]; seen && now.Sub(last) < rolloutAlertCooldown {
 			continue
 		}
+		due = append(due, d)
+	}
+	rc.mu.Unlock()
+
+	var batches []alertBatch
+	for _, d := range due {
 		batches = append(batches, alertBatch{
 			entry: ResourceLogEntry{
 				Time:      now.UTC().Format(time.RFC3339),
 				App:       d.Labels["app"],
 				Namespace: d.Namespace,
 				Action:    "rollout stuck",
-				Reason:    fmt.Sprintf("deployment %q did not roll out within its progress deadline", d.Name),
+				Reason:    fmt.Sprintf("deployment %q did not roll out within its progress deadline. %s", d.Name, explain(d)),
 				Severity:  "warning",
 			},
-			marks: []pendingMark{{dst: rc.rolloutAlerted, key: key, at: now}},
+			marks: []pendingMark{{dst: rc.rolloutAlerted, key: d.Namespace + "/" + d.Name, at: now}},
 		})
 	}
 	return batches
+}
+
+// explainStuckRollout uses the newest pods to explain a stalled rollout,
+// falling back to the Deployment condition if it cannot read them.
+func (rc *ResourceController) explainStuckRollout(ctx context.Context) func(*appsv1.Deployment) string {
+	return func(d *appsv1.Deployment) string {
+		// Estimate the startup timeout from the progress deadline. For Apps
+		// with a startup timeout below five minutes, this overestimates it.
+		budget := 5 * time.Minute
+		if d.Spec.ProgressDeadlineSeconds != nil {
+			budget = max(time.Duration(*d.Spec.ProgressDeadlineSeconds)*time.Second-5*time.Minute, time.Minute)
+		}
+		if rc.client == nil || d.Spec.Selector == nil {
+			return rollout.Message(d)
+		}
+		selector := metav1.FormatLabelSelector(d.Spec.Selector)
+		sets, err := rc.client.AppsV1().ReplicaSets(d.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+		if err != nil {
+			return rollout.Message(d)
+		}
+		pods, err := rc.client.CoreV1().Pods(d.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+		if err != nil {
+			return rollout.Message(d)
+		}
+		newPods := rollout.PodsOf(rollout.NewestReplicaSet(d, sets.Items), pods.Items)
+		_, message := rollout.Explain(d, newPods, budget, time.Now())
+		return message
+	}
 }
 
 func (rc *ResourceController) createAlerts(ctx context.Context, entries []ResourceLogEntry) error {

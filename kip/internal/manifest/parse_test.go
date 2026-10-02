@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -35,5 +36,33 @@ func TestValidateRedirectFromHosts(t *testing.T) {
 				require.Error(t, err)
 			}
 		})
+	}
+}
+
+func TestValidate_HealthCheck(t *testing.T) {
+	base := func(h *HealthSpec) *Manifest {
+		return &Manifest{Project: "acme", Apps: map[string]AppSpec{"api": {Image: "nginx:1.27", Port: 8080, Health: h}}}
+	}
+	if err := Validate(base(&HealthSpec{Type: "http", Path: "/ready", StartupTimeoutSeconds: 600})); err != nil {
+		t.Fatalf("a valid check is refused: %v", err)
+	}
+	if err := Validate(base(nil)); err != nil {
+		t.Fatalf("no check is automatic, not an error: %v", err)
+	}
+	for _, tc := range []struct {
+		health *HealthSpec
+		want   string
+	}{
+		{&HealthSpec{Type: "http"}, "needs a path"},
+		{&HealthSpec{Type: "tcp", Path: "/ready"}, "only an HTTP check supports a path"},
+		{&HealthSpec{Type: "none", Port: 8081}, "accepts no port"},
+		{&HealthSpec{Type: "tcp", Port: 18080}, "instance proxy"},
+		{&HealthSpec{Type: "auto"}, "leave the health block out"},
+		{&HealthSpec{Type: "grpc"}, "http, tcp or none"},
+	} {
+		err := Validate(base(tc.health))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("Validate(%+v) = %v, want an error mentioning %q", *tc.health, err, tc.want)
+		}
 	}
 }

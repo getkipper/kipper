@@ -364,3 +364,22 @@ func TestCreateApp_TheRemedyForAnUnstoredTokenNamesFlagsKipActuallyHas(t *testin
 	assert.Contains(t, message, "--git-token <token>")
 	assert.NotContains(t, message, "deploy web ", "a positional app name is silently discarded by cobra")
 }
+
+// Report a stalled rollout even when the app phase is Running.
+func TestAppCRToResponse_CarriesAWaitingRollout(t *testing.T) {
+	app := kipperv1.App{ObjectMeta: metav1.ObjectMeta{Name: "api"}, Status: kipperv1.AppStatus{
+		Phase: "Running", Conditions: []metav1.Condition{{
+			Type: kipperv1.ConditionRolloutComplete, Status: metav1.ConditionFalse, Reason: "Unschedulable",
+			Message: "A new pod cannot be placed: 0/1 nodes are available: 1 Insufficient cpu. The current pods keep serving.",
+		}},
+	}}
+	got := appCRToResponse(app)
+	if got.RolloutReason != "Unschedulable" || !strings.Contains(got.RolloutWaiting, "Insufficient cpu") {
+		t.Errorf("rollout = %q / %q, want the reason and the scheduler's message", got.RolloutReason, got.RolloutWaiting)
+	}
+
+	app.Status.Conditions[0].Status = metav1.ConditionTrue
+	if got := appCRToResponse(app); got.RolloutWaiting != "" || got.RolloutReason != "" {
+		t.Errorf("a finished rollout says nothing, got %q / %q", got.RolloutReason, got.RolloutWaiting)
+	}
+}

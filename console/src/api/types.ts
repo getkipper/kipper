@@ -24,6 +24,9 @@ export interface App {
   ready: number
   namespace?: string
   project?: string
+  // Why the latest change has not finished rolling out; absent once it has.
+  rollout_reason?: string
+  rollout_waiting?: string
 }
 
 export interface CreateAppPayload {

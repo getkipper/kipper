@@ -64,9 +64,20 @@ The saturation override raises the CPU limit only when CPU is sized automaticall
 
 ### Single-replica apps
 
-For apps with a single replica, the controller only scales **up** and never scales down. Every resource change triggers a pod restart, and with one replica that means a brief outage. Scaling down is only safe with 2+ replicas, where Kubernetes performs a rolling update and at least one pod stays up.
+For single-replica apps, automatic sizing only increases resources. A resource change starts a replacement pod and waits for it to become ready before stopping the old one. With a [health check](/en/deploying-apps#health-checks-and-rollouts), the replacement must pass it first. The cluster needs capacity for the extra pod; if none is available, lower the request or add capacity to unblock the rollout.
 
 The Scale tab in the web console shows a message explaining this when an app has one replica and auto mode is active.
+
+### During a rollout {#rollouts}
+
+Automatic sizing normally waits for an app's rollout to finish, avoiding repeated pod replacements during startup. Your resource bounds still apply. There are two exceptions:
+
+- **A pod cannot be scheduled or is blocked by quota:** recommendations may apply only if neither the CPU nor memory request increases. Lower requests may help the pod fit.
+- **The progress deadline expires or another admission error blocks new pods:** recommendations can apply again, subject to the usual bounds and quota checks. For example, more memory may help a pod recover from an out-of-memory failure.
+
+A pod that is slow to become ready postpones recommendations until the rollout finishes or exceeds its progress deadline. Crashes after a completed rollout do not postpone recommendations.
+
+See [When a rollout waits](/en/deploying-apps#when-a-rollout-waits) for what each state means.
 
 ## Autoscaling (HPA)
 
@@ -81,6 +92,8 @@ Autoscaling adjusts the **number of pods** based on CPU and memory utilisation. 
 | Deployment shape (image, env, volumes) | App reconciler | Syncs the Deployment to match the App CR |
 
 When autoscaling is enabled, the App reconciler stops writing `spec.replicas` to the Deployment and lets the HPA own that field. When autoscaling is disabled, the App reconciler owns replicas again.
+
+The HPA treats CPU metrics from starting and unready pods separately. A [health check](/en/deploying-apps#health-checks-and-rollouts) that reflects startup readiness helps prevent temporary CPU spikes, such as JVM warm-up, from triggering unnecessary scaling.
 
 ### Choosing a setup {#when-to-use-what}
 

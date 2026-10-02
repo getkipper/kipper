@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	k8sversion "k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -322,6 +323,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 	dbHandler := &handlers.Database{Client: clientset, CRClient: crClient}
 	routeGroupHandler := &handlers.RouteGroups{Client: clientset, CRClient: crClient, Domain: os.Getenv("CLUSTER_DOMAIN")}
 	settingsHandler := &handlers.Settings{Client: clientset, CRClient: crClient}
+	healthCheckHandler := &handlers.HealthCheck{CRClient: crClient}
 	webhookHandler := &handlers.Webhooks{Client: clientset, CRClient: crClient}
 	backupHandler := &handlers.Backups{Client: clientset, Dynamic: dynClient}
 	modeHandler := &handlers.Mode{Client: clientset}
@@ -772,6 +774,8 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 					r.Post("/recommendation/apply", cap("kipper.write")(recommendationHandler.Apply))
 					r.Get("/settings", cap("kipper.read")(settingsHandler.Get))
 					r.Put("/settings", cap("kipper.write")(settingsHandler.Update))
+					r.Get("/health-check", cap("kipper.read")(healthCheckHandler.Get))
+					r.Put("/health-check", cap("kipper.write")(healthCheckHandler.Update))
 					r.Get("/route", cap("workloads.read")(apps.GetRoute))
 					r.Put("/route", cap("kipper.write")(apps.SetRoute))
 					r.Delete("/route", cap("kipper.write")(apps.DeleteRoute))
@@ -979,6 +983,27 @@ func discoveryFor(cfg *rest.Config) discovery.ServerResourcesInterface {
 	return dc
 }
 
+// preStopSleepSupported retries the server version lookup up to three times
+// to decide whether to enable the shutdown delay.
+func preStopSleepSupported(cfg *rest.Config) bool {
+	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		log.Printf("building a discovery client for the server version: %v", err)
+		return false
+	}
+	var info *k8sversion.Info
+	for attempt := 0; attempt < 3; attempt++ {
+		if info, err = dc.ServerVersion(); err == nil {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if err != nil {
+		log.Printf("could not read the server version; disabling the preStop delay: %v", err)
+	}
+	return controllers.SupportsPreStopSleep(info, err)
+}
+
 func startControllerManager(cfg *rest.Config, direct crclient.Client) {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -1015,7 +1040,7 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client) {
 		name  string
 		setup func(ctrl.Manager) error
 	}{
-		{"App", (&controllers.AppReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Domain: domain, SidecarImage: sidecarImage, Recorder: mgr.GetEventRecorderFor("app-controller")}).SetupWithManager}, //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
+		{"App", (&controllers.AppReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Domain: domain, SidecarImage: sidecarImage, Recorder: mgr.GetEventRecorderFor("app-controller"), PreStopSleep: preStopSleepSupported(cfg), Dial: controllers.TCPDial}).SetupWithManager}, //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
 		{"Service", (&controllers.ServiceReconciler{
 			Client:              mgr.GetClient(),
 			APIReader:           mgr.GetAPIReader(),

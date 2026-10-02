@@ -1,0 +1,41 @@
+metadata:
+  labels:
+    app: shop
+    app.kubernetes.io/managed-by: kipper
+spec:
+  containers:
+  - envFrom:
+    - secretRef:
+        name: gen-1
+        optional: false
+    image: registry.example.com/shop:1.2.3
+    name: shop
+    ports:
+    - containerPort: 8080
+    resources:
+      limits:
+        cpu: 100m
+        memory: 128Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+  - env:
+    - name: LISTEN_PORT
+      value: "18080"
+    - name: UPSTREAM_PORT
+      value: "8080"
+    - name: POD_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.name
+    image: ghcr.io/getkipper/kipper-sidecar:latest
+    name: kipper-instance-proxy
+    ports:
+    - containerPort: 18080
+    resources:
+      limits:
+        cpu: 50m
+        memory: 32Mi
+      requests:
+        cpu: 10m
+        memory: 16Mi

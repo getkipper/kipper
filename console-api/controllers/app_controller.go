@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -64,6 +65,14 @@ type AppReconciler struct {
 	// describe` finds it without anyone tailing the controller's log. Nil in
 	// unit tests.
 	Recorder record.EventRecorder
+	// PreStopSleep enables the delay before sending the termination signal.
+	PreStopSleep bool
+	// Dial tests the app port for automatic readiness inference.
+	// Nil disables new inference decisions.
+	Dial func(ctx context.Context, addr string) error
+	// adoptionWarned tracks apps already warned about rejected dry runs
+	// during this controller process.
+	adoptionWarned sync.Map
 }
 
 // hostReader returns the uncached reader for reservation reads, falling back to
@@ -302,11 +311,20 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 		// did learn is still worth recording, or the workload goes on reporting
 		// whatever the last complete pass found while a refused object holds it.
 		r.sweepEnv(ctx, &app, generation, keepProjections)
-		if obsErr := r.observeWorkload(ctx, &app); obsErr != nil {
+		if _, obsErr := r.observeWorkload(ctx, &app); obsErr != nil {
 			// Losing the observation does not change why the pass failed, and the
 			// caller's error is the one worth returning.
 			logger.Error(obsErr, "observing workload while recording a refused child", "app", app.Name)
 		}
+		// The Deployment observed above may be settled on the previous spec;
+		// this generation has not reached it.
+		apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
+			Type:               kipperv1.ConditionRolloutComplete,
+			Status:             metav1.ConditionFalse,
+			Reason:             "NotApplied",
+			Message:            fmt.Sprintf("The latest change could not be applied: %v. Any healthy current pods continue serving.", err),
+			ObservedGeneration: app.Generation,
+		})
 		apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
 			Type:               kipperv1.ConditionChildrenAdopted,
 			Status:             metav1.ConditionFalse,
@@ -332,10 +350,14 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 	retryIn := r.sweepEnv(ctx, &app, generation, keepProjections)
 
 	// Update status from the Deployment
-	if err := r.updateStatus(ctx, &app); err != nil {
+	rolloutRetry, err := r.updateStatus(ctx, &app)
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 
+	if rolloutRetry > 0 && (linkResync.RequeueAfter == 0 || rolloutRetry < linkResync.RequeueAfter) {
+		linkResync.RequeueAfter = rolloutRetry
+	}
 	if retryIn > 0 && (linkResync.RequeueAfter == 0 || retryIn < linkResync.RequeueAfter) {
 		linkResync.RequeueAfter = retryIn
 	}
@@ -370,6 +392,23 @@ func (r *AppReconciler) sweepEnv(ctx context.Context, app *kipperv1.App, generat
 }
 
 func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *kipperv1.App, sources []envSource, generation, bindingHash string) error {
+	desired, err := r.buildDeployment(ctx, app, sources, generation, bindingHash)
+	if err != nil {
+		return err
+	}
+
+	// Retry conflicts locally because other controllers can update the
+	// same Deployment between our read and write.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// applyDeployment mutates desired based on the live object. Start each
+		// retry with a fresh copy to avoid reusing decisions from a failed attempt.
+		return r.applyDeployment(ctx, app, desired.DeepCopy(), generation)
+	})
+}
+
+// buildDeployment renders the declared configuration. applyDeployment adds
+// platform probe and shutdown settings after reading the live Deployment.
+func (r *AppReconciler) buildDeployment(ctx context.Context, app *kipperv1.App, sources []envSource, generation, bindingHash string) (*appsv1.Deployment, error) {
 	replicas := int32(1)
 	if app.Spec.Replicas != nil {
 		replicas = *app.Spec.Replicas
@@ -389,7 +428,8 @@ func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *kipperv1.A
 		Ports: []corev1.ContainerPort{
 			{ContainerPort: app.Spec.Port},
 		},
-		Resources: buildAppResources(app.Spec.Resources),
+		Resources:      buildAppResources(app.Spec.Resources),
+		ReadinessProbe: declaredReadiness(app),
 	}
 
 	// When a git-based app is waiting for its first build, the image is
@@ -490,7 +530,7 @@ httpd -p %d -h /www -f`, app.Name, app.Name, app.Spec.Port)}
 
 	pullSecrets, err := ensureImagePullSecret(ctx, r.Client, r.Scheme, app, app.Spec.Image)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	historyLimit := int32(3)
@@ -522,27 +562,13 @@ httpd -p %d -h /www -f`, app.Name, app.Name, app.Spec.Port)}
 		},
 	}
 
+	ensureProgressDeadline(desired, appProgressDeadline(app))
+
 	// Set owner reference so the Deployment is garbage-collected with the App
 	if err := controllerutil.SetControllerReference(app, desired, r.Scheme); err != nil {
-		return fmt.Errorf("setting owner reference: %w", err)
+		return nil, fmt.Errorf("setting owner reference: %w", err)
 	}
-
-	// Read, decide and write under one retry. This controller and everything
-	// else that touches a Deployment — the operator's own `kip app update`, the
-	// console, a scale — write the same object, so a conflict here is ordinary
-	// rather than exceptional. Returning it works, because a returned error is
-	// requeued with backoff, but it logs a failure for something that did not
-	// fail and buries the ones that did.
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// Each attempt gets its own copy. applyDeployment decides from the live
-		// object and writes what it decides into desired — holding the running
-		// environment generation, keeping an unpinned resource value — so an
-		// attempt that loses a conflict leaves those decisions behind. The next
-		// attempt reads a different live object and would treat the previous
-		// one's conclusions as its own, which is how a workload gets written
-		// back to a generation that was already retired.
-		return r.applyDeployment(ctx, app, desired.DeepCopy(), generation)
-	})
+	return desired, nil
 }
 
 // applyDeployment brings one Deployment to the desired state, reading it fresh
@@ -552,11 +578,15 @@ func (r *AppReconciler) applyDeployment(ctx context.Context, app *kipperv1.App, 
 	var existing appsv1.Deployment
 	err := r.Get(ctx, types.NamespacedName{Name: app.Name, Namespace: app.Namespace}, &existing)
 	if errors.IsNotFound(err) {
+		applyPlatformShape(&desired.Spec.Template, app, storedInference(app, nil), r.PreStopSleep)
 		return r.Create(ctx, desired)
 	}
 	if err != nil {
 		return err
 	}
+
+	inf := storedInference(app, &existing.Spec.Template)
+	applyPlatformShape(&desired.Spec.Template, app, inf, r.PreStopSleep)
 
 	// Apply recommendations within user bounds. If a quantity cannot be parsed,
 	// preserve the live Deployment values for resources omitted from the spec.
@@ -569,6 +599,7 @@ func (r *AppReconciler) applyDeployment(ctx context.Context, app *kipperv1.App, 
 				Namespace: app.Namespace, Kind: "App", Name: app.Name, UID: app.UID, Spec: spec,
 				Desired: desiredRes, Live: liveRes, LiveAnnotations: existing.Annotations,
 				Replicas: replicas, SurgePods: quotapkg.DeploymentSurgePods(desired, replicas), PodSpec: &desired.Spec.Template.Spec,
+				Rollout: func() rolloutPhase { return r.liveRolloutPhase(ctx, app, &existing) },
 			}) && r.Recorder != nil {
 				r.Recorder.Event(app, corev1.EventTypeWarning, "ResourceRequestAboveLimit",
 					"a CPU or memory request is above its limit, so the container runs at the limit")
@@ -591,80 +622,88 @@ func (r *AppReconciler) applyDeployment(ctx context.Context, app *kipperv1.App, 
 		existing.Spec.Replicas = desired.Spec.Replicas
 	}
 
-	// Only update if the template or labels actually changed.
-	// Unconditional updates cause an infinite reconciliation loop
-	// because each update bumps the resourceVersion, which triggers
-	// another reconciliation.
-	templateChanged := !equality.Semantic.DeepEqual(existing.Spec.Template, desired.Spec.Template)
+	deadlineChanged := ensureProgressDeadline(&existing, *desired.Spec.ProgressDeadlineSeconds)
+
 	labelsChanged := !equality.Semantic.DeepEqual(existing.Labels, desired.Labels)
 
-	// Reconcile a permanent invariant: every source this app's environment
-	// comes from must have a matching EnvFrom entry on the running container.
-	// The full-template DeepEqual above usually catches drift, but
-	// `equality.Semantic.DeepEqual` can return true for two templates
-	// that differ only in EnvFrom ordering or normalized fields, and
-	// the binding env is load-bearing for the pod's credentials. Any
-	// drift here — whether from `kubectl edit`, a Velero restore, or a
-	// third-party admission controller — forces a re-render.
-	// Which generation the pod template names is a separate decision from which
-	// one was published, and it exists to keep a product promise: editing env in
-	// the console shows a "restart to apply" banner and does not restart a
-	// running app.
-	//
-	// Every other trigger that should roll a workload already changes the
-	// template in some other field — the credential fingerprint and the restart
-	// stamp are both pod annotations, an image change is the container — so the
-	// question reduces to whether anything but the generation differs. It is put
-	// to the API server rather than answered here: the template built above sets
-	// what this controller owns, the live one has been through admission, and
-	// comparing those two directly says "different" on every cluster whatever
-	// the environment is doing.
+	// Adopt platform probe and shutdown changes during an existing rollout.
+	// Compare a candidate with the live platform settings to distinguish a
+	// requested rollout from changes introduced by an upgrade.
+	open := inf == inferencePending || inf == inferredNone
+	checkShape := open || !platformShapeEqual(&desired.Spec.Template, &existing.Spec.Template)
+	candidate := desired
+	if checkShape {
+		candidate = desired.DeepCopy()
+		copyPlatformShape(&candidate.Spec.Template, &existing.Spec.Template, app)
+	}
+	envHeld, rollComing, dryRunRefused := false, false, false
+
+	// Keep the running environment generation until another template change
+	// requires a rollout. Use a server-side dry run to account for admission
+	// defaults when comparing templates.
 	running := generationOnContainer(existing.Spec.Template.Spec.Containers, secretname.KindApp, app.Name)
 	if running != "" && running != generation {
 		protected, err := hasLivePod(ctx, r.hostReader(), &existing)
 		if err != nil {
 			return err
 		}
-		// Holding a generation that has gone, or that something else now sits
-		// at, would strand the workload for good: this pass republishes the
-		// newest, so nothing ever rewrites the one the template names, and the
-		// pods cannot start. Advancing is both the repair and the right answer —
-		// an environment that vanished is not one worth protecting a pod's
-		// place on.
+		// Advance to the published generation if the old secrets are missing
+		// or no longer belong to this app, so replacement pods can start.
 		stillThere, err := generationUsable(ctx, r.hostReader(), app, secretname.KindApp, running)
 		if err != nil {
 			return err
 		}
 		if protected && stillThere {
-			held := desired.DeepCopy()
+			held := candidate.DeepCopy()
 			held.Spec.Template.Spec.Containers[0].EnvFrom = envFrom(running)
 			settles, answered, err := templateSettlesAs(ctx, r.Client, &existing, held.Spec.Template)
 			if err != nil {
-				// A pass that cannot tell whether the app would roll asks again
-				// rather than guessing. Guessing wrong here restarts a running
-				// app nobody asked to restart.
+				// Retry errors rather than risk an unintended restart.
 				return err
 			}
+			dryRunRefused = !answered
+			rollComing = answered && !settles
 			if !answered && r.Recorder != nil {
-				// The promise is that an env edit does not restart a running
-				// app, and on this cluster it cannot be kept. Say so on the App,
-				// where an operator wondering why their pods rolled will look.
+				// Warn when a rejected dry run prevents preserving the running env.
 				r.Recorder.Event(app, corev1.EventTypeWarning, "EnvHoldUnavailable",
 					"this cluster does not allow the dry-run that decides whether an environment change can be applied without a restart, so the app restarts to pick it up")
 			}
 			if settles {
-				// The live template already is what the write would store, so
-				// it is what desired becomes: assigning the freshly built one
-				// instead leaves templateChanged true for the same defaulting
-				// reason, and the pass writes an object identical to the one
-				// already there, every reconcile, for as long as the edit is
-				// pending.
+				// Reuse the stored template, including admission defaults, to avoid
+				// repeated writes while the environment change is pending.
 				desired.Spec.Template = existing.Spec.Template
 				generation = running
+				envHeld = true
 			}
 		}
-		templateChanged = !equality.Semantic.DeepEqual(existing.Spec.Template, desired.Spec.Template)
 	}
+
+	if checkShape && !envHeld {
+		settles, answered := false, !dryRunRefused
+		if !rollComing && !dryRunRefused {
+			settles = equality.Semantic.DeepEqual(existing.Spec.Template, candidate.Spec.Template)
+			if !settles {
+				settles, answered, err = templateSettlesAs(ctx, r.Client, &existing, candidate.Spec.Template)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		switch {
+		case settles:
+			desired.Spec.Template = existing.Spec.Template
+		case !answered:
+			// If the dry run is unavailable, preserve the live platform settings
+			// while applying the requested change.
+			desired.Spec.Template = candidate.Spec.Template
+			r.warnAdoptionUnavailable(app)
+		case open:
+			applyPlatformShape(&desired.Spec.Template, app, r.inferReadiness(ctx, app, &existing, time.Now()), r.PreStopSleep)
+		}
+	}
+
+	// Skip unchanged writes to avoid triggering repeated reconciliations.
+	templateChanged := !equality.Semantic.DeepEqual(existing.Spec.Template, desired.Spec.Template)
 
 	bindingDriftDetected := generationOnContainer(
 		existing.Spec.Template.Spec.Containers, secretname.KindApp, app.Name) != generation
@@ -674,13 +713,26 @@ func (r *AppReconciler) applyDeployment(ctx context.Context, app *kipperv1.App, 
 		return err
 	}
 
-	if ownerOK && !templateChanged && !labelsChanged && !replicasChanged && !bindingDriftDetected {
+	if ownerOK && !templateChanged && !labelsChanged && !replicasChanged && !deadlineChanged && !bindingDriftDetected {
 		return nil
 	}
 
 	existing.Spec.Template = desired.Spec.Template
 	existing.Labels = desired.Labels
 	return r.Update(ctx, &existing)
+}
+
+// warnAdoptionUnavailable records one warning per App UID per controller
+// process when a rejected dry run prevents adopting new platform settings.
+func (r *AppReconciler) warnAdoptionUnavailable(app *kipperv1.App) {
+	if r.Recorder == nil {
+		return
+	}
+	if _, seen := r.adoptionWarned.LoadOrStore(app.UID, true); seen {
+		return
+	}
+	r.Recorder.Event(app, corev1.EventTypeWarning, "AdoptionUnavailable",
+		"the cluster rejected the dry run used to detect rollout changes; existing platform readiness and shutdown settings are preserved")
 }
 
 // injectableBindingSecret reports whether the named Secret may be injected into
@@ -805,8 +857,24 @@ func hasLivePod(ctx context.Context, reader client.Reader, deploy *appsv1.Deploy
 	if deploy.Spec.Replicas != nil && *deploy.Spec.Replicas > 0 {
 		return true, nil
 	}
+	pods, err := ownedPods(ctx, reader, deploy)
+	if err != nil {
+		return false, err
+	}
+	for i := range pods {
+		switch pods[i].Status.Phase {
+		case corev1.PodSucceeded, corev1.PodFailed:
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// ownedPods lists the pods of deploy's own ReplicaSets.
+func ownedPods(ctx context.Context, reader client.Reader, deploy *appsv1.Deployment) ([]corev1.Pod, error) {
 	if deploy.Spec.Selector == nil {
-		return false, nil
+		return nil, nil
 	}
 
 	// The selector alone is not ownership. An App and a Function may share a
@@ -817,7 +885,7 @@ func hasLivePod(ctx context.Context, reader client.Reader, deploy *appsv1.Deploy
 	var sets appsv1.ReplicaSetList
 	if err := reader.List(ctx, &sets, client.InNamespace(deploy.Namespace),
 		client.MatchingLabels(deploy.Spec.Selector.MatchLabels)); err != nil {
-		return false, err
+		return nil, err
 	}
 	// Keyed by UID, not name. Kubernetes owner references carry a UID precisely
 	// because names are reused: a replaced ReplicaSet can take the name of one
@@ -830,24 +898,21 @@ func hasLivePod(ctx context.Context, reader client.Reader, deploy *appsv1.Deploy
 		}
 	}
 	if len(ours) == 0 {
-		return false, nil
+		return nil, nil
 	}
 
 	var pods corev1.PodList
 	if err := reader.List(ctx, &pods, client.InNamespace(deploy.Namespace),
 		client.MatchingLabels(deploy.Spec.Selector.MatchLabels)); err != nil {
-		return false, err
+		return nil, err
 	}
+	var owned []corev1.Pod
 	for i := range pods.Items {
-		switch pods.Items[i].Status.Phase {
-		case corev1.PodSucceeded, corev1.PodFailed:
-			continue
-		}
 		if ref := metav1.GetControllerOf(&pods.Items[i]); ref != nil && ours[ref.UID] {
-			return true, nil
+			owned = append(owned, pods.Items[i])
 		}
 	}
-	return false, nil
+	return owned, nil
 }
 
 func (r *AppReconciler) reconcileService(ctx context.Context, app *kipperv1.App) error {
@@ -2169,17 +2234,24 @@ func (r *AppReconciler) writeStatusIfChanged(ctx context.Context, app *kipperv1.
 // observeWorkload records what the Deployment currently reports. It edits status
 // in memory and leaves persistence to the caller, so a pass that is about to
 // fail can still carry the observation into the one status write it makes.
-func (r *AppReconciler) observeWorkload(ctx context.Context, app *kipperv1.App) error {
+func (r *AppReconciler) observeWorkload(ctx context.Context, app *kipperv1.App) (time.Duration, error) {
 	var deploy appsv1.Deployment
 	err := r.Get(ctx, types.NamespacedName{Name: app.Name, Namespace: app.Namespace}, &deploy)
 	if errors.IsNotFound(err) {
 		app.Status.Phase = "Pending"
 		app.Status.Replicas = 0
 		app.Status.ReadyReplicas = 0
-		return nil
+		return 0, nil
 	}
 	if err != nil {
-		return err
+		return 0, err
+	}
+
+	check := healthCheckStatus(app, &deploy.Spec.Template)
+	app.Status.HealthCheck = &check
+	requeue, err := r.observeRollout(ctx, app, &deploy)
+	if err != nil {
+		return 0, err
 	}
 
 	app.Status.Replicas = deploy.Status.Replicas
@@ -2194,10 +2266,12 @@ func (r *AppReconciler) observeWorkload(ctx context.Context, app *kipperv1.App) 
 	default:
 		app.Status.Phase = "Pending"
 	}
-	return nil
+	return requeue, nil
 }
 
-func (r *AppReconciler) updateStatus(ctx context.Context, app *kipperv1.App) error {
+// updateStatus writes the App's status and reports how soon to look again
+// while its rollout is unfinished.
+func (r *AppReconciler) updateStatus(ctx context.Context, app *kipperv1.App) (time.Duration, error) {
 	// Reaching updateStatus means every route resource reconciled, so the API
 	// key gate is engaged when the toggle is on. Clear the condition when it is
 	// off so a stale warning never lingers.
@@ -2213,11 +2287,12 @@ func (r *AppReconciler) updateStatus(ctx context.Context, app *kipperv1.App) err
 		apimeta.RemoveStatusCondition(&app.Status.Conditions, kipperv1.ConditionAPIKeyGateReady)
 	}
 
-	if err := r.observeWorkload(ctx, app); err != nil {
-		return err
+	requeue, err := r.observeWorkload(ctx, app)
+	if err != nil {
+		return 0, err
 	}
 
-	return r.Status().Update(ctx, app)
+	return requeue, r.Status().Update(ctx, app)
 }
 
 func (r *AppReconciler) removeFinalizer(ctx context.Context, app *kipperv1.App) error {

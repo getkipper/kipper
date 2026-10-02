@@ -2601,7 +2601,7 @@ func TestReconcileDeployment_RetriesAConflictingWrite(t *testing.T) {
 	fakeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, existing).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Update: func(ctx context.Context, c crclient.WithWatch, obj crclient.Object, opts ...crclient.UpdateOption) error {
-				if _, isDeployment := obj.(*appsv1.Deployment); isDeployment {
+				if _, isDeployment := obj.(*appsv1.Deployment); isDeployment && !isDryRun(opts) {
 					updates++
 					if updates == 1 {
 						return errors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "backend", context.DeadlineExceeded)
@@ -2660,7 +2660,7 @@ func TestReconcileDeployment_EachRetryDecidesFromAFreshDesired(t *testing.T) {
 		WithInterceptorFuncs(interceptor.Funcs{
 			Update: func(ctx context.Context, c crclient.WithWatch, obj crclient.Object, opts ...crclient.UpdateOption) error {
 				d, isDeployment := obj.(*appsv1.Deployment)
-				if !isDeployment {
+				if !isDeployment || isDryRun(opts) {
 					return c.Update(ctx, obj, opts...)
 				}
 				updates++
@@ -3006,4 +3006,15 @@ func TestAdoptWriterSecrets_TakesWhatNothingOwnsAndLeavesTheRest(t *testing.T) {
 	require.Len(t, foreign.OwnerReferences, 1)
 	assert.Equal(t, "something-else", foreign.OwnerReferences[0].Name,
 		"a Secret another object controls was taken over")
+}
+
+// isDryRun reports whether an Update is the dry-run that asks how a template
+// would settle, rather than a write.
+func isDryRun(opts []crclient.UpdateOption) bool {
+	for _, o := range opts {
+		if o == crclient.DryRunAll {
+			return true
+		}
+	}
+	return false
 }

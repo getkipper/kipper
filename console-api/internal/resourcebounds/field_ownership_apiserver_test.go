@@ -3,8 +3,6 @@ package resourcebounds
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -15,9 +13,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/internal/apiservertest"
 	"github.com/getkipper/kipper/controller/pkg/fieldowners"
 )
 
@@ -28,31 +26,6 @@ const (
 	consoleAPIUserAgent = "console-api/v0.0.0 (linux/amd64) kubernetes/unknown"
 	kipUserAgent        = "kip/v0.0.0 (darwin/arm64) kubernetes/unknown"
 )
-
-func startAPIServer(t *testing.T) *rest.Config {
-	t.Helper()
-	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
-		if os.Getenv("CI") != "" {
-			t.Fatal("KUBEBUILDER_ASSETS is not set; the CI job must install the envtest binaries")
-		}
-		t.Skip(`KUBEBUILDER_ASSETS is not set; to run the API server tests: ` +
-			`export KUBEBUILDER_ASSETS="$(setup-envtest use 1.35.0 -p path)" && go test ./internal/resourcebounds/`)
-	}
-	env := &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "deploy", "crds")},
-		ErrorIfCRDPathMissing: true,
-	}
-	cfg, err := env.Start()
-	if err != nil {
-		t.Fatalf("starting API server: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := env.Stop(); err != nil {
-			t.Errorf("stopping API server: %v", err)
-		}
-	})
-	return cfg
-}
 
 func clientAs(t *testing.T, cfg *rest.Config, userAgent string) crclient.Client {
 	t.Helper()
@@ -123,7 +96,7 @@ func assertOwners(t *testing.T, app *kipperv1.App, field string, want ...string)
 }
 
 func TestFieldOwnershipOnTheAPIServer(t *testing.T) {
-	cfg := startAPIServer(t)
+	cfg := apiservertest.Start(t)
 	consoleAPI := clientAs(t, cfg, consoleAPIUserAgent)
 	kip := clientAs(t, cfg, kipUserAgent)
 	ctx := context.Background()

@@ -553,3 +553,22 @@ func TestDroppingASiblingEnvironmentLinkIsReported(t *testing.T) {
 	assert.Empty(t, out.Spec.Links)
 	assert.Equal(t, []string{"hrportal-acc/api"}, dropped)
 }
+
+// Environment copies must preserve declared health settings.
+func TestCopier_CarriesTheHealthCheck(t *testing.T) {
+	startup := int32(600)
+	src := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "demo-test"},
+		Spec: kipperv1.AppSpec{Image: "registry.example.com/api:1", Port: 8080,
+			Health: &kipperv1.AppHealth{Type: "http", Path: "/actuator/health/readiness", StartupTimeoutSeconds: &startup}},
+	}
+	crClient := crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(src).Build()
+	c := &Copier{CRClient: crClient, Client: fake.NewClientset()}
+
+	_, err := c.Run(context.Background(), Options{Source: "demo-test", Target: "demo-prod", TargetEnv: "prod", ClusterDomain: "example.com"})
+	require.NoError(t, err)
+
+	var copied kipperv1.App
+	require.NoError(t, crClient.Get(context.Background(), crclient.ObjectKey{Namespace: "demo-prod", Name: "api"}, &copied))
+	assert.Equal(t, src.Spec.Health, copied.Spec.Health)
+}

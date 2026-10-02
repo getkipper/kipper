@@ -38,6 +38,10 @@ For user-set or [held memory](/en/resource-management#held-values), Kipper prese
 
 If a pod remains in `ContainerCreating` state for more than 5 minutes, the controller deletes it (allowing Kubernetes to recreate it) and creates a warning alert.
 
+### Stalled rollouts
+
+When a rollout exceeds its Kubernetes progress deadline, the controller raises a warning alert with the available diagnostic details. These may identify a scheduling problem, a quota limit, or pods that have not become ready. See [When a rollout waits](/en/deploying-apps#when-a-rollout-waits) for troubleshooting steps.
+
 ### Node resource pressure
 
 When total memory usage across all pods exceeds 80% of the node's allocatable memory, the controller generates a warning alert listing the top consumers and any anomalies. At 90%+, the alert is marked critical. The alert includes which workloads are using the most memory and which ones have grown significantly in the last 10 minutes.

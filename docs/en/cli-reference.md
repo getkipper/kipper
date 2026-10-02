@@ -442,13 +442,14 @@ kip ai restore --name pre-upgrade        # requires kipper-ai uninstalled first
 
 ## kip app update {#kip-app-update}
 
-Updates the container image, resource profile or CPU and memory of a deployed application and triggers a rolling update.
+Updates a deployed app's image, resource settings, or health check. Changes to the pod configuration trigger a rolling update.
 
 ```bash
 kip app update api --image ghcr.io/acme/api:v2.1.0
 kip app update api --profile jvm
 kip app update api --memory-request 512Mi --memory-limit 2Gi
 kip app update api --tuning auto
+kip app update api --health-path /actuator/health/readiness --health-startup-timeout 600
 ```
 
 | Flag | Required | Description |
@@ -459,12 +460,19 @@ kip app update api --tuning auto
 | `--memory-request` / `--cpu-request` | No* | Minimum request for automatic tuning |
 | `--memory-limit` / `--cpu-limit` | No* | Container limit and maximum request for automatic tuning |
 | `--tuning auto` | No* | Clear the CPU and memory values so Kipper sizes the app on its own |
+| `--health` | No* | Health check type: `http`, `tcp`, `none` (disable the app readiness check), or `auto` to remove a declared check |
+| `--health-path` | No* | Path for an `http` check, e.g. `/ready`. Selects `http` when `--health` is not given |
+| `--health-port` | No* | Port to check, when it is not the app port |
+| `--health-startup-timeout` | No* | Time allowed for a running pod to become ready before it is reported as stuck, in seconds (default 300) |
+| `--health-timeout` | No* | Timeout for each check in seconds (default 2) |
 | `--project` | No | Project name |
 | `--environment` | No | Target environment |
 
-\* Supply at least one update flag: `--image`, `--profile`, a CPU or memory flag, `--tuning auto`, `--redirect-from`, `--internal-path` or `--public-path`.
+\* Supply at least one update flag: `--image`, `--profile`, a CPU or memory flag, `--tuning auto`, `--redirect-from`, `--internal-path`, `--public-path`, `--health` or a `--health-*` flag.
 
 A request below its limit defines a range for automatic tuning. A request or limit supplied alone sets a fixed size; a request above its limit is rejected. Use either `--memory` or the separate memory request/limit flags. The same rule applies to CPU. `--tuning auto` cannot be combined with CPU or memory values. Changing the profile preserves explicit resource values. See [Your own CPU and memory values](/en/resource-management#your-own-values).
+
+The health flags also work with `kip app deploy`. Updates merge into the existing check; switching types clears unsupported settings. Changing the readiness probe triggers a rollout, while changing only the startup timeout leaves pods running. See [Health checks and rollouts](/en/deploying-apps#health-checks-and-rollouts).
 
 ## kip app scale {#kip-app-scale}
 

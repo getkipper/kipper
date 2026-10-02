@@ -251,3 +251,27 @@ func TestHealthDoesNotFetchLogsForAHealthyContainer(t *testing.T) {
 		t.Error("a running container's log was fetched, which nothing asked for")
 	}
 }
+
+// Include scheduling errors for Pending pods that have no container status.
+func TestHealthSaysWhyAPodCannotBePlaced(t *testing.T) {
+	pending := appPod("checkout-stu", corev1.PodPending)
+	pending.Status.Conditions = []corev1.PodCondition{{
+		Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+		Message: "0/1 nodes are available: 1 Insufficient cpu.",
+	}}
+	running := appPod("checkout-vwx", corev1.PodRunning)
+	running.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodScheduled, Status: corev1.ConditionTrue}}
+
+	got := getHealth(t, pending, running)
+
+	messages := map[string]string{}
+	for _, p := range got.Pods {
+		messages[p.Name] = p.Message
+	}
+	if messages["checkout-stu"] != "0/1 nodes are available: 1 Insufficient cpu." {
+		t.Errorf("pending pod message = %q, want the scheduler's reason", messages["checkout-stu"])
+	}
+	if messages["checkout-vwx"] != "" {
+		t.Errorf("a placed pod has nothing to explain, got %q", messages["checkout-vwx"])
+	}
+}

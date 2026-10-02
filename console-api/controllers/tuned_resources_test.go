@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,6 +18,7 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	"github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/controller/pkg/rollout"
 )
 
 func tunedClient(t *testing.T, objs ...client.Object) client.Client {
@@ -180,4 +182,83 @@ func TestRolloutReplicasCountsWhatTheHPASet(t *testing.T) {
 	if got := rolloutReplicas(&two, nil); got != 2 {
 		t.Fatalf("rolloutReplicas = %d, want 2 before the first rollout", got)
 	}
+}
+
+func TestTunedResourcesWaitForTheRollout(t *testing.T) {
+	cpuRecommendation := func(req string) *kipperv1.ResourceTuning {
+		return &kipperv1.ResourceTuning{
+			ObjectMeta: metav1.ObjectMeta{Name: resourcebounds.TuningName("App", "shop"), Namespace: "default", OwnerReferences: controlledBy("App", "shop", "uid-shop")},
+			Spec:       kipperv1.ResourceTuningSpec{Kind: "App", Name: "shop"},
+			Status:     kipperv1.ResourceTuningStatus{Recommendation: kipperv1.TunedResources{CPURequest: req}},
+		}
+	}
+	cpuBounds := func(min, max string) resourcebounds.Spec {
+		spec, err := resourcebounds.OwnedSpec(min, max, "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return spec
+	}
+	cpu := func(req string) *corev1.ResourceRequirements {
+		return &corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(req)}}
+	}
+	tests := []struct {
+		name    string
+		phase   rolloutPhase
+		rec     string
+		bounds  resourcebounds.Spec
+		live    string
+		wantCPU string
+	}{
+		{name: "settled: the recommendation applies", phase: phaseSettled, rec: "1500m", bounds: cpuBounds("500m", "3"), live: "3", wantCPU: "1500m"},
+		{name: "in flight: the live size stays", phase: phaseInFlight, rec: "1500m", bounds: cpuBounds("500m", "3"), live: "3", wantCPU: "3"},
+		{name: "in flight: a user bound still applies", phase: phaseInFlight, rec: "1500m", bounds: cpuBounds("500m", "2"), live: "3", wantCPU: "2"},
+		{name: "unschedulable: a decrease applies", phase: phaseUnschedulable, rec: "1500m", bounds: cpuBounds("500m", "3"), live: "3", wantCPU: "1500m"},
+		{name: "unschedulable: an increase waits", phase: phaseUnschedulable, rec: "2", bounds: cpuBounds("500m", "3"), live: "1", wantCPU: "1"},
+		{name: "failed: an increase applies", phase: phaseFailed, rec: "2", bounds: cpuBounds("500m", "3"), live: "1", wantCPU: "2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := tunedClient(t, cpuRecommendation(tt.rec))
+			desired := cpu(tt.live)
+			applyTunedResources(context.Background(), c, tunedWorkload{
+				Namespace: "default", Kind: "App", Name: "shop", UID: "uid-shop", Spec: tt.bounds,
+				Desired: desired, Live: cpu(tt.live), Replicas: 2, Rollout: func() rolloutPhase { return tt.phase },
+			})
+			got := desired.Requests[corev1.ResourceCPU]
+			if got.Cmp(resource.MustParse(tt.wantCPU)) != 0 {
+				t.Fatalf("cpu request = %s, want %s", got.String(), tt.wantCPU)
+			}
+		})
+	}
+}
+
+func TestRolloutPhaseFor(t *testing.T) {
+	assert.Equal(t, phaseSettled, rolloutPhase(0))
+	cases := map[rollout.Reason]rolloutPhase{
+		rollout.Complete:         phaseSettled,
+		rollout.InProgress:       phaseInFlight,
+		rollout.Unschedulable:    phaseUnschedulable,
+		rollout.QuotaExceeded:    phaseUnschedulable,
+		rollout.PodsRefused:      phaseFailed,
+		rollout.NotBecomingReady: phaseInFlight,
+		rollout.DeadlineExceeded: phaseFailed,
+	}
+	for reason, want := range cases {
+		assert.Equal(t, want, rolloutPhaseFor(reason), "reason %q", reason)
+	}
+}
+
+// Reading the rollout phase lists pods, so it happens only when there is a
+// recommendation to hold back.
+func TestTunedResourcesReadTheRolloutOnlyForARecommendation(t *testing.T) {
+	c := tunedClient(t)
+	desired := memoryPair("128Mi", "128Mi")
+	applyTunedResources(context.Background(), c, tunedWorkload{
+		Namespace: "default", Kind: "App", Name: "shop", UID: "uid-shop", Desired: desired, Live: memoryPair("384Mi", "384Mi"), Replicas: 1,
+		Rollout: func() rolloutPhase {
+			t.Fatal("the rollout was read with no recommendation to gate")
+			return phaseSettled
+		},
+	})
 }

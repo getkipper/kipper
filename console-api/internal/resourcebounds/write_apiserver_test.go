@@ -8,6 +8,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/internal/apiservertest"
 )
 
 func crclientWithOwner(c client.Client, owner string) client.Client {
@@ -17,7 +18,7 @@ func crclientWithOwner(c client.Client, owner string) client.Client {
 func memoryEdit(req, lim string) *PairEdit { return &PairEdit{Request: req, Limit: lim} }
 
 func TestWriteQuantitiesOnTheAPIServer(t *testing.T) {
-	cfg := startAPIServer(t)
+	cfg := apiservertest.Start(t)
 	consoleAPI := clientAs(t, cfg, consoleAPIUserAgent)
 	kip := clientAs(t, cfg, kipUserAgent)
 	console := clientAs(t, cfg, "kipper-console-test/v0.0.0")
@@ -127,7 +128,7 @@ func TestWriteQuantitiesOnTheAPIServer(t *testing.T) {
 // user's. Values the claim does not reach stay held, and a claim that finds the
 // target changed leaves the user's edit alone.
 func TestCarriedValuesAreHeldUntilClaimedOnTheAPIServer(t *testing.T) {
-	cfg := startAPIServer(t)
+	cfg := apiservertest.Start(t)
 	ctx := context.Background()
 	kip := clientAs(t, cfg, kipUserAgent)
 	copier := clientAs(t, cfg, "kipper-copy-test/v0.0.0")

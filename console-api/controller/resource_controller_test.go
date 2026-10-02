@@ -1478,15 +1478,65 @@ func TestCheckStuckRollouts(t *testing.T) {
 		}}},
 	}
 	rc := NewResourceController(nil, nil)
+	explained := 0
+	explain := func(*appsv1.Deployment) string {
+		explained++
+		return "A new pod cannot be placed: 0/1 nodes are available: 1 Insufficient cpu."
+	}
 
-	batches := rc.checkStuckRollouts([]appsv1.Deployment{stuck})
+	batches := rc.checkStuckRollouts([]appsv1.Deployment{stuck}, explain)
 	entries, marks := entriesOf(batches), marksOf(batches)
 	if len(entries) != 1 || entries[0].Action != "rollout stuck" {
 		t.Fatalf("expected 1 rollout-stuck entry, got %+v", entries)
 	}
+	if !strings.Contains(entries[0].Reason, "Insufficient cpu") {
+		t.Errorf("the alert names the cause: %q", entries[0].Reason)
+	}
 	rc.commitMarks(marks)
-	if again := entriesOf(rc.checkStuckRollouts([]appsv1.Deployment{stuck})); len(again) != 0 {
+	if again := entriesOf(rc.checkStuckRollouts([]appsv1.Deployment{stuck}, explain)); len(again) != 0 {
 		t.Fatalf("expected cooldown to suppress repeat, got %+v", again)
+	}
+	if explained != 1 {
+		t.Errorf("explain ran %d times, want once: a rollout in cooldown reads no pods", explained)
+	}
+}
+
+func TestExplainStuckRollout(t *testing.T) {
+	deadline := int32(600)
+	controller := true
+	stuck := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "staging", UID: "dep-uid"},
+		Spec: appsv1.DeploymentSpec{
+			ProgressDeadlineSeconds: &deadline,
+			Selector:                &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
+		},
+		Status: appsv1.DeploymentStatus{Conditions: []appsv1.DeploymentCondition{{
+			Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse, Reason: "ProgressDeadlineExceeded",
+			Message: `ReplicaSet "web-2" has timed out progressing.`,
+		}}},
+	}
+	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "web-2", Namespace: "staging", UID: "rs-2", Labels: map[string]string{"app": "web"},
+		Annotations:     map[string]string{"deployment.kubernetes.io/revision": "2"},
+		OwnerReferences: []metav1.OwnerReference{{UID: "dep-uid", Controller: &controller}},
+	}}
+	pending := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-2-a", Namespace: "staging", Labels: map[string]string{"app": "web"},
+			OwnerReferences: []metav1.OwnerReference{{UID: "rs-2", Controller: &controller}}},
+		Status: corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+			Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+			Message: "0/1 nodes are available: 1 Insufficient cpu.",
+		}}},
+	}
+
+	rc := NewResourceController(fake.NewSimpleClientset(rs, pending), nil)
+	if got := rc.explainStuckRollout(context.Background())(stuck); !strings.Contains(got, "Insufficient cpu") {
+		t.Errorf("explanation = %q, want the scheduler's reason", got)
+	}
+
+	rc = NewResourceController(fake.NewSimpleClientset(), nil)
+	if got := rc.explainStuckRollout(context.Background())(stuck); !strings.Contains(got, "timed out progressing") {
+		t.Errorf("explanation = %q, want the Deployment's own message when there are no pods to read", got)
 	}
 }
 
@@ -2046,5 +2096,41 @@ func TestTuningPausedSkipsWorkload(t *testing.T) {
 	entries = rc.processStatefulSet(context.Background(), makeSTS(nil), metrics)
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry for the unpaused statefulset, got %d: %v", len(entries), entries)
+	}
+}
+
+// Measure readiness against the estimated startup timeout, not the longer
+// Deployment progress deadline.
+func TestExplainStuckRolloutMeasuresTheStartupTime(t *testing.T) {
+	deadline := int32(600)
+	controller := true
+	stuck := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "staging", UID: "dep-uid"},
+		Spec: appsv1.DeploymentSpec{
+			ProgressDeadlineSeconds: &deadline,
+			Selector:                &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
+		},
+		Status: appsv1.DeploymentStatus{Conditions: []appsv1.DeploymentCondition{{
+			Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse, Reason: "ProgressDeadlineExceeded",
+		}}},
+	}
+	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "web-2", Namespace: "staging", UID: "rs-2", Labels: map[string]string{"app": "web"},
+		Annotations:     map[string]string{"deployment.kubernetes.io/revision": "2"},
+		OwnerReferences: []metav1.OwnerReference{{UID: "dep-uid", Controller: &controller}},
+	}}
+	started := metav1.NewTime(time.Now().Add(-8 * time.Minute))
+	notReady := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-2-a", Namespace: "staging", Labels: map[string]string{"app": "web"},
+			OwnerReferences: []metav1.OwnerReference{{UID: "rs-2", Controller: &controller}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, StartTime: &started, Conditions: []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+		}},
+	}
+
+	rc := NewResourceController(fake.NewSimpleClientset(rs, notReady), nil)
+	got := rc.explainStuckRollout(context.Background())(stuck)
+	if !strings.Contains(got, "within 5m0s") {
+		t.Errorf("explanation = %q, want the 5-minute startup time named", got)
 	}
 }

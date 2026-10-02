@@ -493,19 +493,20 @@ func TestALinkedAppIsSweptPeriodically(t *testing.T) {
 		WithStatusSubresource(linked, unlinked).
 		Build()
 	r := &AppReconciler{Client: client, Scheme: scheme}
+	// Settled rollouts, so the only reason left to look again is the links.
+	reconcileSettled := func(name string) ctrl.Result {
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "hrportal-test"}}
+		_, err := r.Reconcile(context.Background(), req)
+		require.NoError(t, err)
+		settleDeployment(t, client, req.NamespacedName)
+		res, err := r.Reconcile(context.Background(), req)
+		require.NoError(t, err)
+		return res
+	}
 
-	res, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "hrportal-backend", Namespace: "hrportal-test"},
-	})
-	require.NoError(t, err)
-	assert.Equal(t, linkRefreshInterval, res.RequeueAfter,
+	assert.Equal(t, linkRefreshInterval, reconcileSettled("hrportal-backend").RequeueAfter,
 		"an app holding links must be swept, or a dropped revocation event lasts forever")
-
-	res, err = r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "plain", Namespace: "hrportal-test"},
-	})
-	require.NoError(t, err)
-	assert.Zero(t, res.RequeueAfter,
+	assert.Zero(t, reconcileSettled("plain").RequeueAfter,
 		"an app with no links has no allowance to keep fresh and must not be swept")
 }
 

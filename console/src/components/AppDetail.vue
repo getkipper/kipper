@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick, type ComponentP
 import { Eye, EyeOff, Plus, Minus, Trash2, Terminal, RotateCw, Pencil, Save, AlertTriangle, Package, Undo2, Shield, X, Sparkles, Link, GitBranch, File, Folder, Download, ChevronRight, ChevronDown, Upload, Copy, Check, Globe, CheckCircle2, RefreshCw } from 'lucide-vue-next'
 import SidePanel from '@/components/SidePanel.vue'
 import SaveButton from '@/components/SaveButton.vue'
+import AppHealthCheck from '@/components/AppHealthCheck.vue'
 import LogAnalysis from '@/components/LogAnalysis.vue'
 import DiagnoseModal from '@/components/DiagnoseModal.vue'
 import ContainerErrorsModal from '@/components/ContainerErrorsModal.vue'
@@ -720,6 +721,9 @@ const failingContainers = computed(() => {
   return out
 })
 
+// Pending pods may have scheduling errors without any container failures.
+const unplacedPods = computed(() => appHealth.value.filter(p => p.phase === 'Pending' && p.message))
+
 function openContainerErrors() {
   modal.open(ContainerErrorsModal, {
     title: `Container errors — ${props.appName}`,
@@ -742,17 +746,20 @@ async function loadHealth() {
 }
 
 let healthPollTimer: ReturnType<typeof setInterval> | undefined
+let healthPollTicks = 0
 onMounted(() => {
   loadHealth()
-  // Only while something is wrong: a healthy app has nothing to re-read, and a
-  // failing one changes state as it restarts.
+  // Poll every 5 seconds when there are problems, or every 15 seconds
+  // to catch problems that start while the panel is open.
   healthPollTimer = setInterval(() => {
+    healthPollTicks++
     // Also while something has restarted but currently looks fine: a crash
     // loop sampled during its running window would otherwise stop the polling
     // that would have caught the next crash.
     const restarting = appHealth.value.some(p =>
       [...p.init_containers, ...p.containers].some(c => c.restarts > 0))
-    if (failingContainers.value.length > 0 || restarting) loadHealth()
+    const troubled = failingContainers.value.length > 0 || restarting || unplacedPods.value.length > 0
+    if (troubled || healthPollTicks % 3 === 0) loadHealth()
   }, 5000)
 })
 onUnmounted(() => {
@@ -2703,6 +2710,14 @@ function openOptimise() {
     </div>
 
     <div
+      v-else-if="unplacedPods.length > 0"
+      data-testid="app-unplaced-banner"
+      class="border-b border-amber-200 bg-amber-50 px-5 py-2.5 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300"
+    >
+      A new pod cannot be placed: {{ unplacedPods[0].message }} Any healthy current pods continue serving. Lower the CPU or memory request on the Resources tab, or add capacity.
+    </div>
+
+    <div
       v-else-if="healthError"
       class="border-b border-amber-200 bg-amber-50 px-5 py-2.5 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300"
     >
@@ -4233,6 +4248,9 @@ function openOptimise() {
             <SaveButton v-if="canWriteApp" :saving="settingsSaving" label="Save settings" @click="saveSettings" />
           </div>
 
+          <!-- Health settings use a separate endpoint to preserve route settings. -->
+          <AppHealthCheck :project="project" :app-name="props.appName" :can-write="canWriteApp" />
+
           <!-- Info box -->
           <div class="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
             <p class="text-xs text-slate-600 dark:text-slate-400">
@@ -4481,7 +4499,7 @@ function openOptimise() {
           <Info class="mt-0.5 h-4 w-4 flex-shrink-0 text-kipper-600 dark:text-kipper-400" />
           <div class="text-xs text-kipper-700 dark:text-kipper-300">
             <p>Resources are managed automatically. CPU and memory are adjusted based on usage.</p>
-            <p v-if="replicaCount < 2" class="mt-1 font-medium">Scale-down is paused because this app has a single replica. With 2+ replicas, resource adjustments use rolling updates with zero downtime.</p>
+            <p v-if="replicaCount < 2" class="mt-1 font-medium">Scale-down is paused because this app has a single replica. Increases still apply.</p>
           </div>
         </div>
         <!-- Resource recommendation banner -->

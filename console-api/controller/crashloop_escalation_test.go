@@ -467,3 +467,19 @@ func TestAGenericCrashLoopDoesNotPromiseARecovery(t *testing.T) {
 	assert.Contains(t, batch.entry.Reason, "kip service restart db",
 		"the command is still worth naming, as the thing to try if it looks like storage")
 }
+
+// An unready container with no restarts should not open a crash-loop episode.
+func TestANeverReadyContainerIsNotACrashLoop(t *testing.T) {
+	waiting := podWith("shop-prod", "api", "api-new", unreadyStatus("app", 0))
+	waiting.Status.Phase = corev1.PodRunning
+	rc := NewResourceController(fake.NewClientset(waiting), nil)
+	rc.readPreviousLog = func(context.Context, string, string, string) string { return "" }
+
+	for range 3 {
+		batches := rc.checkPodProblems(context.Background())
+		assert.Empty(t, entriesOf(batches))
+		rc.commitBatches(batches)
+	}
+
+	assert.Empty(t, rc.crashLoopEpisode, "no episode opens for a pod that is only waiting for its check")
+}

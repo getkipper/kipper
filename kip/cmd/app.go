@@ -76,7 +76,7 @@ var appDeleteCmd = &cobra.Command{
 
 var appUpdateCmd = &cobra.Command{
 	Use:   "update [app-name]",
-	Short: "Update an application's image, resource profile, redirect domains or refused paths",
+	Short: "Update an application's image, resource profile, health check, redirect domains or refused paths",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runAppUpdate,
 }
@@ -125,6 +125,7 @@ func init() {
 	appDeployCmd.Flags().String("memory", "", "memory limit (e.g. 256Mi, 1Gi)")
 	appDeployCmd.Flags().String("cpu", "", "CPU limit (e.g. 500m, 1)")
 	appDeployCmd.Flags().String("profile", "", "resource profile: lightweight, standard, compute-heavy, memory-heavy, or jvm")
+	addHealthFlags(appDeployCmd)
 	appDeployCmd.MarkFlagsMutuallyExclusive("profile", "memory")
 	appDeployCmd.MarkFlagsMutuallyExclusive("profile", "cpu")
 
@@ -149,6 +150,7 @@ func init() {
 	appUpdateCmd.Flags().StringSlice("redirect-from", nil, "hostnames that 301 to this app's hostname (e.g. www.example.com); pass empty to clear, max 10")
 	appUpdateCmd.Flags().StringSlice("internal-path", nil, "path prefixes refused at the ingress on every route this app has, matched literally; pass empty to clear")
 	appUpdateCmd.Flags().StringSlice("public-path", nil, "paths that stay public even though a refusal covers them; pass empty to clear")
+	addHealthFlags(appUpdateCmd)
 	appUpdateCmd.Flags().String("project", "", "project name")
 	appUpdateCmd.Flags().String("environment", "", "target environment")
 
@@ -299,6 +301,10 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 	}
 	buildMemory, _ := cmd.Flags().GetString("build-memory")
 	buildCPU, _ := cmd.Flags().GetString("build-cpu")
+	healthEdit, err := readHealthFlags(cmd)
+	if err != nil {
+		return err
+	}
 
 	// Record which flags the user actually set so an update only writes those
 	// fields (a bare redeploy must not reset replicas, route or branch to their
@@ -402,6 +408,7 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 			GitCredentials:    gitCredentials,
 			BuildMemory:       buildMemory,
 			BuildCPU:          buildCPU,
+			Health:            healthEdit,
 			Changed:           changed,
 		})
 	}()
@@ -497,6 +504,12 @@ func runAppList(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  !   %s depends on %s, which is crash-looping\n", app.Name, app.BrokenDependency)
 		fmt.Printf("      kip service list  shows why, and what to try\n\n")
 	}
+	for _, app := range apps {
+		if app.RolloutWaiting == "" {
+			continue
+		}
+		fmt.Printf("  !   %s is still rolling out: %s\n\n", app.Name, app.RolloutWaiting)
+	}
 
 	return nil
 }
@@ -587,8 +600,12 @@ func runAppUpdate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if image == "" && profile == "" && !redirectSet && !internalSet && !publicSet && resourceEdits == nil {
-		return fmt.Errorf("nothing to update. Pass --image, --profile, --memory, --cpu, their -request/-limit forms, --tuning auto, --redirect-from, --internal-path, --public-path, or a combination")
+	healthEdit, err := readHealthFlags(cmd)
+	if err != nil {
+		return err
+	}
+	if image == "" && profile == "" && !redirectSet && !internalSet && !publicSet && resourceEdits == nil && !healthEdit.Any() {
+		return fmt.Errorf("nothing to update. Pass --image, --profile, --memory, --cpu, their -request/-limit forms, --tuning auto, --redirect-from, --internal-path, --public-path, --health, a --health-* flag, or a combination")
 	}
 
 	ns, k8sClient, err := resolveAppNamespace(cmd, appName)
@@ -614,6 +631,13 @@ func runAppUpdate(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		fmt.Printf("\n  ✔  %s\n", describeResourceEdits(*resourceEdits))
+	}
+
+	if healthEdit.Any() {
+		if err := d.UpdateHealth(ctx, ns, appName, healthEdit); err != nil {
+			return err
+		}
+		fmt.Printf("\n  ✔  %s\n", describeHealthEdit(healthEdit))
 	}
 
 	if redirectSet {

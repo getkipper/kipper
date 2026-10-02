@@ -1029,7 +1029,8 @@ func runSystemUpgrade(host, explicitKey, fallbackKey, domain string, dnsResolver
 		return err
 	}
 
-	fmt.Printf("\n  Upgrade complete. Cluster components reconciled.\n\n")
+	fmt.Printf("\n  Upgrade complete. Cluster components reconciled.\n")
+	fmt.Printf("  Apps adopt platform changes on their next rollout; this upgrade does not restart them.\n\n")
 	return nil
 }
 

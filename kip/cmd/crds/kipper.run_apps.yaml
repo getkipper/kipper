@@ -139,6 +139,54 @@ spec:
                 required:
                 - url
                 type: object
+              health:
+                description: |-
+                  Health declares how Kipper checks whether a pod is ready for traffic.
+                  If omitted, Kipper infers a check; status.healthCheck reports the result.
+                properties:
+                  path:
+                    description: Path is the HTTP path to request, for an http check.
+                    maxLength: 1024
+                    pattern: ^/\S*$
+                    type: string
+                  port:
+                    description: Port is the port to check. It defaults to spec.port.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  startupTimeoutSeconds:
+                    description: |-
+                      StartupTimeoutSeconds is the time allowed for a running pod to become
+                      ready before it is reported as stuck. The default is 300 seconds.
+                    format: int32
+                    maximum: 3600
+                    minimum: 10
+                    type: integer
+                  timeoutSeconds:
+                    description: TimeoutSeconds is how long one check may take. It
+                      defaults to 2.
+                    format: int32
+                    maximum: 60
+                    minimum: 1
+                    type: integer
+                  type:
+                    description: |-
+                      Type is http (a GET returning 200-399), tcp (a successful connection),
+                      or none (no readiness check on the app container).
+                    enum:
+                    - http
+                    - tcp
+                    - none
+                    type: string
+                required:
+                - type
+                type: object
+                x-kubernetes-validations:
+                - message: path is required for an http check and allowed only there
+                  rule: 'self.type == ''http'' ? has(self.path) : !has(self.path)'
+                - message: a check of type none takes no port or timeout
+                  rule: self.type != 'none' || (!has(self.port) && !has(self.timeoutSeconds))
               image:
                 description: Image is the container image to deploy.
                 type: string
@@ -385,6 +433,11 @@ spec:
             - image
             - port
             type: object
+            x-kubernetes-validations:
+            - message: health.port must not be port + 10000, which Kipper uses for
+                the instance proxy
+              rule: '!has(self.health) || !has(self.health.port) || self.health.port
+                != self.port + 10000'
           status:
             description: AppStatus defines the observed state of the application.
             properties:
@@ -482,6 +535,30 @@ spec:
                   - type
                   type: object
                 type: array
+              healthCheck:
+                description: HealthCheck is the check new pods must pass, as Kipper
+                  applies it.
+                properties:
+                  path:
+                    description: Path is the HTTP path, for an http check.
+                    type: string
+                  port:
+                    description: Port is the checked port, when there is a check.
+                    format: int32
+                    type: integer
+                  source:
+                    description: |-
+                      Source is declared (spec.health), applying (the declared probe is not
+                      in the Deployment template yet), inferred (based on TCP connections),
+                      pending (inconclusive observations), or building (the Git placeholder).
+                    type: string
+                  type:
+                    description: Type is http, tcp or none.
+                    type: string
+                required:
+                - source
+                - type
+                type: object
               image:
                 description: Image is the currently deployed image.
                 type: string

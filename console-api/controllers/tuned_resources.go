@@ -18,6 +18,7 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	quotapkg "github.com/getkipper/kipper/console-api/quota"
+	"github.com/getkipper/kipper/controller/pkg/rollout"
 )
 
 // tunedWorkload supplies the desired resources and the state needed to resolve
@@ -34,6 +35,36 @@ type tunedWorkload struct {
 	Replicas        int32
 	SurgePods       int32
 	PodSpec         *corev1.PodSpec
+	// Rollout classifies the live rollout when a recommendation is available.
+	// It may read pods; nil treats the workload as settled.
+	Rollout func() rolloutPhase
+}
+
+// rolloutPhase determines whether resource recommendations may apply.
+type rolloutPhase int
+
+const (
+	// phaseSettled allows recommendations.
+	phaseSettled rolloutPhase = iota
+	// phaseInFlight postpones recommendations to avoid another rollout.
+	phaseInFlight
+	// phaseUnschedulable allows recommendations only when neither request grows.
+	phaseUnschedulable
+	// phaseFailed allows recommendations that may help a failed rollout recover.
+	phaseFailed
+)
+
+// rolloutPhaseFor maps the reason a rollout has not finished to its phase.
+func rolloutPhaseFor(reason rollout.Reason) rolloutPhase {
+	switch reason {
+	case rollout.Complete:
+		return phaseSettled
+	case rollout.Unschedulable, rollout.QuotaExceeded:
+		return phaseUnschedulable
+	case rollout.PodsRefused, rollout.DeadlineExceeded:
+		return phaseFailed
+	}
+	return phaseInFlight
 }
 
 // applyTunedResources resolves CPU and memory from the spec, live values and
@@ -42,8 +73,19 @@ type tunedWorkload struct {
 // limit; that resource is fixed at the limit.
 func applyTunedResources(ctx context.Context, reader client.Reader, w tunedWorkload) (requestAboveLimit bool) {
 	rec := recommendationFor(ctx, reader, w)
+	phase := phaseSettled
+	if rec != nil && w.Rollout != nil {
+		phase = w.Rollout()
+	}
+	if phase == phaseInFlight {
+		rec = nil
+	}
 	trial := w.Desired.DeepCopy()
 	resourcebounds.Apply(trial, w.Spec, rec, w.Live)
+	if rec != nil && phase == phaseUnschedulable && w.Live != nil && requestsGrow(*w.Live, *trial) {
+		trial = w.Desired.DeepCopy()
+		resourcebounds.Apply(trial, w.Spec, nil, w.Live)
+	}
 	if rec != nil && w.Live != nil && !quotaAllows(ctx, reader, w.Namespace, *w.Live, *trial, w.Replicas, w.SurgePods,
 		quotapkg.WithContainerResources(w.PodSpec, *trial)) {
 		logf.FromContext(ctx).Info("the resource recommendation does not fit the project quota, keeping the live size",
@@ -53,6 +95,20 @@ func applyTunedResources(ctx context.Context, reader client.Reader, w tunedWorkl
 	}
 	*w.Desired = *trial
 	return requestAboveLimitIn(w.Spec.CPURequest, w.Spec.CPULimit) || requestAboveLimitIn(w.Spec.MemoryRequest, w.Spec.MemoryLimit)
+}
+
+func requestsGrow(live, desired corev1.ResourceRequirements) bool {
+	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		want, ok := desired.Requests[name]
+		if !ok {
+			continue
+		}
+		have, ok := live.Requests[name]
+		if !ok || want.Cmp(have) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func recommendationFor(ctx context.Context, reader client.Reader, w tunedWorkload) *kipperv1.TunedResources {
