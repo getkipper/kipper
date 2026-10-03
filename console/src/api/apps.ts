@@ -20,6 +20,19 @@ export async function restartApp(project: string, app: string): Promise<void> {
   await client.post(`/projects/${project}/apps/${app}/restart`)
 }
 
+export async function stopApp(project: string, app: string, reason: string): Promise<void> {
+  await client.post(`/projects/${project}/apps/${app}/stop`, { reason })
+}
+
+/**
+ * Starts a stopped app with its replica count and autoscaling.
+ * @returns the status, and a note when the app will run no pods
+ */
+export async function startApp(project: string, app: string): Promise<{ status: string; note?: string }> {
+  const { data } = await client.post<{ status: string; note?: string }>(`/projects/${project}/apps/${app}/start`)
+  return data
+}
+
 export async function scaleApp(project: string, app: string, replicas: number): Promise<void> {
   await client.put(`/projects/${project}/apps/${app}/scale`, { replicas })
 }

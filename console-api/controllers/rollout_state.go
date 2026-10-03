@@ -34,6 +34,20 @@ func (r *AppReconciler) observeRollout(ctx context.Context, app *kipperv1.App, d
 		})
 		return 0, nil
 	}
+	if appStopped(app) {
+		reason, message, requeue := rollout.Stopped, "The app is stopped; it runs no pods until started.", time.Duration(0)
+		if !r.podsGone(ctx, deploy) {
+			reason, message, requeue = rollout.Stopping, "The app is stopping; its pods are shutting down.", rolloutRequeue
+		}
+		apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
+			Type:               kipperv1.ConditionRolloutComplete,
+			Status:             metav1.ConditionTrue,
+			Reason:             string(reason),
+			Message:            message,
+			ObservedGeneration: app.Generation,
+		})
+		return requeue, nil
+	}
 	if rollout.Settled(deploy) {
 		return complete()
 	}
@@ -71,6 +85,20 @@ func (r *AppReconciler) observeRollout(ctx context.Context, app *kipperv1.App, d
 		ObservedGeneration: app.Generation,
 	})
 	return rolloutRequeue, nil
+}
+
+// podsGone confirms an observed scale-down and an empty pod list. Listing pods
+// includes those still terminating; a read failure keeps the app polled.
+func (r *AppReconciler) podsGone(ctx context.Context, deploy *appsv1.Deployment) bool {
+	if deploy.Status.ObservedGeneration < deploy.Generation || deploy.Status.Replicas > 0 || deploy.Spec.Selector == nil {
+		return false
+	}
+	var pods corev1.PodList
+	if err := r.hostReader().List(ctx, &pods, client.InNamespace(deploy.Namespace),
+		client.MatchingLabels(deploy.Spec.Selector.MatchLabels)); err != nil {
+		return false
+	}
+	return len(pods.Items) == 0
 }
 
 // newestPods lists pods owned by the Deployment's highest-revision ReplicaSet.
@@ -153,6 +181,10 @@ func healthCheckStatus(app *kipperv1.App, live *corev1.PodTemplateSpec) kipperv1
 // liveRolloutPhase classifies the rollout for resource tuning. A pod read
 // failure postpones recommendations until the rollout state is known.
 func (r *AppReconciler) liveRolloutPhase(ctx context.Context, app *kipperv1.App, deploy *appsv1.Deployment) rolloutPhase {
+	// Postpone sizing recommendations while stopped and during the start pass.
+	if appStopped(app) || deploy.Annotations[stoppedAnnotation] != "" {
+		return phaseInFlight
+	}
 	if rollout.Settled(deploy) {
 		return phaseSettled
 	}

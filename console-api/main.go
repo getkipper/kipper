@@ -752,6 +752,8 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 					r.Get("/health", cap("workloads.read")(podsHandler.Health))
 					r.Put("/image", cap("kipper.write")(apps.UpdateImage))
 					r.Put("/scale", cap("kipper.write")(apps.Scale))
+					r.Post("/stop", cap("kipper.write")(apps.Stop))
+					r.Post("/start", cap("kipper.write")(apps.Start))
 					r.Get("/history", cap("kipper.read")(webhookHandler.History))
 					r.Post("/rollback", cap("kipper.write")(webhookHandler.Rollback))
 					r.Get("/webhook", cap("webhook.reveal")(webhookHandler.GetConfig))

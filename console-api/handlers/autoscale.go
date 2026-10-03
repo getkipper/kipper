@@ -136,7 +136,7 @@ func (a *Autoscale) Set(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondJSON(w, http.StatusOK, map[string]string{"status": "enabled"})
+	respondJSON(w, http.StatusOK, withStoppedNote(map[string]string{"status": "enabled"}, &appCR, "autoscaling"))
 }
 
 // Delete removes autoscaling for an app.
@@ -167,5 +167,13 @@ func (a *Autoscale) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondJSON(w, http.StatusOK, map[string]string{"status": "disabled"})
+	respondJSON(w, http.StatusOK, withStoppedNote(map[string]string{"status": "disabled"}, &appCR, "autoscaling change"))
+}
+
+// withStoppedNote explains when a saved change will take effect on a stopped app.
+func withStoppedNote(resp map[string]string, app *kipperv1.App, what string) map[string]string {
+	if app.Spec.Stopped != nil {
+		resp["note"] = fmt.Sprintf("%s is stopped; the %s applies when the app is started", app.Name, what)
+	}
+	return resp
 }

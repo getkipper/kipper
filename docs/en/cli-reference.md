@@ -486,7 +486,24 @@ kip app scale api --replicas 3
 |---|---|---|
 | `--replicas` | Yes | Number of replicas |
 
-Setting replicas to 0 stops the application without deleting it.
+For a stopped app, the new replica count takes effect on start. Use [`kip app stop`](#kip-app-stop-kip-app-start) to take an app out of service while preserving its count and recording a reason.
+
+## kip app stop / kip app start {#kip-app-stop-kip-app-start}
+
+`kip app stop` shuts down an app’s pods. `kip app start` resumes the app using its saved configuration.
+
+```bash
+kip app stop api --reason "not needed until the next campaign"
+kip app start api
+```
+
+| Flag | Command | Description |
+|---|---|---|
+| `--reason` | `stop` | Optional stop reason, up to 500 bytes. On an already stopped app, only an explicit `--reason` changes the reason |
+| `--for-migration` | `stop` | Marks a new stop as a migration write freeze, which stays on the source. Existing stop records keep their original type |
+| `--project`, `--environment` | both | The app's project and environment |
+
+Stopping preserves the app’s configuration, replica count, autoscaling settings and data. Its route returns a "this app is stopped" page. For an app scaled to zero without a stop record and without autoscaling, use `kip app scale` to raise the count. See [Stopping and starting an app](/en/deploying-apps#stopping-and-starting-an-app).
 
 ## kip app env / kip app secret {#kip-app-env-kip-app-secret}
 

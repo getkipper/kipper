@@ -187,6 +187,7 @@ func (h *Handler) migrateDatabaseData(ctx context.Context, session *Session, tok
 	estimatedSize, sizeErr := h.estimateDatabaseSize(ctx, namespace, svc.Name, svc.Spec.Type)
 	if sizeErr == nil && estimatedSize > maxAutoTransferBytes {
 		sizeMB := estimatedSize / (1024 * 1024)
+		session.MarkDataLeftBehind(namespace, svc.Name)
 		session.UpdateStep(stepName, func(s *Step) {
 			s.Status = StepSkipped
 			s.Detail = fmt.Sprintf("Database is ~%d MB: too large for automatic transfer", sizeMB)

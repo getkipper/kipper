@@ -36,6 +36,7 @@ func (h *Handler) migrateApps(ctx context.Context, session *Session, token *Toke
 		BytesTotal: int64(len(appList.Items)),
 	})
 
+	var arrivesStopped []string
 	for i, app := range appList.Items {
 		if session.IsCancelled() {
 			return fmt.Errorf("migration cancelled")
@@ -86,6 +87,22 @@ func (h *Handler) migrateApps(ctx context.Context, session *Session, token *Toke
 			specMap["route"] = stripped
 		}
 
+		// Require stop support before sending an app that must remain stopped
+		// on the target, including apps waiting for a manual database restore.
+		delete(specMap, "stopped")
+		if stop := outgoingStop(&appList.Items[i], func(svc string) bool { return session.DataLeftBehind(namespace, svc) }, time.Now()); stop != nil {
+			if !session.TargetKeepsStops {
+				err := fmt.Errorf("%s would arrive stopped, but the target's Kipper cannot keep a stop and would start it. Upgrade the target cluster, then migrate again", app.Name)
+				session.UpdateStep(stepName, func(s *Step) {
+					s.Status = StepFailed
+					s.Error = err.Error()
+				})
+				return err
+			}
+			specMap["stopped"] = stopSpec(stop)
+			arrivesStopped = append(arrivesStopped, app.Name)
+		}
+
 		if err := h.sendToTarget(token, fmt.Sprintf("/api/v1/migrate-target/%s/resource", session.ID), map[string]interface{}{
 			"kind":          "App",
 			"name":          app.Name,
@@ -112,6 +129,9 @@ func (h *Handler) migrateApps(ctx context.Context, session *Session, token *Toke
 		s.CompletedAt = &now
 	})
 
+	if len(arrivesStopped) > 0 {
+		session.AddStep(arrivesStoppedStep(namespace, h.appScope(ctx, namespace), arrivesStopped))
+	}
 	return nil
 }
 

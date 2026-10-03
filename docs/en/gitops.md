@@ -165,6 +165,33 @@ apps:
 `kip export` includes this block only for declared checks. To use automatic inference, omit
 the block; `type: auto` is not valid in a manifest.
 
+### The stopped block
+
+`stopped` scales the app to zero until the block is removed. See
+[Stopping and starting an app](/en/deploying-apps#stopping-and-starting-an-app).
+
+| Field | What it does |
+|---|---|
+| `reason` | Optional reason shown with the stopped app. Up to 500 characters |
+| `forMigration` | Marks a [migration write freeze](/en/migration#_3-freeze-writes-on-the-source) that stays on the source cluster |
+
+```yaml
+apps:
+  api:
+    image: registry.git.example.com/api:latest
+    port: 8080
+    stopped:
+      reason: not needed until the next campaign
+```
+
+`stopped: {}` stops an app without a reason. For a new stop, `kip apply` records the
+current time and the applying user's cluster identity when available. For an existing
+stop, it preserves the original identity and timestamp.
+
+`kip export` includes the reason and migration flag, leaving the identity and timestamp
+in the cluster. Removing the block starts the app, so `kip apply` requires `--force`
+to apply that change.
+
 ## Applying a manifest
 
 ```bash

@@ -180,3 +180,20 @@ func TestPromoteApp_RefusesATargetThatIsBeingDeleted(t *testing.T) {
 	require.Error(t, err, "an app that is going does not get a tick")
 	assert.Contains(t, err.Error(), "being deleted")
 }
+
+func TestPromoteApp_ToAStoppedAppSaysTheImageWaits(t *testing.T) {
+	dyn := fakeWorkloadDynamic()
+	seedApp(t, dyn, "hrportal-test", "backend", map[string]interface{}{"image": "ghcr.io/acme/backend:2026-08-02"})
+	seedApp(t, dyn, "hrportal-prod", "backend", map[string]interface{}{"image": "ghcr.io/acme/backend:2026-06-29",
+		"stopped": map[string]interface{}{"reason": "parked"}})
+
+	out := captureStdout(t, func() {
+		require.NoError(t, promoteApp(context.Background(), dyn, "hrportal-test", "hrportal-prod", "backend", "test", "prod"))
+	})
+
+	assert.Contains(t, out, "stopped")
+	app, err := dyn.Resource(deployer.AppGVR).Namespace("hrportal-prod").Get(context.Background(), "backend", metav1.GetOptions{})
+	require.NoError(t, err)
+	_, stopped, _ := unstructured.NestedMap(app.Object, "spec", "stopped")
+	assert.True(t, stopped, "a promotion must not start the app")
+}

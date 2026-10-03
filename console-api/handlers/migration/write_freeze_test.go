@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,12 +33,12 @@ func autoscaledApp(namespace, name string) *kipperv1.App {
 
 func TestTheWriteFreezeCheckNamesAnAutoscaledApp(t *testing.T) {
 	h := &Handler{
-		Client: fake.NewSimpleClientset(projectNamespace("shop-prod", "shop")),
+		Client: fake.NewSimpleClientset(projectNamespace("shop-prod", "shop"), servingDeployment("shop-prod", "storefront")),
 		CRClient: crfake.NewClientBuilder().WithScheme(migrationScheme()).
 			WithObjects(autoscaledApp("shop-prod", "storefront"), ownerOf("shop-prod")).Build(),
 	}
 
-	step := h.autoscaledAppsWarning(context.Background(), []string{"shop"})
+	step := h.writeFreezeWarning(context.Background(), []string{"shop"}, 0)
 
 	require.NotNil(t, step, "an autoscaled app was not reported, so the operator freezes replicas and it keeps serving")
 	assert.Contains(t, step.Detail, "shop-prod/storefront")
@@ -59,7 +60,7 @@ func TestTheWriteFreezeCheckSaysWhatItCouldNotCheck(t *testing.T) {
 		CRClient: failing,
 	}
 
-	step := h.autoscaledAppsWarning(context.Background(), []string{"shop"})
+	step := h.writeFreezeWarning(context.Background(), []string{"shop"}, 0)
 
 	require.NotNil(t, step, "the check could not run and said nothing, which reads as nothing still taking writes")
 	assert.Contains(t, step.Detail, "could not check")
@@ -75,7 +76,15 @@ func TestTheWriteFreezeCheckIsQuietForAProjectWithNothingRunning(t *testing.T) {
 			WithObjects(ownerOf("shop-prod")).Build(),
 	}
 
-	step := h.autoscaledAppsWarning(context.Background(), []string{"shop"})
+	step := h.writeFreezeWarning(context.Background(), []string{"shop"}, 0)
 
 	assert.Nil(t, step, "a project holding no namespaces was reported as unable to be checked: %+v", step)
+}
+
+func servingDeployment(namespace, name string) *appsv1.Deployment {
+	two := int32(2)
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec:       appsv1.DeploymentSpec{Replicas: &two},
+	}
 }

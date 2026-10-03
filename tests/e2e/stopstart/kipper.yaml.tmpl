@@ -1,0 +1,26 @@
+# Filled in by tests/e2e/stop-start-test.sh.
+project: stop-start
+environment: test
+apps:
+  web:
+    image: traefik/whoami:v1.10
+    port: 80
+    replicas: 2
+    resources:
+      profile: standard
+    serviceBindings:
+      - name: db
+        prefix: DB_
+    autoscale:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 3
+      cpuTarget: 80
+    route:
+      host: ${ROUTE_HOST}
+      basicAuth: ${BASIC_AUTH}
+${STOPPED}
+services:
+  db:
+    type: postgres
+    storage: 1Gi

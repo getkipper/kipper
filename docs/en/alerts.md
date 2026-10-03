@@ -56,6 +56,8 @@ A crash-looping container generates hourly warnings for six hours, then a critic
 
 After ten minutes of healthy running, the episode closes. An escalated episode also produces an all-clear alert.
 
+Kipper suppresses crash-loop and stuck-rollout alerts for [stopped apps](/en/deploying-apps#stopping-and-starting-an-app) and resets their crash-loop history. After the app starts again, any new crash loop begins a fresh episode.
+
 ### Read-only volumes
 
 When a container with a writable persistent volume fails, Kipper checks its previous logs for read-only filesystem errors. A matching message produces a critical `ReadOnlyFilesystem` alert containing the log evidence and mounted volumes.

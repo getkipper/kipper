@@ -135,6 +135,15 @@ const (
 	// is what ties a build back to it, and what keeps two projects with an app
 	// of the same name apart.
 	SourceNamespace = "kipper.run/source-namespace"
+
+	// AnnoStopped marks a Deployment scaled to zero for an app stop. It lets the
+	// App reconciler resume autoscaling and suppresses resource tuning and alerts.
+	AnnoStopped = "kipper.run/stopped"
+
+	// AnnoLastStop is when the App reconciler last stopped a Deployment. Unlike
+	// AnnoStopped it stays after the start, so the resource controller notices
+	// a stop and start that both happened between two of its passes.
+	AnnoLastStop = "kipper.run/last-stop"
 )
 
 // BuildsNamespace is where the build system runs every build, whatever

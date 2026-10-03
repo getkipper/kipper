@@ -407,8 +407,16 @@ func (d *Deployer) Scale(ctx context.Context, namespace, name string, replicas i
 }
 
 // Restart triggers a rolling restart by annotating the App CR.
+// Stopped apps must be started first.
 func (d *Deployer) Restart(ctx context.Context, namespace, name string) error {
-	_, err := d.RestartWorkload(ctx, AppGVR, "app", namespace, name)
+	stopped, err := d.Stopped(ctx, namespace, name)
+	if err != nil {
+		return err
+	}
+	if stopped {
+		return fmt.Errorf("%s is stopped; start it with `kip app start %s`", name, name)
+	}
+	_, err = d.RestartWorkload(ctx, AppGVR, "app", namespace, name)
 	return err
 }
 
@@ -658,6 +666,15 @@ type AppStatus struct {
 	// RolloutWaiting explains an incomplete rollout. It can report a stalled
 	// update even when the existing pods are healthy.
 	RolloutWaiting string
+
+	Stopped *StoppedInfo
+}
+
+// StoppedInfo contains the recorded reason, actor and RFC 3339 timestamp.
+type StoppedInfo struct {
+	Reason string
+	By     string
+	At     string
 }
 
 // appStatusFromCR derives the CLI's display status from an App CR. Status
@@ -686,7 +703,7 @@ func appStatusFromCR(cr *unstructured.Unstructured) AppStatus {
 		phase = "Pending"
 	}
 
-	return AppStatus{
+	st := AppStatus{
 		Name:           cr.GetName(),
 		Status:         strings.ToLower(phase),
 		Image:          image,
@@ -694,6 +711,14 @@ func appStatusFromCR(cr *unstructured.Unstructured) AppStatus {
 		Ready:          ready,
 		RolloutWaiting: rolloutWaiting(cr),
 	}
+	if stopped, found, _ := unstructured.NestedMap(cr.Object, "spec", "stopped"); found {
+		st.Status = "stopped"
+		st.Stopped = &StoppedInfo{}
+		st.Stopped.Reason, _ = stopped["reason"].(string)
+		st.Stopped.By, _ = stopped["by"].(string)
+		st.Stopped.At, _ = stopped["at"].(string)
+	}
+	return st
 }
 
 func rolloutWaiting(cr *unstructured.Unstructured) string {

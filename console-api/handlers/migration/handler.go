@@ -170,6 +170,7 @@ func (h *Handler) AcceptHandler(w http.ResponseWriter, r *http.Request) {
 				"session_id":         existing.ID,
 				"target_version":     BuildVersion,
 				"target_base_domain": h.Domain,
+				"keeps_stops":        h.keepsStops(ctx),
 			})
 			return
 		}
@@ -272,6 +273,7 @@ func (h *Handler) AcceptHandler(w http.ResponseWriter, r *http.Request) {
 		"session_id":         sessionID,
 		"target_version":     BuildVersion,
 		"target_base_domain": h.Domain,
+		"keeps_stops":        h.keepsStops(ctx),
 	})
 }
 
@@ -1011,6 +1013,9 @@ func (h *Handler) StartHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Treat an absent capability as unsupported for older targets.
+	keepsStops, _ := acceptResp["keeps_stops"].(bool)
+
 	// Create session
 	startedBy := ""
 	if claims != nil {
@@ -1033,6 +1038,7 @@ func (h *Handler) StartHandler(w http.ResponseWriter, r *http.Request) {
 		SavedRoutes:      make(map[string]map[string]interface{}),
 		KeepDomains:      keepDomains,
 		MoveBaseDomain:   req.MoveBaseDomain,
+		TargetKeepsStops: keepsStops,
 		// Retained so post-run cutover writes (sendToTargetDirect) still
 		// authenticate to the target after the token has been consumed.
 		Secret: token.Secret,

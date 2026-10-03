@@ -236,6 +236,17 @@ func convertApp(name, namespace string, app AppSpec) Resource {
 		spec["health"] = health
 	}
 
+	if app.Stopped != nil {
+		stopped := map[string]interface{}{}
+		if app.Stopped.Reason != "" {
+			stopped["reason"] = app.Stopped.Reason
+		}
+		if app.Stopped.ForMigration {
+			stopped["forMigration"] = true
+		}
+		spec["stopped"] = stopped
+	}
+
 	if app.Git != nil {
 		git := map[string]interface{}{
 			"url": app.Git.URL,

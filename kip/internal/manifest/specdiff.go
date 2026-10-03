@@ -111,8 +111,16 @@ func diffInto(out *[]Change, prefix string, live, desired map[string]interface{}
 			// The whole block goes, so nothing inside it takes a default:
 			// admission does not rebuild an absent parent because a child
 			// declares one.
+			if _, meaningful := presenceIsTheValue[path]; meaningful && len(liveMap) == 0 {
+				*out = append(*out, Change{Path: path, Kind: Cleared, Live: "{}"})
+				continue
+			}
 			diffInto(out, path, liveMap, map[string]interface{}{}, keep, nil)
 		case newIsMap && !inLive:
+			if _, meaningful := presenceIsTheValue[path]; meaningful && len(newMap) == 0 {
+				*out = append(*out, Change{Path: path, Kind: Added, New: "{}"})
+				continue
+			}
 			diffInto(out, path, map[string]interface{}{}, newMap, keep, defaults)
 		case inLive && !inNew:
 			*out = append(*out, Change{Path: path, Kind: Cleared, Live: display(path, liveVal)})
@@ -124,6 +132,12 @@ func diffInto(out *[]Change, prefix string, live, desired map[string]interface{}
 			}
 		}
 	}
+}
+
+// presenceIsTheValue lists blocks whose presence alone means something, so
+// dropping one is a clear even when nothing is set inside it.
+var presenceIsTheValue = map[string]struct{}{
+	"stopped": {},
 }
 
 func sortedKeys(a, b map[string]interface{}) []string {
@@ -243,6 +257,9 @@ var printable = map[string]struct{}{
 	// Health check.
 	"health.type": {}, "health.path": {}, "health.port": {},
 	"health.startupTimeoutSeconds": {}, "health.timeoutSeconds": {},
+
+	// Stop. Who stopped the app is withheld: it is a person's name or address.
+	"stopped.reason": {}, "stopped.forMigration": {},
 
 	// Scaling.
 	"autoscale.enabled": {}, "autoscale.minReplicas": {}, "autoscale.maxReplicas": {},

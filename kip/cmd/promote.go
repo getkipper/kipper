@@ -137,22 +137,22 @@ func promoteApp(ctx context.Context, dyn dynamic.Interface, fromNs, toNs, appNam
 		return fmt.Errorf("has no image in %s yet; a git app has none until its first build finishes", from)
 	}
 
-	stored, err := setAppImage(ctx, dyn, toNs, appName, image, from, to)
+	stored, stopped, err := setAppImage(ctx, dyn, toNs, appName, image, from, to)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("  ✔  %s → %s (%s)\n", appName, to, stored)
+	if stopped {
+		fmt.Printf("     %s is stopped in %s, so the image applies when it is started\n", appName, to)
+	}
 	return nil
 }
 
-// setAppImage writes the image and returns what the cluster stored, so the
-// caller reports the promotion it can see rather than the request it sent.
-//
-// The retry is not decoration: the reconciler writes status and finalizers onto
-// the same object, so a plain update loses to it often enough to matter, and a
-// lost update here is a promotion that silently did not happen.
-func setAppImage(ctx context.Context, dyn dynamic.Interface, namespace, appName, image, from, to string) (string, error) {
+// setAppImage returns the stored image and stop status after verifying the write.
+// Conflict retries handle concurrent reconciler updates to the same App.
+func setAppImage(ctx context.Context, dyn dynamic.Interface, namespace, appName, image, from, to string) (string, bool, error) {
 	var stored string
+	var stopped bool
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		app, err := dyn.Resource(deployer.AppGVR).Namespace(namespace).Get(ctx, appName, metav1.GetOptions{})
 		if err != nil {
@@ -186,22 +186,23 @@ func setAppImage(ctx context.Context, dyn dynamic.Interface, namespace, appName,
 			return err
 		}
 		stored, _, _ = unstructured.NestedString(updated.Object, "spec", "image")
+		_, stopped, _ = unstructured.NestedMap(updated.Object, "spec", "stopped")
 		return nil
 	})
 	switch {
 	case errors.IsNotFound(err):
-		return "", fmt.Errorf("not found in %s; create it there first with 'kip app deploy'", to)
+		return "", false, fmt.Errorf("not found in %s; create it there first with 'kip app deploy'", to)
 	case err == errBuildsFromGit:
-		return "", fmt.Errorf("builds from git in %s, so its image is build output rather than something to promote", to)
+		return "", false, fmt.Errorf("builds from git in %s, so its image is build output rather than something to promote", to)
 	case err == errBeingDeleted:
-		return "", fmt.Errorf("is being deleted in %s", to)
+		return "", false, fmt.Errorf("is being deleted in %s", to)
 	case err != nil:
-		return "", fmt.Errorf("writing the image in %s: %w", to, err)
+		return "", false, fmt.Errorf("writing the image in %s: %w", to, err)
 	}
 	if stored != image {
-		return "", fmt.Errorf("the cluster stored %q rather than %q", stored, image)
+		return "", false, fmt.Errorf("the cluster stored %q rather than %q", stored, image)
 	}
-	return stored, nil
+	return stored, stopped, nil
 }
 
 // errBuildsFromGit and errBeingDeleted stop the retry loop without being

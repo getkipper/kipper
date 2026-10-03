@@ -146,6 +146,33 @@ type AppSpec struct {
 	// If omitted, Kipper infers a check; status.healthCheck reports the result.
 	// +optional
 	Health *AppHealth `json:"health,omitempty"`
+
+	// Stopped requests zero pods until the field is removed. The configured
+	// replica count and autoscaling settings are preserved for the next start.
+	// +optional
+	Stopped *AppStopped `json:"stopped,omitempty"`
+}
+
+// AppStopped records why, by whom and when an app was stopped.
+type AppStopped struct {
+	// Reason explains the stop in app details and CLI listings.
+	// +kubebuilder:validation:MaxLength=500
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// By identifies the user or tool that recorded the stop.
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	By string `json:"by,omitempty"`
+
+	// At is when it was stopped.
+	// +optional
+	At *metav1.Time `json:"at,omitempty"`
+
+	// ForMigration marks the write freeze before a migration. A migration
+	// does not carry such a stop to the target.
+	// +optional
+	ForMigration bool `json:"forMigration,omitempty"`
 }
 
 // AppHealth declares the readiness check and rollout startup timeout.

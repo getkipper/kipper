@@ -267,10 +267,9 @@ kip app scale api --replicas 3
 
 # Scale down
 kip app scale api --replicas 1
-
-# Stop without deleting (zero replicas)
-kip app scale api --replicas 0
 ```
+
+To take an app out of service temporarily, [stop it](#stopping-and-starting-an-app). This preserves its replica count and autoscaling settings, records who stopped it and why, and shows visitors a "this app is stopped" page.
 
 The `READY` column in `kip app list` shows progress during scaling (e.g. `2/3` means 2 of 3 replicas are healthy). Kubernetes distributes traffic across all healthy replicas automatically.
 
@@ -373,6 +372,36 @@ kip app restart api
 ```
 
 Triggers a rolling restart, which replaces the pods as described in [How pods are replaced](#how-pods-are-replaced). With a [health check](#health-checks-and-rollouts) in place, a new pod counts as ready once your app passes the check. Without one, Kubernetes counts a pod as ready as soon as its container starts. Useful when you need to pick up new environment variables or pull a fresh `:latest` image.
+
+### Stopping and starting an app
+
+```bash
+kip app stop api --reason "not needed until the next campaign"
+kip app start api
+```
+
+In the console, click **Stop** in the app panel's header to enter an optional reason and see what will keep running.
+
+Stopping an app shuts down its pods and releases their CPU and memory. It preserves the app's configuration, replica count, autoscaling settings, route and deployment history. Volumes and their data remain available. Bound services, databases, functions and jobs keep running.
+
+While an app is stopped:
+
+- Its route returns a "this app is stopped" page with HTTP status 503. Requests with `Accept: application/json` receive `{"code":"app_stopped","message":"This app is stopped."}`. Basic auth, API-key checks and internal-path restrictions still apply. The page shows the host, without the stop reason or operator's identity.
+- `kip app list` shows `stopped`, followed by the recorded time, operator and reason. The console shows these details in the app panel with a **Start** button.
+- Crash-loop and stuck-rollout alerts are suppressed, and automatic sizing is paused.
+- Image changes, rollbacks, replica counts and autoscaling changes are saved for the next start. Autoscaled apps continue to reject manual replica counts. Use `kip app start` to resume a stopped app; `kip app restart` rejects it.
+
+`kip app start` uses the current configured replica count, or the autoscaling minimum for an autoscaled app. Automatic sizing recommendations remain paused during the start; explicit resource settings still apply. New pods take traffic once they pass their [health check](#health-checks-and-rollouts). `kip app list` shows rollout progress until they are ready.
+
+Repeating `kip app stop` preserves the original operator and timestamp. It updates the reason only when you provide `--reason`. For an app scaled to zero without a stop record and without autoscaling, use `kip app scale` to raise its replica count. Without autoscaling, starting a stopped app whose configured count is zero also leaves it at zero.
+
+Older App schemas may discard the stop field even when the write succeeds. `kip app stop`, `kip apply` and the stop API report failure if the field was dropped. Upgrade Kipper before retrying.
+
+`kip export` includes the stop in the manifest. Applying a manifest that omits it would start the app, so `kip apply` requires `--force` to remove it. See [the stopped block](/en/gitops#the-stopped-block).
+
+::: warning Downgrading
+Older Kipper versions do not honor stop records. A downgrade can resume apps without autoscaling and discard their stop records, while autoscaled apps may remain at zero replicas. Review stopped apps before downgrading.
+:::
 
 ### Delete an app
 

@@ -23,6 +23,10 @@ const (
 	NotBecomingReady Reason = "NotBecomingReady"
 	DeadlineExceeded Reason = "DeadlineExceeded"
 	InProgress       Reason = "InProgress"
+	// Stopping and Stopped describe an app that was stopped on purpose: its
+	// pods are draining, or all gone.
+	Stopping Reason = "Stopping"
+	Stopped  Reason = "Stopped"
 )
 
 const keepServing = "Any healthy current pods continue serving."

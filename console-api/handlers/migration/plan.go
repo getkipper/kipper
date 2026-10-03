@@ -92,6 +92,11 @@ type planResponse struct {
 	// is bound into the digest.
 	TargetBaseDomain string `json:"target_base_domain,omitempty"`
 	MoveBaseDomain   bool   `json:"move_base_domain,omitempty"`
+
+	// arriveStopped names the apps that may arrive stopped on the target:
+	// stopped by an operator, or bound to a database whose data may stay
+	// behind.
+	arriveStopped []string
 }
 
 // notMigratedList is the static "what does NOT move" block, mirrored from
@@ -360,6 +365,7 @@ func (h *Handler) buildPlan(ctx context.Context, claims *middleware.Claims, toke
 		return resp
 	}
 	target, targetVersion, err := h.fetchTargetCapacity(token, projects)
+	targetAnswered := err == nil
 	if err != nil {
 		resp.Blockers = append(resp.Blockers, fmt.Sprintf("The target cluster is unreachable or refused the token: %v", err))
 	} else {
@@ -415,7 +421,13 @@ func (h *Handler) buildPlan(ctx context.Context, claims *middleware.Claims, toke
 		}
 	}
 
-	if warning := h.autoscaledAppsWarning(ctx, projects); warning != nil {
+	if targetAnswered && !target.KeepsStops && len(resp.arriveStopped) > 0 {
+		resp.Blockers = append(resp.Blockers, fmt.Sprintf(
+			"%s would arrive stopped, but the target's Kipper cannot keep a stop and would start them. Upgrade the target cluster first.",
+			strings.Join(resp.arriveStopped, ", ")))
+	}
+
+	if warning := h.writeFreezeWarning(ctx, projects, 0); warning != nil {
 		resp.Warnings = append(resp.Warnings, warning.Detail)
 	}
 
@@ -513,7 +525,6 @@ func (h *Handler) planProject(ctx context.Context, project string, token *Token,
 		return err
 	}
 
-	var runningApps []string
 	var gitApps []string
 	for _, ns := range namespaces {
 		// Fail closed on a namespace read error: guessing env="" would derive
@@ -527,6 +538,7 @@ func (h *Handler) planProject(ctx context.Context, project string, token *Token,
 		if err := h.CRClient.List(ctx, &appList, crclient.InNamespace(ns)); err != nil {
 			return fmt.Errorf("listing apps in %s: %w", ns, err)
 		}
+		var bound []*kipperv1.App
 		for i := range appList.Items {
 			app := &appList.Items[i]
 			item := planItem{Kind: "app", Name: app.Name, Namespace: ns, Status: "ok"}
@@ -536,10 +548,10 @@ func (h *Handler) planProject(ctx context.Context, project string, token *Token,
 			}
 			h.planAppDomain(app, ns, env, token, keep, resp.MoveBaseDomain, &item)
 			resp.WillMigrate = append(resp.WillMigrate, item)
-			// Each volume is copied once, so writes from still-running apps
-			// after their volume's transfer would stay behind silently.
-			if app.Spec.Replicas == nil || *app.Spec.Replicas > 0 {
-				runningApps = append(runningApps, ns+"/"+app.Name)
+			if app.Spec.Stopped != nil && !app.Spec.Stopped.ForMigration {
+				resp.arriveStopped = append(resp.arriveStopped, ns+"/"+app.Name)
+			} else {
+				bound = append(bound, app)
 			}
 		}
 
@@ -547,9 +559,18 @@ func (h *Handler) planProject(ctx context.Context, project string, token *Token,
 		if err := h.CRClient.List(ctx, &svcList, crclient.InNamespace(ns)); err != nil {
 			return fmt.Errorf("listing services in %s: %w", ns, err)
 		}
+		behind := map[string]bool{}
 		for i := range svcList.Items {
 			svc := &svcList.Items[i]
-			h.planService(ctx, svc, ns, resp)
+			behind[svc.Name] = h.planService(ctx, svc, ns, resp)
+		}
+		for _, app := range bound {
+			for _, b := range app.Spec.ServiceBindings {
+				if behind[b.Name] {
+					resp.arriveStopped = append(resp.arriveStopped, ns+"/"+app.Name)
+					break
+				}
+			}
 		}
 
 		var fnList kipperv1.FunctionList
@@ -594,11 +615,6 @@ func (h *Handler) planProject(ctx context.Context, project string, token *Token,
 				Kind: "secrets", Name: fmt.Sprintf("%d secrets", count), Namespace: ns, Status: "ok",
 			})
 		}
-	}
-	if len(runningApps) > 0 {
-		resp.Warnings = append(resp.Warnings, fmt.Sprintf(
-			"Source apps are still running (%s). Data is copied once per volume, so scale them to 0 before starting, writes after a transfer stay on this cluster.",
-			strings.Join(runningApps, ", ")))
 	}
 	if cpu, memory := builder.ClusterBuildDefaults(); len(gitApps) > 0 && (cpu != "" || memory != "") {
 		limits := memory
@@ -658,7 +674,9 @@ func (h *Handler) planAppDomain(app *kipperv1.App, ns, env string, token *Token,
 
 // planService classifies one service for the report, sizing its database
 // against the automatic-transfer cap.
-func (h *Handler) planService(ctx context.Context, svc *kipperv1.Service, ns string, resp *planResponse) {
+// It reports whether the service's data may stay behind for a manual
+// restore: over the cap, or of a size that could not be measured.
+func (h *Handler) planService(ctx context.Context, svc *kipperv1.Service, ns string, resp *planResponse) bool {
 	switch {
 	case needsManualDataTransfer(svc.Spec.Type):
 		resp.WillMigrate = append(resp.WillMigrate, planItem{
@@ -673,11 +691,13 @@ func (h *Handler) planService(ctx context.Context, svc *kipperv1.Service, ns str
 				Kind: "service", Name: svc.Name, Namespace: ns, Status: "warn",
 				Detail: fmt.Sprintf("%s: size could not be measured (%v); the transfer decides against the %dMB cap at run time", svc.Spec.Type, err, maxAutoTransferBytes/(1024*1024)),
 			})
+			return true
 		case size > maxAutoTransferBytes:
 			resp.WillSkip = append(resp.WillSkip, planItem{
 				Kind: "service", Name: svc.Name, Namespace: ns, Status: "warn",
 				Detail: fmt.Sprintf("%s database is ~%dMB: over the %dMB automatic-transfer cap, data stays behind with manual steps", svc.Spec.Type, size/(1024*1024), maxAutoTransferBytes/(1024*1024)),
 			})
+			return true
 		default:
 			resp.WillMigrate = append(resp.WillMigrate, planItem{
 				Kind: "service", Name: svc.Name, Namespace: ns, Status: "ok",
@@ -689,6 +709,7 @@ func (h *Handler) planService(ctx context.Context, svc *kipperv1.Service, ns str
 			Kind: "service", Name: svc.Name, Namespace: ns, Status: "ok", Detail: svc.Spec.Type,
 		})
 	}
+	return false
 }
 
 // planVolumes lists the namespace's shared volumes. Volume data moves

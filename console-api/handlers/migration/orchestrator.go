@@ -82,7 +82,7 @@ func (h *Handler) runMigration(session *Session, token *Token) {
 
 	log("starting migration of %v to %s", session.Projects, session.TargetCluster)
 
-	if warning := h.autoscaledAppsWarning(ctx, session.Projects); warning != nil {
+	if warning := h.writeFreezeWarning(ctx, session.Projects, drainWait); warning != nil {
 		session.AddStep(*warning)
 	}
 
@@ -159,74 +159,6 @@ func (h *Handler) abortTarget(session *Session, log func(string, ...interface{})
 	token := &Token{Endpoint: session.TargetAPI, Secret: session.Secret}
 	if _, err := h.callTarget(token, "POST", fmt.Sprintf("/api/v1/migrate-target/%s/abort", session.ID), nil); err != nil {
 		log("cleaning up transferred secrets on target: %v", err)
-	}
-}
-
-// autoscaledDetail names what keeps serving, and what could not be looked at.
-func autoscaledDetail(autoscaled, unchecked []string) string {
-	detail := fmt.Sprintf("autoscaling keeps %s serving during the data copy; anything written there after its copy stays on this cluster", strings.Join(autoscaled, ", "))
-	if len(unchecked) > 0 {
-		detail += fmt.Sprintf(". %s could not be checked, so there may be more", strings.Join(unchecked, ", "))
-	}
-	return detail
-}
-
-// autoscaledAppsWarning surfaces apps whose HPA keeps them serving through a
-// replica freeze. The scale writers refuse replica edits on these apps, but
-// an operator who skipped the freeze — or froze before that guard existed —
-// must see in the flow who is still taking writes during the data copy.
-func (h *Handler) autoscaledAppsWarning(ctx context.Context, projects []string) *Step {
-	var autoscaled []string
-	var unchecked []string
-	for _, project := range projects {
-		namespaces, err := h.getProjectNamespaces(ctx, project)
-		if goerrors.Is(err, errNoNamespaces) {
-			continue
-		}
-		if err != nil {
-			unchecked = append(unchecked, "project "+project)
-			continue
-		}
-		for _, ns := range namespaces {
-			var appList kipperv1.AppList
-			if err := h.CRClient.List(ctx, &appList, crclient.InNamespace(ns)); err != nil {
-				unchecked = append(unchecked, "namespace "+ns)
-				continue
-			}
-			for _, app := range appList.Items {
-				if app.Spec.Autoscale != nil && app.Spec.Autoscale.Enabled {
-					autoscaled = append(autoscaled, ns+"/"+app.Name)
-				}
-			}
-		}
-	}
-	// A check that could not run is not a check that found nothing. Silence
-	// here reads as "nothing is still taking writes", and the cost of believing
-	// that wrongly is data written after its copy and left behind on this
-	// cluster. Saying which projects were not checked is the whole of the fix:
-	// failing the migration over an advisory would be worse.
-	if len(autoscaled) == 0 && len(unchecked) > 0 {
-		return &Step{
-			Name:   "Write freeze check",
-			Phase:  "structure",
-			Status: StepSkipped,
-			Detail: fmt.Sprintf("could not check whether anything in %s keeps serving during the data copy, so this list may be incomplete", strings.Join(unchecked, ", ")),
-		}
-	}
-	if len(autoscaled) == 0 {
-		return nil
-	}
-	return &Step{
-		Name:   "Write freeze check",
-		Phase:  "structure",
-		Status: StepSkipped,
-		Detail: autoscaledDetail(autoscaled, unchecked),
-		ManualSteps: []string{
-			"# Autoscaled apps keep running through a replica freeze. To stop their writes:",
-			"kip app autoscale <app> --off",
-			"kip app scale <app> --replicas 0 --project <project>",
-			"# Re-enable autoscaling on the target after the domain cutover.",
-		},
 	}
 }
 
@@ -907,6 +839,12 @@ func (h *Handler) createApp(ctx context.Context, name, namespace string, spec ma
 		return nil
 	}); err != nil {
 		return err
+	}
+	// The source checks this cluster's answer before sending a stopped app,
+	// and this is the last word: the schema dropping the field would leave
+	// the app running here.
+	if appSpec.Stopped != nil && app.Spec.Stopped == nil {
+		return fmt.Errorf("this cluster's App schema predates stopping apps, so %s would run here. Upgrade Kipper on this cluster, then migrate again", name)
 	}
 	if user != nil {
 		if err := resourcebounds.ClaimQuantities(ctx, h.CRClient, &kipperv1.App{}, namespace, name,

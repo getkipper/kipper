@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick, type ComponentPublicInstance } from 'vue'
-import { Eye, EyeOff, Plus, Minus, Trash2, Terminal, RotateCw, Pencil, Save, AlertTriangle, Package, Undo2, Shield, X, Sparkles, Link, GitBranch, File, Folder, Download, ChevronRight, ChevronDown, Upload, Copy, Check, Globe, CheckCircle2, RefreshCw } from 'lucide-vue-next'
+import { Eye, EyeOff, Plus, Minus, Trash2, Terminal, RotateCw, Power, Pencil, Save, AlertTriangle, Package, Undo2, Shield, X, Sparkles, Link, GitBranch, File, Folder, Download, ChevronRight, ChevronDown, Upload, Copy, Check, Globe, CheckCircle2, RefreshCw } from 'lucide-vue-next'
 import SidePanel from '@/components/SidePanel.vue'
 import SaveButton from '@/components/SaveButton.vue'
 import AppHealthCheck from '@/components/AppHealthCheck.vue'
@@ -16,6 +16,7 @@ import MetricSparkline from '@/components/MetricSparkline.vue'
 import TabBar, { type Tab } from '@/components/TabBar.vue'
 import RevealDialog from '@/components/RevealDialog.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import StopAppDialog from '@/components/StopAppDialog.vue'
 import NoticeCallout from '@/components/NoticeCallout.vue'
 import { useModal } from '@/composables/useModal'
 import { useProjectsStore } from '@/stores/projects'
@@ -32,6 +33,7 @@ import { automatic, changedResources, confirm, fixedSize, forLegacyApi, isEmptyE
 import type { ResourceDetail } from '@/api/resources'
 import ResourceMode from '@/components/ResourceMode.vue'
 import * as api from '@/api/apps'
+import type { AppStop } from '@/api/types'
 import type { AppLink } from '@/api/apps'
 import { gitCardState as deriveGitCardState, imageCardState as deriveImageCardState } from '@/utils/deployMethods'
 import { formatDateTime } from '@/utils/datetime'
@@ -1418,6 +1420,7 @@ async function toggleJsonView() {
 const replicaCount = ref(1)
 const replicaCountUnreadable = ref(false)
 const scaling = ref(false)
+const appStop = ref<AppStop | null>(null)
 
 async function loadScale() {
   try {
@@ -1426,6 +1429,7 @@ async function loadScale() {
     if (app) {
       replicaCountUnreadable.value = false
       replicaCount.value = app.replicas
+      appStop.value = app.stopped ?? null
     }
   } catch (e) {
     // The scale controls send an absolute count, so acting on a number nothing
@@ -1443,7 +1447,9 @@ async function setScale(count: number) {
   try {
     await api.scaleApp(project.value, props.appName, count)
     replicaCount.value = count
-    toast.success(`Scaled ${props.appName} to ${count} replicas`)
+    toast.success(appStop.value
+      ? `${props.appName} is stopped; it runs ${count} replicas when started`
+      : `Scaled ${props.appName} to ${count} replicas`)
   } catch {
     toast.error(`Failed to scale ${props.appName}`)
   } finally {
@@ -1746,6 +1752,67 @@ async function handleRestart() {
     if (current()) restarting.value = false
   }
 }
+
+const stopping = ref(false)
+
+function handleStop() {
+  if (!canWriteApp.value) return
+  const name = props.appName
+  modal.open(StopAppDialog, {
+    appName: name,
+    onConfirm: async (reason: string) => {
+      modal.close()
+      stopping.value = true
+      try {
+        await api.stopApp(project.value, name, reason)
+        toast.success(`${name} is stopping`)
+        await loadScale()
+      } catch {
+        toast.error(`Failed to stop ${name}`)
+      } finally {
+        stopping.value = false
+      }
+    },
+  })
+}
+
+async function handleStart() {
+  if (!canWriteApp.value) return
+  const name = props.appName
+  stopping.value = true
+  try {
+    const result = await api.startApp(project.value, name)
+    toast.success(result.note ?? `${name} is starting`)
+    await loadScale()
+  } catch {
+    toast.error(`Failed to start ${name}`)
+  } finally {
+    stopping.value = false
+  }
+}
+
+// Load stop status with the panel because the header and banner use it.
+const beginStopLoad = loadGuard()
+async function loadStop() {
+  const current = beginStopLoad()
+  try {
+    const apps = await api.fetchApps(project.value)
+    if (!current()) return
+    appStop.value = apps.find(a => a.name === props.appName)?.stopped ?? null
+  } catch {
+    // Keep what is shown; the Scale tab and the next open read it again.
+  }
+}
+
+const stoppedSummary = computed(() => {
+  const stop = appStop.value
+  if (!stop) return ''
+  let text = 'Stopped'
+  if (stop.at) text += ` since ${formatDateTime(stop.at)}`
+  if (stop.by) text += ` by ${stop.by}`
+  if (stop.reason) text += `: ${stop.reason}`
+  return text
+})
 
 // Update image
 const showImageForm = ref(false)
@@ -2419,6 +2486,7 @@ watch(activeTab, (tab) => {
 
 onMounted(() => {
   loadLokiLogs()
+  loadStop()
 })
 
 // Both props identify what the panel shows. The same app name exists in every
@@ -2452,6 +2520,9 @@ watch(() => [props.appName, props.namespace], () => {
   linkingTarget.value = ''
   linkingPublic.value = false
   restarting.value = false
+  stopping.value = false
+  appStop.value = null
+  loadStop()
   fixingConflicts.value = false
   binding.value = false
   linking.value = false
@@ -2664,7 +2735,17 @@ function openOptimise() {
         <Package class="h-4 w-4" :stroke-width="1.75" />
       </button>
       <button
-        v-if="canRestart"
+        v-if="canWriteApp && !appStop"
+        data-testid="app-stop"
+        @click="handleStop"
+        :disabled="stopping"
+        class="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+        title="Stop app"
+      >
+        <Power class="h-4 w-4" :stroke-width="1.75" />
+      </button>
+      <button
+        v-if="canRestart && !appStop"
         @click="handleRestart"
         :disabled="restarting"
         class="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
@@ -2674,10 +2755,25 @@ function openOptimise() {
       </button>
     </template>
 
+    <div
+      v-if="appStop"
+      data-testid="app-stopped-banner"
+      class="flex items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-5 py-2.5 text-xs text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300"
+    >
+      <span>{{ stoppedSummary }}. Its route answers with the stopped page; bound services keep running.</span>
+      <button
+        v-if="canWriteApp"
+        data-testid="app-start"
+        :disabled="stopping"
+        @click="handleStart"
+        class="shrink-0 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-700 disabled:opacity-40 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
+      >Start</button>
+    </div>
+
     <!-- Why the app is not running. Above the tabs, because this is what the
          operator opened the app to find out. -->
     <div
-      v-if="failingContainers.length > 0"
+      v-else-if="failingContainers.length > 0"
       data-testid="app-health-banner"
       class="border-b border-red-200 bg-red-50 px-5 py-3 dark:border-red-900 dark:bg-red-950/40"
     >

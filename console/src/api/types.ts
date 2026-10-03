@@ -27,6 +27,14 @@ export interface App {
   // Why the latest change has not finished rolling out; absent once it has.
   rollout_reason?: string
   rollout_waiting?: string
+  stopped?: AppStop
+}
+
+export interface AppStop {
+  reason?: string
+  by?: string
+  // RFC 3339.
+  at?: string
 }
 
 export interface CreateAppPayload {
