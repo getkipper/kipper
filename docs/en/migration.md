@@ -127,25 +127,33 @@ The token is valid for 24 hours and can only be used once.
 
 ### 3. Freeze writes on the source
 
-Data is copied while the source apps keep running. Anything written to a database or volume after its copy has been taken stays behind on the source and never reaches the target. For test projects that can be acceptable. For a production project, stop writes before starting and keep them stopped until the domain cutover:
+Migration leaves source apps running unless you stop them. Writes made after a database or volume is copied stay on the source. For production, stop the apps before starting migration and keep them stopped through domain cutover:
 
 ```bash
-kip app scale api --replicas 0 --project shop --environment prod
-kip app scale worker --replicas 0 --project shop --environment prod
+kip app stop api --for-migration --project shop --environment prod
+kip app stop worker --for-migration --project shop --environment prod
 ```
 
-Autoscaled apps need one step first: the HPA keeps them running whatever the replica count says, so `kip app scale` refuses them until autoscaling is off. Disable it, scale down, and re-enable it on the target after the cutover:
+`--for-migration` works for autoscaled apps too. It marks a new stop as a temporary write freeze on the source. On the target, the app uses its configured replica count and autoscaling settings, unless it needs a manual database restore. An already stopped app keeps its original stop record; see [Apps that arrive stopped](#apps-that-arrive-stopped).
+
+If migration is aborted, restart each app you froze on the source, for example:
 
 ```bash
-kip app autoscale api --off --project shop --environment prod
-kip app scale api --replicas 0 --project shop --environment prod
+kip app start api --project shop --environment prod
+kip app start worker --project shop --environment prod
 ```
 
-Scaling the source apps to zero clears the "source apps still running" warning on the plan, which changes the plan itself. If you already reviewed a plan with that warning, the console asks you to review a fresh one before starting. That is expected: the warning-free plan is the one you want to confirm.
+The plan lists apps that may still write and reports any checks it could not complete. At migration start, the check waits up to 30 seconds for stopped apps to finish shutting down. Any remaining apps appear in a "Write freeze check" warning.
 
-The migration also lists any still-autoscaled apps as a "Write freeze check" warning in the progress view, so nothing keeps writing unnoticed.
+Once the apps have finished shutting down, the warning clears. This changes the plan, so the console asks you to review it again before starting.
 
-The apps come up on the target with the replica counts they had when their App configs were copied, so scale the source down right before starting the migration and scale the target's apps up from its console if needed. The capacity precheck sizes app demand from the App configs (frozen apps count with at least one replica), so freezing first does not weaken it. The console shows this warning again on the start screen.
+The capacity precheck uses configured replica counts and autoscaling minimums, reserving room for at least one replica per app even when it is stopped.
+
+#### Apps that arrive stopped
+
+Apps stopped for reasons other than a migration freeze retain their original reason, operator and timestamp on the target. Other apps bound to a database that needs [manual restore](#limitations) arrive stopped with the reason "waiting for a manual database restore". This prevents them from writing to an empty database before the restore. The progress view lists these apps and the command to start each one.
+
+If apps may need to arrive stopped, the plan requires a target schema that preserves stop records. An unsupported target must be upgraded before migration can proceed.
 
 ### 4. Review the migration plan
 
@@ -214,7 +222,7 @@ If a route fails to apply, the cutover stops and reports which one. The session 
 
 - **Database size**: Databases up to ~500MB transfer automatically. Larger ones are skipped with manual instructions shown in the progress view. The dump streams between the clusters with a one-hour budget per database, so the cap is about transfer time on a normal uplink rather than memory.
 - **Volumes and service storage have no size cap**: Shared volumes move through a chunked transfer that verifies every file and resumes from the last completed chunk after a network or pod failure within the run. MinIO and OpenSearch storage moves the same way as raw bytes; the service pauses on both clusters for the duration of its transfer and restarts automatically. If the console API itself restarts mid-run, the migration fails, both clusters clean up and restart paused services on their own, and a fresh migration retransfers the data.
-- **Stop apps before migrating**: The data transfer copies each volume once. Writes that land while a transfer runs are not picked up, so scale the source apps to zero first. The plan screen reminds you when source apps are still running.
+- **Stop apps before migrating**: The data transfer copies each volume once. Writes that land while a transfer runs are not picked up, so stop the source apps with `kip app stop --for-migration` first. The plan screen reminds you when source apps can still write.
 - **Redirect domains move at cutover**: An app's route carries one serving hostname plus any [redirect domains](/en/domains#redirect-domains). During the verification phase the target serves neither; both switch over together at cutover, and each redirect domain's DNS record must be repointed just like the main hostname's.
 - **Git apps build the branch head**: The rebuild on the target checks out the configured branch fresh. If the branch moved since the last deploy on the source, the target runs the newer code.
 - **Active connections**: Apps on the source cluster continue running during migration. There is no automatic traffic cutover. DNS changes propagate gradually. Writes that land on the source after its data was copied stay there, which is why the guide says to freeze writes first.

@@ -477,3 +477,37 @@ func TestDiffSpec_ARoutePathIsNotPrinted(t *testing.T) {
 	assert.Equal(t, "shop.example.com", shown["route.host"], "a hostname is public")
 	assert.Equal(t, "(value hidden)", shown["route.path"])
 }
+
+// A stop with nothing recorded is still a stop. Dropping it starts the app, so
+// it reads as cleared like any other value.
+func TestDiffSpec_DroppingAStopIsAClear(t *testing.T) {
+	for _, live := range []map[string]interface{}{
+		{"stopped": map[string]interface{}{}},
+		{"stopped": map[string]interface{}{"reason": "x"}},
+	} {
+		changes := DiffSpec(live, map[string]interface{}{}, nil, nil)
+		found := false
+		for _, c := range changes {
+			if c.Kind == Cleared && (c.Path == "stopped" || c.Path == "stopped.reason") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("dropping %v reported %+v, want a clear", live, changes)
+		}
+	}
+}
+
+func TestDiffSpec_DroppingAnEmptyEnvIsNotAClear(t *testing.T) {
+	if changes := DiffSpec(map[string]interface{}{"env": map[string]interface{}{}}, map[string]interface{}{}, nil, nil); len(changes) != 0 {
+		t.Errorf("got %+v", changes)
+	}
+}
+
+// Adding an empty stop stops the app, so a preview must show it.
+func TestDiffSpec_AddingAnEmptyStopIsShown(t *testing.T) {
+	changes := DiffSpec(map[string]interface{}{}, map[string]interface{}{"stopped": map[string]interface{}{}}, nil, nil)
+	if len(changes) != 1 || changes[0].Kind != Added || changes[0].Path != "stopped" {
+		t.Fatalf("got %+v, want stopped added", changes)
+	}
+}

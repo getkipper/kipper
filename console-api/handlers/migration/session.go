@@ -89,6 +89,15 @@ type Session struct {
 	// saved here, so cutover and the DNS screen act on movers only.
 	SavedRoutes map[string]map[string]interface{} `json:"-"`
 
+	// TargetKeepsStops is what the target said at accept: whether its App
+	// schema keeps spec.stopped. An older target says nothing, which reads
+	// as false.
+	TargetKeepsStops bool `json:"-"`
+
+	// dataLeftBehind holds namespace/service for each database whose data
+	// stays on this cluster for a manual restore.
+	dataLeftBehind map[string]bool
+
 	// JournaledSecrets records, per namespace, the pre-existing Secrets this
 	// session overwrote and holds a rollback copy of. The copies themselves
 	// live in the project namespace, where a workload principal could strip
@@ -180,6 +189,24 @@ func (s *Session) Finish(status SessionStatus, errMsg string) {
 	}
 	now := time.Now()
 	s.CompletedAt = &now
+}
+
+// MarkDataLeftBehind records that a database's data stays on this cluster
+// for a manual restore, so the apps bound to it arrive stopped.
+func (s *Session) MarkDataLeftBehind(namespace, service string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dataLeftBehind == nil {
+		s.dataLeftBehind = map[string]bool{}
+	}
+	s.dataLeftBehind[namespace+"/"+service] = true
+}
+
+// DataLeftBehind reports whether a database's data stays on this cluster.
+func (s *Session) DataLeftBehind(namespace, service string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dataLeftBehind[namespace+"/"+service]
 }
 
 // SaveRoute records an app's original route config for the cutover phase.

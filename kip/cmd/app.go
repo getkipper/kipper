@@ -454,6 +454,9 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Printf("  ✔  Deployed (no public route)\n\n")
 		}
+		if _, stopped, _ := unstructured.NestedMap(app.Object, "spec", "stopped"); stopped {
+			fmt.Printf("  !   %s is stopped, so the changes apply when it is started: kip app start %s\n\n", name, name)
+		}
 	} else {
 		// Fall back to the computed domain if the read-back fails.
 		fmt.Printf("  ✔  Live at https://%s%s\n\n", domain, routePath)
@@ -498,7 +501,14 @@ func runAppList(cmd *cobra.Command, args []string) error {
 	// the database behind it is dead. The note goes below the table because it
 	// is a sentence, and because the app's own status is not what is wrong.
 	for _, app := range apps {
-		if app.BrokenDependency == "" {
+		if app.Stopped == nil {
+			continue
+		}
+		fmt.Printf("  !   %s\n", stoppedNote(app.Name, *app.Stopped))
+		fmt.Printf("      kip app start %s  starts it again\n\n", app.Name)
+	}
+	for _, app := range apps {
+		if app.BrokenDependency == "" || app.Stopped != nil {
 			continue
 		}
 		fmt.Printf("  !   %s depends on %s, which is crash-looping\n", app.Name, app.BrokenDependency)
@@ -733,6 +743,10 @@ func runAppScale(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n  Scaling %s to %d replicas...\n", appName, replicas)
 	if err := d.Scale(ctx, ns, appName, int32(replicas)); err != nil { //nolint:gosec // CLI flag values are bounded
 		return err
+	}
+	if stopped, err := d.Stopped(ctx, ns, appName); err == nil && stopped {
+		fmt.Printf("  ✔  %s is stopped; it runs %d replicas when started\n\n", appName, replicas)
+		return nil
 	}
 	fmt.Printf("  ✔  Scaled to %d replicas\n\n", replicas)
 

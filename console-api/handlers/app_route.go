@@ -71,6 +71,9 @@ func (a *Apps) GetRoute(w http.ResponseWriter, r *http.Request) {
 		if resp.Host != "" {
 			resp.URL = "https://" + resp.Host + resp.Path
 			resp.Health = routeHealth(ctx, a.Client, project, appName, resp.Host)
+			if appCR.Spec.Stopped != nil {
+				resp.Health = stoppedRouteHealth(resp.Health)
+			}
 		}
 	}
 
@@ -175,6 +178,9 @@ func (a *Apps) SetRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	if host != "" {
 		resp.Health = routeHealth(ctx, a.Client, project, appName, host)
+		if appCR.Spec.Stopped != nil {
+			resp.Health = stoppedRouteHealth(resp.Health)
+		}
 	}
 
 	respondJSON(w, http.StatusOK, resp)

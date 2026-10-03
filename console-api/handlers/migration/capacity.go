@@ -26,6 +26,9 @@ type clusterCapacity struct {
 	RequestedCPU       int64 `json:"requested_cpu_millis"`
 	RequestedMemory    int64 `json:"requested_memory_bytes"`
 	RequestedStorage   int64 `json:"requested_storage_bytes"`
+	// KeepsStops is true when this cluster's App schema keeps spec.stopped,
+	// so an app that arrives stopped stays stopped.
+	KeepsStops bool `json:"keeps_stops"`
 }
 
 // FreeCPU returns the unrequested CPU headroom.
@@ -67,6 +70,7 @@ func (h *Handler) TargetCapacityHandler(w http.ResponseWriter, r *http.Request) 
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("computing capacity: %v", err))
 		return
 	}
+	capacity.KeepsStops = h.keepsStops(ctx)
 
 	// The version rides along so the source can run its major-version check
 	// at plan time; the accept handshake otherwise only reveals it on the
@@ -359,6 +363,8 @@ func (h *Handler) fetchTargetCapacity(token *Token, projects []string) (clusterC
 		}
 		*f.dest = int64(v)
 	}
+	// Treat an absent capability as unsupported for older targets.
+	target.KeepsStops, _ = resp["keeps_stops"].(bool)
 	version, _ := resp["target_version"].(string)
 	return target, version, nil
 }

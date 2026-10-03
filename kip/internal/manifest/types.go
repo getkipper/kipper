@@ -32,6 +32,14 @@ type AppSpec struct {
 	Autoscale       *AutoscaleSpec    `yaml:"autoscale,omitempty"`
 	Git             *GitSpec          `yaml:"git,omitempty"`
 	Health          *HealthSpec       `yaml:"health,omitempty"`
+	Stopped         *StoppedSpec      `yaml:"stopped,omitempty"`
+}
+
+// StoppedSpec declares a stop, its optional reason and migration flag.
+// Apply preserves the actor and timestamp of an existing stop.
+type StoppedSpec struct {
+	Reason       string `yaml:"reason,omitempty"`
+	ForMigration bool   `yaml:"forMigration,omitempty"`
 }
 
 // HealthSpec is the check a new pod must pass before it takes traffic. Leaving

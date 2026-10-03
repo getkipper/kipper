@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -190,12 +191,11 @@ func (c *shareClient) list(ctx context.Context, name, namespace string) error {
 	return nil
 }
 
-// printable strips control characters from a stored label before it reaches
-// the terminal: another admin's label must not carry ANSI escapes or
-// newlines into this one's output.
+// printable strips Unicode control characters so stored text cannot inject
+// escapes or newlines into terminal output.
 func printable(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		if unicode.IsControl(r) {
 			return -1
 		}
 		return r

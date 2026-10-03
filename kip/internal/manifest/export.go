@@ -106,6 +106,7 @@ func exportApps(ctx context.Context, dynClient dynamic.Interface, namespace stri
 		app.Volumes = exportVolumeMounts(spec)
 		app.Autoscale = exportAutoscale(spec)
 		app.Health = exportHealth(spec)
+		app.Stopped = exportStopped(spec)
 
 		m.Apps[name] = app
 	}
@@ -313,6 +314,19 @@ func exportAutoscale(spec map[string]interface{}) *AutoscaleSpec {
 		a.MemoryTarget = int32(v) //nolint:gosec // bounded by K8s
 	}
 	return a
+}
+
+// exportStopped exports the reason and migration flag. The actor and timestamp
+// stay in the cluster; apply preserves them for an existing stop.
+func exportStopped(spec map[string]interface{}) *StoppedSpec {
+	st := extractMap(spec, "stopped")
+	if st == nil {
+		return nil
+	}
+	out := &StoppedSpec{}
+	out.Reason, _ = st["reason"].(string)
+	out.ForMigration, _ = st["forMigration"].(bool)
+	return out
 }
 
 // exportHealth exports declared checks only; automatic checks have no block.

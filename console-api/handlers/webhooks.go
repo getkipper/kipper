@@ -631,8 +631,9 @@ func (wh *Webhooks) Rollback(w http.ResponseWriter, r *http.Request) {
 	// Apply under conflict retry: the reconciler and build controller also write
 	// the App, so a benign concurrent update must not fail the rollback.
 	var newRevision int
+	var live kipperv1.App
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var live kipperv1.App
+		live = kipperv1.App{}
 		if err := wh.CRClient.Get(ctx, key, &live); err != nil {
 			return err
 		}
@@ -663,11 +664,15 @@ func (wh *Webhooks) Rollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"status":   "rolled_back",
 		"revision": newRevision,
 		"image":    targetImage,
-	})
+	}
+	if live.Spec.Stopped != nil {
+		resp["note"] = fmt.Sprintf("%s is stopped; the rolled-back image applies when the app is started", app)
+	}
+	respondJSON(w, http.StatusOK, resp)
 }
 
 // selectRollbackTarget returns the history entry to roll back to. An explicit

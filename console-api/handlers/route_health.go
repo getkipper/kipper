@@ -30,6 +30,16 @@ type RouteHealth struct {
 
 	// Message is a short, human-readable status line for the UI.
 	Message string `json:"message,omitempty"`
+
+	// Stopped reflects the App stop record, independently of route readiness.
+	Stopped bool `json:"stopped,omitempty"`
+}
+
+// stoppedRouteHealth adds stop status while preserving Ingress and TLS readiness.
+func stoppedRouteHealth(h RouteHealth) RouteHealth {
+	h.Stopped = true
+	h.Message = "The app is stopped, so its route answers with the stopped page."
+	return h
 }
 
 // routeHealth returns the live health of an app's route. It looks up the

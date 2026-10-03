@@ -47,6 +47,8 @@ type routeEntry struct {
 	PublicPaths []string `json:"public_paths"`
 	// RefusalReady reports whether the guard Ingresses match the requested policy.
 	RefusalReady bool `json:"refusal_ready"`
+
+	stopped bool
 }
 
 type routeGroupResponse struct {
@@ -154,6 +156,7 @@ func (rt *Routes) List(w http.ResponseWriter, r *http.Request) {
 			RefusedPaths: controllers.RefusedRoutePaths(route, guardOn),
 			PublicPaths:  controllers.ReopenedRoutePaths(route, guardOn),
 			RefusalReady: rt.refusalInstalled(ctx, app, host, guardOn),
+			stopped:      app.Spec.Stopped != nil,
 		})
 	}
 
@@ -176,6 +179,9 @@ func (rt *Routes) List(w http.ResponseWriter, r *http.Request) {
 		g := grouped[key]
 		for i := range g.Routes {
 			g.Routes[i].Health = routeHealth(ctx, rt.Client, key.namespace, g.Routes[i].App, key.host)
+			if g.Routes[i].stopped {
+				g.Routes[i].Health = stoppedRouteHealth(g.Routes[i].Health)
+			}
 		}
 		g.Health = aggregateRouteHealth(g.Routes)
 		groups = append(groups, *g)

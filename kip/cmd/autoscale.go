@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/getkipper/kipper/kip/internal/deployer"
+
 	"github.com/spf13/cobra"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
@@ -168,6 +170,10 @@ func runAutoscale(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\n  ✔  Autoscaling enabled for %s\n", appName)
+	d := &deployer.Deployer{Client: clientset, Dynamic: k8sClient.Dynamic()}
+	if stopped, err := d.Stopped(ctx, ns, appName); err == nil && stopped {
+		fmt.Printf("  %s is stopped; autoscaling takes over when it is started\n", appName)
+	}
 	fmt.Printf("  Replicas: %d–%d\n", minReplicas, maxReplicas)
 	if cpuTarget > 0 {
 		fmt.Printf("  CPU target: %d%%\n", cpuTarget)

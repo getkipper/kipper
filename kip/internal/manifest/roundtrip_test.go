@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -180,6 +182,7 @@ func fullApp() AppSpec {
 			StartupTimeoutSeconds: 600,
 			TimeoutSeconds:        3,
 		},
+		Stopped: &StoppedSpec{Reason: "freeing memory", ForMigration: true},
 	}
 }
 
@@ -288,4 +291,20 @@ func fakeClientWithManifest(t *testing.T, m *Manifest, namespace string) *fake.F
 
 	_ = metav1.AddMetaToScheme(scheme)
 	return fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind, objs...)
+}
+
+// A stop without a reason is still a stop. Losing the empty block on the way
+// through YAML would start the app on the next apply.
+func TestStopWithoutAReasonSurvivesYAML(t *testing.T) {
+	out, err := yaml.Marshal(AppSpec{Port: 8080, Stopped: &StoppedSpec{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back AppSpec
+	if err := yaml.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Stopped == nil {
+		t.Fatalf("the stop was lost:\n%s", out)
+	}
 }

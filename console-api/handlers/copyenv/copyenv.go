@@ -230,6 +230,10 @@ func (c *Copier) copyApps(ctx context.Context, opts Options) (int, []string, err
 				"%s no longer links to %s: a link outside this project's environment is not copied; re-link it if the new environment needs it",
 				copied.Name, strings.Join(dropped, ", ")))
 		}
+		if copied.Spec.Stopped != nil {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s is stopped in %s and arrives stopped; start it in the new environment when it should run", copied.Name, opts.Source))
+		}
 		if err := resourcebounds.ClaimQuantities(ctx, c.CRClient, &kipperv1.App{}, copied.Namespace, copied.Name,
 			resourcebounds.CopyManager, copied.ResourceVersion, user); err != nil {
 			warnings = append(warnings, fmt.Sprintf("%s: its CPU and memory values are held until you confirm them in the new environment: %v", copied.Name, err))

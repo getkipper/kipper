@@ -403,6 +403,8 @@ var routeAuthz = map[string]authzDeclaration{
 	"PUT /api/v1/projects/{name}/apps/{app}/resources":               {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
 	"PUT /api/v1/projects/{name}/apps/{app}/route":                   {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
 	"PUT /api/v1/projects/{name}/apps/{app}/scale":                   {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/apps/{app}/stop":                   {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
+	"POST /api/v1/projects/{name}/apps/{app}/start":                  {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
 	"PUT /api/v1/projects/{name}/apps/{app}/secrets":                 {class: classProjectCapability, capability: "env.write", scope: scopeNamespace},
 	"PUT /api/v1/projects/{name}/apps/{app}/settings":                {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},
 	"PUT /api/v1/projects/{name}/apps/{app}/health-check":            {class: classProjectCapability, capability: "kipper.write", scope: scopeNamespace},

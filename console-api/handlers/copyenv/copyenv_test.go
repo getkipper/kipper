@@ -2,6 +2,7 @@ package copyenv
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -571,4 +572,29 @@ func TestCopier_CarriesTheHealthCheck(t *testing.T) {
 	var copied kipperv1.App
 	require.NoError(t, crClient.Get(context.Background(), crclient.ObjectKey{Namespace: "demo-prod", Name: "api"}, &copied))
 	assert.Equal(t, src.Spec.Health, copied.Spec.Health)
+}
+
+// A stopped app is copied stopped, and the wizard's replica override does not
+// start it. The summary says so, so nobody waits for its pods.
+func TestCopier_AStoppedAppArrivesStopped(t *testing.T) {
+	src := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "demo-test"},
+		Spec: kipperv1.AppSpec{Image: "nginx:1.27", Port: 80, Replicas: int32Ptr(1),
+			Stopped: &kipperv1.AppStopped{Reason: "parked", By: "alice@example.com"}},
+	}
+	crClient := crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(src).Build()
+	c := &Copier{CRClient: crClient, Client: fake.NewClientset()}
+
+	summary, err := c.Run(context.Background(), Options{
+		Source: "demo-test", Target: "demo-prod", TargetEnv: "prod", ClusterDomain: "example.com",
+		AppOverrides: map[string]AppOverride{"web": {Replicas: int32Ptr(3)}},
+	})
+	require.NoError(t, err)
+
+	var copied kipperv1.App
+	require.NoError(t, crClient.Get(context.Background(), crclient.ObjectKey{Namespace: "demo-prod", Name: "web"}, &copied))
+	require.NotNil(t, copied.Spec.Stopped)
+	assert.Equal(t, "parked", copied.Spec.Stopped.Reason)
+	assert.Equal(t, int32(3), *copied.Spec.Replicas, "the override applies when it is started")
+	assert.Contains(t, strings.Join(summary.Warnings, "\n"), "web is stopped")
 }

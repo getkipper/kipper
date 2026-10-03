@@ -131,6 +131,11 @@ type ResourceController struct {
 	// minutes between crashes re-arm a first-tick alert and roughly double
 	// today's traffic.
 	crashLoopEpisode map[string]episode
+
+	// stoppedApps holds namespace/app for each app the last pass found
+	// stopped, and lastStop the stop stamp last seen on each Deployment.
+	stoppedApps      map[string]bool
+	lastStop         map[string]string
 	oomHandledAt     map[string]time.Time    // namespace/app/container → finish time of the last OOM acted on
 	rolloutAlerted   map[string]time.Time    // namespace/name → last stuck-rollout alert time
 	jobFailAlerted   map[string]time.Time    // job UID → last failed-job alert time
@@ -201,14 +206,18 @@ func (rc *ResourceController) tick(ctx context.Context) {
 	// stages its cooldown marks rather than setting them; the marks commit only
 	// once the alert write lands, so a failed write re-fires next tick instead
 	// of being suppressed for the cooldown window.
-	batches := rc.checkPodProblems(ctx)
-	batches = append(batches, rc.checkNodeReady(nodes)...)
-	batches = append(batches, rc.checkFailedJobs(ctx)...)
-
+	//
+	// Identify stopped apps before checking their pods for problems.
 	deployments, deployErr := rc.listManagedDeployments(ctx)
 	if deployErr != nil {
 		log.Printf("resource controller: failed to list deployments: %v", deployErr)
-	} else {
+	}
+	rc.forgetStoppedApps(ctx, deployments)
+
+	batches := rc.checkPodProblems(ctx)
+	batches = append(batches, rc.checkNodeReady(nodes)...)
+	batches = append(batches, rc.checkFailedJobs(ctx)...)
+	if deployErr == nil {
 		batches = append(batches, rc.checkStuckRollouts(deployments, rc.explainStuckRollout(ctx))...)
 	}
 
@@ -567,7 +576,13 @@ func stuckDuration(pod *corev1.Pod) float64 {
 }
 
 func (rc *ResourceController) processDeployment(ctx context.Context, deploy *appsv1.Deployment, metrics map[string][]podMetricsEntry, scaledOut map[string]bool) []ResourceLogEntry {
-	if len(deploy.Spec.Template.Spec.Containers) == 0 || tuningPaused(deploy.Annotations) {
+	if len(deploy.Spec.Template.Spec.Containers) == 0 || tuningPaused(deploy.Annotations) || deploymentStopped(deploy) {
+		return nil
+	}
+	rc.mu.Lock()
+	stopped := rc.appStoppedLocked(deploy.Namespace + "/" + appNameOf(deploy))
+	rc.mu.Unlock()
+	if stopped {
 		return nil
 	}
 
@@ -1723,6 +1738,9 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) []alertBatch
 	// clean minutes could never elapse.
 	for _, obs := range observeWorkloads(pods.Items) {
 		key := obs.key
+		if namespace, rest, _ := strings.Cut(key, "/"); rc.appStoppedLocked(namespace + "/" + strings.SplitN(rest, "/", 2)[0]) {
+			continue
+		}
 
 		if obs.waiting == "" {
 			if b, ok := rc.observeCrashLoopRecovery(key, obs, now, nowStr); ok {
@@ -1894,7 +1912,7 @@ func (rc *ResourceController) checkStuckRollouts(deployments []appsv1.Deployment
 	for i := range deployments {
 		d := &deployments[i]
 		key := d.Namespace + "/" + d.Name
-		if !rollout.Failed(d) {
+		if !rollout.Failed(d) || deploymentStopped(d) || rc.appStoppedLocked(d.Namespace+"/"+appNameOf(d)) {
 			delete(rc.rolloutAlerted, key)
 			continue
 		}

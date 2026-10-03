@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
@@ -70,6 +71,11 @@ func runApply(cmd *cobra.Command, args []string) error {
 		}
 		namespace := cluster.ResolveNamespace(project, environment)
 		plans = append(plans, applyPlan{m: m, project: project, namespace: namespace, resources: manifest.Convert(m, namespace)})
+	}
+	for _, p := range plans {
+		if manifestsStop(p.resources) {
+			stampStops(p.resources, stopIdentity(ctx, k8sClient.Clientset(), "kip apply"), time.Now())
+		}
 	}
 
 	if dryRun {
@@ -329,7 +335,7 @@ func scanChangesWith(ctx context.Context, dyn dynamic.Interface, namespace strin
 		// where a manifest carries a credential name the cluster owns, and a
 		// scan that reported the manifest's version showed a change the write
 		// never makes and passed a preflight the write then refuses.
-		effective := effectiveSpecForDiff(name, newSpec)
+		effective := withLiveStopRecord(effectiveSpecForDiff(name, newSpec), liveSpec)
 		for _, c := range manifest.DiffSpec(liveSpec, effective, preservedPaths(name, effective, liveSpec), kindDefaults) {
 			out = append(out, resourceChange{kind: res.Object.GetKind(), name: name, change: c})
 		}
@@ -602,6 +608,9 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 			if err := deployer.RequireHealthStored(written, sendsHealth(res)); err != nil {
 				return "", err
 			}
+			if err := deployer.RequireStopStored(written, sendsStop(res)); err != nil {
+				return "", err
+			}
 			return "created", nil
 		}
 		// AlreadyExists proves the workload is there, so the reservation just
@@ -649,8 +658,9 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 				applyGitCredential(git, name, manifestCredential, manifestNamesCredential, live)
 			}
 		}
+		liveSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
+		newSpec = withLiveStopRecord(newSpec, liveSpec)
 		if !force {
-			liveSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
 			if clears := manifest.Clears(manifest.DiffSpec(liveSpec, newSpec, preservedPaths(name, newSpec, liveSpec), defaults)); len(clears) > 0 {
 				return &clearedUnderApplyError{kind: res.Object.GetKind(), name: name, clears: clears, schemaUnread: schemaUnread}
 			}
@@ -660,7 +670,10 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 		if err != nil {
 			return err
 		}
-		return deployer.RequireHealthStored(written, sendsHealth(res))
+		if err := deployer.RequireHealthStored(written, sendsHealth(res)); err != nil {
+			return err
+		}
+		return deployer.RequireStopStored(written, sendsStop(res))
 	})
 	if err != nil {
 		return "", err

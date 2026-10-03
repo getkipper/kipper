@@ -45,6 +45,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("/deny", handleDeny)
+	mux.HandleFunc("GET /stopped", handleStopped)
 }
 
 // handleDeny returns an empty 404 through Traefik forwardAuth.

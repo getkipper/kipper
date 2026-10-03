@@ -413,6 +413,30 @@ spec:
                   - name
                   type: object
                 type: array
+              stopped:
+                description: |-
+                  Stopped requests zero pods until the field is removed. The configured
+                  replica count and autoscaling settings are preserved for the next start.
+                properties:
+                  at:
+                    description: At is when it was stopped.
+                    format: date-time
+                    type: string
+                  by:
+                    description: By identifies the user or tool that recorded the
+                      stop.
+                    maxLength: 256
+                    type: string
+                  forMigration:
+                    description: |-
+                      ForMigration marks the write freeze before a migration. A migration
+                      does not carry such a stop to the target.
+                    type: boolean
+                  reason:
+                    description: Reason explains the stop in app details and CLI listings.
+                    maxLength: 500
+                    type: string
+                type: object
               volumes:
                 description: Volumes lists volume mounts for this app.
                 items:

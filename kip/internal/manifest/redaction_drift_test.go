@@ -94,6 +94,7 @@ func TestRedaction_ClassifiesEveryPathConvertEmits(t *testing.T) {
 			ServiceBindings: []BindingSpec{{Name: "db", Prefix: "DB_", Database: "api"}},
 			Volumes:         []VolumeMountSpec{{Name: "uploads", MountPath: "/data"}},
 			Health:          &HealthSpec{Type: "http", Path: "/ready", Port: 8081, StartupTimeoutSeconds: 600, TimeoutSeconds: 3},
+			Stopped:         &StoppedSpec{Reason: "freeing memory", ForMigration: true},
 		}},
 		Services: map[string]SvcSpec{"db": {
 			Type: "postgres", Version: "16", Storage: "5Gi",

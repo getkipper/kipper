@@ -53,8 +53,15 @@ type appResponse struct {
 	Ready    int32  `json:"ready"`
 	// RolloutReason and RolloutWaiting say why the latest change has not
 	// finished rolling out; both are empty once it has.
-	RolloutReason  string `json:"rollout_reason,omitempty"`
-	RolloutWaiting string `json:"rollout_waiting,omitempty"`
+	RolloutReason  string              `json:"rollout_reason,omitempty"`
+	RolloutWaiting string              `json:"rollout_waiting,omitempty"`
+	Stopped        *appStoppedResponse `json:"stopped,omitempty"`
+}
+
+type appStoppedResponse struct {
+	Reason string `json:"reason,omitempty"`
+	By     string `json:"by,omitempty"`
+	At     string `json:"at,omitempty"`
 }
 
 type createAppRequest struct {
@@ -474,10 +481,14 @@ func (a *Apps) Scale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"name":     appName,
 		"replicas": req.Replicas,
-	})
+	}
+	if app.Spec.Stopped != nil {
+		resp["note"] = fmt.Sprintf("%s is stopped; the new replica count applies when the app is started", appName)
+	}
+	respondJSON(w, http.StatusOK, resp)
 }
 
 // Delete removes an application from the project.
@@ -532,6 +543,11 @@ func (a *Apps) Restart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		respondError(w, http.StatusInternalServerError, "failed to get app")
+		return
+	}
+
+	if app.Spec.Stopped != nil {
+		respondError(w, http.StatusConflict, fmt.Sprintf("%s is stopped; start it instead", appName))
 		return
 	}
 
@@ -592,7 +608,7 @@ func (a *Apps) UpdateImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondJSON(w, http.StatusOK, map[string]string{"status": "updated", "image": req.Image})
+	respondJSON(w, http.StatusOK, withStoppedNote(map[string]string{"status": "updated", "image": req.Image}, app, "new image"))
 }
 
 func appCRToResponse(app kipperv1.App) appResponse {
@@ -617,6 +633,12 @@ func appCRToResponse(app kipperv1.App) appResponse {
 	}
 	if c := apimeta.FindStatusCondition(app.Status.Conditions, kipperv1.ConditionRolloutComplete); c != nil && c.Status == metav1.ConditionFalse {
 		resp.RolloutReason, resp.RolloutWaiting = c.Reason, c.Message
+	}
+	if st := app.Spec.Stopped; st != nil {
+		resp.Stopped = &appStoppedResponse{Reason: st.Reason, By: st.By}
+		if st.At != nil {
+			resp.Stopped.At = st.At.UTC().Format(time.RFC3339)
+		}
 	}
 	return resp
 }

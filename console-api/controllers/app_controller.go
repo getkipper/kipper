@@ -73,6 +73,10 @@ type AppReconciler struct {
 	// adoptionWarned tracks apps already warned about rejected dry runs
 	// during this controller process.
 	adoptionWarned sync.Map
+
+	// stoppedPageFailed holds the UIDs of stopped apps whose stopped-page
+	// middleware could not be applied, so the pass schedules a retry.
+	stoppedPageFailed sync.Map
 }
 
 // hostReader returns the uncached reader for reservation reads, falling back to
@@ -364,6 +368,9 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 	if credentialRetry > 0 && (linkResync.RequeueAfter == 0 || credentialRetry < linkResync.RequeueAfter) {
 		linkResync.RequeueAfter = credentialRetry
 	}
+	if pageRetry := r.stoppedPageRetry(&app); pageRetry > 0 && (linkResync.RequeueAfter == 0 || pageRetry < linkResync.RequeueAfter) {
+		linkResync.RequeueAfter = pageRetry
+	}
 
 	return linkResync, nil
 }
@@ -412,6 +419,9 @@ func (r *AppReconciler) buildDeployment(ctx context.Context, app *kipperv1.App, 
 	replicas := int32(1)
 	if app.Spec.Replicas != nil {
 		replicas = *app.Spec.Replicas
+	}
+	if appStopped(app) {
+		replicas = 0
 	}
 
 	labels := map[string]string{
@@ -563,6 +573,7 @@ httpd -p %d -h /www -f`, app.Name, app.Name, app.Spec.Port)}
 	}
 
 	ensureProgressDeadline(desired, appProgressDeadline(app))
+	setStoppedMarker(desired, appStopped(app))
 
 	// Set owner reference so the Deployment is garbage-collected with the App
 	if err := controllerutil.SetControllerReference(app, desired, r.Scheme); err != nil {
@@ -578,6 +589,11 @@ func (r *AppReconciler) applyDeployment(ctx context.Context, app *kipperv1.App, 
 	var existing appsv1.Deployment
 	err := r.Get(ctx, types.NamespacedName{Name: app.Name, Namespace: app.Namespace}, &existing)
 	if errors.IsNotFound(err) {
+		if appStopped(app) {
+			if err := r.beginStop(ctx, app, desired); err != nil {
+				return err
+			}
+		}
 		applyPlatformShape(&desired.Spec.Template, app, storedInference(app, nil), r.PreStopSleep)
 		return r.Create(ctx, desired)
 	}
@@ -611,16 +627,25 @@ func (r *AppReconciler) applyDeployment(ctx context.Context, app *kipperv1.App, 
 		}
 	}
 
-	// When autoscaling is active, let the HPA own the replica count.
-	// Otherwise the reconciler would reset it on every loop. The change
-	// check must run before the assignment, or a replicas-only edit
-	// compares the already-synced value against itself and never
-	// reaches the Deployment.
+	// The HPA owns the count except while stopped and on the first start pass,
+	// which restores its minimum so scaling can resume. Compare before assigning
+	// so replica-only changes reach the Deployment.
 	replicasChanged := false
-	if app.Spec.Autoscale == nil || !app.Spec.Autoscale.Enabled {
+	switch {
+	case appStopped(app) || !appAutoscaled(app):
 		replicasChanged = !equality.Semantic.DeepEqual(existing.Spec.Replicas, desired.Spec.Replicas)
 		existing.Spec.Replicas = desired.Spec.Replicas
+	case existing.Annotations[stoppedAnnotation] != "":
+		n := startReplicas(app)
+		replicasChanged = true
+		existing.Spec.Replicas = &n
 	}
+	if appStopped(app) && existing.Annotations[stoppedAnnotation] == "" {
+		if err := r.beginStop(ctx, app, &existing); err != nil {
+			return err
+		}
+	}
+	markerChanged := setStoppedMarker(&existing, appStopped(app))
 
 	deadlineChanged := ensureProgressDeadline(&existing, *desired.Spec.ProgressDeadlineSeconds)
 
@@ -713,7 +738,7 @@ func (r *AppReconciler) applyDeployment(ctx context.Context, app *kipperv1.App, 
 		return err
 	}
 
-	if ownerOK && !templateChanged && !labelsChanged && !replicasChanged && !deadlineChanged && !bindingDriftDetected {
+	if ownerOK && !templateChanged && !labelsChanged && !replicasChanged && !markerChanged && !deadlineChanged && !bindingDriftDetected {
 		return nil
 	}
 
@@ -1392,8 +1417,8 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *kipperv1.App)
 	if route.BasicAuth {
 		middlewareParts = append(middlewareParts, app.Namespace+"-"+app.Name+"-basic-auth@kubernetescrd")
 	}
-	// API key enforcement runs last, after BasicAuth and redirects, so a
-	// request rejected by an earlier gate never consumes the key's quota.
+	// API key enforcement follows BasicAuth and redirects, so requests rejected
+	// by those gates do not consume the key's quota.
 	// The identity-strip clears any forged X-Kipper-Key-* first; forwardAuth
 	// then validates the key and injects the trusted consumer identity; the
 	// strip middleware finally removes X-API-Key so it never reaches the
@@ -1403,6 +1428,10 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *kipperv1.App)
 			app.Namespace+"-"+app.Name+"-apikey-identity-strip@kubernetescrd",
 			app.Namespace+"-"+app.Name+"-apikey@kubernetescrd",
 			app.Namespace+"-"+app.Name+"-apikey-strip@kubernetescrd")
+	}
+	// The stopped page goes last, so every gate above still answers first.
+	if r.ensureStoppedPage(ctx, app) {
+		middlewareParts = append(middlewareParts, stoppedPageRef)
 	}
 	annotations["traefik.ingress.kubernetes.io/router.middlewares"] = strings.Join(middlewareParts, ",")
 
@@ -2239,6 +2268,9 @@ func (r *AppReconciler) observeWorkload(ctx context.Context, app *kipperv1.App) 
 	err := r.Get(ctx, types.NamespacedName{Name: app.Name, Namespace: app.Namespace}, &deploy)
 	if errors.IsNotFound(err) {
 		app.Status.Phase = "Pending"
+		if appStopped(app) {
+			app.Status.Phase = "Stopped"
+		}
 		app.Status.Replicas = 0
 		app.Status.ReadyReplicas = 0
 		return 0, nil
@@ -2259,6 +2291,8 @@ func (r *AppReconciler) observeWorkload(ctx context.Context, app *kipperv1.App) 
 	app.Status.Image = app.Spec.Image
 
 	switch {
+	case appStopped(app):
+		app.Status.Phase = "Stopped"
 	case deploy.Status.AvailableReplicas > 0:
 		app.Status.Phase = "Running"
 	case deploy.Status.Replicas == 0:
