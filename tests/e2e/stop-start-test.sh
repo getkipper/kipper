@@ -32,10 +32,10 @@ fail=0
 ok() { echo -e "  ${GREEN}✔${NC}  $1"; pass=$((pass + 1)); }
 bad() { echo -e "  ${RED}✗${NC}  $1"; fail=$((fail + 1)); }
 
-# Renders the manifest. $1 is basicAuth (true or false), $2 a stopped block or
-# nothing.
+# Renders the manifest. $1 is requireApiKey (true or false), $2 a stopped
+# block or nothing.
 manifest() {
-  ROUTE_HOST="$ROUTE_HOST" BASIC_AUTH="$1" STOPPED="$2" \
+  ROUTE_HOST="$ROUTE_HOST" API_KEY="$1" STOPPED="$2" \
     envsubst < tests/e2e/stopstart/kipper.yaml.tmpl > "$WORK/kipper.yaml"
 }
 
@@ -52,6 +52,19 @@ wait_ready() {
   return 1
 }
 
+# Waits until kip service list shows the database running.
+wait_db() {
+  local deadline=$((SECONDS + ${1:-600}))
+  while [ $SECONDS -lt $deadline ]; do
+    if $KIP service list "${SCOPE[@]}" 2>&1 | grep -qE "^  db +postgres +running"; then
+      return 0
+    fi
+    sleep 5
+  done
+  $KIP service list "${SCOPE[@]}" || true
+  return 1
+}
+
 # Prints the HTTP status code and saves the response body in $WORK/body.
 fetch() {
   curl -s --max-time 10 -o "$WORK/body" -w '%{http_code}' "$@" "https://$ROUTE_HOST/" || true
@@ -65,6 +78,7 @@ echo "Setup"
 manifest false ""
 $KIP apply -f "$WORK/kipper.yaml" > "$WORK/apply.out" 2>&1 && ok "manifest applied" || { bad "manifest applied"; cat "$WORK/apply.out"; exit 1; }
 wait_ready "2/2" 900 && ok "app running with two replicas" || { bad "app running with two replicas"; exit 1; }
+wait_db 600 && ok "the database is running" || { bad "the database is running"; exit 1; }
 [ "$(fetch)" = "200" ] && ok "the route serves the app" || bad "the route serves the app"
 
 echo ""
@@ -76,7 +90,7 @@ status="$(fetch -H 'Accept: text/html')"
 [ "$status" = "503" ] && grep -q "This app is stopped" "$WORK/body" && ok "the route answers the stopped page" || bad "the route answers the stopped page (got $status)"
 status="$(fetch -H 'Accept: application/json')"
 [ "$status" = "503" ] && grep -q '"app_stopped"' "$WORK/body" && ok "an API client gets the JSON answer" || bad "an API client gets the JSON answer (got $status)"
-$KIP service list "${SCOPE[@]}" 2>&1 | grep -qE "^  db .*running" && ok "the bound database keeps running" || bad "the bound database keeps running"
+wait_db 30 && ok "the bound database keeps running" || bad "the bound database keeps running"
 if $KIP app restart "$APP" "${SCOPE[@]}" > "$WORK/restart.out" 2>&1; then bad "a restart of a stopped app is refused"; else ok "a restart of a stopped app is refused"; fi
 if $KIP app scale "$APP" "${SCOPE[@]}" --replicas 3 > "$WORK/scale.out" 2>&1; then bad "scaling an autoscaled app is refused while stopped, as while running"; else ok "scaling an autoscaled app is refused while stopped, as while running"; fi
 
@@ -86,17 +100,20 @@ manifest false ""
 if $KIP apply -f "$WORK/kipper.yaml" > "$WORK/apply-clear.out" 2>&1; then bad "kip apply without the stop is refused"; else ok "kip apply without the stop is refused"; fi
 wait_ready "0/2" 30 && ok "the app is still stopped" || bad "the app is still stopped"
 
+# The API-key gate stands in for every gate here: it answers 401 without any
+# credentials set up, which kip cannot do for basic auth.
 echo ""
 echo "Case: the route's gates answer before the stopped page"
 manifest true "    stopped:
       reason: e2e stop"
-$KIP apply -f "$WORK/kipper.yaml" > "$WORK/apply-auth.out" 2>&1 && ok "basic auth switched on" || { bad "basic auth switched on"; cat "$WORK/apply-auth.out"; }
+$KIP apply -f "$WORK/kipper.yaml" > "$WORK/apply-gate.out" 2>&1 && ok "the API-key gate switched on" || { bad "the API-key gate switched on"; cat "$WORK/apply-gate.out"; }
 sleep 10
 status="$(fetch)"
-[ "$status" = "401" ] && ! grep -q "This app is stopped" "$WORK/body" && ok "a visitor without credentials gets 401, not the page" || bad "a visitor without credentials gets 401, not the page (got $status)"
+[ "$status" = "401" ] && ! grep -q "This app is stopped" "$WORK/body" && ok "a visitor without a key gets 401, not the page" || bad "a visitor without a key gets 401, not the page (got $status)"
+# Switching the gate off clears a field, which apply refuses without --force.
 manifest false "    stopped:
       reason: e2e stop"
-$KIP apply -f "$WORK/kipper.yaml" > "$WORK/apply-noauth.out" 2>&1 || bad "basic auth switched off"
+$KIP apply -f "$WORK/kipper.yaml" --force > "$WORK/apply-nogate.out" 2>&1 && ok "the API-key gate switched off" || bad "the API-key gate switched off"
 
 echo ""
 echo "Case: start"
@@ -107,6 +124,8 @@ sleep 10
 
 echo ""
 echo "Logs and responses are in $WORK"
-echo "Remove the test project with: $KIP project delete stop-start"
+echo "Remove the test app and its database with:"
+echo "  $KIP app delete $APP ${SCOPE[*]}"
+echo "  $KIP service delete db --delete-data ${SCOPE[*]}"
 echo -e "Passed: ${GREEN}$pass${NC}  Failed: ${RED}$fail${NC}"
 [ "$fail" -eq 0 ]

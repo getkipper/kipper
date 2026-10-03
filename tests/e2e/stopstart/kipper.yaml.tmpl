@@ -18,7 +18,7 @@ apps:
       cpuTarget: 80
     route:
       host: ${ROUTE_HOST}
-      basicAuth: ${BASIC_AUTH}
+      requireApiKey: ${API_KEY}
 ${STOPPED}
 services:
   db:
