@@ -60,6 +60,7 @@ kip upgrade --yes              # all three steps, no prompt (for automation)
 |---|---|---|
 | `--skip-system` | `false` | Skip the cluster components (Traefik, Longhorn, KEDA, Velero, Zot, monitoring). CRDs, console, and the cluster's own trust material still move. Use this in production to avoid touching component versions. |
 | `--yes` | `false` | Skip the confirmation prompt before upgrading cluster components. Required in non-interactive contexts (CI, scripts) |
+| `--image-tag` | none | Install the console images built from this commit (a full 40-character sha) instead of the released ones. It is meant for testing a branch on a test cluster and needs `--skip-system`, because the component step would put authz back on its released image; see [Testing a branch on a test cluster](/en/contributing#testing-a-branch-on-a-test-cluster). The next `kip upgrade` without it returns the cluster to the released images |
 | `--ssh-key` | inherited from `~/.kip/config.yaml` | SSH private key for connecting to the cluster host. If unset, falls back to `KIP_SSH_KEY` env, then the saved `cluster.ssh_key`, then your ssh-agent. Needed by every upgrade, including `--skip-system`, because the cluster's trust material is reconciled over SSH |
 
 ### Upgrade scope {#what-an-upgrade-moves-and-what-it-does-not}

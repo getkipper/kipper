@@ -78,6 +78,7 @@ func init() {
 	upgradeCmd.Flags().Bool("skip-system", false, "skip cluster system components (Traefik, Longhorn, KEDA, etc.). Upgrade only Kipper CRDs and console")
 	upgradeCmd.Flags().Bool("yes", false, "skip the confirmation prompt before upgrading system components")
 	upgradeCmd.Flags().Bool("seed-credential-grants", false, "grant each shared git credential the projects whose apps already reference it, without asking. Skips the pre-rollout prompt on a legacy cluster; a no-op everywhere else")
+	upgradeCmd.Flags().String("image-tag", "", "install the console images built from this commit (a full sha) instead of the released ones, for testing a branch on a test cluster; requires --skip-system; a later 'kip upgrade' without it returns to the released images")
 	upgradeCmd.Flags().String("ssh-key", "", "path to SSH private key for the host; needed by every upgrade, including --skip-system, because the cluster's trust material is reconciled over SSH (overrides cluster.ssh_key in config and KIP_SSH_KEY env)")
 	rootCmd.AddCommand(upgradeCmd)
 }
@@ -87,6 +88,10 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	autoYes, _ := cmd.Flags().GetBool("yes")
 	seedGrants, _ := cmd.Flags().GetBool("seed-credential-grants")
 	sshKey, _ := cmd.Flags().GetString("ssh-key")
+	imageTag, _ := cmd.Flags().GetString("image-tag")
+	if err := checkImageTagFlags(imageTag, skipSystem); err != nil {
+		return err
+	}
 
 	cluster, k8sClient, err := loadCurrentCluster()
 	if err != nil {
@@ -212,12 +217,8 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 			// policy goes with it: a :latest tag that kept an inherited
 			// IfNotPresent would serve a stale cached layer instead of the
 			// released image.
-			if pinned := installer.PinnedImage(comp.name); pinned != "" && len(dep.Spec.Template.Spec.Containers) > 0 {
-				if current := dep.Spec.Template.Spec.Containers[0].Image; current != pinned {
-					moved = fmt.Sprintf(" (%s → %s)", current, pinned)
-				}
-				dep.Spec.Template.Spec.Containers[0].Image = pinned
-				dep.Spec.Template.Spec.Containers[0].ImagePullPolicy = corev1.PullAlways
+			if m := pinComponentImage(dep, comp.name, imageTag); m != "" {
+				moved = m
 			}
 
 			// Deliver the pod-spec hardening the install manifest carries.
@@ -288,6 +289,9 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 			}
 			grants.rolled = pinned
 		}
+	}
+	if imageTag != "" {
+		fmt.Println(testImagesNotice(imageTag))
 	}
 
 	// Again, now that the writer which erases an allow-list is gone, and only
@@ -1435,4 +1439,45 @@ func createInitialAdminBindingIfMissing(ctx context.Context, dynClient dynamic.I
 		return false, fmt.Errorf("creating %s: %w", initialAdminBindingName, err)
 	}
 	return true, nil
+}
+
+// testImagesNotice tells the operator that the cluster runs test images and
+// how to return it to the released ones.
+func testImagesNotice(tag string) string {
+	return fmt.Sprintf("  This cluster now runs the console images built from %s. Run 'kip upgrade' without --image-tag to return to the released images.", tag)
+}
+
+// pinComponentImage puts a console component's Deployment on the image this kip
+// build pins, at tag when one is given, with an Always pull policy. It returns
+// the change as " (old → new)", or "" when the image was already in place or
+// the component has no pinned image.
+func pinComponentImage(dep *appsv1.Deployment, component, tag string) string {
+	pinned := installer.PinnedImageAt(component, tag)
+	if pinned == "" || len(dep.Spec.Template.Spec.Containers) == 0 {
+		return ""
+	}
+	moved := ""
+	if current := dep.Spec.Template.Spec.Containers[0].Image; current != pinned {
+		moved = fmt.Sprintf(" (%s → %s)", current, pinned)
+	}
+	dep.Spec.Template.Spec.Containers[0].Image = pinned
+	dep.Spec.Template.Spec.Containers[0].ImagePullPolicy = corev1.PullAlways
+	return moved
+}
+
+// checkImageTagFlags refuses an --image-tag that is not a commit sha, and one
+// without --skip-system: the cluster-component step re-applies the authz
+// manifest at its released image, which would leave a mix of released and test
+// images.
+func checkImageTagFlags(tag string, skipSystem bool) error {
+	if tag == "" {
+		return nil
+	}
+	if err := installer.ValidateImageTag(tag); err != nil {
+		return err
+	}
+	if !skipSystem {
+		return fmt.Errorf("--image-tag installs test images of the console components only; run it with --skip-system")
+	}
+	return nil
 }

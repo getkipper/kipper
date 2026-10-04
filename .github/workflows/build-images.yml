@@ -1,6 +1,7 @@
 name: Build and publish images
 
 # Builds and publishes the nine code images on a push to main, or on demand.
+# A run dispatched from a branch publishes only the commit tag, never :latest.
 # paths-ignore keeps a docs-only change from running the matrix; the docs
 # image has its own workflow that triggers on exactly those paths.
 
@@ -95,8 +96,11 @@ jobs:
           # reports a real version for the CLI's version handshake. Other
           # images do not declare a VERSION arg, so they are left unset.
           build-args: ${{ matrix.image == 'kipper-console-api' && format('VERSION={0}', github.event.workflow_run.head_sha || github.sha) || '' }}
+          # Only main publishes :latest, which every cluster pulls. A run
+          # dispatched from a branch publishes the commit tag alone, for
+          # 'kip upgrade --image-tag' on a test cluster.
           tags: |
-            ${{ env.REGISTRY }}/${{ env.ORG }}/${{ matrix.image }}:latest
             ${{ env.REGISTRY }}/${{ env.ORG }}/${{ matrix.image }}:${{ github.event.workflow_run.head_sha || github.sha }}
+            ${{ github.ref == 'refs/heads/main' && format('{0}/{1}/{2}:latest', env.REGISTRY, env.ORG, matrix.image) || '' }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,scope=${{ matrix.image }},mode=max
