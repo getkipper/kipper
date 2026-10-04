@@ -91,3 +91,31 @@ func indexOf(haystack, needle string) int {
 	}
 	return -1
 }
+
+func TestPinnedImageAt(t *testing.T) {
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	for _, tc := range []struct{ component, want string }{
+		{"console-api", "ghcr.io/getkipper/kipper-console-api:" + sha},
+		{"console", "ghcr.io/getkipper/kipper-console:" + sha},
+		{"kipper-authz", "ghcr.io/getkipper/kipper-authz:" + sha},
+		{"traefik", ""},
+	} {
+		if got := PinnedImageAt(tc.component, sha); got != tc.want {
+			t.Errorf("PinnedImageAt(%q) = %q, want %q", tc.component, got, tc.want)
+		}
+	}
+	if got := PinnedImageAt("console-api", ""); got != ConsoleAPIImage {
+		t.Errorf("without a tag the released image applies, got %q", got)
+	}
+}
+
+func TestValidateImageTag(t *testing.T) {
+	if err := ValidateImageTag("0123456789abcdef0123456789abcdef01234567"); err != nil {
+		t.Errorf("a full commit sha is valid: %v", err)
+	}
+	for _, bad := range []string{"", "latest", "v0.23.0", "0123456", "0123456789ABCDEF0123456789ABCDEF01234567", "0123456789abcdef0123456789abcdef0123456g"} {
+		if ValidateImageTag(bad) == nil {
+			t.Errorf("ValidateImageTag(%q) must refuse anything but a full lowercase commit sha", bad)
+		}
+	}
+}

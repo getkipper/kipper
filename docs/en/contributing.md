@@ -92,6 +92,44 @@ cd kip && go build -o kip . && cd ..
 
 Sign in to the console with those admin credentials. Local development uses the cluster’s Dex login, the same authentication path as production.
 
+### Testing a branch on a test cluster
+
+To try a branch end to end before it merges, run its code on a test cluster with `kip` alone. Never do this on a cluster that serves real apps.
+
+1. Make sure the branch carries the image workflow that keeps `:latest` for `main`. `gh workflow run --ref` runs the workflow file from the branch itself, and on a branch cut before that change a run publishes all its images as `:latest`, which every cluster pulls. Rebase onto `main`, push, and check the pushed copy:
+
+   ```bash
+   git fetch origin && git rebase origin/main && git push --force-with-lease
+   git show origin/my-branch:.github/workflows/build-images.yml | grep -q "refs/heads/main" && echo "safe to build"
+   ```
+
+2. Build `kip` from that same revision, so the CRDs, data checks and CLI behaviour match the images:
+
+   ```bash
+   cd kip && go build -o kip . && cd ..
+   ```
+
+   Then build the images. A run from a branch that passed step 1 publishes them under the commit sha only:
+
+   ```bash
+   gh workflow run build-images.yml --ref my-branch
+   gh run watch
+   ```
+
+3. Upgrade the test cluster onto that commit's console images:
+
+   ```bash
+   ./kip/kip upgrade --cluster my-test-cluster --skip-system --image-tag "$(git rev-parse HEAD)"
+   ```
+
+4. Run the scenario, or the matching script under `tests/e2e/`, with `./kip/kip`.
+
+5. Return the cluster to the released images and CRDs with a released `kip`:
+
+   ```bash
+   kip upgrade --cluster my-test-cluster --skip-system
+   ```
+
 ### Console-only iteration
 
 For quick frontend work, run the Vite dev server on its own:
