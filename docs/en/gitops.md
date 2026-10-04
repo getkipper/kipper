@@ -245,6 +245,39 @@ four replicas you scaled to are gone just the same and nothing you wrote asked f
 one. Where the live value already is the default there is nothing to lose and
 nothing is said.
 
+An app with autoscaling bounds is the exception. When a manifest specifies
+`maxReplicas` and omits `replicas`, apply keeps the App's stored replica count
+if it lies within the bounds; otherwise it uses `minReplicas`. A new app starts
+at `minReplicas`. `kip diff` shows a replica change only if the stored count changes. While autoscaling is on,
+the autoscaler sets the running pod count and the stored count is the one the app
+returns to when autoscaling is switched off, so the two can differ.
+
+```yaml
+apps:
+  api:
+    image: registry.example.com/api:v2
+    port: 8080
+    autoscale:
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 6
+```
+
+Applied to an app whose stored count is three, this keeps three. Applied to one
+whose stored count is one, it raises the count to two. An explicit `replicas`
+value must lie within the bounds, or apply refuses the manifest. `kip export` leaves out
+a count of 1, so an exported app with a minimum of 1 relies on this rule. See
+[Autoscaling](/en/deploying-apps#in-kipper-yaml) for the rest of the block's rules.
+
+Applying this block to an app that is autoscaling switches autoscaling off and
+runs the stored count, or `minReplicas` when the stored count lies outside the bounds,
+whatever the autoscaler was running. An app autoscaled to
+five pods with a stored count of two drops to two, and `kip diff` shows no replica
+change, because the stored count does not move. To keep the autoscaler's count,
+follow [Switching autoscaling off](/en/deploying-apps#switching-autoscaling-off):
+run `kip app autoscale <app> --off` first and fold the result into the manifest with
+`kip export`.
+
 If the CLI cannot read the cluster's resource schemas it says so under the list,
 because without them a value the cluster fills in for itself cannot be told from
 one the manifest removes, and both get listed. A project-scoped role does not have

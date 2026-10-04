@@ -10,6 +10,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
@@ -259,8 +260,8 @@ func (h *Handler) crossKindNames(ctx context.Context, ns string) (map[string]boo
 // HPA floor.
 func plannedReplicas(app *kipperv1.App) int32 {
 	if app.Spec.Autoscale != nil && app.Spec.Autoscale.Enabled {
-		if app.Spec.Autoscale.MinReplicas > 1 {
-			return app.Spec.Autoscale.MinReplicas
+		if lo := ptr.Deref(app.Spec.Autoscale.MinReplicas, 0); lo > 1 {
+			return lo
 		}
 		return 1
 	}

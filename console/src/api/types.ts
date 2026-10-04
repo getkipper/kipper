@@ -21,6 +21,8 @@ export interface App {
   status: 'running' | 'pending' | 'failed' | 'stopped'
   image: string
   replicas: number
+  // The stored count manual scaling changes; absent from older APIs.
+  desired_replicas?: number
   ready: number
   namespace?: string
   project?: string

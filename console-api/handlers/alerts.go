@@ -165,22 +165,32 @@ func (a *Alerts) Dismiss(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Alerts) readAlerts(ctx context.Context) []Alert {
-	cm, err := a.Client.CoreV1().ConfigMaps(alertsNamespace).Get(ctx, alertsConfigMapName, metav1.GetOptions{})
-	if err != nil {
+	alerts, err := StoredAlerts(ctx, a.Client)
+	if err != nil || alerts == nil {
 		return []Alert{}
 	}
+	return alerts
+}
 
+// StoredAlerts returns the alerts in the store, oldest first. A store that does
+// not exist yet holds none; one that cannot be read or parsed is an error.
+func StoredAlerts(ctx context.Context, client kubernetes.Interface) ([]Alert, error) {
+	cm, err := client.CoreV1().ConfigMaps(alertsNamespace).Get(ctx, alertsConfigMapName, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	alertsData, ok := cm.Data["alerts"]
 	if !ok {
-		return []Alert{}
+		return nil, nil
 	}
-
 	var alerts []Alert
 	if err := json.Unmarshal([]byte(alertsData), &alerts); err != nil {
-		return []Alert{}
+		return nil, err
 	}
-
-	return alerts
+	return alerts, nil
 }
 
 // StoreSecurityAlert writes a security event to the bell and posts it to Slack,

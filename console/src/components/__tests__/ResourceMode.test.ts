@@ -89,4 +89,42 @@ describe('ResourceMode', () => {
       'CPU is sized automatically, running with 100m reserved and no cap.',
     )
   })
+
+  it('says a metric the autoscaler tracks is left to it', () => {
+    const cpu = mount(ResourceMode, {
+      props: { kind: 'cpu', trackedByAutoscaler: true, detail: detail({ live: { request: '100m', limit: '100m' } }) },
+    })
+    expect(cpu.get('[data-testid="resource-mode-summary"]').text()).toBe(
+      'CPU is left to the autoscaler, which tracks it, running at 100m.',
+    )
+    const memory = mount(ResourceMode, {
+      props: { kind: 'memory', trackedByAutoscaler: true, detail: detail({ live: { request: '128Mi', limit: '128Mi' } }) },
+    })
+    expect(memory.get('[data-testid="resource-mode-summary"]').text()).toBe(
+      'Memory is left to the autoscaler, which tracks it, running at 128Mi. It is still raised after an out-of-memory kill.',
+    )
+  })
+
+  it('keeps the bounds visible when a tracked metric has them', () => {
+    const wrapper = mount(ResourceMode, {
+      props: {
+        kind: 'cpu',
+        trackedByAutoscaler: true,
+        detail: detail({
+          mode: 'bounded',
+          request: { value: '100m', source: 'user' },
+          limit: { value: '500m', source: 'user' },
+          live: { request: '200m', limit: '500m' },
+        }),
+      },
+    })
+    expect(wrapper.get('[data-testid="resource-mode-summary"]').text()).toBe(
+      'CPU is left to the autoscaler, which tracks it, between your 100m and 500m, running with 200m reserved, up to 500m.',
+    )
+  })
+
+  it('reads as before when the autoscaler does not track the metric', () => {
+    const wrapper = mount(ResourceMode, { props: { kind: 'cpu', trackedByAutoscaler: false, detail: detail({ live: { request: '100m', limit: '100m' } }) } })
+    expect(wrapper.get('[data-testid="resource-mode-summary"]').text()).toBe('CPU is sized automatically, running at 100m.')
+  })
 })

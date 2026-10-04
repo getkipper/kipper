@@ -14,6 +14,7 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/rollout"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -120,7 +121,7 @@ type ResourceController struct {
 	historySize      map[workloadKey]string  // the resources history was sampled at
 	skippedLogged    map[string]bool         // namespace/name of ownerless workloads already logged
 	stagedAcks       []func(context.Context) // acknowledgements waiting for this tick's alerts to be stored
-	hpaReplicas      map[string]int32        // namespace/name → last seen replica count
+	hpaReplicas      map[string]int32        // namespace/name/uid → last seen replica count
 	changeTimestamps map[string][]time.Time  // namespace/name → recent resource or HPA change times
 	imagePullAlerted map[string]time.Time    // namespace/pod/container → last ImagePullBackOff alert time
 	crashLoopAlerted map[string]time.Time    // namespace/pod/container → last CrashLoopBackOff alert time
@@ -143,6 +144,9 @@ type ResourceController struct {
 	quotaBlockAlert  map[string]time.Time    // namespace/app → last quota-blocked-increase alert time
 	updateFailAlert  map[string]time.Time    // namespace/app → last failed-workload-update alert time
 	cpuPinned        map[string]pinnedWindow // namespace/app → CPU-saturation observation window
+	atMaxAlerted     map[string]time.Time    // namespace/name/uid of an HPA → when its current at-maximum episode was alerted
+	belowMaxAt       map[string]time.Time    // namespace/name/uid of an HPA → last time it ran below its maximum
+	notReadyAlerted  map[string]string       // namespace/name/uid of an App → AutoscalingReady reason already alerted
 	mu               sync.Mutex
 	leader           leaderWorker
 	oomCapBytes      int64
@@ -165,6 +169,9 @@ func NewResourceController(client kubernetes.Interface, crClient crclient.Client
 		quotaBlockAlert:  make(map[string]time.Time),
 		updateFailAlert:  make(map[string]time.Time),
 		cpuPinned:        make(map[string]pinnedWindow),
+		atMaxAlerted:     make(map[string]time.Time),
+		belowMaxAt:       make(map[string]time.Time),
+		notReadyAlerted:  make(map[string]string),
 		client:           client,
 		crClient:         crClient,
 		history:          make(map[workloadKey][]usageObservation),
@@ -220,6 +227,7 @@ func (rc *ResourceController) tick(ctx context.Context) {
 	if deployErr == nil {
 		batches = append(batches, rc.checkStuckRollouts(deployments, rc.explainStuckRollout(ctx))...)
 	}
+	batches = append(batches, rc.checkAutoscaling(ctx)...)
 
 	if len(batches) > 0 {
 		// Bound this tick to the store's per-write cap, dropping the oldest.
@@ -256,13 +264,13 @@ func (rc *ResourceController) tick(ctx context.Context) {
 		return
 	}
 
-	// Resolve which apps are scaled out once, rather than per deployment.
-	scaledOut := rc.scaledOutApps(ctx)
+	// Resolve each autoscaled app's sizing rule once, rather than per deployment.
+	sizing := rc.appSizingRules(ctx)
 
 	var logEntries []ResourceLogEntry
 
 	for i := range deployments {
-		entries := rc.processDeployment(ctx, &deployments[i], podMetrics, scaledOut)
+		entries := rc.processDeployment(ctx, &deployments[i], podMetrics, sizing)
 		logEntries = append(logEntries, entries...)
 	}
 
@@ -575,7 +583,7 @@ func stuckDuration(pod *corev1.Pod) float64 {
 	return 0
 }
 
-func (rc *ResourceController) processDeployment(ctx context.Context, deploy *appsv1.Deployment, metrics map[string][]podMetricsEntry, scaledOut map[string]bool) []ResourceLogEntry {
+func (rc *ResourceController) processDeployment(ctx context.Context, deploy *appsv1.Deployment, metrics map[string][]podMetricsEntry, sizing map[string]appSizing) []ResourceLogEntry {
 	if len(deploy.Spec.Template.Spec.Containers) == 0 || tuningPaused(deploy.Annotations) || deploymentStopped(deploy) {
 		return nil
 	}
@@ -599,9 +607,8 @@ func (rc *ResourceController) processDeployment(ctx context.Context, deploy *app
 	if deploy.Spec.Replicas != nil {
 		replicas = *deploy.Spec.Replicas
 	}
-	blockDecrease := scaledOut[deploy.Namespace+"/"+appName]
 	entries := rc.tuneWorkload(ctx, deploy, appName, container, replicas,
-		quotapkg.DeploymentSurgePods(deploy, replicas), &deploy.Spec.Template.Spec, podEntries, blockDecrease, 0)
+		quotapkg.DeploymentSurgePods(deploy, replicas), &deploy.Spec.Template.Spec, podEntries, sizing[key], 0)
 
 	// Handle stuck pods
 	for _, pe := range podEntries {
@@ -643,7 +650,7 @@ func (rc *ResourceController) processStatefulSet(ctx context.Context, sts *appsv
 	}
 	// StatefulSets replace pods one at a time with no surge, so the
 	// steady-state projection is also the admission peak.
-	return rc.tuneWorkload(ctx, sts, appName, container, replicas, 0, nil, podEntries, false, statefulSetSaturationWindow)
+	return rc.tuneWorkload(ctx, sts, appName, container, replicas, 0, nil, podEntries, appSizing{}, statefulSetSaturationWindow)
 }
 
 // quotaBlockCooldown keeps a persistently blocked increase from re-alerting
@@ -890,12 +897,17 @@ func (rc *ResourceController) pruneAlertState() {
 	}
 }
 
-// scaledOutApps returns the set of "namespace/name" apps whose autoscaling is
-// enabled and whose HPA has scaled above minReplicas — pods under genuine load
-// whose resources should not be decreased. Computing it once from a single App
-// list and a single HPA list avoids a per-deployment App+HPA get on every tick.
-func (rc *ResourceController) scaledOutApps(ctx context.Context) map[string]bool {
-	out := make(map[string]bool)
+type appSizing struct {
+	// ScaledOut means the HPA reports more replicas than its minimum.
+	// This holds off decreases for untracked metrics too.
+	ScaledOut bool
+	Tracked   resourcebounds.Tracked
+}
+
+// appSizingRules returns sizing rules keyed by namespace/name for enabled
+// policies. Listing Apps and HPAs once avoids per-deployment reads each tick.
+func (rc *ResourceController) appSizingRules(ctx context.Context) map[string]appSizing {
+	out := make(map[string]appSizing)
 	if rc.crClient == nil {
 		return out
 	}
@@ -904,11 +916,11 @@ func (rc *ResourceController) scaledOutApps(ctx context.Context) map[string]bool
 	if err := rc.crClient.List(ctx, &apps); err != nil {
 		return out
 	}
-	enabled := make(map[string]bool)
+	enabled := make(map[string]*kipperv1.App)
 	for i := range apps.Items {
 		a := &apps.Items[i]
 		if a.Spec.Autoscale != nil && a.Spec.Autoscale.Enabled {
-			enabled[a.Namespace+"/"+a.Name] = true
+			enabled[a.Namespace+"/"+a.Name] = a
 		}
 	}
 	if len(enabled) == 0 {
@@ -917,16 +929,35 @@ func (rc *ResourceController) scaledOutApps(ctx context.Context) map[string]bool
 
 	hpas, err := rc.client.AutoscalingV2().HorizontalPodAutoscalers("").List(ctx, metav1.ListOptions{})
 	if err != nil {
+		log.Printf("resource controller: listing autoscalers: %v", err)
+		for key, app := range enabled {
+			tracked := resourcebounds.TrackedMetrics(app, nil)
+			if !appPolicyUsable(app) {
+				// The autoscaler an unusable policy left running may read
+				// either metric.
+				tracked = resourcebounds.Tracked{CPU: true, Memory: true}
+			}
+			out[key] = appSizing{Tracked: tracked}
+		}
 		return out
 	}
+	byKey := make(map[string]*autoscalingv2.HorizontalPodAutoscaler, len(hpas.Items))
 	for i := range hpas.Items {
 		hpa := &hpas.Items[i]
-		key := hpa.Namespace + "/" + hpa.Name
-		if enabled[key] && hpa.Spec.MinReplicas != nil && hpa.Status.CurrentReplicas > *hpa.Spec.MinReplicas {
-			out[key] = true
+		byKey[hpa.Namespace+"/"+hpa.Name] = hpa
+	}
+	for key, app := range enabled {
+		hpa := byKey[key]
+		out[key] = appSizing{
+			ScaledOut: hpa != nil && hpa.Spec.MinReplicas != nil && hpa.Status.CurrentReplicas > *hpa.Spec.MinReplicas,
+			Tracked:   resourcebounds.TrackedMetrics(app, hpa),
 		}
 	}
 	return out
+}
+
+func appPolicyUsable(app *kipperv1.App) bool {
+	return app.Spec.Autoscale.Policy().Usable()
 }
 
 const (
@@ -1081,26 +1112,36 @@ func (rc *ResourceController) checkHPAScaling(ctx context.Context) []ResourceLog
 	}
 
 	var entries []ResourceLogEntry
-	now := time.Now().UTC().Format(time.RFC3339)
+	var firstSight []*autoscalingv2.HorizontalPodAutoscaler
+	nowTime := time.Now()
+	now := nowTime.UTC().Format(time.RFC3339)
+	present := make(map[string]bool, len(hpaList.Items))
 
 	rc.mu.Lock()
-	defer rc.mu.Unlock()
-
-	for _, hpa := range hpaList.Items {
+	for i := range hpaList.Items {
+		hpa := &hpaList.Items[i]
 		key := hpa.Namespace + "/" + hpa.Name
+		state := hpaKey(hpa)
+		present[state] = true
 		current := hpa.Status.CurrentReplicas
-		prev, seen := rc.hpaReplicas[key]
-		rc.hpaReplicas[key] = current
+		prev, seen := rc.hpaReplicas[state]
+		rc.hpaReplicas[state] = current
 
-		if !seen || current == prev {
+		if !seen {
+			if scaledRecentlyFromMinimum(hpa, nowTime) {
+				firstSight = append(firstSight, hpa)
+			}
+			continue
+		}
+		if current == prev {
 			continue
 		}
 
 		var action string
 		if current > prev {
-			action = fmt.Sprintf("scaled out (%d → %d pods)", prev, current)
+			action = fmt.Sprintf("scaled out (%d → %s)", prev, podCount(current))
 		} else {
-			action = fmt.Sprintf("scaled in (%d → %d pods)", prev, current)
+			action = fmt.Sprintf("scaled in (%d → %s)", prev, podCount(current))
 		}
 
 		entries = append(entries, ResourceLogEntry{
@@ -1110,14 +1151,119 @@ func (rc *ResourceController) checkHPAScaling(ctx context.Context) []ResourceLog
 			Action:    action,
 			From:      fmt.Sprintf("%d", prev),
 			To:        fmt.Sprintf("%d", current),
-			Reason:    "HPA autoscaling",
+			Reason:    handlers.HPAScaleReason,
+			Severity:  "info",
 		})
 
 		log.Printf("resource controller: HPA %s %s", key, action)
+	}
+	// An autoscaler created again later, or replaced under the same name, is
+	// seen for the first time again.
+	for key := range rc.hpaReplicas {
+		if !present[key] {
+			delete(rc.hpaReplicas, key)
+		}
+	}
+	rc.mu.Unlock()
+
+	// recordChange takes the state lock itself.
+	for _, e := range entries {
+		rc.recordChange(e.Namespace, e.App)
+	}
+	return append(entries, rc.firstSightScales(ctx, firstSight)...)
+}
+
+// scaledRecentlyFromMinimum identifies recent scaling with a count different
+// from the minimum. On first observation, there is no previous count to compare.
+func scaledRecentlyFromMinimum(hpa *autoscalingv2.HorizontalPodAutoscaler, now time.Time) bool {
+	last := hpa.Status.LastScaleTime
+	if last == nil || now.Sub(last.Time) > firstSightWindow {
+		return false
+	}
+	return hpa.Status.CurrentReplicas != hpaMinimum(hpa)
+}
+
+func podCount(n int32) string {
+	if n == 1 {
+		return "1 pod"
+	}
+	return fmt.Sprintf("%d pods", n)
+}
+
+func hpaMinimum(hpa *autoscalingv2.HorizontalPodAutoscaler) int32 {
+	if hpa.Spec.MinReplicas == nil {
+		return 1
+	}
+	return *hpa.Spec.MinReplicas
+}
+
+// firstSightScales records the scales of autoscalers seen for the first time,
+// counted from the minimum because the count before the scale is unknown. A
+// scale the resource log already holds was recorded before a restart and is
+// left out.
+func (rc *ResourceController) firstSightScales(ctx context.Context, hpas []*autoscalingv2.HorizontalPodAutoscaler) []ResourceLogEntry {
+	if len(hpas) == 0 {
+		return nil
+	}
+	logged, err := rc.readLogEntries(ctx)
+	if err != nil {
+		log.Printf("resource controller: reading resource log: %v", err)
+	}
+	var entries []ResourceLogEntry
+	for _, hpa := range hpas {
+		scaledAt := hpa.Status.LastScaleTime.Time
+		if scaleLogged(logged, hpa.Namespace, hpa.Name, scaledAt) {
+			continue
+		}
+		minimum, current := hpaMinimum(hpa), hpa.Status.CurrentReplicas
+		action := fmt.Sprintf("scaled out from the minimum (%d → %s)", minimum, podCount(current))
+		entries = append(entries, ResourceLogEntry{
+			Time:      scaledAt.UTC().Format(time.RFC3339),
+			App:       hpa.Name,
+			Namespace: hpa.Namespace,
+			Action:    action,
+			From:      fmt.Sprintf("%d", minimum),
+			To:        fmt.Sprintf("%d", current),
+			Reason:    handlers.HPAScaleReason,
+			Severity:  "info",
+		})
+		log.Printf("resource controller: HPA %s/%s %s", hpa.Namespace, hpa.Name, action)
 		rc.recordChange(hpa.Namespace, hpa.Name)
 	}
-
 	return entries
+}
+
+// scaleLogged reports whether the log holds a scale of the app recorded at or
+// after scaledAt.
+func scaleLogged(logged []ResourceLogEntry, namespace, app string, scaledAt time.Time) bool {
+	for _, e := range logged {
+		if e.Namespace != namespace || e.App != app || e.Reason != handlers.HPAScaleReason {
+			continue
+		}
+		if at, err := time.Parse(time.RFC3339, e.Time); err == nil && !at.Before(scaledAt.Truncate(time.Second)) {
+			return true
+		}
+	}
+	return false
+}
+
+// readLogEntries returns the resource log. A log that does not exist yet is
+// empty.
+func (rc *ResourceController) readLogEntries(ctx context.Context) ([]ResourceLogEntry, error) {
+	cm, err := rc.client.CoreV1().ConfigMaps(modeConfigMapNamespace).Get(ctx, resourceLogConfigMap, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var entries []ResourceLogEntry
+	if data, ok := cm.Data["entries"]; ok {
+		if err := json.Unmarshal([]byte(data), &entries); err != nil {
+			return nil, err
+		}
+	}
+	return entries, nil
 }
 
 // evaluate proposes resources from usage by modifying container in place.
@@ -2003,7 +2149,7 @@ func alertSeverity(action string) string {
 	switch {
 	case strings.Contains(action, "OOM"), strings.Contains(action, "doubled memory"):
 		return "critical"
-	case strings.Contains(action, "stuck"), strings.Contains(action, "increased"), strings.Contains(action, "scaled out"), strings.Contains(action, "ImagePullBackOff"), strings.Contains(action, "CrashLoopBackOff"):
+	case strings.Contains(action, "stuck"), strings.Contains(action, "increased"), strings.Contains(action, "ImagePullBackOff"), strings.Contains(action, "CrashLoopBackOff"):
 		return "warning"
 	default:
 		return "info"

@@ -38,6 +38,8 @@ type tunedWorkload struct {
 	// Rollout classifies the live rollout when a recommendation is available.
 	// It may read pods; nil treats the workload as settled.
 	Rollout func() rolloutPhase
+	// Tracked filters recommendations that would interfere with autoscaling.
+	Tracked resourcebounds.Tracked
 }
 
 // rolloutPhase determines whether resource recommendations may apply.
@@ -121,7 +123,8 @@ func recommendationFor(ctx context.Context, reader client.Reader, w tunedWorkloa
 	case err == nil && !resourcebounds.TuningBelongsTo(&rt, w.UID):
 		return nil
 	case err == nil:
-		return &rt.Status.Recommendation
+		rec := w.Tracked.Recommendation(rt.Status)
+		return &rec
 	case errors.IsNotFound(err), meta.IsNoMatchError(err), errors.IsForbidden(err):
 		// No record yet, the CRD is not installed, or console-api may not
 		// read it: all mean there is no recommendation to apply.

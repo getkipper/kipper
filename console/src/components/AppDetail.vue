@@ -4,6 +4,7 @@ import { Eye, EyeOff, Plus, Minus, Trash2, Terminal, RotateCw, Power, Pencil, Sa
 import SidePanel from '@/components/SidePanel.vue'
 import SaveButton from '@/components/SaveButton.vue'
 import AppHealthCheck from '@/components/AppHealthCheck.vue'
+import AppCapacityPanel from '@/components/AppCapacityPanel.vue'
 import LogAnalysis from '@/components/LogAnalysis.vue'
 import DiagnoseModal from '@/components/DiagnoseModal.vue'
 import ContainerErrorsModal from '@/components/ContainerErrorsModal.vue'
@@ -34,7 +35,8 @@ import type { ResourceDetail } from '@/api/resources'
 import ResourceMode from '@/components/ResourceMode.vue'
 import * as api from '@/api/apps'
 import type { AppStop } from '@/api/types'
-import type { AppLink } from '@/api/apps'
+import type { AppLink, AutoscaleConfig } from '@/api/apps'
+import { sizingNotice, trackedMetrics } from '@/utils/capacity'
 import { gitCardState as deriveGitCardState, imageCardState as deriveImageCardState } from '@/utils/deployMethods'
 import { formatDateTime } from '@/utils/datetime'
 import { isSensitiveEnvVar } from '@/utils/sensitiveEnv'
@@ -1418,8 +1420,9 @@ async function toggleJsonView() {
 
 // Scale
 const replicaCount = ref(1)
-const replicaCountUnreadable = ref(false)
-const scaling = ref(false)
+const capacityPanel = ref<InstanceType<typeof AppCapacityPanel> | null>(null)
+const capacityState = ref<AutoscaleConfig | null>(null)
+const sizing = computed(() => sizingNotice(capacityState.value, replicaCount.value))
 const appStop = ref<AppStop | null>(null)
 
 async function loadScale() {
@@ -1427,83 +1430,20 @@ async function loadScale() {
     const apps = await api.fetchApps(project.value)
     const app = apps.find(a => a.name === props.appName)
     if (app) {
-      replicaCountUnreadable.value = false
-      replicaCount.value = app.replicas
+      // Running pods include surge pods, so without the Deployment's count the
+      // single-replica note reads the stored count.
+      replicaCount.value = app.desired_replicas ?? app.replicas
       appStop.value = app.stopped ?? null
     }
-  } catch (e) {
-    // The scale controls send an absolute count, so acting on a number nothing
-    // measured scales by the difference between it and the truth. A refused
-    // read leaves the initial 1, and "+" then takes a five-replica app to two.
-    replicaCountUnreadable.value = refusal(e)
+  } catch {
+    // Keep what is shown; the next open reads it again.
   }
-  await loadAutoscale()
   loadRecommendation()
 }
 
-async function setScale(count: number) {
-  if (count < 0) return
-  scaling.value = true
-  try {
-    await api.scaleApp(project.value, props.appName, count)
-    replicaCount.value = count
-    toast.success(appStop.value
-      ? `${props.appName} is stopped; it runs ${count} replicas when started`
-      : `Scaled ${props.appName} to ${count} replicas`)
-  } catch {
-    toast.error(`Failed to scale ${props.appName}`)
-  } finally {
-    scaling.value = false
-  }
-}
-
-// Autoscaling
-const autoscaleEnabled = ref(false)
-const autoscaleMin = ref(1)
-const autoscaleMax = ref(5)
-const autoscaleCpu = ref(70)
-const autoscaleMemory = ref(0)
-const autoscaleCurrentCpu = ref('')
-const autoscaleCurrentMemory = ref('')
-const autoscaleSaving = ref(false)
-
-async function loadAutoscale() {
-  try {
-    const config = await api.fetchAutoscale(project.value, props.appName)
-    autoscaleEnabled.value = config.enabled
-    if (config.enabled) {
-      autoscaleMin.value = config.min_replicas
-      autoscaleMax.value = config.max_replicas
-      autoscaleCpu.value = config.cpu_target || 70
-      autoscaleMemory.value = config.memory_target || 0
-      autoscaleCurrentCpu.value = config.current_cpu
-      autoscaleCurrentMemory.value = config.current_memory
-    }
-  } catch {
-    autoscaleEnabled.value = false
-  }
-}
-
-async function saveAutoscale() {
-  autoscaleSaving.value = true
-  try {
-    if (autoscaleEnabled.value) {
-      await api.setAutoscale(project.value, props.appName, {
-        min_replicas: autoscaleMin.value,
-        max_replicas: autoscaleMax.value,
-        cpu_target: autoscaleCpu.value,
-        memory_target: autoscaleMemory.value,
-      })
-      toast.success('Autoscaling enabled')
-    } else {
-      await api.disableAutoscale(project.value, props.appName)
-      toast.success('Autoscaling disabled')
-    }
-  } catch {
-    toast.error('Failed to update autoscaling')
-  } finally {
-    autoscaleSaving.value = false
-  }
+// The API's own message for a refused write.
+function apiErrorDetail(e: unknown): string | undefined {
+  return (e as { response?: { data?: { error?: string } } })?.response?.data?.error
 }
 
 // Resource recommendation
@@ -1767,6 +1707,7 @@ function handleStop() {
         await api.stopApp(project.value, name, reason)
         toast.success(`${name} is stopping`)
         await loadScale()
+        capacityPanel.value?.load()
       } catch {
         toast.error(`Failed to stop ${name}`)
       } finally {
@@ -1784,6 +1725,7 @@ async function handleStart() {
     const result = await api.startApp(project.value, name)
     toast.success(result.note ?? `${name} is starting`)
     await loadScale()
+    capacityPanel.value?.load()
   } catch {
     toast.error(`Failed to start ${name}`)
   } finally {
@@ -2017,8 +1959,25 @@ function resourcesIdentity(): string {
   return `${project.value}/${props.appName}`
 }
 
+const resourcesTracked = ref({ cpu: false, memory: false })
+let resourcesTrackedSeq = 0
+
+async function loadResourcesTracked() {
+  const identity = resourcesIdentity()
+  const seq = ++resourcesTrackedSeq
+  let tracked = { cpu: false, memory: false }
+  try {
+    tracked = trackedMetrics(await api.fetchAutoscale(project.value, props.appName))
+  } catch {
+    // Use the default summaries when tracking state is unavailable.
+  }
+  if (seq === resourcesTrackedSeq && resourcesIdentity() === identity) resourcesTracked.value = tracked
+}
+
 // Clear inputs and resource state before displaying another app.
 function forgetResources() {
+  resourcesTracked.value = { cpu: false, memory: false }
+  resourcesTrackedSeq++
   memoryRequest.value = ''
   memoryLimit.value = ''
   cpuRequest.value = ''
@@ -2329,7 +2288,7 @@ async function saveSettings() {
     toast.success('Settings updated')
   } catch (e) {
     // Show the API validation error so the operator can identify the invalid entry.
-    const detail = (e as { response?: { data?: { error?: string } } })?.response?.data?.error
+    const detail = apiErrorDetail(e)
     toast.error(detail || 'Failed to update settings')
   } finally {
     settingsSaving.value = false
@@ -2471,7 +2430,7 @@ watch(activeTab, (tab) => {
   if (tab === 'secrets') loadSecrets()
   if (tab === 'scale') { loadScale(); loadMode() }
   if (tab === 'deploys') { loadHistory(); loadBuildStatus(); loadWebhookConfig() }
-  if (tab === 'resources') loadResources()
+  if (tab === 'resources') { loadResources(); loadResourcesTracked() }
   if (tab === 'settings') { loadSettings(); loadBasicAuth() }
   if (tab === 'files') loadFiles(currentPath.value)
   if (tab === 'connect') {
@@ -2548,7 +2507,7 @@ watch(() => [props.appName, props.namespace], () => {
   if (activeTab.value === 'secrets') loadSecrets()
   if (activeTab.value === 'scale') { loadScale(); loadMode() }
   if (activeTab.value === 'deploys') { loadHistory(); loadBuildStatus(); loadWebhookConfig() }
-  if (activeTab.value === 'resources') loadResources()
+  if (activeTab.value === 'resources') { loadResources(); loadResourcesTracked() }
   if (activeTab.value === 'settings') { loadSettings(); loadBasicAuth() }
   if (activeTab.value === 'files') loadFiles('/')
   if (activeTab.value === 'connect') loadPods()
@@ -3775,6 +3734,7 @@ function openOptimise() {
                 <ResourceMode
                   kind="memory"
                   :detail="memoryDetail"
+                  :tracked-by-autoscaler="resourcesTracked.memory"
                   :can-write="canWriteApp"
                   :busy="resourcesSaving"
                   @confirm="keepHeld('memory')"
@@ -3800,6 +3760,7 @@ function openOptimise() {
                 <ResourceMode
                   kind="cpu"
                   :detail="cpuDetail"
+                  :tracked-by-autoscaler="resourcesTracked.cpu"
                   :can-write="canWriteApp"
                   :busy="resourcesSaving"
                   @confirm="keepHeld('cpu')"
@@ -4591,11 +4552,11 @@ function openOptimise() {
 
       <div v-if="showsTab('scale')" class="p-5">
         <!-- Auto mode banner -->
-        <div v-if="isAutoMode" class="mb-4 flex items-start gap-2 rounded-lg border border-kipper-200 bg-kipper-50 p-3 dark:border-kipper-800 dark:bg-kipper-950">
+        <div v-if="isAutoMode" data-testid="sizing-notice" class="mb-4 flex items-start gap-2 rounded-lg border border-kipper-200 bg-kipper-50 p-3 dark:border-kipper-800 dark:bg-kipper-950">
           <Info class="mt-0.5 h-4 w-4 flex-shrink-0 text-kipper-600 dark:text-kipper-400" />
           <div class="text-xs text-kipper-700 dark:text-kipper-300">
-            <p>Resources are managed automatically. CPU and memory are adjusted based on usage.</p>
-            <p v-if="replicaCount < 2" class="mt-1 font-medium">Scale-down is paused because this app has a single replica. Increases still apply.</p>
+            <p>{{ sizing.summary }}</p>
+            <p v-if="sizing.singleReplica" class="mt-1 font-medium">Scale-down is paused because this app has a single replica. Increases still apply.</p>
           </div>
         </div>
         <!-- Resource recommendation banner -->
@@ -4633,90 +4594,15 @@ function openOptimise() {
             Optimise resources
           </button>
         </div>
-        <div class="space-y-6">
-          <!-- Manual scaling -->
-          <div>
-            <label class="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-300">Manual replicas</label>
-            <div class="flex items-center gap-4">
-              <button
-                v-if="canWriteApp && !replicaCountUnreadable"
-                @click="setScale(replicaCount - 1)"
-                :disabled="scaling || replicaCount <= 0 || autoscaleEnabled"
-                class="rounded-lg border border-slate-300 p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-800"
-              >
-                <Minus class="h-4 w-4" />
-              </button>
-              <span class="font-mono text-3xl font-bold text-slate-900 dark:text-slate-50">
-                {{ replicaCountUnreadable ? '—' : replicaCount }}
-              </span>
-              <button
-                v-if="canWriteApp && !replicaCountUnreadable"
-                @click="setScale(replicaCount + 1)"
-                :disabled="scaling || autoscaleEnabled"
-                class="rounded-lg border border-slate-300 p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-800"
-              >
-                <Plus class="h-4 w-4" />
-              </button>
-            </div>
-            <p v-if="scaling" class="mt-2 text-xs text-slate-500 dark:text-slate-400">Scaling...</p>
-            <p v-if="autoscaleEnabled" class="mt-2 text-xs text-amber-600 dark:text-amber-400">Manual scaling disabled, autoscaling is active</p>
-          </div>
-
-          <!-- Autoscaling -->
-          <div class="rounded-lg border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
-            <div class="flex items-center justify-between mb-4">
-              <div>
-                <p class="text-sm font-medium text-slate-900 dark:text-slate-50">Autoscaling</p>
-                <p class="text-xs text-slate-500 dark:text-slate-400">Automatically scale based on CPU and memory usage</p>
-              </div>
-              <button
-                v-if="canWriteApp"
-                @click="autoscaleEnabled = !autoscaleEnabled"
-                class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors"
-                :class="autoscaleEnabled ? 'bg-kipper-600' : 'bg-slate-300 dark:bg-slate-600'"
-              >
-                <span
-                  class="inline-block h-4 w-4 rounded-full bg-white transition-transform"
-                  :class="autoscaleEnabled ? 'translate-x-6' : 'translate-x-1'"
-                />
-              </button>
-            </div>
-
-            <div v-if="autoscaleEnabled" class="space-y-4">
-              <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div>
-                  <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Min replicas</label>
-                  <input v-model.number="autoscaleMin" type="number" min="1" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50" />
-                </div>
-                <div>
-                  <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Max replicas</label>
-                  <input v-model.number="autoscaleMax" type="number" min="1" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50" />
-                </div>
-              </div>
-
-              <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div>
-                  <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">CPU target (%)</label>
-                  <input v-model.number="autoscaleCpu" type="number" min="0" max="100" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50" />
-                  <p v-if="autoscaleCurrentCpu" class="mt-1 text-xs text-slate-500">Current: {{ autoscaleCurrentCpu }}</p>
-                </div>
-                <div>
-                  <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Memory target (%)</label>
-                  <input v-model.number="autoscaleMemory" type="number" min="0" max="100" placeholder="0 = disabled" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50" />
-                  <p v-if="autoscaleCurrentMemory" class="mt-1 text-xs text-slate-500">Current: {{ autoscaleCurrentMemory }}</p>
-                </div>
-              </div>
-
-              <div class="flex justify-end">
-                <SaveButton v-if="canWriteApp" :saving="autoscaleSaving" label="Save autoscaling" @click="saveAutoscale" />
-              </div>
-            </div>
-
-            <div v-if="!autoscaleEnabled" class="text-xs text-slate-500 dark:text-slate-400">
-              Enable to automatically scale between a minimum and maximum number of replicas based on resource usage.
-            </div>
-          </div>
-        </div>
+        <AppCapacityPanel
+          ref="capacityPanel"
+          :key="`${project}/${props.appName}`"
+          :project="project"
+          :app-name="props.appName"
+          :can-write="canWriteApp"
+          @saved="loadScale"
+          @loaded="capacityState = $event"
+        />
       </div>
     </div>
 

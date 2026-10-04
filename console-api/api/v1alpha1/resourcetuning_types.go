@@ -63,7 +63,16 @@ type ResourceTuningStatus struct {
 	// LastOOM is the last OOM kill the auto-sizer acted on.
 	// +optional
 	LastOOM *OOMRecord `json:"lastOOM,omitempty"`
+
+	// MemoryCause is OOMKill while the memory recommendation is the raise
+	// after an OOM kill, and empty for a routine value.
+	// +kubebuilder:validation:Enum=OOMKill
+	// +optional
+	MemoryCause string `json:"memoryCause,omitempty"`
 }
+
+// MemoryCauseOOMKill marks a memory recommendation raised after an OOM kill.
+const MemoryCauseOOMKill = "OOMKill"
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

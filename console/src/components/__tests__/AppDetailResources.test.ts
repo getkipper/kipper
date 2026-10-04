@@ -98,6 +98,58 @@ describe('AppDetail resources tab', () => {
     expect(document.body.textContent).toContain('CPU is sized automatically, running at 200m.')
   })
 
+  it('says a metric the autoscaler tracks is left to it', async () => {
+    vi.mocked(appsApi.fetchAutoscale).mockResolvedValue({
+      enabled: true, min_replicas: 1, max_replicas: 3, cpu_target: 70, memory_target: 0,
+      tracked: { cpu: true, memory: false },
+    } as Awaited<ReturnType<typeof appsApi.fetchAutoscale>>)
+    await openResources()
+    expect(appsApi.fetchAutoscale).toHaveBeenCalledWith('shop-prod', 'web')
+    expect(document.body.textContent).toContain('CPU is left to the autoscaler, which tracks it, running at 200m.')
+    expect(document.body.textContent).toContain('Memory is tuned between your 512Mi and 2Gi, running with 768Mi reserved, up to 2Gi.')
+  })
+
+  it('drops the tracked wording when the policy can no longer be read', async () => {
+    vi.mocked(appsApi.fetchAutoscale).mockResolvedValue({
+      enabled: true, min_replicas: 1, max_replicas: 3, cpu_target: 70, memory_target: 0,
+      tracked: { cpu: true, memory: false },
+    } as Awaited<ReturnType<typeof appsApi.fetchAutoscale>>)
+    const wrapper = await openResources()
+    expect(document.body.textContent).toContain('CPU is left to the autoscaler')
+
+    vi.mocked(appsApi.fetchAutoscale).mockRejectedValue(new Error('unavailable'))
+    const vm = wrapper.vm as unknown as { activeTab: string }
+    vm.activeTab = 'logs'
+    await flushPromises()
+    vm.activeTab = 'resources'
+    await flushPromises()
+    expect(document.body.textContent).toContain('CPU is sized automatically, running at 200m.')
+  })
+
+  it('ignores a policy read that a newer one overtook', async () => {
+    type Config = Awaited<ReturnType<typeof appsApi.fetchAutoscale>>
+    let answerFirst: (c: Config) => void = () => {}
+    vi.mocked(appsApi.fetchAutoscale).mockReturnValueOnce(new Promise<Config>(resolve => { answerFirst = resolve }))
+    const wrapper = await openResources()
+
+    vi.mocked(appsApi.fetchAutoscale).mockResolvedValue({
+      enabled: false, min_replicas: 1, max_replicas: 3, cpu_target: 70, memory_target: 0,
+      tracked: { cpu: false, memory: false },
+    } as Config)
+    const vm = wrapper.vm as unknown as { activeTab: string }
+    vm.activeTab = 'logs'
+    await flushPromises()
+    vm.activeTab = 'resources'
+    await flushPromises()
+
+    answerFirst({
+      enabled: true, min_replicas: 1, max_replicas: 3, cpu_target: 70, memory_target: 0,
+      tracked: { cpu: true, memory: false },
+    } as Config)
+    await flushPromises()
+    expect(document.body.textContent).toContain('CPU is sized automatically, running at 200m.')
+  })
+
   // Moving the memory slider must not send CPU: the displayed CPU value would
   // become the user's and Kipper would stop sizing it. With bounds in place
   // the request controls are open, so the slider moves the ceiling and keeps

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,8 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/utils/ptr"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 )
@@ -76,9 +79,9 @@ func TestAutoscaleHandler_Get(t *testing.T) {
 				Port:  80,
 				Autoscale: &kipperv1.AppAutoscale{
 					Enabled:     true,
-					MinReplicas: 2,
-					MaxReplicas: 10,
-					CPUTarget:   80,
+					MinReplicas: ptr.To[int32](2),
+					MaxReplicas: ptr.To[int32](10),
+					CPUTarget:   ptr.To[int32](80),
 				},
 			},
 		}
@@ -215,6 +218,93 @@ func TestAutoscaleHandler_Set(t *testing.T) {
 		}
 	})
 
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"rejects min above max", `{"min_replicas":6,"max_replicas":5,"cpu_target":70}`, "minReplicas (6) must not exceed maxReplicas (5)"},
+		{"rejects an explicit min of 0", `{"min_replicas":0,"max_replicas":5,"cpu_target":70}`, "minReplicas must be at least 1"},
+		{"rejects a missing max", `{"min_replicas":1,"cpu_target":70}`, "maxReplicas is required"},
+		{"rejects a negative target", `{"max_replicas":5,"cpu_target":70,"memory_target":-1}`, "memoryTarget must not be negative"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			appCR := &kipperv1.App{
+				ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "staging"},
+				Spec:       kipperv1.AppSpec{Image: "nginx:1.25", Port: 80, Replicas: int32Ptr(2)},
+			}
+			crClient := testCRClient(appCR)
+			handler := &Autoscale{Client: fake.NewClientset(), CRClient: crClient}
+			r := chi.NewRouter()
+			r.Put("/projects/{name}/apps/{app}/autoscale", handler.Set)
+			req := httptest.NewRequest("PUT", "/projects/staging/apps/web/autoscale", strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.want) {
+				t.Errorf("expected the response to say %q, got %s", tc.want, rec.Body.String())
+			}
+			var stored kipperv1.App
+			if err := crClient.Get(context.Background(), crclient.ObjectKey{Namespace: "staging", Name: "web"}, &stored); err != nil {
+				t.Fatal(err)
+			}
+			if stored.Spec.Autoscale != nil {
+				t.Errorf("a refused request must not write the block, got %+v", stored.Spec.Autoscale)
+			}
+		})
+	}
+
+	t.Run("an omitted min is stored as 1", func(t *testing.T) {
+		appCR := &kipperv1.App{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "staging"},
+			Spec:       kipperv1.AppSpec{Image: "nginx:1.25", Port: 80, Replicas: int32Ptr(2)},
+		}
+		crClient := testCRClient(appCR)
+		handler := &Autoscale{Client: fake.NewClientset(), CRClient: crClient}
+		r := chi.NewRouter()
+		r.Put("/projects/{name}/apps/{app}/autoscale", handler.Set)
+		req := httptest.NewRequest("PUT", "/projects/staging/apps/web/autoscale", strings.NewReader(`{"max_replicas":5,"cpu_target":70}`))
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+		}
+		var stored kipperv1.App
+		if err := crClient.Get(context.Background(), crclient.ObjectKey{Namespace: "staging", Name: "web"}, &stored); err != nil {
+			t.Fatal(err)
+		}
+		if stored.Spec.Autoscale == nil || ptr.Deref(stored.Spec.Autoscale.MinReplicas, 0) != 1 {
+			t.Errorf("expected minReplicas 1, got %+v", stored.Spec.Autoscale)
+		}
+	})
+
+	t.Run("an unused zero target is left out of the stored block", func(t *testing.T) {
+		appCR := &kipperv1.App{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "staging"},
+			Spec:       kipperv1.AppSpec{Image: "nginx:1.25", Port: 80, Replicas: int32Ptr(2)},
+		}
+		crClient := testCRClient(appCR)
+		handler := &Autoscale{Client: fake.NewClientset(), CRClient: crClient}
+		r := chi.NewRouter()
+		r.Put("/projects/{name}/apps/{app}/autoscale", handler.Set)
+		req := httptest.NewRequest("PUT", "/projects/staging/apps/web/autoscale", strings.NewReader(`{"max_replicas":5,"cpu_target":70,"memory_target":0}`))
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+		}
+		var stored kipperv1.App
+		if err := crClient.Get(context.Background(), crclient.ObjectKey{Namespace: "staging", Name: "web"}, &stored); err != nil {
+			t.Fatal(err)
+		}
+		if stored.Spec.Autoscale == nil || stored.Spec.Autoscale.MemoryTarget != nil || ptr.Deref(stored.Spec.Autoscale.CPUTarget, 0) != 70 {
+			t.Errorf("expected cpuTarget 70 and no memoryTarget, got %+v", stored.Spec.Autoscale)
+		}
+	})
+
 	t.Run("returns 404 when app does not exist", func(t *testing.T) {
 		client := fake.NewClientset()
 		handler := &Autoscale{Client: client, CRClient: testCRClient()}
@@ -241,9 +331,9 @@ func TestAutoscaleHandler_Set(t *testing.T) {
 				Replicas: int32Ptr(2),
 				Autoscale: &kipperv1.AppAutoscale{
 					Enabled:     true,
-					MinReplicas: 1,
-					MaxReplicas: 3,
-					CPUTarget:   50,
+					MinReplicas: ptr.To[int32](1),
+					MaxReplicas: ptr.To[int32](3),
+					CPUTarget:   ptr.To[int32](50),
 				},
 			},
 		}
@@ -273,9 +363,9 @@ func TestAutoscaleHandler_Delete(t *testing.T) {
 				Port:  80,
 				Autoscale: &kipperv1.AppAutoscale{
 					Enabled:     true,
-					MinReplicas: 1,
-					MaxReplicas: 5,
-					CPUTarget:   70,
+					MinReplicas: ptr.To[int32](1),
+					MaxReplicas: ptr.To[int32](5),
+					CPUTarget:   ptr.To[int32](70),
 				},
 			},
 		}
@@ -293,7 +383,7 @@ func TestAutoscaleHandler_Delete(t *testing.T) {
 			t.Errorf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
 		}
 
-		var resp map[string]string
+		var resp map[string]any
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("failed to decode response: %v", err)
 		}

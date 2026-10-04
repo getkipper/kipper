@@ -78,6 +78,26 @@ spec:
                 required:
                 - enabled
                 type: object
+                x-kubernetes-validations:
+                - message: minReplicas must be at least 1
+                  rule: '!has(self.minReplicas) || self.minReplicas >= 1'
+                - message: maxReplicas must be at least 1
+                  rule: '!has(self.maxReplicas) || self.maxReplicas >= 1'
+                - message: minReplicas must not exceed maxReplicas
+                  rule: '!has(self.maxReplicas) || !has(self.minReplicas) || self.minReplicas
+                    <= self.maxReplicas'
+                - message: maxReplicas is required when autoscaling is enabled
+                  rule: '!self.enabled || has(self.maxReplicas)'
+                - message: set maxReplicas with minReplicas, or leave both out to
+                    remove the bounds
+                  rule: self.enabled || has(self.maxReplicas) || !has(self.minReplicas)
+                    || self.minReplicas <= 1
+                - message: targets must not be negative when autoscaling is enabled
+                  rule: '!self.enabled || ((!has(self.cpuTarget) || self.cpuTarget
+                    >= 0) && (!has(self.memoryTarget) || self.memoryTarget >= 0))'
+                - message: set cpuTarget or memoryTarget when autoscaling is enabled
+                  rule: '!self.enabled || (has(self.cpuTarget) && self.cpuTarget >
+                    0) || (has(self.memoryTarget) && self.memoryTarget > 0)'
               env:
                 additionalProperties:
                   type: string

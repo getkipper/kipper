@@ -1,6 +1,9 @@
 package manifest
 
-import "github.com/getkipper/kipper/controller/pkg/healthcheck"
+import (
+	"github.com/getkipper/kipper/controller/pkg/capacity"
+	"github.com/getkipper/kipper/controller/pkg/healthcheck"
+)
 
 // Manifest represents a kipper.yaml file that declares the desired state
 // of apps, services, volumes, jobs, and functions for a project environment.
@@ -22,7 +25,7 @@ type Manifest struct {
 type AppSpec struct {
 	Image           string            `yaml:"image,omitempty"`
 	Port            int32             `yaml:"port"`
-	Replicas        int32             `yaml:"replicas,omitempty"`
+	Replicas        *int32            `yaml:"replicas,omitempty"`
 	Env             map[string]string `yaml:"env,omitempty"`
 	SecretRefs      []string          `yaml:"secretRefs,omitempty"`
 	Route           *RouteSpec        `yaml:"route,omitempty"`
@@ -114,13 +117,27 @@ type BindingSpec struct {
 	Database string `yaml:"database,omitempty"`
 }
 
-// AutoscaleSpec configures horizontal pod autoscaling.
+// AutoscaleSpec configures horizontal pod autoscaling. Pointer fields preserve
+// explicit zeros for validation before conversion omits unused values.
 type AutoscaleSpec struct {
-	Enabled      bool  `yaml:"enabled"`
-	MinReplicas  int32 `yaml:"minReplicas,omitempty"`
-	MaxReplicas  int32 `yaml:"maxReplicas,omitempty"`
-	CPUTarget    int32 `yaml:"cpuTarget,omitempty"`
-	MemoryTarget int32 `yaml:"memoryTarget,omitempty"`
+	Enabled      bool   `yaml:"enabled"`
+	MinReplicas  *int32 `yaml:"minReplicas,omitempty"`
+	MaxReplicas  *int32 `yaml:"maxReplicas,omitempty"`
+	CPUTarget    *int32 `yaml:"cpuTarget,omitempty"`
+	MemoryTarget *int32 `yaml:"memoryTarget,omitempty"`
+}
+
+func (a *AutoscaleSpec) policy() *capacity.Policy {
+	if a == nil {
+		return nil
+	}
+	return &capacity.Policy{
+		Enabled:      a.Enabled,
+		MinReplicas:  a.MinReplicas,
+		MaxReplicas:  a.MaxReplicas,
+		CPUTarget:    a.CPUTarget,
+		MemoryTarget: a.MemoryTarget,
+	}
 }
 
 // GitSpec configures source-based deployment.

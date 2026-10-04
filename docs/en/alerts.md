@@ -17,9 +17,9 @@ Each alert shows:
 ## What triggers alerts
 
 Alerts come from the resource controller. Failure alerts (crash loops, read-only
-volumes, unready nodes, failed jobs, stalled rollouts) run whether the controller
-is in auto or expert mode, because an operator needs to know about those either
-way. The alerts about resource changes below only appear in auto mode, since
+volumes, unready nodes, failed jobs, stalled rollouts) and the autoscaling
+warnings run whether the controller is in auto or expert mode, because an
+operator needs to know about those either way. The alerts about resource changes below only appear in auto mode, since
 expert mode makes no such changes.
 
 ### Resource adjustments
@@ -45,6 +45,15 @@ When a rollout exceeds its Kubernetes progress deadline, the controller raises a
 ### Node resource pressure
 
 When total memory usage across all pods exceeds 80% of the node's allocatable memory, the controller generates a warning alert listing the top consumers and any anomalies. At 90%+, the alert is marked critical. The alert includes which workloads are using the most memory and which ones have grown significantly in the last 10 minutes.
+
+### Autoscaling
+
+For an app with [autoscaling](/en/deploying-apps#autoscaling), two situations raise a warning:
+
+- **autoscaling at maximum:** the app runs its maximum number of pods and the autoscaler reports that the maximum stops it from adding more (`ScalingLimited` with reason `TooManyReplicas`). The warning fires once per episode and again only after the app has dropped below its maximum. If the load is expected to last, raise the maximum, or the CPU request when CPU is the target.
+- **autoscaling not ready:** the App's `AutoscalingReady` condition is False. The alert names the reason and the message, for example an invalid policy or an autoscaler that could not be written. It fires once per reason, and again after the condition has returned to True or been removed.
+
+An ordinary scale out or scale in is recorded as an info alert and in the capacity panel's **Scaling activity**. Scale changes are recorded in auto mode. When the controller first sees an autoscaler, for example after a console-api restart, a scale within the last three minutes is recorded as a scale from the minimum, unless the resource log already holds it. After a console-api restart, a warning whose alert is still among the stored 50 is not repeated. The exception is an at-maximum limit that lifted and returned while the app stayed at its maximum, which can be reported once more after a restart.
 
 ### Default profile application
 

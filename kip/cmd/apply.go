@@ -331,11 +331,12 @@ func scanChangesWith(ctx context.Context, dyn dynamic.Interface, namespace strin
 		}
 		liveSpec, _, _ := unstructured.NestedMap(live.Object, "spec")
 		newSpec, _ := res.Object.Object["spec"].(map[string]interface{})
-		// What the apply will write, not what the manifest says. The two differ
-		// where a manifest carries a credential name the cluster owns, and a
-		// scan that reported the manifest's version showed a change the write
-		// never makes and passed a preflight the write then refuses.
+		// Use the same credential, stop-record and replica resolution as the write
+		// path so previews and field-removal checks agree with the applied spec.
 		effective := withLiveStopRecord(effectiveSpecForDiff(name, newSpec), liveSpec)
+		if res.Object.GetKind() == "App" {
+			effective = withResolvedReplicas(effective, liveSpec)
+		}
 		for _, c := range manifest.DiffSpec(liveSpec, effective, preservedPaths(name, effective, liveSpec), kindDefaults) {
 			out = append(out, resourceChange{kind: res.Object.GetKind(), name: name, change: c})
 		}
@@ -343,19 +344,27 @@ func scanChangesWith(ctx context.Context, dyn dynamic.Interface, namespace strin
 	return out, nil
 }
 
-// objectForCreate returns what a create should write. There is nothing live to
-// carry forward, so this is the manifest minus anything it does not assert: a
-// credential name the app owns is machine state, and creating an App onto one
-// names a Secret that is not there.
-//
-// The manifest is left alone, because the update path reads it afterwards.
+// objectForCreate resolves omitted App replicas and removes app-owned git
+// credential references, which are managed by the cluster. It preserves the
+// manifest for the update path if creation loses an AlreadyExists race.
 func objectForCreate(name string, object *unstructured.Unstructured) *unstructured.Unstructured {
 	spec, isSpec := object.Object["spec"].(map[string]interface{})
-	if !isSpec || !assertsNothingByNamingItsOwnCredential(name, spec) {
+	if !isSpec {
+		return object
+	}
+	resolved := spec
+	if object.GetKind() == "App" {
+		resolved = withResolvedReplicas(spec, nil)
+	}
+	ownCredential := assertsNothingByNamingItsOwnCredential(name, resolved)
+	if ownCredential {
+		resolved = effectiveSpecForDiff(name, resolved)
+	}
+	if !ownCredential && len(resolved) == len(spec) {
 		return object
 	}
 	out := object.DeepCopy()
-	out.Object["spec"] = effectiveSpecForDiff(name, spec)
+	out.Object["spec"] = resolved
 	return out
 }
 
@@ -371,12 +380,9 @@ func assertsNothingByNamingItsOwnCredential(name string, spec map[string]interfa
 	return named && value != "" && secretname.IsGitCredentialOf(name, value)
 }
 
-// effectiveSpecForDiff returns the spec an apply would write, so a diff shows
-// what will happen rather than what the manifest says.
-//
-// Only the credential differs, and only where the manifest carries a name this
-// app owns. The manifest is left alone: the write path reads it afterwards and
-// derives its own value per attempt.
+// effectiveSpecForDiff omits app-owned git credential references from the diff;
+// apply resolves them from live state. It preserves the manifest so each write
+// attempt can resolve the current credential independently.
 func effectiveSpecForDiff(name string, newSpec map[string]interface{}) map[string]interface{} {
 	git, isGit := newSpec["git"].(map[string]interface{})
 	if !isGit {
@@ -660,6 +666,9 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 		}
 		liveSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
 		newSpec = withLiveStopRecord(newSpec, liveSpec)
+		if res.Object.GetKind() == "App" {
+			newSpec = withResolvedReplicas(newSpec, liveSpec)
+		}
 		if !force {
 			if clears := manifest.Clears(manifest.DiffSpec(liveSpec, newSpec, preservedPaths(name, newSpec, liveSpec), defaults)); len(clears) > 0 {
 				return &clearedUnderApplyError{kind: res.Object.GetKind(), name: name, clears: clears, schemaUnread: schemaUnread}

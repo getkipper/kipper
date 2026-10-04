@@ -1,0 +1,16 @@
+# Filled in by tests/e2e/autoscaling-test.sh.
+project: autoscale-e2e
+environment: test
+environments: [test]
+apps:
+  web:
+    image: traefik/whoami:v1.10
+    port: 80
+${REPLICAS}
+    resources:
+      profile: standard
+    autoscale:
+      enabled: ${ENABLED}
+      minReplicas: ${MIN}
+      maxReplicas: ${MAX}
+      cpuTarget: 80

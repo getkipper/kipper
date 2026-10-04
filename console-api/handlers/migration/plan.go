@@ -21,6 +21,7 @@ import (
 	"github.com/getkipper/kipper/console-api/builder"
 	"github.com/getkipper/kipper/console-api/domain"
 	"github.com/getkipper/kipper/console-api/middleware"
+	"github.com/getkipper/kipper/controller/pkg/capacity"
 )
 
 // The plan screen is the mandatory report every migration starts from: what
@@ -548,6 +549,10 @@ func (h *Handler) planProject(ctx context.Context, project string, token *Token,
 			}
 			h.planAppDomain(app, ns, env, token, keep, resp.MoveBaseDomain, &item)
 			resp.WillMigrate = append(resp.WillMigrate, item)
+			if msg := invalidAutoscaling(app); msg != "" {
+				resp.Blockers = append(resp.Blockers, fmt.Sprintf("App %s/%s has invalid autoscaling settings: %s. %s",
+					ns, app.Name, msg, autoscalingFix(app, project, env)))
+			}
 			if app.Spec.Stopped != nil && !app.Spec.Stopped.ForMigration {
 				resp.arriveStopped = append(resp.arriveStopped, ns+"/"+app.Name)
 			} else {
@@ -633,6 +638,61 @@ func (h *Handler) planProject(ctx context.Context, project string, token *Token,
 			strings.Join(gitApps, ", ")))
 	}
 	return nil
+}
+
+// invalidAutoscaling returns, on one line, what the shared capacity rule
+// refuses in an app's autoscaling block and replica count, or "" when both
+// are valid. An absent replica count is the CRD default of 1. Explicit zeros
+// stay set, because the migration sends them to the target as they are.
+func invalidAutoscaling(app *kipperv1.App) string {
+	as := app.Spec.Autoscale
+	if as == nil {
+		return ""
+	}
+	policy := as.Policy()
+	replicas := int32(1)
+	if app.Spec.Replicas != nil {
+		replicas = *app.Spec.Replicas
+	}
+	if err := capacity.Validate(policy, &replicas); err != nil {
+		return strings.ReplaceAll(err.Error(), "\n", "; ")
+	}
+	return ""
+}
+
+// autoscalingFix says how to fix an app that invalidAutoscaling refuses. The
+// target's CRD rules check the block but not the replica count against it.
+func autoscalingFix(app *kipperv1.App, project, env string) string {
+	as := app.Spec.Autoscale
+	if capacity.Validate(as.Policy(), nil) == nil {
+		fix := "Fix it on this cluster before migrating, or the app arrives on the target with a count outside its bounds."
+		if as.Enabled {
+			cmd := "kip app autoscale " + app.Name + appScope(project, env)
+			fix += fmt.Sprintf(" Autoscaling sets the count while it is on, so run '%s' to save the policy again, which moves the stored count into the bounds, or switch autoscaling off with '%s --off'.", cmd, cmd)
+		}
+		return fix
+	}
+	return "Fix them on this cluster before migrating, because the target checks the same rules when it creates the app." + disabledBoundsRemoval(app, project, env)
+}
+
+// disabledBoundsRemoval names the command that removes the invalid bounds of
+// a disabled block, which also leaves autoscaling off. It returns "" for any
+// other block.
+func disabledBoundsRemoval(app *kipperv1.App, project, env string) string {
+	as := app.Spec.Autoscale
+	if as == nil || as.Enabled || capacity.Validate(as.Policy(), nil) == nil {
+		return ""
+	}
+	return fmt.Sprintf(" To remove the bounds and leave autoscaling off, run 'kip app autoscale %s%s --remove'.", app.Name, appScope(project, env))
+}
+
+// appScope returns the --project and --environment flags that address an app.
+func appScope(project, env string) string {
+	scope := " --project " + project
+	if env != "" {
+		scope += " --environment " + env
+	}
+	return scope
 }
 
 // planAppDomain fills the domain-disposition fields on an app's plan item and

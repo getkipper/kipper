@@ -90,17 +90,19 @@ describe('a read the caller was refused is not an answer', () => {
 
   it('does not offer to scale by a replica count it could not read', async () => {
     // The refused read left the count at its initial value, so "+" sent an
-    // absolute number that scaled a multi-replica app down.
+    // absolute number that scaled a multi-replica app down. An older
+    // console-api leaves the desired count to the app list.
+    vi.mocked(appsApi.fetchAutoscale).mockResolvedValue({
+      enabled: false, min_replicas: 0, max_replicas: 0, cpu_target: 0, memory_target: 0,
+      current_replicas: 0, current_cpu: '', current_memory: '',
+    })
     vi.mocked(appsApi.fetchApps).mockRejectedValue({ response: { status: 403 } })
     const wrapper = await mountPanel(projectWithout('kipper.read'))
 
-    const vm = wrapper.vm as unknown as {
-      loadScale: () => Promise<void>
-      replicaCountUnreadable: boolean
-    }
-    await vm.loadScale()
+    ;(wrapper.vm as unknown as { activeTab: string }).activeTab = 'scale'
     await flushPromises()
 
-    expect(vm.replicaCountUnreadable).toBe(true)
+    expect(document.body.querySelector('[data-testid="capacity-read-error"]')).not.toBeNull()
+    expect(document.body.querySelector('[data-testid="capacity-save"]')).toBeNull()
   })
 })

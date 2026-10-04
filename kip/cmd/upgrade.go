@@ -65,20 +65,35 @@ server verifies logins against are reconciled over SSH on every run,
 including with --skip-system, because they are this cluster's identity
 rather than a component version.
 
+Before it changes anything, the upgrade checks the apps' autoscaling
+settings against the rules of this kip build. It lists what it would
+fix and asks; --repair-autoscaling answers yes. A run with no terminal
+and fixes to apply stops unless that flag is given, and so does any app
+that needs a decision unless --skip-autoscaling-check is given. The
+fixes are written once the new console-api is serving alone.
+
+--check runs these data checks on their own, changes nothing and needs
+no SSH key. It exits non-zero when something needs a decision.
+
 Examples:
+  kip upgrade --check
   kip upgrade
   kip upgrade --skip-system
   kip upgrade --yes
-  kip upgrade --seed-credential-grants`,
+  kip upgrade --seed-credential-grants
+  kip upgrade --repair-autoscaling`,
 	SilenceUsage: true,
 	RunE:         runUpgrade,
 }
 
 func init() {
 	upgradeCmd.Flags().Bool("skip-system", false, "skip cluster system components (Traefik, Longhorn, KEDA, etc.). Upgrade only Kipper CRDs and console")
-	upgradeCmd.Flags().Bool("yes", false, "skip the confirmation prompt before upgrading system components")
+	upgradeCmd.Flags().Bool("yes", false, "skip the confirmation prompt before upgrading system components; autoscaling fixes are confirmed separately, by --repair-autoscaling when there is no terminal")
 	upgradeCmd.Flags().Bool("seed-credential-grants", false, "grant each shared git credential the projects whose apps already reference it, without asking. Skips the pre-rollout prompt on a legacy cluster; a no-op everywhere else")
 	upgradeCmd.Flags().String("image-tag", "", "install the console images built from this commit (a full sha) instead of the released ones, for testing a branch on a test cluster; requires --skip-system; a later 'kip upgrade' without it returns to the released images")
+	upgradeCmd.Flags().Bool("check", false, "run the upgrade's data checks and report what it would fix, without changing anything; exits non-zero when something needs a decision")
+	upgradeCmd.Flags().Bool("repair-autoscaling", false, "apply the autoscaling fixes the upgrade lists, without asking")
+	upgradeCmd.Flags().Bool("skip-autoscaling-check", false, "upgrade although some apps' autoscaling settings need a decision, leaving those apps as they are")
 	upgradeCmd.Flags().String("ssh-key", "", "path to SSH private key for the host; needed by every upgrade, including --skip-system, because the cluster's trust material is reconciled over SSH (overrides cluster.ssh_key in config and KIP_SSH_KEY env)")
 	rootCmd.AddCommand(upgradeCmd)
 }
@@ -88,6 +103,9 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	autoYes, _ := cmd.Flags().GetBool("yes")
 	seedGrants, _ := cmd.Flags().GetBool("seed-credential-grants")
 	sshKey, _ := cmd.Flags().GetString("ssh-key")
+	checkOnly, _ := cmd.Flags().GetBool("check")
+	repairAutoscalingFlag, _ := cmd.Flags().GetBool("repair-autoscaling")
+	skipAutoscalingCheck, _ := cmd.Flags().GetBool("skip-autoscaling-check")
 	imageTag, _ := cmd.Flags().GetString("image-tag")
 	if err := checkImageTagFlags(imageTag, skipSystem); err != nil {
 		return err
@@ -101,7 +119,24 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	ctx := context.Background()
 	clientset := k8sClient.Clientset()
 
+	if checkOnly {
+		return runUpgradeChecks(ctx, clientset, k8sClient.Dynamic(), os.Stdout, cliVersion())
+	}
+
 	fmt.Printf("\n  Upgrading Kipper on %s...\n\n", cluster.Domain)
+
+	// Obtain repair consent before making any upgrade changes.
+	autoscaling, err := autoscalingRepairConsent(ctx, clientset, k8sClient.Dynamic(), os.Stdout, cliVersion(),
+		autoscalingConsentOptions{
+			Repair:        repairAutoscalingFlag,
+			SkipDecisions: skipAutoscalingCheck,
+			IsTTY:         term.IsTerminal(int(os.Stdin.Fd())),
+		},
+		confirmAutoscalingRepair,
+	)
+	if err != nil {
+		return err
+	}
 
 	// Update CRD schemas via K8s API. Later steps (the system-component
 	// upgrade applies an ApiKey canary) need the new CRDs registered, so a
@@ -301,6 +336,10 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	if err := closeSharedCredentialGrants(ctx, clientset, os.Stdout, grants); err != nil {
 		return err
 	}
+
+	// Wait for the new console-api to serve alone: versions predating stops
+	// would restart apps that the repair marks as stopped.
+	repairAutoscaling(ctx, clientset, k8sClient.Dynamic(), os.Stdout, cliVersion(), autoscaling, grants.rolled, grants.rolledConsoleAPI)
 
 	// Which namespaces their projects have not recorded taking. The console
 	// publishes those records as it reconciles and the next release resolves

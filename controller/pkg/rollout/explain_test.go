@@ -460,3 +460,27 @@ func TestExplainAScaleUpPodCrashingLaterIsNotARollout(t *testing.T) {
 		t.Errorf("reason = %q, want Complete (message %q)", reason, message)
 	}
 }
+
+func TestQuotaBlocked(t *testing.T) {
+	failure := func(status corev1.ConditionStatus, message string) appsv1.DeploymentCondition {
+		return appsv1.DeploymentCondition{Type: appsv1.DeploymentReplicaFailure, Status: status, Reason: "FailedCreate", Message: message}
+	}
+	tests := []struct {
+		name string
+		dep  *appsv1.Deployment
+		want bool
+	}{
+		{name: "no Deployment", dep: nil},
+		{name: "no failure", dep: deployment(2, 1, 1)},
+		{name: "quota refusal", dep: deployment(2, 1, 1, failure(corev1.ConditionTrue, `pods "shop-1" is forbidden: exceeded quota: project-quota`)), want: true},
+		{name: "a refusal for another reason", dep: deployment(2, 1, 1, failure(corev1.ConditionTrue, `pods "shop-1" is forbidden: violates PodSecurity`))},
+		{name: "a cleared quota refusal", dep: deployment(2, 1, 1, failure(corev1.ConditionFalse, `pods "shop-1" is forbidden: exceeded quota: project-quota`))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := QuotaBlocked(tt.dep); got != tt.want {
+				t.Errorf("QuotaBlocked = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

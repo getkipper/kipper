@@ -45,13 +45,11 @@ func Explain(dep *appsv1.Deployment, newPods []corev1.Pod, budget time.Duration,
 			return Unschedulable, fmt.Sprintf("A new pod cannot be placed: %s %s Lower the CPU or memory request, or add capacity.", c.Message, keepServing)
 		}
 	}
-	for _, c := range dep.Status.Conditions {
-		if c.Type == appsv1.DeploymentReplicaFailure && c.Status == corev1.ConditionTrue {
-			if strings.Contains(c.Message, "exceeded quota") {
-				return QuotaExceeded, fmt.Sprintf("The project quota prevents new pods from being created: %s %s", c.Message, keepServing)
-			}
-			return PodsRefused, fmt.Sprintf("The cluster rejected new pods: %s %s", c.Message, keepServing)
+	if c := replicaFailure(dep); c != nil {
+		if quotaRefusal(c) {
+			return QuotaExceeded, fmt.Sprintf("The project quota prevents new pods from being created: %s %s", c.Message, keepServing)
 		}
+		return PodsRefused, fmt.Sprintf("The cluster rejected new pods: %s %s", c.Message, keepServing)
 	}
 	newPods = activePods(newPods)
 	// Check scheduling and admission before completion because scale-ups
@@ -96,6 +94,32 @@ func Explain(dep *appsv1.Deployment, newPods []corev1.Pod, budget time.Duration,
 		return InProgress, fmt.Sprintf("Scaling to %d pod(s).", want)
 	}
 	return InProgress, fmt.Sprintf("Replacing pods: %d of %d updated.", dep.Status.UpdatedReplicas, want)
+}
+
+// QuotaBlocked reports whether the project quota is refusing the
+// Deployment's new pods.
+func QuotaBlocked(dep *appsv1.Deployment) bool {
+	c := replicaFailure(dep)
+	return c != nil && quotaRefusal(c)
+}
+
+// replicaFailure returns the Deployment's active ReplicaFailure condition, or
+// nil when no ReplicaFailure condition is True.
+func replicaFailure(dep *appsv1.Deployment) *appsv1.DeploymentCondition {
+	if dep == nil {
+		return nil
+	}
+	for i := range dep.Status.Conditions {
+		c := &dep.Status.Conditions[i]
+		if c.Type == appsv1.DeploymentReplicaFailure && c.Status == corev1.ConditionTrue {
+			return c
+		}
+	}
+	return nil
+}
+
+func quotaRefusal(c *appsv1.DeploymentCondition) bool {
+	return strings.Contains(c.Message, "exceeded quota")
 }
 
 // stuckWaitingReasons identifies startup problems worth reporting before

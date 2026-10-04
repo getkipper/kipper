@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"github.com/getkipper/kipper/console-api/internal/gitreach"
 	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	"github.com/getkipper/kipper/controller/pkg/appowner"
+	"github.com/getkipper/kipper/controller/pkg/capacity"
 	"github.com/getkipper/kipper/controller/pkg/gitcred"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
 	"github.com/getkipper/kipper/controller/pkg/netguard"
@@ -50,7 +52,9 @@ type appResponse struct {
 	Status   string `json:"status"`
 	Image    string `json:"image"`
 	Replicas int32  `json:"replicas"`
-	Ready    int32  `json:"ready"`
+	// DesiredReplicas is the stored count, which manual scaling changes.
+	DesiredReplicas int32 `json:"desired_replicas"`
+	Ready           int32 `json:"ready"`
 	// RolloutReason and RolloutWaiting say why the latest change has not
 	// finished rolling out; both are empty once it has.
 	RolloutReason  string              `json:"rollout_reason,omitempty"`
@@ -457,27 +461,43 @@ func (a *Apps) Scale(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	app := &kipperv1.App{}
-	if err := a.CRClient.Get(ctx, crclient.ObjectKey{Namespace: project, Name: appName}, app); err != nil {
-		if errors.IsNotFound(err) {
-			respondError(w, http.StatusNotFound, fmt.Sprintf("app %q not found", appName))
-			return
+	var (
+		app     *kipperv1.App
+		readErr error
+		refused *scaleRefusal
+	)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		app = &kipperv1.App{}
+		readErr = a.CRClient.Get(ctx, crclient.ObjectKey{Namespace: project, Name: appName}, app)
+		if readErr != nil {
+			return readErr
 		}
+
+		// The HPA controls the desired count while autoscaling is enabled;
+		// changing the stored count would not perform the requested scale.
+		if app.Spec.Autoscale != nil && app.Spec.Autoscale.Enabled {
+			return &scaleRefusal{http.StatusConflict, fmt.Sprintf("autoscaling keeps %s running regardless of the replica count; disable autoscaling first, then scale", appName)}
+		}
+
+		if err := capacity.Validate(storedPolicy(app), &req.Replicas); err != nil {
+			return &scaleRefusal{http.StatusBadRequest, err.Error()}
+		}
+
+		app.Spec.Replicas = &req.Replicas
+		return a.CRClient.Update(ctx, app)
+	})
+	switch {
+	case errors.IsNotFound(readErr):
+		respondError(w, http.StatusNotFound, fmt.Sprintf("app %q not found", appName))
+		return
+	case readErr != nil:
 		respondError(w, http.StatusInternalServerError, "failed to get app")
 		return
-	}
-
-	// With autoscaling enabled, the HPA owns the replica count and the
-	// reconciler never applies spec.replicas to the Deployment. Accepting
-	// the write would report a scale that never happens.
-	if app.Spec.Autoscale != nil && app.Spec.Autoscale.Enabled {
-		respondError(w, http.StatusConflict, fmt.Sprintf("autoscaling keeps %s running regardless of the replica count; disable autoscaling first, then scale", appName))
+	case stderrors.As(err, &refused):
+		respondError(w, refused.status, refused.message)
 		return
-	}
-
-	app.Spec.Replicas = &req.Replicas
-	if err := a.CRClient.Update(ctx, app); err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to scale app")
+	case err != nil:
+		respondUpdateError(w, err, "failed to scale app")
 		return
 	}
 
@@ -490,6 +510,14 @@ func (a *Apps) Scale(w http.ResponseWriter, r *http.Request) {
 	}
 	respondJSON(w, http.StatusOK, resp)
 }
+
+// scaleRefusal is a scale request declined after reading the App.
+type scaleRefusal struct {
+	status  int
+	message string
+}
+
+func (r *scaleRefusal) Error() string { return r.message }
 
 // Delete removes an application from the project.
 // DELETE /api/v1/projects/{name}/apps/{app}
@@ -608,7 +636,7 @@ func (a *Apps) UpdateImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondJSON(w, http.StatusOK, withStoppedNote(map[string]string{"status": "updated", "image": req.Image}, app, "new image"))
+	respondJSON(w, http.StatusOK, withStoppedNote(map[string]any{"status": "updated", "image": req.Image}, app, "new image"))
 }
 
 func appCRToResponse(app kipperv1.App) appResponse {
@@ -625,11 +653,12 @@ func appCRToResponse(app kipperv1.App) appResponse {
 	}
 
 	resp := appResponse{
-		Name:     app.Name,
-		Status:   status,
-		Image:    app.Spec.Image,
-		Replicas: replicas,
-		Ready:    app.Status.ReadyReplicas,
+		Name:            app.Name,
+		Status:          status,
+		Image:           app.Spec.Image,
+		Replicas:        replicas,
+		DesiredReplicas: replicasOrDefault(app.Spec.Replicas),
+		Ready:           app.Status.ReadyReplicas,
 	}
 	if c := apimeta.FindStatusCondition(app.Status.Conditions, kipperv1.ConditionRolloutComplete); c != nil && c.Status == metav1.ConditionFalse {
 		resp.RolloutReason, resp.RolloutWaiting = c.Reason, c.Message
