@@ -92,7 +92,7 @@ func exportApps(ctx context.Context, dynClient dynamic.Interface, namespace stri
 			app.Port = int32(v) //nolint:gosec // port values are bounded by K8s validation
 		}
 		if v, ok := spec["replicas"].(int64); ok && v > 1 {
-			app.Replicas = int32(v) //nolint:gosec // replica values are bounded
+			app.Replicas = int32Ptr(v)
 		}
 		if env := extractStringMap(spec, "env"); len(env) > 0 {
 			app.Env = env
@@ -293,25 +293,23 @@ func exportAutoscale(spec map[string]interface{}) *AutoscaleSpec {
 	if as == nil {
 		return nil
 	}
-	// Emit the block whether enabled or disabled — the controller treats
-	// `autoscale.enabled: false` as an explicit opt-out separate from
-	// "autoscale unset", and dropping the block on export would lose
-	// that distinction.
+	// Preserve disabled policies too: their replica bounds still apply.
+	// Stored zeros represent omitted fields, so leave them out of the manifest.
 	a := &AutoscaleSpec{}
 	if v, ok := as["enabled"].(bool); ok {
 		a.Enabled = v
 	}
-	if v, ok := as["minReplicas"].(int64); ok {
-		a.MinReplicas = int32(v) //nolint:gosec // bounded by K8s
+	if v, ok := as["minReplicas"].(int64); ok && v != 0 {
+		a.MinReplicas = int32Ptr(v)
 	}
-	if v, ok := as["maxReplicas"].(int64); ok {
-		a.MaxReplicas = int32(v) //nolint:gosec // bounded by K8s
+	if v, ok := as["maxReplicas"].(int64); ok && v != 0 {
+		a.MaxReplicas = int32Ptr(v)
 	}
-	if v, ok := as["cpuTarget"].(int64); ok {
-		a.CPUTarget = int32(v) //nolint:gosec // bounded by K8s
+	if v, ok := as["cpuTarget"].(int64); ok && v != 0 {
+		a.CPUTarget = int32Ptr(v)
 	}
-	if v, ok := as["memoryTarget"].(int64); ok {
-		a.MemoryTarget = int32(v) //nolint:gosec // bounded by K8s
+	if v, ok := as["memoryTarget"].(int64); ok && v != 0 {
+		a.MemoryTarget = int32Ptr(v)
 	}
 	return a
 }
@@ -642,4 +640,9 @@ func extractStringSlice(obj map[string]interface{}, key string) []string {
 		}
 	}
 	return out
+}
+
+func int32Ptr(v int64) *int32 {
+	n := int32(v) //nolint:gosec // replica counts and targets are bounded by K8s validation
+	return &n
 }

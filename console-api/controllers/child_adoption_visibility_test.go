@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -61,7 +62,7 @@ func TestReconcile_ARefusedChildStopsThePassAndLeavesLaterChildrenAlone(t *testi
 	scheme := testScheme()
 
 	app := routedApp()
-	app.Spec.Autoscale = &kipperv1.AppAutoscale{Enabled: true, MinReplicas: 2, MaxReplicas: 5, CPUTarget: 70}
+	app.Spec.Autoscale = &kipperv1.AppAutoscale{Enabled: true, MinReplicas: ptr.To[int32](2), MaxReplicas: ptr.To[int32](5), CPUTarget: ptr.To[int32](70)}
 
 	c := crfake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(app, refusedSecurityMiddleware()).WithStatusSubresource(app).Build()

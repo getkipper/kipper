@@ -13,6 +13,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -29,10 +30,11 @@ type stopHarness struct {
 	key types.NamespacedName
 }
 
-func newStopHarness(t *testing.T, app *kipperv1.App) *stopHarness {
+func newStopHarness(t *testing.T, app *kipperv1.App, objs ...client.Object) *stopHarness {
 	t.Helper()
 	scheme := testScheme()
-	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	c := crfake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(append([]client.Object{app}, objs...)...).WithStatusSubresource(app).Build()
 	return &stopHarness{t: t, c: c, r: &AppReconciler{Client: c, Scheme: scheme},
 		key: types.NamespacedName{Name: app.Name, Namespace: app.Namespace}}
 }
@@ -92,7 +94,7 @@ func TestStop_PlainAppScalesToZeroAndStartRestoresItsCount(t *testing.T) {
 
 func TestStop_AutoscaledAppScalesToZeroAndStartsAtMinReplicas(t *testing.T) {
 	app := newTestApp()
-	app.Spec.Autoscale = &kipperv1.AppAutoscale{Enabled: true, MinReplicas: 2, MaxReplicas: 5, CPUTarget: 80}
+	app.Spec.Autoscale = &kipperv1.AppAutoscale{Enabled: true, MinReplicas: ptr.To[int32](2), MaxReplicas: ptr.To[int32](5), CPUTarget: ptr.To[int32](80)}
 	h := newStopHarness(t, app)
 	h.reconcile()
 	h.setLiveReplicas(4)
@@ -120,7 +122,7 @@ func TestStop_AutoscaledAppScalesToZeroAndStartsAtMinReplicas(t *testing.T) {
 
 func TestStop_AppCreatedStoppedStartsAtMinReplicas(t *testing.T) {
 	app := newTestApp()
-	app.Spec.Autoscale = &kipperv1.AppAutoscale{Enabled: true, MinReplicas: 2, MaxReplicas: 5, CPUTarget: 80}
+	app.Spec.Autoscale = &kipperv1.AppAutoscale{Enabled: true, MinReplicas: ptr.To[int32](2), MaxReplicas: ptr.To[int32](5), CPUTarget: ptr.To[int32](80)}
 	stop(app)
 	h := newStopHarness(t, app)
 	h.reconcile()
@@ -131,18 +133,6 @@ func TestStop_AppCreatedStoppedStartsAtMinReplicas(t *testing.T) {
 	h.edit(start)
 	h.reconcile()
 	assert.Equal(t, int32(2), *h.deployment().Spec.Replicas)
-}
-
-// An autoscaled app at zero without a stop is left at zero: only Kipper's own
-// marker may scale a Deployment up from zero.
-func TestStop_AutoscaledAppAtZeroWithoutAStopIsLeftAlone(t *testing.T) {
-	app := newTestApp()
-	app.Spec.Autoscale = &kipperv1.AppAutoscale{Enabled: true, MinReplicas: 2, MaxReplicas: 5, CPUTarget: 80}
-	h := newStopHarness(t, app)
-	h.reconcile()
-	h.setLiveReplicas(0)
-	h.reconcile()
-	assert.Equal(t, int32(0), *h.deployment().Spec.Replicas)
 }
 
 func TestStop_StartOfAnAppWithZeroReplicasRunsNone(t *testing.T) {

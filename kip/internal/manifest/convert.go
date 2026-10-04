@@ -68,8 +68,8 @@ func convertApp(name, namespace string, app AppSpec) Resource {
 		spec["image"] = "busybox:latest" // placeholder until first build
 	}
 
-	if app.Replicas > 0 {
-		spec["replicas"] = int64(app.Replicas)
+	if positive(app.Replicas) {
+		spec["replicas"] = int64(*app.Replicas)
 	}
 
 	if len(app.Env) > 0 {
@@ -206,17 +206,17 @@ func convertApp(name, namespace string, app AppSpec) Resource {
 		as := map[string]interface{}{
 			"enabled": app.Autoscale.Enabled,
 		}
-		if app.Autoscale.MinReplicas > 0 {
-			as["minReplicas"] = int64(app.Autoscale.MinReplicas)
+		if positive(app.Autoscale.MinReplicas) {
+			as["minReplicas"] = int64(*app.Autoscale.MinReplicas)
 		}
-		if app.Autoscale.MaxReplicas > 0 {
-			as["maxReplicas"] = int64(app.Autoscale.MaxReplicas)
+		if positive(app.Autoscale.MaxReplicas) {
+			as["maxReplicas"] = int64(*app.Autoscale.MaxReplicas)
 		}
-		if app.Autoscale.CPUTarget > 0 {
-			as["cpuTarget"] = int64(app.Autoscale.CPUTarget)
+		if positive(app.Autoscale.CPUTarget) {
+			as["cpuTarget"] = int64(*app.Autoscale.CPUTarget)
 		}
-		if app.Autoscale.MemoryTarget > 0 {
-			as["memoryTarget"] = int64(app.Autoscale.MemoryTarget)
+		if positive(app.Autoscale.MemoryTarget) {
+			as["memoryTarget"] = int64(*app.Autoscale.MemoryTarget)
 		}
 		spec["autoscale"] = as
 	}
@@ -563,3 +563,5 @@ func convertJob(name, namespace string, job JobSpec) Resource {
 		},
 	}
 }
+
+func positive(v *int32) bool { return v != nil && *v > 0 }

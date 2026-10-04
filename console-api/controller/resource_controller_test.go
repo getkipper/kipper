@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/utils/ptr"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -1762,10 +1763,10 @@ func TestOOMEntriesForUncovered(t *testing.T) {
 	}
 }
 
-func TestScaledOutApps(t *testing.T) {
+func TestAppSizingRulesMarkScaledOutApps(t *testing.T) {
 	scaled := &kipperv1.App{
 		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
-		Spec:       kipperv1.AppSpec{Autoscale: &kipperv1.AppAutoscale{Enabled: true, MinReplicas: 2}},
+		Spec:       kipperv1.AppSpec{Autoscale: &kipperv1.AppAutoscale{Enabled: true, MinReplicas: ptr.To[int32](2)}},
 	}
 	notAutoscaled := &kipperv1.App{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default"},
@@ -1785,13 +1786,27 @@ func TestScaledOutApps(t *testing.T) {
 	}
 
 	rc := NewResourceController(fake.NewClientset(webHPA, workerHPA), testCRClient(scaled, notAutoscaled))
-	out := rc.scaledOutApps(context.Background())
+	out := rc.appSizingRules(context.Background())
 
-	if !out["default/web"] {
+	if !out["default/web"].ScaledOut {
 		t.Error("expected default/web to be scaled out")
 	}
-	if out["default/worker"] {
+	if out["default/worker"].ScaledOut {
 		t.Error("expected default/worker not to be scaled out")
+	}
+}
+
+func TestAppPolicyUsableKeepsStoredZeros(t *testing.T) {
+	policy := func(min, memory int32) *kipperv1.App {
+		return &kipperv1.App{Spec: kipperv1.AppSpec{Autoscale: &kipperv1.AppAutoscale{
+			Enabled: true, MinReplicas: ptr.To(min), MaxReplicas: ptr.To[int32](5), CPUTarget: ptr.To[int32](70), MemoryTarget: ptr.To(memory),
+		}}}
+	}
+	if appPolicyUsable(policy(0, 80)) {
+		t.Error("a stored zero minimum must make the policy unusable")
+	}
+	if !appPolicyUsable(policy(1, 0)) {
+		t.Error("a zero memory target beside a CPU target must leave the policy usable")
 	}
 }
 

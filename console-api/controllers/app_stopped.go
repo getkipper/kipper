@@ -11,6 +11,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -35,11 +36,11 @@ func appAutoscaled(app *kipperv1.App) bool {
 	return app.Spec.Autoscale != nil && app.Spec.Autoscale.Enabled
 }
 
-// startReplicas restores the configured count, or at least one replica at the
-// autoscaling minimum so the HPA can resume scaling.
+// startReplicas uses the minimum of a usable autoscaling policy to resume
+// scaling. Otherwise it uses the configured count, defaulting to one.
 func startReplicas(app *kipperv1.App) int32 {
-	if appAutoscaled(app) {
-		return max(app.Spec.Autoscale.MinReplicas, 1)
+	if appPolicy(app).Usable() {
+		return max(ptr.Deref(app.Spec.Autoscale.MinReplicas, 0), 1)
 	}
 	if app.Spec.Replicas != nil {
 		return *app.Spec.Replicas
@@ -140,9 +141,10 @@ func (r *AppReconciler) beginStop(ctx context.Context, app *kipperv1.App, d *app
 	case err != nil:
 		return fmt.Errorf("reading the resource recommendation: %w", err)
 	case resourcebounds.TuningBelongsTo(&rt, app.UID) &&
-		(rt.Status.Recommendation != (kipperv1.TunedResources{}) || rt.Status.RecommendedAt != nil):
+		(rt.Status.Recommendation != (kipperv1.TunedResources{}) || rt.Status.RecommendedAt != nil || rt.Status.MemoryCause != ""):
 		rt.Status.Recommendation = kipperv1.TunedResources{}
 		rt.Status.RecommendedAt = nil
+		rt.Status.MemoryCause = ""
 		if err := r.Status().Update(ctx, &rt); err != nil {
 			return fmt.Errorf("clearing the resource recommendation: %w", err)
 		}

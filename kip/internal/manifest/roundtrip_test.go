@@ -131,7 +131,7 @@ func fullApp() AppSpec {
 	return AppSpec{
 		Image:    "ghcr.io/example/webapp:2.3.4",
 		Port:     8080,
-		Replicas: 3,
+		Replicas: i32(3),
 		Env:      map[string]string{"LOG_LEVEL": "info", "REGION": "eu-west-1"},
 		SecretRefs: []string{
 			"webapp-secrets",
@@ -170,10 +170,10 @@ func fullApp() AppSpec {
 		},
 		Autoscale: &AutoscaleSpec{
 			Enabled:      true,
-			MinReplicas:  2,
-			MaxReplicas:  10,
-			CPUTarget:    70,
-			MemoryTarget: 80,
+			MinReplicas:  i32(2),
+			MaxReplicas:  i32(10),
+			CPUTarget:    i32(70),
+			MemoryTarget: i32(80),
 		},
 		Health: &HealthSpec{
 			Type:                  "http",

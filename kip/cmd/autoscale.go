@@ -2,17 +2,14 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
-
-	"github.com/getkipper/kipper/kip/internal/deployer"
+	"strings"
 
 	"github.com/spf13/cobra"
-	autoscalingv2 "k8s.io/api/autoscaling/v2"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
+	"github.com/spf13/pflag"
+
+	"github.com/getkipper/kipper/kip/internal/deployer"
 )
 
 var appAutoscaleCmd = &cobra.Command{
@@ -20,22 +17,35 @@ var appAutoscaleCmd = &cobra.Command{
 	Short: "Configure automatic scaling for an app",
 	Long: `Configure horizontal pod autoscaling based on CPU and memory usage.
 
+The minimum and maximum are bounds for the app's replica count, whether the
+autoscaler or you set it. While autoscaling is on, the autoscaler sets the
+count. Switching it off keeps the count it last set, and the bounds keep
+applying to 'kip app scale' until you remove them with --remove.
+
+Flags you leave out keep their stored values. On a first enable the minimum
+is 1, the maximum 5, and CPU 70% when no target is given. A target of 0
+removes that target. --off and --remove ignore --min, --max, --cpu and --memory
+and say so; to change a setting and switch off, run the change first.
+
 Examples:
   kip app autoscale api --min 1 --max 5 --cpu 70
   kip app autoscale api --min 2 --max 10 --cpu 80 --memory 80
+  kip app autoscale api --max 8
   kip app autoscale api --status
-  kip app autoscale api --off`,
+  kip app autoscale api --off
+  kip app autoscale api --remove`,
 	Args: cobra.ExactArgs(1),
 	RunE: runAutoscale,
 }
 
 func init() {
-	appAutoscaleCmd.Flags().Int32("min", 1, "minimum number of replicas")
-	appAutoscaleCmd.Flags().Int32("max", 5, "maximum number of replicas")
-	appAutoscaleCmd.Flags().Int32("cpu", 0, "target CPU utilization percentage (e.g. 70)")
-	appAutoscaleCmd.Flags().Int32("memory", 0, "target memory utilization percentage (e.g. 80)")
-	appAutoscaleCmd.Flags().Bool("status", false, "show current autoscaling status")
-	appAutoscaleCmd.Flags().Bool("off", false, "disable autoscaling")
+	appAutoscaleCmd.Flags().Int32("min", 0, "minimum number of replicas (1 on a first enable)")
+	appAutoscaleCmd.Flags().Int32("max", 0, "maximum number of replicas (5 on a first enable)")
+	appAutoscaleCmd.Flags().Int32("cpu", 0, "target CPU utilization percentage (e.g. 70); 0 removes the target")
+	appAutoscaleCmd.Flags().Int32("memory", 0, "target memory utilization percentage (e.g. 80); 0 removes the target")
+	appAutoscaleCmd.Flags().Bool("status", false, "show current autoscaling status and any autoscaling problem")
+	appAutoscaleCmd.Flags().Bool("off", false, "switch autoscaling off, keeping the current replica count and the bounds")
+	appAutoscaleCmd.Flags().Bool("remove", false, "remove the bounds from an app whose autoscaling is off")
 	appAutoscaleCmd.Flags().String("project", "", "project name")
 	appAutoscaleCmd.Flags().String("environment", "", "target environment")
 
@@ -46,171 +56,243 @@ func runAutoscale(cmd *cobra.Command, args []string) error {
 	appName := args[0]
 	showStatus, _ := cmd.Flags().GetBool("status")
 	off, _ := cmd.Flags().GetBool("off")
+	remove, _ := cmd.Flags().GetBool("remove")
 
 	ns, k8sClient, err := resolveAppNamespace(cmd, appName)
 	if err != nil {
 		return err
 	}
-
 	ctx := context.Background()
-	clientset := k8sClient.Clientset()
+	d := &deployer.Deployer{Client: k8sClient.Clientset(), Dynamic: k8sClient.Dynamic()}
 
-	if showStatus {
-		return printAutoscaleStatus(ctx, clientset, ns, appName)
+	mode := autoscaleMode(showStatus, off, remove)
+	if notice := ignoredEditFlagsNotice(appName, mode, changedEditFlags(cmd.Flags())); notice != "" {
+		fmt.Println(notice)
 	}
-
-	if off {
-		err := clientset.AutoscalingV2().HorizontalPodAutoscalers(ns).Delete(ctx, appName, metav1.DeleteOptions{})
+	switch mode {
+	case modeStatus:
+		st, err := d.ReadAutoscaleStatus(ctx, ns, appName)
 		if err != nil {
-			if errors.IsNotFound(err) {
-				fmt.Printf("  Autoscaling is not enabled for %s\n", appName)
-				return nil
-			}
-			return fmt.Errorf("disabling autoscaling: %w", err)
+			return err
 		}
-		fmt.Printf("  ✔  Autoscaling disabled for %s\n", appName)
+		fmt.Printf("\n%s\n\n", strings.Join(autoscaleStatusLines(appName, st), "\n"))
+		return nil
+
+	case modeOff, modeOffAndRemove:
+		res, err := d.DisableAutoscale(ctx, ns, appName)
+		if err != nil {
+			return switchOffError(appName, err)
+		}
+		switch {
+		case res.AlreadyOff:
+			fmt.Printf("  Autoscaling is not on for %s\n", appName)
+		case res.Stopped:
+			fmt.Printf("  ✔  Autoscaling switched off for %s\n", appName)
+			fmt.Printf("  %s is stopped; it runs %d replicas when started\n", appName, res.Replicas)
+		case res.CountUnknown:
+			fmt.Printf("  ✔  Autoscaling switched off for %s\n", appName)
+			fmt.Printf("  ⚠  The running count could not be read, so the stored count of %d applies\n", res.Replicas)
+		case res.InvalidBounds:
+			fmt.Printf("  ✔  Autoscaling switched off for %s; it keeps running %d replicas\n", appName, res.Replicas)
+			fmt.Println(invalidBoundsWarning(appName))
+		case res.Live != res.Replicas:
+			fmt.Printf("  ✔  Autoscaling switched off for %s\n", appName)
+			fmt.Printf("  It was running %d replicas; the count is now %d to stay within the bounds\n", res.Live, res.Replicas)
+		default:
+			fmt.Printf("  ✔  Autoscaling switched off for %s; it keeps running %d replicas\n", appName, res.Replicas)
+		}
+		if mode == modeOff {
+			return nil
+		}
+		fallthrough
+
+	case modeRemove:
+		if err := d.RemoveAutoscale(ctx, ns, appName); err != nil {
+			return err
+		}
+		fmt.Printf("  ✔  Bounds removed from %s\n", appName)
 		return nil
 	}
 
-	minReplicas, _ := cmd.Flags().GetInt32("min")
-	maxReplicas, _ := cmd.Flags().GetInt32("max")
-	cpuTarget, _ := cmd.Flags().GetInt32("cpu")
-	memoryTarget, _ := cmd.Flags().GetInt32("memory")
-
-	if cpuTarget == 0 && memoryTarget == 0 {
-		cpuTarget = 70
-	}
-
-	var metrics []autoscalingv2.MetricSpec
-	if cpuTarget > 0 {
-		metrics = append(metrics, autoscalingv2.MetricSpec{
-			Type: autoscalingv2.ResourceMetricSourceType,
-			Resource: &autoscalingv2.ResourceMetricSource{
-				Name: "cpu",
-				Target: autoscalingv2.MetricTarget{
-					Type:               autoscalingv2.UtilizationMetricType,
-					AverageUtilization: &cpuTarget,
-				},
-			},
-		})
-	}
-	if memoryTarget > 0 {
-		metrics = append(metrics, autoscalingv2.MetricSpec{
-			Type: autoscalingv2.ResourceMetricSourceType,
-			Resource: &autoscalingv2.ResourceMetricSource{
-				Name: "memory",
-				Target: autoscalingv2.MetricTarget{
-					Type:               autoscalingv2.UtilizationMetricType,
-					AverageUtilization: &memoryTarget,
-				},
-			},
-		})
-	}
-
-	// Ensure the deployment has resource requests — HPA needs them to calculate utilisation
-	deploy, err := clientset.AppsV1().Deployments(ns).Get(ctx, appName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("deployment %q not found: %w", appName, err)
-	}
-
-	needsUpdate := false
-	for i := range deploy.Spec.Template.Spec.Containers {
-		c := &deploy.Spec.Template.Spec.Containers[i]
-		if c.Resources.Requests == nil {
-			c.Resources.Requests = corev1.ResourceList{}
-		}
-		if _, ok := c.Resources.Requests[corev1.ResourceCPU]; !ok && cpuTarget > 0 {
-			c.Resources.Requests[corev1.ResourceCPU] = resource.MustParse("100m")
-			needsUpdate = true
-		}
-		if _, ok := c.Resources.Requests[corev1.ResourceMemory]; !ok && memoryTarget > 0 {
-			c.Resources.Requests[corev1.ResourceMemory] = resource.MustParse("128Mi")
-			needsUpdate = true
+	var change deployer.AutoscaleChange
+	for _, f := range []struct {
+		name string
+		dst  **int32
+	}{
+		{"min", &change.MinReplicas}, {"max", &change.MaxReplicas},
+		{"cpu", &change.CPUTarget}, {"memory", &change.MemoryTarget},
+	} {
+		if cmd.Flags().Changed(f.name) {
+			v, _ := cmd.Flags().GetInt32(f.name)
+			*f.dst = &v
 		}
 	}
-	if needsUpdate {
-		if _, err := clientset.AppsV1().Deployments(ns).Update(ctx, deploy, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("setting resource requests: %w", err)
-		}
-		fmt.Printf("  ✔  Added default resource requests (100m CPU, 128Mi memory)\n")
-	}
 
-	hpa := &autoscalingv2.HorizontalPodAutoscaler{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      appName,
-			Namespace: ns,
-			Labels: map[string]string{
-				"app":                          appName,
-				"app.kubernetes.io/managed-by": "kipper",
-			},
-		},
-		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
-			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
-				APIVersion: "apps/v1",
-				Kind:       "Deployment",
-				Name:       appName,
-			},
-			MinReplicas: &minReplicas,
-			MaxReplicas: maxReplicas,
-			Metrics:     metrics,
-		},
-	}
-
-	_, err = clientset.AutoscalingV2().HorizontalPodAutoscalers(ns).Create(ctx, hpa, metav1.CreateOptions{})
-	if errors.IsAlreadyExists(err) {
-		existing, getErr := clientset.AutoscalingV2().HorizontalPodAutoscalers(ns).Get(ctx, appName, metav1.GetOptions{})
-		if getErr != nil {
-			return fmt.Errorf("getting existing HPA: %w", getErr)
-		}
-		existing.Spec = hpa.Spec
-		_, err = clientset.AutoscalingV2().HorizontalPodAutoscalers(ns).Update(ctx, existing, metav1.UpdateOptions{})
-	}
+	res, err := d.EnableAutoscale(ctx, ns, appName, change)
 	if err != nil {
 		return fmt.Errorf("configuring autoscaling: %w", err)
 	}
 
+	lo, hi, _ := res.Policy.Bounds()
 	fmt.Printf("\n  ✔  Autoscaling enabled for %s\n", appName)
-	d := &deployer.Deployer{Client: clientset, Dynamic: k8sClient.Dynamic()}
-	if stopped, err := d.Stopped(ctx, ns, appName); err == nil && stopped {
+	if res.Stopped {
 		fmt.Printf("  %s is stopped; autoscaling takes over when it is started\n", appName)
 	}
-	fmt.Printf("  Replicas: %d–%d\n", minReplicas, maxReplicas)
-	if cpuTarget > 0 {
-		fmt.Printf("  CPU target: %d%%\n", cpuTarget)
+	fmt.Printf("  Replicas: %d–%d\n", lo, hi)
+	if res.ReplicasMoved != nil {
+		fmt.Printf("  Desired count moved from %d to %d to stay within the bounds\n", res.ReplicasMoved[0], res.ReplicasMoved[1])
 	}
-	if memoryTarget > 0 {
-		fmt.Printf("  Memory target: %d%%\n", memoryTarget)
+	if t := res.Policy.CPUTarget; t != nil && *t > 0 {
+		fmt.Printf("  CPU target: %d%%\n", *t)
+	}
+	if t := res.Policy.MemoryTarget; t != nil && *t > 0 {
+		fmt.Printf("  Memory target: %d%%\n", *t)
 	}
 	fmt.Println()
-
 	return nil
 }
 
-func printAutoscaleStatus(ctx context.Context, clientset kubernetes.Interface, ns, appName string) error {
-	hpa, err := clientset.AutoscalingV2().HorizontalPodAutoscalers(ns).Get(ctx, appName, metav1.GetOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			fmt.Printf("\n  Autoscaling is not enabled for %s (using fixed replicas)\n\n", appName)
-			return nil
+// autoscaleStatusLines shows the Deployment’s desired count while autoscaling
+// is enabled and the stored App count otherwise. Missing observations appear as unknown.
+func autoscaleStatusLines(name string, st deployer.AutoscaleStatus) []string {
+	p := st.Policy
+	on := p != nil && p.Enabled
+	var lines []string
+
+	if on {
+		var targets []string
+		if p.CPUTarget != nil && *p.CPUTarget > 0 {
+			targets = append(targets, fmt.Sprintf("CPU %d%%", *p.CPUTarget))
 		}
-		return fmt.Errorf("getting autoscale status: %w", err)
+		if p.MemoryTarget != nil && *p.MemoryTarget > 0 {
+			targets = append(targets, fmt.Sprintf("memory %d%%", *p.MemoryTarget))
+		}
+		lines = append(lines, fmt.Sprintf("  Autoscaling: on (%s)", strings.Join(targets, ", ")))
+	} else {
+		lines = append(lines, "  Autoscaling: off")
 	}
 
-	fmt.Printf("\n  Autoscaling: enabled\n")
-	fmt.Printf("  Replicas: %d–%d (current: %d)\n", *hpa.Spec.MinReplicas, hpa.Spec.MaxReplicas, hpa.Status.CurrentReplicas)
+	desired := fmt.Sprintf("  Desired: %d", st.Replicas)
+	if on {
+		desired = "  Desired: unknown (set by autoscaling)"
+		if st.LiveDesired != nil {
+			desired = fmt.Sprintf("  Desired: %d (set by autoscaling)", *st.LiveDesired)
+		}
+	}
+	if lo, hi, ok := p.Bounds(); ok {
+		desired += fmt.Sprintf("   Min: %d   Max: %d", lo, hi)
+		if !on {
+			desired += " (the bounds apply to the desired count)"
+		}
+	}
+	lines = append(lines, desired)
 
-	for _, metric := range hpa.Spec.Metrics {
-		if metric.Resource != nil && metric.Resource.Target.AverageUtilization != nil {
-			current := "unknown"
-			for _, status := range hpa.Status.CurrentMetrics {
-				if status.Resource != nil && status.Resource.Name == metric.Resource.Name && status.Resource.Current.AverageUtilization != nil {
-					current = fmt.Sprintf("%d%%", *status.Resource.Current.AverageUtilization)
-				}
+	if st.Ready != nil {
+		lines = append(lines, fmt.Sprintf("  Ready: %d", *st.Ready))
+	} else {
+		lines = append(lines, "  Ready: unknown")
+	}
+
+	if on {
+		for _, metric := range []struct {
+			name   string
+			target *int32
+		}{{"cpu", p.CPUTarget}, {"memory", p.MemoryTarget}} {
+			if metric.target == nil || *metric.target == 0 {
+				continue
 			}
-			fmt.Printf("  %s: target %d%%, current %s\n", metric.Resource.Name, *metric.Resource.Target.AverageUtilization, current)
+			current := "unknown"
+			if v, ok := st.CurrentMetric[metric.name]; ok {
+				current = fmt.Sprintf("%d%%", v)
+			}
+			lines = append(lines, fmt.Sprintf("  %s: target %d%%, current %s", metric.name, *metric.target, current))
 		}
 	}
-	fmt.Println()
 
-	return nil
+	if c := st.Condition; c != nil && c.Status != "True" {
+		lines = append(lines, fmt.Sprintf("  ⚠  Autoscaling is not ready (%s): %s", c.Reason, c.Message))
+	}
+	if st.Stopped {
+		lines = append(lines, fmt.Sprintf("  %s is stopped; these settings apply when it is started", name))
+	}
+	if st.HPAExists && !on {
+		lines = append(lines, "  ⚠  an autoscaler exists that the app's spec does not describe; Kipper removes it on the next reconcile when it is Kipper's own")
+	}
+	return lines
+}
+
+// switchOffError reports a failed switch-off. When the cluster refused it
+// because the stored block breaks the rules, it names the command that makes
+// the block valid, so the switch-off can be run again.
+func switchOffError(appName string, err error) error {
+	var invalid *deployer.InvalidPolicyRefusal
+	if errors.As(err, &invalid) {
+		advice := strings.TrimSuffix(invalidPolicyAdvice(appState{Name: appName, Policy: &invalid.Policy}), ".")
+		return fmt.Errorf("switching autoscaling off: %w. %s, then switch off", err, advice)
+	}
+	return fmt.Errorf("switching autoscaling off: %w", err)
+}
+
+// invalidBoundsWarning follows a switch-off that kept invalid bounds.
+func invalidBoundsWarning(command string) string {
+	return "  ⚠  The stored bounds are invalid. " + disabledBoundsAdvice(command)
+}
+
+// changedEditFlags lists the policy flags given on the command line with
+// their values, in the order the help shows them.
+func changedEditFlags(flags *pflag.FlagSet) []string {
+	var edits []string
+	for _, name := range []string{"min", "max", "cpu", "memory"} {
+		if f := flags.Lookup(name); f != nil && f.Changed {
+			edits = append(edits, fmt.Sprintf("--%s %s", name, f.Value))
+		}
+	}
+	return edits
+}
+
+// ignoredEditFlagsNotice names the policy flags that --off and --remove leave
+// unapplied, and for --off the two commands that apply them and switch off.
+func ignoredEditFlagsNotice(name string, mode autoscaleModeKind, edits []string) string {
+	if len(edits) == 0 {
+		return ""
+	}
+	given := strings.Join(edits, " ")
+	switch mode {
+	case modeOff:
+		return fmt.Sprintf("  ⚠  Ignored %s, because --off only switches autoscaling off. To change them as well, run 'kip app autoscale %s %s' first, then 'kip app autoscale %s --off'.",
+			given, name, given, name)
+	case modeRemove, modeOffAndRemove:
+		return fmt.Sprintf("  ⚠  Ignored %s, because --remove deletes the bounds and targets.", given)
+	}
+	return ""
+}
+
+type autoscaleModeKind int
+
+const (
+	modeEdit autoscaleModeKind = iota
+	modeStatus
+	modeOff
+	modeRemove
+	modeOffAndRemove
+)
+
+// autoscaleMode gives read-only status precedence over edits. Combining --off
+// and --remove disables autoscaling before removing the policy.
+func autoscaleMode(status, off, remove bool) autoscaleModeKind {
+	switch {
+	case status:
+		return modeStatus
+	case off && remove:
+		return modeOffAndRemove
+	case off:
+		return modeOff
+	case remove:
+		return modeRemove
+	}
+	return modeEdit
+}
+
+func autoscaledReplicasNote(name string, replicas int) string {
+	return fmt.Sprintf("  Autoscaling is on for %s, so the stored count of %d has no effect while autoscaling is on; 'kip app autoscale %s --off' keeps the count the autoscaler last set", name, replicas, name)
 }

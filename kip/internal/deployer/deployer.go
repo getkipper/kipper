@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 
+	"github.com/getkipper/kipper/controller/pkg/capacity"
 	"github.com/getkipper/kipper/controller/pkg/internalpath"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/kip/internal/workload"
@@ -85,6 +86,9 @@ type Deployer struct {
 // route.requireApiKey. Declarative replace (clearing an omitted field) is the
 // job of `kip apply`, not this command.
 func (d *Deployer) Deploy(ctx context.Context, opts Options) error {
+	if opts.Replicas < 0 {
+		return fmt.Errorf("replicas must not be negative")
+	}
 	release, err := workload.Reserve(ctx, d.Dynamic, opts.Namespace, opts.Name, "app")
 	if err != nil {
 		return err
@@ -155,6 +159,13 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) error {
 		_, hadRoute, _ := unstructured.NestedMap(existing.Object, "spec", "route")
 		if !hadRoute && !opts.Changed["route"] && (opts.Changed["rate-limit"] || opts.Changed["no-security-headers"]) {
 			return fmt.Errorf("app %q has no route; add one with --route before setting --rate-limit or --no-security-headers", opts.Name)
+		}
+
+		if opts.Changed["replicas"] {
+			replicas := opts.Replicas
+			if err := capacity.Validate(storedPolicy(existing), &replicas); err != nil {
+				return err
+			}
 		}
 
 		// Update: merge only the user-set fields over the live spec. The merge
@@ -387,12 +398,17 @@ func (d *Deployer) Scale(ctx context.Context, namespace, name string, replicas i
 		return fmt.Errorf("getting app: %w", err)
 	}
 
-	// With autoscaling enabled, the HPA owns the replica count and the
-	// reconciler never applies spec.replicas to the Deployment. Accepting
-	// the write would report "scaled to 0" while the app keeps running —
-	// a trap for anyone freezing writes before a migration.
+	// Require manual replica control before reporting a successful scale;
+	// writing the App count while the HPA controls replicas would be misleading.
 	if enabled, _, _ := unstructured.NestedBool(app.Object, "spec", "autoscale", "enabled"); enabled {
 		return fmt.Errorf("autoscaling keeps %s running regardless of the replica count; disable it first with 'kip app autoscale %s --off', then scale", name, name)
+	}
+
+	if replicas < 0 {
+		return fmt.Errorf("replicas must not be negative")
+	}
+	if err := capacity.Validate(storedPolicy(app), &replicas); err != nil {
+		return err
 	}
 
 	if err := unstructured.SetNestedField(app.Object, int64(replicas), "spec", "replicas"); err != nil {

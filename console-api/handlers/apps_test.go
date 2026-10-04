@@ -383,3 +383,22 @@ func TestAppCRToResponse_CarriesAWaitingRollout(t *testing.T) {
 		t.Errorf("a finished rollout says nothing, got %q / %q", got.RolloutReason, got.RolloutWaiting)
 	}
 }
+
+// The manual scale control sends an absolute count, so it needs the stored
+// desired count; status.replicas lags a pending scale and includes surge pods.
+func TestAppCRToResponse_CarriesTheDesiredCount(t *testing.T) {
+	app := kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "api"},
+		Spec:       kipperv1.AppSpec{Replicas: int32Ptr(4)},
+		Status:     kipperv1.AppStatus{Phase: "Running", Replicas: 2},
+	}
+	got := appCRToResponse(app)
+	if got.Replicas != 2 || got.DesiredReplicas != 4 {
+		t.Errorf("replicas / desired = %d / %d, want 2 / 4", got.Replicas, got.DesiredReplicas)
+	}
+
+	app.Spec.Replicas = nil
+	if got := appCRToResponse(app); got.DesiredReplicas != 1 {
+		t.Errorf("an unset count deploys one replica, got desired %d", got.DesiredReplicas)
+	}
+}

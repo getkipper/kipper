@@ -149,6 +149,13 @@ Once the apps have finished shutting down, the warning clears. This changes the 
 
 The capacity precheck uses configured replica counts and autoscaling minimums, reserving room for at least one replica per app even when it is stopped.
 
+The plan checks every app's [autoscaling settings](/en/deploying-apps#autoscaling), including stopped apps. Each problem blocks migration and names the app:
+
+- An invalid policy, such as a minimum above the maximum or autoscaling enabled without a maximum or target, would be rejected when the target creates the App. Fix the policy on the source with `kip app autoscale`. For invalid bounds with autoscaling off, the blocker also suggests `kip app autoscale <app> --remove`.
+- A stored replica count outside valid bounds would pass the target's API validation but leave the app with an unusable count. With autoscaling off, fix it with `kip app scale`. With autoscaling on, run `kip app autoscale <app>` to save the policy again and move the stored count into bounds, or switch it off with `kip app autoscale <app> --off`.
+
+Review the plan after fixing these problems. On older source clusters without this precheck, run [`kip upgrade --check`](/en/maintenance#checking-before-an-upgrade) with a current `kip` to check autoscaling settings across the cluster before migrating.
+
 #### Apps that arrive stopped
 
 Apps stopped for reasons other than a migration freeze retain their original reason, operator and timestamp on the target. Other apps bound to a database that needs [manual restore](#limitations) arrive stopped with the reason "waiting for a manual database restore". This prevents them from writing to an empty database before the restore. The progress view lists these apps and the command to start each one.
@@ -162,7 +169,7 @@ On the **source cluster's** console, go to **Migration** and click **Migrate to 
 The plan shows everything before anything moves:
 
 - The consent line: which projects, databases, and secrets go to which cluster at which endpoint
-- **Blockers** (red) that stop the start: target unreachable, version mismatch, not enough capacity, unconfirmed overwrites, or a 2FA factor that is missing or still inside its 7-day wait
+- **Blockers** (red) that stop the start: target unreachable, version mismatch, not enough capacity, unconfirmed overwrites, an app with invalid autoscaling settings, or a 2FA factor that is missing or still inside its 7-day wait
 - **Warnings** (amber): autoscaled apps that keep serving through a freeze, missing notification channels
 - Capacity numbers: CPU, memory, and disk the projects need against what the target has free
 - **Data that will be skipped**: databases over the 500MB cap stay behind with manual steps. Volumes and service storage always move, chunked and verified, with no size cap

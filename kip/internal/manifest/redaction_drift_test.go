@@ -70,7 +70,7 @@ func TestRedaction_ClassifiesEveryPathConvertEmits(t *testing.T) {
 	m := &Manifest{
 		Project: "acme", Environment: "test",
 		Apps: map[string]AppSpec{"api": {
-			Image: "nginx:1.27", Port: 8080, Replicas: 2,
+			Image: "nginx:1.27", Port: 8080, Replicas: i32(2),
 			Env: map[string]string{"LOG_LEVEL": "debug"}, SecretRefs: []string{"api-secrets"},
 			Route: &RouteSpec{
 				Host: "api.example.com", Path: "/v1", Group: "public",
@@ -84,7 +84,7 @@ func TestRedaction_ClassifiesEveryPathConvertEmits(t *testing.T) {
 				Profile: "standard", CPURequest: "100m", CPULimit: "500m",
 				MemoryRequest: "128Mi", MemoryLimit: "512Mi",
 			},
-			Autoscale: &AutoscaleSpec{Enabled: true, MinReplicas: 1, MaxReplicas: 5, CPUTarget: 70, MemoryTarget: 80},
+			Autoscale: &AutoscaleSpec{Enabled: true, MinReplicas: i32(1), MaxReplicas: i32(5), CPUTarget: i32(70), MemoryTarget: i32(80)},
 			Git: &GitSpec{
 				URL: "https://github.com/acme/api.git", Branch: "main",
 				CredentialsSecret: "api-git", DockerfilePath: "Dockerfile", Context: ".",

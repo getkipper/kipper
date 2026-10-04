@@ -8,7 +8,7 @@ description: Commands for managing Kipper clusters, workloads, users, and config
 Use this reference to look up commands and flags. For workflows, start with the guides in the sidebar. Run `kip <command> --help` for the options available in your installed version.
 
 - [Installation reference](/en/installation) covers `kip install`, server requirements, and initial setup.
-- [Upgrades & Maintenance](/en/maintenance) covers `kip upgrade` and upgrade recovery.
+- [Upgrades & Maintenance](/en/maintenance) covers `kip upgrade`, its flags, `kip upgrade --check` and upgrade recovery.
 
 ## kip cluster {#kip-cluster}
 
@@ -485,8 +485,42 @@ kip app scale api --replicas 3
 | Flag | Required | Description |
 |---|---|---|
 | `--replicas` | Yes | Number of replicas |
+| `--project`, `--environment` | No | The app's project and environment |
 
 For a stopped app, the new replica count takes effect on start. Use [`kip app stop`](#kip-app-stop-kip-app-start) to take an app out of service while preserving its count and recording a reason.
+
+For an app with bounds, counts outside them (including 0) are refused with a message naming the bounds. While autoscaling is on, every count is refused, because the autoscaler sets it. `kip app deploy --replicas` follows the same bounds on an existing app; on an autoscaled app it stores the count for when autoscaling is off and prints a note saying so.
+
+## kip app autoscale {#kip-app-autoscale}
+
+Configures automatic scaling for an app. The minimum and maximum are bounds on the app's replica count whether the autoscaler or you set it. See [Autoscaling](/en/deploying-apps#autoscaling).
+
+```bash
+kip app autoscale api --min 2 --max 10 --cpu 70
+kip app autoscale api --max 15
+kip app autoscale api --status
+kip app autoscale api --off
+kip app autoscale api --remove
+```
+
+| Flag | Required | Description |
+|---|---|---|
+| `--min` | No | Minimum number of replicas. 1 on a first enable |
+| `--max` | No | Maximum number of replicas. 5 on a first enable |
+| `--cpu` | No | Target CPU use as a percentage of the request. 0 removes the target |
+| `--memory` | No | Target memory use as a percentage of the request. 0 removes the target |
+| `--status` | No | Show desired replicas, bounds, ready pods, current use and autoscaling problems |
+| `--off` | No | Switch autoscaling off, retaining the desired count within the bounds |
+| `--remove` | No | Remove the bounds from an app whose autoscaling is off |
+| `--project`, `--environment` | No | The app's project and environment |
+
+Any of `--min`, `--max`, `--cpu` or `--memory` switches autoscaling on. Flags you leave out keep their stored values. Missing bounds default to 1 and 5. When neither target is set, CPU defaults to 70%. A change to the bounds moves the stored count into them and prints the move.
+
+`--off` keeps the count the autoscaler last set, moved into the bounds if it lies outside them. A stopped app keeps its stored count. A failed Deployment read also falls back to the stored count and prints a warning. `--remove` refuses while autoscaling is on; pass `--off --remove` to do both. `--status` takes precedence over the other flags. When the App's `AutoscalingReady` condition is not True, it adds a line starting `⚠  Autoscaling is not ready (` with the reason and message the cluster reports.
+
+`--off` and `--remove` ignore `--min`, `--max`, `--cpu` and `--memory` and print a notice naming the flags they ignored. To change a setting and switch off, run the change first and `--off` after it.
+
+The cluster refuses a change that leaves the autoscaling block invalid, and switching off counts as a change. On an app whose stored minimum is above its maximum, `--off` (and so `--off --remove`) fails with `minReplicas must not exceed maxReplicas`. Set valid bounds with `--min` and `--max` first, then switch off. An app stored with autoscaling on, a minimum above 1 and no maximum fails `--off` with `set maxReplicas with minReplicas, or leave both out to remove the bounds`, so first set a maximum no lower than the stored minimum, for example `kip app autoscale api --max 5` for a minimum of up to 5. In both cases kip names the command that fixes the block. See [When settings do not add up](/en/deploying-apps#when-settings-do-not-add-up).
 
 ## kip app stop / kip app start {#kip-app-stop-kip-app-start}
 

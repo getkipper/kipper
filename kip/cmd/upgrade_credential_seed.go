@@ -94,7 +94,7 @@ func closeSharedCredentialGrants(ctx context.Context, clientset kubernetes.Inter
 			return fillSharedCredentialGrants(ctx, clientset, out, grants.approved, grants.shownAs, grants.decided, false)
 		}
 	}
-	if err := waitForConsoleAPIQuiescence(ctx, clientset, pinned); err != nil {
+	if err := waitForConsoleAPIQuiescence(ctx, clientset, pinned, credentialOldWriter); err != nil {
 		_, _ = fmt.Fprintf(out, "  !   %v\n"+
 			"      The migration stays open, and the next upgrade finishes it.\n", err)
 		return fillSharedCredentialGrants(ctx, clientset, out, grants.approved, grants.shownAs, grants.decided, false)
@@ -764,6 +764,10 @@ func (r consoleAPIRollout) movedTo(uid types.UID, hash string) string {
 	return ""
 }
 
+// credentialOldWriter is what a console-api from before allow-lists can still
+// do while the credential migration closes.
+const credentialOldWriter = "clear a shared credential's allowed projects"
+
 // quiescenceWait bounds the wait for the console-api being replaced to stop.
 // Overridden in tests, as stampWait is.
 var (
@@ -779,12 +783,14 @@ const (
 )
 
 // waitForConsoleAPIQuiescence waits for the pinned rollout's pods to replace
-// old writers before restoring credential grants. Deployment readiness alone
-// can leave terminating pods processing writes.
+// old writers before a pass that an old writer could undo, such as restoring
+// credential grants. Deployment readiness alone can leave terminating pods
+// processing writes. hazard names what an old writer can still do, for the
+// error.
 // Require no terminating/old-revision pods, the desired current replica count,
 // and consistent reported images. A changed Deployment or revision aborts.
 // Image agreement does not prove the binary each pod is running.
-func waitForConsoleAPIQuiescence(ctx context.Context, clientset kubernetes.Interface, pinned consoleAPIRollout) error {
+func waitForConsoleAPIQuiescence(ctx context.Context, clientset kubernetes.Interface, pinned consoleAPIRollout, hazard string) error {
 	// The Deployment is what says which pods are the console-api's and which
 	// revision is current, so without it there is nothing to ask. It is not
 	// evidence that no writer is left: a Deployment can go before the pods it
@@ -810,7 +816,7 @@ func waitForConsoleAPIQuiescence(ctx context.Context, clientset kubernetes.Inter
 			return err
 		}
 		if changed := pinned.movedTo(dep.UID, hash); changed != "" {
-			return fmt.Errorf("the console-api %s while this upgrade was waiting for the one it replaces to stop, so the build that is serving now is not the one that recorded itself", changed)
+			return fmt.Errorf("the console-api %s while this upgrade was waiting for the one it replaces to stop, so the build serving now is not the one this upgrade waited for", changed)
 		}
 		pods, err := clientset.CoreV1().Pods(kipperSystemNS).List(ctx, metav1.ListOptions{LabelSelector: selector})
 		if err != nil {
@@ -828,17 +834,17 @@ func waitForConsoleAPIQuiescence(ctx context.Context, clientset kubernetes.Inter
 		if time.Now().After(deadline) {
 			switch {
 			case lingering > 0:
-				return fmt.Errorf("%d console-api pod(s) from before the upgrade were still running after %s, and one of them can still clear a shared credential's allowed projects",
-					lingering, quiescenceWait)
+				return fmt.Errorf("%d console-api pod(s) from before the upgrade were still running after %s, and one of them can still %s",
+					lingering, quiescenceWait, hazard)
 			case current < want:
 				return fmt.Errorf("only %d of %d console-api pods were up after %s, so whether the one being replaced has stopped is unknown",
 					current, want, quiescenceWait)
 			case running[""]:
-				return fmt.Errorf("a console-api pod had still not reported what it is running after %s, so whether the build that clears a shared credential's allowed projects has stopped is unknown",
-					quiescenceWait)
+				return fmt.Errorf("a console-api pod had still not reported what it is running after %s, so whether one from before the upgrade, which can %s, is still serving is unknown",
+					quiescenceWait, hazard)
 			default:
-				return fmt.Errorf("the console-api pods were still reporting %d different images after %s, so whether one of them is the build that clears a shared credential's allowed projects is unknown",
-					len(running), quiescenceWait)
+				return fmt.Errorf("the console-api pods were still reporting %d different images after %s, so whether one of them is from before the upgrade, which can %s, is unknown",
+					len(running), quiescenceWait, hazard)
 			}
 		}
 		select {

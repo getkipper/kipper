@@ -267,6 +267,41 @@ export interface AutoscaleConfig {
   current_replicas: number
   current_cpu: string
   current_memory: string
+  // APIs that set capacity_api report these fields; null means unavailable.
+  capacity_api?: number
+  /** The stored desired count, also retained while the app is stopped. */
+  replicas?: number | null
+  /** The Deployment's desired count. */
+  deployment_replicas?: number | null
+  running_replicas?: number | null
+  ready_replicas?: number | null
+  conditions?: AutoscalerCondition[] | null
+  last_scale_time?: string | null
+  stopped?: boolean | null
+  quota_blocked?: boolean | null
+  /** The App's AutoscalingReady condition. */
+  autoscaling_ready?: AutoscalerCondition | null
+  /** The metrics automatic sizing leaves to the autoscaler. */
+  tracked?: { cpu: boolean; memory: boolean } | null
+  activity?: ScaleActivity[] | null
+  activity_partial?: boolean
+}
+
+export interface AutoscalerCondition {
+  type: string
+  status: string
+  reason: string
+  message: string
+}
+
+/** One recent autoscaler event or scale log entry. */
+export interface ScaleActivity {
+  /** RFC 3339. */
+  time: string
+  source: string
+  type?: string
+  reason: string
+  message: string
 }
 
 export async function fetchAutoscale(project: string, app: string): Promise<AutoscaleConfig> {
@@ -274,14 +309,38 @@ export async function fetchAutoscale(project: string, app: string): Promise<Auto
   return data
 }
 
-export async function setAutoscale(project: string, app: string, config: {
-  min_replicas: number; max_replicas: number; cpu_target: number; memory_target: number
-}): Promise<void> {
-  await client.put(`/projects/${project}/apps/${app}/autoscale`, config)
+/** What an autoscaling save did to the stored replica count. */
+export interface AutoscaleSaveResult {
+  status: string
+  /** The saved count; older APIs may omit it when already disabled. */
+  replicas?: number
+  /** Set when the count was moved to stay within the bounds. */
+  replicas_moved?: { from: number; to: number }
+  warning?: string
+  note?: string
 }
 
-export async function disableAutoscale(project: string, app: string): Promise<void> {
-  await client.delete(`/projects/${project}/apps/${app}/autoscale`)
+/**
+ * The body of PUT /autoscale. Leaving out enabled means true. replicas goes only
+ * with enabled false, and only to an API that reports capacity_api.
+ */
+export interface AutoscaleRequest {
+  enabled?: boolean
+  replicas?: number
+  min_replicas?: number
+  max_replicas?: number
+  cpu_target: number
+  memory_target: number
+}
+
+export async function setAutoscale(project: string, app: string, config: AutoscaleRequest): Promise<AutoscaleSaveResult> {
+  const { data } = await client.put<AutoscaleSaveResult>(`/projects/${project}/apps/${app}/autoscale`, config)
+  return data
+}
+
+export async function disableAutoscale(project: string, app: string): Promise<AutoscaleSaveResult> {
+  const { data } = await client.delete<AutoscaleSaveResult>(`/projects/${project}/apps/${app}/autoscale`)
+  return data
 }
 
 export interface ResourceRecommendation {

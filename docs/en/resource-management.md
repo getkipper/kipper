@@ -105,11 +105,11 @@ The HPA treats CPU metrics from starting and unready pods separately. A [health 
 | App with measured per-pod requirements | Expert mode plus HPA |
 | Managed database or cache | Auto mode, single service replica |
 
-With both controllers enabled, the HPA adjusts replica count and the resource controller adjusts per-pod allocations. While the HPA has scaled out, the resource controller can increase per-pod resources but holds off on decreases. Resource changes trigger a rollout; allow capacity for replacement pods.
+With both controllers enabled, the HPA adjusts replica count and the resource controller adjusts per-pod allocations. For resources the HPA tracks, automatic sizing keeps requests and limits stable, except for memory increases after an OOM kill. See [how automatic sizing steps back](/en/deploying-apps#how-automatic-sizing-steps-back). For untracked resources, sizing allows increases but holds off on decreases while the HPA reports more replicas than its minimum. Resource changes trigger a rollout; allow capacity for replacement pods.
 
 ### Enabling autoscaling
 
-From the **Scale** tab in the web console, toggle **Autoscaling** on. Set the minimum and maximum replicas and a CPU target percentage. Click **Save autoscaling**.
+In the web console, open the app's **Scale** tab and set **Scaling policy** to **Target tracking**. Set the minimum, the maximum and a CPU target percentage, then click **Save capacity**. See [In the console](/en/deploying-apps#in-the-console) for the rest of the panel.
 
 From the CLI or GitOps:
 
@@ -142,8 +142,8 @@ A good starting point for most apps:
 
 | Setting | Value |
 |---|---|
-| Min replicas | 2 |
-| Max replicas | 5 |
+| Minimum | 2 |
+| Maximum | 5 |
 | CPU target | 70% |
 | Memory target | 0 (disabled) |
 
@@ -159,7 +159,7 @@ Memory-based autoscaling is usually less useful because most applications do not
 
 ### Disabling autoscaling
 
-Toggle autoscaling off in the Scale tab and click **Save autoscaling**. The HPA is deleted and the App reconciler takes over replica management again, setting replicas to `app.Spec.Replicas` (defaults to 1).
+Set **Scaling policy** to **None (fixed count)** in the Scale tab and click **Save capacity**, or run `kip app autoscale <app> --off`. The Deployment's desired count is saved within the bounds, and the App reconciler takes over replica management and deletes the HPA. Stopped apps use their stored restart count; a failed Deployment read also falls back to the stored count and produces a warning. See [Switching autoscaling off](/en/deploying-apps#switching-autoscaling-off) for these fallback rules. The minimum and maximum remain in place. To remove them, clear both in the Scale tab while no scaling policy is set, or run `kip app autoscale <app> --remove`.
 
 ### OOM recovery
 

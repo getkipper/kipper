@@ -8,6 +8,7 @@ const props = defineProps<{
   detail?: ResourceDetail
   canWrite?: boolean
   busy?: boolean
+  trackedByAutoscaler?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -31,9 +32,22 @@ function fixedValue(d: ResourceDetail): string {
   return d.limit.source === 'user' ? d.limit.value : d.request.value
 }
 
+// Keep tracked resources stable so sizing preserves the utilization signal.
+// Memory can still increase after an out-of-memory kill.
+const tracked = computed(() => {
+  const oomRaise = props.kind === 'memory' ? ' It is still raised after an out-of-memory kill.' : ''
+  return { lead: `${name.value} is left to the autoscaler, which tracks it`, oomRaise }
+})
+
 const summary = computed(() => {
   const d = props.detail
   if (!d) return ''
+  if (props.trackedByAutoscaler && d.mode === 'automatic') {
+    return `${tracked.value.lead}, ${running.value || 'no size yet'}.${tracked.value.oomRaise}`
+  }
+  if (props.trackedByAutoscaler && d.mode === 'bounded') {
+    return `${tracked.value.lead}, between your ${d.request.value} and ${d.limit.value}, ${running.value}.${tracked.value.oomRaise}`
+  }
   switch (d.mode) {
     case 'automatic':
       return `${name.value} is sized automatically, ${running.value || 'no size yet'}.`

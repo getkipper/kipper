@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/utils/ptr"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -194,7 +195,10 @@ func TestAutoscale_OnAStoppedAppAppliesWhenStarted(t *testing.T) {
 		{http.MethodDelete, ""},
 	} {
 		t.Run(tc.method, func(t *testing.T) {
-			c := testCRClient(stoppableApp(&kipperv1.AppStopped{}))
+			app := stoppableApp(&kipperv1.AppStopped{})
+			// A disable only writes, and so only notes, when a policy is on.
+			app.Spec.Autoscale = &kipperv1.AppAutoscale{Enabled: true, MinReplicas: ptr.To[int32](1), MaxReplicas: ptr.To[int32](5), CPUTarget: ptr.To[int32](70)}
+			c := testCRClient(app)
 			h := &Autoscale{Client: fake.NewClientset(), CRClient: c}
 			r := chi.NewRouter()
 			r.Put("/api/v1/projects/{name}/apps/{app}/autoscale", h.Set)

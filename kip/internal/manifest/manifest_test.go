@@ -70,13 +70,13 @@ func TestParseFile(t *testing.T) {
 	require.Len(t, m.Apps, 2)
 	assert.Equal(t, int32(80), m.Apps["frontend"].Port)
 	assert.Equal(t, "registry.git.example.com/api:latest", m.Apps["api"].Image)
-	assert.Equal(t, int32(2), m.Apps["api"].Replicas)
+	assert.Equal(t, i32(2), m.Apps["api"].Replicas)
 	assert.Equal(t, "jvm", m.Apps["api"].Resources.Profile)
 	assert.Equal(t, "info", m.Apps["api"].Env["LOG_LEVEL"])
 	require.Len(t, m.Apps["api"].ServiceBindings, 1)
 	assert.Equal(t, "db", m.Apps["api"].ServiceBindings[0].Name)
 	assert.True(t, m.Apps["api"].Autoscale.Enabled)
-	assert.Equal(t, int32(70), m.Apps["api"].Autoscale.CPUTarget)
+	assert.Equal(t, i32(70), m.Apps["api"].Autoscale.CPUTarget)
 
 	// Services
 	require.Len(t, m.Services, 1)
@@ -140,7 +140,7 @@ func TestConvert(t *testing.T) {
 		Project:     "blog",
 		Environment: "test",
 		Apps: map[string]AppSpec{
-			"api": {Image: "img:latest", Port: 8080, Replicas: 2},
+			"api": {Image: "img:latest", Port: 8080, Replicas: i32(2)},
 		},
 		Services: map[string]SvcSpec{
 			"db": {Type: "postgres", Storage: "5Gi"},

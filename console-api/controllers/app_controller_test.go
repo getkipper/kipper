@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -649,7 +650,7 @@ func TestReconcileDeployment_ReplicasOnlyChange(t *testing.T) {
 func TestReconcileDeployment_AutoscaleLeavesReplicasToHPA(t *testing.T) {
 	scheme := testScheme()
 	app := newTestApp()
-	app.Spec.Autoscale = &kipperv1.AppAutoscale{Enabled: true, MinReplicas: 1, MaxReplicas: 5, CPUTarget: 80}
+	app.Spec.Autoscale = &kipperv1.AppAutoscale{Enabled: true, MinReplicas: ptr.To[int32](1), MaxReplicas: ptr.To[int32](5), CPUTarget: ptr.To[int32](80)}
 
 	fakeClient := crfake.NewClientBuilder().
 		WithScheme(scheme).
@@ -686,7 +687,7 @@ func TestReconcileDeployment_AutoscaleLeavesReplicasToHPA(t *testing.T) {
 func TestReconcileDeployment_TemplateChangeKeepsHPAReplicas(t *testing.T) {
 	scheme := testScheme()
 	app := newTestApp()
-	app.Spec.Autoscale = &kipperv1.AppAutoscale{Enabled: true, MinReplicas: 1, MaxReplicas: 5, CPUTarget: 80}
+	app.Spec.Autoscale = &kipperv1.AppAutoscale{Enabled: true, MinReplicas: ptr.To[int32](1), MaxReplicas: ptr.To[int32](5), CPUTarget: ptr.To[int32](80)}
 
 	fakeClient := crfake.NewClientBuilder().
 		WithScheme(scheme).
@@ -1368,9 +1369,9 @@ func TestReconcileDeployment_AutoscalePreservesReplicas(t *testing.T) {
 	require.NoError(t, err)
 	updated.Spec.Autoscale = &kipperv1.AppAutoscale{
 		Enabled:     true,
-		MinReplicas: 2,
-		MaxReplicas: 5,
-		CPUTarget:   70,
+		MinReplicas: ptr.To[int32](2),
+		MaxReplicas: ptr.To[int32](5),
+		CPUTarget:   ptr.To[int32](70),
 	}
 	require.NoError(t, fakeClient.Update(context.Background(), &updated))
 

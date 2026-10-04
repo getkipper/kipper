@@ -435,6 +435,12 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if changed["replicas"] {
+		if on, err := d.Autoscaled(ctx, namespace, name); err == nil && on {
+			fmt.Println(autoscaledReplicasNote(name, replicas))
+		}
+	}
+
 	fmt.Printf("  ✔  Deployment created\n")
 	fmt.Printf("  ✔  Service created\n")
 	if gitURL != "" {

@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,6 +40,7 @@ import (
 	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	quotapkg "github.com/getkipper/kipper/console-api/quota"
 	"github.com/getkipper/kipper/controller/pkg/appowner"
+	"github.com/getkipper/kipper/controller/pkg/capacity"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/controller/pkg/workload"
@@ -310,25 +312,27 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 	}
 
 	if err := r.reconcileChildren(ctx, &app, sources, generation, bindingHash); err != nil {
-		// The pass stops here, and everything after it — the ingress, the
-		// autoscaler, the sweep, the status write — is skipped. What this pass
-		// did learn is still worth recording, or the workload goes on reporting
-		// whatever the last complete pass found while a refused object holds it.
+		// Record observations and cleanup results even when a child fails, so
+		// status reflects this pass rather than the last successful reconciliation.
 		r.sweepEnv(ctx, &app, generation, keepProjections)
 		if _, obsErr := r.observeWorkload(ctx, &app); obsErr != nil {
 			// Losing the observation does not change why the pass failed, and the
 			// caller's error is the one worth returning.
 			logger.Error(obsErr, "observing workload while recording a refused child", "app", app.Name)
 		}
-		// The Deployment observed above may be settled on the previous spec;
-		// this generation has not reached it.
-		apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
-			Type:               kipperv1.ConditionRolloutComplete,
-			Status:             metav1.ConditionFalse,
-			Reason:             "NotApplied",
-			Message:            fmt.Sprintf("The latest change could not be applied: %v. Any healthy current pods continue serving.", err),
-			ObservedGeneration: app.Generation,
-		})
+		// An earlier child failure can leave the rollout on the previous spec.
+		// An HPA failure occurs after Deployment and route reconciliation, so
+		// preserve their rollout status and report the autoscaling failure separately.
+		var autoscalerErr autoscalerStepError
+		if !stderrors.As(err, &autoscalerErr) {
+			apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
+				Type:               kipperv1.ConditionRolloutComplete,
+				Status:             metav1.ConditionFalse,
+				Reason:             "NotApplied",
+				Message:            fmt.Sprintf("The latest change could not be applied: %v. Any healthy current pods continue serving.", err),
+				ObservedGeneration: app.Generation,
+			})
+		}
 		apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
 			Type:               kipperv1.ConditionChildrenAdopted,
 			Status:             metav1.ConditionFalse,
@@ -419,6 +423,10 @@ func (r *AppReconciler) buildDeployment(ctx context.Context, app *kipperv1.App, 
 	replicas := int32(1)
 	if app.Spec.Replicas != nil {
 		replicas = *app.Spec.Replicas
+	}
+	if !appAutoscaled(app) && replicasOutsideBounds(app) {
+		// A new or recreated Deployment has no live count to preserve.
+		replicas = clampToBounds(app)
 	}
 	if appStopped(app) {
 		replicas = 0
@@ -616,6 +624,7 @@ func (r *AppReconciler) applyDeployment(ctx context.Context, app *kipperv1.App, 
 				Desired: desiredRes, Live: liveRes, LiveAnnotations: existing.Annotations,
 				Replicas: replicas, SurgePods: quotapkg.DeploymentSurgePods(desired, replicas), PodSpec: &desired.Spec.Template.Spec,
 				Rollout: func() rolloutPhase { return r.liveRolloutPhase(ctx, app, &existing) },
+				Tracked: r.trackedMetrics(ctx, app),
 			}) && r.Recorder != nil {
 				r.Recorder.Event(app, corev1.EventTypeWarning, "ResourceRequestAboveLimit",
 					"a CPU or memory request is above its limit, so the container runs at the limit")
@@ -627,15 +636,26 @@ func (r *AppReconciler) applyDeployment(ctx context.Context, app *kipperv1.App, 
 		}
 	}
 
-	// The HPA owns the count except while stopped and on the first start pass,
-	// which restores its minimum so scaling can resume. Compare before assigning
-	// so replica-only changes reach the Deployment.
+	// Preserve HPA control except for stops, starts and bootstrapping a usable
+	// policy from zero. With autoscaling disabled, an out-of-bounds stored count
+	// leaves live replicas unchanged; a start clamps the count to valid bounds.
+	// Compare before assigning so replica-only changes reach the Deployment.
 	replicasChanged := false
+	starting := existing.Annotations[stoppedAnnotation] != ""
 	switch {
+	case !appStopped(app) && !appAutoscaled(app) && !starting && replicasOutsideBounds(app):
+	case !appStopped(app) && !appAutoscaled(app) && starting && replicasOutsideBounds(app):
+		n := clampToBounds(app)
+		replicasChanged = true
+		existing.Spec.Replicas = &n
 	case appStopped(app) || !appAutoscaled(app):
 		replicasChanged = !equality.Semantic.DeepEqual(existing.Spec.Replicas, desired.Spec.Replicas)
 		existing.Spec.Replicas = desired.Spec.Replicas
-	case existing.Annotations[stoppedAnnotation] != "":
+	case starting:
+		n := startReplicas(app)
+		replicasChanged = true
+		existing.Spec.Replicas = &n
+	case appPolicy(app).Usable() && replicasOf(existing.Spec.Replicas) == 0:
 		n := startReplicas(app)
 		replicasChanged = true
 		existing.Spec.Replicas = &n
@@ -1986,57 +2006,72 @@ func (r *AppReconciler) reconcileBasicAuthMiddleware(ctx context.Context, app *k
 }
 
 func (r *AppReconciler) reconcileHPA(ctx context.Context, app *kipperv1.App) error {
-	hpaName := types.NamespacedName{Name: app.Name, Namespace: app.Namespace}
+	policy := appPolicy(app)
+	invalid := capacity.Validate(policy, nil)
 
-	if app.Spec.Autoscale == nil || !app.Spec.Autoscale.Enabled {
-		var existing autoscalingv2.HorizontalPodAutoscaler
-		if err := r.Get(ctx, hpaName, &existing); err != nil {
-			if errors.IsNotFound(err) {
-				return nil
-			}
+	if !appAutoscaled(app) {
+		if err := r.deleteOwnedHPA(ctx, app); err != nil {
+			setAutoscalingCondition(app, metav1.ConditionFalse, "AutoscalerDeleteFailed",
+				fmt.Sprintf("the autoscaler could not be deleted: %v", err))
 			return err
 		}
-		// Only this app's own autoscaler. Turning autoscaling off must not
-		// delete somebody else's object that happens to share the name.
-		if !ownedByWorkload(&existing, appOwner(app)) {
-			return nil
-		}
-		if err := r.Delete(ctx, &existing); err != nil && !errors.IsNotFound(err) {
-			return err
-		}
+		reportDisabledPolicy(app)
 		return nil
 	}
 
+	// Preserve the existing HPA when an enabled policy is invalid. It can
+	// continue scaling with its previous configuration until the policy is fixed.
+	if invalid != nil {
+		setAutoscalingCondition(app, metav1.ConditionFalse, "InvalidPolicy",
+			fmt.Sprintf("the autoscaling policy is not applied: %v", invalid))
+		return nil
+	}
+
+	if err := r.applyHPA(ctx, app, policy); err != nil {
+		setAutoscalingCondition(app, metav1.ConditionFalse, "AutoscalerReconcileFailed",
+			fmt.Sprintf("the autoscaler could not be written: %v", err))
+		return err
+	}
+	if replicasOutsideBounds(app) {
+		reportReplicasOutsideBounds(app)
+		return nil
+	}
+	lo, hi, _ := policy.Bounds()
+	setAutoscalingCondition(app, metav1.ConditionTrue, "PolicyApplied",
+		fmt.Sprintf("the autoscaler keeps between %d and %d replicas", lo, hi))
+	return nil
+}
+
+// applyHPA creates or updates the autoscaler for a usable policy.
+func (r *AppReconciler) applyHPA(ctx context.Context, app *kipperv1.App, policy *capacity.Policy) error {
+	hpaName := types.NamespacedName{Name: app.Name, Namespace: app.Namespace}
 	as := app.Spec.Autoscale
+	lo, hi, _ := policy.Bounds()
 
 	var metrics []autoscalingv2.MetricSpec
-	if as.CPUTarget > 0 {
+	if ptr.Deref(as.CPUTarget, 0) > 0 {
 		metrics = append(metrics, autoscalingv2.MetricSpec{
 			Type: autoscalingv2.ResourceMetricSourceType,
 			Resource: &autoscalingv2.ResourceMetricSource{
 				Name: "cpu",
 				Target: autoscalingv2.MetricTarget{
 					Type:               autoscalingv2.UtilizationMetricType,
-					AverageUtilization: &as.CPUTarget,
+					AverageUtilization: as.CPUTarget,
 				},
 			},
 		})
 	}
-	if as.MemoryTarget > 0 {
+	if ptr.Deref(as.MemoryTarget, 0) > 0 {
 		metrics = append(metrics, autoscalingv2.MetricSpec{
 			Type: autoscalingv2.ResourceMetricSourceType,
 			Resource: &autoscalingv2.ResourceMetricSource{
 				Name: "memory",
 				Target: autoscalingv2.MetricTarget{
 					Type:               autoscalingv2.UtilizationMetricType,
-					AverageUtilization: &as.MemoryTarget,
+					AverageUtilization: as.MemoryTarget,
 				},
 			},
 		})
-	}
-
-	if len(metrics) == 0 {
-		return nil
 	}
 
 	labels := map[string]string{
@@ -2056,8 +2091,8 @@ func (r *AppReconciler) reconcileHPA(ctx context.Context, app *kipperv1.App) err
 				Kind:       "Deployment",
 				Name:       app.Name,
 			},
-			MinReplicas: &as.MinReplicas,
-			MaxReplicas: as.MaxReplicas,
+			MinReplicas: &lo,
+			MaxReplicas: hi,
 			Metrics:     metrics,
 		},
 	}
@@ -2170,16 +2205,13 @@ func (r *AppReconciler) reconcileChildren(ctx context.Context, app *kipperv1.App
 		fn   func() error
 	}{
 		{"deployment", func() error { return r.reconcileDeployment(ctx, app, sources, generation, bindingHash) }},
+		{"disabled autoscaler", func() error { return r.removeDisabledAutoscaler(ctx, app) }},
 		{"service", func() error { return r.reconcileService(ctx, app) }},
 		{"security middleware", func() error { return r.reconcileSecurityMiddleware(ctx, app) }},
 		{"rate limit middleware", func() error { return r.reconcileRateLimitMiddleware(ctx, app) }},
 		{"api key middlewares", func() error { return r.reconcileAPIKeyMiddlewares(ctx, app) }},
 		{"strip prefix middleware", func() error { return r.reconcileStripPrefixMiddleware(ctx, app) }},
 		{"redirect middleware", func() error { return r.reconcileRedirectMiddleware(ctx, app) }},
-		// Added when this list absorbed the inline block: redirect-from landed on
-		// develop after the extraction was written, so the merge would otherwise
-		// have stopped reconciling it — silently, since a middleware that is
-		// never reconciled is also never deleted when its route is cleared.
 		{"redirect-from middleware", func() error { return r.reconcileRedirectFromMiddleware(ctx, app) }},
 		{"basic auth middleware", func() error { return r.reconcileBasicAuthMiddleware(ctx, app) }},
 		{"ingress", func() error { return r.reconcileIngress(ctx, app) }},
@@ -2204,35 +2236,54 @@ func (r *AppReconciler) reconcileChildren(ctx context.Context, app *kipperv1.App
 			if step.name == "api key middlewares" {
 				return gateStepError{err: wrapped}
 			}
+			if step.name == "hpa" {
+				return autoscalerStepError{err: wrapped}
+			}
 			return wrapped
 		}
 	}
 	return nil
 }
 
-// withdrawAPIKeyGate takes back the gate claim when a pass stops before the gate
-// was reconciled.
-//
-// updateStatus asserts the gate is engaged on the strength of having been
-// reached — the control flow is the whole proof — so a True written under an
-// earlier generation must not outlive a pass that stopped short of it. Without
-// this, a workload whose security middleware is refused would keep reporting a
-// gate that this pass never checked.
-//
-// A pass that stopped at the gate step itself recorded a more specific False,
-// and that one is kept. Any other stopping point means the gate was not looked
-// at on this pass, whatever an earlier one concluded.
+// claimAPIKeyGate records the configured gate state after all route resources
+// have reconciled. Disabled gates clear the condition.
+func claimAPIKeyGate(app *kipperv1.App) {
+	if app.Spec.Route != nil && app.Spec.Route.RequireAPIKey {
+		apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
+			Type:               kipperv1.ConditionAPIKeyGateReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             "GateEngaged",
+			Message:            "the API key gate is in place",
+			ObservedGeneration: app.Generation,
+		})
+		return
+	}
+	apimeta.RemoveStatusCondition(&app.Status.Conditions, kipperv1.ConditionAPIKeyGateReady)
+}
+
+// autoscalerStepError identifies a final-step HPA failure, allowing the caller
+// to preserve rollout and gate status from earlier successful steps.
+type autoscalerStepError struct{ err error }
+
+func (e autoscalerStepError) Error() string { return e.err.Error() }
+func (e autoscalerStepError) Unwrap() error { return e.err }
+
+// withdrawAPIKeyGate updates gate status after a child failure. It preserves
+// a specific gate error and confirms the gate after a final-step HPA failure.
+// Other failures leave route reconciliation incomplete, so the gate is unverified.
 func (r *AppReconciler) withdrawAPIKeyGate(app *kipperv1.App, cause error) {
 	if app.Spec.Route == nil || !app.Spec.Route.RequireAPIKey {
-		// Clearing the condition when the toggle is off is updateStatus's job,
-		// and updateStatus is downstream of the failure. Doing it here too means
-		// switching the gate off while an earlier child is refused does not leave
-		// a route reported as gated when it no longer asks to be.
+		// Clear a disabled gate even when failure skips the normal status update.
 		apimeta.RemoveStatusCondition(&app.Status.Conditions, kipperv1.ConditionAPIKeyGateReady)
 		return
 	}
 	var gateErr gateStepError
 	if stderrors.As(cause, &gateErr) {
+		return
+	}
+	var autoscalerErr autoscalerStepError
+	if stderrors.As(cause, &autoscalerErr) {
+		claimAPIKeyGate(app)
 		return
 	}
 	apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
@@ -2306,20 +2357,8 @@ func (r *AppReconciler) observeWorkload(ctx context.Context, app *kipperv1.App) 
 // updateStatus writes the App's status and reports how soon to look again
 // while its rollout is unfinished.
 func (r *AppReconciler) updateStatus(ctx context.Context, app *kipperv1.App) (time.Duration, error) {
-	// Reaching updateStatus means every route resource reconciled, so the API
-	// key gate is engaged when the toggle is on. Clear the condition when it is
-	// off so a stale warning never lingers.
-	if app.Spec.Route != nil && app.Spec.Route.RequireAPIKey {
-		apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
-			Type:               kipperv1.ConditionAPIKeyGateReady,
-			Status:             metav1.ConditionTrue,
-			Reason:             "GateEngaged",
-			Message:            "the API key gate is in place",
-			ObservedGeneration: app.Generation,
-		})
-	} else {
-		apimeta.RemoveStatusCondition(&app.Status.Conditions, kipperv1.ConditionAPIKeyGateReady)
-	}
+	// Reaching updateStatus means every route resource reconciled.
+	claimAPIKeyGate(app)
 
 	requeue, err := r.observeWorkload(ctx, app)
 	if err != nil {

@@ -273,32 +273,140 @@ To take an app out of service temporarily, [stop it](#stopping-and-starting-an-a
 
 The `READY` column in `kip app list` shows progress during scaling (e.g. `2/3` means 2 of 3 replicas are healthy). Kubernetes distributes traffic across all healthy replicas automatically.
 
-Scaling is also available in the web console via the Scale tab in the app detail panel.
+In the web console, set **Desired** in the app's Scale tab. See [In the console](#in-the-console).
+
+An app with a minimum and maximum keeps its count between them, and a count outside them is refused. See [the minimum and maximum always hold](#the-minimum-and-maximum-always-hold).
 
 ## Autoscaling
 
-Kipper supports automatic horizontal scaling based on CPU and memory usage.
+Autoscaling changes the number of pods an app runs, based on how much of its CPU or memory request the pods use. Kipper adds pods on the cluster's existing nodes. When the nodes are full, a new pod waits to be scheduled and the app shows a [waiting rollout](#when-a-rollout-waits) until room is made.
 
-```bash
-# Scale between 1 and 5 replicas, targeting 70% CPU
-kip app autoscale api --min 1 --max 5 --cpu 70
+An app's capacity works like an AWS Auto Scaling group. Where a group adds and removes machines, Kipper adds and removes pods on the nodes the cluster already has:
 
-# Scale based on both CPU and memory
-kip app autoscale api --min 2 --max 10 --cpu 80 --memory 80
+| Auto Scaling group | Kipper | What it means |
+|---|---|---|
+| Desired capacity | Desired (`replicas`) | The number of pods that should run. You set it while the app has no scaling policy. While target tracking is on, the autoscaler sets the Deployment's desired count; the App's stored replica count is separate |
+| Minimum capacity | Minimum (`minReplicas`) | The lowest desired count while the app is active, with or without a policy |
+| Maximum capacity | Maximum (`maxReplicas`) | The highest desired count. Target tracking needs one |
+| Target tracking scaling policy | CPU and memory targets (`cpuTarget`, `memoryTarget`) | The average use, as a percentage of each pod's request, that the autoscaler aims for. A target of 0 is unused |
+| Current and InService instances | Current, as running and ready pods | Pods that exist, and pods that pass their [health check](#health-checks-and-rollouts) |
+| Activity history | Scaling activity | Recent scale changes from the autoscaler's events and Kipper's scale log. Both expire, so the list can be incomplete |
 
-# Check current autoscaling status
-kip app autoscale api --status
+### In the console
 
-# Disable autoscaling (return to fixed replicas)
-kip app autoscale api --off
+The app's **Scale** tab has a **Capacity** panel. Its top row shows **Desired**, **Minimum** and **Maximum** side by side, with **Current** beside them as running and ready pods.
+
+Under **Scaling policy**, choose **None (fixed count)** to run the desired count you enter, or **Target tracking** to let the autoscaler set it. Target tracking adds a **CPU target (% of request)** and a **Memory target (% of request)**, each showing the current use once the policy is saved. While target tracking is on, Desired is read only and shows the autoscaler's count followed by "(set by autoscaling)".
+
+Minimum and Maximum can be edited under either policy. With no scaling policy, leave both empty to remove the bounds. Target tracking requires a maximum; an empty minimum means 1. The panel checks the values before anything is saved. The minimum must not exceed the maximum, a minimum needs a maximum, target tracking needs a maximum and at least one target above 0, and a desired count you enter must lie within the bounds. A desired count of 0 is refused with or without bounds when explicitly entered; use **Stop app** instead. A desired count above the maximum offers **Raise maximum to** that count, which changes the maximum in the form so that one save carries both. Choosing target tracking fills in missing bounds as 1 to 5 and sets CPU to 70 when both targets are 0.
+
+**Save capacity** writes the change in one request on the current API, and **Cancel** restores the loaded values. When a save with no scaling policy would move the desired count into new bounds, the panel says so before you save. A target tracking save moves the stored count into the bounds on the server, and a notification names the move once the save is done. The autoscaler then sets the running count within the same bounds.
+
+To switch autoscaling off, choose **None (fixed count)** and click **Save capacity**. The app keeps the Deployment's desired count, adjusted to fit the bounds. A stopped app uses its stored count. The minimum and maximum stay in place. To remove the bounds as well, clear both fields before saving.
+
+Badges next to the heading show the autoscaler's state: **At maximum**, **At minimum**, **Waiting for metrics**, **Not scaling at 0**, **Quota blocks new pods** and **Stopped, applies on start**.
+
+Whenever the App's `AutoscalingReady` condition is False, a badge shows that too, whether autoscaling is on or off: **Policy invalid** for an invalid block, **Autoscaler not applied** or **Autoscaler not removed** when the autoscaler could not be written or deleted, **Desired outside bounds** when the stored count lies outside the bounds, and **Autoscaling not ready** with the reason for anything else. Hover over a badge for details.
+
+The counts, badges and activity refresh every 15 seconds while the Scale tab is open, and the refresh button reads them immediately. A refresh leaves values you are editing alone, and when one fails the panel keeps the last values and says so. When an app with a CPU target sits at its maximum, the panel suggests raising the maximum or the CPU request. Under **Scaling activity** the panel lists recent scale changes and the last scale time, with a reminder that the list can be incomplete. While new pods start, the autoscaler briefly has no metrics for them, and the panel shows those events as one line, "Metrics for new pods are not available yet; the autoscaler waits for them", with the autoscaler's own messages on hover. An app held at its maximum, or one whose `AutoscalingReady` condition turns False, also raises a [warning alert](/en/alerts#autoscaling).
+
+Someone who can view the app but not change it sees the values without the controls.
+
+During an upgrade the console can briefly talk to an older console-api. A save that switches autoscaling off and changes the desired count then goes out as two requests, and the panel warns that the second request can fail after the first succeeds. That older console-api stores bounds only together with target tracking, so the panel asks you to save the desired count on its own or turn target tracking on.
+
+### In kipper.yaml
+
+```yaml
+apps:
+  api:
+    image: registry.example.com/api:v2
+    port: 8080
+    autoscale:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10
+      cpuTarget: 70
 ```
 
-When autoscaling is enabled, Kubernetes automatically adds replicas when CPU or memory exceeds the target and removes them when usage drops. The `--min` and `--max` flags set the boundaries.
+`kip apply` checks the block before it writes anything:
 
-Autoscaling is also configurable from the web console via the Scale tab. Toggle the autoscaling switch and set your thresholds.
+- With `enabled: true`, `maxReplicas` is required and at least one target must be above 0. Targets can exceed 100%.
+- `minReplicas` can be left out, which means 1. An explicit 0 or a negative value is refused, as is a minimum above the maximum.
+- A block with `enabled: false` and a `maxReplicas` keeps its bounds while autoscaling is off. `enabled: false` without a `maxReplicas` sets no bounds, so a `minReplicas` above 1 needs a `maxReplicas` beside it and is otherwise refused with `set maxReplicas with minReplicas, or leave both out to remove the bounds`.
+- A `replicas` field must lie within the bounds. While autoscaling is on it is stored as the count for when autoscaling is switched off.
+- Leaving `replicas` out of a manifest with bounds keeps the App's stored replica count when it lies within them, and otherwise uses `minReplicas`. A new app starts at `minReplicas`. While autoscaling is on, the running count can differ from the stored one, so turning autoscaling off in the manifest can change the number of pods with no replica change in `kip diff`, as [Switching autoscaling off](#switching-autoscaling-off) explains.
+
+See [Applying a manifest](/en/gitops#applying-a-manifest) for how apply treats the rest of the spec.
+
+### From the CLI
+
+```bash
+# Scale between 2 and 10 replicas, targeting 70% CPU
+kip app autoscale api --min 2 --max 10 --cpu 70
+
+# Change one setting; the others keep their stored values
+kip app autoscale api --max 15
+
+# Show the desired count, the bounds, ready pods and current usage
+kip app autoscale api --status
+
+# Switch autoscaling off, keeping the running count and the bounds
+kip app autoscale api --off
+
+# Remove the bounds once autoscaling is off
+kip app autoscale api --remove
+```
+
+```
+  Autoscaling: on (CPU 70%)
+  Desired: 4 (set by autoscaling)   Min: 2   Max: 10
+  Ready: 4
+  cpu: target 70%, current 58%
+```
+
+When the App's `AutoscalingReady` condition is not True, `--status` adds a line such as `⚠  Autoscaling is not ready (InvalidPolicy): the autoscaling policy is not applied: minReplicas (6) must not exceed maxReplicas (5)` with the reason and message the cluster reports.
+
+Flags you leave out keep their stored values. Missing bounds default to a minimum of 1 and a maximum of 5. With neither target set, CPU defaults to 70%. `--cpu 0` or `--memory 0` removes that target, and with no target left the CPU target of 70% applies. `kip app autoscale` with any setting flag switches autoscaling on.
+
+`--off` and `--remove` ignore `--min`, `--max`, `--cpu` and `--memory` and print a notice naming the flags they ignored. To change a setting and switch off, run the change first and `--off` after it, for example `kip app autoscale api --max 6` and then `kip app autoscale api --off`.
+
+### The minimum and maximum always hold
+
+Kipper checks replica changes against the app's bounds:
+
+- `kip app scale`, `kip app deploy --replicas`, the console's Desired field and `kip apply` refuse a count outside the bounds, and the message names them. The way to run no pods is [stopping the app](#stopping-and-starting-an-app), so a count of 0 is refused too.
+- Changing the bounds with `kip app autoscale` or in the console moves the stored count into them in the same write. A minimum above the count raises it, and a maximum below it lowers it. The CLI prints the move. The console shows it before you save when no scaling policy is chosen, and in a notification after any save that moved the stored count. In `kipper.yaml` a declared `replicas` outside the new bounds is refused instead, so change both together.
+- Switching autoscaling off keeps the bounds. Remove them with `kip app autoscale api --remove`, by clearing Minimum and Maximum in the console with no scaling policy, or by deleting the `autoscale` block from `kipper.yaml` and applying with `--force`. `--remove` refuses while autoscaling is on; `--off --remove` does both in one go.
+
+While autoscaling is on, `kip app scale` refuses any count, because the autoscaler would overwrite it. `kip app deploy --replicas` stores the count and prints a note that it has no effect until autoscaling is off.
+
+### Switching autoscaling off
+
+`kip app autoscale api --off` and choosing None (fixed count) in the console preserve the Deployment's desired count, adjusted to fit the bounds. The CLI reports any adjustment. A stopped app uses its stored restart count. If the Deployment's count cannot be read, the stored count is used and a warning explains why. The console also adjusts these fallback counts to fit the bounds.
+
+`kip apply` with `enabled: false` is different, because the manifest is the declared state. The app runs the manifest's `replicas`, whatever the autoscaler was running. When the manifest leaves `replicas` out, the app runs its stored count if that lies within the bounds and `minReplicas` otherwise, the same rule as [In kipper.yaml](#in-kipper-yaml). To keep the autoscaler's count, switch autoscaling off with `kip app autoscale <app> --off` first and fold the result into the manifest with `kip export`.
+
+### How automatic sizing steps back
+
+The autoscaler measures use as a percentage of each pod's request. Raising a tracked resource's request lowers its measured utilization, which can prompt the autoscaler to remove pods. To keep these signals stable, [automatic sizing](/en/resource-management) follows these rules:
+
+- **CPU target:** automatic sizing keeps CPU requests and limits unchanged, including when pods reach their CPU limits. The autoscaler handles CPU pressure by adjusting the replica count. To give each pod more CPU, set the CPU request yourself.
+- **Memory target:** automatic sizing keeps memory requests and limits unchanged during routine sizing. It can still raise memory after an out-of-memory kill, since adding pods cannot resolve an individual pod's memory shortage.
+
+A metric without a target is sized as before. Your own CPU and memory values, the OOM cap and project quotas apply as usual. In auto mode, the note at the top of the Scale tab says which resources automatic sizing still adjusts for the app, and mentions that scale-down is paused only while the app runs a single replica.
+
+### When settings do not add up
+
+Older apps can contain settings that violate these rules. Kipper reports invalid settings and preserves the existing Deployment's desired count instead of applying them. With an invalid enabled policy, an existing autoscaler keeps its previous settings and can still change that count. The App's `AutoscalingReady` condition gives the reason (`InvalidPolicy` or `ReplicasOutsideBounds`), `kip app autoscale api --status` and the console's badges show it, and [`kip upgrade --check`](/en/maintenance#checking-before-an-upgrade) lists every such app with the command that fixes it.
+
+The cluster's API server validates the autoscaling block on writes from any client and names the violated rule when refusing a change. This checks the block itself; Kipper's commands and controllers also check replica counts against its bounds. A block stored before the rules existed stays as it is, and a write that leaves it untouched, such as an image deploy, still goes through. A write that changes the block has to leave it valid, and switching autoscaling off changes it. On an app whose stored minimum is above its maximum, `kip app autoscale api --off` is therefore refused with `minReplicas must not exceed maxReplicas`. Fix the bounds first with `kip app autoscale api --min 2 --max 5` and then switch off, or correct Minimum and Maximum in the console and choose None (fixed count) in the same save.
+
+An app stored with autoscaling on, a minimum above 1 and no maximum is caught the same way. Switching off would leave a minimum without a maximum, so `kip app autoscale api --off` is refused with `set maxReplicas with minReplicas, or leave both out to remove the bounds`, and `--remove` asks you to switch off first. Set a maximum no lower than the stored minimum, such as `kip app autoscale api --max 5` for a minimum of up to 5, then switch off. When the cluster refuses `--off` like this, kip prints the command that fixes the block.
+
+An autoscaled app whose pods were taken to 0 without a stop is started at its minimum, because the autoscaler cannot scale up from zero.
 
 ::: tip Resource requests required
-For CPU-based autoscaling to work, your deployment must have CPU resource requests set. Kipper sets sensible defaults, but if you override them, ensure requests are defined.
+The autoscaler needs a CPU request for a CPU target and a memory request for a memory target. Kipper sets both from the app's resource profile. If you set resources yourself, keep the requests.
 :::
 
 ## App connections and internal paths
@@ -382,18 +490,18 @@ kip app start api
 
 In the console, click **Stop** in the app panel's header to enter an optional reason and see what will keep running.
 
-Stopping an app shuts down its pods and releases their CPU and memory. It preserves the app's configuration, replica count, autoscaling settings, route and deployment history. Volumes and their data remain available. Bound services, databases, functions and jobs keep running.
+Stopping an app shuts down its pods and releases their CPU and memory. It preserves the app's configuration, replica count, autoscaling settings and bounds, route and deployment history. Volumes and their data remain available. Bound services, databases, functions and jobs keep running.
 
 While an app is stopped:
 
 - Its route returns a "this app is stopped" page with HTTP status 503. Requests with `Accept: application/json` receive `{"code":"app_stopped","message":"This app is stopped."}`. Basic auth, API-key checks and internal-path restrictions still apply. The page shows the host, without the stop reason or operator's identity.
 - `kip app list` shows `stopped`, followed by the recorded time, operator and reason. The console shows these details in the app panel with a **Start** button.
 - Crash-loop and stuck-rollout alerts are suppressed, and automatic sizing is paused.
-- Image changes, rollbacks, replica counts and autoscaling changes are saved for the next start. Autoscaled apps continue to reject manual replica counts. Use `kip app start` to resume a stopped app; `kip app restart` rejects it.
+- Image changes, rollbacks, replica counts and autoscaling changes are saved for the next start. Autoscaled apps continue to reject manual replica counts, and a count outside the app's bounds is refused. Use `kip app start` to resume a stopped app; `kip app restart` rejects it.
 
-`kip app start` uses the current configured replica count, or the autoscaling minimum for an autoscaled app. Automatic sizing recommendations remain paused during the start; explicit resource settings still apply. New pods take traffic once they pass their [health check](#health-checks-and-rollouts). `kip app list` shows rollout progress until they are ready.
+`kip app start` uses the current configured replica count, or the autoscaling minimum for an autoscaled app. A configured count outside the app's bounds starts at the nearest bound instead. When the autoscaling settings are invalid, the start uses the configured count. Automatic sizing recommendations remain paused during the start; explicit resource settings still apply. New pods take traffic once they pass their [health check](#health-checks-and-rollouts). `kip app list` shows rollout progress until they are ready.
 
-Repeating `kip app stop` preserves the original operator and timestamp. It updates the reason only when you provide `--reason`. For an app scaled to zero without a stop record and without autoscaling, use `kip app scale` to raise its replica count. Without autoscaling, starting a stopped app whose configured count is zero also leaves it at zero.
+Repeating `kip app stop` preserves the original operator and timestamp. It updates the reason only when you provide `--reason`. For an app scaled to zero without a stop record and without autoscaling, use `kip app scale` to raise its replica count. An autoscaled app in that state starts at its minimum on its own. Without autoscaling or bounds, starting a stopped app whose configured count is zero also leaves it at zero.
 
 Older App schemas may discard the stop field even when the write succeeds. `kip app stop`, `kip apply` and the stop API report failure if the field was dropped. Upgrade Kipper before retrying.
 

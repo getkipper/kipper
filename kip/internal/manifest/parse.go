@@ -9,6 +9,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/getkipper/kipper/controller/pkg/capacity"
 	"github.com/getkipper/kipper/controller/pkg/healthcheck"
 	"github.com/getkipper/kipper/controller/pkg/internalpath"
 )
@@ -115,7 +116,7 @@ func Parse(path string) ([]*Manifest, error) {
 	return []*Manifest{m}, nil
 }
 
-// Validate checks that a manifest has all required fields.
+// Validate checks required fields and validates app health, capacity and route settings.
 func Validate(m *Manifest) error {
 	if m.Project == "" {
 		return fmt.Errorf("project is required")
@@ -141,6 +142,9 @@ func Validate(m *Manifest) error {
 			if err := app.Health.check().Validate(app.Port); err != nil {
 				return fmt.Errorf("app %q: health: %w", name, err)
 			}
+		}
+		if err := capacity.Validate(app.Autoscale.policy(), app.Replicas); err != nil {
+			return fmt.Errorf("app %q: autoscale: %w", name, err)
 		}
 		if app.Route != nil {
 			if err := ValidateRedirectFromHosts(app.Route.RedirectFrom); err != nil {

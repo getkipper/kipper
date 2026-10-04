@@ -72,6 +72,11 @@ const ConditionEnvPublished = "EnvPublished"
 // created would make it die with the workload. Refusing it silently was not.
 const ConditionChildrenAdopted = "ChildrenAdopted"
 
+// ConditionAutoscalingReady reports policy validation and HPA reconciliation.
+// False identifies an invalid policy, an out-of-bounds replica count, or an HPA
+// write/delete failure. It is cleared when autoscaling is disabled without errors.
+const ConditionAutoscalingReady = "AutoscalingReady"
+
 // ConditionRolloutComplete reports rollout progress separately from pod health.
 // A False condition explains why the latest change has not finished rolling out.
 const ConditionRolloutComplete = "RolloutComplete"
@@ -378,6 +383,13 @@ type RedirectRule struct {
 }
 
 // AppAutoscale configures horizontal pod autoscaling.
+// +kubebuilder:validation:XValidation:rule="!has(self.minReplicas) || self.minReplicas >= 1",message="minReplicas must be at least 1"
+// +kubebuilder:validation:XValidation:rule="!has(self.maxReplicas) || self.maxReplicas >= 1",message="maxReplicas must be at least 1"
+// +kubebuilder:validation:XValidation:rule="!has(self.maxReplicas) || !has(self.minReplicas) || self.minReplicas <= self.maxReplicas",message="minReplicas must not exceed maxReplicas"
+// +kubebuilder:validation:XValidation:rule="!self.enabled || has(self.maxReplicas)",message="maxReplicas is required when autoscaling is enabled"
+// +kubebuilder:validation:XValidation:rule="self.enabled || has(self.maxReplicas) || !has(self.minReplicas) || self.minReplicas <= 1",message="set maxReplicas with minReplicas, or leave both out to remove the bounds"
+// +kubebuilder:validation:XValidation:rule="!self.enabled || ((!has(self.cpuTarget) || self.cpuTarget >= 0) && (!has(self.memoryTarget) || self.memoryTarget >= 0))",message="targets must not be negative when autoscaling is enabled"
+// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.cpuTarget) && self.cpuTarget > 0) || (has(self.memoryTarget) && self.memoryTarget > 0)",message="set cpuTarget or memoryTarget when autoscaling is enabled"
 type AppAutoscale struct {
 	// Enabled turns autoscaling on or off.
 	Enabled bool `json:"enabled"`
@@ -385,19 +397,19 @@ type AppAutoscale struct {
 	// MinReplicas is the minimum number of replicas.
 	// +kubebuilder:default=1
 	// +optional
-	MinReplicas int32 `json:"minReplicas,omitempty"`
+	MinReplicas *int32 `json:"minReplicas,omitempty"`
 
 	// MaxReplicas is the maximum number of replicas.
 	// +optional
-	MaxReplicas int32 `json:"maxReplicas,omitempty"`
+	MaxReplicas *int32 `json:"maxReplicas,omitempty"`
 
 	// CPUTarget is the target CPU utilisation percentage.
 	// +optional
-	CPUTarget int32 `json:"cpuTarget,omitempty"`
+	CPUTarget *int32 `json:"cpuTarget,omitempty"`
 
 	// MemoryTarget is the target memory utilisation percentage.
 	// +optional
-	MemoryTarget int32 `json:"memoryTarget,omitempty"`
+	MemoryTarget *int32 `json:"memoryTarget,omitempty"`
 }
 
 // ServiceBinding defines a bound service with an optional env var prefix.

@@ -103,6 +103,13 @@ spec:
                 - at
                 - identity
                 type: object
+              memoryCause:
+                description: |-
+                  MemoryCause is OOMKill while the memory recommendation is the raise
+                  after an OOM kill, and empty for a routine value.
+                enum:
+                - OOMKill
+                type: string
               recommendation:
                 description: |-
                   Recommendation is what the auto-sizer wants the container to get,

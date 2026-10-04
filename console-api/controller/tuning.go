@@ -139,7 +139,7 @@ func (rc *ResourceController) tuneWorkload(
 	replicas, surgePods int32,
 	podSpec *corev1.PodSpec,
 	podEntries []podMetricsEntry,
-	blockDecrease bool,
+	sizing appSizing,
 	sustainSaturationFor time.Duration,
 ) []ResourceLogEntry {
 	namespace := obj.GetNamespace()
@@ -190,6 +190,7 @@ func (rc *ResourceController) tuneWorkload(
 			podEntries = withoutOOMAt(podEntries, oomSeen)
 		}
 	}
+	blockDecrease := sizing.ScaledOut
 	cooldown := false
 	if until := rt.Status.DecreaseBlockedUntil; until != nil && now.Before(until.Time) {
 		blockDecrease = true
@@ -210,14 +211,23 @@ func (rc *ResourceController) tuneWorkload(
 	work := live.DeepCopy()
 	cpuMode := resourcebounds.ModeOf(spec.CPURequest, spec.CPULimit)
 	proposed, oomMark := rc.evaluate(namespace, appName, work, podEntries, workloadLabels, replicas, blockDecrease, sustainSaturationFor,
-		cpuMode == resourcebounds.ModeAutomatic)
+		cpuMode == resourcebounds.ModeAutomatic && !sizing.Tracked.CPU)
+	// An autoscaler reads usage as a share of the request, so a metric it
+	// tracks keeps its live size. The raise after an OOM kill is the exception,
+	// because more pods do not save a pod that runs out of memory.
+	if sizing.Tracked.CPU {
+		keepLive(work, live, corev1.ResourceCPU)
+	}
+	if sizing.Tracked.Memory && oomMark == nil {
+		keepLive(work, live, corev1.ResourceMemory)
+	}
 
 	profile := profileDefaults(workloadLabels[labels.ResourceProfile])
 	oomCap := rc.oomCapBytes
 	if oomCap == 0 {
 		oomCap = defaultOOMCapBytes
 	}
-	pendingCPU, pendingMem := pendingPairs(rt.Status.Recommendation)
+	pendingCPU, pendingMem := pendingPairs(sizing.Tracked.Recommendation(rt.Status))
 	cpuEff, cpuChanged := effective(spec.CPURequest, spec.CPULimit, corev1.ResourceCPU, live, work, pendingCPU, cooldown,
 		resourcebounds.AutoRange{Floor: resource.MustParse(profile.cpu)})
 	memEff, memChanged := effective(spec.MemoryRequest, spec.MemoryLimit, corev1.ResourceMemory, live, work, pendingMem, cooldown,
@@ -233,7 +243,21 @@ func (rc *ResourceController) tuneWorkload(
 
 	// Preserve the pending recommendation while quota blocks this proposal.
 	if !quotaBlocked {
-		rt.Status.Recommendation = recommendation(cpuMode, cpuEff, memMode, memEff)
+		next := kipperv1.ResourceTuningStatus{
+			Recommendation: recommendation(cpuMode, cpuEff, memMode, memEff),
+			MemoryCause:    rt.Status.MemoryCause,
+		}
+		switch {
+		case oomMark != nil && memChanged:
+			next.MemoryCause = kipperv1.MemoryCauseOOMKill
+		case !sameMemory(next.Recommendation, rt.Status.Recommendation):
+			next.MemoryCause = ""
+		case pairsEqual(memEff, liveMemory(live)):
+			// The raise is running, so the live size keeps it from here on.
+			next.MemoryCause = ""
+		}
+		rt.Status.Recommendation = sizing.Tracked.Recommendation(next)
+		rt.Status.MemoryCause = next.MemoryCause
 	}
 	if oomMark != nil && !quotaBlocked {
 		rt.Status.LastOOM = &kipperv1.OOMRecord{Identity: oomIdentity(live.Name, oomMark.at), At: metav1.NewTime(oomMark.at), Alerted: true}
@@ -422,12 +446,38 @@ func setPair(c *corev1.Container, name corev1.ResourceName, p resourcebounds.Pai
 	c.Resources.Limits[name] = p.Limit
 }
 
+// keepLive sets one resource of c back to the live container's values.
+func keepLive(c, live *corev1.Container, name corev1.ResourceName) {
+	restore := func(dst *corev1.ResourceList, src corev1.ResourceList) {
+		v, ok := src[name]
+		switch {
+		case !ok:
+			delete(*dst, name)
+		case *dst == nil:
+			*dst = corev1.ResourceList{name: v}
+		default:
+			(*dst)[name] = v
+		}
+	}
+	restore(&c.Resources.Requests, live.Resources.Requests)
+	restore(&c.Resources.Limits, live.Resources.Limits)
+}
+
+func sameMemory(a, b kipperv1.TunedResources) bool {
+	return a.MemoryRequest == b.MemoryRequest && a.MemoryLimit == b.MemoryLimit
+}
+
+func liveMemory(live *corev1.Container) resourcebounds.Pair {
+	p, _ := resourcebounds.PairOf(&live.Resources, corev1.ResourceMemory)
+	return p
+}
+
 func pairsEqual(a, b resourcebounds.Pair) bool {
 	return a.Request.Cmp(b.Request) == 0 && a.Limit.Cmp(b.Limit) == 0
 }
 
 func statusEqual(a, b *kipperv1.ResourceTuningStatus) bool {
-	if a.Recommendation != b.Recommendation {
+	if a.Recommendation != b.Recommendation || a.MemoryCause != b.MemoryCause {
 		return false
 	}
 	if !timesEqual(a.DecreaseBlockedUntil, b.DecreaseBlockedUntil) {

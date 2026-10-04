@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/utils/ptr"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -388,5 +389,166 @@ func TestPlanDigestBindsMaterialFacts(t *testing.T) {
 		if planDigest(p) != reference {
 			t.Errorf("%s must not force a re-plan", name)
 		}
+	}
+}
+
+// TestPlanProjectBlocksInvalidAutoscaling runs the shared capacity rule over
+// each source app, because the target creates the App fresh and a create gets
+// no ratcheting from the CRD rule.
+func TestPlanProjectBlocksInvalidAutoscaling(t *testing.T) {
+	replicas := func(n int32) *int32 { return &n }
+	cases := []struct {
+		name      string
+		autoscale *kipperv1.AppAutoscale
+		replicas  *int32
+		stopped   bool
+		want      []string
+		// removal is set where the bounds of a disabled block are invalid.
+		removal bool
+		// countOnly is set where the block is valid and only the replica count
+		// is outside the bounds, which the target's CRD rules do not check.
+		countOnly bool
+		// resave is set where autoscaling is on and only the stored count is
+		// outside the bounds, which kip app scale refuses to change.
+		resave bool
+	}{
+		{name: "no block"},
+		{name: "opt-out without bounds", autoscale: &kipperv1.AppAutoscale{Enabled: false}, replicas: replicas(7)},
+		{name: "valid policy within bounds", autoscale: &kipperv1.AppAutoscale{Enabled: true, MinReplicas: ptr.To[int32](2), MaxReplicas: ptr.To[int32](5), CPUTarget: ptr.To[int32](70)}, replicas: replicas(3)},
+		{
+			name:      "enabled without a maximum",
+			autoscale: &kipperv1.AppAutoscale{Enabled: true, CPUTarget: ptr.To[int32](70)},
+			want:      []string{"maxReplicas is required when autoscaling is enabled"},
+		},
+		{
+			name:      "minimum above maximum",
+			autoscale: &kipperv1.AppAutoscale{Enabled: true, MinReplicas: ptr.To[int32](5), MaxReplicas: ptr.To[int32](3), CPUTarget: ptr.To[int32](70)},
+			want:      []string{"minReplicas (5) must not exceed maxReplicas (3)"},
+		},
+		{
+			name:      "enabled without a target",
+			autoscale: &kipperv1.AppAutoscale{Enabled: true, MaxReplicas: ptr.To[int32](3)},
+			want:      []string{"set cpuTarget or memoryTarget when autoscaling is enabled"},
+		},
+		{
+			name:      "every problem on one line",
+			autoscale: &kipperv1.AppAutoscale{Enabled: true, MinReplicas: ptr.To[int32](5), MaxReplicas: ptr.To[int32](3)},
+			want:      []string{"minReplicas (5) must not exceed maxReplicas (3); set cpuTarget or memoryTarget"},
+		},
+		{
+			name:      "policy off with replicas above the maximum",
+			autoscale: &kipperv1.AppAutoscale{Enabled: false, MaxReplicas: ptr.To[int32](3)},
+			replicas:  replicas(5),
+			want:      []string{"replicas (5) must be between 1 and 3"},
+			countOnly: true,
+		},
+		{
+			name:      "absent replicas below the minimum",
+			autoscale: &kipperv1.AppAutoscale{Enabled: true, MinReplicas: ptr.To[int32](2), MaxReplicas: ptr.To[int32](5), CPUTarget: ptr.To[int32](70)},
+			want:      []string{"replicas (1) must be between 2 and 5"},
+			countOnly: true,
+			resave:    true,
+		},
+		{
+			name:      "stopped app outside its bounds",
+			autoscale: &kipperv1.AppAutoscale{Enabled: false, MinReplicas: ptr.To[int32](2), MaxReplicas: ptr.To[int32](4)},
+			replicas:  replicas(0),
+			stopped:   true,
+			want:      []string{"replicas (0) must be between 2 and 4"},
+			countOnly: true,
+		},
+		{
+			name:      "explicit zero minimum",
+			autoscale: &kipperv1.AppAutoscale{Enabled: true, MinReplicas: ptr.To[int32](0), MaxReplicas: ptr.To[int32](3), CPUTarget: ptr.To[int32](70)},
+			want:      []string{"minReplicas must be at least 1"},
+		},
+		{
+			name:      "policy off with an explicit zero minimum",
+			autoscale: &kipperv1.AppAutoscale{Enabled: false, MinReplicas: ptr.To[int32](0), MaxReplicas: ptr.To[int32](5)},
+			replicas:  replicas(8),
+			want:      []string{"minReplicas must be at least 1"},
+			removal:   true,
+		},
+		{
+			name:      "policy off with an explicit zero maximum",
+			autoscale: &kipperv1.AppAutoscale{Enabled: false, MaxReplicas: ptr.To[int32](0)},
+			want:      []string{"maxReplicas must be at least 1"},
+			removal:   true,
+		},
+		{
+			name:      "policy off with a minimum and no maximum",
+			autoscale: &kipperv1.AppAutoscale{Enabled: false, MinReplicas: ptr.To[int32](3)},
+			replicas:  replicas(3),
+			want:      []string{"set maxReplicas with minReplicas, or leave both out to remove the bounds"},
+			removal:   true,
+		},
+		{
+			name:      "policy off with the default minimum and no maximum",
+			autoscale: &kipperv1.AppAutoscale{Enabled: false, MinReplicas: ptr.To[int32](1)},
+			replicas:  replicas(7),
+		},
+		{
+			name:      "explicit zero cpu target beside a memory target",
+			autoscale: &kipperv1.AppAutoscale{Enabled: true, MaxReplicas: ptr.To[int32](3), CPUTarget: ptr.To[int32](0), MemoryTarget: ptr.To[int32](60)},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app := &kipperv1.App{
+				ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "shop-prod"},
+				Spec: kipperv1.AppSpec{
+					Image:     "registry.example.com/web:1",
+					Replicas:  tc.replicas,
+					Autoscale: tc.autoscale,
+				},
+			}
+			if tc.stopped {
+				app.Spec.Stopped = &kipperv1.AppStopped{Reason: "maintenance"}
+			}
+			h := &Handler{
+				Client: fakeClientWithProject(t),
+				CRClient: crfake.NewClientBuilder().WithScheme(migrationScheme()).
+					WithObjects(app, ownerOf("shop-prod")).Build(),
+				Domain: "source.example.com",
+			}
+			token, _ := testToken(t, "https://api.target.example.com")
+			resp := &planResponse{}
+			if err := h.planProject(context.Background(), "shop", token, nil, resp); err != nil {
+				t.Fatal(err)
+			}
+			var blockers []string
+			for _, b := range resp.Blockers {
+				if strings.Contains(b, "autoscaling") {
+					blockers = append(blockers, b)
+				}
+			}
+			if len(blockers) != len(tc.want) {
+				t.Fatalf("autoscaling blockers = %q, want %d", blockers, len(tc.want))
+			}
+			for i, want := range tc.want {
+				if !strings.Contains(blockers[i], "shop-prod/web") || !strings.Contains(blockers[i], want) {
+					t.Errorf("blocker %q must name shop-prod/web and say %q", blockers[i], want)
+				}
+				if strings.Contains(blockers[i], "\n") {
+					t.Errorf("blocker %q must be one line", blockers[i])
+				}
+				const remove = "'kip app autoscale web --project shop --remove'"
+				if got := strings.Contains(blockers[i], remove); got != tc.removal {
+					t.Errorf("blocker %q naming %s = %v, want %v", blockers[i], remove, got, tc.removal)
+				}
+				const sameRules = "the target checks the same rules"
+				if got := strings.Contains(blockers[i], sameRules); got == tc.countOnly {
+					t.Errorf("blocker %q saying %q = %v, want %v", blockers[i], sameRules, got, !tc.countOnly)
+				}
+				for _, cmd := range []string{"'kip app autoscale web --project shop'", "'kip app autoscale web --project shop --off'"} {
+					if got := strings.Contains(blockers[i], cmd); got != tc.resave {
+						t.Errorf("blocker %q naming %s = %v, want %v", blockers[i], cmd, got, tc.resave)
+					}
+				}
+				if tc.resave && strings.Contains(blockers[i], "kip app scale") {
+					t.Errorf("blocker %q must not suggest kip app scale, which autoscaling refuses", blockers[i])
+				}
+			}
+		})
 	}
 }
