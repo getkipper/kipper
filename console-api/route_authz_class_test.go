@@ -193,6 +193,7 @@ var routeAuthz = map[string]authzDeclaration{
 	"GET /api/v1/projects/{name}/api-keys":                            {class: classProjectCapability, capability: "project.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/api-keys/{key}/usage":                {class: classProjectCapability, capability: "project.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps":                                {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
+	"GET /api/v1/projects/{name}/apps/{app}/activity":                 {class: classProjectCapability, capability: "workloads.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/autoscale":                {class: classProjectCapability, capability: "workloads.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/basic-auth":               {class: classProjectCapability, capability: "kipper.read", scope: scopeNamespace},
 	"GET /api/v1/projects/{name}/apps/{app}/build/logs":               {class: classProjectCapability, capability: "pods.logs.read", scope: scopeNamespace},

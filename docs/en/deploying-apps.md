@@ -326,6 +326,37 @@ Someone who can view the app but not change it sees the values without the contr
 
 During an upgrade the console can briefly talk to an older console-api. A save that switches autoscaling off and changes the desired count then goes out as two requests, and the panel warns that the second request can fail after the first succeeds. That older console-api stores bounds only together with target tracking, so the panel asks you to save the desired count on its own or turn target tracking on.
 
+### Traffic and scaling
+
+Below the capacity panel, the Scale tab shows **Traffic and scaling** for the last hour, 6 hours, 24 hours or 3 days. The browser remembers your selected range. Three charts share a time axis:
+
+- **Requests per minute**, stacked by status (2xx, 3xx, 4xx, abandoned and 5xx). A thin line estimates the busiest short interval in each chart step. Abandoned requests have status 499, meaning the client disconnected before receiving a response.
+- **CPU as a share of its request**, expressed as a percentage. A dashed line shows the autoscaling target, with a faint band for the default 10% tolerance above it. A lighter line shows peaks from 30-second windows. Use the toggle to view memory instead; memory is selected initially when it is the only target.
+- **Pods**, showing the Deployment's desired count, with a faint band between the autoscaling minimum and maximum.
+
+Detected pod-count changes appear as vertical markers across the charts:
+
+- **Solid:** a matching autoscaler event records the change.
+- **Dashed:** autoscaling was present before and after the change, but no matching event identifies who changed the count. Older events may have expired. Repeated events are matched by their latest occurrence, so earlier changes may lack a match.
+- **Solid with a label:** the count moved to or from zero, or matched a nearby change to an autoscaling bound.
+- **Dotted:** autoscaler data is missing on one or both sides of the change.
+
+Point at a marker to read its details. For dashed markers and unlabelled solid ones, the panel looks back 2 minutes before a scale-out or 5 minutes before a scale-in. Available details include peaks and averages for targeted CPU and memory metrics, plus estimated request counts. Point elsewhere to read the chart values at that time.
+
+While autoscaling is enabled and the app is not stopped, a guide estimates when the autoscaler adds pods. For example, a 70% CPU target with the default 10% tolerance gives a threshold of about 77% of the CPU request. The guide also shows the maximum pod count. A cluster can use a different tolerance.
+
+The section refreshes every minute while the Scale tab is open and the page is visible. It needs Prometheus; if monitoring is disabled or unavailable, the panel explains why.
+
+When interpreting the charts:
+
+- CPU and request rates use rolling averages; peaks are estimates from shorter windows. The autoscaler takes its own samples and may react to spikes these figures smooth out. Memory and pod counts show sampled values.
+- Changes are detected on a 30-second grid. Missing samples can hide changes.
+- Request counts cover traffic handled by the app's Traefik service. Requests rejected before reaching that service, such as by authentication or rate limiting, and direct traffic between apps are excluded.
+- Traffic appears only when the app currently holds its [route name](#route-names) exclusively and held it throughout each point's input window. Ownership gaps, route checks after a console-api restart, and missing scrape data can leave gaps. Recent points wait for a route check, normally every 30 seconds, and appear on a later refresh. If no traffic can be shown, the panel displays a note.
+- Details are fetched for the 20 most recent changes with dashed or unlabelled solid markers. Prometheus retains 3 days of data by default, so changes near the start of that period may lack earlier measurements.
+
+If pods increase with traffic and decrease afterward, scaling is following demand. Sustained CPU use above the target at the maximum pod count may call for a higher maximum or a review of CPU requests; see the [at-maximum alert](/en/alerts#autoscaling). Bursts of 4xx or abandoned requests warrant checking the traffic source. If unwanted traffic is driving load, a [route rate limit](/en/gitops#the-route-block) may help.
+
 ### In kipper.yaml
 
 ```yaml

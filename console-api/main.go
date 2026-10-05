@@ -311,6 +311,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 	apiGatewayHandler := &handlers.APIGateway{CRClient: crClient}
 	logsHandler := &handlers.Logs{}
 	autoscaleHandler := &handlers.Autoscale{Client: clientset, CRClient: crClient}
+	activityHandler := &handlers.Activity{Client: clientset, CRClient: crClient}
 	recommendationHandler := &handlers.Recommendations{CRClient: crClient}
 	resourcesHandler := &handlers.Resources{Client: clientset, CRClient: crClient, Adjustments: adjustmentsHandler}
 	jobHandler := &handlers.Jobs{Client: clientset, CRClient: crClient, Resources: resourcesHandler}
@@ -532,6 +533,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 			promURL = "http://prometheus-operated.monitoring.svc.cluster.local:9090"
 		}
 		usageHistoryHandler.PrometheusBaseURL = promURL
+		activityHandler.PrometheusBaseURL = promURL
 		resourceUsageHandler := &handlers.ResourceUsage{Client: clientset, PrometheusBaseURL: promURL}
 		requestUsageHandler := &handlers.RequestUsage{Client: clientset, CRClient: crClient, PrometheusBaseURL: promURL}
 		r.Get("/resources/usage", resourceUsageHandler.Get)
@@ -766,6 +768,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 					r.Get("/resources", cap("kipper.read")(resourcesHandler.Get))
 					r.Put("/resources", cap("kipper.write")(resourcesHandler.Update))
 					r.Get("/autoscale", cap("workloads.read")(autoscaleHandler.Get))
+					r.Get("/activity", cap("workloads.read")(activityHandler.Get))
 					r.Put("/autoscale", cap("kipper.write")(autoscaleHandler.Set))
 					r.Delete("/autoscale", cap("kipper.write")(autoscaleHandler.Delete))
 					r.Get("/recommendation", cap("kipper.read")(recommendationHandler.Get))

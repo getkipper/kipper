@@ -5,6 +5,7 @@ import SidePanel from '@/components/SidePanel.vue'
 import SaveButton from '@/components/SaveButton.vue'
 import AppHealthCheck from '@/components/AppHealthCheck.vue'
 import AppCapacityPanel from '@/components/AppCapacityPanel.vue'
+import AppActivityPanel from '@/components/AppActivityPanel.vue'
 import LogAnalysis from '@/components/LogAnalysis.vue'
 import DiagnoseModal from '@/components/DiagnoseModal.vue'
 import ContainerErrorsModal from '@/components/ContainerErrorsModal.vue'
@@ -4602,6 +4603,12 @@ function openOptimise() {
           :can-write="canWriteApp"
           @saved="loadScale"
           @loaded="capacityState = $event"
+        />
+        <AppActivityPanel
+          :key="`activity-${project}/${props.appName}`"
+          :project="project"
+          :app-name="props.appName"
+          :config="capacityState"
         />
       </div>
     </div>

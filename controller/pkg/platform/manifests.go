@@ -200,6 +200,10 @@ spec:
   valuesContent: |-
     alertmanager:
       enabled: false
+    kubelet:
+      serviceMonitor:
+        # The traffic view's CPU peaks read 30s rate windows at a 10s step.
+        cAdvisorInterval: 10s
     prometheus:
       prometheusSpec:
         retention: 3d

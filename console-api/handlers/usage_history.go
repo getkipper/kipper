@@ -145,16 +145,18 @@ func (h *UsageHistory) Get(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, resp)
 }
 
-// monitoringEnabled reports whether the prometheus component is effectively
-// enabled. Unknown states (no CR client wired, missing or unreadable
-// PlatformConfig) count as enabled, so a real query failure still surfaces
-// as degraded instead of being masked.
 func (h *UsageHistory) monitoringEnabled(ctx context.Context) bool {
-	if h.CRClient == nil {
+	return prometheusComponentEnabled(ctx, h.CRClient)
+}
+
+// Unknown configuration counts as enabled so query failures surface as errors
+// rather than being mistaken for disabled monitoring.
+func prometheusComponentEnabled(ctx context.Context, c crclient.Client) bool {
+	if c == nil {
 		return true
 	}
 	var pc kipperv1.PlatformConfig
-	if err := h.CRClient.Get(ctx, crclient.ObjectKey{Name: platformConfigName}, &pc); err != nil {
+	if err := c.Get(ctx, crclient.ObjectKey{Name: platformConfigName}, &pc); err != nil {
 		return true
 	}
 	overrides := enabledOverrideMap(indexOverrides(pc.Spec.Components))

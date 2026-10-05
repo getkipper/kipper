@@ -70,6 +70,7 @@ GET /api/v1/projects	anon=401 outsider=allow viewer=allow deployer=allow owner=a
 GET /api/v1/projects/{name}/api-keys	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/projects/{name}/api-keys/{key}/usage	anon=401 outsider=403 viewer=404 deployer=404 owner=404 admin=404
 GET /api/v1/projects/{name}/apps	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
+GET /api/v1/projects/{name}/apps/{app}/activity	anon=401 outsider=403 viewer=404 deployer=404 owner=404 admin=404
 GET /api/v1/projects/{name}/apps/{app}/autoscale	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/projects/{name}/apps/{app}/basic-auth	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow
 GET /api/v1/projects/{name}/apps/{app}/build/logs	anon=401 outsider=403 viewer=404 deployer=404 owner=404 admin=404
