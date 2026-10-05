@@ -76,11 +76,13 @@ In Grafana, go to **Explore** → select **Prometheus** as the data source → q
 container_memory_usage_bytes{namespace="blog-test"}
 ```
 
-Traefik's request counters carry a `service` label that encodes the namespace and app, so per-app traffic is one query away:
+Traefik's routed service names follow `<namespace>-<app>-<port>@kubernetes`, with repeated hyphens collapsed. Kipper's default scrape stores this name in `exported_service`; `service` identifies the Kubernetes Service being scraped. For example, this query shows request rates for names beginning with `blog-test-`:
 
 ```
-rate(traefik_service_requests_total{service=~"blog-test-.*"}[5m])
+rate(traefik_service_requests_total{exported_service=~"blog-test-.*"}[5m])
 ```
+
+A scrape with `honorLabels: true` keeps the name in `service` instead. The app's [Traffic and scaling](/en/deploying-apps#traffic-and-scaling) section reads either layout.
 
 ### Grafana: Dashboards
 

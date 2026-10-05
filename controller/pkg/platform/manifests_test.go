@@ -129,3 +129,14 @@ func kubeStateMetricsBlock(t *testing.T, chart string) string {
 	}
 	return rest
 }
+
+// Pin the scrape interval so chart upgrades preserve the sample density needed
+// by the traffic view's 30s CPU rate windows.
+func TestKubePrometheusStackHelmChart_PinsTheCAdvisorScrapeInterval(t *testing.T) {
+	values := seededValues(t, KubePrometheusStackHelmChart(Resources{}))
+	kubelet, _ := values["kubelet"].(map[string]interface{})
+	sm, _ := kubelet["serviceMonitor"].(map[string]interface{})
+	if sm["cAdvisorInterval"] != "10s" {
+		t.Fatalf("kubelet.serviceMonitor.cAdvisorInterval = %v, want 10s", sm["cAdvisorInterval"])
+	}
+}
