@@ -122,10 +122,7 @@ func main() {
 	// Start the autonomous resource management controller. It runs in one
 	// console-api pod at a time; the pod name is the hostname.
 	resCtrl := controller.NewResourceController(clientset, crClient)
-	podName, err := os.Hostname()
-	if err != nil {
-		podName = "console-api-" + rand.Text()
-	}
+	podName := consoleAPIPodName()
 	go resCtrl.RunAsLeader(context.Background(), podName)
 
 	// Age out per-key usage history beyond the retention window.
@@ -153,7 +150,7 @@ func main() {
 	// client once the informers are warm and buildRouter is what publishes the
 	// resolver. Started before it, the two race and the loser is the swap,
 	// which then never happens and says nothing.
-	go startControllerManager(restConfig, crClient)
+	go startControllerManager(restConfig, crClient, clientset, podName)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -305,7 +302,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 	cluster := &handlers.Cluster{Client: clientset}
 	projects := &handlers.Projects{Client: clientset, CRClient: crClient, Domain: os.Getenv("CLUSTER_DOMAIN")}
 	quotaHandler := &handlers.Quota{Client: clientset, CRClient: crClient}
-	apps := &handlers.Apps{Client: clientset, CRClient: crClient, Domain: os.Getenv("CLUSTER_DOMAIN")}
+	apps := &handlers.Apps{Client: clientset, CRClient: crClient, Domain: os.Getenv("CLUSTER_DOMAIN"), RouteNamesReady: func(ctx context.Context) (bool, error) { return controllers.RouteNamesReady(ctx, crClient) }}
 	env := &handlers.Env{Client: clientset, CRClient: crClient}
 	secrets := &handlers.Secrets{Client: clientset}
 	routes := &handlers.Routes{Client: clientset, CRClient: crClient, Domain: os.Getenv("CLUSTER_DOMAIN")}
@@ -1006,7 +1003,7 @@ func preStopSleepSupported(cfg *rest.Config) bool {
 	return controllers.SupportsPreStopSleep(info, err)
 }
 
-func startControllerManager(cfg *rest.Config, direct crclient.Client) {
+func startControllerManager(cfg *rest.Config, direct crclient.Client, clientset kubernetes.Interface, podName string) {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(kipperv1.AddToScheme(scheme))
@@ -1014,6 +1011,10 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client) {
 	// Register networking and autoscaling types for reconciliation
 	utilruntime.Must(networkingv1.AddToScheme(scheme))
 	utilruntime.Must(autoscalingv2.AddToScheme(scheme))
+
+	// Admits new routes only in the pod running the route-name sweeper, once
+	// its generation is bootstrapped.
+	routeNameGate := controllers.NewRouteNameGate()
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
@@ -1042,7 +1043,7 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client) {
 		name  string
 		setup func(ctrl.Manager) error
 	}{
-		{"App", (&controllers.AppReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Domain: domain, SidecarImage: sidecarImage, Recorder: mgr.GetEventRecorderFor("app-controller"), PreStopSleep: preStopSleepSupported(cfg), Dial: controllers.TCPDial}).SetupWithManager}, //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
+		{"App", (&controllers.AppReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Domain: domain, SidecarImage: sidecarImage, Recorder: mgr.GetEventRecorderFor("app-controller"), PreStopSleep: preStopSleepSupported(cfg), Dial: controllers.TCPDial, RouteNames: routeNameGate}).SetupWithManager}, //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
 		{"Service", (&controllers.ServiceReconciler{
 			Client:              mgr.GetClient(),
 			APIReader:           mgr.GetAPIReader(),
@@ -1050,6 +1051,7 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client) {
 			Domain:              os.Getenv("CLUSTER_DOMAIN"),
 			ConsoleAuthCheckURL: serviceUIAuthCheckURL(),
 			ShareGrants:         shareGrantStoreFor(cfg),
+			RouteNames:          routeNameGate,
 		}).SetupWithManager},
 		{"Function", (&controllers.FunctionReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Domain: domain, Recorder: mgr.GetEventRecorderFor("function-controller")}).SetupWithManager}, //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
 		{"Job", (&controllers.JobReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Recorder: mgr.GetEventRecorderFor("job-controller")}).SetupWithManager},                                //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
@@ -1130,6 +1132,9 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client) {
 			mgr.GetEventRecorderFor("orphan-warner"), //nolint:staticcheck // RunOrphanWarner consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
 		)
 	}()
+
+	// One elected pod maintains route-name claims and attribution intervals.
+	go (&controllers.RouteNameSweeper{Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Clientset: clientset, PodName: podName, Gate: routeNameGate}).Run(context.Background())
 
 	log.Printf("CRD controller manager starting")
 	handlers.SetControllerManagerStarted(true)
@@ -1214,4 +1219,14 @@ func serviceUIAuthCheckURL() string {
 		return ""
 	}
 	return "http://console-api.kipper-system.svc.cluster.local:8080/auth/check"
+}
+
+// consoleAPIPodName uses the pod hostname as the election identity, with a
+// random fallback if the hostname cannot be read.
+func consoleAPIPodName() string {
+	name, err := os.Hostname()
+	if err != nil {
+		return "console-api-" + rand.Text()
+	}
+	return name
 }

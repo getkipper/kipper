@@ -26,6 +26,7 @@ import (
 // prints its findings and returns how many need a decision.
 var upgradeDataChecks = []func(context.Context, kubernetes.Interface, dynamic.Interface, io.Writer, string) (int, error){
 	checkAutoscalingData,
+	checkRouteNames,
 }
 
 // runUpgradeChecks runs every data check the upgrade runs, without changing

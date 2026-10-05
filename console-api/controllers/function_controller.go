@@ -33,6 +33,7 @@ import (
 	"github.com/getkipper/kipper/console-api/domain"
 	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	quotapkg "github.com/getkipper/kipper/console-api/quota"
+	"github.com/getkipper/kipper/controller/pkg/routename"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/controller/pkg/workload"
 )
@@ -1691,7 +1692,7 @@ func (r *FunctionReconciler) reconcileIngress(ctx context.Context, fn *kipperv1.
 	desired := &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "fn-" + fn.Name,
-			Namespace:   "keda",
+			Namespace:   routename.KEDAInterceptor.Namespace,
 			Labels:      labels,
 			Annotations: annotations,
 		},
@@ -1709,8 +1710,8 @@ func (r *FunctionReconciler) reconcileIngress(ctx context.Context, fn *kipperv1.
 									PathType: &pathType,
 									Backend: networkingv1.IngressBackend{
 										Service: &networkingv1.IngressServiceBackend{
-											Name: "keda-add-ons-http-interceptor-proxy",
-											Port: networkingv1.ServiceBackendPort{Number: 8080},
+											Name: routename.KEDAInterceptor.Service,
+											Port: networkingv1.ServiceBackendPort{Number: routename.KEDAInterceptor.Port},
 										},
 									},
 								},

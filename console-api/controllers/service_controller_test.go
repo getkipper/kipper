@@ -1860,3 +1860,32 @@ func TestRepairCredentials_ConvergesAUsernameWithNoDataBehindIt(t *testing.T) {
 		"the statefulset will initialise this database as kipper, whatever the Secret says")
 	assert.Equal(t, "secret", got["PASSWORD"], "a password that was never missing must not be replaced")
 }
+
+func TestReconcileUIIngress_RefusesACollidingRouteName(t *testing.T) {
+	first := &kipperv1.Service{ObjectMeta: metav1.ObjectMeta{Name: "prod-mailhog", Namespace: "team", UID: "uid-s1"}, Spec: kipperv1.ServiceSpec{Type: "mailhog"}}
+	second := &kipperv1.Service{ObjectMeta: metav1.ObjectMeta{Name: "mailhog", Namespace: "team-prod", UID: "uid-s2"}, Spec: kipperv1.ServiceSpec{Type: "mailhog"}}
+	gate := NewRouteNameGate()
+	gate.open()
+	c := crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(first, second,
+		namespaceWithUID("team", "uid-team"), namespaceWithUID("team-prod", "uid-team-prod")).
+		WithStatusSubresource(first, second).Build()
+	r := &ServiceReconciler{Client: c, Scheme: testScheme(), Domain: "example.com",
+		ConsoleAuthCheckURL: "https://console.example.com/api/v1/auth/check", RouteNames: gate}
+	ctx := context.Background()
+
+	require.NoError(t, r.reconcileUIIngress(ctx, first))
+	require.NoError(t, r.reconcileUIIngress(ctx, second))
+
+	assert.True(t, ingressExists(t, c, "team", "prod-mailhog-ui"))
+	assert.False(t, ingressExists(t, c, "team-prod", "mailhog-ui"), "both UIs would be team-prod-mailhog-ui to Traefik")
+	cond := meta.FindStatusCondition(second.Status.Conditions, kipperv1.ConditionRouteReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, reasonRouteNameTaken, cond.Reason)
+}
+
+func TestServiceRouteNameRetry(t *testing.T) {
+	svc := &kipperv1.Service{}
+	assert.Zero(t, serviceRouteNameRetry(svc))
+	svc.Status.Conditions = []metav1.Condition{{Type: kipperv1.ConditionRouteReady, Reason: reasonRouteNameTaken}}
+	assert.Equal(t, routeNameTakenRetry, serviceRouteNameRetry(svc), "a refused UI route looks again once the name may be free")
+}

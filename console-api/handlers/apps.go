@@ -23,6 +23,7 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/builder"
+	"github.com/getkipper/kipper/console-api/controllers"
 	"github.com/getkipper/kipper/console-api/internal/gitreach"
 	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	"github.com/getkipper/kipper/controller/pkg/appowner"
@@ -30,6 +31,7 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/gitcred"
 	"github.com/getkipper/kipper/controller/pkg/giturl"
 	"github.com/getkipper/kipper/controller/pkg/netguard"
+	"github.com/getkipper/kipper/controller/pkg/routename"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
@@ -41,6 +43,10 @@ type Apps struct {
 	// GitReach checks whether a git source can be cloned with the credential
 	// it is being given, before either is stored. Nil uses the real one.
 	GitReach GitReachFunc
+	// RouteNamesReady reports whether route names have been checked since the
+	// last console-api start. Nil leaves tenant route names unchecked, as the
+	// App controller does without a gate.
+	RouteNamesReady func(ctx context.Context) (bool, error)
 }
 
 // GitReachFunc reports whether a repository answers to a credential, and why
@@ -206,6 +212,10 @@ func (a *Apps) Create(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
+
+	if req.Route != nil && !a.routeNameAllowed(ctx, w, project, req.Name) {
+		return
+	}
 
 	// Ahead of the git-credentials Secret below, because that write outlives a
 	// refusal: a rejected create that had already stored a token would answer
@@ -748,4 +758,35 @@ func dockerfileRawURL(gitURL, branch string) string {
 	default:
 		return ""
 	}
+}
+
+// routeNameAllowed answers the request itself when the app's route would be
+// refused for its traffic name, so the caller hears it before anything is
+// written. The App controller makes the same decision and stays authoritative.
+func (a *Apps) routeNameAllowed(ctx context.Context, w http.ResponseWriter, namespace, name string) bool {
+	if _, platform := routename.Platform(routename.Key(namespace, name)); !platform {
+		if a.RouteNamesReady == nil {
+			return true
+		}
+		ready, err := a.RouteNamesReady(ctx)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to check the route name")
+			return false
+		}
+		if !ready {
+			w.Header().Set("Retry-After", "5")
+			respondError(w, http.StatusServiceUnavailable, "Route names are being checked after a console-api start. Try again in a few seconds.")
+			return false
+		}
+	}
+	refused, message, err := controllers.RouteNameRefusal(ctx, a.CRClient, namespace, name)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to check the route name")
+		return false
+	}
+	if refused {
+		respondError(w, http.StatusConflict, message)
+		return false
+	}
+	return true
 }

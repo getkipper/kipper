@@ -8,6 +8,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 
@@ -68,6 +69,9 @@ type ServiceReconciler struct {
 	// retained and deletion errors — so only non-deleting unit fixtures
 	// may leave it unset.
 	ShareGrants *share.GrantStore
+	// RouteNames says whether this process may publish a UI route that does
+	// not exist yet. Nil disables tenant route-name reservations.
+	RouteNames *RouteNameGate
 }
 
 func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -152,7 +156,15 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: serviceRouteNameRetry(&svc)}, nil
+}
+
+// serviceRouteNameRetry retries name collisions so a freed name can be claimed.
+func serviceRouteNameRetry(svc *kipperv1.Service) time.Duration {
+	if c := meta.FindStatusCondition(svc.Status.Conditions, kipperv1.ConditionRouteReady); c != nil && c.Reason == reasonRouteNameTaken {
+		return routeNameTakenRetry
+	}
+	return 0
 }
 
 func (r *ServiceReconciler) reconcileCredentialsSecret(ctx context.Context, svc *kipperv1.Service) error {
@@ -865,10 +877,15 @@ func (r *ServiceReconciler) reconcileUIIngress(ctx context.Context, svc *kipperv
 	var existing networkingv1.Ingress
 	err := r.Get(ctx, types.NamespacedName{Name: ingressName, Namespace: svc.Namespace}, &existing)
 	if errors.IsNotFound(err) {
-		return r.Create(ctx, desired)
+		return r.createUIIngress(ctx, svc, desired)
 	}
 	if err != nil {
 		return err
+	}
+	if r.RouteNames != nil {
+		if release, ok := r.RouteNames.Admit(); ok {
+			defer release()
+		}
 	}
 	existing.Spec = desired.Spec
 	existing.Annotations = desired.Annotations
@@ -1731,6 +1748,59 @@ func restartStamp(svc *kipperv1.Service) map[string]string {
 }
 
 func (r *ServiceReconciler) hostReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+// createUIIngress publishes a service UI route once its traffic name is the
+// service's own. Its backend is filed by Traefik under the same key as an app
+// route, so the same reservation applies.
+func (r *ServiceReconciler) createUIIngress(ctx context.Context, svc *kipperv1.Service, desired *networkingv1.Ingress) error {
+	decision, release, err := admitNewRoute(ctx, r.RouteNames, r.serviceReader(), r.Client, svc.Namespace, svc.Name)
+	if err != nil {
+		return err
+	}
+	switch decision {
+	case routeNamePending:
+		return fmt.Errorf("route names are being checked after a console-api start")
+	case routeNameTaken:
+		r.refuseUIRoute(ctx, svc, reasonRouteNameTaken, routeNameIndistinguishable)
+		return nil
+	case routeNameReservedForPlatform:
+		r.refuseUIRoute(ctx, svc, reasonRouteNamePlatform, routeNamePlatformReserved)
+		return nil
+	}
+	if release != nil {
+		defer release()
+	}
+	if meta.RemoveStatusCondition(&svc.Status.Conditions, kipperv1.ConditionRouteReady) {
+		if err := r.Status().Update(ctx, svc); err != nil {
+			log.FromContext(ctx).Error(err, "clearing the service UI route refusal")
+		}
+	}
+	return r.Create(ctx, desired)
+}
+
+// refuseUIRoute records on the Service why its UI route was not published.
+func (r *ServiceReconciler) refuseUIRoute(ctx context.Context, svc *kipperv1.Service, reason, message string) {
+	if !meta.SetStatusCondition(&svc.Status.Conditions, metav1.Condition{
+		Type:               kipperv1.ConditionRouteReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: svc.Generation,
+	}) {
+		return
+	}
+	if err := r.Status().Update(ctx, svc); err != nil {
+		log.FromContext(ctx).Error(err, "recording the service UI route refusal")
+	}
+}
+
+// serviceReader prefers uncached reads for route-name decisions.
+func (r *ServiceReconciler) serviceReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
 	}

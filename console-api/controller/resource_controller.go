@@ -25,6 +25,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/internal/leader"
 	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	quotapkg "github.com/getkipper/kipper/console-api/quota"
 	"github.com/getkipper/kipper/controller/pkg/labels"
@@ -148,7 +149,7 @@ type ResourceController struct {
 	belowMaxAt       map[string]time.Time    // namespace/name/uid of an HPA → last time it ran below its maximum
 	notReadyAlerted  map[string]string       // namespace/name/uid of an App → AutoscalingReady reason already alerted
 	mu               sync.Mutex
-	leader           leaderWorker
+	leader           leader.Worker
 	oomCapBytes      int64
 	nodePressureAt   time.Time // last node-pressure alert time
 	nodePressureSev  string    // severity of the last node-pressure alert
