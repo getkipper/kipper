@@ -182,6 +182,10 @@ A token set per app (under the app's Git settings) is a separate case. It lives 
 
 Each project environment runs in its own Kubernetes namespace. This provides **logical isolation**: each namespace has its own Deployments, Services, Secrets, and ConfigMaps. A project cannot access another project's secrets or environment variables.
 
+### Route names {#route-names}
+
+Different namespace and Service names can produce the same Traefik backend name. If their ports match too, requests can reach the wrong workload. Kipper checks new app and stateful service UI routes against cluster-wide name reservations, including names reserved for platform components. Existing tenant collisions are retained and need operator action; see [Route names](/en/deploying-apps#route-names) and the [upgrade checks](/en/maintenance#route-names).
+
 ### Network isolation between namespaces
 
 Kipper installs a NetworkPolicy called `kipper-workload-egress` in every project namespace, before

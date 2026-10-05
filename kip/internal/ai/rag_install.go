@@ -198,6 +198,9 @@ func (i *Installer) InstallRAG(ctx context.Context, opts RAGOptions) error {
 	if opts.Host == "" {
 		return fmt.Errorf("host is required: pass --host ask.<your-domain>")
 	}
+	if err := i.refuseOccupiedRouteName(ctx, anythingLLMRoute()); err != nil {
+		return err
+	}
 
 	report, err := DetectRAG(ctx, i.Clientset)
 	if err != nil {

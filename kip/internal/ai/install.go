@@ -150,6 +150,9 @@ func (i *Installer) Install(ctx context.Context, tier Tier, opts Options) error 
 	if opts.NodeName == "" {
 		return fmt.Errorf("nodeName is required (run Detect and pass report.BestNode.Name)")
 	}
+	if err := i.refuseOccupiedRouteName(ctx, libreChatRoute()); err != nil {
+		return err
+	}
 
 	model := opts.Model
 	if model == "" {

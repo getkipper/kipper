@@ -88,7 +88,7 @@ Examples:
 
 func init() {
 	upgradeCmd.Flags().Bool("skip-system", false, "skip cluster system components (Traefik, Longhorn, KEDA, etc.). Upgrade only Kipper CRDs and console")
-	upgradeCmd.Flags().Bool("yes", false, "skip the confirmation prompt before upgrading system components; autoscaling fixes are confirmed separately, by --repair-autoscaling when there is no terminal")
+	upgradeCmd.Flags().Bool("yes", false, "skip the confirmation prompts before upgrading system components and before removing app routes that collide with Kipper's own routes; autoscaling fixes are confirmed separately, by --repair-autoscaling when there is no terminal")
 	upgradeCmd.Flags().Bool("seed-credential-grants", false, "grant each shared git credential the projects whose apps already reference it, without asking. Skips the pre-rollout prompt on a legacy cluster; a no-op everywhere else")
 	upgradeCmd.Flags().String("image-tag", "", "install the console images built from this commit (a full sha) instead of the released ones, for testing a branch on a test cluster; requires --skip-system; a later 'kip upgrade' without it returns to the released images")
 	upgradeCmd.Flags().Bool("check", false, "run the upgrade's data checks and report what it would fix, without changing anything; exits non-zero when something needs a decision")
@@ -135,6 +135,11 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		confirmAutoscalingRepair,
 	)
 	if err != nil {
+		return err
+	}
+	if err := routeNameConsent(ctx, clientset, os.Stdout, term.IsTerminal(int(os.Stdin.Fd())), autoYes, func() (bool, error) {
+		return confirmInteractiveNonFatal("  Remove these routes so Kipper's own routes work? [y/N] ")
+	}); err != nil {
 		return err
 	}
 

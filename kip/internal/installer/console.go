@@ -185,7 +185,7 @@ metadata:
   name: console-api
   namespace: kipper-system
 rules:
-  # The Lease that keeps the resource auto-sizer to one console-api pod at a time.
+  # The Leases that keep the resource auto-sizer and the route-name sweeper to one console-api pod at a time.
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "create", "update"]

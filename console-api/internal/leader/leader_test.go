@@ -1,4 +1,4 @@
-package controller
+package leader
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 )
 
-var testLease = leaseTiming{LeaseDuration: 2 * time.Second, RenewDeadline: time.Second, RetryPeriod: 200 * time.Millisecond}
+var testLease = Timing{LeaseDuration: 2 * time.Second, RenewDeadline: time.Second, RetryPeriod: 200 * time.Millisecond}
 
 // activity records how many workers are active at once, and how many terms
 // each identity has started.
@@ -65,24 +65,24 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
-func startElector(t *testing.T, client kubernetes.Interface, identity string, worker *leaderWorker, a *activity) (stop func()) {
+func startElector(t *testing.T, client kubernetes.Interface, identity string, worker *Worker, a *activity) (stop func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runAsLeader(ctx, client, identity, testLease, worker, a.run(identity))
+		Run(ctx, client, "kipper-system", "test-lease", identity, testLease, worker, a.run(identity))
 		close(done)
 	}()
 	return func() { cancel(); <-done }
 }
 
-func TestAutoSizerRunsInOnePodAndHandsOver(t *testing.T) {
+func TestRunHoldsTheLeaseInOnePodAndHandsOver(t *testing.T) {
 	client := fake.NewClientset()
 	a := newActivity(0)
 
-	stopA := startElector(t, client, "pod-a", &leaderWorker{}, a)
+	stopA := startElector(t, client, "pod-a", &Worker{}, a)
 	waitFor(t, "pod-a to lead", func() bool { return a.termsOf("pod-a") == 1 })
-	stopB := startElector(t, client, "pod-b", &leaderWorker{}, a)
+	stopB := startElector(t, client, "pod-b", &Worker{}, a)
 	defer stopB()
 
 	// pod-a stops; pod-b takes over once the Lease expires.
@@ -96,7 +96,7 @@ func TestAutoSizerRunsInOnePodAndHandsOver(t *testing.T) {
 
 // A pod that loses the Lease and wins it back must not start a second worker
 // while the first is still finishing its tick.
-func TestAutoSizerWaitsForTheLastTermBeforeStartingAgain(t *testing.T) {
+func TestRunWaitsForTheLastTermBeforeStartingAgain(t *testing.T) {
 	client := fake.NewClientset()
 	// Failing every Lease update makes renewal fail, which ends the term. The
 	// fake does not enforce resourceVersion conflicts, so taking the Lease
@@ -116,7 +116,7 @@ func TestAutoSizerWaitsForTheLastTermBeforeStartingAgain(t *testing.T) {
 	release := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
 	defer release()
 
-	worker := &leaderWorker{beforeLock: func() { arrived.Add(1) }}
+	worker := &Worker{BeforeLock: func() { arrived.Add(1) }}
 	run := func(ctx context.Context) {
 		term := terms.Add(1)
 		if n := active.Add(1); n > maxActive.Load() {
@@ -132,7 +132,7 @@ func TestAutoSizerWaitsForTheLastTermBeforeStartingAgain(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { runAsLeader(ctx, client, "pod-a", testLease, worker, run); close(done) }()
+	go func() { Run(ctx, client, "kipper-system", "test-lease", "pod-a", testLease, worker, run); close(done) }()
 	defer func() { release(); cancel(); <-done }()
 
 	waitFor(t, "the first term", func() bool { return terms.Load() == 1 })

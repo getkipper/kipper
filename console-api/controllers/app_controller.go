@@ -79,6 +79,10 @@ type AppReconciler struct {
 	// stoppedPageFailed holds the UIDs of stopped apps whose stopped-page
 	// middleware could not be applied, so the pass schedules a retry.
 	stoppedPageFailed sync.Map
+
+	// RouteNames says whether this process may publish a route that does not
+	// exist yet. Nil disables tenant route-name reservations.
+	RouteNames *RouteNameGate
 }
 
 // hostReader returns the uncached reader for reservation reads, falling back to
@@ -374,6 +378,9 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 	}
 	if pageRetry := r.stoppedPageRetry(&app); pageRetry > 0 && (linkResync.RequeueAfter == 0 || pageRetry < linkResync.RequeueAfter) {
 		linkResync.RequeueAfter = pageRetry
+	}
+	if nameRetry := routeNameRetry(&app); nameRetry > 0 && (linkResync.RequeueAfter == 0 || nameRetry < linkResync.RequeueAfter) {
+		linkResync.RequeueAfter = nameRetry
 	}
 
 	return linkResync, nil
@@ -1364,6 +1371,17 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *kipperv1.App)
 	}
 	apimeta.RemoveStatusCondition(&app.Status.Conditions, kipperv1.ConditionRouteReady)
 
+	publish, release, updateOnly, err := r.claimRouteName(ctx, app)
+	if release != nil {
+		defer release()
+	}
+	if err != nil || !publish {
+		return err
+	}
+	if updateOnly {
+		ctx = withRouteUpdateOnly(ctx)
+	}
+
 	// Redirect-source hosts are resolved only after the canonical host holds
 	// its claim. A refused alias degrades the route — it is skipped and
 	// reported on RouteReady — while the canonical host and the remaining
@@ -1538,6 +1556,9 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *kipperv1.App)
 
 	// Withdraw the old host before moving its guard.
 	if err := r.withdrawSupersededPublication(ctx, app, host); err != nil {
+		if stderrors.Is(err, errHostChangeWaits) {
+			return r.withdrawForHostChange(ctx, app)
+		}
 		return err
 	}
 

@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/controllers"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 )
 
@@ -401,4 +402,65 @@ func TestAppCRToResponse_CarriesTheDesiredCount(t *testing.T) {
 	if got := appCRToResponse(app); got.DesiredReplicas != 1 {
 		t.Errorf("an unset count deploys one replica, got desired %d", got.DesiredReplicas)
 	}
+}
+
+func routeNamesReady(ready bool) func(context.Context) (bool, error) {
+	return func(context.Context) (bool, error) { return ready, nil }
+}
+
+func createWithRoute(t *testing.T, handler *Apps, namespace, name string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := strings.NewReader(`{"name":"` + name + `","image":"nginx:1.25","port":8080,"route":{"host":"` + name + `.example.com"}}`)
+	r := chi.NewRouter()
+	r.Post("/projects/{name}/apps", handler.Create)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("POST", "/projects/"+namespace+"/apps", body))
+	return rec
+}
+
+func TestCreateApp_RefusesARouteWhoseTrafficNameIsTaken(t *testing.T) {
+	claim := controllers.RouteNameClaimObject("team-prod-web", "team", "uid-team")
+	crClient := crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(claim,
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team", UID: "uid-team"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team-prod", UID: "uid-team-prod"}}).Build()
+	handler := &Apps{Client: fake.NewClientset(), CRClient: crClient, RouteNamesReady: routeNamesReady(true)}
+
+	rec := createWithRoute(t, handler, "team-prod", "web")
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "same traffic name")
+	var app kipperv1.App
+	assert.True(t, apierrors.IsNotFound(crClient.Get(context.Background(), crclient.ObjectKey{Namespace: "team-prod", Name: "web"}, &app)))
+}
+
+func TestCreateApp_RefusesAPlatformTrafficName(t *testing.T) {
+	crClient := crfake.NewClientBuilder().WithScheme(testScheme()).
+		WithObjects(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kipper", UID: "uid-k"}}).Build()
+	handler := &Apps{Client: fake.NewClientset(), CRClient: crClient, RouteNamesReady: routeNamesReady(true)}
+
+	rec := createWithRoute(t, handler, "kipper", "system-console-api")
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "reserved for one of Kipper's own routes")
+}
+
+func TestCreateApp_AsksForARetryWhileRouteNamesAreBeingChecked(t *testing.T) {
+	crClient := crfake.NewClientBuilder().WithScheme(testScheme()).
+		WithObjects(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shop", UID: "uid-shop"}}).Build()
+	handler := &Apps{Client: fake.NewClientset(), CRClient: crClient, RouteNamesReady: routeNamesReady(false)}
+
+	rec := createWithRoute(t, handler, "shop", "web")
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.NotEmpty(t, rec.Header().Get("Retry-After"))
+}
+
+func TestCreateApp_RefusesAPlatformNameEvenWhileRouteNamesAreBeingChecked(t *testing.T) {
+	crClient := crfake.NewClientBuilder().WithScheme(testScheme()).
+		WithObjects(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kipper", UID: "uid-k"}}).Build()
+	handler := &Apps{Client: fake.NewClientset(), CRClient: crClient, RouteNamesReady: routeNamesReady(false)}
+
+	rec := createWithRoute(t, handler, "kipper", "system-console-api")
+
+	require.Equal(t, http.StatusConflict, rec.Code, "a reserved name is refused for good, not retried")
 }

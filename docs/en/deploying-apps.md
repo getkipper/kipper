@@ -259,6 +259,18 @@ See the [Source tab](/en/deploying-apps#from-a-git-repository) in the web consol
 
 See [Route groups](/en/routing#route-groups-path-based-routing) to serve several apps under one hostname.
 
+### Route names
+
+Traefik identifies each backend by its namespace, Service name and port, joined with dashes. For example, app `web` in namespace `shop-prod` on port 8080 becomes `shop-prod-web-8080`. Consecutive dashes collapse to one, so `prod--web` and `prod-web` produce the same name. App `prod-web` in namespace `team` also shares a name with app `web` in namespace `team-prod` when their ports match. Such collisions can send requests to the wrong backend. Stateful service UIs use the same naming scheme.
+
+Kipper reserves the namespace-and-Service part of the name across all ports before publishing a new route. Turning a route off preserves its reservation while the workload exists. Another namespace can claim it after the owning namespace is deleted. Unused reservations can also be removed once no matching workload or route remains and their attribution history has expired.
+
+A conflicting app gets no new route. Its `RouteReady` condition is False with reason `RouteNameTaken`, and a warning event asks you to choose another name without identifying the other project. A refused service UI shows the same condition. Use a different workload name, or wait for the reservation to become available; refusals are retried every 10 minutes. Within one namespace, differently named workloads that normalize to the same key also block new routes.
+
+Kipper's platform route names are reserved even when the component is not installed. For example, app `system-console-api` in namespace `kipper` conflicts with the console API in `kipper-system` and is refused with reason `RouteNameReservedForPlatform`. Console app creation checks these names before writing anything. `kip apply` can create the App, which then reports the route refusal. Existing routes follow the [upgrade rules](/en/maintenance#route-names).
+
+After a console-api start, new tenant routes wait for the elected pod to check existing names. This can take longer while older console-api pods are still running. A host change that requires recreating an Ingress also waits: the old route is withdrawn, and publication on the new host is retried after the checks. Changes that only update existing routing resources can proceed. Apps waiting for admission report `RouteNamePending`; console creation requests made during bootstrap ask you to retry.
+
 ## Scaling
 
 ```bash

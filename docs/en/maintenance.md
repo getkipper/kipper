@@ -61,7 +61,7 @@ kip upgrade --yes --repair-autoscaling  # also apply autoscaling fixes without a
 | Flag | Default | Description |
 |---|---|---|
 | `--skip-system` | `false` | Skip the cluster components (Traefik, Longhorn, KEDA, Velero, Zot, monitoring). CRDs, console, and the cluster's own trust material still move. Use this in production to avoid touching component versions. |
-| `--yes` | `false` | Skip the confirmation prompt before upgrading cluster components. Required in non-interactive contexts (CI, scripts). Autoscaling fixes are confirmed separately, so a run without a terminal also needs `--repair-autoscaling` when there are fixes to apply |
+| `--yes` | `false` | Confirm cluster-component upgrades and removal of app routes that collide with installed platform routes. Required for these steps in non-interactive contexts (CI, scripts). Autoscaling fixes are confirmed separately, so a run without a terminal also needs `--repair-autoscaling` when there are fixes to apply |
 | `--check` | `false` | Run the upgrade's data checks and report what it would fix, without changing anything. Needs no SSH key. Exits non-zero when something needs a decision. See [Checking before an upgrade](#checking-before-an-upgrade) |
 | `--repair-autoscaling` | `false` | Apply the autoscaling fixes the upgrade lists without asking. Required in non-interactive contexts when there are fixes to apply |
 | `--skip-autoscaling-check` | `false` | Upgrade although some apps' autoscaling settings need a decision, leaving those apps as they are |
@@ -77,7 +77,7 @@ Upgrade `kip` first, then run the check before every upgrade:
 kip upgrade --check
 ```
 
-The check lists findings and proposed fixes without changing the cluster. It reads apps and Deployments through the Kubernetes API, so it needs no SSH key. It exits non-zero if a check fails or an app needs a decision; otherwise it exits zero.
+The check lists findings and proposed fixes without changing the cluster. It reads apps, Deployments and Ingresses through the Kubernetes API, so it needs no SSH key. It exits non-zero if a check fails or an app needs a decision; otherwise it exits zero.
 
 The check covers app [autoscaling settings](/en/deploying-apps#autoscaling). Older apps can have invalid policies or stored counts outside their bounds:
 
@@ -93,9 +93,19 @@ The check covers app [autoscaling settings](/en/deploying-apps#autoscaling). Old
           Set the count you want with 'kip app scale worker --project shop --environment prod --replicas N', with N from 2 to 5.
 ```
 
+#### Route names
+
+The check also lists routes whose [backend names](/en/deploying-apps#route-names) share a normalized key:
+
+- **A route matching an installed Kipper backend's key and port.** For example, app `system-console-api` in namespace `kipper` on port 8080 conflicts with the console API. The new App reconciler removes conflicting routes it owns, so use a different app name to keep the app reachable. The check exits non-zero, and `kip upgrade` requires confirmation before making changes. Use `--yes` to confirm without a prompt. Ingresses outside the App reconciler's ownership require manual removal.
+- **A tenant route using a platform key without an exact collision.** The platform component may be absent or use a different port. Existing routes are retained. `kip ai` refuses to install a bundle while another namespace uses its key, regardless of port; rename or remove the conflicting route first.
+- **Different tenant backends sharing a key.** Existing routes are retained. If their ports also match, requests can reach the wrong backend. Use distinct names to resolve the collision. Within one namespace, removing a colliding route prevents it from being recreated while the other workload remains.
+
+The last two findings are advisory and do not change the exit code. Shared reservations are reassessed at the next console-api bootstrap, after the earlier pods have stopped. Resolving a collision does not separate traffic already recorded under the shared backend name.
+
 #### What the upgrade does with the findings
 
-`kip upgrade` runs the same check before its first change and prints the same list. With nothing to fix it carries on without asking. Otherwise it asks:
+`kip upgrade` checks autoscaling settings before its first change and prints the proposed fixes. If there are autoscaling repairs to apply, it asks:
 
 ```
   Apply these fixes? [y/N]

@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"strings"
 
@@ -296,8 +297,19 @@ func (r *AppReconciler) withdrawSupersededPublication(ctx context.Context, app *
 			return nil
 		}
 	}
+	if routeUpdateOnly(ctx) {
+		return errHostChangeWaits
+	}
 	return r.deleteOwnedIngress(ctx, app)
 }
+
+// errRouteCreateDeferred routes blocked Ingress creation through protection-
+// failure handling, so missing guards trigger a retry.
+var errRouteCreateDeferred = stderrors.New("creating this Ingress waits for route names to be checked")
+
+// errHostChangeWaits defers a host change because recreating its Ingress
+// requires admission through the route-name gate.
+var errHostChangeWaits = stderrors.New("a host change waits for route names to be checked")
 
 // guardEnforcing checks installed Ingresses and middleware to decide whether
 // the route can keep serving after a failed reconciliation.
@@ -565,6 +577,9 @@ func (r *AppReconciler) applyOwnedIngress(ctx context.Context, app *kipperv1.App
 	var existing networkingv1.Ingress
 	err := r.Get(ctx, client.ObjectKeyFromObject(desired), &existing)
 	if errors.IsNotFound(err) {
+		if routeUpdateOnly(ctx) {
+			return errRouteCreateDeferred
+		}
 		return r.Create(ctx, desired)
 	}
 	if err != nil {
