@@ -25,8 +25,8 @@ const (
 	reasonRouteNamePlatform    = "RouteNameReservedForPlatform"
 	reasonRouteNameShared      = "RouteNameShared"
 	reasonRouteNamePending     = "RouteNamePending"
-	routeNameIndistinguishable = "Another workload on the cluster would get the same traffic name, so Traefik would mix the two routes' requests. Choose another name."
-	routeNamePlatformReserved  = "This name is reserved for one of Kipper's own routes. Choose another name."
+	routeNameIndistinguishable = "This name conflicts with another app or service. Choose a different name to create the route."
+	routeNamePlatformReserved  = "This name is reserved for a Kipper component. Choose a different name to create the route."
 )
 
 const (
@@ -83,7 +83,7 @@ func (r *AppReconciler) claimRouteName(ctx context.Context, app *kipperv1.App) (
 	switch decision {
 	case routeNamePending:
 		r.setRouteNameCondition(app, metav1.ConditionFalse, reasonRouteNamePending,
-			"Waiting for route names to be checked after a console-api start.")
+			"The route is waiting for a name check. It will retry automatically.")
 		return false, nil, false, nil
 	case routeNameTaken:
 		r.refuseRouteName(app, reasonRouteNameTaken, routeNameIndistinguishable)
@@ -152,13 +152,13 @@ func (r *AppReconciler) claimPlatformRouteName(ctx context.Context, app *kipperv
 	switch {
 	case live && installedPort == platform.Port:
 		r.refuseRouteName(app, reasonRouteNamePlatform,
-			"This route used the same traffic name as one of Kipper's own routes and was removed. Choose another name.")
+			"The route was removed because it conflicts with a Kipper component. Use a different app name to restore access.")
 		return false, r.deleteOwnedRouteIngresses(ctx, app)
 	case live && app.Spec.Port == platform.Port:
 		// The Service has already moved to the new port, so the old route
 		// would point at nothing; it is removed rather than left broken.
 		r.refuseRouteName(app, reasonRouteNamePlatform,
-			"This port gives the route the same traffic name as one of Kipper's own routes, so the route was removed. Choose another name or port.")
+			"The route was removed because this port causes a conflict with a Kipper component. Use a different app name to restore access.")
 		return false, r.deleteOwnedRouteIngresses(ctx, app)
 	}
 	return true, nil
@@ -185,7 +185,7 @@ func (r *AppReconciler) withdrawForHostChange(ctx context.Context, app *kipperv1
 		return fmt.Errorf("withdrawing a route whose host change waits: %w", err)
 	}
 	r.setRouteNameCondition(app, metav1.ConditionFalse, reasonRouteNamePending,
-		"Waiting for route names to be checked after a console-api start; the route moves to its new host once they are.")
+		"The old route has been removed. The route on the new host is waiting for a name check and will retry automatically.")
 	return errRouteCreateDeferred
 }
 
@@ -227,7 +227,7 @@ func (r *AppReconciler) markSharedRouteName(ctx context.Context, app *kipperv1.A
 		return err
 	}
 	r.setRouteNameCondition(app, metav1.ConditionTrue, reasonRouteNameShared,
-		"This route works, but another workload on the cluster has the same traffic name, so traffic cannot be shown for it. Rename one of them.")
+		"The route is still published, but its name conflicts with another app or service. Request figures are unavailable. Use a different app name to avoid requests reaching the wrong destination.")
 	return nil
 }
 

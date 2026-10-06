@@ -115,27 +115,28 @@ func printRouteNameFindings(out io.Writer, f routeNameFindings) {
 		return
 	}
 	if len(f.PlatformCollisions) > 0 {
-		_, _ = fmt.Fprintf(out, "  ✗   These routes have the same traffic name as one of Kipper's own routes, so Traefik\n"+
-			"      sends one host's requests to the other. The new console-api removes the routes of Kipper apps\n"+
-			"      among them so Kipper's route works; rename each app to keep it reachable. An Ingress that\n"+
-			"      Kipper does not manage is not removed and needs deleting by whoever created it:\n")
+		_, _ = fmt.Fprintf(out, "  ✗   These routes conflict with an installed Kipper component on the same port.\n"+
+			"      Requests can reach the wrong app or service. The upgrade removes conflicting\n"+
+			"      app routes managed by Kipper. Use different app names to keep them reachable.\n"+
+			"      Remove conflicting routes that Kipper does not manage yourself:\n")
 		for _, r := range f.PlatformCollisions {
 			_, _ = fmt.Fprintf(out, "      - %s\n", r)
 		}
 	}
 	if len(f.Occupied) > 0 {
-		_, _ = fmt.Fprintf(out, "  !   These routes use the traffic name of an optional Kipper route that is not installed,\n"+
-			"      or installed on another port. They keep working, show no traffic, and that Kipper route\n"+
-			"      cannot be installed until they are renamed:\n")
+		_, _ = fmt.Fprintf(out, "  !   These routes use names reserved for Kipper components that are absent or use\n"+
+			"      different ports. Existing routes stay available, but request figures are unavailable.\n"+
+			"      Rename or remove conflicting routes before installing those components:\n")
 		for _, r := range f.Occupied {
 			_, _ = fmt.Fprintf(out, "      - %s\n", r)
 		}
 	}
 	if len(f.Shared) > 0 {
-		_, _ = fmt.Fprintf(out, "  !   These routes share a traffic name, so Traefik can send their requests to one of them.\n"+
-			"      The upgrade keeps them as they are. Rename one app of each pair; traffic shows again after the\n"+
-			"      next console-api start, which every 'kip upgrade' causes. Within one namespace, a route\n"+
-			"      removed from one of the pair cannot come back under that name:\n")
+		_, _ = fmt.Fprintf(out, "  !   These apps or services have conflicting route names. The upgrade keeps their routes.\n"+
+			"      If ports match, requests can reach the wrong app or service. Give each a distinct\n"+
+			"      name, then run 'kip upgrade' to recheck names and allow new request figures.\n"+
+			"      In the same namespace, a removed route cannot be recreated while the conflicting\n"+
+			"      app or service remains:\n")
 		for _, routes := range f.Shared {
 			_, _ = fmt.Fprintf(out, "      - %s\n", joinRoutes(routes))
 		}

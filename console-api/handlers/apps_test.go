@@ -428,7 +428,7 @@ func TestCreateApp_RefusesARouteWhoseTrafficNameIsTaken(t *testing.T) {
 	rec := createWithRoute(t, handler, "team-prod", "web")
 
 	require.Equal(t, http.StatusConflict, rec.Code)
-	assert.Contains(t, rec.Body.String(), "same traffic name")
+	assert.Contains(t, rec.Body.String(), "conflicts with another app or service")
 	var app kipperv1.App
 	assert.True(t, apierrors.IsNotFound(crClient.Get(context.Background(), crclient.ObjectKey{Namespace: "team-prod", Name: "web"}, &app)))
 }
@@ -441,7 +441,7 @@ func TestCreateApp_RefusesAPlatformTrafficName(t *testing.T) {
 	rec := createWithRoute(t, handler, "kipper", "system-console-api")
 
 	require.Equal(t, http.StatusConflict, rec.Code)
-	assert.Contains(t, rec.Body.String(), "reserved for one of Kipper's own routes")
+	assert.Contains(t, rec.Body.String(), "reserved for a Kipper component")
 }
 
 func TestCreateApp_AsksForARetryWhileRouteNamesAreBeingChecked(t *testing.T) {

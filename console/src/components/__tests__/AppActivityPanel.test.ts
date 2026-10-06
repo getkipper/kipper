@@ -78,7 +78,7 @@ describe('AppActivityPanel', () => {
     expect(find('chart-usage').exists()).toBe(true)
     expect(find('chart-pods').exists()).toBe(true)
     expect(wrapper.findAll('[data-testid="chart-marker-solid"]')).toHaveLength(3)
-    expect(find('activity-guide').text()).toContain('adds pods above about 77% (277m of 360m)')
+    expect(find('activity-guide').text()).toContain('pods may be added above about 77% (277m of 360m)')
   })
 
   it('remembers the chosen range in this browser', async () => {
@@ -102,7 +102,7 @@ describe('AppActivityPanel', () => {
     const svg = find('chart-pods').find('svg')
     svg.element.getBoundingClientRect = () => ({ left: 0, width: 300, top: 0, height: 64, right: 300, bottom: 64, x: 0, y: 0, toJSON: () => ({}) })
     await svg.trigger('mousemove', { clientX: 299 })
-    expect(find('activity-change').text()).toContain('The autoscaler changed the count from 2 pods to 3 pods.')
+    expect(find('activity-change').text()).toContain('The autoscaler changed the desired count from 2 pods to 3 pods.')
     expect(find('activity-change').text()).toContain('CPU peaked at 97% of its request')
     expect(find('activity-readout').text()).toContain('30 requests/min (peak 40)')
   })
@@ -153,7 +153,7 @@ describe('AppActivityPanel', () => {
   it('opens on memory when memory is the only autoscaled metric', async () => {
     await open(response(), { ...tracking, cpu_target: 0, memory_target: 80 })
     expect(find('chart-usage').attributes('data-testid')).toBe('chart-usage')
-    expect(wrapper.text()).toContain('Memory as a share of its request')
+    expect(wrapper.text()).toContain('Memory use (% of resource request)')
   })
 
   it('refreshes every minute while the page is visible', async () => {

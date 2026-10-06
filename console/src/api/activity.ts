@@ -77,6 +77,8 @@ export interface AppActivity {
   /** Unix seconds, one per chart point. */
   timestamps?: number[]
   traffic?: TrafficState
+  /** With not_attributed, `shared` means another app or service has a conflicting route name. */
+  traffic_reason?: 'shared'
   requests_per_min?: RequestsByClass
   requests_peak_per_min?: Series
   cpu_pct_of_request?: Series

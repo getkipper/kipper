@@ -1764,7 +1764,7 @@ func (r *ServiceReconciler) createUIIngress(ctx context.Context, svc *kipperv1.S
 	}
 	switch decision {
 	case routeNamePending:
-		return fmt.Errorf("route names are being checked after a console-api start")
+		return fmt.Errorf("the service UI route is waiting for a name check; it will retry automatically")
 	case routeNameTaken:
 		r.refuseUIRoute(ctx, svc, reasonRouteNameTaken, routeNameIndistinguishable)
 		return nil

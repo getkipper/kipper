@@ -28,15 +28,15 @@ describe('markerLook', () => {
 
 describe('changeSummary', () => {
   it('names the autoscaler only when the cause is its event', () => {
-    expect(changeSummary(change())).toBe('The autoscaler changed the count from 2 pods to 3 pods.')
-    expect(changeSummary(change({ cause: 'while_autoscaling' }))).toContain('No record says who changed it.')
+    expect(changeSummary(change())).toBe('The autoscaler changed the desired count from 2 pods to 3 pods.')
+    expect(changeSummary(change({ cause: 'while_autoscaling' }))).toContain('The cause was not recorded.')
   })
 
-  it('explains a scale to 0 as a stop only with an autoscaler on both sides', () => {
-    expect(changeSummary(change({ to: 0, cause: 'to_zero' }))).toContain('only by stopping it')
-    expect(changeSummary(change({ to: 0, cause: 'to_zero', autoscaled: false }))).toBe('The count went from 2 pods to 0 pods.')
-    expect(changeSummary(change({ from: 0, to: 2, cause: 'from_zero' }))).toContain('only when it is started')
-    expect(changeSummary(change({ from: 0, to: 2, cause: 'from_zero', autoscaled: false }))).toBe('The count rose from 0 pods to 2 pods.')
+  it('explains stop and minimum behaviour when autoscaling data is present', () => {
+    expect(changeSummary(change({ to: 0, cause: 'to_zero' }))).toContain('Stop an app to take it to 0 pods')
+    expect(changeSummary(change({ to: 0, cause: 'to_zero', autoscaled: false }))).toBe('The desired count changed from 2 pods to 0 pods.')
+    expect(changeSummary(change({ from: 0, to: 2, cause: 'from_zero' }))).toContain('Autoscaling keeps an active app at or above its minimum.')
+    expect(changeSummary(change({ from: 0, to: 2, cause: 'from_zero', autoscaled: false }))).toBe('The desired count changed from 0 pods to 2 pods.')
   })
 })
 
@@ -49,21 +49,21 @@ describe('changeObservation', () => {
   }
 
   it('phrases the figures as what was measured', () => {
-    expect(changeObservation(change({ around: { ...around, requests: { total: 3, not_found: 0, aborted: 0, server_error: 1, other: 2 } } }))).toContain('of which 1 server error.')
+    expect(changeObservation(change({ around: { ...around, requests: { total: 3, not_found: 0, aborted: 0, server_error: 1, other: 2 } } }))).toContain('including 1 server error.')
     expect(changeObservation(change({ around }))).toBe(
-      'In the 2 minutes before: CPU peaked at 97% of its request (target 70%, average 41%). About 57 requests, of which 37 abandoned and 17 not found.',
+      'In the 2 minutes before this change: CPU peaked at 97% of its request (target 70%, average 41%). About 57 requests, including 37 abandoned and 17 not found.',
     )
   })
 
   it('adds the sampling note when no peak reached the target plus tolerance', () => {
     const low = { ...around, cpu: { peak_pct: 75, avg_pct: 40, target_pct: 70 } }
-    expect(changeObservation(change({ around: low }))).toContain('The autoscaler takes its own samples')
-    expect(changeObservation(change({ around }))).not.toContain('takes its own samples')
-    expect(changeObservation(change({ from: 3, to: 2, cause: 'while_autoscaling', around: low }))).not.toContain('takes its own samples')
+    expect(changeObservation(change({ around: low }))).toContain('The autoscaler measures usage separately')
+    expect(changeObservation(change({ around }))).not.toContain('measures usage separately')
+    expect(changeObservation(change({ from: 3, to: 2, cause: 'while_autoscaling', around: low }))).not.toContain('measures usage separately')
   })
 
   it('gives the reason when the figures are missing', () => {
-    expect(changeObservation(change({ around_unavailable: 'Prometheus no longer holds the data from before this change.' }))).toContain('no longer holds')
+    expect(changeObservation(change({ around_unavailable: 'Measurements from before this change are no longer available.' }))).toContain('no longer available')
     expect(changeObservation(change())).toBeNull()
   })
 })
@@ -73,16 +73,16 @@ describe('targetGuide', () => {
 
   it('gives the trigger with the default tolerance named and the absolute figures', () => {
     expect(targetGuide(config(), withRequest, false)).toEqual([
-      "Target: CPU at 70% of request. With Kubernetes' default 10% tolerance, the autoscaler adds pods above about 77% (277m of 360m), up to the maximum of 3.",
+      "CPU target: 70% of the resource request. With the default 10% tolerance, pods may be added above about 77% (277m of 360m), up to 3 pods.",
     ])
   })
 
   it('says no more pods are added at the maximum', () => {
-    expect(targetGuide(config(), withRequest, true)[0]).toContain('at the maximum of 3 and adds no more')
+    expect(targetGuide(config(), withRequest, true)[0]).toContain('maximum of 3 pods prevents further autoscaling increases')
   })
 
   it('says either metric can add a pod when both are tracked', () => {
-    expect(targetGuide(config({ memory_target: 80 }), withRequest, false)).toContain('Either metric can add a pod.')
+    expect(targetGuide(config({ memory_target: 80 }), withRequest, false)).toContain('Either target can trigger more pods.')
   })
 
   it('is empty while autoscaling is off or the app is stopped', () => {
@@ -94,8 +94,9 @@ describe('targetGuide', () => {
 describe('trafficNote and trafficPartial', () => {
   it('explains each state without data in one sentence', () => {
     expect(trafficNote(activity({ traffic: 'no_route' }))).toContain('no route')
-    expect(trafficNote(activity({ traffic: 'not_attributed' }))).toContain('held its route name')
-    expect(trafficNote(activity({ traffic: 'unavailable' }))).toContain('could not be read')
+    expect(trafficNote(activity({ traffic: 'not_attributed' }))).toBe('No request figures are available for this range.')
+    expect(trafficNote(activity({ traffic: 'not_attributed', traffic_reason: 'shared' }))).toContain('Use a different app name.')
+    expect(trafficNote(activity({ traffic: 'unavailable' }))).toContain('could not be loaded')
     expect(trafficNote(activity({ traffic: 'available' }))).toBeNull()
   })
 
