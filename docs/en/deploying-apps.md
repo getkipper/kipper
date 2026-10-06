@@ -22,16 +22,17 @@ The web console's Deploys tab shows all three as side-by-side cards, so you can 
 ## From a container image
 
 ```bash
-kip app deploy --name api --image ghcr.io/acme/api:latest --port 3000
+kip app deploy --name shop --image ghcr.io/acme/shop:latest --port 3000
 ```
 
 ```
-  Deploying api...
+  Deploying shop...
   ✔  Deployment created
   ✔  Service created
-  ✔  Ingress created
-  ✔  Live at https://api--203-0-113-10.kipper.run
+  ✔  Public URL: https://shop--203-0-113-10.kipper.run
 ```
+
+The last line shows the app's public URL once its route is published. If the [route name](#route-names) or hostname is taken or reserved, kip prints `✗  Public URL unavailable:` with the reason; choose another app name or hostname. A pending or unconfirmed URL means you should try it again shortly. Route publication is separate from app health; use `kip app list` to check whether the app is ready.
 
 ### What this creates
 
@@ -41,7 +42,7 @@ flowchart LR
     Gateway -->|proxy| Traefik
     Traefik -->|Host header| Ingress
     Ingress --> Service
-    Service --> Pod[Pod: api]
+    Service --> Pod[Pod: shop]
 ```
 
 Behind the scenes, Kipper creates an `App` Custom Resource (`kipper.run/v1alpha1`). A reconciler then ensures the underlying Kubernetes resources exist:
