@@ -450,22 +450,27 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 	if routeGroup != "" {
 		fmt.Printf("  ✔  Route added: %s → %s\n", routePath, name)
 	}
-	// Report the app's real route, read back from the CR: a bare redeploy keeps
-	// a console-set custom host, or may have no route at all, so the computed
-	// default domain can be wrong.
-	if app, getErr := d.Dynamic.Resource(deployer.AppGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{}); getErr == nil {
-		if host, _, _ := unstructured.NestedString(app.Object, "spec", "route", "host"); host != "" {
-			path, _, _ := unstructured.NestedString(app.Object, "spec", "route", "path")
-			fmt.Printf("  ✔  Live at https://%s%s\n\n", host, path)
-		} else {
-			fmt.Printf("  ✔  Deployed (no public route)\n\n")
+	// Read back the saved route: a bare redeploy preserves a custom host or
+	// absent route. Check the outcome because a requested route may be refused.
+	getRoute := func(ctx context.Context) (routeView, error) {
+		app, err := d.Dynamic.Resource(deployer.AppGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return routeView{}, err
 		}
+		v := routeView{app: app}
+		// A failed Ingress read leaves publication unconfirmed;
+		// status may still explain a refusal.
+		if ing, ingErr := d.Client.NetworkingV1().Ingresses(namespace).Get(ctx, name, metav1.GetOptions{}); ingErr == nil {
+			v.ingressHosts = ownedIngressHosts(ing, app)
+		}
+		return v, nil
+	}
+	line, app := waitForRouteOutcome(ctx, getRoute, routeOutcomeWait, time.Second)
+	fmt.Printf("%s\n\n", line)
+	if app != nil {
 		if _, stopped, _ := unstructured.NestedMap(app.Object, "spec", "stopped"); stopped {
 			fmt.Printf("  !   %s is stopped, so the changes apply when it is started: kip app start %s\n\n", name, name)
 		}
-	} else {
-		// Fall back to the computed domain if the read-back fails.
-		fmt.Printf("  ✔  Live at https://%s%s\n\n", domain, routePath)
 	}
 
 	return nil
