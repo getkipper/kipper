@@ -184,7 +184,9 @@ Each project environment runs in its own Kubernetes namespace. This provides **l
 
 ### Route names {#route-names}
 
-Different namespace and Service names can produce the same Traefik backend name. If their ports match too, requests can reach the wrong workload. Kipper checks new app and stateful service UI routes against cluster-wide name reservations, including names reserved for platform components. Existing tenant collisions are retained and need operator action; see [Route names](/en/deploying-apps#route-names) and the [upgrade checks](/en/maintenance#route-names).
+Kipper checks new app and service UI routes for conflicting names, including names reserved for Kipper components. Choose a different app or service name if the route is refused.
+
+Existing app and service routes that conflict with each other remain published after an upgrade. If their ports match, requests can reach the wrong app or service. Give them distinct names. The upgrade removes app routes managed by Kipper that conflict with an installed Kipper component on the same port. See [Route names](/en/deploying-apps#route-names) and the [upgrade checks](/en/maintenance#route-names).
 
 ### Network isolation between namespaces
 

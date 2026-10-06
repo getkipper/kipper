@@ -95,13 +95,13 @@ The check covers app [autoscaling settings](/en/deploying-apps#autoscaling). Old
 
 #### Route names
 
-The check also lists routes whose [backend names](/en/deploying-apps#route-names) share a normalized key:
+`kip upgrade --check` lists [route name conflicts](/en/deploying-apps#route-names) and explains which routes need attention:
 
-- **A route matching an installed Kipper backend's key and port.** For example, app `system-console-api` in namespace `kipper` on port 8080 conflicts with the console API. The new App reconciler removes conflicting routes it owns, so use a different app name to keep the app reachable. The check exits non-zero, and `kip upgrade` requires confirmation before making changes. Use `--yes` to confirm without a prompt. Ingresses outside the App reconciler's ownership require manual removal.
-- **A tenant route using a platform key without an exact collision.** The platform component may be absent or use a different port. Existing routes are retained. `kip ai` refuses to install a bundle while another namespace uses its key, regardless of port; rename or remove the conflicting route first.
-- **Different tenant backends sharing a key.** Existing routes are retained. If their ports also match, requests can reach the wrong backend. Use distinct names to resolve the collision. Within one namespace, removing a colliding route prevents it from being recreated while the other workload remains.
+- **A route conflicts with an installed Kipper component on the same port.** For example, app `system-console-api` in namespace `kipper` on port 8080 conflicts with the console API. The upgrade removes conflicting app routes managed by Kipper. Use a different app name to keep the app reachable. The check exits with a non-zero status, and `kip upgrade` requires confirmation. Use `--yes` to confirm without a prompt. Manually remove conflicting routes that Kipper does not manage.
+- **A route uses a name reserved for a Kipper component that is absent or uses a different port.** The existing route stays available, but its request figures are unavailable. `kip ai` refuses to install a component while its route name is in use by another namespace, regardless of port. Rename or remove the conflicting route before installing it.
+- **Apps or services have conflicting route names.** The upgrade keeps their existing routes. If their ports match, requests can reach the wrong app or service. Give each a distinct name. In the same namespace, a removed route cannot be recreated while the conflicting app or service remains.
 
-The last two findings are advisory and do not change the exit code. Shared reservations are reassessed at the next console-api bootstrap, after the earlier pods have stopped. Resolving a collision does not separate traffic already recorded under the shared backend name.
+The last two findings are advisory. After renaming conflicting apps or services, run `kip upgrade` to recheck the names so new request figures can appear. Figures recorded while names conflicted cannot be separated.
 
 #### What the upgrade does with the findings
 

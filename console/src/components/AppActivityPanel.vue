@@ -205,7 +205,7 @@ const buttonClass = (active: boolean) =>
     <div class="mb-3 flex flex-wrap items-start justify-between gap-2">
       <div>
         <p class="text-sm font-medium text-slate-900 dark:text-slate-50">Traffic and scaling</p>
-        <p class="text-xs text-slate-500 dark:text-slate-400">Rolling averages, with short-window peaks. Change times are accurate to about 30 seconds.</p>
+        <p class="text-xs text-slate-500 dark:text-slate-400">Compare traffic, resource use and desired pods. Change times are approximate.</p>
       </div>
       <div class="flex items-center gap-1">
         <button
@@ -220,10 +220,10 @@ const buttonClass = (active: boolean) =>
     </div>
 
     <p v-if="unsupported" data-testid="activity-unsupported" class="text-sm text-slate-600 dark:text-slate-300">
-      This view needs a newer Kipper version on this cluster.
+      Upgrade Kipper on this cluster to use this view.
     </p>
     <p v-else-if="failed && !activity" data-testid="activity-error" class="text-sm text-red-600 dark:text-rose-300">
-      The traffic and scaling figures could not be read.
+      Traffic and scaling figures could not be loaded.
     </p>
     <p v-else-if="!activity" class="text-sm text-slate-500 dark:text-slate-400">Loading…</p>
     <p v-else-if="!activity.available" data-testid="activity-unavailable" class="text-sm text-slate-600 dark:text-slate-300">
@@ -232,13 +232,13 @@ const buttonClass = (active: boolean) =>
 
     <div v-else class="space-y-3">
       <p v-if="failed" data-testid="activity-refresh-failed" class="text-xs text-amber-700 dark:text-orange-300">
-        The latest refresh failed, so the charts show the last figures read.
+        Refresh failed. The charts show the last available figures.
       </p>
       <div v-if="guide.length" data-testid="activity-guide" class="space-y-0.5 text-xs text-slate-600 dark:text-slate-300">
         <p v-for="(line, k) in guide" :key="k">{{ line }}</p>
       </div>
       <p v-if="activity.degraded.length" data-testid="activity-degraded" class="text-xs text-amber-700 dark:text-orange-300">
-        Some figures could not be read in time and show as gaps.
+        Some chart values or change details could not be loaded.
       </p>
 
       <template v-if="ready">
@@ -263,14 +263,14 @@ const buttonClass = (active: boolean) =>
               :format="countFormat"
             />
             <p v-if="partial" data-testid="activity-traffic-partial" class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              Gaps are times with no figures for this app: before it held its route name alone, while route names were rechecked after a console-api restart, or while Traefik was not scraped.
+              Gaps mean request figures are unavailable, not zero.
             </p>
           </template>
         </div>
 
         <div>
           <div class="mb-1 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
-            <span class="font-medium">{{ metric === 'cpu' ? 'CPU' : 'Memory' }} as a share of its request</span>
+            <span class="font-medium">{{ metric === 'cpu' ? 'CPU' : 'Memory' }} use (% of resource request)</span>
             <button type="button" data-testid="activity-metric-cpu" :class="buttonClass(metric === 'cpu')" @click="metric = 'cpu'">CPU</button>
             <button type="button" data-testid="activity-metric-memory" :class="buttonClass(metric === 'memory')" @click="metric = 'memory'">Memory</button>
           </div>
@@ -288,7 +288,7 @@ const buttonClass = (active: boolean) =>
         </div>
 
         <div>
-          <p class="mb-1 text-xs font-medium text-slate-600 dark:text-slate-300">Pods</p>
+          <p class="mb-1 text-xs font-medium text-slate-600 dark:text-slate-300">Desired pods</p>
           <TimeChart
             v-model:hover="hover"
             v-model:active-marker="activeMarker"
@@ -314,10 +314,10 @@ const buttonClass = (active: boolean) =>
           <p v-if="changeObservation(selected)" class="mt-1">{{ changeObservation(selected) }}</p>
         </div>
         <p v-else-if="changes.length" data-testid="activity-changes-hint" class="text-xs text-slate-500 dark:text-slate-400">
-          {{ changes.length === 1 ? '1 change' : `${changes.length} changes` }} of the pod count in this range. Point at a marker for details<template v-if="qualifying > activity.changes_detailed">; figures are given for the latest {{ activity.changes_detailed }}</template>.
+          {{ changes.length === 1 ? '1 change' : `${changes.length} changes` }} in the desired pod count. Point at a marker for details<template v-if="qualifying > activity.changes_detailed">; measurements cover up to the latest {{ activity.changes_detailed }}</template>.
         </p>
       </template>
-      <p v-else class="text-sm text-slate-500 dark:text-slate-400">No figures recorded for this range yet.</p>
+      <p v-else class="text-sm text-slate-500 dark:text-slate-400">No figures are available for this range.</p>
     </div>
   </div>
 </template>

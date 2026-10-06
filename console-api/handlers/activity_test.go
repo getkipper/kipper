@@ -176,6 +176,13 @@ func TestActivity_TrafficStates(t *testing.T) {
 		assert.Equal(t, "not_attributed", resp.Traffic)
 		assert.Nil(t, resp.RequestsPerMin.OK[len(resp.Timestamps)-1])
 	})
+	t.Run("another project's app has the same traffic name", func(t *testing.T) {
+		claim := controllers.RouteNameClaimObject(routename.Key("shop", "web"), "shop", "uid-shop")
+		claim.Data["shared"] = `["shop-other"]`
+		_, resp := getActivity(t, newActivity(newFakeProm(), routedAppObject(), claim, freshMarker()), "")
+		assert.Equal(t, "not_attributed", resp.Traffic, "older consoles explain the missing figures")
+		assert.Equal(t, "shared", resp.TrafficReason)
+	})
 	t.Run("no route and no history", func(t *testing.T) {
 		app := routedAppObject()
 		app.Spec.Route = nil

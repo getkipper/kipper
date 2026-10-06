@@ -40,21 +40,21 @@ export function changeSummary(change: ReplicaChange): string {
   const move = `from ${pods(change.from)} to ${pods(change.to)}`
   switch (change.cause) {
     case 'autoscaler':
-      return `The autoscaler changed the count ${move}.`
+      return `The autoscaler changed the desired count ${move}.`
     case 'while_autoscaling':
-      return `The count changed ${move} while autoscaling was on. No record says who changed it.`
+      return `The desired count changed ${move} while autoscaling was on. The cause was not recorded.`
     case 'bounds_change':
-      return `The count changed ${move} when an autoscaling bound changed at the same time.`
+      return `The desired count changed ${move}, matching a nearby change to the autoscaling minimum or maximum.`
     case 'to_zero':
       return change.autoscaled
-        ? `The count went ${move}. Kipper takes an autoscaled app to 0 only by stopping it.`
-        : `The count went ${move}.`
+        ? `The desired count changed ${move}. Stop an app to take it to 0 pods while autoscaling is on.`
+        : `The desired count changed ${move}.`
     case 'from_zero':
       return change.autoscaled
-        ? `The count rose ${move}. An autoscaled app rises from 0 only when it is started.`
-        : `The count rose ${move}.`
+        ? `The desired count changed ${move}. Autoscaling keeps an active app at or above its minimum.`
+        : `The desired count changed ${move}.`
     default:
-      return `The count changed ${move}. Autoscaling was not on at both sides of this change.`
+      return `The desired count changed ${move}. There is not enough autoscaling data to explain why.`
   }
 }
 
@@ -86,13 +86,10 @@ function requestSentence(r: { total: number; not_found: number; aborted: number;
   if (!parts.length) return `About ${total} ${noun}.`
   const last = parts.pop()
   const list = parts.length ? `${parts.join(', ')} and ${last}` : last
-  return `About ${total} ${noun}, of which ${list}.`
+  return `About ${total} ${noun}, including ${list}.`
 }
 
-/**
- * Summarize pre-change measurements or explain why they are unavailable. Scale-outs
- * below the estimated threshold get a note about independent HPA sampling.
- */
+/** Explain low measured peaks during scale-out using the HPA's independent sampling. */
 export function changeObservation(change: ReplicaChange): string | null {
   const a = change.around
   if (!a) return change.around_unavailable ?? null
@@ -103,11 +100,11 @@ export function changeObservation(change: ReplicaChange): string | null {
   if (memory) sentences.push(memory)
   if (a.requests) sentences.push(requestSentence(a.requests))
   if (!sentences.length) return null
-  let text = `In the ${minutes(a.window_seconds)} before: ${sentences.join(' ')}`
+  let text = `In the ${minutes(a.window_seconds)} before this change: ${sentences.join(' ')}`
   const measured = [a.cpu, a.memory].filter(m => m && m.peak_pct !== null && m.target_pct !== null)
   const scaleOut = change.to > change.from
   if (scaleOut && measured.length && measured.every(m => m!.peak_pct! < m!.target_pct! * (1 + DEFAULT_TOLERANCE))) {
-    text += ' The autoscaler takes its own samples, which can catch a short spike that these figures smooth out.'
+    text += ' The autoscaler measures usage separately and may see spikes these figures miss.'
   }
   return text
 }
@@ -120,36 +117,34 @@ function latest(series: Series | undefined): number | null {
   return null
 }
 
-/**
- * Estimate scale-out thresholds from current targets and the latest summed requests.
- * Use the default tolerance; hide the guide when autoscaling is disabled or the app is stopped.
- */
+/** Estimate scale-out thresholds using the default tolerance and latest summed resource requests. */
 export function targetGuide(config: AutoscaleConfig, activity: AppActivity | null, atMax: boolean): string[] {
   if (!config.enabled || config.stopped === true) return []
   const lines: string[] = []
-  const tolerance = `With Kubernetes' default ${pct(DEFAULT_TOLERANCE * 100)} tolerance`
+  const tolerance = `With the default ${pct(DEFAULT_TOLERANCE * 100)} tolerance`
   const metrics: { name: string; target: number; requested: number | null; format: (v: number) => string }[] = []
   if (config.cpu_target > 0) metrics.push({ name: 'CPU', target: config.cpu_target, requested: latest(activity?.cpu_requested_millis), format: formatCpu })
   if (config.memory_target > 0) metrics.push({ name: 'Memory', target: config.memory_target, requested: latest(activity?.memory_requested_bytes), format: formatMemory })
   for (const m of metrics) {
     const above = m.target * (1 + DEFAULT_TOLERANCE)
     const absolute = m.requested !== null && m.requested > 0 ? ` (${m.format((m.requested * above) / 100)} of ${m.format(m.requested)})` : ''
-    const end = atMax ? `, but it is at the maximum of ${config.max_replicas} and adds no more.` : `, up to the maximum of ${config.max_replicas}.`
-    lines.push(`Target: ${m.name} at ${pct(m.target)} of request. ${tolerance}, the autoscaler adds pods above about ${pct(above)}${absolute}${end}`)
+    const end = atMax ? `. The maximum of ${config.max_replicas} pods prevents further autoscaling increases.` : `, up to ${config.max_replicas} pods.`
+    lines.push(`${m.name} target: ${pct(m.target)} of the resource request. ${tolerance}, pods may be added above about ${pct(above)}${absolute}${end}`)
   }
-  if (metrics.length > 1) lines.push('Either metric can add a pod.')
+  if (metrics.length > 1) lines.push('Either target can trigger more pods.')
   return lines
 }
 
-/** Explain missing traffic data; return null when no explanation applies. */
 export function trafficNote(activity: AppActivity): string | null {
   switch (activity.traffic) {
     case 'no_route':
-      return 'This app has no route, so there is no request traffic to show.'
+      return 'This app has no route. Request figures are unavailable.'
     case 'not_attributed':
-      return 'Requests are shown only while this app alone held its route name, which it did not long enough in this range.'
+      return activity.traffic_reason === 'shared'
+        ? 'Request figures cannot be separated from another app or service with a conflicting route name. Use a different app name.'
+        : 'No request figures are available for this range.'
     case 'unavailable':
-      return 'The request figures could not be read.'
+      return 'Request figures could not be loaded.'
     default:
       return null
   }

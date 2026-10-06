@@ -94,6 +94,7 @@ type activityResponse struct {
 	StepSeconds          int64             `json:"step_seconds,omitempty"`
 	Timestamps           []int64           `json:"timestamps,omitempty"`
 	Traffic              string            `json:"traffic,omitempty"`
+	TrafficReason        string            `json:"traffic_reason,omitempty"`
 	RequestsPerMin       *activityRequests `json:"requests_per_min,omitempty"`
 	RequestsPeakPerMin   []*float64        `json:"requests_peak_per_min,omitempty"`
 	CPUPctOfRequest      []*float64        `json:"cpu_pct_of_request,omitempty"`
@@ -314,7 +315,7 @@ func (b *activityBuilder) build(ctx context.Context) activityResponse {
 	}
 	degraded := runQueryPool(ctx, jobs)
 	if len(degraded) == len(jobs) {
-		return activityResponse{Reason: "Prometheus could not be reached.", Changes: []activityChange{}, Degraded: degraded}
+		return activityResponse{Reason: "Monitoring data could not be loaded.", Changes: []activityChange{}, Degraded: degraded}
 	}
 
 	resp := activityResponse{
@@ -416,6 +417,10 @@ func (b *activityBuilder) fillTraffic(resp *activityResponse, window time.Durati
 	switch {
 	case failed:
 		resp.Traffic = "unavailable"
+		return
+	case b.attribution.State == controllers.AttributionShared:
+		// Older consoles know only not_attributed; the reason is additive.
+		resp.Traffic, resp.TrafficReason = "not_attributed", "shared"
 		return
 	case b.attribution.State != controllers.AttributionHeld || !spanInRange:
 		if !b.hasRoute && !spanInRange {
@@ -522,13 +527,13 @@ func (b *activityBuilder) changes(ctx context.Context, detectTS []int64) ([]acti
 			// CPU shares need a further 30s of input before the observation window.
 			if !b.since.IsZero() && time.Unix(c.Time, 0).Add(-win-30*time.Second).Before(b.since) {
 				mu.Lock()
-				out[idx].AroundUnavailable = "The figures from before this change reach back before the project existed."
+				out[idx].AroundUnavailable = "The project had just been created, so the full period before this change is unavailable."
 				mu.Unlock()
 				return nil
 			}
 			if !lowest.IsZero() && time.Unix(c.Time, 0).Add(-win-30*time.Second).Before(lowest) {
 				mu.Lock()
-				out[idx].AroundUnavailable = "Prometheus no longer holds the data from before this change."
+				out[idx].AroundUnavailable = "Measurements from before this change are no longer available."
 				mu.Unlock()
 				return nil
 			}
@@ -536,7 +541,7 @@ func (b *activityBuilder) changes(ctx context.Context, detectTS []int64) ([]acti
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				out[idx].AroundUnavailable = "The figures from before this change could not be read in time."
+				out[idx].AroundUnavailable = "Measurements from before this change could not be loaded."
 				return err
 			}
 			out[idx].Around = around
@@ -549,7 +554,7 @@ func (b *activityBuilder) changes(ctx context.Context, detectTS []int64) ([]acti
 	// A job still queued at the deadline never ran, so it left no reason.
 	for _, idx := range detail {
 		if out[idx].Around == nil && out[idx].AroundUnavailable == "" {
-			out[idx].AroundUnavailable = "The figures from before this change could not be read in time."
+			out[idx].AroundUnavailable = "Measurements from before this change could not be loaded."
 		}
 	}
 	return out, len(detail), degraded

@@ -261,15 +261,18 @@ See [Route groups](/en/routing#route-groups-path-based-routing) to serve several
 
 ### Route names
 
-Traefik identifies each backend by its namespace, Service name and port, joined with dashes. For example, app `web` in namespace `shop-prod` on port 8080 becomes `shop-prod-web-8080`. Consecutive dashes collapse to one, so `prod--web` and `prod-web` produce the same name. App `prod-web` in namespace `team` also shares a name with app `web` in namespace `team-prod` when their ports match. Such collisions can send requests to the wrong backend. Stateful service UIs use the same naming scheme.
+Kipper checks route names before creating a route for an app or service UI. If a name conflicts with another app or service, choose a different name. Changing only the port does not avoid the check.
 
-Kipper reserves the namespace-and-Service part of the name across all ports before publishing a new route. Turning a route off preserves its reservation while the workload exists. Another namespace can claim it after the owning namespace is deleted. Unused reservations can also be removed once no matching workload or route remains and their attribution history has expired.
+A conflict can occur even when app names differ. For example, app `prod-web` in namespace `team` conflicts with app `web` in namespace `team-prod`. Consecutive dashes count as one, so `prod--web` and `prod-web` also conflict. If conflicting routes use the same port, requests can reach the wrong app or service.
 
-A conflicting app gets no new route. Its `RouteReady` condition is False with reason `RouteNameTaken`, and a warning event asks you to choose another name without identifying the other project. A refused service UI shows the same condition. Use a different workload name, or wait for the reservation to become available; refusals are retried every 10 minutes. Within one namespace, differently named workloads that normalize to the same key also block new routes.
+The route status explains what to do:
 
-Kipper's platform route names are reserved even when the component is not installed. For example, app `system-console-api` in namespace `kipper` conflicts with the console API in `kipper-system` and is refused with reason `RouteNameReservedForPlatform`. Console app creation checks these names before writing anything. `kip apply` can create the App, which then reports the route refusal. Existing routes follow the [upgrade rules](/en/maintenance#route-names).
+- **`RouteNameTaken`:** the new route was refused. Choose a different app or service name. Kipper retries every 10 minutes if you keep the name.
+- **`RouteNameReservedForPlatform`:** the name is reserved for a Kipper component, even if it is not installed. Choose a different name. For example, app `system-console-api` in namespace `kipper` conflicts with the console API. The console rejects this name when creating an app; `kip apply` can create the app, but its route is refused.
+- **`RouteNameShared`:** an existing app route remains published, but its request figures cannot be separated from another app or service. Use distinct names to avoid requests reaching the wrong destination. See the [upgrade rules](/en/maintenance#route-names).
+- **`RouteNamePending`:** the app route is waiting for a name check and retries automatically. This can happen during an upgrade or restart. If you changed its host, the old route is removed while the new route waits. If the console asks you to retry app creation, try again once the checks finish.
 
-After a console-api start, new tenant routes wait for the elected pod to check existing names. This can take longer while older console-api pods are still running. A host change that requires recreating an Ingress also waits: the old route is withdrawn, and publication on the new host is retried after the checks. Changes that only update existing routing resources can proceed. Apps waiting for admission report `RouteNamePending`; console creation requests made during bootstrap ask you to retry.
+An app or service keeps its route-name reservation while it exists, even with its route turned off. Choose a different name to avoid waiting for the reservation to be released.
 
 ## Scaling
 
@@ -328,34 +331,34 @@ During an upgrade the console can briefly talk to an older console-api. A save t
 
 ### Traffic and scaling
 
-Below the capacity panel, the Scale tab shows **Traffic and scaling** for the last hour, 6 hours, 24 hours or 3 days. The browser remembers your selected range. Three charts share a time axis:
+In the Scale tab, **Traffic and scaling** compares traffic, resource use and desired pods over the last hour, 6 hours, 24 hours or 3 days. Your browser remembers the selected range. Three charts share a time axis:
 
-- **Requests per minute**, stacked by status (2xx, 3xx, 4xx, abandoned and 5xx). A thin line estimates the busiest short interval in each chart step. Abandoned requests have status 499, meaning the client disconnected before receiving a response.
-- **CPU as a share of its request**, expressed as a percentage. A dashed line shows the autoscaling target, with a faint band for the default 10% tolerance above it. A lighter line shows peaks from 30-second windows. Use the toggle to view memory instead; memory is selected initially when it is the only target.
-- **Pods**, showing the Deployment's desired count, with a faint band between the autoscaling minimum and maximum.
+- **Requests per minute**, grouped by response status: 2xx, 3xx, 4xx, abandoned and 5xx. The thin line estimates peak request rates. Abandoned requests have status 499: the client disconnected before receiving a response.
+- **CPU or memory use**, as a percentage of the resource request. The dashed line shows the autoscaling target; the faint band extends 10% above it. The lighter CPU line shows estimated peaks. Select **CPU** or **Memory** to switch. Memory is selected initially when it is the only autoscaling target.
+- **Desired pods**, with a faint band between the autoscaling minimum and maximum. This is the count the app should run, not the number of ready pods.
 
-Detected pod-count changes appear as vertical markers across the charts:
+Point at a vertical marker to read about a change in the desired count:
 
-- **Solid:** a matching autoscaler event records the change.
-- **Dashed:** autoscaling was present before and after the change, but no matching event identifies who changed the count. Older events may have expired. Repeated events are matched by their latest occurrence, so earlier changes may lack a match.
-- **Solid with a label:** the count moved to or from zero, or matched a nearby change to an autoscaling bound.
-- **Dotted:** autoscaler data is missing on one or both sides of the change.
+- **Solid, unlabelled:** a matching autoscaler event records the change.
+- **Dashed:** autoscaling was on before and after the change, but no matching autoscaler event is available. Older events may have expired.
+- **Solid, labelled:** the count moved to or from zero, or matched a nearby change to the autoscaling minimum or maximum.
+- **Dotted:** there is not enough autoscaling data to explain the change.
 
-Point at a marker to read its details. For dashed markers and unlabelled solid ones, the panel looks back 2 minutes before a scale-out or 5 minutes before a scale-in. Available details include peaks and averages for targeted CPU and memory metrics, plus estimated request counts. Point elsewhere to read the chart values at that time.
+For the 20 most recent dashed or unlabelled solid markers, available measurements cover the 2 minutes before an increase or 5 minutes before a decrease. They include CPU and memory peaks and averages for the configured targets, plus estimated request counts. Older measurements may no longer be available. Point elsewhere on a chart to read the values at that time.
 
-While autoscaling is enabled and the app is not stopped, a guide estimates when the autoscaler adds pods. For example, a 70% CPU target with the default 10% tolerance gives a threshold of about 77% of the CPU request. The guide also shows the maximum pod count. A cluster can use a different tolerance.
+While autoscaling is on and the app is not stopped, a guide estimates when pods may be added, up to the configured maximum. For example, a 70% CPU target gives an estimated threshold of 77% of the CPU request. This assumes the default 10% tolerance; a cluster can use a different value.
 
-The section refreshes every minute while the Scale tab is open and the page is visible. It needs Prometheus; if monitoring is disabled or unavailable, the panel explains why.
+The charts refresh every minute while the Scale tab is open and the page is visible. Monitoring must be enabled on the cluster. If figures cannot be loaded, the panel says so.
 
-When interpreting the charts:
+When reading the charts:
 
-- CPU and request rates use rolling averages; peaks are estimates from shorter windows. The autoscaler takes its own samples and may react to spikes these figures smooth out. Memory and pod counts show sampled values.
-- Changes are detected on a 30-second grid. Missing samples can hide changes.
-- Request counts cover traffic handled by the app's Traefik service. Requests rejected before reaching that service, such as by authentication or rate limiting, and direct traffic between apps are excluded.
-- Traffic appears only when the app currently holds its [route name](#route-names) exclusively and held it throughout each point's input window. Ownership gaps, route checks after a console-api restart, and missing scrape data can leave gaps. Recent points wait for a route check, normally every 30 seconds, and appear on a later refresh. If no traffic can be shown, the panel displays a note.
-- Details are fetched for the 20 most recent changes with dashed or unlabelled solid markers. Prometheus retains 3 days of data by default, so changes near the start of that period may lack earlier measurements.
+- CPU and request rates are averages. Peak lines help show brief bursts; the autoscaler measures usage separately and may see spikes the charts miss. Memory and pod counts show values measured at each point.
+- Changes are detected from samples spaced 30 seconds apart, so their times are approximate. Missing data can hide changes.
+- Request figures cover traffic through the app's route. They exclude direct traffic between apps and requests rejected before reaching the app's routing service, for example by authentication or rate limiting.
+- Gaps mean figures are unavailable, not zero. They can appear after a route is created or after an upgrade. The newest figures can take another refresh to appear.
+- If [route names](#route-names) conflict, request figures may be unavailable because they cannot be separated from another app or service. Use a different app name.
 
-If pods increase with traffic and decrease afterward, scaling is following demand. Sustained CPU use above the target at the maximum pod count may call for a higher maximum or a review of CPU requests; see the [at-maximum alert](/en/alerts#autoscaling). Bursts of 4xx or abandoned requests warrant checking the traffic source. If unwanted traffic is driving load, a [route rate limit](/en/gitops#the-route-block) may help.
+Compare pod changes with traffic and resource use to assess demand. If CPU use stays above target at the maximum pod count, review the maximum and CPU request; see the [at-maximum alert](/en/alerts#autoscaling). Check the traffic source if 4xx or abandoned requests rise. A [route rate limit](/en/gitops#the-route-block) can help control unwanted traffic.
 
 ### In kipper.yaml
 
