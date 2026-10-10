@@ -62,3 +62,34 @@ func TestClassifyOwnedForServicesAndFunctions(t *testing.T) {
 		t.Fatalf("set value = %v, want User", got)
 	}
 }
+
+func TestModeOf(t *testing.T) {
+	cases := []struct {
+		name              string
+		request, limit    Source
+		requestBelowLimit bool
+		want              Mode
+	}{
+		{"nothing set", Unset, Unset, false, ModeAutomatic},
+		{"automatic values", Automatic, Automatic, true, ModeAutomatic},
+		{"user range", User, User, true, ModeBounded},
+		{"user equal pair", User, User, false, ModeFixed},
+		{"user request only", User, Unset, false, ModeFixed},
+		{"user limit only", Unset, User, false, ModeFixed},
+		{"held request", Held, User, true, ModeHeld},
+		{"held limit", User, Held, true, ModeHeld},
+	}
+	for _, c := range cases {
+		if got := ModeOf(c.request, c.limit, c.requestBelowLimit); got != c.want {
+			t.Errorf("%s: ModeOf = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestModeNames(t *testing.T) {
+	for mode, want := range map[Mode]string{ModeAutomatic: "automatic", ModeBounded: "bounded", ModeFixed: "fixed", ModeHeld: "held"} {
+		if got := mode.String(); got != want {
+			t.Errorf("Mode(%d).String() = %q, want %q", mode, got, want)
+		}
+	}
+}

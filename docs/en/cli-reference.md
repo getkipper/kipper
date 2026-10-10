@@ -440,6 +440,49 @@ kip ai restore --name pre-upgrade        # requires kipper-ai uninstalled first
 | `--name` | backup delete | — | Snapshot to delete (required) |
 | `--name` | restore | — | Snapshot to restore (required) |
 
+## kip app info {#kip-app-info}
+
+Shows an app's status, scaling, and CPU and memory settings.
+
+```bash
+kip app info api --project shop --environment prod
+```
+
+```
+  App: api
+
+  Status:  running, 2/2 ready
+  Image:   ghcr.io/acme/api:v1
+
+  Autoscaling: on (CPU 70%)
+  Desired: 2 (set by autoscaling)   Min: 2   Max: 5
+  Ready: 2
+  cpu: target 70%, current 12%
+  Last scaled: 2026-10-10 20:56 UTC (2h ago)
+
+  Resources (profile jvm, from the pod template)
+  CPU:     request 300m, limit 1
+           the autoscaler tracks CPU, so Kipper leaves the CPU request alone
+  Memory:  request 2Gi, limit 2Gi
+           sized by Kipper; latest recommendation: request 1536Mi, limit 2Gi
+```
+
+| Flag | Required | Description |
+|---|---|---|
+| `--project` | No | Project name |
+| `--environment` | No | Target environment |
+
+The resource lines show the app's pod-template values. During a rollout, some pods may still use earlier values. Each resource includes a sizing explanation:
+
+- **automatic:** Kipper manages sizing and shows its latest recommendation when it differs from the template. Recommendations take effect when sizing rules allow. Paused tuning keeps the current size; autoscaler targets restrict changes to the tracked resource.
+- **bounded:** you set a request below a limit, and Kipper moves the request between them.
+- **fixed:** Kipper uses the size you set.
+- **held:** ownership is unknown, so Kipper keeps the values until you set them.
+
+For automatic and bounded resources, the sizing explanation accounts for autoscaling: Kipper keeps tracked CPU requests unchanged and increases tracked memory only after an out-of-memory kill. If the policy is invalid and you lack permission to read the autoscaler, sizing is shown as unknown.
+
+See [Your own CPU and memory values](/en/resource-management#your-own-values).
+
 ## kip app update {#kip-app-update}
 
 Updates a deployed app's image, resource settings, or health check. Changes to the pod configuration trigger a rolling update.

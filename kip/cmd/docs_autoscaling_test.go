@@ -69,6 +69,16 @@ func TestCLIReferenceDocumentsEveryAutoscaleAndScaleFlag(t *testing.T) {
 	assert.Contains(t, scale, "kip app deploy --replicas", "the reference does not say that deploy's replica count follows the same bounds")
 }
 
+func TestCLIReferenceDocumentsAppInfo(t *testing.T) {
+	info := docSection(t, "cli-reference.md", "## kip app info")
+	for _, name := range localFlagNames(appInfoCmd) {
+		assert.Contains(t, info, "`"+name+"`", "the kip app info reference does not document %s", name)
+	}
+	for _, want := range []string{"automatic", "bounded", "fixed", "held"} {
+		assert.Contains(t, info, want, "the kip app info reference does not explain the %s sizing", want)
+	}
+}
+
 func TestMaintenanceDocumentsEveryUpgradeFlag(t *testing.T) {
 	flags := docSection(t, "maintenance.md", "### Flags")
 	for _, name := range localFlagNames(upgradeCmd) {
