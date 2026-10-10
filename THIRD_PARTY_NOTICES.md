@@ -9711,7 +9711,7 @@ Apache license:
 
 ## JavaScript components (163)
 
-### @babel/helper-string-parser 7.27.1
+### @babel/helper-string-parser 7.29.7
 
 Licence: MIT
 
@@ -9740,7 +9740,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### @babel/helper-validator-identifier 7.28.5
+### @babel/helper-validator-identifier 7.29.7
 
 Licence: MIT
 
@@ -9769,7 +9769,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### @babel/parser 7.29.0
+### @babel/parser 7.29.9
 
 Licence: MIT
 
@@ -9795,7 +9795,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### @babel/types 7.29.0
+### @babel/types 7.29.8
 
 Licence: MIT
 
@@ -10326,7 +10326,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### @vue/compiler-core 3.5.30
+### @vue/compiler-core 3.5.43
 
 Licence: MIT
 
@@ -10354,7 +10354,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### @vue/compiler-dom 3.5.30
+### @vue/compiler-dom 3.5.43
 
 Licence: MIT
 
@@ -10382,7 +10382,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### @vue/compiler-sfc 3.5.30
+### @vue/compiler-sfc 3.5.43
 
 Licence: MIT
 
@@ -10410,7 +10410,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### @vue/compiler-ssr 3.5.30
+### @vue/compiler-ssr 3.5.43
 
 Licence: MIT
 
@@ -10444,7 +10444,7 @@ Licence: MIT
 
 _Licence text not bundled; see the component's source repository._
 
-### @vue/reactivity 3.5.30
+### @vue/reactivity 3.5.43
 
 Licence: MIT
 
@@ -10472,7 +10472,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### @vue/runtime-core 3.5.30
+### @vue/runtime-core 3.5.43
 
 Licence: MIT
 
@@ -10500,7 +10500,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### @vue/runtime-dom 3.5.30
+### @vue/runtime-dom 3.5.43
 
 Licence: MIT
 
@@ -10528,7 +10528,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### @vue/server-renderer 3.5.30
+### @vue/server-renderer 3.5.43
 
 Licence: MIT
 
@@ -10556,7 +10556,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### @vue/shared 3.5.30
+### @vue/shared 3.5.43
 
 Licence: MIT
 
@@ -10934,7 +10934,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### axios 1.18.1
+### axios 1.20.0
 
 Licence: MIT
 
@@ -12893,7 +12893,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### nanoid 3.3.18
+### nanoid 3.3.20
 
 Licence: MIT
 
@@ -13208,7 +13208,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### postcss 8.5.26
+### postcss 8.5.29
 
 Licence: MIT
 
@@ -13235,7 +13235,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### proxy-addr 2.0.7
+### proxy-addr 2.0.8
 
 Licence: MIT
 
@@ -13723,7 +13723,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### source-map-js 1.2.1
+### source-map-js 1.2.2
 
 Licence: BSD-3-Clause
 
@@ -14049,7 +14049,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### vue 3.5.30
+### vue 3.5.43
 
 Licence: MIT
 
