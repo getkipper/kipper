@@ -48,16 +48,19 @@ jobs:
           BEFORE: ${{ github.event.before }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          ACTOR: ${{ github.actor }}
+          REF: ${{ github.ref }}
         run: |
-          # Neither a fork nor Dependabot can read repository secrets, so a
-          # pull request from either has no name pattern and runs the address
-          # and domain checks alone. A push and a scheduled run always have the
-          # secret, and the guard fails when it is missing. Nothing reaches a
-          # branch except through a push, so the full check still stands in
-          # front of main.
+          # Allow address and domain checks without a name pattern for pull
+          # requests and Dependabot pushes to dependabot/ branches. All other
+          # runs require the pattern. The scanner keeps Dependabot commits
+          # eligible for name checks when they reach another branch.
           require=--require-pattern
           if [ -z "$PRIVATE_NAME_PATTERN" ] && [ "$EVENT" = "pull_request" ]; then
-            echo "::warning::No name pattern is readable from this pull request, so only the generic checks ran. The push to the base branch scans with the pattern."
+            echo "::warning::PRIVATE_NAME_PATTERN is unavailable for this pull request. The scanner will check addresses and domains; name checks require the pattern."
+            require=""
+          elif [ -z "$PRIVATE_NAME_PATTERN" ] && [ "$EVENT" = "push" ] && [ "$ACTOR" = "dependabot[bot]" ] && [[ "$REF" == refs/heads/dependabot/* ]]; then
+            echo "::warning::PRIVATE_NAME_PATTERN is unavailable for this Dependabot push. The scanner will check addresses and domains; name checks require the pattern."
             require=""
           fi
 
@@ -72,13 +75,12 @@ jobs:
               if git show "$PR_BASE:scripts/private-data-scan.py" > "$RUNNER_TEMP/private-data-scan.py" 2>/dev/null; then
                 scanner="$RUNNER_TEMP/private-data-scan.py"
               else
-                echo "::warning::The base branch has no scanner yet, so this pull request was scanned with its own copy."
+                echo "::warning::Could not load the scanner from the base branch. This pull request will use its own copy."
               fi
               scope="--range $PR_BASE..$PR_HEAD" ;;
             push)
-              # After a force push or on a new branch the old tip is unusable,
-              # so scan what this branch has that no other branch on the
-              # remote has.
+              # If the old tip is unavailable, scan reachable commits using
+              # the scanner's remote-branch exclusions.
               if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
                 scope="--range $BEFORE..$GITHUB_SHA"
               else

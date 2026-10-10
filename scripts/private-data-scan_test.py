@@ -272,6 +272,29 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertNotIn("old.md", out)
 
+    def test_commits_on_dependabot_branches_are_still_scanned(self):
+        remote = tempfile.mkdtemp(prefix="pds-remote-")
+        self.addCleanup(shutil.rmtree, remote, True)
+        git(remote, "init", "-q", "--bare")
+        git(self.repo.dir, "remote", "add", "origin", remote)
+        git(self.repo.dir, "push", "-q", "origin", "main")
+        git(self.repo.dir, "checkout", "-q", "-b", "dependabot/npm_and_yarn/example")
+        self.plant("lock.json", '"acmecorp"\n', message="bump")
+        leak = self.repo.head()
+        self.plant("lock.json", '"payroll"\n', message="bump again")
+        git(self.repo.dir, "push", "-q", "origin", "dependabot/npm_and_yarn/example")
+        git(self.repo.dir, "checkout", "-q", "main")
+        # Use an earlier commit to test the branch exclusion independently
+        # of the exclusion for refs at the new tip.
+        git(self.repo.dir, "merge", "-q", "--ff-only", leak)
+        env = {"PRIVATE_NAME_PATTERN": r"\bacmecorp\b"}
+        rc, out = scan(self.repo, "--range", f"{self.base}..HEAD", env=env)
+        self.assertEqual(rc, 1, out)
+        self.assertFinding(out, "name", "lock.json")
+        rc, out = scan(self.repo, "--new", "HEAD", "--remote", "origin", env=env)
+        self.assertEqual(rc, 1, out)
+        self.assertFinding(out, "name", "lock.json")
+
     def test_tree_scan_covers_the_whole_tree(self):
         self.plant("deep/old.md", "leak 93.184.216.34\n", message="old")  # private-data-scan:allow
         base2 = self.repo.head()

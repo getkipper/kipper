@@ -2,7 +2,7 @@
 """Find private data before it reaches the public repository.
 
 The scan walks git objects rather than the working tree, so a value that was
-committed and then removed inside the same push is still found. Four checks
+committed and then removed inside the same push is still found. Three checks
 run over every changed blob, path name and commit message:
 
   name     a word from PRIVATE_NAME_PATTERN (client and internal names)
@@ -250,24 +250,29 @@ def ocr(data, lower):
 
 # --- what to scan ------------------------------------------------------------
 
-def commits_in_range(old, new, remote):
-    """Commits in old..new that the remote does not already have on some branch.
+def scanned_remote_refs(new, remote):
+    """Return remote-tracking refs whose commits count as already scanned.
 
-    A branch rebuilt from another branch pushes history the remote already
-    serves; scanning it again finds nothing that is not already public.
+    Exclude refs at the new tip so fetching the push cannot hide its commits.
+    Exclude dependabot/ branches because their pushes may lack the name pattern.
     """
     tip = git("rev-parse", new).strip()
-    refs = [line.split()[1] for line in git("for-each-ref", "--format=%(objectname) %(refname)", f"refs/remotes/{remote}/").splitlines()
-            if line.split()[0] != tip]
-    return git("rev-list", "--reverse", f"{old}..{new}", "--not", *refs).split()
+    refs = []
+    for line in git("for-each-ref", "--format=%(objectname) %(refname)", f"refs/remotes/{remote}/").splitlines():
+        sha, ref = line.split()
+        if sha != tip and not ref.startswith(f"refs/remotes/{remote}/dependabot/"):
+            refs.append(ref)
+    return refs
+
+
+def commits_in_range(old, new, remote):
+    """Return commits in old..new, excluding history treated as already scanned."""
+    return git("rev-list", "--reverse", f"{old}..{new}", "--not", *scanned_remote_refs(new, remote)).split()
 
 
 def commits_new_to_remote(new, remote):
-    """Commits reachable from new that no ref of the remote has, ignoring a ref that already sits at new itself (a force push)."""
-    tip = git("rev-parse", new).strip()
-    refs = [line.split()[1] for line in git("for-each-ref", "--format=%(objectname) %(refname)", f"refs/remotes/{remote}/").splitlines()
-            if line.split()[0] != tip]
-    return git("rev-list", "--reverse", new, "--not", *refs).split()
+    """Return commits reachable from new, excluding history treated as scanned."""
+    return git("rev-list", "--reverse", new, "--not", *scanned_remote_refs(new, remote)).split()
 
 
 def changed_blobs(commit):
@@ -310,9 +315,9 @@ def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     what = p.add_mutually_exclusive_group(required=True)
     what.add_argument("--range", metavar="OLD..NEW", help="scan the commits in OLD..NEW")
-    what.add_argument("--new", metavar="SHA", help="scan the commits reachable from SHA that no ref of --remote has")
+    what.add_argument("--new", metavar="SHA", help="scan commits reachable from SHA, excluding history treated as already scanned")
     what.add_argument("--tree", metavar="REV", help="scan every file in the tree at REV")
-    p.add_argument("--remote", default="origin", help="remote whose branches count as already public (default origin)")
+    p.add_argument("--remote", default="origin", help="remote used to identify scanned history, excluding dependabot/ branches and refs at the new tip (default origin)")
     p.add_argument("--redact", action="store_true", help="report locations only, for logs that are public")
     p.add_argument("--require-pattern", action="store_true", help="fail when PRIVATE_NAME_PATTERN is unset")
     p.add_argument("--allowlist", default=None, help=f"allow-list path (default {ALLOWLIST_FILE} at the repository root)")
