@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 
 	networkingv1 "k8s.io/api/networking/v1"
@@ -14,16 +15,16 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/routename"
 )
 
-// routeNameFindings groups routes that share normalized backend keys.
+// routeNameFindings records shared and reserved backend keys.
 type routeNameFindings struct {
-	// PlatformCollisions match an installed platform backend's key and port.
-	// The App reconciler removes matching routes it owns.
+	// PlatformCollisions lists tenant Ingresses as namespace/name whose backends
+	// match an installed platform backend's key and port.
 	PlatformCollisions []string
-	// Occupied are tenant routes on the name of an optional Kipper route that
-	// is not installed, or installed on another port. They keep working.
+	// Occupied lists distinct tenant Services as namespace/name using a platform
+	// key while the platform backend is absent or the tenant port differs.
 	Occupied []string
-	// Shared lists, per colliding name, the tenant routes that share it. They
-	// keep their routes and are reported.
+	// Shared groups distinct Services as namespace/name by shared non-platform
+	// key, regardless of port.
 	Shared [][]string
 }
 
@@ -35,17 +36,23 @@ func (f routeNameFindings) empty() bool {
 	return len(f.PlatformCollisions) == 0 && len(f.Occupied) == 0 && len(f.Shared) == 0
 }
 
-// assessRouteNames groups Ingress backends by normalized key, ignoring port
-// for tenant sharing and comparing it for installed platform collisions.
+type routeProducer struct {
+	backend routename.Backend
+	route   string
+}
+
+// workload returns the Service identity used to deduplicate reports across Ingresses.
+func (p routeProducer) workload() string {
+	return p.backend.Namespace + "/" + p.backend.Service
+}
+
+// assessRouteNames checks normalized backend keys across all ports for tenant
+// sharing, and requires matching ports for installed platform collisions.
 func assessRouteNames(ingresses []networkingv1.Ingress) routeNameFindings {
-	type producer struct {
-		backend routename.Backend
-		route   string
-	}
-	byKey := map[string][]producer{}
+	byKey := map[string][]routeProducer{}
 	for _, ing := range ingresses {
 		for _, b := range routename.Backends(ing) {
-			byKey[b.Key()] = append(byKey[b.Key()], producer{backend: b, route: ing.Namespace + "/" + ing.Name})
+			byKey[b.Key()] = append(byKey[b.Key()], routeProducer{backend: b, route: ing.Namespace + "/" + ing.Name})
 		}
 	}
 	keys := make([]string, 0, len(byKey))
@@ -70,23 +77,23 @@ func assessRouteNames(ingresses []networkingv1.Ingress) routeNameFindings {
 				}
 				if live && p.backend.Port == platform.Port {
 					f.PlatformCollisions = append(f.PlatformCollisions, p.route)
-				} else {
-					f.Occupied = append(f.Occupied, p.route)
+				} else if w := p.workload(); !slices.Contains(f.Occupied, w) {
+					f.Occupied = append(f.Occupied, w)
 				}
 			}
 			continue
 		}
-		// Reserve the key across ports, including differently spelled names
-		// in one namespace such as "prod-web" and "prod--web".
-		services := map[string]bool{}
-		var routes []string
+		// Normalization can merge names within one namespace, such as
+		// "prod-web" and "prod--web".
+		var workloads []string
 		for _, p := range producers {
-			services[p.backend.Namespace+"/"+p.backend.Service] = true
-			routes = append(routes, p.route)
+			if w := p.workload(); !slices.Contains(workloads, w) {
+				workloads = append(workloads, w)
+			}
 		}
-		if len(services) > 1 {
-			sort.Strings(routes)
-			f.Shared = append(f.Shared, routes)
+		if len(workloads) > 1 {
+			sort.Strings(workloads)
+			f.Shared = append(f.Shared, workloads)
 		}
 	}
 	return f
@@ -124,9 +131,9 @@ func printRouteNameFindings(out io.Writer, f routeNameFindings) {
 		}
 	}
 	if len(f.Occupied) > 0 {
-		_, _ = fmt.Fprintf(out, "  !   These routes use names reserved for Kipper components that are absent or use\n"+
-			"      different ports. Existing routes stay available, but request figures are unavailable.\n"+
-			"      Rename or remove conflicting routes before installing those components:\n")
+		_, _ = fmt.Fprintf(out, "  !   These apps or services use names reserved for Kipper components that are absent\n"+
+			"      or use different ports. The upgrade keeps their routes. Request figures are unavailable.\n"+
+			"      Rename these apps or services before installing those components:\n")
 		for _, r := range f.Occupied {
 			_, _ = fmt.Fprintf(out, "      - %s\n", r)
 		}
@@ -137,8 +144,8 @@ func printRouteNameFindings(out io.Writer, f routeNameFindings) {
 			"      name, then run 'kip upgrade' to recheck names and allow new request figures.\n"+
 			"      In the same namespace, a removed route cannot be recreated while the conflicting\n"+
 			"      app or service remains:\n")
-		for _, routes := range f.Shared {
-			_, _ = fmt.Fprintf(out, "      - %s\n", joinRoutes(routes))
+		for _, group := range f.Shared {
+			_, _ = fmt.Fprintf(out, "      - %s\n", joinRoutes(group))
 		}
 	}
 }
@@ -154,10 +161,9 @@ func joinRoutes(routes []string) string {
 	return s
 }
 
-// routeNameConsent runs before the upgrade changes anything. A Kipper app
-// route that collides with a live Kipper route is removed by the new
-// console-api, so the operator confirms that at a terminal or with --yes;
-// otherwise the upgrade stops.
+// routeNameConsent requires confirmation at a terminal or via --yes for platform
+// collisions, since the upgraded console-api removes conflicting app routes.
+// It runs before any upgrade changes.
 func routeNameConsent(ctx context.Context, clientset kubernetes.Interface, out io.Writer, isTTY, assumeYes bool, confirm func() (bool, error)) error {
 	f, err := assessClusterRouteNames(ctx, clientset)
 	if err != nil {
