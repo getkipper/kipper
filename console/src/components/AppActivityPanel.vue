@@ -29,6 +29,8 @@ const failed = ref(false)
 const unsupported = ref(false)
 const hover = ref<number | null>(null)
 const activeMarker = ref<number | null>(null)
+const frozenReadout = ref<string | null>(null)
+const frozenChange = ref<AppActivity['changes'][number] | null>(null)
 const metric = ref<'cpu' | 'memory'>('cpu')
 
 watch(
@@ -39,7 +41,7 @@ watch(
   { immediate: true },
 )
 
-// A slower response for an earlier range must not overwrite a later one.
+// Only apply the latest request so overlapping loads keep the selected range current.
 let loadSeq = 0
 
 async function load() {
@@ -72,7 +74,10 @@ function selectRange(r: ActivityRange) {
   } catch {
     // Remembering the range is a convenience.
   }
+  hover.value = null
   activeMarker.value = null
+  frozenReadout.value = null
+  frozenChange.value = null
   load()
 }
 
@@ -142,7 +147,7 @@ const podBands = computed<ChartBand[]>(() => {
 const changes = computed(() => activity.value?.changes ?? [])
 const markers = computed<ChartMarker[]>(() => changes.value.map(c => ({ time: c.time, ...markerLook(c.cause) })))
 const qualifying = computed(() => changes.value.filter(c => c.cause === 'autoscaler' || c.cause === 'while_autoscaling').length)
-const selected = computed(() => (activeMarker.value === null ? null : changes.value[activeMarker.value] ?? null))
+const selected = computed(() => (activeMarker.value === null ? frozenChange.value : changes.value[activeMarker.value] ?? frozenChange.value))
 
 function clock(t: number): string {
   const opts: Intl.DateTimeFormatOptions = { hour: '2-digit', minute: '2-digit', hour12: false }
@@ -160,10 +165,9 @@ function at(s: Series | undefined, i: number): number | null {
   return s?.[i] ?? null
 }
 
-const readout = computed(() => {
-  const i = hover.value
+function readoutAt(i: number): string | null {
   const a = activity.value
-  if (i === null || !a) return null
+  if (!a || ts.value[i] === undefined) return null
   const parts = [clock(ts.value[i])]
   if (a.traffic === 'available' && a.requests_per_min) {
     const total = classes.reduce<number | null>((sum, c) => {
@@ -190,7 +194,17 @@ const readout = computed(() => {
   const pods = at(a.replicas, i)
   if (pods !== null) parts.push(pods === 1 ? '1 pod' : `${pods} pods`)
   return parts.join(' · ')
+}
+
+// Snapshot hovered values and changes so details stay stable across refreshes
+// while users read or scroll them after leaving the chart.
+watch([hover, activity], ([h]) => {
+  if (h !== null) frozenReadout.value = readoutAt(h)
 })
+watch([activeMarker, activity], ([m]) => {
+  if (m !== null) frozenChange.value = activity.value?.changes[m] ?? frozenChange.value
+})
+const readout = computed(() => (hover.value === null ? frozenReadout.value : readoutAt(hover.value)))
 
 const pctFormat = (v: number) => `${Math.round(v)}%`
 const countFormat = (v: number) => String(Math.round(v))
@@ -230,7 +244,7 @@ const buttonClass = (active: boolean) =>
       {{ activity.reason || 'Monitoring is not available.' }}
     </p>
 
-    <div v-else class="space-y-3">
+    <div v-else class="space-y-5">
       <p v-if="failed" data-testid="activity-refresh-failed" class="text-xs text-amber-700 dark:text-orange-300">
         Refresh failed. The charts show the last available figures.
       </p>
@@ -243,7 +257,7 @@ const buttonClass = (active: boolean) =>
 
       <template v-if="ready">
         <div>
-          <div class="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600 dark:text-slate-300">
+          <div class="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600 dark:text-slate-300">
             <span class="font-medium">Requests per minute</span>
             <span v-for="c in classes" :key="c.key" class="inline-flex items-center gap-1">
               <span class="inline-block h-2 w-2 rounded-sm" :style="{ background: c.color }" />{{ c.label }}
@@ -269,7 +283,7 @@ const buttonClass = (active: boolean) =>
         </div>
 
         <div>
-          <div class="mb-1 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+          <div class="mb-2 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
             <span class="font-medium">{{ metric === 'cpu' ? 'CPU' : 'Memory' }} use (% of resource request)</span>
             <button type="button" data-testid="activity-metric-cpu" :class="buttonClass(metric === 'cpu')" @click="metric = 'cpu'">CPU</button>
             <button type="button" data-testid="activity-metric-memory" :class="buttonClass(metric === 'memory')" @click="metric = 'memory'">Memory</button>
@@ -288,7 +302,7 @@ const buttonClass = (active: boolean) =>
         </div>
 
         <div>
-          <p class="mb-1 text-xs font-medium text-slate-600 dark:text-slate-300">Desired pods</p>
+          <p class="mb-2 text-xs font-medium text-slate-600 dark:text-slate-300">Desired pods</p>
           <TimeChart
             v-model:hover="hover"
             v-model:active-marker="activeMarker"
@@ -301,21 +315,29 @@ const buttonClass = (active: boolean) =>
             :height="64"
             :format="countFormat"
           />
-          <div class="mt-1 flex justify-between text-[10px] text-slate-400 dark:text-slate-500">
+          <div class="mt-1 flex justify-between pl-10 text-[10px] text-slate-400 dark:text-slate-500">
             <span v-for="(label, k) in axis" :key="k">{{ label }}</span>
           </div>
         </div>
 
-        <p v-if="readout" data-testid="activity-readout" class="text-xs text-slate-600 dark:text-slate-300">{{ readout }}</p>
-
-        <div v-if="selected" data-testid="activity-change" class="rounded border border-violet-200 bg-violet-50 p-2 text-xs text-slate-700 dark:border-violet-900 dark:bg-violet-950 dark:text-slate-200">
-          <p class="font-medium">About {{ clock(selected.time) }}</p>
-          <p>{{ changeSummary(selected) }}</p>
-          <p v-if="changeObservation(selected)" class="mt-1">{{ changeObservation(selected) }}</p>
+        <!-- Keep the layout stable as hover details change. -->
+        <div
+          data-testid="activity-details"
+          tabindex="0"
+          aria-label="Chart details"
+          class="h-36 overflow-y-auto rounded border border-slate-200 p-2 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300"
+        >
+          <p v-if="readout" data-testid="activity-readout">{{ readout }}</p>
+          <p v-else class="text-slate-500 dark:text-slate-400">Hover over a chart to see values.</p>
+          <div v-if="selected" data-testid="activity-change" class="mt-2 rounded bg-violet-50 p-2 text-slate-700 dark:bg-violet-950 dark:text-slate-200">
+            <p class="font-medium">About {{ clock(selected.time) }}</p>
+            <p>{{ changeSummary(selected) }}</p>
+            <p v-if="changeObservation(selected)" class="mt-1">{{ changeObservation(selected) }}</p>
+          </div>
+          <p v-else-if="changes.length" data-testid="activity-changes-hint" class="mt-2 text-slate-500 dark:text-slate-400">
+            {{ changes.length === 1 ? '1 change' : `${changes.length} changes` }} in the desired pod count. Hover over a marker for details<template v-if="qualifying > activity.changes_detailed">; measurements cover up to the latest {{ activity.changes_detailed }}</template>.
+          </p>
         </div>
-        <p v-else-if="changes.length" data-testid="activity-changes-hint" class="text-xs text-slate-500 dark:text-slate-400">
-          {{ changes.length === 1 ? '1 change' : `${changes.length} changes` }} in the desired pod count. Point at a marker for details<template v-if="qualifying > activity.changes_detailed">; measurements cover up to the latest {{ activity.changes_detailed }}</template>.
-        </p>
       </template>
       <p v-else class="text-sm text-slate-500 dark:text-slate-400">No figures are available for this range.</p>
     </div>

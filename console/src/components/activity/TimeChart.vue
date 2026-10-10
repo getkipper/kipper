@@ -30,14 +30,11 @@ interface Props {
   lines?: ChartLine[]
   bands?: ChartBand[]
   markers?: ChartMarker[]
-  /** The smallest axis maximum, so a quiet chart is not drawn at full height. */
+  // Minimum value for the axis maximum.
   floor?: number
   height?: number
-  /** Formats the axis maximum. */
   format?: (v: number) => string
-  /** Point index shared across charts to synchronize the readout. */
   hover?: number | null
-  /** Marker index shared across charts to synchronize highlighting. */
   activeMarker?: number | null
   label: string
 }
@@ -85,7 +82,7 @@ function move(event: MouseEvent) {
   if (box.width <= 0) return
   const fraction = (event.clientX - box.left) / box.width
   emit('update:hover', indexAtFraction(fraction, props.timestamps.length))
-  // A marker within 1.5% of the width counts as under the pointer.
+  // Allow some distance from thin markers to make them easier to hover over.
   const px = fraction * width
   let near: number | null = null
   placed.value.forEach((m, k) => {
@@ -99,11 +96,21 @@ function leave() {
   emit('update:hover', null)
   emit('update:activeMarker', null)
 }
+
+// Align labels inward near plot edges to reduce overflow.
+function labelShift(px: number): string {
+  const f = px / width
+  if (f < 0.1) return 'translate-x-0'
+  if (f > 0.9) return '-translate-x-full'
+  return '-translate-x-1/2'
+}
 </script>
 
 <template>
-  <div class="relative" :data-testid="`chart-${label}`">
-    <span class="pointer-events-none absolute left-1 top-0 text-[10px] text-slate-400 dark:text-slate-500">{{ format(max) }}</span>
+  <div class="flex" :data-testid="`chart-${label}`">
+    <!-- Reserve space beside the plot for the axis maximum. -->
+    <span class="w-10 shrink-0 pr-1.5 pt-3 text-right text-[10px] leading-none text-slate-400 dark:text-slate-500" data-testid="chart-axis-max">{{ format(max) }}</span>
+    <div class="relative min-w-0 flex-1 pt-4" data-testid="chart-plot">
     <svg
       :viewBox="`0 0 ${width} ${height}`"
       preserveAspectRatio="none"
@@ -169,9 +176,11 @@ function leave() {
     <span
       v-for="(m, k) in placed.filter(m => m.label)"
       :key="`label-${k}`"
-      class="pointer-events-none absolute top-0 -translate-x-1/2 rounded bg-violet-100 px-1 text-[10px] text-violet-700 dark:bg-violet-950 dark:text-violet-300"
+      class="pointer-events-none absolute top-0 rounded bg-violet-100 px-1 text-[10px] text-violet-700 dark:bg-violet-950 dark:text-violet-300"
+      :class="labelShift(m.x)"
       :style="{ left: `${(m.x / width) * 100}%` }"
       data-testid="chart-marker-label"
     >{{ m.label }}</span>
+    </div>
   </div>
 </template>
