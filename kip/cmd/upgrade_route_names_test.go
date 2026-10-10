@@ -31,8 +31,11 @@ func TestAssessRouteNames(t *testing.T) {
 		*ingressTo("kipper", "system-console-api", "system-console-api", 8080),
 		*ingressTo("kipper-ai", "librechat", "librechat-librechat", 3080),
 		*ingressTo("kipper-ai-librechat", "librechat", "librechat", 8080),
+		*ingressTo("kipper-ai-librechat", "librechat-internal-paths", "librechat", 8080),
 		*ingressTo("team", "prod-web", "prod-web", 8080),
+		*ingressTo("team", "prod-web-internal-paths", "prod-web", 8080),
 		*ingressTo("team-prod", "web", "web", 8080),
+		*ingressTo("team-prod", "web-internal-paths", "web", 8080),
 		*ingressTo("shop", "web", "web", 8080),
 	}
 
@@ -42,7 +45,7 @@ func TestAssessRouteNames(t *testing.T) {
 	assert.Equal(t, "kipper/system-console-api", got.PlatformCollisions[0])
 	assert.Equal(t, []string{"kipper-ai-librechat/librechat"}, got.Occupied)
 	require.Len(t, got.Shared, 1)
-	assert.Equal(t, []string{"team-prod/web", "team/prod-web"}, got.Shared[0])
+	assert.Equal(t, []string{"team-prod/web", "team/prod-web"}, got.Shared[0], "each Service is listed once across its Ingresses")
 	assert.Equal(t, 1, got.decisions(), "only a live platform collision needs a decision")
 }
 
@@ -132,6 +135,6 @@ func TestAssessRouteNamesSeesCollisionsWithinOneNamespaceAndOnNamedPorts(t *test
 	got := assessRouteNames(ings)
 
 	require.Len(t, got.Shared, 2)
-	assert.Equal(t, []string{"team-prod/db-ui", "team/prod-db-ui"}, got.Shared[0])
+	assert.Equal(t, []string{"team-prod/db", "team/prod-db"}, got.Shared[0], "reports identify backend Services")
 	assert.Equal(t, []string{"team/prod--web", "team/prod-web"}, got.Shared[1])
 }
