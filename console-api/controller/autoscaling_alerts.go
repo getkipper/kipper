@@ -89,6 +89,10 @@ func (rc *ResourceController) atMaximumEpisodes(ctx context.Context, now time.Ti
 		if _, alerted := rc.atMaxAlerted[key]; alerted || limit == nil {
 			continue
 		}
+		// Leave the episode unmarked so it can be reported after the restart hold.
+		if rc.restartHeldLocked(hpa.Namespace, hpa.Name, now) {
+			continue
+		}
 		// The episode began no earlier than the autoscaler, its last scale, the
 		// limit's last transition, or the last time this controller saw the app
 		// below its maximum. The maximum can be lowered onto the running count

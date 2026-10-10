@@ -34,9 +34,9 @@ For automatically sized resources, the controller uses profile minimums when pro
 | `compute-heavy` | 500m | 256 Mi |
 | `memory-heavy` | 100m | 512 Mi |
 | `database` | 500m | 1 Gi |
-| `jvm` | 500m | 2 Gi |
+| `jvm` | 100m (limit at least 500m) | 2 Gi |
 
-These are the floors the auto controller scales down to. The deploy-time `jvm` profile itself is burstable (100m request, 1000m limit): the request stays low so pods schedule on small nodes, and the high limit lets cold-start JIT compilation use a full core for a few minutes without that capacity being permanently reserved. JVM apps spend most of their time idle and only need that headroom during startup.
+These minimums apply to automatic sizing recommendations. The `jvm` profile starts with a 100m CPU request and a 1000m limit, reserving less CPU while allowing bursts during startup. Automatic sizing adjusts the request with usage, down to 100m, and keeps the limit at 500m or higher to preserve startup headroom.
 
 Database services (PostgreSQL, MySQL, MongoDB, OpenSearch) automatically get the `database` profile.
 
@@ -48,15 +48,15 @@ Automatic adjustments round CPU up to the nearest 50m and memory up to the neare
 
 ### Startup grace period
 
-Pods younger than 5 minutes are excluded from CPU and memory calculations. Without this grace period, the controller would react to transient startup spikes. JVM applications, for example, often use 100% CPU during class loading and JIT compilation for several minutes before settling to idle. OOM detection is unaffected and works immediately regardless of pod age.
+Routine CPU and memory averages exclude pods for 5 minutes after the latest start of any currently running workload container, including native sidecars. If none is running, the grace period counts from pod creation. This gives restarted containers time to warm up, including after a node reboot. OOM detection remains active throughout the grace period.
 
 ### Saturation override
 
-The grace period protects against transient startup noise, but a pod that is **pinned at its CPU limit** is not transient. The cgroup is the bottleneck. When any pod sits at 95% or more of its CPU limit, the controller bypasses both the startup grace and the 3-tick hysteresis and bumps CPU.
+After the warmup window below, a pod using 95% or more of its CPU limit can trigger an immediate CPU increase. This saturation override bypasses the routine startup grace period and usage history checks.
 
-This catches a specific failure mode: a JVM app whose CPU limit is too low to ever finish JIT compilation. Without the override, the pod would sit at 100% forever and the grace period would keep classifying it as "still starting up". With the override, the controller raises the limit, the JIT can finish, and the pod settles to idle.
+This helps workloads whose CPU limit slows startup, such as JVM apps performing JIT compilation. Raising the limit before the grace period expires gives startup work more CPU.
 
-Pods younger than 2 minutes don't count towards the override. A booting app legitimately pins its CPU limit for a minute or two, and reacting to that would roll the pod into another boot, endlessly. A pod still pinned past the warmup is genuinely bottlenecked and gets its bump well before the 5-minute grace expires.
+The override uses the same pod age as the startup grace period and becomes eligible after 2 minutes. This warmup window reduces the risk of repeatedly replacing pods in response to startup CPU spikes.
 
 Stateful services get extra caution. Restarting a database mid-operation can kill a running restore or bulk import, so a service only receives a saturation bump after staying pinned for 90 seconds of continuous observations, and never from a single hot reading.
 
@@ -281,7 +281,7 @@ In expert mode, you can still view the resource log to see what the controller c
 
 ## Alerts
 
-Every action the controller takes generates an alert visible in the console bell icon:
+Resource actions generate alerts visible in the console bell icon. Scaling alerts pause during the [restart hold](/en/alerts#autoscaling):
 
 - **Critical** (red): OOM kills, emergency memory doubling
 - **Warning** (yellow): resource increases, stuck pod recovery

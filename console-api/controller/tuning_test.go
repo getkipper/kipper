@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/controller/pkg/labels"
 )
 
 // workloadName names the workload every test here tunes.
@@ -587,5 +588,55 @@ func TestSaturatedBoundedCPURaisesItsRequest(t *testing.T) {
 	rec := tuningOf(t, crClient, "Service").Status.Recommendation
 	if rec.CPURequest != "150m" || rec.CPULimit != "200m" {
 		t.Fatalf("cpu recommendation = %s/%s, want 150m/200m", rec.CPURequest, rec.CPULimit)
+	}
+}
+
+func jvmDeployment(cpuReq, cpuLim string) *appsv1.Deployment {
+	deploy := ownedDeployment("App", corev1.Container{
+		Name: "web",
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(cpuReq), corev1.ResourceMemory: resource.MustParse("2Gi")},
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(cpuLim), corev1.ResourceMemory: resource.MustParse("2Gi")},
+		},
+	})
+	deploy.Labels[labels.ResourceProfile] = "jvm"
+	return deploy
+}
+
+func TestABusyJVMAppGrowsItsCPURequestStepByStep(t *testing.T) {
+	app := automaticApp()
+	crClient := tuningCRClient(app)
+	deploy := jvmDeployment("100m", "1000m")
+	rc := NewResourceController(fake.NewClientset(deploy), crClient)
+
+	entries := rc.processDeployment(context.Background(), deploy.DeepCopy(), usage(877, "1Gi"), nil)
+	if !hasAction(entries, "increased CPU") {
+		t.Fatalf("expected a CPU increase, got %v", entries)
+	}
+	rec := tuningOf(t, crClient, "App").Status.Recommendation
+	if rec.CPURequest != "150m" {
+		t.Fatalf("CPU request recommendation = %s, want 150m: the jvm minimum applies to the limit, not the request", rec.CPURequest)
+	}
+	if lim := resource.MustParse(rec.CPULimit); lim.Cmp(resource.MustParse("500m")) < 0 {
+		t.Fatalf("CPU limit recommendation = %s, want at least the jvm minimum of 500m", rec.CPULimit)
+	}
+}
+
+func TestAnIdleJVMAppLowersItsCPURequestButKeepsTheLimitMinimum(t *testing.T) {
+	app := automaticApp()
+	crClient := tuningCRClient(app)
+	deploy := jvmDeployment("500m", "500m")
+	rc := NewResourceController(fake.NewClientset(deploy), crClient)
+
+	var entries []ResourceLogEntry
+	for tick := 0; tick < 3; tick++ {
+		entries = rc.processDeployment(context.Background(), deploy.DeepCopy(), usage(20, "1Gi"), nil)
+	}
+	if !hasAction(entries, "decreased CPU") {
+		t.Fatalf("expected a CPU decrease after three quiet checks, got %v", entries)
+	}
+	rec := tuningOf(t, crClient, "App").Status.Recommendation
+	if rec.CPURequest != "250m" || rec.CPULimit != "500m" {
+		t.Fatalf("CPU recommendation = %s/%s, want 250m/500m", rec.CPURequest, rec.CPULimit)
 	}
 }

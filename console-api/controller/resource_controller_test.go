@@ -2149,3 +2149,26 @@ func TestExplainStuckRolloutMeasuresTheStartupTime(t *testing.T) {
 		t.Errorf("explanation = %q, want the 5-minute startup time named", got)
 	}
 }
+
+func TestLoweringJVMCPUNeverTakesTheLimitBelowItsMinimum(t *testing.T) {
+	rc := NewResourceController(nil, nil)
+	cpu := resource.MustParse("500m")
+	mem := resource.MustParse("2Gi")
+	idle := []podMetricsEntry{{Namespace: "default", PodName: "jvm-abc", CPUMillis: 10, MemoryBytes: 1 << 30, Age: 10 * time.Minute}}
+	jvm := map[string]string{labels.ResourceProfile: "jvm"}
+
+	var container *corev1.Container
+	for tick := 0; tick < 4; tick++ {
+		container = &corev1.Container{Name: "web", Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: mem},
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: mem},
+		}}
+		rc.evaluate("default", "jvm-idle", container, idle, jvm, 2, false, 0, true)
+	}
+	if got := container.Resources.Requests[corev1.ResourceCPU]; got.Cmp(cpu) >= 0 {
+		t.Fatalf("CPU request = %s, want it lowered below 500m", got.String())
+	}
+	if got := container.Resources.Limits[corev1.ResourceCPU]; got.Cmp(cpu) < 0 {
+		t.Fatalf("CPU limit = %s, want at least the jvm minimum of 500m", got.String())
+	}
+}
