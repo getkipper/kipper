@@ -19,11 +19,19 @@ type Pair struct {
 	Limit   resource.Quantity
 }
 
-// AutoRange is the floor and ceiling Kipper keeps automatic values inside. A
-// zero Ceiling means no ceiling.
+// AutoRange bounds automatic sizing. LimitFloor can raise the limit's floor
+// independently of the request's floor. A zero Ceiling leaves values uncapped.
 type AutoRange struct {
-	Floor   resource.Quantity
-	Ceiling resource.Quantity
+	Floor      resource.Quantity
+	LimitFloor resource.Quantity
+	Ceiling    resource.Quantity
+}
+
+func (a AutoRange) forLimit() AutoRange {
+	if a.LimitFloor.Cmp(a.Floor) > 0 {
+		a.Floor = a.LimitFloor
+	}
+	return a
 }
 
 // Mode describes how [Resolve] sizes a resource; see [provenance.Mode].
@@ -66,7 +74,7 @@ func Resolve(request, limit Quantity, recommended *Pair, fallback Pair, auto Aut
 		p = *recommended
 	}
 	p.Request = withinAuto(p.Request, auto)
-	p.Limit = withinAuto(p.Limit, auto)
+	p.Limit = withinAuto(p.Limit, auto.forLimit())
 	if p.Limit.Cmp(p.Request) < 0 {
 		p.Limit = p.Request
 	}
