@@ -6,7 +6,7 @@ Kipper is open source under the Apache 2.0 license. Contributions are welcome.
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - Node.js 20+
 - `golangci-lint` and `goimports` for linting and formatting
 - A Linux host or VM to run the whole platform (k3s is Linux-only). A local VM works fine, see [Running Kipper locally](#running-kipper-locally).

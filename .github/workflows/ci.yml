@@ -15,21 +15,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# The toolchain every job builds, lints and scans with.
-#
-# Pinned, because `stable` floats: the day Go publishes a new minor, every job
-# changes compiler without a commit. That is how this file broke on 2026-08-20,
-# when one commit passed at 00:29 under Go 1.26 and failed at 09:42 under 1.27,
-# on a gofmt whose output had moved and a pinned golangci-lint whose bundled
-# staticcheck panicked on the new AST.
-#
-# Pinned to the current patch of the line go.mod declares, not to the patch it
-# names: the `go` directive is a language minimum, while this is the toolchain,
-# and an old patch means an old standard library. 1.25.12 fails the vulnerability
-# scan on five advisories that 1.25.13 fixed. Move this deliberately, and expect
-# a new minor to need golangci-lint moved with it.
+# Pin Go to keep compiler and formatter updates deliberate. Keep the patch
+# current for standard-library security fixes, and check golangci-lint
+# compatibility when upgrading the minor version.
 env:
-  GO_VERSION: '1.25.14'
+  GO_VERSION: '1.26.9'
 
 # One run per ref: a superseded run is cancelled rather than run to completion.
 concurrency:
@@ -316,8 +306,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
-      # Pinned to the last x/tools that builds on the pinned Go: v0.50.0 needs
-      # Go 1.26, and an unpinned install broke every module at once.
+      # Pin goimports to keep formatting checks consistent across runs.
       - name: Install goimports
         run: |
           # The module proxy and checksum server drop connections now and then;
@@ -365,10 +354,7 @@ jobs:
         module: [kip, controller, console-api, gateway, sidecar, kipper-poll, authz, datamover]
     steps:
       - uses: actions/checkout@v5
-      # Pinned Go version (must match each module's `go` directive). The
-      # tidy output is sensitive to the running toolchain — pinning keeps
-      # CI deterministic. Bump this together with the per-module
-      # directives if the project's Go floor moves.
+      # GOTOOLCHAIN=local requires Go to meet every module's minimum version.
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -458,9 +444,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
-      # The vulnerability database is fetched at run time whatever the binary
-      # version, so pinning loses nothing. v1.8.0 needs Go 1.26; this is the
-      # last release that builds on the pinned Go.
+      # Pin govulncheck so scanner upgrades are deliberate.
       - run: |
           # The module proxy and checksum server drop connections now and then;
           # three attempts turn that into a pause instead of a red pipeline.

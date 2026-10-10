@@ -1,9 +1,7 @@
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 
-# Build context is the repo root, not gateway/, because gateway imports
-# controller/pkg/hostnames (a sibling Go module). A minimal go.work references
-# only the two modules this build needs; the go directive comes from the build
-# image's toolchain so it always satisfies the modules' own go directives.
+# Use the repo root as the build context to include the sibling controller
+# module.
 WORKDIR /src
 
 COPY gateway/ ./gateway/

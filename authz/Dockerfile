@@ -1,9 +1,7 @@
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 
-# Build context is the repo root, not authz/, because authz imports the
-# CRD types from console-api (a sibling Go module), which in turn imports
-# controller/pkg/labels. A minimal workspace references only the modules
-# this build needs.
+# Use the repo root as the build context to include the sibling modules
+# console-api and controller.
 WORKDIR /src
 
 COPY authz/ ./authz/
