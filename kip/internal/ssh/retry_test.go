@@ -5,8 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -318,4 +321,86 @@ func TestSocketPathFits_LeavesRoomForTheListenerOpenSSHActuallyBinds(t *testing.
 	// The bound in the previous version of this guard.
 	assert.False(t, socketPathFits(strings.Repeat("a", 99)),
 		"99 bytes leaves no room for the suffix and was accepted before")
+}
+
+func TestRun_StopsACommandThatOverrunsItsTimeout(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "pid")
+
+	stub := filepath.Join(dir, "ssh")
+	script := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *' true') exit 0 ;;\n" +
+		"esac\n" +
+		"echo $$ > " + pidFile + "\n" +
+		"exec sleep 30\n"
+	//nolint:gosec // a stub in the test's own temp dir has to be executable
+	require.NoError(t, os.WriteFile(stub, []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	c, err := Dial(Config{Host: "demo.example.com", User: "root", CommandTimeout: 2 * time.Second})
+	require.NoError(t, err)
+
+	started := time.Now()
+	_, runErr := c.Run("cat /proc/sys/kernel/random/boot_id")
+	require.Error(t, runErr)
+	assert.Contains(t, runErr.Error(), "did not finish within 2s")
+	assert.Less(t, time.Since(started), 10*time.Second, "the timeout, not the stalled command, ended the call")
+
+	raw, err := os.ReadFile(pidFile)
+	require.NoError(t, err)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	require.NoError(t, err)
+	process, err := os.FindProcess(pid)
+	require.NoError(t, err)
+	assert.Error(t, process.Signal(syscall.Signal(0)), "the stalled ssh process is still running")
+}
+
+func alive(t *testing.T, pidFile string) bool {
+	t.Helper()
+	raw, err := os.ReadFile(pidFile)
+	require.NoError(t, err)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	require.NoError(t, err)
+	process, err := os.FindProcess(pid)
+	require.NoError(t, err)
+	return process.Signal(syscall.Signal(0)) == nil
+}
+
+func TestRun_TimeoutStopsHelpersThatHoldTheOutputOpen(t *testing.T) {
+	dir := t.TempDir()
+	pidFile, childFile := filepath.Join(dir, "pid"), filepath.Join(dir, "child")
+
+	stub := filepath.Join(dir, "ssh")
+	script := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *' true') exit 0 ;;\n" +
+		"esac\n" +
+		"sleep 30 &\n" +
+		"echo $! > " + childFile + "\n" +
+		"echo $$ > " + pidFile + "\n" +
+		"exec sleep 30\n"
+	//nolint:gosec // a stub in the test's own temp dir has to be executable
+	require.NoError(t, os.WriteFile(stub, []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	c, err := Dial(Config{Host: "demo.example.com", User: "root", CommandTimeout: 2 * time.Second})
+	require.NoError(t, err)
+
+	started := time.Now()
+	_, runErr := c.Run("cat /proc/sys/kernel/random/boot_id")
+	require.Error(t, runErr)
+	assert.Less(t, time.Since(started), 10*time.Second, "a helper holding the output open kept the call waiting")
+	time.Sleep(100 * time.Millisecond)
+	assert.False(t, alive(t, pidFile), "the ssh process is still running")
+	assert.False(t, alive(t, childFile), "the helper ssh started is still running")
+}
+
+func TestBoundedConnectionsStillShareAConnection(t *testing.T) {
+	cfg := Config{Host: "demo.example.com", User: "root", CommandTimeout: time.Second}
+	c := &Client{cfg: cfg, controlPath: controlSocket(cfg)}
+	if c.controlPath == "" {
+		t.Skip("control socket unavailable")
+	}
+	assert.Contains(t, strings.Join(c.sshArgs(), " "), "ControlMaster=auto")
 }

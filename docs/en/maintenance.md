@@ -259,5 +259,6 @@ kubectl -n kube-system annotate helmchart <chart> kip.kipper/reapply="$(date +%s
 - [DNS repair](/en/cli-reference#kip-cluster-dns-repair) restores the configured host resolvers.
 - [Host hardening](/en/security#host-hardening) applies firewall and service defaults.
 - [Node repair](/en/alerts#what-causes-the-session-to-drop) updates storage-related host settings.
+- [Node reboot](/en/cli-reference#kip-node-reboot) backs up and reboots the server to apply kernel or service updates, then waits for node and component health checks to pass.
 - [Domain changes](/en/domains#custom-console-domain) move the cluster’s serving identity.
 - [Cluster removal](/en/cli-reference#kip-cluster-uninstall) removes the installation and cluster data.

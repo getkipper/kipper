@@ -222,6 +222,34 @@ Lists all nodes in the cluster with role, status, version, and IP.
 kip node list
 ```
 
+## kip node reboot {#kip-node-reboot}
+
+Reboots the cluster's server and waits for node and component health checks to pass. Use it to apply a new kernel or service updates listed under Pending restarts in `kip status`.
+
+```bash
+kip node reboot
+kip node reboot --yes --skip-backup
+```
+
+| Flag | Required | Description |
+|---|---|---|
+| `--yes` | No | Reboot without asking for confirmation |
+| `--skip-backup` | No | Reboot without taking a backup first |
+| `--ssh-key` | No | SSH private key for the server; overrides `KIP_SSH_KEY` and `cluster.ssh_key` |
+| `--timeout` | No | How long to wait for the server and every component to be ready again (default `20m`) |
+
+Apps on a single-server cluster are unavailable during the reboot. The command:
+
+1. Reads the server's boot ID over SSH. Stops if the server cannot be reached.
+2. Asks for confirmation, unless you pass `--yes`.
+3. Unless `--skip-backup` is set, takes a backup using the defaults from `kip backup create` and waits up to 30 minutes for completion. A failed or timed-out backup cancels the reboot.
+4. Reboots the server. If console-api uses `:latest`, it may start with a newer image. Before rebooting, run `kip upgrade --check` to check for required data updates.
+5. Waits until the server reports a new boot ID. If it still reports the old ID after three minutes, the command stops with instructions for investigating the cause.
+6. Waits for Kubernetes to report the new boot ID and for every node and component from `kip status` to pass two consecutive readiness checks.
+7. Runs the host checks from `kip status` over SSH, including Pending restarts. These checks also run if cluster readiness times out, even when the API server is unavailable.
+
+The `--timeout` period starts after the reboot is scheduled; backup time is separate. Boot times vary by server. If the wait times out, run `kip status` to check progress. If SSH remains unreachable, check the server through your provider’s console.
+
 ## kip auth verify {#kip-auth-verify}
 
 Proves your OIDC identity authenticates and authorizes against the cluster, the same check the installer runs inline. Run it after a headless install, or any time you want to confirm the login path works end to end.
