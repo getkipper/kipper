@@ -229,7 +229,7 @@ func (rc *ResourceController) tuneWorkload(
 	}
 	pendingCPU, pendingMem := pendingPairs(sizing.Tracked.Recommendation(rt.Status))
 	cpuEff, cpuChanged := effective(spec.CPURequest, spec.CPULimit, corev1.ResourceCPU, live, work, pendingCPU, cooldown,
-		resourcebounds.AutoRange{Floor: resource.MustParse(profile.cpu)})
+		resourcebounds.AutoRange{Floor: resource.MustParse(profile.cpu), LimitFloor: resource.MustParse(profile.cpuLimit())})
 	memEff, memChanged := effective(spec.MemoryRequest, spec.MemoryLimit, corev1.ResourceMemory, live, work, pendingMem, cooldown,
 		resourcebounds.AutoRange{Floor: resource.MustParse(profile.memory), Ceiling: *resource.NewQuantity(oomCap, resource.BinarySI)})
 

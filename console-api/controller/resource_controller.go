@@ -73,9 +73,8 @@ type ResourceLogEntry struct {
 	From      string `json:"from"`
 	To        string `json:"to"`
 	Reason    string `json:"reason"`
-	// Severity overrides the action-derived severity when the alert is
-	// created. Empty falls back to alertSeverity(Action).
-	Severity string `json:"severity,omitempty"`
+	Severity  string `json:"severity,omitempty"`
+	Quiet     bool   `json:"-"`
 }
 
 const (
@@ -123,6 +122,7 @@ type ResourceController struct {
 	skippedLogged    map[string]bool         // namespace/name of ownerless workloads already logged
 	stagedAcks       []func(context.Context) // acknowledgements waiting for this tick's alerts to be stored
 	hpaReplicas      map[string]int32        // namespace/name/uid → last seen replica count
+	restarts         map[string]time.Time    // namespace/app → latest container restart within restartAlertHold
 	changeTimestamps map[string][]time.Time  // namespace/name → recent resource or HPA change times
 	imagePullAlerted map[string]time.Time    // namespace/pod/container → last ImagePullBackOff alert time
 	crashLoopAlerted map[string]time.Time    // namespace/pod/container → last CrashLoopBackOff alert time
@@ -222,6 +222,8 @@ func (rc *ResourceController) tick(ctx context.Context) {
 	}
 	rc.forgetStoppedApps(ctx, deployments)
 
+	rc.refreshRestarts(ctx, time.Now())
+
 	batches := rc.checkPodProblems(ctx)
 	batches = append(batches, rc.checkNodeReady(nodes)...)
 	batches = append(batches, rc.checkFailedJobs(ctx)...)
@@ -291,7 +293,7 @@ func (rc *ResourceController) tick(ctx context.Context) {
 	stored := true
 	if len(logEntries) > 0 {
 		rc.appendLogEntries(ctx, logEntries)
-		if err := rc.createAlerts(ctx, logEntries); err != nil {
+		if err := rc.createAlerts(ctx, alertable(logEntries)); err != nil {
 			log.Printf("resource controller: failed to persist tuning alerts: %v", err)
 			stored = false
 		}
@@ -378,10 +380,8 @@ func (rc *ResourceController) listManagedStatefulSets(ctx context.Context) ([]ap
 	return list.Items, nil
 }
 
-// startupGracePeriod is how long to ignore pod metrics after creation.
-// JVM apps can spike to 100% CPU during class loading and JIT compilation
-// for several minutes — this prevents the controller from reacting to
-// startup transients.
+// startupGracePeriod excludes startup spikes from routine usage averages.
+// OOM handling and the saturation override use separate checks.
 const startupGracePeriod = 5 * time.Minute
 
 // podMetricsEntry holds parsed metrics for a single pod.
@@ -471,7 +471,7 @@ func (rc *ResourceController) fetchPodMetrics(ctx context.Context) (map[string][
 			continue
 		}
 
-		podAge := time.Since(pod.CreationTimestamp.Time)
+		age := podAge(pod, time.Now())
 
 		key := item.Metadata.Namespace + "/" + appName
 		result[key] = append(result[key], podMetricsEntry{
@@ -483,7 +483,7 @@ func (rc *ResourceController) fetchPodMetrics(ctx context.Context) (map[string][
 			OOMKilled:    oomKilled,
 			OOMAt:        oomAt,
 			StuckMinutes: stuckMinutes,
-			Age:          podAge,
+			Age:          age,
 		})
 	}
 
@@ -522,7 +522,7 @@ func oomEntriesForUncovered(podInfo map[string]*corev1.Pod, covered map[string]b
 			Labels:    pod.Labels,
 			OOMKilled: oomKilled,
 			OOMAt:     oomAt,
-			Age:       time.Since(pod.CreationTimestamp.Time),
+			Age:       podAge(pod, time.Now()),
 			Synthetic: true,
 		})
 	}
@@ -1102,8 +1102,8 @@ func (rc *ResourceController) recommendProfile(app *kipperv1.App) string {
 	}
 }
 
-// checkHPAScaling lists all HPAs managed by Kipper and generates alerts
-// when the replica count changes.
+// checkHPAScaling records managed HPA replica changes, marking entries as
+// log-only during a restart hold.
 func (rc *ResourceController) checkHPAScaling(ctx context.Context) []ResourceLogEntry {
 	hpaList, err := rc.client.AutoscalingV2().HorizontalPodAutoscalers("").List(ctx, metav1.ListOptions{
 		LabelSelector: labels.KipperManagedSelector,
@@ -1154,6 +1154,7 @@ func (rc *ResourceController) checkHPAScaling(ctx context.Context) []ResourceLog
 			To:        fmt.Sprintf("%d", current),
 			Reason:    handlers.HPAScaleReason,
 			Severity:  "info",
+			Quiet:     rc.restartHeldLocked(hpa.Namespace, hpa.Name, nowTime),
 		})
 
 		log.Printf("resource controller: HPA %s %s", key, action)
@@ -1227,6 +1228,7 @@ func (rc *ResourceController) firstSightScales(ctx context.Context, hpas []*auto
 			To:        fmt.Sprintf("%d", current),
 			Reason:    handlers.HPAScaleReason,
 			Severity:  "info",
+			Quiet:     rc.restartHeld(hpa.Namespace, hpa.Name, time.Now()),
 		})
 		log.Printf("resource controller: HPA %s/%s %s", hpa.Namespace, hpa.Name, action)
 		rc.recordChange(hpa.Namespace, hpa.Name)
@@ -1291,7 +1293,7 @@ func (rc *ResourceController) evaluate(
 				corev1.ResourceMemory: resource.MustParse(defaults.memory),
 			},
 			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse(defaults.cpu),
+				corev1.ResourceCPU:    resource.MustParse(defaults.cpuLimit()),
 				corev1.ResourceMemory: resource.MustParse(defaults.memory),
 			},
 		}
@@ -1536,9 +1538,7 @@ func (rc *ResourceController) evaluate(
 				newMillis := int64(math.Ceil(float64(reqMillis) * 1.5))
 				newQty := roundCPU(newMillis)
 				container.Resources.Requests[corev1.ResourceCPU] = newQty
-				// Preserve a burstable profile's higher CPU limit (e.g. jvm's
-				// 1000m ceiling for JIT warm-up); only raise the limit when the
-				// request would otherwise exceed it.
+				// Preserve a higher CPU limit to retain headroom for startup.
 				if curLim, ok := container.Resources.Limits[corev1.ResourceCPU]; !ok || newQty.Cmp(curLim) > 0 {
 					container.Resources.Limits[corev1.ResourceCPU] = newQty
 				}
@@ -1563,7 +1563,12 @@ func (rc *ResourceController) evaluate(
 				if newQty.MilliValue() < reqMillis {
 					oldVal := cpuReq.String()
 					container.Resources.Requests[corev1.ResourceCPU] = newQty
-					container.Resources.Limits[corev1.ResourceCPU] = newQty
+					// Retain the profile's startup headroom as the request shrinks.
+					limit := newQty
+					if minLimit := resource.MustParse(profileMin.cpuLimit()); limit.Cmp(minLimit) < 0 {
+						limit = minLimit
+					}
+					container.Resources.Limits[corev1.ResourceCPU] = limit
 					entries = append(entries, ResourceLogEntry{
 						Time:      now,
 						App:       appName,
@@ -1783,9 +1788,17 @@ func roundCPU(millis int64) resource.Quantity {
 }
 
 type profileDefaults_ struct {
-	name   string
-	cpu    string
-	memory string
+	name        string
+	cpu         string
+	minCPULimit string
+	memory      string
+}
+
+func (p profileDefaults_) cpuLimit() string {
+	if p.minCPULimit != "" {
+		return p.minCPULimit
+	}
+	return p.cpu
 }
 
 func profileDefaults(profile string) profileDefaults_ {
@@ -1799,7 +1812,8 @@ func profileDefaults(profile string) profileDefaults_ {
 	case "memory-heavy":
 		return profileDefaults_{name: "memory-heavy", cpu: "100m", memory: "512Mi"}
 	case "jvm":
-		return profileDefaults_{name: "jvm", cpu: "500m", memory: "2Gi"}
+		// Separate floors let the request shrink while retaining CPU headroom for startup.
+		return profileDefaults_{name: "jvm", cpu: "100m", minCPULimit: "500m", memory: "2Gi"}
 	case "database":
 		return profileDefaults_{name: "database", cpu: "500m", memory: "1Gi"}
 	default:
