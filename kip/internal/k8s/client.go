@@ -68,12 +68,9 @@ type NodeInfo struct {
 	Version string
 	IP      string
 
-	// MachineID is the host identity the kubelet published, and Annotations
-	// carries what kip stamped on the node. Together they say whether host
-	// configuration written at install or node add still applies, or whether
-	// the machine underneath the name has been replaced since.
 	MachineID   string
 	Annotations map[string]string
+	BootID      string
 }
 
 // ListNodes returns summary info for all nodes in the cluster.
@@ -237,6 +234,7 @@ func nodeToInfo(node corev1.Node) NodeInfo {
 		Version:     node.Status.NodeInfo.KubeletVersion,
 		IP:          ip,
 		MachineID:   node.Status.NodeInfo.MachineID,
+		BootID:      node.Status.NodeInfo.BootID,
 		Annotations: node.Annotations,
 	}
 }

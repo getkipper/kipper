@@ -159,11 +159,11 @@ kip node repair-host --host <address>
 ```
   Pending restarts:
     ⚠  deferred by Kipper: iscsid.service
-       Patched libraries stay unloaded until these restart. Restarting them
-       drops every Longhorn volume on this node, so reboot the node during a
-       window you choose rather than restarting the units directly.
+       These services need a restart to load updated libraries.
+       Restarting them can disrupt Longhorn volumes. Schedule downtime
+       and reboot with 'kip node reboot' instead of restarting these
+       services directly.
 ```
 
-Reboot the node to pick those up. A reboot restarts everything cleanly, where
-restarting `iscsid` on its own reproduces the failure this configuration exists
-to prevent.
+Apply the updates during planned downtime with [`kip node reboot`](/en/cli-reference#kip-node-reboot).
+Restarting `iscsid` on its own can disconnect mounted Longhorn volumes.

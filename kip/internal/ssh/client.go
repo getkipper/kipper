@@ -1,11 +1,11 @@
 // Package ssh wraps OpenSSH, honoring SSH configuration, agents and options.
-// Commands share a ControlMaster connection to reduce handshakes and exposure
-// to sshd's unauthenticated-connection limits. Uploads stream through remote
-// cat, using the same transport.
+// Commands use ControlMaster multiplexing when available. Uploads send data
+// through remote cat over the same transport.
 package ssh
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -54,32 +54,16 @@ const (
 
 // Config holds the parameters needed to invoke ssh.
 type Config struct {
-	Host string
-	Port string
-	User string
-	// KeyPath is the SSH private key the caller explicitly chose. When
-	// non-empty, ssh is invoked with `-i <path> -o IdentitiesOnly=yes`,
-	// forcing OpenSSH to use ONLY this key (the agent and other default
-	// identities are ignored). Use this for "force key X" semantics.
-	KeyPath string
-	// FallbackKeyPath is a hint at a key file the caller would prefer
-	// when KeyPath is empty. Unlike KeyPath this never forces
-	// IdentitiesOnly: if the file exists ssh tries it; if not, ssh
-	// falls through to its normal lookup (ssh-agent, ~/.ssh/config,
-	// default identity files). Use this for the "default if I haven't
-	// said otherwise" path so users with ssh-agent are not locked out
-	// when the default file is absent.
+	Host            string
+	Port            string
+	User            string
+	KeyPath         string
 	FallbackKeyPath string
-	// Options is a list of additional `-o NAME=VALUE` strings forwarded
-	// to ssh verbatim, for cases where the caller needs to override a
-	// default (e.g. StrictHostKeyChecking, ProxyJump). Most users will
-	// configure these in ~/.ssh/config instead.
-	Options []string
+	Options         []string
+	CommandTimeout  time.Duration
 }
 
-// Client wraps an SSH-reachable remote host. Each method invocation spawns a
-// fresh ssh process, but they share one connection through the control master
-// established at Dial.
+// Client runs commands on a remote host using a fresh SSH process per invocation.
 type Client struct {
 	cfg Config
 	// controlPath is the multiplexing socket, or "" when one could not be
@@ -197,17 +181,23 @@ func (c *Client) Run(command string) (string, error) {
 // command; stream, when non-nil, receives stdout and stderr as they arrive
 // instead of them being captured.
 func (c *Client) attempt(command string, stdin []byte, stream io.Writer) (string, error) {
-	//nolint:gosec // ssh client is the operator's chosen execution surface; command is built by kip internals against the host the operator selected
-	cmd := exec.Command("ssh", append(c.sshArgs(), command)...)
+	cmd, ctx, cancel := c.command(append(c.sshArgs(), command)...)
+	defer cancel()
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
+	var out []byte
+	var err error
 	if stream != nil {
 		cmd.Stdout = stream
 		cmd.Stderr = stream
-		return "", cmd.Run()
+		err = cmd.Run()
+	} else {
+		out, err = cmd.CombinedOutput()
 	}
-	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return string(out), fmt.Errorf("ssh command did not finish within %s: %w", c.cfg.CommandTimeout, err)
+	}
 	return string(out), err
 }
 
@@ -321,9 +311,27 @@ func (c *Client) Close() error {
 	if c.controlPath == "" {
 		return nil
 	}
-	//nolint:gosec // the socket path is derived from the operator's own connection parameters
-	_ = exec.Command("ssh", c.sshArgsWith("-O", "exit")...).Run()
+	cmd, _, cancel := c.command(c.sshArgsWith("-O", "exit")...)
+	defer cancel()
+	_ = cmd.Run()
 	return nil
+}
+
+// command bounds execution and output-pipe waits when CommandTimeout is positive.
+// On Unix, cancellation kills the process group. Normal SSH exit preserves
+// helpers that may serve the shared connection. Untimed commands retain
+// terminal access for interactive SSH prompts.
+func (c *Client) command(args ...string) (*exec.Cmd, context.Context, context.CancelFunc) {
+	if c.cfg.CommandTimeout <= 0 {
+		//nolint:gosec // ssh client is the operator's chosen execution surface; arguments are built by kip internals against the host the operator selected
+		return exec.Command("ssh", args...), context.Background(), func() {}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.CommandTimeout)
+	//nolint:gosec // ssh client is the operator's chosen execution surface; arguments are built by kip internals against the host the operator selected
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	ownProcessGroup(cmd)
+	cmd.WaitDelay = 2 * time.Second
+	return cmd, ctx, cancel
 }
 
 // fileExists returns true when the path exists and is not a directory.

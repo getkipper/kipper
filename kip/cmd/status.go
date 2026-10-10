@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -136,39 +138,42 @@ func reportCrashLoopingServices(ctx context.Context, client *k8s.Client) {
 	fmt.Println()
 }
 
-// checkHost runs the checks that live on the host rather than in the API, over
-// one SSH connection. Reaching for SSH at all is the exception here, so the two
-// checks that need it share the dial.
 func checkHost(cluster *config.Cluster, nodes []k8s.NodeInfo) {
 	if cluster.Host == "" {
 		return
 	}
+	checkHostWith(os.Stdout, hostSSHConfig(cluster, ""), cluster, nodes)
+}
 
-	explicit, fallback := resolveSSHKey("", cluster)
-	client, err := ssh.Dial(ssh.Config{
+// hostSSHConfig applies the shared SSH key precedence and disables interactive prompts.
+func hostSSHConfig(cluster *config.Cluster, keyFlag string) ssh.Config {
+	explicit, fallback := resolveSSHKey(keyFlag, cluster)
+	return ssh.Config{
 		Host:            cluster.Host,
 		User:            "root",
 		KeyPath:         explicit,
 		FallbackKeyPath: fallback,
 		Options:         []string{"BatchMode=yes"},
-	})
+	}
+}
+
+func checkHostWith(out io.Writer, sshConfig ssh.Config, cluster *config.Cluster, nodes []k8s.NodeInfo) {
+	client, err := ssh.Dial(sshConfig)
 	if err != nil {
-		// Every host section says it was not checked. A missing section reads
-		// as one that passed, and an unreachable host is not evidence that its
-		// resolvers are right or its volumes writable.
-		fmt.Printf("  DNS resolvers:\n")
-		fmt.Printf("    ⚠  not checked (could not reach the host over SSH: %v)\n\n", err)
-		fmt.Printf("  Pending restarts:\n")
-		fmt.Printf("    ⚠  not checked (could not reach the host over SSH)\n\n")
-		fmt.Printf("  Volume mounts:\n")
-		fmt.Printf("    ⚠  not checked (could not reach the host over SSH)\n\n")
+		// Show each skipped check so missing results cannot be mistaken for success.
+		say(out, "  DNS resolvers:\n")
+		say(out, "    ⚠  not checked (could not reach the host over SSH: %v)\n\n", err)
+		say(out, "  Pending restarts:\n")
+		say(out, "    ⚠  not checked (could not reach the host over SSH)\n\n")
+		say(out, "  Volume mounts:\n")
+		say(out, "    ⚠  not checked (could not reach the host over SSH)\n\n")
 		return
 	}
 	defer func() { _ = client.Close() }()
 
-	checkHostDNSResolvers(cluster, client)
-	reportPendingRestarts(client)
-	reportReadOnlyVolumes(cluster, client, nodes)
+	checkHostDNSResolvers(out, cluster, client)
+	reportPendingRestarts(out, client)
+	reportReadOnlyVolumes(out, cluster, client, nodes)
 }
 
 // reportStorageRestartCoverage names the nodes whose host configuration is
@@ -206,34 +211,28 @@ func reportStorageRestartCoverage(nodes []k8s.NodeInfo) {
 	fmt.Printf("         kip node repair-host --host <address>\n\n")
 }
 
-// reportReadOnlyVolumes checks the mounts on the one node this command can
-// reach, and names every node it could not.
-//
-// The connection goes to the cluster host, so on a multi-node cluster this sees
-// the control plane's mount namespace and nothing else. Reporting "no read-only
-// volumes" from that would be a worse answer than reporting nothing: the
-// controller's log-based detector is what covers the other nodes.
-func reportReadOnlyVolumes(cluster *config.Cluster, client *ssh.Client, nodes []k8s.NodeInfo) {
-	fmt.Printf("  Volume mounts:\n")
+// reportReadOnlyVolumes checks CSI mounts in the cluster host's mount namespace.
+// Results are scoped to that host; other known nodes are listed as unchecked.
+func reportReadOnlyVolumes(out io.Writer, cluster *config.Cluster, client *ssh.Client, nodes []k8s.NodeInfo) {
+	say(out, "  Volume mounts:\n")
 
 	readOnly, err := installer.ReadOnlyVolumeMounts(client)
 	if err != nil {
-		fmt.Printf("    ⚠  not checked (could not read the mounts on %s: %v)\n\n", cluster.Host, err)
+		say(out, "    ⚠  not checked (could not read the mounts on %s: %v)\n\n", cluster.Host, err)
 		return
 	}
 
 	if len(readOnly) == 0 {
-		fmt.Printf("    ✔  no read-only volumes on %s\n", cluster.Host)
+		say(out, "    ✔  no read-only volumes on %s\n", cluster.Host)
 	} else {
 		for _, mount := range readOnly {
-			fmt.Printf("    ✗  mounted read-only: %s\n", mount)
+			say(out, "    ✗  mounted read-only: %s\n", mount)
 		}
-		fmt.Printf("       Whatever writes to it has stopped being able to. Recreate the pod\n")
-		fmt.Printf("       with 'kip service restart <name>'; restarting the container cannot\n")
-		fmt.Printf("       clear a mount.\n")
+		say(out, "       Writes to these volumes fail. Recreate the affected pod\n")
+		say(out, "       with 'kip service restart <name>'; a container restart alone\n")
+		say(out, "       cannot restore a writable mount.\n")
 	}
 
-	// A node this command never looked at must not be covered by the line above.
 	var unchecked []string
 	for _, node := range nodes {
 		if !nodeIsHost(node, cluster.Host, nodes) {
@@ -241,10 +240,10 @@ func reportReadOnlyVolumes(cluster *config.Cluster, client *ssh.Client, nodes []
 		}
 	}
 	if len(unchecked) > 0 {
-		fmt.Printf("    ⚠  not checked on %s (this command reads mounts on %s only)\n",
+		say(out, "    ⚠  not checked on %s (this command reads mounts on %s only)\n",
 			strings.Join(unchecked, ", "), cluster.Host)
 	}
-	fmt.Println()
+	say(out, "\n")
 }
 
 // nodeIsHost reports whether a node is the one the status command connected to.
@@ -270,69 +269,58 @@ func nodeIsHost(node k8s.NodeInfo, host string, all []k8s.NodeInfo) bool {
 	return false
 }
 
-// reportPendingRestarts says what the host still owes.
-//
-// Kipper tells needrestart to leave the storage path alone, because restarting
-// iscsid fails every Longhorn volume on the node. That trades an availability
-// risk for a security one: the patched library stays unloaded until something
-// restarts the daemon. Reporting it here is what keeps the deferral from
-// becoming drift nobody remembers agreeing to.
-func reportPendingRestarts(client *ssh.Client) {
-	fmt.Printf("  Pending restarts:\n")
+// reportPendingRestarts surfaces updates that still need a service restart or reboot.
+// Kipper defers storage service restarts to protect Longhorn volumes, so operators
+// need to schedule downtime to load the updated libraries.
+func reportPendingRestarts(out io.Writer, client *ssh.Client) {
+	say(out, "  Pending restarts:\n")
 
 	pending, err := installer.PendingRestarts(client)
 	if err != nil {
-		fmt.Printf("    ⚠  not checked (%v)\n\n", err)
+		say(out, "    ⚠  not checked (%v)\n\n", err)
 		return
 	}
 	if !pending.Any() {
-		fmt.Printf("    ✔  nothing waiting on a restart\n\n")
+		say(out, "    ✔  nothing waiting on a restart\n\n")
 		return
 	}
 
 	if len(pending.Deferred) > 0 {
-		fmt.Printf("    ⚠  deferred by Kipper: %s\n", strings.Join(pending.Deferred, ", "))
-		fmt.Printf("       Patched libraries stay unloaded until these restart. Restarting them\n")
-		fmt.Printf("       drops every Longhorn volume on this node, so reboot the node during a\n")
-		fmt.Printf("       window you choose rather than restarting the units directly.\n")
+		say(out, "    ⚠  deferred by Kipper: %s\n", strings.Join(pending.Deferred, ", "))
+		say(out, "       These services need a restart to load updated libraries.\n")
+		say(out, "       Restarting them can disrupt Longhorn volumes. Schedule downtime\n")
+		say(out, "       and reboot with 'kip node reboot' instead of restarting these\n")
+		say(out, "       services directly.\n")
 	}
 	if len(pending.Other) > 0 {
-		fmt.Printf("    ⚠  waiting on a restart: %s\n", strings.Join(pending.Other, ", "))
+		say(out, "    ⚠  waiting on a restart: %s\n", strings.Join(pending.Other, ", "))
 	}
 	if pending.KernelOutdated {
-		fmt.Printf("    ⚠  the installed kernel is not the running one; the node needs a reboot\n")
+		say(out, "    ⚠  a kernel update is pending; reboot with 'kip node reboot'\n")
 	}
-	fmt.Println()
+	say(out, "\n")
 }
 
-// checkHostDNSResolvers audits the curated resolv.conf against the resolver set
-// the cluster was configured with: an unsafe hand-edit, a divergence from the
-// configured set, and an unreachable resolver each get their own warning.
-//
-// Best-effort: a missing file must not fail status, but it prints a "not
-// checked" line, because a silently absent section would read as "audited and
-// fine".
-func checkHostDNSResolvers(cluster *config.Cluster, client *ssh.Client) {
-	fmt.Printf("  DNS resolvers:\n")
+// checkHostDNSResolvers checks resolver validity, configuration, and reachability.
+// Read failures are reported as unchecked so status can continue with other checks.
+func checkHostDNSResolvers(out io.Writer, cluster *config.Cluster, client *ssh.Client) {
+	say(out, "  DNS resolvers:\n")
 
 	body, err := client.Run("cat " + installer.ResolvConfPath())
 	if err != nil {
-		fmt.Printf("    ⚠  not checked (could not read %s on the host: %v)\n\n", installer.ResolvConfPath(), err)
+		say(out, "    ⚠  not checked (could not read %s on the host: %v)\n\n", installer.ResolvConfPath(), err)
 		return
 	}
 
 	resolvers, problem := installer.CheckResolvConf(body)
 	if problem != nil {
-		fmt.Printf("    ⚠  %s\n", problem)
-		fmt.Printf("       run 'kip cluster dns repair' to restore the configured resolvers,\n")
-		fmt.Printf("       or fix the nameserver entries in %s by hand\n\n", installer.ResolvConfPath())
+		say(out, "    ⚠  %s\n", problem)
+		say(out, "       run 'kip cluster dns repair' to restore the configured resolvers,\n")
+		say(out, "       or fix the nameserver entries in %s by hand\n\n", installer.ResolvConfPath())
 		return
 	}
 
-	// Drift and reachability are independent failures, so both checks run
-	// and both report. An empty dns_resolvers in the local config means the
-	// install used the default set, so there is always an intent to compare
-	// against.
+	// Report configuration drift and reachability independently.
 	healthy := true
 	configured := cluster.DNSResolvers
 	if len(configured) == 0 {
@@ -340,27 +328,27 @@ func checkHostDNSResolvers(cluster *config.Cluster, client *ssh.Client) {
 	}
 	if !installer.ResolversMatch(resolvers, configured) {
 		healthy = false
-		fmt.Printf("    ⚠  live resolvers (%s) differ from the configured set (%s)\n",
+		say(out, "    ⚠  live resolvers (%s) differ from the configured set (%s)\n",
 			strings.Join(resolvers, ", "), strings.Join(configured, ", "))
-		fmt.Printf("       %s was changed outside kip: run 'kip cluster dns repair'\n", installer.ResolvConfPath())
-		fmt.Printf("       to restore the configured set, or update dns_resolvers in\n")
-		fmt.Printf("       ~/.kip/config.yaml if the new set is intended\n")
+		say(out, "       Run 'kip cluster dns repair' to restore %s\n", installer.ResolvConfPath())
+		say(out, "       to the configured set, or update dns_resolvers in\n")
+		say(out, "       ~/.kip/config.yaml if the new set is intended\n")
 	}
 
 	unreachable, probeErr := installer.ProbeResolvers(client, resolvers)
 	switch {
 	case probeErr != nil:
 		healthy = false
-		fmt.Printf("    ⚠  reachability not checked (probing the resolvers from the host failed: %v)\n", probeErr)
+		say(out, "    ⚠  reachability not checked (probing the resolvers from the host failed: %v)\n", probeErr)
 	case len(unreachable) > 0:
 		healthy = false
 		for _, r := range unreachable {
-			fmt.Printf("    ⚠  resolver %s did not accept a TCP connection on port 53 from the host\n", r)
+			say(out, "    ⚠  resolver %s did not accept a TCP connection on port 53 from the host\n", r)
 		}
 	}
 
 	if healthy {
-		fmt.Printf("    ✔  %s\n", strings.Join(resolvers, ", "))
+		say(out, "    ✔  %s\n", strings.Join(resolvers, ", "))
 	}
-	fmt.Println()
+	say(out, "\n")
 }
