@@ -158,3 +158,15 @@ func TestResolveWithoutACeiling(t *testing.T) {
 		t.Fatalf("got %s / %s (%v), want 4 / 4 automatic", got.Request.String(), got.Limit.String(), mode)
 	}
 }
+
+func TestAutomaticLimitKeepsItsOwnFloor(t *testing.T) {
+	cpuRange := AutoRange{Floor: q("100m"), LimitFloor: q("500m")}
+	rec := Pair{Request: q("150m"), Limit: q("150m")}
+	got, mode := Resolve(Quantity{}, Quantity{}, &rec, Pair{Request: q("100m"), Limit: q("1")}, cpuRange)
+	if mode != ModeAutomatic {
+		t.Fatalf("mode = %v, want automatic", mode)
+	}
+	if got.Request.Cmp(q("150m")) != 0 || got.Limit.Cmp(q("500m")) != 0 {
+		t.Fatalf("Resolve = %s/%s, want 150m/500m", got.Request.String(), got.Limit.String())
+	}
+}
