@@ -107,6 +107,117 @@ describe('AppActivityPanel', () => {
     expect(find('activity-readout').text()).toContain('30 requests/min (peak 40)')
   })
 
+  it('keeps the details area in place while pointing at the charts', async () => {
+    await open(response())
+    const details = find('activity-details')
+    expect(details.exists()).toBe(true)
+    expect(details.classes().some(c => /^h-/.test(c))).toBe(true)
+    expect(details.classes()).toContain('overflow-y-auto')
+    expect(details.attributes('tabindex')).toBe('0')
+    expect(details.text()).toContain('Hover over a chart to see values')
+    const before = details.element
+
+    const svg = find('chart-pods').find('svg')
+    svg.element.getBoundingClientRect = () => ({ left: 0, width: 300, top: 0, height: 64, right: 300, bottom: 64, x: 0, y: 0, toJSON: () => ({}) })
+    await svg.trigger('mousemove', { clientX: 299 })
+    expect(find('activity-details').element).toBe(before)
+    expect(find('activity-details').text()).toContain('30 requests/min (peak 40)')
+    expect(find('activity-details').text()).toContain('The autoscaler changed the desired count')
+
+    await svg.trigger('mouseleave')
+    expect(find('activity-details').element).toBe(before)
+    expect(find('activity-details').text(), 'the details stay readable while the pointer moves into the box').toContain('The autoscaler changed the desired count')
+    expect(find('activity-details').text()).toContain('30 requests/min (peak 40)')
+
+    await svg.trigger('mousemove', { clientX: 1 })
+    expect(find('activity-readout').text(), 'the readout follows the pointer').toContain('10 requests/min')
+    expect(find('activity-change').exists(), 'the change stays until another marker is pointed at').toBe(true)
+
+    await svg.trigger('mouseleave')
+    await find('activity-range-6h').trigger('click')
+    await flushPromises()
+    expect(find('activity-details').text()).toContain('Hover over a chart to see values')
+  })
+
+  it('keeps the retained details on the same moment when the window slides', async () => {
+    vi.useFakeTimers()
+    await open(response())
+    const svg = find('chart-pods').find('svg')
+    svg.element.getBoundingClientRect = () => ({ left: 0, width: 300, top: 0, height: 64, right: 300, bottom: 64, x: 0, y: 0, toJSON: () => ({}) })
+    await svg.trigger('mousemove', { clientX: 299 })
+    await svg.trigger('mouseleave')
+    const before = find('activity-readout').text()
+    expect(before).toContain('30 requests/min')
+
+    vi.mocked(activityApi.fetchAppActivity).mockResolvedValue(response({
+      timestamps: [1030, 1060, 1090],
+      requests_per_min: { ok: [20, 30, 99], redirect: three(0), client_error: three(0), aborted: three(0), server_error: three(0) },
+      requests_peak_per_min: [25, 40, 120],
+    }))
+    await vi.advanceTimersByTimeAsync(60_000)
+    await flushPromises()
+
+    expect(find('activity-readout').text(), 'the retained details are a snapshot of what was pointed at').toBe(before)
+    expect(find('activity-change').text()).toContain('The autoscaler changed the desired count')
+  })
+
+  it('keeps the retained details when a refresh samples a different grid', async () => {
+    vi.useFakeTimers()
+    await open(response())
+    const svg = find('chart-pods').find('svg')
+    svg.element.getBoundingClientRect = () => ({ left: 0, width: 300, top: 0, height: 64, right: 300, bottom: 64, x: 0, y: 0, toJSON: () => ({}) })
+    await svg.trigger('mousemove', { clientX: 150 })
+    await svg.trigger('mouseleave')
+    const before = find('activity-readout').text()
+
+    vi.mocked(activityApi.fetchAppActivity).mockResolvedValue(response({ timestamps: [1015, 1045, 1075] }))
+    await vi.advanceTimersByTimeAsync(60_000)
+    await flushPromises()
+
+    expect(find('activity-readout').text()).toBe(before)
+  })
+
+  it('keeps the readout on the crosshair when a refresh arrives while pointing', async () => {
+    vi.useFakeTimers()
+    await open(response())
+    const svg = find('chart-pods').find('svg')
+    svg.element.getBoundingClientRect = () => ({ left: 0, width: 300, top: 0, height: 64, right: 300, bottom: 64, x: 0, y: 0, toJSON: () => ({}) })
+    await svg.trigger('mousemove', { clientX: 299 })
+
+    vi.mocked(activityApi.fetchAppActivity).mockResolvedValue(response({
+      timestamps: [1030, 1060, 1090],
+      requests_per_min: { ok: [20, 30, 99], redirect: three(0), client_error: three(0), aborted: three(0), server_error: three(0) },
+      requests_peak_per_min: [25, 40, 120],
+    }))
+    await vi.advanceTimersByTimeAsync(60_000)
+    await flushPromises()
+
+    expect(find('activity-readout').text(), 'the readout describes the point under the crosshair').toContain('99 requests/min')
+  })
+
+  it('clears the details when the range changes while the pointer rests on a chart', async () => {
+    await open(response())
+    const svg = find('chart-pods').find('svg')
+    svg.element.getBoundingClientRect = () => ({ left: 0, width: 300, top: 0, height: 64, right: 300, bottom: 64, x: 0, y: 0, toJSON: () => ({}) })
+    await svg.trigger('mousemove', { clientX: 150 })
+
+    await find('activity-range-6h').trigger('click')
+    await flushPromises()
+
+    expect(find('activity-details').text(), 'a range chosen by keyboard must not keep the old point').toContain('Hover over a chart to see values')
+  })
+
+  it('keeps each axis maximum beside the plot, clear of marker labels', async () => {
+    await open(response({ changes: [{ time: 1000, from: 0, to: 2, cause: 'from_zero', autoscaled: false, around: null }], changes_detailed: 0 }))
+    const chart = find('chart-requests')
+    const plot = chart.find('[data-testid="chart-plot"]')
+    expect(plot.find('svg').exists()).toBe(true)
+    expect(plot.find('[data-testid="chart-marker-label"]').exists()).toBe(true)
+    expect(chart.find('[data-testid="chart-axis-max"]').exists()).toBe(true)
+    expect(plot.find('[data-testid="chart-axis-max"]').exists()).toBe(false)
+    expect(plot.find('[data-testid="chart-marker-label"]').classes()).not.toContain('-translate-x-1/2')
+  })
+
   it('explains a requests chart without data in one sentence', async () => {
     await open(response({ traffic: 'no_route' }))
     expect(find('chart-requests').exists()).toBe(false)
