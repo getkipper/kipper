@@ -136,22 +136,28 @@ func reportCrashLoopingServices(ctx context.Context, client *k8s.Client) {
 	fmt.Println()
 }
 
-// checkHost runs the checks that live on the host rather than in the API, over
-// one SSH connection. Reaching for SSH at all is the exception here, so the two
-// checks that need it share the dial.
+// checkHost runs the SSH checks when the cluster has a configured host.
 func checkHost(cluster *config.Cluster, nodes []k8s.NodeInfo) {
 	if cluster.Host == "" {
 		return
 	}
+	checkHostWith(hostSSHConfig(cluster, ""), cluster, nodes)
+}
 
-	explicit, fallback := resolveSSHKey("", cluster)
-	client, err := ssh.Dial(ssh.Config{
+// hostSSHConfig applies the shared SSH key precedence and disables interactive prompts.
+func hostSSHConfig(cluster *config.Cluster, keyFlag string) ssh.Config {
+	explicit, fallback := resolveSSHKey(keyFlag, cluster)
+	return ssh.Config{
 		Host:            cluster.Host,
 		User:            "root",
 		KeyPath:         explicit,
 		FallbackKeyPath: fallback,
 		Options:         []string{"BatchMode=yes"},
-	})
+	}
+}
+
+func checkHostWith(sshConfig ssh.Config, cluster *config.Cluster, nodes []k8s.NodeInfo) {
+	client, err := ssh.Dial(sshConfig)
 	if err != nil {
 		// Every host section says it was not checked. A missing section reads
 		// as one that passed, and an unreachable host is not evidence that its
@@ -292,15 +298,16 @@ func reportPendingRestarts(client *ssh.Client) {
 
 	if len(pending.Deferred) > 0 {
 		fmt.Printf("    ⚠  deferred by Kipper: %s\n", strings.Join(pending.Deferred, ", "))
-		fmt.Printf("       Patched libraries stay unloaded until these restart. Restarting them\n")
-		fmt.Printf("       drops every Longhorn volume on this node, so reboot the node during a\n")
-		fmt.Printf("       window you choose rather than restarting the units directly.\n")
+		fmt.Printf("       These services need a restart to load updated libraries.\n")
+		fmt.Printf("       Restarting them can disrupt Longhorn volumes. Schedule downtime\n")
+		fmt.Printf("       and reboot with 'kip node reboot' instead of restarting these\n")
+		fmt.Printf("       services directly.\n")
 	}
 	if len(pending.Other) > 0 {
 		fmt.Printf("    ⚠  waiting on a restart: %s\n", strings.Join(pending.Other, ", "))
 	}
 	if pending.KernelOutdated {
-		fmt.Printf("    ⚠  the installed kernel is not the running one; the node needs a reboot\n")
+		fmt.Printf("    ⚠  a kernel update is pending; reboot with 'kip node reboot'\n")
 	}
 	fmt.Println()
 }
