@@ -494,6 +494,14 @@ kip app list --project staging
 
 In the web console, every app row on the **Projects** screen shows the app's public URL with an open-in-new-tab link, so you can reach a running app without opening its detail panel.
 
+### Inspect one app
+
+```bash
+kip app info api --project staging
+```
+
+Shows the app's status, scaling settings, and last autoscaling time when available. It also shows CPU and memory values from the pod template and explains how Kipper sizes each resource. See [`kip app info`](/en/cli-reference#kip-app-info).
+
 ### Stream logs
 
 ```bash

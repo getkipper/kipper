@@ -3,6 +3,9 @@ package deployer
 import (
 	"context"
 	"fmt"
+	"time"
+
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -233,8 +236,10 @@ type AutoscaleStatus struct {
 	Ready         *int32
 	HPAExists     bool
 	CurrentMetric map[string]int32
-	// Condition is the App's AutoscalingReady condition, or nil when absent.
-	Condition *AutoscalingCondition
+	LastScaleTime *time.Time
+	HPAMetrics    map[string]bool
+	HPAUnreadable bool
+	Condition     *AutoscalingCondition
 }
 
 // AutoscalingCondition is the console-api's report on the autoscaling policy
@@ -281,13 +286,26 @@ func (d *Deployer) ReadAutoscaleStatus(ctx context.Context, namespace, name stri
 	switch {
 	case err == nil:
 		st.HPAExists = true
+		for _, m := range hpa.Spec.Metrics {
+			if m.Type == autoscalingv2.ResourceMetricSourceType && m.Resource != nil {
+				if st.HPAMetrics == nil {
+					st.HPAMetrics = map[string]bool{}
+				}
+				st.HPAMetrics[string(m.Resource.Name)] = true
+			}
+		}
+		if t := hpa.Status.LastScaleTime; t != nil {
+			scaled := t.Time
+			st.LastScaleTime = &scaled
+		}
 		for _, m := range hpa.Status.CurrentMetrics {
 			if m.Resource != nil && m.Resource.Current.AverageUtilization != nil {
 				st.CurrentMetric[string(m.Resource.Name)] = *m.Resource.Current.AverageUtilization
 			}
 		}
-	case errors.IsNotFound(err), errors.IsForbidden(err):
-		// A project operator may read Deployments but not autoscalers, so the metrics stay unknown.
+	case errors.IsForbidden(err):
+		st.HPAUnreadable = true
+	case errors.IsNotFound(err):
 	default:
 		return st, fmt.Errorf("reading the autoscaler: %w", err)
 	}
