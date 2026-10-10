@@ -2,6 +2,8 @@ package resourcebounds
 
 import (
 	"k8s.io/apimachinery/pkg/api/resource"
+
+	"github.com/getkipper/kipper/controller/pkg/provenance"
 )
 
 // Quantity is one resource value from a workload's spec and who set it. An
@@ -24,34 +26,15 @@ type AutoRange struct {
 	Ceiling resource.Quantity
 }
 
-// Mode says how Resolve arrived at a container's values.
-type Mode int
+// Mode describes how [Resolve] sizes a resource; see [provenance.Mode].
+type Mode = provenance.Mode
 
 const (
-	// ModeAutomatic means Kipper sizes the resource on its own.
-	ModeAutomatic Mode = iota
-	// ModeBounded means the request moves between the user's request and limit.
-	ModeBounded
-	// ModeFixed means the user set a single size.
-	ModeFixed
-	// ModeHeld means the values stay as they are until the user confirms them.
-	ModeHeld
+	ModeAutomatic = provenance.ModeAutomatic
+	ModeBounded   = provenance.ModeBounded
+	ModeFixed     = provenance.ModeFixed
+	ModeHeld      = provenance.ModeHeld
 )
-
-func (m Mode) String() string {
-	switch m {
-	case ModeAutomatic:
-		return "automatic"
-	case ModeBounded:
-		return "bounded"
-	case ModeFixed:
-		return "fixed"
-	case ModeHeld:
-		return "held"
-	default:
-		return "unknown"
-	}
-}
 
 // Resolve returns the container's request and limit for CPU or memory.
 // request and limit carry the spec values and their sources. recommended is
@@ -92,17 +75,7 @@ func Resolve(request, limit Quantity, recommended *Pair, fallback Pair, auto Aut
 
 // ModeOf says how a resource with these spec quantities is sized.
 func ModeOf(request, limit Quantity) Mode {
-	reqIsUser, limIsUser := request.Source == User, limit.Source == User
-	switch {
-	case request.Source == Held || limit.Source == Held:
-		return ModeHeld
-	case reqIsUser && limIsUser && request.Value.Cmp(limit.Value) < 0:
-		return ModeBounded
-	case reqIsUser || limIsUser:
-		return ModeFixed
-	default:
-		return ModeAutomatic
-	}
+	return provenance.ModeOf(request.Source, limit.Source, request.Value.Cmp(limit.Value) < 0)
 }
 
 // mirrored returns the spec's own values, copying a lone value to the other

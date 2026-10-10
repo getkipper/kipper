@@ -425,6 +425,7 @@ func TestReadAutoscaleStatusReportsTheReadyCondition(t *testing.T) {
 		require.NotNil(t, st.Condition)
 		assert.Equal(t, "ReplicasOutsideBounds", st.Condition.Reason)
 		assert.False(t, st.HPAExists)
+		assert.True(t, st.HPAUnreadable, "a refused read is not the same as no autoscaler")
 		assert.Empty(t, st.CurrentMetric)
 	})
 

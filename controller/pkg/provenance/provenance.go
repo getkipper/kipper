@@ -13,13 +13,9 @@ import (
 type Source int
 
 const (
-	// Unset means the quantity has no value.
 	Unset Source = iota
-	// User means a person set the value; it is a bound the auto-sizer never crosses.
 	User
-	// Automatic means the pre-upgrade auto-sizer wrote the value; it is a starting point only.
 	Automatic
-	// Held means nobody can tell who set the value, so nothing automatic changes it.
 	Held
 )
 
@@ -88,4 +84,45 @@ func ClassifyOwned(value string) Source {
 		return Unset
 	}
 	return User
+}
+
+// Mode says how Kipper sizes a resource, given who set its request and limit.
+type Mode int
+
+const (
+	ModeAutomatic Mode = iota
+	ModeBounded
+	ModeFixed
+	ModeHeld
+)
+
+func (m Mode) String() string {
+	switch m {
+	case ModeAutomatic:
+		return "automatic"
+	case ModeBounded:
+		return "bounded"
+	case ModeFixed:
+		return "fixed"
+	case ModeHeld:
+		return "held"
+	default:
+		return "unknown"
+	}
+}
+
+// ModeOf classifies sizing by field ownership and whether the request is below
+// the limit. Held ownership takes precedence over user settings.
+func ModeOf(request, limit Source, requestBelowLimit bool) Mode {
+	reqIsUser, limIsUser := request == User, limit == User
+	switch {
+	case request == Held || limit == Held:
+		return ModeHeld
+	case reqIsUser && limIsUser && requestBelowLimit:
+		return ModeBounded
+	case reqIsUser || limIsUser:
+		return ModeFixed
+	default:
+		return ModeAutomatic
+	}
 }
