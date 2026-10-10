@@ -1,13 +1,7 @@
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 
-# Build context is the repo root, not console-api/, because console-api
-# imports controller/pkg/labels (a sibling Go module). The full repo
-# go.work references modules we do not need at compile time (kip,
-# gateway, sidecar, kipper-poll), so we write a minimal workspace that
-# only references the two modules required for this build. The go
-# directive is taken from the build image's toolchain, so it always
-# satisfies the modules' own go directives without a hardcoded version
-# to keep in sync.
+# Use the repo root as the build context to include the sibling controller
+# module.
 WORKDIR /src
 
 COPY console-api/ ./console-api/
