@@ -122,8 +122,8 @@ function formatExpiry(iso: string): string {
 
 const roles = [
   { value: 'admin', label: 'Admin', description: 'Full access: manage users, settings, backups' },
-  { value: 'deployer', label: 'Deployer', description: 'Deploy, scale, manage apps and services' },
-  { value: 'viewer', label: 'Viewer', description: 'Read-only: view apps, logs, routes' },
+  { value: 'deployer', label: 'Deployer', description: 'Use the AI assistant. Project access depends on membership.' },
+  { value: 'viewer', label: 'Viewer', description: 'Sign in to the console. Project access depends on membership.' },
 ]
 
 onMounted(async () => {
