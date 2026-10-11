@@ -676,10 +676,17 @@ func RepairHostDNS(client *ssh.Client, resolvers []string) ([]string, error) {
 	return cleaned, nil
 }
 
+// agentInstallCommand builds an install command that reads the join token from
+// stdin to keep it out of process arguments.
+func agentInstallCommand(serverVersion, masterHost string) string {
+	return fmt.Sprintf(
+		"read -r K3S_TOKEN && export K3S_TOKEN && curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='%s' K3S_URL=https://%s:6443 sh -",
+		serverVersion, masterHost)
+}
+
 // JoinWorkerNode joins a worker using the master's token and returns its node name
 // after confirming registration against id. Read id before changing the host.
 func JoinWorkerNode(masterClient *ssh.Client, workerClient *ssh.Client, masterHost string, id HostIdentity) (string, error) {
-	// Get the join token from the master
 	token, err := masterClient.Run("cat /var/lib/rancher/k3s/server/node-token")
 	if err != nil {
 		return "", fmt.Errorf("reading node token from master: %w", err)
@@ -769,11 +776,7 @@ func JoinWorkerNode(masterClient *ssh.Client, workerClient *ssh.Client, masterHo
 	}
 
 	// Install k3s agent on the worker — idempotent within the join policy
-	installCmd := fmt.Sprintf(
-		"curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='%s' K3S_URL=https://%s:6443 K3S_TOKEN=%s sh -",
-		serverVersion, masterHost, strings.TrimSpace(token),
-	)
-	if _, err := workerClient.Run(installCmd); err != nil {
+	if _, err := workerClient.RunStdin(agentInstallCommand(serverVersion, masterHost), strings.NewReader(strings.TrimSpace(token)+"\n")); err != nil {
 		return "", fmt.Errorf("running k3s agent installer: %w", err)
 	}
 
