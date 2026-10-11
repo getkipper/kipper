@@ -25,6 +25,7 @@ import (
 
 	"github.com/getkipper/kipper/controller/pkg/envtemplate"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
+	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/deployer"
 	"github.com/getkipper/kipper/kip/internal/k8s"
 	"github.com/getkipper/kipper/kip/internal/manifest"
@@ -75,17 +76,23 @@ func init() {
 	appCmd.AddCommand(envCmd)
 }
 
+// selectedNamespace resolves explicit flags or the saved project selection.
+// An empty result lets the caller search for the app across namespaces.
+func selectedNamespace(cmd *cobra.Command, cluster *config.Cluster) string {
+	project, environment := resolveProjectAndEnvironment(cmd, cluster)
+	if project == "" {
+		return ""
+	}
+	return cluster.ResolveNamespace(project, environment)
+}
+
 func resolveAppNamespace(cmd *cobra.Command, appName string) (string, *k8s.Client, error) {
 	cluster, k8sClient, err := loadCurrentCluster()
 	if err != nil {
 		return "", nil, err
 	}
 
-	project, _ := cmd.Flags().GetString("project")
-	environment, _ := cmd.Flags().GetString("environment")
-
-	if project != "" {
-		ns := cluster.ResolveNamespace(project, environment)
+	if ns := selectedNamespace(cmd, cluster); ns != "" {
 		return ns, k8sClient, nil
 	}
 

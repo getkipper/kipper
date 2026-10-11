@@ -193,10 +193,8 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 	gitBranch, _ := cmd.Flags().GetString("branch")
 	port, _ := cmd.Flags().GetInt("port")
 	replicas, _ := cmd.Flags().GetInt("replicas")
-	project, _ := cmd.Flags().GetString("project")
 	envSlice, _ := cmd.Flags().GetStringArray("env")
 	route, _ := cmd.Flags().GetString("route")
-	environment, _ := cmd.Flags().GetString("environment")
 
 	if image == "" && gitURL == "" {
 		return fmt.Errorf("either --image or --git is required")
@@ -222,6 +220,7 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	project, environment := resolveProjectAndEnvironment(cmd, cluster)
 	if project == "" {
 		project = "default"
 	}
@@ -773,8 +772,7 @@ func runAppRebuild(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	project, _ := cmd.Flags().GetString("project")
-	environment, _ := cmd.Flags().GetString("environment")
+	project, environment := resolveProjectAndEnvironment(cmd, cluster)
 	if project == "" {
 		project = "default"
 	}
