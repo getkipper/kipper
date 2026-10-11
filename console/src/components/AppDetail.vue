@@ -517,8 +517,9 @@ async function handleBind() {
   try {
     await op.ready()
     if (!op.stillHere()) return
-    await bindService(request)
-    toast.success(`Bound ${bound}: app restarting`)
+    const result = await bindService(request)
+    if (result.warning) toast.error(`Bound ${bound}. Warning: ${result.warning}`)
+    else toast.success(`Bound ${bound}: app restarting`)
     if (!onPanel()) return
     bindingService.value = ''
     bindingPrefix.value = ''

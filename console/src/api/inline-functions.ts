@@ -57,6 +57,7 @@ export interface CreateInlineResponse {
   name: string
   runtime: string
   url: string
+  binding_warnings?: string[]
 }
 
 export async function createInlineFunction(project: string, payload: CreateInlinePayload): Promise<CreateInlineResponse> {

@@ -479,8 +479,8 @@ func TestProvisionPerBinding_NormalisesDefaults(t *testing.T) {
 	handler := &Services{Client: client, CRClient: testCRClient()}
 
 	t.Run("rabbitmq slash becomes empty", func(t *testing.T) {
-		db, env, err := handler.provisionPerBinding(context.Background(), "rabbit", "default", "rabbitmq", "AMQP_", "/", creds)
-		assert.NoError(t, err)
+		db, env, warning := handler.provisionPerBinding(context.Background(), "rabbit", "default", "rabbitmq", "AMQP_", "/", creds)
+		assert.Empty(t, warning)
 		assert.Empty(t, db, "rabbitmq \"/\" must normalise to empty so the reconciler uses the shared Secret")
 		assert.Equal(t, "/", env["AMQP_VHOST"], "shared VHOST falls through from the service credentials")
 		_, hasPer := client.CoreV1().Secrets("default").Get(context.Background(), "rabbit-consumer-credentials", metav1.GetOptions{})
@@ -488,8 +488,8 @@ func TestProvisionPerBinding_NormalisesDefaults(t *testing.T) {
 	})
 
 	t.Run("empty input stays empty", func(t *testing.T) {
-		db, _, err := handler.provisionPerBinding(context.Background(), "rabbit", "default", "rabbitmq", "AMQP_", "", creds)
-		assert.NoError(t, err)
+		db, _, warning := handler.provisionPerBinding(context.Background(), "rabbit", "default", "rabbitmq", "AMQP_", "", creds)
+		assert.Empty(t, warning)
 		assert.Empty(t, db)
 	})
 }
@@ -1031,4 +1031,52 @@ func TestInjectedEnv_ReportsATransientServiceLookupFailure(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code,
 		"a lookup that failed must be reported, not answered as though the service had no type")
+}
+
+// Omitting RESTConfig simulates unavailable pod exec while allowing the binding write.
+func TestBind_ReportsADatabaseItCouldNotCreate(t *testing.T) {
+	ss := newServiceStatefulSet("db", "postgres")
+	creds := newCredentialsSecret("db", map[string][]byte{"HOST": []byte("db"), "NAME": []byte("app"), "PASSWORD": []byte("secret")})
+	appCR := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+		Spec:       kipperv1.AppSpec{Image: "web:v1", Port: 8080, Replicas: int32Ptr(1)},
+	}
+	handler := &Services{Client: fake.NewClientset(ss, creds), CRClient: testCRClient(appCR)}
+
+	rec := postBind(t, handler, `{"service":"db","app":"web","namespace":"default","database":"web_prod"}`)
+	assert.Equal(t, http.StatusOK, rec.Code, "the binding itself was written")
+
+	var resp bindResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	assert.Contains(t, resp.Warning, "web_prod", "the response names the database that was not created")
+	assert.Contains(t, resp.Warning, "not created")
+}
+
+func TestBind_SaysNothingWhenNoDatabaseIsCreated(t *testing.T) {
+	ss := newServiceStatefulSet("db", "postgres")
+	creds := newCredentialsSecret("db", map[string][]byte{"HOST": []byte("db"), "NAME": []byte("app")})
+	appCR := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+		Spec:       kipperv1.AppSpec{Image: "web:v1", Port: 8080, Replicas: int32Ptr(1)},
+	}
+	handler := &Services{Client: fake.NewClientset(ss, creds), CRClient: testCRClient(appCR)}
+
+	rec := postBind(t, handler, `{"service":"db","app":"web","namespace":"default"}`)
+
+	var resp bindResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	assert.Empty(t, resp.Warning, "the service's own database needs no provisioning")
+}
+
+func TestProvisionBindingReportsADatabaseItCouldNotCreate(t *testing.T) {
+	ss := newServiceStatefulSet("db", "postgres")
+	creds := newCredentialsSecret("db", map[string][]byte{"HOST": []byte("db"), "NAME": []byte("app")})
+	handler := &Services{Client: fake.NewClientset(ss, creds), CRClient: testCRClient()}
+
+	_, _, err := handler.ProvisionBinding(context.Background(), "db", "sync", "default", "", "sync_db")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"sync_db" was not created`)
 }

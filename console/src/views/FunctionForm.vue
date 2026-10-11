@@ -583,7 +583,7 @@ async function applyBinding() {
   }
   // Edit mode — POST /bind so the controller picks up the per-binding secret.
   try {
-    await bindService({
+    const result = await bindService({
       service: bindServiceName.value,
       app: fnName.value,
       namespace: namespace.value,
@@ -593,7 +593,8 @@ async function applyBinding() {
     })
     bindings.value = await fetchFunctionBindings(namespace.value, fnName.value)
     resetBindForm()
-    toast.success('Service bound')
+    if (result.warning) toast.error(`Service bound. Warning: ${result.warning}`)
+    else toast.success('Service bound')
   } catch {
     toast.error('Failed to bind service')
   }
@@ -644,7 +645,7 @@ async function save() {
         prefix: b.prefix || undefined,
         database: b.database || undefined,
       }))
-      await createInlineFunction(namespace.value, {
+      const created = await createInlineFunction(namespace.value, {
         name: name.value,
         runtime: runtime.value,
         code: code.value,
@@ -660,11 +661,12 @@ async function save() {
         dependencies: Object.keys(depsObj).length ? depsObj : undefined,
         bindings: bindingsPayload.length ? bindingsPayload : undefined,
       })
-      // InlineFunctions.Create runs per-binding provisioning server-side
-      // now (postgres CREATE DATABASE, rabbitmqctl add_vhost, per-binding
-      // credentials Secret), so the frontend doesn't have to fan out
-      // /bind calls after CR creation.
-      toast.success(`Function ${name.value} created`)
+      const warnings = created.binding_warnings ?? []
+      if (warnings.length) {
+        toast.error(`Function ${name.value} created. Binding warnings: ${warnings.join('; ')}. Resolve the reported issues, then bind the affected services again.`)
+      } else {
+        toast.success(`Function ${name.value} created`)
+      }
       // Route to the edit URL so the form picks up server-side state.
       await router.replace({ name: 'function-edit', params: { fn: name.value } })
       return

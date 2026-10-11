@@ -11,6 +11,7 @@ import * as databaseApi from '@/api/database'
 import * as projectsApi from '@/api/projects'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectsStore } from '@/stores/projects'
+import { useToast } from '@/composables/useToast'
 import type { Capability, Project, ProjectRole } from '@/api/projects'
 
 // Nothing in this test may reach the network. AppDetail loads build status and
@@ -2607,4 +2608,43 @@ describe('the write controls inside the read-gated tabs', () => {
       }
     })
   }
+})
+
+it('says when a bound database was not created', async () => {
+  vi.clearAllMocks()
+  document.body.innerHTML = ''
+  setActivePinia(createPinia())
+  useAuthStore().role = 'deployer'
+  useProjectsStore().projects = [projectWithRole('deployer')]
+  vi.mocked(appsApi.fetchEnv).mockResolvedValue({})
+  vi.mocked(appsApi.fetchEnvPreview).mockRejectedValue(new Error('403'))
+  vi.mocked(appsApi.fetchEnvConflicts).mockResolvedValue([])
+  vi.mocked(appsApi.fetchEnvRestartPending).mockResolvedValue(false)
+  vi.mocked(appsApi.fetchInjectedEnv).mockResolvedValue([])
+  vi.mocked(appsApi.fetchApps).mockResolvedValue([])
+  vi.mocked(appsApi.fetchLinks).mockResolvedValue([])
+  vi.mocked(servicesApi.fetchServices).mockResolvedValue([
+    { name: 'db', namespace: 'shop-prod', type: 'postgres', status: 'Running', ready: '1/1', storage: '1Gi' },
+  ])
+  vi.mocked(servicesApi.bindService).mockResolvedValue({
+    warning: 'database "web_prod" was not created in db: pod not running',
+  })
+  const { toasts } = useToast()
+  toasts.value = []
+
+  const w = mount(AppDetail, {
+    props: { appName: 'web', namespace: 'shop-prod' },
+    attachTo: document.body,
+    global: { stubs: { RouterLink: true } },
+  })
+  await flushPromises()
+  const vm = w.vm as unknown as { bindingService: string; handleBind: () => Promise<void> }
+  vm.bindingService = 'db'
+  await flushPromises()
+  await vm.handleBind()
+  await flushPromises()
+
+  const shown = toasts.value.map(t => `${t.type}: ${t.message}`)
+  expect(shown.some(m => m.startsWith('error:') && m.includes('"web_prod" was not created'))).toBe(true)
+  expect(shown.some(m => m.startsWith('success:'))).toBe(false)
 })
