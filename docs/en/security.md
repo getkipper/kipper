@@ -333,6 +333,8 @@ Basic auth applies one access rule to the whole app. Applications that need user
 
 Open the app's **Settings** tab and scroll to **Basic authentication**. Enter a username and password, then click **Add user**. The app is immediately protected. Visitors see a browser login prompt.
 
+Enabling basic auth before adding users, for example with `basicAuth: true` in a manifest, locks access to the app. Visitors see a login prompt; add a user to allow access. Until then, the App's `BasicAuthReady` condition is `False` with reason `NoUsers`.
+
 You can add multiple users. Each one gets their own credentials.
 
 To remove basic auth entirely, click **Remove all**. The password prompt disappears and the app is publicly accessible again.
