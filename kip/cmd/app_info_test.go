@@ -196,3 +196,33 @@ func TestWriteAppInfo(t *testing.T) {
 		assert.Contains(t, out.String(), "  Rollout incomplete: some pods may still use earlier values.\n")
 	})
 }
+
+func TestWriteAppInfo_Conditions(t *testing.T) {
+	now := time.Date(2026, 10, 10, 23, 0, 0, 0, time.UTC)
+
+	t.Run("shows the reason and message of every condition", func(t *testing.T) {
+		info := sampleAppInfo()
+		info.Conditions = []deployer.Condition{
+			{Type: "RouteReady", Status: "True", Reason: "RouteNameShared", Message: "rename the app to avoid a conflict"},
+			{Type: "RolloutComplete", Status: "False", Reason: "InProgress", Message: "replacing pods"},
+			{Type: "BindingDatabasesReady", Status: "False", Reason: "DatabaseCreateFailed", Message: `binding "db": no running pod`},
+			{Type: "LinksOpen", Status: "Unknown", Reason: "Pending"},
+		}
+		var out bytes.Buffer
+		writeAppInfo(&out, "api", info, now)
+		got := out.String()
+
+		assert.Contains(t, got, "  Conditions\n")
+		assert.Contains(t, got, "  ✔  RouteReady: RouteNameShared\n           rename the app to avoid a conflict\n")
+		assert.Contains(t, got, "  ✘  RolloutComplete: InProgress\n           replacing pods\n")
+		assert.Contains(t, got, "  ✘  BindingDatabasesReady: DatabaseCreateFailed\n           binding \"db\": no running pod\n")
+		assert.Contains(t, got, "  ⚠  LinksOpen: Pending\n\n")
+	})
+
+	t.Run("prints no section when the app has no conditions", func(t *testing.T) {
+		var out bytes.Buffer
+		writeAppInfo(&out, "api", sampleAppInfo(), now)
+
+		assert.NotContains(t, out.String(), "Conditions")
+	})
+}

@@ -23,12 +23,18 @@ var ResourceTuningGVR = schema.GroupVersionResource{
 
 // AppInfo is one app's status, scaling and resource settings.
 type AppInfo struct {
-	Status    AppStatus
-	Autoscale AutoscaleStatus
-	Profile   string
-	Template  TemplateState
-	CPU       ResourceInfo
-	Memory    ResourceInfo
+	Status     AppStatus
+	Autoscale  AutoscaleStatus
+	Profile    string
+	Template   TemplateState
+	CPU        ResourceInfo
+	Memory     ResourceInfo
+	Conditions []Condition
+}
+
+// Condition is a controller-reported app status condition.
+type Condition struct {
+	Type, Status, Reason, Message string
 }
 
 // TemplateState says what is known about an app's pod template.
@@ -86,7 +92,28 @@ func (d *Deployer) ReadAppInfo(ctx context.Context, namespace, name string) (App
 
 	info.CPU = resourceInfo(app, "cpu", live, corev1.ResourceCPU, recommended)
 	info.Memory = resourceInfo(app, "memory", live, corev1.ResourceMemory, recommended)
+	info.Conditions = appConditions(app)
 	return info, nil
+}
+
+func appConditions(app *unstructured.Unstructured) []Condition {
+	raw, _, _ := unstructured.NestedSlice(app.Object, "status", "conditions")
+	var conditions []Condition
+	for _, entry := range raw {
+		m, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		field := func(key string) string {
+			v, _ := m[key].(string)
+			return v
+		}
+		if field("type") == "" {
+			continue
+		}
+		conditions = append(conditions, Condition{Type: field("type"), Status: field("status"), Reason: field("reason"), Message: field("message")})
+	}
+	return conditions
 }
 
 // resourceInfo uses prefix ("cpu" or "memory") to look up spec and recommendation fields.
