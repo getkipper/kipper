@@ -95,6 +95,10 @@ type gatewayHeartbeat struct {
 
 	errorRetry       time.Duration
 	warnedOldGateway bool
+	now              func() time.Time
+	// writtenRecord is the unused record this process last wrote. Only that
+	// exact record is trusted; anything else restarts the grace period.
+	writtenRecord string
 }
 
 // gatewayRegisterResponse mirrors the gateway's /register response. An older
@@ -105,11 +109,8 @@ type gatewayRegisterResponse struct {
 	Pin                 string `json:"pin"`
 	AssertedFingerprint string `json:"assertedFingerprint"`
 	ObservedFingerprint string `json:"observedFingerprint"`
-	// Challenge is a proof-of-possession nonce (B16) the cluster signs with
-	// the hop-cert private key and submits to /proof. Empty from an older
-	// gateway, which wants no proof.
-	Challenge string `json:"challenge"`
-	Error     string `json:"error"`
+	Challenge           string `json:"challenge"`
+	Error               string `json:"error"`
 }
 
 // proofResponse mirrors the gateway's /proof reply.
@@ -183,6 +184,9 @@ func (h *gatewayHeartbeat) run(ctx context.Context) {
 
 // beat performs one heartbeat cycle and returns when the next should run.
 func (h *gatewayHeartbeat) beat(ctx context.Context) time.Duration {
+	if h.nameIdle(ctx) {
+		return nameUnusedRecheck
+	}
 	assertFP, candidate, ensureOK := h.resolveFingerprint(ctx)
 
 	// Read the token unconditionally: both the pin assertion and the proof of
@@ -233,7 +237,7 @@ func (h *gatewayHeartbeat) beat(ctx context.Context) time.Duration {
 		return convergeRetry
 	}
 
-	// Prove control of the IP (B16): sign the gateway's challenge with the hop
+	// Prove control of the IP: sign the gateway's challenge with the hop
 	// key. Until proof completes the gateway won't route this cluster once
 	// proof-before-route is on, so retry soon if it hasn't converged yet.
 	proofPending := h.proveControl(ctx, token, resp.Challenge)
@@ -245,8 +249,7 @@ func (h *gatewayHeartbeat) beat(ctx context.Context) time.Duration {
 	return next
 }
 
-// pinInterval runs the pin state machine and returns the pin-driven next
-// interval (unchanged B5 behaviour).
+// pinInterval returns the next heartbeat interval based on certificate pinning progress.
 func (h *gatewayHeartbeat) pinInterval(ctx context.Context, resp gatewayRegisterResponse, assertFP string, candidate, ensureOK bool) time.Duration {
 	if assertFP == "" {
 		log.Printf("gateway heartbeat: renewed %s.kipper.run", h.subdomain)
@@ -260,17 +263,12 @@ func (h *gatewayHeartbeat) pinInterval(ctx context.Context, resp gatewayRegister
 	return h.handlePinResponse(ctx, resp, assertFP, candidate)
 }
 
-// proveControl signs the gateway's proof-of-possession challenge with the
-// hop-cert private key and submits it to /proof. Reports whether proof is
-// still pending (so the caller retries soon). No challenge or no token means
-// nothing to prove this beat — not pending.
+// proveControl signs the gateway's challenge with the hop-cert private key
+// and submits it to /proof. It reports whether proof needs a retry. A missing
+// token requires a retry; a token with no challenge requires no proof this beat.
 func (h *gatewayHeartbeat) proveControl(ctx context.Context, token, challenge string) bool {
-	// No token means the cluster has nothing to prove possession with, and under
-	// proof-before-route it will never be routed. Reporting "not pending" hid
-	// that completely: the beat kept renewing on the slow interval and logged
-	// nothing, so a cluster that could never serve looked healthy for as long as
-	// anyone cared to watch. Say it, and keep the fast retry, because the token
-	// can still arrive — the installer writes it moments after registration.
+	// The installer may still be writing the token. Retry soon so proof can
+	// complete and enable routing on gateways that require it.
 	if token == "" {
 		log.Printf("gateway heartbeat: no gateway token on this cluster, so control of %s.kipper.run cannot be proven; it will not be routed until one is present", h.subdomain)
 		return true
