@@ -28,6 +28,10 @@ import (
 
 const jobFinalizer = "kipper.run/job-cleanup"
 
+// runOutcomeFinalizer preserves the native Job until its outcome is recorded
+// on the CR, preventing another run after cleanup.
+const runOutcomeFinalizer = "kipper.run/run-outcome"
+
 // JobReconciler reconciles a Job CR.
 type JobReconciler struct {
 	client.Client
@@ -73,6 +77,9 @@ func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 
 	if !job.DeletionTimestamp.IsZero() {
 		logger.Info("cleaning up job resources", "job", job.Name)
+		if err := r.releaseRun(ctx, &job); err != nil {
+			return ctrl.Result{}, err
+		}
 		controllerutil.RemoveFinalizer(&job, jobFinalizer)
 		return ctrl.Result{}, r.Update(ctx, &job)
 	}
@@ -118,6 +125,9 @@ func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 	}
 
 	if job.Spec.Schedule != "" {
+		if err := r.releaseRun(ctx, &job); err != nil {
+			return ctrl.Result{}, fmt.Errorf("releasing the one-off run: %w", err)
+		}
 		if err := r.reconcileCronJob(ctx, &job, generation); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconciling cronjob: %w", err)
 		}
@@ -310,9 +320,10 @@ func (r *JobReconciler) reconcileOneOffJob(ctx context.Context, job *kipperv1.Jo
 
 	desired := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      job.Name,
-			Namespace: job.Namespace,
-			Labels:    labels,
+			Name:       job.Name,
+			Namespace:  job.Namespace,
+			Labels:     labels,
+			Finalizers: []string{runOutcomeFinalizer},
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &backoffLimit,
@@ -335,22 +346,67 @@ func (r *JobReconciler) reconcileOneOffJob(ctx context.Context, job *kipperv1.Jo
 	var existing batchv1.Job
 	err = r.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, &existing)
 	if errors.IsNotFound(err) {
+		// LastResult preserves the one-off run's outcome after the native Job is deleted.
+		if job.Status.LastResult != "" {
+			return nil
+		}
+		// Check the server for a recorded outcome to avoid rerunning from stale cache data.
+		var current kipperv1.Job
+		if err := r.hostReader().Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, &current); err != nil {
+			return err
+		}
+		if current.Status.LastResult != "" {
+			job.Status = current.Status
+			return nil
+		}
 		return r.Create(ctx, desired)
 	}
 	if err != nil {
 		return err
 	}
 
-	// Native Job specs are largely immutable once running. Don't try to
-	// patch — the run is what it is. The CR is the audit record.
-	//
-	// Ownership is not part of the spec, and a run this Job started but does
-	// not own outlives it: nothing garbage-collects it and nothing stops it.
+	// Preserve the run's immutable pod template while repairing ownership
+	// for garbage collection and protecting any unrecorded outcome.
+	changed := false
 	if !metav1.IsControlledBy(&existing, job) {
 		if err := adoptChild("Job", &existing, jobOwner(job), r.Scheme); err != nil {
 			return err
 		}
+		changed = true
+	}
+	if job.Status.LastResult == "" && existing.DeletionTimestamp.IsZero() &&
+		controllerutil.AddFinalizer(&existing, runOutcomeFinalizer) {
+		changed = true
+	}
+	if changed {
 		return r.Update(ctx, &existing)
+	}
+	return nil
+}
+
+func jobConditionTrue(nj *batchv1.Job, t batchv1.JobConditionType) bool {
+	for _, c := range nj.Status.Conditions {
+		if c.Type == t && c.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+// releaseRun removes outcome protection when the CR is deleted or becomes scheduled.
+func (r *JobReconciler) releaseRun(ctx context.Context, job *kipperv1.Job) error {
+	// Read from the server so cache lag cannot leave a run stuck with its finalizer
+	// after the CR is deleted.
+	var nj batchv1.Job
+	err := r.hostReader().Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, &nj)
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if controllerutil.RemoveFinalizer(&nj, runOutcomeFinalizer) {
+		return r.Update(ctx, &nj)
 	}
 	return nil
 }
@@ -383,30 +439,42 @@ func (r *JobReconciler) updateStatus(ctx context.Context, job *kipperv1.Job) err
 	var nj batchv1.Job
 	err := r.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, &nj)
 	if errors.IsNotFound(err) {
-		job.Status.Phase = "Pending"
+		// Preserve the recorded outcome while the native Job is absent from the cache.
 		return r.Status().Update(ctx, job)
 	}
 	if err != nil {
 		return err
 	}
 
+	// Terminal conditions determine the outcome; failed pods may still be retried.
 	switch {
-	case nj.Status.Succeeded > 0:
+	case jobConditionTrue(&nj, batchv1.JobComplete):
 		job.Status.Phase = "Completed"
 		job.Status.LastResult = "Succeeded"
-	case nj.Status.Failed > 0:
+	case jobConditionTrue(&nj, batchv1.JobFailed):
+		job.Status.Phase = "Failed"
+		job.Status.LastResult = "Failed"
+	case !nj.DeletionTimestamp.IsZero():
+		// Treat deletion before a terminal condition as failure.
 		job.Status.Phase = "Failed"
 		job.Status.LastResult = "Failed"
 	case nj.Status.Active > 0:
 		job.Status.Phase = "Running"
 	default:
-		job.Status.Phase = "Pending"
+		// Use an empty phase while pending; the schema excludes "Pending".
+		job.Status.Phase = ""
 	}
 	if !nj.CreationTimestamp.IsZero() {
 		t := nj.CreationTimestamp
 		job.Status.LastRun = &t
 	}
-	return r.Status().Update(ctx, job)
+	if err := r.Status().Update(ctx, job); err != nil {
+		return err
+	}
+	if job.Status.LastResult != "" && controllerutil.RemoveFinalizer(&nj, runOutcomeFinalizer) {
+		return r.Update(ctx, &nj)
+	}
+	return nil
 }
 
 func (r *JobReconciler) SetupWithManager(mgr ctrl.Manager) error {

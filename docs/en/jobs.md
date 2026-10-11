@@ -72,7 +72,7 @@ Changes apply to the next job run. They do not affect any execution that is alre
 
 ## How it works
 
-- **One-off jobs** create a `Job` Custom Resource (`kipper.run/v1alpha1`). The reconciler creates a Kubernetes `batchv1.Job` that runs to completion then stops, with `TTLSecondsAfterFinished = 86400` so the underlying pod auto-cleans.
+- **One-off jobs** create a Kipper `Job` custom resource (`kipper.run/v1alpha1`) and a Kubernetes Job to execute it. Kubernetes cleans up the execution Job and its pods 24 hours after it finishes. Kipper records the outcome before allowing cleanup and keeps it on the custom resource. Cleanup does not trigger another run. Deleting the execution Job before it finishes records a failure. To run the task again, delete and recreate the Kipper job.
 - **Scheduled jobs** create a `Job` CR with a cron schedule. The reconciler creates a Kubernetes CronJob that spawns a pod on each run.
 - The CLI and the web console write the same Job CRs, so a job created with `kip job schedule` shows up immediately in the Jobs view and vice versa. The CR is the source of truth.
 - A job's `env:` block is published as an immutable Secret named for a digest of its contents, `job-<name>-env-<digest>`, which its pods read through `envFrom`. The name carries the kind, so a job and an app of one name keep separate configuration on a cluster old enough to hold both. New ones cannot share a name: see [names are shared across workload kinds](/en/functions#names-are-shared-across-workload-kinds).
