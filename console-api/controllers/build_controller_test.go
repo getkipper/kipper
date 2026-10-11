@@ -219,7 +219,7 @@ func TestSupersededByNewerBuild(t *testing.T) {
 			fakeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 			reconciler := &BuildReconciler{Client: fakeClient, Scheme: scheme}
 
-			got, err := reconciler.supersededByNewerBuild(context.Background(), tt.subject)
+			got, _, err := reconciler.supersededByNewerBuild(context.Background(), tt.subject, "")
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, got)
 		})
@@ -876,10 +876,7 @@ func TestBuildReconciler_ADiscardedBuildDoesNotOverwriteAnAppliedCompletion(t *t
 	}
 }
 
-// The reconcile's UID guard runs against the read at the
-// top, and the status write does its own. An App deleted and a same-named one
-// recreated in between is exactly what the UID label exists to catch, so the
-// write has to check it too rather than trusting a decision made earlier.
+// The status writer must recheck the App's UID after reading it again.
 func TestBuildReconciler_ABuildStatusIsNotWrittenOntoARecreatedApp(t *testing.T) {
 	scheme := testScheme()
 
@@ -892,7 +889,7 @@ func TestBuildReconciler_ABuildStatusIsNotWrittenOntoARecreatedApp(t *testing.T)
 	reconciler := &BuildReconciler{Client: fakeClient, Scheme: scheme}
 
 	require.NoError(t, reconciler.updateBuildStatus(context.Background(), "project-test", "my-app",
-		"the-app-that-was-deleted", "my-app-build-abc12345", "Building", "", ""))
+		"the-app-that-was-deleted", buildJob("my-app-build-abc12345", "the-app-that-was-deleted", time.Now(), batchv1.JobStatus{}), "Building", ""))
 
 	var after kipperv1.App
 	require.NoError(t, fakeClient.Get(context.Background(),

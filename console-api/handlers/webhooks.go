@@ -151,14 +151,11 @@ func (wh *Webhooks) processDeploy(ctx context.Context, w http.ResponseWriter, na
 	}
 
 	if appCR.Spec.Git != nil {
-		// An image names an exact artefact the pipeline has already built and
-		// pushed. Discarding it to build the repository again answers a
-		// question nobody asked, and answering 200 for it let a pipeline stay
-		// green while nothing deployed. The two ways of deploying cannot both
-		// be in play, so say which one is configured and stop.
+		// Reject prebuilt images for git-based apps so a successful response
+		// means the requested deployment was accepted.
 		if req.Image != "" {
 			respondError(w, http.StatusConflict, fmt.Sprintf(
-				"%s builds from %s, so the image you posted would be ignored. Remove the git source with 'kip app git remove %s' to deploy prebuilt images, or post only a commit to trigger a build",
+				"%s builds from %s. Send only a commit to trigger a build, or run 'kip app git remove %s' to deploy prebuilt images",
 				appCR.Name, appCR.Spec.Git.URL, appCR.Name))
 			return
 		}
@@ -187,15 +184,15 @@ func (wh *Webhooks) triggerBuild(ctx context.Context, w http.ResponseWriter, app
 		return
 	}
 
-	// Update build status on the App CR
+	// Save the Job's creation time and name so build ordering survives Job deletion.
 	now := metav1.Now()
+	created := job.CreationTimestamp
 	appCR.Status.Build = &kipperv1.AppBuildStatus{
-		Phase:     "Pending",
-		Commit:    commit,
-		StartedAt: &now,
-		// Named from the start, so a status this write leaves behind is never
-		// one the guards have to treat as predating the field.
-		Build: job.Name,
+		Phase:        "Pending",
+		Commit:       commit,
+		StartedAt:    &now,
+		JobCreatedAt: &created,
+		Build:        job.Name,
 	}
 	if err := wh.CRClient.Status().Update(ctx, appCR); err != nil {
 		log.Printf("webhook: failed to update build status for %s/%s: %v", appCR.Namespace, appCR.Name, err)

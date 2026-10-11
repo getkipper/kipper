@@ -523,6 +523,9 @@ type AppBuildStatus struct {
 	// build, which a phase alone cannot, and it needs no clock.
 	// +optional
 	Build string `json:"build,omitempty"`
+
+	// +optional
+	JobCreatedAt *metav1.Time `json:"jobCreatedAt,omitempty"`
 }
 
 // AppStatus defines the observed state of the application.
