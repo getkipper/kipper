@@ -40,6 +40,8 @@ import (
 	"github.com/getkipper/kipper/console-api/handlers/migration"
 	"github.com/getkipper/kipper/console-api/handlers/twofa"
 	"github.com/getkipper/kipper/console-api/internal/clusterstamp"
+	"github.com/getkipper/kipper/console-api/internal/leader"
+	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	"github.com/getkipper/kipper/console-api/middleware"
 	"github.com/getkipper/kipper/console-api/security"
 	"github.com/getkipper/kipper/console-api/share"
@@ -127,6 +129,14 @@ func main() {
 
 	// Age out per-key usage history beyond the retention window.
 	go handlers.RunRollupRetention(context.Background(), crClient)
+
+	// Migrate legacy query history and snippets from ConfigMaps to Secrets.
+	// A leader lease coordinates migration across console-api replicas.
+	var legacyRetirement leader.Worker
+	go leader.Run(context.Background(), clientset, resourcebounds.ModeConfigMapNamespace, "kipper-db-legacy-retirement", podName,
+		leader.DefaultTiming, &legacyRetirement, func(ctx context.Context) {
+			handlers.RunLegacyDBConfigMapRetirement(ctx, clientset, handlers.CRServiceExists(crClient), 10*time.Minute)
+		})
 
 	// Backstop cleanup of build Jobs and their ephemeral credential secrets in
 	// kipper-builds: sweeps anything older than 3h, so a hung build or a secret
