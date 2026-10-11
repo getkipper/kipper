@@ -60,15 +60,9 @@ func runWebhookEnable(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	project, _ := cmd.Flags().GetString("project")
-	environment, _ := cmd.Flags().GetString("environment")
-
-	var ns string
-	if project != "" {
-		ns = cluster.ResolveNamespace(project, environment)
-	} else {
-		ctx := context.Background()
-		ns, err = findWorkloadNamespace(ctx, k8sClient.Clientset(), k8sClient.Dynamic(), secretname.KindApp, appName)
+	ns := selectedNamespace(cmd, cluster)
+	if ns == "" {
+		ns, err = findWorkloadNamespace(context.Background(), k8sClient.Clientset(), k8sClient.Dynamic(), secretname.KindApp, appName)
 		if err != nil {
 			return err
 		}
@@ -133,15 +127,9 @@ func runWebhookStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	project, _ := cmd.Flags().GetString("project")
-	environment, _ := cmd.Flags().GetString("environment")
-
-	var ns string
-	if project != "" {
-		ns = cluster.ResolveNamespace(project, environment)
-	} else {
-		ctx := context.Background()
-		ns, err = findWorkloadNamespace(ctx, k8sClient.Clientset(), k8sClient.Dynamic(), secretname.KindApp, appName)
+	ns := selectedNamespace(cmd, cluster)
+	if ns == "" {
+		ns, err = findWorkloadNamespace(context.Background(), k8sClient.Clientset(), k8sClient.Dynamic(), secretname.KindApp, appName)
 		if err != nil {
 			return err
 		}

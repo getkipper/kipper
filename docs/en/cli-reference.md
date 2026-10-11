@@ -707,7 +707,7 @@ kip project use blog test      # same, with a space instead of a slash
 kip project use --clear              # forget the active project on this cluster
 ```
 
-The active project is stored per cluster in `~/.kip/config.yaml`. After setting it, `kip service list`, `kip app list`, `kip volume list`, `kip function list`, and similar commands resolve to the active project's namespace automatically. `kip cluster list` shows the active project on each cluster line.
+The active project is stored per cluster in `~/.kip/config.yaml`. After setting it, `kip service list`, `kip volume list`, `kip function list` and every `kip app` command, including `kip app deploy`, `kip app logs`, `kip app rebuild` and `kip app webhook`, resolve to the active project's namespace automatically. `kip app promote` is the exception: it moves an app between environments, so it always takes `--project`. `kip cluster list` shows the active project on each cluster line.
 
 Explicit `--project` flags still win. Passing `--project other-name` switches that single command to the other project; the persisted environment is not carried over so a different project never inherits a stale environment.
 
