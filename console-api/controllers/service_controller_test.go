@@ -320,6 +320,19 @@ func TestReconcileCredentialsSecret_MinioS3Shape(t *testing.T) {
 	assert.Equal(t, "storage-credentials", rootPass.ValueFrom.SecretKeyRef.Name)
 }
 
+func TestServiceCatalog_MinioDoesNotCheckForUpdates(t *testing.T) {
+	env := serviceCatalog("minio").envVars("storage")
+
+	var update *corev1.EnvVar
+	for i := range env {
+		if env[i].Name == "MINIO_UPDATE" {
+			update = &env[i]
+		}
+	}
+	require.NotNil(t, update, "MINIO_UPDATE must be set")
+	assert.Equal(t, "off", update.Value)
+}
+
 func TestRepairCredentials_PostgresPreservesName(t *testing.T) {
 	// A postgres secret that the user has customised — NAME is the
 	// default database name and must not be touched.

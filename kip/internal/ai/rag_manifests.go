@@ -176,6 +176,8 @@ spec:
   targetNamespace: %[4]s
   valuesContent: |-
     replicaCount: 1
+    config:
+      telemetry_disabled: true
     service:
       type: ClusterIP
       additionalLabels:

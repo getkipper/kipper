@@ -546,6 +546,15 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	// Set env vars from catalog
 	container.Env = catalog.envVars(svc.Name)
 
+	var podVolumes []corev1.Volume
+	if svc.Spec.Type == "mongodb" {
+		if err := r.reconcileMongoshConfig(ctx, svc); err != nil {
+			return err
+		}
+		container.VolumeMounts = append(container.VolumeMounts, mongoshConfigMount())
+		podVolumes = append(podVolumes, mongoshConfigPodVolume(svc.Name))
+	}
+
 	replicas := int32(1)
 	storageClass := "longhorn-single"
 
@@ -587,6 +596,7 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 				Spec: corev1.PodSpec{
 					InitContainers: initContainers,
 					Containers:     []corev1.Container{container},
+					Volumes:        podVolumes,
 				},
 			},
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
@@ -663,6 +673,9 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 		}
 	}
 	existing.Spec.Template.Spec.Containers = desired.Spec.Template.Spec.Containers
+	for _, v := range podVolumes {
+		existing.Spec.Template.Spec.Volumes = withVolume(existing.Spec.Template.Spec.Volumes, v)
+	}
 	existing.Labels = desired.Labels
 	// Accepted is not adopted. A workload from before these records existed has
 	// no owner, and without one garbage collection has nothing to follow when
@@ -1353,6 +1366,7 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 				return []corev1.EnvVar{
 					{Name: "MINIO_ROOT_USER", Value: "kipper"},
 					secretEnv("MINIO_ROOT_PASSWORD", secretname.ServiceCredentials(name), "SECRET_KEY"),
+					{Name: "MINIO_UPDATE", Value: "off"},
 				}
 			},
 		}

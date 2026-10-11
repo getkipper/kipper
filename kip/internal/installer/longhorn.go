@@ -9,8 +9,23 @@ import (
 
 const longhornVersion = "v1.7.3"
 
+const longhornSettingsFuncName = "add_kipper_longhorn_settings"
+
+// longhornSettingsFunc copies the manifest from $1 to $2, disabling upgrade
+// checks and usage metrics before it is applied. Exactly one settings header
+// must match so a changed manifest format fails before installation.
+const longhornSettingsFunc = longhornSettingsFuncName + `() {
+  header='  default-setting.yaml: |-'
+  [ "$(grep -cxF "$header" "$1")" = 1 ] || { echo "expected exactly one default-setting block in the Longhorn manifest" >&2; return 1; }
+  awk -v header="$header" '{ print } $0 == header { print "    upgrade-checker: false"; print "    allow-collecting-longhorn-usage-metrics: false" }' "$1" > "$2"
+}`
+
 // InstallLonghorn installs Longhorn for distributed persistent storage.
 func InstallLonghorn(client *ssh.Client) error {
+	return installLonghorn(client)
+}
+
+func installLonghorn(client commandRunner) error {
 	// Longhorn requires open-iscsi and nfs-common (for RWX shared volumes)
 	if _, err := client.Run("apt-get update -qq && apt-get install -y -qq open-iscsi nfs-common"); err != nil {
 		return fmt.Errorf("installing longhorn dependencies: %w", err)
@@ -32,7 +47,13 @@ func InstallLonghorn(client *ssh.Client) error {
 		longhornVersion,
 	)
 
-	applyCmd := fmt.Sprintf("kubectl apply -f %s", url)
+	applyCmd := fmt.Sprintf(`set -e
+%s
+dir=$(mktemp -d)
+trap 'rm -rf "$dir"' EXIT
+curl -fsSL %s -o "$dir/stock.yaml"
+%s "$dir/stock.yaml" "$dir/longhorn.yaml"
+kubectl apply -f "$dir/longhorn.yaml"`, longhornSettingsFunc, url, longhornSettingsFuncName)
 	if _, err := client.Run(applyCmd); err != nil {
 		return fmt.Errorf("applying longhorn manifest: %w", err)
 	}
@@ -94,7 +115,7 @@ const stripKipperMultipathBlockAwk = `awk '
 // configureMultipathForLonghorn blacklists IET VIRTUAL-DISK devices so
 // kubelet can format Longhorn volumes without multipathd claiming them.
 // It replaces the previous Kipper block and reloads multipathd when installed.
-func configureMultipathForLonghorn(client *ssh.Client) error {
+func configureMultipathForLonghorn(client commandRunner) error {
 	out, err := client.Run("command -v multipathd >/dev/null 2>&1 && echo present || echo absent")
 	if err != nil {
 		return fmt.Errorf("checking for multipathd: %w", err)

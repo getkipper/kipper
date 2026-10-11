@@ -206,6 +206,8 @@ spec:
                 secretKeyRef:
                   name: %s
                   key: %s
+            - name: MINIO_UPDATE
+              value: "off"
           ports:
             - containerPort: 9000
             - containerPort: 9001

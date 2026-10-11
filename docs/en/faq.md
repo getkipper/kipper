@@ -6,6 +6,10 @@
 
 Kipper is an open source platform that installs and manages Kubernetes on Ubuntu and Debian servers. It includes a web console, automatic TLS, persistent storage, and commands for deploying apps.
 
+### Does Kipper collect telemetry?
+
+No. Kipper sends no telemetry of its own, and it switches off the usage reports and update checks of the components it bundles. Apart from image and chart downloads, certificate renewals and DNS lookups, the only thing a cluster sends without being set up to is the daily kipper.run gateway heartbeat, and only on a cluster that holds a kipper.run name. See [what leaves your cluster](/en/security#what-leaves-your-cluster).
+
 ### Who is Kipper for?
 
 Kipper is for teams and independent operators who want to run apps on their own Kubernetes infrastructure. It brings installation, deployment, and day-to-day management into one CLI and console.

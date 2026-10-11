@@ -208,3 +208,10 @@ func TestIngressRunsWhereThePublishedAddressPoints(t *testing.T) {
 		}
 	}
 }
+
+func TestTraefikSendsNothingUpstream(t *testing.T) {
+	values := traefikValues(t)
+
+	assert.Equal(t, false, dig(t, values, "global", "checkNewVersion"))
+	assert.Equal(t, false, dig(t, values, "global", "sendAnonymousUsage"))
+}

@@ -239,3 +239,22 @@ func TestLibreChatCredentialsQuotedSafely(t *testing.T) {
 	assert.Equal(t, hostile, stringData["CREDS_KEY"])
 	assert.Equal(t, hostile, stringData["JWT_SECRET"])
 }
+
+func TestLibreChatMongoDBDisablesMongoshTelemetry(t *testing.T) {
+	docs := SplitYAMLDocuments(LibreChatManifest(LibreChatConfig{Host: "chat.example.com", Model: "m", Credentials: libreChatTestCreds()}))
+	cm := parseDoc(t, docs[1])
+	conf := cm["data"].(map[string]any)["mongosh.conf"].(string)
+	assert.Contains(t, conf, "forceDisableTelemetry: true")
+	assert.Contains(t, conf, `snippetIndexSourceURLs: ""`)
+
+	chart := parseDoc(t, docs[2])
+	var values map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(chart["spec"].(map[string]any)["valuesContent"].(string)), &values))
+	mongodb := values["mongodb"].(map[string]any)
+	volume := mongodb["extraVolumes"].([]any)[0].(map[string]any)
+	assert.Equal(t, LibreChatConfigMapName, volume["configMap"].(map[string]any)["name"])
+	mount := mongodb["extraVolumeMounts"].([]any)[0].(map[string]any)
+	assert.Equal(t, volume["name"], mount["name"])
+	assert.Equal(t, "/etc/mongosh.conf", mount["mountPath"])
+	assert.Equal(t, "mongosh.conf", mount["subPath"])
+}

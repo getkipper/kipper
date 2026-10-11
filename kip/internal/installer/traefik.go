@@ -39,6 +39,10 @@ spec:
     # chart's version-gated logic the real version, which it cannot derive
     # from a digest — the chart documents setting it alongside image.digest.
     versionOverride: v3.7.8
+    # Keep reporting disabled across chart upgrades.
+    global:
+      checkNewVersion: false
+      sendAnonymousUsage: false
     image:
       tag: v3.7.8
       digest: sha256:4299bbed850421258fc5448c2e0e6ad350981d4d335a68de11b92448aedbefe5

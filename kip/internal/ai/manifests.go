@@ -258,6 +258,10 @@ data:
           titleConvo: true
           titleModel: "%[12]s"
           modelDisplayLabel: "Kipper AI"
+  mongosh.conf: |
+    mongosh:
+      forceDisableTelemetry: true
+      snippetIndexSourceURLs: ""
 ---
 apiVersion: helm.cattle.io/v1
 kind: HelmChart
@@ -293,6 +297,18 @@ spec:
       image:
         registry: docker.io
         repository: bitnamilegacy/mongodb
+      # Apply the global mongosh settings to the MongoDB container.
+      extraVolumes:
+        - name: mongosh-config
+          configMap:
+            name: %[14]s
+            items:
+              - key: mongosh.conf
+                path: mongosh.conf
+      extraVolumeMounts:
+        - name: mongosh-config
+          mountPath: /etc/mongosh.conf
+          subPath: mongosh.conf
     meilisearch:
       auth:
         existingMasterKeySecret: %[2]s
