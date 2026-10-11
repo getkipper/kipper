@@ -40,9 +40,12 @@ var userAddCmd = &cobra.Command{
 	Long: `Creates a user in Dex and assigns a role.
 
 Roles:
-  admin:    full access
-  deployer: deploy, scale, manage apps and services
-  viewer:   read-only access
+  admin:    manage the cluster, settings, users and platform components
+  deployer: sign in and use the console's AI assistant
+  viewer:   sign in to the console
+
+In the console, admins can work in every project. Other users get access to
+project apps, services and data through project membership (kip project members add).
 
 Examples:
   kip user add dev@example.com --role deployer

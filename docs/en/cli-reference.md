@@ -802,7 +802,13 @@ See [Storage](/en/storage) for full documentation.
 
 ## kip user {#kip-user}
 
-Manage cluster users and roles. Kipper supports three roles: `admin` (full access), `deployer` (deploy, scale, manage apps and services), and `viewer` (read-only).
+Manage cluster users and roles. Kipper has three cluster roles:
+
+- `admin`: manage the cluster, settings, users and platform components.
+- `deployer`: sign in and use the console's AI assistant.
+- `viewer`: sign in to the console.
+
+In the console, admins can work in every project. Other users get access to project apps, services and data through [project membership](/en/project-members).
 
 ```bash
 kip user list
