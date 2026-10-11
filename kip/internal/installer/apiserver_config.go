@@ -1,8 +1,11 @@
 package installer
 
 import (
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
@@ -10,43 +13,49 @@ import (
 )
 
 const (
-	// k3sConfigPath is the config k3s reads its server flags from. kip writes
-	// it at install; this is the only other thing that touches it.
 	k3sConfigPath = "/etc/rancher/k3s/config.yaml"
 
-	// k3sConfigBackupPath holds the file as it was before the arguments were
-	// added, both for the rollback below and for an operator who wants to see
-	// what changed.
+	// k3sConfigBackupPath preserves the configuration preceding a pending write for rollback.
 	k3sConfigBackupPath = k3sConfigPath + ".kipper-bak"
 
-	// apiServerArgKey is the mapping key the argument block defines.
+	// k3sConfigPendingPath records the checksum of a write awaiting confirmation.
+	// A matching checksum allows rollback to the preserved backup.
+	k3sConfigPendingPath = k3sConfigPath + ".kipper-pending"
+
+	configChangedMarker = "kipper-config-changed"
+
+	// apiServerLockPath serializes repairs that share a backup and pending-write marker.
+	// The lock can be reclaimed after apiServerLockTTL seconds, between commands.
+	apiServerLockPath = "/run/kipper-apiserver-config.lock"
+	apiServerLockTTL  = 15 * 60
+
 	apiServerArgKey = "kube-apiserver-arg"
 )
 
-// apiServerArgState says what a cluster's config already has to say about the
-// API server arguments.
+// apiServerArgState describes how the configured arguments match the install defaults.
 type apiServerArgState int
 
 const (
-	// apiServerArgsMissing: no kube-apiserver-arg key at all, which is every
-	// cluster installed before kip wrote one.
 	apiServerArgsMissing apiServerArgState = iota
-	// apiServerArgsCurrent: every argument this kip installs is already there.
 	apiServerArgsCurrent
-	// apiServerArgsPartial: the key exists and does not carry all of them,
-	// whether because someone else wrote it or because a previous attempt got
-	// halfway. Both are refused rather than merged.
 	apiServerArgsPartial
 )
 
-// EnsureAPIServerConfig updates host-side API-server arguments and reports
-// whether it changed configuration. It prepares referenced files before adding
-// flags or advising repair of a partial configuration. EnsureOperatorAuth later
-// installs and verifies the issuer configuration. notify runs before a restart.
+// EnsureAPIServerConfig adds missing API server arguments and restarts k3s when
+// needed. It prepares referenced files before suggesting manual edits to a partial
+// argument block. The changed result reports a successful config update or an
+// attempted restart of an already configured server. notify runs before a restart.
 func EnsureAPIServerConfig(client commandRunner, notify func(string)) (changed bool, err error) {
 	if err := refuseANodeThatRunsNoServer(client); err != nil {
 		return false, err
 	}
+
+	locked, release, err := lockAPIServerConfig(client)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	client = locked
 
 	current, err := readK3sConfig(client)
 	if err != nil {
@@ -61,9 +70,7 @@ func EnsureAPIServerConfig(client commandRunner, notify func(string)) (changed b
 		return false, err
 	}
 
-	// Before the refusal below, not after it: an operator who follows that
-	// refusal adds flags naming these files, and flags naming files that are
-	// not there stop the API server from starting.
+	// Prepare referenced files before advising the operator to add their flags.
 	policyChanged, err := writeAuthnStubAndAuditPolicy(client)
 	if err != nil {
 		return false, err
@@ -83,7 +90,7 @@ func EnsureAPIServerConfig(client commandRunner, notify func(string)) (changed b
 	}
 
 	if notify != nil {
-		notify("The API server is missing the arguments this kip installs. Adding them and restarting k3s once; workloads keep running through it.")
+		notify("Adding the required API server arguments and restarting k3s.")
 	}
 
 	if _, err := client.Run(writeK3sConfigScript(desired)); err != nil {
@@ -93,89 +100,156 @@ func EnsureAPIServerConfig(client commandRunner, notify func(string)) (changed b
 	if err := restartK3s(client); err != nil {
 		return false, rollBackK3sConfig(client, err)
 	}
+	clearPendingWrite(client)
 	return true, nil
 }
 
-// restartIfTheServerIsBehind handles a config file that already carries the
-// arguments. The file is not the process: a run interrupted between the rename
-// and the restart leaves exactly this state, and the audit policy is read once
-// at startup, so replacing it changes nothing until k3s restarts.
-//
-// An API server that cannot be asked is left alone rather than restarted or
-// failed. Not knowing is not the same as knowing it is behind, and the next run
-// asks again; restarting a healthy control plane on a guess is the one outcome
-// worth avoiding here.
+// restartIfTheServerIsBehind restarts k3s for a changed policy or an authentication
+// config that metrics indicate is unloaded. If the policy is unchanged and metrics
+// are unavailable, it leaves the server running for a later retry.
 func restartIfTheServerIsBehind(client commandRunner, policyChanged bool, notify func(string)) (bool, error) {
-	// A changed policy is known, not observed, so it needs no confirmation from
-	// the API server and must not be forgotten when the server cannot be asked.
-	// Dropping it would leave the file replaced and the policy unloaded, and
-	// every later run would find the bytes matching and do nothing.
+	// Restart for a changed policy even if metrics are unavailable; later runs
+	// will see matching policy content and cannot detect this pending restart.
 	if policyChanged {
 		if notify != nil {
-			notify("The audit policy changed, and the API server reads it only at startup. Restarting k3s once; workloads keep running through it.")
+			notify("Restarting k3s to load the updated audit policy.")
 		}
-		return true, restartAfterAPolicyChange(client)
+		if err := restartAfterAPolicyChange(client, pendingWriteIsUnchanged(client)); err != nil {
+			return true, err
+		}
+		clearPendingWrite(client)
+		return true, nil
 	}
 
 	loaded, err := apiServerLoadedAnAuthnConfig(client)
 	if err != nil {
 		if notify != nil {
-			notify(fmt.Sprintf("The API server could not be asked what it is running (%v). Its arguments are already on disk, so nothing was changed; run this again when the cluster answers.", err))
+			notify(fmt.Sprintf("The API server could not be asked for its authentication status (%v). Its arguments are on disk. Run this again when the cluster responds.", err))
 		}
 		return false, nil
 	}
 	if loaded {
+		clearPendingWrite(client)
 		return false, nil
 	}
 
 	if notify != nil {
-		notify("The API server arguments are on disk but the running API server has not loaded them, which is where an interrupted run leaves a server. Restarting k3s once.")
+		notify("Restarting k3s to load the API server arguments already on disk.")
 	}
-	return true, restartWithoutTouchingTheConfig(client)
+	if !pendingWriteIsUnchanged(client) {
+		return true, restartWithoutTouchingTheConfig(client)
+	}
+	if err := restartK3s(client); err != nil {
+		return true, rollBackK3sConfig(client, err)
+	}
+	clearPendingWrite(client)
+	return true, nil
 }
 
-// restartAfterAPolicyChange restarts k3s to load a policy this run wrote, and
-// puts the previous policy back if the server does not return.
-//
-// This run did change a file, so undoing it is repairing its own work rather
-// than guessing at someone else's: the API server refuses to start on a policy
-// it cannot parse, and the policy is the only thing that moved.
-func restartAfterAPolicyChange(client commandRunner) error {
+const (
+	lockAcquiredMarker = "kipper-lock-acquired"
+	lockHeldMarker     = "kipper-lock-held"
+	lockLostMarker     = "kipper-lock-lost"
+)
+
+// lockAPIServerConfig returns a runner guarded by the host lock and a release function.
+// A shared flock serializes acquisition, release, and each command. Each command
+// checks the owner token so a previous owner stops after a takeover.
+func lockAPIServerConfig(client commandRunner) (commandRunner, func(), error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, nil, fmt.Errorf("generating an API server lock token: %w", err)
+	}
+	token := hex.EncodeToString(buf)
+	out, err := client.Run(fmt.Sprintf(`exec 9>%[1]s.guard && flock 9 || exit 1
+if [ -d %[1]s ] && [ $(( $(date +%%s) - $(stat -c %%Y %[1]s) )) -gt %[2]d ]; then rm -rf %[1]s; fi
+mkdir %[1]s 2>/dev/null || { echo %[4]s; exit 5; }
+echo %[3]s > %[1]s/owner || { rm -rf %[1]s; exit 1; }
+echo %[5]s`,
+		apiServerLockPath, apiServerLockTTL, token, lockHeldMarker, lockAcquiredMarker))
+	switch {
+	case strings.Contains(out, lockHeldMarker):
+		return nil, nil, fmt.Errorf("another kip run holds the API server configuration lock (%s). Wait for it to finish, then retry. A lock older than %d minutes can be reclaimed between commands", apiServerLockPath, apiServerLockTTL/60)
+	case err != nil:
+		return nil, nil, fmt.Errorf("taking the API server configuration lock: %w", err)
+	case !strings.Contains(out, lockAcquiredMarker):
+		return nil, nil, fmt.Errorf("taking the API server configuration lock: unexpected response %q", strings.TrimSpace(out))
+	}
+	release := func() {
+		_, _ = client.Run(fmt.Sprintf(`exec 9>%[1]s.guard && flock 9 || exit 1
+[ "$(cat %[1]s/owner 2>/dev/null)" = %[2]s ] && rm -rf %[1]s`, apiServerLockPath, token))
+	}
+	return fencedRunner{base: client, token: token}, release, nil
+}
+
+// fencedRunner runs each command only while this run still owns the host lock.
+type fencedRunner struct {
+	base  commandRunner
+	token string
+}
+
+func (f fencedRunner) fence(command string) string {
+	return fmt.Sprintf(`exec 9>%[1]s.guard && flock 9 || exit 1
+[ "$(cat %[1]s/owner 2>/dev/null)" = %[2]s ] || { echo %[3]s; exit 4; }
+%[4]s`, apiServerLockPath, f.token, lockLostMarker, command)
+}
+
+func (f fencedRunner) Run(command string) (string, error) {
+	return f.base.Run(f.fence(command))
+}
+
+func (f fencedRunner) RunStdin(command string, stdin io.Reader) (string, error) {
+	return f.base.RunStdin(f.fence(command), stdin)
+}
+
+// pendingWriteIsUnchanged reports whether the config matches the pending checksum.
+// Rollback requires a successful match, including when retrying an interrupted run.
+func pendingWriteIsUnchanged(client commandRunner) bool {
+	out, err := client.Run(fmt.Sprintf(
+		`[ -f %s ] || { echo none; exit 0; }; [ "$(cat %s)" = "$(sha256sum "$(readlink -f %s)" | cut -d' ' -f1)" ] && echo ours || echo changed`,
+		k3sConfigPendingPath, k3sConfigPendingPath, k3sConfigPath))
+	return err == nil && strings.TrimSpace(out) == "ours"
+}
+
+// clearPendingWrite removes the marker on a best-effort basis after confirmation
+// or rollback. A leftover marker can authorize rollback while its checksum matches.
+func clearPendingWrite(client commandRunner) {
+	_, _ = client.Run("rm -f " + k3sConfigPendingPath)
+}
+
+// restartAfterAPolicyChange restarts k3s to load the new policy and attempts to
+// restore the previous policy on failure. With ownConfigWrite, it also attempts
+// to roll back the pending config write before restarting again.
+func restartAfterAPolicyChange(client commandRunner, ownConfigWrite bool) error {
 	err := restartK3s(client)
 	if err == nil {
 		return nil
 	}
 	if _, rerr := client.Run(fmt.Sprintf(`cp -p %s "$(readlink -f %s)"`, auditPolicyBackupPath, auditPolicyPath)); rerr != nil {
-		return fmt.Errorf("%w; the audit policy this run replaced could not be put back either (%v), so %s holds the new one and this server needs looking at directly", err, rerr, auditPolicyPath)
+		return fmt.Errorf("%w; restoring the previous audit policy failed (%v). Inspect %s and the k3s service on the server", err, rerr, auditPolicyPath)
+	}
+	if ownConfigWrite {
+		return rollBackK3sConfig(client, fmt.Errorf("%w; the previous audit policy was restored", err))
 	}
 	if rerr := restartK3s(client); rerr != nil {
-		return fmt.Errorf("%w; the previous audit policy was restored but k3s did not come back on it either (%v), so this server needs looking at directly", err, rerr)
+		return fmt.Errorf("%w; the previous audit policy was restored; restarting k3s failed (%v). Inspect the k3s service on the server", err, rerr)
 	}
-	return fmt.Errorf("%w; the previous audit policy was restored and k3s is running on it again, so the cluster is as it was and the new policy is not loaded", err)
+	return fmt.Errorf("%w; the previous audit policy was restored and the API server is ready again", err)
 }
 
-// restartWithoutTouchingTheConfig restarts k3s on a configuration this run did
-// not write, and reports rather than repairs when it does not come back.
-//
-// It deliberately never restores the backup. That file is whatever the last
-// repair left behind, which can be months old and predates any change an
-// operator has made since; copying it back over a live configuration to recover
-// from a failed restart would destroy their work to fix something this run did
-// not break. The error names the file instead, so the choice stays with the
-// person who knows what is in it.
+// restartWithoutTouchingTheConfig restarts k3s while preserving the config.
+// Without a matching pending checksum, restoring a backup could overwrite
+// operator changes made since the backup was saved.
 func restartWithoutTouchingTheConfig(client commandRunner) error {
 	if err := restartK3s(client); err != nil {
-		return fmt.Errorf("%w; this run changed no k3s configuration, so nothing was rolled back and %s is as it was. If an earlier repair left %s, it holds the configuration from before the API server arguments were added",
+		return fmt.Errorf("%w; this run changed no k3s configuration. Inspect %s and the k3s service on the server. An earlier repair may have saved a backup at %s",
 			err, k3sConfigPath, k3sConfigBackupPath)
 	}
 	return nil
 }
 
-// classifyAPIServerArgs decides from the parsed document rather than from the
-// text. A comment naming an argument, or a value that happens to contain one,
-// reads as configuration to a substring match and as nothing at all to YAML,
-// and this decision either skips a control-plane repair or refuses one, so it
-// has to be the answer k3s itself would give.
+// classifyAPIServerArgs parses YAML so comments and unrelated values cannot
+// be mistaken for configured arguments.
 func classifyAPIServerArgs(config string) (apiServerArgState, error) {
 	var doc map[string]interface{}
 	if err := yaml.Unmarshal([]byte(config), &doc); err != nil {
@@ -197,8 +271,7 @@ func classifyAPIServerArgs(config string) (apiServerArgState, error) {
 	return apiServerArgsCurrent, nil
 }
 
-// asStringSlice reads k3s's own tolerance of a single scalar where a list is
-// expected, so `kube-apiserver-arg: "x"` is not mistaken for an empty block.
+// asStringSlice accepts a single argument or a list of strings.
 func asStringSlice(raw interface{}) []string {
 	switch v := raw.(type) {
 	case string:
@@ -215,9 +288,7 @@ func asStringSlice(raw interface{}) []string {
 	return nil
 }
 
-// apiServerArgList is the argument values, read from the same constant the
-// install path writes, so the check and the block can never disagree about
-// what "current" means.
+// apiServerArgList uses the install defaults as the definition of current arguments.
 func apiServerArgList() []string {
 	var doc map[string]interface{}
 	if err := yaml.Unmarshal([]byte(k3sAPIServerArgs), &doc); err != nil {
@@ -226,11 +297,7 @@ func apiServerArgList() []string {
 	return asStringSlice(doc[apiServerArgKey])
 }
 
-// missingAPIServerArgs returns the arguments a config does not already carry.
-// A refusal lists these rather than all six: an operator pasting an argument
-// their block already sets ends up with the flag twice, and what a duplicate
-// flag does is a question nobody should have to answer while repairing a
-// control plane.
+// missingAPIServerArgs lists only missing arguments so suggested edits avoid duplicates.
 func missingAPIServerArgs(config string) []string {
 	var doc map[string]interface{}
 	if err := yaml.Unmarshal([]byte(config), &doc); err != nil {
@@ -249,8 +316,6 @@ func missingAPIServerArgs(config string) []string {
 	return missing
 }
 
-// renderAPIServerArgs renders arguments as the YAML list entries an operator
-// would paste into a block of their own.
 func renderAPIServerArgs(args []string) string {
 	var b strings.Builder
 	for _, arg := range args {
@@ -259,11 +324,8 @@ func renderAPIServerArgs(args []string) string {
 	return b.String()
 }
 
-// withAPIServerArgs appends the block to a config that has no
-// kube-apiserver-arg key, and proves the result parses before it can reach the
-// server. Exactly one newline joins them: YAML does not require a file to end
-// in one, and a config ending at EOF would otherwise be spliced into its own
-// last line and restart k3s on a file that cannot be read.
+// withAPIServerArgs appends and validates the argument block. A separating newline
+// keeps the block valid even when the existing file has no trailing newline.
 func withAPIServerArgs(current string) (string, error) {
 	desired := strings.TrimRight(current, "\n") + "\n" + k3sAPIServerArgs
 	state, err := classifyAPIServerArgs(desired)
@@ -276,28 +338,20 @@ func withAPIServerArgs(current string) (string, error) {
 	return desired, nil
 }
 
-// refuseANodeThatRunsNoServer stops the repair on a node that runs the k3s
-// agent rather than the server. These are server flags, and `systemctl restart
-// k3s` finds no unit there, so without this the repair writes control-plane
-// configuration onto a worker and then fails trying to apply it.
+// refuseANodeThatRunsNoServer requires a k3s server unit before writing server flags.
 func refuseANodeThatRunsNoServer(client commandRunner) error {
 	out, err := client.Run("systemctl list-unit-files k3s.service --no-legend 2>/dev/null | wc -l")
 	if err != nil {
 		return fmt.Errorf("checking for the k3s server on this host: %w", err)
 	}
-	// Anything but a positive count is refused, including an empty answer: not
-	// knowing whether this host runs the server is not a reason to write
-	// server flags onto it.
 	if count, cerr := strconv.Atoi(strings.TrimSpace(out)); cerr != nil || count < 1 {
 		return fmt.Errorf("this host does not appear to run a k3s server (no k3s.service), so the API server arguments do not belong here. Point the cluster's host at the server node")
 	}
 	return nil
 }
 
-// apiServerLoadedAnAuthnConfig reports whether the running API server has an
-// authentication config loaded, which is the flag taking effect rather than the
-// file existing. The metric appears only when the server was started with
-// --authentication-config.
+// apiServerLoadedAnAuthnConfig uses the authentication controller metric as a
+// proxy for whether the running API server has loaded an authentication config.
 func apiServerLoadedAnAuthnConfig(client commandRunner) (bool, error) {
 	out, err := client.Run(`raw=$(kubectl get --raw /metrics) || exit 97
 printf '%s\n' "$raw" | grep -c 'apiserver_authentication_config_controller_last_config_info' || true`)
@@ -307,11 +361,7 @@ printf '%s\n' "$raw" | grep -c 'apiserver_authentication_config_controller_last_
 	return strings.TrimSpace(out) != "0", nil
 }
 
-// readK3sConfig returns the config file, distinguishing absent from unreadable
-// the way readHopCA does: a permission or I/O error must not read as "there is
-// no config", because the caller would then be told to write a fresh one and
-// silently drop the settings that disable traefik and pin the cluster's
-// resolvers.
+// readK3sConfig returns empty content for an absent file and propagates read errors.
 func readK3sConfig(client commandRunner) (string, error) {
 	out, err := client.Run(fmt.Sprintf(
 		"if [ ! -e %s ] && [ ! -L %s ]; then exit 0; fi; cat %s", k3sConfigPath, k3sConfigPath, k3sConfigPath))
@@ -321,45 +371,36 @@ func readK3sConfig(client commandRunner) (string, error) {
 	return out, nil
 }
 
-// writeK3sConfigScript renders the whole file rather than appending to it, so a
-// failure leaves either the old config or the new one. The content travels
-// base64-encoded and single-quoted, so no byte in it is ever interpreted by the
-// shell that carries it.
-//
-// Mode and ownership are carried across from the file being replaced. That file
-// can hold a datastore endpoint or a node token, so an operator who tightened
-// it must not find it world-readable because an upgrade rewrote it, and `mv`
-// replaces the inode rather than the contents.
-//
-// The rename lands on what the path resolves to, so a config an operator keeps
-// as a symlink into their own configuration management still points there
-// afterwards. Replacing the link with a plain file would leave their tooling
-// writing somewhere nothing reads.
+// writeK3sConfigScript stages and renames the config to avoid partial writes.
+// It preserves symlinks, mode, and ownership so managed paths and access
+// restrictions survive the replacement. Base64 keeps the content out of shell syntax.
 func writeK3sConfigScript(content string) string {
-	return fmt.Sprintf(`set -e
-target=$(readlink -f %s)
-mode=$(stat -c %%a "$target")
-owner=$(stat -c %%u:%%g "$target")
-cp -p "$target" %s
+	// Preserve the original backup while the live config matches a pending write.
+	// Otherwise, back up the live config before replacing it.
+	return strings.NewReplacer(
+		"CONFIG", k3sConfigPath,
+		"BACKUP", k3sConfigBackupPath,
+		"PENDING", k3sConfigPendingPath,
+		"PAYLOAD", shellQuote(base64.StdEncoding.EncodeToString([]byte(content))),
+	).Replace(`set -e
+target=$(readlink -f CONFIG)
+mode=$(stat -c %a "$target")
+owner=$(stat -c %u:%g "$target")
+if [ ! -f PENDING ] || [ "$(cat PENDING)" != "$(sha256sum "$target" | cut -d' ' -f1)" ]; then
+  cp -p "$target" BACKUP
+fi
 staged=$(mktemp "$(dirname "$target")"/.kipper-XXXXXX)
 trap 'rm -f "$staged"' EXIT
-printf %%s %s | base64 -d > "$staged"
+printf %s PAYLOAD | base64 -d > "$staged"
 chmod "$mode" "$staged"
 chown "$owner" "$staged"
+sha256sum "$staged" | cut -d' ' -f1 > PENDING
 mv "$staged" "$target"
-trap - EXIT`,
-		k3sConfigPath,
-		k3sConfigBackupPath,
-		shellQuote(base64.StdEncoding.EncodeToString([]byte(content))))
+trap - EXIT`)
 }
 
-// restartK3s restarts the server and waits for its API server to answer.
-//
-// Readiness is asked of the API server rather than of the nodes. This restarts
-// one server's control plane, and the caller answers a failure by rolling the
-// configuration back, so a `kubectl wait node --all` would let any unrelated
-// agent that happened to be NotReady cost a second restart and a repair that
-// never lands.
+// restartK3s restarts k3s and checks API readiness. Node readiness is unrelated
+// to this repair and could trigger rollback because of an unhealthy worker.
 func restartK3s(client commandRunner) error {
 	if _, err := client.Run("systemctl restart k3s"); err != nil {
 		return fmt.Errorf("restarting k3s: %w", err)
@@ -371,30 +412,32 @@ func restartK3s(client commandRunner) error {
 	return nil
 }
 
-// rollBackK3sConfig puts the previous config back and restarts k3s on it, so a
-// cluster whose API server did not accept the new arguments is left running the
-// configuration it had. The returned error carries what the rollback managed,
-// because an operator reading it needs to know whether their control plane is
-// up, and the one case where that is unknown says so rather than guessing.
+// rollBackK3sConfig attempts to restore the backup only while the config matches
+// the pending checksum, then restarts k3s. Its error includes the recovery outcome.
 func rollBackK3sConfig(client commandRunner, cause error) error {
-	// A restart that follows someone else's interrupted run has nothing of its
-	// own to restore, and the config on disk is the one the operator wants.
-	// Saying so beats reporting a rollback that never happened.
 	if out, err := client.Run(fmt.Sprintf("[ -f %s ] && echo yes || echo no", k3sConfigBackupPath)); err == nil && strings.TrimSpace(out) == "no" {
-		return fmt.Errorf("%w; nothing was changed on disk by this run and there is no earlier configuration to restore, so %s still holds the arguments and this server needs looking at directly", cause, k3sConfigPath)
+		return fmt.Errorf("%w; no configuration backup is available. Inspect %s and the k3s service on the server", cause, k3sConfigPath)
 	}
-	if _, err := client.Run(fmt.Sprintf(`cp -p %s "$(readlink -f %s)"`, k3sConfigBackupPath, k3sConfigPath)); err != nil {
-		return fmt.Errorf("%w; the configuration could not be restored either (%v), so the state of this server is unknown. Its previous configuration is at %s: put it back with 'cp -p %s %s' and run 'systemctl restart k3s' on the server",
+	// Recheck the checksum immediately before copying: the config may have been
+	// edited during the failed restart. Both operations share the command lock.
+	out, err := client.Run(fmt.Sprintf(
+		`t=$(readlink -f %s); if [ ! -f %s ] || [ "$(cat %s)" != "$(sha256sum "$t" | cut -d' ' -f1)" ]; then echo %s; exit 3; fi; cp -p %s "$t"`,
+		k3sConfigPath, k3sConfigPendingPath, k3sConfigPendingPath, configChangedMarker, k3sConfigBackupPath))
+	if err != nil && strings.Contains(out, configChangedMarker) {
+		return fmt.Errorf("%w; rollback skipped: %s changed since kip wrote it, or its pending-write marker is missing. Inspect the server; the backup is at %s",
+			cause, k3sConfigPath, k3sConfigBackupPath)
+	}
+	if err != nil {
+		return fmt.Errorf("%w; restoring the configuration failed (%v); the server state is unknown. Review the backup at %s before restoring it with 'cp -p %s %s' and running 'systemctl restart k3s' on the server",
 			cause, err, k3sConfigBackupPath, k3sConfigBackupPath, k3sConfigPath)
 	}
+	clearPendingWrite(client)
 	if err := restartK3s(client); err != nil {
-		return fmt.Errorf("%w; the previous configuration was restored but k3s did not come back on it either (%v), so this server needs looking at directly", cause, err)
+		return fmt.Errorf("%w; the previous configuration was restored; restarting k3s failed (%v). Inspect the k3s service on the server", cause, err)
 	}
-	return fmt.Errorf("%w; the previous configuration was restored and k3s is running on it again, so operator login is still unconfigured", cause)
+	return fmt.Errorf("%w; the previous configuration was restored and the API server is ready again", cause)
 }
 
-// indentBlock prefixes each line so a refusal can print the lines to add
-// without them reading as part of the sentence around them.
 func indentBlock(block string) string {
 	var b strings.Builder
 	for _, line := range strings.Split(strings.TrimRight(block, "\n"), "\n") {
