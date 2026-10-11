@@ -49,7 +49,7 @@ func TestEnsureProject_UpdatePreservesUnmanagedFieldsAndUnionsEnvs(t *testing.T)
 
 	// A manifest that omits prod and displayName, and adds acc.
 	m := &manifest.Manifest{Project: "blog", Environments: []string{"test", "acc"}}
-	require.NoError(t, ensureProject(context.Background(), dyn, m, "blog"))
+	require.NoError(t, ensureProject(context.Background(), dyn, m, "blog", ""))
 
 	got, err := dyn.Resource(manifest.ProjectGVR).Get(context.Background(), "blog", metav1.GetOptions{})
 	require.NoError(t, err)
@@ -701,7 +701,7 @@ func TestApplyPlans_ReportsWhatItWroteBeforeStopping(t *testing.T) {
 		assert.Equal(t, 1, updated, "the count of what was already written must survive the error")
 	})
 
-	assert.Contains(t, out, "Stopped part-way: 1 updated, 1 namespace(s) created")
+	assert.Contains(t, out, "Stopped part-way: 1 updated, 2 project(s) written, 1 namespace(s) created")
 	assert.Contains(t, out, "Those writes stand")
 
 	api, _ := dyn.Resource(deployer.AppGVR).Namespace("acme-test").Get(context.Background(), "api", metav1.GetOptions{})
@@ -756,8 +756,9 @@ func TestApplyPlans_SaysNothingWhenItWroteNothing(t *testing.T) {
 	dyn := fakeWorkloadDynamic()
 	clientset := k8sfake.NewSimpleClientset()
 
-	clientset.PrependReactor("create", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, "acme-test", context.DeadlineExceeded)
+	// The Project is the first write, so failing it means nothing was written.
+	dyn.PrependReactor("create", "projects", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "projects"}, "acme", context.DeadlineExceeded)
 	})
 
 	plans := []applyPlan{
@@ -1149,4 +1150,78 @@ func TestApplyResource_NoticesAnOlderSchemaDroppingHealth(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "kip upgrade")
+}
+
+// Project commands need a Project resource to manage an applied manifest.
+func TestApplyPlans_RegistersTheProjectOfAManifestWithoutAnEnvironmentList(t *testing.T) {
+	dyn := fakeWorkloadDynamic()
+	clientset := k8sfake.NewSimpleClientset()
+	plans := []applyPlan{{
+		m:           &manifest.Manifest{Project: "stop-start", Environment: "test"},
+		project:     "stop-start",
+		environment: "test",
+		namespace:   "stop-start-test",
+		resources:   []manifest.Resource{appResource("web", map[string]interface{}{"image": "nginx:1.27"})},
+	}}
+
+	_, _, err := applyPlans(context.Background(), dyn, clientset, plans, false)
+	require.NoError(t, err)
+
+	project, err := dyn.Resource(manifest.ProjectGVR).Get(context.Background(), "stop-start", metav1.GetOptions{})
+	require.NoError(t, err, "the Project must exist")
+	envs, _, _ := unstructured.NestedSlice(project.Object, "spec", "environments")
+	assert.Equal(t, []interface{}{map[string]interface{}{"name": "test"}}, envs, "with the environment the manifest deploys to")
+}
+
+// Preserve the implicit "test" environment so reconciliation keeps its namespace.
+func TestApplyKeepsTheImplicitEnvironmentOfAnExistingProject(t *testing.T) {
+	dyn := fakeWorkloadDynamic()
+	_, err := dyn.Resource(manifest.ProjectGVR).Create(context.Background(), &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "kipper.run/v1alpha1", "kind": "Project",
+		"metadata": map[string]interface{}{"name": "shop"},
+		"spec":     map[string]interface{}{},
+	}}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	require.NoError(t, ensureProject(context.Background(), dyn, &manifest.Manifest{Project: "shop", Environment: "prod"}, "shop", "prod"))
+
+	project, err := dyn.Resource(manifest.ProjectGVR).Get(context.Background(), "shop", metav1.GetOptions{})
+	require.NoError(t, err)
+	envs, _, _ := unstructured.NestedSlice(project.Object, "spec", "environments")
+	assert.Equal(t, []interface{}{
+		map[string]interface{}{"name": "test"},
+		map[string]interface{}{"name": "prod"},
+	}, envs)
+}
+
+func TestApplyRegistersTheDefaultEnvironmentForABareDeploy(t *testing.T) {
+	for _, environment := range []string{"", "default"} {
+		assert.Equal(t, []string{"default"}, declaredEnvironments(&manifest.Manifest{Project: "shop", Environment: environment}, environment), "environment %q", environment)
+	}
+}
+
+func TestApplyRegistersTheOrgPrefixedProject(t *testing.T) {
+	dyn := fakeWorkloadDynamic()
+	clientset := k8sfake.NewSimpleClientset()
+	plans := []applyPlan{{
+		m: &manifest.Manifest{Project: "shop", Environment: "test"}, project: "shop", projectCR: "acme-shop",
+		environment: "test", namespace: "acme-shop-test",
+		resources: []manifest.Resource{appResource("web", map[string]interface{}{"image": "nginx:1.27"})},
+	}}
+
+	_, _, err := applyPlans(context.Background(), dyn, clientset, plans, false)
+	require.NoError(t, err)
+
+	_, err = dyn.Resource(manifest.ProjectGVR).Get(context.Background(), "acme-shop", metav1.GetOptions{})
+	require.NoError(t, err, "the Project is named as kip project create names it")
+	ns, err := clientset.CoreV1().Namespaces().Get(context.Background(), "acme-shop-test", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "acme-shop", ns.Labels["kipper.run/project"])
+}
+
+func TestApplyRegistersAnOverriddenEnvironment(t *testing.T) {
+	m := &manifest.Manifest{Project: "shop", Environments: []string{"test"}}
+
+	assert.Equal(t, []string{"test", "prod"}, declaredEnvironments(m, "prod"))
+	assert.Equal(t, []string{"test"}, declaredEnvironments(m, "test"))
 }

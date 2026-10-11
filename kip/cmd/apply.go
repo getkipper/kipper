@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 
+	"github.com/getkipper/kipper/controller/pkg/projectenv"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/kip/internal/deployer"
 	"github.com/getkipper/kipper/kip/internal/installer"
@@ -70,7 +71,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 			environment = envOverride
 		}
 		namespace := cluster.ResolveNamespace(project, environment)
-		plans = append(plans, applyPlan{m: m, project: project, namespace: namespace, resources: manifest.Convert(m, namespace)})
+		plans = append(plans, applyPlan{m: m, project: project, projectCR: cluster.ResolveNamespace(project, ""), environment: environment, namespace: namespace, resources: manifest.Convert(m, namespace)})
 	}
 	for _, p := range plans {
 		if manifestsStop(p.resources) {
@@ -88,9 +89,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 		var shown []resourceChange
 		for _, p := range plans {
 			fmt.Printf("\n  Dry run: %s (%s)\n", p.project, p.namespace)
-			if len(p.m.Environments) > 0 {
-				fmt.Printf("    Project/%s (environments: %v)\n", p.project, p.m.Environments)
-			}
+			fmt.Printf("    Project/%s (environments: %v)\n", p.projectName(), declaredEnvironments(p.m, p.environment))
 			for _, res := range p.resources {
 				fmt.Printf("    %s/%s (%s)\n", res.Object.GetKind(), res.Object.GetName(), res.GVR.Resource)
 			}
@@ -116,12 +115,20 @@ func runApply(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// applyPlan is one manifest resolved to the namespace and resources it writes.
 type applyPlan struct {
-	m         *manifest.Manifest
-	project   string
-	namespace string
-	resources []manifest.Resource
+	m           *manifest.Manifest
+	project     string
+	projectCR   string
+	environment string
+	namespace   string
+	resources   []manifest.Resource
+}
+
+func (p applyPlan) projectName() string {
+	if p.projectCR != "" {
+		return p.projectCR
+	}
+	return p.project
 }
 
 // applyPlans scans every plan for fields an apply would remove, and writes
@@ -170,21 +177,20 @@ func applyPlans(ctx context.Context, dyn dynamic.Interface, clientset kubernetes
 	}
 
 	for _, p := range plans {
-		if len(p.m.Environments) > 0 {
-			if err := ensureProject(ctx, dyn, p.m, p.project); err != nil {
-				return stopped(fmt.Errorf("ensuring project: %w", err))
-			}
-			projectsWritten++
+		// Register the Project so project commands can manage this deployment.
+		if err := ensureProject(ctx, dyn, p.m, p.projectName(), p.environment); err != nil {
+			return stopped(fmt.Errorf("ensuring project: %w", err))
 		}
+		projectsWritten++
 
 		if _, nsErr := clientset.CoreV1().Namespaces().Get(ctx, p.namespace, metav1.GetOptions{}); errors.IsNotFound(nsErr) {
-			// Wait for the Project reconciler to create it, or create it manually
+			// Create the namespace now so workloads can be applied before reconciliation.
 			ns := &corev1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: p.namespace,
 					Labels: map[string]string{
 						"app.kubernetes.io/managed-by": "kipper",
-						"kipper.run/project":           p.project,
+						"kipper.run/project":           p.projectName(),
 					},
 				},
 			}
@@ -710,11 +716,13 @@ func declaredResources(obj map[string]interface{}) map[string]string {
 	return declared
 }
 
-// unionEnvironments returns the live environment entries plus any manifest
-// environment names not already present. Existing entries are preserved
-// verbatim (keeping per-environment quota and other fields), and nothing is
-// ever removed — apply adds environments, it never prunes them.
+// unionEnvironments adds manifest environments while preserving existing
+// entries and their settings. Removing an environment would delete its namespace.
 func unionEnvironments(existing []interface{}, manifestEnvs []string) []interface{} {
+	// Preserve the implicit "test" environment when adding explicit environments.
+	if len(existing) == 0 {
+		existing = []interface{}{map[string]interface{}{"name": projectenv.Default}}
+	}
 	seen := make(map[string]bool, len(existing))
 	out := make([]interface{}, 0, len(existing)+len(manifestEnvs))
 	for _, e := range existing {
@@ -734,9 +742,24 @@ func unionEnvironments(existing []interface{}, manifestEnvs []string) []interfac
 	return out
 }
 
-func ensureProject(ctx context.Context, dynClient dynamic.Interface, m *manifest.Manifest, project string) error {
-	envs := make([]interface{}, len(m.Environments))
-	for i, e := range m.Environments {
+// declaredEnvironments includes the deployment target even when --environment
+// selects one outside the manifest's list. "default" uses the project's own namespace.
+func declaredEnvironments(m *manifest.Manifest, environment string) []string {
+	if environment == "" {
+		environment = "default"
+	}
+	for _, e := range m.Environments {
+		if e == environment {
+			return m.Environments
+		}
+	}
+	return append(append([]string(nil), m.Environments...), environment)
+}
+
+func ensureProject(ctx context.Context, dynClient dynamic.Interface, m *manifest.Manifest, project, environment string) error {
+	declared := declaredEnvironments(m, environment)
+	envs := make([]interface{}, len(declared))
+	for i, e := range declared {
 		envs[i] = map[string]interface{}{"name": e}
 	}
 
@@ -768,7 +791,7 @@ func ensureProject(ctx context.Context, dynClient dynamic.Interface, m *manifest
 	if errors.IsNotFound(getErr) {
 		_, err := dynClient.Resource(manifest.ProjectGVR).Create(ctx, projectObj, metav1.CreateOptions{})
 		if err == nil {
-			fmt.Printf("  ✔  Project %s created (environments: %v)\n", project, m.Environments)
+			fmt.Printf("  ✔  Project %s created (environments: %v)\n", project, declared)
 			return nil
 		}
 		if !errors.IsAlreadyExists(err) {
@@ -792,7 +815,7 @@ func ensureProject(ctx context.Context, dynClient dynamic.Interface, m *manifest
 			return err
 		}
 		existingEnvs, _, _ := unstructured.NestedSlice(live.Object, "spec", "environments")
-		if err := unstructured.SetNestedSlice(live.Object, unionEnvironments(existingEnvs, m.Environments), "spec", "environments"); err != nil {
+		if err := unstructured.SetNestedSlice(live.Object, unionEnvironments(existingEnvs, declared), "spec", "environments"); err != nil {
 			return err
 		}
 		if m.DisplayName != "" {
