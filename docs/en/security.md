@@ -246,6 +246,29 @@ Use a current kip version when removing and re-adding users. Older versions can 
 
 The daily backup schedule runs at 3:00 AM with seven-day retention. It covers user resources and persistent volume data, with system namespace exclusions. See [Backups & Restore](/en/backups) for coverage and storage options.
 
+### What leaves your cluster {#what-leaves-your-cluster}
+
+Kipper sends no telemetry of its own, and the `kip` CLI does not check for updates. The components Kipper bundles would report usage or check for new versions by default, so Kipper switches that off for Grafana, Loki, Traefik, Longhorn and MinIO, for mongosh telemetry and snippet index downloads in MongoDB services and the optional AI bundle, and for Qdrant telemetry in the optional RAG bundle.
+
+Normal outbound connections include:
+
+- **The kipper.run gateway heartbeat.** Clusters with a registered `*.kipper.run` name renew it at `https://kipper.run` when the console API starts and daily thereafter. Retries happen sooner after failures or while certificate verification is pending. Requests include the subdomain and server IP, plus the management token and certificate fingerprint when available. The cluster signs gateway challenges to prove it holds the certificate's private key. A cluster that was later moved to a domain of your own keeps renewing its old name only while something still serves under it, and stops a day after the last such host is gone. See [changing the name later](/en/domains#changing-the-name-later). Clusters installed with only a custom domain do not send this heartbeat. See [what the gateway records](/en/domains#what-the-gateway-records).
+- **Software downloads.** Installation and upgrades fetch container images, Helm charts and component manifests from their registries and repositories. Nodes also download images as needed. Installation downloads k3s and installs `open-iscsi` and `nfs-common` from the server's package mirrors.
+- **Let's Encrypt**, when cert-manager requests or renews a certificate for a custom domain.
+- **DNS lookups** through the configured resolvers.
+
+Optional features make additional connections:
+
+- **AI features** send code, logs or diagnostic context to your configured AI provider. See [AI provider settings](/en/configuration#ai-provider-settings).
+- **Alerts** go to your configured Slack webhook or SMTP server.
+- **Git integrations** contact your Git provider to clone repositories, validate access tokens and report commit build status when configured.
+- **Backups** go to your configured S3 bucket. Backups using the in-cluster store stay in the cluster.
+- **The AI bundle** downloads the selected models through Ollama.
+
+Your apps and their services may also make outbound connections, depending on their configuration.
+
+For an existing cluster, run `kip upgrade` with system components enabled (omit `--skip-system`) to apply these settings. For each installed AI or RAG bundle, rerun `kip ai install` or `kip ai rag install`, respectively, using your original options.
+
 ## Docker image best practices
 
 Kipper works with any Docker image, but for production deployments we recommend following these security practices:

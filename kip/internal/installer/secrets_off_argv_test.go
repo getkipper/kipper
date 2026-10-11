@@ -56,3 +56,10 @@ func TestTheBucketJobPassesTheMinIOPasswordThroughTheEnvironment(t *testing.T) {
 	assert.NotContains(t, job, "mc alias set", "mc alias set takes the password as an argument")
 	assert.Contains(t, job, "MC_HOST_kipper=")
 }
+
+func TestTheBackupStoreDoesNotCheckForUpdates(t *testing.T) {
+	host := &stdinHost{}
+	require.NoError(t, installInClusterMinIO(host, "synthetic-minio-value"))
+
+	assert.Contains(t, strings.Join(host.stdin, ""), "- name: MINIO_UPDATE\n              value: \"off\"")
+}

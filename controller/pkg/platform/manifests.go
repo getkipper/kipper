@@ -66,6 +66,8 @@ spec:
     deploymentMode: SingleBinary
     loki:
       auth_enabled: false
+      analytics:
+        reporting_enabled: false
       commonConfig:
         replication_factor: 1
       schemaConfig:
@@ -231,6 +233,13 @@ spec:
       ingress:
         enabled: false
       grafana.ini:
+        analytics:
+          reporting_enabled: false
+          check_for_updates: false
+          check_for_plugin_updates: false
+        plugins:
+          preinstall_disabled: true
+          public_key_retrieval_disabled: true
         auth.proxy:
           enabled: true
           header_name: X-WEBAUTH-USER
@@ -254,6 +263,8 @@ spec:
         # wait for a login cookie to be present.
         security:
           csrf_always_check: true
+          # Keep email hashes out of Gravatar requests.
+          disable_gravatar: true
       envFromConfigMaps:
         - name: `+GrafanaServerConfigMapName+`
           optional: true

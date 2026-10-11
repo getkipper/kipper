@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func qdrantTestConfig() QdrantConfig {
@@ -297,4 +298,12 @@ func TestAnythingLLMManifestSizing(t *testing.T) {
 	assert.Contains(t, values, "size: 30Gi")
 	assert.Contains(t, values, "requests:\n    memory: 3Gi")
 	assert.Contains(t, values, "limits:\n    memory: 4Gi")
+}
+
+func TestQdrantManifestDisablesTelemetry(t *testing.T) {
+	doc := parseDoc(t, QdrantManifest(qdrantTestConfig()))
+	var values map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(doc["spec"].(map[string]any)["valuesContent"].(string)), &values))
+
+	assert.Equal(t, true, values["config"].(map[string]any)["telemetry_disabled"])
 }

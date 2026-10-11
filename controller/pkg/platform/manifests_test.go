@@ -140,3 +140,34 @@ func TestKubePrometheusStackHelmChart_PinsTheCAdvisorScrapeInterval(t *testing.T
 		t.Fatalf("kubelet.serviceMonitor.cAdvisorInterval = %v, want 10s", sm["cAdvisorInterval"])
 	}
 }
+
+// valueAt walks a nested values map and fails when a key on the path is absent.
+func valueAt(t *testing.T, values map[string]interface{}, path ...string) interface{} {
+	t.Helper()
+	var current interface{} = values
+	for _, key := range path {
+		m, ok := current.(map[string]interface{})
+		require.True(t, ok, "%v: %q is not under a map", path, key)
+		current, ok = m[key]
+		require.True(t, ok, "%v: %q is not set", path, key)
+	}
+	return current
+}
+
+func TestLokiHelmChart_SendsNoUsageReports(t *testing.T) {
+	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium)))
+
+	assert.Equal(t, false, valueAt(t, values, "loki", "analytics", "reporting_enabled"))
+}
+
+func TestKubePrometheusStackHelmChart_GrafanaSendsNothingUpstream(t *testing.T) {
+	values := seededValues(t, KubePrometheusStackHelmChart(ResourcesForProfile(ProfileMedium)))
+	analytics := []string{"grafana", "grafana.ini", "analytics"}
+
+	for _, key := range []string{"reporting_enabled", "check_for_updates", "check_for_plugin_updates"} {
+		assert.Equal(t, false, valueAt(t, values, append(analytics, key)...), key)
+	}
+	assert.Equal(t, true, valueAt(t, values, "grafana", "grafana.ini", "plugins", "preinstall_disabled"))
+	assert.Equal(t, true, valueAt(t, values, "grafana", "grafana.ini", "plugins", "public_key_retrieval_disabled"))
+	assert.Equal(t, true, valueAt(t, values, "grafana", "grafana.ini", "security", "disable_gravatar"))
+}
