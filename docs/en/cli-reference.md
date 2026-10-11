@@ -554,6 +554,32 @@ A request below its limit defines a range for automatic tuning. A request or lim
 
 The health flags also work with `kip app deploy`. Updates merge into the existing check; switching types clears unsupported settings. Changing the readiness probe triggers a rollout, while changing only the startup timeout leaves pods running. See [Health checks and rollouts](/en/deploying-apps#health-checks-and-rollouts).
 
+## kip app route {#kip-app-route}
+
+Shows, sets or removes an app's public route.
+
+```bash
+kip app route show backend --project shop
+kip app route set backend --host shop.example.com --path /api
+kip app route remove backend --yes
+```
+
+`show` prints the host, path, URL and configured route settings: authentication, internal and public paths, redirects, the CSP allowlist and rate limit. It also displays the controller's `RouteReady` condition when available. Routes without an explicit host use a hostname derived from the app name, environment and cluster domain.
+
+`set` updates the host and path you provide while preserving other route settings. Updating an existing route's host or path keeps pods running. A new route uses the supplied host or the default hostname, with `/` as the default path. Adding a route may restart pods to add Kipper's instance proxy.
+
+For `kipper.run`, use the cluster's domain (such as `lab.kipper.run`) or a name such as `shop--lab.kipper.run`. The gateway routes these names to your cluster, and its wildcard certificate covers one label under `kipper.run`. For a custom host, point its DNS record at the server so its certificate can be issued. `set` waits briefly for the controller and reports whether publication is confirmed.
+
+`remove` deletes the route and its settings, then waits briefly for the route's Ingresses to be removed. The app remains accessible inside the cluster and through links. Pods may restart to remove the instance proxy. Adding a route later uses defaults rather than restoring the removed settings. The command lists the settings being removed and asks for confirmation. Pass `--yes` to skip the prompt; this flag is required without an interactive terminal.
+
+| Flag | Command | Description |
+|---|---|---|
+| `--host` | `set` | Hostname to serve the app on |
+| `--path` | `set` | Path the app is served under (default `/` for a new route) |
+| `--yes`, `-y` | `remove` | Remove without asking |
+| `--project` | all | Project name |
+| `--environment` | all | Target environment |
+
 ## kip app scale {#kip-app-scale}
 
 Sets the replica count for a deployed application.

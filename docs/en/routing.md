@@ -13,6 +13,8 @@ Choose how clients reach your apps:
 
 For DNS and certificates, see [Domains & SSL](/en/domains). For route authentication, see [API Keys](/en/api-keys) and [Basic authentication](/en/security#basic-authentication).
 
+To add, update or remove an app's public route, use [`kip app route`](/en/cli-reference#kip-app-route) or the app's Settings tab in the console.
+
 ## Route groups {#route-groups-path-based-routing}
 
 <span id="path-based-routing-microservices"></span>
