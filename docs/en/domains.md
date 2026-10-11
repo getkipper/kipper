@@ -61,6 +61,8 @@ kip cluster domain lab.kipper.run
 
 The old hosts keep serving until the cutover, and everyone signs in again once it completes, because the move takes the login issuer with it.
 
+After you move to a custom domain, Kipper keeps renewing the old kipper.run name while any Ingress host still uses it, including app routes. Once checks have found no matching hosts for at least a day, renewal pauses and the name follows the [expiry timetable](#subdomain-expiry). This check uses configured hosts, regardless of traffic. Restarting the console API or failing to read the cluster state resets the one-day grace period. While renewal is paused, Kipper checks hourly and resumes renewal if a matching host returns.
+
 ### How it works
 
 ```mermaid
