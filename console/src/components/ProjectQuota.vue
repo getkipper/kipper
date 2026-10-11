@@ -180,7 +180,7 @@ watch(() => props.project, load)
           v-model="selectedTier"
           :disabled="saving"
           @change="changeTier(selectedTier)"
-          class="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-900 focus:border-kipper-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
+          class="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-900 focus:border-kipper-500 focus:outline-hidden dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
         >
           <option value="">{{ tierLabel('') }}</option>
           <option v-for="tier in tierNames" :key="tier" :value="tier">{{ tierLabel(tier) }}</option>
@@ -252,7 +252,7 @@ watch(() => props.project, load)
               <button
                 v-if="editingEnv !== env.environment"
                 @click="startEdit(env)"
-                class="rounded p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+                class="rounded-sm p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
                 :title="`Edit ${env.environment} quota`"
               >
                 <Pencil class="h-3.5 w-3.5" :stroke-width="2" />
@@ -261,7 +261,7 @@ watch(() => props.project, load)
                 v-if="env.source === 'override'"
                 @click="resetToTier(env)"
                 :disabled="saving"
-                class="rounded p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+                class="rounded-sm p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
                 title="Reset to tier default"
               >
                 <RotateCcw class="h-3.5 w-3.5" :stroke-width="2" />
@@ -281,14 +281,14 @@ watch(() => props.project, load)
                 v-model="editValues[dim.key]"
                 type="text"
                 :placeholder="env.hard[dim.key]"
-                class="w-24 rounded-md border border-slate-300 bg-white px-2 py-1 text-right font-mono text-xs text-slate-900 focus:border-kipper-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
+                class="w-24 rounded-md border border-slate-300 bg-white px-2 py-1 text-right font-mono text-xs text-slate-900 focus:border-kipper-500 focus:outline-hidden dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
               />
             </div>
             <div class="flex justify-end gap-1.5 pt-1">
               <button
                 type="button"
                 @click="editingEnv = null"
-                class="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+                class="rounded-sm p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
                 title="Cancel"
               >
                 <X class="h-4 w-4" :stroke-width="2" />

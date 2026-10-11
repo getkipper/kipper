@@ -29,7 +29,7 @@ function failureDetail(container: ContainerHealth): string {
   <div class="text-xs">
     <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
       <span class="font-mono font-medium text-red-900 dark:text-red-200">{{ container.name }}</span>
-      <span class="rounded bg-red-100 px-1.5 py-0.5 font-medium text-red-700 dark:bg-red-900/60 dark:text-red-300">
+      <span class="rounded-sm bg-red-100 px-1.5 py-0.5 font-medium text-red-700 dark:bg-red-900/60 dark:text-red-300">
         {{ container.reason || container.state }}
       </span>
       <span v-if="container.restarts > 0" class="text-red-700 dark:text-red-400">
@@ -39,12 +39,12 @@ function failureDetail(container: ContainerHealth): string {
     </div>
     <p
       v-if="failureDetail(container)"
-      class="mt-0.5 break-words font-mono text-red-800 dark:text-red-300"
+      class="mt-0.5 wrap-break-word font-mono text-red-800 dark:text-red-300"
     >{{ failureDetail(container) }}</p>
     <pre
       v-if="container.log"
       data-testid="app-health-log"
-      class="mt-1 max-h-40 overflow-auto rounded bg-red-100/60 p-2 font-mono text-[11px] leading-relaxed text-red-900 dark:bg-red-950/60 dark:text-red-200"
+      class="mt-1 max-h-40 overflow-auto rounded-sm bg-red-100/60 p-2 font-mono text-[11px] leading-relaxed text-red-900 dark:bg-red-950/60 dark:text-red-200"
     >{{ container.log }}</pre>
   </div>
 </template>

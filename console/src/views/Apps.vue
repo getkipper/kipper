@@ -198,7 +198,7 @@ function openApp(appName: string, namespace?: string) {
         <button
           v-if="!isAllProjects && canInNamespace(projects.globalNamespace, 'kipper.write')"
           @click="showDeploy = !showDeploy"
-          class="inline-flex items-center gap-2 rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-kipper-700 dark:bg-kipper-500 dark:hover:bg-kipper-600"
+          class="inline-flex items-center gap-2 rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-xs transition-colors hover:bg-kipper-700 dark:bg-kipper-500 dark:hover:bg-kipper-600"
         >
           <Plus class="h-4 w-4" :stroke-width="2" />
           Deploy app
@@ -212,14 +212,14 @@ function openApp(appName: string, namespace?: string) {
       <div class="mb-4 flex gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
         <button
           @click="deployMode = 'git'"
-          :class="deployMode === 'git' ? 'bg-white shadow-sm dark:bg-slate-700 dark:text-slate-50' : 'text-slate-500 dark:text-slate-400'"
+          :class="deployMode === 'git' ? 'bg-white shadow-xs dark:bg-slate-700 dark:text-slate-50' : 'text-slate-500 dark:text-slate-400'"
           class="flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors"
         >
           From Git repository
         </button>
         <button
           @click="deployMode = 'image'"
-          :class="deployMode === 'image' ? 'bg-white shadow-sm dark:bg-slate-700 dark:text-slate-50' : 'text-slate-500 dark:text-slate-400'"
+          :class="deployMode === 'image' ? 'bg-white shadow-xs dark:bg-slate-700 dark:text-slate-50' : 'text-slate-500 dark:text-slate-400'"
           class="flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors"
         >
           From container image
@@ -235,7 +235,7 @@ function openApp(appName: string, namespace?: string) {
               v-model="gitUrl"
               type="text"
               placeholder="https://github.com/org/repo.git"
-              class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+              class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
             />
           </div>
           <div>
@@ -244,7 +244,7 @@ function openApp(appName: string, namespace?: string) {
               v-model="gitBranch"
               type="text"
               placeholder="main"
-              class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+              class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
             />
           </div>
           <div>
@@ -253,7 +253,7 @@ function openApp(appName: string, namespace?: string) {
               v-model="gitToken"
               type="password"
               placeholder="ghp_... or glpat-..."
-              class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+              class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
             />
           </div>
         </template>
@@ -266,7 +266,7 @@ function openApp(appName: string, namespace?: string) {
               v-model="form.image"
               type="text"
               placeholder="ghcr.io/acme/api:latest"
-              class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+              class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
             />
           </div>
         </template>
@@ -278,7 +278,7 @@ function openApp(appName: string, namespace?: string) {
             v-model="form.name"
             type="text"
             placeholder="api"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
           />
         </div>
         <div>
@@ -287,7 +287,7 @@ function openApp(appName: string, namespace?: string) {
             v-model.number="form.port"
             type="number"
             placeholder="8080"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
           />
         </div>
         <div>
@@ -296,14 +296,14 @@ function openApp(appName: string, namespace?: string) {
             v-model.number="form.replicas"
             type="number"
             min="1"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
           />
         </div>
         <div>
           <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">Resource profile</label>
           <select
             v-model="form.resource_profile"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
           >
             <option v-for="p in resourceProfiles" :key="p.value" :value="p.value">{{ p.label }}</option>
           </select>
@@ -314,7 +314,7 @@ function openApp(appName: string, namespace?: string) {
             v-model="form.memory_limit"
             type="text"
             placeholder="e.g. 512Mi, 2Gi, 4Gi"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
           />
         </div>
         <div v-if="showCustomResources">
@@ -323,7 +323,7 @@ function openApp(appName: string, namespace?: string) {
             v-model="form.cpu_limit"
             type="text"
             placeholder="e.g. 250m, 500m, 1, 2"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
           />
         </div>
         <div class="sm:col-span-2">
@@ -332,7 +332,7 @@ function openApp(appName: string, namespace?: string) {
             v-model="envText"
             rows="3"
             placeholder="KEY=value&#10;API_KEY=sk-...&#10;# Lines starting with # are ignored"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
           />
           <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">One per line, KEY=value format. For sensitive values, use the Secrets tab after deploying.</p>
         </div>
@@ -340,7 +340,7 @@ function openApp(appName: string, namespace?: string) {
           <button
             type="submit"
             :disabled="deploying || !form.name || (deployMode === 'image' && !form.image) || (deployMode === 'git' && !gitUrl)"
-            class="rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-kipper-700 disabled:opacity-50 dark:bg-kipper-500 dark:hover:bg-kipper-600"
+            class="rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-xs transition-colors hover:bg-kipper-700 disabled:opacity-50 dark:bg-kipper-500 dark:hover:bg-kipper-600"
           >
             {{ deploying ? 'Deploying...' : 'Deploy' }}
           </button>
@@ -371,7 +371,7 @@ function openApp(appName: string, namespace?: string) {
           <div class="min-w-0">
             <div class="text-sm font-semibold text-slate-900 dark:text-slate-50">{{ app.name }}</div>
             <div class="mt-0.5 flex items-center gap-2">
-              <span v-if="isAllProjects && app.project" class="rounded bg-kipper-50 px-1.5 py-0.5 text-xs font-medium text-kipper-700 dark:bg-kipper-950 dark:text-kipper-400">
+              <span v-if="isAllProjects && app.project" class="rounded-sm bg-kipper-50 px-1.5 py-0.5 text-xs font-medium text-kipper-700 dark:bg-kipper-950 dark:text-kipper-400">
                 {{ app.project }}
               </span>
               <span class="truncate font-mono text-xs text-slate-500 dark:text-slate-400">{{ app.image }}</span>

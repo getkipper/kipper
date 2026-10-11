@@ -184,7 +184,7 @@ watch(() => props.density, () => recompute())
         ref="popover"
         role="menu"
         data-testid="tabbar-overflow-menu"
-        class="absolute right-0 top-full z-20 mt-1 min-w-[10rem] rounded-md border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-700 dark:bg-slate-900"
+        class="absolute right-0 top-full z-20 mt-1 min-w-40 rounded-md border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-700 dark:bg-slate-900"
       >
         <button
           v-for="tab in hiddenTabs"

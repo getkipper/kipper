@@ -136,12 +136,12 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <div v-else-if="editing" class="flex flex-1 flex-col">
-        <div class="bg-amber-50 px-4 py-1.5 text-[10px] text-amber-700 dark:bg-slate-900 dark:text-slate-400 dark:shadow-[inset_3px_0_0_theme(colors.orange.300)]">
+        <div class="bg-amber-50 px-4 py-1.5 text-[10px] text-amber-700 dark:bg-slate-900 dark:text-slate-400 dark:shadow-[inset_3px_0_0_var(--color-orange-300)]">
           Changes are saved to all running pods but will be lost on the next deployment.
         </div>
         <textarea
           v-model="content"
-          class="flex-1 min-h-[400px] w-full resize-none bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-300 outline-none"
+          class="flex-1 min-h-[400px] w-full resize-none bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-300 outline-hidden"
         />
       </div>
       <pre v-else class="overflow-auto bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-300">{{ content }}</pre>

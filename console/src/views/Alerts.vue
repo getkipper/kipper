@@ -110,14 +110,14 @@ onMounted(() => {
 
       <div v-else class="divide-y divide-slate-100 dark:divide-slate-800">
         <div v-for="alert in visibleAlerts" :key="alert.id" class="flex items-start gap-3 px-5 py-4">
-          <span :class="severityColor(alert.severity)" class="mt-1.5 h-2 w-2 flex-shrink-0 rounded-full" />
+          <span :class="severityColor(alert.severity)" class="mt-1.5 h-2 w-2 shrink-0 rounded-full" />
           <div class="min-w-0 flex-1">
             <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
               <div class="flex min-w-0 items-center gap-2">
                 <span class="truncate text-sm font-semibold text-slate-900 dark:text-slate-50">{{ alert.app }}</span>
                 <span v-if="alert.namespace" class="truncate text-xs text-slate-400 dark:text-slate-500">{{ alert.namespace }}</span>
               </div>
-              <span class="flex-shrink-0 text-xs text-slate-400 dark:text-slate-500">
+              <span class="shrink-0 text-xs text-slate-400 dark:text-slate-500">
                 {{ severityLabel(alert.severity) }} · {{ relativeTime(alert.time) }}
               </span>
             </div>

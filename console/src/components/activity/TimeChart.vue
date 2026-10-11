@@ -176,7 +176,7 @@ function labelShift(px: number): string {
     <span
       v-for="(m, k) in placed.filter(m => m.label)"
       :key="`label-${k}`"
-      class="pointer-events-none absolute top-0 rounded bg-violet-100 px-1 text-[10px] text-violet-700 dark:bg-violet-950 dark:text-violet-300"
+      class="pointer-events-none absolute top-0 rounded-sm bg-violet-100 px-1 text-[10px] text-violet-700 dark:bg-violet-950 dark:text-violet-300"
       :class="labelShift(m.x)"
       :style="{ left: `${(m.x / width) * 100}%` }"
       data-testid="chart-marker-label"

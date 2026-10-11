@@ -292,7 +292,7 @@ function envColor(env: string): string {
           type="text"
           :disabled="!!editingHost"
           placeholder="Leave empty for auto-generated kipper.run subdomain"
-          class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
+          class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
         />
       </div>
 
@@ -326,9 +326,9 @@ function envColor(env: string): string {
               v-model="mapping.path"
               type="text"
               placeholder="/"
-              class="w-40 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-mono text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
+              class="w-40 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-mono text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
             />
-            <ArrowRight class="h-3.5 w-3.5 flex-shrink-0 text-slate-400" />
+            <ArrowRight class="h-3.5 w-3.5 shrink-0 text-slate-400" />
             <select
               v-model="mapping.app"
               class="flex-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
@@ -446,7 +446,7 @@ function envColor(env: string): string {
                     data-testid="route-refused-paths"
                     class="mt-1.5 flex flex-wrap items-center gap-1.5 pl-1 text-xs text-slate-500 dark:text-slate-400"
                   >
-                    <ShieldOff class="h-3 w-3 flex-shrink-0" :stroke-width="1.75" />
+                    <ShieldOff class="h-3 w-3 shrink-0" :stroke-width="1.75" />
                     <span v-if="route.refusal_ready" :title="'Matched literally and case-sensitively at the ingress'">Refused:</span>
                     <span v-else data-testid="route-refusal-pending" class="text-amber-700 dark:text-amber-400">
                       Refusal not confirmed:
@@ -454,7 +454,7 @@ function envColor(env: string): string {
                     <code
                       v-for="p in route.refused_paths"
                       :key="p"
-                      class="rounded bg-slate-100 px-1 py-0.5 font-mono text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                      class="rounded-sm bg-slate-100 px-1 py-0.5 font-mono text-slate-600 dark:bg-slate-800 dark:text-slate-400"
                     >{{ p }}</code>
                   </div>
                   <div
@@ -476,7 +476,7 @@ function envColor(env: string): string {
                     <code
                       v-for="p in route.public_paths"
                       :key="p"
-                      class="rounded bg-slate-100 px-1 py-0.5 font-mono text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                      class="rounded-sm bg-slate-100 px-1 py-0.5 font-mono text-slate-600 dark:bg-slate-800 dark:text-slate-400"
                     >{{ p }}</code>
                   </div>
                 </div>

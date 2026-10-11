@@ -164,7 +164,7 @@ onMounted(async () => {
       <button
         v-else
         @click="handleLogin"
-        class="flex w-full items-center justify-center rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-kipper-700 focus:outline-none focus:ring-2 focus:ring-kipper-500/50 dark:bg-kipper-500 dark:hover:bg-kipper-600"
+        class="flex w-full items-center justify-center rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-xs transition-colors hover:bg-kipper-700 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/50 dark:bg-kipper-500 dark:hover:bg-kipper-600"
       >
         Sign in
       </button>

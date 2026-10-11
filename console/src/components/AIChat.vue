@@ -522,7 +522,7 @@ watch(() => props.code, () => {
           <span class="text-slate-500">{{ formatBytes(a.size) }}</span>
           <button
             @click="removeAttachment(ai)"
-            class="ml-0.5 rounded-sm text-slate-500 hover:bg-slate-700 hover:text-slate-300"
+            class="ml-0.5 rounded-xs text-slate-500 hover:bg-slate-700 hover:text-slate-300"
             :title="`Remove ${a.name}`"
           >
             <X class="h-2.5 w-2.5" />
@@ -551,7 +551,7 @@ watch(() => props.code, () => {
           v-model="input"
           type="text"
           placeholder="Ask about your code..."
-          class="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:border-kipper-500 focus:outline-none"
+          class="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:border-kipper-500 focus:outline-hidden"
           :disabled="streaming"
           @keyup.enter="send"
         />

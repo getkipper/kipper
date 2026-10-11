@@ -1520,7 +1520,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
     <!-- Header -->
     <div class="sticky top-0 z-10 flex items-center justify-between gap-4 px-6 py-3 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800">
       <div class="flex items-center gap-3 min-w-0">
-        <button class="p-2 -ml-2 rounded hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Back" @click="back">
+        <button class="p-2 -ml-2 rounded-sm hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Back" @click="back">
           <ArrowLeft class="w-4 h-4" />
         </button>
         <Database class="w-5 h-5 text-kipper-500" />
@@ -1531,13 +1531,13 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
       </div>
       <div class="flex items-center gap-2">
         <button
-          class="text-xs inline-flex items-center gap-1 px-2 py-1 rounded"
+          class="text-xs inline-flex items-center gap-1 px-2 py-1 rounded-sm"
           :class="showAI ? 'bg-kipper-600 text-white' : 'hover:bg-slate-100 dark:hover:bg-slate-800'"
           @click="showAI = !showAI"
         >
           <Sparkles class="w-3.5 h-3.5" /> AI
         </button>
-        <button class="text-xs inline-flex items-center gap-1 px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800" @click="loadSchema">
+        <button class="text-xs inline-flex items-center gap-1 px-2 py-1 rounded-sm hover:bg-slate-100 dark:hover:bg-slate-800" @click="loadSchema">
           <RefreshCw class="w-3.5 h-3.5" :class="schemaLoading ? 'animate-spin' : ''" /> Refresh schema
         </button>
       </div>
@@ -1563,12 +1563,12 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
           v-if="!schemaCollapsed"
           class="px-2 py-2 border-b border-slate-200 dark:border-slate-800 space-y-1"
         >
-          <label class="text-[10px] font-semibold uppercase tracking-wide text-slate-500 px-1">Database</label>
+          <label class="block text-[10px] font-semibold uppercase tracking-wide text-slate-500 px-1">Database</label>
           <div class="relative">
             <select
               :value="activeDatabase || (databases.find((d) => d.default)?.name ?? '')"
               :disabled="databasesLoading || databases.length === 0"
-              class="w-full text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 pr-6 disabled:opacity-50"
+              class="w-full text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 pr-6 disabled:opacity-50"
               @change="onDatabaseChange(($event.target as HTMLSelectElement).value)"
             >
               <option v-if="databasesLoading" disabled value="">Loading…</option>
@@ -1584,14 +1584,14 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
           <div class="flex items-center gap-1">
             <button
               v-if="!schemaCollapsed && canWriteData"
-              class="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-800 text-kipper-600"
+              class="p-1 rounded-sm hover:bg-slate-200 dark:hover:bg-slate-800 text-kipper-600"
               title="Create a new table"
               @click="startCreateTable"
             >
               <Plus class="w-3.5 h-3.5" />
             </button>
             <button
-              class="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-800"
+              class="p-1 rounded-sm hover:bg-slate-200 dark:hover:bg-slate-800"
               :title="schemaCollapsed ? 'Expand schema' : 'Collapse schema'"
               @click="schemaCollapsed = !schemaCollapsed"
             >
@@ -1688,47 +1688,47 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
             <div class="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950">
               <button
                 v-if="canWriteData"
-                class="inline-flex items-center gap-1 px-2.5 py-1 rounded text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+                class="inline-flex items-center gap-1 px-2.5 py-1 rounded-sm text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
                 @click="startInsert"
               >
                 <Plus class="w-4 h-4" /> Insert row
               </button>
               <button
                 v-if="selectedRows.size > 0 && canWriteData"
-                class="inline-flex items-center gap-1 px-2.5 py-1 rounded text-sm bg-rose-600 text-white hover:bg-rose-700"
+                class="inline-flex items-center gap-1 px-2.5 py-1 rounded-sm text-sm bg-rose-600 text-white hover:bg-rose-700"
                 @click="deleteSelected"
               >
                 <Trash2 class="w-4 h-4" /> Delete {{ selectedRows.size }}
               </button>
               <template v-if="dirtyCount > 0 && canWriteData">
                 <button
-                  class="inline-flex items-center gap-1 px-2.5 py-1 rounded text-sm bg-kipper-600 text-white hover:bg-kipper-700"
+                  class="inline-flex items-center gap-1 px-2.5 py-1 rounded-sm text-sm bg-kipper-600 text-white hover:bg-kipper-700"
                   @click="saveEdits"
                 >
                   <Check class="w-4 h-4" /> Save {{ dirtyCount }} change{{ dirtyCount === 1 ? '' : 's' }}
                 </button>
                 <button
-                  class="inline-flex items-center gap-1 px-2.5 py-1 rounded text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  class="inline-flex items-center gap-1 px-2.5 py-1 rounded-sm text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
                   @click="discardEdits"
                 >
                   <X class="w-4 h-4" /> Discard
                 </button>
               </template>
-              <button class="inline-flex items-center gap-1 px-2 py-1 rounded text-sm hover:bg-slate-100 dark:hover:bg-slate-800" @click="loadRows">
+              <button class="inline-flex items-center gap-1 px-2 py-1 rounded-sm text-sm hover:bg-slate-100 dark:hover:bg-slate-800" @click="loadRows">
                 <RefreshCw class="w-4 h-4" :class="browseLoading ? 'animate-spin' : ''" />
               </button>
 
               <!-- Pagination -->
               <div class="ml-auto flex items-center gap-1 text-xs text-slate-500">
-                <span v-if="filterCol" class="mr-2 px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300">
+                <span v-if="filterCol" class="mr-2 px-2 py-0.5 rounded-sm bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300">
                   filter: {{ filterCol }} = {{ filterVal || '(empty)' }}
                   <button class="ml-1 hover:underline" @click="clearFilter">clear</button>
                 </span>
-                <button :disabled="offset === 0" class="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30" @click="firstPage"><ChevronsLeft class="w-4 h-4" /></button>
-                <button :disabled="offset === 0" class="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30" @click="prevPage"><ChevronRight class="w-4 h-4 rotate-180" /></button>
+                <button :disabled="offset === 0" class="p-1 rounded-sm hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30" @click="firstPage"><ChevronsLeft class="w-4 h-4" /></button>
+                <button :disabled="offset === 0" class="p-1 rounded-sm hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30" @click="prevPage"><ChevronRight class="w-4 h-4 rotate-180" /></button>
                 <span class="px-1">{{ currentPage }} / {{ totalPages || 1 }}</span>
-                <button :disabled="!browseData || offset + pageSize >= browseData.total" class="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30" @click="nextPage"><ChevronRight class="w-4 h-4" /></button>
-                <button :disabled="!browseData || offset + pageSize >= browseData.total" class="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30" @click="lastPage"><ChevronsRight class="w-4 h-4" /></button>
+                <button :disabled="!browseData || offset + pageSize >= browseData.total" class="p-1 rounded-sm hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30" @click="nextPage"><ChevronRight class="w-4 h-4" /></button>
+                <button :disabled="!browseData || offset + pageSize >= browseData.total" class="p-1 rounded-sm hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30" @click="lastPage"><ChevronsRight class="w-4 h-4" /></button>
                 <span v-if="browseData" class="ml-2">
                   {{ browseData.structure.columns.length }} {{ browseData.structure.columns.length === 1 ? 'col' : 'cols' }}
                   · {{ browseData.total }} {{ browseData.total === 1 ? 'row' : 'rows' }}
@@ -1738,22 +1738,22 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
             </div>
 
             <!-- Filter input (inline when active) -->
-            <div v-if="filterCol" class="flex items-center gap-2 px-4 py-1 border-b border-slate-200 dark:border-slate-800 bg-amber-50 dark:bg-slate-900 dark:shadow-[inset_3px_0_0_theme(colors.orange.300)]">
+            <div v-if="filterCol" class="flex items-center gap-2 px-4 py-1 border-b border-slate-200 dark:border-slate-800 bg-amber-50 dark:bg-slate-900 dark:shadow-[inset_3px_0_0_var(--color-orange-300)]">
               <span class="text-xs text-slate-600 dark:text-slate-400">Filter <code class="font-mono">{{ filterCol }}</code> =</span>
               <input
                 v-model="filterVal"
-                class="px-2 py-0.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
+                class="px-2 py-0.5 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
                 placeholder="value"
                 autofocus
                 @keyup.enter="loadRows"
                 @keyup.escape="clearFilter"
               />
               <button
-                class="text-xs px-2 py-0.5 rounded bg-kipper-600 text-white disabled:opacity-50"
+                class="text-xs px-2 py-0.5 rounded-sm bg-kipper-600 text-white disabled:opacity-50"
                 :disabled="!filterVal"
                 @click="loadRows"
               >Apply</button>
-              <button class="text-xs px-2 py-0.5 rounded border border-slate-300 dark:border-slate-700" @click="clearFilter">Cancel</button>
+              <button class="text-xs px-2 py-0.5 rounded-sm border border-slate-300 dark:border-slate-700" @click="clearFilter">Cancel</button>
             </div>
 
             <!-- Insert form (inline above the grid) -->
@@ -1770,22 +1770,22 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                     :value="insertValues[c.name] ?? ''"
                     @input="insertValues[c.name] = ($event.target as HTMLInputElement).value"
                     :placeholder="c.default ? `default: ${c.default}` : (c.nullable ? '(null)' : '')"
-                    class="w-full px-2 py-1 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
+                    class="w-full px-2 py-1 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
                   />
                   <span v-else class="text-xs text-slate-400 italic">generated</span>
                 </div>
               </div>
               <div class="mt-2 flex items-center gap-2">
-                <button class="px-3 py-1 rounded text-sm bg-kipper-600 text-white hover:bg-kipper-700" @click="submitInsert">Insert</button>
-                <button class="px-3 py-1 rounded text-sm border border-slate-300 dark:border-slate-700" @click="showInsertForm = false">Cancel</button>
+                <button class="px-3 py-1 rounded-sm text-sm bg-kipper-600 text-white hover:bg-kipper-700" @click="submitInsert">Insert</button>
+                <button class="px-3 py-1 rounded-sm text-sm border border-slate-300 dark:border-slate-700" @click="showInsertForm = false">Cancel</button>
               </div>
             </div>
 
             <!-- Status / errors -->
-            <div v-if="browseError" class="px-4 py-2 text-sm text-rose-600 bg-rose-50 dark:bg-slate-900 dark:text-slate-300 border-b border-rose-200 dark:border-slate-800 dark:shadow-[inset_3px_0_0_theme(colors.rose.400)]">
+            <div v-if="browseError" class="px-4 py-2 text-sm text-rose-600 bg-rose-50 dark:bg-slate-900 dark:text-slate-300 border-b border-rose-200 dark:border-slate-800 dark:shadow-[inset_3px_0_0_var(--color-rose-400)]">
               <AlertTriangle class="inline w-4 h-4 mr-1 dark:text-rose-300" /> {{ browseError }}
             </div>
-            <div v-if="browseData && browseData.structure.primary_key.length === 0" class="px-4 py-2 text-xs text-amber-700 dark:text-slate-300 bg-amber-50 dark:bg-slate-900 border-b border-amber-200 dark:border-slate-800 dark:shadow-[inset_3px_0_0_theme(colors.orange.300)]">
+            <div v-if="browseData && browseData.structure.primary_key.length === 0" class="px-4 py-2 text-xs text-amber-700 dark:text-slate-300 bg-amber-50 dark:bg-slate-900 border-b border-amber-200 dark:border-slate-800 dark:shadow-[inset_3px_0_0_var(--color-orange-300)]">
               This table has no primary key: inline edits and deletes are disabled. Use the SQL tab to modify rows.
             </div>
 
@@ -1855,7 +1855,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                       <template v-if="editingCell?.row === i && editingCell?.col === col.name">
                         <input
                           v-model="editBuffer"
-                          class="w-full px-1 py-0.5 text-xs rounded border border-kipper-500 bg-white dark:bg-slate-800 font-mono"
+                          class="w-full px-1 py-0.5 text-xs rounded-sm border border-kipper-500 bg-white dark:bg-slate-800 font-mono"
                           autofocus
                           @keyup.enter="commitEdit"
                           @keyup.escape="cancelEdit"
@@ -1866,7 +1866,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                         <span v-if="cellValue(i, col.name) === null" class="text-slate-400 italic">NULL</span>
                         <template v-else-if="fkFor(col.name)">
                           <button
-                            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-kipper-50 dark:bg-kipper-900/30 text-kipper-700 dark:text-kipper-300 hover:underline"
+                            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm bg-kipper-50 dark:bg-kipper-900/30 text-kipper-700 dark:text-kipper-300 hover:underline"
                             :title="`→ ${fkFor(col.name)?.ref_schema}.${fkFor(col.name)?.ref_table}.${fkFor(col.name)?.ref_column}`"
                             @click.stop="navigateToFK(fkFor(col.name)!)"
                           >
@@ -1896,13 +1896,13 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
               <Plus class="w-4 h-4 text-kipper-600" />
               <span class="text-sm font-medium">New table</span>
               <button
-                class="ml-auto inline-flex items-center gap-1 px-3 py-1 rounded text-sm bg-kipper-600 text-white hover:bg-kipper-700"
+                class="ml-auto inline-flex items-center gap-1 px-3 py-1 rounded-sm text-sm bg-kipper-600 text-white hover:bg-kipper-700"
                 :disabled="!newTableName || newTableCols.length === 0"
                 @click="applyCreateTable"
               >
                 <Check class="w-4 h-4" /> Create table
               </button>
-              <button class="inline-flex items-center gap-1 px-3 py-1 rounded text-sm border border-slate-300 dark:border-slate-700" @click="cancelCreateTable">
+              <button class="inline-flex items-center gap-1 px-3 py-1 rounded-sm text-sm border border-slate-300 dark:border-slate-700" @click="cancelCreateTable">
                 <X class="w-4 h-4" /> Cancel
               </button>
             </div>
@@ -1910,11 +1910,11 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
             <div class="px-4 py-3 border-b border-slate-200 dark:border-slate-800 grid grid-cols-1 md:grid-cols-3 gap-3">
               <div>
                 <label class="text-[10px] uppercase tracking-wide text-slate-500 block mb-1">Schema</label>
-                <input v-model="newTableSchema" placeholder="public" class="w-full px-2 py-1 text-sm rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono" />
+                <input v-model="newTableSchema" placeholder="public" class="w-full px-2 py-1 text-sm rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono" />
               </div>
               <div class="md:col-span-2">
                 <label class="text-[10px] uppercase tracking-wide text-slate-500 block mb-1">Name</label>
-                <input v-model="newTableName" placeholder="domains" class="w-full px-2 py-1 text-sm rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono" autofocus />
+                <input v-model="newTableName" placeholder="domains" class="w-full px-2 py-1 text-sm rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono" autofocus />
               </div>
             </div>
 
@@ -1936,14 +1936,14 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                       <input
                         v-model="c.name"
                         placeholder="column_name"
-                        class="w-full px-2 py-0.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
+                        class="w-full px-2 py-0.5 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
                       />
                     </td>
                     <td class="px-3 py-1 border-b border-slate-100 dark:border-slate-800/50">
                       <div class="flex gap-1">
                         <select
                           :value="isCustomType(c.type) ? CUSTOM_SENTINEL : (c.type || 'text')"
-                          class="flex-1 px-2 py-0.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
+                          class="flex-1 px-2 py-0.5 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
                           @change="c.type = typeSelectValue($event)"
                         >
                           <optgroup v-for="g in TYPE_GROUPS" :key="g.label" :label="g.label">
@@ -1955,7 +1955,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                           v-if="isCustomType(c.type) || c.type === ''"
                           v-model="c.type"
                           placeholder="varchar(50), numeric(10,2)…"
-                          class="flex-1 px-2 py-0.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
+                          class="flex-1 px-2 py-0.5 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
                         />
                       </div>
                     </td>
@@ -1967,7 +1967,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                         :value="c.default ?? ''"
                         @input="c.default = ($event.target as HTMLInputElement).value || null"
                         placeholder="now() / 'pending' / 0"
-                        class="w-full px-2 py-0.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
+                        class="w-full px-2 py-0.5 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
                       />
                     </td>
                     <td class="px-3 py-1 border-b border-slate-100 dark:border-slate-800/50">
@@ -1980,7 +1980,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                       />
                     </td>
                     <td class="px-3 py-1 border-b border-slate-100 dark:border-slate-800/50">
-                      <button class="p-1 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950 rounded" @click="removeNewTableCol(i)" title="Remove">
+                      <button class="p-1 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950 rounded-sm" @click="removeNewTableCol(i)" title="Remove">
                         <Trash2 class="w-3.5 h-3.5" />
                       </button>
                     </td>
@@ -2008,7 +2008,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
           <div v-else-if="!selectedRelation || !browseData" class="flex-1 flex items-center justify-center text-sm text-slate-500 p-8">
             <div class="text-center">
               <p>Pick a table from the sidebar to design its schema.</p>
-              <button v-if="canWriteData" class="mt-3 inline-flex items-center gap-1 px-3 py-1.5 rounded text-sm bg-kipper-600 text-white hover:bg-kipper-700" @click="startCreateTable">
+              <button v-if="canWriteData" class="mt-3 inline-flex items-center gap-1 px-3 py-1.5 rounded-sm text-sm bg-kipper-600 text-white hover:bg-kipper-700" @click="startCreateTable">
                 <Plus class="w-4 h-4" /> New table
               </button>
             </div>
@@ -2017,7 +2017,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
             <div class="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950">
               <span class="text-sm font-medium">{{ selectedRelation.schema }}.{{ selectedRelation.name }}</span>
               <button
-                class="ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+                class="ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded-sm text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
                 @click="showAddColumn = !showAddColumn"
               >
                 <Plus class="w-4 h-4" /> Add column
@@ -2028,7 +2028,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
               </label>
               <button
                 v-if="designerOps.length > 0"
-                class="inline-flex items-center gap-1 px-3 py-1 rounded text-sm bg-kipper-600 text-white hover:bg-kipper-700 disabled:opacity-50"
+                class="inline-flex items-center gap-1 px-3 py-1 rounded-sm text-sm bg-kipper-600 text-white hover:bg-kipper-700 disabled:opacity-50"
                 :disabled="designerApplying"
                 @click="applyDesigner"
               >
@@ -2038,7 +2038,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
               </button>
               <button
                 v-if="designerOps.length > 0"
-                class="inline-flex items-center gap-1 px-2.5 py-1 rounded text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+                class="inline-flex items-center gap-1 px-2.5 py-1 rounded-sm text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
                 @click="designerOps = []; designerPreview = []"
               >
                 <X class="w-4 h-4" /> Discard
@@ -2051,14 +2051,14 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
               <div class="grid grid-cols-1 md:grid-cols-4 gap-2 items-end">
                 <div>
                   <label class="text-[10px] uppercase tracking-wide text-slate-500 block">Name</label>
-                  <input v-model="newCol.name" placeholder="last_synced_at" class="w-full px-2 py-1 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono" />
+                  <input v-model="newCol.name" placeholder="last_synced_at" class="w-full px-2 py-1 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono" />
                 </div>
                 <div>
                   <label class="text-[10px] uppercase tracking-wide text-slate-500 block">Type</label>
                   <div class="flex gap-1">
                     <select
                       :value="isCustomType(newCol.type) ? CUSTOM_SENTINEL : (newCol.type || 'text')"
-                      class="flex-1 px-2 py-1 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
+                      class="flex-1 px-2 py-1 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
                       @change="newCol.type = typeSelectValue($event)"
                     >
                       <optgroup v-for="g in TYPE_GROUPS" :key="g.label" :label="g.label">
@@ -2070,7 +2070,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                       v-if="isCustomType(newCol.type) || newCol.type === ''"
                       v-model="newCol.type"
                       placeholder="varchar(50)"
-                      class="flex-1 px-2 py-1 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
+                      class="flex-1 px-2 py-1 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
                     />
                   </div>
                 </div>
@@ -2080,7 +2080,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                     :value="newCol.default ?? ''"
                     @input="newCol.default = ($event.target as HTMLInputElement).value || null"
                     placeholder="now() / 'pending' / 0"
-                    class="w-full px-2 py-1 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
+                    class="w-full px-2 py-1 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
                   />
                 </div>
                 <div class="flex items-center gap-2">
@@ -2090,13 +2090,13 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                 </div>
               </div>
               <div class="mt-2 flex gap-2">
-                <button class="px-3 py-1 rounded text-sm bg-kipper-600 text-white hover:bg-kipper-700" @click="queueAddColumn">Queue</button>
-                <button class="px-3 py-1 rounded text-sm border border-slate-300 dark:border-slate-700" @click="showAddColumn = false">Cancel</button>
+                <button class="px-3 py-1 rounded-sm text-sm bg-kipper-600 text-white hover:bg-kipper-700" @click="queueAddColumn">Queue</button>
+                <button class="px-3 py-1 rounded-sm text-sm border border-slate-300 dark:border-slate-700" @click="showAddColumn = false">Cancel</button>
               </div>
             </div>
 
             <!-- Pending ops list -->
-            <div v-if="designerOps.length > 0" class="px-4 py-2 border-b border-slate-200 dark:border-slate-800 bg-amber-50 dark:bg-slate-900 dark:shadow-[inset_3px_0_0_theme(colors.orange.300)]">
+            <div v-if="designerOps.length > 0" class="px-4 py-2 border-b border-slate-200 dark:border-slate-800 bg-amber-50 dark:bg-slate-900 dark:shadow-[inset_3px_0_0_var(--color-orange-300)]">
               <div class="text-xs font-semibold text-amber-800 dark:text-orange-300 mb-1">Pending changes</div>
               <ul class="space-y-1">
                 <li v-for="(op, i) in designerOps" :key="i" class="flex items-center gap-2 text-xs">
@@ -2128,17 +2128,17 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                         <div class="flex items-center gap-1">
                           <input
                             v-model="editingRenameValue"
-                            class="px-2 py-0.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
+                            class="px-2 py-0.5 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
                             autofocus
                             @keyup.enter="commitRenameEdit"
                             @keyup.escape="cancelRenameEdit"
                           />
                           <button
-                            class="px-1.5 py-0.5 rounded text-xs bg-kipper-600 text-white hover:bg-kipper-700 disabled:opacity-50"
+                            class="px-1.5 py-0.5 rounded-sm text-xs bg-kipper-600 text-white hover:bg-kipper-700 disabled:opacity-50"
                             :disabled="!editingRenameValue.trim() || editingRenameValue.trim() === col.name"
                             @click="commitRenameEdit"
                           >Apply</button>
-                          <button class="px-1.5 py-0.5 rounded text-xs border border-slate-300 dark:border-slate-700" @click="cancelRenameEdit">Cancel</button>
+                          <button class="px-1.5 py-0.5 rounded-sm text-xs border border-slate-300 dark:border-slate-700" @click="cancelRenameEdit">Cancel</button>
                         </div>
                       </template>
                       <template v-else>
@@ -2152,7 +2152,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                         <div class="flex items-center gap-1">
                           <select
                             :value="isCustomType(editingTypeValue) ? CUSTOM_SENTINEL : editingTypeValue"
-                            class="px-2 py-0.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
+                            class="px-2 py-0.5 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
                             @change="editingTypeValue = typeSelectValue($event)"
                           >
                             <optgroup v-for="g in TYPE_GROUPS" :key="g.label" :label="g.label">
@@ -2164,14 +2164,14 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                             v-if="isCustomType(editingTypeValue) || editingTypeValue === ''"
                             v-model="editingTypeValue"
                             placeholder="varchar(50)"
-                            class="px-2 py-0.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono w-32"
+                            class="px-2 py-0.5 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono w-32"
                           />
                           <button
-                            class="px-1.5 py-0.5 rounded text-xs bg-kipper-600 text-white hover:bg-kipper-700 disabled:opacity-50"
+                            class="px-1.5 py-0.5 rounded-sm text-xs bg-kipper-600 text-white hover:bg-kipper-700 disabled:opacity-50"
                             :disabled="!editingTypeValue.trim() || editingTypeValue.trim() === col.type"
                             @click="commitTypeEdit"
                           >Apply</button>
-                          <button class="px-1.5 py-0.5 rounded text-xs border border-slate-300 dark:border-slate-700" @click="cancelTypeEdit">Cancel</button>
+                          <button class="px-1.5 py-0.5 rounded-sm text-xs border border-slate-300 dark:border-slate-700" @click="cancelTypeEdit">Cancel</button>
                         </div>
                       </template>
                       <span v-else class="text-slate-500">{{ col.type }}</span>
@@ -2210,7 +2210,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
               <span class="text-sm font-medium">{{ selectedRelation.schema }}.{{ selectedRelation.name }}</span>
               <button
                 v-if="canWriteData"
-                class="ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+                class="ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded-sm text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
                 @click="showAddIndex = !showAddIndex"
               >
                 <Plus class="w-4 h-4" /> Create index
@@ -2226,7 +2226,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                   <input
                     v-model="newIndex.name"
                     :placeholder="suggestedIndexName() || 'users_email_idx'"
-                    class="w-full px-2 py-1 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
+                    class="w-full px-2 py-1 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
                   />
                   <p v-if="!newIndex.name && suggestedIndexName()" class="mt-0.5 text-[10px] text-slate-500">
                     Leave blank to use <code class="font-mono">{{ suggestedIndexName() }}</code>.
@@ -2234,7 +2234,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                 </div>
                 <div>
                   <label class="text-[10px] uppercase tracking-wide text-slate-500 block">Method</label>
-                  <select v-model="newIndex.method" class="w-full px-2 py-1 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900">
+                  <select v-model="newIndex.method" class="w-full px-2 py-1 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900">
                     <option value="">default (btree)</option>
                     <option value="btree">btree</option>
                     <option value="gin">gin</option>
@@ -2248,31 +2248,31 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                     <span
                       v-for="(col, i) in newIndex.columns"
                       :key="col"
-                      class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono bg-kipper-100 dark:bg-kipper-900/40 text-kipper-800 dark:text-kipper-200"
+                      class="inline-flex items-center gap-1 px-2 py-0.5 rounded-sm text-xs font-mono bg-kipper-100 dark:bg-kipper-900/40 text-kipper-800 dark:text-kipper-200"
                     >
                       <span class="text-kipper-500/70">{{ i + 1 }}.</span>
                       {{ col }}
                       <button
-                        class="px-0.5 hover:bg-kipper-200 dark:hover:bg-kipper-800 rounded disabled:opacity-30"
+                        class="px-0.5 hover:bg-kipper-200 dark:hover:bg-kipper-800 rounded-sm disabled:opacity-30"
                         :disabled="i === 0"
                         title="Move earlier in the index"
                         @click="moveIndexColumn(i, -1)"
                       >↑</button>
                       <button
-                        class="px-0.5 hover:bg-kipper-200 dark:hover:bg-kipper-800 rounded disabled:opacity-30"
+                        class="px-0.5 hover:bg-kipper-200 dark:hover:bg-kipper-800 rounded-sm disabled:opacity-30"
                         :disabled="i === newIndex.columns.length - 1"
                         title="Move later in the index"
                         @click="moveIndexColumn(i, 1)"
                       >↓</button>
                       <button
-                        class="px-0.5 hover:bg-rose-100 dark:hover:bg-rose-900/40 rounded text-rose-600"
+                        class="px-0.5 hover:bg-rose-100 dark:hover:bg-rose-900/40 rounded-sm text-rose-600"
                         title="Remove from index"
                         @click="removeIndexColumn(col)"
                       >×</button>
                     </span>
                     <select
                       v-if="availableIndexColumns.length"
-                      class="px-2 py-0.5 text-xs rounded border border-dashed border-slate-300 dark:border-slate-700 bg-transparent font-mono"
+                      class="px-2 py-0.5 text-xs rounded-sm border border-dashed border-slate-300 dark:border-slate-700 bg-transparent font-mono"
                       :value="''"
                       @change="addIndexColumnFromSelect($event)"
                     >
@@ -2287,7 +2287,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                 </div>
                 <div class="md:col-span-2">
                   <label class="text-[10px] uppercase tracking-wide text-slate-500 block">WHERE clause (partial index, Postgres only)</label>
-                  <input v-model="newIndex.where" placeholder="status = 'active'" class="w-full px-2 py-1 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono" />
+                  <input v-model="newIndex.where" placeholder="status = 'active'" class="w-full px-2 py-1 text-xs rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono" />
                 </div>
                 <div class="flex items-center gap-3">
                   <label class="inline-flex items-center gap-1 text-xs">
@@ -2299,12 +2299,12 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                 </div>
               </div>
               <div class="mt-2 flex gap-2">
-                <button class="px-3 py-1 rounded text-sm bg-kipper-600 text-white hover:bg-kipper-700" @click="applyCreateIndex">Create</button>
-                <button class="px-3 py-1 rounded text-sm border border-slate-300 dark:border-slate-700" @click="showAddIndex = false">Cancel</button>
+                <button class="px-3 py-1 rounded-sm text-sm bg-kipper-600 text-white hover:bg-kipper-700" @click="applyCreateIndex">Create</button>
+                <button class="px-3 py-1 rounded-sm text-sm border border-slate-300 dark:border-slate-700" @click="showAddIndex = false">Cancel</button>
               </div>
               <div v-if="indexPreview.length > 0" class="mt-2">
                 <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">DDL preview</div>
-                <pre class="text-xs font-mono p-2 bg-slate-950 text-slate-100 rounded">{{ indexPreview.join(';\n') + ';' }}</pre>
+                <pre class="text-xs font-mono p-2 bg-slate-950 text-slate-100 rounded-sm">{{ indexPreview.join(';\n') + ';' }}</pre>
               </div>
             </div>
 
@@ -2430,7 +2430,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
           <div class="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950">
             <button
               v-if="canWriteData"
-              class="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-kipper-600 text-white text-sm hover:bg-kipper-700 disabled:opacity-50 whitespace-nowrap"
+              class="inline-flex items-center gap-1 px-3 py-1.5 rounded-sm bg-kipper-600 text-white text-sm hover:bg-kipper-700 disabled:opacity-50 whitespace-nowrap"
               :disabled="running || !sqlText.trim()"
               @click="runQuery"
               title="Run the statement at the cursor (or selection). Cmd/Ctrl+Enter"
@@ -2441,7 +2441,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
             </button>
             <button
               v-if="canWriteData"
-              class="inline-flex items-center gap-1 px-2 py-1.5 rounded text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap"
+              class="inline-flex items-center gap-1 px-2 py-1.5 rounded-sm text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap"
               :disabled="running || !sqlText.trim()"
               @click="runQueryAll"
               title="Run every statement in the editor. Cmd/Ctrl+Shift+Enter"
@@ -2449,14 +2449,14 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
               <Play class="w-4 h-4" /> Run all
             </button>
             <button
-              class="inline-flex items-center gap-1 px-2 py-1.5 rounded text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap"
+              class="inline-flex items-center gap-1 px-2 py-1.5 rounded-sm text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap"
               @click="formatSQL"
             >
               <Wand2 class="w-4 h-4" /> Format
             </button>
             <button
               v-if="canWriteData"
-              class="inline-flex items-center gap-1 px-2 py-1.5 rounded text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap"
+              class="inline-flex items-center gap-1 px-2 py-1.5 rounded-sm text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap"
               :disabled="!sqlText.trim()"
               @click="showSaveSnippet = true; newSnippetName = ''; newSnippetPinned = false"
               title="Save the current query as a reusable snippet"
@@ -2464,7 +2464,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
               <BookmarkPlus class="w-4 h-4" /> Save
             </button>
             <button
-              class="inline-flex items-center gap-1 px-2 py-1.5 rounded text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap"
+              class="inline-flex items-center gap-1 px-2 py-1.5 rounded-sm text-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap"
               :disabled="!sqlText.trim()"
               @click="explainQuery"
               title="Ask the AI to explain the current query"
@@ -2488,14 +2488,14 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
             <input
               v-model="newSnippetName"
               placeholder="snippet name"
-              class="flex-1 max-w-sm px-2 py-1 text-sm rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+              class="flex-1 max-w-sm px-2 py-1 text-sm rounded-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
               @keyup.enter="saveCurrentAsSnippet"
             />
             <label class="inline-flex items-center gap-1 text-xs">
               <input v-model="newSnippetPinned" type="checkbox" class="accent-kipper-600" /> Pin
             </label>
-            <button class="px-3 py-1 rounded text-sm bg-kipper-600 text-white hover:bg-kipper-700" @click="saveCurrentAsSnippet">Save</button>
-            <button class="px-3 py-1 rounded text-sm border border-slate-300 dark:border-slate-700" @click="showSaveSnippet = false">Cancel</button>
+            <button class="px-3 py-1 rounded-sm text-sm bg-kipper-600 text-white hover:bg-kipper-700" @click="saveCurrentAsSnippet">Save</button>
+            <button class="px-3 py-1 rounded-sm text-sm border border-slate-300 dark:border-slate-700" @click="showSaveSnippet = false">Cancel</button>
           </div>
 
           <!-- Editor takes 40% of available height; results take the rest. Both
@@ -2527,7 +2527,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
                 <span class="ml-auto">{{ result.duration_ms }} ms</span>
                 <button
                   v-if="result.rows && result.rows.length"
-                  class="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  class="inline-flex items-center gap-1 px-2 py-1 rounded-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
                   @click="exportCSV"
                 >
                   <Download class="w-3 h-3" /> Export CSV
@@ -2580,7 +2580,7 @@ function dropIndexByName(idx: { name: string; primary: boolean }) {
       >
         <div class="px-3 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-xs flex items-center justify-between">
           <span class="font-semibold uppercase tracking-wide text-slate-500">Kipper knows</span>
-          <button class="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-800" @click="showAI = false">
+          <button class="p-0.5 rounded-sm hover:bg-slate-200 dark:hover:bg-slate-800" @click="showAI = false">
             <X class="w-3.5 h-3.5" />
           </button>
         </div>

@@ -210,8 +210,8 @@ const pctFormat = (v: number) => `${Math.round(v)}%`
 const countFormat = (v: number) => String(Math.round(v))
 const buttonClass = (active: boolean) =>
   active
-    ? 'rounded px-2 py-0.5 text-xs font-medium bg-kipper-600 text-white'
-    : 'rounded px-2 py-0.5 text-xs font-medium text-slate-600 hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-700'
+    ? 'rounded-sm px-2 py-0.5 text-xs font-medium bg-kipper-600 text-white'
+    : 'rounded-sm px-2 py-0.5 text-xs font-medium text-slate-600 hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-700'
 </script>
 
 <template>
@@ -260,7 +260,7 @@ const buttonClass = (active: boolean) =>
           <div class="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600 dark:text-slate-300">
             <span class="font-medium">Requests per minute</span>
             <span v-for="c in classes" :key="c.key" class="inline-flex items-center gap-1">
-              <span class="inline-block h-2 w-2 rounded-sm" :style="{ background: c.color }" />{{ c.label }}
+              <span class="inline-block h-2 w-2 rounded-xs" :style="{ background: c.color }" />{{ c.label }}
             </span>
           </div>
           <p v-if="note" data-testid="activity-traffic-note" class="py-6 text-center text-xs text-slate-500 dark:text-slate-400">{{ note }}</p>
@@ -325,11 +325,11 @@ const buttonClass = (active: boolean) =>
           data-testid="activity-details"
           tabindex="0"
           aria-label="Chart details"
-          class="h-36 overflow-y-auto rounded border border-slate-200 p-2 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300"
+          class="h-36 overflow-y-auto rounded-sm border border-slate-200 p-2 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300"
         >
           <p v-if="readout" data-testid="activity-readout">{{ readout }}</p>
           <p v-else class="text-slate-500 dark:text-slate-400">Hover over a chart to see values.</p>
-          <div v-if="selected" data-testid="activity-change" class="mt-2 rounded bg-violet-50 p-2 text-slate-700 dark:bg-violet-950 dark:text-slate-200">
+          <div v-if="selected" data-testid="activity-change" class="mt-2 rounded-sm bg-violet-50 p-2 text-slate-700 dark:bg-violet-950 dark:text-slate-200">
             <p class="font-medium">About {{ clock(selected.time) }}</p>
             <p>{{ changeSummary(selected) }}</p>
             <p v-if="changeObservation(selected)" class="mt-1">{{ changeObservation(selected) }}</p>

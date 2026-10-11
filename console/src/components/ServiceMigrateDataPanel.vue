@@ -111,12 +111,12 @@ async function submitMigration() {
 const phaseColor = computed(() => {
   switch (status.value?.phase) {
     case 'Succeeded':
-      return 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-slate-800 dark:bg-slate-900 dark:text-emerald-300 dark:shadow-[inset_3px_0_0_theme(colors.emerald.400)]'
+      return 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-slate-800 dark:bg-slate-900 dark:text-emerald-300 dark:shadow-[inset_3px_0_0_var(--color-emerald-400)]'
     case 'Failed':
-      return 'border-red-300 bg-red-50 text-red-900 dark:border-slate-800 dark:bg-slate-900 dark:text-rose-300 dark:shadow-[inset_3px_0_0_theme(colors.rose.400)]'
+      return 'border-red-300 bg-red-50 text-red-900 dark:border-slate-800 dark:bg-slate-900 dark:text-rose-300 dark:shadow-[inset_3px_0_0_var(--color-rose-400)]'
     case 'Running':
     case 'Pending':
-      return 'border-amber-200 bg-amber-50 text-amber-800 dark:border-slate-800 dark:bg-slate-900 dark:text-orange-300 dark:shadow-[inset_3px_0_0_theme(colors.orange.300)]'
+      return 'border-amber-200 bg-amber-50 text-amber-800 dark:border-slate-800 dark:bg-slate-900 dark:text-orange-300 dark:shadow-[inset_3px_0_0_var(--color-orange-300)]'
     default:
       return 'border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300'
   }
@@ -145,7 +145,7 @@ onBeforeUnmount(() => stopPolling())
           <button
             @click="loadPeers"
             :disabled="loadingPeers"
-            class="rounded p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+            class="rounded-sm p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
             title="Refresh source list"
           >
             <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingPeers }" />
@@ -191,7 +191,7 @@ onBeforeUnmount(() => stopPolling())
           <h3 class="text-sm font-semibold text-slate-900 dark:text-slate-50">Latest migration</h3>
           <button
             @click="refreshStatus"
-            class="rounded p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+            class="rounded-sm p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
             title="Refresh status"
           >
             <RefreshCw class="h-3.5 w-3.5" />
@@ -214,7 +214,7 @@ onBeforeUnmount(() => stopPolling())
     <!-- Confirm modal -->
     <div
       v-if="confirmingFor"
-      class="fixed inset-0 z-[120] flex items-center justify-center bg-black/40 p-8"
+      class="fixed inset-0 z-120 flex items-center justify-center bg-black/40 p-8"
       @click.self="cancelConfirm"
     >
       <div class="w-full max-w-md rounded-xl bg-white p-6 shadow-xl dark:bg-slate-900" @click.stop>

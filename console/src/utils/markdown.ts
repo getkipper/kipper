@@ -75,7 +75,7 @@ renderer.code = (token: Tokens.Code) => {
 }
 
 renderer.codespan = (token: Tokens.Codespan) => {
-  return `<code class="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-xs text-kipper-300">${token.text}</code>`
+  return `<code class="rounded-sm bg-slate-800 px-1.5 py-0.5 font-mono text-xs text-kipper-300">${token.text}</code>`
 }
 
 renderer.table = (token: Tokens.Table) => {

@@ -431,7 +431,7 @@ onUnmounted(() => {
       </div>
 
       <div v-else class="px-5 py-8 text-center text-sm text-slate-500 dark:text-slate-400">
-        No nodes found. Run <code class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-800">kip install</code> to set up your cluster.
+        No nodes found. Run <code class="rounded-sm bg-slate-100 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-800">kip install</code> to set up your cluster.
       </div>
     </div>
 

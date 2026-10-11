@@ -293,11 +293,11 @@ function roleColor(role: string): string {
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div>
           <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Email</label>
-          <input v-model="newEmail" type="email" placeholder="dev@example.com" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+          <input v-model="newEmail" type="email" placeholder="dev@example.com" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
         </div>
         <div>
           <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Password</label>
-          <input v-model="newPassword" type="password" placeholder="Letters, numbers, and symbols" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+          <input v-model="newPassword" type="password" placeholder="Letters, numbers, and symbols" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
           <div class="mt-2">
             <PasswordStrengthBar :password="newPassword" />
           </div>
@@ -344,7 +344,7 @@ function roleColor(role: string): string {
             type="email"
             placeholder="colleague@example.com"
             required
-            class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+            class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
           />
         </div>
         <div>
@@ -403,7 +403,7 @@ function roleColor(role: string): string {
             <input
               :value="inviteURL"
               readonly
-              class="flex-1 bg-transparent font-mono text-xs text-slate-700 outline-none dark:text-slate-300"
+              class="flex-1 bg-transparent font-mono text-xs text-slate-700 outline-hidden dark:text-slate-300"
             />
             <button @click="copyInvite" class="rounded-md bg-kipper-600 px-3 py-1 text-xs font-medium text-white hover:bg-kipper-700">
               <Check v-if="inviteCopied" class="h-3.5 w-3.5" />
@@ -433,7 +433,7 @@ function roleColor(role: string): string {
             </span>
             <div>
               <span class="text-sm font-medium text-slate-700 dark:text-slate-300">{{ inv.email || 'Link invite' }}</span>
-              <span class="ml-2 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold" :class="roleColor(inv.role)">{{ inv.role }}</span>
+              <span class="ml-2 inline-block rounded-sm px-1.5 py-0.5 text-[10px] font-semibold" :class="roleColor(inv.role)">{{ inv.role }}</span>
             </div>
           </div>
           <div class="flex items-center gap-3">
@@ -483,7 +483,7 @@ function roleColor(role: string): string {
               :checked="user.monitoring"
               :disabled="user.role === 'admin'"
               data-testid="monitoring-toggle"
-              class="rounded border-slate-300 text-kipper-600 dark:border-slate-600"
+              class="rounded-sm border-slate-300 text-kipper-600 dark:border-slate-600"
               @change="handleMonitoringChange(user.email, ($event.target as HTMLInputElement).checked)"
             />
             Monitoring
@@ -520,7 +520,7 @@ function roleColor(role: string): string {
         <NoticeCallout v-if="showPasswordFor === user.email" tone="warning" class="mt-3 p-3">
           <p class="mb-2 text-xs font-medium text-amber-700 dark:text-orange-300">Share this password. It won't be shown again</p>
           <div class="flex items-center gap-2">
-            <code class="flex-1 rounded bg-white px-2 py-1 font-mono text-sm text-slate-900 dark:bg-slate-800 dark:text-slate-50">{{ displayPassword }}</code>
+            <code class="flex-1 rounded-sm bg-white px-2 py-1 font-mono text-sm text-slate-900 dark:bg-slate-800 dark:text-slate-50">{{ displayPassword }}</code>
             <button @click="copyPassword" class="rounded-md bg-kipper-600 px-3 py-1 text-xs font-medium text-white hover:bg-kipper-700">
               <Check v-if="passwordCopied" class="h-3.5 w-3.5" />
               <Copy v-else class="h-3.5 w-3.5" />

@@ -151,7 +151,7 @@ function statusDot(status: string): string {
         <button
           v-if="canCreateSomewhere"
           @click="showCreate = !showCreate"
-          class="inline-flex items-center gap-2 rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-kipper-700 dark:bg-kipper-500 dark:hover:bg-kipper-600"
+          class="inline-flex items-center gap-2 rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-xs transition-colors hover:bg-kipper-700 dark:bg-kipper-500 dark:hover:bg-kipper-600"
         >
           <Plus class="h-4 w-4" :stroke-width="2" />
           New job
@@ -169,7 +169,7 @@ function statusDot(status: string): string {
             v-model="newName"
             type="text"
             placeholder="cleanup-expired"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
           />
         </div>
         <div>
@@ -178,7 +178,7 @@ function statusDot(status: string): string {
             v-model="newImage"
             type="text"
             placeholder="ghcr.io/acme/cleanup:latest"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
           />
         </div>
         <div>
@@ -187,7 +187,7 @@ function statusDot(status: string): string {
             v-model="newCommand"
             type="text"
             placeholder="python cleanup.py"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
           />
         </div>
         <div>
@@ -196,7 +196,7 @@ function statusDot(status: string): string {
             v-model="newSchedule"
             type="text"
             placeholder="0 3 * * *"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
           />
           <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Leave empty for a one-off job</p>
         </div>
@@ -204,7 +204,7 @@ function statusDot(status: string): string {
           <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">Namespace</label>
           <select
             v-model="newNamespace"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
           >
             <option v-for="ns in namespaceOptions" :key="ns.value" :value="ns.value">{{ ns.label }}</option>
           </select>
@@ -216,7 +216,7 @@ function statusDot(status: string): string {
               v-model="newMemory"
               type="text"
               placeholder="128Mi"
-              class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+              class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
             />
           </div>
           <div>
@@ -225,7 +225,7 @@ function statusDot(status: string): string {
               v-model="newCPU"
               type="text"
               placeholder="100m"
-              class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+              class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
             />
           </div>
         </div>
@@ -233,7 +233,7 @@ function statusDot(status: string): string {
           <button
             type="submit"
             :disabled="creating || !newName || !newImage"
-            class="rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-kipper-700 disabled:opacity-50 dark:bg-kipper-500 dark:hover:bg-kipper-600"
+            class="rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-xs transition-colors hover:bg-kipper-700 disabled:opacity-50 dark:bg-kipper-500 dark:hover:bg-kipper-600"
           >
             {{ creating ? 'Creating...' : newSchedule ? 'Create scheduled job' : 'Run one-off job' }}
           </button>

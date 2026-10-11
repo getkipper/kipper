@@ -172,7 +172,7 @@ onMounted(load)
             <option v-for="o in expiresOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
           </select>
         </div>
-        <div class="min-w-[12rem] flex-1">
+        <div class="min-w-48 flex-1">
           <label class="block text-xs font-medium text-slate-600 dark:text-slate-400">Label (optional)</label>
           <input
             v-model="label"
@@ -203,7 +203,7 @@ onMounted(load)
           Copy this link now: it carries the token and won't be shown again.
         </p>
         <div class="mt-2 flex items-center gap-2">
-          <code class="flex-1 truncate rounded bg-white px-2 py-1.5 font-mono text-xs text-slate-700 dark:bg-slate-900 dark:text-slate-200">{{ minted.url }}</code>
+          <code class="flex-1 truncate rounded-sm bg-white px-2 py-1.5 font-mono text-xs text-slate-700 dark:bg-slate-900 dark:text-slate-200">{{ minted.url }}</code>
           <button
             class="inline-flex items-center gap-1 rounded-md border border-kipper-300 px-2 py-1.5 text-xs font-medium text-kipper-700 hover:bg-white dark:border-kipper-800 dark:text-kipper-300 dark:hover:bg-slate-900"
             @click="minted.url && copy(minted.url)"
@@ -219,7 +219,7 @@ onMounted(load)
       <div class="mb-2 flex items-center justify-between">
         <h3 class="text-sm font-semibold text-slate-900 dark:text-slate-50">Active links</h3>
         <button
-          class="rounded p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+          class="rounded-sm p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
           title="Refresh"
           @click="load"
         >

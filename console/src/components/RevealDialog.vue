@@ -93,7 +93,7 @@ function copy() {
 
 <template>
   <div
-    class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-8"
+    class="fixed inset-0 z-100 flex items-center justify-center bg-black/40 p-8"
     @mousedown.self="emit('close')"
     @keydown.esc="emit('close')"
   >
@@ -123,7 +123,7 @@ function copy() {
             v-model="password"
             type="password"
             autocomplete="current-password"
-            class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+            class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
             placeholder="Your password"
           />
           <p v-if="errorMsg" class="text-xs text-red-600 dark:text-red-400">{{ errorMsg }}</p>

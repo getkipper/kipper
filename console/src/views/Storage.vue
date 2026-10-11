@@ -586,7 +586,7 @@ async function copyShareLink() {
       <FolderOpen class="mx-auto mb-3 h-10 w-10 text-slate-400 dark:text-slate-500" :stroke-width="1.5" />
       <p class="text-sm font-medium text-slate-900 dark:text-slate-50">No MinIO services</p>
       <p class="mt-1 max-w-sm mx-auto text-sm text-slate-500 dark:text-slate-400">
-        Create a MinIO service with <code class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-800">kip service add minio --name storage</code>
+        Create a MinIO service with <code class="rounded-sm bg-slate-100 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-800">kip service add minio --name storage</code>
       </p>
     </div>
 
@@ -647,7 +647,7 @@ async function copyShareLink() {
               v-model="newBucketName"
               type="text"
               placeholder="uploads"
-              class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+              class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
               @keyup.enter="handleCreateBucket"
             />
           </div>
@@ -677,7 +677,7 @@ async function copyShareLink() {
               v-model="newFolderName"
               type="text"
               placeholder="images"
-              class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+              class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
               @keyup.enter="handleCreateFolder"
             />
           </div>
@@ -743,7 +743,7 @@ async function copyShareLink() {
             type="checkbox"
             :checked="allFilesSelected"
             @change="toggleSelectAll"
-            class="h-4 w-4 rounded border-slate-300 text-kipper-600 focus:ring-kipper-500 dark:border-slate-600"
+            class="h-4 w-4 rounded-sm border-slate-300 text-kipper-600 focus:ring-kipper-500 dark:border-slate-600"
           />
           <span class="text-xs text-slate-500 dark:text-slate-400">Select all</span>
         </div>
@@ -774,9 +774,9 @@ async function copyShareLink() {
             type="checkbox"
             :checked="selectedKeys.has(obj.key)"
             @change="toggleSelect(obj.key)"
-            class="h-4 w-4 flex-shrink-0 rounded border-slate-300 text-kipper-600 focus:ring-kipper-500 dark:border-slate-600"
+            class="h-4 w-4 shrink-0 rounded-sm border-slate-300 text-kipper-600 focus:ring-kipper-500 dark:border-slate-600"
           />
-          <div v-else class="w-4 flex-shrink-0" />
+          <div v-else class="w-4 shrink-0" />
 
           <button
             class="flex flex-1 items-center gap-3 text-left"
@@ -789,7 +789,7 @@ async function copyShareLink() {
             <div class="min-w-0 flex-1">
               <p class="flex items-center gap-1.5 truncate text-sm font-medium text-slate-900 dark:text-slate-50">
                 {{ objectName(obj.key) }}
-                <Globe v-if="obj.is_public" class="h-3 w-3 flex-shrink-0 text-emerald-500" />
+                <Globe v-if="obj.is_public" class="h-3 w-3 shrink-0 text-emerald-500" />
               </p>
               <p v-if="!obj.is_dir" class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
                 {{ formatSize(obj.size) }} &middot; {{ formatDate(obj.last_modified) }}

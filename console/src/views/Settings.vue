@@ -555,7 +555,7 @@ onMounted(async () => {
           <!-- Mode switch warning -->
           <NoticeCallout v-if="showModeWarning" tone="warning" class="p-4">
             <div class="flex items-start gap-2">
-              <AlertTriangle class="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600 dark:text-orange-300" />
+              <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-orange-300" />
               <div>
                 <p v-if="pendingMode === 'auto'" class="text-sm text-amber-800 dark:text-slate-300">
                   Auto mode will take over resource management. It may change your current settings based on actual usage.
@@ -638,7 +638,7 @@ onMounted(async () => {
                 v-model="apiKey"
                 :type="showKey ? 'text' : 'password'"
                 :placeholder="provider === 'claude' ? 'sk-ant-...' : 'sk-...'"
-                class="block w-full max-w-md rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+                class="block w-full max-w-md rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
               />
               <button
                 @click="showKey = !showKey"
@@ -660,7 +660,7 @@ onMounted(async () => {
               v-model="ollamaUrl"
               type="text"
               placeholder="http://localhost:11434"
-              class="block w-full max-w-md rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+              class="block w-full max-w-md rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
             />
           </div>
 
@@ -671,7 +671,7 @@ onMounted(async () => {
               v-model="model"
               type="text"
               :placeholder="modelPlaceholder"
-              class="block w-full max-w-md rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+              class="block w-full max-w-md rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
             />
           </div>
 
@@ -713,7 +713,7 @@ onMounted(async () => {
                 v-model="slackWebhookUrl"
                 :type="showSlackUrl ? 'text' : 'password'"
                 placeholder="https://hooks.slack.com/services/..."
-                class="block w-full max-w-md rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+                class="block w-full max-w-md rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
               />
               <button
                 @click="showSlackUrl = !showSlackUrl"
@@ -759,7 +759,7 @@ onMounted(async () => {
                 v-model="smtpHost"
                 type="text"
                 placeholder="smtp.example.com"
-                class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+                class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
               />
             </div>
             <div>
@@ -768,7 +768,7 @@ onMounted(async () => {
                 v-model.number="smtpPort"
                 type="number"
                 placeholder="587"
-                class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+                class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
               />
             </div>
           </div>
@@ -780,7 +780,7 @@ onMounted(async () => {
                 v-model="smtpUsername"
                 type="text"
                 placeholder="user@example.com"
-                class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+                class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
               />
             </div>
             <div>
@@ -790,7 +790,7 @@ onMounted(async () => {
                   v-model="smtpPassword"
                   :type="showSmtpPassword ? 'text' : 'password'"
                   placeholder="App password or SMTP password"
-                  class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+                  class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
                 />
                 <button
                   @click="showSmtpPassword = !showSmtpPassword"
@@ -809,7 +809,7 @@ onMounted(async () => {
               v-model="smtpFrom"
               type="text"
               placeholder="Kipper <noreply@example.com>"
-              class="block w-full max-w-md rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+              class="block w-full max-w-md rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
             />
           </div>
 
@@ -833,7 +833,7 @@ onMounted(async () => {
               v-model="smtpTestTo"
               type="email"
               placeholder="test@example.com"
-              class="w-48 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+              class="w-48 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
             />
             <button
               @click="handleSmtpTest"
@@ -870,19 +870,19 @@ onMounted(async () => {
             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div>
                 <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Server</label>
-                <input v-model="newRegServer" type="text" placeholder="registry.example.com" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+                <input v-model="newRegServer" type="text" placeholder="registry.example.com" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
               </div>
               <div>
                 <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Name (optional)</label>
-                <input v-model="newRegName" type="text" placeholder="auto-generated from server" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+                <input v-model="newRegName" type="text" placeholder="auto-generated from server" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
               </div>
               <div>
                 <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Username</label>
-                <input v-model="newRegUsername" type="text" placeholder="username or token name" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+                <input v-model="newRegUsername" type="text" placeholder="username or token name" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
               </div>
               <div>
                 <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Password / Token</label>
-                <input v-model="newRegPassword" type="password" placeholder="access token or password" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+                <input v-model="newRegPassword" type="password" placeholder="access token or password" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
               </div>
             </div>
             <div class="mt-3 flex justify-end gap-2">
@@ -942,19 +942,19 @@ onMounted(async () => {
             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div>
                 <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Server</label>
-                <input v-model="newGitServer" type="text" placeholder="git.example.com" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+                <input v-model="newGitServer" type="text" placeholder="git.example.com" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
               </div>
               <div>
                 <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Name (optional)</label>
-                <input v-model="newGitName" type="text" placeholder="auto-generated from server" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+                <input v-model="newGitName" type="text" placeholder="auto-generated from server" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
               </div>
               <div>
                 <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Username</label>
-                <input v-model="newGitUsername" type="text" placeholder="oauth2" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+                <input v-model="newGitUsername" type="text" placeholder="oauth2" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
               </div>
               <div>
                 <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Token</label>
-                <input v-model="newGitToken" type="password" placeholder="glpat-... or ghp_..." class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+                <input v-model="newGitToken" type="password" placeholder="glpat-... or ghp_..." class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
               </div>
             </div>
             <div class="mt-3 flex justify-end gap-2">

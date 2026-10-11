@@ -19,7 +19,7 @@ const saving = ref(false)
 const loaded = ref(false)
 const readError = ref('')
 
-const inputClass = 'w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500'
+const inputClass = 'w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500'
 
 const current = computed(() => {
   const s = status.value

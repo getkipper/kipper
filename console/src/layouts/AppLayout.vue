@@ -162,7 +162,7 @@ function handleLogout() {
     <aside
       ref="drawerRef"
       tabindex="-1"
-      class="fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-slate-200 bg-white transition-transform duration-200 focus:outline-none dark:border-slate-800 dark:bg-slate-900 md:static md:z-auto md:translate-x-0"
+      class="fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-slate-200 bg-white transition-transform duration-200 focus:outline-hidden dark:border-slate-800 dark:bg-slate-900 md:static md:z-auto md:translate-x-0"
       :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'"
       :role="sidebarOpen ? 'dialog' : undefined"
       :aria-modal="sidebarOpen ? 'true' : undefined"

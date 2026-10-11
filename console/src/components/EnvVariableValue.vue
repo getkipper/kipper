@@ -67,7 +67,7 @@ const list = (names: string[]) => names.join(', ')
         <span
           v-else
           :title="referenceTitle(segment.name)"
-          class="rounded px-0.5"
+          class="rounded-sm px-0.5"
           :class="isUnresolved(segment.name)
             ? 'bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-300'
             : 'bg-kipper-100 text-kipper-800 dark:bg-kipper-500/20 dark:text-kipper-300'"

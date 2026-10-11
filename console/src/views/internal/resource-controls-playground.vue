@@ -64,7 +64,7 @@ function onApply(i: number, newLimit: number) {
         Resource Controls playground
       </h1>
       <p class="mt-1 text-sm text-slate-600 dark:text-slate-400">
-        Internal sandbox for the <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">&lt;ResourceControl&gt;</code>
+        Internal sandbox for the <code class="rounded-sm bg-slate-100 px-1 dark:bg-slate-800">&lt;ResourceControl&gt;</code>
         primitive. Drag a slider to preview a new limit; Apply records the value on this page (no
         backend call). Designers can iterate here without touching the Platform page.
       </p>

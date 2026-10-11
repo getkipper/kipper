@@ -507,7 +507,7 @@ onMounted(() => {
             references that use the source namespace literally
             (<span class="font-mono">{{ preview.source_namespace }}</span>) are
             auto-rewritten below. Review the rows tagged
-            <span class="rounded bg-sky-100 px-1 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">auto-updated</span>.
+            <span class="rounded-sm bg-sky-100 px-1 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">auto-updated</span>.
           </p>
         </div>
 
@@ -519,14 +519,14 @@ onMounted(() => {
             <button
               @click="envFilter = 'all'"
               :class="envFilter === 'all' ? 'bg-slate-900 text-white dark:bg-slate-50 dark:text-slate-900' : 'text-slate-500'"
-              class="rounded px-2.5 py-1"
+              class="rounded-sm px-2.5 py-1"
             >
               All ({{ allEnvVars.length }})
             </button>
             <button
               @click="envFilter = 'suspect'"
               :class="envFilter === 'suspect' ? 'bg-slate-900 text-white dark:bg-slate-50 dark:text-slate-900' : 'text-slate-500'"
-              class="rounded px-2.5 py-1"
+              class="rounded-sm px-2.5 py-1"
               title="Show only keys matching common per-env patterns (STRIPE_, SENTRY_, _URL, KEY, SECRET…)"
             >
               Suspect only
@@ -550,12 +550,12 @@ onMounted(() => {
                 <td class="px-4 py-2 font-medium text-slate-900 dark:text-slate-50">{{ row.app }}</td>
                 <td class="px-4 py-2 font-mono text-xs text-slate-700 dark:text-slate-300">
                   {{ row.key }}
-                  <span v-if="isSuspect(row.key)" class="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+                  <span v-if="isSuspect(row.key)" class="ml-1 rounded-sm bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
                     review
                   </span>
                   <span
                     v-if="rewriteFor(row.app, row.key)"
-                    class="ml-1 rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
+                    class="ml-1 rounded-sm bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
                     :title="`Auto-updated to point at the new env's namespace. Source value: ${rewriteFor(row.app, row.key)?.from}`"
                   >
                     auto-updated
@@ -570,7 +570,7 @@ onMounted(() => {
                       class="w-full rounded-md border border-slate-300 bg-white px-2 py-1 font-mono text-xs dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
                     />
                     <div v-if="rewriteFor(row.app, row.key)" class="flex items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400">
-                      <span>was <code class="rounded bg-slate-100 px-1 py-0.5 dark:bg-slate-800">{{ rewriteFor(row.app, row.key)?.from }}</code></span>
+                      <span>was <code class="rounded-sm bg-slate-100 px-1 py-0.5 dark:bg-slate-800">{{ rewriteFor(row.app, row.key)?.from }}</code></span>
                       <button
                         @click="undoRewrite(row.app, row.key)"
                         type="button"

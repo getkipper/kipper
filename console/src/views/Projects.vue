@@ -463,7 +463,7 @@ function statusColor(status: string): string {
         <button
           v-if="authStore.isAdmin"
           @click="showCreate = !showCreate"
-          class="inline-flex items-center gap-2 rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-kipper-700 dark:bg-kipper-500 dark:hover:bg-kipper-600"
+          class="inline-flex items-center gap-2 rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-xs transition-colors hover:bg-kipper-700 dark:bg-kipper-500 dark:hover:bg-kipper-600"
         >
           <Plus class="h-4 w-4" :stroke-width="2" />
           New project
@@ -480,7 +480,7 @@ function statusColor(status: string): string {
             v-model="newName"
             type="text"
             placeholder="blog"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
           />
         </div>
         <div>
@@ -489,7 +489,7 @@ function statusColor(status: string): string {
             v-model="newDisplayName"
             type="text"
             placeholder="example.com Domain Platform"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
           />
           <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Human-readable name shown in the console</p>
         </div>
@@ -499,14 +499,14 @@ function statusColor(status: string): string {
             v-model="newEnvs"
             type="text"
             placeholder="test,acc,prod"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50 dark:placeholder-slate-500"
           />
           <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Leave empty for a single default environment</p>
         </div>
         <button
           type="submit"
           :disabled="creating || !newName.trim()"
-          class="rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-kipper-700 disabled:opacity-50 dark:bg-kipper-500 dark:hover:bg-kipper-600"
+          class="rounded-lg bg-kipper-600 px-4 py-2.5 text-sm font-semibold text-white shadow-xs transition-colors hover:bg-kipper-700 disabled:opacity-50 dark:bg-kipper-500 dark:hover:bg-kipper-600"
         >
           {{ creating ? 'Creating...' : 'Create project' }}
         </button>
@@ -531,7 +531,7 @@ function statusColor(status: string): string {
               <div class="text-sm font-semibold text-slate-900 dark:text-slate-50">{{ project.display_name || project.name }}</div>
               <div class="mt-0.5 flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
                 <span v-if="project.display_name" class="font-mono">{{ project.name }}</span>
-                <span v-if="project.org" class="rounded bg-slate-100 px-1 py-0.5 font-mono dark:bg-slate-800">{{ project.org }}</span>
+                <span v-if="project.org" class="rounded-sm bg-slate-100 px-1 py-0.5 font-mono dark:bg-slate-800">{{ project.org }}</span>
                 <span>{{ project.environments.map(e => e.name).join(' → ') }}</span>
               </div>
             </div>
@@ -578,7 +578,7 @@ function statusColor(status: string): string {
               <button
                 v-if="canInProject(project, 'project.settings') && project.environments.length > 1"
                 @click.stop="handleRemoveEnv(project, env)"
-                class="mr-2 rounded p-0.5 text-slate-300 md:opacity-0 transition-all hover:bg-red-50 hover:text-red-600 group-hover/tab:opacity-100 dark:text-slate-600 dark:hover:bg-red-950 dark:hover:text-red-400"
+                class="mr-2 rounded-sm p-0.5 text-slate-300 md:opacity-0 transition-all hover:bg-red-50 hover:text-red-600 group-hover/tab:opacity-100 dark:text-slate-600 dark:hover:bg-red-950 dark:hover:text-red-400"
                 :title="`Remove ${env.name}`"
               >
                 <X class="h-3.5 w-3.5" :stroke-width="2" />
@@ -598,13 +598,13 @@ function statusColor(status: string): string {
                     placeholder="env name"
                     autofocus
                     :disabled="savingEnv"
-                    class="w-28 rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-900 focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
+                    class="w-28 rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-900 focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
                     @keyup.escape="cancelAddEnv"
                   />
                   <select
                     v-model="newEnvCopyFrom"
                     :disabled="savingEnv || project.environments.length === 0"
-                    class="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-900 focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
+                    class="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-900 focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
                   >
                     <option value="">Blank. Start empty</option>
                     <optgroup v-if="project.environments.length" label="Copy as-is">
@@ -698,7 +698,7 @@ function statusColor(status: string): string {
                       :aria-label="`Open ${app.url}`"
                       class="inline-flex items-center gap-1.5 rounded-md p-1.5 text-slate-400 transition-colors hover:bg-kipper-50 hover:text-kipper-600 dark:hover:bg-kipper-950 dark:hover:text-kipper-400"
                     >
-                      <span class="hidden lg:inline-block max-w-[14rem] truncate font-mono text-xs">{{ hostOf(app.url) }}</span>
+                      <span class="hidden lg:inline-block max-w-56 truncate font-mono text-xs">{{ hostOf(app.url) }}</span>
                       <ExternalLink class="h-4 w-4" :stroke-width="1.75" />
                     </a>
                     <span class="inline-flex items-center gap-1.5 text-xs">

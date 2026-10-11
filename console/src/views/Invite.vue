@@ -111,7 +111,7 @@ async function handleAccept() {
               v-model="email"
               type="email"
               placeholder="you@example.com"
-              class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+              class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
             />
           </div>
           <div>
@@ -120,7 +120,7 @@ async function handleAccept() {
               v-model="password"
               type="password"
               placeholder="Letters, numbers, and symbols"
-              class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+              class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
             />
             <div class="mt-2">
               <PasswordStrengthBar :password="password" />
@@ -132,7 +132,7 @@ async function handleAccept() {
               v-model="confirmPassword"
               type="password"
               placeholder="Repeat password"
-              class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+              class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
               @keyup.enter="handleAccept"
             />
           </div>

@@ -8,10 +8,10 @@ defineProps<Props>()
 // card with a coloured accent edge, matching the TwoFactorNudge banner.
 // Call sites own their padding and layout classes.
 const toneClasses: Record<Props['tone'], string> = {
-  info: 'border-sky-200 bg-sky-50 dark:shadow-[inset_3px_0_0_theme(colors.sky.400)]',
-  success: 'border-emerald-200 bg-emerald-50 dark:shadow-[inset_3px_0_0_theme(colors.emerald.400)]',
-  warning: 'border-amber-200 bg-amber-50 dark:shadow-[inset_3px_0_0_theme(colors.orange.300)]',
-  danger: 'border-red-200 bg-red-50 dark:shadow-[inset_3px_0_0_theme(colors.rose.400)]',
+  info: 'border-sky-200 bg-sky-50 dark:shadow-[inset_3px_0_0_var(--color-sky-400)]',
+  success: 'border-emerald-200 bg-emerald-50 dark:shadow-[inset_3px_0_0_var(--color-emerald-400)]',
+  warning: 'border-amber-200 bg-amber-50 dark:shadow-[inset_3px_0_0_var(--color-orange-300)]',
+  danger: 'border-red-200 bg-red-50 dark:shadow-[inset_3px_0_0_var(--color-rose-400)]',
 }
 </script>
 
