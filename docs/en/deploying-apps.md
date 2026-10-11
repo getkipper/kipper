@@ -500,7 +500,7 @@ In the web console, every app row on the **Projects** screen shows the app's pub
 kip app info backend --project staging
 ```
 
-Shows the app's status, scaling settings, and last autoscaling time when available. It also shows CPU and memory values from the pod template and explains how Kipper sizes each resource. See [`kip app info`](/en/cli-reference#kip-app-info).
+Shows the app's status, scaling settings, and last autoscaling time when available. It also shows CPU and memory values from the pod template and explains how Kipper sizes each resource. The Conditions section includes reasons and messages for rollout progress, warnings, and failures. See [`kip app info`](/en/cli-reference#kip-app-info).
 
 ### Stream logs
 

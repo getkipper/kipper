@@ -195,6 +195,28 @@ func TestReadAppInfo(t *testing.T) {
 		assert.Equal(t, provenance.ModeAutomatic, info.CPU.Mode)
 	})
 
+	t.Run("reads the app's status conditions", func(t *testing.T) {
+		d, _ := testDeployer()
+		_, err := d.Dynamic.Resource(AppGVR).Namespace("default").Create(ctx, &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "kipper.run/v1alpha1",
+			"kind":       "App",
+			"metadata":   map[string]interface{}{"name": "api", "namespace": "default"},
+			"spec":       map[string]interface{}{"image": "web:1"},
+			"status": map[string]interface{}{"conditions": []interface{}{
+				map[string]interface{}{"type": "RouteReady", "status": "True", "reason": "Published", "message": "route is live"},
+				map[string]interface{}{"type": "BindingDatabasesReady", "status": "False", "reason": "DatabaseCreateFailed", "message": "binding \"db\": no running pod"},
+			}},
+		}}, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		info, err := d.ReadAppInfo(ctx, "default", "api")
+		require.NoError(t, err)
+		assert.Equal(t, []Condition{
+			{Type: "RouteReady", Status: "True", Reason: "Published", Message: "route is live"},
+			{Type: "BindingDatabasesReady", Status: "False", Reason: "DatabaseCreateFailed", Message: "binding \"db\": no running pod"},
+		}, info.Conditions)
+	})
+
 	t.Run("returns an error for a missing app", func(t *testing.T) {
 		d, _ := testDeployer()
 		_, err := d.ReadAppInfo(ctx, "default", "missing")

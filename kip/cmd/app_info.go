@@ -64,7 +64,30 @@ func writeAppInfo(out io.Writer, name string, info deployer.AppInfo, now time.Ti
 	if info.Status.RolloutWaiting != "" {
 		say(out, "  Rollout incomplete: some pods may still use earlier values.\n")
 	}
+	writeConditions(out, info.Conditions)
 	say(out, "\n")
+}
+
+// writeConditions includes reasons and messages to distinguish progress,
+// warnings, and failures.
+func writeConditions(out io.Writer, conditions []deployer.Condition) {
+	if len(conditions) == 0 {
+		return
+	}
+	say(out, "\n  Conditions\n")
+	for _, c := range conditions {
+		symbol := "⚠"
+		switch c.Status {
+		case "True":
+			symbol = "✔"
+		case "False":
+			symbol = "✘"
+		}
+		say(out, "  %s  %s: %s\n", symbol, c.Type, c.Reason)
+		if c.Message != "" {
+			say(out, "           %s\n", c.Message)
+		}
+	}
 }
 
 func writeResource(out io.Writer, label string, r deployer.ResourceInfo, template deployer.TemplateState, note string) {

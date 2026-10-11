@@ -494,7 +494,15 @@ kip app info backend --project shop --environment prod
            the autoscaler tracks CPU, so Kipper leaves the CPU request alone
   Memory:  request 2Gi, limit 2Gi
            sized by Kipper; latest recommendation: request 1536Mi, limit 2Gi
+
+  Conditions
+  ✔  ServiceBindingsReady: BindingsInjected
+           every declared service binding was injected
+  ✘  BindingDatabasesReady: DatabaseCreateFailed
+           binding "db": creating "shop" in service "db": no running pod found for service "db"
 ```
+
+The Conditions section shows the app's controller-reported conditions: ✔ for `True`, ✘ for `False`, and ⚠ for an unknown status. Read each reason and message for context: `RolloutComplete: False` can mean pods are still being replaced, while `RouteReady: True` can include a warning about a shared route name.
 
 | Flag | Required | Description |
 |---|---|---|
