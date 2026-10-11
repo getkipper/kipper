@@ -36,4 +36,4 @@ Codex will open the file when a Kipper task comes up. Alternatively, paste the c
 
 ## Keeping it current
 
-The command reference is based on the `kip` CLI's help output. If you add or change commands, refresh it by walking `kip <command> --help` and updating `SKILL.md` to match. Docs links point at `https://getkipper.com/en/<page>`.
+The command reference is based on the `kip` CLI's help output. If you add or change commands, refresh it by walking `kip <command> --help` and updating `SKILL.md` to match. Docs links point at `https://docs.getkipper.com/en/<page>`.
