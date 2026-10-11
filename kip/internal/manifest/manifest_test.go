@@ -153,7 +153,7 @@ func TestConvert(t *testing.T) {
 		},
 	}
 
-	resources := Convert(m, "blog-test")
+	resources := Convert(m, "blog-test", nil)
 
 	assert.Len(t, resources, 4) // 1 app + 1 service + 1 volume + 1 job
 
@@ -190,7 +190,7 @@ func TestConvertGitApp(t *testing.T) {
 		},
 	}
 
-	resources := Convert(m, "test")
+	resources := Convert(m, "test", nil)
 	require.Len(t, resources, 1)
 
 	spec := resources[0].Object.Object["spec"].(map[string]interface{})

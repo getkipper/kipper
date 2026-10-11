@@ -13,18 +13,9 @@ import (
 type ChangeKind int
 
 const (
-	// Added is a field the manifest carries and the cluster does not.
 	Added ChangeKind = iota
-	// Changed is a field both carry, with different values.
 	Changed
-	// Cleared is a field live in the cluster that the manifest does not carry.
-	// Applying removes it, because a spec is replaced rather than merged.
 	Cleared
-	// Reset is a field the manifest does not carry whose live value the cluster
-	// will replace with its schema default. The value the operator set goes
-	// either way, so it is confirmed like a clear rather than reported like an
-	// ordinary change — omitting `replicas` from a manifest scales a live app of
-	// four back to one, and nothing supplied the one.
 	Reset
 )
 
@@ -43,11 +34,9 @@ func (k ChangeKind) String() string {
 
 // Change is one field an apply would touch.
 type Change struct {
-	// Path is dotted, as it reads in a kipper.yaml: route.redirectFrom.
 	Path string
 	Kind ChangeKind
-	// Live and New are rendered for display and truncated. They are here to be
-	// read, not parsed.
+	// Live and New contain truncated display text, not parseable values.
 	Live string
 	New  string
 }
@@ -67,6 +56,7 @@ func DiffSpec(live, desired map[string]interface{}, preserved []string, defaults
 	}
 	var out []Change
 	diffInto(&out, "", live, desired, keep, defaults)
+	out = append(out, removedLinks(live, desired)...)
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Kind != out[j].Kind {
 			return out[i].Kind < out[j].Kind
@@ -344,6 +334,31 @@ func Clears(changes []Change) []Change {
 	for _, c := range changes {
 		if c.Kind == Cleared || c.Kind == Reset {
 			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// removedLinks marks individual removals as clears so apply requires --force
+// even when diffInto reports the links list as changed.
+func removedLinks(live, desired map[string]interface{}) []Change {
+	liveLinks, inLive := live["links"].([]interface{})
+	desiredLinks, inDesired := desired["links"].([]interface{})
+	if !inLive || !inDesired {
+		return nil
+	}
+	key := func(l interface{}) string {
+		m, _ := l.(map[string]interface{})
+		return fmt.Sprint(m["namespace"], "/", m["app"])
+	}
+	kept := make(map[string]bool, len(desiredLinks))
+	for _, l := range desiredLinks {
+		kept[key(l)] = true
+	}
+	var out []Change
+	for _, l := range liveLinks {
+		if k := key(l); !kept[k] {
+			out = append(out, Change{Path: "links", Kind: Cleared, Live: k})
 		}
 	}
 	return out

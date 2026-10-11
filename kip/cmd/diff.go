@@ -58,7 +58,7 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		}
 
 		namespace := cluster.ResolveNamespace(project, environment)
-		resources := manifest.Convert(m, namespace)
+		resources := manifest.Convert(m, namespace, linkNamespace(cluster, environment))
 
 		fmt.Printf("\n  Comparing %s (%s)...\n", project, namespace)
 

@@ -17,8 +17,7 @@ type Manifest struct {
 	Volumes      map[string]VolSpec  `yaml:"volumes,omitempty"`
 	Jobs         map[string]JobSpec  `yaml:"jobs,omitempty"`
 	Functions    map[string]FuncSpec `yaml:"functions,omitempty"`
-	// Notes are export messages printed to stderr, outside the manifest.
-	Notes []string `yaml:"-"`
+	Notes        []string            `yaml:"-"`
 }
 
 // AppSpec defines an application in the manifest.
@@ -31,11 +30,20 @@ type AppSpec struct {
 	Route           *RouteSpec        `yaml:"route,omitempty"`
 	Resources       *ResourceSpec     `yaml:"resources,omitempty"`
 	ServiceBindings []BindingSpec     `yaml:"serviceBindings,omitempty"`
+	Links           []LinkSpec        `yaml:"links,omitempty"`
 	Volumes         []VolumeMountSpec `yaml:"volumes,omitempty"`
 	Autoscale       *AutoscaleSpec    `yaml:"autoscale,omitempty"`
 	Git             *GitSpec          `yaml:"git,omitempty"`
 	Health          *HealthSpec       `yaml:"health,omitempty"`
 	Stopped         *StoppedSpec      `yaml:"stopped,omitempty"`
+}
+
+// LinkSpec identifies an app dependency. An omitted project selects the local
+// namespace; cross-project links default to the apply environment.
+type LinkSpec struct {
+	App         string `yaml:"app"`
+	Project     string `yaml:"project,omitempty"`
+	Environment string `yaml:"environment,omitempty"`
 }
 
 // StoppedSpec declares a stop, its optional reason and migration flag.
@@ -142,11 +150,8 @@ func (a *AutoscaleSpec) policy() *capacity.Policy {
 
 // GitSpec configures source-based deployment.
 type GitSpec struct {
-	URL    string `yaml:"url"`
-	Branch string `yaml:"branch,omitempty"`
-	// CredentialsSecret names the git credential the build uses: the app's own
-	// per-app credential Secret, or a shared credential configured in
-	// kipper-system (used only for an allow-listed project and matching host).
+	URL               string            `yaml:"url"`
+	Branch            string            `yaml:"branch,omitempty"`
 	CredentialsSecret string            `yaml:"credentialsSecret,omitempty"`
 	DockerfilePath    string            `yaml:"dockerfilePath,omitempty"`
 	Context           string            `yaml:"context,omitempty"`
@@ -185,10 +190,21 @@ type MountSpec struct {
 
 // JobSpec defines a scheduled or one-off job in the manifest.
 type JobSpec struct {
-	Image    string            `yaml:"image"`
-	Schedule string            `yaml:"schedule,omitempty"`
-	Command  []string          `yaml:"command,omitempty"`
-	Env      map[string]string `yaml:"env,omitempty"`
+	Image        string            `yaml:"image"`
+	Schedule     string            `yaml:"schedule,omitempty"`
+	Command      []string          `yaml:"command,omitempty"`
+	Env          map[string]string `yaml:"env,omitempty"`
+	Resources    *JobResourceSpec  `yaml:"resources,omitempty"`
+	SecretRefs   []string          `yaml:"secretRefs,omitempty"`
+	BackoffLimit *int32            `yaml:"backoffLimit,omitempty"`
+}
+
+// JobResourceSpec configures a job's CPU and memory requests and limits.
+type JobResourceSpec struct {
+	CPURequest    string `yaml:"cpuRequest,omitempty"`
+	CPULimit      string `yaml:"cpuLimit,omitempty"`
+	MemoryRequest string `yaml:"memoryRequest,omitempty"`
+	MemoryLimit   string `yaml:"memoryLimit,omitempty"`
 }
 
 // FuncSpec defines a serverless function in the manifest.

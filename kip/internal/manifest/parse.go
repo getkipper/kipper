@@ -143,6 +143,9 @@ func Validate(m *Manifest) error {
 				return fmt.Errorf("app %q: health: %w", name, err)
 			}
 		}
+		if err := validateLinks(app.Links); err != nil {
+			return fmt.Errorf("app %q: %w", name, err)
+		}
 		if err := capacity.Validate(app.Autoscale.policy(), app.Replicas); err != nil {
 			return fmt.Errorf("app %q: autoscale: %w", name, err)
 		}
@@ -177,5 +180,25 @@ func Validate(m *Manifest) error {
 		}
 	}
 
+	return nil
+}
+
+// maxLinks matches the App CRD's limit on spec.links.
+const maxLinks = 64
+
+var linkTargetName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+func validateLinks(links []LinkSpec) error {
+	if len(links) > maxLinks {
+		return fmt.Errorf("links: at most %d are allowed, got %d", maxLinks, len(links))
+	}
+	for i, l := range links {
+		if !linkTargetName.MatchString(l.App) {
+			return fmt.Errorf("links[%d]: app %q is not a valid app name", i, l.App)
+		}
+		if l.Environment != "" && l.Project == "" {
+			return fmt.Errorf("links[%d]: project is required when environment is set", i)
+		}
+	}
 	return nil
 }

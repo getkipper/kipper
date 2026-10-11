@@ -122,7 +122,7 @@ func TestRedaction_ClassifiesEveryPathConvertEmits(t *testing.T) {
 	}
 
 	emitted := map[string]struct{}{}
-	for _, res := range Convert(m, "acme-test") {
+	for _, res := range Convert(m, "acme-test", nil) {
 		spec, _ := res.Object.Object["spec"].(map[string]interface{})
 		leafPaths(emitted, "", spec)
 	}

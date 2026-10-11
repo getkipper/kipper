@@ -38,6 +38,10 @@ apps:
     serviceBindings:
       - name: db
         prefix: DB_
+    links:
+      - app: frontend
+      - app: docuseal
+        project: docuseal
     autoscale:
       enabled: true
       minReplicas: 2
@@ -78,7 +82,24 @@ jobs:
     env:
       RETENTION_DAYS: "30"
       LOG_LEVEL: info
+    resources:
+      memoryLimit: 256Mi
+    secretRefs:
+      - cleanup-credentials
+    backoffLimit: 5
 ```
+
+### The links block
+
+`links` declares app dependencies, as `kip app link` does:
+
+- Set `app` for a target in the same project and environment.
+- Add `project` for a target in another project. It defaults to the environment you apply the manifest to.
+- Add `environment` to select a different environment. Use `environment: default` for the target project's default environment.
+
+Cross-project traffic requires the target project's consent; see [Linking apps](/en/deploying-apps#linking-apps). When adding a link outside the app's namespace, `kip apply` checks that you can read the target app with your credentials. Existing links skip this check, and targets in the same namespace can be created by the same apply.
+
+Each app supports up to 64 links. Omitting an existing link removes it and requires `--force`.
 
 ### The route block
 
@@ -319,9 +340,11 @@ This outputs the manifest to stdout. Save it to a file:
 kip export --project blog --environment test -o kipper.yaml
 ```
 
-The export includes all apps, services, volumes, jobs, functions, project metadata (display name, environments list), resource profiles, autoscale config, service bindings, routes, and declared health checks. Secrets are excluded by design.
+The export includes all apps, services, volumes, jobs, functions, project metadata (display name, environments list), resource profiles, autoscale config, service bindings, links, routes, and declared health checks. Secret values are excluded. To edit a live project, export it, update the manifest, and apply the file. Review export messages on stderr and run `kip diff -f kipper.yaml` before applying to check for changes, including omitted values.
 
-For Apps, `kip export` includes explicit CPU and memory settings and omits values written by the old auto-sizer. It includes held values with a message on stderr. Applying the file confirms every declared resource value as a user setting, including held values. See [Your own CPU and memory values](/en/resource-management#your-own-values).
+For Apps, `kip export` includes explicit CPU and memory settings and omits values written by the old auto-sizer. Applying the file preserves those automatic values and their ownership. Held values are included with a message on stderr. Applying the file confirms every declared resource value as a user setting, including held values. See [Your own CPU and memory values](/en/resource-management#your-own-values).
+
+For links to other namespaces, export uses namespace labels to identify the target project and environment. A namespace named exactly after its project can omit the environment label and is treated as the default environment. If the namespace is missing or its project or environment cannot be determined, export omits the link and reports it on stderr. Applying that file requires `--force` to remove the omitted link. Other namespace lookup errors stop the export.
 
 Use this to bootstrap a GitOps workflow from an existing cluster, or to replicate a cluster on a new server.
 

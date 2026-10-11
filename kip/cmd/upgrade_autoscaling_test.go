@@ -289,7 +289,7 @@ func TestRow5Advice_OlderClusterIsToldTheAppStarts(t *testing.T) {
 	assert.True(t, strings.HasSuffix(installer.ConsoleAPIImage, ":latest"),
 		"if kip pins console-api to a release tag, an upgrade through an older kip keeps a pre-D7 console-api and is worth advising")
 
-	res := manifest.Convert(&manifest.Manifest{Project: "shop", Apps: map[string]manifest.AppSpec{"web": {Image: "nginx", Port: 80, Replicas: i32(0)}}}, "shop-prod")
+	res := manifest.Convert(&manifest.Manifest{Project: "shop", Apps: map[string]manifest.AppSpec{"web": {Image: "nginx", Port: 80, Replicas: i32(0)}}}, "shop-prod", nil)
 	require.Len(t, res, 1)
 	require.Equal(t, "App", res[0].Object.GetKind())
 	_, declared, _ := unstructured.NestedInt64(res[0].Object.Object, "spec", "replicas")
