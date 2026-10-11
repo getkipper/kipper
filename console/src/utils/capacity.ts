@@ -14,7 +14,6 @@ export interface CapacityForm {
 
 export interface CapacityCheck {
   error?: string
-  /** Set when desired is above the maximum, so the panel can offer to raise it. */
   raiseMaxTo?: number
 }
 
@@ -175,7 +174,6 @@ export function capacityBadges(config: AutoscaleConfig): CapacityBadge[] {
 export interface ActivityLine {
   time: string
   text: string
-  /** The autoscaler's own messages behind a line that summarises them. */
   title?: string
 }
 
@@ -189,18 +187,65 @@ function isMetricsGap(entry: ScaleActivity): boolean {
   return metricsGapReasons.has(entry.reason) && metricsGapMessages.some(m => entry.message.includes(m))
 }
 
+// Allow for the delay until Kipper observes a changed replica count.
+const sameScaleWindowMs = 3 * 60 * 1000
+// On first observation, Kipper uses the HPA's last scale time; allow a small
+// lead over the event timestamp when matching these entries.
+const sameScaleLeadMs = 10 * 1000
+
+function newSize(entry: ScaleActivity): number | null {
+  const match = entry.source === 'hpa_event' && entry.reason === 'SuccessfulRescale'
+    ? /^New size: (\d+)/.exec(entry.message)
+    : entry.source === 'scale_log' ? /→ (\d+) pods?\)/.exec(entry.message) : null
+  return match ? Number(match[1]) : null
+}
+
+// Infer duplicates by matching each event to the nearest unused log entry
+// with the same target count within the time window. Map event indices to log indices.
+function sameScales(activity: ScaleActivity[]): Map<number, number> {
+  const pairs = new Map<number, number>()
+  const paired = new Set<number>()
+  activity.forEach((event, i) => {
+    const size = event.source === 'hpa_event' ? newSize(event) : null
+    if (size === null) return
+    let best = -1
+    let bestDistance = Infinity
+    activity.forEach((logged, j) => {
+      if (logged.source !== 'scale_log' || paired.has(j) || newSize(logged) !== size) return
+      const gap = Date.parse(logged.time) - Date.parse(event.time)
+      if (gap >= -sameScaleLeadMs && gap <= sameScaleWindowMs && Math.abs(gap) < bestDistance) {
+        best = j
+        bestDistance = Math.abs(gap)
+      }
+    })
+    if (best >= 0) {
+      pairs.set(i, best)
+      paired.add(best)
+    }
+  })
+  return pairs
+}
+
 /**
- * Turns scale activity, newest first, into the lines the panel shows. A run of
- * consecutive startup metric gaps becomes one plain line at the newest time,
- * with the distinct raw messages as its title.
+ * Merges matching scale records and groups consecutive metric gaps for display.
+ * Matched records use Kipper's wording and the event's time and hover message.
+ * Metric groups use the newest time and distinct raw messages on hover.
  *
- * @param activity the activity from GET /autoscale, newest first
- * @returns one line per entry, with each run of metric gaps folded into one
+ * @param activity - Activity from GET /autoscale, newest first.
  */
 export function activityLines(activity: ScaleActivity[]): ActivityLine[] {
+  const pairs = sameScales(activity)
+  const pairedLogs = new Set(pairs.values())
   const lines: ActivityLine[] = []
   let gap: { line: ActivityLine; messages: string[] } | null = null
-  for (const entry of activity) {
+  for (const [i, entry] of activity.entries()) {
+    if (pairedLogs.has(i)) continue
+    const logged = pairs.get(i)
+    if (logged !== undefined) {
+      gap = null
+      lines.push({ time: entry.time, text: activity[logged].message, title: entry.message })
+      continue
+    }
     if (!isMetricsGap(entry)) {
       gap = null
       lines.push({ time: entry.time, text: entry.message || entry.reason })
@@ -219,7 +264,6 @@ export function activityLines(activity: ScaleActivity[]): ActivityLine[] {
 /** What the Scale tab says about automatic sizing for one app. */
 export interface SizingNotice {
   summary: string
-  /** Whether to say that scale-down is paused for a single replica. */
   singleReplica: boolean
 }
 
