@@ -26,7 +26,7 @@ apps:
       group: blog
       path: /
 
-  api:
+  backend:
     image: registry.git.example.com/api:latest
     port: 8080
     replicas: 2
@@ -59,7 +59,7 @@ volumes:
   uploads:
     size: 10Gi
     mounts:
-      - app: api
+      - app: backend
         mountPath: /data/uploads
 
 functions:
@@ -153,7 +153,7 @@ automatic inference; see [Health checks and rollouts](/en/deploying-apps#health-
 
 ```yaml
 apps:
-  api:
+  backend:
     image: registry.git.example.com/api:latest
     port: 8080
     health:
@@ -177,7 +177,7 @@ the block; `type: auto` is not valid in a manifest.
 
 ```yaml
 apps:
-  api:
+  backend:
     image: registry.git.example.com/api:latest
     port: 8080
     stopped:
@@ -204,7 +204,7 @@ kip apply -f kipper.yaml
 
   Applying to blog (blog-test)...
     ✔  App/frontend created
-    ✔  App/api created
+    ✔  App/backend created
     ✔  Service/db created
     ✔  Volume/uploads created
     ✔  Function/image-resize created
@@ -254,7 +254,7 @@ returns to when autoscaling is switched off, so the two can differ.
 
 ```yaml
 apps:
-  api:
+  backend:
     image: registry.example.com/api:v2
     port: 8080
     autoscale:
@@ -339,7 +339,7 @@ kip apply -f acc.yaml
 kip apply -f prod.yaml
 
 # Recreate secrets (not included in the export)
-kip app secret set api DATABASE_URL --project blog --environment test
+kip app secret set backend DATABASE_URL --project blog --environment test
 ```
 
 ## Comparing against the cluster
@@ -353,7 +353,7 @@ kip diff -f kipper.yaml
 ```
   Comparing blog (blog-test)...
     + App/new-service (new)
-    ~ App/api
+    ~ App/backend
         ~ image: nginx:1.25 -> nginx:1.27
         - route.redirectFrom: [www.example.com] (will be cleared)
         - replicas: 4 -> 1 (the cluster's default)
@@ -433,21 +433,21 @@ Apps can reference a Git repository instead of a pre-built image:
 
 ```yaml
 apps:
-  api:
+  backend:
     port: 8080
     git:
       url: https://github.com/acme/api.git
       branch: main
 ```
 
-When applied, the app is created with a placeholder image. Use `kip app rebuild api` or configure a webhook to trigger the first build. See [Deploying Apps: From a Git repository](/en/deploying-apps#from-a-git-repository) for details.
+When applied, the app is created with a placeholder image. Use `kip app rebuild backend` or configure a webhook to trigger the first build. See [Deploying Apps: From a Git repository](/en/deploying-apps#from-a-git-repository) for details.
 
 ## Secrets
 
 Secrets are never stored in `kipper.yaml`. Manage them separately:
 
 ```bash
-kip app secret set api DATABASE_URL --project blog --environment test
+kip app secret set backend DATABASE_URL --project blog --environment test
 ```
 
 The manifest references services via `serviceBindings`. Credentials are injected automatically at runtime.

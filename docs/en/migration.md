@@ -130,7 +130,7 @@ The token is valid for 24 hours and can only be used once.
 Migration leaves source apps running unless you stop them. Writes made after a database or volume is copied stay on the source. For production, stop the apps before starting migration and keep them stopped through domain cutover:
 
 ```bash
-kip app stop api --for-migration --project shop --environment prod
+kip app stop backend --for-migration --project shop --environment prod
 kip app stop worker --for-migration --project shop --environment prod
 ```
 
@@ -139,7 +139,7 @@ kip app stop worker --for-migration --project shop --environment prod
 If migration is aborted, restart each app you froze on the source, for example:
 
 ```bash
-kip app start api --project shop --environment prod
+kip app start backend --project shop --environment prod
 kip app start worker --project shop --environment prod
 ```
 

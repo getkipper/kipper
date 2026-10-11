@@ -205,9 +205,9 @@ For example, a memory request of `512Mi` and limit of `2Gi` lets Kipper reserve 
 **From the CLI:**
 
 ```bash
-kip app update api --memory-request 512Mi --memory-limit 2Gi   # a range
-kip app update api --cpu 500m                                  # a fixed size
-kip app update api --tuning auto                               # hand both back to Kipper
+kip app update backend --memory-request 512Mi --memory-limit 2Gi   # a range
+kip app update backend --cpu 500m                                  # a fixed size
+kip app update backend --tuning auto                               # hand both back to Kipper
 ```
 
 `--memory` and `--cpu` set the request and limit to the same value. Use the separate request and limit flags for a range. Supplying just one of those flags also sets a fixed size. The CLI rejects a request above its limit.

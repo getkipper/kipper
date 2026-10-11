@@ -15,7 +15,7 @@ Kipper supports deploying applications from Git repositories. The Git provider i
 ### GitHub: Personal Access Token
 
 ```bash
-kip app deploy --name api \
+kip app deploy --name backend \
   --git https://github.com/acme/api \
   --git-token github_pat_xxx \
   --port 3000
@@ -24,7 +24,7 @@ kip app deploy --name api \
 ### GitLab: Deploy Token
 
 ```bash
-kip app deploy --name api \
+kip app deploy --name backend \
   --git https://gitlab.com/acme/api \
   --git-token gldt-xxx \
   --port 3000

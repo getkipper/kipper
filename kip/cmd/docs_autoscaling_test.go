@@ -299,8 +299,8 @@ func TestDocsMigrationExplainsHowToFixAnAutoscaledCountOutsideItsBounds(t *testi
 // refused when switched off, and kip names the command that fixes it first.
 func TestDocsExplainSwitchingOffAMinimumWithoutMaximum(t *testing.T) {
 	const refusal = "set maxReplicas with minReplicas, or leave both out to remove the bounds"
-	const fix = "kip app autoscale api --max 5"
-	advice := switchOffError("api", &deployer.InvalidPolicyRefusal{
+	const fix = "kip app autoscale backend --max 5"
+	advice := switchOffError("backend", &deployer.InvalidPolicyRefusal{
 		Policy: capacity.Policy{Enabled: true, MinReplicas: i32p(3), CPUTarget: i32p(70)},
 		Err:    errors.New(refusal),
 	}).Error()
