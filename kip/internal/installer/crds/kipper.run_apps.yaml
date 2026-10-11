@@ -502,6 +502,9 @@ spec:
                     description: CompletedAt is when the build completed.
                     format: date-time
                     type: string
+                  jobCreatedAt:
+                    format: date-time
+                    type: string
                   message:
                     description: Message provides details on build failure.
                     type: string

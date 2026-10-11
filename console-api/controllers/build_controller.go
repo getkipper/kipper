@@ -92,16 +92,22 @@ func (r *BuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	if uid := job.Labels[appUIDLabelKey]; uid != "" && uid != string(app.UID) {
 		return ctrl.Result{}, nil
 	}
-	// A newer build for this App supersedes this one, so a build that finishes
-	// late cannot overwrite a newer build's image or status. If the lookup
-	// cannot be resolved (transient list error), return the error so the
-	// reconcile is requeued without mutating the App — proceeding here could
-	// let a stale build overwrite the current image before any recheck.
-	superseded, err := r.supersededByNewerBuild(ctx, &job)
+	// Preserve the newer build's image and status when an older build finishes
+	// late. Retry lookup errors before making any changes to the App.
+	tracked := ""
+	if app.Status.Build != nil {
+		tracked = app.Status.Build.Build
+	}
+	superseded, trackedLive, err := r.supersededByNewerBuild(ctx, &job, tracked)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("checking build supersession: %w", err)
 	}
 	if superseded {
+		return ctrl.Result{}, nil
+	}
+	// Once the tracked Job is gone, use its saved creation time and name
+	// to preserve the same build ordering.
+	if !trackedLive && olderThanTrackedBuild(&app, &job) {
 		return ctrl.Result{}, nil
 	}
 	// Only publish artifacts from the app's current git source. Check the job's
@@ -114,22 +120,17 @@ func (r *BuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		// retain their terminal status when old jobs are replayed.
 		if app.Spec.Git != nil && (job.Status.Succeeded > 0 || job.Status.Failed > 0) &&
 			!completionAlreadyApplied(app.Status.Build, &job) {
-			// The job is terminal, so no further job event will arrive and
-			// nothing else re-enqueues this reconcile. A write dropped here
-			// leaves the app on Building for ever, which is what the phase
-			// exists to prevent, so the failure has to be retried.
-			if err := r.updateBuildStatus(ctx, sourceNS, appName, job.Labels[appUIDLabelKey], job.Name, "Discarded", "", reason); err != nil {
+			// Retry failed status writes; a finished job may receive no further events.
+			if err := r.updateBuildStatus(ctx, sourceNS, appName, job.Labels[appUIDLabelKey], &job, "Discarded", reason); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
 		return ctrl.Result{}, nil
 	}
 
-	// Check if job is still running
 	if job.Status.Succeeded == 0 && job.Status.Failed == 0 {
-		// Update build phase to Building if pods are active
 		if job.Status.Active > 0 {
-			if err := r.updateBuildStatus(ctx, sourceNS, appName, job.Labels[appUIDLabelKey], job.Name, "Building", "", ""); err != nil {
+			if err := r.updateBuildStatus(ctx, sourceNS, appName, job.Labels[appUIDLabelKey], &job, "Building", ""); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
@@ -147,27 +148,25 @@ func (r *BuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		}
 		imageRef := builder.ImageRef(sourceNS, appName, commit)
 
-		// Update the App CR image
 		app.Spec.Image = imageRef
 
-		// Record in deploy history
 		r.recordDeployHistory(&app, job.Name, imageRef, commit)
 
 		if err := r.Update(ctx, &app); err != nil {
 			return ctrl.Result{}, fmt.Errorf("updating app image: %w", err)
 		}
 
-		// Update build status
 		now := metav1.Now()
+		created := job.CreationTimestamp
 		app.Status.Build = &kipperv1.AppBuildStatus{
-			Phase:       "Succeeded",
-			Commit:      commit,
-			CompletedAt: &now,
-			Build:       job.Name,
+			Phase:        "Succeeded",
+			Commit:       commit,
+			CompletedAt:  &now,
+			Build:        job.Name,
+			JobCreatedAt: &created,
 		}
 		if err := r.Status().Update(ctx, &app); err != nil {
-			// The job is terminal, so nothing re-enqueues this reconcile. A
-			// write dropped here leaves the app on Building for ever.
+			// Retry failed status writes; a finished job may receive no further events.
 			logger.Error(err, "failed to update build status")
 			return ctrl.Result{}, fmt.Errorf("writing build status: %w", err)
 		}
@@ -195,16 +194,17 @@ func (r *BuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 			commit = extractCommitFromJobName(job.Name, appName)
 		}
 		now := metav1.Now()
+		created := job.CreationTimestamp
 		app.Status.Build = &kipperv1.AppBuildStatus{
-			Phase:       "Failed",
-			Commit:      commit,
-			CompletedAt: &now,
-			Message:     message,
-			Build:       job.Name,
+			Phase:        "Failed",
+			Commit:       commit,
+			CompletedAt:  &now,
+			Message:      message,
+			Build:        job.Name,
+			JobCreatedAt: &created,
 		}
 		if err := r.Status().Update(ctx, &app); err != nil {
-			// The job is terminal, so nothing re-enqueues this reconcile. A
-			// write dropped here leaves the app on Building for ever.
+			// Retry failed status writes; a finished job may receive no further events.
 			logger.Error(err, "failed to update build status")
 			return ctrl.Result{}, fmt.Errorf("writing build status: %w", err)
 		}
@@ -213,11 +213,23 @@ func (r *BuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	return ctrl.Result{}, nil
 }
 
-// supersededByNewerBuild checks jobs for the same namespace, app and UID,
-// ordered by creation time and then name. Prefer the direct API reader to see
-// new jobs promptly; propagate list errors before mutating the App.
-// App resource-version conflicts guard concurrent completion writes.
-func (r *BuildReconciler) supersededByNewerBuild(ctx context.Context, job *batchv1.Job) (bool, error) {
+// olderThanTrackedBuild compares the job with the App's saved build by creation
+// time, then name. The saved ordering survives deletion of the tracked Job.
+func olderThanTrackedBuild(app *kipperv1.App, job *batchv1.Job) bool {
+	b := app.Status.Build
+	if b == nil || b.Build == "" || b.Build == job.Name || b.JobCreatedAt == nil {
+		return false
+	}
+	// Keep this ordering consistent with supersededByNewerBuild.
+	return b.JobCreatedAt.After(job.CreationTimestamp.Time) ||
+		(b.JobCreatedAt.Equal(&job.CreationTimestamp) && b.Build > job.Name)
+}
+
+// supersededByNewerBuild checks for newer jobs with matching source namespace,
+// app name and UID, ordered by creation time and then name. It also reports
+// whether the tracked job appears in the list, independently of the UID check.
+// The direct API reader, when available, avoids cache delays for new jobs.
+func (r *BuildReconciler) supersededByNewerBuild(ctx context.Context, job *batchv1.Job, tracked string) (superseded, trackedLive bool, err error) {
 	reader := client.Reader(r.Client)
 	if r.APIReader != nil {
 		reader = r.APIReader
@@ -228,10 +240,13 @@ func (r *BuildReconciler) supersededByNewerBuild(ctx context.Context, job *batch
 		appLabelKey:             job.Labels[appLabelKey],
 		buildLabelKey:           "true",
 	}); err != nil {
-		return false, err
+		return false, false, err
 	}
 	for i := range jobs.Items {
 		other := &jobs.Items[i]
+		if other.Name == tracked {
+			trackedLive = true
+		}
 		if other.Name == job.Name {
 			continue
 		}
@@ -241,14 +256,14 @@ func (r *BuildReconciler) supersededByNewerBuild(ctx context.Context, job *batch
 			continue
 		}
 		if other.CreationTimestamp.After(job.CreationTimestamp.Time) {
-			return true, nil
+			superseded = true
 		}
 		// Break ties on equal timestamps by name so the winner is stable.
 		if other.CreationTimestamp.Equal(&job.CreationTimestamp) && other.Name > job.Name {
-			return true, nil
+			superseded = true
 		}
 	}
-	return false, nil
+	return superseded, trackedLive, nil
 }
 
 // completionAlreadyApplied reports whether a build status records the finished
@@ -284,24 +299,24 @@ func completionAlreadyApplied(status *kipperv1.AppBuildStatus, job *batchv1.Job)
 func staleSourceReason(job *batchv1.Job, git *kipperv1.AppGitSource) string {
 	fingerprint, ok := job.Annotations[builder.SourceFingerprintAnnotation]
 	if !ok {
-		return "This build started before Kipper recorded which git source a build came from, so it cannot be matched against the source this app has now. Deploy again to build from the current source."
+		return "This build has no recorded git source. Deploy again to build from the app's current source."
 	}
 	if fingerprint == builder.UnfingerprintableSource {
-		return "Kipper could not record which git source this build came from, so its image was not deployed. Deploy again."
+		return "Kipper could not identify this build's git source. Deploy again."
 	}
 	if git == nil {
-		return "This app no longer builds from git, so the build was discarded and the image it is running was kept."
+		return "This app no longer builds from git. Its current image was kept."
 	}
 	if fingerprint != builder.GitSourceFingerprint(git) {
-		return "The git source changed while this build was running, so it built from settings the app no longer has. Deploy again to build from the current source."
+		return "The app's git source differs from this build's source. Deploy again to build from the current source."
 	}
 	return ""
 }
 
-// wantUID is the App the job was created for. The reconcile's own guards ran
-// against an earlier read, so an App deleted and a same-named one recreated in
-// between would otherwise be given a dead app's build status here.
-func (r *BuildReconciler) updateBuildStatus(ctx context.Context, namespace, appName, wantUID, build, phase, commit, message string) error {
+// updateBuildStatus rechecks wantUID after reading the App again, so a
+// replacement App with the same name keeps its own build status.
+func (r *BuildReconciler) updateBuildStatus(ctx context.Context, namespace, appName, wantUID string, job *batchv1.Job, phase, message string) error {
+	build := job.Name
 	var app kipperv1.App
 	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: appName}, &app); err != nil {
 		return client.IgnoreNotFound(err)
@@ -317,25 +332,20 @@ func (r *BuildReconciler) updateBuildStatus(ctx context.Context, namespace, appN
 	if app.Status.Build == nil {
 		app.Status.Build = &kipperv1.AppBuildStatus{}
 	}
+	created := job.CreationTimestamp
+	app.Status.Build.JobCreatedAt = &created
 	app.Status.Build.Phase = phase
 	app.Status.Build.Build = build
-	if commit != "" {
-		app.Status.Build.Commit = commit
-	}
 	if message != "" {
 		app.Status.Build.Message = message
 	}
-	// Nothing else writes a completion time for a discarded build, so without
-	// this the console shows the previous build's, next to a phase that is not
-	// the previous build's.
+	// Give discarded builds their own completion time for display in the console.
 	if phase == "Discarded" {
 		now := metav1.Now()
 		app.Status.Build.CompletedAt = &now
 	}
 	if err := r.Status().Update(ctx, &app); err != nil {
-		// A rejected write leaves the app on a phase that will never resolve,
-		// and a schema the cluster has not been upgraded to is one way to get
-		// one. Silence here is what makes that look like the app never built.
+		// Return the error so the reconciler retries the status update.
 		log.FromContext(ctx).Error(err, "writing build status", "app", appName, "phase", phase)
 		return fmt.Errorf("writing %s build status: %w", phase, err)
 	}
