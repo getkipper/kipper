@@ -9,6 +9,8 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/getkipper/kipper/kip/internal/deployer"
 )
 
 const routeOutcomeWait = 20 * time.Second
@@ -17,19 +19,28 @@ const routeOutcomeWait = 20 * time.Second
 var routeRefusals = []string{"RouteNameTaken", "RouteNameReservedForPlatform", "HostUnavailable", "RouteNamePending"}
 
 type routeView struct {
-	app *unstructured.Unstructured
-	// Empty when the App's Ingress is absent or unreadable.
+	app          *unstructured.Unstructured
 	ingressHosts []string
+	derivedHost  string
+}
+
+func (v routeView) host() string {
+	if host, _, _ := unstructured.NestedString(v.app.Object, "spec", "route", "host"); host != "" {
+		return host
+	}
+	if _, hasRoute, _ := unstructured.NestedMap(v.app.Object, "spec", "route"); hasRoute {
+		return v.derivedHost
+	}
+	return ""
 }
 
 func (v routeView) url() string {
-	host, _, _ := unstructured.NestedString(v.app.Object, "spec", "route", "host")
 	path, _, _ := unstructured.NestedString(v.app.Object, "spec", "route", "path")
-	return "https://" + host + path
+	return "https://" + v.host() + path
 }
 
 func (v routeView) published() bool {
-	host, _, _ := unstructured.NestedString(v.app.Object, "spec", "route", "host")
+	host := v.host()
 	return host != "" && slices.Contains(v.ingressHosts, host)
 }
 
@@ -44,7 +55,7 @@ func routeOutcome(v routeView) (line string, done bool) {
 	if adopted["status"] != "True" {
 		return "  ✗  Deploy incomplete: " + str(adopted["message"]), true
 	}
-	if host, _, _ := unstructured.NestedString(v.app.Object, "spec", "route", "host"); host == "" {
+	if v.host() == "" {
 		return "  ✔  Deployed without a public URL", true
 	}
 	ready := condition(v.app, "RouteReady")
@@ -101,24 +112,40 @@ func str(v interface{}) string {
 func waitForRouteOutcome(ctx context.Context, get func(context.Context) (routeView, error), wait, every time.Duration) (string, *unstructured.Unstructured) {
 	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
-	var last *unstructured.Unstructured
+	var last routeView
 	for {
 		if v, err := get(ctx); err == nil {
-			last = v.app
+			last = v
 			if line, done := routeOutcome(v); done {
-				return line, last
+				return line, last.app
 			}
 		}
 		select {
 		case <-ctx.Done():
-			if last == nil {
+			if last.app == nil {
 				return "  !   Deployment status unavailable. Run 'kip app list' to check again.", nil
 			}
-			if host, _, _ := unstructured.NestedString(last.Object, "spec", "route", "host"); host != "" {
-				return fmt.Sprintf("  !   Public URL not confirmed: %s. Try this URL again shortly.", routeView{app: last}.url()), last
+			if last.host() != "" {
+				return fmt.Sprintf("  !   Public URL not confirmed: %s. Try this URL again shortly.", last.url()), last.app
 			}
-			return "  !   Deployment still unconfirmed. Run 'kip app list' to check again.", last
+			return "  !   Deployment still unconfirmed. Run 'kip app list' to check again.", last.app
 		case <-time.After(every):
 		}
+	}
+}
+
+// Keep app status available when the Ingress read fails: it may explain a refusal.
+// Publication still requires a matching Ingress owned by the app.
+func routeReader(d *deployer.Deployer, namespace, name, derivedHost string) func(context.Context) (routeView, error) {
+	return func(ctx context.Context) (routeView, error) {
+		app, err := d.Dynamic.Resource(deployer.AppGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return routeView{}, err
+		}
+		v := routeView{app: app, derivedHost: derivedHost}
+		if ing, ingErr := d.Client.NetworkingV1().Ingresses(namespace).Get(ctx, name, metav1.GetOptions{}); ingErr == nil {
+			v.ingressHosts = ownedIngressHosts(ing, app)
+		}
+		return v, nil
 	}
 }

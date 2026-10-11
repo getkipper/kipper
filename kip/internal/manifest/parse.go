@@ -19,6 +19,30 @@ import (
 // failing at parse time surfaces the problem before anything is applied.
 var redirectFromHostPattern = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
+var routePathPattern = regexp.MustCompile(internalpath.SchemaPattern)
+
+// ValidateRouteHost requires a lowercase DNS name with at least two labels
+// and at most 253 characters.
+func ValidateRouteHost(host string) error {
+	if len(host) > 253 || !redirectFromHostPattern.MatchString(host) {
+		return fmt.Errorf("%q is not a valid hostname (lowercase DNS name like shop.example.com, without a scheme or path)", host)
+	}
+	return nil
+}
+
+// ValidateRoutePath accepts absolute paths with ASCII letters, digits and . _ ~ -.
+// Segments must be nonempty and cannot be "." or ".."; one trailing slash is allowed.
+func ValidateRoutePath(path string) error {
+	if path == "/" {
+		return nil
+	}
+	trimmed := strings.TrimSuffix(path, "/")
+	if !strings.HasPrefix(path, "/") || !routePathPattern.MatchString(trimmed) {
+		return fmt.Errorf("%q is not a valid route path (use / or slash-separated segments of ASCII letters, digits and . _ ~ -; empty, . and .. segments are invalid; one trailing slash is allowed)", path)
+	}
+	return nil
+}
+
 // maxRedirectFromHosts matches the App CRD's cap on route.redirectFrom.
 const maxRedirectFromHosts = 10
 

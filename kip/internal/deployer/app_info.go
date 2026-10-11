@@ -92,11 +92,12 @@ func (d *Deployer) ReadAppInfo(ctx context.Context, namespace, name string) (App
 
 	info.CPU = resourceInfo(app, "cpu", live, corev1.ResourceCPU, recommended)
 	info.Memory = resourceInfo(app, "memory", live, corev1.ResourceMemory, recommended)
-	info.Conditions = appConditions(app)
+	info.Conditions = AppConditions(app)
 	return info, nil
 }
 
-func appConditions(app *unstructured.Unstructured) []Condition {
+// AppConditions reads status conditions, skipping entries without a type.
+func AppConditions(app *unstructured.Unstructured) []Condition {
 	raw, _, _ := unstructured.NestedSlice(app.Object, "status", "conditions")
 	var conditions []Condition
 	for _, entry := range raw {

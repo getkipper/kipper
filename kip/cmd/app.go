@@ -451,20 +451,7 @@ func runAppDeploy(cmd *cobra.Command, args []string) error {
 	}
 	// Read back the saved route: a bare redeploy preserves a custom host or
 	// absent route. Check the outcome because a requested route may be refused.
-	getRoute := func(ctx context.Context) (routeView, error) {
-		app, err := d.Dynamic.Resource(deployer.AppGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return routeView{}, err
-		}
-		v := routeView{app: app}
-		// A failed Ingress read leaves publication unconfirmed;
-		// status may still explain a refusal.
-		if ing, ingErr := d.Client.NetworkingV1().Ingresses(namespace).Get(ctx, name, metav1.GetOptions{}); ingErr == nil {
-			v.ingressHosts = ownedIngressHosts(ing, app)
-		}
-		return v, nil
-	}
-	line, app := waitForRouteOutcome(ctx, getRoute, routeOutcomeWait, time.Second)
+	line, app := waitForRouteOutcome(ctx, routeReader(d, namespace, name, derivedRouteHost(name, environment, cluster.Domain)), routeOutcomeWait, time.Second)
 	fmt.Printf("%s\n\n", line)
 	if app != nil {
 		if _, stopped, _ := unstructured.NestedMap(app.Object, "spec", "stopped"); stopped {
