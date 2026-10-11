@@ -2,6 +2,7 @@ package registry
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,15 +18,39 @@ type valueSnapshot struct {
 // SaveTo persists the current registry state to a JSON file.
 // The write is atomic — it writes to a temp file then renames.
 func (r *Registry) SaveTo(path string) error {
-	// Hold saveMu across the whole snapshot-to-rename so concurrent saves commit
-	// in the order they run: the save that renames last also snapshotted last, so
-	// an older snapshot can never overwrite newer state on disk. It also gives
-	// each save a unique temp file, so two writers can't interleave into one
-	// fixed temp path and rename a half-written file over the registry (which the
-	// next start would refuse to parse).
+	// Serialize snapshots and writes so an older snapshot cannot overwrite
+	// a newer one on disk.
+	r.saveMu.Lock()
+	defer r.saveMu.Unlock()
+	return r.saveLocked(path)
+}
+
+// ErrNotRecorded reports a registration that could not be saved.
+var ErrNotRecorded = errors.New("the registration could not be recorded")
+
+// RegisterDurably calls Register and saves newly created registrations. It holds
+// saveMu through registration, save, and rollback to exclude concurrent saves.
+// A save failure triggers deregistration and returns ErrNotRecorded, including
+// any rollback error. Callers must save changes to existing registrations.
+func (r *Registry) RegisterDurably(subdomain, ip, token, path string) (*Entry, Outcome, error) {
 	r.saveMu.Lock()
 	defer r.saveMu.Unlock()
 
+	entry, outcome, err := r.Register(subdomain, ip, token)
+	if err != nil || outcome != Created {
+		return entry, outcome, err
+	}
+	if serr := r.saveLocked(path); serr != nil {
+		if _, derr := r.Deregister(entry.Token); derr != nil {
+			return nil, outcome, fmt.Errorf("%w: %v; withdrawing it also failed: %v", ErrNotRecorded, serr, derr)
+		}
+		return nil, outcome, fmt.Errorf("%w: %v", ErrNotRecorded, serr)
+	}
+	return entry, outcome, nil
+}
+
+// saveLocked writes a snapshot to disk. The caller must hold saveMu.
+func (r *Registry) saveLocked(path string) error {
 	// Snapshot entries by value under the read lock. Marshalling shared pointers
 	// after releasing it would race Register/Ping mutating LastSeen.
 	r.mu.RLock()
