@@ -6,14 +6,8 @@ import (
 	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
-// InstallSecurityHardening applies production security defaults:
-// - Traefik middleware for rate limiting (100 req/s per IP)
-// - Pod Security Standards enforcement (restricted profile on user namespaces)
-//
-// Response headers are not set here. Platform hosts carry the per-namespace
-// security-headers Middleware from controller/pkg/serving, and an app route
-// gets its own <namespace>-<app>-security Middleware, so a global copy would
-// only be a second policy with the same name and no consumer.
+// InstallSecurityHardening creates rate-limit middleware and configures baseline
+// Pod Security warnings and auditing in namespaces selected by the installer.
 func InstallSecurityHardening(client *ssh.Client) error {
 	if err := installRateLimiting(client); err != nil {
 		return err
@@ -51,13 +45,9 @@ spec:
 }
 
 func installPodSecurityStandards(client *ssh.Client) error {
-	// Pod Security Standards — enforce baseline security on all user namespaces.
-	// This prevents containers from running as root, using privileged mode,
-	// or escalating privileges. System namespaces are excluded.
-	//
-	// We use the "baseline" profile which blocks the most dangerous patterns
-	// while remaining compatible with most Docker images. The "restricted"
-	// profile would be stricter but breaks many common images that run as root.
+	// Configure baseline warnings and auditing in existing namespaces, excluding
+	// the system components listed below. The project controller sets baseline
+	// enforcement separately when creating project namespaces.
 	labelCmd := `for ns in $(kubectl get namespaces -o name | grep -v 'kube-system\|kube-public\|kube-node-lease\|traefik\|cert-manager\|longhorn-system\|dex\|kipper-system\|monitoring\|velero\|keda'); do
   kubectl label --overwrite $ns pod-security.kubernetes.io/warn=baseline pod-security.kubernetes.io/audit=baseline
 done 2>/dev/null || true`
