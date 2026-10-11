@@ -71,7 +71,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 			environment = envOverride
 		}
 		namespace := cluster.ResolveNamespace(project, environment)
-		plans = append(plans, applyPlan{m: m, project: project, projectCR: cluster.ResolveNamespace(project, ""), environment: environment, namespace: namespace, resources: manifest.Convert(m, namespace)})
+		plans = append(plans, applyPlan{m: m, project: project, projectCR: cluster.ResolveNamespace(project, ""), environment: environment, namespace: namespace, resources: manifest.Convert(m, namespace, linkNamespace(cluster, environment))})
 	}
 	for _, p := range plans {
 		if manifestsStop(p.resources) {
@@ -147,6 +147,11 @@ func applyPlans(ctx context.Context, dyn dynamic.Interface, clientset kubernetes
 	// so it is refused before anything is read.
 	if err := refuseDuplicateResources(plans); err != nil {
 		return 0, 0, err
+	}
+	for _, p := range plans {
+		if err := refuseUnreadableLinkTargets(ctx, dyn, p.namespace, p.resources); err != nil {
+			return 0, 0, err
+		}
 	}
 
 	defaults := newSchemaDefaults()
@@ -342,6 +347,7 @@ func scanChangesWith(ctx context.Context, dyn dynamic.Interface, namespace strin
 		effective := withLiveStopRecord(effectiveSpecForDiff(name, newSpec), liveSpec)
 		if res.Object.GetKind() == "App" {
 			effective = withResolvedReplicas(effective, liveSpec)
+			effective = withLiveAutomaticResources(effective, liveSpec, live.GetManagedFields())
 		}
 		for _, c := range manifest.DiffSpec(liveSpec, effective, preservedPaths(name, effective, liveSpec), kindDefaults) {
 			out = append(out, resourceChange{kind: res.Object.GetKind(), name: name, change: c})
@@ -674,6 +680,7 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 		newSpec = withLiveStopRecord(newSpec, liveSpec)
 		if res.Object.GetKind() == "App" {
 			newSpec = withResolvedReplicas(newSpec, liveSpec)
+			newSpec = withLiveAutomaticResources(newSpec, liveSpec, existing.GetManagedFields())
 		}
 		if !force {
 			if clears := manifest.Clears(manifest.DiffSpec(liveSpec, newSpec, preservedPaths(name, newSpec, liveSpec), defaults)); len(clears) > 0 {

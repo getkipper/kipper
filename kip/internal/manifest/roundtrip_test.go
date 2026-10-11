@@ -234,10 +234,8 @@ func fullFunction() FuncSpec {
 	}
 }
 
-// fakeClientWithManifest builds a dynamic fake client whose store
-// contains the resources produced by Convert(manifest, namespace). The
-// exporter then sees the same shape it would see against a live
-// apiserver, so the round-trip exercises both halves of the pipeline.
+// fakeClientWithManifest seeds the fake client with converted resources so
+// round-trip tests exercise both conversion and export.
 func fakeClientWithManifest(t *testing.T, m *Manifest, namespace string) *fake.FakeDynamicClient {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -253,7 +251,7 @@ func fakeClientWithManifest(t *testing.T, m *Manifest, namespace string) *fake.F
 		ProjectGVR:  "ProjectList",
 	}
 
-	resources := Convert(m, namespace)
+	resources := Convert(m, namespace, nil)
 	objs := make([]runtime.Object, 0, len(resources))
 	for _, r := range resources {
 		// Stamp the managed-by label the exporter selects on.

@@ -34,12 +34,18 @@ type Resource struct {
 	Object *unstructured.Unstructured
 }
 
-// Convert transforms a Manifest into a list of Kubernetes CRD objects.
-func Convert(m *Manifest, namespace string) []Resource {
+// LinkNamespace returns the namespace of a link target in another project.
+// An empty environment means the environment the manifest is applied to.
+type LinkNamespace func(project, environment string) string
+
+// Convert transforms a Manifest into Kubernetes CRD objects. The resolver maps
+// cross-project links to namespaces. With nil, targets use project-environment,
+// or just project when the link environment is empty or "default".
+func Convert(m *Manifest, namespace string, resolve LinkNamespace) []Resource {
 	var resources []Resource
 
 	for name, app := range m.Apps {
-		resources = append(resources, convertApp(name, namespace, app))
+		resources = append(resources, convertApp(name, namespace, app, resolve))
 	}
 	for name, svc := range m.Services {
 		resources = append(resources, convertService(name, namespace, svc))
@@ -57,7 +63,7 @@ func Convert(m *Manifest, namespace string) []Resource {
 	return resources
 }
 
-func convertApp(name, namespace string, app AppSpec) Resource {
+func convertApp(name, namespace string, app AppSpec, resolve LinkNamespace) Resource {
 	spec := map[string]interface{}{
 		"port": int64(app.Port),
 	}
@@ -189,6 +195,10 @@ func convertApp(name, namespace string, app AppSpec) Resource {
 			bindings[i] = binding
 		}
 		spec["serviceBindings"] = bindings
+	}
+
+	if links := convertLinks(app.Links, namespace, resolve); len(links) > 0 {
+		spec["links"] = links
 	}
 
 	if len(app.Volumes) > 0 {
@@ -544,6 +554,27 @@ func convertJob(name, namespace string, job JobSpec) Resource {
 		}
 		spec["env"] = envMap
 	}
+	if r := job.Resources; r != nil {
+		resources := map[string]interface{}{}
+		for field, value := range map[string]string{"cpuRequest": r.CPURequest, "cpuLimit": r.CPULimit, "memoryRequest": r.MemoryRequest, "memoryLimit": r.MemoryLimit} {
+			if value != "" {
+				resources[field] = value
+			}
+		}
+		if len(resources) > 0 {
+			spec["resources"] = resources
+		}
+	}
+	if len(job.SecretRefs) > 0 {
+		refs := make([]interface{}, len(job.SecretRefs))
+		for i, ref := range job.SecretRefs {
+			refs[i] = ref
+		}
+		spec["secretRefs"] = refs
+	}
+	if job.BackoffLimit != nil {
+		spec["backoffLimit"] = int64(*job.BackoffLimit)
+	}
 
 	return Resource{
 		GVR: JobGVR,
@@ -565,3 +596,22 @@ func convertJob(name, namespace string, job JobSpec) Resource {
 }
 
 func positive(v *int32) bool { return v != nil && *v > 0 }
+
+func convertLinks(links []LinkSpec, namespace string, resolve LinkNamespace) []interface{} {
+	out := make([]interface{}, 0, len(links))
+	for _, l := range links {
+		target := namespace
+		if l.Project != "" {
+			if resolve != nil {
+				target = resolve(l.Project, l.Environment)
+			} else {
+				target = l.Project
+				if l.Environment != "" && l.Environment != "default" {
+					target += "-" + l.Environment
+				}
+			}
+		}
+		out = append(out, map[string]interface{}{"app": l.App, "namespace": target})
+	}
+	return out
+}

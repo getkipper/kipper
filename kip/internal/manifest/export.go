@@ -7,9 +7,12 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/provenance"
 
 	"gopkg.in/yaml.v3"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
+	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
@@ -74,6 +77,7 @@ func exportApps(ctx context.Context, dynClient dynamic.Interface, namespace stri
 		m.Apps = make(map[string]AppSpec, len(list.Items))
 	}
 
+	owners := &namespaceOwnerCache{ctx: ctx, dyn: dynClient, seen: map[string]namespaceOwner{}}
 	for _, item := range list.Items {
 		name := item.GetName()
 		spec := item.Object["spec"].(map[string]interface{})
@@ -103,6 +107,11 @@ func exportApps(ctx context.Context, dynClient dynamic.Interface, namespace stri
 		app.Route = exportRoute(spec)
 		app.Resources = exportAppResources(spec, item.GetManagedFields(), name, m)
 		app.ServiceBindings = exportBindings(spec)
+		links, err := exportLinks(extractSlice(spec, "links"), namespace, m.Environment, owners.lookup, name, m)
+		if err != nil {
+			return err
+		}
+		app.Links = links
 		app.Volumes = exportVolumeMounts(spec)
 		app.Autoscale = exportAutoscale(spec)
 		app.Health = exportHealth(spec)
@@ -490,21 +499,7 @@ func exportJobs(ctx context.Context, dynClient dynamic.Interface, namespace stri
 	}
 
 	for _, item := range list.Items {
-		spec := item.Object["spec"].(map[string]interface{})
-		job := JobSpec{}
-		if v, ok := spec["image"].(string); ok {
-			job.Image = v
-		}
-		if v, ok := spec["schedule"].(string); ok {
-			job.Schedule = v
-		}
-		if cmd := extractStringSlice(spec, "command"); len(cmd) > 0 {
-			job.Command = cmd
-		}
-		if env := extractStringMap(spec, "env"); len(env) > 0 {
-			job.Env = env
-		}
-		m.Jobs[item.GetName()] = job
+		m.Jobs[item.GetName()] = exportJob(item.Object["spec"].(map[string]interface{}))
 	}
 
 	return nil
@@ -645,4 +640,113 @@ func extractStringSlice(obj map[string]interface{}, key string) []string {
 func int32Ptr(v int64) *int32 {
 	n := int32(v) //nolint:gosec // replica counts and targets are bounded by K8s validation
 	return &n
+}
+
+// exportLinks translates namespaces into portable project and environment names.
+// Matching environments are omitted so links follow the destination environment
+// on apply. Unidentifiable targets produce notes; lookup errors stop the export.
+func exportLinks(live []interface{}, namespace, environment string, owner func(string) (string, string, bool, error), appName string, m *Manifest) ([]LinkSpec, error) {
+	var out []LinkSpec
+	for _, entry := range live {
+		link, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		app, _ := link["app"].(string)
+		ns, _ := link["namespace"].(string)
+		if ns == "" || ns == namespace {
+			out = append(out, LinkSpec{App: app})
+			continue
+		}
+		project, env, known, err := owner(ns)
+		if err != nil {
+			return nil, fmt.Errorf("app %q: reading namespace %s to export its link to %s: %w", appName, ns, app, err)
+		}
+		if known && env == "" && ns == project {
+			env = "default"
+		}
+		if !known || env == "" {
+			m.Notes = append(m.Notes, fmt.Sprintf("app %q: omitted link to %s in namespace %s: Kipper project or environment could not be determined; applying with --force removes this link", appName, app, ns))
+			continue
+		}
+		spec := LinkSpec{App: app, Project: project}
+		if withoutDefault(env) != withoutDefault(environment) {
+			spec.Environment = env
+		}
+		out = append(out, spec)
+	}
+	return out, nil
+}
+
+// withoutDefault treats the default environment and no environment as the same.
+func withoutDefault(environment string) string {
+	if environment == "default" {
+		return ""
+	}
+	return environment
+}
+
+type namespaceOwner struct {
+	project, environment string
+	known                bool
+}
+
+// namespaceOwnerCache reads the project and environment labels of link target
+// namespaces once per export.
+type namespaceOwnerCache struct {
+	ctx  context.Context
+	dyn  dynamic.Interface
+	seen map[string]namespaceOwner
+}
+
+var namespaceGVR = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
+
+// lookup reports a namespace's project and environment labels. A namespace
+// that does not exist is unknown; any other read failure is returned.
+func (c *namespaceOwnerCache) lookup(ns string) (string, string, bool, error) {
+	if o, ok := c.seen[ns]; ok {
+		return o.project, o.environment, o.known, nil
+	}
+	var o namespaceOwner
+	obj, err := c.dyn.Resource(namespaceGVR).Get(c.ctx, ns, metav1.GetOptions{})
+	switch {
+	case k8serrors.IsNotFound(err):
+	case err != nil:
+		return "", "", false, err
+	default:
+		labels := obj.GetLabels()
+		o = namespaceOwner{project: labels[kipperlabels.Project], environment: labels[kipperlabels.Environment]}
+		o.known = o.project != ""
+	}
+	c.seen[ns] = o
+	return o.project, o.environment, o.known, nil
+}
+
+// jobDefaultBackoffLimit is the Job CRD default for spec.backoffLimit.
+const jobDefaultBackoffLimit = 3
+
+func exportJob(spec map[string]interface{}) JobSpec {
+	job := JobSpec{}
+	if v, ok := spec["image"].(string); ok {
+		job.Image = v
+	}
+	if v, ok := spec["schedule"].(string); ok {
+		job.Schedule = v
+	}
+	if cmd := extractStringSlice(spec, "command"); len(cmd) > 0 {
+		job.Command = cmd
+	}
+	if env := extractStringMap(spec, "env"); len(env) > 0 {
+		job.Env = env
+	}
+	if r := extractStringMap(spec, "resources"); len(r) > 0 {
+		job.Resources = &JobResourceSpec{CPURequest: r["cpuRequest"], CPULimit: r["cpuLimit"], MemoryRequest: r["memoryRequest"], MemoryLimit: r["memoryLimit"]}
+	}
+	if refs := extractStringSlice(spec, "secretRefs"); len(refs) > 0 {
+		job.SecretRefs = refs
+	}
+	if v, ok := spec["backoffLimit"].(int64); ok && v != jobDefaultBackoffLimit {
+		job.BackoffLimit = int32Ptr(v)
+	}
+	return job
 }

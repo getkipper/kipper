@@ -151,7 +151,7 @@ func runBlueprintInstall(cmd *cobra.Command, args []string) error {
 	clientset := k8sClient.Clientset()
 
 	namespace := cluster.ResolveNamespace(m.Project, m.Environment)
-	resources := manifest.Convert(m, namespace)
+	resources := manifest.Convert(m, namespace, linkNamespace(cluster, m.Environment))
 
 	// Ensure namespace exists
 	if _, nsErr := clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{}); errors.IsNotFound(nsErr) {
