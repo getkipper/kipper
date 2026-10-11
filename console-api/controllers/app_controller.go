@@ -139,9 +139,12 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 		}
 	}()
 
-	// Handle deletion
 	if !app.DeletionTimestamp.IsZero() {
 		logger.Info("cleaning up app resources", "app", app.Name)
+		// Withdraw link access before cleanup can fail and delay app deletion.
+		if err := r.writeLinkPolicy(ctx, &app, nil); err != nil {
+			return ctrl.Result{}, fmt.Errorf("withdrawing link policy: %w", err)
+		}
 		if err := r.sweepWriterSecrets(ctx, &app); err != nil {
 			return ctrl.Result{}, fmt.Errorf("sweeping writer secrets: %w", err)
 		}
@@ -152,25 +155,22 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 		return ctrl.Result{}, r.removeFinalizer(ctx, &app)
 	}
 
-	// Withdrawing a credential runs before anything that can fail for unrelated
-	// reasons, the name claim included. An app whose binding is broken, whose
-	// variables do not resolve, or whose name is held by another workload fails
-	// the same step on every pass, and cleanup ordered after that point is
-	// never reached — so a token whose source was removed would sit in the
-	// namespace in plaintext for as long as the unrelated fault lasts. Each of
-	// those states is one an App written straight to the Kubernetes API can
-	// arrive in. Same reasoning as the link-policy withdrawal below.
-	credentialRetry, err := r.sweepGitCredentials(ctx, &app)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("removing a git credential the app has moved off: %w", err)
-	}
-	if err := r.clearDetachedBuildStatus(ctx, &app); err != nil {
-		return ctrl.Result{}, fmt.Errorf("clearing a detached build status: %w", err)
+	// Sweep unused credentials before unrelated failures can block cleanup.
+	// Defer cleanup errors until after updating link access so revoked access
+	// is withdrawn even when credential or status cleanup fails.
+	credentialRetry, sweepErr := r.sweepGitCredentials(ctx, &app)
+	if sweepErr != nil {
+		sweepErr = fmt.Errorf("removing a git credential the app has moved off: %w", sweepErr)
+	} else if buildErr := r.clearDetachedBuildStatus(ctx, &app); buildErr != nil {
+		sweepErr = fmt.Errorf("clearing a detached build status: %w", buildErr)
 	}
 
 	// See the Function reconciler: a CR written straight to the API server never
 	// passed a reservation, and an App beside a Job shares no child to refuse.
 	if heldBy, claimErr := reconcileNameClaim(ctx, r.Client, r.hostReader(), r.Scheme, &app, "app"); claimErr != nil {
+		if err := r.narrowLinkPolicy(ctx, &app); err != nil {
+			log.FromContext(ctx).Error(err, "narrowing link policy after a failed name claim")
+		}
 		return ctrl.Result{}, claimErr
 	} else if heldBy != "" {
 		apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
@@ -182,26 +182,26 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 		})
 		app.Status.Phase = "Failed"
 		r.writeStatusIfChanged(ctx, &app, statusAtEntry)
+		// The policy's app-name selector could grant access to the workload
+		// holding this name, so remove the policy.
+		if err := r.writeLinkPolicy(ctx, &app, nil); err != nil {
+			return ctrl.Result{}, fmt.Errorf("withdrawing link policy: %w", err)
+		}
+		if sweepErr != nil {
+			return ctrl.Result{}, sweepErr
+		}
 		return ctrl.Result{}, workload.NameTakenError{Name: app.Name, Kind: heldBy}
 	}
 
-	// The egress this app's links need, reconciled before anything else this app
-	// owns. What it withdraws is an authorisation — a consent taken back, a link
-	// removed, a target gone — and that has to converge whether or not the
-	// workload does. Behind the Deployment it would not: a spec the cluster
-	// cannot roll fails every pass at the same place, and an allowance nobody
-	// agreed to any more would stand for as long as the app stayed broken.
-	//
-	// Each target's port is read from its App on every pass, through the same
-	// rule that gives its Service a target port, so a target that gains, changes
-	// or loses a port is followed rather than pinned.
-	// Resolved once and carried through the pass. Resolving again for the pod's
-	// addresses would be asking the same question of a cluster that has moved on:
-	// a target deleted in between leaves the condition saying every link is open
-	// while the Deployment rolls without the address it names.
+	// Reconcile link access before workload updates so deployment failures
+	// cannot delay revocations. Reuse the resolved targets for pod addresses
+	// to keep them consistent with the policy and link status on this pass.
 	links, err := r.reconcileLinkPolicy(ctx, &app)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling link policy: %w", err)
+	}
+	if sweepErr != nil {
+		return ctrl.Result{}, sweepErr
 	}
 	// An app holding links gets swept periodically. The watches that notice a
 	// changed target or a withdrawn consent map events through the cache, and a
@@ -2623,12 +2623,8 @@ func (r *AppReconciler) sweepGitCredentials(ctx context.Context, app *kipperv1.A
 	return retryIn, nil
 }
 
-// clearDetachedBuildStatus drops a build result belonging to a source that is
-// gone, and reports whether it changed anything.
-//
-// A build status outliving its source makes the console report a failed build
-// for an app that has no builds, which is what an operator saw after switching
-// an app from git to a prebuilt image.
+// clearDetachedBuildStatus clears stale build results after an app switches
+// from Git to a prebuilt image.
 func (r *AppReconciler) clearDetachedBuildStatus(ctx context.Context, app *kipperv1.App) error {
 	if !detachedBuildStatus(app) {
 		return nil
