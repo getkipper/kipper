@@ -155,6 +155,8 @@ type FunctionReconciler struct {
 	// describe` finds it without anyone tailing the controller's log. Nil in
 	// unit tests.
 	Recorder record.EventRecorder
+	// Nil disables database and vhost provisioning.
+	Provision DatabaseProvisioner
 }
 
 func (r *FunctionReconciler) hostReader() client.Reader {
@@ -251,6 +253,8 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_
 		}
 		return ctrl.Result{}, fmt.Errorf("reconciling binding secrets: %w", err)
 	}
+	declaredDatabases, databaseFailures := ensureBindingDatabases(ctx, r.Client, r.Provision, &fn, secretname.KindFunction, fn.Spec.ServiceBindings)
+	applyBindingDatabaseCondition(&fn.Status.Conditions, fn.Generation, declaredDatabases, databaseFailures)
 
 	// Refuse once, here, as the App does. A Function used to skip a binding it
 	// could not read and render the environment without it, so ${DB_PASSWORD}
@@ -348,6 +352,9 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 
+	if databaseRetry := bindingDatabaseRequeue(databaseFailures); databaseRetry > 0 && (retryIn == 0 || databaseRetry < retryIn) {
+		retryIn = databaseRetry
+	}
 	return ctrl.Result{RequeueAfter: retryIn}, nil
 }
 

@@ -83,6 +83,9 @@ type AppReconciler struct {
 	// RouteNames says whether this process may publish a route that does not
 	// exist yet. Nil disables tenant route-name reservations.
 	RouteNames *RouteNameGate
+
+	// Nil disables database and vhost provisioning.
+	Provision DatabaseProvisioner
 }
 
 // hostReader returns the uncached reader for reservation reads, falling back to
@@ -246,6 +249,8 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 		}
 		return ctrl.Result{}, fmt.Errorf("reconciling binding secrets: %w", err)
 	}
+	declaredDatabases, databaseFailures := ensureBindingDatabases(ctx, r.Client, r.Provision, &app, secretname.KindApp, app.Spec.ServiceBindings)
+	applyBindingDatabaseCondition(&app.Status.Conditions, app.Generation, declaredDatabases, databaseFailures)
 
 	// One table for the env render and the pod both, built before either. The
 	// injection gate used to run inside reconcileDeployment, after the env
@@ -381,6 +386,9 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 	}
 	if nameRetry := routeNameRetry(&app); nameRetry > 0 && (linkResync.RequeueAfter == 0 || nameRetry < linkResync.RequeueAfter) {
 		linkResync.RequeueAfter = nameRetry
+	}
+	if databaseRetry := bindingDatabaseRequeue(databaseFailures); databaseRetry > 0 && (linkResync.RequeueAfter == 0 || databaseRetry < linkResync.RequeueAfter) {
+		linkResync.RequeueAfter = databaseRetry
 	}
 
 	return linkResync, nil

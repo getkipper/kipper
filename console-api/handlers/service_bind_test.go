@@ -363,66 +363,6 @@ func TestBind_RabbitMQExplicitVhostPerBindingSecret(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(secretErr), "the bind handler must not write the derived Secret")
 }
 
-func TestLogicalNamespaceCmd_RabbitMQ(t *testing.T) {
-	creds := newCredentialsSecret("rabbit", map[string][]byte{"USERNAME": []byte("kipper")})
-	cmd, err := logicalNamespaceCmd("rabbitmq", "orders", creds)
-	if err != nil {
-		t.Fatalf("logicalNamespaceCmd: %v", err)
-	}
-	// Pin the shape: sh -c <script> -- <vhost> <user>. User input
-	// must travel as positional args, never interpolated, so a name
-	// with shell metacharacters can't break out of quoting.
-	if len(cmd) < 5 || cmd[0] != "sh" || cmd[1] != "-c" || cmd[3] != "--" {
-		t.Fatalf("expected `sh -c <script> -- <vhost> <user>`, got %v", cmd)
-	}
-	if cmd[4] != "orders" {
-		t.Errorf("expected vhost as positional arg 1, got %q", cmd[4])
-	}
-	if cmd[5] != "kipper" {
-		t.Errorf("expected username as positional arg 2, got %q", cmd[5])
-	}
-	script := cmd[2]
-	for _, want := range []string{"list_vhosts", `add_vhost -- "$1"`, `set_permissions -p "$1" "$2"`} {
-		if !strings.Contains(script, want) {
-			t.Errorf("expected script to contain %q, got %q", want, script)
-		}
-	}
-	// Make sure no raw value ended up interpolated into the script.
-	if strings.Contains(script, "orders") {
-		t.Errorf("vhost value must not be interpolated into the script, got %q", script)
-	}
-}
-
-func TestValidNamespaceValue(t *testing.T) {
-	cases := map[string]bool{
-		"orders":                true,
-		"order_service_test":    true,
-		"order-service":         true,
-		"v1.5":                  true,
-		"orders/sub":            true,
-		"":                      false,
-		"orders; rm -rf /":      false,
-		"orders\"":              false,
-		"orders`whoami`":        false,
-		"orders$(whoami)":       false,
-		"orders\\":              false,
-		strings.Repeat("a", 64): false,
-	}
-	for input, want := range cases {
-		if got := validNamespaceValue(input); got != want {
-			t.Errorf("validNamespaceValue(%q) = %v, want %v", input, got, want)
-		}
-	}
-}
-
-func TestLogicalNamespaceCmd_RejectsShellMetacharacters(t *testing.T) {
-	creds := newCredentialsSecret("rabbit", map[string][]byte{"USERNAME": []byte("kipper")})
-	_, err := logicalNamespaceCmd("rabbitmq", `orders"; rm -rf / #`, creds)
-	if err == nil {
-		t.Fatal("expected error for vhost with shell metacharacters, got nil")
-	}
-}
-
 func TestParseRabbitMQVhosts(t *testing.T) {
 	cases := []struct {
 		name string

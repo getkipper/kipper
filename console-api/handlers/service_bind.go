@@ -19,6 +19,7 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/controllers"
+	"github.com/getkipper/kipper/console-api/internal/logicalns"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
@@ -590,7 +591,8 @@ func (s *Services) provisionPerBinding(ctx context.Context, svcName, svcNamespac
 		return "", injected, ""
 	}
 
-	// Keep the binding usable for retries and report provisioning failures to the caller.
+	// Keep the binding saved and report the failure; the workload controller
+	// retries the create.
 	if perr := s.createLogicalNamespace(ctx, svcName, svcNamespace, svcType, database, creds); perr != nil {
 		warning = fmt.Sprintf("database %q was not created in %s: %v", database, svcName, perr)
 	}
@@ -611,134 +613,6 @@ func (s *Services) provisionPerBinding(ctx context.Context, svcName, svcNamespac
 	return database, injected, warning
 }
 
-// createLogicalNamespace provisions the per-binding logical namespace
-// (a database for postgres/mysql/mongodb, a vhost for rabbitmq) on a
-// running service instance via pod exec. Commands are written
-// idempotently so a re-bind that lands on the same name is a no-op.
 func (s *Services) createLogicalNamespace(ctx context.Context, serviceName, namespace, svcType, value string, creds *corev1.Secret) error {
-	if s.RESTConfig == nil {
-		return fmt.Errorf("REST config not available for pod exec")
-	}
-
-	// Find the service pod
-	pods, err := s.Client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("app=%s", serviceName),
-	})
-	if err != nil || len(pods.Items) == 0 {
-		return fmt.Errorf("no running pod found for service %q", serviceName)
-	}
-	podName := pods.Items[0].Name
-
-	cmd, err := logicalNamespaceCmd(svcType, value, creds)
-	if err != nil {
-		return err
-	}
-
-	req := s.Client.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(podName).
-		Namespace(namespace).
-		SubResource("exec").
-		VersionedParams(&corev1.PodExecOptions{
-			Container: serviceName,
-			Command:   cmd,
-			Stdout:    true,
-			Stderr:    true,
-		}, scheme.ParameterCodec)
-
-	exec, err := remotecommand.NewSPDYExecutor(s.RESTConfig, "POST", req.URL())
-	if err != nil {
-		return fmt.Errorf("creating executor: %w", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
-	}); err != nil {
-		return fmt.Errorf("provisioning namespace: %s: %w", stderr.String(), err)
-	}
-
-	return nil
-}
-
-// logicalNamespaceCmd returns the shell command that provisions the
-// per-binding logical namespace inside the running service pod.
-// Extracted so unit tests can pin the exact command shape — pod exec
-// itself is not unit-testable without a cluster.
-//
-// User-supplied values (the namespace value and the connecting
-// username) are passed to `sh -c` as positional parameters and
-// referenced as "$1"/"$2" inside the script. That keeps a name
-// containing shell metacharacters from breaking out of quoting and
-// running arbitrary commands in the service pod.
-func logicalNamespaceCmd(svcType, value string, creds *corev1.Secret) ([]string, error) {
-	if !validNamespaceValue(value) {
-		return nil, fmt.Errorf("invalid namespace name %q", value)
-	}
-	username := string(creds.Data["USERNAME"])
-	switch svcType {
-	case "postgres":
-		// Connect to the default "app" database (psql defaults to a database
-		// matching the username, which may not exist).
-		defaultDB := string(creds.Data["NAME"])
-		if defaultDB == "" {
-			defaultDB = "app"
-		}
-		// $1 = namespace value, $2 = username, $3 = default DB.
-		return []string{
-			"sh", "-c",
-			`psql -U "$2" -d "$3" -tc "SELECT 1 FROM pg_database WHERE datname='$1'" | grep -q 1 || psql -U "$2" -d "$3" -c "CREATE DATABASE \"$1\""`,
-			"--", value, username, defaultDB,
-		}, nil
-	case "mysql":
-		// Go raw strings can't contain backticks; build the script in
-		// two pieces so the inner MySQL backquoted identifier survives.
-		return []string{
-			"sh", "-c",
-			`mysql -u "$2" -p"$MYSQL_ROOT_PASSWORD" -e "CREATE DATABASE IF NOT EXISTS ` + "`$1`" + `"`,
-			"--", value, username,
-		}, nil
-	case "mongodb":
-		// MongoDB creates databases implicitly on first use; just touch a collection
-		return []string{
-			"sh", "-c",
-			`mongosh --quiet --eval "use $1; db.createCollection('_init')"`,
-			"--", value,
-		}, nil
-	case "rabbitmq":
-		// add_vhost errors when the vhost already exists, so gate it
-		// on list_vhosts; permissions are set every time so a re-bind
-		// with the same vhost remains a no-op for state but
-		// re-asserts the grant (cheap and harmless).
-		return []string{
-			"sh", "-c",
-			`rabbitmqctl list_vhosts -q | grep -Fxq -- "$1" || rabbitmqctl add_vhost -- "$1" && rabbitmqctl set_permissions -p "$1" "$2" ".*" ".*" ".*"`,
-			"--", value, username,
-		}, nil
-	}
-	return nil, fmt.Errorf("logical-namespace provisioning not supported for service type %q", svcType)
-}
-
-// validNamespaceValue is a belt-and-braces check on top of the shell
-// quoting above. We accept alphanumeric, underscore, dash, dot, and
-// slash — enough for database names and rabbitmq vhost paths like
-// "/orders" — and reject anything that could carry shell or SQL
-// metacharacters. Rejecting at the boundary is much easier to reason
-// about than escaping each downstream tool's quoting rules.
-func validNamespaceValue(value string) bool {
-	if value == "" || len(value) > 63 {
-		return false
-	}
-	for _, r := range value {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= 'A' && r <= 'Z':
-		case r >= '0' && r <= '9':
-		case r == '_' || r == '-' || r == '.' || r == '/':
-		default:
-			return false
-		}
-	}
-	return true
+	return logicalns.Create(ctx, s.Client, s.RESTConfig, serviceName, namespace, svcType, value, creds)
 }

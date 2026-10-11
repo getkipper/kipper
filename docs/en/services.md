@@ -85,7 +85,7 @@ kip service bind db identity-service --database identity_service_prod --project 
 
 A manifest binding takes the same value as `database:`. Each app then reads its own `DB_NAME` and shares everything else: the instance, the storage, and the credentials.
 
-Kipper creates the database by running a command in the service's pod. If provisioning fails, the binding is saved and the CLI and console show the reason. Resolve the reported issue, then bind the service again to retry.
+Kipper creates the database by running a command in the service's pod, for bindings made through the CLI, the console or a manifest. If that fails, the binding is saved, the CLI and console show the reason, and the controller tries again every minute. The app or function's `BindingDatabasesReady` status condition carries the reason as well. MongoDB creates the database on first write.
 
 Bindings share the service’s credentials, so an app can also access sibling databases on that instance. Use separate services when apps need separate access boundaries.
 

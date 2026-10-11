@@ -41,6 +41,7 @@ import (
 	"github.com/getkipper/kipper/console-api/handlers/twofa"
 	"github.com/getkipper/kipper/console-api/internal/clusterstamp"
 	"github.com/getkipper/kipper/console-api/internal/leader"
+	"github.com/getkipper/kipper/console-api/internal/logicalns"
 	"github.com/getkipper/kipper/console-api/internal/resourcebounds"
 	"github.com/getkipper/kipper/console-api/middleware"
 	"github.com/getkipper/kipper/console-api/security"
@@ -1016,6 +1017,12 @@ func preStopSleepSupported(cfg *rest.Config) bool {
 	return controllers.SupportsPreStopSleep(info, err)
 }
 
+func bindingDatabaseProvisioner(clientset kubernetes.Interface, cfg *rest.Config) controllers.DatabaseProvisioner {
+	return func(ctx context.Context, svc *kipperv1.Service, creds *corev1.Secret, database string) error {
+		return logicalns.Create(ctx, clientset, cfg, svc.Name, svc.Namespace, svc.Spec.Type, database, creds)
+	}
+}
+
 func startControllerManager(cfg *rest.Config, direct crclient.Client, clientset kubernetes.Interface, podName string) {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -1056,7 +1063,7 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client, clientset 
 		name  string
 		setup func(ctrl.Manager) error
 	}{
-		{"App", (&controllers.AppReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Domain: domain, SidecarImage: sidecarImage, Recorder: mgr.GetEventRecorderFor("app-controller"), PreStopSleep: preStopSleepSupported(cfg), Dial: controllers.TCPDial, RouteNames: routeNameGate}).SetupWithManager}, //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
+		{"App", (&controllers.AppReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Domain: domain, SidecarImage: sidecarImage, Recorder: mgr.GetEventRecorderFor("app-controller"), PreStopSleep: preStopSleepSupported(cfg), Dial: controllers.TCPDial, RouteNames: routeNameGate, Provision: bindingDatabaseProvisioner(clientset, cfg)}).SetupWithManager}, //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
 		{"Service", (&controllers.ServiceReconciler{
 			Client:              mgr.GetClient(),
 			APIReader:           mgr.GetAPIReader(),
@@ -1066,8 +1073,8 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client, clientset 
 			ShareGrants:         shareGrantStoreFor(cfg),
 			RouteNames:          routeNameGate,
 		}).SetupWithManager},
-		{"Function", (&controllers.FunctionReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Domain: domain, Recorder: mgr.GetEventRecorderFor("function-controller")}).SetupWithManager}, //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
-		{"Job", (&controllers.JobReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Recorder: mgr.GetEventRecorderFor("job-controller")}).SetupWithManager},                                //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
+		{"Function", (&controllers.FunctionReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Domain: domain, Recorder: mgr.GetEventRecorderFor("function-controller"), Provision: bindingDatabaseProvisioner(clientset, cfg)}).SetupWithManager}, //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
+		{"Job", (&controllers.JobReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Recorder: mgr.GetEventRecorderFor("job-controller")}).SetupWithManager},                                                                                       //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
 		{"WorkloadName", (&controllers.WorkloadNameReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme()}).SetupWithManager},
 		{"Volume", (&controllers.VolumeReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
 		{"Project", (&controllers.ProjectReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), APIReader: mgr.GetAPIReader(), Recorder: mgr.GetEventRecorderFor("project-controller")}).SetupWithManager}, //nolint:staticcheck // ProjectReconciler consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
