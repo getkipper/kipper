@@ -85,6 +85,8 @@ kip service bind db identity-service --database identity_service_prod --project 
 
 A manifest binding takes the same value as `database:`. Each app then reads its own `DB_NAME` and shares everything else: the instance, the storage, and the credentials.
 
+Kipper creates the database by running a command in the service's pod. If provisioning fails, the binding is saved and the CLI and console show the reason. Resolve the reported issue, then bind the service again to retry.
+
 Bindings share the service’s credentials, so an app can also access sibling databases on that instance. Use separate services when apps need separate access boundaries.
 
 PostgreSQL, MySQL, MongoDB and RabbitMQ can be divided this way. RabbitMQ calls it a vhost and takes the name in the same place, where `/` means the service's own. Redis, OpenSearch and MinIO have nothing to divide, so a binding there always points at the whole service.

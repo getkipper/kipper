@@ -48,12 +48,11 @@ type bindResponse struct {
 	Type     string            `json:"type"`
 	Database string            `json:"database,omitempty"`
 	Injected map[string]string `json:"injected"`
+	Warning  string            `json:"warning,omitempty"`
 }
 
-// Bind injects a service's connection details into an app's environment.
-// For database services (postgres, mysql, mongodb), a per-app database is
-// created automatically and a per-binding credentials secret is used.
-// POST /api/v1/bind
+// Bind saves a service binding for an app or function and provisions any
+// requested database or vhost. Provisioning failures are returned as warnings.
 func (s *Services) Bind(w http.ResponseWriter, r *http.Request) {
 	var req bindRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -128,18 +127,7 @@ func (s *Services) Bind(w http.ResponseWriter, r *http.Request) {
 		prefix = defaultPrefix(svcType)
 	}
 
-	// The Database field on the wire is the binding's logical-namespace
-	// value: a database name for postgres/mysql/mongodb, a vhost name
-	// for rabbitmq. provisionPerBinding decides whether that needs a
-	// dedicated namespace + Secret, runs the side-effects, and gives
-	// us back the resolved value (which it normalises — empty or
-	// rabbitmq "/" both become "" so the reconciler stays on the
-	// shared credentials).
-	database, injected, err := s.provisionPerBinding(ctx, req.Service, appNamespace, svcType, prefix, req.Database, creds)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	database, injected, warning := s.provisionPerBinding(ctx, req.Service, appNamespace, svcType, prefix, req.Database, creds)
 
 	// Add or update service binding on the right CR.
 	if target == "function" {
@@ -192,6 +180,7 @@ func (s *Services) Bind(w http.ResponseWriter, r *http.Request) {
 		Type:     svcType,
 		Database: database,
 		Injected: injected,
+		Warning:  warning,
 	})
 }
 
@@ -551,17 +540,10 @@ func (s *Services) ResolveBindingDatabase(ctx context.Context, svcName, appNames
 	return requested, nil
 }
 
-// ProvisionBinding is the entry point other handlers use to run the
-// per-binding side-effects for a single binding. It resolves the
-// service + credentials + default prefix, then delegates to
-// provisionPerBinding. Returns the resolved (possibly normalised)
-// database value the caller should write onto the ServiceBinding CR
-// — e.g. rabbitmq "/" becomes "" so the reconciler stays on the
-// shared service credentials.
-//
-// Callers that want to gate the side effects on a successful CR
-// write should use ResolveBindingDatabase first (read-only) and
-// invoke ProvisionBinding only after the CR is in place.
+// ProvisionBinding provisions a binding's database or vhost and returns its
+// normalized name and a credential preview with sensitive values masked.
+// Call ResolveBindingDatabase before saving the workload, then call this
+// method after saving so provisioning failures can be reported as warnings.
 func (s *Services) ProvisionBinding(ctx context.Context, svcName, appName, appNamespace, prefix, requested string) (string, map[string]string, error) {
 	// The service must live in the function's own namespace. This keeps a
 	// project-scoped binding from reading another project's credentials.
@@ -579,29 +561,23 @@ func (s *Services) ProvisionBinding(ctx context.Context, svcName, appName, appNa
 	if prefix == "" {
 		prefix = defaultPrefix(svcType)
 	}
-	return s.provisionPerBinding(ctx, svcName, appNamespace, svcType, prefix, requested, creds)
+	database, injected, warning := s.provisionPerBinding(ctx, svcName, appNamespace, svcType, prefix, requested, creds)
+	if warning != "" {
+		return database, injected, errors.New(warning)
+	}
+	return database, injected, nil
 }
 
-// provisionPerBinding decides whether the bind path needs a
-// per-binding logical namespace (postgres database, rabbitmq vhost),
-// runs the side-effects if so, and returns the *resolved* database
-// value (which the caller writes onto the ServiceBinding CR) plus
-// the env map that the bound container will see via EnvFrom.
-//
-// Empty input, or rabbitmq's default vhost "/", maps to the shared
-// service credentials — no exec, no per-binding Secret — and the
-// returned database is the empty string so the reconciler stays on
-// the shared `<service>-credentials` Secret.
-//
-// Shared between Services.Bind and InlineFunctions.Create so a
-// function created in one shot picks up the same provisioning the
-// edit-mode bind path would have done.
-func (s *Services) provisionPerBinding(ctx context.Context, svcName, svcNamespace, svcType, prefix, requested string, creds *corev1.Secret) (string, map[string]string, error) {
-	database := requested
+// provisionPerBinding provisions a database or vhost and returns its normalized
+// name, a credential preview with sensitive values masked, and any warning.
+// An empty name or RabbitMQ's "/" uses shared service credentials, as do
+// service types without logical namespaces.
+func (s *Services) provisionPerBinding(ctx context.Context, svcName, svcNamespace, svcType, prefix, requested string, creds *corev1.Secret) (database string, injected map[string]string, warning string) {
+	database = requested
 	if svcType == "rabbitmq" && database == "/" {
 		database = ""
 	}
-	injected := make(map[string]string)
+	injected = make(map[string]string)
 
 	if database == "" || !kipperv1.HasLogicalNamespace(svcType) {
 		for key, val := range creds.Data {
@@ -611,25 +587,16 @@ func (s *Services) provisionPerBinding(ctx context.Context, svcName, svcNamespac
 				injected[prefix+key] = string(val)
 			}
 		}
-		return "", injected, nil
+		return "", injected, ""
 	}
 
-	// Provision the logical namespace inside the service. Best
-	// effort: pod exec may be unavailable in tests, and the
-	// namespace may already exist on re-bind. The user still gets
-	// a valid per-binding Secret either way.
-	if err := s.createLogicalNamespace(ctx, svcName, svcNamespace, svcType, database, creds); err != nil {
-		fmt.Printf("warning: could not provision %q in %s: %v\n", database, svcName, err)
+	// Keep the binding usable for retries and report provisioning failures to the caller.
+	if perr := s.createLogicalNamespace(ctx, svcName, svcNamespace, svcType, database, creds); perr != nil {
+		warning = fmt.Sprintf("database %q was not created in %s: %v", database, svcName, perr)
 	}
 
-	// The per-binding Secret itself is rendered by the workload's reconciler
-	// from the service's shared credentials, so a later password rotation
-	// reaches the binding instead of leaving it on the value copied here.
-
-	// Show what will be injected from the per-binding secret. The
-	// type-specific logical-namespace key (NAME / VHOST) gets the
-	// binding's value; everything else falls through from the
-	// shared credentials.
+	// The reconciler derives the binding Secret from shared credentials so it
+	// follows password rotations. Return a masked preview for the response.
 	nsKey := kipperv1.LogicalNamespaceKey(svcType)
 	for key, val := range creds.Data {
 		switch {
@@ -641,7 +608,7 @@ func (s *Services) provisionPerBinding(ctx context.Context, svcName, svcNamespac
 			injected[prefix+key] = string(val)
 		}
 	}
-	return database, injected, nil
+	return database, injected, warning
 }
 
 // createLogicalNamespace provisions the per-binding logical namespace

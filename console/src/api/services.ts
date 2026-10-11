@@ -110,8 +110,14 @@ export interface BindPayload {
 // would otherwise stop for good. See envQueueTimeout in api/apps.ts.
 const envQueueTimeout = { timeout: 30_000 }
 
-export async function bindService(payload: BindPayload): Promise<void> {
-  await client.post('/bind', payload, envQueueTimeout)
+export interface BindResult {
+  warning?: string
+}
+
+/** Saves the binding and returns a warning if database provisioning fails. */
+export async function bindService(payload: BindPayload): Promise<BindResult> {
+  const { data } = await client.post<BindResult>('/bind', payload, envQueueTimeout)
+  return data ?? {}
 }
 
 export async function unbindService(payload: BindPayload): Promise<void> {

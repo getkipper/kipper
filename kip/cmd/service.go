@@ -869,28 +869,36 @@ func runServiceBind(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("bind failed: %s", string(respBody))
 	}
 
-	var result struct {
-		Service  string            `json:"service"`
-		App      string            `json:"app"`
-		Type     string            `json:"type"`
-		Database string            `json:"database,omitempty"`
-		Injected map[string]string `json:"injected"`
-	}
+	var result bindResult
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return fmt.Errorf("parsing response: %w", err)
 	}
-
-	fmt.Printf("  ✔  Bound %s (%s) → %s\n", serviceName, result.Type, appName)
-	if result.Database != "" {
-		fmt.Printf("  ✔  Database: %s\n", result.Database)
-	}
-	fmt.Printf("\n  Injected environment variables:\n")
-	for key, val := range result.Injected {
-		fmt.Printf("    %s=%s\n", key, val)
-	}
-	fmt.Println()
-
+	printBindResult(os.Stdout, serviceName, appName, result)
 	return nil
+}
+
+type bindResult struct {
+	Service  string            `json:"service"`
+	App      string            `json:"app"`
+	Type     string            `json:"type"`
+	Database string            `json:"database,omitempty"`
+	Injected map[string]string `json:"injected"`
+	Warning  string            `json:"warning,omitempty"`
+}
+
+func printBindResult(out io.Writer, serviceName, appName string, result bindResult) {
+	say(out, "  ✔  Bound %s (%s) → %s\n", serviceName, result.Type, appName)
+	switch {
+	case result.Warning != "":
+		say(out, "  ⚠  The binding was saved, but %s\n", result.Warning)
+	case result.Database != "":
+		say(out, "  ✔  Database: %s\n", result.Database)
+	}
+	say(out, "\n  Injected environment variables:\n")
+	for key, val := range result.Injected {
+		say(out, "    %s=%s\n", key, val)
+	}
+	say(out, "\n")
 }
 
 func runServiceUnbind(cmd *cobra.Command, args []string) error {
