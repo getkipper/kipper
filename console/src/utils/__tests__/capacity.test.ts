@@ -290,6 +290,99 @@ describe('activityLines', () => {
   })
 })
 
+describe('activityLines with the same change from both sources', () => {
+  const rescale = (time: string, size: number): ScaleActivity => ({
+    time, source: 'hpa_event', type: 'Normal', reason: 'SuccessfulRescale',
+    message: `New size: ${size}; reason: cpu resource utilization (percentage of request) above target`,
+  })
+  const logged = (time: string, action: string): ScaleActivity => ({ time, source: 'scale_log', reason: 'HPA autoscaling', message: action })
+
+  it("shows one line with Kipper's wording at the autoscaler's time and its message as the title", () => {
+    const lines = activityLines([
+      logged('2026-10-10T20:57:00Z', 'scaled out (2 → 5 pods)'),
+      rescale('2026-10-10T20:56:10Z', 5),
+    ])
+    expect(lines).toEqual([{
+      time: '2026-10-10T20:56:10Z',
+      text: 'scaled out (2 → 5 pods)',
+      title: 'New size: 5; reason: cpu resource utilization (percentage of request) above target',
+    }])
+  })
+
+  it('keeps both lines when the sizes differ or the times are far apart', () => {
+    const lines = activityLines([
+      logged('2026-10-10T21:30:00Z', 'scaled in (5 → 1 pod)'),
+      logged('2026-10-10T21:00:00Z', 'scaled out (2 → 5 pods)'),
+      rescale('2026-10-10T20:56:10Z', 4),
+      rescale('2026-10-10T20:40:00Z', 5),
+    ])
+    expect(lines.map(l => l.text)).toEqual([
+      'scaled in (5 → 1 pod)', 'scaled out (2 → 5 pods)',
+      'New size: 4; reason: cpu resource utilization (percentage of request) above target',
+      'New size: 5; reason: cpu resource utilization (percentage of request) above target',
+    ])
+  })
+
+  it('pairs each change with its own entry when the same size repeats', () => {
+    const lines = activityLines([
+      logged('2026-10-10T22:01:00Z', 'scaled out (1 → 2 pods)'),
+      rescale('2026-10-10T22:00:30Z', 2),
+      logged('2026-10-10T21:01:00Z', 'scaled out (1 → 2 pods)'),
+      rescale('2026-10-10T21:00:30Z', 2),
+    ])
+    expect(lines.map(l => [l.time, l.text])).toEqual([
+      ['2026-10-10T22:00:30Z', 'scaled out (1 → 2 pods)'],
+      ['2026-10-10T21:00:30Z', 'scaled out (1 → 2 pods)'],
+    ])
+  })
+
+  it("never borrows an earlier change's entry for a later rescale", () => {
+    const lines = activityLines([
+      rescale('2026-10-10T12:02:00Z', 2),
+      logged('2026-10-10T12:00:40Z', 'scaled in (3 → 2 pods)'),
+      rescale('2026-10-10T12:00:00Z', 2),
+    ])
+    expect(lines.map(l => [l.time, l.text])).toEqual([
+      ['2026-10-10T12:02:00Z', 'New size: 2; reason: cpu resource utilization (percentage of request) above target'],
+      ['2026-10-10T12:00:00Z', 'scaled in (3 → 2 pods)'],
+    ])
+  })
+
+  it('leaves an aggregated event alone once its latest occurrence is newer than the entry', () => {
+    const lines = activityLines([
+      rescale('2026-10-10T12:02:30Z', 2),
+      logged('2026-10-10T12:00:40Z', 'scaled out (1 → 2 pods)'),
+    ])
+    expect(lines).toHaveLength(2)
+  })
+
+  it('pairs a first-sight entry, which carries the scale time itself', () => {
+    const lines = activityLines([
+      logged('2026-10-10T12:00:00Z', 'scaled out from the minimum (2 → 4 pods)'),
+      rescale('2026-10-10T12:00:01Z', 4),
+    ])
+    expect(lines.map(l => l.text)).toEqual(['scaled out from the minimum (2 → 4 pods)'])
+  })
+
+  it('pairs each event with the nearest entry when a first-sight entry competes with an older one', () => {
+    const lines = activityLines([
+      rescale('2026-10-10T12:01:00Z', 2),
+      logged('2026-10-10T12:00:59Z', 'scaled out from the minimum (1 → 2 pods)'),
+      logged('2026-10-10T12:00:51Z', 'scaled in (3 → 2 pods)'),
+      rescale('2026-10-10T11:59:00Z', 2),
+    ])
+    expect(lines.map(l => [l.time, l.text])).toEqual([
+      ['2026-10-10T12:01:00Z', 'scaled out from the minimum (1 → 2 pods)'],
+      ['2026-10-10T11:59:00Z', 'scaled in (3 → 2 pods)'],
+    ])
+  })
+
+  it('pairs a scale to one pod', () => {
+    const lines = activityLines([logged('2026-10-10T23:01:00Z', 'scaled in (3 → 1 pod)'), rescale('2026-10-10T23:00:00Z', 1)])
+    expect(lines.map(l => l.text)).toEqual(['scaled in (3 → 1 pod)'])
+  })
+})
+
 describe('sizingNotice', () => {
   const base: AutoscaleConfig = {
     enabled: true, min_replicas: 1, max_replicas: 3, cpu_target: 0, memory_target: 0,
