@@ -49,13 +49,7 @@ const derivedRouteSeparator = hostnames.DerivedRouteSeparator
 type registerRequest struct {
 	Subdomain string `json:"subdomain"`
 	IP        string `json:"ip"`
-	// CertFingerprint is the SPKI SHA-256 the cluster asserts for the
-	// gateway→cluster hop, authenticated by Token. Both are optional: a plain
-	// {subdomain, ip} naming an existing registration carries neither and is
-	// answered without proving anything, refreshing nothing and moving nothing.
-	// The first registration happens before the cluster exists (kip install), so
-	// a fingerprint on a creating request is ignored — the cluster asserts it in
-	// a follow-up call authenticated by the token this one returns.
+	// SPKI SHA-256 fingerprint for the gateway-to-cluster TLS connection.
 	CertFingerprint string `json:"certFingerprint,omitempty"`
 	Token           string `json:"token,omitempty"`
 }
@@ -70,23 +64,13 @@ const (
 )
 
 type registerResponse struct {
-	Subdomain string `json:"subdomain"`
-	Domain    string `json:"domain"`
-	// Only set on a new registration. Nothing else echoes the token: an
-	// anonymous request naming an existing registration has proven nothing, and
-	// the label and address it names are both readable from public DNS.
-	Token string `json:"token,omitempty"`
-	// Pin reports the entry's pin state after this request. On a pending
-	// assertion the asserted and observed fingerprints ride along so the
-	// mismatch is debuggable from cluster-side logs alone.
+	Subdomain           string `json:"subdomain"`
+	Domain              string `json:"domain"`
+	Token               string `json:"token,omitempty"`
 	Pin                 string `json:"pin,omitempty"`
 	AssertedFingerprint string `json:"assertedFingerprint,omitempty"`
 	ObservedFingerprint string `json:"observedFingerprint,omitempty"`
-	// Challenge is a fresh proof-of-possession nonce (B16) for the token
-	// holder to sign with the hop-cert private key and submit to /proof. Set
-	// only when a valid token accompanied the request. Its absence tells an
-	// older cluster this gateway wants no proof; the cluster keeps heartbeating.
-	Challenge string `json:"challenge,omitempty"`
+	Challenge           string `json:"challenge,omitempty"`
 }
 
 // proofRequest carries a signed challenge: the token holder proves it possesses
@@ -211,14 +195,14 @@ func main() {
 	}
 	log.Printf("loaded %d registration(s) from %s", reg.Count(), dataPath)
 
-	// Proof-before-route (B16): a registration routes only once its holder has
+	// Proof-before-route: a registration routes only once its holder has
 	// proven possession of the key served at the address it registered. On
 	// unless explicitly disabled, because an operator who has never heard of the
 	// setting should get the protection: with it off, anyone who can register a
 	// label can point it at any address and have the gateway serve traffic there.
 	//
 	// Turning it off is the transition mode, for a fleet that has not acquired
-	// proofs yet: proofs are still recorded and routing stays fail-open (B5).
+	// proofs yet: proofs are still recorded, and unproven registrations can route.
 	// The way back on is to audit the detail endpoint for zero unproven entries
 	// and unset this.
 	enforceProof := boolEnvDefaultTrue("KIPPER_PROOF_BEFORE_ROUTE")
@@ -567,8 +551,14 @@ func handleRegister(reg *registry.Registry, baseDomain string, observe observeFu
 			return
 		}
 
-		entry, outcome, err := reg.Register(req.Subdomain, req.IP, req.Token)
+		entry, outcome, err := reg.RegisterDurably(req.Subdomain, req.IP, req.Token, dataPath)
 		if err != nil {
+			if errors.Is(err, registry.ErrNotRecorded) {
+				// Return a token only after the registration has been saved.
+				log.Printf("registering %s failed: %v", req.Subdomain, err) //nolint:gosec // subdomain validated above
+				respondError(w, http.StatusInternalServerError, "could not save the registration; please try again")
+				return
+			}
 			if errors.Is(err, registry.ErrSubdomainTaken) {
 				refuseRegistration(w, http.StatusConflict, req.Subdomain, err.Error())
 				return
@@ -601,15 +591,12 @@ func handleRegister(reg *registry.Registry, baseDomain string, observe observeFu
 			log.Printf("registered %s for %s", entry.Subdomain, entry.IP)
 			resp.Token = entry.Token
 			resp.Pin = pinNone
-			if err := reg.SaveTo(dataPath); err != nil {
-				log.Printf("failed to persist registry: %v", err)
-			}
 			respondJSON(w, http.StatusCreated, resp)
 			return
 		}
 
-		// Issue a fresh proof-of-possession challenge to the token holder
-		// (B16). IssueChallenge is token-gated, so a plain unauthenticated
+		// Issue a fresh proof-of-possession challenge to the token holder.
+		// IssueChallenge is token-gated, so a plain unauthenticated
 		// renewal gets none. The cluster signs it and calls /proof.
 		// A caller reads the absence of a challenge as its token having been
 		// rejected, so an internal failure to mint one must not be served as a
@@ -632,7 +619,10 @@ func handleRegister(reg *registry.Registry, baseDomain string, observe observeFu
 				resp.Pin = pinNone
 			}
 			if err := reg.SaveTo(dataPath); err != nil {
-				log.Printf("failed to persist registry: %v", err)
+				// Renewals remain in memory for the periodic flush to retry.
+				log.Printf("failed to persist the renewal of %s: %v", entry.Subdomain, err)
+				respondError(w, http.StatusInternalServerError, "could not save the renewal; please try again")
+				return
 			}
 			respondJSON(w, http.StatusCreated, resp)
 			return
