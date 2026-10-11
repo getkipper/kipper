@@ -147,7 +147,7 @@ func ensureMinIOPassword(client *ssh.Client) (string, error) {
 // Note: backups stored here die with the cluster (Longhorn data is on
 // the cluster's own host). For durability across cluster wipes, use
 // external storage via `kip install --backup-storage-*`.
-func installInClusterMinIO(client *ssh.Client, password string) error {
+func installInClusterMinIO(client commandRunner, password string) error {
 	minioManifest := fmt.Sprintf(`apiVersion: v1
 kind: Namespace
 metadata:
@@ -246,8 +246,8 @@ spec:
 		minioCredentialsSecret, minioUserSecretKey,
 		minioCredentialsSecret, minioPasswordSecretKey)
 
-	applyCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", minioManifest)
-	if _, err := client.Run(applyCmd); err != nil {
+	// Send the manifest over stdin to keep the root password out of process arguments.
+	if _, err := client.RunStdin("kubectl apply -f -", strings.NewReader(minioManifest)); err != nil {
 		return fmt.Errorf("applying MinIO manifest: %w", err)
 	}
 
@@ -259,12 +259,10 @@ spec:
 	return createMinIOBucket(client)
 }
 
-// createMinIOBucket runs a one-shot Job that creates the velero bucket
-// in the freshly-deployed MinIO. The Job reads the root credentials from
-// the minio-credentials Secret via env, so the generated password never
-// appears on a command line (where `ps` on the host could see it) or in
-// the Job's pod spec as a literal.
-func createMinIOBucket(client *ssh.Client) error {
+// createMinIOBucket creates the velero bucket with a one-shot Job.
+// Credentials from the minio-credentials Secret reach mc through MC_HOST_kipper
+// to keep the password out of process arguments.
+func createMinIOBucket(client commandRunner) error {
 	jobManifest := fmt.Sprintf(`apiVersion: batch/v1
 kind: Job
 metadata:
@@ -278,7 +276,7 @@ spec:
       containers:
         - name: mc
           image: %s
-          command: ["sh", "-c", "mc alias set kipper http://minio.velero.svc:9000 \"$MINIO_ROOT_USER\" \"$MINIO_ROOT_PASSWORD\" && mc mb --ignore-existing kipper/velero"]
+          command: ["sh", "-c", "export MC_HOST_kipper=\"http://$MINIO_ROOT_USER:$MINIO_ROOT_PASSWORD@minio.velero.svc:9000\" && mc mb --ignore-existing kipper/velero"]
           env:
             - name: MINIO_ROOT_USER
               valueFrom:
