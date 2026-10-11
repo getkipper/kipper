@@ -44,7 +44,12 @@ func (gc *GitCredentials) List(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	entries, _ := sharedcred.Load(ctx, gc.Client)
+	entries, err := sharedcred.Load(ctx, gc.Client)
+	if err != nil {
+		log.Printf("git credentials: %v", err)
+		respondError(w, http.StatusInternalServerError, "could not load Git credentials")
+		return
+	}
 
 	resp := make([]gitCredentialResponse, len(entries))
 	for i, e := range entries {
@@ -282,7 +287,12 @@ func (gc *GitCredentials) Health(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	entries, _ := sharedcred.Load(ctx, gc.Client)
+	entries, err := sharedcred.Load(ctx, gc.Client)
+	if err != nil {
+		log.Printf("git credentials: %v", err)
+		respondError(w, http.StatusInternalServerError, "could not load Git credentials")
+		return
+	}
 
 	type result struct {
 		name   string
@@ -353,7 +363,12 @@ func (gc *GitCredentials) Reveal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entries, _ := sharedcred.Load(ctx, gc.Client)
+	entries, err := sharedcred.Load(ctx, gc.Client)
+	if err != nil {
+		log.Printf("git credentials: %v", err)
+		respondError(w, http.StatusInternalServerError, "could not load Git credentials")
+		return
+	}
 	if e := sharedcred.Find(entries, name); e != nil {
 		log.Printf("reveal git-credential=%s by user=%s: ok", name, claims.Email)
 		respondJSON(w, http.StatusOK, map[string]string{"token": e.Token})
