@@ -1,3 +1,4 @@
+import DOMPurify from 'dompurify'
 import { marked, type Tokens, type Token, type TokensList } from 'marked'
 import hljs from 'highlight.js/lib/core'
 import javascript from 'highlight.js/lib/languages/javascript'
@@ -31,7 +32,7 @@ marked.setOptions({
 let codeBlockIndex = 0
 const codeBlockContents: string[] = []
 
-// Helper: parse inline tokens to HTML (handles bold, code, etc. inside block elements)
+// Preserve inline formatting without the paragraph wrapper.
 function parseInline(tokens: Token[]): string {
   return marked.parser([{ type: 'paragraph', raw: '', text: '', tokens }] as TokensList)
     .replace(/^<p>/, '').replace(/<\/p>\n?$/, '')
@@ -100,7 +101,6 @@ renderer.table = (token: Tokens.Table) => {
 }
 
 renderer.blockquote = (token: Tokens.Blockquote) => {
-  // Parse the full blockquote body with inline formatting
   const content = token.tokens ? marked.parser(token.tokens as TokensList) : token.text
   return `<blockquote class="my-2 border-l-2 border-kipper-500 pl-3 text-slate-400 italic">${content}</blockquote>`
 }
@@ -109,10 +109,11 @@ renderer.hr = () => '<hr class="my-4 border-slate-700" />'
 
 marked.use({ renderer })
 
+/** Sanitizes rendered Markdown before display; AI responses can contain untrusted cluster data. */
 export function renderMarkdown(text: string): string {
   codeBlockIndex = 0
   codeBlockContents.length = 0
-  return marked.parse(text) as string
+  return DOMPurify.sanitize(marked.parse(text) as string)
 }
 
 export function handleCodeCopyClick(e: MouseEvent): void {
