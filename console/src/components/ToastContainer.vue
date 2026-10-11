@@ -6,7 +6,7 @@ const { toasts, dismiss } = useToast()
 </script>
 
 <template>
-  <div class="fixed bottom-4 right-4 z-[200] flex flex-col gap-2">
+  <div class="fixed bottom-4 right-4 z-200 flex flex-col gap-2">
     <transition-group name="toast">
       <div
         v-for="toast in toasts"
@@ -26,7 +26,7 @@ const { toasts, dismiss } = useToast()
         <button
           type="button"
           aria-label="Dismiss"
-          class="ml-1 shrink-0 rounded p-0.5 text-white/70 transition-colors hover:bg-white/15 hover:text-white"
+          class="ml-1 shrink-0 rounded-sm p-0.5 text-white/70 transition-colors hover:bg-white/15 hover:text-white"
           @click="dismiss(toast.id)"
         >
           <X class="h-3.5 w-3.5" :stroke-width="2.5" />

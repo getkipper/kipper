@@ -95,7 +95,7 @@ onBeforeUnmount(() => {
       aria-modal="true"
       :aria-label="dialogLabel"
       tabindex="-1"
-      class="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-8 focus:outline-none"
+      class="fixed inset-0 z-100 flex items-center justify-center bg-black/40 p-8 focus:outline-hidden"
       @mousedown="onMousedown"
       @mouseup="onMouseup"
     >

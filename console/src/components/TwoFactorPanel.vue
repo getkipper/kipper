@@ -228,7 +228,7 @@ onMounted(loadStatus)
         <div class="space-y-3">
           <div>
             <p class="mb-1 text-xs font-medium text-slate-500 dark:text-slate-400">Manual entry secret</p>
-            <code class="break-all rounded bg-slate-100 px-2 py-1 font-mono text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300">{{ enrollment.secret }}</code>
+            <code class="break-all rounded-sm bg-slate-100 px-2 py-1 font-mono text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300">{{ enrollment.secret }}</code>
           </div>
           <div class="flex gap-3">
             <input
@@ -262,7 +262,7 @@ onMounted(loadStatus)
         Each works once to replace the factor if the device is lost. They are shown only this once.
       </p>
       <div class="grid grid-cols-2 gap-1 sm:grid-cols-4">
-        <code v-for="code in recoveryCodes" :key="code" class="rounded bg-white px-2 py-1 text-center font-mono text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300">{{ code }}</code>
+        <code v-for="code in recoveryCodes" :key="code" class="rounded-sm bg-white px-2 py-1 text-center font-mono text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300">{{ code }}</code>
       </div>
       <button
         @click="copyRecoveryCodes"

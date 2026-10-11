@@ -794,7 +794,7 @@ function addDependencyFromAI(pkg: string) {
     <div class="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-4 px-6 py-3 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800">
       <div class="flex items-center gap-3 min-w-0">
         <button
-          class="p-2 -ml-2 rounded hover:bg-slate-100 dark:hover:bg-slate-800"
+          class="p-2 -ml-2 rounded-sm hover:bg-slate-100 dark:hover:bg-slate-800"
           aria-label="Back to functions"
           @click="backToList"
         >
@@ -807,7 +807,7 @@ function addDependencyFromAI(pkg: string) {
               v-model="name"
               type="text"
               placeholder="function-name"
-              class="text-lg font-semibold bg-transparent border-b border-slate-300 dark:border-slate-700 focus:border-kipper-500 focus:outline-none px-1"
+              class="text-lg font-semibold bg-transparent border-b border-slate-300 dark:border-slate-700 focus:border-kipper-500 focus:outline-hidden px-1"
             />
             <h1 v-else class="text-lg font-semibold truncate">{{ name }}</h1>
             <span v-if="fnInfo" class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
@@ -830,7 +830,7 @@ function addDependencyFromAI(pkg: string) {
           @click="collapseAll"
         >Collapse all</button>
         <button
-          class="inline-flex items-center gap-2 px-4 py-2 rounded bg-kipper-600 text-white hover:bg-kipper-700 disabled:opacity-50"
+          class="inline-flex items-center gap-2 px-4 py-2 rounded-sm bg-kipper-600 text-white hover:bg-kipper-700 disabled:opacity-50"
           :disabled="saving"
           @click="save"
         >
@@ -852,13 +852,13 @@ function addDependencyFromAI(pkg: string) {
           <span class="flex items-center gap-2 font-medium">
             <CodeIcon class="w-4 h-4 text-slate-500" />
             Code
-            <select v-model="runtime" class="ml-2 text-xs border border-slate-300 dark:border-slate-700 rounded px-2 py-0.5 bg-transparent" @click.stop>
+            <select v-model="runtime" class="ml-2 text-xs border border-slate-300 dark:border-slate-700 rounded-sm px-2 py-0.5 bg-transparent" @click.stop>
               <option value="node">Node 22</option>
               <option value="python">Python 3.12</option>
             </select>
           </span>
           <button
-            class="text-xs inline-flex items-center gap-1 px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800"
+            class="text-xs inline-flex items-center gap-1 px-2 py-1 rounded-sm hover:bg-slate-100 dark:hover:bg-slate-800"
             @click.stop.prevent="showAI = !showAI"
           >
             <Wand2 class="w-3.5 h-3.5" /> {{ showAI ? 'Hide AI' : 'AI Assistant' }}
@@ -919,7 +919,7 @@ function addDependencyFromAI(pkg: string) {
         <div class="px-4 py-3 border-t border-slate-200 dark:border-slate-800 space-y-3">
           <div class="flex flex-wrap gap-2">
             <label v-for="t in (['http', 'cron', 'postgres', 'mysql', 'redis', 'minio'] as const)" :key="t"
-              class="inline-flex items-center gap-2 px-3 py-1.5 rounded border cursor-pointer text-sm"
+              class="inline-flex items-center gap-2 px-3 py-1.5 rounded-sm border cursor-pointer text-sm"
               :class="trigger === t ? 'border-kipper-500 bg-kipper-50 dark:bg-kipper-900/20 text-kipper-700 dark:text-kipper-300' : 'border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800'"
             >
               <input type="radio" v-model="trigger" :value="t" class="sr-only" />
@@ -933,10 +933,10 @@ function addDependencyFromAI(pkg: string) {
                 v-model="schedule"
                 type="text"
                 placeholder="0 2 * * *"
-                class="flex-1 px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent font-mono text-sm"
+                class="flex-1 px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent font-mono text-sm"
               />
               <select
-                class="text-sm border border-slate-300 dark:border-slate-700 rounded px-2 py-1.5 bg-transparent"
+                class="text-sm border border-slate-300 dark:border-slate-700 rounded-sm px-2 py-1.5 bg-transparent"
                 @change="applySchedulePreset($event)"
               >
                 <option value="">Common schedules…</option>
@@ -974,46 +974,46 @@ function addDependencyFromAI(pkg: string) {
           <div v-if="['postgres', 'mysql'].includes(trigger)" class="space-y-2">
             <div>
               <label class="text-xs text-slate-500 block mb-1">Source service</label>
-              <select v-model="eventSource" class="w-full px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent">
+              <select v-model="eventSource" class="w-full px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent">
                 <option value="">Select…</option>
                 <option v-for="s in eventTriggerCapableServices" :key="s.name" :value="s.name">{{ s.name }} ({{ s.type }})</option>
               </select>
             </div>
             <div>
               <label class="text-xs text-slate-500 block mb-1">Query (SELECT…)</label>
-              <textarea v-model="eventQuery" rows="2" class="w-full px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent font-mono text-xs"></textarea>
+              <textarea v-model="eventQuery" rows="2" class="w-full px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent font-mono text-xs"></textarea>
             </div>
             <div>
               <label class="text-xs text-slate-500 block mb-1">Mark-done query (optional)</label>
-              <textarea v-model="eventMarkDone" rows="2" class="w-full px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent font-mono text-xs"></textarea>
+              <textarea v-model="eventMarkDone" rows="2" class="w-full px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent font-mono text-xs"></textarea>
             </div>
           </div>
 
           <div v-if="trigger === 'redis'" class="space-y-2">
             <div>
               <label class="text-xs text-slate-500 block mb-1">Source service</label>
-              <select v-model="eventSource" class="w-full px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent">
+              <select v-model="eventSource" class="w-full px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent">
                 <option value="">Select…</option>
                 <option v-for="s in eventTriggerCapableServices.filter(x => x.type === 'redis')" :key="s.name" :value="s.name">{{ s.name }}</option>
               </select>
             </div>
             <div>
               <label class="text-xs text-slate-500 block mb-1">List name</label>
-              <input v-model="eventList" type="text" class="w-full px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent" />
+              <input v-model="eventList" type="text" class="w-full px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent" />
             </div>
           </div>
 
           <div v-if="trigger === 'minio'" class="space-y-2">
             <div>
               <label class="text-xs text-slate-500 block mb-1">Source service</label>
-              <select v-model="eventSource" class="w-full px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent">
+              <select v-model="eventSource" class="w-full px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent">
                 <option value="">Select…</option>
                 <option v-for="s in eventTriggerCapableServices.filter(x => x.type === 'minio')" :key="s.name" :value="s.name">{{ s.name }}</option>
               </select>
             </div>
             <div>
               <label class="text-xs text-slate-500 block mb-1">Bucket</label>
-              <input v-model="eventBucket" type="text" class="w-full px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent" />
+              <input v-model="eventBucket" type="text" class="w-full px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent" />
             </div>
           </div>
         </div>
@@ -1026,7 +1026,7 @@ function addDependencyFromAI(pkg: string) {
           <span class="text-xs text-slate-500">{{ bindings.length }} bound</span>
         </summary>
         <div class="px-4 py-3 border-t border-slate-200 dark:border-slate-800 space-y-3">
-          <div v-for="b in bindings" :key="b.service" class="rounded border border-slate-200 dark:border-slate-800 p-3">
+          <div v-for="b in bindings" :key="b.service" class="rounded-sm border border-slate-200 dark:border-slate-800 p-3">
             <div class="flex items-center justify-between">
               <div>
                 <span class="font-medium">{{ b.service }}</span>
@@ -1039,13 +1039,13 @@ function addDependencyFromAI(pkg: string) {
             </p>
           </div>
 
-          <div class="rounded border border-dashed border-slate-300 dark:border-slate-700 p-3 space-y-2">
+          <div class="rounded-sm border border-dashed border-slate-300 dark:border-slate-700 p-3 space-y-2">
             <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <select v-model="bindServiceName" class="px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm">
+              <select v-model="bindServiceName" class="px-2 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm">
                 <option value="">Pick service…</option>
                 <option v-for="s in bindableServices" :key="s.name" :value="s.name">{{ s.name }} ({{ s.type }})</option>
               </select>
-              <input v-model="bindPrefix" placeholder="Prefix (e.g. DB_)" class="px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-mono" />
+              <input v-model="bindPrefix" placeholder="Prefix (e.g. DB_)" class="px-2 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-mono" />
             </div>
 
             <!-- Namespace picker — meaningful for postgres/mysql
@@ -1072,7 +1072,7 @@ function addDependencyFromAI(pkg: string) {
               <select
                 v-if="bindDbMode === 'existing' && bindPickerCanListNamespaces"
                 v-model="bindDatabaseExisting"
-                class="w-full px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
+                class="w-full px-2 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
               >
                 <option value="">Pick a {{ bindNamespaceLabel }}…</option>
                 <option v-for="d in bindDatabases" :key="d" :value="d">
@@ -1084,7 +1084,7 @@ function addDependencyFromAI(pkg: string) {
                 <input
                   v-model="bindDatabaseNew"
                   :placeholder="bindNamespaceLabel === 'vhost' ? 'new vhost name (e.g. orders)' : 'new database name (e.g. myapp_data)'"
-                  class="w-full px-2 py-1.5 rounded border border-amber-400 dark:border-amber-700 bg-transparent text-sm font-mono"
+                  class="w-full px-2 py-1.5 rounded-sm border border-amber-400 dark:border-amber-700 bg-transparent text-sm font-mono"
                 />
                 <p class="mt-1 text-xs text-amber-700 dark:text-amber-400">
                   <span v-if="bindNamespaceLabel === 'vhost'">
@@ -1102,7 +1102,7 @@ function addDependencyFromAI(pkg: string) {
             </p>
             <button
               :disabled="!bindServiceName"
-              class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
+              class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
               @click="applyBinding"
             >
               <Plus class="w-4 h-4" /> Bind
@@ -1119,13 +1119,13 @@ function addDependencyFromAI(pkg: string) {
         </summary>
         <div class="px-4 py-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
           <div v-for="(row, idx) in env" :key="idx" class="grid grid-cols-[1fr_2fr_auto] gap-2">
-            <input v-model="row.key" placeholder="KEY" class="px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-mono" />
-            <input v-model="row.value" placeholder="value" class="px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm" />
-            <button class="p-1.5 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950 rounded" @click="removeEnvRow(idx)" aria-label="Remove">
+            <input v-model="row.key" placeholder="KEY" class="px-2 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-mono" />
+            <input v-model="row.value" placeholder="value" class="px-2 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm" />
+            <button class="p-1.5 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950 rounded-sm" @click="removeEnvRow(idx)" aria-label="Remove">
               <Trash2 class="w-4 h-4" />
             </button>
           </div>
-          <button class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800" @click="addEnvRow">
+          <button class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800" @click="addEnvRow">
             <Plus class="w-4 h-4" /> Add variable
           </button>
         </div>
@@ -1141,18 +1141,18 @@ function addDependencyFromAI(pkg: string) {
           <div v-for="s in secretKeys" :key="s.key" class="grid grid-cols-[1fr_2fr_auto] gap-2 items-center text-sm">
             <code class="font-mono">{{ s.key }}</code>
             <span class="text-slate-400">••••••••••••</span>
-            <button class="p-1.5 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950 rounded" @click="deleteExistingSecret(s.key)" aria-label="Delete">
+            <button class="p-1.5 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950 rounded-sm" @click="deleteExistingSecret(s.key)" aria-label="Delete">
               <Trash2 class="w-4 h-4" />
             </button>
           </div>
           <div v-for="(row, idx) in secretsToSet" :key="'new-' + idx" class="grid grid-cols-[1fr_2fr_auto] gap-2">
-            <input v-model="row.key" placeholder="KEY" class="px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-mono" />
+            <input v-model="row.key" placeholder="KEY" class="px-2 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-mono" />
             <div class="relative">
               <input
                 v-model="row.value"
                 :type="showSecretValueIdx === idx ? 'text' : 'password'"
                 placeholder="value"
-                class="w-full pr-8 px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-mono"
+                class="w-full pr-8 px-2 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-mono"
               />
               <button
                 class="absolute inset-y-0 right-1 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
@@ -1163,11 +1163,11 @@ function addDependencyFromAI(pkg: string) {
                 <Eye v-else class="w-4 h-4" />
               </button>
             </div>
-            <button class="p-1.5 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950 rounded" @click="removeNewSecretRow(idx)" aria-label="Remove">
+            <button class="p-1.5 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950 rounded-sm" @click="removeNewSecretRow(idx)" aria-label="Remove">
               <Trash2 class="w-4 h-4" />
             </button>
           </div>
-          <button class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800" @click="addSecretRow">
+          <button class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800" @click="addSecretRow">
             <Plus class="w-4 h-4" /> Add secret
           </button>
           <p class="text-xs text-slate-500">Secret values are write-only. They never round-trip through this UI.</p>
@@ -1198,28 +1198,28 @@ function addDependencyFromAI(pkg: string) {
               <span class="font-mono dark:text-slate-300">{{ conflict.keep }}</span> variant is the safer pick on the slim runtime image.
             </div>
             <button
-              class="shrink-0 inline-flex items-center gap-1 rounded border border-amber-400 bg-white px-2 py-1 text-[11px] font-medium text-amber-700 hover:bg-amber-100 dark:bg-amber-950 dark:text-amber-200"
+              class="shrink-0 inline-flex items-center gap-1 rounded-sm border border-amber-400 bg-white px-2 py-1 text-[11px] font-medium text-amber-700 hover:bg-amber-100 dark:bg-amber-950 dark:text-amber-200"
               @click="applyConflictFix(conflict.drop)"
             >Remove {{ conflict.drop }}</button>
           </NoticeCallout>
 
           <div v-for="(row, idx) in deps" :key="idx" class="grid grid-cols-[2fr_1fr_auto] gap-2">
-            <input v-model="row.name" placeholder="package name" class="px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-mono" />
-            <input v-model="row.version" placeholder="version (e.g. 8.11.5)" class="px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-mono" />
-            <button class="p-1.5 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950 rounded" @click="removeDepRow(idx)" aria-label="Remove">
+            <input v-model="row.name" placeholder="package name" class="px-2 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-mono" />
+            <input v-model="row.version" placeholder="version (e.g. 8.11.5)" class="px-2 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-mono" />
+            <button class="p-1.5 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950 rounded-sm" @click="removeDepRow(idx)" aria-label="Remove">
               <Trash2 class="w-4 h-4" />
             </button>
           </div>
           <div class="flex items-center gap-2">
-            <button class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800" @click="addDepRow">
+            <button class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800" @click="addDepRow">
               <Plus class="w-4 h-4" /> Add dependency
             </button>
-            <button class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800" @click="scanCodeForImports">
+            <button class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800" @click="scanCodeForImports">
               <ScanLine class="w-4 h-4" /> Scan code for imports
             </button>
             <button
               v-if="isEdit"
-              class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800"
+              class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800"
               @click="reloadDeps"
               title="Re-fetch dependencies from the server. Useful if the CR was changed externally (kubectl, AI suggestion)."
             >
@@ -1247,14 +1247,14 @@ function addDependencyFromAI(pkg: string) {
           <div v-if="!resourcesAdvanced" class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <label class="text-xs text-slate-500 block mb-1">Memory</label>
-              <input v-model="memoryLimit" placeholder="64Mi" class="w-full px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm" />
+              <input v-model="memoryLimit" placeholder="64Mi" class="w-full px-2 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm" />
               <p v-if="memoryRequest && memoryRequest !== memoryLimit" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
                 Saved request: {{ memoryRequest }} (overridden in advanced mode)
               </p>
             </div>
             <div>
               <label class="text-xs text-slate-500 block mb-1">CPU</label>
-              <input v-model="cpuLimit" placeholder="50m" class="w-full px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm" />
+              <input v-model="cpuLimit" placeholder="50m" class="w-full px-2 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm" />
               <p v-if="cpuRequest && cpuRequest !== cpuLimit" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
                 Saved request: {{ cpuRequest }} (overridden in advanced mode)
               </p>
@@ -1268,19 +1268,19 @@ function addDependencyFromAI(pkg: string) {
             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div>
                 <label class="text-xs text-slate-500 block mb-1">CPU request</label>
-                <input v-model="cpuRequest" placeholder="50m" class="w-full px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm" />
+                <input v-model="cpuRequest" placeholder="50m" class="w-full px-2 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm" />
               </div>
               <div>
                 <label class="text-xs text-slate-500 block mb-1">CPU limit</label>
-                <input v-model="cpuLimit" placeholder="500m" class="w-full px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm" />
+                <input v-model="cpuLimit" placeholder="500m" class="w-full px-2 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm" />
               </div>
               <div>
                 <label class="text-xs text-slate-500 block mb-1">Memory request</label>
-                <input v-model="memoryRequest" placeholder="256Mi" class="w-full px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm" />
+                <input v-model="memoryRequest" placeholder="256Mi" class="w-full px-2 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm" />
               </div>
               <div>
                 <label class="text-xs text-slate-500 block mb-1">Memory limit</label>
-                <input v-model="memoryLimit" placeholder="1Gi" class="w-full px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm" />
+                <input v-model="memoryLimit" placeholder="1Gi" class="w-full px-2 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm" />
               </div>
             </div>
           </div>
@@ -1303,10 +1303,10 @@ function addDependencyFromAI(pkg: string) {
             <input
               v-model="logSearch"
               placeholder="filter logs (e.g. error)"
-              class="flex-1 px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
+              class="flex-1 px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
               @keyup.enter="loadLogs"
             />
-            <select v-model="logSince" class="text-sm border border-slate-300 dark:border-slate-700 rounded px-2 py-1.5 bg-transparent">
+            <select v-model="logSince" class="text-sm border border-slate-300 dark:border-slate-700 rounded-sm px-2 py-1.5 bg-transparent">
               <option value="5m">last 5 min</option>
               <option value="15m">last 15 min</option>
               <option value="1h">last hour</option>
@@ -1315,7 +1315,7 @@ function addDependencyFromAI(pkg: string) {
               <option value="7d">last 7 days</option>
             </select>
             <button
-              class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
+              class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
               :disabled="logsLoading"
               @click="loadLogs"
             >
@@ -1324,7 +1324,7 @@ function addDependencyFromAI(pkg: string) {
               Refresh
             </button>
             <button
-              class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded border border-amber-400/40 text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40"
+              class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded-sm border border-amber-400/40 text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40"
               @click="openDiagnose"
               title="Ask the AI to look at pod status, events, and logs and tell you what's wrong"
             >
@@ -1340,7 +1340,7 @@ function addDependencyFromAI(pkg: string) {
           </div>
           <div
             v-else-if="logs.length"
-            class="rounded bg-slate-950 text-slate-100 font-mono text-xs leading-relaxed overflow-auto"
+            class="rounded-sm bg-slate-950 text-slate-100 font-mono text-xs leading-relaxed overflow-auto"
             style="max-height: 480px;"
           >
             <div
@@ -1350,7 +1350,7 @@ function addDependencyFromAI(pkg: string) {
             >
               <span class="text-slate-500 select-none">{{ formatLogTime(entry.timestamp) }}</span>
               <span class="text-slate-400 select-none truncate" :title="entry.pod">{{ entry.pod.slice(0, 12) }}</span>
-              <span class="whitespace-pre-wrap break-words">{{ entry.line }}</span>
+              <span class="whitespace-pre-wrap wrap-break-word">{{ entry.line }}</span>
             </div>
           </div>
         </div>

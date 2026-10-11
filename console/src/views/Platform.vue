@@ -65,7 +65,7 @@ function profileBlurb(profile: string): string {
           <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ profileBlurb(store.profile) }}</p>
         </div>
         <div class="text-xs text-slate-500 dark:text-slate-400">
-          Profile is set at install time. Edit the <code class="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-mono text-slate-700 dark:bg-slate-800 dark:text-slate-300">PlatformConfig</code> CR or run <code class="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-mono text-slate-700 dark:bg-slate-800 dark:text-slate-300">kip platform profile set &lt;name&gt;</code> to change it.
+          Profile is set at install time. Edit the <code class="rounded-sm bg-slate-100 px-1.5 py-0.5 text-[11px] font-mono text-slate-700 dark:bg-slate-800 dark:text-slate-300">PlatformConfig</code> CR or run <code class="rounded-sm bg-slate-100 px-1.5 py-0.5 text-[11px] font-mono text-slate-700 dark:bg-slate-800 dark:text-slate-300">kip platform profile set &lt;name&gt;</code> to change it.
         </div>
       </div>
     </section>
@@ -94,7 +94,7 @@ function profileBlurb(profile: string): string {
       <header class="mb-3 flex items-baseline justify-between gap-3">
         <h2 class="text-base font-semibold text-slate-900 dark:text-slate-50">AI bundle health</h2>
         <span class="text-xs text-slate-500 dark:text-slate-400">
-          Driven by the <code class="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-mono text-slate-700 dark:bg-slate-800 dark:text-slate-300">kipper-ai-bundle-state</code> / <code class="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-mono text-slate-700 dark:bg-slate-800 dark:text-slate-300">kipper-rag-bundle-state</code> ConfigMaps.
+          Driven by the <code class="rounded-sm bg-slate-100 px-1.5 py-0.5 text-[11px] font-mono text-slate-700 dark:bg-slate-800 dark:text-slate-300">kipper-ai-bundle-state</code> / <code class="rounded-sm bg-slate-100 px-1.5 py-0.5 text-[11px] font-mono text-slate-700 dark:bg-slate-800 dark:text-slate-300">kipper-rag-bundle-state</code> ConfigMaps.
         </span>
       </header>
 
@@ -104,7 +104,7 @@ function profileBlurb(profile: string): string {
           :key="key"
           class="flex items-start gap-3 rounded-md border p-3 dark:rounded-l-none"
           :class="aiBundle[key].installed && aiBundle[key].missing && aiBundle[key].missing.length
-            ? 'border-rose-200 bg-rose-50 dark:border-slate-800 dark:bg-slate-900 dark:shadow-[inset_3px_0_0_theme(colors.rose.400)]'
+            ? 'border-rose-200 bg-rose-50 dark:border-slate-800 dark:bg-slate-900 dark:shadow-[inset_3px_0_0_var(--color-rose-400)]'
             : 'border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-900/50'"
         >
           <div class="pt-0.5">
@@ -117,7 +117,7 @@ function profileBlurb(profile: string): string {
           <div class="flex-1">
             <div class="text-sm font-medium text-slate-900 dark:text-slate-50">{{ bundleLabel(key) }}</div>
             <div v-if="!aiBundle[key].installed" class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-              Not installed. Run <code class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-700 dark:bg-slate-800 dark:text-slate-300">kip ai {{ key === 'rag' ? 'rag ' : '' }}install</code> to enable.
+              Not installed. Run <code class="rounded-sm bg-slate-100 px-1.5 py-0.5 font-mono text-slate-700 dark:bg-slate-800 dark:text-slate-300">kip ai {{ key === 'rag' ? 'rag ' : '' }}install</code> to enable.
             </div>
             <div v-else-if="aiBundle[key].missing && aiBundle[key].missing.length" class="mt-1">
               <div class="text-xs font-medium text-rose-700 dark:text-rose-300">{{ aiBundle[key].missing!.length }} expected workload(s) missing:</div>
@@ -127,7 +127,7 @@ function profileBlurb(profile: string): string {
                 </li>
               </ul>
               <div class="mt-2 text-xs text-rose-700 dark:text-slate-400">
-                Re-run <code class="rounded bg-rose-100 px-1.5 py-0.5 font-mono dark:bg-slate-800 dark:text-slate-300">kip ai {{ key === 'rag' ? 'rag ' : '' }}install</code> to reconcile.
+                Re-run <code class="rounded-sm bg-rose-100 px-1.5 py-0.5 font-mono dark:bg-slate-800 dark:text-slate-300">kip ai {{ key === 'rag' ? 'rag ' : '' }}install</code> to reconcile.
               </div>
             </div>
             <div v-else class="mt-0.5 text-xs text-emerald-700 dark:text-emerald-300">

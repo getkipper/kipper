@@ -2786,7 +2786,7 @@ function openOptimise() {
         v-model="newImage"
         type="text"
         placeholder="registry.example.com/app:v2"
-        class="flex-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+        class="flex-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
         @keyup.enter="handleUpdateImage"
       />
       <button
@@ -2837,7 +2837,7 @@ function openOptimise() {
               v-model="logSearch"
               type="text"
               placeholder="Search logs..."
-              class="flex-1 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+              class="flex-1 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
               @keyup.enter="loadLokiLogs"
             />
             <select
@@ -2888,7 +2888,7 @@ function openOptimise() {
               v-model="liveFilter"
               type="text"
               placeholder="Filter..."
-              class="w-32 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+              class="w-32 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
             />
             <span class="flex-1" />
             <button @click="clear" class="text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-300">Clear</button>
@@ -2906,8 +2906,8 @@ function openOptimise() {
           <div v-if="lokiLoading" class="text-slate-600">Loading logs...</div>
           <div v-else-if="lokiLogs.length">
             <div v-for="(entry, i) in lokiLogs" :key="i" class="flex gap-2">
-              <span class="flex-shrink-0 text-slate-600">{{ formatLogTimestamp(entry.timestamp) }}</span>
-              <span class="flex-shrink-0 text-kipper-500">{{ entry.pod }}</span>
+              <span class="shrink-0 text-slate-600">{{ formatLogTimestamp(entry.timestamp) }}</span>
+              <span class="shrink-0 text-kipper-500">{{ entry.pod }}</span>
               <span>{{ entry.line }}</span>
             </div>
           </div>
@@ -3016,7 +3016,7 @@ function openOptimise() {
             </option>
           </select>
           <label v-if="linkingTarget" class="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-            <input type="checkbox" v-model="linkingPublic" class="rounded border-slate-300 text-kipper-600 focus:ring-kipper-500 dark:border-slate-600" />
+            <input type="checkbox" v-model="linkingPublic" class="rounded-sm border-slate-300 text-kipper-600 focus:ring-kipper-500 dark:border-slate-600" />
             public
           </label>
           <button
@@ -3034,7 +3034,7 @@ function openOptimise() {
           <!-- Restart-to-apply banner: env changed but running pods still hold the old values -->
           <NoticeCallout v-if="envRestartPending" tone="warning" class="p-3">
             <div class="flex items-start gap-2">
-              <RotateCw class="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600 dark:text-orange-300" />
+              <RotateCw class="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-orange-300" />
               <div class="flex-1">
                 <p class="text-xs font-medium text-amber-800 dark:text-orange-300">
                   Environment or secrets changed. The running pods keep the old values until you restart.
@@ -3054,7 +3054,7 @@ function openOptimise() {
           <!-- Direct env conflict warning -->
           <NoticeCallout v-if="envConflicts.length" tone="warning" class="p-3">
             <div class="flex items-start gap-2">
-              <AlertTriangle class="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600 dark:text-orange-300" />
+              <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-orange-300" />
               <div class="flex-1">
                 <p class="text-xs font-medium text-amber-800 dark:text-orange-300">
                   This deployment has direct env entries that override values set here
@@ -3063,7 +3063,7 @@ function openOptimise() {
                   <span
                     v-for="key in envConflicts"
                     :key="key"
-                    class="rounded bg-amber-200 px-1.5 py-0.5 font-mono text-xs text-amber-800 dark:bg-amber-800 dark:text-amber-200"
+                    class="rounded-sm bg-amber-200 px-1.5 py-0.5 font-mono text-xs text-amber-800 dark:bg-amber-800 dark:text-amber-200"
                   >{{ key }}</span>
                 </div>
                 <button
@@ -3144,7 +3144,7 @@ function openOptimise() {
                 <input
                   v-model="editEnvValue"
                   type="text"
-                  class="flex-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
+                  class="flex-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
                 />
                 <button @click="saveEditEnv(key as string)" class="rounded-md bg-kipper-600 p-1.5 text-white hover:bg-kipper-700">
                   <Save class="h-3.5 w-3.5" />
@@ -3212,11 +3212,11 @@ function openOptimise() {
           <div v-if="canWriteEnv" class="flex items-end gap-2 pt-2">
             <div class="min-w-0 flex-1">
               <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Key</label>
-              <input v-model="newEnvKey" type="text" placeholder="LOG_LEVEL" class="block w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+              <input v-model="newEnvKey" type="text" placeholder="LOG_LEVEL" class="block w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
             </div>
             <div class="min-w-0 flex-1">
               <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Value</label>
-              <input v-model="newEnvValue" type="text" placeholder="debug" class="block w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+              <input v-model="newEnvValue" type="text" placeholder="debug" class="block w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
             </div>
             <button @click="addEnvVar" :disabled="!newEnvKey" class="rounded-md bg-kipper-600 p-1.5 text-white hover:bg-kipper-700 disabled:opacity-50">
               <Plus class="h-4 w-4" />
@@ -3256,7 +3256,7 @@ function openOptimise() {
                   <input
                     v-model="editSecretValue"
                     type="text"
-                    class="flex-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
+                    class="flex-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
                   />
                   <button @click="saveEditSecret(key)" class="rounded-md bg-kipper-600 p-1.5 text-white hover:bg-kipper-700">
                     <Save class="h-3.5 w-3.5" />
@@ -3296,11 +3296,11 @@ function openOptimise() {
           <div v-if="canWriteEnv" class="flex items-end gap-2 pt-2">
             <div class="min-w-0 flex-1">
               <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Key</label>
-              <input v-model="newSecretKey" type="text" placeholder="DATABASE_URL" class="block w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+              <input v-model="newSecretKey" type="text" placeholder="DATABASE_URL" class="block w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
             </div>
             <div class="min-w-0 flex-1">
               <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Value</label>
-              <input v-model="newSecretValue" type="password" placeholder="••••••••" class="block w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+              <input v-model="newSecretValue" type="password" placeholder="••••••••" class="block w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
             </div>
             <button @click="addSecret" :disabled="!newSecretKey || !newSecretValue" class="rounded-md bg-kipper-600 p-1.5 text-white hover:bg-kipper-700 disabled:opacity-50">
               <Plus class="h-4 w-4" />
@@ -3350,7 +3350,7 @@ function openOptimise() {
 
               <!-- Image-mode app (always active for !git_configured) -->
               <div v-if="imageCardState === 'active'" class="text-xs text-slate-500 dark:text-slate-400">
-                <p>This app deploys pre-built images. Push a new version with <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">kip deploy {{ appName }} --image &lt;ref&gt;</code>.</p>
+                <p>This app deploys pre-built images. Push a new version with <code class="rounded-sm bg-slate-100 px-1 dark:bg-slate-800">kip deploy {{ appName }} --image &lt;ref&gt;</code>.</p>
                 <p class="mt-1">See Deploy history below for what's been rolled out.</p>
               </div>
 
@@ -3406,29 +3406,29 @@ function openOptimise() {
                 <label class="block">
                   <span class="text-slate-500 dark:text-slate-400">Repo URL</span>
                   <input v-model="gitForm.url" type="text" placeholder="https://github.com/org/repo.git"
-                    class="mt-0.5 w-full rounded border border-slate-300 px-2 py-1 font-mono text-xs dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200" />
+                    class="mt-0.5 w-full rounded-sm border border-slate-300 px-2 py-1 font-mono text-xs dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200" />
                 </label>
                 <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <label class="block">
                     <span class="text-slate-500 dark:text-slate-400">Branch</span>
                     <input v-model="gitForm.branch" type="text" placeholder="main"
-                      class="mt-0.5 w-full rounded border border-slate-300 px-2 py-1 font-mono text-xs dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200" />
+                      class="mt-0.5 w-full rounded-sm border border-slate-300 px-2 py-1 font-mono text-xs dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200" />
                   </label>
                   <label class="block">
                     <span class="text-slate-500 dark:text-slate-400">Dockerfile path</span>
                     <input v-model="gitForm.dockerfile_path" type="text" placeholder="Dockerfile"
-                      class="mt-0.5 w-full rounded border border-slate-300 px-2 py-1 font-mono text-xs dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200" />
+                      class="mt-0.5 w-full rounded-sm border border-slate-300 px-2 py-1 font-mono text-xs dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200" />
                   </label>
                 </div>
                 <label class="block">
                   <span class="text-slate-500 dark:text-slate-400">Build context</span>
                   <input v-model="gitForm.context" type="text" placeholder="."
-                    class="mt-0.5 w-full rounded border border-slate-300 px-2 py-1 font-mono text-xs dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200" />
+                    class="mt-0.5 w-full rounded-sm border border-slate-300 px-2 py-1 font-mono text-xs dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200" />
                 </label>
                 <label class="block">
                   <span class="text-slate-500 dark:text-slate-400">Git token (only set when rotating; leave empty to keep the existing one)</span>
                   <input v-model="gitForm.token" type="password" autocomplete="new-password" placeholder="ghp_… or glpat-… or github_pat_…"
-                    class="mt-0.5 w-full rounded border border-slate-300 px-2 py-1 font-mono text-xs dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200" />
+                    class="mt-0.5 w-full rounded-sm border border-slate-300 px-2 py-1 font-mono text-xs dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200" />
                 </label>
                 <div class="flex items-center justify-end gap-2 pt-1">
                   <button @click="gitEditing = false"
@@ -3487,7 +3487,7 @@ function openOptimise() {
                       v-if="canRevealEnv"
                       @click="revealGitTokenOpen = true"
                       title="Reveal git token"
-                      class="rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-600 dark:hover:bg-slate-700 dark:hover:text-slate-300"
+                      class="rounded-sm p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-600 dark:hover:bg-slate-700 dark:hover:text-slate-300"
                     >
                       <Eye class="h-3.5 w-3.5" :stroke-width="1.75" />
                     </button>
@@ -3531,7 +3531,7 @@ function openOptimise() {
                   tone="warning"
                   class="flex items-start gap-2 p-2"
                 >
-                  <AlertTriangle class="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-amber-600 dark:text-orange-300" :stroke-width="1.75" />
+                  <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-orange-300" :stroke-width="1.75" />
                   <span class="text-amber-800 dark:text-slate-300">
                     Git credentials
                     <span v-if="buildStatus.credentials_secret" class="font-mono">({{ buildStatus.credentials_secret }})</span>
@@ -3542,7 +3542,7 @@ function openOptimise() {
               </div>
 
               <div v-else class="text-xs text-slate-500 dark:text-slate-400">
-                Builds from a git repo on every push. Deploy with <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">kip deploy {{ appName }} --git &lt;url&gt;</code>.
+                Builds from a git repo on every push. Deploy with <code class="rounded-sm bg-slate-100 px-1 dark:bg-slate-800">kip deploy {{ appName }} --git &lt;url&gt;</code>.
               </div>
             </div>
 
@@ -3594,7 +3594,7 @@ function openOptimise() {
                     <input
                       :value="webhookUrl"
                       readonly
-                      class="flex-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-slate-700 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-300"
+                      class="flex-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-slate-700 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-300"
                     />
                     <button @click="copyWebhook(webhookUrl, 'url')" class="rounded-md border border-slate-300 p-1.5 text-slate-500 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-700">
                       <Check v-if="webhookCopied === 'url'" class="h-3.5 w-3.5 text-green-500" />
@@ -3609,7 +3609,7 @@ function openOptimise() {
                     <input
                       :value="webhookTokenVisible ? webhookToken : '••••••••••••••••••••••••••••••••'"
                       readonly
-                      class="flex-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-slate-700 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-300"
+                      class="flex-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-slate-700 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-300"
                     />
                     <button @click="webhookTokenVisible = !webhookTokenVisible" class="rounded-md border border-slate-300 p-1.5 text-slate-500 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-700">
                       <EyeOff v-if="webhookTokenVisible" class="h-3.5 w-3.5" />
@@ -3638,7 +3638,7 @@ function openOptimise() {
               tone="warning"
               class="flex items-start gap-2 p-2 text-xs"
             >
-              <AlertTriangle class="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-amber-600 dark:text-orange-300" :stroke-width="1.75" />
+              <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-orange-300" :stroke-width="1.75" />
               <span class="text-amber-800 dark:text-slate-300">
                 Registry pull secret credentials may be expired. New pods will fail to start until they are updated.
                 <RouterLink to="/settings" class="ml-1 font-medium underline dark:text-orange-300">Settings → Container Registries</RouterLink>
@@ -3789,7 +3789,7 @@ function openOptimise() {
                     v-model="cpuRequest"
                     type="text"
                     placeholder="e.g. 100m"
-                    class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
+                    class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
                   />
                 </div>
                 <div>
@@ -3798,7 +3798,7 @@ function openOptimise() {
                     v-model="cpuLimit"
                     type="text"
                     placeholder="e.g. 1000m"
-                    class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
+                    class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
                   />
                 </div>
                 <div>
@@ -3807,7 +3807,7 @@ function openOptimise() {
                     v-model="memoryRequest"
                     type="text"
                     placeholder="e.g. 2Gi"
-                    class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
+                    class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
                   />
                 </div>
                 <div>
@@ -3816,7 +3816,7 @@ function openOptimise() {
                     v-model="memoryLimit"
                     type="text"
                     placeholder="e.g. 2Gi"
-                    class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
+                    class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
                   />
                 </div>
               </div>
@@ -3914,7 +3914,7 @@ function openOptimise() {
                   v-model="routeHost"
                   type="text"
                   :placeholder="props.appName + '-' + '(auto-generated).kipper.run'"
-                  class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
+                  class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
                 />
                 <p class="mt-1 text-[10px] text-slate-400 dark:text-slate-500">Leave empty for auto-generated kipper.run subdomain</p>
               </div>
@@ -3924,7 +3924,7 @@ function openOptimise() {
                   v-model="routePath"
                   type="text"
                   placeholder="/"
-                  class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
+                  class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
                 />
               </div>
               <div>
@@ -3946,12 +3946,12 @@ function openOptimise() {
                       v-model="routeRedirectFrom[i]"
                       type="text"
                       placeholder="www.example.com"
-                      class="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
+                      class="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
                     />
                     <button
                       v-if="canWriteApp"
                       @click="removeRouteRedirectFrom(i)"
-                      class="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950"
+                      class="rounded-sm p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950"
                     >
                       <Minus class="h-3 w-3" />
                     </button>
@@ -3996,10 +3996,10 @@ function openOptimise() {
                       >
                         <div v-if="routeDnsStatus.expected_ips && routeDnsStatus.expected_ips.length" class="flex flex-wrap items-center gap-2">
                           <span class="opacity-75">Point your A record to:</span>
-                          <code class="rounded bg-white/60 px-1.5 py-0.5 font-mono text-[11px] dark:bg-black/30">{{ routeDnsStatus.expected_ips.join(', ') }}</code>
+                          <code class="rounded-sm bg-white/60 px-1.5 py-0.5 font-mono text-[11px] dark:bg-black/30">{{ routeDnsStatus.expected_ips.join(', ') }}</code>
                           <button
                             @click="copyRouteIP"
-                            class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-white/60 dark:hover:bg-black/30"
+                            class="inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-[11px] hover:bg-white/60 dark:hover:bg-black/30"
                             type="button"
                             title="Copy IP"
                           >
@@ -4009,7 +4009,7 @@ function openOptimise() {
                         </div>
                         <div v-if="routeDnsStatus.status === 'mismatch' && routeDnsStatus.resolved_ips && routeDnsStatus.resolved_ips.length" class="flex flex-wrap items-center gap-2 opacity-75">
                           <span>Currently resolves to:</span>
-                          <code class="rounded bg-white/60 px-1.5 py-0.5 font-mono text-[11px] dark:bg-black/30">{{ routeDnsStatus.resolved_ips.join(', ') }}</code>
+                          <code class="rounded-sm bg-white/60 px-1.5 py-0.5 font-mono text-[11px] dark:bg-black/30">{{ routeDnsStatus.resolved_ips.join(', ') }}</code>
                         </div>
                       </div>
                       <button
@@ -4028,7 +4028,7 @@ function openOptimise() {
                     @click="checkRouteDns()"
                     :disabled="routeDnsChecking"
                     type="button"
-                    class="shrink-0 rounded p-1 hover:bg-white/60 disabled:opacity-50 dark:hover:bg-black/30"
+                    class="shrink-0 rounded-sm p-1 hover:bg-white/60 disabled:opacity-50 dark:hover:bg-black/30"
                     title="Check again"
                   >
                     <RefreshCw class="h-3.5 w-3.5" :stroke-width="2" :class="{ 'animate-spin': routeDnsChecking }" />
@@ -4098,7 +4098,7 @@ function openOptimise() {
               v-model="cspAllowlist"
               type="text"
               placeholder="fonts.googleapis.com, cdn.example.com"
-              class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
+              class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
             />
             <p class="mt-1.5 text-[10px] text-slate-400 dark:text-slate-500">Comma-separated. Added to style-src, font-src, script-src, and connect-src.</p>
           </div>
@@ -4118,7 +4118,7 @@ function openOptimise() {
                 type="number"
                 min="0"
                 placeholder="0"
-                class="w-32 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
+                class="w-32 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
               />
               <span class="text-xs text-slate-500 dark:text-slate-400">req/s (0 = cluster default of 100)</span>
             </div>
@@ -4140,7 +4140,7 @@ function openOptimise() {
               data-testid="app-internal-paths"
               type="text"
               placeholder="/admin, /debug/pprof"
-              class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
+              class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
             />
             <p class="mt-1.5 text-[10px] text-slate-400 dark:text-slate-500">
               Comma-separated, each starting with a slash. The cluster refuses /actuator, /debug/pprof, /internal, /.git and /.env on top of these when its route guard is on.
@@ -4158,7 +4158,7 @@ function openOptimise() {
               data-testid="app-public-paths"
               type="text"
               placeholder="/actuator/prometheus"
-              class="mt-1.5 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
+              class="mt-1.5 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
             />
             <p class="mt-1.5 text-[10px] text-slate-400 dark:text-slate-500">
               Paths that stay public even though a refusal covers them, for a metrics scraper that needs one endpoint. Each names one path, matched exactly, so the prefix around it stays refused.
@@ -4177,7 +4177,7 @@ function openOptimise() {
               </div>
               <button
                 @click="requireApiKey = !requireApiKey"
-                class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
+                class="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors"
                 :class="requireApiKey ? 'bg-kipper-600' : 'bg-slate-300 dark:bg-slate-600'"
               >
                 <span
@@ -4222,23 +4222,23 @@ function openOptimise() {
                   v-model="redirect.source"
                   type="text"
                   placeholder="Source regex (e.g. ^/$)"
-                  class="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
+                  class="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
                 />
                 <span class="text-xs text-slate-400">→</span>
                 <input
                   v-model="redirect.target"
                   type="text"
                   placeholder="Target (e.g. /en/)"
-                  class="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
+                  class="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
                 />
                 <label class="flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400">
-                  <input type="checkbox" v-model="redirect.permanent" class="rounded" />
+                  <input type="checkbox" v-model="redirect.permanent" class="rounded-sm" />
                   301
                 </label>
                 <button
                   v-if="canWriteApp"
                   @click="removeRedirect(i)"
-                  class="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950"
+                  class="rounded-sm p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950"
                 >
                   <Minus class="h-3 w-3" />
                 </button>
@@ -4270,7 +4270,7 @@ function openOptimise() {
                 <button
                   v-if="canWriteApp"
                   @click="handleDeleteBasicAuthUser(user)"
-                  class="rounded p-0.5 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950 dark:hover:text-red-400"
+                  class="rounded-sm p-0.5 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950 dark:hover:text-red-400"
                   title="Remove user"
                 >
                   <X class="h-3.5 w-3.5" />
@@ -4283,13 +4283,13 @@ function openOptimise() {
                 v-model="basicAuthUsername"
                 type="text"
                 placeholder="Username"
-                class="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
+                class="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
               />
               <input
                 v-model="basicAuthPassword"
                 type="password"
                 placeholder="Password"
-                class="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
+                class="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50"
               />
               <button
                 @click="handleAddBasicAuthUser"
@@ -4324,8 +4324,8 @@ function openOptimise() {
       <div v-show="showsTab('files')" class="flex h-full flex-col">
         <!-- Warnings -->
         <div class="space-y-0">
-          <div v-if="podCount > 1" class="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:shadow-[inset_3px_0_0_theme(colors.orange.300)]">
-            <AlertTriangle class="h-3.5 w-3.5 flex-shrink-0 dark:text-orange-300" />
+          <div v-if="podCount > 1" class="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:shadow-[inset_3px_0_0_var(--color-orange-300)]">
+            <AlertTriangle class="h-3.5 w-3.5 shrink-0 dark:text-orange-300" />
             Browsing pod <span class="font-mono font-medium">{{ currentPod }}</span> ({{ podCount }} pods running). Edits are saved to all pods.
           </div>
           <div class="flex items-center gap-2 border-b border-slate-100 bg-slate-50 px-5 py-1.5 text-[10px] text-slate-400 dark:border-slate-800 dark:bg-slate-900">
@@ -4374,8 +4374,8 @@ function openOptimise() {
               class="flex cursor-pointer items-center gap-3 border-b border-slate-100 px-5 py-2.5 transition-colors hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/50"
               @click="handleFileClick(entry)"
             >
-              <Folder v-if="entry.is_dir" class="h-4 w-4 flex-shrink-0 text-kipper-500" />
-              <File v-else class="h-4 w-4 flex-shrink-0 text-slate-400" />
+              <Folder v-if="entry.is_dir" class="h-4 w-4 shrink-0 text-kipper-500" />
+              <File v-else class="h-4 w-4 shrink-0 text-slate-400" />
               <span class="flex-1 truncate text-sm text-slate-900 dark:text-slate-50">{{ entry.name }}</span>
               <span class="text-xs text-slate-400 tabular-nums">{{ entry.is_dir ? '' : filesApi.formatFileSize(entry.size) }}</span>
               <span class="hidden text-xs text-slate-400 sm:inline">{{ entry.permissions }}</span>
@@ -4383,7 +4383,7 @@ function openOptimise() {
               <button
                 v-if="!entry.is_dir"
                 @click.stop="handleDownload(entry)"
-                class="rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600 dark:hover:bg-slate-700 dark:hover:text-slate-300"
+                class="rounded-sm p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600 dark:hover:bg-slate-700 dark:hover:text-slate-300"
                 title="Download"
               >
                 <Download class="h-3.5 w-3.5" />
@@ -4485,7 +4485,7 @@ function openOptimise() {
                     </button>
                   </div>
                   <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">
-                    Then access the app at <code class="rounded bg-slate-200 px-1 py-0.5 font-mono text-xs dark:bg-slate-700">http://localhost:&lt;port&gt;</code>
+                    Then access the app at <code class="rounded-sm bg-slate-200 px-1 py-0.5 font-mono text-xs dark:bg-slate-700">http://localhost:&lt;port&gt;</code>
                   </p>
                 </div>
               </div>
@@ -4544,8 +4544,8 @@ function openOptimise() {
           <div class="rounded-lg border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
             <p class="text-xs font-medium text-slate-700 dark:text-slate-300">Prerequisites (CLI only)</p>
             <ul class="mt-2 space-y-1 text-xs text-slate-500 dark:text-slate-400">
-              <li>Install the kip CLI: <code class="rounded bg-slate-200 px-1 py-0.5 font-mono dark:bg-slate-700">curl -fsSL https://getkipper.com/install | sh</code></li>
-              <li>Import cluster credentials: <code class="rounded bg-slate-200 px-1 py-0.5 font-mono dark:bg-slate-700">kip cluster add cluster.kip</code></li>
+              <li>Install the kip CLI: <code class="rounded-sm bg-slate-200 px-1 py-0.5 font-mono dark:bg-slate-700">curl -fsSL https://getkipper.com/install | sh</code></li>
+              <li>Import cluster credentials: <code class="rounded-sm bg-slate-200 px-1 py-0.5 font-mono dark:bg-slate-700">kip cluster add cluster.kip</code></li>
             </ul>
           </div>
         </div>
@@ -4554,7 +4554,7 @@ function openOptimise() {
       <div v-if="showsTab('scale')" class="p-5">
         <!-- Auto mode banner -->
         <div v-if="isAutoMode" data-testid="sizing-notice" class="mb-4 flex items-start gap-2 rounded-lg border border-kipper-200 bg-kipper-50 p-3 dark:border-kipper-800 dark:bg-kipper-950">
-          <Info class="mt-0.5 h-4 w-4 flex-shrink-0 text-kipper-600 dark:text-kipper-400" />
+          <Info class="mt-0.5 h-4 w-4 shrink-0 text-kipper-600 dark:text-kipper-400" />
           <div class="text-xs text-kipper-700 dark:text-kipper-300">
             <p>{{ sizing.summary }}</p>
             <p v-if="sizing.singleReplica" class="mt-1 font-medium">Scale-down is paused because this app has a single replica. Increases still apply.</p>
@@ -4562,7 +4562,7 @@ function openOptimise() {
         </div>
         <!-- Resource recommendation banner -->
         <NoticeCallout v-if="recommendation?.active" tone="warning" class="mb-4 flex items-start gap-3 p-4">
-          <AlertTriangle class="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-600 dark:text-orange-300" />
+          <AlertTriangle class="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-orange-300" />
           <div class="flex-1">
             <p class="text-sm font-medium text-amber-800 dark:text-orange-300">Resource recommendation</p>
             <p class="mt-1 text-xs text-amber-700 dark:text-slate-400">{{ recommendation.message }}</p>

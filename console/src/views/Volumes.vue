@@ -195,7 +195,7 @@ function statusColor(status: string): string {
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div>
           <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Name</label>
-          <input v-model="newName" type="text" placeholder="uploads" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+          <input v-model="newName" type="text" placeholder="uploads" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
         </div>
         <div>
           <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Size</label>
@@ -236,7 +236,7 @@ function statusColor(status: string): string {
         </div>
         <div>
           <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Mount path</label>
-          <input v-model="mountPath" type="text" placeholder="/data/uploads" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+          <input v-model="mountPath" type="text" placeholder="/data/uploads" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
         </div>
       </div>
       <div class="mt-4 flex justify-end gap-2">
@@ -318,7 +318,7 @@ function statusColor(status: string): string {
       <HardDrive class="mx-auto mb-3 h-10 w-10 text-slate-400 dark:text-slate-500" :stroke-width="1.5" />
       <p class="text-sm font-medium text-slate-900 dark:text-slate-50">No shared volumes</p>
       <p class="mt-1 max-w-sm mx-auto text-sm text-slate-500 dark:text-slate-400">
-        Create a shared volume with <code class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-800">kip volume create uploads --size 5Gi</code>
+        Create a shared volume with <code class="rounded-sm bg-slate-100 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-800">kip volume create uploads --size 5Gi</code>
       </p>
     </div>
   </div>

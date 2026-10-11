@@ -206,15 +206,15 @@ function statusIcon(status: string) {
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
         <div>
           <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Name (optional)</label>
-          <input v-model="newName" type="text" placeholder="auto-generated" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+          <input v-model="newName" type="text" placeholder="auto-generated" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
         </div>
         <div>
           <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Namespaces (optional, comma-separated)</label>
-          <input v-model="newNamespaces" type="text" placeholder="all namespaces" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+          <input v-model="newNamespaces" type="text" placeholder="all namespaces" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
         </div>
         <div>
           <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Retention</label>
-          <select v-model="newTtl" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50">
+          <select v-model="newTtl" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50">
             <option value="24h0m0s">1 day</option>
             <option value="72h0m0s">3 days</option>
             <option value="168h0m0s">7 days</option>
@@ -396,7 +396,7 @@ function statusIcon(status: string) {
         <Archive class="mx-auto mb-3 h-10 w-10 text-slate-400 dark:text-slate-500" :stroke-width="1.5" />
         <p class="text-sm font-medium text-slate-900 dark:text-slate-50">No backups yet</p>
         <p class="mt-1 max-w-sm mx-auto text-sm text-slate-500 dark:text-slate-400">
-          Create a backup with <code class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-800">kip backup create</code> or use the button above.
+          Create a backup with <code class="rounded-sm bg-slate-100 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-800">kip backup create</code> or use the button above.
         </p>
       </div>
     </template>

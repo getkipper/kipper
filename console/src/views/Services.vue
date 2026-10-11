@@ -589,7 +589,7 @@ function typeIcon(type: string): string {
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div>
           <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Name</label>
-          <input v-model="newName" type="text" placeholder="mydb" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+          <input v-model="newName" type="text" placeholder="mydb" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
         </div>
         <div>
           <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Type</label>
@@ -605,19 +605,19 @@ function typeIcon(type: string): string {
         </div>
         <div>
           <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Storage (optional)</label>
-          <input v-model="newStorage" type="text" :placeholder="serviceTypes.find(t => t.value === newType)?.defaultStorage || '5Gi'" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+          <input v-model="newStorage" type="text" :placeholder="serviceTypes.find(t => t.value === newType)?.defaultStorage || '5Gi'" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
         </div>
         <div>
           <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Memory limit (optional)</label>
-          <input v-model="newMemory" type="text" placeholder="e.g. 512Mi, 1Gi" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+          <input v-model="newMemory" type="text" placeholder="e.g. 512Mi, 1Gi" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
         </div>
         <div>
           <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">CPU limit (optional)</label>
-          <input v-model="newCPU" type="text" placeholder="e.g. 250m, 500m" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+          <input v-model="newCPU" type="text" placeholder="e.g. 250m, 500m" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
         </div>
         <div>
           <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Version (optional)</label>
-          <input v-model="newVersion" type="text" placeholder="e.g. 16-alpine, 8-oracle, 7-alpine" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
+          <input v-model="newVersion" type="text" placeholder="e.g. 16-alpine, 8-oracle, 7-alpine" class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50" />
         </div>
       </div>
       <div class="mt-4 flex justify-end gap-2">
@@ -712,7 +712,7 @@ function typeIcon(type: string): string {
       <Database class="mx-auto mb-3 h-10 w-10 text-slate-400 dark:text-slate-500" :stroke-width="1.5" />
       <p class="text-sm font-medium text-slate-900 dark:text-slate-50">No services deployed</p>
       <p class="mt-1 max-w-sm mx-auto text-sm text-slate-500 dark:text-slate-400">
-        Add a database or cache with <code class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-800">kip service add postgres --name mydb</code>
+        Add a database or cache with <code class="rounded-sm bg-slate-100 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-800">kip service add postgres --name mydb</code>
       </p>
     </div>
 
@@ -813,7 +813,7 @@ function typeIcon(type: string): string {
             v-model="svcLogSearch"
             type="text"
             placeholder="Search logs..."
-            class="flex-1 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+            class="flex-1 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
             @keyup.enter="loadSvcLogs"
           />
           <select
@@ -839,8 +839,8 @@ function typeIcon(type: string): string {
           <div v-if="svcLogsLoading" class="text-slate-600">Loading logs...</div>
           <div v-else-if="svcLogs.length">
             <div v-for="(entry, i) in svcLogs" :key="i" class="flex gap-2">
-              <span class="flex-shrink-0 text-slate-600">{{ formatLogTime(entry.timestamp) }}</span>
-              <span class="flex-shrink-0 text-kipper-500">{{ entry.pod }}</span>
+              <span class="shrink-0 text-slate-600">{{ formatLogTime(entry.timestamp) }}</span>
+              <span class="shrink-0 text-kipper-500">{{ entry.pod }}</span>
               <span>{{ entry.line }}</span>
             </div>
           </div>
@@ -856,7 +856,7 @@ function typeIcon(type: string): string {
         <div v-if="svcResourcesLoading" class="text-sm text-slate-500 dark:text-slate-400">Loading...</div>
         <div v-else class="space-y-4">
           <p class="text-xs text-slate-500 dark:text-slate-400">
-            Drag a slider to preview a new limit; Apply restarts the service with the new value. Database services pre-fill from the <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">database</code> profile defaults at creation.
+            Drag a slider to preview a new limit; Apply restarts the service with the new value. Database services pre-fill from the <code class="rounded-sm bg-slate-100 px-1 dark:bg-slate-800">database</code> profile defaults at creation.
           </p>
 
           <div class="grid grid-cols-1 gap-6 md:grid-cols-2">

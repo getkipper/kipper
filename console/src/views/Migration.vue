@@ -391,7 +391,7 @@ onUnmounted(() => {
             @input="onTokenInput"
             type="text"
             placeholder="Paste the token from the target cluster"
-            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-xs text-slate-900 placeholder-slate-400 shadow-sm focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
+            class="block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-xs text-slate-900 placeholder-slate-400 shadow-xs focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
           />
           <NoticeCallout v-if="targetClusterInfo" tone="success" class="mt-2 px-4 py-3">
             <p class="text-sm font-medium text-emerald-800 dark:text-emerald-300">Target cluster identified</p>
@@ -417,7 +417,7 @@ onUnmounted(() => {
                 type="checkbox"
                 :value="p.name"
                 v-model="selectedProjects"
-                class="rounded border-slate-300 text-kipper-600 focus:ring-kipper-500"
+                class="rounded-sm border-slate-300 text-kipper-600 focus:ring-kipper-500"
               />
               <span class="text-sm font-medium text-slate-900 dark:text-slate-50">{{ p.display_name || p.name }}</span>
               <span class="font-mono text-xs text-slate-400">{{ p.environments.map(e => e.name).join(', ') }}</span>
@@ -454,7 +454,7 @@ onUnmounted(() => {
         v-if="planning"
         class="absolute inset-0 z-10 flex items-start justify-center rounded-xl bg-white/60 pt-28 backdrop-blur-[1px] dark:bg-slate-950/60"
       >
-        <div class="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+        <div class="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 shadow-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
           <RefreshCw class="h-4 w-4 animate-spin" :stroke-width="1.75" />
           Rebuilding plan with your confirmations…
         </div>
@@ -673,7 +673,7 @@ onUnmounted(() => {
           <div
             v-for="i in 10"
             :key="i"
-            class="h-2.5 w-2.5 rounded-sm"
+            class="h-2.5 w-2.5 rounded-xs"
             :class="transferActive
               ? 'bg-emerald-400 dark:bg-emerald-500'
               : 'bg-slate-200 dark:bg-slate-700'"

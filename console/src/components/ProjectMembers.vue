@@ -153,7 +153,7 @@ watch(() => props.project, load)
             v-else-if="canManage"
             :value="member.role"
             @change="changeRole(member, ($event.target as HTMLSelectElement).value as ProjectRole)"
-            class="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 focus:border-kipper-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+            class="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 focus:border-kipper-500 focus:outline-hidden dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
           >
             <option v-for="role in roles" :key="role.name" :value="role.name">{{ roleLabel(role.name) }}</option>
           </select>
@@ -166,7 +166,7 @@ watch(() => props.project, load)
           <button
             v-if="canManage"
             @click="remove(member)"
-            class="rounded p-1 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950 dark:hover:text-red-400"
+            class="rounded-sm p-1 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950 dark:hover:text-red-400"
             :title="`Remove ${member.email}`"
           >
             <Trash2 class="h-4 w-4" :stroke-width="2" />
@@ -181,12 +181,12 @@ watch(() => props.project, load)
         type="email"
         placeholder="email of an existing user"
         :disabled="saving"
-        class="min-w-48 flex-1 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-900 focus:border-kipper-500 focus:outline-none focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
+        class="min-w-48 flex-1 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-900 focus:border-kipper-500 focus:outline-hidden focus:ring-2 focus:ring-kipper-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
       />
       <select
         v-model="newRole"
         :disabled="saving"
-        class="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-900 focus:border-kipper-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
+        class="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-900 focus:border-kipper-500 focus:outline-hidden dark:border-slate-700 dark:bg-slate-800 dark:text-slate-50"
       >
         <option v-for="role in roles" :key="role.name" :value="role.name">{{ roleLabel(role.name) }}</option>
       </select>

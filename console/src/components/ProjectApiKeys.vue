@@ -206,7 +206,7 @@ watch(environment, () => {
       <select
         v-if="environments.length > 1"
         v-model="environment"
-        class="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 focus:border-kipper-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+        class="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 focus:border-kipper-500 focus:outline-hidden dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
       >
         <option v-for="env in environments" :key="env" :value="env">{{ env }}</option>
       </select>
@@ -227,7 +227,7 @@ watch(environment, () => {
         Key created. Copy it now: it is shown only this once.
       </p>
       <div class="mt-2 flex items-center gap-2">
-        <code class="flex-1 overflow-x-auto rounded bg-white px-2 py-1.5 font-mono text-xs text-slate-800 dark:bg-slate-900 dark:text-slate-200">{{ revealedKey.key }}</code>
+        <code class="flex-1 overflow-x-auto rounded-sm bg-white px-2 py-1.5 font-mono text-xs text-slate-800 dark:bg-slate-900 dark:text-slate-200">{{ revealedKey.key }}</code>
         <button
           @click="copyKey"
           class="rounded-md bg-kipper-600 p-1.5 text-white hover:bg-kipper-700"
@@ -321,7 +321,7 @@ watch(environment, () => {
               <button
                 v-if="canManage && plan.keys === 0"
                 @click="removePlan(plan)"
-                class="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950 dark:hover:text-red-400"
+                class="rounded-sm p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950 dark:hover:text-red-400"
                 :title="`Delete ${plan.name}`"
               >
                 <Trash2 class="h-3.5 w-3.5" :stroke-width="2" />
@@ -438,7 +438,7 @@ watch(environment, () => {
               <button
                 v-if="canManage"
                 @click="revokeKey(key)"
-                class="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950 dark:hover:text-red-400"
+                class="rounded-sm p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950 dark:hover:text-red-400"
                 :title="`Revoke ${key.display_name || key.name}`"
               >
                 <Trash2 class="h-3.5 w-3.5" :stroke-width="2" />

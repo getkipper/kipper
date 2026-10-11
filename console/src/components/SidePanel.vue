@@ -127,7 +127,7 @@ onBeforeUnmount(() => {
         role="dialog"
         :aria-label="label"
         tabindex="-1"
-        class="fixed inset-y-0 right-0 z-50 flex flex-col border-l border-slate-200 bg-white shadow-xl outline-none dark:border-slate-800 dark:bg-slate-900"
+        class="fixed inset-y-0 right-0 z-50 flex flex-col border-l border-slate-200 bg-white shadow-xl outline-hidden dark:border-slate-800 dark:bg-slate-900"
         :style="{ width: isFullscreen ? '100vw' : `${effectiveWidth}px` }"
       >
         <!-- Resize handle -->

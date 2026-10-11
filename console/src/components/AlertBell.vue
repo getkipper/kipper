@@ -189,11 +189,11 @@ onUnmounted(() => {
               class="px-4 py-3"
             >
               <div class="flex items-start gap-2.5">
-                <span :class="severityColor(alert.severity)" class="mt-1.5 h-2 w-2 flex-shrink-0 rounded-full" />
+                <span :class="severityColor(alert.severity)" class="mt-1.5 h-2 w-2 shrink-0 rounded-full" />
                 <div class="min-w-0 flex-1">
                   <div class="flex items-baseline justify-between gap-2">
                     <span class="text-xs font-semibold text-slate-900 dark:text-slate-50">{{ alert.app }}</span>
-                    <span class="flex-shrink-0 text-[10px] text-slate-400 dark:text-slate-500">{{ relativeTime(alert.time) }}</span>
+                    <span class="shrink-0 text-[10px] text-slate-400 dark:text-slate-500">{{ relativeTime(alert.time) }}</span>
                   </div>
                   <p class="mt-0.5 text-xs text-slate-700 dark:text-slate-300">{{ alert.action }}</p>
                   <p class="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">{{ alert.reason }}</p>

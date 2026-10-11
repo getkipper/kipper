@@ -208,7 +208,7 @@ function displayImage(image: string): string {
       <p class="text-sm font-medium text-slate-900 dark:text-slate-50">No functions deployed</p>
       <p class="mt-1 max-w-sm mx-auto text-sm text-slate-500 dark:text-slate-400">
         Click <span class="font-medium">New function</span> to build one in the console, or use
-        <code class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-800">kip function create</code> from the CLI.
+        <code class="rounded-sm bg-slate-100 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-800">kip function create</code> from the CLI.
       </p>
     </div>
   </div>

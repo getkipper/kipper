@@ -289,7 +289,7 @@ function statusColor(status: string): string {
             v-model="jobMemoryLimit"
             type="text"
             placeholder="e.g. 256Mi, 1Gi"
-            class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+            class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
           />
           <p v-if="jobResources.memory_request" class="mt-1 text-xs text-slate-500 dark:text-slate-400">
             Current request: {{ jobResources.memory_request }}
@@ -301,7 +301,7 @@ function statusColor(status: string): string {
             v-model="jobCPULimit"
             type="text"
             placeholder="e.g. 100m, 500m, 1"
-            class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
+            class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50"
           />
           <p v-if="jobResources.cpu_request" class="mt-1 text-xs text-slate-500 dark:text-slate-400">
             Current request: {{ jobResources.cpu_request }}

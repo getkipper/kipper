@@ -57,8 +57,8 @@ onMounted(async () => {
     v-if="visible"
     class="flex items-center gap-3 border-b px-4 py-2.5 text-sm dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300"
     :class="escalated
-      ? 'border-red-200 bg-red-50 text-red-800 dark:shadow-[inset_3px_0_0_theme(colors.rose.400)]'
-      : 'border-amber-200 bg-amber-50 text-amber-800 dark:shadow-[inset_3px_0_0_theme(colors.orange.300)]'"
+      ? 'border-red-200 bg-red-50 text-red-800 dark:shadow-[inset_3px_0_0_var(--color-rose-400)]'
+      : 'border-amber-200 bg-amber-50 text-amber-800 dark:shadow-[inset_3px_0_0_var(--color-orange-300)]'"
   >
     <ShieldAlert
       class="h-4 w-4 shrink-0"
@@ -78,7 +78,7 @@ onMounted(async () => {
         :class="escalated ? 'dark:text-rose-300' : 'dark:text-orange-300'"
       >Enroll in Settings</RouterLink>
     </p>
-    <button @click="dismiss" class="shrink-0 rounded p-1 hover:bg-black/5 dark:hover:bg-white/10" aria-label="Dismiss">
+    <button @click="dismiss" class="shrink-0 rounded-sm p-1 hover:bg-black/5 dark:hover:bg-white/10" aria-label="Dismiss">
       <X class="h-4 w-4" :stroke-width="1.75" />
     </button>
   </div>

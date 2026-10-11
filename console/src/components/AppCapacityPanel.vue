@@ -28,7 +28,7 @@ const autoscaledCount = ref<number | null>(null)
 // Number inputs hand back '' when cleared, so the form holds raw values.
 const draft = ref<Record<keyof CapacityForm, string | number | null>>({ ...emptyForm })
 
-const inputClass = 'w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-none disabled:opacity-60 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500'
+const inputClass = 'w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden disabled:opacity-60 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500'
 const labelClass = 'mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400'
 
 const capacityApi = computed(() => (config.value?.capacity_api ?? 0) >= 1)
@@ -282,7 +282,7 @@ defineExpose({ load })
           data-testid="capacity-refresh"
           type="button"
           :disabled="refreshing || saving"
-          class="rounded p-1 text-slate-500 hover:bg-slate-200 disabled:opacity-50 dark:text-slate-400 dark:hover:bg-slate-700"
+          class="rounded-sm p-1 text-slate-500 hover:bg-slate-200 disabled:opacity-50 dark:text-slate-400 dark:hover:bg-slate-700"
           title="Refresh the counts, badges and activity"
           @click="refresh"
         >
