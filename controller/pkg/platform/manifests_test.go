@@ -171,3 +171,11 @@ func TestKubePrometheusStackHelmChart_GrafanaSendsNothingUpstream(t *testing.T) 
 	assert.Equal(t, true, valueAt(t, values, "grafana", "grafana.ini", "plugins", "public_key_retrieval_disabled"))
 	assert.Equal(t, true, valueAt(t, values, "grafana", "grafana.ini", "security", "disable_gravatar"))
 }
+
+// The canary and its dependent Helm test use top-level chart values.
+func TestLokiHelmChart_DeploysNoCanary(t *testing.T) {
+	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium)))
+
+	assert.Equal(t, false, valueAt(t, values, "lokiCanary", "enabled"))
+	assert.Equal(t, false, valueAt(t, values, "test", "enabled"))
+}

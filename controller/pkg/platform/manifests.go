@@ -111,8 +111,11 @@ spec:
         enabled: false
         grafanaAgent:
           installOperator: false
-      lokiCanary:
-        enabled: false
+    lokiCanary:
+      enabled: false
+    # The chart's Helm test requires the canary.
+    test:
+      enabled: false
 `, HelmChartNamespace, LokiChartVersion, res.LokiMemoryRequest, res.LokiMemoryLimit)
 }
 
