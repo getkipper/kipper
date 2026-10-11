@@ -8,6 +8,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -70,6 +71,40 @@ func (r *AppReconciler) reconcileLinkPolicy(ctx context.Context, app *kipperv1.A
 	return live, nil
 }
 
+// narrowLinkPolicy retains only existing rules that match currently resolved
+// links. It grants no new access while ownership of the app name is uncertain.
+func (r *AppReconciler) narrowLinkPolicy(ctx context.Context, app *kipperv1.App) error {
+	var existing networkingv1.NetworkPolicy
+	switch err := r.Get(ctx, types.NamespacedName{Name: linkPolicyName(app.Name), Namespace: app.Namespace}, &existing); {
+	case errors.IsNotFound(err):
+		return nil
+	case err != nil:
+		return err
+	}
+	live, _, err := ResolveLinks(ctx, r.Client, app)
+	if err != nil {
+		return err
+	}
+	justified := r.linkEgressRules(live)
+	var kept []networkingv1.NetworkPolicyEgressRule
+	for _, rule := range existing.Spec.Egress {
+		for _, allowed := range justified {
+			if equality.Semantic.DeepEqual(rule, allowed) {
+				kept = append(kept, rule)
+				break
+			}
+		}
+	}
+	if len(justified) == 0 || len(kept) == 0 {
+		return r.Delete(ctx, &existing)
+	}
+	if len(kept) == len(existing.Spec.Egress) {
+		return nil
+	}
+	existing.Spec.Egress = kept
+	return r.Update(ctx, &existing)
+}
+
 // writeLinkPolicy brings the app's egress policy to match the rules resolved
 // for it, removing it entirely when nothing is allowed.
 func (r *AppReconciler) writeLinkPolicy(ctx context.Context, app *kipperv1.App, peers []networkingv1.NetworkPolicyEgressRule) error {
@@ -123,11 +158,8 @@ func (r *AppReconciler) writeLinkPolicy(ctx context.Context, app *kipperv1.App, 
 // ResolvedLink is a declared link whose target was found and is usable, paired
 // with the target it resolved to.
 type ResolvedLink struct {
-	Link   kipperv1.AppLink
-	target kipperv1.App
-	// sameNamespace links need no consent and get no egress rule, the workload
-	// policy already allowing the namespace. They are still dependencies and
-	// still get an address.
+	Link          kipperv1.AppLink
+	target        kipperv1.App
 	sameNamespace bool
 }
 

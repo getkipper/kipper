@@ -893,3 +893,141 @@ func TestTwoLinksCannotClaimOneAddressVariable(t *testing.T) {
 	require.Len(t, vars, 1, "the pod must not be given the same variable twice")
 	assert.Equal(t, "http://docuseal.docuseal-test.svc.cluster.local:3000", vars[0].Value)
 }
+
+func standingLinkPolicy(t *testing.T, c crclient.Client) {
+	t.Helper()
+	require.NoError(t, c.Create(context.Background(), &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{
+		Name: linkPolicyName("hrportal-backend"), Namespace: "hrportal-test"}}))
+}
+
+func assertLinkPolicyGone(t *testing.T, c crclient.Client, why string) {
+	t.Helper()
+	var np networkingv1.NetworkPolicy
+	err := c.Get(context.Background(), types.NamespacedName{Name: linkPolicyName("hrportal-backend"), Namespace: "hrportal-test"}, &np)
+	assert.True(t, errors.IsNotFound(err), why)
+}
+
+func TestEgressGoesWhenTheNameIsHeldByAnotherWorkload(t *testing.T) {
+	scheme := testScheme()
+	caller := linkTestApp("hrportal-backend", "hrportal-test", 8080,
+		kipperv1.AppLink{App: "docuseal", Namespace: "docuseal-test"})
+	target := linkTestApp("docuseal", "docuseal-test", 3000)
+	held := &kipperv1.WorkloadName{
+		ObjectMeta: metav1.ObjectMeta{Name: "hrportal-backend", Namespace: "hrportal-test"},
+		Spec:       kipperv1.WorkloadNameSpec{Kind: "function"},
+	}
+	client := crfake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(withWorld(caller, target, held)...).WithStatusSubresource(caller).Build()
+	r := &AppReconciler{Client: client, Scheme: scheme}
+	standingLinkPolicy(t, client)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "hrportal-backend", Namespace: "hrportal-test"}})
+
+	require.Error(t, err, "the name claim still fails")
+	assertLinkPolicyGone(t, client, "an app blocked at the name claim keeps no egress allowance")
+}
+
+func TestRevokedEgressGoesWhenTheCredentialSweepFails(t *testing.T) {
+	scheme := testScheme()
+	caller := linkTestApp("hrportal-backend", "hrportal-test", 8080,
+		kipperv1.AppLink{App: "docuseal", Namespace: "docuseal-test"})
+	target := linkTestApp("docuseal", "docuseal-test", 3000)
+	client := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		projectNS("hrportal-test", "hrportal"),
+		projectNS("docuseal-test", "docuseal"),
+		consentingProject("docuseal"),
+		caller, target,
+	).WithStatusSubresource(caller).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(ctx context.Context, c crclient.WithWatch, list crclient.ObjectList, opts ...crclient.ListOption) error {
+			if _, secrets := list.(*corev1.SecretList); secrets {
+				return fmt.Errorf("secrets cannot be listed")
+			}
+			return c.List(ctx, list, opts...)
+		},
+	}).Build()
+	r := &AppReconciler{Client: client, Scheme: scheme}
+	standingLinkPolicy(t, client)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "hrportal-backend", Namespace: "hrportal-test"}})
+
+	require.Error(t, err, "the sweep's failure is still reported")
+	assertLinkPolicyGone(t, client, "the withdrawn consent's allowance must go even though the sweep failed")
+}
+
+func failingNameClaims(c crclient.WithWatch) crclient.Client {
+	return interceptor.NewClient(c, interceptor.Funcs{
+		Get: func(ctx context.Context, cl crclient.WithWatch, key crclient.ObjectKey, obj crclient.Object, opts ...crclient.GetOption) error {
+			if _, claim := obj.(*kipperv1.WorkloadName); claim {
+				return fmt.Errorf("name reservations cannot be read")
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+}
+
+func TestRevokedEgressGoesWhenTheNameClaimFails(t *testing.T) {
+	scheme := testScheme()
+	caller := linkTestApp("hrportal-backend", "hrportal-test", 8080,
+		kipperv1.AppLink{App: "docuseal", Namespace: "docuseal-test"})
+	target := linkTestApp("docuseal", "docuseal-test", 3000)
+	base := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		projectNS("hrportal-test", "hrportal"),
+		projectNS("docuseal-test", "docuseal"),
+		consentingProject("docuseal"),
+		caller, target,
+	).WithStatusSubresource(caller).Build()
+	r := &AppReconciler{Client: failingNameClaims(base), Scheme: scheme}
+	standingLinkPolicy(t, base)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "hrportal-backend", Namespace: "hrportal-test"}})
+
+	require.Error(t, err)
+	assertLinkPolicyGone(t, base, "a revoked consent's allowance must go even when the name claim cannot be checked")
+}
+
+func TestAStillValidLinkSurvivesAFailedNameClaim(t *testing.T) {
+	scheme := testScheme()
+	caller := linkTestApp("hrportal-backend", "hrportal-test", 8080,
+		kipperv1.AppLink{App: "docuseal", Namespace: "docuseal-test"})
+	target := linkTestApp("docuseal", "docuseal-test", 3000)
+	base := crfake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(withWorld(caller, target)...).WithStatusSubresource(caller).Build()
+	healthy := &AppReconciler{Client: base, Scheme: scheme}
+	_, err := healthy.reconcileLinkPolicy(context.Background(), caller)
+	require.NoError(t, err)
+	before, found := linkPolicy(t, healthy, caller)
+	require.True(t, found)
+
+	r := &AppReconciler{Client: failingNameClaims(base), Scheme: scheme}
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "hrportal-backend", Namespace: "hrportal-test"}})
+
+	require.Error(t, err)
+	after, found := linkPolicy(t, healthy, caller)
+	require.True(t, found, "a consented link must keep its allowance")
+	assert.Equal(t, before.Spec.Egress, after.Spec.Egress)
+}
+
+func TestADeletingAppWithdrawsItsLinksEvenWhenCleanupFails(t *testing.T) {
+	scheme := testScheme()
+	caller := linkTestApp("hrportal-backend", "hrportal-test", 8080,
+		kipperv1.AppLink{App: "docuseal", Namespace: "docuseal-test"})
+	caller.Finalizers = []string{appFinalizer}
+	base := crfake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(withWorld(caller)...).WithStatusSubresource(caller).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c crclient.WithWatch, list crclient.ObjectList, opts ...crclient.ListOption) error {
+				if _, secrets := list.(*corev1.SecretList); secrets {
+					return fmt.Errorf("secrets cannot be listed")
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).Build()
+	r := &AppReconciler{Client: base, Scheme: scheme}
+	standingLinkPolicy(t, base)
+	require.NoError(t, base.Delete(context.Background(), caller))
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "hrportal-backend", Namespace: "hrportal-test"}})
+
+	require.Error(t, err, "the cleanup failure is still reported")
+	assertLinkPolicyGone(t, base, "a deleting app keeps no egress allowance")
+}
