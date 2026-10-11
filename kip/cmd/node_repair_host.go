@@ -46,7 +46,7 @@ func runNodeRepairHost(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\n  Connecting to %s...\n", nodeHost)
-	nodeClient, err := ssh.Dial(repairHostSSH(nodeHost, sshKey, cluster))
+	nodeClient, err := ssh.Dial(nodeSSH(nodeHost, sshKey, cluster))
 	if err != nil {
 		return fmt.Errorf("connecting to %s: %w", nodeHost, err)
 	}
@@ -65,7 +65,7 @@ func runNodeRepairHost(cmd *cobra.Command, args []string) error {
 
 	// The record goes on the node object, which is reached through the control
 	// plane rather than the node being repaired: a worker holds no kubectl.
-	masterClient, err := ssh.Dial(repairHostSSH(cluster.Host, sshKey, cluster))
+	masterClient, err := ssh.Dial(nodeSSH(cluster.Host, sshKey, cluster))
 	if err != nil {
 		return fmt.Errorf("connecting to the control plane to record it: %w", err)
 	}
@@ -83,11 +83,8 @@ func runNodeRepairHost(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// repairHostSSH builds the connection to a node being repaired.
-//
-// It uses the same key resolution as every other command, so an operator who
-// installed the cluster with their own key does not have to name it again here.
-func repairHostSSH(host, flagValue string, cluster *config.Cluster) ssh.Config {
+// nodeSSH uses the shared SSH key precedence: flag, environment, then cluster config.
+func nodeSSH(host, flagValue string, cluster *config.Cluster) ssh.Config {
 	explicit, fallback := resolveSSHKey(flagValue, cluster)
 	return ssh.Config{
 		Host:            host,

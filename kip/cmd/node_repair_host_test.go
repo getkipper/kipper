@@ -19,7 +19,7 @@ func TestRepairHostResolvesTheSSHKeyLikeEverythingElse(t *testing.T) {
 	t.Setenv("KIP_SSH_KEY", "")
 	cluster := &config.Cluster{Host: "203.0.113.10", SSHKey: "/keys/cluster-key"}
 
-	cfg := repairHostSSH("203.0.113.11", "", cluster)
+	cfg := nodeSSH("203.0.113.11", "", cluster)
 	assert.Equal(t, "/keys/cluster-key", cfg.KeyPath,
 		"the cluster's own key is what installed it and what should repair it")
 
@@ -34,12 +34,12 @@ func TestRepairHostPrefersTheFlag(t *testing.T) {
 	t.Setenv("KIP_SSH_KEY", "/keys/from-env")
 	cluster := &config.Cluster{SSHKey: "/keys/cluster-key"}
 
-	assert.Equal(t, "/keys/named", repairHostSSH("203.0.113.11", "/keys/named", cluster).KeyPath)
-	assert.Equal(t, "/keys/from-env", repairHostSSH("203.0.113.11", "", cluster).KeyPath,
+	assert.Equal(t, "/keys/named", nodeSSH("203.0.113.11", "/keys/named", cluster).KeyPath)
+	assert.Equal(t, "/keys/from-env", nodeSSH("203.0.113.11", "", cluster).KeyPath,
 		"the environment beats the cluster config, as it does everywhere else")
 }
 
 func TestRepairHostConnectsAsRoot(t *testing.T) {
-	assert.Equal(t, "root", repairHostSSH("203.0.113.11", "", nil).User,
+	assert.Equal(t, "root", nodeSSH("203.0.113.11", "", nil).User,
 		"writing host configuration needs root, as kip node add does")
 }

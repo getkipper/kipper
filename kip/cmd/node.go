@@ -3,8 +3,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -56,25 +54,13 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	workerHost, _ := cmd.Flags().GetString("host")
 	sshKey, _ := cmd.Flags().GetString("ssh-key")
 
-	if sshKey == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("resolving home directory: %w", err)
-		}
-		sshKey = filepath.Join(home, ".ssh", "id_ed25519")
-	}
-
 	cluster, _, err := loadCurrentCluster()
 	if err != nil {
 		return err
 	}
 
 	fmt.Printf("\n  Connecting to master (%s)...\n", cluster.Host)
-	masterClient, err := ssh.Dial(ssh.Config{
-		Host:    cluster.Host,
-		User:    "root",
-		KeyPath: sshKey,
-	})
+	masterClient, err := ssh.Dial(nodeSSH(cluster.Host, sshKey, cluster))
 	if err != nil {
 		return fmt.Errorf("connecting to master: %w", err)
 	}
@@ -82,11 +68,7 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  ✔  Connected to master\n")
 
 	fmt.Printf("  Connecting to worker (%s)...\n", workerHost)
-	workerClient, err := ssh.Dial(ssh.Config{
-		Host:    workerHost,
-		User:    "root",
-		KeyPath: sshKey,
-	})
+	workerClient, err := ssh.Dial(nodeSSH(workerHost, sshKey, cluster))
 	if err != nil {
 		return fmt.Errorf("connecting to worker: %w", err)
 	}
