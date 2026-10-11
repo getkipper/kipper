@@ -10,19 +10,8 @@ export default withMermaid(
     title: SITE_TITLE,
     description: SITE_DESCRIPTION,
 
-    // Held back from the build. A third review found the recovery still prints
-    // success after a failed patch, and that restoring only the certificate
-    // yields a certificate and key that do not match when the live key has
-    // moved — which breaks the fingerprint the gateway pins, the exact hazard
-    // the rewrite was meant to remove. The procedure and its crypto are sound;
-    // the recovery is not, and that is the half people reach for when the rest
-    // has gone wrong.
-    srcExclude: ['en/certificate-authority.md'],
-
     sitemap: { hostname: SITE_URL },
 
-    // VitePress emits one static head for the whole site, so without this every
-    // page would share the home page's URL and title.
     transformHead({ pageData }) {
       const title = pageData.title ? `${pageData.title} | ${SITE_TITLE}` : SITE_TITLE
       const description = pageData.description || SITE_DESCRIPTION
@@ -33,7 +22,7 @@ export default withMermaid(
         ['meta', { name: 'twitter:description', content: description }],
       ]
 
-      // The generated 404 answers on any URL, so it claims none of them.
+      // A 404 page has no canonical URL because it can be served at any path.
       if (pageData.relativePath !== '404.md') {
         const path = pageData.relativePath
           .replace(/index\.md$/, '')
@@ -67,9 +56,6 @@ export default withMermaid(
       ['meta', { property: 'og:image:alt', content: `${SITE_TITLE}: ${SITE_DESCRIPTION}` }],
       ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
       ['meta', { name: 'twitter:image', content: `${SITE_URL}/og-image.png` }],
-      // Plausible sets no cookies and stores no personal data, so the site
-      // needs no consent banner. plausible.io is on the app's CSP allowlist.
-      // The script filename identifies the site, so there is no data-domain.
       ['script', { async: '', src: 'https://plausible.io/js/pa-hNLTVzwL4CpsYcJEEtoFW.js' }],
       ['script', {}, `window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};plausible.init()`],
     ],
@@ -138,6 +124,7 @@ export default withMermaid(
               { text: 'Project Members', link: '/en/project-members' },
               { text: 'Authentication', link: '/en/authentication' },
               { text: 'Security', link: '/en/security' },
+              { text: 'Certificate Authority', link: '/en/certificate-authority' },
             ],
           },
           {
