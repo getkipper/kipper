@@ -98,7 +98,7 @@ The defaults work for most applications. Settings can be changed per app from th
 
 ```bash
 # Disable security headers for a specific app
-kip app deploy --name api --image myimg --port 3000 --no-security-headers
+kip app deploy --name backend --image myimg --port 3000 --no-security-headers
 
 # Set a custom rate limit (requests per second)
 kip app deploy --name public-api --image myimg --port 8080 --rate-limit 500
@@ -113,8 +113,8 @@ A route publishes everything its app answers under the path prefix, so a reposit
 ```bash
 kip platform internal-paths show     # what the cluster refuses, and on which routes
 kip platform internal-paths on       # refuse the default list everywhere
-kip app update api --internal-path /admin
-kip app update api --public-path /actuator/prometheus
+kip app update backend --internal-path /admin
+kip app update backend --public-path /actuator/prometheus
 ```
 
 A new cluster installs with the default list refused. A cluster upgraded from an earlier release keeps serving what it served until an operator turns it on, because the change is visible to whatever is calling those paths today.
@@ -306,10 +306,10 @@ Use specific version tags instead of `:latest` in production:
 
 ```bash
 # Development
-kip app deploy --name api --image registry.git.example.com/api:latest --port 8080
+kip app deploy --name backend --image registry.git.example.com/api:latest --port 8080
 
 # Production
-kip app update api --image registry.git.example.com/api:v1.2.3
+kip app update backend --image registry.git.example.com/api:v1.2.3
 ```
 
 ### Scan images for vulnerabilities

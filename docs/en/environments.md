@@ -147,7 +147,7 @@ After copying, set environment-specific secrets on each app and [copy database c
 ## Deploying to an environment
 
 ```bash
-kip app deploy --name api --image registry.git.example.com/api:v1.2.3 --port 3000 \
+kip app deploy --name backend --image registry.git.example.com/api:v1.2.3 --port 3000 \
   --project blog --environment test
 ```
 
@@ -208,16 +208,16 @@ Promotion updates the target app's image to match the source environment. The ta
 ### Promote a single app
 
 ```bash
-kip app promote api --from test --to acc --project blog
+kip app promote backend --from test --to acc --project blog
 ```
 
 ```
   Promote test → acc (blog)
-  Apps: api
+  Apps: backend
 
   Promote to acc? [y/N] y
 
-  ✔  api → acc (registry.git.example.com/api:v1.2.3)
+  ✔  backend → acc (registry.git.example.com/api:v1.2.3)
 ```
 
 ### Promote all apps
@@ -274,8 +274,8 @@ kip service add postgres --name blog-db --project blog-prod
 Then inject the correct connection URL per environment:
 
 ```bash
-kip app secret set api DATABASE_URL --project blog-test
-kip app secret set api DATABASE_URL --project blog-prod
+kip app secret set backend DATABASE_URL --project blog-test
+kip app secret set backend DATABASE_URL --project blog-prod
 ```
 
 Test and acc environments can use smaller storage allocations:

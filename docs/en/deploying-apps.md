@@ -13,8 +13,8 @@ Deploy from an image or a Git repository. Add a webhook to automate updates from
 
 | Mechanism | When to use | Command |
 |---|---|---|
-| **Container image** | You build images in your own CI and just want Kipper to roll them out. | `kip app deploy --name api --image ghcr.io/acme/api:1.2.3 --port 3000` |
-| **Git source** | You want Kipper to build the image in-cluster from a git repo every time you push. | `kip app deploy --name api --git https://github.com/acme/api --port 3000` |
+| **Container image** | You build images in your own CI and just want Kipper to roll them out. | `kip app deploy --name backend --image ghcr.io/acme/api:1.2.3 --port 3000` |
+| **Git source** | You want Kipper to build the image in-cluster from a git repo every time you push. | `kip app deploy --name backend --git https://github.com/acme/api --port 3000` |
 | **CI webhook** | You want your existing CI to push deploys to Kipper without anyone running `kip` by hand. Works on top of either of the above. | See [Webhooks](./webhooks.md) |
 
 The web console's Deploys tab shows all three as side-by-side cards, so you can see what's currently active and what's still available to wire up.
@@ -57,7 +57,7 @@ All three are owned by the App CR. Deleting the app cascades to all related reso
 
 ```bash
 kip app deploy \
-  --name api \
+  --name backend \
   --image ghcr.io/acme/api:latest \
   --port 3000 \
   --replicas 2 \
@@ -92,15 +92,15 @@ Explicit values set a fixed size. Switching to a named profile later preserves t
 Deploy directly from source code. Kipper clones your repo, builds a container image using your Dockerfile, pushes it to the internal registry, and deploys.
 
 ```bash
-kip app deploy --name api --git https://github.com/acme/api.git --port 3000
+kip app deploy --name backend --git https://github.com/acme/api.git --port 3000
 ```
 
 ```
-  Deploying api...
+  Deploying backend...
   ✔  Deployment created
   ✔  Service created
   ✔  Git source configured: https://github.com/acme/api.git (main)
-     Configure a webhook or run 'kip app rebuild api' to trigger the first build
+     Configure a webhook or run 'kip app rebuild backend' to trigger the first build
 ```
 
 ### Triggering builds
@@ -108,7 +108,7 @@ kip app deploy --name api --git https://github.com/acme/api.git --port 3000
 **Manual rebuild:**
 
 ```bash
-kip app rebuild api --project blog --environment test
+kip app rebuild backend --project blog --environment test
 ```
 
 **Automatic builds via webhook:**
@@ -118,7 +118,7 @@ Configure your Git provider to send push events to the webhook URL. Kipper valid
 **Streaming build logs:**
 
 ```bash
-kip app build-logs api --project blog --environment test
+kip app build-logs backend --project blog --environment test
 ```
 
 ### How it works
@@ -184,7 +184,7 @@ To raise the default for every build on a cluster instead of per app, set `BUILD
 For private repos, pass your Git access token when deploying:
 
 ```bash
-kip app deploy --name api \
+kip app deploy --name backend \
   --git https://github.com/acme/private-api.git \
   --git-token ghp_xxxxxxxxxxxx \
   --port 3000 \
@@ -193,7 +193,7 @@ kip app deploy --name api \
 ```
 
 ```
-  Deploying api...
+  Deploying backend...
   ✔  Git credentials stored
   ✔  Deployment created
   ✔  Service created
@@ -279,10 +279,10 @@ An app or service keeps its route-name reservation while it exists, even with it
 
 ```bash
 # Scale up
-kip app scale api --replicas 3
+kip app scale backend --replicas 3
 
 # Scale down
-kip app scale api --replicas 1
+kip app scale backend --replicas 1
 ```
 
 To take an app out of service temporarily, [stop it](#stopping-and-starting-an-app). This preserves its replica count and autoscaling settings, records who stopped it and why, and shows visitors a "this app is stopped" page.
@@ -365,7 +365,7 @@ Compare pod changes with traffic and resource use to assess demand. If CPU use s
 
 ```yaml
 apps:
-  api:
+  backend:
     image: registry.example.com/api:v2
     port: 8080
     autoscale:
@@ -389,19 +389,19 @@ See [Applying a manifest](/en/gitops#applying-a-manifest) for how apply treats t
 
 ```bash
 # Scale between 2 and 10 replicas, targeting 70% CPU
-kip app autoscale api --min 2 --max 10 --cpu 70
+kip app autoscale backend --min 2 --max 10 --cpu 70
 
 # Change one setting; the others keep their stored values
-kip app autoscale api --max 15
+kip app autoscale backend --max 15
 
 # Show the desired count, the bounds, ready pods and current usage
-kip app autoscale api --status
+kip app autoscale backend --status
 
 # Switch autoscaling off, keeping the running count and the bounds
-kip app autoscale api --off
+kip app autoscale backend --off
 
 # Remove the bounds once autoscaling is off
-kip app autoscale api --remove
+kip app autoscale backend --remove
 ```
 
 ```
@@ -415,7 +415,7 @@ When the App's `AutoscalingReady` condition is not True, `--status` adds a line 
 
 Flags you leave out keep their stored values. Missing bounds default to a minimum of 1 and a maximum of 5. With neither target set, CPU defaults to 70%. `--cpu 0` or `--memory 0` removes that target, and with no target left the CPU target of 70% applies. `kip app autoscale` with any setting flag switches autoscaling on.
 
-`--off` and `--remove` ignore `--min`, `--max`, `--cpu` and `--memory` and print a notice naming the flags they ignored. To change a setting and switch off, run the change first and `--off` after it, for example `kip app autoscale api --max 6` and then `kip app autoscale api --off`.
+`--off` and `--remove` ignore `--min`, `--max`, `--cpu` and `--memory` and print a notice naming the flags they ignored. To change a setting and switch off, run the change first and `--off` after it, for example `kip app autoscale backend --max 6` and then `kip app autoscale backend --off`.
 
 ### The minimum and maximum always hold
 
@@ -423,13 +423,13 @@ Kipper checks replica changes against the app's bounds:
 
 - `kip app scale`, `kip app deploy --replicas`, the console's Desired field and `kip apply` refuse a count outside the bounds, and the message names them. The way to run no pods is [stopping the app](#stopping-and-starting-an-app), so a count of 0 is refused too.
 - Changing the bounds with `kip app autoscale` or in the console moves the stored count into them in the same write. A minimum above the count raises it, and a maximum below it lowers it. The CLI prints the move. The console shows it before you save when no scaling policy is chosen, and in a notification after any save that moved the stored count. In `kipper.yaml` a declared `replicas` outside the new bounds is refused instead, so change both together.
-- Switching autoscaling off keeps the bounds. Remove them with `kip app autoscale api --remove`, by clearing Minimum and Maximum in the console with no scaling policy, or by deleting the `autoscale` block from `kipper.yaml` and applying with `--force`. `--remove` refuses while autoscaling is on; `--off --remove` does both in one go.
+- Switching autoscaling off keeps the bounds. Remove them with `kip app autoscale backend --remove`, by clearing Minimum and Maximum in the console with no scaling policy, or by deleting the `autoscale` block from `kipper.yaml` and applying with `--force`. `--remove` refuses while autoscaling is on; `--off --remove` does both in one go.
 
 While autoscaling is on, `kip app scale` refuses any count, because the autoscaler would overwrite it. `kip app deploy --replicas` stores the count and prints a note that it has no effect until autoscaling is off.
 
 ### Switching autoscaling off
 
-`kip app autoscale api --off` and choosing None (fixed count) in the console preserve the Deployment's desired count, adjusted to fit the bounds. The CLI reports any adjustment. A stopped app uses its stored restart count. If the Deployment's count cannot be read, the stored count is used and a warning explains why. The console also adjusts these fallback counts to fit the bounds.
+`kip app autoscale backend --off` and choosing None (fixed count) in the console preserve the Deployment's desired count, adjusted to fit the bounds. The CLI reports any adjustment. A stopped app uses its stored restart count. If the Deployment's count cannot be read, the stored count is used and a warning explains why. The console also adjusts these fallback counts to fit the bounds.
 
 `kip apply` with `enabled: false` is different, because the manifest is the declared state. The app runs the manifest's `replicas`, whatever the autoscaler was running. When the manifest leaves `replicas` out, the app runs its stored count if that lies within the bounds and `minReplicas` otherwise, the same rule as [In kipper.yaml](#in-kipper-yaml). To keep the autoscaler's count, switch autoscaling off with `kip app autoscale <app> --off` first and fold the result into the manifest with `kip export`.
 
@@ -444,11 +444,11 @@ A metric without a target is sized as before. Your own CPU and memory values, th
 
 ### When settings do not add up
 
-Older apps can contain settings that violate these rules. Kipper reports invalid settings and preserves the existing Deployment's desired count instead of applying them. With an invalid enabled policy, an existing autoscaler keeps its previous settings and can still change that count. The App's `AutoscalingReady` condition gives the reason (`InvalidPolicy` or `ReplicasOutsideBounds`), `kip app autoscale api --status` and the console's badges show it, and [`kip upgrade --check`](/en/maintenance#checking-before-an-upgrade) lists every such app with the command that fixes it.
+Older apps can contain settings that violate these rules. Kipper reports invalid settings and preserves the existing Deployment's desired count instead of applying them. With an invalid enabled policy, an existing autoscaler keeps its previous settings and can still change that count. The App's `AutoscalingReady` condition gives the reason (`InvalidPolicy` or `ReplicasOutsideBounds`), `kip app autoscale backend --status` and the console's badges show it, and [`kip upgrade --check`](/en/maintenance#checking-before-an-upgrade) lists every such app with the command that fixes it.
 
-The cluster's API server validates the autoscaling block on writes from any client and names the violated rule when refusing a change. This checks the block itself; Kipper's commands and controllers also check replica counts against its bounds. A block stored before the rules existed stays as it is, and a write that leaves it untouched, such as an image deploy, still goes through. A write that changes the block has to leave it valid, and switching autoscaling off changes it. On an app whose stored minimum is above its maximum, `kip app autoscale api --off` is therefore refused with `minReplicas must not exceed maxReplicas`. Fix the bounds first with `kip app autoscale api --min 2 --max 5` and then switch off, or correct Minimum and Maximum in the console and choose None (fixed count) in the same save.
+The cluster's API server validates the autoscaling block on writes from any client and names the violated rule when refusing a change. This checks the block itself; Kipper's commands and controllers also check replica counts against its bounds. A block stored before the rules existed stays as it is, and a write that leaves it untouched, such as an image deploy, still goes through. A write that changes the block has to leave it valid, and switching autoscaling off changes it. On an app whose stored minimum is above its maximum, `kip app autoscale backend --off` is therefore refused with `minReplicas must not exceed maxReplicas`. Fix the bounds first with `kip app autoscale backend --min 2 --max 5` and then switch off, or correct Minimum and Maximum in the console and choose None (fixed count) in the same save.
 
-An app stored with autoscaling on, a minimum above 1 and no maximum is caught the same way. Switching off would leave a minimum without a maximum, so `kip app autoscale api --off` is refused with `set maxReplicas with minReplicas, or leave both out to remove the bounds`, and `--remove` asks you to switch off first. Set a maximum no lower than the stored minimum, such as `kip app autoscale api --max 5` for a minimum of up to 5, then switch off. When the cluster refuses `--off` like this, kip prints the command that fixes the block.
+An app stored with autoscaling on, a minimum above 1 and no maximum is caught the same way. Switching off would leave a minimum without a maximum, so `kip app autoscale backend --off` is refused with `set maxReplicas with minReplicas, or leave both out to remove the bounds`, and `--remove` asks you to switch off first. Set a maximum no lower than the stored minimum, such as `kip app autoscale backend --max 5` for a minimum of up to 5, then switch off. When the cluster refuses `--off` like this, kip prints the command that fixes the block.
 
 An autoscaled app whose pods were taken to 0 without a stop is started at its minimum, because the autoscaler cannot scale up from zero.
 
@@ -488,7 +488,7 @@ kip app list --project staging
 
 ```
   NAME                 STATUS     IMAGE                             READY
-  api                  running    ghcr.io/acme/api:latest           2/2
+  backend              running    ghcr.io/acme/api:latest           2/2
   frontend             running    ghcr.io/acme/frontend:latest      1/1
 ```
 
@@ -497,7 +497,7 @@ In the web console, every app row on the **Projects** screen shows the app's pub
 ### Inspect one app
 
 ```bash
-kip app info api --project staging
+kip app info backend --project staging
 ```
 
 Shows the app's status, scaling settings, and last autoscaling time when available. It also shows CPU and memory values from the pod template and explains how Kipper sizes each resource. See [`kip app info`](/en/cli-reference#kip-app-info).
@@ -505,7 +505,7 @@ Shows the app's status, scaling settings, and last autoscaling time when availab
 ### Stream logs
 
 ```bash
-kip app logs api
+kip app logs backend
 ```
 
 Streams logs from the first running pod with 100 lines of history. Press Ctrl+C to stop.
@@ -513,7 +513,7 @@ Streams logs from the first running pod with 100 lines of history. Press Ctrl+C 
 ### Update an app image
 
 ```bash
-kip app update api --image ghcr.io/acme/api:v2.1.0
+kip app update backend --image ghcr.io/acme/api:v2.1.0
 ```
 
 Changes the container image and triggers a rolling update. Use this when you have a new version of your application to deploy.
@@ -521,7 +521,7 @@ Changes the container image and triggers a rolling update. Use this when you hav
 For apps within a project environment:
 
 ```bash
-kip app update api --image ghcr.io/acme/api:v2.1.0 --project blog --environment test
+kip app update backend --image ghcr.io/acme/api:v2.1.0 --project blog --environment test
 ```
 
 ::: tip Rollback history
@@ -531,7 +531,7 @@ Kipper keeps the 3 most recent versions of each deployment. Kubernetes can roll 
 ### Restart an app
 
 ```bash
-kip app restart api
+kip app restart backend
 ```
 
 Triggers a rolling restart, which replaces the pods as described in [How pods are replaced](#how-pods-are-replaced). With a [health check](#health-checks-and-rollouts) in place, a new pod counts as ready once your app passes the check. Without one, Kubernetes counts a pod as ready as soon as its container starts. Useful when you need to pick up new environment variables or pull a fresh `:latest` image.
@@ -539,8 +539,8 @@ Triggers a rolling restart, which replaces the pods as described in [How pods ar
 ### Stopping and starting an app
 
 ```bash
-kip app stop api --reason "not needed until the next campaign"
-kip app start api
+kip app stop backend --reason "not needed until the next campaign"
+kip app start backend
 ```
 
 In the console, click **Stop** in the app panel's header to enter an optional reason and see what will keep running.
@@ -569,7 +569,7 @@ Older Kipper versions do not honor stop records. A downgrade can resume apps wit
 ### Delete an app
 
 ```bash
-kip app delete api
+kip app delete backend
 ```
 
 Removes the Deployment, Service, Ingress, and all associated Secrets.
@@ -597,9 +597,9 @@ Checks connect to the pod's IP address. An app listening only on `127.0.0.1` can
 Declare an HTTP check when an open port does not mean the app is ready, for example when it still needs to warm caches or connect to a database. A declared check also lets you allow more startup time.
 
 ```bash
-kip app update api --health-path /actuator/health/readiness --health-startup-timeout 600
+kip app update backend --health-path /actuator/health/readiness --health-startup-timeout 600
 kip app update queue-worker --health none
-kip app update api --health auto      # remove the declared check and let Kipper decide
+kip app update backend --health auto      # remove the declared check and let Kipper decide
 ```
 
 | Type | What a pod must do |
@@ -656,7 +656,7 @@ The App's `RolloutComplete` condition reports rollout progress separately from p
 `kip app list` prints a note for each app still rolling out:
 
 ```
-  !   api is still rolling out: A new pod cannot be placed: 0/1 nodes are available: 1 Insufficient memory. Any healthy current pods continue serving. Lower the CPU or memory request, or add capacity.
+  !   backend is still rolling out: A new pod cannot be placed: 0/1 nodes are available: 1 Insufficient memory. Any healthy current pods continue serving. Lower the CPU or memory request, or add capacity.
 ```
 
 In the console, the Apps list shows **Rolling out** or **Rollout waiting**, with details on hover. The app panel shows an amber banner when a pod cannot be scheduled. Kipper records a `RolloutWaitingForCapacity` warning event when this state begins. A rollout that exceeds its progress deadline also raises an [alert](/en/alerts#stalled-rollouts) with the available diagnostic details.

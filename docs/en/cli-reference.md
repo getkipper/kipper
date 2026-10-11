@@ -153,8 +153,8 @@ Two things commonly match more than once. The same app name in several
 environments is the ordinary case, since each environment is its own namespace:
 
 ```bash
-$ kip exec api
-Error: "api" matches more than one workload:
+$ kip exec backend
+Error: "backend" matches more than one workload:
   app/blog-prod
   app/blog-test
 Name the one you mean with --project, plus --environment if the project has environments.
@@ -164,14 +164,14 @@ An app and a service can also share a name inside one namespace, which naming
 the project does not resolve. Use `--kind` for that:
 
 ```bash
-$ kip exec api --project blog --environment prod
-Error: "api" matches more than one workload in blog-prod:
+$ kip exec backend --project blog --environment prod
+Error: "backend" matches more than one workload in blog-prod:
   app/blog-prod
   service/blog-prod
 Name the one you mean with --kind app or --kind service.
 
-$ kip exec api --project blog --environment prod --kind service
-  Connecting to blog-prod/api-0...
+$ kip exec backend --project blog --environment prod --kind service
+  Connecting to blog-prod/backend-0...
 ```
 
 ## kip status {#kip-status}
@@ -474,11 +474,11 @@ kip ai restore --name pre-upgrade        # requires kipper-ai uninstalled first
 Shows an app's status, scaling, and CPU and memory settings.
 
 ```bash
-kip app info api --project shop --environment prod
+kip app info backend --project shop --environment prod
 ```
 
 ```
-  App: api
+  App: backend
 
   Status:  running, 2/2 ready
   Image:   ghcr.io/acme/api:v1
@@ -517,11 +517,11 @@ See [Your own CPU and memory values](/en/resource-management#your-own-values).
 Updates a deployed app's image, resource settings, or health check. Changes to the pod configuration trigger a rolling update.
 
 ```bash
-kip app update api --image ghcr.io/acme/api:v2.1.0
-kip app update api --profile jvm
-kip app update api --memory-request 512Mi --memory-limit 2Gi
-kip app update api --tuning auto
-kip app update api --health-path /actuator/health/readiness --health-startup-timeout 600
+kip app update backend --image ghcr.io/acme/api:v2.1.0
+kip app update backend --profile jvm
+kip app update backend --memory-request 512Mi --memory-limit 2Gi
+kip app update backend --tuning auto
+kip app update backend --health-path /actuator/health/readiness --health-startup-timeout 600
 ```
 
 | Flag | Required | Description |
@@ -551,7 +551,7 @@ The health flags also work with `kip app deploy`. Updates merge into the existin
 Sets the replica count for a deployed application.
 
 ```bash
-kip app scale api --replicas 3
+kip app scale backend --replicas 3
 ```
 
 | Flag | Required | Description |
@@ -568,11 +568,11 @@ For an app with bounds, counts outside them (including 0) are refused with a mes
 Configures automatic scaling for an app. The minimum and maximum are bounds on the app's replica count whether the autoscaler or you set it. See [Autoscaling](/en/deploying-apps#autoscaling).
 
 ```bash
-kip app autoscale api --min 2 --max 10 --cpu 70
-kip app autoscale api --max 15
-kip app autoscale api --status
-kip app autoscale api --off
-kip app autoscale api --remove
+kip app autoscale backend --min 2 --max 10 --cpu 70
+kip app autoscale backend --max 15
+kip app autoscale backend --status
+kip app autoscale backend --off
+kip app autoscale backend --remove
 ```
 
 | Flag | Required | Description |
@@ -592,15 +592,15 @@ Any of `--min`, `--max`, `--cpu` or `--memory` switches autoscaling on. Flags yo
 
 `--off` and `--remove` ignore `--min`, `--max`, `--cpu` and `--memory` and print a notice naming the flags they ignored. To change a setting and switch off, run the change first and `--off` after it.
 
-The cluster refuses a change that leaves the autoscaling block invalid, and switching off counts as a change. On an app whose stored minimum is above its maximum, `--off` (and so `--off --remove`) fails with `minReplicas must not exceed maxReplicas`. Set valid bounds with `--min` and `--max` first, then switch off. An app stored with autoscaling on, a minimum above 1 and no maximum fails `--off` with `set maxReplicas with minReplicas, or leave both out to remove the bounds`, so first set a maximum no lower than the stored minimum, for example `kip app autoscale api --max 5` for a minimum of up to 5. In both cases kip names the command that fixes the block. See [When settings do not add up](/en/deploying-apps#when-settings-do-not-add-up).
+The cluster refuses a change that leaves the autoscaling block invalid, and switching off counts as a change. On an app whose stored minimum is above its maximum, `--off` (and so `--off --remove`) fails with `minReplicas must not exceed maxReplicas`. Set valid bounds with `--min` and `--max` first, then switch off. An app stored with autoscaling on, a minimum above 1 and no maximum fails `--off` with `set maxReplicas with minReplicas, or leave both out to remove the bounds`, so first set a maximum no lower than the stored minimum, for example `kip app autoscale backend --max 5` for a minimum of up to 5. In both cases kip names the command that fixes the block. See [When settings do not add up](/en/deploying-apps#when-settings-do-not-add-up).
 
 ## kip app stop / kip app start {#kip-app-stop-kip-app-start}
 
 `kip app stop` shuts down an app’s pods. `kip app start` resumes the app using its saved configuration.
 
 ```bash
-kip app stop api --reason "not needed until the next campaign"
-kip app start api
+kip app stop backend --reason "not needed until the next campaign"
+kip app start backend
 ```
 
 | Flag | Command | Description |
@@ -616,15 +616,15 @@ Stopping preserves the app’s configuration, replica count, autoscaling setting
 Manage environment variables and secrets for an application.
 
 ```bash
-kip app env set api LOG_LEVEL=debug       # set env var
-kip app env list api                      # list with values visible
-kip app env delete api LOG_LEVEL          # remove
+kip app env set backend LOG_LEVEL=debug       # set env var
+kip app env list backend                      # list with values visible
+kip app env delete backend LOG_LEVEL          # remove
 
-kip app secret set api DATABASE_URL       # interactive hidden prompt
-kip app secret list api                   # keys only, values masked
-kip app secret reveal api DATABASE_URL    # show a single value
-kip app secret rollback api DATABASE_URL  # restore previous value
-kip app secret delete api DATABASE_URL    # remove
+kip app secret set backend DATABASE_URL       # interactive hidden prompt
+kip app secret list backend                   # keys only, values masked
+kip app secret reveal backend DATABASE_URL    # show a single value
+kip app secret rollback backend DATABASE_URL  # restore previous value
+kip app secret delete backend DATABASE_URL    # remove
 ```
 
 Every command that changes configuration saves it without restarting the
@@ -718,7 +718,7 @@ See [Projects & Environments](/en/environments) for full documentation.
 Promote an app from one environment to the next (copies the image tag only).
 
 ```bash
-kip app promote api --from test --to acc --project blog
+kip app promote backend --from test --to acc --project blog
 kip app promote --all --from acc --to prod --project blog
 ```
 

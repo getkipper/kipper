@@ -127,7 +127,7 @@ The gateway is a lightweight reverse proxy that manages `*.kipper.run` subdomain
 flowchart LR
     subgraph Internet
         B1[Browser: hello--203-0-113-10.kipper.run]
-        B2[Browser: api--203-0-113-10.kipper.run]
+        B2[Browser: backend--203-0-113-10.kipper.run]
     end
 
     subgraph Gateway
@@ -167,7 +167,7 @@ All subdomains are single-level to work with wildcard certificates:
 | `203-0-113-10.kipper.run` | 203-0-113-10 | (cluster itself) |
 | `console--203-0-113-10.kipper.run` | 203-0-113-10 | console |
 | `hello--203-0-113-10.kipper.run` | 203-0-113-10 | hello |
-| `api--203-0-113-10.kipper.run` | 203-0-113-10 | api |
+| `backend--203-0-113-10.kipper.run` | 203-0-113-10 | backend |
 
 ## Authentication flow
 
@@ -198,7 +198,7 @@ When you run `kip app deploy`, Kipper creates an App Custom Resource. A controll
 
 ```mermaid
 flowchart TD
-    A[kip app deploy --name api --image img --port 3000]
+    A[kip app deploy --name backend --image img --port 3000]
     A --> B[App CR - kipper.run/v1alpha1]
 
     B -->|reconciler| C[Deployment]

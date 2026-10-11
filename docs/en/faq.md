@@ -75,7 +75,7 @@ Any application packaged as a Docker container image. If it listens on a port, K
 Use `kip app update` to change the image and trigger a rolling update:
 
 ```bash
-kip app update api --image ghcr.io/acme/api:v2.1.0
+kip app update backend --image ghcr.io/acme/api:v2.1.0
 ```
 
 You can also update the image from the web console using the package icon in the app detail panel.
@@ -95,7 +95,7 @@ In Kubernetes Secrets, encrypted at rest by k3s. They are scoped to the project 
 ### How do I scale an app?
 
 ```bash
-kip app scale api --replicas 3
+kip app scale backend --replicas 3
 ```
 
 The `READY` column in `kip app list` shows scaling progress. You can also scale via the web console's Scale tab.
@@ -106,14 +106,14 @@ Yes, use the `--route` flag to group services by path:
 
 ```bash
 kip app deploy --name frontend --image img --port 80 --route myapp/
-kip app deploy --name api --image img --port 3000 --route myapp/api
+kip app deploy --name backend --image img --port 3000 --route myapp/api
 ```
 
 Both share `myapp--<cluster>.kipper.run` (or `myapp.<your-domain>` on a custom domain).
 
 ### I accidentally set the wrong secret value
 
-Run `kip app secret rollback api SECRET_KEY` to restore the previous value. Kipper automatically keeps the previous version of every secret.
+Run `kip app secret rollback backend SECRET_KEY` to restore the previous value. Kipper automatically keeps the previous version of every secret.
 
 ### Can I use a private container registry?
 

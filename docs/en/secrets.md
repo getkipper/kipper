@@ -13,16 +13,16 @@ For non-sensitive config like log levels, feature flags, and base URLs.
 
 ```bash
 # Set one or more variables
-kip app env set api LOG_LEVEL=debug API_URL=https://api.example.com
+kip app env set backend LOG_LEVEL=debug API_URL=https://api.example.com
 
 # Load from a file
-kip app env set api --from-file .env.production
+kip app env set backend --from-file .env.production
 
 # List all variables (values visible)
-kip app env list api
+kip app env list backend
 
 # Delete a variable
-kip app env delete api LOG_LEVEL
+kip app env delete backend LOG_LEVEL
 ```
 
 Values are displayed in plain text in both the CLI and the console UI.
@@ -35,19 +35,19 @@ they came up with until something restarts them. The console says so with a
 banner; the CLI says so in its output and tells you how to apply it.
 
 ```bash
-kip app env set api LOG_LEVEL=debug
+kip app env set backend LOG_LEVEL=debug
 ```
 
 ```
-  ✔  Environment updated for api
-      Saved. The running pods keep the values they started with until api restarts.
-      Re-run with --restart to apply it now, or run 'kip app restart api'.
+  ✔  Environment updated for backend
+      Saved. The running pods keep the values they started with until backend restarts.
+      Re-run with --restart to apply it now, or run 'kip app restart backend'.
 ```
 
 Add `--restart` to do both in one step:
 
 ```bash
-kip app env set api LOG_LEVEL=debug --restart
+kip app env set backend LOG_LEVEL=debug --restart
 ```
 
 The same applies to `kip app env delete`, `kip app secret set`, `kip app secret
@@ -136,36 +136,36 @@ For sensitive values like database passwords, API keys, and tokens.
 
 ```bash
 # Interactive prompt (value hidden, not in shell history)
-kip app secret set api DATABASE_URL
+kip app secret set backend DATABASE_URL
 
 # Inline (warns about shell history)
-kip app secret set api DATABASE_URL=postgres://user:pass@host/db
+kip app secret set backend DATABASE_URL=postgres://user:pass@host/db
 
 # Load from a file
-kip app secret set api --from-file .secrets
+kip app secret set backend --from-file .secrets
 
 # List keys only (values always masked)
-kip app secret list api
+kip app secret list backend
 
 # Reveal a single value
-kip app secret reveal api DATABASE_URL
+kip app secret reveal backend DATABASE_URL
 
 # Delete a secret
-kip app secret delete api DATABASE_URL
+kip app secret delete backend DATABASE_URL
 
 # Rollback to the previous value
-kip app secret rollback api DATABASE_URL
+kip app secret rollback backend DATABASE_URL
 ```
 
 Secrets can also be set at deploy time, so the app never has to start without them:
 
 ```bash
 # Prompted with hidden input, once per bare key
-kip app deploy --name api --image ghcr.io/acme/api:latest --port 3000 \
+kip app deploy --name backend --image ghcr.io/acme/api:latest --port 3000 \
   --secret DATABASE_URL --secret STRIPE_API_KEY
 
 # Inline (warns about shell history)
-kip app deploy --name api --image ghcr.io/acme/api:latest --port 3000 \
+kip app deploy --name backend --image ghcr.io/acme/api:latest --port 3000 \
   --secret API_KEY=abc123
 ```
 
@@ -176,7 +176,7 @@ Both forms write the same `app-<app>-secrets` Secret as `kip app secret set`, wi
 Every time you update a secret, Kipper preserves the previous value. The `list` command shows which keys have a previous version available:
 
 ```
-$ kip app secret list api
+$ kip app secret list backend
 
   KEY                            PREVIOUS     VALUE
   DATABASE_URL                   yes          ••••••••
@@ -186,7 +186,7 @@ $ kip app secret list api
 If you accidentally set a wrong value, rollback instantly:
 
 ```bash
-kip app secret rollback api DATABASE_URL
+kip app secret rollback backend DATABASE_URL
 ```
 
 ### JSON secrets
@@ -194,7 +194,7 @@ kip app secret rollback api DATABASE_URL
 If a secret value is valid JSON, `kip app secret reveal` displays it as formatted JSON. This is useful for structured config like database credentials:
 
 ```
-$ kip app secret reveal api DB_CONFIG
+$ kip app secret reveal backend DB_CONFIG
   DB_CONFIG=
   {
     "host": "db.example.com",
@@ -243,7 +243,7 @@ Inside the container, the resolved values are ordinary environment variables.
 
 ### When a change reaches the pod
 
-An environment-only edit publishes a new version while preserving the Deployment's current template. Apply it with the console's **Restart** button, `kip app restart api`, or `--restart` on the configuration command.
+An environment-only edit publishes a new version while preserving the Deployment's current template. Apply it with the console's **Restart** button, `kip app restart backend`, or `--restart` on the configuration command.
 
 Other changes that replace pods, such as an image update or a service-credential rotation, also pick up the latest environment. The restart banner compares the published version with the version referenced by the Deployment template; it is not a health check for every running pod.
 
