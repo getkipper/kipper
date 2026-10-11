@@ -11,10 +11,8 @@ import (
 	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
-// caDocsURL is the replacement procedure. Replacing an authority is a manual
-// operation with verification gates rather than a command, so anything that
-// tells an operator to replace one has to tell them where the steps are.
-const caDocsURL = "https://getkipper.com/en/certificate-authority"
+// caDocsURL links operators to the manual replacement and recovery procedure.
+const caDocsURL = "https://docs.getkipper.com/en/certificate-authority"
 
 func init() {
 	clusterCmd.AddCommand(clusterCACmd)
@@ -75,8 +73,7 @@ nothing to that file. It only re-renders what is already there.`,
 	RunE: runClusterAuthSync,
 }
 
-// dialClusterHost opens the SSH connection every command in this file needs.
-// All of them read or write host state the Kubernetes API cannot reach.
+// dialClusterHost uses SSH to access authentication files on the host.
 func dialClusterHost(cmd *cobra.Command) (*ssh.Client, *config.Cluster, error) {
 	cluster, err := loadCurrentClusterConfig()
 	if err != nil {
@@ -114,9 +111,6 @@ func runClusterCAStatus(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// printCAStatus lays the two sides of the trust relationship side by side and
-// says whether they agree. An operator who reads nothing else should still be
-// able to tell whether this cluster needs them.
 func printCAStatus(clusterName string, s installer.CAStatus) {
 	fmt.Printf("\n  Certificate authority: %s\n\n", clusterName)
 
@@ -142,9 +136,7 @@ func printCAStatus(clusterName string, s installer.CAStatus) {
 	} else {
 		fmt.Printf("    %s The API server has loaded that anchor\n", mark(s.AnchorLoaded))
 	}
-	// A check that cannot be made is said out loud. Printing nothing here reads
-	// as two ticks out of two, and the wire check is the one the replacement
-	// procedure leans on hardest before it narrows trust.
+	// Report skipped live checks so operators can distinguish them from passes.
 	if s.ServedByActive != nil {
 		fmt.Printf("    %s The wire confirms the certificate in use\n", mark(*s.ServedByActive))
 	} else {
@@ -162,9 +154,7 @@ func printCAStatus(clusterName string, s installer.CAStatus) {
 	if len(s.Problems) > 0 {
 		fmt.Printf("  Fix the above before replacing anything. Certificate authentication on the\n")
 		fmt.Printf("  server is unaffected, so you can always reach the cluster over SSH.\n")
-		// Returning here swallowed the phase, the resume point and the recovery
-		// link in exactly the states that have all three — including the one the
-		// procedure's own abandon instruction produces if only half of it runs.
+		// Keep the resume point and recovery link visible when a replacement needs repair.
 		if s.Phase != installer.CAPhaseSteady {
 			fmt.Printf("\n  A replacement is also part-way through (%s), resuming at %s.\n", s.Phase, s.Resume)
 		}
@@ -172,9 +162,7 @@ func printCAStatus(clusterName string, s installer.CAStatus) {
 		return
 	}
 
-	// Where they are comes before what is wrong, and is printed whatever else
-	// is true. Deriving it into a branch that a trust warning could pre-empt
-	// left an operator mid-replacement with no idea which step came next.
+	// Show the resume point alongside any trust warning below.
 	if s.Phase != installer.CAPhaseSteady {
 		fmt.Printf("  A replacement is part-way through (%s). This is a safe state to sit in:\n", s.Phase)
 		fmt.Printf("  the cluster trusts one authority more than it strictly needs to, which\n")
@@ -223,8 +211,6 @@ func mark(ok bool) string {
 	return "✗"
 }
 
-// expiryOf renders a date with the distance to it, because "2056" means little
-// without "30 years from now" next to it.
 func expiryOf(t time.Time) string {
 	if t.IsZero() {
 		return "unknown"

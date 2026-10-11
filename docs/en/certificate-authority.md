@@ -319,7 +319,7 @@ kip cluster ca status
   the cluster trusts one authority more than it strictly needs to, which
   affects nothing. Finish it before changing this cluster's domain.
   Resume at step 2.2, promoting the new authority:
-  https://getkipper.com/en/certificate-authority
+  https://docs.getkipper.com/en/certificate-authority
 ```
 
 Then confirm a login still works:
@@ -585,43 +585,101 @@ The status names the step for you in each case, so you do not have to work out w
 
 ## If it goes wrong
 
-The recovery puts the authority and the certificate back from the decoded files you saved before you
-started. It patches rather than deletes, and it never touches the private key.
+Recovery restores the saved authority and signs a new certificate for the cluster's current key.
+It patches the existing Secrets and preserves the certificate's private key, keeping the gateway's
+public-key pin unchanged.
 
-Both of those matter. Deleting the certificate's Secret and recreating it leaves a gap in which
-Kipper notices there is no certificate and mints a fresh one with a **new key**, which permanently
-moves the fingerprint the gateway pins and takes the cluster off the gateway. And restoring the key
-from a backup has the same effect if the live key has moved on since. The key on the cluster is the
-one to keep; only the certificate and the authority go back.
+Keep the certificate Secret in place. If it is deleted, Kipper can generate a new key, breaking the
+gateway's pin. A saved certificate may also no longer match the current key. Recovery uses the
+current key's public half so the restored certificate matches it.
+
+Use OpenSSL 3 and GNU `base64` on the node. Before updating the cluster, the function checks that the
+required backups are nonempty, builds a certificate, verifies it against the saved authority and
+anchor, and checks its public key. Each restore step stops on failure and reports where it stopped.
+The certificate patch requires the Secret's resource version to match the version read at the start;
+any intervening update stops the patch, protecting against a concurrent key change.
 
 On the node:
 
 ```bash
 cd /root/ca-replacement
 
-CA_B64=$(base64 -w0 < backup-ca.crt)
-CAKEY_B64=$(base64 -w0 < backup-ca.key)
-LEAF_B64=$(base64 -w0 < backup-leaf.crt)
+restore_authority() {
+  local f SAN RV CA_B64 CAKEY_B64 LEAF_B64
+  for f in backup-ca.crt backup-ca.key backup-anchor.crt; do
+    if [ ! -s "$f" ]; then
+      echo "STOP: $f is empty or missing. Cluster configuration is unchanged."; return 1
+    fi
+  done
 
-if [ -n "$CA_B64" ] && [ -n "$CAKEY_B64" ] && [ -n "$LEAF_B64" ]; then
-  kubectl -n kipper-system patch secret kipper-hop-ca --type merge -p "{\"data\":{
-    \"tls.crt\":\"$CA_B64\",
-    \"tls.key\":\"$CAKEY_B64\",
-    \"pending.crt\":null,
-    \"pending.key\":null,
-    \"previous.crt\":null
-  }}"
-  kubectl -n kipper-system patch secret kipper-hop-cert --type merge \
-    -p "{\"data\":{\"tls.crt\":\"$LEAF_B64\"}}"
-  cp backup-anchor.crt /etc/rancher/k3s/kipper-hop-ca.crt
+  RV=$(kubectl -n kipper-system get secret kipper-hop-cert -o jsonpath='{.metadata.resourceVersion}')
+  if [ -z "$RV" ] \
+    || ! kubectl -n kipper-system get secret kipper-hop-cert -o jsonpath='{.data.tls\.crt}' \
+      | base64 -d > live-leaf.crt || [ ! -s live-leaf.crt ] \
+    || ! kubectl -n kipper-system get secret kipper-hop-cert -o jsonpath='{.data.tls\.key}' \
+      | base64 -d | openssl pkey -pubout > live.pub 2> /dev/null || [ ! -s live.pub ]; then
+    echo "STOP: could not read the stored certificate and public key. Cluster configuration is unchanged."; return 1
+  fi
+
+  SAN=$(openssl x509 -in live-leaf.crt -noout -ext subjectAltName | tail -1 | tr -d ' ')
+  if [ -z "$SAN" ] || ! printf '%s\n' \
+      "subjectAltName=$SAN" \
+      "keyUsage=critical,digitalSignature" \
+      "extendedKeyUsage=serverAuth" \
+      "basicConstraints=critical,CA:FALSE" > restore.ext; then
+    echo "STOP: could not read the certificate names or write restore.ext. Cluster configuration is unchanged."; return 1
+  fi
+
+  if ! openssl x509 -new -subj "/CN=kipper-hop" -force_pubkey live.pub \
+      -CA backup-ca.crt -CAkey backup-ca.key -days 3650 -sha256 \
+      -extfile restore.ext -out restored-leaf.crt \
+    || ! openssl verify -CAfile backup-ca.crt restored-leaf.crt > /dev/null \
+    || ! openssl verify -CAfile backup-anchor.crt restored-leaf.crt > /dev/null \
+    || ! openssl x509 -in restored-leaf.crt -noout -pubkey | diff -q - live.pub > /dev/null; then
+    echo "STOP: could not create or verify a certificate for the current key using the saved authority and anchor. Cluster configuration is unchanged."; return 1
+  fi
+
+  if ! CA_B64=$(base64 -w0 < backup-ca.crt) || [ -z "$CA_B64" ] \
+    || ! CAKEY_B64=$(base64 -w0 < backup-ca.key) || [ -z "$CAKEY_B64" ] \
+    || ! LEAF_B64=$(base64 -w0 < restored-leaf.crt) || [ -z "$LEAF_B64" ]; then
+    echo "STOP: could not encode the authority certificate, authority key, or restored certificate. Cluster configuration is unchanged."; return 1
+  fi
+
+  if ! kubectl -n kipper-system patch secret kipper-hop-ca --type merge -p "{\"data\":{
+      \"tls.crt\":\"$CA_B64\",
+      \"tls.key\":\"$CAKEY_B64\",
+      \"pending.crt\":null,
+      \"pending.key\":null,
+      \"previous.crt\":null
+    }}"; then
+    echo "STOP: the authority patch failed. Check the error and cluster status before retrying."; return 1
+  fi
+  if ! kubectl -n kipper-system patch secret kipper-hop-cert --type merge \
+      -p "{\"metadata\":{\"resourceVersion\":\"$RV\"},\"data\":{\"tls.crt\":\"$LEAF_B64\"}}"; then
+    echo "STOP: authority restored; certificate patch failed. Check the error for a concurrent Secret update or another failure, then retry."; return 1
+  fi
+  if ! cp backup-anchor.crt /etc/rancher/k3s/.kipper-hop-ca.crt.restore \
+    || ! mv /etc/rancher/k3s/.kipper-hop-ca.crt.restore /etc/rancher/k3s/kipper-hop-ca.crt; then
+    echo "STOP: authority and certificate restored; anchor file update failed. Check the error, then retry."; return 1
+  fi
   echo "RESTORED"
-else
-  echo "STOP: a backup file is empty, so this would make things worse"
-fi
+}
+restore_authority
 ```
 
-The explicit `null`s are what removes the keys a half-finished replacement added. Without them the
-cluster would still report a replacement in flight after a restore that looked like it worked.
+`RESTORED` means both Secret patches and the anchor file replacement succeeded. A `STOP` message
+identifies the failed step. After resolving the error, rerun the function; it reads the current key
+again and issues a fresh certificate under the saved authority. In a new shell, set
+`KUBECONFIG=/etc/rancher/k3s/k3s.yaml`, return to `/root/ca-replacement`, and paste the function again.
+
+The explicit `null` values remove the pending and previous authority entries, clearing the
+unfinished replacement state.
+
+If the API server already trusts only the new authority, logins fail once the restored certificate
+is served and remain unavailable until the sync below completes.
+
+Recovery restores the authority you intended to replace. If its key was exposed, restart Phase 1
+once the cluster is healthy.
 
 Then from your own machine:
 
@@ -634,7 +692,7 @@ kip auth verify
 The status should report no replacement in flight and everything agreeing. Certificate authentication
 was working the whole time, so you were never locked out of the cluster itself.
 
-If the Secret itself is gone rather than damaged, recreate it and then run the patch above:
+If the authority Secret (`kipper-hop-ca`) is missing, recreate it, then run `restore_authority` again:
 
 ```bash
 kubectl -n kipper-system create secret tls kipper-hop-ca \
