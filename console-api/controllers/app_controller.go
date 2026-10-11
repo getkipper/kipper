@@ -2000,7 +2000,16 @@ func (r *AppReconciler) reconcileBasicAuthMiddleware(ctx context.Context, app *k
 	enabled := route != nil && route.BasicAuth
 
 	if !enabled {
+		apimeta.RemoveStatusCondition(&app.Status.Conditions, kipperv1.ConditionBasicAuthReady)
+		if err := r.deleteBasicAuthLock(ctx, app); err != nil {
+			return err
+		}
 		return r.deleteOwnedMiddleware(ctx, app, mwName)
+	}
+
+	secretName, err := r.basicAuthSecret(ctx, app)
+	if err != nil {
+		return err
 	}
 
 	desired := &unstructured.Unstructured{
@@ -2017,7 +2026,7 @@ func (r *AppReconciler) reconcileBasicAuthMiddleware(ctx context.Context, app *k
 			},
 			"spec": map[string]interface{}{
 				"basicAuth": map[string]interface{}{
-					"secret": app.Name + "-basic-auth",
+					"secret": secretName,
 				},
 			},
 		},
@@ -2524,6 +2533,7 @@ func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&networkingv1.NetworkPolicy{}).
 		Owns(gateMiddleware).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.enqueueForRegistryCredentials)).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.enqueueForBasicAuthUsers)).
 		// A rotated service password has to reach the bindings that derive from
 		// it, rather than waiting for something unrelated to touch each app.
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.enqueueAppsForServiceCredentials)).

@@ -72,6 +72,8 @@ const ConditionEnvPublished = "EnvPublished"
 // created would make it die with the workload. Refusing it silently was not.
 const ConditionChildrenAdopted = "ChildrenAdopted"
 
+const ConditionBasicAuthReady = "BasicAuthReady"
+
 // ConditionAutoscalingReady reports policy validation and HPA reconciliation.
 // False identifies an invalid policy, an out-of-bounds replica count, or an HPA
 // write/delete failure. It is cleared when autoscaling is disabled without errors.
