@@ -86,6 +86,8 @@ type AppReconciler struct {
 
 	// PortDial tests the app port for the PortListening condition. Nil disables the check.
 	PortDial func(ctx context.Context, addr string) error
+	// UpstreamCheck probes through the instance proxy; nil disables proxy checks.
+	UpstreamCheck func(ctx context.Context, addr string) (string, error)
 	// portChecked stores the last probe attempt by app UID to limit probe frequency.
 	portChecked sync.Map
 
@@ -539,7 +541,7 @@ httpd -p %d -h /www -f`, app.Name, app.Name, app.Spec.Port)}
 	// Inject instance-id sidecar proxy when enabled
 	containers := []corev1.Container{container}
 	if r.shouldInjectSidecar(app) {
-		sidecarPort := app.Spec.Port + 10000
+		sidecarPort := app.Spec.Port + instanceProxyPortOffset
 
 		sidecar := corev1.Container{
 			Name:  "kipper-instance-proxy",
@@ -1624,13 +1626,15 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *kipperv1.App)
 	return r.applyOwnedIngress(ctx, app, desired)
 }
 
+const instanceProxyPortOffset = 10000
+
 func (r *AppReconciler) shouldInjectSidecar(app *kipperv1.App) bool {
 	return r.SidecarImage != "" && app.Spec.Route != nil && !app.Spec.Route.NoInstanceHeader
 }
 
 func (r *AppReconciler) serviceTargetPort(app *kipperv1.App) int32 {
 	if r.shouldInjectSidecar(app) {
-		return app.Spec.Port + 10000
+		return app.Spec.Port + instanceProxyPortOffset
 	}
 	return app.Spec.Port
 }

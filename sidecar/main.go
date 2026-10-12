@@ -39,7 +39,7 @@ func main() {
 		log.Fatalf("invalid upstream URL: %v", err)
 	}
 
-	proxy := newProxy(target, instanceID)
+	handler := withUpstreamCheck(newProxy(target, instanceID), net.JoinHostPort("localhost", upstreamPort))
 
 	addr := ":" + listenPort
 	ln, err := net.Listen("tcp", addr)
@@ -48,7 +48,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	log.Printf("sidecar listening on %s, forwarding to %s, instance-id=%s", addr, target, instanceID)
-	err = serve(ctx, ln, proxy)
+	err = serve(ctx, ln, handler)
 	stop()
 	if err != nil {
 		log.Fatalf("server failed: %v", err)

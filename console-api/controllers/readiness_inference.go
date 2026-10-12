@@ -42,6 +42,8 @@ func connectionRefused(err error) bool {
 type portAnswer struct {
 	accepted, ready, settledRefusal bool
 	proxied                         bool
+	settled                         bool
+	podIP                           string
 }
 
 // probePort samples the app port on up to three running pods. Refusals count
@@ -60,14 +62,18 @@ func (r *AppReconciler) probePort(ctx context.Context, dial func(context.Context
 		go func(i int, p *corev1.Pod) {
 			defer wg.Done()
 			addr := net.JoinHostPort(p.Status.PodIP, strconv.Itoa(int(app.Spec.Port)))
-			answers[i] = portAnswer{proxied: hasContainer(p, sidecarContainerName)}
+			since := runningSince(p, app.Name)
+			answers[i] = portAnswer{
+				proxied: hasContainer(p, sidecarContainerName),
+				settled: !since.IsZero() && now.Sub(since) >= inferenceSettledAge,
+				podIP:   p.Status.PodIP,
+			}
 			err := dial(ctx, addr)
 			switch {
 			case err == nil:
 				answers[i].accepted, answers[i].ready = true, podReady(p)
 			case connectionRefused(err):
-				since := runningSince(p, app.Name)
-				answers[i].settledRefusal = !since.IsZero() && now.Sub(since) >= inferenceSettledAge
+				answers[i].settledRefusal = answers[i].settled
 			}
 		}(i, candidates[i])
 	}

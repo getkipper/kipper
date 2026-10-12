@@ -111,7 +111,7 @@ func applyPlatformShape(tpl *corev1.PodTemplateSpec, app *kipperv1.App, inf infe
 	for i := range tpl.Spec.Containers {
 		c := &tpl.Spec.Containers[i]
 		if c.Name == sidecarContainerName {
-			c.ReadinessProbe = tcpProbe(app.Spec.Port+10000, defaultProbeTimeoutSeconds)
+			c.ReadinessProbe = tcpProbe(app.Spec.Port+instanceProxyPortOffset, defaultProbeTimeoutSeconds)
 		}
 		if preStopSleep {
 			c.Lifecycle = &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{

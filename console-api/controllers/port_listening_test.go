@@ -2,6 +2,10 @@ package controllers
 
 import (
 	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -177,4 +181,100 @@ func TestSweepPortChecked(t *testing.T) {
 	_, gone := r.portChecked.Load(types.UID("gone"))
 	assert.True(t, live)
 	assert.False(t, gone)
+}
+
+// fakeProxy answers the instance proxy's upstream check per pod IP.
+type fakeProxy struct {
+	mu      sync.Mutex
+	answers map[string]string
+	errs    map[string]error
+	asked   []string
+}
+
+func (f *fakeProxy) ask(_ context.Context, addr string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.asked = append(f.asked, addr)
+	host, _, _ := net.SplitHostPort(addr)
+	return f.answers[host], f.errs[host]
+}
+
+func observeProxiedPort(t *testing.T, proxy *fakeProxy, runningFor time.Duration) *kipperv1.App {
+	t.Helper()
+	c, dep := inferenceWorld(t, podState{ip: "10.0.0.1", runningFor: runningFor, proxy: true})
+	r := &AppReconciler{Client: c, PortDial: (&fakeDialer{answers: map[string]error{"10.0.0.1": refused}}).dial, UpstreamCheck: proxy.ask}
+	app := routedShop()
+	r.observePort(context.Background(), app, dep, kipperv1.AppHealthCheckStatus{Type: "none", Source: "inferred"}, inferNow)
+	return app
+}
+
+func TestObservePort_AsksTheInstanceProxy(t *testing.T) {
+	proxy := &fakeProxy{answers: map[string]string{"10.0.0.1": "refused"}}
+	app := observeProxiedPort(t, proxy, 3*time.Hour)
+
+	assert.Equal(t, []string{"10.0.0.1:18080"}, proxy.asked, "the proxy answers on its own port")
+	cond := apimeta.FindStatusCondition(app.Status.Conditions, kipperv1.ConditionPortListening)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "NothingListening", cond.Reason)
+}
+
+func TestObservePort_AProxyThatReachesTheAppMeansListening(t *testing.T) {
+	app := observeProxiedPort(t, &fakeProxy{answers: map[string]string{"10.0.0.1": "accepting"}}, 3*time.Hour)
+
+	cond := apimeta.FindStatusCondition(app.Status.Conditions, kipperv1.ConditionPortListening)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+}
+
+func TestObservePort_AProxyAnswerDecidesNothingWhenInconclusive(t *testing.T) {
+	young := observeProxiedPort(t, &fakeProxy{answers: map[string]string{"10.0.0.1": "refused"}}, 2*time.Minute)
+	assert.Nil(t, apimeta.FindStatusCondition(young.Status.Conditions, kipperv1.ConditionPortListening), "the container has not settled")
+
+	older := observeProxiedPort(t, &fakeProxy{errs: map[string]error{"10.0.0.1": refused}}, 3*time.Hour)
+	assert.Nil(t, apimeta.FindStatusCondition(older.Status.Conditions, kipperv1.ConditionPortListening), "a proxy without the check says nothing")
+
+	unknown := observeProxiedPort(t, &fakeProxy{answers: map[string]string{"10.0.0.1": "unknown"}}, 3*time.Hour)
+	assert.Nil(t, apimeta.FindStatusCondition(unknown.Status.Conditions, kipperv1.ConditionPortListening))
+}
+
+func TestAskInstanceProxy(t *testing.T) {
+	var method string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method = r.Method
+		w.Header().Set("X-Kipper-Upstream", "refused")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	answer, err := AskInstanceProxy(context.Background(), srv.Listener.Addr().String())
+
+	require.NoError(t, err)
+	assert.Equal(t, "refused", answer)
+	assert.Equal(t, "KIPPER-UPSTREAM-CHECK", method)
+}
+
+func TestAskInstanceProxyWithoutTheCheck(t *testing.T) {
+	// Model an older proxy forwarding the check to an app that rejects the method.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	defer srv.Close()
+
+	answer, err := AskInstanceProxy(context.Background(), srv.Listener.Addr().String())
+
+	require.NoError(t, err)
+	assert.Empty(t, answer)
+}
+
+func TestObservePort_SkipsTheProxyWhenAPodAccepts(t *testing.T) {
+	c, dep := inferenceWorld(t, podState{ip: "10.0.0.1", runningFor: 3 * time.Hour, proxy: true}, podState{ip: "10.0.0.2", runningFor: 3 * time.Hour, proxy: true})
+	proxy := &fakeProxy{answers: map[string]string{"10.0.0.1": "refused"}}
+	r := &AppReconciler{Client: c, PortDial: (&fakeDialer{answers: map[string]error{"10.0.0.1": refused, "10.0.0.2": nil}}).dial, UpstreamCheck: proxy.ask}
+	app := routedShop()
+
+	r.observePort(context.Background(), app, dep, kipperv1.AppHealthCheckStatus{Type: "none", Source: "inferred"}, inferNow)
+
+	assert.Empty(t, proxy.asked)
+	assert.Equal(t, metav1.ConditionTrue, apimeta.FindStatusCondition(app.Status.Conditions, kipperv1.ConditionPortListening).Status)
 }
