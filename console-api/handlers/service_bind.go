@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/client-go/util/retry"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
@@ -23,9 +24,6 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
-// defaultPrefix is a thin shim for kipperv1.DefaultBindingPrefix kept so
-// existing call sites can switch over without churn. The canonical mapping
-// lives in api/v1alpha1/service_bindings.go.
 func defaultPrefix(svcType string) string {
 	return kipperv1.DefaultBindingPrefix(svcType)
 }
@@ -36,11 +34,7 @@ type bindRequest struct {
 	Namespace string `json:"namespace"`
 	Prefix    string `json:"prefix,omitempty"`
 	Database  string `json:"database,omitempty"`
-	// Target picks which CR carries the ServiceBindings entry. "" or
-	// "app" target the App CR (the original behaviour); "function"
-	// targets a Function CR. The App field carries the target name in
-	// either case.
-	Target string `json:"target,omitempty"`
+	Target    string `json:"target,omitempty"`
 }
 
 type bindResponse struct {
@@ -69,11 +63,8 @@ func (s *Services) Bind(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	// A binding is contained to the app's own project-environment namespace
-	// (the reconciler resolves the credentials SecretRef there), so the
-	// service must live in that same namespace. Authorize before resolving so
-	// bind cannot probe service existence in a project the caller has no role
-	// on.
+	// Resolve credentials in the workload's namespace to keep bindings project-scoped.
+	// Authorize first to avoid exposing service names in other projects.
 	appNamespace := req.Namespace
 	if !enforceCapability(w, r, appNamespace, "kipper.write") {
 		return
@@ -84,14 +75,13 @@ func (s *Services) Bind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read service credentials
 	creds, err := s.Client.CoreV1().Secrets(appNamespace).Get(ctx, secretname.ServiceCredentials(req.Service), metav1.GetOptions{})
 	if err != nil {
 		respondError(w, http.StatusNotFound, fmt.Sprintf("credentials for %q not found", req.Service))
 		return
 	}
 
-	// Verify the target CR (App or Function) exists.
+	// Verify the workload exists before provisioning its database or vhost.
 	var appCR kipperv1.App
 	var fnCR kipperv1.Function
 	target := req.Target
@@ -122,7 +112,6 @@ func (s *Services) Bind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine the env var prefix
 	prefix := req.Prefix
 	if prefix == "" {
 		prefix = defaultPrefix(svcType)
@@ -130,46 +119,28 @@ func (s *Services) Bind(w http.ResponseWriter, r *http.Request) {
 
 	database, injected, warning := s.provisionPerBinding(ctx, req.Service, appNamespace, svcType, prefix, req.Database, creds)
 
-	// Add or update service binding on the right CR.
-	if target == "function" {
-		bindings := fnCR.Spec.ServiceBindings
-		found := false
+	// Provision once, then retry binding updates against fresh reads to preserve concurrent edits.
+	setBinding := func(bindings []kipperv1.ServiceBinding) []kipperv1.ServiceBinding {
 		for i := range bindings {
 			if bindings[i].Name == req.Service {
 				bindings[i].Prefix = prefix
 				bindings[i].Database = database
-				found = true
-				break
+				return bindings
 			}
 		}
-		if !found {
-			bindings = append(bindings, kipperv1.ServiceBinding{
-				Name: req.Service, Prefix: prefix, Database: database,
-			})
-		}
-		fnCR.Spec.ServiceBindings = bindings
-		if err := s.CRClient.Update(ctx, &fnCR); err != nil {
+		return append(bindings, kipperv1.ServiceBinding{Name: req.Service, Prefix: prefix, Database: database})
+	}
+	if target == "function" {
+		if err := updateFunction(ctx, s.CRClient, appNamespace, req.App, func(fn *kipperv1.Function) {
+			fn.Spec.ServiceBindings = setBinding(fn.Spec.ServiceBindings)
+		}); err != nil {
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update function: %v", err))
 			return
 		}
 	} else {
-		bindings := appCR.Spec.ServiceBindings
-		found := false
-		for i := range bindings {
-			if bindings[i].Name == req.Service {
-				bindings[i].Prefix = prefix
-				bindings[i].Database = database
-				found = true
-				break
-			}
-		}
-		if !found {
-			bindings = append(bindings, kipperv1.ServiceBinding{
-				Name: req.Service, Prefix: prefix, Database: database,
-			})
-		}
-		appCR.Spec.ServiceBindings = bindings
-		if err := s.CRClient.Update(ctx, &appCR); err != nil {
+		if err := updateApp(ctx, s.CRClient, appNamespace, req.App, func(app *kipperv1.App) {
+			app.Spec.ServiceBindings = setBinding(app.Spec.ServiceBindings)
+		}); err != nil {
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update app environment: %v", err))
 			return
 		}
@@ -185,8 +156,8 @@ func (s *Services) Bind(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Unbind removes a service's connection details from an app's environment.
-// POST /api/v1/unbind
+// Unbind removes a service binding from an app or function and clears matching
+// environment variables when the service type or binding prefix is known.
 func (s *Services) Unbind(w http.ResponseWriter, r *http.Request) {
 	var req bindRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -221,101 +192,62 @@ func (s *Services) Unbind(w http.ResponseWriter, r *http.Request) {
 		target = "app"
 	}
 
-	// The workload the binding was removed from, and the binding itself, so the
-	// derived-credentials cleanup below can ask whether it derived anything and
-	// whether the object under that name is this workload's.
-	prefix := defaultPrefix(svcType)
-	cleanEnv := !serviceGone
-	switch target {
-	case "function":
-		var fnCR kipperv1.Function
-		if err := s.CRClient.Get(ctx, crclient.ObjectKey{Namespace: appNamespace, Name: req.App}, &fnCR); err != nil {
-			respondError(w, http.StatusOK, "no bindings found")
-			return
-		}
-		for _, b := range fnCR.Spec.ServiceBindings {
-			if b.Name == req.Service {
-				if b.Prefix != "" {
-					prefix = b.Prefix
-					cleanEnv = true
-				}
-				break
-			}
-		}
-		if cleanEnv && fnCR.Spec.Env != nil {
-			for k := range fnCR.Spec.Env {
-				if strings.HasPrefix(k, prefix) {
-					delete(fnCR.Spec.Env, k)
-				}
-			}
-		}
+	// Recompute cleanup from the latest binding on each conflict retry.
+	var cleanEnv bool
+	unbind := func(bindings []kipperv1.ServiceBinding, env map[string]string) []kipperv1.ServiceBinding {
+		prefix := defaultPrefix(svcType)
+		cleanEnv = !serviceGone
 		var remaining []kipperv1.ServiceBinding
-		for _, b := range fnCR.Spec.ServiceBindings {
+		for _, b := range bindings {
 			if b.Name != req.Service {
 				remaining = append(remaining, b)
+				continue
+			}
+			if b.Prefix != "" {
+				prefix = b.Prefix
+				cleanEnv = true
 			}
 		}
-		fnCR.Spec.ServiceBindings = remaining
-		if err := s.CRClient.Update(ctx, &fnCR); err != nil {
-			respondError(w, http.StatusInternalServerError, "failed to update function")
-			return
-		}
-	default:
-		var appCR kipperv1.App
-		if err := s.CRClient.Get(ctx, crclient.ObjectKey{Namespace: appNamespace, Name: req.App}, &appCR); err != nil {
-			respondError(w, http.StatusOK, "no bindings found")
-			return
-		}
-		for _, b := range appCR.Spec.ServiceBindings {
-			if b.Name == req.Service {
-				if b.Prefix != "" {
-					prefix = b.Prefix
-					cleanEnv = true
-				}
-				break
-			}
-		}
-		if cleanEnv && appCR.Spec.Env != nil {
-			for k := range appCR.Spec.Env {
+		if cleanEnv {
+			for k := range env {
 				if strings.HasPrefix(k, prefix) {
-					delete(appCR.Spec.Env, k)
+					delete(env, k)
 				}
 			}
 		}
-		var remaining []kipperv1.ServiceBinding
-		for _, b := range appCR.Spec.ServiceBindings {
-			if b.Name != req.Service {
-				remaining = append(remaining, b)
-			}
-		}
-		appCR.Spec.ServiceBindings = remaining
-		if err := s.CRClient.Update(ctx, &appCR); err != nil {
-			respondError(w, http.StatusInternalServerError, "failed to update app environment")
-			return
-		}
+		return remaining
+	}
+	what := "app environment"
+	if target == "function" {
+		what = "function"
+		err = updateFunction(ctx, s.CRClient, appNamespace, req.App, func(fn *kipperv1.Function) {
+			fn.Spec.ServiceBindings = unbind(fn.Spec.ServiceBindings, fn.Spec.Env)
+		})
+	} else {
+		err = updateApp(ctx, s.CRClient, appNamespace, req.App, func(app *kipperv1.App) {
+			app.Spec.ServiceBindings = unbind(app.Spec.ServiceBindings, app.Spec.Env)
+		})
+	}
+	if apierrors.IsNotFound(err) {
+		respondError(w, http.StatusOK, "no bindings found")
+		return
+	}
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to update "+what)
+		return
 	}
 
-	// The derived per-binding Secret is left to the workload's own reconcile,
-	// which the binding removal above triggers. Retirement there decides when it
-	// goes, and waits while a retained revision or a live pod still names it —
-	// deleting one here took an env source away from something that re-reads it
-	// on every container restart. Its owner reference garbage-collects it if the
-	// workload goes first.
-
-	// Say when the injected variables were left behind, so an operator who
-	// unbound a vanished service knows there is something to tidy rather than
-	// discovering stale entries later.
+	// Let the reconciler retire the binding Secret after retained revisions and
+	// live pods release it, so existing workloads can still restart.
 	status := "unbound"
 	if !cleanEnv {
-		status = "unbound; the service was already gone and the binding set no prefix, so any injected variables were left in place"
+		status = "unbound; service missing and binding prefix unknown. Remove any leftover environment variables manually."
 	}
 	respondJSON(w, http.StatusOK, map[string]string{"status": status})
 }
 
-// InjectedEnv returns the env vars that Kubernetes injects via EnvFrom for
-// an app's service bindings. These are read-only — they come from the
-// credentials secret, not from Spec.Env.
-// GET /api/v1/projects/{name}/apps/{app}/env/injected
+// InjectedEnv returns an app's service-binding variables from credential Secrets,
+// with sensitive values omitted.
 func (s *Services) InjectedEnv(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "name")
 	app := chi.URLParam(r, "app")
@@ -331,17 +263,8 @@ func (s *Services) InjectedEnv(w http.ResponseWriter, r *http.Request) {
 
 	var vars []injectedVar
 	for _, binding := range appCR.Spec.ServiceBindings {
-		// Which Secret a binding injects is the reconciler's decision, and this
-		// endpoint answers for the same pod, so it asks the same way. Deciding
-		// from spec.database alone made this a fourth implementation of the
-		// rule: a database on a service type with no logical namespace derives
-		// nothing, so this looked for a Secret nothing renders, found none, and
-		// dropped the whole binding from the answer while the pod had it.
-		// A Service that is genuinely absent is a different answer from one that
-		// could not be read. Collapsing them would let a transient failure move
-		// this endpoint onto a Secret name the pod is not using, which is the
-		// disagreement it exists to avoid — the reconciler stops on that error
-		// rather than guessing, so this reports it rather than answering wrong.
+		// Use the reconciler's Secret selection so the preview matches the workload.
+		// Lookup failures must surface: treating them as missing services could select the wrong Secret.
 		svcType, lookupErr := s.findServiceInNamespace(ctx, binding.Name, project)
 		typeKnown := lookupErr == nil
 		if lookupErr != nil && !errors.Is(lookupErr, errBindServiceNotFound) {
@@ -465,9 +388,7 @@ func (s *Services) ListRabbitMQVhosts(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, parseRabbitMQVhosts(stdout.String()))
 }
 
-// parseRabbitMQVhosts splits the `rabbitmqctl list_vhosts -q` output
-// into trimmed, deduplicated vhost names with the default flag set
-// on "/". Pulled out so it can be unit-tested without a cluster.
+// parseRabbitMQVhosts parses unique vhost names and flags "/" as the default.
 func parseRabbitMQVhosts(out string) []rabbitMQVhost {
 	entries := []rabbitMQVhost{}
 	seen := map[string]bool{}
@@ -482,12 +403,9 @@ func parseRabbitMQVhosts(out string) []rabbitMQVhost {
 	return entries
 }
 
-// findServiceInNamespace resolves a service to its type by an EXACT lookup in
-// the given namespace: the Service CR first, then the StatefulSet carrying the
-// kipper.run/service-type label. There is no cluster-wide fallback, so a
-// service name that collides across tenants can never resolve to another
-// tenant's namespace. Returns errBindServiceNotFound on a miss and a wrapped
-// error on a Kubernetes API failure.
+// findServiceInNamespace resolves a service type from its Service CR or legacy
+// StatefulSet within the given namespace, keeping lookups isolated by project.
+// It returns errBindServiceNotFound on a miss and wraps Kubernetes API failures.
 func (s *Services) findServiceInNamespace(ctx context.Context, name, namespace string) (svcType string, err error) {
 	if name == "" || namespace == "" {
 		return "", errBindServiceNotFound
@@ -514,16 +432,9 @@ func (s *Services) findServiceInNamespace(ctx context.Context, name, namespace s
 	return svcType, nil
 }
 
-// ResolveBindingDatabase computes the value a binding will carry on
-// the ServiceBinding CR without running any durable side effects.
-// Just the service lookup and the type-aware normalisation (e.g.
-// rabbitmq "/" → ""). Cheap enough to call once per binding before
-// the caller writes the CR; the matching `ProvisionBinding` runs
-// the side effects afterwards.
-//
-// Splitting resolve and provision keeps CR-write failure paths
-// (CRD validation, apiserver conflict) from leaving orphaned
-// per-binding Secrets or rabbitmq vhosts behind.
+// ResolveBindingDatabase normalizes a binding's database or vhost for its service type.
+// Call it before saving the workload and provision after saving, so a failed save
+// leaves no newly provisioned database or vhost.
 func (s *Services) ResolveBindingDatabase(ctx context.Context, svcName, appNamespace, requested string) (string, error) {
 	svcType, err := s.findServiceInNamespace(ctx, svcName, appNamespace)
 	if err != nil {
@@ -546,7 +457,7 @@ func (s *Services) ResolveBindingDatabase(ctx context.Context, svcName, appNames
 // Call ResolveBindingDatabase before saving the workload, then call this
 // method after saving so provisioning failures can be reported as warnings.
 func (s *Services) ProvisionBinding(ctx context.Context, svcName, appName, appNamespace, prefix, requested string) (string, map[string]string, error) {
-	// The service must live in the function's own namespace. This keeps a
+	// The service must live in the workload's own namespace. This keeps a
 	// project-scoped binding from reading another project's credentials.
 	svcType, err := s.findServiceInNamespace(ctx, svcName, appNamespace)
 	if err != nil {
@@ -591,8 +502,8 @@ func (s *Services) provisionPerBinding(ctx context.Context, svcName, svcNamespac
 		return "", injected, ""
 	}
 
-	// Keep the binding saved and report the failure; the workload controller
-	// retries the create.
+	// Return provisioning failures as warnings so the binding can be saved
+	// and the workload controller can retry creation.
 	if perr := s.createLogicalNamespace(ctx, svcName, svcNamespace, svcType, database, creds); perr != nil {
 		warning = fmt.Sprintf("database %q was not created in %s: %v", database, svcName, perr)
 	}
@@ -615,4 +526,17 @@ func (s *Services) provisionPerBinding(ctx context.Context, svcName, svcNamespac
 
 func (s *Services) createLogicalNamespace(ctx context.Context, serviceName, namespace, svcType, value string, creds *corev1.Secret) error {
 	return logicalns.Create(ctx, s.Client, s.RESTConfig, serviceName, namespace, svcType, value, creds)
+}
+
+// updateApp reapplies change to a freshly read App on each conflict retry.
+// The callback may run multiple times; keep external side effects outside it.
+func updateApp(ctx context.Context, c crclient.Client, namespace, name string, change func(*kipperv1.App)) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var app kipperv1.App
+		if err := c.Get(ctx, crclient.ObjectKey{Namespace: namespace, Name: name}, &app); err != nil {
+			return err
+		}
+		change(&app)
+		return c.Update(ctx, &app)
+	})
 }
