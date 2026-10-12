@@ -67,3 +67,9 @@ func TestRemoveRouteRefusesAnAppWithoutOne(t *testing.T) {
 
 	assert.ErrorContains(t, err, "no route")
 }
+
+func TestRouteGatesNameAClosedRoute(t *testing.T) {
+	gates := RouteGates(map[string]interface{}{"closed": true, "publicPaths": []interface{}{"/hook"}})
+
+	assert.Equal(t, []string{"closed", "public paths /hook"}, gates)
+}
