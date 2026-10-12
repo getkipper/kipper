@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/client-go/util/retry"
+
 	"github.com/go-chi/chi/v5"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -36,7 +38,20 @@ func (f *FunctionConfig) getFunction(ctx context.Context, namespace, name string
 	return &fn, nil
 }
 
-// GetEnv returns the function's plain env vars from FunctionSpec.Env.
+// updateFunction reapplies change to a freshly read Function on each conflict retry.
+// The callback may run multiple times and should only modify the supplied Function.
+func updateFunction(ctx context.Context, c crclient.Client, namespace, name string, change func(*kipperv1.Function)) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var fn kipperv1.Function
+		if err := c.Get(ctx, crclient.ObjectKey{Namespace: namespace, Name: name}, &fn); err != nil {
+			return err
+		}
+		change(&fn)
+		return c.Update(ctx, &fn)
+	})
+}
+
+// GetEnv returns the function's plain environment variables.
 // GET /api/v1/projects/{name}/functions/{fn}/env
 func (f *FunctionConfig) GetEnv(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "name")
@@ -79,18 +94,14 @@ func (f *FunctionConfig) UpdateEnv(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	fn, err := f.getFunction(ctx, project, fnName)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			respondError(w, http.StatusNotFound, fmt.Sprintf("function %q not found", fnName))
-			return
-		}
-		respondError(w, http.StatusInternalServerError, "failed to get function")
+	err := updateFunction(ctx, f.CRClient, project, fnName, func(fn *kipperv1.Function) {
+		fn.Spec.Env = env
+	})
+	if errors.IsNotFound(err) {
+		respondError(w, http.StatusNotFound, fmt.Sprintf("function %q not found", fnName))
 		return
 	}
-
-	fn.Spec.Env = env
-	if err := f.CRClient.Update(ctx, fn); err != nil {
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to update env vars")
 		return
 	}
@@ -302,21 +313,17 @@ func (f *FunctionConfig) UpdateDependencies(w http.ResponseWriter, r *http.Reque
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	fn, err := f.getFunction(ctx, project, fnName)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			respondError(w, http.StatusNotFound, fmt.Sprintf("function %q not found", fnName))
-			return
+	err := updateFunction(ctx, f.CRClient, project, fnName, func(fn *kipperv1.Function) {
+		if fn.Spec.Source == nil {
+			fn.Spec.Source = &kipperv1.FunctionSource{}
 		}
-		respondError(w, http.StatusInternalServerError, "failed to get function")
+		fn.Spec.Source.Dependencies = deps
+	})
+	if errors.IsNotFound(err) {
+		respondError(w, http.StatusNotFound, fmt.Sprintf("function %q not found", fnName))
 		return
 	}
-
-	if fn.Spec.Source == nil {
-		fn.Spec.Source = &kipperv1.FunctionSource{}
-	}
-	fn.Spec.Source.Dependencies = deps
-	if err := f.CRClient.Update(ctx, fn); err != nil {
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to update dependencies")
 		return
 	}

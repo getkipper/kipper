@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { sameMap, saveInOrder, saveSummary } from '../utils/functionSave'
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Plus, Trash2, RefreshCw, Save, Code as CodeIcon, Wand2, Eye, EyeOff, ScanLine, Loader2, Play, Sparkles } from 'lucide-vue-next'
@@ -250,14 +251,21 @@ onMounted(async () => {
   }
 })
 
+// Baselines for skipping unchanged environment variables and dependencies.
+// null blocks saving edits until the existing values have loaded successfully.
+const savedEnv = ref<Record<string, string> | null>({})
+const savedDeps = ref<Record<string, string> | null>({})
+// Detect saves completed while a dependency reload was in flight.
+let saveCount = 0
+const unreadNote = 'the current values failed to load. Reload the page before editing them'
+
 async function loadExisting() {
-  // We pull the bits we need in parallel to keep the page snappy.
   const [list, codeResp, envMap, secretsList, depsMap, fnBindings, resources] = await Promise.all([
     fetchFunctions(namespace.value).catch(() => [] as FunctionInfo[]),
     getInlineFunctionCode(namespace.value, fnName.value).catch(() => ({ name: fnName.value, runtime: 'node', code: '' } as Awaited<ReturnType<typeof getInlineFunctionCode>>)),
-    fetchFunctionEnv(namespace.value, fnName.value).catch(() => ({})),
+    fetchFunctionEnv(namespace.value, fnName.value).catch(() => null),
     fetchFunctionSecretKeys(namespace.value, fnName.value).catch(() => []),
-    fetchFunctionDependencies(namespace.value, fnName.value).catch(() => ({})),
+    fetchFunctionDependencies(namespace.value, fnName.value).catch(() => null),
     fetchFunctionBindings(namespace.value, fnName.value).catch(() => []),
     fetchFunctionResources(namespace.value, fnName.value).catch(() => null),
   ])
@@ -281,9 +289,11 @@ async function loadExisting() {
   eventList.value = codeResp.redis_list || ''
   eventBucket.value = codeResp.bucket || ''
 
-  env.value = Object.entries(envMap).map(([key, value]) => ({ key, value }))
+  env.value = Object.entries(envMap ?? {}).map(([key, value]) => ({ key, value }))
+  savedEnv.value = envMap ? { ...envMap } : null
   secretKeys.value = secretsList
-  deps.value = Object.entries(depsMap).map(([n, v]) => ({ name: n, version: v }))
+  deps.value = Object.entries(depsMap ?? {}).map(([n, v]) => ({ name: n, version: v }))
+  savedDeps.value = depsMap ? { ...depsMap } : null
   bindings.value = fnBindings
   resourceForm.load(resources)
 }
@@ -333,15 +343,16 @@ function applyConflictFix(drop: string) {
   deps.value = deps.value.filter((d) => d.name !== drop)
 }
 
-// reloadDeps re-fetches the function's dependencies from the server.
-// Useful when the CR was changed externally (kubectl patch, AI
-// diagnose suggestion, another browser tab) so saving doesn't
-// silently revert those changes.
+// Refresh the editor and its baseline after dependencies are changed elsewhere.
 async function reloadDeps() {
-  if (!isEdit.value) return
+  if (!isEdit.value || saving.value) return
+  const savesBefore = saveCount
   try {
     const map = await fetchFunctionDependencies(namespace.value, fnName.value)
+    // A response overlapping a save may contain stale dependencies.
+    if (saving.value || saveCount !== savesBefore) return
     deps.value = Object.entries(map).map(([name, version]) => ({ name, version }))
+    savedDeps.value = { ...map }
     toast.success('Dependencies refreshed from server')
   } catch {
     toast.error('Failed to reload dependencies')
@@ -672,38 +683,65 @@ async function save() {
       return
     }
 
-    // Edit flow — fan out PUTs in parallel; the controller picks each up.
-    // The inline function PUT carries code, runtime, and trigger config
-    // so changes to any of them survive a page refresh.
+    // Always save code, runtime, and trigger settings; skip unchanged optional parts.
     const pendingResources = resourceForm.pendingEdit()
-    await Promise.all([
-      updateInlineFunctionCode(namespace.value, fnName.value, {
-        code: code.value,
-        runtime: runtime.value,
-        trigger: trigger.value,
-        schedule: trigger.value === 'cron' ? schedule.value.trim() : undefined,
-        source: eventSource.value || undefined,
-        query: eventQuery.value || undefined,
-        mark_done: eventMarkDone.value || undefined,
-        redis_list: eventList.value || undefined,
-        bucket: eventBucket.value || undefined,
-      }),
-      updateFunctionEnv(namespace.value, fnName.value, envObj),
-      updateFunctionDependencies(namespace.value, fnName.value, depsObj),
-      Object.keys(secretsObj).length
-        ? setFunctionSecrets(namespace.value, fnName.value, secretsObj)
-        : Promise.resolve(),
-      typeof pendingResources === 'object'
-        ? updateFunctionResources(namespace.value, fnName.value, pendingResources.edit)
-        : Promise.resolve(),
+    const result = await saveInOrder([
+      {
+        label: 'code',
+        run: () => updateInlineFunctionCode(namespace.value, fnName.value, {
+          code: code.value,
+          runtime: runtime.value,
+          trigger: trigger.value,
+          schedule: trigger.value === 'cron' ? schedule.value.trim() : undefined,
+          source: eventSource.value || undefined,
+          query: eventQuery.value || undefined,
+          mark_done: eventMarkDone.value || undefined,
+          redis_list: eventList.value || undefined,
+          bucket: eventBucket.value || undefined,
+        }),
+      },
+      {
+        label: 'environment variables',
+        skip: savedEnv.value ? sameMap(envObj, savedEnv.value) : Object.keys(envObj).length === 0,
+        blocked: savedEnv.value ? undefined : unreadNote,
+        run: async () => {
+          await updateFunctionEnv(namespace.value, fnName.value, envObj)
+          savedEnv.value = { ...envObj }
+        },
+      },
+      {
+        label: 'dependencies',
+        skip: savedDeps.value ? sameMap(depsObj, savedDeps.value) : Object.keys(depsObj).length === 0,
+        blocked: savedDeps.value ? undefined : unreadNote,
+        run: async () => {
+          await updateFunctionDependencies(namespace.value, fnName.value, depsObj)
+          savedDeps.value = { ...depsObj }
+        },
+      },
+      {
+        label: 'secrets',
+        skip: Object.keys(secretsObj).length === 0,
+        run: () => setFunctionSecrets(namespace.value, fnName.value, secretsObj),
+      },
+      {
+        label: 'CPU and memory',
+        skip: typeof pendingResources !== 'object',
+        run: async () => {
+          if (typeof pendingResources !== 'object') return
+          await updateFunctionResources(namespace.value, fnName.value, pendingResources.edit)
+          resourceForm.saved(pendingResources.values)
+        },
+      },
     ])
-    if (typeof pendingResources === 'object') resourceForm.saved(pendingResources.values)
-    secretsToSet.value = []
-    secretKeys.value = await fetchFunctionSecretKeys(namespace.value, fnName.value)
-    if (pendingResources === 'unknown') {
-      toast.error("The function was saved, but its CPU and memory could not be read earlier, so they were not changed. Reload the page and set them again.")
+    saveCount++
+    if (result.saved.includes('secrets')) secretsToSet.value = []
+    secretKeys.value = await fetchFunctionSecretKeys(namespace.value, fnName.value).catch(() => secretKeys.value)
+    if (result.failed) {
+      toast.error(saveSummary(result))
+    } else if (pendingResources === 'unknown') {
+      toast.error("Function saved. CPU and memory changes were skipped because the current settings failed to load. Reload the page and reapply those changes.")
     } else {
-      toast.success('Function saved: controller is rolling out')
+      toast.success('Function saved')
     }
   } catch {
     toast.error('Failed to save function')
@@ -1221,9 +1259,10 @@ function addDependencyFromAI(pkg: string) {
             </button>
             <button
               v-if="isEdit"
-              class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800"
+              class="text-sm inline-flex items-center gap-1 px-3 py-1.5 rounded-sm border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
+              :disabled="saving"
               @click="reloadDeps"
-              title="Re-fetch dependencies from the server. Useful if the CR was changed externally (kubectl, AI suggestion)."
+              title="Load the latest dependencies from the server, replacing local edits."
             >
               <RefreshCw class="w-4 h-4" /> Reload
             </button>
