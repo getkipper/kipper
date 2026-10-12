@@ -116,6 +116,19 @@ func writeRouteWithHost(out io.Writer, app *unstructured.Unstructured, derivedHo
 	}
 	say(out, "  Path:   %s\n", path)
 	say(out, "  URL:    %s\n", view.url())
+	if closed, _ := route["closed"].(bool); closed {
+		// These paths reflect configuration; RouteReady below reports reconciliation status.
+		if public, _, _ := unstructured.NestedStringSlice(route, "publicPaths"); len(public) > 0 {
+			if base := strings.TrimSuffix(path, "/"); base != "" {
+				for i := range public {
+					public[i] = base + public[i]
+				}
+			}
+			say(out, "  Closed: configured to publish only %s\n", strings.Join(public, ", "))
+		} else {
+			say(out, "  Closed: configured with no public paths\n")
+		}
+	}
 	if gates := deployer.RouteGates(route); len(gates) > 0 {
 		say(out, "  Gates:  %s\n", strings.Join(gates, "; "))
 	}

@@ -118,3 +118,37 @@ func TestConfirmRouteRemoval(t *testing.T) {
 	assert.NoError(t, confirmRouteRemoval(strings.NewReader("y\n"), true, false))
 	assert.Error(t, confirmRouteRemoval(strings.NewReader("n\n"), true, false))
 }
+
+func TestWriteRouteSaysTheRouteIsClosed(t *testing.T) {
+	route := func(extra map[string]interface{}) *unstructured.Unstructured {
+		r := map[string]interface{}{"host": "pay.example.com", "closed": true}
+		for k, v := range extra {
+			r[k] = v
+		}
+		return &unstructured.Unstructured{Object: map[string]interface{}{
+			"metadata": map[string]interface{}{"name": "payments"},
+			"spec":     map[string]interface{}{"route": r},
+		}}
+	}
+	var out bytes.Buffer
+	writeRoute(&out, route(map[string]interface{}{"publicPaths": []interface{}{"/webhooks/stripe"}}))
+	assert.Contains(t, out.String(), "  Closed: configured to publish only /webhooks/stripe\n")
+
+	out.Reset()
+	writeRoute(&out, route(nil))
+	assert.Contains(t, out.String(), "  Closed: configured with no public paths\n")
+	assert.NotContains(t, out.String(), "nothing is published", "the spec alone cannot say the old route is gone")
+
+	out.Reset()
+	writeRoute(&out, route(map[string]interface{}{"path": "/pay/", "publicPaths": []interface{}{"/webhooks/stripe", "/webhooks/paypal"}}))
+	assert.Contains(t, out.String(), "  Closed: configured to publish only /pay/webhooks/stripe, /pay/webhooks/paypal\n", "public paths sit under the route's path")
+
+	rejected := route(map[string]interface{}{"path": "/pay//v1", "publicPaths": []interface{}{"/hook"}})
+	rejected.Object["status"] = map[string]interface{}{"conditions": []interface{}{map[string]interface{}{
+		"type": "RouteReady", "status": "False", "reason": "ClosedWithoutPublicPaths", "message": "closed route has no usable public paths; removing its Ingresses",
+	}}}
+	out.Reset()
+	writeRoute(&out, rejected)
+	assert.Contains(t, out.String(), "ClosedWithoutPublicPaths")
+	assert.NotContains(t, out.String(), " is published")
+}

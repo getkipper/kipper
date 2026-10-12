@@ -54,6 +54,9 @@ func (d *Deployer) RemoveRoute(ctx context.Context, namespace, name string) ([]s
 // RouteGates describes configured access controls, redirects, CSP entries and rate limits.
 func RouteGates(route map[string]interface{}) []string {
 	var gates []string
+	if v, _ := route["closed"].(bool); v {
+		gates = append(gates, "closed")
+	}
 	if v, _ := route["basicAuth"].(bool); v {
 		gates = append(gates, "basic auth")
 	}
