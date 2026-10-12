@@ -11,7 +11,7 @@ import * as servicesApi from '@/api/services'
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }))
 vi.mock('@/composables/useToast', () => ({ useToast: () => toast }))
 vi.mock('vue-router', () => ({
-  useRoute: () => ({ name: 'function-edit', params: { fn: 'update-tlds' }, query: {} }),
+  useRoute: () => ({ name: 'function-edit', params: { fn: 'nightly-sync' }, query: {} }),
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
 }))
 vi.mock('@/api/inline-functions', async importOriginal => ({
@@ -40,7 +40,7 @@ vi.mock('@/api/services', async importOriginal => ({
 beforeEach(() => {
   vi.clearAllMocks()
   setActivePinia(createPinia())
-  vi.mocked(inlineApi.getInlineFunctionCode).mockResolvedValue({ name: 'update-tlds', runtime: 'python', code: 'print(0)', trigger: 'cron', schedule: '0 3 * * *' } as Awaited<ReturnType<typeof inlineApi.getInlineFunctionCode>>)
+  vi.mocked(inlineApi.getInlineFunctionCode).mockResolvedValue({ name: 'nightly-sync', runtime: 'python', code: 'print(0)', trigger: 'cron', schedule: '0 3 * * *' } as Awaited<ReturnType<typeof inlineApi.getInlineFunctionCode>>)
   vi.mocked(inlineApi.updateInlineFunctionCode).mockResolvedValue(undefined)
   vi.mocked(fnApi.fetchFunctions).mockResolvedValue([])
   vi.mocked(fnApi.fetchFunctionEnv).mockResolvedValue({ REGISTRAR: 'api.example.com' })
@@ -136,7 +136,7 @@ it('discards a dependency reload that answers during a save', async () => {
 
   const saving = vm.save()
   await flushPromises()
-  expect(fnApi.updateFunctionDependencies).toHaveBeenCalledWith(expect.anything(), 'update-tlds', { requests: '2.33' })
+  expect(fnApi.updateFunctionDependencies).toHaveBeenCalledWith(expect.anything(), 'nightly-sync', { requests: '2.33' })
   answer({ requests: '2.32' })
   await reload
   secretWritten()
@@ -147,5 +147,5 @@ it('discards a dependency reload that answers during a save', async () => {
   vi.mocked(fnApi.updateFunctionDependencies).mockClear()
   vm.deps = [{ name: 'requests', version: '2.32' }]
   await vm.save()
-  expect(fnApi.updateFunctionDependencies).toHaveBeenCalledWith(expect.anything(), 'update-tlds', { requests: '2.32' })
+  expect(fnApi.updateFunctionDependencies).toHaveBeenCalledWith(expect.anything(), 'nightly-sync', { requests: '2.32' })
 })

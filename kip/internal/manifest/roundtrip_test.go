@@ -15,21 +15,8 @@ import (
 	"k8s.io/client-go/dynamic/fake"
 )
 
-// TestExportRoundTrip is the durable regression guard for kip export's
-// silent field-drop bug. Every optional field on every CR must survive
-// the trip:
-//
-//	build CR via Convert() → set live in fake apiserver → Export() →
-//	compare result against the original Manifest input.
-//
-// Any field that ends up missing from the round-tripped Manifest is a
-// drop bug — either the exporter didn't read the spec key (the original
-// acme-tools bug) or the kip-side Manifest type doesn't carry the
-// field yet (which is a separate gap to file before merging the new
-// field on the controller side).
-//
-// New CR fields land here BEFORE they ship, not after a migration
-// rediscovers them.
+// TestExportRoundTrip checks that populated fixture fields survive conversion and export.
+// Add new manifest fields to the fixtures to include them in this coverage.
 func TestExportRoundTrip(t *testing.T) {
 	original := &Manifest{
 		Project:     "blog",
@@ -66,7 +53,7 @@ func TestExportRoundTrip(t *testing.T) {
 			},
 		},
 		Functions: map[string]FuncSpec{
-			"update-tlds": fullFunction(),
+			"nightly-sync": fullFunction(),
 		},
 	}
 
@@ -76,28 +63,18 @@ func TestExportRoundTrip(t *testing.T) {
 	got, err := Export(ctx, dynClient, "blog", "test", "blog-test")
 	require.NoError(t, err)
 
-	// Compare per-resource — the maps may iterate in different order
-	// and an empty Functions/Jobs/etc. is fine if there was nothing to
-	// emit. The interesting test is "what was put in came out".
 	assert.Equal(t, original.Apps["webapp"], got.Apps["webapp"], "webapp App must round-trip with every optional field intact")
 
-	// A git app exports git-only: its built image is build output, not manifest
-	// state, so export omits it. This keeps export→apply a no-op (a manifest
-	// carrying image+git would fail apply's mutual-exclusion check).
+	// Omit build output so the exported manifest passes image/git validation on apply.
 	assert.Equal(t, original.Apps["docs"], got.Apps["docs"], "git App round-trips git-only, with no image field")
 
 	assert.Equal(t, original.Services["db"], got.Services["db"])
 	assert.Equal(t, original.Volumes["uploads"], got.Volumes["uploads"])
 	assert.Equal(t, original.Jobs["nightly"], got.Jobs["nightly"])
-	assert.Equal(t, original.Functions["update-tlds"], got.Functions["update-tlds"], "Function round-trip must preserve source/serviceBindings/CSP/volumes")
+	assert.Equal(t, original.Functions["nightly-sync"], got.Functions["nightly-sync"], "Function round-trip must preserve source/serviceBindings/CSP/volumes")
 }
 
 func TestExportRoundTrip_AppKeepsImageWithoutGit(t *testing.T) {
-	// Regression for the kip-old `image:`+`git:` mutual-exclusion bug:
-	// an image-only App must come out with no git block (and vice versa).
-	// Today's exporter reads each independently from the CR, so the
-	// failure mode is "CR has both, export emits both" — guard against
-	// that by ensuring an image-only input stays image-only.
 	original := &Manifest{
 		Project: "p", Environment: "e",
 		Apps: map[string]AppSpec{
@@ -117,16 +94,10 @@ func TestExportRoundTrip_AppKeepsImageWithoutGit(t *testing.T) {
 	gitApp := got.Apps["git-only"]
 	assert.NotNil(t, gitApp.Git)
 	assert.Equal(t, "https://github.com/x/y", gitApp.Git.URL)
-	// A git app exports git-only. Convert() stamps a busybox placeholder into
-	// the CR's required image field, but export omits it: the built image is
-	// build output, not manifest state, so a re-applied manifest stays git-only
-	// and passes apply's image/git mutual-exclusion check.
+	// Convert supplies a placeholder image for git apps; export must omit it.
 	assert.Empty(t, gitApp.Image, "a git app must export git-only, with no image field")
 }
 
-// fullApp returns an AppSpec with every optional field populated, so
-// the round-trip test fails if any new field gets added to AppSpec but
-// the export emitter forgets to read it.
 func fullApp() AppSpec {
 	return AppSpec{
 		Image:    "ghcr.io/example/webapp:2.3.4",
@@ -202,7 +173,7 @@ func gitApp() AppSpec {
 
 func fullFunction() FuncSpec {
 	return FuncSpec{
-		Image:   "ghcr.io/example/update-tlds:1",
+		Image:   "ghcr.io/example/nightly-sync:1",
 		Port:    8080,
 		Runtime: "node",
 		Source: &FuncSourceSpec{
@@ -240,8 +211,7 @@ func fakeClientWithManifest(t *testing.T, m *Manifest, namespace string) *fake.F
 	t.Helper()
 	scheme := runtime.NewScheme()
 
-	// The fake client needs to know each resource is a list-kind. The
-	// kip CRDs use `<Kind>List` consistently.
+	// Register list kinds so the fake client can serve the exporter's List calls.
 	gvrToListKind := map[schema.GroupVersionResource]string{
 		AppGVR:      "AppList",
 		ServiceGVR:  "ServiceList",
