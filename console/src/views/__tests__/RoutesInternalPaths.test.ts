@@ -21,7 +21,7 @@ vi.mock('@/api/routes')
 
 const HEALTH = { ingress_ready: true, tls_ready: true, message: '' }
 
-function group(routeGuard: boolean, refused: string[], publicPaths: string[] = [], refusalReady = true) {
+function group(routeGuard: boolean, refused: string[], publicPaths: string[] = [], refusalReady = true, closed = false) {
   return {
     name: 'shop-webapp-test',
     namespace: 'shop-test',
@@ -40,6 +40,7 @@ function group(routeGuard: boolean, refused: string[], publicPaths: string[] = [
       refused_paths: refused,
       public_paths: publicPaths,
       refusal_ready: refusalReady,
+      closed,
     }],
   }
 }
@@ -91,5 +92,20 @@ describe('what a route publishes', () => {
     const html = document.body.innerHTML
     expect(html).toContain('route-publishes-everything')
     expect(html).not.toContain('route-refused-paths')
+  })
+
+  it('says a closed route publishes only its public paths', async () => {
+    await mountRoutes(group(false, [], ['/domains-api/webhooks/stripe'], true, true))
+
+    const html = document.body.innerHTML
+    expect(html).toContain('route-closed')
+    expect(html).toContain('/domains-api/webhooks/stripe')
+    expect(html).not.toContain('route-publishes-everything')
+  })
+
+  it('says a closed route without public paths publishes nothing', async () => {
+    await mountRoutes(group(false, [], [], true, true))
+
+    expect(document.body.innerHTML).toContain('route-closed-empty')
   })
 })

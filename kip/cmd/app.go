@@ -149,7 +149,8 @@ func init() {
 	appUpdateCmd.Flags().String("tuning", "", `"auto" clears the CPU and memory values so Kipper sizes the app on its own`)
 	appUpdateCmd.Flags().StringSlice("redirect-from", nil, "hostnames that 301 to this app's hostname (e.g. www.example.com); pass empty to clear, max 10")
 	appUpdateCmd.Flags().StringSlice("internal-path", nil, "path prefixes refused at the ingress on every route this app has, matched literally; pass empty to clear")
-	appUpdateCmd.Flags().StringSlice("public-path", nil, "paths that stay public even though a refusal covers them; pass empty to clear")
+	appUpdateCmd.Flags().StringSlice("public-path", nil, "public paths for closed routes or exceptions to blocked prefixes; pass empty to clear")
+	appUpdateCmd.Flags().Bool("closed", false, "publish only the route's public paths; use --closed=false to reopen")
 	addHealthFlags(appUpdateCmd)
 	appUpdateCmd.Flags().String("project", "", "project name")
 	appUpdateCmd.Flags().String("environment", "", "target environment")
@@ -611,8 +612,10 @@ func runAppUpdate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if image == "" && profile == "" && !redirectSet && !internalSet && !publicSet && resourceEdits == nil && !healthEdit.Any() {
-		return fmt.Errorf("nothing to update. Pass --image, --profile, --memory, --cpu, their -request/-limit forms, --tuning auto, --redirect-from, --internal-path, --public-path, --health, a --health-* flag, or a combination")
+	closedSet := cmd.Flags().Changed("closed")
+	closed, _ := cmd.Flags().GetBool("closed")
+	if image == "" && profile == "" && !redirectSet && !internalSet && !publicSet && !closedSet && resourceEdits == nil && !healthEdit.Any() {
+		return fmt.Errorf("nothing to update. Pass --image, --profile, --memory, --cpu, their -request/-limit forms, --tuning auto, --redirect-from, --internal-path, --public-path, --closed, --health, a --health-* flag, or a combination")
 	}
 
 	ns, k8sClient, err := resolveAppNamespace(cmd, appName)
@@ -677,7 +680,18 @@ func runAppUpdate(cmd *cobra.Command, args []string) error {
 		if len(publicPaths) == 0 {
 			fmt.Printf("\n  ✔  Published paths cleared. No restart: the route is rebuilt in place\n")
 		} else {
-			fmt.Printf("\n  ✔  Publishing %s despite the refusals. No restart: the route is rebuilt in place\n", strings.Join(publicPaths, ", "))
+			fmt.Printf("\n  ✔  Public paths set to %s\n", strings.Join(publicPaths, ", "))
+		}
+	}
+
+	if closedSet {
+		if err := d.UpdateRouteClosed(ctx, ns, appName, closed); err != nil {
+			return err
+		}
+		if closed {
+			fmt.Printf("\n  ✔  Route set to closed: only public paths will be published\n")
+		} else {
+			fmt.Printf("\n  ✔  Route set to open\n")
 		}
 	}
 

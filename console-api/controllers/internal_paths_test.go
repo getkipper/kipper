@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -799,4 +800,127 @@ func TestRouteGuard_WithdrawsOnlyWhenTheCanonicalHostMoved(t *testing.T) {
 	}
 	require.NoError(t, stranger.withdrawSupersededPublication(ctx, app, "new.example.com"))
 	assert.True(t, stillPublished(stranger), "not ours to withdraw")
+}
+
+func TestRouteGuard_AClosedRoutePublishesOnlyItsPublicPaths(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+	app := guardedApp()
+	app.Spec.Route.Closed = true
+	app.Spec.Route.PublicPaths = []string{"/webhooks/stripe"}
+	sibling := newTestApp()
+	sibling.Name = "ops"
+	sibling.UID = types.UID("uid-ops")
+	sibling.Spec.Route = &kipperv1.AppRoute{Host: guardedHost, Path: "/ops"}
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, sibling, routeGuardOn()).Build()
+	r := &AppReconciler{Client: c, Scheme: scheme}
+
+	require.NoError(t, r.reconcileIngress(ctx, app))
+	require.NoError(t, r.reconcileIngress(ctx, sibling))
+
+	assert.Equal(t, "my-app", servedBy(t, c, "/domains-api/webhooks/stripe"))
+	assert.Equal(t, "my-app", servedBy(t, c, "/domains-api/webhooks/stripe/"))
+	assert.Equal(t, "", servedBy(t, c, "/domains-api"), "the route's own path is not published")
+	assert.Equal(t, "", servedBy(t, c, "/domains-api/admin"))
+	assert.Equal(t, "", servedBy(t, c, "/domains-api/webhooks/stripe/other"))
+	assert.Equal(t, "ops", servedBy(t, c, "/ops/anything"), "a sibling on the host is untouched")
+	assert.Empty(t, RefusedRoutePaths(app.Spec.Route, true), "a closed route needs no refusal of its own")
+}
+
+func TestRouteGuard_AClosedRouteAtTheRoot(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+	app := guardedApp()
+	app.Spec.Route.Path = "/"
+	app.Spec.Route.Closed = true
+	app.Spec.Route.PublicPaths = []string{"/webhooks/stripe"}
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app).Build()
+	r := &AppReconciler{Client: c, Scheme: scheme}
+
+	require.NoError(t, r.reconcileIngress(ctx, app))
+
+	assert.Equal(t, "my-app", servedBy(t, c, "/webhooks/stripe"))
+	assert.Equal(t, "", servedBy(t, c, "/"))
+	assert.Equal(t, "", servedBy(t, c, "/login"))
+}
+
+func TestRouteGuard_AClosedRouteWithoutPublicPathsPublishesNothing(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+	app := guardedApp()
+	app.Spec.Route.Closed = true
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app).Build()
+	r := &AppReconciler{Client: c, Scheme: scheme}
+
+	require.NoError(t, r.reconcileIngress(ctx, app))
+
+	assert.False(t, ingressExists(t, c, "project-test", "my-app"))
+	cond := apimeta.FindStatusCondition(app.Status.Conditions, kipperv1.ConditionRouteReady)
+	require.NotNil(t, cond)
+	assert.Contains(t, cond.Message, "public paths")
+}
+
+func TestRouteGuard_ClosingKeepsTheRefusalsUntilTheRouteIsNarrowed(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+	app := guardedApp()
+	failMain := false
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, routeGuardOn()).WithInterceptorFuncs(interceptor.Funcs{
+		Update: func(ctx context.Context, cl crclient.WithWatch, obj crclient.Object, opts ...crclient.UpdateOption) error {
+			if _, ok := obj.(*networkingv1.Ingress); ok && failMain && obj.GetName() == "my-app" {
+				return errors.NewInternalError(fmt.Errorf("admission rejected"))
+			}
+			return cl.Update(ctx, obj, opts...)
+		},
+	}).Build()
+	r := &AppReconciler{Client: c, Scheme: scheme}
+	require.NoError(t, r.reconcileIngress(ctx, app))
+	require.True(t, ingressExists(t, c, "project-test", "my-app-internal-paths"), "the open route starts out guarded")
+
+	app.Spec.Route.Closed = true
+	app.Spec.Route.PublicPaths = []string{"/webhooks/stripe"}
+	failMain = true
+	assert.Error(t, r.reconcileIngress(ctx, app))
+
+	assert.True(t, ingressExists(t, c, "project-test", "my-app-internal-paths"), "the refusals stay while the route is still wide")
+}
+
+func TestRouteGuard_ClosingWithdrawsOldPublicExceptionsFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		publicPaths []string
+	}{
+		{"with a new public path", []string{"/webhooks/stripe"}},
+		{"without public paths", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := testScheme()
+			app := guardedApp()
+			app.Spec.Route.PublicPaths = []string{"/actuator/prometheus"}
+			failDeny := false
+			c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, routeGuardOn()).WithInterceptorFuncs(interceptor.Funcs{
+				Delete: func(ctx context.Context, cl crclient.WithWatch, obj crclient.Object, opts ...crclient.DeleteOption) error {
+					if failDeny && obj.GetName() == "my-app-internal-paths" {
+						return errors.NewInternalError(fmt.Errorf("admission rejected"))
+					}
+					return cl.Delete(ctx, obj, opts...)
+				},
+			}).Build()
+			r := &AppReconciler{Client: c, Scheme: scheme}
+			require.NoError(t, r.reconcileIngress(ctx, app))
+			require.Equal(t, "my-app-public-paths", servedBy(t, c, "/domains-api/actuator/prometheus"), "the open route starts out with the exception")
+
+			app.Spec.Route.Closed = true
+			app.Spec.Route.PublicPaths = tc.publicPaths
+			failDeny = true
+			assert.Error(t, r.reconcileIngress(ctx, app))
+
+			assert.NotContains(t, []string{"my-app", "my-app-public-paths"}, servedBy(t, c, "/domains-api/actuator/prometheus"), "nothing publishes the old exception")
+			assert.False(t, ingressExists(t, c, "project-test", "my-app-public-paths"))
+			cond := apimeta.FindStatusCondition(app.Status.Conditions, kipperv1.ConditionRouteReady)
+			require.NotNil(t, cond)
+			assert.Equal(t, metav1.ConditionFalse, cond.Status)
+		})
+	}
 }

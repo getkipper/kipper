@@ -369,6 +369,11 @@ type AppRoute struct {
 	// +kubebuilder:validation:items:Pattern=`^(/(\.{3,}|\.*[A-Za-z0-9_~-][A-Za-z0-9._~-]*))+$`
 	// +optional
 	PublicPaths []string `json:"publicPaths,omitempty"`
+
+	// Closed publishes only the route's PublicPaths, matched exactly, so a host
+	// can serve one endpoint of the app, such as a webhook, and nothing else.
+	// +optional
+	Closed bool `json:"closed,omitempty"`
 }
 
 // MaxRedirectFromHosts caps route.redirectFrom, matching the MaxItems marker

@@ -155,6 +155,9 @@ func convertApp(name, namespace string, app AppSpec, resolve LinkNamespace) Reso
 		if paths := internalpath.Clean(app.Route.PublicPaths); len(paths) > 0 {
 			route["publicPaths"] = toInterfaceSlice(paths)
 		}
+		if app.Route.Closed {
+			route["closed"] = true
+		}
 		if len(route) > 0 {
 			spec["route"] = route
 		}

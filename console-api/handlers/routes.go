@@ -36,17 +36,15 @@ type Routes struct {
 }
 
 type routeEntry struct {
-	Path    string      `json:"path"`
-	Service string      `json:"service"`
-	Port    int32       `json:"port"`
-	App     string      `json:"app"`
-	Health  RouteHealth `json:"health"`
-	// RefusedPaths lists configured refused prefixes including the route base path.
-	RefusedPaths []string `json:"refused_paths"`
-	// PublicPaths lists covered public exceptions including the route base path.
-	PublicPaths []string `json:"public_paths"`
-	// RefusalReady reports whether the guard Ingresses match the requested policy.
-	RefusalReady bool `json:"refusal_ready"`
+	Path         string      `json:"path"`
+	Service      string      `json:"service"`
+	Port         int32       `json:"port"`
+	App          string      `json:"app"`
+	Health       RouteHealth `json:"health"`
+	RefusedPaths []string    `json:"refused_paths"`
+	PublicPaths  []string    `json:"public_paths"`
+	Closed       bool        `json:"closed,omitempty"`
+	RefusalReady bool        `json:"refusal_ready"`
 
 	stopped bool
 }
@@ -59,13 +57,8 @@ type routeGroupResponse struct {
 	Project     string       `json:"project"`
 	Environment string       `json:"environment"`
 	Routes      []routeEntry `json:"routes"`
-	// RouteGuard reports whether cluster-wide default refusals are enabled.
-	RouteGuard bool `json:"route_guard"`
-	// Health is the aggregate state for the host. Group is ready only
-	// when every member app's Ingress is ready; group TLS is ready only
-	// when every member's certificate is issued. This way the host-level
-	// badge in the UI reflects shared-host groups honestly.
-	Health RouteHealth `json:"health"`
+	RouteGuard  bool         `json:"route_guard"`
+	Health      RouteHealth  `json:"health"`
 }
 
 // List returns every configured public route, grouped by host. Each group
@@ -155,6 +148,7 @@ func (rt *Routes) List(w http.ResponseWriter, r *http.Request) {
 			App:          app.Name,
 			RefusedPaths: controllers.RefusedRoutePaths(route, guardOn),
 			PublicPaths:  controllers.ReopenedRoutePaths(route, guardOn),
+			Closed:       route.Closed,
 			RefusalReady: rt.refusalInstalled(ctx, app, host, guardOn),
 			stopped:      app.Spec.Stopped != nil,
 		})

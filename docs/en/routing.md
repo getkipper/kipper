@@ -312,6 +312,22 @@ The exact path uses the route's normal strip-prefix, rate limit, and authenticat
 
 Both lists are settable on the app's **Settings** tab in the console, and the **Routes** page prints the refused prefixes under each path mapping.
 
+### Closing a route except for one path {#closing-a-route-except-for-one-path}
+
+To expose only specific endpoints, such as a payment webhook, close the route and list them in `publicPaths`:
+
+```bash
+kip app update payments --closed --public-path /webhooks/stripe
+```
+
+A closed route publishes each public path under the route's base path, with exact matches for both the path and its trailing-slash form. Other paths return 404 unless another route on the host serves them. A closed route with no usable public paths removes its Ingresses and reports this in its `RouteReady` condition.
+
+On a shared host, another app's guard takes priority over a closed route's public paths. Choose paths outside that app's blocked prefixes, or use a separate host.
+
+Public paths use the route's middleware, including `basicAuth` and `requireApiKey`. Configure authentication to match the webhook provider's capabilities.
+
+Use `--closed=false` to reopen the route. In a manifest, set `closed: true` in the `route` block. If `kip app update --closed` reports that the cluster dropped the setting, run `kip upgrade` to install a CRD that supports closed routes, then retry.
+
 ### Looking at a refused path yourself {#looking-at-a-refused-path-yourself}
 
 The endpoint remains available inside the cluster. Use a tunnel to reach it directly for administration or debugging.

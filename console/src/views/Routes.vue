@@ -442,7 +442,27 @@ function envColor(env: string): string {
                   </div>
 
                   <div
-                    v-if="route.refused_paths?.length"
+                    v-if="route.closed && route.public_paths?.length"
+                    data-testid="route-closed"
+                    class="mt-1.5 flex flex-wrap items-center gap-1.5 pl-1 text-xs text-slate-500 dark:text-slate-400"
+                  >
+                    <ShieldOff class="h-3 w-3 shrink-0" :stroke-width="1.75" />
+                    <span>Closed route. Public paths:</span>
+                    <code
+                      v-for="p in route.public_paths"
+                      :key="p"
+                      class="rounded-sm bg-slate-100 px-1 py-0.5 font-mono text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                    >{{ p }}</code>
+                  </div>
+                  <div
+                    v-else-if="route.closed"
+                    data-testid="route-closed-empty"
+                    class="mt-1.5 pl-1 text-xs text-amber-700 dark:text-amber-400"
+                  >
+                    Closed route. No public paths configured.
+                  </div>
+                  <div
+                    v-else-if="route.refused_paths?.length"
                     data-testid="route-refused-paths"
                     class="mt-1.5 flex flex-wrap items-center gap-1.5 pl-1 text-xs text-slate-500 dark:text-slate-400"
                   >
@@ -468,7 +488,7 @@ function envColor(env: string): string {
                     </span>
                   </div>
                   <div
-                    v-if="route.public_paths?.length"
+                    v-if="!route.closed && route.public_paths?.length"
                     data-testid="route-public-paths"
                     class="mt-1 flex flex-wrap items-center gap-1.5 pl-1 text-xs text-slate-500 dark:text-slate-400"
                   >

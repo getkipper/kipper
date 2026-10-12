@@ -545,10 +545,11 @@ kip app update backend --health-path /actuator/health/readiness --health-startup
 | `--health-port` | No* | Port to check, when it is not the app port |
 | `--health-startup-timeout` | No* | Seconds from pod creation to readiness before the pod is reported as stuck, including image pulls (default 300) |
 | `--health-timeout` | No* | Timeout for each check in seconds (default 2) |
+| `--closed` | No* | Publish only the route's public paths; use `--closed=false` to reopen. See [closing a route](/en/routing#closing-a-route-except-for-one-path) |
 | `--project` | No | Project name |
 | `--environment` | No | Target environment |
 
-\* Supply at least one update flag: `--image`, `--profile`, a CPU or memory flag, `--tuning auto`, `--redirect-from`, `--internal-path`, `--public-path`, `--health` or a `--health-*` flag.
+\* Supply at least one update flag: `--image`, `--profile`, a CPU or memory flag, `--tuning auto`, `--redirect-from`, `--internal-path`, `--public-path`, `--closed`, `--health` or a `--health-*` flag.
 
 A request below its limit defines a range for automatic tuning. A request or limit supplied alone sets a fixed size; a request above its limit is rejected. Use either `--memory` or the separate memory request/limit flags. The same rule applies to CPU. `--tuning auto` cannot be combined with CPU or memory values. Changing the profile preserves explicit resource values. See [Your own CPU and memory values](/en/resource-management#your-own-values).
 
