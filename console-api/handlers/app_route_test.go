@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -434,4 +435,24 @@ func TestGetRouteDNSStatus_NoRoute(t *testing.T) {
 	var resp dnsStatusResponse
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	assert.Equal(t, dnsStatusDisabled, resp.Status)
+}
+
+func TestGetRoute_AClosedRouteWithoutPublicPathsPublishesNothing(t *testing.T) {
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+		Spec: kipperv1.AppSpec{
+			Image: "nginx", Port: 80, Replicas: int32Ptr(1),
+			Route: &kipperv1.AppRoute{Host: "web.example.com", Closed: true},
+		},
+	}
+	handler := &Apps{Client: fake.NewClientset(), CRClient: testCRClient(app)}
+
+	rec := httptest.NewRecorder()
+	routeRouter(handler).ServeHTTP(rec, httptest.NewRequest("GET", "/projects/default/apps/web/route", nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp routeResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.True(t, resp.Health.Unpublished)
+	assert.Contains(t, resp.Health.Message, "nothing is published")
 }

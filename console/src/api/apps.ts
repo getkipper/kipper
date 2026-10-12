@@ -489,6 +489,7 @@ export interface AppRouteHealth {
   ingress_ready: boolean
   tls_ready: boolean
   message: string
+  unpublished?: boolean
 }
 
 export interface AppRoute {

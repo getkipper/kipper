@@ -46,7 +46,8 @@ type routeEntry struct {
 	Closed       bool        `json:"closed,omitempty"`
 	RefusalReady bool        `json:"refusal_ready"`
 
-	stopped bool
+	stopped     bool
+	unpublished *RouteHealth
 }
 
 type routeGroupResponse struct {
@@ -141,7 +142,7 @@ func (rt *Routes) List(w http.ResponseWriter, r *http.Request) {
 			order = append(order, key)
 		}
 
-		group.Routes = append(group.Routes, routeEntry{
+		entry := routeEntry{
 			Path:         path,
 			Service:      app.Name,
 			Port:         app.Spec.Port,
@@ -151,7 +152,11 @@ func (rt *Routes) List(w http.ResponseWriter, r *http.Request) {
 			Closed:       route.Closed,
 			RefusalReady: rt.refusalInstalled(ctx, app, host, guardOn),
 			stopped:      app.Spec.Stopped != nil,
-		})
+		}
+		if h, ok := unpublishedHealth(ctx, rt.Client, app); ok {
+			entry.unpublished = &h
+		}
+		group.Routes = append(group.Routes, entry)
 	}
 
 	// Sort path entries within each group for stable output; root path
@@ -172,6 +177,10 @@ func (rt *Routes) List(w http.ResponseWriter, r *http.Request) {
 	for _, key := range order {
 		g := grouped[key]
 		for i := range g.Routes {
+			if g.Routes[i].unpublished != nil {
+				g.Routes[i].Health = *g.Routes[i].unpublished
+				continue
+			}
 			g.Routes[i].Health = routeHealth(ctx, rt.Client, key.namespace, g.Routes[i].App, key.host)
 			if g.Routes[i].stopped {
 				g.Routes[i].Health = stoppedRouteHealth(g.Routes[i].Health)
@@ -228,14 +237,23 @@ func (rt *Routes) resolveRouteHost(app *kipperv1.App, route *kipperv1.AppRoute, 
 	return domain.SubdomainFor(prefix, rt.Domain)
 }
 
-// aggregateRouteHealth folds the per-app health entries in a route group
-// into a single host-level summary. Ingress and TLS are reported as ready
-// only when every member is ready; the message surfaces the first member
-// that isn't, so users can see what's holding the group back.
+// aggregateRouteHealth summarizes readiness across routes that may serve traffic.
+// Confirmed unpublished routes are excluded unless every route is unpublished;
+// in that case, the first route supplies the group's health.
 func aggregateRouteHealth(entries []routeEntry) RouteHealth {
-	if len(entries) == 0 {
-		return RouteHealth{}
+	published := make([]routeEntry, 0, len(entries))
+	for _, e := range entries {
+		if !e.Health.Unpublished {
+			published = append(published, e)
+		}
 	}
+	if len(published) == 0 {
+		if len(entries) == 0 {
+			return RouteHealth{}
+		}
+		return entries[0].Health
+	}
+	entries = published
 	out := RouteHealth{IngressReady: true, TLSReady: true}
 	for _, e := range entries {
 		if !e.Health.IngressReady {

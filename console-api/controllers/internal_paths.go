@@ -96,8 +96,12 @@ func refusalPathRules(routePath string, prefixes []string) []ingressPathRule {
 	return rules
 }
 
-// closedRoutePaths returns valid public paths under the route base, including
-// trailing-slash variants, for exact Ingress matches.
+// ClosedRoutePaths returns the valid exact-match paths the reconciler uses for
+// a closed route, including the route base and trailing-slash variants.
+func ClosedRoutePaths(route *kipperv1.AppRoute) []string {
+	return closedRoutePaths(route)
+}
+
 func closedRoutePaths(route *kipperv1.AppRoute) []string {
 	var paths []string
 	for _, rule := range reopenedPathRules(route.Path, internalpath.Clean(route.PublicPaths)) {

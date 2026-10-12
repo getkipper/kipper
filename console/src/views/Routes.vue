@@ -9,6 +9,10 @@ import { useCapabilities } from '@/composables/useCapabilities'
 import { fetchRoutes, createRouteGroup, updateRouteGroup, deleteRouteGroup, type RouteGroup, type PathMapping } from '@/api/routes'
 import { fetchApps } from '@/api/apps'
 import type { App } from '@/api/types'
+import { routeBadge, routeBadgeClass } from '@/utils/routeBadge'
+
+const NO_HEALTH = { ingress_ready: false, tls_ready: false }
+
 
 const toast = useToast()
 const projectsStore = useProjectsStore()
@@ -384,13 +388,11 @@ function envColor(env: string): string {
                   <span
                     v-if="group.tls"
                     class="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-xs font-medium"
-                    :class="group.health?.tls_ready
-                      ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400'
-                      : 'bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-400'"
+                    :class="routeBadgeClass[routeBadge(group.health ?? NO_HEALTH, 'TLS').tone]"
                     :title="group.health?.message"
                   >
                     <ShieldCheck class="h-3 w-3" />
-                    {{ group.health?.tls_ready ? 'TLS' : group.health?.ingress_ready ? 'TLS pending' : 'Provisioning' }}
+                    {{ routeBadge(group.health ?? NO_HEALTH, 'TLS').label }}
                   </span>
                   <span
                     class="rounded-full px-2 py-0.5 text-xs font-medium"

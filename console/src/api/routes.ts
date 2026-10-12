@@ -4,6 +4,7 @@ export interface RouteHealth {
   ingress_ready: boolean
   tls_ready: boolean
   message: string
+  unpublished?: boolean
 }
 
 export interface RouteEntry {
