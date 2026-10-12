@@ -1,10 +1,13 @@
 package blueprint
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/getkipper/kipper/kip/internal/manifest"
 )
 
 const testBlueprint = `name: wordpress
@@ -271,7 +274,7 @@ func TestBuiltinGhost(t *testing.T) {
 	bp, err := Get("ghost")
 	require.NoError(t, err)
 
-	m, err := bp.Render(map[string]string{"projectName": "site"})
+	m, err := bp.Render(map[string]string{"projectName": "site", "domain": "https://blog.example.com"})
 	require.NoError(t, err)
 
 	assert.Equal(t, "site", m.Project)
@@ -616,4 +619,144 @@ func TestBuiltinWordpress_WithEnvironment(t *testing.T) {
 
 	assert.Equal(t, "prod", m.Environment)
 	assert.Contains(t, m.Apps["wordpress"].Env["WORDPRESS_DB_HOST"], "blog-prod")
+}
+
+func TestBuiltinBlueprintsRenderValidRouteHosts(t *testing.T) {
+	metas, err := List()
+	require.NoError(t, err)
+	require.NotEmpty(t, metas)
+	for _, meta := range metas {
+		for _, domain := range []string{"https://app.example.com", "app.example.com"} {
+			t.Run(meta.Name+"/"+domain, func(t *testing.T) {
+				b, err := Get(meta.Name)
+				require.NoError(t, err)
+				params := map[string]string{"domain": domain, "baseUrl": "https://app.example.com"}
+				for _, p := range b.Metadata.Parameters {
+					if p.Required && params[p.Name] == "" {
+						params[p.Name] = "shop"
+					}
+				}
+				m, err := b.Render(params)
+				require.NoError(t, err)
+				routed := 0
+				for name, app := range m.Apps {
+					if app.Route == nil {
+						continue
+					}
+					routed++
+					assert.NoError(t, manifest.ValidateRouteHost(app.Route.Host), "app %s", name)
+					assert.Equal(t, "app.example.com", app.Route.Host, "app %s", name)
+				}
+				assert.NotZero(t, routed, "every built-in blueprint publishes a route")
+			})
+		}
+	}
+}
+
+func TestBuiltinBlueprintsPassAFullURLToTheApp(t *testing.T) {
+	urlEnv := map[string][2]string{
+		"calcom":        {"calcom", "NEXT_PUBLIC_WEBAPP_URL"},
+		"calcom-auth":   {"calcom", "NEXTAUTH_URL"},
+		"ghost":         {"ghost", "url"},
+		"invoice-ninja": {"invoice-ninja", "APP_URL"},
+		"mattermost":    {"mattermost", "MM_SERVICESETTINGS_SITEURL"},
+		"outline":       {"outline", "URL"},
+		"rocketchat":    {"rocketchat", "ROOT_URL"},
+	}
+	for name, where := range urlEnv {
+		for _, domain := range []string{"https://app.example.com", "app.example.com"} {
+			t.Run(name+"/"+domain, func(t *testing.T) {
+				b, err := Get(strings.TrimSuffix(name, "-auth"))
+				require.NoError(t, err)
+				m, err := b.Render(map[string]string{"projectName": "shop", "domain": domain})
+				require.NoError(t, err)
+				app, ok := m.Apps[where[0]]
+				require.True(t, ok, "blueprint %s has no app %s", name, where[0])
+				assert.Equal(t, "https://app.example.com", app.Env[where[1]])
+			})
+		}
+	}
+}
+
+func TestBuiltinBlueprintsWithoutADomainUseTheGeneratedHost(t *testing.T) {
+	for _, name := range []string{"gitea", "medusa", "n8n", "plausible", "uptime-kuma", "wordpress"} {
+		b, err := Get(name)
+		require.NoError(t, err)
+		m, err := b.Render(map[string]string{"projectName": "shop", "baseUrl": "https://app.example.com"})
+		require.NoError(t, err, name)
+		for app, spec := range m.Apps {
+			if spec.Route != nil {
+				assert.Empty(t, spec.Route.Host, "%s/%s", name, app)
+			}
+		}
+	}
+}
+
+func TestGhostRequiresItsPublicURL(t *testing.T) {
+	b, err := Get("ghost")
+	require.NoError(t, err)
+	_, err = b.Render(map[string]string{"projectName": "shop"})
+	assert.ErrorContains(t, err, "domain")
+}
+
+func TestHostOf(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://Shop.Example.com/":     "shop.example.com",
+		"http://shop.example.com:8080":  "shop.example.com",
+		"https://shop.example.com/blog": "shop.example.com",
+		"shop.example.com":              "shop.example.com",
+		"":                              "",
+	} {
+		got, err := hostOf(in)
+		assert.NoError(t, err, in)
+		assert.Equal(t, want, got, in)
+	}
+}
+
+func TestURLOf(t *testing.T) {
+	assert.Equal(t, "https://shop.example.com", urlOf("shop.example.com"))
+	assert.Equal(t, "http://shop.example.com:8080", urlOf("http://shop.example.com:8080"))
+	assert.Equal(t, "", urlOf(""))
+}
+
+func TestBlueprintsRefuseAMalformedDomain(t *testing.T) {
+	for _, domain := range []string{"https://blog.example.com:bad", "https:///blog.example.com", "blog example.com"} {
+		b, err := Get("ghost")
+		require.NoError(t, err)
+		_, err = b.Render(map[string]string{"projectName": "shop", "domain": domain})
+		assert.ErrorContains(t, err, "is not a valid public address", domain)
+		_, err = b.RenderYAML(map[string]string{"projectName": "shop", "domain": domain})
+		assert.ErrorContains(t, err, "is not a valid public address", domain)
+	}
+}
+
+func TestBlueprintsRefuseABlankRequiredParameter(t *testing.T) {
+	b, err := Get("ghost")
+	require.NoError(t, err)
+	_, err = b.Render(map[string]string{"projectName": "shop", "domain": "   "})
+	assert.ErrorContains(t, err, `required parameter "domain" is missing`)
+	_, err = b.RenderYAML(map[string]string{"projectName": "shop", "domain": "   "})
+	assert.ErrorContains(t, err, `required parameter "domain" is missing`)
+}
+
+func TestInstallCommandRendersForEveryBuiltin(t *testing.T) {
+	metas, err := List()
+	require.NoError(t, err)
+	for _, meta := range metas {
+		cmd := InstallCommand(meta)
+		assert.True(t, strings.HasPrefix(cmd, "kip blueprint install "+meta.Name+" "), cmd)
+		params := map[string]string{}
+		for _, field := range strings.Fields(cmd) {
+			if k, v, ok := strings.Cut(field, "="); ok {
+				params[k] = v
+			}
+		}
+		b, err := Get(meta.Name)
+		require.NoError(t, err)
+		_, err = b.Render(params)
+		assert.NoError(t, err, cmd)
+	}
+	ghost, err := Get("ghost")
+	require.NoError(t, err)
+	assert.Contains(t, InstallCommand(ghost.Metadata), "--set domain=https://app.example.com")
 }

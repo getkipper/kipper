@@ -34,7 +34,7 @@ apps:
       - name: db
         prefix: GITEA__database__
     route:
-      host: "{{ .domain }}"
+      host: "{{ hostOf .domain }}"
       path: /
 
 services:

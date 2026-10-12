@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"strings"
 	"text/template"
 
@@ -20,6 +21,38 @@ var templateFuncs = template.FuncMap{
 		_, _ = rand.Read(b)
 		return hex.EncodeToString(b)
 	},
+	"hostOf": hostOf,
+	"urlOf":  urlOf,
+}
+
+// hostOf extracts and validates a lowercase route hostname from a URL or bare host.
+// Blank input leaves the route host unset; invalid addresses return an error.
+func hostOf(address string) (string, error) {
+	trimmed := strings.TrimSpace(address)
+	if trimmed == "" {
+		return "", nil
+	}
+	if !strings.Contains(trimmed, "://") {
+		trimmed = "https://" + trimmed
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Hostname() == "" {
+		return "", fmt.Errorf("%q is not a valid public address; use a URL like https://app.example.com or a hostname like app.example.com", address)
+	}
+	host := strings.ToLower(u.Hostname())
+	if err := manifest.ValidateRouteHost(host); err != nil {
+		return "", fmt.Errorf("%q is not a valid public address: %w", address, err)
+	}
+	return host, nil
+}
+
+// urlOf trims whitespace and adds https:// to a nonempty address without a scheme.
+func urlOf(address string) string {
+	address = strings.TrimSpace(address)
+	if address == "" || strings.Contains(address, "://") {
+		return address
+	}
+	return "https://" + address
 }
 
 // Parse splits a blueprint file into metadata and template.
@@ -47,7 +80,6 @@ func Parse(data []byte) (*Blueprint, error) {
 
 // Render applies the parameter values to the template and returns a parsed Manifest.
 func (b *Blueprint) Render(params map[string]string) (*manifest.Manifest, error) {
-	// Apply defaults for missing parameters
 	values := make(map[string]string)
 	for _, p := range b.Metadata.Parameters {
 		values[p.Name] = p.Default
@@ -56,16 +88,14 @@ func (b *Blueprint) Render(params map[string]string) (*manifest.Manifest, error)
 		values[k] = v
 	}
 
-	// Validate required parameters
 	for _, p := range b.Metadata.Parameters {
 		if p.Required {
-			if v, ok := values[p.Name]; !ok || v == "" {
+			if v, ok := values[p.Name]; !ok || strings.TrimSpace(v) == "" {
 				return nil, fmt.Errorf("required parameter %q is missing", p.Name)
 			}
 		}
 	}
 
-	// Render the Go template
 	tmpl, err := template.New("blueprint").Funcs(templateFuncs).Option("missingkey=error").Parse(b.Template)
 	if err != nil {
 		return nil, fmt.Errorf("parsing template: %w", err)
@@ -76,7 +106,6 @@ func (b *Blueprint) Render(params map[string]string) (*manifest.Manifest, error)
 		return nil, fmt.Errorf("rendering template: %w", err)
 	}
 
-	// Parse the rendered YAML as a manifest
 	var m manifest.Manifest
 	if err := yaml.Unmarshal(buf.Bytes(), &m); err != nil {
 		return nil, fmt.Errorf("parsing rendered manifest: %w", err)
@@ -101,7 +130,7 @@ func (b *Blueprint) RenderYAML(params map[string]string) ([]byte, error) {
 
 	for _, p := range b.Metadata.Parameters {
 		if p.Required {
-			if v, ok := values[p.Name]; !ok || v == "" {
+			if v, ok := values[p.Name]; !ok || strings.TrimSpace(v) == "" {
 				return nil, fmt.Errorf("required parameter %q is missing", p.Name)
 			}
 		}
@@ -141,4 +170,24 @@ func splitDocuments(content string) []string {
 	}
 
 	return parts
+}
+
+// InstallCommand returns an example install command with a value for each required
+// parameter. Unrecognized parameter names use <name> placeholders for the user to fill in.
+func InstallCommand(meta Metadata) string {
+	cmd := "kip blueprint install " + meta.Name
+	for _, p := range meta.Parameters {
+		if !p.Required {
+			continue
+		}
+		value := "<" + p.Name + ">"
+		switch p.Name {
+		case "projectName":
+			value = "my-project"
+		case "domain", "baseUrl":
+			value = "https://app.example.com"
+		}
+		cmd += " --set " + p.Name + "=" + value
+	}
+	return cmd
 }

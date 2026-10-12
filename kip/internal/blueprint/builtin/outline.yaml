@@ -9,7 +9,7 @@ parameters:
     description: Target environment
     default: ""
   - name: domain
-    description: Public URL for Outline (e.g. https://wiki.example.com)
+    description: Public URL or hostname for Outline (e.g. https://wiki.example.com)
     required: true
   - name: dbStorage
     description: Database storage size
@@ -24,7 +24,7 @@ apps:
     port: 3000
     env:
       NODE_ENV: production
-      URL: "{{ .domain }}"
+      URL: "{{ urlOf .domain }}"
       SECRET_KEY: "{{ generateSecret 32 }}"
       UTILS_SECRET: "{{ generateSecret 32 }}"
       DATABASE_URL: "postgres://kipper@db.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local:5432/app"
@@ -40,7 +40,7 @@ apps:
     resources:
       profile: standard
     route:
-      host: "{{ .domain }}"
+      host: "{{ hostOf .domain }}"
       path: /
 
 services:

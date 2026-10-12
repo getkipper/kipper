@@ -9,7 +9,7 @@ parameters:
     description: Target environment
     default: ""
   - name: domain
-    description: Public URL (e.g. https://invoices.example.com)
+    description: Public URL or hostname (e.g. https://invoices.example.com)
     required: true
   - name: dbStorage
     description: Database storage size
@@ -23,7 +23,7 @@ apps:
     image: invoiceninja/invoiceninja:5
     port: 9000
     env:
-      APP_URL: "{{ .domain }}"
+      APP_URL: "{{ urlOf .domain }}"
       APP_KEY: "base64:{{ generateSecret 32 }}"
       DB_HOST: "db.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local"
       DB_PORT: "3306"
@@ -35,7 +35,7 @@ apps:
     resources:
       profile: standard
     route:
-      host: "{{ .domain }}"
+      host: "{{ hostOf .domain }}"
       path: /
 
 services:

@@ -9,7 +9,7 @@ parameters:
     description: Target environment
     default: ""
   - name: domain
-    description: Public URL for Cal.com (e.g. https://cal.example.com)
+    description: Public URL or hostname for Cal.com (e.g. https://cal.example.com)
     required: true
   - name: dbStorage
     description: Database storage size
@@ -23,8 +23,8 @@ apps:
     image: calcom/cal.com:latest
     port: 3000
     env:
-      NEXT_PUBLIC_WEBAPP_URL: "{{ .domain }}"
-      NEXTAUTH_URL: "{{ .domain }}"
+      NEXT_PUBLIC_WEBAPP_URL: "{{ urlOf .domain }}"
+      NEXTAUTH_URL: "{{ urlOf .domain }}"
       NEXTAUTH_SECRET: "{{ generateSecret 32 }}"
       CALENDSO_ENCRYPTION_KEY: "{{ generateSecret 16 }}"
       DATABASE_URL: "postgres://kipper@db.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local:5432/app"
@@ -34,7 +34,7 @@ apps:
     resources:
       profile: standard
     route:
-      host: "{{ .domain }}"
+      host: "{{ hostOf .domain }}"
       path: /
 
 services:

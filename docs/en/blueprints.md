@@ -78,6 +78,8 @@ kip blueprint install ghost \
   --environment prod
 ```
 
+`domain` accepts a URL (`https://blog.example.com`) or a hostname (`blog.example.com`). The route uses only the hostname. When a blueprint also uses `domain` for the app’s public URL, a bare hostname gets an `https://` prefix.
+
 ## Generating a manifest
 
 Generate a `kipper.yaml` file that you can review and customise before applying, instead of installing directly:
@@ -118,7 +120,7 @@ Ghost publishing platform with MySQL backend.
 |---|---|
 | App | `ghost:5-alpine` on port 2368 |
 | Database | MySQL with configurable storage |
-| Parameters | `domain`: the public URL for Ghost |
+| Parameters | `domain` (required): the public URL for Ghost |
 
 ### Gitea
 
