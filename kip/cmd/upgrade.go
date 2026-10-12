@@ -90,7 +90,7 @@ func init() {
 	upgradeCmd.Flags().Bool("skip-system", false, "skip cluster system components (Traefik, Longhorn, KEDA, etc.). Upgrade only Kipper CRDs and console")
 	upgradeCmd.Flags().Bool("yes", false, "skip the confirmation prompts before upgrading system components and before removing app routes that collide with Kipper's own routes; autoscaling fixes are confirmed separately, by --repair-autoscaling when there is no terminal")
 	upgradeCmd.Flags().Bool("seed-credential-grants", false, "grant each shared git credential the projects whose apps already reference it, without asking. Skips the pre-rollout prompt on a legacy cluster; a no-op everywhere else")
-	upgradeCmd.Flags().String("image-tag", "", "install the console images built from this commit (a full sha) instead of the released ones, for testing a branch on a test cluster; requires --skip-system; a later 'kip upgrade' without it returns to the released images")
+	upgradeCmd.Flags().String("image-tag", "", "test a commit's console, instance proxy and data mover images (full 40-character SHA); requires --skip-system; apps using the instance proxy roll out when its image changes; omit on the next upgrade to restore released images")
 	upgradeCmd.Flags().Bool("check", false, "run the upgrade's data checks and report what it would fix, without changing anything; exits non-zero when something needs a decision")
 	upgradeCmd.Flags().Bool("repair-autoscaling", false, "apply the autoscaling fixes the upgrade lists, without asking")
 	upgradeCmd.Flags().Bool("skip-autoscaling-check", false, "upgrade although some apps' autoscaling settings need a decision, leaving those apps as they are")
@@ -273,7 +273,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 				}
 				hardened = applied
 
-				repointed, imageErr := applyPlatformImageEnv(dep)
+				repointed, imageErr := applyPlatformImageEnv(dep, imageTag)
 				if imageErr != nil {
 					return fmt.Errorf("rendering console-api platform images: %w", imageErr)
 				}
@@ -582,28 +582,14 @@ func wantReplicas(dep *appsv1.Deployment) int32 {
 	return 1
 }
 
-// applyConsoleAPIHardening brings a live console-api Deployment up to the pod
-// spec a fresh install renders: the pod and container security contexts, and the
-// writable /tmp the read-only root filesystem needs. Volumes and mounts are
-// merged by name rather than replaced, so anything an operator added to the
-// Deployment survives. Reports whether it changed anything.
-// platformImageEnv names the console-api env vars that carry a first-party image
-// reference this kip build owns. They are not cluster state: they name images
-// OTHER pods run — the instance-proxy sidecar attached to every app, and the
-// migration data mover — so a cluster installed before one of those images moved
-// keeps handing out a reference nothing can pull, while console-api's own image
-// is perfectly current. Nothing else is reconciled from the manifest's env,
-// which is why this is an explicit list and not a name pattern: cluster identity
-// and operator controls live in the same block, and a future manifest variable
-// must be added here deliberately rather than captured by a suffix.
-//
-// An operator who pins one of these by hand has it reset on the next upgrade.
-// The upgrade names every value it moves so that is visible rather than silent.
+// platformImageEnv lists the image variables owned by upgrades. An explicit list
+// preserves unrelated console-api settings. Upgrades reset manual image overrides
+// and report each changed value.
 var platformImageEnv = []string{"SIDECAR_IMAGE", "DATAMOVER_IMAGE"}
 
-// applyPlatformImageEnv reconciles the platformImageEnv vars onto the references
-// this build ships and returns one line per value it moved.
-func applyPlatformImageEnv(deploy *appsv1.Deployment) ([]string, error) {
+// applyPlatformImageEnv sets the owned image variables to this build's defaults
+// or the supplied commit tag. It returns a description of each changed value.
+func applyPlatformImageEnv(deploy *appsv1.Deployment, imageTag string) ([]string, error) {
 	desired, err := installer.DesiredConsoleAPIDeployment()
 	if err != nil {
 		return nil, err
@@ -621,6 +607,9 @@ func applyPlatformImageEnv(deploy *appsv1.Deployment) ([]string, error) {
 	for _, e := range desired.Spec.Template.Spec.Containers[wantIdx].Env {
 		if e.Value != "" {
 			shipped[e.Name] = e.Value
+			if imageTag != "" {
+				shipped[e.Name] = strings.TrimSuffix(e.Value, ":latest") + ":" + imageTag
+			}
 		}
 	}
 
@@ -664,6 +653,9 @@ func applyPlatformImageEnv(deploy *appsv1.Deployment) ([]string, error) {
 	return moved, nil
 }
 
+// applyConsoleAPIHardening applies security contexts and writable mounts from the
+// install manifest, preserving volumes and mounts with other names.
+// It reports whether the deployment changed.
 func applyConsoleAPIHardening(deploy *appsv1.Deployment) (bool, error) {
 	desired, err := installer.DesiredConsoleAPIDeployment()
 	if err != nil {
@@ -1485,10 +1477,8 @@ func createInitialAdminBindingIfMissing(ctx context.Context, dynClient dynamic.I
 	return true, nil
 }
 
-// testImagesNotice tells the operator that the cluster runs test images and
-// how to return it to the released ones.
 func testImagesNotice(tag string) string {
-	return fmt.Sprintf("  This cluster now runs the console images built from %s. Run 'kip upgrade' without --image-tag to return to the released images.", tag)
+	return fmt.Sprintf("  This cluster is configured to use the console, instance proxy and data mover images built from %s. Apps using the instance proxy roll out when its image changes. Run 'kip upgrade' without --image-tag to restore released images, triggering another rollout for those apps.", tag)
 }
 
 // pinComponentImage puts a console component's Deployment on the image this kip
@@ -1521,7 +1511,7 @@ func checkImageTagFlags(tag string, skipSystem bool) error {
 		return err
 	}
 	if !skipSystem {
-		return fmt.Errorf("--image-tag installs test images of the console components only; run it with --skip-system")
+		return fmt.Errorf("--image-tag requires --skip-system to keep system component upgrades from restoring released images")
 	}
 	return nil
 }
