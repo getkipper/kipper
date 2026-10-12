@@ -422,18 +422,17 @@ func (d *Deployer) Scale(ctx context.Context, namespace, name string, replicas i
 	return nil
 }
 
-// Restart triggers a rolling restart by annotating the App CR.
+// Restart requests a rolling restart and returns its annotation timestamp.
 // Stopped apps must be started first.
-func (d *Deployer) Restart(ctx context.Context, namespace, name string) error {
+func (d *Deployer) Restart(ctx context.Context, namespace, name string) (string, error) {
 	stopped, err := d.Stopped(ctx, namespace, name)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if stopped {
-		return fmt.Errorf("%s is stopped; start it with `kip app start %s`", name, name)
+		return "", fmt.Errorf("%s is stopped; start it with `kip app start %s`", name, name)
 	}
-	_, err = d.RestartWorkload(ctx, AppGVR, "app", namespace, name)
-	return err
+	return d.RestartWorkload(ctx, AppGVR, "app", namespace, name)
 }
 
 // RestartWorkload triggers a rolling restart of any workload kind by bumping
@@ -441,10 +440,7 @@ func (d *Deployer) Restart(ctx context.Context, namespace, name string) error {
 // projects onto the pod template. kind names the workload in the error text,
 // since the GVR carries only the plural resource.
 func (d *Deployer) RestartWorkload(ctx context.Context, gvr schema.GroupVersionResource, kind, namespace, name string) (string, error) {
-	// Nano rather than seconds: the stamp is what makes the pod template
-	// differ, so two restarts inside one second produced the identical value,
-	// the second template matched the running one, and the workload did not
-	// roll — while the command reported that it had.
+	// Nanosecond precision lets restarts within one second change the pod template.
 	stamp := time.Now().Format(time.RFC3339Nano)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		workload, err := d.Dynamic.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
@@ -459,7 +455,7 @@ func (d *Deployer) RestartWorkload(ctx context.Context, gvr schema.GroupVersionR
 		if annotations == nil {
 			annotations = make(map[string]string)
 		}
-		annotations["kipper.run/restartedAt"] = stamp
+		annotations[restartedAtAnnotation] = stamp
 		workload.SetAnnotations(annotations)
 
 		if _, err := d.Dynamic.Resource(gvr).Namespace(namespace).Update(ctx, workload, metav1.UpdateOptions{}); err != nil {

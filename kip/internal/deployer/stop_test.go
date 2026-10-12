@@ -176,7 +176,7 @@ func TestRestartRefusesAStoppedApp(t *testing.T) {
 	d, dynClient := testDeployer()
 	seedApp(t, dynClient, map[string]interface{}{"image": "web:1", "stopped": map[string]interface{}{}})
 
-	err := d.Restart(context.Background(), "default", "api")
+	_, err := d.Restart(context.Background(), "default", "api")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "kip app start api")
