@@ -685,7 +685,7 @@ func TestUpgradeRepointsPlatformImageEnv(t *testing.T) {
 		{Name: "SOME_OTHER_IMAGE", Value: "example.com/operator-owned:v1"},
 	}
 
-	moved, err := applyPlatformImageEnv(dep)
+	moved, err := applyPlatformImageEnv(dep, "")
 	if err != nil {
 		t.Fatalf("repoint: %v", err)
 	}
@@ -720,7 +720,7 @@ func TestUpgradeRepointsPlatformImageEnv(t *testing.T) {
 		t.Errorf("a variable not on the owned list must be left alone, got %q", env["SOME_OTHER_IMAGE"].Value)
 	}
 
-	again, err := applyPlatformImageEnv(dep)
+	again, err := applyPlatformImageEnv(dep, "")
 	if err != nil {
 		t.Fatalf("second repoint: %v", err)
 	}
@@ -742,7 +742,7 @@ func TestUpgradeRepointClearsAValueFromReference(t *testing.T) {
 		}},
 	}}
 
-	if _, err := applyPlatformImageEnv(dep); err != nil {
+	if _, err := applyPlatformImageEnv(dep, ""); err != nil {
 		t.Fatalf("repoint: %v", err)
 	}
 	for _, e := range dep.Spec.Template.Spec.Containers[0].Env {
@@ -767,12 +767,43 @@ func TestUpgradeRepointWritesEveryDuplicateEntry(t *testing.T) {
 		{Name: "SIDECAR_IMAGE", Value: retiredSidecarRef},
 	}
 
-	if _, err := applyPlatformImageEnv(dep); err != nil {
+	if _, err := applyPlatformImageEnv(dep, ""); err != nil {
 		t.Fatalf("repoint: %v", err)
 	}
 	for i, e := range dep.Spec.Template.Spec.Containers[0].Env {
 		if e.Name == "SIDECAR_IMAGE" && e.Value == retiredSidecarRef {
 			t.Errorf("entry %d still carries the unpullable reference", i)
+		}
+	}
+}
+
+func TestUpgradeRepointUsesTheImageTag(t *testing.T) {
+	dep := liveConsoleAPI()
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+
+	if _, err := applyPlatformImageEnv(dep, sha); err != nil {
+		t.Fatalf("repoint: %v", err)
+	}
+	env := map[string]string{}
+	for _, e := range dep.Spec.Template.Spec.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	want := map[string]string{
+		"SIDECAR_IMAGE":   "ghcr.io/getkipper/kipper-sidecar:" + sha,
+		"DATAMOVER_IMAGE": "ghcr.io/getkipper/kipper-datamover:" + sha,
+	}
+	for name, ref := range want {
+		if env[name] != ref {
+			t.Errorf("%s = %q, want %q", name, env[name], ref)
+		}
+	}
+
+	if _, err := applyPlatformImageEnv(dep, ""); err != nil {
+		t.Fatalf("repoint: %v", err)
+	}
+	for _, e := range dep.Spec.Template.Spec.Containers[0].Env {
+		if want, ok := want[e.Name]; ok && e.Value != strings.TrimSuffix(want, ":"+sha)+":latest" {
+			t.Errorf("a plain upgrade must return %s to the released image, got %q", e.Name, e.Value)
 		}
 	}
 }

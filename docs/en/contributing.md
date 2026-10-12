@@ -116,7 +116,7 @@ To try a branch end to end before it merges, run its code on a test cluster with
    gh run watch
    ```
 
-3. Upgrade the test cluster onto that commit's console images:
+3. Upgrade the test cluster to that commit's console, instance proxy and data mover images. Apps using the instance proxy roll out when its image changes:
 
    ```bash
    ./kip/kip upgrade --cluster my-test-cluster --skip-system --image-tag "$(git rev-parse HEAD)"
