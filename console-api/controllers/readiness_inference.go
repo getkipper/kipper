@@ -39,34 +39,32 @@ func connectionRefused(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED)
 }
 
-// inferReadiness samples up to three running pods. A ready pod accepting
-// a connection selects TCP. Otherwise, a refusal from a container running
-// for at least ten minutes selects no check. Other results leave it pending.
-func (r *AppReconciler) inferReadiness(ctx context.Context, app *kipperv1.App, deploy *appsv1.Deployment, now time.Time) inference {
-	if r.Dial == nil {
-		return inferencePending
-	}
+type portAnswer struct {
+	accepted, ready, settledRefusal bool
+	proxied                         bool
+}
+
+// probePort samples the app port on up to three running pods. Refusals count
+// after inferenceSettledAge to allow startup time; other errors are inconclusive.
+func (r *AppReconciler) probePort(ctx context.Context, dial func(context.Context, string) error, app *kipperv1.App, deploy *appsv1.Deployment, now time.Time) []portAnswer {
 	pods, err := ownedPods(ctx, r.hostReader(), deploy)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "listing pods to learn whether the app port accepts connections", "app", app.Name)
-		return inferencePending
+		return nil
 	}
 	candidates := inferenceCandidates(app, pods)
-
-	type answer struct {
-		accepted, settledRefusal bool
-	}
-	answers := make([]answer, len(candidates))
+	answers := make([]portAnswer, len(candidates))
 	var wg sync.WaitGroup
 	for i := range candidates {
 		wg.Add(1)
 		go func(i int, p *corev1.Pod) {
 			defer wg.Done()
 			addr := net.JoinHostPort(p.Status.PodIP, strconv.Itoa(int(app.Spec.Port)))
-			err := r.Dial(ctx, addr)
+			answers[i] = portAnswer{proxied: hasContainer(p, sidecarContainerName)}
+			err := dial(ctx, addr)
 			switch {
 			case err == nil:
-				answers[i].accepted = podReady(p)
+				answers[i].accepted, answers[i].ready = true, podReady(p)
 			case connectionRefused(err):
 				since := runningSince(p, app.Name)
 				answers[i].settledRefusal = !since.IsZero() && now.Sub(since) >= inferenceSettledAge
@@ -74,10 +72,19 @@ func (r *AppReconciler) inferReadiness(ctx context.Context, app *kipperv1.App, d
 		}(i, candidates[i])
 	}
 	wg.Wait()
+	return answers
+}
 
+// inferReadiness samples up to three running pods. A ready pod accepting
+// a connection selects TCP. Otherwise, a refusal from a container running
+// for at least ten minutes selects no check. Other results leave it pending.
+func (r *AppReconciler) inferReadiness(ctx context.Context, app *kipperv1.App, deploy *appsv1.Deployment, now time.Time) inference {
+	if r.Dial == nil {
+		return inferencePending
+	}
 	result := inferencePending
-	for _, a := range answers {
-		if a.accepted {
+	for _, a := range r.probePort(ctx, r.Dial, app, deploy, now) {
+		if a.accepted && a.ready {
 			return inferredTCP
 		}
 		if a.settledRefusal {
@@ -136,4 +143,13 @@ func runningSince(p *corev1.Pod, container string) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+func hasContainer(p *corev1.Pod, name string) bool {
+	for _, c := range p.Spec.Containers {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
 }

@@ -30,6 +30,7 @@ type podState struct {
 	restarting  bool
 	image       string
 	foreign     bool
+	proxy       bool
 }
 
 // inferenceWorld creates a Deployment, a ReplicaSet, and the requested pods.
@@ -62,6 +63,9 @@ func inferenceWorld(t *testing.T, pods ...podState) (crclient.Client, *appsv1.De
 			},
 			Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "shop", Image: image}}},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: p.ip},
+		}
+		if p.proxy {
+			pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: sidecarContainerName})
 		}
 		if p.terminating {
 			now := metav1.NewTime(inferNow)

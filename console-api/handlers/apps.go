@@ -54,18 +54,16 @@ type Apps struct {
 type GitReachFunc func(ctx context.Context, repoURL, branch, username, token string) (gitreach.Result, string)
 
 type appResponse struct {
-	Name     string `json:"name"`
-	Status   string `json:"status"`
-	Image    string `json:"image"`
-	Replicas int32  `json:"replicas"`
-	// DesiredReplicas is the stored count, which manual scaling changes.
-	DesiredReplicas int32 `json:"desired_replicas"`
-	Ready           int32 `json:"ready"`
-	// RolloutReason and RolloutWaiting say why the latest change has not
-	// finished rolling out; both are empty once it has.
-	RolloutReason  string              `json:"rollout_reason,omitempty"`
-	RolloutWaiting string              `json:"rollout_waiting,omitempty"`
-	Stopped        *appStoppedResponse `json:"stopped,omitempty"`
+	Name            string              `json:"name"`
+	Status          string              `json:"status"`
+	Image           string              `json:"image"`
+	Replicas        int32               `json:"replicas"`
+	DesiredReplicas int32               `json:"desired_replicas"`
+	Ready           int32               `json:"ready"`
+	RolloutReason   string              `json:"rollout_reason,omitempty"`
+	RolloutWaiting  string              `json:"rollout_waiting,omitempty"`
+	PortClosed      string              `json:"port_closed,omitempty"`
+	Stopped         *appStoppedResponse `json:"stopped,omitempty"`
 }
 
 type appStoppedResponse struct {
@@ -672,6 +670,9 @@ func appCRToResponse(app kipperv1.App) appResponse {
 	}
 	if c := apimeta.FindStatusCondition(app.Status.Conditions, kipperv1.ConditionRolloutComplete); c != nil && c.Status == metav1.ConditionFalse {
 		resp.RolloutReason, resp.RolloutWaiting = c.Reason, c.Message
+	}
+	if c := apimeta.FindStatusCondition(app.Status.Conditions, kipperv1.ConditionPortListening); c != nil && c.Status == metav1.ConditionFalse {
+		resp.PortClosed = c.Message
 	}
 	if st := app.Spec.Stopped; st != nil {
 		resp.Stopped = &appStoppedResponse{Reason: st.Reason, By: st.By}

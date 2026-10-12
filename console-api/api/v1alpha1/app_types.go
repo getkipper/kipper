@@ -27,6 +27,8 @@ const ConditionServiceBindingsReady = "ServiceBindingsReady"
 
 const ConditionBindingDatabasesReady = "BindingDatabasesReady"
 
+const ConditionPortListening = "PortListening"
+
 // ConditionLinksOpen is the App status condition reporting whether every link
 // this app declares actually carries traffic. A link opens nothing when the
 // target project has not consented, has withdrawn consent, or the target app is

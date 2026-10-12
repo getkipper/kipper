@@ -588,7 +588,15 @@ If you omit the check, Kipper infers one during a rollout, such as an image upda
 - **No ready pod accepts, and an app container running for at least 10 minutes refuses a connection:** Kipper adds no app check and tries again on the next rollout.
 - **Results are inconclusive**, such as timeouts or refusals only from younger containers: the rollout proceeds without an app check, and Kipper tries again next time.
 
-A background worker that never listens on a port can therefore deploy without a check. A new app has no running pods to inspect, so its first deploy has no automatic app check. A later rollout gets one if a ready pod accepts connections on the app port.
+A background worker that never listens on a port can therefore deploy without a check.
+
+A refused connection can also mean the app listens on a different port from its declared port. For routed apps and apps targeted by a link, Kipper checks the port every five minutes while automatic readiness has selected no check or is still pending. Stopped apps and build placeholders are excluded.
+
+The `PortListening` condition is true if any sampled pod accepts a connection. Otherwise, it is false if an app container running for at least 10 minutes refuses a connection. Refusals from pods with the [instance proxy](#instance-id-header) are inconclusive because the proxy can reach a listener on `127.0.0.1`. Inconclusive results preserve the previous condition.
+
+`kip app info` shows the condition. When it is false, the console shows "Port not listening", and `kip app links` flags links to the app. For a worker that serves no traffic, apply `--health none` to disable these checks.
+
+A new app has no running pods to inspect, so its first deploy has no automatic app check. A later rollout gets one if a ready pod accepts connections on the app port.
 
 Checks connect to the pod's IP address. An app listening only on `127.0.0.1` can receive traffic through the [instance proxy](#instance-id-header), but neither an automatic nor a declared check can reach that listener. To use a check, make the checked endpoint listen on `0.0.0.0`. A separate health endpoint can use `--health-port`.
 
