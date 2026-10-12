@@ -10,29 +10,41 @@ import (
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/controllers"
 )
 
-// RouteHealth describes the live serving state of a route. It is intended
-// for display in the UI alongside the configured spec, and is built from
-// what the cluster currently shows — never from a cached status field.
-//
-// Both the per-app Settings tab and the cluster-wide Routes page render
-// this same struct, so the two views can never disagree about whether a
-// route is live.
+// RouteHealth describes route readiness for the Settings tab and Routes page.
 type RouteHealth struct {
-	// IngressReady is true once the App reconciler has created the
-	// Ingress for the configured host.
-	IngressReady bool `json:"ingress_ready"`
+	IngressReady bool   `json:"ingress_ready"`
+	TLSReady     bool   `json:"tls_ready"`
+	Message      string `json:"message,omitempty"`
+	Stopped      bool   `json:"stopped,omitempty"`
+	Unpublished  bool   `json:"unpublished,omitempty"`
+}
 
-	// TLSReady is true once cert-manager has populated the TLS Secret
-	// referenced by the Ingress with a valid certificate.
-	TLSReady bool `json:"tls_ready"`
+// unpublishedHealth confirms that a closed route has no usable public paths
+// and both its app and public-exception Ingresses are absent. Otherwise, callers
+// use live health because an existing Ingress may still serve traffic.
+func unpublishedHealth(ctx context.Context, kubeClient kubernetes.Interface, app *kipperv1.App) (RouteHealth, bool) {
+	route := app.Spec.Route
+	if route == nil || !route.Closed || len(controllers.ClosedRoutePaths(route)) > 0 || kubeClient == nil {
+		return RouteHealth{}, false
+	}
+	for _, name := range []string{app.Name, controllers.PublicPathsIngressName(app.Name)} {
+		_, err := kubeClient.NetworkingV1().Ingresses(app.Namespace).Get(ctx, name, metav1.GetOptions{})
+		if !kerrors.IsNotFound(err) {
+			return RouteHealth{}, false
+		}
+	}
+	h := closedRouteHealth()
+	h.Stopped = app.Spec.Stopped != nil
+	return h, true
+}
 
-	// Message is a short, human-readable status line for the UI.
-	Message string `json:"message,omitempty"`
-
-	// Stopped reflects the App stop record, independently of route readiness.
-	Stopped bool `json:"stopped,omitempty"`
+func closedRouteHealth() RouteHealth {
+	return RouteHealth{Unpublished: true, Message: "This route is closed with no usable public paths, so nothing is published."}
 }
 
 // stoppedRouteHealth adds stop status while preserving Ingress and TLS readiness.
@@ -42,15 +54,9 @@ func stoppedRouteHealth(h RouteHealth) RouteHealth {
 	return h
 }
 
-// routeHealth returns the live health of an app's route. It looks up the
-// Ingress named after the app — which is exactly what the App reconciler
-// creates — so per-app status stays accurate even when several apps share
-// a host (route group). The host argument is used only for human-readable
-// messaging.
-//
-// Nil or empty arguments yield a zero-valued health (everything false,
-// empty message) — callers should treat that as "unknown" rather than as
-// a definitive negative.
+// routeHealth checks the app's Ingress and TLS certificate, matching the host
+// when supplied. Looking up the Ingress by app keeps checks specific to each
+// app on a shared host. A missing client, namespace, or app name yields unknown health.
 func routeHealth(ctx context.Context, kubeClient kubernetes.Interface, namespace, appName, host string) RouteHealth {
 	if kubeClient == nil || namespace == "" || appName == "" {
 		return RouteHealth{}
@@ -119,10 +125,8 @@ func routeHealth(ctx context.Context, kubeClient kubernetes.Interface, namespace
 	return certificateHealth(ctx, kubeClient, namespace, displayHost, tlsSecret)
 }
 
-// certificateHealth completes the health check once the Ingress is known
-// to exist. If no TLS secret is referenced, TLS is off by configuration
-// rather than waiting to be issued — that's still "ready" from the
-// platform's point of view, just unencrypted.
+// certificateHealth checks TLS for an existing Ingress. Without a TLS secret
+// reference, it reports HTTP-only service with TLSReady false.
 func certificateHealth(ctx context.Context, kubeClient kubernetes.Interface, namespace, host, tlsSecret string) RouteHealth {
 	if tlsSecret == "" {
 		return RouteHealth{

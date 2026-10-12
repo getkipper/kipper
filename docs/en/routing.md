@@ -320,7 +320,9 @@ To expose only specific endpoints, such as a payment webhook, close the route an
 kip app update payments --closed --public-path /webhooks/stripe
 ```
 
-A closed route publishes each public path under the route's base path, with exact matches for both the path and its trailing-slash form. Other paths return 404 unless another route on the host serves them. A closed route with no usable public paths removes its Ingresses and reports this in its `RouteReady` condition.
+A closed route publishes each public path under the route's base path, matching the path and its trailing-slash form exactly. Other paths return 404 unless another route on the host serves them.
+
+When a closed route has no usable public paths, the controller removes its Ingresses and reports this in the `RouteReady` condition. `kip app route show` displays that condition alongside the configured public paths. Once the console confirms that the app and public-exception Ingresses are gone, the app's Settings tab shows "Nothing published". The Routes page excludes that route from the host's health summary and shows "Nothing published" when all routes on the host are unpublished.
 
 On a shared host, another app's guard takes priority over a closed route's public paths. Choose paths outside that app's blocked prefixes, or use a separate host.
 

@@ -112,3 +112,27 @@ func TestRoutesList_SaysWhatAClosedRoutePublishes(t *testing.T) {
 	assert.Empty(t, entry.RefusedPaths)
 	assert.Equal(t, []string{"/webhooks/stripe"}, entry.PublicPaths)
 }
+
+func TestRoutesList_AClosedRouteWithoutPublicPathsLeavesTheHostHealthAlone(t *testing.T) {
+	web := appWithRoute("team-test", "web", "shop.example.com", "/", 8080)
+	pay := appWithRoute("team-test", "pay", "shop.example.com", "/pay", 8080)
+	pay.Spec.Route.Closed = true
+	kube := fake.NewClientset(kipperNamespace(), &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "team-test"},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{{Host: "shop.example.com"}},
+			TLS:   []networkingv1.IngressTLS{{Hosts: []string{"shop.example.com"}, SecretName: "web-tls"}},
+		},
+	})
+
+	groups := listRoutesWith(t, kube, web, pay)
+
+	require.Len(t, groups, 1)
+	for _, r := range groups[0].Routes {
+		if r.App == "pay" {
+			assert.True(t, r.Health.Unpublished)
+		}
+	}
+	assert.False(t, groups[0].Health.Unpublished)
+	assert.True(t, groups[0].Health.IngressReady, groups[0].Health.Message)
+}

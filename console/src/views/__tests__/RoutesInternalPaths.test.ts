@@ -108,4 +108,13 @@ describe('what a route publishes', () => {
 
     expect(document.body.innerHTML).toContain('route-closed-empty')
   })
+
+  it('labels a host whose routes publish nothing instead of showing it as provisioning', async () => {
+    const g = group(false, [], [], true, true)
+    g.health = { ingress_ready: false, tls_ready: false, message: 'closed', unpublished: true } as never
+    await mountRoutes(g)
+
+    expect(document.body.textContent).toContain('Nothing published')
+    expect(document.body.textContent).not.toContain('Provisioning')
+  })
 })

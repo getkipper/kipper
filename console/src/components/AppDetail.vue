@@ -78,6 +78,8 @@ const projects = useProjectsStore()
 const project = computed(() => props.namespace || projects.currentProject || 'default')
 
 import { useAuthStore } from '@/stores/auth'
+import { routeBadge, routeBadgeClass } from '@/utils/routeBadge'
+
 const authStore = useAuthStore()
 
 type TabKey = 'logs' | 'deploys' | 'scale' | 'resources' | 'env' | 'files' | 'connect' | 'secrets' | 'settings'
@@ -3885,13 +3887,11 @@ function openOptimise() {
                     <span
                       v-if="routeEnabled && routeHealth"
                       class="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium"
-                      :class="routeHealth.tls_ready
-                        ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400'
-                        : 'bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-400'"
+                      :class="routeBadgeClass[routeBadge(routeHealth, 'TLS active').tone]"
                       :title="routeHealth.message"
                     >
                       <Shield class="h-3 w-3" :stroke-width="2" />
-                      {{ routeHealth.tls_ready ? 'TLS active' : routeHealth.ingress_ready ? 'TLS pending' : 'Provisioning' }}
+                      {{ routeBadge(routeHealth, 'TLS active').label }}
                     </span>
                   </div>
                   <p class="text-xs text-slate-500 dark:text-slate-400">Expose this app via HTTPS with automatic TLS</p>

@@ -74,6 +74,9 @@ func (a *Apps) GetRoute(w http.ResponseWriter, r *http.Request) {
 			if appCR.Spec.Stopped != nil {
 				resp.Health = stoppedRouteHealth(resp.Health)
 			}
+			if h, ok := unpublishedHealth(ctx, a.Client, &appCR); ok {
+				resp.Health = h
+			}
 		}
 	}
 
@@ -180,6 +183,9 @@ func (a *Apps) SetRoute(w http.ResponseWriter, r *http.Request) {
 		resp.Health = routeHealth(ctx, a.Client, project, appName, host)
 		if appCR.Spec.Stopped != nil {
 			resp.Health = stoppedRouteHealth(resp.Health)
+		}
+		if h, ok := unpublishedHealth(ctx, a.Client, &appCR); ok {
+			resp.Health = h
 		}
 	}
 
