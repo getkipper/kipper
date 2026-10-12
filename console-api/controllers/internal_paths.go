@@ -52,8 +52,9 @@ type ingressPathRule struct {
 }
 
 // refusedPrefixes combines app declarations with enabled cluster defaults.
+// Closed routes use exact public-path rules instead of a deny Ingress.
 func refusedPrefixes(route *kipperv1.AppRoute, blockDefaults bool) []string {
-	if route == nil {
+	if route == nil || route.Closed {
 		return nil
 	}
 	declared := route.InternalPaths
@@ -93,6 +94,16 @@ func refusalPathRules(routePath string, prefixes []string) []ingressPathRule {
 		)
 	}
 	return rules
+}
+
+// closedRoutePaths returns valid public paths under the route base, including
+// trailing-slash variants, for exact Ingress matches.
+func closedRoutePaths(route *kipperv1.AppRoute) []string {
+	var paths []string
+	for _, rule := range reopenedPathRules(route.Path, internalpath.Clean(route.PublicPaths)) {
+		paths = append(paths, rule.path)
+	}
+	return paths
 }
 
 // reopenedPathRules matches each public exception and its trailing-slash form
@@ -362,8 +373,13 @@ func RefusedRoutePaths(route *kipperv1.AppRoute, blockDefaults bool) []string {
 	return belowRoutePath(route, refusedPrefixes(route, blockDefaults))
 }
 
-// ReopenedRoutePaths returns covered public exceptions including the route base path.
+// ReopenedRoutePaths returns configured public exceptions with the route base
+// prepended. Closed routes include all valid public paths; open routes include
+// only those covered by a refused prefix. Trailing-slash variants are omitted.
 func ReopenedRoutePaths(route *kipperv1.AppRoute, blockDefaults bool) []string {
+	if route != nil && route.Closed {
+		return belowRoutePath(route, internalpath.Clean(route.PublicPaths))
+	}
 	return belowRoutePath(route, reopenedPaths(route, refusedPrefixes(route, blockDefaults)))
 }
 
@@ -460,19 +476,23 @@ func (r *AppReconciler) reconcileGuard(ctx context.Context, app *kipperv1.App, h
 			Type:   kipperv1.ConditionRouteReady,
 			Status: metav1.ConditionFalse,
 			Reason: "InternalPathUnusable",
-			Message: fmt.Sprintf("these paths cannot become an ingress rule and refuse nothing: %s",
+			Message: fmt.Sprintf("invalid paths were excluded from the routing rules: %s",
 				strings.Join(bad, ", ")),
 		})
 	}
 
-	if err := r.reconcileInternalPathsMiddleware(ctx, app, len(refused) > 0); err != nil {
-		return err
-	}
 	if len(refused) == 0 {
+		// Remove public exceptions first so they cannot survive a failed guard removal.
+		if err := r.deleteOwnedIngressNamed(ctx, app, PublicPathsIngressName(app.Name)); err != nil {
+			return err
+		}
 		if err := r.deleteOwnedIngressNamed(ctx, app, InternalPathsIngressName(app.Name)); err != nil {
 			return err
 		}
-		return r.deleteOwnedIngressNamed(ctx, app, PublicPathsIngressName(app.Name))
+		return r.reconcileInternalPathsMiddleware(ctx, app, false)
+	}
+	if err := r.reconcileInternalPathsMiddleware(ctx, app, true); err != nil {
+		return err
 	}
 
 	tls := []networkingv1.IngressTLS{tlsEntry}

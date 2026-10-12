@@ -83,6 +83,7 @@ type RouteSpec struct {
 	RequireAPIKey     bool           `yaml:"requireApiKey,omitempty"`
 	InternalPaths     []string       `yaml:"internalPaths,omitempty"`
 	PublicPaths       []string       `yaml:"publicPaths,omitempty"`
+	Closed            bool           `yaml:"closed,omitempty"`
 }
 
 // RedirectSpec defines a URL redirect rule on a route.

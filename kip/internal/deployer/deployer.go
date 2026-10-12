@@ -527,6 +527,38 @@ func (d *Deployer) UpdatePublicPaths(ctx context.Context, namespace, name string
 	return d.updateRoutePathList(ctx, namespace, name, "publicPaths", paths)
 }
 
+// UpdateRouteClosed sets whether an existing route publishes only its public paths.
+func (d *Deployer) UpdateRouteClosed(ctx context.Context, namespace, name string, closed bool) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		app, err := d.Dynamic.Resource(AppGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return fmt.Errorf("app %q not found", name)
+			}
+			return fmt.Errorf("getting app: %w", err)
+		}
+		if _, found, _ := unstructured.NestedMap(app.Object, "spec", "route"); !found {
+			return fmt.Errorf("app %q has no route; configure a route before changing its closed setting", name)
+		}
+		if closed {
+			if err := unstructured.SetNestedField(app.Object, true, "spec", "route", "closed"); err != nil {
+				return fmt.Errorf("setting route.closed: %w", err)
+			}
+		} else {
+			unstructured.RemoveNestedField(app.Object, "spec", "route", "closed")
+		}
+		written, err := d.Dynamic.Resource(AppGVR).Namespace(namespace).Update(ctx, app, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("updating app: %w", err)
+		}
+		// Check the stored value because older CRD schemas can prune unknown fields.
+		if stored, _, _ := unstructured.NestedBool(written.Object, "spec", "route", "closed"); closed && !stored {
+			return fmt.Errorf("the cluster did not retain route.closed; run kip upgrade to install a CRD that supports closed routes")
+		}
+		return nil
+	})
+}
+
 // Update only spec.route so path policy changes preserve running pods.
 func (d *Deployer) updateRoutePathList(ctx context.Context, namespace, name, field string, paths []string) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {

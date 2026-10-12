@@ -34,3 +34,19 @@ func TestValidate_AcceptsAWorkableRoute(t *testing.T) {
 		t.Fatalf("Validate = %v, want nil", err)
 	}
 }
+
+func TestClosedRouteRoundTrips(t *testing.T) {
+	m := &Manifest{Project: "shop", Apps: map[string]AppSpec{"pay": {
+		Image: "pay:1", Port: 8080,
+		Route: &RouteSpec{Host: "pay.example.com", Closed: true, PublicPaths: []string{"/webhooks/stripe"}},
+	}}}
+
+	spec := Convert(m, "shop-test")[0].Object.Object["spec"].(map[string]interface{})
+	route := spec["route"].(map[string]interface{})
+	if route["closed"] != true {
+		t.Fatalf("convert lost closed: %v", route)
+	}
+	if got := exportRoute(spec); got == nil || !got.Closed {
+		t.Fatalf("export lost closed: %+v", got)
+	}
+}

@@ -178,6 +178,9 @@ func exportRoute(spec map[string]interface{}) *RouteSpec {
 	if paths := extractStringSlice(route, "publicPaths"); len(paths) > 0 {
 		r.PublicPaths = paths
 	}
+	if closed, ok := route["closed"].(bool); ok && closed {
+		r.Closed = true
+	}
 	return r
 }
 

@@ -98,3 +98,17 @@ func TestRoutesList_RefusesNothingWhenTheGuardIsOff(t *testing.T) {
 	assert.False(t, groups[0].RouteGuard)
 	assert.Empty(t, groups[0].Routes[0].RefusedPaths)
 }
+
+func TestRoutesList_SaysWhatAClosedRoutePublishes(t *testing.T) {
+	pay := appWithRoute("team-test", "pay", "team-test.kipper.run", "/", 8080)
+	pay.Spec.Route.Closed = true
+	pay.Spec.Route.PublicPaths = []string{"/webhooks/stripe"}
+
+	groups := listRoutes(t, pay)
+
+	require.Len(t, groups, 1)
+	entry := groups[0].Routes[0]
+	assert.True(t, entry.Closed)
+	assert.Empty(t, entry.RefusedPaths)
+	assert.Equal(t, []string{"/webhooks/stripe"}, entry.PublicPaths)
+}

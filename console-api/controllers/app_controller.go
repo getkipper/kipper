@@ -1308,13 +1308,14 @@ func (r *AppReconciler) deleteOwnedIngress(ctx context.Context, app *kipperv1.Ap
 }
 
 func (r *AppReconciler) deleteOwnedRouteIngresses(ctx context.Context, app *kipperv1.App) error {
+	// Keep the guard until all publishing Ingresses have been removed.
 	if err := r.deleteOwnedIngress(ctx, app); err != nil {
 		return err
 	}
-	if err := r.deleteOwnedIngressNamed(ctx, app, InternalPathsIngressName(app.Name)); err != nil {
+	if err := r.deleteOwnedIngressNamed(ctx, app, PublicPathsIngressName(app.Name)); err != nil {
 		return err
 	}
-	if err := r.deleteOwnedIngressNamed(ctx, app, PublicPathsIngressName(app.Name)); err != nil {
+	if err := r.deleteOwnedIngressNamed(ctx, app, InternalPathsIngressName(app.Name)); err != nil {
 		return err
 	}
 	return r.reconcileInternalPathsMiddleware(ctx, app, false)
@@ -1509,19 +1510,28 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *kipperv1.App)
 			},
 		},
 	}
+	routePaths := []networkingv1.HTTPIngressPath{{Path: path, PathType: &pathType, Backend: backend}}
+	if route.Closed {
+		exact := networkingv1.PathTypeExact
+		routePaths = nil
+		for _, p := range closedRoutePaths(route) {
+			routePaths = append(routePaths, networkingv1.HTTPIngressPath{Path: p, PathType: &exact, Backend: backend})
+		}
+		if len(routePaths) == 0 {
+			apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
+				Type:    kipperv1.ConditionRouteReady,
+				Status:  metav1.ConditionFalse,
+				Reason:  "ClosedWithoutPublicPaths",
+				Message: "closed route has no usable public paths; removing its Ingresses",
+			})
+			return r.deleteOwnedRouteIngresses(ctx, app)
+		}
+	}
 	rules := []networkingv1.IngressRule{
 		{
 			Host: host,
 			IngressRuleValue: networkingv1.IngressRuleValue{
-				HTTP: &networkingv1.HTTPIngressRuleValue{
-					Paths: []networkingv1.HTTPIngressPath{
-						{
-							Path:     path,
-							PathType: &pathType,
-							Backend:  backend,
-						},
-					},
-				},
+				HTTP: &networkingv1.HTTPIngressRuleValue{Paths: routePaths},
 			},
 		},
 	}
@@ -1570,8 +1580,23 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *kipperv1.App)
 		return err
 	}
 
-	// Install the guard before publishing the route, using the same host and TLS.
-	// Aliases redirect to the guarded canonical host before reaching the backend.
+	if route.Closed {
+		// Keep the existing guard until the main Ingress uses exact public paths.
+		if err := r.applyOwnedIngress(ctx, app, desired); err != nil {
+			return err
+		}
+		if err := r.reconcileGuard(ctx, app, host, tlsEntry, backend, path, blockDefaults, middlewareParts, rateLimitRef); err != nil {
+			apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
+				Type:    kipperv1.ConditionRouteReady,
+				Status:  metav1.ConditionFalse,
+				Reason:  "CloseIncomplete",
+				Message: fmt.Sprintf("route closure is incomplete: failed to remove previous routing rules or middleware: %v", err),
+			})
+			return err
+		}
+		return nil
+	}
+	// Install the guard before publishing an open route.
 	if err := r.reconcileGuard(ctx, app, host, tlsEntry, backend, path, blockDefaults, middlewareParts, rateLimitRef); err != nil {
 		withdrawn := ""
 		// Keep serving after a failed reconcile only if the installed guard still

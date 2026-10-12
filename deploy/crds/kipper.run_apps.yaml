@@ -299,6 +299,11 @@ spec:
                       BasicAuth enables HTTP basic authentication on this route.
                       Credentials are stored in a Secret named {app}-basic-auth.
                     type: boolean
+                  closed:
+                    description: |-
+                      Closed publishes only the route's PublicPaths, matched exactly, so a host
+                      can serve one endpoint of the app, such as a webhook, and nothing else.
+                    type: boolean
                   cspAllowlist:
                     description: |-
                       CSPAllowlist adds external domains to the Content Security Policy.
