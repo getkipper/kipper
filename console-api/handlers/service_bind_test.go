@@ -638,7 +638,7 @@ func TestUnbind_NeverResolvesAcrossNamespaces(t *testing.T) {
 	// With no service and no prefix on the binding there is nothing that
 	// identifies the injected variables, so they stay — and the caller is told,
 	// rather than finding stale entries later.
-	assert.Contains(t, rec.Body.String(), "left in place",
+	assert.Contains(t, rec.Body.String(), "Remove any leftover environment variables manually",
 		"a cleanup that could not be done must be reported, not implied by silence")
 }
 
