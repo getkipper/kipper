@@ -3,6 +3,10 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/http"
+	"strconv"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -17,6 +21,11 @@ import (
 )
 
 const portRecheck = 5 * time.Minute
+
+const (
+	upstreamCheckMethod = "KIPPER-UPSTREAM-CHECK"
+	upstreamHeader      = "X-Kipper-Upstream"
+)
 
 // portWatched selects routed or linked apps with no app readiness check.
 // Stopped apps, build placeholders, and apps with an applied explicit opt-out are excluded.
@@ -42,15 +51,17 @@ func (r *AppReconciler) observePort(ctx context.Context, app *kipperv1.App, depl
 	}
 	r.portChecked.Store(app.UID, now)
 	r.sweepPortChecked(now)
+	answers := r.probePort(ctx, r.PortDial, app, deploy, now)
 	accepted, refused := false, false
-	for _, a := range r.probePort(ctx, r.PortDial, app, deploy, now) {
-		if a.proxied {
-			// The instance proxy can reach a localhost-only listener, so a
-			// refusal on the pod IP is inconclusive.
-			a.settledRefusal = false
-		}
+	for _, a := range answers {
 		accepted = accepted || a.accepted
-		refused = refused || a.settledRefusal
+		refused = refused || (a.settledRefusal && !a.proxied)
+	}
+	if !accepted {
+		// The proxy can reach localhost-only listeners, so use it to check
+		// proxied pods when direct connections are inconclusive.
+		proxyAccepted, proxyRefused := r.askInstanceProxies(ctx, app, answers)
+		accepted, refused = proxyAccepted, refused || proxyRefused
 	}
 	cond := metav1.Condition{Type: kipperv1.ConditionPortListening, ObservedGeneration: app.Generation}
 	switch {
@@ -68,6 +79,61 @@ func (r *AppReconciler) observePort(ctx context.Context, app *kipperv1.App, depl
 	}
 	apimeta.SetStatusCondition(&app.Status.Conditions, cond)
 	return portRecheck
+}
+
+// askInstanceProxies checks upstream connectivity for proxied pods whose direct
+// probes failed. Refusals count after inferenceSettledAge to allow startup time;
+// errors and unrecognized replies are inconclusive.
+func (r *AppReconciler) askInstanceProxies(ctx context.Context, app *kipperv1.App, answers []portAnswer) (accepted, refused bool) {
+	if r.UpstreamCheck == nil {
+		return false, false
+	}
+	replies := make([]string, len(answers))
+	var wg sync.WaitGroup
+	for i, a := range answers {
+		if !a.proxied || a.accepted {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, a portAnswer) {
+			defer wg.Done()
+			addr := net.JoinHostPort(a.podIP, strconv.Itoa(int(app.Spec.Port+instanceProxyPortOffset)))
+			if reply, err := r.UpstreamCheck(ctx, addr); err == nil {
+				replies[i] = reply
+			}
+		}(i, a)
+	}
+	wg.Wait()
+	for i, reply := range replies {
+		accepted = accepted || reply == "accepting"
+		refused = refused || (reply == "refused" && answers[i].settled)
+	}
+	return accepted, refused
+}
+
+// AskInstanceProxy returns the upstream status header from the proxy at addr.
+// Proxies supporting the check report "accepting", "refused", or "unknown".
+// A response without the header yields an empty string.
+func AskInstanceProxy(ctx context.Context, addr string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*inferenceDialTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, upstreamCheckMethod, "http://"+addr+"/", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := upstreamCheckClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	_ = resp.Body.Close()
+	return resp.Header.Get(upstreamHeader), nil
+}
+
+// upstreamCheckClient bypasses environment HTTP proxies to connect to the pod.
+// Redirects are disabled to keep checks local if an older proxy forwards them.
+var upstreamCheckClient = &http.Client{
+	Transport:     &http.Transport{Proxy: nil, DisableKeepAlives: true},
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
 // portWatchedNow looks up inbound links only when needed to determine eligibility.

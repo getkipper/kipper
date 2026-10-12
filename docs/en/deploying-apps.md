@@ -592,13 +592,13 @@ A background worker that never listens on a port can therefore deploy without a 
 
 A refused connection can also mean the app listens on a different port from its declared port. For routed apps and apps targeted by a link, Kipper checks the port every five minutes while automatic readiness has selected no check or is still pending. Stopped apps and build placeholders are excluded.
 
-The `PortListening` condition is true if any sampled pod accepts a connection. Otherwise, it is false if an app container running for at least 10 minutes refuses a connection. Refusals from pods with the [instance proxy](#instance-id-header) are inconclusive because the proxy can reach a listener on `127.0.0.1`. Inconclusive results preserve the previous condition.
+The `PortListening` condition is true if any sampled pod accepts a connection. If none accepts directly, Kipper also asks each sampled [instance proxy](#instance-id-header) to connect to its app on localhost, which reaches listeners bound to `127.0.0.1`. A successful proxy connection also makes the condition true. Otherwise, a refusal makes it false once the app container has run for at least 10 minutes; for pods with an instance proxy, that refusal must come from the proxy's check. Errors, unknown replies, and replies without the check's response header are inconclusive and preserve the previous condition if no other sample is conclusive.
 
 `kip app info` shows the condition. When it is false, the console shows "Port not listening", and `kip app links` flags links to the app. For a worker that serves no traffic, apply `--health none` to disable these checks.
 
 A new app has no running pods to inspect, so its first deploy has no automatic app check. A later rollout gets one if a ready pod accepts connections on the app port.
 
-Checks connect to the pod's IP address. An app listening only on `127.0.0.1` can receive traffic through the [instance proxy](#instance-id-header), but neither an automatic nor a declared check can reach that listener. To use a check, make the checked endpoint listen on `0.0.0.0`. A separate health endpoint can use `--health-port`.
+Automatic and declared readiness checks connect to the pod's IP address. Make the checked endpoint listen on `0.0.0.0` so these checks can reach it. An app listening only on `127.0.0.1` can receive traffic through the [instance proxy](#instance-id-header) and use a separate health endpoint with `--health-port`.
 
 ### Declaring a check
 
@@ -703,7 +703,9 @@ The request flow looks like this:
 Client → Traefik → Service:8080 → Sidecar(:18080) → Your app(:8080)
 ```
 
-The sidecar listens on an offset port (your app's port + 10000). The Kubernetes Service routes traffic to the sidecar via `targetPort`, and the sidecar forwards it to your app on localhost. Your app keeps listening on its original port and never knows the sidecar is there.
+The sidecar listens on an offset port (your app's port + 10000). The Kubernetes Service routes traffic to the sidecar via `targetPort`, and the sidecar forwards it to your app on localhost. Your app keeps listening on its original port.
+
+The sidecar also answers Kipper's [port check](#what-kipper-checks-on-its-own) by testing a connection to your app. Older sidecars forward this check to the app, so it may receive a `KIPPER-UPSTREAM-CHECK /` request every five minutes until its pod is replaced. Requests with an `X-Forwarded-For` header, such as those from Traefik, follow the usual proxy path.
 
 The sidecar has its own TCP readiness check. A pod receives traffic when both containers are ready; without an app check, the app container counts as ready once it starts. On shutdown, the sidecar waits for active HTTP requests to finish within the pod's [shutdown grace period](#how-pods-are-replaced).
 
