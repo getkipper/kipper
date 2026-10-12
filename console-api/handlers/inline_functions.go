@@ -22,25 +22,16 @@ import (
 type InlineFunctions struct {
 	Client   kubernetes.Interface
 	CRClient crclient.Client
-	// Services drives the per-binding provisioning side of Create —
-	// pod exec to add a postgres database or rabbitmq vhost, and the
-	// per-binding credentials Secret. Without this the create form
-	// would silently write a Function CR whose bindings reference
-	// Secrets that don't exist.
+	// Services provisions databases, vhosts, and credentials for service bindings.
 	Services *Services
 	Domain   string
 }
 
-// inlineCreateRequest carries the full create payload from the function
-// form: code + trigger + bindings + env + secrets + dependencies. The
-// handler materialises the Function CR plus the env / secrets Secrets
-// in one round trip so the form can deploy with a single user click.
 type inlineCreateRequest struct {
 	Name    string `json:"name"`
-	Runtime string `json:"runtime"` // "node" or "python"
+	Runtime string `json:"runtime"`
 	Code    string `json:"code"`
 
-	// Trigger config — defaults to HTTP.
 	Trigger   string `json:"trigger"`
 	Schedule  string `json:"schedule"`
 	Source    string `json:"source"`
@@ -49,15 +40,12 @@ type inlineCreateRequest struct {
 	RedisList string `json:"redis_list"`
 	Bucket    string `json:"bucket"`
 
-	// Configuration the form collects in one shot.
 	Env          map[string]string     `json:"env,omitempty"`
 	Secrets      map[string]string     `json:"secrets,omitempty"`
 	Dependencies map[string]string     `json:"dependencies,omitempty"`
 	Bindings     []inlineCreateBinding `json:"bindings,omitempty"`
 }
 
-// inlineCreateBinding mirrors ServiceBinding from the v1alpha1 package
-// without leaking unintended JSON tags.
 type inlineCreateBinding struct {
 	Service  string `json:"service"`
 	Prefix   string `json:"prefix,omitempty"`
@@ -69,10 +57,6 @@ type inlineCodeResponse struct {
 	Runtime string `json:"runtime"`
 	Code    string `json:"code"`
 
-	// Trigger configuration so the edit form can re-populate after a
-	// page refresh. Without these fields the form loads a blank
-	// schedule, source query, etc, and the user has to re-enter them
-	// on every save.
 	Trigger   string `json:"trigger,omitempty"`
 	Schedule  string `json:"schedule,omitempty"`
 	Source    string `json:"source,omitempty"`
@@ -173,23 +157,19 @@ func (f *InlineFunctions) Create(w http.ResponseWriter, r *http.Request) {
 			release()
 		}
 		if errors.IsAlreadyExists(err) {
-			// Update existing Function CR with new spec.
-			var existing kipperv1.Function
-			if getErr := f.CRClient.Get(ctx, crclient.ObjectKey{Namespace: project, Name: req.Name}, &existing); getErr != nil {
-				respondError(w, http.StatusInternalServerError, "failed to get existing function")
-				return
-			}
-			existing.Spec.Runtime = req.Runtime
-			if existing.Spec.Source == nil {
-				existing.Spec.Source = &kipperv1.FunctionSource{}
-			}
-			existing.Spec.Source.Code = req.Code
-			existing.Spec.Source.Dependencies = req.Dependencies
-			existing.Spec.Env = req.Env
-			existing.Spec.ServiceBindings = bindings
-			existing.Spec.Triggers = []kipperv1.FunctionTrigger{trigger}
-			existing.Labels = fn.Labels
-			if updateErr := f.CRClient.Update(ctx, &existing); updateErr != nil {
+			updateErr := updateFunction(ctx, f.CRClient, project, req.Name, func(existing *kipperv1.Function) {
+				existing.Spec.Runtime = req.Runtime
+				if existing.Spec.Source == nil {
+					existing.Spec.Source = &kipperv1.FunctionSource{}
+				}
+				existing.Spec.Source.Code = req.Code
+				existing.Spec.Source.Dependencies = req.Dependencies
+				existing.Spec.Env = req.Env
+				existing.Spec.ServiceBindings = bindings
+				existing.Spec.Triggers = []kipperv1.FunctionTrigger{trigger}
+				existing.Labels = fn.Labels
+			})
+			if updateErr != nil {
 				respondError(w, http.StatusInternalServerError, "failed to update function")
 				return
 			}
@@ -358,13 +338,8 @@ func (f *InlineFunctions) upsertSecrets(ctx context.Context, namespace, fnName s
 	return err
 }
 
-// UpdateCode updates the code, runtime, and trigger config for an
-// inline function. Runtime and trigger config are mutable
-// post-creation because users routinely change them after first save:
-// fixing a runtime that defaulted to Node when they wanted Python,
-// adjusting a cron schedule, or pointing an event trigger at a
-// different source. The reconciler rolls the deployment with the new
-// settings on the next pass.
+// UpdateCode saves inline code and any supplied runtime and trigger settings.
+// A supplied trigger replaces the entire trigger list.
 // PUT /api/v1/projects/{name}/inline-functions/{fn}/code
 func (f *InlineFunctions) UpdateCode(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "name")
@@ -374,9 +349,6 @@ func (f *InlineFunctions) UpdateCode(w http.ResponseWriter, r *http.Request) {
 		Code    string `json:"code"`
 		Runtime string `json:"runtime,omitempty"`
 
-		// Optional trigger updates. When Trigger is non-empty the
-		// function's first trigger is replaced with one built from
-		// these fields, mirroring the create path.
 		Trigger   string `json:"trigger,omitempty"`
 		Schedule  string `json:"schedule,omitempty"`
 		Source    string `json:"source,omitempty"`
@@ -401,41 +373,35 @@ func (f *InlineFunctions) UpdateCode(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	var fn kipperv1.Function
-	if err := f.CRClient.Get(ctx, crclient.ObjectKey{Namespace: project, Name: fnName}, &fn); err != nil {
-		if errors.IsNotFound(err) {
-			respondError(w, http.StatusNotFound, "function not found")
-			return
+	err := updateFunction(ctx, f.CRClient, project, fnName, func(fn *kipperv1.Function) {
+		if fn.Spec.Source == nil {
+			fn.Spec.Source = &kipperv1.FunctionSource{}
 		}
-		respondError(w, http.StatusInternalServerError, "failed to get function")
+		fn.Spec.Source.Code = req.Code
+		if req.Runtime != "" {
+			fn.Spec.Runtime = req.Runtime
+		}
+		if req.Trigger != "" {
+			fn.Spec.Triggers = []kipperv1.FunctionTrigger{buildInlineTrigger(inlineCreateRequest{
+				Trigger:   req.Trigger,
+				Schedule:  req.Schedule,
+				Source:    req.Source,
+				Query:     req.Query,
+				MarkDone:  req.MarkDone,
+				RedisList: req.RedisList,
+				Bucket:    req.Bucket,
+			})}
+			if fn.Labels == nil {
+				fn.Labels = map[string]string{}
+			}
+			fn.Labels["kipper.run/trigger"] = req.Trigger
+		}
+	})
+	if errors.IsNotFound(err) {
+		respondError(w, http.StatusNotFound, "function not found")
 		return
 	}
-
-	if fn.Spec.Source == nil {
-		fn.Spec.Source = &kipperv1.FunctionSource{}
-	}
-	fn.Spec.Source.Code = req.Code
-	if req.Runtime != "" {
-		fn.Spec.Runtime = req.Runtime
-	}
-	if req.Trigger != "" {
-		fn.Spec.Triggers = []kipperv1.FunctionTrigger{buildInlineTrigger(inlineCreateRequest{
-			Trigger:   req.Trigger,
-			Schedule:  req.Schedule,
-			Source:    req.Source,
-			Query:     req.Query,
-			MarkDone:  req.MarkDone,
-			RedisList: req.RedisList,
-			Bucket:    req.Bucket,
-		})}
-		// Keep the trigger label in sync so /functions list filters work.
-		if fn.Labels == nil {
-			fn.Labels = map[string]string{}
-		}
-		fn.Labels["kipper.run/trigger"] = req.Trigger
-	}
-
-	if err := f.CRClient.Update(ctx, &fn); err != nil {
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to update function")
 		return
 	}
