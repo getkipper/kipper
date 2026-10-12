@@ -33,7 +33,7 @@ apps:
       - name: db
         prefix: DB_
     route:
-      host: "{{ .domain }}"
+      host: "{{ hostOf .domain }}"
       path: /
 
 services:

@@ -112,7 +112,7 @@ func runBlueprintInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("  Install:\n")
-	fmt.Printf("    kip blueprint install %s --set projectName=my-project\n\n", bp.Metadata.Name)
+	fmt.Printf("    %s\n\n", blueprint.InstallCommand(bp.Metadata))
 
 	return nil
 }

@@ -9,7 +9,7 @@ parameters:
     description: Target environment
     default: ""
   - name: domain
-    description: Public URL (e.g. https://chat.example.com)
+    description: Public URL or hostname (e.g. https://chat.example.com)
     required: true
   - name: dbStorage
     description: Database storage size
@@ -41,7 +41,7 @@ apps:
     image: rocket.chat:8.4.3
     port: 3000
     env:
-      ROOT_URL: "{{ .domain }}"
+      ROOT_URL: "{{ urlOf .domain }}"
       MONGO_URL: "mongodb://kipper@mongodb.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local:27017/app"
       MONGO_OPLOG_URL: "mongodb://kipper@mongodb.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local:27017/local"
 {{- if .smtpHost }}
@@ -65,7 +65,7 @@ apps:
     resources:
       profile: standard
     route:
-      host: "{{ .domain }}"
+      host: "{{ hostOf .domain }}"
       path: /
 
 services:

@@ -9,8 +9,8 @@ parameters:
     description: Target environment
     default: ""
   - name: domain
-    description: Public URL for Ghost (e.g. https://blog.example.com)
-    default: "http://localhost:2368"
+    description: Public URL or hostname for Ghost (e.g. https://blog.example.com)
+    required: true
   - name: dbStorage
     description: Database storage size
     default: "5Gi"
@@ -27,12 +27,12 @@ apps:
       database__connection__host: "db.{{ .projectName }}{{ if .environment }}-{{ .environment }}{{ end }}.svc.cluster.local"
       database__connection__user: kipper
       database__connection__database: app
-      url: "{{ .domain }}"
+      url: "{{ urlOf .domain }}"
     serviceBindings:
       - name: db
         prefix: database__connection__
     route:
-      host: "{{ .domain }}"
+      host: "{{ hostOf .domain }}"
       path: /
 
 services:
