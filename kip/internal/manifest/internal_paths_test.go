@@ -41,7 +41,7 @@ func TestClosedRouteRoundTrips(t *testing.T) {
 		Route: &RouteSpec{Host: "pay.example.com", Closed: true, PublicPaths: []string{"/webhooks/stripe"}},
 	}}}
 
-	spec := Convert(m, "shop-test")[0].Object.Object["spec"].(map[string]interface{})
+	spec := Convert(m, "shop-test", nil)[0].Object.Object["spec"].(map[string]interface{})
 	route := spec["route"].(map[string]interface{})
 	if route["closed"] != true {
 		t.Fatalf("convert lost closed: %v", route)
