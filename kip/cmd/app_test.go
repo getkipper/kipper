@@ -625,3 +625,13 @@ func TestStoreGitCredentialLeavesAFirstDeploysCredentialForTheReconciler(t *test
 	require.NoError(t, getErr)
 	assert.Empty(t, got.OwnerReferences)
 }
+
+func TestAppRestartAcceptsWait(t *testing.T) {
+	f := appRestartCmd.Flags().Lookup("wait")
+	if f == nil {
+		t.Fatal("kip app restart must accept --wait")
+	}
+	if f.DefValue != "false" {
+		t.Errorf("--wait must default to off so a plain restart returns at once, got %q", f.DefValue)
+	}
+}

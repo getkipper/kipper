@@ -137,6 +137,7 @@ func init() {
 
 	appRestartCmd.Flags().String("project", "", "project name")
 	appRestartCmd.Flags().String("environment", "", "target environment")
+	appRestartCmd.Flags().Bool("wait", false, "wait until every pod has been replaced and is ready (up to 15 minutes)")
 
 	appUpdateCmd.Flags().String("image", "", "new container image (e.g. registry.git.example.com/app:v2)")
 	appUpdateCmd.Flags().String("profile", "", "resource profile: lightweight, standard, compute-heavy, memory-heavy, or jvm")
@@ -563,6 +564,11 @@ func runAppLogs(cmd *cobra.Command, args []string) error {
 	return err
 }
 
+const (
+	restartWaitBudget   = 15 * time.Minute
+	restartWaitInterval = 3 * time.Second
+)
+
 func runAppRestart(cmd *cobra.Command, args []string) error {
 	appName := args[0]
 
@@ -575,10 +581,19 @@ func runAppRestart(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
 	fmt.Printf("\n  Restarting %s...\n", appName)
-	if err := d.Restart(ctx, ns, appName); err != nil {
+	stamp, err := d.Restart(ctx, ns, appName)
+	if err != nil {
 		return err
 	}
-	fmt.Printf("  ✔  Restart triggered\n\n")
+	fmt.Printf("  ✔  Restart triggered\n")
+	if wait, _ := cmd.Flags().GetBool("wait"); wait {
+		fmt.Printf("  ...  Waiting for every pod to be replaced and ready\n")
+		if err := d.WaitForRestart(ctx, ns, appName, stamp, restartWaitBudget, restartWaitInterval); err != nil {
+			return err
+		}
+		fmt.Printf("  ✔  All pods for %s have been replaced and are ready\n", appName)
+	}
+	fmt.Println()
 
 	return nil
 }

@@ -612,7 +612,8 @@ func TestRestartStampsAppCRAnnotation(t *testing.T) {
 	ctx := context.Background()
 	seedApp(t, dynClient, map[string]interface{}{"image": "ghcr.io/acme/api:v1"})
 
-	require.NoError(t, d.Restart(ctx, "default", "api"))
+	_, err := d.Restart(ctx, "default", "api")
+	require.NoError(t, err)
 
 	app, err := dynClient.Resource(AppGVR).Namespace("default").Get(ctx, "api", metav1.GetOptions{})
 	require.NoError(t, err)
@@ -624,7 +625,7 @@ func TestRestartStampsAppCRAnnotation(t *testing.T) {
 
 func TestRestartErrorsWhenAppMissing(t *testing.T) {
 	d, _ := testDeployer()
-	err := d.Restart(context.Background(), "default", "ghost")
+	_, err := d.Restart(context.Background(), "default", "ghost")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }

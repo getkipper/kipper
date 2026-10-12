@@ -57,7 +57,7 @@ func TestDeployWithRouteGroupSetsRoute(t *testing.T) {
 func TestRestartNotFoundReturnsError(t *testing.T) {
 	d, _ := testDeployer()
 
-	err := d.Restart(context.Background(), "default", "nonexistent")
+	_, err := d.Restart(context.Background(), "default", "nonexistent")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }

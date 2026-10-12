@@ -536,6 +536,14 @@ kip app restart backend
 
 Triggers a rolling restart, which replaces the pods as described in [How pods are replaced](#how-pods-are-replaced). With a [health check](#health-checks-and-rollouts) in place, a new pod counts as ready once your app passes the check. Without one, Kubernetes counts a pod as ready as soon as its container starts. Useful when you need to pick up new environment variables or pull a fresh `:latest` image.
 
+The command returns once the restart is requested. Add `--wait` to wait until all replacement pods are ready and all pods from before this restart are gone:
+
+```bash
+kip app restart backend --wait
+```
+
+The wait lasts up to 15 minutes and fails earlier if Kubernetes reports that the rollout has stalled. Stall and timeout errors include pod counts once the controller has applied the restart. Run `kip app info backend` to check the app's status and rollout details.
+
 ### Stopping and starting an app
 
 ```bash
