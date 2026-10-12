@@ -385,6 +385,24 @@ func TestAppCRToResponse_CarriesAWaitingRollout(t *testing.T) {
 	}
 }
 
+// Port warnings remain visible even when the app phase is Running.
+func TestAppCRToResponse_CarriesAClosedPort(t *testing.T) {
+	app := kipperv1.App{ObjectMeta: metav1.ObjectMeta{Name: "geo"}, Status: kipperv1.AppStatus{
+		Phase: "Running", Conditions: []metav1.Condition{{
+			Type: kipperv1.ConditionPortListening, Status: metav1.ConditionFalse, Reason: "NothingListening",
+			Message: "nothing accepts connections on port 8080 in a pod running for at least 10m0s.",
+		}},
+	}}
+	if got := appCRToResponse(app); !strings.Contains(got.PortClosed, "port 8080") {
+		t.Errorf("port_closed = %q, want the condition's message", got.PortClosed)
+	}
+
+	app.Status.Conditions[0].Status = metav1.ConditionTrue
+	if got := appCRToResponse(app); got.PortClosed != "" {
+		t.Errorf("a listening app says nothing, got %q", got.PortClosed)
+	}
+}
+
 // The manual scale control sends an absolute count, so it needs the stored
 // desired count; status.replicas lags a pending scale and includes surge pods.
 func TestAppCRToResponse_CarriesTheDesiredCount(t *testing.T) {

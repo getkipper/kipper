@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -21,13 +23,9 @@ import (
 var appLinksCmd = &cobra.Command{
 	Use:   "links [app]",
 	Short: "Show what an app links to and whether the traffic gets through",
-	Long: `Lists the apps this one declares it reaches, and checks each one.
-
-A link has to be several things at once: the other project has to have agreed,
-the target has to exist and serve a port, the allowance has to be in place, and
-the address has to have reached the running pods. This reports each of those,
-then tries the connection itself from inside the calling pod. The only place
-the allowance applies, and so the only place worth testing from.`,
+	Long: `Lists the app's declared links and checks project consent, the target's
+declared port, network policy, and the address in the running pod.
+It then tests connectivity from the calling pod, where the egress policy applies.`,
 	Args: cobra.RangeArgs(0, 1),
 	RunE: runAppLinks,
 }
@@ -40,13 +38,14 @@ func init() {
 
 // linkReport is what could be established about one declared link.
 type linkReport struct {
-	target, targetNS, envKey, url string
-	consented                     bool
-	consentNote                   string
-	targetPort                    int64
-	allowancePort                 int64
-	addressInPod                  bool
-	probe                         string
+	target, targetNS, envKey, url        string
+	consented                            bool
+	consentNote                          string
+	targetPort                           int64
+	allowancePort                        int64
+	addressInPod                         bool
+	probe                                string
+	targetListening, targetListeningNote string
 }
 
 func runAppLinks(cmd *cobra.Command, args []string) error {
@@ -129,6 +128,13 @@ func inspectLink(ctx context.Context, k8sClient *k8s.Client, ns, app, callerProj
 
 	if obj, err := dyn.Resource(appGVR).Namespace(targetNS).Get(ctx, target, metav1.GetOptions{}); err == nil {
 		r.targetPort, _, _ = unstructured.NestedInt64(obj.Object, "spec", "port")
+		conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+		for _, entry := range conditions {
+			if c, ok := entry.(map[string]interface{}); ok && c["type"] == "PortListening" {
+				r.targetListening, _ = c["status"].(string)
+				r.targetListeningNote, _ = c["message"].(string)
+			}
+		}
 	}
 	if r.targetPort > 0 {
 		r.url = fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", target, targetNS, r.targetPort)
@@ -168,43 +174,58 @@ func inspectLink(ctx context.Context, k8sClient *k8s.Client, ns, app, callerProj
 }
 
 func printLinkReport(r linkReport) {
-	ok := r.consented && r.targetPort > 0 && r.allowancePort > 0 && strings.HasPrefix(r.probe, "reachable")
+	writeLinkReport(os.Stdout, r)
+}
+
+// writeLinkReport includes the target's port warning even when the connection probe succeeds.
+func writeLinkReport(out io.Writer, r linkReport) {
+	ok := r.consented && r.targetPort > 0 && r.allowancePort > 0 && strings.HasPrefix(r.probe, "reachable") && r.targetListening != "False"
 	mark := "⚠"
 	if ok {
 		mark = "✔"
 	}
-	fmt.Printf("  %s  %s in %s\n", mark, r.target, r.targetNS)
+	say(out, "  %s  %s in %s\n", mark, r.target, r.targetNS)
 	if r.url != "" {
-		fmt.Printf("       %s=%s\n", r.envKey, r.url)
+		say(out, "       %s=%s\n", r.envKey, r.url)
 	}
 
-	fmt.Printf("       consent      %s\n", r.consentNote)
+	say(out, "       consent      %s\n", r.consentNote)
 	if r.targetPort > 0 {
-		fmt.Printf("       target       serving on port %d\n", r.targetPort)
+		if r.targetListening == "False" {
+			say(out, "       target       declared port %d; %s\n", r.targetPort, firstSentence(r.targetListeningNote))
+		} else {
+			say(out, "       target       declared port %d\n", r.targetPort)
+		}
 	} else {
-		fmt.Printf("       target       not found, or serving no port\n")
+		say(out, "       target       unavailable or no port declared\n")
 	}
 	switch {
 	case r.allowancePort > 0 && r.allowancePort != r.targetPort:
-		// The two differing is correct: the allowance names the port the target's
-		// pods listen on, which is 10000 above its own when it runs the
-		// instance-id sidecar, while the address names the port its Service
-		// publishes. Said plainly, because it looks wrong until it is explained.
-		fmt.Printf("       allowance    egress to %s on port %d, which is where its Service sends %d\n",
+		// Network policy uses the pod port; the Service can map its public
+		// port to a different port on the pod.
+		say(out, "       allowance    egress to %s on port %d, which is where its Service sends %d\n",
 			r.target, r.allowancePort, r.targetPort)
 	case r.allowancePort > 0:
-		fmt.Printf("       allowance    egress to %s on port %d\n", r.target, r.allowancePort)
+		say(out, "       allowance    egress to %s on port %d\n", r.target, r.allowancePort)
 	case r.targetNS == "":
-		fmt.Printf("       allowance    none\n")
+		say(out, "       allowance    none\n")
 	default:
-		fmt.Printf("       allowance    none: nothing opens a path to %s\n", r.targetNS)
+		say(out, "       allowance    none: nothing opens a path to %s\n", r.targetNS)
 	}
-	fmt.Printf("       address      %s\n",
+	say(out, "       address      %s\n",
 		either(r.addressInPod, "in the running pod", "not in the running pod yet"))
 	if r.probe != "" {
-		fmt.Printf("       connection   %s\n", r.probe)
+		say(out, "       connection   %s\n", r.probe)
 	}
-	fmt.Println()
+	say(out, "\n")
+}
+
+// firstSentence keeps a condition message to its first sentence for a one-line report.
+func firstSentence(message string) string {
+	if i := strings.Index(message, ". "); i >= 0 {
+		return message[:i]
+	}
+	return strings.TrimSuffix(message, ".")
 }
 
 // either picks the wording for an outcome. Two arguments rather than one,

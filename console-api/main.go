@@ -1063,7 +1063,7 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client, clientset 
 		name  string
 		setup func(ctrl.Manager) error
 	}{
-		{"App", (&controllers.AppReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Domain: domain, SidecarImage: sidecarImage, Recorder: mgr.GetEventRecorderFor("app-controller"), PreStopSleep: preStopSleepSupported(cfg), Dial: controllers.TCPDial, RouteNames: routeNameGate, Provision: bindingDatabaseProvisioner(clientset, cfg)}).SetupWithManager}, //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
+		{"App", (&controllers.AppReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Domain: domain, SidecarImage: sidecarImage, Recorder: mgr.GetEventRecorderFor("app-controller"), PreStopSleep: preStopSleepSupported(cfg), Dial: controllers.TCPDial, PortDial: controllers.TCPDial, RouteNames: routeNameGate, Provision: bindingDatabaseProvisioner(clientset, cfg)}).SetupWithManager}, //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
 		{"Service", (&controllers.ServiceReconciler{
 			Client:              mgr.GetClient(),
 			APIReader:           mgr.GetAPIReader(),

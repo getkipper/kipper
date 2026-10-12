@@ -84,6 +84,11 @@ type AppReconciler struct {
 	// exist yet. Nil disables tenant route-name reservations.
 	RouteNames *RouteNameGate
 
+	// PortDial tests the app port for the PortListening condition. Nil disables the check.
+	PortDial func(ctx context.Context, addr string) error
+	// portChecked stores the last probe attempt by app UID to limit probe frequency.
+	portChecked sync.Map
+
 	// Nil disables database and vhost provisioning.
 	Provision DatabaseProvisioner
 }
@@ -2374,6 +2379,9 @@ func (r *AppReconciler) observeWorkload(ctx context.Context, app *kipperv1.App) 
 	if err != nil {
 		return 0, err
 	}
+	if portRetry := r.observePort(ctx, app, &deploy, check, time.Now()); portRetry > 0 && (requeue == 0 || portRetry < requeue) {
+		requeue = portRetry
+	}
 
 	app.Status.Replicas = deploy.Status.Replicas
 	app.Status.ReadyReplicas = deploy.Status.ReadyReplicas
@@ -2407,6 +2415,7 @@ func (r *AppReconciler) updateStatus(ctx context.Context, app *kipperv1.App) (ti
 }
 
 func (r *AppReconciler) removeFinalizer(ctx context.Context, app *kipperv1.App) error {
+	r.portChecked.Delete(app.UID)
 	controllerutil.RemoveFinalizer(app, appFinalizer)
 	return r.Update(ctx, app)
 }
@@ -2555,6 +2564,7 @@ func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&kipperv1.PlatformConfig{}, handler.EnqueueRequestsFromMapFunc(r.enqueueAppsForRouteGuard),
 			builder.WithPredicates(routeGuardChanged())).
 		Watches(&kipperv1.App{}, handler.EnqueueRequestsFromMapFunc(r.enqueueCallersOfLinkTarget)).
+		Watches(&kipperv1.App{}, handler.EnqueueRequestsFromMapFunc(r.enqueueLinkTargets)).
 		// Consent is the target project's decision, and withdrawing it has to
 		// actually close the paths it authorised rather than wait for something
 		// unrelated to touch each caller.

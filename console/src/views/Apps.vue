@@ -391,6 +391,11 @@ function openApp(appName: string, namespace?: string) {
             class="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-400"
             :title="app.rollout_waiting"
           >{{ rolloutLabel(app) }}</span>
+          <span
+            v-if="app.port_closed"
+            class="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-400"
+            :title="app.port_closed"
+          >Port not listening</span>
 
           <!-- Replicas -->
           <span class="font-mono text-xs text-slate-500 dark:text-slate-400">

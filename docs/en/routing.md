@@ -144,13 +144,13 @@ kip app links hrportal-backend --project hrportal --environment test
   ✔  docuseal in docuseal-test
        DOCUSEAL_URL=http://docuseal.docuseal-test.svc.cluster.local:3000
        consent      docuseal allows hrportal
-       target       serving on port 3000
+       target       declared port 3000
        allowance    egress to docuseal on port 13000, which is where its Service sends 3000
        address      in the running pod
        connection   reachable — nc connected to docuseal.docuseal-test.svc.cluster.local:3000 from hrportal-backend-7999dfd5-29qhl
 ```
 
-The report checks the link declaration, target, policy, and connectivity. The final check runs from the calling app's pod, where the link's network policy applies.
+The report checks the link declaration, target, policy, and connectivity. The final check runs from the calling app's pod, where the link's network policy applies. If Kipper reports a closed port on the target, the report shows that warning and marks the link ⚠ even if the connection probe succeeds. A successful connection to the instance proxy alone does not confirm that the app accepts connections.
 
 The two port numbers differing is correct. The address names the port the target's Service
 publishes, which is what your app dials; the allowance names the port its pods listen on, which is

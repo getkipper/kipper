@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // A container that has no such program is not a link that is shut. Reading one
@@ -67,4 +70,21 @@ func TestAnOutcomeIsWordedByWhatHappened(t *testing.T) {
 	if got := either(false, "in the running pod", "not in the running pod yet"); got != "not in the running pod yet" {
 		t.Errorf("a failing check reported %q", got)
 	}
+}
+
+// A successful connection probe must still show a reported target port failure.
+func TestLinkReportTargetLine(t *testing.T) {
+	healthy := linkReport{target: "geo", targetNS: "shop-test", consented: true, targetPort: 8080, allowancePort: 8080, probe: "reachable: nc connected"}
+	var out bytes.Buffer
+	writeLinkReport(&out, healthy)
+	assert.Contains(t, out.String(), "  ✔  geo in shop-test\n")
+	assert.Contains(t, out.String(), "target       declared port 8080\n")
+
+	closed := healthy
+	closed.targetListening = "False"
+	closed.targetListeningNote = "nothing accepts connections on port 8080"
+	out.Reset()
+	writeLinkReport(&out, closed)
+	assert.Contains(t, out.String(), "  ⚠  geo in shop-test\n", "a link to a port nothing answers on is not healthy")
+	assert.Contains(t, out.String(), "target       declared port 8080; nothing accepts connections on port 8080\n")
 }
