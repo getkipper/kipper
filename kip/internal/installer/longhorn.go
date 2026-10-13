@@ -19,13 +19,21 @@ const longhornSettingsFunc = longhornSettingsFuncName + `() {
 }`
 
 // InstallLonghorn installs Longhorn for distributed persistent storage.
+// It detects the OS here so kip upgrade can run without gathering system info.
 func InstallLonghorn(client CommandRunner) error {
-	return installLonghorn(client)
+	host, err := DetectHostOS(client)
+	if err != nil {
+		return fmt.Errorf("installing longhorn dependencies: %w", err)
+	}
+	return installLonghorn(client, host)
 }
 
-func installLonghorn(client CommandRunner) error {
-	// Longhorn requires open-iscsi and nfs-common (for RWX shared volumes)
-	if _, err := client.Run("apt-get update -qq && apt-get install -y -qq open-iscsi nfs-common"); err != nil {
+func installLonghorn(client CommandRunner, host HostOS) error {
+	install := host.InstallPackagesCommand(true, host.StoragePackages()...)
+	if install == "" {
+		return fmt.Errorf("installing longhorn dependencies: kip cannot install packages on %s", host.ID)
+	}
+	if _, err := client.Run(install); err != nil {
 		return fmt.Errorf("installing longhorn dependencies: %w", err)
 	}
 

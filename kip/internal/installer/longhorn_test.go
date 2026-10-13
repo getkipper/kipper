@@ -73,12 +73,23 @@ func TestLonghornSettingsFilter_RefusesAManifestItCannotPlaceTheSettingsIn(t *te
 
 func TestInstallLonghorn_AppliesTheFilteredManifest(t *testing.T) {
 	r := &recordingRunner{}
-	require.NoError(t, installLonghorn(r))
+	require.NoError(t, installLonghorn(r, HostOS{ID: "debian", Family: FamilyDebian}))
 
 	all := strings.Join(r.commands, "\n")
+	assert.Equal(t, "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq open-iscsi nfs-common", r.commands[0],
+		"the host's storage packages come first")
 	assert.Contains(t, all, longhornSettingsFuncName+` "$dir/stock.yaml" "$dir/longhorn.yaml"`)
 	assert.Contains(t, all, `kubectl apply -f "$dir/longhorn.yaml"`)
 	assert.NotContains(t, all, "kubectl apply -f https://", "the stock manifest must not be applied unfiltered")
+}
+
+func TestInstallLonghornRefusesAHostItCannotInstallPackagesOn(t *testing.T) {
+	r := &recordingRunner{}
+
+	err := installLonghorn(r, HostOS{ID: "arch"})
+
+	assert.ErrorContains(t, err, "arch")
+	assert.Empty(t, r.commands)
 }
 
 // Sharing the install step applies these settings during upgrades too.

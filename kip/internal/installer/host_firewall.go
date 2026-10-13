@@ -204,14 +204,23 @@ func claimCommand(claimPath string) string {
 // configureFirewallWith enables the requested SSH rate limit only when the
 // runner can continue under it, either locally or over a shared SSH connection.
 // ApplyFirewallPlan remains the public entry point to enforce ownership checks.
+// It detects the OS here so kip cluster harden can run without gathering system info.
 func configureFirewallWith(client FirewallRunner, rateLimitSSH bool) error {
-	return configureFirewall(client, rateLimitSSH && client.SurvivesSSHRateLimit())
+	host, err := DetectHostOS(client)
+	if err != nil {
+		return fmt.Errorf("configuring the firewall: %w", err)
+	}
+	return configureFirewall(client, host, rateLimitSSH && client.SurvivesSSHRateLimit())
 }
 
-func configureFirewall(client CommandRunner, rateLimitSSH bool) error {
+func configureFirewall(client CommandRunner, host HostOS, rateLimitSSH bool) error {
 	// Installing the package changes no firewall: ufw ships inactive and
 	// stays that way until it is enabled below.
-	if _, err := client.Run("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ufw >/dev/null"); err != nil {
+	install := host.InstallPackagesCommand(false, "ufw")
+	if install == "" {
+		return fmt.Errorf("installing ufw: kip cannot install packages on %s", host.ID)
+	}
+	if _, err := client.Run(install + " >/dev/null"); err != nil {
 		return fmt.Errorf("installing ufw: %w", err)
 	}
 
