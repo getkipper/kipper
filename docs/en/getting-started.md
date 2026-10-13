@@ -70,12 +70,14 @@ kip app deploy --name hello --image nginx:latest --port 80
 
 Open the HTTPS URL printed by the command. Once the deployment is ready, you should see the nginx welcome page.
 
-Check the app and stream its logs:
+Check the app and read its logs:
 
 ```bash
 kip app list
 kip app logs hello
 ```
+
+Add `-f` to keep streaming new lines until you press Ctrl+C.
 
 Visit the console URL printed during installation and sign in with the same account. The dashboard shows your cluster, apps, and services.
 
