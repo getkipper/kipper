@@ -560,6 +560,10 @@ func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPre
 
 	warnUnreachableResolvers(probeDNSResolvers(client, resolvers), resolvers)
 
+	if err := prepareHostForK3s(client); err != nil {
+		return err
+	}
+
 	// protect-kernel-defaults makes the kubelet refuse to start unless these
 	// sysctls are already set, so they must be in place before k3s installs
 	// (and before an upgrade restarts the kubelet). Applied live and persisted.
@@ -708,6 +712,9 @@ func JoinWorkerNode(masterClient CommandRunner, workerClient CommandRunner, mast
 		return "", err
 	}
 	if err := writeAgentDNSConfig(workerClient); err != nil {
+		return "", err
+	}
+	if err := prepareHostForK3s(workerClient); err != nil {
 		return "", err
 	}
 	// Match the server's kubelet hardening: sysctls (applied live) before the

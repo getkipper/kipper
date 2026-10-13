@@ -10,6 +10,7 @@ type Family string
 
 const (
 	FamilyDebian  Family = "debian"
+	FamilyRHEL    Family = "rhel"
 	FamilyUnknown Family = ""
 )
 
@@ -24,8 +25,12 @@ type HostOS struct {
 
 // familyByID maps an os-release ID, or an ID_LIKE entry, to its family.
 var familyByID = map[string]Family{
-	"debian": FamilyDebian,
-	"ubuntu": FamilyDebian,
+	"debian":    FamilyDebian,
+	"ubuntu":    FamilyDebian,
+	"rhel":      FamilyRHEL,
+	"rocky":     FamilyRHEL,
+	"almalinux": FamilyRHEL,
+	"centos":    FamilyRHEL,
 }
 
 // DetectHostOS reads the host's /etc/os-release.
@@ -70,25 +75,75 @@ func parseOSRelease(content string) HostOS {
 	return h
 }
 
+// MajorVersion returns VERSION_ID up to its first dot.
+func (h HostOS) MajorVersion() string {
+	major, _, _ := strings.Cut(h.VersionID, ".")
+	return major
+}
+
 // InstallPackagesCommand returns a noninteractive install command, refreshing
 // package lists first when refresh is true. It returns an empty string for
 // unsupported families. Package names must be safe as unquoted shell arguments.
 func (h HostOS) InstallPackagesCommand(refresh bool, pkgs ...string) string {
-	if h.Family != FamilyDebian {
-		return ""
+	switch h.Family {
+	case FamilyDebian:
+		install := "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq " + strings.Join(pkgs, " ")
+		if refresh {
+			return "DEBIAN_FRONTEND=noninteractive apt-get update -qq && " + install
+		}
+		return install
+	case FamilyRHEL:
+		if refresh {
+			return "dnf install -y -q --refresh " + strings.Join(pkgs, " ")
+		}
+		return "dnf install -y -q " + strings.Join(pkgs, " ")
 	}
-	install := "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq " + strings.Join(pkgs, " ")
-	if refresh {
-		return "DEBIAN_FRONTEND=noninteractive apt-get update -qq && " + install
-	}
-	return install
+	return ""
 }
 
 // StoragePackages returns Longhorn's iSCSI and NFS client packages, or nil for
 // unsupported families.
 func (h HostOS) StoragePackages() []string {
-	if h.Family != FamilyDebian {
-		return nil
+	switch h.Family {
+	case FamilyDebian:
+		return []string{"open-iscsi", "nfs-common"}
+	case FamilyRHEL:
+		return []string{"iscsi-initiator-utils", "nfs-utils"}
 	}
-	return []string{"open-iscsi", "nfs-common"}
+	return nil
+}
+
+// StorageServices returns the services Kipper explicitly enables for Longhorn.
+func (h HostOS) StorageServices() []string {
+	if h.Family == FamilyRHEL {
+		return []string{"iscsid"}
+	}
+	return nil
+}
+
+// UsesNeedrestart reports whether Kipper configures needrestart for this OS family.
+func (h HostOS) UsesNeedrestart() bool {
+	return h.Family == FamilyDebian
+}
+
+// K3sSELinux reports whether Kipper enables SELinux support in k3s.
+func (h HostOS) K3sSELinux() bool {
+	return h.Family == FamilyRHEL
+}
+
+// KernelModules returns the modules to check before installing k3s and Longhorn.
+func (h HostOS) KernelModules() []string {
+	if h.Family == FamilyRHEL {
+		return []string{"br_netfilter", "overlay", "iscsi_tcp"}
+	}
+	return nil
+}
+
+// KernelModulePackages returns extra packages to install when required modules
+// are missing. The caller must select versions matching the running kernel.
+func (h HostOS) KernelModulePackages() []string {
+	if h.Family == FamilyRHEL && h.MajorVersion() == "10" {
+		return []string{"kernel-modules-extra"}
+	}
+	return nil
 }

@@ -25,7 +25,7 @@ kip install --host <ip> [flags]
 | `--admin-email` | No | `admin@<domain>` | Email for Let's Encrypt certificates and the admin account. Defaults to `admin@<domain>` when `--domain` is a domain you run, otherwise `admin@kipper.local` |
 | `--org` | No | — | Organisation short code (e.g. `acme`), used as namespace prefix |
 | `--org-display-name` | No | — | Human-readable organisation name (e.g. `Acme Inc`) |
-| `--harden` | No | `true` | Disable surplus host services exposed on public interfaces (e.g. `rpcbind`). Pass `--harden=false` only when you manage host security yourself |
+| `--harden` | No | `true` | Disable surplus host services exposed on public interfaces (e.g. `rpcbind`, Cockpit). Pass `--harden=false` only when you manage host security yourself |
 | `--admin-kubeconfig` | No | `false` | Write the shared k3s admin certificate to this machine instead of a per-operator OIDC kubeconfig. The certificate is unattributed and revocable only by rotating the cluster CA. A CI escape hatch, not the everyday path |
 | `--no-login` | No | `false` | Skip the inline browser sign-in during install. The machine ends up with a credential-free kubeconfig; the first operator runs `kip auth login && kip auth verify` afterwards |
 | `--firewall` | No | `true` | Install and configure UFW with k3s-correct rules. Skipped automatically if another firewall is already active. Pass `--firewall=false` only when you manage host security yourself |

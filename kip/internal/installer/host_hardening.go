@@ -5,63 +5,80 @@ import (
 	"strings"
 )
 
-// HostAudit reports host-level security findings detected before
-// installation. AuditHost populates this struct; HardenHost acts on it.
+// HostAudit records wildcard listeners on the rpcbind and Cockpit ports.
 type HostAudit struct {
-	// RpcbindExposed is true when rpcbind is listening on a public
-	// interface (0.0.0.0:111 or [::]:111). It can be abused for DDoS
-	// reflection and leaks RPC service information.
 	RpcbindExposed bool
+	CockpitExposed bool
 }
 
-// Findings returns a human-readable list of security issues detected on
-// the host. An empty slice means the host has no surplus services
-// exposed on public interfaces.
+// Findings returns descriptions of the detected listeners.
 func (a HostAudit) Findings() []string {
 	var f []string
 	if a.RpcbindExposed {
-		f = append(f, "rpcbind exposed on 0.0.0.0:111")
+		f = append(f, "rpcbind port 111 is listening on all interfaces")
+	}
+	if a.CockpitExposed {
+		f = append(f, "Cockpit port 9090 is listening on all interfaces")
 	}
 	return f
 }
 
-// AuditHost inspects the remote host for surplus services exposed on
-// public interfaces. It does not modify state — pair it with HardenHost
-// to fix anything found.
+// AuditHost checks for wildcard listeners on the rpcbind and Cockpit ports.
+// Internet reachability also depends on routing and firewall rules.
 func AuditHost(client CommandRunner) (HostAudit, error) {
 	var audit HostAudit
-
-	// A socket on 0.0.0.0:111, [::]:111, or *:111 is reachable from
-	// the public internet. Loopback-only bindings (127.0.0.1, [::1])
-	// are not. ss-format may quote the IPv6 wildcard as [::] or just *.
-	cmd := `ss -tulnH 2>/dev/null | awk '
-	$5 ~ /:111$/ {
-		addr = $5
-		sub(/:[0-9]+$/, "", addr)
-		if (addr == "0.0.0.0" || addr == "[::]" || addr == "*") print
-	}'`
-	out, err := client.Run(cmd)
-	if err != nil {
-		return audit, fmt.Errorf("auditing port 111: %w", err)
+	var err error
+	if audit.RpcbindExposed, err = listensPublicly(client, 111); err != nil {
+		return audit, err
 	}
-	audit.RpcbindExposed = strings.TrimSpace(out) != ""
-
+	if audit.CockpitExposed, err = listensPublicly(client, 9090); err != nil {
+		return audit, err
+	}
 	return audit, nil
 }
 
-// HardenHost applies host-level security defaults for the surplus
-// services AuditHost can detect. Idempotent: safe to run on hosts that
-// are already hardened or that never had the service installed.
+// listensPublicly checks for a wildcard listener on port, accepting the
+// 0.0.0.0, [::], and * forms from ss.
+func listensPublicly(client CommandRunner, port int) (bool, error) {
+	cmd := fmt.Sprintf(`ss -tulnH 2>/dev/null | awk '
+	$5 ~ /:%d$/ {
+		addr = $5
+		sub(/:[0-9]+$/, "", addr)
+		if (addr == "0.0.0.0" || addr == "[::]" || addr == "*") print
+	}'`, port)
+	out, err := client.Run(cmd)
+	if err != nil {
+		return false, fmt.Errorf("auditing port %d: %w", port, err)
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
+// HardenHost disables rpcbind and Cockpit socket activation where installed.
+// It is safe to repeat.
 func HardenHost(client CommandRunner) error {
 	if err := disableRpcbind(client); err != nil {
 		return err
+	}
+	return disableCockpit(client)
+}
+
+// disableCockpit leaves the socket unmasked so operators can re-enable it
+// with systemctl enable --now cockpit.socket.
+func disableCockpit(client CommandRunner) error {
+	out, err := client.Run("systemctl list-unit-files cockpit.socket 2>/dev/null | awk '$1 == \"cockpit.socket\" {print $1}'")
+	if err != nil {
+		return fmt.Errorf("checking cockpit.socket: %w", err)
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil
+	}
+	if _, err := client.Run("systemctl disable --now cockpit.socket >/dev/null"); err != nil {
+		return fmt.Errorf("disabling cockpit.socket: %w", err)
 	}
 	return nil
 }
 
 func disableRpcbind(client CommandRunner) error {
-	// Skip silently if rpcbind isn't installed. systemctl
-	// list-unit-files prints the unit name only when it exists.
 	out, err := client.Run("systemctl list-unit-files rpcbind.socket 2>/dev/null | awk '$1 == \"rpcbind.socket\" {print $1}'")
 	if err != nil {
 		return fmt.Errorf("checking rpcbind.socket: %w", err)
@@ -70,11 +87,8 @@ func disableRpcbind(client CommandRunner) error {
 		return nil
 	}
 
-	// Disable both the service and its socket activator, then mask
-	// the socket so a future package upgrade or systemd reload cannot
-	// re-enable it. `|| true` on disable because systemctl returns
-	// non-zero when the unit was already disabled, which is the desired
-	// end state.
+	// Attempt to stop both units, then mask the socket to block activation.
+	// Masking still runs if disabling either unit fails.
 	cmd := "systemctl disable --now rpcbind rpcbind.socket >/dev/null 2>&1 || true; " +
 		"systemctl mask rpcbind.socket >/dev/null"
 	if _, err := client.Run(cmd); err != nil {

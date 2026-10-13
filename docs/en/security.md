@@ -30,6 +30,7 @@ This matters because Kipper installs on whatever Linux server you point it at, a
 **What gets hardened**
 
 - `rpcbind`. Disabled and the socket is masked so it cannot be re-enabled by a package upgrade. Reversible with `systemctl unmask rpcbind.socket`.
+- Cockpit. Kipper stops and disables `cockpit.socket` when installed. To re-enable the web console, run `systemctl enable --now cockpit.socket`.
 
 **What the firewall opens**
 
@@ -74,7 +75,7 @@ kip cluster harden --cluster storefront  # specific cluster
 kip cluster harden --firewall=false   # only disable surplus services
 ```
 
-The command is idempotent. It runs the same audit as `kip install`, then disables `rpcbind` and configures UFW (skipping the firewall step if another firewall is already active).
+The command is idempotent. It runs the same audit as `kip install`, then disables `rpcbind` and Cockpit socket activation where installed. It configures UFW if no other firewall is active.
 
 ### Security headers
 

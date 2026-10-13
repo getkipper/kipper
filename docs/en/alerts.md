@@ -160,7 +160,7 @@ kip node repair-host --host <address>
 
 ```
   Pending restarts:
-    ⚠  deferred by Kipper: iscsid.service
+    ⚠  storage services awaiting restart: iscsid.service
        These services need a restart to load updated libraries.
        Restarting them can disrupt Longhorn volumes. Schedule downtime
        and reboot with 'kip node reboot' instead of restarting these

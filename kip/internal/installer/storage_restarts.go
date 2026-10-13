@@ -50,18 +50,21 @@ func storageRestartConfig() string {
 	return b.String()
 }
 
-// ConfigureStorageRestarts installs the drop-in on a host.
-//
-// It runs at install, at node add, and from the repair command, so it has to be
-// safe to run twice. The write lands under a temporary name in the same
-// directory and is moved into place: a connection lost mid-write leaves the
-// previous file rather than half a line of Perl, which needrestart cannot parse
-// and answers by restarting everything.
+// ConfigureStorageRestarts installs storage restart exclusions on Debian-family
+// hosts. Replacing the file atomically preserves the previous configuration if
+// the write fails.
 func ConfigureStorageRestarts(runner CommandRunner) error {
+	host, err := DetectHostOS(runner)
+	if err != nil {
+		return fmt.Errorf("configuring storage restarts: %w", err)
+	}
+	if !host.UsesNeedrestart() {
+		return nil
+	}
+
 	dir := needrestartDropIn[:strings.LastIndex(needrestartDropIn, "/")]
 
-	// The directory is absent on a node where needrestart is not installed, and
-	// the file has to be there before it ever is.
+	// Install the exclusions even if needrestart will be installed later.
 	if _, err := runner.Run(fmt.Sprintf("mkdir -p %s", dir)); err != nil {
 		return fmt.Errorf("creating %s: %w", dir, err)
 	}
@@ -288,34 +291,32 @@ func NodeNameForMachine(runner CommandRunner, machineID string) (string, error) 
 	}
 }
 
-// RestartsPending is what a host still owes: daemons holding an old copy of a
-// patched library, and a kernel that has been replaced on disk but not booted.
+// RestartsPending records service restarts and reboots reported by the host.
+// Deferred groups storage-related units; Other contains the remaining units.
 type RestartsPending struct {
-	// Deferred are units Kipper told needrestart to leave alone. Their patched
-	// libraries stay unloaded until the node is rebooted or the unit is
-	// restarted at a moment the operator chooses.
-	Deferred []string
-	// Other are units needrestart would have restarted on its own.
-	Other []string
-	// KernelOutdated is true when the installed kernel is not the running one.
+	Deferred       []string
+	Other          []string
 	KernelOutdated bool
+	RebootRequired bool
 }
 
-// Any reports whether the host owes anything at all.
+// Any reports whether a service restart or reboot is pending.
 func (p RestartsPending) Any() bool {
-	return len(p.Deferred) > 0 || len(p.Other) > 0 || p.KernelOutdated
+	return len(p.Deferred) > 0 || len(p.Other) > 0 || p.KernelOutdated || p.RebootRequired
 }
 
-// PendingRestarts asks the host what still needs restarting.
-//
-// It fails rather than reporting nothing when needrestart is absent, because
-// "nothing pending" and "could not check" are different answers and only one of
-// them is reassuring.
+// PendingRestarts checks dnf needs-restarting on RHEL-family hosts and
+// needrestart elsewhere. An unavailable or failed check returns an error.
 func PendingRestarts(runner CommandRunner) (RestartsPending, error) {
-	// The two failures are told apart on the host, because they send an
-	// operator to different places. Answering "not installed" for a host that
-	// has it, because the tool exited non-zero for its own reasons, is a wrong
-	// diagnosis dressed as a definite one.
+	host, err := DetectHostOS(runner)
+	if err != nil {
+		return RestartsPending{}, fmt.Errorf("reading pending restarts: %w", err)
+	}
+	if host.Family == FamilyRHEL {
+		return pendingRestartsDNF(runner)
+	}
+
+	// Distinguish a missing tool from a failed check so operators can act on the error.
 	out, err := runner.Run(
 		"if ! command -v needrestart >/dev/null 2>&1; then echo NEEDRESTART-ABSENT; " +
 			"elif ! needrestart -b; then echo NEEDRESTART-FAILED; fi")
@@ -353,6 +354,57 @@ func PendingRestarts(runner CommandRunner) (RestartsPending, error) {
 			// ABI or version upgrade waiting on a reboot; 0 is unknown, which
 			// is not a claim that anything is pending.
 			pending.KernelOutdated = value == "2" || value == "3"
+		}
+	}
+	return pending, nil
+}
+
+// Require both exit code 1 and the reboot message to distinguish a reboot hint
+// from a failed dnf command. LC_ALL=C keeps the message check stable.
+const dnfNeedsRestartingCommand = "if ! dnf needs-restarting --help >/dev/null 2>&1; then echo NEEDS-RESTARTING-ABSENT; exit 0; fi; " +
+	"svc=$(LC_ALL=C dnf -q needs-restarting -s 2>/dev/null) || { echo NEEDS-RESTARTING-FAILED; exit 0; }; " +
+	`printf '%s\n' "$svc" | sed -n 's/^\(..*\)$/SVC:\1/p'; ` +
+	"hint=$(LC_ALL=C dnf -q needs-restarting -r 2>&1); rc=$?; " +
+	"if [ $rc -eq 1 ] && printf '%s' \"$hint\" | grep -q 'Reboot is required'; then echo REBOOT:yes; " +
+	"elif [ $rc -ne 0 ]; then echo NEEDS-RESTARTING-FAILED; fi"
+
+// pendingRestartsDNF reads service and reboot hints from dnf needs-restarting.
+func pendingRestartsDNF(runner CommandRunner) (RestartsPending, error) {
+	out, err := runner.Run(dnfNeedsRestartingCommand)
+	if err != nil {
+		return RestartsPending{}, fmt.Errorf("reading pending restarts: %w", err)
+	}
+	if strings.Contains(out, "NEEDS-RESTARTING-ABSENT") {
+		return RestartsPending{}, fmt.Errorf("dnf needs-restarting is not available on this host; install dnf-plugins-core")
+	}
+	if strings.Contains(out, "NEEDS-RESTARTING-FAILED") {
+		return RestartsPending{}, fmt.Errorf("dnf needs-restarting exited with an error")
+	}
+
+	deferred := map[string]bool{}
+	for _, unit := range storageRestartUnits {
+		deferred[unit+".service"] = true
+	}
+
+	var pending RestartsPending
+	for _, line := range strings.Split(out, "\n") {
+		field, value, found := strings.Cut(strings.TrimSpace(line), ":")
+		if !found {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		switch field {
+		case "SVC":
+			if !strings.Contains(value, ".") {
+				value += ".service"
+			}
+			if deferred[value] {
+				pending.Deferred = append(pending.Deferred, value)
+			} else {
+				pending.Other = append(pending.Other, value)
+			}
+		case "REBOOT":
+			pending.RebootRequired = true
 		}
 	}
 	return pending, nil
