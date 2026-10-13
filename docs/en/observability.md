@@ -43,11 +43,11 @@ The existing `grafana-admin` Secret remains configured for the chart's built-in 
 
 ### Loki: Log aggregation
 
-Loki collects logs from all pods across all namespaces. Unlike streaming logs from a single pod (`kip app logs`), Loki gives you:
+Loki collects logs from all pods across all namespaces and provides:
 
 - **Persistent logs:** survive pod restarts and crashes
 - **Searchable:** filter by app, namespace, time range, or text content
-- **Multi-pod:** see logs from all replicas of an app in one view
+- **Multi-pod:** see logs from all replicas of an app in one view, merged in time order
 
 In Grafana, go to **Explore** → select **Loki** as the data source → query with LogQL:
 

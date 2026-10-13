@@ -42,9 +42,14 @@ var functionListCmd = &cobra.Command{
 var functionLogsCmd = &cobra.Command{
 	Use:   "logs [name]",
 	Short: "Print function logs",
-	Long: `Print the last 100 log lines of the function and exit. Use --tail N to
-change the number of lines. Add -f (--follow) to stream new lines until you
-press Ctrl+C.
+	Long: `Print the last 100 log lines from each of the function's current pods and exit.
+Use --tail N to change the number of lines per pod. Add -f (--follow) to stream
+new lines until all streams end or you press Ctrl+C.
+
+By default, logs are grouped by pod, oldest pod first. In follow mode, lines
+from different pods interleave as they arrive. With multiple pods, each line
+starts with [pod/<pod>/<container>]. Pods are listed once when the command starts;
+follow mode reads those pods only.
 
 Examples:
   kip function logs process-image
@@ -450,26 +455,7 @@ func runFunctionLogs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx := context.Background()
-	clientset := k8sClient.Clientset()
-
-	pods, err := clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("app=%s", name),
-	})
-	if err != nil || len(pods.Items) == 0 {
-		return fmt.Errorf("no running pods for function %q: it may be scaled to zero", name)
-	}
-
-	req := clientset.CoreV1().Pods(ns).GetLogs(pods.Items[0].Name, podLogOptions(&pods.Items[0], name, readLogFlags(cmd)))
-
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		return fmt.Errorf("opening log stream: %w", err)
-	}
-	defer func() { _ = stream.Close() }()
-
-	_, err = io.Copy(os.Stdout, stream)
-	return err
+	return functionLogs(context.Background(), k8sClient.Clientset(), ns, name, readLogFlags(cmd), os.Stdout, os.Stderr)
 }
 
 func runFunctionDelete(cmd *cobra.Command, args []string) error {

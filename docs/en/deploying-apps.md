@@ -510,7 +510,11 @@ kip app logs backend --tail 50
 kip app logs backend -f
 ```
 
-Prints the last 500 log lines and exits. Use `--tail N` to change the number of lines. Add `-f` (`--follow`) to stream new lines until you press Ctrl+C.
+Prints the last 500 log lines from each current pod and exits. Use `--tail N` to change the number of lines per pod. Add `-f` (`--follow`) to stream new lines until all streams end or you press Ctrl+C.
+
+By default, logs are grouped by pod, oldest pod first. In follow mode, lines from different pods interleave as they arrive. With multiple pods, each line starts with `[pod/<pod>/<container>]` to identify its source. Follow mode reads only the pods found when the command starts.
+
+If a pod's logs cannot be opened or read, the command reports the pod name and error on stderr and continues reading the other pods.
 
 ### Update an app image
 

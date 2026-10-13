@@ -56,9 +56,14 @@ var appListCmd = &cobra.Command{
 var appLogsCmd = &cobra.Command{
 	Use:   "logs [app-name]",
 	Short: "Print application logs",
-	Long: `Print the last 500 log lines of the app and exit. Use --tail N to change
-the number of lines. Add -f (--follow) to stream new lines until you press
-Ctrl+C.
+	Long: `Print the last 500 log lines from each of the app's current pods and exit.
+Use --tail N to change the number of lines per pod. Add -f (--follow) to stream
+new lines until all streams end or you press Ctrl+C.
+
+By default, logs are grouped by pod, oldest pod first. In follow mode, lines
+from different pods interleave as they arrive. With multiple pods, each line
+starts with [pod/<pod>/<container>]. Pods are listed once when the command starts;
+follow mode reads those pods only.
 
 Examples:
   kip app logs shop
@@ -539,31 +544,7 @@ func runAppLogs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx := context.Background()
-	clientset := k8sClient.Clientset()
-
-	pods, err := clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("app=%s", appName),
-	})
-	if err != nil {
-		return fmt.Errorf("listing pods: %w", err)
-	}
-
-	if len(pods.Items) == 0 {
-		return fmt.Errorf("no pods found for app %q", appName)
-	}
-
-	pod := pods.Items[0]
-	req := clientset.CoreV1().Pods(ns).GetLogs(pod.Name, podLogOptions(&pod, appName, readLogFlags(cmd)))
-
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		return fmt.Errorf("opening log stream: %w", err)
-	}
-	defer func() { _ = stream.Close() }()
-
-	_, err = io.Copy(os.Stdout, stream)
-	return err
+	return appLogs(context.Background(), k8sClient.Clientset(), ns, appName, readLogFlags(cmd), os.Stdout, os.Stderr)
 }
 
 const (
