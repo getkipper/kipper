@@ -88,6 +88,10 @@ kip auth reset-password
   Password: 5b2bf14ef6525...
 ```
 
-This generates a new password, updates the Dex configuration, prints the credentials, and restarts Dex. Sign-in works once that restart completes, which normally takes a few seconds.
+If your kubeconfig requires a local session and none is available, kip retrieves the server's admin credentials over SSH and keeps them in memory. Pass `--ssh-key <key>` to use SSH explicitly, for example if your session lacks admin rights. SSH recovery requires root access to the server.
 
-The credentials are printed as soon as the Dex configuration holds them, which is before the restart. If the restart then fails, the command says so and the password it printed is still the right one: it applies the next time Dex starts.
+The SSH key is selected from `--ssh-key`, then `KIP_SSH_KEY`, then the key saved for the cluster. If none is set, kip uses OpenSSH's normal key selection with `~/.ssh/id_ed25519` as a fallback.
+
+The command generates a new password, updates the Dex configuration, prints the credentials, and requests a Dex restart. You can sign in with the new password once Dex restarts.
+
+Credentials are printed before Dex restarts. If the restart fails, the command reports the error, and the new password takes effect the next time Dex starts.

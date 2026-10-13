@@ -810,14 +810,19 @@ func waitForHostNode(master CommandRunner, id HostIdentity, timeout, interval ti
 }
 
 // FetchKubeconfig retrieves the k3s kubeconfig from the remote server
-// and rewrites the server address to point to the public host.
+// and replaces the loopback API server address with host.
 func FetchKubeconfig(client CommandRunner, host string) (string, error) {
 	output, err := client.Run("cat /etc/rancher/k3s/k3s.yaml")
 	if err != nil {
-		return "", fmt.Errorf("reading kubeconfig: %w", err)
+		// Unwrap the SSH runner's error to omit command output, which may contain
+		// the cluster's admin key.
+		cause := errors.Unwrap(err)
+		if cause == nil {
+			cause = errors.New("the command failed")
+		}
+		return "", fmt.Errorf("reading kubeconfig: %v", cause)
 	}
 
-	// k3s writes https://127.0.0.1:6443 — replace with the public IP
 	rewritten := replaceServerAddress(output, host)
 	return rewritten, nil
 }

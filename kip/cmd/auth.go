@@ -63,13 +63,18 @@ var authResetPasswordCmd = &cobra.Command{
 	Long: `Generates a new admin password, updates the Dex configuration,
 prints the new credentials, and restarts Dex so they take effect.
 
-The credentials are printed as soon as Dex's configuration holds them, so a
-restart that fails still leaves a password you can read and use.`,
+If the kubeconfig requires a local session and none is available, the command
+retrieves the server's admin credentials over SSH and keeps them in memory.
+Pass --ssh-key <key> to use SSH explicitly. SSH recovery requires root access.
+
+Credentials are printed before Dex restarts. If the restart fails, the new
+password takes effect the next time Dex starts.`,
 	SilenceUsage: true,
 	RunE:         runAuthResetPassword,
 }
 
 func init() {
+	authResetPasswordCmd.Flags().String("ssh-key", "", "private key for resetting the password over SSH")
 	authCmd.AddCommand(authLoginCmd)
 	authCmd.AddCommand(authStatusCmd)
 	authCmd.AddCommand(authLogoutCmd)
@@ -159,17 +164,41 @@ func runAuthLogout(cmd *cobra.Command, args []string) error {
 }
 
 func runAuthResetPassword(cmd *cobra.Command, args []string) error {
-	_, k8sClient, err := loadCurrentCluster()
+	cluster, err := loadCurrentClusterConfig()
 	if err != nil {
 		return err
 	}
-	return resetAdminPassword(context.Background(), k8sClient.Clientset(), cmd.OutOrStdout())
+	out := cmd.OutOrStdout()
+	sshKey, _ := cmd.Flags().GetString("ssh-key")
+	store, _ := auth.Load()
+	needsSession := kubeconfigNeedsSession(cluster.Kubeconfig)
+	hasSession := hasLocalSession(store, cluster.Domain)
+	if resetOverSSH(sshKey != "", needsSession, hasSession) {
+		if sshKey == "" {
+			_, _ = fmt.Fprintf(out, "\n  No usable local session for %s. Resetting the password over SSH\n", cluster.Name)
+		} else {
+			_, _ = fmt.Fprintf(out, "\n  Resetting the password for %s over SSH\n", cluster.Name)
+		}
+		_, _ = fmt.Fprintf(out, "  using admin credentials held in memory.\n")
+		clientset, err := adminClientsetOverSSH(cluster, sshKey)
+		if err != nil {
+			return err
+		}
+		return resetAdminPassword(context.Background(), clientset, out)
+	}
+	_, k8sClient, err := loadCurrentCluster()
+	if err == nil {
+		err = resetAdminPassword(context.Background(), k8sClient.Clientset(), out)
+	}
+	if err != nil {
+		return fmt.Errorf("%w\n\n  To reset the password over SSH, run: kip auth reset-password --ssh-key <key>", err)
+	}
+	return nil
 }
 
-// resetAdminPassword persists a new bcrypt hash, discloses credentials, then
-// patches Dex to restart. Print immediately after the durable write so a failed
-// restart still leaves the operator with the password that will take effect.
-// This recovery path works independently of the reconciler.
+// resetAdminPassword updates Dex's password hash and requests a restart.
+// It prints credentials after saving the hash so the operator has the new
+// password even if the restart fails.
 func resetAdminPassword(ctx context.Context, clientset kubernetes.Interface, out io.Writer) error {
 	pwBytes := make([]byte, 16)
 	if _, err := rand.Read(pwBytes); err != nil {
@@ -184,8 +213,7 @@ func resetAdminPassword(ctx context.Context, clientset kubernetes.Interface, out
 
 	configMaps := clientset.CoreV1().ConfigMaps(dexNamespace)
 	var email string
-	// The reconciler server-side applies this same ConfigMap, so an unretried
-	// get-modify-update loses the race whenever the two land together.
+	// Retry if another writer updates the ConfigMap between our read and write.
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cm, err := configMaps.Get(ctx, dexConfigMapName, metav1.GetOptions{})
 		if err != nil {
@@ -199,9 +227,8 @@ func resetAdminPassword(ctx context.Context, clientset kubernetes.Interface, out
 		if err != nil {
 			return err
 		}
-		// Read before the write, because a password nobody can name is no use:
-		// Dex matches a static password on its email, so an admin entry without
-		// one cannot be logged into whatever hash it carries.
+		// Require a login email before changing the password so the printed
+		// credentials identify the account.
 		configured, ok, err := cfg.AdminEmail()
 		if err != nil {
 			return err
@@ -227,10 +254,8 @@ func resetAdminPassword(ctx context.Context, clientset kubernetes.Interface, out
 		return fmt.Errorf("updating dex config: %w", err)
 	}
 
-	// One write, and its failure is the operation failing. The hash is live from
-	// here on, so a disclosure that did not reach the operator locks them out
-	// just as thoroughly as the lost restart this command was fixed for. The
-	// password rides the error to give stderr a chance at what stdout dropped.
+	// The hash is saved. Include the password in any output error so the
+	// operator can recover it from stderr if stdout fails.
 	if _, err := fmt.Fprintf(out, "\n  Admin password reset.\n  Email:    %s\n  Password: %s\n\n", email, newPassword); err != nil {
 		return fmt.Errorf("the new password could not be displayed. it is set and it is %q: %w", newPassword, err)
 	}

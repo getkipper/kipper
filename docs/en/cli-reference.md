@@ -340,7 +340,13 @@ Generates a new admin password, writes it to Dex, displays the new credentials, 
 kip auth reset-password
 ```
 
-This command requires the kubeconfig stored in `~/.kip/clusters/`. Only someone with cluster admin access can run it.
+Uses your local session or the authentication configured in the cluster's kubeconfig. If the kubeconfig requires a session and none is available, kip retrieves the server's admin credentials over SSH and keeps them in memory.
+
+Pass `--ssh-key <key>` to use SSH explicitly. Resetting the password requires permission to read and update Dex's ConfigMap and patch its deployment, or root SSH access to the server.
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--ssh-key` | No | `KIP_SSH_KEY`, then the key saved for the cluster | Private key for resetting the password over SSH |
 
 ## kip discover {#kip-discover}
 
