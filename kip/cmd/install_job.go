@@ -113,7 +113,19 @@ func init() {
 		},
 	}
 
-	installJobCmd.AddCommand(claim, follow, result, ack, cancel, status)
+	firewallAck := &cobra.Command{
+		Use:  "firewall-ack",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			run, _ := cmd.Flags().GetString("run")
+			nonce, _ := cmd.Flags().GetString("nonce")
+			return installjob.AckFirewall(jobRoot, run, nonce)
+		},
+	}
+	firewallAck.Flags().String("run", "", "run ID")
+	firewallAck.Flags().String("nonce", "", "nonce from the job's firewall check")
+
+	installJobCmd.AddCommand(claim, follow, result, ack, cancel, status, firewallAck)
 	rootCmd.AddCommand(installJobCmd)
 }
 
@@ -236,7 +248,7 @@ func runInstallRequest(path string) error {
 		}
 	}
 
-	opts := req.Options()
+	opts := jobOptions(req, dir, os.Stdout)
 	opts.KubeconfigMode = installer.ResolveKubeconfigMode(false, true, false)
 	opts.LoginGate = func(ctx context.Context, domain, dexHost, server string, caData []byte) installer.GateResult {
 		return installer.DefaultLoginGate(domain, dexHost)(ctx, domain, server, caData)
@@ -264,6 +276,19 @@ func runInstallRequest(path string) error {
 	}
 	return installErr
 }
+
+// jobOptions delegates SSH connectivity checks to the client driving the job
+// so firewall changes are verified from outside the server.
+func jobOptions(req installjob.Request, dir string, log io.Writer) installer.Options {
+	opts := req.Options()
+	opts.ConfirmConnection = func() error {
+		return installjob.AwaitFirewallAck(dir, req.RunID, log, firewallAckTimeout, time.Second)
+	}
+	return opts
+}
+
+// firewallAckTimeout allows reconnection before the 180-second firewall rollback.
+const firewallAckTimeout = 90 * time.Second
 
 var requestFlagUsage = strings.TrimSpace(`
 install from a client-generated request file (internal)`)

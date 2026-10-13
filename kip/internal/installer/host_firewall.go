@@ -21,10 +21,11 @@ const firewallClaimPath = "/etc/kipper/firewall-managed"
 type FirewallAudit struct {
 	Existing      string
 	KipperManaged bool
+	Adoptable     bool
 }
 
-// BlocksConfiguration reports that the firewall on this host belongs to
-// someone else, so Kipper must leave it alone.
+// BlocksConfiguration reports whether ownership prevents configuration
+// without explicit adoption.
 func (a FirewallAudit) BlocksConfiguration() bool {
 	return a.Existing != "" && !a.KipperManaged
 }
@@ -35,22 +36,23 @@ type FirewallPlan struct {
 	Configure  bool
 	Notice     string
 	FlagNotice string
+	Adopt      bool
 }
 
-// PlanFirewall decides what to do about the firewall an audit found, and what
-// the operator is told about it. Both `kip install` and `kip cluster harden`
-// go through it, so neither the decision nor its explanation can drift.
-func PlanFirewall(audit FirewallAudit, wantFirewall bool) FirewallPlan {
-	mayConfigure := !audit.BlocksConfiguration()
-	plan := FirewallPlan{Configure: wantFirewall && mayConfigure}
+// PlanFirewall shares firewall configuration decisions and notices between
+// kip install and kip cluster harden.
+func PlanFirewall(audit FirewallAudit, wantFirewall, adopt bool) FirewallPlan {
+	adopting := wantFirewall && adopt && audit.Adoptable
+	mayConfigure := !audit.BlocksConfiguration() || adopting
+	plan := FirewallPlan{Configure: wantFirewall && mayConfigure, Adopt: adopting}
 
-	// The notice states what was found. Announcing the work belongs to the
-	// step that does it, which --firewall=false stops from running at all.
 	switch {
 	case audit.Existing == "":
 		plan.Notice = "  ✔  No existing host firewall\n"
 	case audit.KipperManaged:
 		plan.Notice = "  ✔  Existing firewall was set up by kip\n"
+	case adopting:
+		plan.Notice = "  ⚠  Existing firewalld detected. kip will replace its public zone and add a pod zone and forwarding policies (--adopt-firewall).\n"
 	default:
 		plan.Notice = fmt.Sprintf(
 			"  ⚠  Existing firewall detected (%s). Skipping kip's firewall step to avoid trampling your rules.\n"+
@@ -73,8 +75,8 @@ func PlanFirewall(audit FirewallAudit, wantFirewall bool) FirewallPlan {
 type FirewallRunner interface {
 	CommandRunner
 	SurvivesSSHRateLimit() bool
-	// ConfirmFreshConnection returns localrun.ErrNoConnection when commands
-	// run on the host itself.
+	// ConfirmFreshConnection returns localrun.ErrNoConnection when no external
+	// SSH connectivity check is available.
 	ConfirmFreshConnection() error
 }
 
@@ -84,7 +86,7 @@ func ApplyFirewallPlan(client FirewallRunner, plan FirewallPlan, rateLimitSSH bo
 	if !plan.Configure {
 		return nil
 	}
-	return configureFirewallWith(client, rateLimitSSH)
+	return configureFirewallWith(client, rateLimitSSH, plan.Adopt)
 }
 
 // AuditFirewall detects whether a host firewall is already active, and whether
@@ -106,13 +108,14 @@ func AuditFirewall(client CommandRunner) (FirewallAudit, error) {
 			return audit, fmt.Errorf("checking for firewalld: %w", err)
 		}
 		audit.KipperManaged = host.Family == FamilyRHEL && firewalldClaimed(client)
+		audit.Adoptable = host.Family == FamilyRHEL && !audit.KipperManaged
 		// Two active managers block configuration even when one is claimed.
 		out, err := client.Run("ufw status 2>/dev/null | awk 'NR==1 {print $2}'")
 		if err != nil {
 			return audit, fmt.Errorf("checking for ufw: %w", err)
 		}
 		if strings.TrimSpace(out) == "active" {
-			audit.Existing, audit.KipperManaged = "firewalld and ufw", false
+			audit.Existing, audit.KipperManaged, audit.Adoptable = "firewalld and ufw", false, false
 		}
 		return audit, nil
 	}
@@ -163,7 +166,7 @@ func claimCommandFor(claimPath, what string) string {
 
 // configureFirewallWith selects the host's firewall backend. UFW rate limiting
 // requires a runner that can continue under the limit; firewalld uses an allow rule.
-func configureFirewallWith(client FirewallRunner, rateLimitSSH bool) error {
+func configureFirewallWith(client FirewallRunner, rateLimitSSH, adopt bool) error {
 	host, err := DetectHostOS(client)
 	if err != nil {
 		return fmt.Errorf("configuring the firewall: %w", err)
@@ -172,7 +175,7 @@ func configureFirewallWith(client FirewallRunner, rateLimitSSH bool) error {
 		if rateLimitSSH {
 			fmt.Printf("  ℹ  Kipper's firewalld configuration allows SSH without rate limiting\n")
 		}
-		return configureFirewalld(client, host)
+		return configureFirewalld(client, host, adopt)
 	}
 	return configureFirewall(client, host, rateLimitSSH && client.SurvivesSSHRateLimit())
 }

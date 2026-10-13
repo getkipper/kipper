@@ -28,7 +28,8 @@ Examples:
 func init() {
 	clusterHardenCmd.Flags().String("ssh-key", "", "path to SSH private key (defaults to ~/.ssh/id_ed25519)")
 	clusterHardenCmd.Flags().Bool("harden", true, "disable surplus host services exposed on public interfaces (e.g. rpcbind, Cockpit)")
-	clusterHardenCmd.Flags().Bool("firewall", true, "install and configure UFW with a k3s-correct ruleset (skipped if another firewall is detected)")
+	clusterHardenCmd.Flags().Bool("firewall", true, "configure the host firewall for k3s: firewalld on Rocky, AlmaLinux and CentOS Stream; UFW elsewhere (preserves operator-managed firewalls unless --adopt-firewall is set)")
+	clusterHardenCmd.Flags().Bool("adopt-firewall", false, "take over an existing firewalld configuration on Rocky, AlmaLinux or CentOS Stream; replaces the public zone")
 	clusterHardenCmd.Flags().Bool("no-ssh-rate-limit", false, "open the SSH port outright instead of limiting it to six connections per thirty seconds per source; set this for CI, or when several operators share one NAT address")
 	clusterCmd.AddCommand(clusterHardenCmd)
 }
@@ -44,6 +45,7 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 	explicit, fallback := resolveSSHKey(flagKey, cluster)
 	harden, _ := cmd.Flags().GetBool("harden")
 	firewall, _ := cmd.Flags().GetBool("firewall")
+	adoptFirewall, _ := cmd.Flags().GetBool("adopt-firewall")
 
 	fmt.Printf("\n  Hardening %s (%s)...\n\n", cluster.Name, cluster.Host)
 
@@ -76,7 +78,7 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("auditing firewall: %w", err)
 	}
-	fwPlan := installer.PlanFirewall(fwAudit, firewall)
+	fwPlan := installer.PlanFirewall(fwAudit, firewall, adoptFirewall)
 	fmt.Print(fwPlan.Notice)
 	fmt.Println()
 

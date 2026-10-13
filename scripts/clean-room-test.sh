@@ -100,15 +100,14 @@ echo "  when you destroy the server; destroying the server does not remove it."
 echo "Clean-room test against $HOST"
 echo "kip: $($KIP --version 2>&1 | head -1)"
 
-# --admin-kubeconfig because this run is unattended. `step` captures output, so
-# kip has no terminal, and ResolveKubeconfigMode defers the login in that case,
-# which would leave every later step with no credential.
+# --admin-kubeconfig supplies credentials for later unattended steps.
+# --adopt-firewall lets kip configure firewalld on fresh RHEL-family images.
 install_cluster() {
   if [ -n "$DOMAIN" ]; then
     $KIP install --host "$HOST" --ssh-key "$KEY" --admin-email "$EMAIL" \
-      --admin-kubeconfig --domain "$DOMAIN"
+      --admin-kubeconfig --adopt-firewall --domain "$DOMAIN"
   else
-    $KIP install --host "$HOST" --ssh-key "$KEY" --admin-email "$EMAIL" --admin-kubeconfig
+    $KIP install --host "$HOST" --ssh-key "$KEY" --admin-email "$EMAIL" --admin-kubeconfig --adopt-firewall
   fi
 }
 step "install the cluster" install_cluster || exit 1

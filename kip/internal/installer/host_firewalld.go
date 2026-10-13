@@ -117,10 +117,10 @@ type firewalldSavedConfig struct {
 	public    string
 }
 
-// changes checks saved files and selected settings for operator customizations.
-// A claim also permits Kipper's zone and policy files and skips public-zone
-// content checks. Backups ending in .old follow the same filename allowlist.
-func (c firewalldSavedConfig) changes(claimed bool, want firewalldWant) []string {
+// changes reports saved customizations outside the files kip may replace.
+// A claim permits kip's zone and policy files; adoption permits custom public-zone
+// contents. Backups ending in .old follow the same filename allowlist.
+func (c firewalldSavedConfig) changes(claimed, adopting bool, want firewalldWant) []string {
 	ours := want.files()
 	var changes []string
 	for _, line := range strings.Split(c.inventory, "\n") {
@@ -150,7 +150,7 @@ func (c firewalldSavedConfig) changes(claimed bool, want firewalldWant) []string
 		}
 	}
 
-	if c.public == "" || claimed {
+	if c.public == "" || claimed || adopting {
 		return changes
 	}
 	var zone struct {
@@ -427,23 +427,37 @@ func firewalldMismatches(state string, want firewalldWant) []string {
 		}
 	}
 	if containsString(policies, "allow-host-ipv6") {
-		info := parseFirewalldInfo(sections["policy allow-host-ipv6"])
-		what := "policy allow-host-ipv6"
-		expect(what, info, "target", []string{"CONTINUE"})
-		expect(what, info, "ingress-zones", []string{"ANY"})
-		expect(what, info, "egress-zones", []string{"HOST"})
-		expect(what, info, "masquerade", []string{"no"})
-		for _, f := range []string{"services", "ports", "protocols", "forward-ports", "source-ports"} {
-			expect(what, info, f, nil)
-		}
-		for _, rule := range info["rich rules"] {
-			if !allowHostIPv6Rule.MatchString(rule) {
-				problems = append(problems, what+" has rule "+rule)
-			}
-		}
+		problems = append(problems, allowHostIPv6Problems(parseFirewalldInfo(sections["policy allow-host-ipv6"]))...)
 	}
 
 	sort.Strings(problems)
+	return problems
+}
+
+// allowHostIPv6Problems checks the policy settings and permits only ICMPv6
+// accept rules to the host. It accepts any set of ICMPv6 types.
+func allowHostIPv6Problems(info firewalldInfo) []string {
+	const what = "policy allow-host-ipv6"
+	var problems []string
+	expect := func(field string, want []string) {
+		if got, ok := info[field]; !ok {
+			problems = append(problems, fmt.Sprintf("%s does not report %s", what, field))
+		} else if !sameSet(got, want) {
+			problems = append(problems, fmt.Sprintf("%s %s is %q, want %q", what, field, strings.Join(got, " "), strings.Join(want, " ")))
+		}
+	}
+	expect("target", []string{"CONTINUE"})
+	expect("ingress-zones", []string{"ANY"})
+	expect("egress-zones", []string{"HOST"})
+	expect("masquerade", []string{"no"})
+	for _, f := range []string{"services", "ports", "protocols", "forward-ports", "source-ports"} {
+		expect(f, nil)
+	}
+	for _, rule := range info["rich rules"] {
+		if !allowHostIPv6Rule.MatchString(rule) {
+			problems = append(problems, what+" has rule "+rule)
+		}
+	}
 	return problems
 }
 
@@ -570,9 +584,9 @@ func (r firewalldRun) commitCommand() string {
 const pendingRollbackCommand = "systemctl list-units --all --no-legend --plain '" + firewalldRollbackUnit + "-*' | awk '($3 == \"active\" || $3 == \"activating\") && $4 != \"elapsed\" {print $1}'"
 
 // configureFirewalld backs up, loads, and verifies Kipper's configuration under
-// a rollback timer. Remote runs also require a new SSH connection before commit.
-// Local runs may start a stopped firewall or verify an already matching one.
-func configureFirewalld(client FirewallRunner, host HostOS) error {
+// a rollback timer. SSH and server-driven runs verify a new SSH connection
+// before commit. Other local runs may start a stopped firewall or verify a matching one.
+func configureFirewalld(client FirewallRunner, host HostOS, adopt bool) error {
 	install := host.InstallPackagesCommand(false, "firewalld")
 	if install == "" {
 		return fmt.Errorf("installing firewalld: kip cannot install packages on %s", host.ID)
@@ -595,7 +609,7 @@ func configureFirewalld(client FirewallRunner, host HostOS) error {
 	}
 	// Inspect after reserving so cooperating runs cannot change the configuration
 	// between inspection and application.
-	seen, err := inspectFirewalld(client, sshPort)
+	seen, err := inspectFirewalld(client, sshPort, adopt)
 	if err != nil || seen.done {
 		if _, releaseErr := client.Run(run.releaseLockedCommand()); releaseErr != nil {
 			return errors.Join(err, fmt.Errorf("releasing the firewall reservation: %w", releaseErr))
@@ -664,15 +678,16 @@ type firewalldSeen struct {
 
 // inspectFirewalld checks ownership, connectivity, and configuration before
 // making changes. The caller must hold the run's reservation.
-func inspectFirewalld(client FirewallRunner, sshPort string) (firewalldSeen, error) {
+func inspectFirewalld(client FirewallRunner, sshPort string, adopt bool) (firewalldSeen, error) {
 	audit, err := AuditFirewall(client)
 	if err != nil {
 		return firewalldSeen{}, fmt.Errorf("re-auditing firewall: %w", err)
 	}
-	if audit.BlocksConfiguration() {
+	adopting := adopt && audit.Adoptable
+	if audit.BlocksConfiguration() && !adopting {
 		return firewalldSeen{}, fmt.Errorf("a %s firewall became active on this host, so kip left it alone", audit.Existing)
 	}
-	if audit.Existing == "ufw" {
+	if strings.Contains(audit.Existing, "ufw") {
 		return firewalldSeen{}, fmt.Errorf("ufw is active on this host, and kip uses firewalld here. Switch ufw off or keep it as your own firewall with --firewall=false")
 	}
 	wasActive := audit.Existing == "firewalld"
@@ -692,13 +707,16 @@ func inspectFirewalld(client FirewallRunner, sshPort string) (firewalldSeen, err
 	if baseline != nil && !local {
 		return firewalldSeen{}, fmt.Errorf("kip could not open a second connection to the host, so it left the firewall alone: %w", baseline)
 	}
+	if adopting && local {
+		return firewalldSeen{}, fmt.Errorf("taking over a running firewalld needs a check from outside the host, so kip left it alone; run kip install over SSH or with --via-server")
+	}
 
 	want := wantFirewalld(sshPort)
 	saved, err := readFirewalldSaved(client)
 	if err != nil {
 		return firewalldSeen{}, err
 	}
-	if changes := saved.changes(wasClaimed, want); len(changes) > 0 {
+	if changes := saved.changes(wasClaimed, adopting, want); len(changes) > 0 {
 		return firewalldSeen{}, fmt.Errorf("the saved firewalld configuration has custom changes (%s). Remove them to let kip configure it, or use --firewall=false to manage it yourself. For manual management, also delete %s if present",
 			strings.Join(changes, ", "), firewalldClaimPath)
 	}
@@ -717,7 +735,7 @@ func inspectFirewalld(client FirewallRunner, sshPort string) (firewalldSeen, err
 }
 
 // checkLocalFirewalld verifies that a claimed firewall already matches the
-// expected runtime state and saved files. Local execution cannot verify SSH access.
+// expected runtime state and saved files when no external SSH check is available.
 func checkLocalFirewalld(client CommandRunner, want firewalldWant) error {
 	state, err := client.Run(firewalldStateCommand)
 	if err != nil {
