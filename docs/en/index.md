@@ -16,7 +16,7 @@ hero:
       link: https://github.com/getkipper/kipper
 features:
   - title: One-Command Install
-    details: Run one command on your Linux, macOS or Windows computer to set up a supported Ubuntu or Debian server with Kubernetes, HTTPS, storage, and authentication.
+    details: Run one command on your Linux, macOS or Windows computer to set up a supported Ubuntu, Debian, Rocky Linux, AlmaLinux or CentOS Stream server with Kubernetes, HTTPS, storage, and authentication.
   - title: Deploy Without YAML
     details: Deploy a container image or build from a Git repository. Kipper creates the Kubernetes resources and public route.
   - title: Web Console

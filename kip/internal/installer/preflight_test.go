@@ -78,10 +78,10 @@ func TestRunPreflightChecks(t *testing.T) {
 		{
 			name: "fails with unsupported OS",
 			system: SystemInfo{
-				OS: "centos", OSVersion: "9",
+				OS: "fedora", OSVersion: "44",
 				RAMMB: 8192, DiskMB: 40960,
 			},
-			wantError: "unsupported OS: centos (supported: ubuntu, debian)",
+			wantError: "unsupported OS: fedora (supported: ubuntu, debian, rocky, almalinux, centos)",
 		},
 		{
 			name: "fails with unsupported OS version",
@@ -186,7 +186,7 @@ func TestRunPreflightChecks(t *testing.T) {
 				OS: "windows", OSVersion: "11",
 				RAMMB: 512, DiskMB: 1024,
 			},
-			wantError: "unsupported OS: windows (supported: ubuntu, debian)",
+			wantError: "unsupported OS: windows (supported: ubuntu, debian, rocky, almalinux, centos)",
 		},
 	}
 

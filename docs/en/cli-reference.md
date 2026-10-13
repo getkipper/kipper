@@ -210,7 +210,7 @@ kip node add --host <ip> [--ssh-key <path>]
 The command joins the host as a k3s worker using the control plane's k3s version. Worker operation requires additional setup and manual maintenance:
 
 - **Networking:** the server's default firewall lacks rules for cross-node overlay traffic, which can disrupt pod connectivity.
-- **Host setup:** the command applies kubelet hardening and storage restart safeguards, but skips firewall configuration and installation of Longhorn's host dependencies (`open-iscsi` and `nfs-common`).
+- **Host setup:** the command applies kubelet hardening and, on Ubuntu and Debian, storage restart safeguards. Configure the worker's firewall and install Longhorn's iSCSI and NFS client packages manually.
 - **Maintenance:** `kip upgrade`, `kip cluster harden`, and `kip cluster uninstall` perform host operations on the configured server only. Worker maintenance and removal are manual.
 - **Availability:** ingress remains on the control-plane node, and the registry uses one replica with single-replica storage. Adding a worker alone does not provide high availability.
 

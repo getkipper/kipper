@@ -75,6 +75,18 @@ type installStep struct {
 	fn   func() error
 }
 
+// storageRestartSteps schedules needrestart configuration for Debian-family hosts.
+func storageRestartSteps(host HostOS, client CommandRunner) []installStep {
+	if !host.UsesNeedrestart() {
+		fmt.Printf("  ℹ  Kipper configures needrestart only on Ubuntu and Debian. Update storage packages\n")
+		fmt.Printf("     during planned downtime: their package scripts may restart iscsid.\n\n")
+		return nil
+	}
+	return []installStep{{"Deferring storage-path restarts", func() error {
+		return ConfigureStorageRestarts(client)
+	}}}
+}
+
 // k3sAndFirewallSteps configures firewalld before installing k3s so the pod
 // zone is available during startup. A nil firewall step leaves the firewall alone.
 func k3sAndFirewallSteps(host HostOS, k3s installStep, firewall *installStep) []installStep {
@@ -433,13 +445,9 @@ func Run(opts Options) (*Result, error) {
 
 	// Install cluster components
 	var steps []installStep
-	// First, before anything installs a package. needrestart restarts daemons
-	// holding a patched library after an unattended upgrade, and restarting
-	// iscsid fails every Longhorn volume's block device under a mounted
-	// filesystem, which remounts it read-only.
-	steps = append(steps, installStep{"Deferring storage-path restarts", func() error {
-		return ConfigureStorageRestarts(client)
-	}})
+	// Configure needrestart before package installation to protect active
+	// Longhorn sessions from storage-service restarts.
+	steps = append(steps, storageRestartSteps(sysInfo.Host, client)...)
 	if opts.Harden && len(findings) > 0 {
 		steps = append(steps, installStep{"Hardening host OS", func() error {
 			return HardenHost(client)
@@ -492,10 +500,10 @@ func Run(opts Options) (*Result, error) {
 			if err := InstallLonghorn(client); err != nil {
 				return err
 			}
-			// The node object exists by now, so the record of what was written
-			// to this host in the first step can go on it. A failure here
-			// leaves the host configured and the record missing, which reads as
-			// uncovered: the safe direction.
+			if !sysInfo.Host.UsesNeedrestart() {
+				return nil
+			}
+			// Record the host configuration now that the node exists.
 			machineID, err := ReadMachineID(client)
 			if err != nil {
 				fmt.Printf("       (could not record host configuration: %v)\n", err)

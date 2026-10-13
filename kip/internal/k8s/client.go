@@ -69,6 +69,7 @@ type NodeInfo struct {
 	IP      string
 
 	MachineID   string
+	OSImage     string
 	Annotations map[string]string
 	BootID      string
 }
@@ -234,6 +235,7 @@ func nodeToInfo(node corev1.Node) NodeInfo {
 		Version:     node.Status.NodeInfo.KubeletVersion,
 		IP:          ip,
 		MachineID:   node.Status.NodeInfo.MachineID,
+		OSImage:     node.Status.NodeInfo.OSImage,
 		BootID:      node.Status.NodeInfo.BootID,
 		Annotations: node.Annotations,
 	}

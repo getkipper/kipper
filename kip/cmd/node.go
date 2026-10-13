@@ -83,11 +83,17 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 
 	// Defer storage-service restarts before joining so unattended upgrades
 	// preserve active Longhorn sessions once this node starts hosting volumes.
-	fmt.Printf("  Configuring host restarts for storage...\n")
-	if err := installer.ConfigureStorageRestarts(workerClient); err != nil {
-		return fmt.Errorf("configuring storage restarts on %s: %w", workerHost, err)
+	workerOS, err := installer.DetectHostOS(workerClient)
+	if err != nil {
+		return fmt.Errorf("reading the OS of %s: %w", workerHost, err)
 	}
-	fmt.Printf("  ✔  Storage-path restarts deferred on %s\n\n", workerHost)
+	if workerOS.UsesNeedrestart() {
+		fmt.Printf("  Configuring host restarts for storage...\n")
+		if err := installer.ConfigureStorageRestarts(workerClient); err != nil {
+			return fmt.Errorf("configuring storage restarts on %s: %w", workerHost, err)
+		}
+		fmt.Printf("  ✔  Storage-path restarts deferred on %s\n\n", workerHost)
+	}
 
 	fmt.Printf("  Joining worker node to cluster...\n")
 	nodeName, err := installer.JoinWorkerNode(masterClient, workerClient, cluster.Host, identity)
@@ -97,8 +103,10 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  ✔  Worker node %s joined the cluster as %s\n\n", workerHost, nodeName)
 
 	// Stamp after registration, when the node object is available to annotate.
-	if err := installer.StampStorageRestarts(masterClient, nodeName, identity.MachineID); err != nil {
-		fmt.Printf("  ⚠   could not record host configuration for %s: %v\n      The host is configured; 'kip node repair-host' records it.\n\n", nodeName, err)
+	if workerOS.UsesNeedrestart() {
+		if err := installer.StampStorageRestarts(masterClient, nodeName, identity.MachineID); err != nil {
+			fmt.Printf("  ⚠   could not record host configuration for %s: %v\n      The host is configured; 'kip node repair-host' records it.\n\n", nodeName, err)
+		}
 	}
 
 	// Address publication can lag registration. Wait for IPv4 so build egress
