@@ -325,6 +325,26 @@ func (c *Client) SurvivesSSHRateLimit() bool {
 	return c.masterIsServing()
 }
 
+// ConfirmFreshConnection runs true over a new SSH connection to verify that
+// the host accepts new sessions independently of the shared connection.
+func (c *Client) ConfirmFreshConnection() error {
+	cmd, ctx, cancel := c.command(c.freshConnectionArgs()...)
+	defer cancel()
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("a new SSH connection to %s did not finish within %s", c.cfg.Host, c.cfg.CommandTimeout)
+	}
+	if err != nil {
+		return fmt.Errorf("opening a new SSH connection to %s: %w: %s", c.cfg.Host, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// freshConnectionArgs bypasses multiplexing for the connectivity check.
+func (c *Client) freshConnectionArgs() []string {
+	return append(c.connectionArgs(false, true), "true")
+}
+
 // Close tears down the shared connection, so kip does not leave one open behind
 // it. A failure here is not worth reporting: the master exits on its own when
 // ControlPersist elapses.
@@ -365,22 +385,20 @@ func fileExists(path string) bool {
 	return !info.IsDir()
 }
 
-// sshArgs builds the OpenSSH argument list (everything before the
-// command itself). Options precedence follows ssh's usual rules:
-// -F / ~/.ssh/config first, then per-call flags. We add reasonable
-// defaults (accept-new host keys, 10s connect timeout) that the user
-// can override via cfg.Options.
+// sshArgs builds the connection arguments, including multiplexing when available.
 func (c *Client) sshArgs() []string {
 	return c.sshArgsWith()
 }
 
-// sshArgsWith builds the argument list with extra flags placed before the
-// destination.
-//
-// Order is load-bearing for control commands: ssh treats anything after the
-// destination as the remote command, so `ssh <opts> user@host -O exit` asks the
-// remote shell to run "-O exit" instead of telling the master to close.
+// sshArgsWith places extra flags before the destination so OpenSSH interprets
+// control options such as -O exit locally instead of as a remote command.
 func (c *Client) sshArgsWith(extra ...string) []string {
+	return c.connectionArgs(c.controlPath != "", false, extra...)
+}
+
+// connectionArgs puts fresh-connection overrides before Config.Options because
+// OpenSSH uses the first value supplied for each option.
+func (c *Client) connectionArgs(multiplex, fresh bool, extra ...string) []string {
 	args := []string{
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "ConnectTimeout=10",
@@ -388,7 +406,10 @@ func (c *Client) sshArgsWith(extra ...string) []string {
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=4",
 	}
-	if c.controlPath != "" {
+	if fresh {
+		args = append(args, "-o", "ControlMaster=no", "-o", "ControlPath=none")
+	}
+	if multiplex {
 		// One connection carries every command. Without this an install
 		// makes a handshake per command, which is what a flooded sshd
 		// randomly drops.
