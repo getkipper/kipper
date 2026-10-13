@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // ExistingIdentity is the serving identity read from an existing cluster's
@@ -27,7 +25,7 @@ type ExistingIdentity struct {
 // error: proceeding would let the installer render an identity the cluster
 // may have moved away from, which the reconciler's issuer guard can never
 // converge back from.
-func ReadExistingClusterIdentity(client *ssh.Client) (*ExistingIdentity, bool, error) {
+func ReadExistingClusterIdentity(client CommandRunner) (*ExistingIdentity, bool, error) {
 	freshness, err := client.Run("test -d /var/lib/rancher/k3s && echo existing || echo fresh")
 	k3sPreexisting := k3sPreexistingFromSample(freshness, err)
 	if !k3sPreexisting {

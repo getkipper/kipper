@@ -3,8 +3,6 @@ package installer
 import (
 	"fmt"
 	"strings"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 const longhornVersion = "v1.7.3"
@@ -21,11 +19,11 @@ const longhornSettingsFunc = longhornSettingsFuncName + `() {
 }`
 
 // InstallLonghorn installs Longhorn for distributed persistent storage.
-func InstallLonghorn(client *ssh.Client) error {
+func InstallLonghorn(client CommandRunner) error {
 	return installLonghorn(client)
 }
 
-func installLonghorn(client commandRunner) error {
+func installLonghorn(client CommandRunner) error {
 	// Longhorn requires open-iscsi and nfs-common (for RWX shared volumes)
 	if _, err := client.Run("apt-get update -qq && apt-get install -y -qq open-iscsi nfs-common"); err != nil {
 		return fmt.Errorf("installing longhorn dependencies: %w", err)
@@ -115,7 +113,7 @@ const stripKipperMultipathBlockAwk = `awk '
 // configureMultipathForLonghorn blacklists IET VIRTUAL-DISK devices so
 // kubelet can format Longhorn volumes without multipathd claiming them.
 // It replaces the previous Kipper block and reloads multipathd when installed.
-func configureMultipathForLonghorn(client commandRunner) error {
+func configureMultipathForLonghorn(client CommandRunner) error {
 	out, err := client.Run("command -v multipathd >/dev/null 2>&1 && echo present || echo absent")
 	if err != nil {
 		return fmt.Errorf("checking for multipathd: %w", err)

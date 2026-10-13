@@ -5,8 +5,6 @@ import (
 	"net"
 	"net/netip"
 	"strings"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // traefikManifestTemplate carries one %s per entrypoint for the rendered
@@ -172,7 +170,7 @@ func ResolveTrustedProxies(domain string, extras []string) []string {
 // k3s HelmChart CRD. We disable the k3s-bundled Traefik in the k3s
 // config and install our own with custom settings. trustedProxies is the
 // forwarded-header trust list from ResolveTrustedProxies.
-func InstallTraefik(client *ssh.Client, trustedProxies []string) error {
+func InstallTraefik(client CommandRunner, trustedProxies []string) error {
 	trusted, err := renderTrustedIPs(trustedProxies)
 	if err != nil {
 		return err

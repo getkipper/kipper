@@ -10,7 +10,6 @@ import (
 
 	"github.com/getkipper/kipper/controller/pkg/hostnames"
 	"github.com/getkipper/kipper/controller/pkg/serving"
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // adminEmailPattern is a conservative email check. It rejects anything
@@ -502,7 +501,7 @@ func securityHeadersMiddleware(namespace string) string {
 // heartbeat keeps alive — after a custom-domain move it differs from
 // bareDomain, so it is a separate input. host is the cluster's public IP
 // or hostname.
-func DeployConsole(client *ssh.Client, dexHost, consoleHost, consoleAPIHost, bareDomain, kipperRunDomain, host string) error {
+func DeployConsole(client CommandRunner, dexHost, consoleHost, consoleAPIHost, bareDomain, kipperRunDomain, host string) error {
 	applyRBACCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", ConsoleRBACManifest)
 	if _, err := client.Run(applyRBACCmd); err != nil {
 		return fmt.Errorf("applying console rbac: %w", err)
@@ -544,7 +543,7 @@ func DeployConsole(client *ssh.Client, dexHost, consoleHost, consoleAPIHost, bar
 // login. Create-if-absent (not apply) is deliberate: the RoleStore manages
 // this ConfigMap at runtime, so a re-install or upgrade must not reset the
 // user list back to just the admin.
-func seedAdminUser(client *ssh.Client, adminEmail string) error {
+func seedAdminUser(client CommandRunner, adminEmail string) error {
 	if !adminEmailPattern.MatchString(adminEmail) {
 		return fmt.Errorf("invalid admin email %q: must be a plain email address", adminEmail)
 	}

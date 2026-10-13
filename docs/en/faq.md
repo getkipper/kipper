@@ -30,7 +30,7 @@ Funding is an open question. Kipper is written by one person and earns nothing t
 
 ### Does kip work on Windows?
 
-Yes. The kip CLI runs natively on Windows for deploying apps, managing secrets, viewing logs, scaling, rollbacks and the rest of the everyday work, all of which talks to the Kubernetes API. Install from [WSL](https://learn.microsoft.com/en-us/windows/wsl/), where SSH reuses one connection for the hundreds an install sends; PowerShell opens one per command, which works and leaves less margin on a busy server. The handful of commands that maintain the server belong in WSL for the same reason. Download `kip-windows-amd64.exe` from the releases page, and see [Installing from Windows](/en/windows) for the full path.
+Yes. Download `kip-windows-amd64.exe` from the releases page and run `kip install` from PowerShell. kip runs the installation on the server and streams its progress over SSH. You can also deploy apps, manage secrets, view logs, and scale workloads from PowerShell. See [Installing from Windows](/en/windows).
 
 One small difference: in `kip exec`, a shell keeps drawing to the size the window had when the session opened, because Windows reports resizes as console input rather than as a signal. Resize before you connect, or reconnect after.
 

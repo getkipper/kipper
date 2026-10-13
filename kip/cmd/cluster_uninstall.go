@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 
@@ -53,6 +54,12 @@ func runClusterUninstall(cmd *cobra.Command, args []string) error {
 	cluster, err := resolveUninstallTarget(args)
 	if err != nil {
 		return err
+	}
+
+	if !cluster.HostWiped {
+		if err := refuseUninstallingThisMachine(cluster, readLocalMachineID, net.LookupIP, localAddresses); err != nil {
+			return err
+		}
 	}
 
 	flagKey, _ := cmd.Flags().GetString("ssh-key")

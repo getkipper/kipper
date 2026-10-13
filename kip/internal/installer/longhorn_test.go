@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,4 +90,20 @@ func TestSystemComponents_UpgradeRunsTheLonghornInstall(t *testing.T) {
 		}
 	}
 	t.Fatal("kip upgrade has no longhorn step")
+}
+
+// runOnly runs commands and cannot upload.
+type runOnly struct{}
+
+func (runOnly) Run(string) (string, error)                 { return "", nil }
+func (runOnly) RunStdin(string, io.Reader) (string, error) { return "", nil }
+
+func TestSystemComponents_VeleroNeedsARunnerThatUploads(t *testing.T) {
+	for _, c := range SystemComponents("example.com", nil, nil, PlatformState{Profile: ProfileMedium}) {
+		if c.Name == "velero" {
+			assert.ErrorContains(t, c.Apply(runOnly{}), "cannot upload")
+			return
+		}
+	}
+	t.Fatal("kip upgrade has no velero step")
 }

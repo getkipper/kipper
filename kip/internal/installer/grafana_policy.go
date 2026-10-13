@@ -7,7 +7,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // ingressPeerQuery prints the ingress-controller settings as namespace|labelKey|labelValue.
@@ -16,7 +15,7 @@ const ingressPeerQuery = `kubectl -n kipper-system get configmap ingress-control
 
 // applyGrafanaNetworkPolicy restricts access to the ingress controller and
 // Prometheus before the chart enables trusted identity headers.
-func applyGrafanaNetworkPolicy(client *ssh.Client) error {
+func applyGrafanaNetworkPolicy(client CommandRunner) error {
 	// A missing ConfigMap or a failed read leaves the defaults for the Traefik Kipper installs.
 	out, _ := client.Run(ingressPeerQuery)
 	manifest := platform.GrafanaNetworkPolicy(parseIngressPeer(out))

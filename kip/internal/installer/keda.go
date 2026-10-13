@@ -2,8 +2,6 @@ package installer
 
 import (
 	"fmt"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 const (
@@ -13,7 +11,7 @@ const (
 
 // InstallKEDA installs the KEDA event-driven autoscaler from its upstream Helm chart
 // via the k3s HelmChart CRD. KEDA enables scale-to-zero for Kipper functions.
-func InstallKEDA(client *ssh.Client) error {
+func InstallKEDA(client CommandRunner) error {
 	manifest := fmt.Sprintf(`apiVersion: helm.cattle.io/v1
 kind: HelmChart
 metadata:

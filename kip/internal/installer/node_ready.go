@@ -3,8 +3,6 @@ package installer
 import (
 	"fmt"
 	"time"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // nodeReadyQuery blocks until every node reports Ready. Its own timeout is
@@ -13,7 +11,7 @@ import (
 const nodeReadyQuery = "kubectl wait --for=condition=Ready node --all --timeout=30s"
 
 // WaitForNodeReady waits for k3s to register a node and report it Ready.
-func WaitForNodeReady(client *ssh.Client, timeout time.Duration) error {
+func WaitForNodeReady(client CommandRunner, timeout time.Duration) error {
 	return waitForNodeReady(client.Run, timeout, 3*time.Second)
 }
 

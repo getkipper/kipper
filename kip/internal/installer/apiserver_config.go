@@ -45,7 +45,7 @@ const (
 // needed. It prepares referenced files before suggesting manual edits to a partial
 // argument block. The changed result reports a successful config update or an
 // attempted restart of an already configured server. notify runs before a restart.
-func EnsureAPIServerConfig(client commandRunner, notify func(string)) (changed bool, err error) {
+func EnsureAPIServerConfig(client CommandRunner, notify func(string)) (changed bool, err error) {
 	if err := refuseANodeThatRunsNoServer(client); err != nil {
 		return false, err
 	}
@@ -107,7 +107,7 @@ func EnsureAPIServerConfig(client commandRunner, notify func(string)) (changed b
 // restartIfTheServerIsBehind restarts k3s for a changed policy or an authentication
 // config that metrics indicate is unloaded. If the policy is unchanged and metrics
 // are unavailable, it leaves the server running for a later retry.
-func restartIfTheServerIsBehind(client commandRunner, policyChanged bool, notify func(string)) (bool, error) {
+func restartIfTheServerIsBehind(client CommandRunner, policyChanged bool, notify func(string)) (bool, error) {
 	// Restart for a changed policy even if metrics are unavailable; later runs
 	// will see matching policy content and cannot detect this pending restart.
 	if policyChanged {
@@ -155,7 +155,7 @@ const (
 // lockAPIServerConfig returns a runner guarded by the host lock and a release function.
 // A shared flock serializes acquisition, release, and each command. Each command
 // checks the owner token so a previous owner stops after a takeover.
-func lockAPIServerConfig(client commandRunner) (commandRunner, func(), error) {
+func lockAPIServerConfig(client CommandRunner) (CommandRunner, func(), error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		return nil, nil, fmt.Errorf("generating an API server lock token: %w", err)
@@ -184,7 +184,7 @@ echo %[5]s`,
 
 // fencedRunner runs each command only while this run still owns the host lock.
 type fencedRunner struct {
-	base  commandRunner
+	base  CommandRunner
 	token string
 }
 
@@ -204,7 +204,7 @@ func (f fencedRunner) RunStdin(command string, stdin io.Reader) (string, error) 
 
 // pendingWriteIsUnchanged reports whether the config matches the pending checksum.
 // Rollback requires a successful match, including when retrying an interrupted run.
-func pendingWriteIsUnchanged(client commandRunner) bool {
+func pendingWriteIsUnchanged(client CommandRunner) bool {
 	out, err := client.Run(fmt.Sprintf(
 		`[ -f %s ] || { echo none; exit 0; }; [ "$(cat %s)" = "$(sha256sum "$(readlink -f %s)" | cut -d' ' -f1)" ] && echo ours || echo changed`,
 		k3sConfigPendingPath, k3sConfigPendingPath, k3sConfigPath))
@@ -213,14 +213,14 @@ func pendingWriteIsUnchanged(client commandRunner) bool {
 
 // clearPendingWrite removes the marker on a best-effort basis after confirmation
 // or rollback. A leftover marker can authorize rollback while its checksum matches.
-func clearPendingWrite(client commandRunner) {
+func clearPendingWrite(client CommandRunner) {
 	_, _ = client.Run("rm -f " + k3sConfigPendingPath)
 }
 
 // restartAfterAPolicyChange restarts k3s to load the new policy and attempts to
 // restore the previous policy on failure. With ownConfigWrite, it also attempts
 // to roll back the pending config write before restarting again.
-func restartAfterAPolicyChange(client commandRunner, ownConfigWrite bool) error {
+func restartAfterAPolicyChange(client CommandRunner, ownConfigWrite bool) error {
 	err := restartK3s(client)
 	if err == nil {
 		return nil
@@ -240,7 +240,7 @@ func restartAfterAPolicyChange(client commandRunner, ownConfigWrite bool) error 
 // restartWithoutTouchingTheConfig restarts k3s while preserving the config.
 // Without a matching pending checksum, restoring a backup could overwrite
 // operator changes made since the backup was saved.
-func restartWithoutTouchingTheConfig(client commandRunner) error {
+func restartWithoutTouchingTheConfig(client CommandRunner) error {
 	if err := restartK3s(client); err != nil {
 		return fmt.Errorf("%w; this run changed no k3s configuration. Inspect %s and the k3s service on the server. An earlier repair may have saved a backup at %s",
 			err, k3sConfigPath, k3sConfigBackupPath)
@@ -339,7 +339,7 @@ func withAPIServerArgs(current string) (string, error) {
 }
 
 // refuseANodeThatRunsNoServer requires a k3s server unit before writing server flags.
-func refuseANodeThatRunsNoServer(client commandRunner) error {
+func refuseANodeThatRunsNoServer(client CommandRunner) error {
 	out, err := client.Run("systemctl list-unit-files k3s.service --no-legend 2>/dev/null | wc -l")
 	if err != nil {
 		return fmt.Errorf("checking for the k3s server on this host: %w", err)
@@ -352,7 +352,7 @@ func refuseANodeThatRunsNoServer(client commandRunner) error {
 
 // apiServerLoadedAnAuthnConfig uses the authentication controller metric as a
 // proxy for whether the running API server has loaded an authentication config.
-func apiServerLoadedAnAuthnConfig(client commandRunner) (bool, error) {
+func apiServerLoadedAnAuthnConfig(client CommandRunner) (bool, error) {
 	out, err := client.Run(`raw=$(kubectl get --raw /metrics) || exit 97
 printf '%s\n' "$raw" | grep -c 'apiserver_authentication_config_controller_last_config_info' || true`)
 	if err != nil {
@@ -362,7 +362,7 @@ printf '%s\n' "$raw" | grep -c 'apiserver_authentication_config_controller_last_
 }
 
 // readK3sConfig returns empty content for an absent file and propagates read errors.
-func readK3sConfig(client commandRunner) (string, error) {
+func readK3sConfig(client CommandRunner) (string, error) {
 	out, err := client.Run(fmt.Sprintf(
 		"if [ ! -e %s ] && [ ! -L %s ]; then exit 0; fi; cat %s", k3sConfigPath, k3sConfigPath, k3sConfigPath))
 	if err != nil {
@@ -401,7 +401,7 @@ trap - EXIT`)
 
 // restartK3s restarts k3s and checks API readiness. Node readiness is unrelated
 // to this repair and could trigger rollback because of an unhealthy worker.
-func restartK3s(client commandRunner) error {
+func restartK3s(client CommandRunner) error {
 	if _, err := client.Run("systemctl restart k3s"); err != nil {
 		return fmt.Errorf("restarting k3s: %w", err)
 	}
@@ -414,7 +414,7 @@ func restartK3s(client commandRunner) error {
 
 // rollBackK3sConfig attempts to restore the backup only while the config matches
 // the pending checksum, then restarts k3s. Its error includes the recovery outcome.
-func rollBackK3sConfig(client commandRunner, cause error) error {
+func rollBackK3sConfig(client CommandRunner, cause error) error {
 	if out, err := client.Run(fmt.Sprintf("[ -f %s ] && echo yes || echo no", k3sConfigBackupPath)); err == nil && strings.TrimSpace(out) == "no" {
 		return fmt.Errorf("%w; no configuration backup is available. Inspect %s and the k3s service on the server", cause, k3sConfigPath)
 	}

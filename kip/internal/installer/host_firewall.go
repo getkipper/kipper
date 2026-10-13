@@ -1,11 +1,11 @@
 package installer
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"strings"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
+	"time"
 )
 
 // k3sPodCIDR is the k3s default pod CIDR. Kipper does not customize k3s
@@ -86,6 +86,13 @@ func PlanFirewall(audit FirewallAudit, wantFirewall bool) FirewallPlan {
 	return plan
 }
 
+// FirewallRunner runs the firewall's commands and says whether the SSH rate
+// limit is safe for the connection the installer itself is using.
+type FirewallRunner interface {
+	CommandRunner
+	SurvivesSSHRateLimit() bool
+}
+
 // ApplyFirewallPlan installs UFW and applies a k3s-correct ruleset when the
 // plan calls for it, and does nothing when it does not: SSH (on the configured
 // port), HTTP/HTTPS, the k3s API, and pod→host access limited to the specific
@@ -104,7 +111,7 @@ func PlanFirewall(audit FirewallAudit, wantFirewall bool) FirewallPlan {
 // firewall predates the claim file carries no claim, so it reads as an admin's
 // and keeps its rules until it is rebuilt (pre-release clusters are rebuilt,
 // not migrated in place).
-func ApplyFirewallPlan(client *ssh.Client, plan FirewallPlan, rateLimitSSH bool) error {
+func ApplyFirewallPlan(client FirewallRunner, plan FirewallPlan, rateLimitSSH bool) error {
 	if !plan.Configure {
 		return nil
 	}
@@ -113,7 +120,7 @@ func ApplyFirewallPlan(client *ssh.Client, plan FirewallPlan, rateLimitSSH bool)
 
 // AuditFirewall detects whether a host firewall is already active, and whether
 // it is one Kipper established.
-func AuditFirewall(client *ssh.Client) (FirewallAudit, error) {
+func AuditFirewall(client CommandRunner) (FirewallAudit, error) {
 	var audit FirewallAudit
 
 	// firewalld is asked about first because Kipper never manages it, and a
@@ -156,7 +163,7 @@ func AuditFirewall(client *ssh.Client) (FirewallAudit, error) {
 // `test -s` rather than `test -f`: an empty file is not a claim. The write
 // publishes by rename so an empty one should never appear, and requiring
 // content costs nothing to be sure of it.
-func firewallClaimed(client *ssh.Client) bool {
+func firewallClaimed(client CommandRunner) bool {
 	out, err := client.Run("test -s " + firewallClaimPath + " && echo claimed || true")
 	if err != nil {
 		return false
@@ -194,22 +201,14 @@ func claimCommand(claimPath string) string {
 		shellQuote(note), shellQuote(claimPath))
 }
 
-// configureFirewallWith applies the ruleset, rate-limiting the SSH port when
-// the caller wants it and this client is actually multiplexing.
-//
-// Both have to hold. The limit fits one connection per install and not the
-// hundreds a non-multiplexing client makes, so applying it to one of those
-// would rate-limit the installer off a host it had half built.
-//
-// It is unexported so that ApplyFirewallPlan is the only way in from outside
-// this package. A second exported entry point is a second place for the
-// ownership decision to be skipped, and the compiler is a better guard against
-// that than a test is.
-func configureFirewallWith(client *ssh.Client, rateLimitSSH bool) error {
-	return configureFirewall(client, rateLimitSSH && client.Multiplexed())
+// configureFirewallWith enables the requested SSH rate limit only when the
+// runner can continue under it, either locally or over a shared SSH connection.
+// ApplyFirewallPlan remains the public entry point to enforce ownership checks.
+func configureFirewallWith(client FirewallRunner, rateLimitSSH bool) error {
+	return configureFirewall(client, rateLimitSSH && client.SurvivesSSHRateLimit())
 }
 
-func configureFirewall(client *ssh.Client, rateLimitSSH bool) error {
+func configureFirewall(client CommandRunner, rateLimitSSH bool) error {
 	// Installing the package changes no firewall: ufw ships inactive and
 	// stays that way until it is enabled below.
 	if _, err := client.Run("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ufw >/dev/null"); err != nil {
@@ -244,20 +243,94 @@ func configureFirewall(client *ssh.Client, rateLimitSSH bool) error {
 		return fmt.Errorf("setting the ufw forward policy and claiming the firewall: %w", err)
 	}
 
+	// A saved rule can survive a failed reload. Reload and check the live SSH
+	// rule below even if retrying a rule command succeeds.
+	var ruleErr error
 	for _, rule := range ufwRules(sshPort, rateLimitSSH) {
-		if _, err := client.Run(rule + " >/dev/null"); err != nil {
-			return fmt.Errorf("applying %q: %w", rule, err)
+		if err := runUFW(client, rule); err != nil {
+			ruleErr = fmt.Errorf("applying %q: %w", rule, err)
+			break
 		}
 	}
 
-	// --force skips the "this may disrupt SSH" prompt. The SSH rule above
-	// ran first, whether it opened the port or limited it, so the prompt's
-	// concern does not apply.
-	if _, err := client.Run("ufw --force enable >/dev/null"); err != nil {
-		return fmt.Errorf("enabling ufw: %w", err)
+	if err := loadSavedRules(client, sshPort); err != nil {
+		// A firewall that denies by default without the rule letting SSH in
+		// locks the host out, so it is switched off and the install fails.
+		if stopErr := stopUFW(client); stopErr != nil {
+			return errors.Join(ruleErr, fmt.Errorf("ufw would not load its rules (%w) and could not be switched off either (%v), so the host may refuse SSH; switch ufw off from the provider's console, then re-run kip install", err, stopErr))
+		}
+		return errors.Join(ruleErr, fmt.Errorf("ufw would not load its rules, so it was left not active; re-run kip install: %w", err))
 	}
+	return ruleErr
+}
 
-	return nil
+// Retry transient UFW failures while k3s updates netfilter during startup.
+const ufwAttempts = 5
+
+var ufwRetryDelay = 3 * time.Second
+
+// runUFW runs a ufw command, retrying a failure with a growing pause. Every
+// command it runs is idempotent on disk.
+func runUFW(client CommandRunner, command string) error {
+	var err error
+	for attempt := 1; attempt <= ufwAttempts; attempt++ {
+		if _, err = client.Run(command + " >/dev/null"); err == nil {
+			return nil
+		}
+		if attempt < ufwAttempts {
+			time.Sleep(ufwRetryDelay * time.Duration(attempt))
+		}
+	}
+	return err
+}
+
+// loadSavedRules stops UFW before each start to recover partially loaded rules.
+// Each attempt checks that the live user-input chain contains the SSH port rule.
+func loadSavedRules(client CommandRunner, sshPort string) error {
+	var err error
+	for attempt := 1; attempt <= ufwAttempts; attempt++ {
+		if err = stopUFW(client); err == nil {
+			_, err = client.Run("ufw --force enable >/dev/null")
+			if err == nil && !sshRuleLoaded(client, sshPort) {
+				err = fmt.Errorf("the rule for SSH port %s is not loaded", sshPort)
+			}
+			if err == nil {
+				return nil
+			}
+		}
+		if attempt < ufwAttempts {
+			time.Sleep(ufwRetryDelay * time.Duration(attempt))
+		}
+	}
+	return err
+}
+
+// stopUFW retries disabling UFW, then checks that its user-input chain is gone.
+func stopUFW(client CommandRunner) error {
+	if err := runUFW(client, "ufw --force disable"); err != nil {
+		return err
+	}
+	// Only iptables' own answer for a missing chain proves it gone; a query
+	// that failed for any other reason proves nothing.
+	out, err := client.Run(`out=$(iptables -S ufw-user-input 2>&1); rc=$?; ` +
+		`if [ $rc -eq 0 ]; then echo present; elif printf '%s' "$out" | grep -q 'No chain/target/match'; then echo absent; ` +
+		`else echo "unknown: $out"; exit 1; fi`)
+	switch strings.TrimSpace(out) {
+	case "absent":
+		return nil
+	case "present":
+		return fmt.Errorf("ufw's chains are still loaded after switching it off")
+	}
+	return fmt.Errorf("could not tell whether ufw's chains are gone: %v", err)
+}
+
+// sshRuleLoaded checks for a rule matching the SSH port in UFW's live input chain.
+func sshRuleLoaded(client CommandRunner, sshPort string) bool {
+	out, err := client.Run("iptables -S ufw-user-input 2>/dev/null")
+	if err != nil {
+		return false
+	}
+	return strings.Contains(out+"\n", "--dport "+sshPort+" ") || strings.Contains(out+"\n", "--dport "+sshPort+"\n")
 }
 
 // k3s host ports pods legitimately reach on the node's INPUT chain.
@@ -285,17 +358,8 @@ const (
 // before routing, so no packet ever arrives on INPUT with a service-CIDR
 // source or an un-rewritten service-CIDR destination.
 func ufwRules(sshPort string, rateLimitSSH bool) []string {
-	// limit drops a source that opens more than six connections in thirty
-	// seconds. That is what an untargeted brute-force sweep looks like, and it
-	// is also what an installer looks like when it opens a connection per
-	// command — so it is applied only when this client is multiplexing and one
-	// install is one connection. Rate-limiting the way in, and then needing
-	// hundreds of connections through it, strands a half-built host.
-	//
-	// It is still a rule about a source address rather than an attacker. Six
-	// connections in thirty seconds is generous for a person and reachable for
-	// CI running several kip commands in a row, or for two operators behind one
-	// NAT address. Hence --no-ssh-rate-limit.
+	// CI and operators behind a shared NAT can exceed the per-source limit;
+	// --no-ssh-rate-limit selects an unrestricted SSH rule.
 	sshRule := fmt.Sprintf("ufw limit %s/tcp", sshPort)
 	if !rateLimitSSH {
 		sshRule = fmt.Sprintf("ufw allow %s/tcp", sshPort)
@@ -315,7 +379,7 @@ func ufwRules(sshPort string, rateLimitSSH bool) []string {
 // readSSHPort returns the effective sshd port. `sshd -T` prints the
 // running configuration including defaults, so this works even when
 // /etc/ssh/sshd_config is empty.
-func readSSHPort(client *ssh.Client) (string, error) {
+func readSSHPort(client CommandRunner) (string, error) {
 	out, err := client.Run(`sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}'`)
 	if err != nil {
 		return "", fmt.Errorf("reading sshd port: %w", err)

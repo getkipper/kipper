@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/getkipper/kipper/controller/pkg/podnet"
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // Build isolation moves image builds out of tenant namespaces into a single
@@ -143,7 +142,7 @@ roleRef:
 // NetworkPolicy, and the Role/RoleBinding letting console-api drive builds
 // there. The egress except-list is derived at install time so it covers the
 // cluster's actual node addresses, which are public on bare-metal targets.
-func InstallBuildIsolation(client *ssh.Client) error {
+func InstallBuildIsolation(client CommandRunner) error {
 	excepts, err := buildEgressExcepts(client)
 	if err != nil {
 		// Returning here leaves any policy already on the cluster in force, and
@@ -168,7 +167,7 @@ func InstallBuildIsolation(client *ssh.Client) error {
 // union their allowances, so a new deny-everything policy alongside the old one
 // would change nothing. Builds fail loudly afterwards, which is the point — the
 // alternative is builds running under a policy that no longer constrains them.
-func sealBuildEgress(client *ssh.Client) string {
+func sealBuildEgress(client CommandRunner) string {
 	// --ignore-not-found separates the three cases: a definite absence exits 0
 	// with no output, a present namespace names itself, and only a real failure
 	// (API unreachable, credentials) errors. Treating that failure as absence
@@ -220,7 +219,7 @@ func nodeAddressQuery(nodeName string) string {
 // WaitForNodeToPublishAddress polls for an IPv4 InternalIP or ExternalIP
 // that build isolation can include in its egress exclusions. Address publication
 // can lag node registration.
-func WaitForNodeToPublishAddress(client *ssh.Client, nodeName string, timeout time.Duration) error {
+func WaitForNodeToPublishAddress(client CommandRunner, nodeName string, timeout time.Duration) error {
 	return waitForNodeToPublishAddress(client.Run, nodeName, timeout, 3*time.Second)
 }
 
@@ -265,7 +264,7 @@ func reportsARoutableAddress(out string) bool {
 // IPv4 node address as a /32. It reads the nodes once, so the pod CIDRs the
 // decision rests on and the addresses that end up in the policy describe the
 // same set of nodes.
-func buildEgressExcepts(client *ssh.Client) ([]string, error) {
+func buildEgressExcepts(client CommandRunner) ([]string, error) {
 	out, err := client.Run("kubectl get nodes -o json")
 	if err != nil {
 		return nil, fmt.Errorf("reading nodes: %w", err)

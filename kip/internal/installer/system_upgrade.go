@@ -4,21 +4,13 @@ import (
 	"fmt"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
-// SystemComponent describes one cluster component that kip upgrade can
-// reconcile in place. Re-running Apply against an existing cluster
-// re-applies the chart manifest at the version this kip build pins —
-// helm-controller (or kubectl apply for non-helm components) handles
-// the actual upgrade.
+// SystemComponent reconciles a component at the version pinned by this kip build.
+// Apply must be safe to repeat while preserving secrets and data.
 type SystemComponent struct {
-	// Name is the short identifier shown to operators in plan output.
-	Name string
-	// Apply re-runs the component's install function. Functions must
-	// be idempotent: safe to call multiple times against the same
-	// cluster without rotating secrets or causing data loss.
-	Apply func(client *ssh.Client) error
+	Name  string
+	Apply func(client CommandRunner) error
 }
 
 // SystemComponents returns components reconciled by kip upgrade, honoring
@@ -29,10 +21,10 @@ type SystemComponent struct {
 // Console and k3s upgrades have separate paths.
 func SystemComponents(domain string, dnsResolvers, trustedProxies []string, state PlatformState) []SystemComponent {
 	components := []SystemComponent{
-		{Name: "traefik", Apply: func(c *ssh.Client) error {
+		{Name: "traefik", Apply: func(c CommandRunner) error {
 			return InstallTraefik(c, ResolveTrustedProxies(domain, trustedProxies))
 		}},
-		{Name: "cert-manager-dns", Apply: func(c *ssh.Client) error { return patchCertManagerDNSConfig(c, dnsResolvers) }},
+		{Name: "cert-manager-dns", Apply: func(c CommandRunner) error { return patchCertManagerDNSConfig(c, dnsResolvers) }},
 		{Name: "security-middleware", Apply: InstallSecurityHardening},
 		{Name: "longhorn", Apply: InstallLonghorn},
 		{Name: "keda", Apply: InstallKEDA},
@@ -41,13 +33,13 @@ func SystemComponents(domain string, dnsResolvers, trustedProxies []string, stat
 	if state.LokiEnabled() {
 		res := state.EffectiveResources()
 		components = append(components,
-			SystemComponent{Name: "loki", Apply: func(c *ssh.Client) error { return InstallLokiWithResources(c, res) }},
+			SystemComponent{Name: "loki", Apply: func(c CommandRunner) error { return InstallLokiWithResources(c, res) }},
 		)
 	}
 	if state.PrometheusEnabled() {
 		res := state.EffectiveResources()
 		components = append(components,
-			SystemComponent{Name: "kube-prometheus-stack", Apply: func(c *ssh.Client) error { return InstallPrometheusGrafanaWithResources(c, res) }},
+			SystemComponent{Name: "kube-prometheus-stack", Apply: func(c CommandRunner) error { return InstallPrometheusGrafanaWithResources(c, res) }},
 		)
 	}
 	// Velero re-applies the BSL the cluster was installed with. The
@@ -60,7 +52,13 @@ func SystemComponents(domain string, dnsResolvers, trustedProxies []string, stat
 	// credentials are available; the chart references it by name.
 	bs := state.BackupStorage
 	components = append(components,
-		SystemComponent{Name: "velero", Apply: func(c *ssh.Client) error { return InstallBackup(c, bs) }},
+		SystemComponent{Name: "velero", Apply: func(c CommandRunner) error {
+			u, ok := c.(Uploader)
+			if !ok {
+				return fmt.Errorf("this runner cannot upload the Velero credentials")
+			}
+			return InstallBackup(u, bs)
+		}},
 		SystemComponent{Name: "zot", Apply: InstallZot},
 		// Build isolation must be (re)applied on upgrade: a cluster installed
 		// before it existed has no kipper-builds namespace/RBAC/policy, so the
@@ -113,7 +111,7 @@ func (s PlatformState) enabled(name string) bool {
 // RunSystemUpgrade re-applies each system component in order. Stops at
 // the first failure and returns the wrapped error so the caller can
 // report which component broke.
-func RunSystemUpgrade(client *ssh.Client, components []SystemComponent) error {
+func RunSystemUpgrade(client CommandRunner, components []SystemComponent) error {
 	for _, c := range components {
 		fmt.Printf("  ...  %s\n", c.Name)
 		if err := c.Apply(client); err != nil {

@@ -11,8 +11,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"golang.org/x/crypto/bcrypt"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // Builds use the push account; nodes use the read-only pull account.
@@ -353,7 +351,7 @@ configs:
 // ensureZotCredentials reuses existing passwords because nodes store the
 // pull password locally. It creates missing passwords and rebuilds htpasswd
 // when it is missing or a password was generated, then returns the pull password.
-func ensureZotCredentials(client *ssh.Client) (string, error) {
+func ensureZotCredentials(client CommandRunner) (string, error) {
 	pushPassword, err := readSecretValue(client, zotNamespace, zotPushSecret, "password")
 	if err != nil {
 		return "", err
@@ -402,7 +400,7 @@ func ensureZotCredentials(client *ssh.Client) (string, error) {
 // writeZotNodeFiles writes the registry CA and pull configuration on one node
 // with mode 600. Passing file contents through stdin keeps the pull password
 // out of command arguments.
-func writeZotNodeFiles(client *ssh.Client, caPEM, clusterIP, pullPassword string) error {
+func writeZotNodeFiles(client CommandRunner, caPEM, clusterIP, pullPassword string) error {
 	if _, err := client.Run("mkdir -p /etc/rancher/k3s"); err != nil {
 		return fmt.Errorf("creating k3s config directory: %w", err)
 	}
@@ -421,7 +419,7 @@ func writeZotNodeFiles(client *ssh.Client, caPEM, clusterIP, pullPassword string
 // verifyZotAuth requires /v2/ to return 401 for anonymous requests and 200
 // with the pull credential, both over verified TLS. The credential reaches
 // curl through stdin to keep it out of command arguments.
-func verifyZotAuth(client *ssh.Client, clusterIP, pullPassword string) error {
+func verifyZotAuth(client CommandRunner, clusterIP, pullPassword string) error {
 	anonCmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --cacert %s https://%s:5000/v2/", zotCAFilePath, clusterIP)
 	anon, err := client.Run(anonCmd)
 	if err != nil {
@@ -444,7 +442,7 @@ func verifyZotAuth(client *ssh.Client, clusterIP, pullPassword string) error {
 }
 
 // zotRolloutDiagnosis reads recent pod logs to add context to rollout errors.
-func zotRolloutDiagnosis(client *ssh.Client) string {
+func zotRolloutDiagnosis(client CommandRunner) string {
 	out, err := client.Run("kubectl -n kipper-system logs -l app=zot --tail=5 --all-containers=true 2>&1 || true")
 	if err != nil {
 		return ""
@@ -472,7 +470,7 @@ func formatZotDiagnosis(logs string) string {
 // InstallZot deploys the Zot OCI registry with authentication and TLS, then
 // configures k3s to use the pull account. Builds use a separate push account.
 // Repeated installs reuse existing credentials.
-func InstallZot(client *ssh.Client) error {
+func InstallZot(client CommandRunner) error {
 	// Preserve the existing volume size before applying the storage manifest.
 	// Stop on lookup errors to avoid requesting a smaller volume.
 	existing, err := client.Run(zotStorageQuery)

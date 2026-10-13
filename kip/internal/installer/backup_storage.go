@@ -109,11 +109,17 @@ func (c *AWSCredentials) VeleroCredentialsBlock() string {
 		c.AccessKeyID, c.SecretAccessKey)
 }
 
-// backupStorageRef converts an installer.BackupStorageConfig into the
-// trimmed BackupStorageRef the kip config persists. Credentials are
-// deliberately omitted — they live on the cluster as a Kubernetes
-// Secret and must not be written to ~/.kip/config.yaml. Returns nil
-// for in-cluster mode so the config stays compact.
+// BackupStorageFromRef restores external storage settings from persisted config.
+// The installer reuses the cluster's credential Secret.
+func BackupStorageFromRef(ref *config.BackupStorageRef) *BackupStorageConfig {
+	if ref == nil || ref.Mode != "external" {
+		return nil
+	}
+	return &BackupStorageConfig{Bucket: ref.Bucket, Region: ref.Region, Endpoint: ref.Endpoint}
+}
+
+// backupStorageRef persists the storage mode and location while credentials
+// remain in the cluster's Secret.
 func backupStorageRef(cfg *BackupStorageConfig) *config.BackupStorageRef {
 	if cfg == nil {
 		return &config.BackupStorageRef{Mode: "in-cluster"}

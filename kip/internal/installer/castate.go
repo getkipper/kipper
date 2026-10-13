@@ -117,7 +117,7 @@ type CAState struct {
 // authentication config are four reads, and console-api's heartbeat writes one
 // of them, so a state that was consistent when it was read can be stale by the
 // time it is printed. Nothing here acts on it.
-func ReadCAState(client *ssh.Client) (CAState, error) {
+func ReadCAState(client CommandRunner) (CAState, error) {
 	ca, err := readSecretData(client, hopCASecret)
 	if err != nil {
 		return CAState{}, err
@@ -160,7 +160,7 @@ func ReadCAState(client *ssh.Client) (CAState, error) {
 // cluster whose ClusterIdentity cannot be read is exactly when they still need
 // to see their certificate state. Losing one check is better than losing the
 // whole report, provided the missing check is named.
-func readDomainTransition(client *ssh.Client) (phase string, known bool) {
+func readDomainTransition(client CommandRunner) (phase string, known bool) {
 	out, err := client.Run(
 		"kubectl get clusteridentities -o jsonpath='{.items[*].status.transition.phase}'")
 	if err != nil {
@@ -172,7 +172,7 @@ func readDomainTransition(client *ssh.Client) (phase string, known bool) {
 // readSecretData returns every key of a Secret, decoded, from a single read.
 // An absent Secret is an empty map rather than an error; a read that fails for
 // any other reason is returned, never mistaken for absence.
-func readSecretData(client *ssh.Client, name string) (map[string]string, error) {
+func readSecretData(client CommandRunner, name string) (map[string]string, error) {
 	out, err := client.Run(fmt.Sprintf(
 		"kubectl -n %s get secret %s --ignore-not-found -o jsonpath='{.data}'", hopNamespace, name))
 	if err != nil {
@@ -436,7 +436,7 @@ func parsesAsCertificate(certPEM string) bool {
 // misbehaving; refusing to report anything because one probe failed would take
 // the diagnosis away exactly when it is needed. Reporting it as "not loaded"
 // would be worse still, because that is a different fact with a different fix.
-func anchorIsActive(client *ssh.Client, state CAState) (loaded, known bool, err error) {
+func anchorIsActive(client CommandRunner, state CAState) (loaded, known bool, err error) {
 	if len(state.DexHosts) == 0 {
 		return false, false, fmt.Errorf("the authentication config names no issuer, so there is nothing to verify")
 	}
@@ -454,7 +454,7 @@ func anchorIsActive(client *ssh.Client, state CAState) (loaded, known bool, err 
 // issuer hosts and the anchor on disk, then waits for activation. The fenced
 // write detects anchor changes before rename, but concurrent manual edits can
 // still race it; serialize anchor replacement with this operation.
-func SyncOperatorAuth(client *ssh.Client) error {
+func SyncOperatorAuth(client CommandRunner) error {
 	hosts, err := readAuthnHosts(client)
 	if err != nil {
 		return err
@@ -473,7 +473,7 @@ func SyncOperatorAuth(client *ssh.Client) error {
 // fail an upgrade over the absence of something it was never asked to set up.
 // A cluster that does have one must not be told its trust material is in order
 // until the API server has actually loaded it.
-func SyncOperatorAuthIfConfigured(client *ssh.Client) (synced bool, err error) {
+func SyncOperatorAuthIfConfigured(client CommandRunner) (synced bool, err error) {
 	hosts, err := readAuthnHosts(client)
 	if err != nil {
 		return false, err
@@ -486,7 +486,7 @@ func SyncOperatorAuthIfConfigured(client *ssh.Client) (synced bool, err error) {
 
 // readAuthnHosts returns the issuer hosts the authentication config currently
 // trusts, read back from the file the API server is using.
-func readAuthnHosts(client *ssh.Client) ([]string, error) {
+func readAuthnHosts(client CommandRunner) ([]string, error) {
 	out, err := client.Run("cat " + authnConfigPath + " 2>/dev/null || true")
 	if err != nil {
 		return nil, fmt.Errorf("reading the authentication config: %w", err)
@@ -529,7 +529,7 @@ func parseAuthnHosts(config string) []string {
 // This is deliberately not a read of stored material. What Traefik has loaded
 // is the only thing that matters when deciding whether an authority can stop
 // being trusted, and the two disagree for as long as a reload takes.
-func ServedByAuthority(client *ssh.Client, host, caPEM string) (bool, error) {
+func ServedByAuthority(client CommandRunner, host, caPEM string) (bool, error) {
 	if host == "" {
 		return false, fmt.Errorf("no issuer host to check")
 	}
@@ -648,7 +648,7 @@ func RefuseDuringCAReplacement(ctx context.Context, clientset kubernetes.Interfa
 // A host that cannot be reached skips the check rather than failing it. This
 // guards against a deadlock; refusing to act because the guard could not run
 // would be a worse outcome than the deadlock it prevents.
-func refuseWhenAnchorDisagreesWithSecret(caSecret map[string][]byte, client commandRunner) error {
+func refuseWhenAnchorDisagreesWithSecret(caSecret map[string][]byte, client CommandRunner) error {
 	onHost, err := readHopCA(client)
 	if err != nil || onHost == "" {
 		//nolint:nilerr // A host that cannot be read skips this guard rather than failing it, per the contract above: refusing to act because the guard could not run is a worse outcome than the deadlock it exists to prevent.

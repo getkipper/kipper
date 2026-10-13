@@ -2,13 +2,11 @@ package installer
 
 import (
 	"fmt"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // InstallSecurityHardening creates rate-limit middleware and configures baseline
 // Pod Security warnings and auditing in namespaces selected by the installer.
-func InstallSecurityHardening(client *ssh.Client) error {
+func InstallSecurityHardening(client CommandRunner) error {
 	if err := installRateLimiting(client); err != nil {
 		return err
 	}
@@ -18,7 +16,7 @@ func InstallSecurityHardening(client *ssh.Client) error {
 	return nil
 }
 
-func installRateLimiting(client *ssh.Client) error {
+func installRateLimiting(client CommandRunner) error {
 	// Rate limiting middleware — 100 requests per second per IP.
 	// Protects against brute force attacks and basic DDoS.
 	manifest := `apiVersion: traefik.io/v1alpha1
@@ -44,7 +42,7 @@ spec:
 	return nil
 }
 
-func installPodSecurityStandards(client *ssh.Client) error {
+func installPodSecurityStandards(client CommandRunner) error {
 	// Configure baseline warnings and auditing in existing namespaces, excluding
 	// the system components listed below. The project controller sets baseline
 	// enforcement separately when creating project namespaces.

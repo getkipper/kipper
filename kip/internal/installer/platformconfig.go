@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // Platform sizing profile names. The installer picks one based on node memory;
@@ -52,7 +51,7 @@ func pickProfile(ramMB int) string {
 // `kubectl apply` on a CRD can return before the API server is ready to serve
 // the new kind, so we wait for the CRD to be Established before creating the
 // CR — otherwise the first create can race and fail with "no matches for kind".
-func InstallPlatformConfig(client *ssh.Client, profile string) error {
+func InstallPlatformConfig(client CommandRunner, profile string) error {
 	if _, err := client.Run(
 		"kubectl wait --for=condition=Established " +
 			"crd/platformconfigs.kipper.run --timeout=60s",
@@ -88,7 +87,7 @@ spec:
 // `kip platform disable loki` then runs `kip install` again — we must not
 // resurrect Loki just because we re-detected a non-nano profile from the
 // host).
-func ReadPlatformStateViaSSH(client *ssh.Client) (PlatformState, error) {
+func ReadPlatformStateViaSSH(client CommandRunner) (PlatformState, error) {
 	out, err := client.Run(
 		"kubectl get platformconfig platform -o " +
 			`jsonpath='{.spec.profile}|{range .spec.components[*]}{.name}={.memoryLimit};{.enabled}{"\n"}{end}'`,

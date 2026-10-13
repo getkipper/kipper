@@ -29,7 +29,7 @@ const CRDWrittenByAnnotation = "kipper.run/written-by-kip-version"
 // command this actually sends. Asserting on StampCRDManifest alone proves the
 // helper works and says nothing about whether the install path calls it, which
 // is the half that was missing.
-func InstallCRDs(client commandRunner, kipVersion string) error {
+func InstallCRDs(client CommandRunner, kipVersion string) error {
 	entries, err := crdManifests.ReadDir("crds")
 	if err != nil {
 		return fmt.Errorf("reading embedded CRD manifests: %w", err)
@@ -216,7 +216,7 @@ func crdNameFromManifest(manifest []byte) (string, error) {
 // a CRD, or empty when the CRD is absent or carries no stamp. A cluster that has
 // never seen this annotation is the ordinary case on a fresh install and on
 // every cluster written before stamping existed.
-func liveCRDWriterVersion(client commandRunner, name string) (string, error) {
+func liveCRDWriterVersion(client CommandRunner, name string) (string, error) {
 	// Escape dots in the annotation key for kubectl JSONPath. Missing CRDs
 	// and annotations yield empty output; API failures retain their exit status.
 	// Discard stderr so warnings cannot corrupt the version string returned by

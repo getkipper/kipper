@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -152,6 +153,8 @@ Examples:
 func init() {
 	clusterExportCmd.Flags().String("cluster", "", "cluster name (defaults to current)")
 	clusterAddCmd.Flags().Bool("set-current", false, "set as the active cluster after adding")
+	clusterAddCmd.Flags().String("ssh-key", "", "SSH private key path to save for this cluster's server")
+	clusterAddCmd.Flags().Bool("install-result", false, "import a 'kip install --local --result' file with its gateway credential, backup storage and network settings; requires a new cluster name")
 	clusterDomainCmd.Flags().Bool("repair", false, "rewrite local config from the cluster's ClusterIdentity record")
 	clusterDomainCmd.Flags().Bool("sync", false, "resume an interrupted domain change, or report an already-converged cluster")
 	clusterDomainCmd.Flags().Bool("rollback", false, "return to the previous serving identity recorded at the last change")
@@ -334,54 +337,11 @@ func runClusterExport(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// The bundle carries no credential. Rendering it through the importer's own
-	// renderer keeps the server address and cluster authority and discards
-	// every authentication form, so what is written is what the other side
-	// would have kept anyway — the two halves cannot disagree about it.
-	//
-	// Without this, a machine still holding the shared admin certificate wrote
-	// that certificate and its private key into a file the documentation
-	// invites you to send to your team, and the importer then refused the
-	// result.
-	shareable, err := installer.RenderImportedKubeconfig(domain, string(kubeconfig))
-	if err != nil {
-		return fmt.Errorf("preparing the kubeconfig to share: %w", err)
-	}
-	// A credential is not only an AuthInfo. The server and proxy addresses are
-	// carried across because without them the cluster is unreachable, and a URL
-	// can carry a username and password in its userinfo — so a bundle that
-	// truthfully holds no authentication data can still hand a colleague the
-	// operator's proxy password. Refused rather than stripped: silently
-	// removing it would produce a plausible bundle that cannot reach anything.
-	if err := rejectURLCredentials([]byte(shareable)); err != nil {
-		return err
-	}
-
 	// Everything the operator is told goes to stderr, so a redirected stdout is
 	// the bundle and nothing else.
 	fmt.Fprintf(os.Stderr, "\n  ✔  Exporting %s. The file carries no credential: your colleague signs in as themselves.\n\n", cluster.Name)
 
-	fmt.Printf("# Kipper cluster export: share this file with team members\n")
-	fmt.Printf("# Import with: kip cluster add <file>\n")
-	fmt.Printf("name: %s\n", cluster.Name)
-	fmt.Printf("provider: %s\n", cluster.Provider)
-	fmt.Printf("host: %s\n", cluster.Host)
-	fmt.Printf("domain: %s\n", domain)
-	if cluster.Org != "" {
-		fmt.Printf("org: %s\n", cluster.Org)
-	}
-	fmt.Print(renderExportHostLines(hosts))
-	fmt.Printf("kubeconfig: |\n")
-	encoded := base64.StdEncoding.EncodeToString([]byte(shareable))
-	for i := 0; i < len(encoded); i += 76 {
-		end := i + 76
-		if end > len(encoded) {
-			end = len(encoded)
-		}
-		fmt.Printf("  %s\n", encoded[i:end])
-	}
-
-	return nil
+	return writeClusterBundle(os.Stdout, exportBundleHeader, cluster, domain, hosts, kubeconfig, nil)
 }
 
 // clusterNamePattern is what a cluster name may be. An import takes its name
@@ -579,6 +539,7 @@ func pinnedClusterDomains(args []string) []string {
 func runClusterAdd(cmd *cobra.Command, args []string) error {
 	filePath := args[0]
 	setCurrent, _ := cmd.Flags().GetBool("set-current")
+	sshKey, _ := cmd.Flags().GetString("ssh-key")
 
 	data, err := os.ReadFile(filePath) //nolint:gosec // user-provided file path is intentional
 	if err != nil {
@@ -596,6 +557,18 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 	orgCarried := false
 	inKubeconfig := false
 	var kubeconfigLines []string
+	// Require explicit consent to import gateway credentials and backup settings;
+	// the file header alone is insufficient.
+	isResult, _ := cmd.Flags().GetBool("install-result")
+	looksLikeResult := isInstallResult(data)
+	if isResult && !looksLikeResult {
+		return fmt.Errorf("%s is not an install result; drop --install-result to import it as a cluster export", filePath)
+	}
+	// Require the result import path to preserve maintenance settings on the first import.
+	if looksLikeResult && !isResult {
+		return fmt.Errorf("%s is an install result; add it with kip cluster add --install-result so its settings come with it", filePath)
+	}
+	var extras resultSettings
 
 	for _, line := range strings.Split(string(data), "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -663,6 +636,10 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 		case "dex_domain":
 			hosts.Dex = val
 			hosts.keys++
+		default:
+			if isResult {
+				extras.set(parts[0], val)
+			}
 		}
 	}
 
@@ -675,6 +652,12 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("%s is a kubeconfig, not a cluster export. Run 'kip cluster export > cluster.kip' on a machine that already has this cluster, and import that file instead", filePath)
 		}
 		return fmt.Errorf("invalid export file: missing name or host")
+	}
+
+	if isResult {
+		if err := extras.validate(); err != nil {
+			return err
+		}
 	}
 
 	kubeconfigB64 := strings.Join(kubeconfigLines, "")
@@ -731,19 +714,17 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 
 	becameCurrent := false
 	if err := config.Update(func(cfg *config.Config) error {
-		// The kubeconfig is written here rather than before the lock. Its path
-		// is derived from the cluster name, so two imports of the same name
-		// share it: publishing outside the lock lets one write the file and the
-		// other write the entry, leaving a config that describes one cluster
-		// beside credentials that reach another.
-		// Atomic: writing in place truncates first, so a failure partway leaves
-		// a live cluster's own kubeconfig corrupt while its entry still names it.
-		// An export carries no credential, so writing it over one is a
-		// one-way trade: the file at this path may be how this machine
-		// reaches the cluster, and nothing in the import can reissue it.
+		// Keep the kubeconfig and entry consistent across concurrent imports by
+		// writing both under the config lock. Atomic replacement protects the
+		// existing kubeconfig if writing fails.
+		// Preserve existing cluster settings by accepting results only for new names.
+		if isResult && cfg.GetCluster(name) != nil {
+			return fmt.Errorf("this machine already has a cluster named %s; an install result only adds a new one", name)
+		}
 		if err := refuseAStolenKubeconfigPath(cfg, name, kubeconfigPath); err != nil {
 			return err
 		}
+		// Preserve credentials that the imported kubeconfig cannot replace.
 		if err := refuseToReplaceACredential(kubeconfigPath); err != nil {
 			return err
 		}
@@ -801,6 +782,12 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 				Kubeconfig:       kubeconfigPath,
 				Org:              org,
 			})
+			if isResult {
+				extras.applyTo(&cfg.Clusters[len(cfg.Clusters)-1])
+			}
+		}
+		if sshKey != "" {
+			cfg.GetCluster(name).SSHKey = sshKey
 		}
 		if setCurrent || cfg.CurrentCluster == "" {
 			cfg.CurrentCluster = name
@@ -1369,19 +1356,48 @@ func importedHostOverrides(domain string, h exportHosts) exportHosts {
 	}
 }
 
-// exportServingIdentity resolves the domain and hosts an export declares, from
-// the cluster's own ClusterIdentity rather than from local config.
-//
-// The local entry is what a colleague's import would have derived anyway, and
-// it is the thing that drifts: a machine whose config predates a domain change
-// would otherwise export the hosts it happens to remember. The CR is the
-// cluster's own record of what it serves.
-//
-// A cluster with no ClusterIdentity predates the reconciler, and there is
-// nothing more authoritative to consult, so its local config is used and the
-// operator is told. Every other failure — no permission, no route to the
-// cluster, an identity mid-move — refuses, because each of them can produce
-// hosts that look right and are not.
+const exportBundleHeader = "# Kipper cluster export: share this file with team members\n# Import with: kip cluster add <file>\n"
+
+// writeClusterBundle writes the file kip cluster add reads: the cluster's
+// connection details, its serving hosts, any extra lines, and a kubeconfig that
+// carries no credential.
+func writeClusterBundle(w io.Writer, header string, cluster *config.Cluster, domain string, hosts exportHosts, kubeconfig []byte, extra []string) error {
+	// Use the import renderer to preserve connection details and replace
+	// kubeconfig authentication with the local kip login command.
+	shareable, err := installer.RenderImportedKubeconfig(domain, string(kubeconfig))
+	if err != nil {
+		return fmt.Errorf("preparing the kubeconfig to share: %w", err)
+	}
+	// Reject URL credentials: stripping them could break proxy access.
+	if err := rejectURLCredentials([]byte(shareable)); err != nil {
+		return err
+	}
+	var b strings.Builder
+	b.WriteString(header)
+	fmt.Fprintf(&b, "name: %s\n", cluster.Name)
+	fmt.Fprintf(&b, "provider: %s\n", cluster.Provider)
+	fmt.Fprintf(&b, "host: %s\n", cluster.Host)
+	fmt.Fprintf(&b, "domain: %s\n", domain)
+	if cluster.Org != "" {
+		fmt.Fprintf(&b, "org: %s\n", cluster.Org)
+	}
+	b.WriteString(renderExportHostLines(hosts))
+	for _, line := range extra {
+		b.WriteString(line + "\n")
+	}
+	b.WriteString("kubeconfig: |\n")
+	encoded := base64.StdEncoding.EncodeToString([]byte(shareable))
+	for i := 0; i < len(encoded); i += 76 {
+		end := min(i+76, len(encoded))
+		fmt.Fprintf(&b, "  %s\n", encoded[i:end])
+	}
+	_, err = io.WriteString(w, b.String())
+	return err
+}
+
+// exportServingIdentity reads the cluster's serving domain and hosts from
+// ClusterIdentity to avoid exporting stale local settings. A missing identity
+// falls back to local config with a warning; other lookup errors stop the export.
 func exportServingIdentity(cluster *config.Cluster) (string, exportHosts, error) {
 	client, err := k8s.NewFromCluster(cluster)
 	if err != nil {

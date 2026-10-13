@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // k3sVersion is the exact k3s release every install runs. Unpinned installs
@@ -133,7 +131,7 @@ func decideK3sAgentJoin(workerInstalled, masterVersion string) error {
 
 // installedK3sVersion returns the k3s release tag installed on the host, or
 // "" when k3s is not present.
-func installedK3sVersion(client *ssh.Client) (string, error) {
+func installedK3sVersion(client CommandRunner) (string, error) {
 	output, err := client.Run(k3sVersionProbeCmd)
 	if err != nil {
 		return "", fmt.Errorf("checking installed k3s version: %w", err)
@@ -348,7 +346,7 @@ func parseDNSProbeOutput(output string) []string {
 // failure warns and returns nil: reachability advice is best-effort and
 // must not block an install, but a silently skipped check would read as
 // "all resolvers fine".
-func probeDNSResolvers(client *ssh.Client, resolvers []string) []string {
+func probeDNSResolvers(client CommandRunner, resolvers []string) []string {
 	unreachable, err := ProbeResolvers(client, resolvers)
 	if err != nil {
 		fmt.Printf("  ⚠  could not check DNS resolver reachability: %v\n", err)
@@ -365,7 +363,7 @@ func probeDNSResolvers(client *ssh.Client, resolvers []string) []string {
 // auditing the live resolver file. Callers must pass validated bare IPv4
 // literals (CheckResolvConf output qualifies) — the values are
 // interpolated into a shell command.
-func ProbeResolvers(client *ssh.Client, resolvers []string) ([]string, error) {
+func ProbeResolvers(client CommandRunner, resolvers []string) ([]string, error) {
 	output, err := client.Run(dnsProbeCommand(resolvers))
 	if err != nil {
 		return nil, err
@@ -482,7 +480,7 @@ func rawResolvConfNameservers(body string) []string {
 // quoted so the body is taken literally; callers pass content that
 // resolveDNSResolvers has already reduced to bare `nameserver <ip>`
 // lines.
-func writeResolvConf(client *ssh.Client, body string) error {
+func writeResolvConf(client CommandRunner, body string) error {
 	if _, err := client.Run("mkdir -p /etc/rancher/k3s"); err != nil {
 		return fmt.Errorf("creating k3s config directory: %w", err)
 	}
@@ -499,7 +497,7 @@ func writeResolvConf(client *ssh.Client, body string) error {
 // them live, so the current kubelet start also sees them. A failure here is
 // fatal to the install: starting k3s with protect-kernel-defaults against an
 // unprepared kernel would leave the kubelet unable to come up.
-func writeKubeletSysctls(client *ssh.Client) error {
+func writeKubeletSysctls(client CommandRunner) error {
 	writeCmd := fmt.Sprintf("cat > %s << 'KIPEOF'\n%sKIPEOF", kubeletSysctlPath, kubeletProtectSysctls)
 	if _, err := client.Run(writeCmd); err != nil {
 		return fmt.Errorf("writing kubelet sysctls: %w", err)
@@ -514,7 +512,7 @@ func writeKubeletSysctls(client *ssh.Client) error {
 // file through a config.yaml.d drop-in, which k3s merges on top of any
 // existing config.yaml. A worker join must not clobber agent settings a
 // pre-provisioned or retried host may already carry.
-func writeAgentDNSConfig(client *ssh.Client) error {
+func writeAgentDNSConfig(client CommandRunner) error {
 	if _, err := client.Run("mkdir -p /etc/rancher/k3s/config.yaml.d"); err != nil {
 		return fmt.Errorf("creating k3s config.yaml.d directory: %w", err)
 	}
@@ -530,7 +528,7 @@ func writeAgentDNSConfig(client *ssh.Client) error {
 // protect-kernel-defaults posture as the server, via a config.yaml.d drop-in.
 // The matching sysctls must be applied (writeKubeletSysctls) before the agent
 // starts, exactly as on the server, or the worker kubelet refuses to come up.
-func writeAgentKubeletConfig(client *ssh.Client) error {
+func writeAgentKubeletConfig(client CommandRunner) error {
 	if _, err := client.Run("mkdir -p /etc/rancher/k3s/config.yaml.d"); err != nil {
 		return fmt.Errorf("creating k3s config.yaml.d directory: %w", err)
 	}
@@ -554,7 +552,7 @@ func writeAgentKubeletConfig(client *ssh.Client) error {
 // reading the existing cluster's identity): a fresh k3s server deploys
 // CoreDNS as soon as the apiserver is up, so an after-the-fact existence
 // check cannot tell a re-run from a fresh install.
-func InstallK3s(client *ssh.Client, host string, dnsResolvers []string, k3sPreexisting bool) error {
+func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPreexisting bool) error {
 	resolvers, err := resolveDNSResolvers(dnsResolvers)
 	if err != nil {
 		return err
@@ -661,7 +659,7 @@ func k3sPreexistingFromSample(output string, err error) bool {
 // (the defaults when empty) and restarts CoreDNS to pick it up. It is the
 // scoped remediation for resolver drift on a live cluster; nothing else about
 // the installation is touched. Returns the resolver set it wrote.
-func RepairHostDNS(client *ssh.Client, resolvers []string) ([]string, error) {
+func RepairHostDNS(client CommandRunner, resolvers []string) ([]string, error) {
 	cleaned, err := resolveDNSResolvers(resolvers)
 	if err != nil {
 		return nil, err
@@ -686,7 +684,7 @@ func agentInstallCommand(serverVersion, masterHost string) string {
 
 // JoinWorkerNode joins a worker using the master's token and returns its node name
 // after confirming registration against id. Read id before changing the host.
-func JoinWorkerNode(masterClient *ssh.Client, workerClient *ssh.Client, masterHost string, id HostIdentity) (string, error) {
+func JoinWorkerNode(masterClient CommandRunner, workerClient CommandRunner, masterHost string, id HostIdentity) (string, error) {
 	token, err := masterClient.Run("cat /var/lib/rancher/k3s/server/node-token")
 	if err != nil {
 		return "", fmt.Errorf("reading node token from master: %w", err)
@@ -792,7 +790,7 @@ func JoinWorkerNode(masterClient *ssh.Client, workerClient *ssh.Client, masterHo
 // waitForHostNode polls for registration matching both machine and boot IDs.
 // Duplicate matches fail immediately; lookup errors are retried until timeout.
 // A reboot after the identity read changes the boot ID and causes a timeout.
-func waitForHostNode(master commandRunner, id HostIdentity, timeout, interval time.Duration) (string, error) {
+func waitForHostNode(master CommandRunner, id HostIdentity, timeout, interval time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	var last error
 	for {
@@ -813,7 +811,7 @@ func waitForHostNode(master commandRunner, id HostIdentity, timeout, interval ti
 
 // FetchKubeconfig retrieves the k3s kubeconfig from the remote server
 // and rewrites the server address to point to the public host.
-func FetchKubeconfig(client *ssh.Client, host string) (string, error) {
+func FetchKubeconfig(client CommandRunner, host string) (string, error) {
 	output, err := client.Run("cat /etc/rancher/k3s/k3s.yaml")
 	if err != nil {
 		return "", fmt.Errorf("reading kubeconfig: %w", err)

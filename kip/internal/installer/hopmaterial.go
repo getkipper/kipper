@@ -9,15 +9,9 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/hostnames"
 )
 
-// commandRunner is the part of an SSH connection this package needs to reach a
-// cluster's trust material.
-//
-// It exists as a seam because the functions below decide what every install and
-// every upgrade writes to the anchor the API server verifies logins against,
-// and that decision was previously testable only by inspecting the strings it
-// would have sent. A test could assert the predicate and still pass with the
-// decision inverted. *ssh.Client is the only implementation that ships.
-type commandRunner interface {
+// CommandRunner runs installer shell commands on the cluster host.
+// SSH and local runners implement it; tests can substitute a fake.
+type CommandRunner interface {
 	Run(command string) (string, error)
 	RunStdin(command string, stdin io.Reader) (string, error)
 }
@@ -37,7 +31,7 @@ type commandRunner interface {
 // rotation, reissue and the TLSStore are its job. This function exists because
 // that reconciler does not exist yet at install time, and waiting for it would
 // put a bootstrap dependency on a pod that has not been deployed.
-func EnsureHopMaterial(client commandRunner) error {
+func EnsureHopMaterial(client CommandRunner) error {
 	if _, err := client.Run(ensureNamespaceCmd(hopNamespace)); err != nil {
 		return fmt.Errorf("ensuring %s namespace: %w", hopNamespace, err)
 	}
@@ -64,7 +58,7 @@ func EnsureHopMaterial(client commandRunner) error {
 // ensureAnchorCovers adds the active signer while preserving the existing
 // trust bundle. Rebuilding from the Secret alone could undo an operator's
 // staged CA replacement.
-func ensureAnchorCovers(client commandRunner, activePEM string) error {
+func ensureAnchorCovers(client CommandRunner, activePEM string) error {
 	existing, err := readHopCA(client)
 	if err != nil {
 		return err
@@ -90,7 +84,7 @@ func anchorContains(anchor, certPEM string) bool {
 // already held. Narrowing trust behind the back of whatever put it there is the
 // one thing this must never do, so callers pass what they read rather than what
 // they think it should be.
-func writeAnchor(client commandRunner, active, alsoTrust string) error {
+func writeAnchor(client CommandRunner, active, alsoTrust string) error {
 	bundle := hopca.Bundle([]byte(active), []byte(alsoTrust))
 	if _, err := client.RunStdin(writeFileCmd(hopCAPath, "0644"), strings.NewReader(string(bundle))); err != nil {
 		return fmt.Errorf("writing the cluster certificate authority for the API server: %w", err)
@@ -120,7 +114,7 @@ const (
 // reason other than the Secret not existing therefore stops the install rather
 // than being read as a fresh cluster, and the create is a create — never an
 // apply — so even a misjudged absence loses the race instead of overwriting.
-func ensureHopCA(client commandRunner) (caCertPEM, caKeyPEM string, err error) {
+func ensureHopCA(client CommandRunner) (caCertPEM, caKeyPEM string, err error) {
 	existingCert, err := readSecretKey(client, hopCASecret, "tls.crt")
 	if err != nil {
 		return "", "", err
@@ -155,7 +149,7 @@ func ensureHopCA(client commandRunner) (caCertPEM, caKeyPEM string, err error) {
 
 // readHopCAPair reads back an authority that already existed, insisting on both
 // halves: half an authority cannot sign and cannot anchor.
-func readHopCAPair(client commandRunner) (caCertPEM, caKeyPEM string, err error) {
+func readHopCAPair(client CommandRunner) (caCertPEM, caKeyPEM string, err error) {
 	caCertPEM, err = readSecretKey(client, hopCASecret, "tls.crt")
 	if err != nil {
 		return "", "", err
@@ -180,7 +174,7 @@ func isAlreadyExists(err error) bool {
 // here rather than leaving it to console-api matters on an upgrade or a cutover:
 // the reconciler would not converge until its next heartbeat, up to a day away,
 // and the probe runs in the next few seconds.
-func ensureHopLeaf(client commandRunner, caCertPEM, caKeyPEM string) error {
+func ensureHopLeaf(client CommandRunner, caCertPEM, caKeyPEM string) error {
 	keyPEM, err := readSecretKey(client, hopCertSecret, "tls.key")
 	if err != nil {
 		return err
@@ -219,7 +213,7 @@ func ensureHopLeaf(client commandRunner, caCertPEM, caKeyPEM string) error {
 // exist. A read that fails for any other reason is returned as an error and
 // never mistaken for absence — see ensureHopCA for why that distinction is the
 // safety property of this file.
-func readSecretKey(client commandRunner, name, key string) (string, error) {
+func readSecretKey(client CommandRunner, name, key string) (string, error) {
 	out, err := client.Run(readSecretKeyCmd(name, key))
 	if err != nil {
 		return "", fmt.Errorf("reading %s/%s: %w", hopNamespace, name, err)
@@ -237,18 +231,18 @@ func readSecretKeyCmd(name, key string) string {
 
 // createTLSSecret creates a kubernetes.io/tls Secret and fails if one is already
 // there, which is what keeps an established authority from being overwritten.
-func createTLSSecret(client commandRunner, name, certPEM, keyPEM string) error {
+func createTLSSecret(client CommandRunner, name, certPEM, keyPEM string) error {
 	return writeTLSSecret(client, name, certPEM, keyPEM, false)
 }
 
 // applyTLSSecret upserts a kubernetes.io/tls Secret. The material is piped
 // through stdin rather than the command line, so no private key reaches the
 // process table or an error message.
-func applyTLSSecret(client commandRunner, name, certPEM, keyPEM string) error {
+func applyTLSSecret(client CommandRunner, name, certPEM, keyPEM string) error {
 	return writeTLSSecret(client, name, certPEM, keyPEM, true)
 }
 
-func writeTLSSecret(client commandRunner, name, certPEM, keyPEM string, upsert bool) error {
+func writeTLSSecret(client CommandRunner, name, certPEM, keyPEM string, upsert bool) error {
 	_, err := client.RunStdin(tlsSecretCmd(name, upsert), strings.NewReader(certPEM+"\n"+keyPEM+"\n"))
 	return err
 }

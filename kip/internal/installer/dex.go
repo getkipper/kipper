@@ -5,8 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 const dexManifestTemplate = `apiVersion: v1
@@ -183,16 +181,19 @@ func renderDexManifest(dexHost, consoleHost, adminEmailDomain, adminPasswordHash
 // once (generated on first install, reused on every re-run) before the Dex
 // Deployment, which references it by env — so re-running install never mints a
 // new secret and breaks the console flow.
-func InstallDex(client *ssh.Client, dexHost, consoleHost, adminEmailDomain, adminPasswordHash string) error {
+//
+// passwordSent reports an attempted apply of the admin password manifest.
+// An apply error can occur after the server has committed the change.
+func InstallDex(client CommandRunner, dexHost, consoleHost, adminEmailDomain, adminPasswordHash string) (passwordSent bool, err error) {
 	if err := ensureDexClientSecret(client); err != nil {
-		return err
+		return false, err
 	}
 
 	manifest := renderDexManifest(dexHost, consoleHost, adminEmailDomain, adminPasswordHash)
 
 	applyCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", manifest)
 	if _, err := client.Run(applyCmd); err != nil {
-		return fmt.Errorf("applying dex manifest: %w", err)
+		return true, fmt.Errorf("applying dex manifest: %w", err)
 	}
 
 	// Restart Dex to pick up any ConfigMap changes. On a fresh install
@@ -200,22 +201,22 @@ func InstallDex(client *ssh.Client, dexHost, consoleHost, adminEmailDomain, admi
 	// ensures Dex reloads the updated config.
 	restartCmd := "kubectl rollout restart deployment/dex -n dex"
 	if _, err := client.Run(restartCmd); err != nil {
-		return fmt.Errorf("restarting dex: %w", err)
+		return true, fmt.Errorf("restarting dex: %w", err)
 	}
 
 	waitCmd := "kubectl -n dex rollout status deployment/dex --timeout=120s"
 	if _, err := client.Run(waitCmd); err != nil {
-		return fmt.Errorf("waiting for dex: %w", err)
+		return true, fmt.Errorf("waiting for dex: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 // ensureDexClientSecret provisions the kipper-console client secret into the
 // dex-oidc-client Secret in both the dex and kipper-system namespaces, reusing an
 // existing value so a re-run preserves it. It runs before the Dex Deployment so
 // the secretEnv reference resolves to a non-empty value on first boot.
-func ensureDexClientSecret(client *ssh.Client) error {
+func ensureDexClientSecret(client CommandRunner) error {
 	// Ensure both namespaces exist; the Secret has to precede the Dex Deployment
 	// that references it, and dex-oidc-client also mirrors into kipper-system for
 	// console-api.
@@ -248,7 +249,7 @@ func ensureDexClientSecret(client *ssh.Client) error {
 // or empty only when the Secret is genuinely absent from both. A read that fails
 // for any other reason (API unavailable, RBAC) is returned as an error so the
 // caller stops rather than minting a fresh secret over a live one.
-func readDexClientSecret(client *ssh.Client) (string, error) {
+func readDexClientSecret(client CommandRunner) (string, error) {
 	for _, ns := range []string{"dex", "kipper-system"} {
 		value, err := readSecretValue(client, ns, dexOIDCClientSecretName, "secret")
 		if err != nil {

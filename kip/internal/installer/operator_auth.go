@@ -9,7 +9,6 @@ import (
 
 	"github.com/getkipper/kipper/controller/pkg/authncfg"
 	"github.com/getkipper/kipper/controller/pkg/hostnames"
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 const (
@@ -144,7 +143,7 @@ func renderAuthnConfig(caPEM string, dexHosts ...string) string {
 // It also reports whether the audit policy changed. That answer matters: the
 // API server reads the policy once at startup and never again, so a policy
 // written without a restart is a policy nobody is running.
-func writeAuthnStubAndAuditPolicy(client commandRunner) (policyChanged bool, err error) {
+func writeAuthnStubAndAuditPolicy(client CommandRunner) (policyChanged bool, err error) {
 	if _, err := client.Run(authnStubWriteCmd()); err != nil {
 		return false, fmt.Errorf("writing authentication config stub: %w", err)
 	}
@@ -213,7 +212,7 @@ var errMetricsUnreadable = errors.New("the API server's metrics could not be rea
 // reports grep's 1 as the rightmost non-zero status, so the two stay
 // indistinguishable. Capturing first makes the API server's own failure the
 // script's failure.
-func authnConfigActive(client *ssh.Client, content string) (bool, error) {
+func authnConfigActive(client CommandRunner, content string) (bool, error) {
 	out, err := client.Run(`raw=$(kubectl get --raw /metrics) || exit 97
 printf '%s\n' "$raw" | grep 'apiserver_authentication_config_controller_last_config_info' || true`)
 	if err != nil {
@@ -258,10 +257,10 @@ func unionHosts(a, b []string) []string {
 }
 
 // writePinLine atomically rewrites the managed /etc/hosts pin line to exactly
-// hosts (all pointed at loopback). The atomic filter-into-temp-then-copy-back
-// pattern means a failure leaves either the old or the new line, never a
-// hosts file missing its other entries. Callers must have validated hosts.
-func writePinLine(client *ssh.Client, hosts []string) error {
+// hosts (all pointed at loopback). It prepares the new content in a temporary
+// file before copying over /etc/hosts; that final copy is not atomic.
+// Callers must have validated hosts.
+func writePinLine(client CommandRunner, hosts []string) error {
 	line := "127.0.0.1 " + strings.Join(hosts, " ") + " " + dexHostsPinMarker
 	cmd := fmt.Sprintf(
 		"sed '/%s/d' /etc/hosts > /etc/hosts.kipper-tmp && echo '%s' >> /etc/hosts.kipper-tmp && cat /etc/hosts.kipper-tmp > /etc/hosts && rm -f /etc/hosts.kipper-tmp",
@@ -273,7 +272,7 @@ func writePinLine(client *ssh.Client, hosts []string) error {
 }
 
 // readPinnedHosts reads the current managed pin host list from the server.
-func readPinnedHosts(client *ssh.Client) ([]string, error) {
+func readPinnedHosts(client CommandRunner) ([]string, error) {
 	out, err := client.Run("cat /etc/hosts")
 	if err != nil {
 		return nil, fmt.Errorf("reading /etc/hosts: %w", err)
@@ -296,7 +295,7 @@ const hopCAPath = "/etc/rancher/k3s/kipper-hop-ca.crt"
 // all into "this cluster has no authority" — and the callers act on that: the
 // probe stops verifying, the status reports the API server as untrusting, and
 // the render drops the anchor the API server needs.
-func readHopCA(client commandRunner) (string, error) {
+func readHopCA(client CommandRunner) (string, error) {
 	// -e alone is false for a dangling symlink and for a path whose parent
 	// cannot be traversed, both of which are "could not read this", not "there
 	// is none". -L catches the first; the cat that follows reports the rest.
@@ -347,7 +346,7 @@ const anchorChangedMarker = "KIPPER_ANCHOR_CHANGED"
 // config already matches what A renders to, the write is skipped as "already
 // active" and the run reports success having ignored the anchor the operator
 // asked it to rebuild from. Checking first turns that into a refusal.
-func refuseChangedAnchor(client *ssh.Client, probed string) error {
+func refuseChangedAnchor(client CommandRunner, probed string) error {
 	current, err := readHopCA(client)
 	if err != nil {
 		return err
@@ -368,7 +367,7 @@ func anchorMovedError() error {
 // writeAuthnConfigFenced compares the anchor and installs the config in one
 // remote command. A mismatch preserves the current config. The read and rename
 // still leave a race with concurrent anchor edits; operators must serialize them.
-func writeAuthnConfigFenced(client *ssh.Client, desired, probed string) error {
+func writeAuthnConfigFenced(client CommandRunner, desired, probed string) error {
 	out, err := client.Run(fencedWriteScript(hopCAPath, authnConfigPath, desired, probed))
 	if err == nil {
 		return nil
@@ -415,7 +414,7 @@ func shellQuote(s string) string {
 // node's :443 dropping traffic. Traefik is pinned to the server node for exactly
 // that reason (see traefik.go), so reaching this means something overrode it —
 // or the ingress is simply not up yet.
-func listenerDiagnosis(client *ssh.Client) string {
+func listenerDiagnosis(client CommandRunner) string {
 	if _, err := client.Run("curl -sS -o /dev/null -k --max-time 5 https://127.0.0.1/ 2>&1"); err != nil {
 		return "; nothing is answering https on this node, so the ingress controller is not running here, " +
 			"check that Traefik is scheduled on the server node and Ready"
@@ -446,7 +445,7 @@ func probeHint(host string) string {
 // old issuer): the config drops it while the pin still covers it, then the
 // pin tightens. Certificate authentication is untouched throughout, so a
 // failure here never severs cluster access.
-func EnsureOperatorAuth(client *ssh.Client, dexHosts ...string) error {
+func EnsureOperatorAuth(client CommandRunner, dexHosts ...string) error {
 	if len(dexHosts) == 0 {
 		return fmt.Errorf("no dex hosts given")
 	}
@@ -529,6 +528,6 @@ func EnsureOperatorAuth(client *ssh.Client, dexHosts ...string) error {
 // InstallOperatorAuth activates OIDC authentication for a single Dex host at
 // install time. It is the thin wrapper over EnsureOperatorAuth; the
 // convergent mutator is what a domain cutover drives with two hosts.
-func InstallOperatorAuth(client *ssh.Client, dexHost string) error {
+func InstallOperatorAuth(client CommandRunner, dexHost string) error {
 	return EnsureOperatorAuth(client, dexHost)
 }

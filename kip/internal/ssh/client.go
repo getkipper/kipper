@@ -260,15 +260,28 @@ func (c *Client) RunStream(command string, stdout io.Writer) error {
 	return nil
 }
 
+// RunStreamTo separates remote stdout from stderr and SSH diagnostics so callers
+// can track log offsets. It leaves retries to the caller to avoid duplicate output.
+func (c *Client) RunStreamTo(command string, stdout, stderr io.Writer) error {
+	cmd, ctx, cancel := c.command(append(c.sshArgs(), command)...)
+	defer cancel()
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("ssh command did not finish within %s: %w", c.cfg.CommandTimeout, err)
+	}
+	if err != nil {
+		return fmt.Errorf("running %q on %s: %w", command, c.cfg.Host, err)
+	}
+	return nil
+}
+
 // Upload writes the contents of a reader to a remote file path. We use
 // `cat > path` over an ssh session rather than scp so the only required
 // remote-side tooling is a POSIX shell.
 func (c *Client) Upload(content io.Reader, remotePath string, mode os.FileMode) error {
-	// Set a restrictive umask and remove any pre-existing file/symlink before
-	// writing, so the file is created 0600 from its first byte (never briefly
-	// world-readable under the default umask) and a planted symlink at the
-	// fixed path cannot redirect the write. chmod then applies the exact mode.
-	remoteCmd := fmt.Sprintf("umask 077 && rm -f %s && cat > %s && chmod %o %s", remotePath, remotePath, mode, remotePath)
+	remoteCmd := UploadCommand(remotePath, mode)
 	payload, readErr := io.ReadAll(content)
 	if readErr != nil {
 		return fmt.Errorf("reading content for %s: %w", remotePath, readErr)
@@ -285,22 +298,30 @@ func (c *Client) Upload(content io.Reader, remotePath string, mode os.FileMode) 
 	return nil
 }
 
+// UploadCommand is the shell command that writes stdin to path with mode. A
+// restrictive umask keeps the new file private until chmod applies mode.
+// Removing the existing path avoids following a pre-existing symlink; callers
+// must use a directory protected from concurrent untrusted writes.
+func UploadCommand(path string, mode os.FileMode) string {
+	q := Quote(path)
+	return fmt.Sprintf("umask 077 && rm -f %s && cat > %s && chmod %o %s", q, q, mode, q)
+}
+
+// Quote makes s a single shell word.
+func Quote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // socketPathFits reports whether OpenSSH can bind a multiplexing listener at
 // this path, allowing for the temporary name it binds first.
 func socketPathFits(path string) bool {
 	return len(path) <= maxSocketPath
 }
 
-// Multiplexed reports whether commands are sharing one connection right now.
-//
-// It asks rather than remembers. The firewall step runs long after Dial — after
-// hardening, after k3s — and a master killed in between leaves its socket file
-// behind, at which point ssh quietly falls back to a connection per command. A
-// remembered answer would then authorise a rule sized for one connection while
-// the installer was making hundreds through it, and lock itself out of a
-// half-built host. That is the failure this gate exists to prevent, so the gate
-// cannot be reading a cached value.
-func (c *Client) Multiplexed() bool {
+// SurvivesSSHRateLimit checks that the shared SSH connection is still serving.
+// Rechecking before the firewall step prevents a stale socket from enabling a
+// rate limit that would block an installer opening one connection per command.
+func (c *Client) SurvivesSSHRateLimit() bool {
 	return c.masterIsServing()
 }
 
@@ -363,6 +384,9 @@ func (c *Client) sshArgsWith(extra ...string) []string {
 	args := []string{
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "ConnectTimeout=10",
+		// Detect stalled connections during long commands and log streams.
+		"-o", "ServerAliveInterval=15",
+		"-o", "ServerAliveCountMax=4",
 	}
 	if c.controlPath != "" {
 		// One connection carries every command. Without this an install
@@ -372,11 +396,6 @@ func (c *Client) sshArgsWith(extra ...string) []string {
 			"-o", "ControlMaster=auto",
 			"-o", "ControlPath="+c.controlPath,
 			"-o", "ControlPersist="+controlPersist,
-			// A master whose TCP has died silently — a VPN reconnect, a NAT
-			// table flush — would otherwise hang the install with no timeout
-			// at all, where a connection per command failed in ten seconds.
-			"-o", "ServerAliveInterval=15",
-			"-o", "ServerAliveCountMax=4",
 		)
 	}
 	if c.cfg.Port != "" && c.cfg.Port != defaultPort {

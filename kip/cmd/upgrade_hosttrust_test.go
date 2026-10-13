@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
@@ -30,11 +31,11 @@ func stageHostTrust(t *testing.T, synced bool, changed bool) *[]string {
 		order = append(order, "apiserver")
 		return changed, nil
 	}
-	syncOperatorAuth = func(*ssh.Client) (bool, error) {
+	syncOperatorAuth = func(installer.CommandRunner) (bool, error) {
 		order = append(order, "sync")
 		return synced, nil
 	}
-	ensureOperatorAuth = func(_ *ssh.Client, hosts ...string) error {
+	ensureOperatorAuth = func(_ installer.CommandRunner, hosts ...string) error {
 		order = append(order, "issuer:"+hosts[0])
 		return nil
 	}
@@ -77,7 +78,7 @@ func TestUpgradeRepairsTheAPIServerEvenWithNoIssuerToConfigure(t *testing.T) {
 // cannot reach its own Dex on an old version too.
 func TestUpgradeReportsAnUnreachableIssuerAndCarriesOn(t *testing.T) {
 	stageHostTrust(t, false, true)
-	ensureOperatorAuth = func(*ssh.Client, ...string) error { return assert.AnError }
+	ensureOperatorAuth = func(installer.CommandRunner, ...string) error { return assert.AnError }
 
 	assert.NoError(t, reconcileHostTrust(nil, "dex.shop.example"))
 }

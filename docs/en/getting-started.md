@@ -29,7 +29,7 @@ curl -sL https://getkipper.com/install | sh
 kip --version
 ```
 
-On Windows, follow [Installing from Windows](/en/windows). That guide uses WSL for installation and the native Windows CLI for daily work.
+On Windows, follow [Installing from Windows](/en/windows): the same `kip install` runs from PowerShell.
 
 To build the CLI from source, see [Contributing](/en/contributing).
 

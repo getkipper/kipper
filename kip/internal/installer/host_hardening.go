@@ -3,8 +3,6 @@ package installer
 import (
 	"fmt"
 	"strings"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // HostAudit reports host-level security findings detected before
@@ -30,7 +28,7 @@ func (a HostAudit) Findings() []string {
 // AuditHost inspects the remote host for surplus services exposed on
 // public interfaces. It does not modify state — pair it with HardenHost
 // to fix anything found.
-func AuditHost(client *ssh.Client) (HostAudit, error) {
+func AuditHost(client CommandRunner) (HostAudit, error) {
 	var audit HostAudit
 
 	// A socket on 0.0.0.0:111, [::]:111, or *:111 is reachable from
@@ -54,14 +52,14 @@ func AuditHost(client *ssh.Client) (HostAudit, error) {
 // HardenHost applies host-level security defaults for the surplus
 // services AuditHost can detect. Idempotent: safe to run on hosts that
 // are already hardened or that never had the service installed.
-func HardenHost(client *ssh.Client) error {
+func HardenHost(client CommandRunner) error {
 	if err := disableRpcbind(client); err != nil {
 		return err
 	}
 	return nil
 }
 
-func disableRpcbind(client *ssh.Client) error {
+func disableRpcbind(client CommandRunner) error {
 	// Skip silently if rpcbind isn't installed. systemctl
 	// list-unit-files prints the unit name only when it exists.
 	out, err := client.Run("systemctl list-unit-files rpcbind.socket 2>/dev/null | awk '$1 == \"rpcbind.socket\" {print $1}'")

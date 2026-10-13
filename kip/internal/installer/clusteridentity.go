@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/getkipper/kipper/controller/pkg/pubip"
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // dnsHostnamePattern matches a DNS hostname. Validating against it before the
@@ -107,7 +106,7 @@ func validateIdentityInputs(domain, consoleOverride, consoleAPIOverride, dexOver
 // already exist, so the console-api reconciler adopts the serving identity on
 // first boot. Create-if-absent preserves an existing CR, so re-running install
 // never stomps a custom domain a cluster has since moved to.
-func InstallClusterIdentity(client *ssh.Client, domain, consoleOverride, consoleAPIOverride, dexOverride, kipperRunDomain, clusterHost string) error {
+func InstallClusterIdentity(client CommandRunner, domain, consoleOverride, consoleAPIOverride, dexOverride, kipperRunDomain, clusterHost string) error {
 	if err := validateIdentityInputs(domain, consoleOverride, consoleAPIOverride, dexOverride, kipperRunDomain, clusterHost); err != nil {
 		return err
 	}
