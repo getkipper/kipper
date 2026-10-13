@@ -8,31 +8,18 @@ import (
 	"time"
 )
 
-// k3sPodCIDR is the k3s default pod CIDR. Kipper does not customize k3s
-// today, so this default is correct. If a --cluster-cidr flag is ever
-// exposed in the installer, ufwRules must read the actual value from k3s
-// instead of this constant. The service CIDR needs no firewall rule
-// (service IPs are DNAT'd before they reach the host INPUT chain), so it is
-// deliberately not a constant here.
+// k3sPodCIDR matches the default used by the k3s installer. If the installer
+// makes the pod CIDR configurable, both firewall backends must use that value.
 const k3sPodCIDR = "10.42.0.0/16"
 
-// firewallClaimPath records that Kipper's first configuration command ran to
-// completion on this host, which is what makes the ruleset Kipper's. It is
-// attempted in that same command and reached only if the rest of it succeeded,
-// so a run that fails earlier leaves no claim, and one that fails later leaves
-// a claim over the half-built firewall it left, which is what a retry needs.
+// firewallClaimPath records ownership of the UFW ruleset after the first
+// configuration change, allowing retries to repair a partially applied ruleset.
 const firewallClaimPath = "/etc/kipper/firewall-managed"
 
-// FirewallAudit reports an existing host firewall configuration that
-// Kipper should not modify. Cloud-side firewalls (Hetzner Cloud
-// Firewall, AWS Security Groups, etc.) are external to the host and
-// are not visible to this audit.
+// FirewallAudit reports active host firewall managers and Kipper ownership.
+// Cloud firewalls are outside the scope of this audit.
 type FirewallAudit struct {
-	// Existing names the active host firewall manager. Empty means
-	// no managed firewall was detected and Kipper may install one.
-	Existing string
-	// KipperManaged reports that the active firewall is one Kipper set up
-	// rather than an admin's own, which makes it Kipper's to reconfigure.
+	Existing      string
 	KipperManaged bool
 }
 
@@ -45,12 +32,8 @@ func (a FirewallAudit) BlocksConfiguration() bool {
 // FirewallPlan is what a caller should do about the firewall on this host, and
 // what to tell the operator about it.
 type FirewallPlan struct {
-	// Configure reports that kip should apply its ruleset to this host.
-	Configure bool
-	// Notice describes the firewall the audit found, ready to print.
-	Notice string
-	// FlagNotice explains an opt-out. Empty unless the operator turned off a
-	// firewall step kip would otherwise have run.
+	Configure  bool
+	Notice     string
 	FlagNotice string
 }
 
@@ -86,31 +69,17 @@ func PlanFirewall(audit FirewallAudit, wantFirewall bool) FirewallPlan {
 	return plan
 }
 
-// FirewallRunner runs the firewall's commands and says whether the SSH rate
-// limit is safe for the connection the installer itself is using.
+// FirewallRunner runs firewall commands and checks SSH connectivity.
 type FirewallRunner interface {
 	CommandRunner
 	SurvivesSSHRateLimit() bool
+	// ConfirmFreshConnection returns localrun.ErrNoConnection when commands
+	// run on the host itself.
+	ConfirmFreshConnection() error
 }
 
-// ApplyFirewallPlan installs UFW and applies a k3s-correct ruleset when the
-// plan calls for it, and does nothing when it does not: SSH (on the configured
-// port), HTTP/HTTPS, the k3s API, and pod→host access limited to the specific
-// ports k3s needs (the kubelet and node-exporter). Sets the FORWARD policy to
-// ACCEPT in /etc/default/ufw so it persists across reloads.
-//
-// Idempotent: re-running adds no duplicate rules. Switching the SSH rule
-// between allow and limit is also safe, because ufw matches a rule by its port
-// and protocol and replaces the action in place rather than leaving both rules
-// for the earlier one to win.
-//
-// This is the only way to configure a firewall from outside this package, so
-// the plan's refusal is enforced by the code that changes the host rather than
-// trusted to each caller. It audits again itself before starting, because the
-// caller's plan predates host hardening and the k3s install. A cluster whose
-// firewall predates the claim file carries no claim, so it reads as an admin's
-// and keeps its rules until it is rebuilt (pre-release clusters are rebuilt,
-// not migrated in place).
+// ApplyFirewallPlan configures firewalld on RHEL-family hosts or UFW elsewhere
+// when the plan permits it. Each backend rechecks ownership before changing rules.
 func ApplyFirewallPlan(client FirewallRunner, plan FirewallPlan, rateLimitSSH bool) error {
 	if !plan.Configure {
 		return nil
@@ -123,21 +92,28 @@ func ApplyFirewallPlan(client FirewallRunner, plan FirewallPlan, rateLimitSSH bo
 func AuditFirewall(client CommandRunner) (FirewallAudit, error) {
 	var audit FirewallAudit
 
-	// firewalld is asked about first because Kipper never manages it, and a
-	// host running both managers has to come out blocked. Asking about ufw
-	// first would let a claim on the ufw ruleset speak for a firewalld Kipper
-	// cannot have set up, and configuring the host behind its back.
-	//
-	// Both probes swallow a missing or inactive service in the shell and exit
-	// zero, so a non-zero status is the session itself failing. That has to be
-	// an error rather than an answer: read as "no firewall" it would license
-	// Kipper to configure a host it never managed to look at.
+	// Probe commands tolerate missing or inactive services. A runner error
+	// must stop configuration rather than be treated as an absent firewall.
 	out, err := client.Run("systemctl is-active firewalld 2>/dev/null || true")
 	if err != nil {
 		return audit, fmt.Errorf("checking for firewalld: %w", err)
 	}
 	if strings.TrimSpace(out) == "active" {
 		audit.Existing = "firewalld"
+		// Honor firewalld ownership only on the family this backend supports.
+		host, err := DetectHostOS(client)
+		if err != nil {
+			return audit, fmt.Errorf("checking for firewalld: %w", err)
+		}
+		audit.KipperManaged = host.Family == FamilyRHEL && firewalldClaimed(client)
+		// Two active managers block configuration even when one is claimed.
+		out, err := client.Run("ufw status 2>/dev/null | awk 'NR==1 {print $2}'")
+		if err != nil {
+			return audit, fmt.Errorf("checking for ufw: %w", err)
+		}
+		if strings.TrimSpace(out) == "active" {
+			audit.Existing, audit.KipperManaged = "firewalld and ufw", false
+		}
 		return audit, nil
 	}
 
@@ -156,13 +132,8 @@ func AuditFirewall(client CommandRunner) (FirewallAudit, error) {
 	return audit, nil
 }
 
-// firewallClaimed answers whether Kipper left its claim on this host. Any
-// failure to read it answers no, which keeps an unreadable host in the same
-// hands-off state as an admin's own firewall.
-//
-// `test -s` rather than `test -f`: an empty file is not a claim. The write
-// publishes by rename so an empty one should never appear, and requiring
-// content costs nothing to be sure of it.
+// firewallClaimed requires the runner to confirm a nonempty ownership file.
+// A failed check leaves an active firewall under operator control.
 func firewallClaimed(client CommandRunner) bool {
 	out, err := client.Run("test -s " + firewallClaimPath + " && echo claimed || true")
 	if err != nil {
@@ -171,29 +142,18 @@ func firewallClaimed(client CommandRunner) bool {
 	return strings.TrimSpace(out) == "claimed"
 }
 
-// claimCommand records Kipper as the owner of this host's ufw ruleset. The
-// file is addressed to whoever finds it, since it decides whether a later kip
-// run reconfigures this firewall or keeps its hands off.
-//
-// The note is written to a staged file and moved into place, because `>`
-// creates the destination before anything is written to it. Writing straight
-// to the claim path would publish whatever prefix a failed write had already
-// emitted, and a partial file is as readable a claim as a whole one.
-//
-// mktemp gives each run its own staged name. A fixed one is shared state
-// between concurrent runs: the second to open it truncates the first's file,
-// and the first then renames the second's half-written bytes over a claim that
-// was valid. The template sits in the destination directory so the rename stays
-// within one filesystem, and the trap clears the staged file on any exit that
-// did not publish it.
+// claimCommand builds an ownership claim for the UFW ruleset.
 func claimCommand(claimPath string) string {
-	const note = "The ufw ruleset on this host is managed by Kipper (kip install, kip cluster harden).\n" +
+	return claimCommandFor(claimPath, "ufw ruleset")
+}
+
+// claimCommandFor builds an ownership claim naming the managed configuration.
+// A unique temporary file in the same directory allows atomic publication by
+// rename after a successful write. The trap removes any unpublished file.
+func claimCommandFor(claimPath, what string) string {
+	note := "The " + what + " on this host is managed by Kipper (kip install, kip cluster harden).\n" +
 		"Delete this file to take the firewall over, and kip will leave its rules alone.\n"
 
-	// shellQuote (operator_auth.go) so the command does not depend on its
-	// operands happening to be free of shell syntax. Kipper only ever claims one
-	// fixed path, but a command assembled by string formatting should not rest
-	// on that.
 	dir := path.Dir(claimPath)
 	return fmt.Sprintf(
 		`mkdir -p %s && tmp=$(mktemp %s) && trap 'rm -f "$tmp"' EXIT && printf %s > "$tmp" && mv "$tmp" %s`,
@@ -201,14 +161,18 @@ func claimCommand(claimPath string) string {
 		shellQuote(note), shellQuote(claimPath))
 }
 
-// configureFirewallWith enables the requested SSH rate limit only when the
-// runner can continue under it, either locally or over a shared SSH connection.
-// ApplyFirewallPlan remains the public entry point to enforce ownership checks.
-// It detects the OS here so kip cluster harden can run without gathering system info.
+// configureFirewallWith selects the host's firewall backend. UFW rate limiting
+// requires a runner that can continue under the limit; firewalld uses an allow rule.
 func configureFirewallWith(client FirewallRunner, rateLimitSSH bool) error {
 	host, err := DetectHostOS(client)
 	if err != nil {
 		return fmt.Errorf("configuring the firewall: %w", err)
+	}
+	if host.Family == FamilyRHEL {
+		if rateLimitSSH {
+			fmt.Printf("  ℹ  Kipper's firewalld configuration allows SSH without rate limiting\n")
+		}
+		return configureFirewalld(client, host)
 	}
 	return configureFirewall(client, host, rateLimitSSH && client.SurvivesSSHRateLimit())
 }

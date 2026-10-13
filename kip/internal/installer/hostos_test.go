@@ -77,3 +77,5 @@ func TestEntryPointsStopWhenTheHostCannotBeRead(t *testing.T) {
 type firewallOnly struct{ osReleaseRunner }
 
 func (firewallOnly) SurvivesSSHRateLimit() bool { return true }
+
+func (firewallOnly) ConfirmFreshConnection() error { return nil }

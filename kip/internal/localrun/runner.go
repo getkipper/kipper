@@ -4,6 +4,7 @@ package localrun
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -68,6 +69,14 @@ func (r *Runner) bash() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("bash is not installed in %s; the installer's commands need it", r.Path)
+}
+
+// ErrNoConnection indicates that commands run locally, without an SSH connection.
+var ErrNoConnection = errors.New("commands run on this machine, so there is no connection to confirm")
+
+// ConfirmFreshConnection returns ErrNoConnection.
+func (r *Runner) ConfirmFreshConnection() error {
+	return ErrNoConnection
 }
 
 // SurvivesSSHRateLimit returns true because commands run locally.

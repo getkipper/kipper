@@ -129,8 +129,7 @@ func TestAuditFirewall(t *testing.T) {
 			"rules kip did not write are never trampled")
 	})
 
-	// Kipper manages ufw and nothing else, so a claim left beside an active
-	// firewalld describes a firewall that is no longer the one running.
+	// A UFW claim cannot authorize changes to firewalld.
 	t.Run("a claim does not launder a firewall kip does not manage", func(t *testing.T) {
 		c, _ := dialStub(t, stubHost{
 			ufwStatus: "inactive", firewalldIs: "active", claimPresent: true,
@@ -144,10 +143,7 @@ func TestAuditFirewall(t *testing.T) {
 		assert.True(t, audit.BlocksConfiguration())
 	})
 
-	// Both managers running at once is the state a claim must not talk its way
-	// out of: the claim can only ever describe the ufw ruleset, and Kipper has
-	// no business reconfiguring a host while a firewalld it does not manage is
-	// up.
+	// Two active managers block configuration even when UFW is claimed.
 	t.Run("a claimed ufw does not excuse an active firewalld beside it", func(t *testing.T) {
 		c, _ := dialStub(t, stubHost{
 			ufwStatus: "active", firewalldIs: "active", claimPresent: true,
@@ -156,7 +152,7 @@ func TestAuditFirewall(t *testing.T) {
 		audit, err := AuditFirewall(c)
 
 		require.NoError(t, err)
-		assert.Equal(t, "firewalld", audit.Existing)
+		assert.Equal(t, "firewalld and ufw", audit.Existing)
 		assert.False(t, audit.KipperManaged)
 		assert.True(t, audit.BlocksConfiguration(),
 			"a firewall manager kip cannot manage outranks kip's claim on another")

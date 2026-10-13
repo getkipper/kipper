@@ -160,3 +160,29 @@ func TestSSHArgsAlwaysSendKeepalives(t *testing.T) {
 		}
 	}
 }
+
+// The firewall check needs a connection of its own: a command over the shared
+// master proves only that the old session survived.
+func TestFreshConnectionArgsBypassTheSharedConnection(t *testing.T) {
+	c := &Client{cfg: Config{Host: "203.0.113.10", User: "root", Port: "2222", KeyPath: "/path/to/key"}, controlPath: "/tmp/kip-test.sock"}
+
+	args := c.freshConnectionArgs()
+	joined := strings.Join(args, " ")
+
+	assert.Contains(t, joined, "-o ControlMaster=no -o ControlPath=none")
+	assert.NotContains(t, joined, "/tmp/kip-test.sock")
+	assert.Contains(t, joined, "-p 2222")
+	assert.Contains(t, joined, "-i /path/to/key")
+	assert.Equal(t, []string{"root@203.0.113.10", "true"}, args[len(args)-2:])
+}
+
+// OpenSSH uses the first value for each option, so multiplexing overrides
+// must precede the caller's options.
+func TestFreshConnectionArgsOverrideACallersControlPath(t *testing.T) {
+	c := &Client{cfg: Config{Host: "203.0.113.10", Options: []string{"ControlPath=/tmp/elsewhere.sock", "ControlMaster=auto"}}}
+
+	joined := strings.Join(c.freshConnectionArgs(), " ")
+
+	assert.Less(t, strings.Index(joined, "ControlPath=none"), strings.Index(joined, "ControlPath=/tmp/elsewhere.sock"))
+	assert.Less(t, strings.Index(joined, "ControlMaster=no"), strings.Index(joined, "ControlMaster=auto"))
+}

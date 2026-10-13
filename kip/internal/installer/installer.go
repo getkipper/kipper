@@ -56,17 +56,34 @@ type Result struct {
 	CredentialsShown bool
 }
 
-// hostRunner is everything an install asks of the server: commands, uploads,
-// and whether the SSH rate limit is safe for the connection in use.
+// hostRunner supports installation commands, uploads, and SSH connectivity checks.
 type hostRunner interface {
 	Uploader
 	SurvivesSSHRateLimit() bool
+	ConfirmFreshConnection() error
 }
 
 var (
 	_ hostRunner = (*ssh.Client)(nil)
 	_ hostRunner = (*localrun.Runner)(nil)
 )
+
+type installStep struct {
+	name string
+	fn   func() error
+}
+
+// k3sAndFirewallSteps configures firewalld before installing k3s so the pod
+// zone is available during startup. A nil firewall step leaves the firewall alone.
+func k3sAndFirewallSteps(host HostOS, k3s installStep, firewall *installStep) []installStep {
+	if firewall == nil {
+		return []installStep{k3s}
+	}
+	if host.Family == FamilyRHEL {
+		return []installStep{*firewall, k3s}
+	}
+	return []installStep{k3s, *firewall}
+}
 
 // Run executes the full cluster installation sequence.
 func Run(opts Options) (*Result, error) {
@@ -352,10 +369,6 @@ func Run(opts Options) (*Result, error) {
 	gatewayKipperRunDomain := gatewayRegistrationFor(existingIdentity, domainName)
 
 	// Install cluster components
-	type installStep struct {
-		name string
-		fn   func() error
-	}
 	var steps []installStep
 	// First, before anything installs a package. needrestart restarts daemons
 	// holding a patched library after an unattended upgrade, and restarting
@@ -369,16 +382,16 @@ func Run(opts Options) (*Result, error) {
 			return HardenHost(client)
 		}})
 	}
-	steps = append(steps, []installStep{
-		{"Installing k3s", func() error {
-			return InstallK3s(client, opts.Host, opts.DNSResolvers, k3sPreexisting)
-		}},
-	}...)
+	k3sStep := installStep{"Installing k3s", func() error {
+		return InstallK3s(client, opts.Host, opts.DNSResolvers, k3sPreexisting)
+	}}
+	var firewallStep *installStep
 	if configureFirewall {
-		steps = append(steps, installStep{"Configuring firewall", func() error {
+		firewallStep = &installStep{"Configuring firewall", func() error {
 			return ApplyFirewallPlan(client, fwPlan, !opts.NoSSHRateLimit)
-		}})
+		}}
 	}
+	steps = append(steps, k3sAndFirewallSteps(sysInfo.Host, k3sStep, firewallStep)...)
 	// effectivePlatform is the cluster's actual sizing state after
 	// InstallPlatformConfig runs (which preserves an existing CR's
 	// overrides on reinstall). The observability install steps below
