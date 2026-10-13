@@ -48,20 +48,26 @@ Kipper is pre-1.0. See [operating considerations](#operating-considerations) bef
 
 - An Ubuntu 20.04/22.04/24.04/26.04 or Debian 11/12 server with a public IP address and root SSH access
 - At least 2 GB RAM and 30 GB free disk for installation; allow more capacity for your workloads. See [sizing guidance](docs/en/installation.md).
-- An SSH key authorized for the server's root account
+- An SSH key authorised for the server's root account. On Windows, kip can create the key and add its public key to the server
 - Provider firewall rules allowing SSH, ports 80 and 443, and port 6443 from the computers that will manage the cluster
 
 Run the commands below on your own computer.
 
 ### Install the CLI
 
+Linux and macOS, on x86-64 and arm64:
+
 ```bash
 curl -sL https://getkipper.com/install | sh
 ```
 
-Downloads the binary for your platform from the [latest release](https://github.com/getkipper/kipper/releases/latest), checks it against the published checksums, and puts `kip` in `/usr/local/bin`. Linux and macOS, on x86-64 and arm64.
+Windows, in PowerShell:
 
-On Windows, download `kip-windows-amd64.exe` from the releases page and run `kip install` from PowerShell. See [Installing from Windows](docs/en/windows.md).
+```powershell
+irm https://getkipper.com/install.ps1 | iex
+```
+
+Both installers download the binary for your platform from the [latest release](https://github.com/getkipper/kipper/releases/latest) and check it against the published checksums. On Linux and macOS, the installer places `kip` in `/usr/local/bin`. On Windows, it uses `%LOCALAPPDATA%\Programs\kip` and adds this folder to your user PATH. See [Installing from Windows](docs/en/windows.md) for details.
 
 ### Install the cluster
 
@@ -69,6 +75,12 @@ Replace the example IP, key path, and email with your own:
 
 ```bash
 kip install --host 203.0.113.10 --ssh-key ~/.ssh/id_ed25519 --admin-email you@example.com
+```
+
+On Windows, omit `--ssh-key` and leave `KIP_SSH_KEY` unset to use the default key at `%USERPROFILE%\.ssh\id_ed25519`. kip offers to create the key if it is missing and add its public key to the server if needed.
+
+```powershell
+kip install --host 203.0.113.10 --admin-email you@example.com
 ```
 
 Save the console URL and admin password printed by the installer. Complete the browser sign-in when prompted, then check the cluster:

@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -123,6 +122,5 @@ func confirmRepair(in interface{ Read([]byte) (int, error) }) bool {
 	if err != nil {
 		return false
 	}
-	ans = strings.ToLower(strings.TrimSpace(ans))
-	return ans == "y" || ans == "yes"
+	return isYes(ans)
 }

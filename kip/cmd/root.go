@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -24,10 +25,17 @@ func SetVersion(v string) {
 	rootCmd.Version = v
 }
 
-// Execute runs the root command.
+// Execute runs the root command and exits with its status.
 func Execute() {
+	os.Exit(execute(os.Stderr))
+}
+
+func execute(errOut io.Writer) int {
+	// This function prints errors, so suppress Cobra's duplicate output.
+	rootCmd.SilenceErrors = true
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		_, _ = fmt.Fprintf(errOut, "Error: %v\n", err)
+		return 1
 	}
+	return 0
 }

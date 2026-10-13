@@ -274,8 +274,7 @@ func askToProceed(d uninstallDeps, question string) (proceed, asked bool) {
 		// never put to anyone, so the answer is not "no", it is "unknown".
 		return false, false
 	}
-	answer := strings.ToLower(strings.TrimSpace(scanner.Text()))
-	return answer == "y" || answer == "yes", true
+	return isYes(scanner.Text()), true
 }
 
 // gatewayTokenReader is the slice of an SSH client the release path needs, so a

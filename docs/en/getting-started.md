@@ -5,7 +5,7 @@ description: 'Set up Kipper on a Linux server, sign in, and deploy a container w
 
 # Getting Started
 
-This guide takes you from a fresh Linux server to a running app with HTTPS and a web console. Run the commands on your own computer. Kipper uses SSH to install the server, then APIs to deploy and manage your workloads.
+This guide takes you from a fresh Linux server to a running app with HTTPS and a web console. Run the commands on your own Linux, macOS or Windows computer. Kipper uses SSH to set up the server, then APIs to deploy and manage your workloads.
 
 To join a cluster someone has already installed, follow [Team Access](/en/team-access).
 
@@ -13,7 +13,7 @@ To join a cluster someone has already installed, follow [Team Access](/en/team-a
 
 - **A supported server:** Ubuntu 20.04, 22.04, 24.04, or 26.04; or Debian 11 or 12, with a public IP address and root SSH access.
 - **Capacity:** the installer requires at least 2 GB RAM and 30 GB free disk. Allow additional capacity for your apps and databases; see [sizing guidance](/en/installation#preflight-checks).
-- **An SSH key:** install its public half on the server's root account. You should be able to connect with `ssh root@your-server`.
+- **An SSH key:** add the public key to the server's root account. You should be able to connect with `ssh root@your-server`. On Windows, kip can create the key and add its public key to the server.
 - **Provider firewall rules:** allow SSH and ports 80 and 443. Allow port 6443 from the addresses that will use the Kubernetes API, including your own computer.
 
 Kipper configures the server's UFW firewall during installation. If an existing firewall is already active and managed separately, Kipper preserves it and reports that you need to maintain its rules. See [host security](/en/security#host-hardening) for details.
@@ -22,14 +22,21 @@ The free `*.kipper.run` address works with Kipper-managed DNS. To use your own d
 
 ## Step 1: Install the CLI
 
-On Linux or macOS:
+::: code-group
 
-```bash
+```bash [Linux / macOS]
 curl -sL https://getkipper.com/install | sh
 kip --version
 ```
 
-On Windows, follow [Installing from Windows](/en/windows): the same `kip install` runs from PowerShell.
+```powershell [Windows (PowerShell)]
+irm https://getkipper.com/install.ps1 | iex
+kip --version
+```
+
+:::
+
+Both installers verify the download against the release's checksums. On Windows, the installer places kip in `%LOCALAPPDATA%\Programs\kip` and adds this folder to your user PATH. The default Windows installation requires no administrator rights. If `kip` is not found, open a new PowerShell window. See [Installing from Windows](/en/windows) for details.
 
 To build the CLI from source, see [Contributing](/en/contributing).
 
@@ -37,9 +44,19 @@ To build the CLI from source, see [Contributing](/en/contributing).
 
 Replace the example IP, key path, and email with your own:
 
-```bash
+::: code-group
+
+```bash [Linux / macOS]
 kip install --host 203.0.113.10 --ssh-key ~/.ssh/id_ed25519 --admin-email admin@example.com
 ```
+
+```powershell [Windows (PowerShell)]
+kip install --host 203.0.113.10 --admin-email admin@example.com
+```
+
+:::
+
+On Windows, unless you set `--ssh-key` or `KIP_SSH_KEY`, kip uses the default key at `%USERPROFILE%\.ssh\id_ed25519` and offers to create it if it is missing. If the server rejects the key, kip offers to add its public key through a separate SSH login, which may prompt for the root password. The installation runs on the server and continues if your connection drops.
 
 Kipper checks the server, installs the platform, and prints the console URL and admin sign-in details. The free cluster address is derived from the server's IP; in this example it is `203-0-113-10.kipper.run`.
 

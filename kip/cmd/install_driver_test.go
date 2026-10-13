@@ -487,9 +487,34 @@ func TestKeyCheckFailure(t *testing.T) {
 }
 
 func TestPlacementError(t *testing.T) {
-	err := placementError("root@203.0.113.10: Permission denied (publickey,password).\n", errors.New("exit status 255"))
-	assert.ErrorContains(t, err, "Permission denied")
-	assert.ErrorContains(t, placementError("", errors.New("exit status 255")), "exit status 255")
+	err := placementError("203.0.113.10", "ssh: connect to host 203.0.113.10 port 22: Connection refused\n", errors.New("exit status 255"))
+	assert.ErrorContains(t, err, "Connection refused")
+	assert.ErrorContains(t, placementError("203.0.113.10", "", errors.New("exit status 255")), "exit status 255")
+}
+
+func TestPlacementErrorNamesARefusedPassword(t *testing.T) {
+	for _, stderr := range []string{
+		"root@203.0.113.10: Permission denied (publickey,password).\n",
+		"Permission denied, please try again.\n",
+	} {
+		err := placementError("203.0.113.10", stderr, errors.New("exit status 255"))
+		assert.ErrorContains(t, err, "refused the root password", stderr)
+		assert.ErrorContains(t, err, "provider", stderr)
+	}
+}
+
+func TestPlacementErrorNamesAServerWithoutPasswordLogins(t *testing.T) {
+	err := placementError("203.0.113.10", "root@203.0.113.10: Permission denied (publickey).\n", errors.New("exit status 255"))
+
+	assert.ErrorContains(t, err, "accepts no password")
+	assert.NotContains(t, err.Error(), "reset it")
+}
+
+func TestPlacementErrorKeepsOtherPermissionErrors(t *testing.T) {
+	err := placementError("203.0.113.10", "bash: /root/.ssh/authorized_keys: Permission denied\n", errors.New("exit status 1"))
+
+	assert.ErrorContains(t, err, "/root/.ssh/authorized_keys: Permission denied")
+	assert.NotContains(t, err.Error(), "root password")
 }
 
 func TestAgentHolds(t *testing.T) {

@@ -1,19 +1,32 @@
 ---
 title: 'Install Kubernetes from Windows'
-description: 'Install and run a Kipper cluster from PowerShell with the native kip.exe. kip runs the install on the server and follows it from your machine.'
+description: 'Install and run a Kipper cluster from PowerShell with the native kip.exe. kip runs the installation on the server and displays its progress on your computer.'
 ---
 
 # Installing from Windows
 
-You can install and manage a cluster from PowerShell with the native `kip.exe`. This page covers the path from a fresh Windows machine to a working cluster.
+You can install and manage a cluster from PowerShell with the native `kip.exe`. This guide takes you from a fresh Windows machine to a working cluster.
 
 To connect to an existing cluster, ask an administrator for a `kip cluster export` file and follow [Team Access](/en/team-access).
 
 ## What you need
 
-- Windows 10 version 1809 or later, or Windows 11. Both ship the OpenSSH client; check with `ssh -V`.
-- `kip-windows-amd64.exe` from the [releases page](https://github.com/getkipper/kipper/releases/latest), renamed to `kip.exe` and put on your PATH.
+- Windows 10 version 1809 or later, or Windows 11, on x64. Windows 11 on ARM runs kip through its x64 emulation; Windows 10 on ARM and 32-bit Windows are not supported. The OpenSSH client must be installed; check with `ssh -V`.
 - A fresh Ubuntu or Debian server you can reach as root, by password or with a key.
+
+## Install kip
+
+In PowerShell:
+
+```powershell
+irm https://getkipper.com/install.ps1 | iex
+```
+
+The installer downloads `kip-windows-amd64.exe` from the [latest release](https://github.com/getkipper/kipper/releases/latest) and verifies its checksum. It installs `kip.exe` in `%LOCALAPPDATA%\Programs\kip` and adds that folder to your current session and user PATH. The default installation requires no administrator rights. Check with `kip --version`.
+
+To choose a release, set `$env:KIP_VERSION = "v0.29.0"` before running the installer. To choose an installation folder, set `$env:KIP_INSTALL_DIR`.
+
+To install manually, download `kip-windows-amd64.exe` from the releases page, rename it to `kip.exe`, and put it in a folder on your PATH. If you rename it in Explorer, show file extensions first to avoid naming it `kip.exe.exe`.
 
 ## Install the cluster
 
@@ -27,7 +40,7 @@ When it finishes, kip adds the cluster to your machine as the active one, prints
 
 ### Your SSH key
 
-kip looks for a key at `%USERPROFILE%\.ssh\id_ed25519`, or the one you name with `--ssh-key`. If there is none, it offers to create one. If the server rejects the key, kip offers to add it through a separate SSH login, which may prompt for the root password.
+kip uses the key specified by `--ssh-key`, then `KIP_SSH_KEY`, or defaults to `%USERPROFILE%\.ssh\id_ed25519`. If the key is missing, kip offers to create it. If the server rejects the key, kip offers to add its public key through a separate SSH login, which may prompt for the root password.
 
 ::: tip Servers that force a password change on first login
 If your provider requires a password change on first login, connect with `ssh root@203.0.113.10`, change the password, then `exit` and run `kip install` again.

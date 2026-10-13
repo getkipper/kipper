@@ -289,7 +289,7 @@ func confirmRouteRemoval(in io.Reader, interactive, yes bool) error {
 	}
 	fmt.Print("  Remove it? [y/N]: ")
 	answer, _ := bufio.NewReader(in).ReadString('\n')
-	if a := strings.ToLower(strings.TrimSpace(answer)); a == "y" || a == "yes" {
+	if isYes(answer) {
 		return nil
 	}
 	return fmt.Errorf("route removal cancelled")
