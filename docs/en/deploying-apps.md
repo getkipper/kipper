@@ -502,13 +502,15 @@ kip app info backend --project staging
 
 Shows the app's status, scaling settings, and last autoscaling time when available. It also shows CPU and memory values from the pod template and explains how Kipper sizes each resource. The Conditions section includes reasons and messages for rollout progress, warnings, and failures. See [`kip app info`](/en/cli-reference#kip-app-info).
 
-### Stream logs
+### View logs
 
 ```bash
 kip app logs backend
+kip app logs backend --tail 50
+kip app logs backend -f
 ```
 
-Streams logs from the first running pod with 100 lines of history. Press Ctrl+C to stop.
+Prints the last 500 log lines and exits. Use `--tail N` to change the number of lines. Add `-f` (`--follow`) to stream new lines until you press Ctrl+C.
 
 ### Update an app image
 

@@ -55,9 +55,17 @@ var appListCmd = &cobra.Command{
 
 var appLogsCmd = &cobra.Command{
 	Use:   "logs [app-name]",
-	Short: "Stream application logs",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runAppLogs,
+	Short: "Print application logs",
+	Long: `Print the last 500 log lines of the app and exit. Use --tail N to change
+the number of lines. Add -f (--follow) to stream new lines until you press
+Ctrl+C.
+
+Examples:
+  kip app logs shop
+  kip app logs shop --tail 50
+  kip app logs shop -f`,
+	Args: cobra.ExactArgs(1),
+	RunE: runAppLogs,
 }
 
 var appRestartCmd = &cobra.Command{
@@ -158,7 +166,7 @@ func init() {
 
 	appLogsCmd.Flags().String("project", "", "project name")
 	appLogsCmd.Flags().String("environment", "", "target environment")
-	appLogsCmd.Flags().Int("tail", 500, "number of lines to show from the end of the logs")
+	addLogFlags(appLogsCmd, 500)
 
 	appDeleteCmd.Flags().String("project", "", "project name")
 	appDeleteCmd.Flags().String("environment", "", "target environment")
@@ -546,13 +554,7 @@ func runAppLogs(cmd *cobra.Command, args []string) error {
 	}
 
 	pod := pods.Items[0]
-	tail, _ := cmd.Flags().GetInt("tail")
-	tailLines := int64(tail)
-	req := clientset.CoreV1().Pods(ns).GetLogs(pod.Name, &corev1.PodLogOptions{
-		Container: workloadContainerName(&pod, appName),
-		Follow:    true,
-		TailLines: &tailLines,
-	})
+	req := clientset.CoreV1().Pods(ns).GetLogs(pod.Name, podLogOptions(&pod, appName, readLogFlags(cmd)))
 
 	stream, err := req.Stream(ctx)
 	if err != nil {

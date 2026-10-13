@@ -208,7 +208,7 @@ Requires an AI provider to be configured in the Settings page. See [Configuratio
 
 ## Disabling monitoring
 
-On smaller servers (8-12 GB RAM), the monitoring stack can be disabled to free approximately 1-2 GB of memory for your applications. Logs from the web console (live streaming via `kip app logs` and the Console log viewer) continue to work. Only persistent log storage and metrics collection are affected.
+On smaller servers (8-12 GB RAM), the monitoring stack can be disabled to free approximately 1-2 GB of memory for your applications. Live logs from `kip app logs -f` and the Console log viewer continue to work. Only persistent log storage and metrics collection are affected.
 
 Monitoring lives in the platform layer. The same `kip platform` commands that manage Prometheus and Loki memory limits also toggle them on and off. See [Platform Resources](/en/platform-resources) for the full picture.
 

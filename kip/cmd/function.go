@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -42,9 +41,16 @@ var functionListCmd = &cobra.Command{
 
 var functionLogsCmd = &cobra.Command{
 	Use:   "logs [name]",
-	Short: "Stream function logs",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runFunctionLogs,
+	Short: "Print function logs",
+	Long: `Print the last 100 log lines of the function and exit. Use --tail N to
+change the number of lines. Add -f (--follow) to stream new lines until you
+press Ctrl+C.
+
+Examples:
+  kip function logs process-image
+  kip function logs process-image -f`,
+	Args: cobra.ExactArgs(1),
+	RunE: runFunctionLogs,
 }
 
 var functionDeleteCmd = &cobra.Command{
@@ -158,6 +164,7 @@ func init() {
 
 	functionLogsCmd.Flags().String("project", "", "project name")
 	functionLogsCmd.Flags().String("environment", "", "target environment")
+	addLogFlags(functionLogsCmd, 100)
 
 	functionDeleteCmd.Flags().String("project", "", "project name")
 	functionDeleteCmd.Flags().String("environment", "", "target environment")
@@ -453,12 +460,7 @@ func runFunctionLogs(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no running pods for function %q: it may be scaled to zero", name)
 	}
 
-	tailLines := int64(100)
-	req := clientset.CoreV1().Pods(ns).GetLogs(pods.Items[0].Name, &corev1.PodLogOptions{
-		Container: workloadContainerName(&pods.Items[0], name),
-		Follow:    true,
-		TailLines: &tailLines,
-	})
+	req := clientset.CoreV1().Pods(ns).GetLogs(pods.Items[0].Name, podLogOptions(&pods.Items[0], name, readLogFlags(cmd)))
 
 	stream, err := req.Stream(ctx)
 	if err != nil {

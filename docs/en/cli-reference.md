@@ -775,6 +775,7 @@ kip function create db-sync --trigger postgres --source mydb --query "SELECT * F
 kip function create cache-worker --trigger redis --source cache --list jobs --project blog
 kip function list --project blog
 kip function logs process-image --project blog
+kip function logs process-image --project blog -f
 kip function delete process-image --project blog
 ```
 
