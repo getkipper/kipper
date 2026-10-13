@@ -38,7 +38,7 @@ One small difference: in `kip exec`, a shell keeps drawing to the size the windo
 
 ### What servers are supported?
 
-Any Linux server with root SSH access running Ubuntu 20.04, 22.04, 24.04, 26.04, or Debian 11 or 12. Minimum 2GB RAM and 30GB disk.
+Any Linux server with root SSH access running Ubuntu 22.04, 24.04 or 26.04, or Debian 12 or 13. Kipper also accepts Ubuntu 20.04 and Debian 11, with a warning that standard support has ended. Minimum 2GB RAM and 30GB disk.
 
 ### Can I install on a cloud VM?
 

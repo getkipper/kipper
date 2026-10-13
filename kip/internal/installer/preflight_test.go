@@ -53,6 +53,29 @@ func TestRunPreflightChecks(t *testing.T) {
 			wantWarningContains: "'small' profile",
 		},
 		{
+			name: "accepts debian 13",
+			system: SystemInfo{
+				OS: "debian", OSVersion: "13",
+				RAMMB: 8192, DiskMB: 40960,
+			},
+		},
+		{
+			name: "accepts debian 11 with a warning that its standard support has ended",
+			system: SystemInfo{
+				OS: "debian", OSVersion: "11",
+				RAMMB: 8192, DiskMB: 40960,
+			},
+			wantWarningContains: "Debian 11 is past the end of its standard support",
+		},
+		{
+			name: "accepts ubuntu 20.04 with a warning that its standard support has ended",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "20.04",
+				RAMMB: 8192, DiskMB: 40960,
+			},
+			wantWarningContains: "Ubuntu 20.04 is past the end of its standard support",
+		},
+		{
 			name: "fails with unsupported OS",
 			system: SystemInfo{
 				OS: "centos", OSVersion: "9",

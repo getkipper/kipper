@@ -16,10 +16,21 @@ const (
 	minDiskMB        = 30720 // 30GB — a 40GB disk has ~35GB free after OS install
 )
 
-// supportedOS maps OS names to their minimum supported versions.
 var supportedOS = map[string][]string{
 	"ubuntu": {"20.04", "22.04", "24.04", "26.04"},
-	"debian": {"11", "12"},
+	"debian": {"11", "12", "13"},
+}
+
+// pastStandardSupportOS retains older releases for compatibility with
+// existing clusters, with a warning about their support status.
+var pastStandardSupportOS = map[string][]string{
+	"ubuntu": {"20.04"},
+	"debian": {"11"},
+}
+
+var osDisplayName = map[string]string{
+	"ubuntu": "Ubuntu",
+	"debian": "Debian",
 }
 
 // SystemInfo holds the remote server's system information
@@ -47,6 +58,9 @@ func RunPreflightChecks(sys SystemInfo) (*PreflightResult, error) {
 
 	if err := checkOS(sys); err != nil {
 		return nil, err
+	}
+	if warning := pastStandardSupportWarning(sys); warning != "" {
+		result.Warnings = append(result.Warnings, warning)
 	}
 	if err := checkRAM(sys); err != nil {
 		return nil, err
@@ -84,6 +98,16 @@ func checkOS(sys SystemInfo) error {
 
 	return fmt.Errorf("unsupported %s version: %s (supported: %s)",
 		sys.OS, sys.OSVersion, strings.Join(versions, ", "))
+}
+
+func pastStandardSupportWarning(sys SystemInfo) string {
+	id := strings.ToLower(sys.OS)
+	for _, v := range pastStandardSupportOS[id] {
+		if sys.OSVersion == v {
+			return fmt.Sprintf("%s %s is past the end of its standard support. Installation can continue. Kipper no longer tests this release; upgrade to a current release.", osDisplayName[id], v)
+		}
+	}
+	return ""
 }
 
 func checkRAM(sys SystemInfo) error {
