@@ -16,7 +16,7 @@ hero:
       link: https://github.com/getkipper/kipper
 features:
   - title: One-Command Install
-    details: Run the installer from your computer to set up a supported Ubuntu or Debian server with Kubernetes, HTTPS, storage, and authentication.
+    details: Run one command on your Linux, macOS or Windows computer to set up a supported Ubuntu or Debian server with Kubernetes, HTTPS, storage, and authentication.
   - title: Deploy Without YAML
     details: Deploy a container image or build from a Git repository. Kipper creates the Kubernetes resources and public route.
   - title: Web Console
@@ -31,7 +31,8 @@ features:
 
 ## Start here
 
-- **New to Kipper?** Follow [Getting Started](/en/getting-started) to install a cluster and deploy your first app.
+- **New to Kipper?** Follow [Getting Started](/en/getting-started) to install a cluster and deploy your first app from Linux, macOS or Windows.
+- **On Windows?** [Installing from Windows](/en/windows) explains how to install a cluster from PowerShell.
 - **Joining a team?** Use [Team Access](/en/team-access) to connect to an existing cluster.
 - **Ready to deploy?** Choose an [image or Git repository](/en/deploying-apps), then add [services](/en/services) and [configuration](/en/secrets).
 - **Operating a cluster?** Read about [backups](/en/backups), [monitoring](/en/observability), and [security](/en/security).

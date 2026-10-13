@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -426,7 +427,7 @@ func ensureKeyAccess(host, keyPath string, isTTY bool) error {
 		if msg := strings.ToLower(placeErr.String()); strings.Contains(msg, "password change") || strings.Contains(msg, "expired") {
 			return fmt.Errorf("the server wants its root password changed first: run ssh root@%s once, change it, then run this again", host)
 		}
-		return placementError(placeErr.String(), err)
+		return placementError(host, placeErr.String(), err)
 	}
 	if ok, _ := probe(); !ok {
 		return fmt.Errorf("the key was added but key login to root@%s still fails", host)
@@ -453,7 +454,18 @@ func keyCheckFailure(path, stderr string) (bool, error) {
 	return false, fmt.Errorf("cannot use the SSH key %s: %s", path, lastLine(stderr))
 }
 
-func placementError(stderr string, err error) error {
+// sshAuthDenied captures the authentication methods listed in an SSH login failure.
+var sshAuthDenied = regexp.MustCompile(`Permission denied \(([^)]*)\)`)
+
+// placementError adds recovery steps for SSH authentication failures.
+func placementError(host, stderr string, err error) error {
+	m := sshAuthDenied.FindStringSubmatch(stderr)
+	switch {
+	case strings.Contains(stderr, "Permission denied, please try again") || (len(m) == 2 && strings.Contains(m[1], "password")):
+		return fmt.Errorf("adding the key to the server: root@%s refused the root password. Use your current password, including any change made at first login. If you have lost it, reset it in your provider's console and retry", host)
+	case len(m) == 2:
+		return fmt.Errorf("adding the key to the server: root@%s accepts no password logins (%s). Add your public key to /root/.ssh/authorized_keys through your provider's console and retry", host, strings.TrimSpace(m[0]))
+	}
 	if reason := lastLine(stderr); reason != "" {
 		return fmt.Errorf("adding the key to the server: %s", reason)
 	}
@@ -510,5 +522,5 @@ func confirm(question string) bool {
 	fmt.Printf("\n  %s [y/N] ", question)
 	var answer string
 	_, _ = fmt.Scanln(&answer)
-	return strings.EqualFold(strings.TrimSpace(answer), "y")
+	return isYes(answer)
 }

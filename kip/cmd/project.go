@@ -450,7 +450,7 @@ func confirmPrompt(message string) bool {
 	fmt.Printf("  %s [y/N] ", message)
 	var response string
 	_, _ = fmt.Scanln(&response)
-	return strings.EqualFold(response, "y")
+	return isYes(response)
 }
 
 // confirmTypePrompt requires the user to type the expected token verbatim.

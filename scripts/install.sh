@@ -18,7 +18,7 @@ detect_os() {
   case "$(uname -s)" in
     Linux*)  echo "linux" ;;
     Darwin*) echo "darwin" ;;
-    # Direct Windows shell users to the native binary download below.
+    # Redirect Windows shells to the PowerShell installer.
     MINGW*|MSYS*|CYGWIN*) echo "windows" ;;
     *)       echo "unsupported" ;;
   esac
@@ -38,9 +38,9 @@ ARCH=$(detect_arch)
 
 if [ "$OS" = "windows" ]; then
   echo ""
-  echo "  To install kip on Windows, download kip-windows-amd64.exe from"
-  echo "  https://github.com/${REPO}/releases/latest, rename it to kip.exe and"
-  echo "  put it on your PATH. You can install and manage clusters from PowerShell."
+  echo "  On Windows, install kip from PowerShell instead:"
+  echo ""
+  echo "    irm https://getkipper.com/install.ps1 | iex"
   echo ""
   exit 1
 fi

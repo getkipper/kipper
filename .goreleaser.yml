@@ -54,8 +54,16 @@ release:
 
     ### Install
 
+    Linux and macOS:
+
     ```bash
     curl -sL https://getkipper.com/install | sh
+    ```
+
+    Windows (PowerShell):
+
+    ```powershell
+    irm https://getkipper.com/install.ps1 | iex
     ```
 
     ### Manual download
@@ -75,6 +83,4 @@ release:
     sudo mv kip-* /usr/local/bin/kip
     ```
 
-    Windows: download `kip-windows-amd64.exe`, rename to `kip.exe`, and add to your PATH.
-    Run `kip install` from PowerShell to start the installation on the server
-    and stream its progress to your machine.
+    Windows: download `kip-windows-amd64.exe`, rename it to `kip.exe`, and put it in a folder on your PATH.

@@ -467,7 +467,7 @@ func checkDirectEnvConflicts(ctx context.Context, clientset kubernetes.Interface
 	fmt.Fprintf(os.Stderr, "  Remove them so envFrom takes effect? [y/N] ")
 
 	scanner := bufio.NewScanner(os.Stdin)
-	if scanner.Scan() && strings.TrimSpace(strings.ToLower(scanner.Text())) == "y" {
+	if scanner.Scan() && isYes(scanner.Text()) {
 		conflictSet := make(map[string]bool)
 		for _, k := range conflicts {
 			conflictSet[k] = true

@@ -515,3 +515,35 @@ jobs:
             echo "  python3 scripts/generate-notices.py"
             exit 1
           fi
+
+  windows-installer:
+    name: Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Exercise the documented Invoke-Expression usage in both PowerShell versions.
+      # Failures return normally, so check the installed binary and PATH explicitly.
+      - name: Install with Windows PowerShell 5.1
+        shell: powershell
+        env:
+          KIP_INSTALL_DIR: ${{ runner.temp }}\kip-ps5
+        run: |
+          Get-Content -Raw scripts/install.ps1 | Invoke-Expression
+          $kip = Join-Path $env:KIP_INSTALL_DIR 'kip.exe'
+          if (-not (Test-Path $kip)) { throw "kip.exe was not installed to $env:KIP_INSTALL_DIR" }
+          $version = & $kip --version
+          if ($LASTEXITCODE -ne 0 -or "$version" -notmatch '^kip version ') { throw "kip.exe --version failed: $version" }
+          Write-Host $version
+          if (([Environment]::GetEnvironmentVariable('Path', 'User') -split ';') -notcontains $env:KIP_INSTALL_DIR) { throw "$env:KIP_INSTALL_DIR is not on the user PATH" }
+      - name: Install with PowerShell 7
+        shell: pwsh
+        env:
+          KIP_INSTALL_DIR: ${{ runner.temp }}\kip-ps7
+        run: |
+          Get-Content -Raw scripts/install.ps1 | Invoke-Expression
+          $kip = Join-Path $env:KIP_INSTALL_DIR 'kip.exe'
+          if (-not (Test-Path $kip)) { throw "kip.exe was not installed to $env:KIP_INSTALL_DIR" }
+          $version = & $kip --version
+          if ($LASTEXITCODE -ne 0 -or "$version" -notmatch '^kip version ') { throw "kip.exe --version failed: $version" }
+          Write-Host $version
+          if (([Environment]::GetEnvironmentVariable('Path', 'User') -split ';') -notcontains $env:KIP_INSTALL_DIR) { throw "$env:KIP_INSTALL_DIR is not on the user PATH" }

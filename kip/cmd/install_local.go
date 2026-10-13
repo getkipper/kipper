@@ -75,7 +75,7 @@ func confirmUnboundHost(in io.Reader, out io.Writer, host string) bool {
 	say(out, "\n  %s is not assigned to a local interface. A public address behind NAT can still reach this machine.\n", host)
 	say(out, "  Does %s reach this machine? [y/N] ", host)
 	answer, _ := bufio.NewReader(in).ReadString('\n')
-	return strings.EqualFold(strings.TrimSpace(answer), "y")
+	return isYes(answer)
 }
 
 func guardLocalInstall(host string, hostMapsHere, isTTY bool) error {
