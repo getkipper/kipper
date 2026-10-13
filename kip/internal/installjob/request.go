@@ -35,6 +35,7 @@ type Request struct {
 	OrgDisplayName   string          `json:"org_display_name,omitempty"`
 	Harden           bool            `json:"harden"`
 	Firewall         bool            `json:"firewall"`
+	AdoptFirewall    bool            `json:"adopt_firewall,omitempty"`
 	NoSSHRateLimit   bool            `json:"no_ssh_rate_limit"`
 	DNSResolvers     []string        `json:"dns_resolvers,omitempty"`
 	TrustedProxies   []string        `json:"trusted_proxies,omitempty"`
@@ -92,6 +93,7 @@ func (r Request) Options() installer.Options {
 		OrgDisplayName:   r.OrgDisplayName,
 		Harden:           r.Harden,
 		Firewall:         r.Firewall,
+		AdoptFirewall:    r.AdoptFirewall,
 		NoSSHRateLimit:   r.NoSSHRateLimit,
 		DNSResolvers:     r.DNSResolvers,
 		TrustedProxies:   r.TrustedProxies,

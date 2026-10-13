@@ -221,28 +221,26 @@ func TestPlanFirewall(t *testing.T) {
 	fresh := FirewallAudit{}
 
 	t.Run("configures a fresh host", func(t *testing.T) {
-		step := PlanFirewall(fresh, true)
+		step := PlanFirewall(fresh, true, false)
 		assert.True(t, step.Configure)
 		assert.Contains(t, step.Notice, "No existing host firewall")
 		assert.Empty(t, step.FlagNotice)
 	})
 
 	t.Run("reconfigures a firewall kip set up", func(t *testing.T) {
-		step := PlanFirewall(kippers, true)
+		step := PlanFirewall(kippers, true, false)
 		assert.True(t, step.Configure)
 		assert.Contains(t, step.Notice, "set up by kip")
 	})
 
 	t.Run("never touches an admin's firewall", func(t *testing.T) {
-		step := PlanFirewall(admins, true)
+		step := PlanFirewall(admins, true, false)
 		assert.False(t, step.Configure)
 		assert.Contains(t, step.Notice, "avoid trampling your rules")
 	})
 
-	// The notice describes the host. Announcing work that --firewall=false
-	// then cancels is how the two commands came to disagree.
 	t.Run("promises no work the opt-out cancels", func(t *testing.T) {
-		step := PlanFirewall(kippers, false)
+		step := PlanFirewall(kippers, false, false)
 		assert.False(t, step.Configure)
 		assert.NotContains(t, step.Notice, "Reapplying")
 		assert.Contains(t, step.FlagNotice, "--firewall=false")
@@ -250,15 +248,13 @@ func TestPlanFirewall(t *testing.T) {
 	})
 
 	t.Run("explains the opt-out on a fresh host", func(t *testing.T) {
-		step := PlanFirewall(fresh, false)
+		step := PlanFirewall(fresh, false, false)
 		assert.False(t, step.Configure)
 		assert.Contains(t, step.FlagNotice, "Your host has no firewall")
 	})
 
-	// An admin's firewall is not skipped by the flag; it was never kip's to
-	// configure, and the notice already said so.
 	t.Run("does not blame the flag for a host it may not touch", func(t *testing.T) {
-		assert.Empty(t, PlanFirewall(admins, false).FlagNotice)
+		assert.Empty(t, PlanFirewall(admins, false, false).FlagNotice)
 	})
 }
 

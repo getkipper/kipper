@@ -166,7 +166,7 @@ func TestSSHArgsAlwaysSendKeepalives(t *testing.T) {
 func TestFreshConnectionArgsBypassTheSharedConnection(t *testing.T) {
 	c := &Client{cfg: Config{Host: "203.0.113.10", User: "root", Port: "2222", KeyPath: "/path/to/key"}, controlPath: "/tmp/kip-test.sock"}
 
-	args := c.freshConnectionArgs()
+	args := c.freshConnectionArgs("true")
 	joined := strings.Join(args, " ")
 
 	assert.Contains(t, joined, "-o ControlMaster=no -o ControlPath=none")
@@ -181,7 +181,7 @@ func TestFreshConnectionArgsBypassTheSharedConnection(t *testing.T) {
 func TestFreshConnectionArgsOverrideACallersControlPath(t *testing.T) {
 	c := &Client{cfg: Config{Host: "203.0.113.10", Options: []string{"ControlPath=/tmp/elsewhere.sock", "ControlMaster=auto"}}}
 
-	joined := strings.Join(c.freshConnectionArgs(), " ")
+	joined := strings.Join(c.freshConnectionArgs("true"), " ")
 
 	assert.Less(t, strings.Index(joined, "ControlPath=none"), strings.Index(joined, "ControlPath=/tmp/elsewhere.sock"))
 	assert.Less(t, strings.Index(joined, "ControlMaster=no"), strings.Index(joined, "ControlMaster=auto"))

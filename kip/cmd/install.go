@@ -45,7 +45,8 @@ func init() {
 	installCmd.Flags().Bool("harden", true, "disable surplus host services exposed on public interfaces (e.g. rpcbind, Cockpit)")
 	installCmd.Flags().Bool("admin-kubeconfig", false, "write the shared k3s admin certificate to this machine instead of a per-operator OIDC kubeconfig; CI escape hatch. The certificate is unattributed and revocable only by rotation")
 	installCmd.Flags().Bool("no-login", false, "skip the inline sign-in; run kip auth login && kip auth verify later")
-	installCmd.Flags().Bool("firewall", true, "install and configure UFW with a k3s-correct ruleset (skipped if another firewall is detected)")
+	installCmd.Flags().Bool("firewall", true, "configure the host firewall for k3s: firewalld on Rocky, AlmaLinux and CentOS Stream; UFW elsewhere (preserves operator-managed firewalls unless --adopt-firewall is set)")
+	installCmd.Flags().Bool("adopt-firewall", false, "take over an existing firewalld configuration on Rocky, AlmaLinux or CentOS Stream; replaces the public zone")
 	installCmd.Flags().String("request", "", requestFlagUsage)
 	_ = installCmd.Flags().MarkHidden("request")
 	installCmd.Flags().Bool("via-server", false, "run the install as a persistent server job and stream its log (default on Windows)")
@@ -90,6 +91,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	orgDisplayName, _ := cmd.Flags().GetString("org-display-name")
 	harden, _ := cmd.Flags().GetBool("harden")
 	firewall, _ := cmd.Flags().GetBool("firewall")
+	adoptFirewall, _ := cmd.Flags().GetBool("adopt-firewall")
 	noSSHRateLimit, _ := cmd.Flags().GetBool("no-ssh-rate-limit")
 	adminKubeconfig, _ := cmd.Flags().GetBool("admin-kubeconfig")
 	noLogin, _ := cmd.Flags().GetBool("no-login")
@@ -171,6 +173,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		OrgDisplayName:     orgDisplayName,
 		Harden:             harden,
 		Firewall:           firewall,
+		AdoptFirewall:      adoptFirewall,
 		NoSSHRateLimit:     noSSHRateLimit,
 		BackupStorage:      backupStorage,
 		DNSResolvers:       dnsResolvers,

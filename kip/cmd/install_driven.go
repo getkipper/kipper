@@ -142,7 +142,12 @@ func runDrivenInstall(cmd *cobra.Command) error {
 			fmt.Printf("\n\n  Disconnected. The install continues on %s. Run the same command to reconnect.\n\n", host)
 			os.Exit(130)
 		}()
-		phase, err = followJob(client, kipCmd, outcome.RunID, os.Stdout, 5, 3*time.Second)
+		acks := &firewallAckWriter{out: os.Stdout, runID: outcome.RunID, ack: func(nonce string) error {
+			_, err := client.RunFresh(kipCmd + " install-job firewall-ack --run " + outcome.RunID + " --nonce " + nonce)
+			return err
+		}}
+		phase, err = followJob(client, kipCmd, outcome.RunID, acks, 5, 3*time.Second)
+		_ = acks.Flush()
 		signal.Stop(interrupts)
 		if err != nil {
 			return err
@@ -231,6 +236,7 @@ func drivenRequest(cmd *cobra.Command, host string) (installjob.Request, error) 
 		OrgDisplayName:   str("org-display-name"),
 		Harden:           boolean("harden"),
 		Firewall:         boolean("firewall"),
+		AdoptFirewall:    boolean("adopt-firewall"),
 		// Allow maintenance bursts from Windows, which opens a connection per command.
 		NoSSHRateLimit: !flags.Changed("no-ssh-rate-limit") || boolean("no-ssh-rate-limit"),
 		DNSResolvers:   slice("dns-resolver"),

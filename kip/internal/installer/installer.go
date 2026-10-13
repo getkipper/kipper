@@ -36,12 +36,14 @@ type Options struct {
 	OrgDisplayName     string
 	Harden             bool
 	Firewall           bool
+	AdoptFirewall      bool
 	NoSSHRateLimit     bool
 	BackupStorage      *BackupStorageConfig
 	DNSResolvers       []string
 	TrustedProxies     []string
 	KubeconfigMode     KubeconfigMode
 	LoginGate          func(ctx context.Context, domain, dexHost, server string, caData []byte) GateResult
+	ConfirmConnection  func() error
 }
 
 // Result contains installation outputs, including those available after a failure.
@@ -83,6 +85,64 @@ func k3sAndFirewallSteps(host HostOS, k3s installStep, firewall *installStep) []
 		return []installStep{*firewall, k3s}
 	}
 	return []installStep{k3s, *firewall}
+}
+
+// confirmedRunner delegates SSH connectivity checks to the client driving
+// the local installation.
+type confirmedRunner struct {
+	*localrun.Runner
+	confirm func() error
+}
+
+func (r confirmedRunner) ConfirmFreshConnection() error { return r.confirm() }
+
+// localClient uses opts.ConfirmConnection for SSH checks during server-driven installs.
+func localClient(opts Options) hostRunner {
+	if opts.ConfirmConnection != nil {
+		return confirmedRunner{Runner: localrun.New(), confirm: opts.ConfirmConnection}
+	}
+	return localrun.New()
+}
+
+// requireOwnFirewalldIntact verifies the queried runtime settings against kip's
+// expected configuration when the firewall step is skipped.
+func requireOwnFirewalldIntact(client CommandRunner) error {
+	sshPort, err := readSSHPort(client)
+	if err != nil {
+		return err
+	}
+	state, err := client.Run(firewalldStateCommand)
+	if err != nil {
+		return fmt.Errorf("reading the running firewalld configuration: %w", err)
+	}
+	if problems := firewalldMismatches(state, wantFirewalld(sshPort)); len(problems) > 0 {
+		return fmt.Errorf("the firewalld kip set up has changed since configuration (%s). Run the install with --firewall to restore kip's rules", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// requireOperatorFirewalld checks cluster access when the install preserves
+// an existing firewalld configuration.
+func requireOperatorFirewalld(client CommandRunner, host HostOS, audit FirewallAudit, plan FirewallPlan) error {
+	if host.Family == FamilyRHEL && audit.Existing == "firewalld and ufw" {
+		return fmt.Errorf("firewalld and ufw are both running. Disable one so kip can verify cluster access, then retry")
+	}
+	leftRunning := audit.Existing == "firewalld" && (audit.Adoptable || audit.KipperManaged)
+	if !leftRunning || plan.Configure {
+		return nil
+	}
+	if audit.KipperManaged {
+		return requireOwnFirewalldIntact(client)
+	}
+	missing, err := CheckOperatorFirewalld(client)
+	if err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("the existing firewalld configuration requires these changes for the cluster: %s. "+
+			"Update the rules manually, or run with --firewall --adopt-firewall to let kip configure it", strings.Join(missing, "; "))
+	}
+	return nil
 }
 
 // Run executes the full cluster installation sequence.
@@ -158,7 +218,7 @@ func Run(opts Options) (*Result, error) {
 	var client hostRunner
 	if opts.Local {
 		fmt.Printf("\n  Installing on this machine (%s)\n\n", opts.Host)
-		client = localrun.New()
+		client = localClient(opts)
 	} else {
 		fmt.Printf("\n  Connecting to %s...\n", opts.Host)
 		if err := provider.Connect(); err != nil {
@@ -218,7 +278,10 @@ func Run(opts Options) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auditing firewall: %w", err)
 	}
-	fwPlan := PlanFirewall(fwAudit, opts.Firewall)
+	fwPlan := PlanFirewall(fwAudit, opts.Firewall, opts.AdoptFirewall)
+	if err := requireOperatorFirewalld(client, sysInfo.Host, fwAudit, fwPlan); err != nil {
+		return nil, err
+	}
 	configureFirewall := fwPlan.Configure
 	fmt.Print(fwPlan.Notice)
 

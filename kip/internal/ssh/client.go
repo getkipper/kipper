@@ -328,21 +328,28 @@ func (c *Client) SurvivesSSHRateLimit() bool {
 // ConfirmFreshConnection runs true over a new SSH connection to verify that
 // the host accepts new sessions independently of the shared connection.
 func (c *Client) ConfirmFreshConnection() error {
-	cmd, ctx, cancel := c.command(c.freshConnectionArgs()...)
+	_, err := c.RunFresh("true")
+	return err
+}
+
+// RunFresh runs command over a new SSH connection and returns combined stdout
+// and stderr. Bypassing multiplexing verifies that new connections are accepted.
+func (c *Client) RunFresh(command string) (string, error) {
+	cmd, ctx, cancel := c.command(c.freshConnectionArgs(command)...)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("a new SSH connection to %s did not finish within %s", c.cfg.Host, c.cfg.CommandTimeout)
+		return string(out), fmt.Errorf("a new SSH connection to %s did not finish within %s", c.cfg.Host, c.cfg.CommandTimeout)
 	}
 	if err != nil {
-		return fmt.Errorf("opening a new SSH connection to %s: %w: %s", c.cfg.Host, err, strings.TrimSpace(string(out)))
+		return string(out), fmt.Errorf("opening a new SSH connection to %s: %w: %s", c.cfg.Host, err, strings.TrimSpace(string(out)))
 	}
-	return nil
+	return string(out), nil
 }
 
-// freshConnectionArgs bypasses multiplexing for the connectivity check.
-func (c *Client) freshConnectionArgs() []string {
-	return append(c.connectionArgs(false, true), "true")
+// freshConnectionArgs disables multiplexing for command.
+func (c *Client) freshConnectionArgs(command string) []string {
+	return append(c.connectionArgs(false, true), command)
 }
 
 // Close tears down the shared connection, so kip does not leave one open behind
