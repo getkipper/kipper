@@ -2,7 +2,7 @@
 # Clean-room install test. Runs the path a new user takes, on a fresh server,
 # using only kip. A failure here blocks a release.
 #
-#   export KIPPER_TEST_HOST=<ip of a fresh Ubuntu 24.04 or Debian 12 server>
+#   export KIPPER_TEST_HOST=<ip of a fresh Ubuntu 24.04/26.04 or Debian 12/13 server>
 #   export KIPPER_TEST_KEY=~/.ssh/id_ed25519
 #   scripts/clean-room-test.sh
 #

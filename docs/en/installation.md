@@ -126,7 +126,7 @@ flowchart TD
 
 Before installing, Kipper verifies:
 
-- **OS:** Ubuntu 20.04, 22.04, 24.04, 26.04, or Debian 11, 12
+- **OS:** Ubuntu 22.04, 24.04 or 26.04, or Debian 12 or 13. Ubuntu 20.04 and Debian 11 pass the OS check with a warning: standard support has ended, and Kipper no longer tests these releases.
 - **RAM:** 2 GB minimum. The `nano` sizing profile disables monitoring. The installer recommends at least 8 GB for production workloads.
 - **Disk:** 30 GB free space minimum; allow additional space for images, data, and backups.
 - **Ports:** 80 (HTTP), 443 (HTTPS), and 6443 (Kubernetes API) must not be in use by another service. The installer stops if something other than k3s, such as nginx or a Docker container, already listens on one of them

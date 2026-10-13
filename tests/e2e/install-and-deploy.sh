@@ -7,7 +7,7 @@ set -euo pipefail
 #   ./tests/e2e/install-and-deploy.sh <server-ip> <ssh-key-path>
 #
 # Prerequisites:
-#   - A fresh Linux server (Ubuntu 22.04/24.04 or Debian 11/12)
+#   - A fresh Linux server (Ubuntu 22.04/24.04/26.04 or Debian 12/13)
 #   - SSH key access as root
 #   - The kip binary built: cd kip && go build -o kip .
 #

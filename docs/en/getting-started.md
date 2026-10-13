@@ -11,7 +11,7 @@ To join a cluster someone has already installed, follow [Team Access](/en/team-a
 
 ## Prerequisites
 
-- **A supported server:** Ubuntu 20.04, 22.04, 24.04, or 26.04; or Debian 11 or 12, with a public IP address and root SSH access.
+- **A supported server:** Ubuntu 22.04, 24.04, or 26.04; or Debian 12 or 13, with a public IP address and root SSH access. Kipper also accepts Ubuntu 20.04 and Debian 11, with a warning that standard support has ended.
 - **Capacity:** the installer requires at least 2 GB RAM and 30 GB free disk. Allow additional capacity for your apps and databases; see [sizing guidance](/en/installation#preflight-checks).
 - **An SSH key:** add the public key to the server's root account. You should be able to connect with `ssh root@your-server`. On Windows, kip can create the key and add its public key to the server.
 - **Provider firewall rules:** allow SSH and ports 80 and 443. Allow port 6443 from the addresses that will use the Kubernetes API, including your own computer.
