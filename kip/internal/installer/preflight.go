@@ -36,6 +36,7 @@ var osDisplayName = map[string]string{
 // SystemInfo holds the remote server's system information
 // gathered before installation.
 type SystemInfo struct {
+	Host          HostOS
 	OS            string
 	OSVersion     string
 	RAMMB         int

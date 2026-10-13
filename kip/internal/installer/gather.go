@@ -15,12 +15,13 @@ import (
 func GatherSystemInfo(client CommandRunner) (SystemInfo, error) {
 	var info SystemInfo
 
-	os, version, err := gatherOS(client)
+	host, err := DetectHostOS(client)
 	if err != nil {
 		return info, fmt.Errorf("detecting OS: %w", err)
 	}
-	info.OS = os
-	info.OSVersion = version
+	info.Host = host
+	info.OS = host.ID
+	info.OSVersion = host.VersionID
 
 	ram, err := gatherRAM(client)
 	if err != nil {
@@ -41,29 +42,6 @@ func GatherSystemInfo(client CommandRunner) (SystemInfo, error) {
 	info.PortListeners = listeners
 
 	return info, nil
-}
-
-func gatherOS(client CommandRunner) (string, string, error) {
-	output, err := client.Run("cat /etc/os-release")
-	if err != nil {
-		return "", "", err
-	}
-
-	var id, versionID string
-	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(line, "ID=") {
-			id = strings.Trim(strings.TrimPrefix(line, "ID="), "\"")
-		}
-		if strings.HasPrefix(line, "VERSION_ID=") {
-			versionID = strings.Trim(strings.TrimPrefix(line, "VERSION_ID="), "\"")
-		}
-	}
-
-	if id == "" {
-		return "", "", fmt.Errorf("could not determine OS from /etc/os-release")
-	}
-
-	return id, versionID, nil
 }
 
 func gatherRAM(client CommandRunner) (int, error) {

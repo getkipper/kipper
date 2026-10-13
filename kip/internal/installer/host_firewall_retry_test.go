@@ -42,6 +42,8 @@ var errUFW = errors.New("exit status 1: ERROR: Could not load logging rules")
 func (h *ufwHost) Run(cmd string) (string, error) {
 	h.ran = append(h.ran, cmd)
 	switch {
+	case strings.Contains(cmd, "/etc/os-release"):
+		return "ID=debian\nVERSION_ID=13\n", nil
 	case strings.Contains(cmd, "systemctl is-active firewalld"):
 		return "inactive\n", nil
 	case strings.Contains(cmd, "ufw status"):
@@ -136,7 +138,7 @@ func TestConfigureFirewall_LoadsSavedRulesAfterAHalfAppliedRule(t *testing.T) {
 	h := newUFWHost()
 	h.ruleLiveFails["ufw allow 22/tcp"] = 1
 
-	require.NoError(t, configureFirewall(h, false))
+	require.NoError(t, configureFirewall(h, debianHost, false))
 
 	assert.True(t, h.live["ufw allow 22/tcp"], "SSH is allowed in the loaded firewall, not only on disk")
 }
@@ -146,7 +148,7 @@ func TestConfigureFirewall_ChecksTheLoadedRules(t *testing.T) {
 	h := newUFWHost()
 	h.startLoadsNothing = 1
 
-	require.NoError(t, configureFirewall(h, false))
+	require.NoError(t, configureFirewall(h, debianHost, false))
 
 	assert.True(t, h.live["ufw allow 22/tcp"])
 }
@@ -156,7 +158,7 @@ func TestConfigureFirewall_RetriesAFailedStart(t *testing.T) {
 	h := newUFWHost()
 	h.startFails = 2
 
-	require.NoError(t, configureFirewall(h, false))
+	require.NoError(t, configureFirewall(h, debianHost, false))
 
 	assert.True(t, h.live["ufw allow 22/tcp"])
 }
@@ -166,7 +168,7 @@ func TestConfigureFirewall_LeavesTheHostReachableWhenUFWWillNotLoad(t *testing.T
 	h := newUFWHost()
 	h.startFails = 100
 
-	err := configureFirewall(h, false)
+	err := configureFirewall(h, debianHost, false)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not active")
@@ -184,7 +186,7 @@ func TestConfigureFirewall_StartsOnlyAfterAConfirmedStop(t *testing.T) {
 	h.live["ufw allow 22/tcp"] = true
 	h.stopFails = ufwAttempts
 
-	require.NoError(t, configureFirewall(h, false))
+	require.NoError(t, configureFirewall(h, debianHost, false))
 
 	assert.True(t, h.live["ufw allow 80/tcp"], "the whole saved ruleset is loaded, not only what survived")
 }
@@ -199,7 +201,7 @@ func TestConfigureFirewall_ChecksTheStopRemovedTheChains(t *testing.T) {
 	h.live["ufw allow 22/tcp"] = true
 	h.stopLeavesChains = 1
 
-	require.NoError(t, configureFirewall(h, false))
+	require.NoError(t, configureFirewall(h, debianHost, false))
 
 	assert.True(t, h.live["ufw allow 80/tcp"])
 }
@@ -211,7 +213,7 @@ func TestConfigureFirewall_SaysWhenItCouldNotSwitchUFWOff(t *testing.T) {
 	h.startFails = 100
 	h.stopFails = 100
 
-	err := configureFirewall(h, false)
+	err := configureFirewall(h, debianHost, false)
 
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "left not active")
@@ -223,7 +225,7 @@ func TestConfigureFirewall_ReportsARuleItCouldNotSave(t *testing.T) {
 	h := newUFWHost()
 	h.ruleFails["ufw allow 80/tcp"] = 100
 
-	err := configureFirewall(h, false)
+	err := configureFirewall(h, debianHost, false)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ufw allow 80/tcp")
@@ -241,8 +243,19 @@ func TestConfigureFirewall_TreatsAFailedChainQueryAsUnknown(t *testing.T) {
 	h.stopLeavesChains = 100
 	h.chainQueryFails = 100
 
-	err := configureFirewall(h, false)
+	err := configureFirewall(h, debianHost, false)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "may refuse SSH")
+}
+
+func TestConfigureFirewall_RefusesAHostItCannotInstallPackagesOn(t *testing.T) {
+	h := newUFWHost()
+
+	err := configureFirewall(h, HostOS{ID: "arch"}, false)
+
+	assert.ErrorContains(t, err, "arch")
+	for _, cmd := range h.ran {
+		assert.NotContains(t, cmd, "ufw ", "nothing touches the firewall")
+	}
 }
