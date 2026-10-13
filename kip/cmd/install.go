@@ -2,10 +2,12 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -15,8 +17,10 @@ import (
 )
 
 var installCmd = &cobra.Command{
-	Use:   "install",
-	Short: "Install a Kipper cluster on a remote server",
+	// Keep install errors visible without appending the full flag list.
+	SilenceUsage: true,
+	Use:          "install",
+	Short:        "Install a Kipper cluster on a remote server",
 	Long: `Connects to a Linux server via SSH, runs preflight checks, and installs
 a production-ready Kubernetes cluster with automatic SSL, storage,
 authentication, and a web console.
@@ -42,6 +46,14 @@ func init() {
 	installCmd.Flags().Bool("admin-kubeconfig", false, "write the shared k3s admin certificate to this machine instead of a per-operator OIDC kubeconfig; CI escape hatch. The certificate is unattributed and revocable only by rotation")
 	installCmd.Flags().Bool("no-login", false, "skip the inline sign-in; run kip auth login && kip auth verify later")
 	installCmd.Flags().Bool("firewall", true, "install and configure UFW with a k3s-correct ruleset (skipped if another firewall is detected)")
+	installCmd.Flags().String("request", "", requestFlagUsage)
+	_ = installCmd.Flags().MarkHidden("request")
+	installCmd.Flags().Bool("via-server", false, "run the install as a persistent server job and stream its log (default on Windows)")
+	installCmd.Flags().String("server-kip", "", "with --via-server: upload a local Linux kip binary, useful for unreleased builds")
+	installCmd.Flags().Bool("cancel", false, "with --via-server: stop the running install or discard its uncollected result")
+	installCmd.Flags().Bool("local", false, "install on this machine; --host must reach it (for CI, cloud-init and provider user-data)")
+	installCmd.Flags().Bool("host-maps-here", false, "with --local: confirm that --host routes to this machine, such as through NAT")
+	installCmd.Flags().String("result", "", "with --local: save a result file to import on your management machine with 'kip cluster add --install-result'")
 	installCmd.Flags().Bool("no-ssh-rate-limit", false, "open the SSH port outright instead of limiting it to six connections per thirty seconds per source; set this for CI, or when several operators share one NAT address")
 	installCmd.Flags().StringSlice("dns-resolver", nil, "upstream DNS resolver CoreDNS forwards external queries to (repeatable; default 1.1.1.1, 8.8.8.8, 9.9.9.9). Set for clusters that must reach internal/corporate DNS.")
 	installCmd.Flags().StringSlice("trusted-proxy", nil, "IP or CIDR whose X-Forwarded-* headers Traefik honours (repeatable). Set for clusters behind an external load balancer; the kipper.run gateway is trusted automatically.")
@@ -58,6 +70,15 @@ func init() {
 }
 
 func runInstall(cmd *cobra.Command, args []string) error {
+	if request, _ := cmd.Flags().GetString("request"); request != "" {
+		return runInstallRequest(request)
+	}
+	if usesDriver(cmd, runtime.GOOS) {
+		return runDrivenInstall(cmd)
+	}
+	if cancel, _ := cmd.Flags().GetBool("cancel"); cancel {
+		return fmt.Errorf("--cancel stops an install run with --via-server")
+	}
 	host, _ := cmd.Flags().GetString("host")
 	domain, _ := cmd.Flags().GetString("domain")
 	consoleDomain, _ := cmd.Flags().GetString("console-domain")
@@ -74,6 +95,12 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	noLogin, _ := cmd.Flags().GetBool("no-login")
 	dnsResolvers, _ := cmd.Flags().GetStringSlice("dns-resolver")
 	trustedProxies, _ := cmd.Flags().GetStringSlice("trusted-proxy")
+	local, _ := cmd.Flags().GetBool("local")
+	hostMapsHere, _ := cmd.Flags().GetBool("host-maps-here")
+	resultPath, _ := cmd.Flags().GetString("result")
+	if !local && (hostMapsHere || resultPath != "") {
+		return fmt.Errorf("--host-maps-here and --result only apply with --local")
+	}
 
 	// Canonicalise the name before anything reads it, so LAB.KIPPER.RUN and
 	// lab.kipper.run. take the same path as the host they name.
@@ -116,11 +143,23 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	// known inside Run for the *.kipper.run case, so the gate closure is
 	// built there from the resolved domain, dex host, server, and CA.
 	isTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+	if local {
+		if err := guardLocalInstall(host, hostMapsHere, isTTY); err != nil {
+			return err
+		}
+		// Defer browser sign-in to the machine used to manage the cluster.
+		noLogin = true
+		if !noSSHRateLimit {
+			fmt.Printf("\n  The firewall will limit SSH to six new connections per thirty seconds per source.\n")
+			fmt.Printf("  If you will manage this cluster from Windows, install with --no-ssh-rate-limit.\n")
+		}
+	}
 	kubeconfigMode := installer.ResolveKubeconfigMode(adminKubeconfig, noLogin, isTTY)
 
 	result, installErr := installer.Run(installer.Options{
 		KipVersion:         installingKipVersion(),
 		Host:               host,
+		Local:              local,
 		Domain:             domain,
 		ConsoleDomain:      consoleDomain,
 		ConsoleAPIDomain:   consoleAPIDomain,
@@ -145,6 +184,12 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	// Always print credentials if available, even if a later install step failed
 	printInstallSummary(os.Stdout, result, installErr)
 
+	if resultPath != "" && result != nil {
+		if err := writeInstallResult(resultPath, host); err != nil {
+			return errors.Join(installErr, err)
+		}
+		fmt.Printf("  ✔  Install result written to %s. On the machine you manage the cluster from: kip cluster add --install-result <file>\n\n", resultPath)
+	}
 	return installErr
 }
 

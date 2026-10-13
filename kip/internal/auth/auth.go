@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -489,15 +490,28 @@ func postForm(ctx context.Context, tokenURL string, data url.Values) (*http.Resp
 }
 
 func openBrowser(url string) {
-	// Try the platform openers in turn; the printed URL is always the
-	// reliable fallback when none is present (headless, minimal Linux).
+	// Login prints the URL so users can open it manually if launching fails.
+	name, args, ok := browserCommand(runtime.GOOS, func(opener string) bool {
+		_, err := exec.LookPath(opener)
+		return err == nil
+	}, url)
+	if ok {
+		//nolint:gosec // url comes from the OAuth flow we constructed in this process; not user-tainted input
+		_ = exec.Command(name, args...).Start()
+	}
+}
+
+func browserCommand(goos string, exists func(string) bool, url string) (string, []string, bool) {
+	if goos == "windows" {
+		// Pass the URL directly to preserve query separators such as & without shell parsing.
+		return "rundll32", []string{"url.dll,FileProtocolHandler", url}, true
+	}
 	for _, opener := range []string{"open", "xdg-open"} {
-		if _, err := exec.LookPath(opener); err == nil {
-			//nolint:gosec // url comes from the OAuth flow we constructed in this process; not user-tainted input
-			_ = exec.Command(opener, url).Start()
-			return
+		if exists(opener) {
+			return opener, []string{url}, true
 		}
 	}
+	return "", nil, false
 }
 
 func callbackPage(title, message string, isError bool) string {

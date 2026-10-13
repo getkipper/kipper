@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/getkipper/kipper/controller/pkg/authncfg"
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // OIDC identity prefixes, sourced from the shared authncfg package so the
@@ -166,7 +165,7 @@ subjects:
 // initial admin grant for the identity the install itself creates in Dex.
 // Everything here is inert until the API server authenticates OIDC
 // identities; applying it first is what makes enabling authentication safe.
-func InstallOperatorRBAC(client *ssh.Client, domain string) error {
+func InstallOperatorRBAC(client CommandRunner, domain string) error {
 	applyCmd := fmt.Sprintf("cat << 'KIPEOF' | kubectl apply -f -\n%sKIPEOF", operatorRBACManifest(domain))
 	if _, err := client.Run(applyCmd); err != nil {
 		return fmt.Errorf("applying operator rbac: %w", err)
@@ -210,7 +209,7 @@ func renderAdminSubjectPatch(emails []string) string {
 // carry the oidc: prefix, so nothing unprefixed is ever bindable to
 // cluster-admin. Written over the server-side admin kubeconfig, keeping the
 // console-api ServiceAccount descoped from cluster-admin-grade RBAC writes.
-func EnsureAdminBindingSubjects(client *ssh.Client, emails ...string) error {
+func EnsureAdminBindingSubjects(client CommandRunner, emails ...string) error {
 	for _, e := range emails {
 		if err := authncfg.ValidateAdminEmail(e); err != nil {
 			return err

@@ -8,13 +8,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // GatherSystemInfo collects OS, RAM, disk, and port information from
 // the remote server over SSH.
-func GatherSystemInfo(client *ssh.Client) (SystemInfo, error) {
+func GatherSystemInfo(client CommandRunner) (SystemInfo, error) {
 	var info SystemInfo
 
 	os, version, err := gatherOS(client)
@@ -45,7 +43,7 @@ func GatherSystemInfo(client *ssh.Client) (SystemInfo, error) {
 	return info, nil
 }
 
-func gatherOS(client *ssh.Client) (string, string, error) {
+func gatherOS(client CommandRunner) (string, string, error) {
 	output, err := client.Run("cat /etc/os-release")
 	if err != nil {
 		return "", "", err
@@ -68,7 +66,7 @@ func gatherOS(client *ssh.Client) (string, string, error) {
 	return id, versionID, nil
 }
 
-func gatherRAM(client *ssh.Client) (int, error) {
+func gatherRAM(client CommandRunner) (int, error) {
 	// MemTotal is in kB
 	output, err := client.Run("grep MemTotal /proc/meminfo | awk '{print $2}'")
 	if err != nil {
@@ -83,7 +81,7 @@ func gatherRAM(client *ssh.Client) (int, error) {
 	return kb / 1024, nil
 }
 
-func gatherDisk(client *ssh.Client) (int, error) {
+func gatherDisk(client CommandRunner) (int, error) {
 	// Available space on root partition in 1M blocks
 	output, err := client.Run("df -BM --output=avail / | tail -1")
 	if err != nil {
@@ -101,7 +99,7 @@ func gatherDisk(client *ssh.Client) (int, error) {
 
 // gatherPortListeners lists the processes listening on each required port,
 // keyed by port. A listener ss cannot attribute to a process maps to "".
-func gatherPortListeners(client *ssh.Client) (map[int][]string, error) {
+func gatherPortListeners(client CommandRunner) (map[int][]string, error) {
 	filters := make([]string, 0, len(requiredPorts))
 	for _, p := range requiredPorts {
 		filters = append(filters, fmt.Sprintf("sport = :%d", p))

@@ -36,6 +36,16 @@ func execCommandForHostPinned() (command string, pinned bool) {
 	return "kip", false
 }
 
+// PinnedKipWarning tells the operator their kubeconfig pins this binary's path.
+const PinnedKipWarning = "⚠  kip is not on PATH; the kubeconfig pins this binary's location. Install kip to PATH and run: kip auth kubeconfig" //nolint:gosec // a notice, not a credential
+
+// KipPinned reports whether a kubeconfig written now pins this binary's
+// absolute path, because kip is not on PATH.
+func KipPinned() bool {
+	_, pinned := execCommandForHostPinned()
+	return pinned
+}
+
 // osExecutable is a seam for tests; production is os.Executable so the
 // kubeconfig can pin this binary's real path when kip is not on PATH.
 var osExecutable = os.Executable

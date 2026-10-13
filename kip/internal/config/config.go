@@ -32,6 +32,7 @@ type Cluster struct {
 	CurrentProject     string            `mapstructure:"current_project"     yaml:"current_project,omitempty"`
 	CurrentEnvironment string            `mapstructure:"current_environment" yaml:"current_environment,omitempty"`
 	BackupStorage      *BackupStorageRef `mapstructure:"backup_storage"      yaml:"backup_storage,omitempty"`
+	MachineID          string            `mapstructure:"machine_id" yaml:"machine_id,omitempty"`
 	DNSResolvers       []string          `mapstructure:"dns_resolvers"       yaml:"dns_resolvers,omitempty"`
 	TrustedProxies     []string          `mapstructure:"trusted_proxies"     yaml:"trusted_proxies,omitempty"`
 }

@@ -391,12 +391,8 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	// Credentials are not persisted in ~/.kip/config.yaml; for external
 	// mode they stay on the cluster as a Kubernetes Secret and the
 	// upgrade preserves them rather than rewriting.
-	if cluster.BackupStorage != nil && cluster.BackupStorage.Mode == "external" {
-		state.BackupStorage = &installer.BackupStorageConfig{
-			Bucket:   cluster.BackupStorage.Bucket,
-			Region:   cluster.BackupStorage.Region,
-			Endpoint: cluster.BackupStorage.Endpoint,
-		}
+	if bs := installer.BackupStorageFromRef(cluster.BackupStorage); bs != nil {
+		state.BackupStorage = bs
 	}
 
 	return runSystemUpgrade(cluster.Host, explicitKey, fallbackKey, cluster.Domain, cluster.DNSResolvers, cluster.TrustedProxies, state, autoYes)

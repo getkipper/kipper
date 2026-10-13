@@ -57,7 +57,7 @@ func storageRestartConfig() string {
 // directory and is moved into place: a connection lost mid-write leaves the
 // previous file rather than half a line of Perl, which needrestart cannot parse
 // and answers by restarting everything.
-func ConfigureStorageRestarts(runner commandRunner) error {
+func ConfigureStorageRestarts(runner CommandRunner) error {
 	dir := needrestartDropIn[:strings.LastIndex(needrestartDropIn, "/")]
 
 	// The directory is absent on a node where needrestart is not installed, and
@@ -92,7 +92,7 @@ const (
 // It asks the host rather than the Kubernetes node object, because the point of
 // stamping it is to notice a node reimaged under the same name. An identity
 // read from the object it is compared against would always agree.
-func ReadMachineID(runner commandRunner) (string, error) {
+func ReadMachineID(runner CommandRunner) (string, error) {
 	out, err := runner.Run("cat /etc/machine-id")
 	if err != nil {
 		return "", fmt.Errorf("reading machine id: %w", err)
@@ -127,7 +127,7 @@ type HostIdentity struct {
 
 // ReadHostIdentity reads the machine and boot IDs. The boot ID distinguishes
 // a running host from clones that share its machine ID.
-func ReadHostIdentity(runner commandRunner) (HostIdentity, error) {
+func ReadHostIdentity(runner CommandRunner) (HostIdentity, error) {
 	machineID, err := ReadMachineID(runner)
 	if err != nil {
 		return HostIdentity{}, err
@@ -140,7 +140,7 @@ func ReadHostIdentity(runner commandRunner) (HostIdentity, error) {
 }
 
 // ReadBootID reads the kernel boot ID that kubelet publishes as nodeInfo.bootID.
-func ReadBootID(runner commandRunner) (string, error) {
+func ReadBootID(runner CommandRunner) (string, error) {
 	out, err := runner.Run("cat /proc/sys/kernel/random/boot_id")
 	if err != nil {
 		return "", fmt.Errorf("reading boot id: %w", err)
@@ -170,7 +170,7 @@ func nodeIdentityQuery() string {
 
 // NodeForMachineBoot finds a unique node matching both machine and boot IDs.
 // Run it on the control plane to confirm this host's current registration.
-func NodeForMachineBoot(runner commandRunner, id HostIdentity) (string, error) {
+func NodeForMachineBoot(runner CommandRunner, id HostIdentity) (string, error) {
 	if !machineIDPattern.MatchString(id.MachineID) {
 		return "", fmt.Errorf("%q is not a machine id", id.MachineID)
 	}
@@ -215,7 +215,7 @@ func NodeForMachineBoot(runner commandRunner, id HostIdentity) (string, error) {
 // host, so the two can be compared later without another SSH connection.
 //
 // Run it on the control plane, after the write it describes has succeeded.
-func StampStorageRestarts(runner commandRunner, nodeName, machineID string) error {
+func StampStorageRestarts(runner CommandRunner, nodeName, machineID string) error {
 	if !nodeNamePattern.MatchString(nodeName) {
 		return fmt.Errorf("%q is not a node name", nodeName)
 	}
@@ -239,7 +239,7 @@ var errSharedMachineID = errors.New("more than one node reports this machine id"
 // NodeNameForMachine finds a unique node by machine ID for host-configuration
 // stamping. Run it on the control plane. For join verification, use
 // NodeForMachineBoot to match the current boot as well.
-func NodeNameForMachine(runner commandRunner, machineID string) (string, error) {
+func NodeNameForMachine(runner CommandRunner, machineID string) (string, error) {
 	if machineID == "" {
 		return "", fmt.Errorf("looking up a node needs a machine id")
 	}
@@ -311,7 +311,7 @@ func (p RestartsPending) Any() bool {
 // It fails rather than reporting nothing when needrestart is absent, because
 // "nothing pending" and "could not check" are different answers and only one of
 // them is reassuring.
-func PendingRestarts(runner commandRunner) (RestartsPending, error) {
+func PendingRestarts(runner CommandRunner) (RestartsPending, error) {
 	// The two failures are told apart on the host, because they send an
 	// operator to different places. Answering "not installed" for a host that
 	// has it, because the tool exited non-zero for its own reasons, is a wrong
@@ -364,7 +364,7 @@ func PendingRestarts(runner commandRunner) (RestartsPending, error) {
 // cluster with workers has mounts it cannot reach, and the caller has to say
 // which node it asked. The controller's log-based detector is the signal that
 // covers every node.
-func ReadOnlyVolumeMounts(runner commandRunner) ([]string, error) {
+func ReadOnlyVolumeMounts(runner CommandRunner) ([]string, error) {
 	out, err := runner.Run("cat /proc/mounts")
 	if err != nil {
 		return nil, fmt.Errorf("reading mounts: %w", err)

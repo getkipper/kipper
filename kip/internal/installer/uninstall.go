@@ -2,15 +2,13 @@ package installer
 
 import (
 	"fmt"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // UninstallHost runs k3s's uninstall scripts, removes Kipper's Longhorn
 // integration and Dex hosts pin, and deletes cluster and optional AI data.
 // Missing scripts and directories are tolerated. Host firewall policy and
 // OS hardening remain configured.
-func UninstallHost(client *ssh.Client) error {
+func UninstallHost(client CommandRunner) error {
 	// k3s-killall.sh stops k3s cleanly before uninstall. If the script
 	// does not exist, k3s was not installed via the standard installer
 	// and we silently skip. If it exists, we run it and propagate its

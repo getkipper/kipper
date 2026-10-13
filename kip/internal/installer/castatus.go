@@ -5,7 +5,6 @@ import (
 
 	"github.com/getkipper/kipper/controller/pkg/hopca"
 	"github.com/getkipper/kipper/controller/pkg/hostnames"
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // CAStatus answers the question an operator actually has: does everything
@@ -93,7 +92,7 @@ func (s CAStatus) NextCommand() string {
 // the wire. The wire check is what turns "the Secrets look right" into "the
 // cluster is actually serving what we think", which is the distinction three
 // abandoned designs failed on.
-func ReadCAStatus(client *ssh.Client) (CAStatus, error) {
+func ReadCAStatus(client CommandRunner) (CAStatus, error) {
 	state, err := ReadCAState(client)
 	if err != nil {
 		return CAStatus{}, err

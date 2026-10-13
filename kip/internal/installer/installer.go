@@ -14,102 +14,59 @@ import (
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/domain"
 	"github.com/getkipper/kipper/kip/internal/infra"
+	"github.com/getkipper/kipper/kip/internal/localrun"
+	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // Options holds the parameters for a cluster installation.
 type Options struct {
-	Host   string
-	Domain string
-	// KipVersion is the version of the CLI performing the install, recorded on
-	// the CRDs it writes. A later, older kip reads it to refuse replacing a
-	// newer schema with its own. Empty leaves the CRDs unstamped, which reads
-	// as an install that predates stamping.
-	KipVersion string
-	// ConsoleDomain, ConsoleAPIDomain, DexDomain are optional admin
-	// overrides for each component's public hostname. Empty values fall
-	// back to the SubdomainFor convention applied to Domain.
-	ConsoleDomain    string
-	ConsoleAPIDomain string
-	DexDomain        string
-	// SSHKeyPath is the user's explicit key choice. When non-empty, ssh
-	// is invoked with -i + IdentitiesOnly=yes to force this key.
-	SSHKeyPath string
-	// FallbackSSHKeyPath is a soft hint (typically ~/.ssh/id_ed25519);
-	// ssh tries it if it exists and otherwise falls through to ssh-agent
-	// and the rest of OpenSSH's normal key resolution.
+	Host               string
+	Domain             string
+	KipVersion         string
+	ConsoleDomain      string
+	ConsoleAPIDomain   string
+	DexDomain          string
+	Local              bool
+	SSHKeyPath         string
 	FallbackSSHKeyPath string
 	AdminEmail         string
 	AdminPasswordHash  string
 	GatewayURL         string
 	Org                string
 	OrgDisplayName     string
-	// Harden enables host-level security hardening of surplus services
-	// (e.g. masking rpcbind so it does not respond to public scans).
-	// Default is true via the --harden flag; set false only when the
-	// operator manages host security themselves.
-	Harden bool
-	// Firewall enables installation and configuration of UFW with a
-	// k3s-correct ruleset. Default is true via the --firewall flag.
-	// If a pre-existing host firewall is detected (UFW or firewalld),
-	// this step is skipped regardless of the flag value.
-	Firewall bool
-
-	// NoSSHRateLimit opens the SSH port outright instead of rate-limiting it.
-	//
-	// The limit allows six connections per thirty seconds from one address,
-	// which is generous for a person and reachable for CI running several kip
-	// commands in a row, or for two operators sharing a NAT address. It is a
-	// rule about a source address, not about an attacker, so anyone whose
-	// legitimate traffic looks like a burst needs this.
-	NoSSHRateLimit bool
-	// BackupStorage configures Velero's BSL. When nil the installer
-	// deploys an in-cluster MinIO (default). When non-nil the installer
-	// skips MinIO and points Velero at the user-supplied S3-compatible
-	// bucket so backups survive a cluster wipe.
-	BackupStorage *BackupStorageConfig
-	// DNSResolvers are the upstream nameservers CoreDNS forwards external
-	// queries to. Empty uses the default public resolvers; set it (via
-	// --dns-resolver) for clusters that must reach internal or corporate
-	// DNS.
-	DNSResolvers []string
-	// TrustedProxies are extra IPs/CIDRs (via --trusted-proxy) whose
-	// X-Forwarded-* headers Traefik honours, for clusters behind an
-	// external load balancer. The kipper.run gateway is trusted
-	// automatically by resolving the cluster's own domain; it is never
-	// persisted here.
-	TrustedProxies []string
-	// KubeconfigMode decides what credential lands on the operator machine:
-	// the credential-free exec kubeconfig (interactive or deferred) or the
-	// shared admin certificate (explicit opt-out). Zero value is
-	// KubeconfigExecInteractive.
-	KubeconfigMode KubeconfigMode
-	// LoginGate runs the inline OIDC login and proof for an interactive
-	// install. nil skips the gate (the exec kubeconfig is written but not
-	// verified inline) — the cmd layer wires the real gate.
-	LoginGate func(ctx context.Context, domain, dexHost, server string, caData []byte) GateResult
+	Harden             bool
+	Firewall           bool
+	NoSSHRateLimit     bool
+	BackupStorage      *BackupStorageConfig
+	DNSResolvers       []string
+	TrustedProxies     []string
+	KubeconfigMode     KubeconfigMode
+	LoginGate          func(ctx context.Context, domain, dexHost, server string, caData []byte) GateResult
 }
 
-// Result contains the outputs of a successful installation.
+// Result contains installation outputs, including those available after a failure.
 type Result struct {
-	Domain         string
-	ConsoleURL     string
-	KubeconfigPath string
-	GatewayToken   string
-	AdminPassword  string
-	// AuthMode records how the operator authenticates: "oidc" (verified
-	// exec kubeconfig), "deferred" (exec kubeconfig; login pending,
-	// unreachable, or proof failed — finish with kip auth verify), or
-	// "admin-optout" (--admin-kubeconfig). The exec kubeconfig is the only
-	// thing install writes by default; the shared certificate lands on disk
-	// only via --admin-kubeconfig.
-	AuthMode      string
-	VerifiedEmail string
-	// CredentialsShown reports that the admin credentials were already printed,
-	// which the interactive path does before its sign-in prompt. The caller's
-	// closing summary reads it so one install does not disclose the same
-	// password twice under two different "save this now" headings.
+	Domain           string
+	ConsoleURL       string
+	KubeconfigPath   string
+	GatewayToken     string
+	AdminPassword    string
+	AuthMode         string
+	VerifiedEmail    string
 	CredentialsShown bool
 }
+
+// hostRunner is everything an install asks of the server: commands, uploads,
+// and whether the SSH rate limit is safe for the connection in use.
+type hostRunner interface {
+	Uploader
+	SurvivesSSHRateLimit() bool
+}
+
+var (
+	_ hostRunner = (*ssh.Client)(nil)
+	_ hostRunner = (*localrun.Runner)(nil)
+)
 
 // Run executes the full cluster installation sequence.
 func Run(opts Options) (*Result, error) {
@@ -181,17 +138,25 @@ func Run(opts Options) (*Result, error) {
 		FallbackSSHKey: opts.FallbackSSHKeyPath,
 	}
 
-	fmt.Printf("\n  Connecting to %s...\n", opts.Host)
-	if err := provider.Connect(); err != nil {
-		return nil, fmt.Errorf("connecting to %s: %w", opts.Host, err)
+	var client hostRunner
+	if opts.Local {
+		fmt.Printf("\n  Installing on this machine (%s)\n\n", opts.Host)
+		client = localrun.New()
+	} else {
+		fmt.Printf("\n  Connecting to %s...\n", opts.Host)
+		if err := provider.Connect(); err != nil {
+			return nil, fmt.Errorf("connecting to %s: %w", opts.Host, err)
+		}
+		defer func() { _ = provider.Close() }()
+		fmt.Printf("  ✔  Connected\n\n")
+		client = provider.Client()
 	}
-	defer func() { _ = provider.Close() }()
-	fmt.Printf("  ✔  Connected\n\n")
 
-	client := provider.Client()
-
-	// Gather system info and run preflight checks
 	fmt.Printf("  Running preflight checks...\n")
+	// Record machine identity for the local-uninstall guard, including hosts
+	// reached through NAT. Address checks remain available if this read fails.
+	hostMachineID, _ := ReadMachineID(client)
+
 	sysInfo, err := GatherSystemInfo(client)
 	if err != nil {
 		return nil, fmt.Errorf("gathering system info: %w", err)
@@ -272,6 +237,7 @@ func Run(opts Options) (*Result, error) {
 	// disclosed exactly once and which nothing else holds yet.
 	freshlyRegistered := false
 	credentialsAttempted := false
+	passwordSent := false
 	domainName := opts.Domain
 	if existingIdentity != nil {
 		adopted, err := AdoptIdentity(existingIdentity, opts.Domain, opts.ConsoleDomain, opts.ConsoleAPIDomain, opts.DexDomain)
@@ -329,18 +295,7 @@ func Run(opts Options) (*Result, error) {
 			if gatewayToken == "" {
 				gatewayToken = existing.GatewayToken
 			}
-			// With no explicit flag, inherit the resolver choice persisted at
-			// install time so a re-run does not silently revert a custom
-			// resolver to the public defaults. An explicit flag was already
-			// validated above and wins.
-			if len(opts.DNSResolvers) == 0 {
-				opts.DNSResolvers = existing.DNSResolvers
-			}
-			// Same for the trusted-proxy extras: a re-run without the flag
-			// keeps the operator's load-balancer trust instead of dropping it.
-			if len(opts.TrustedProxies) == 0 {
-				opts.TrustedProxies = existing.TrustedProxies
-			}
+			inheritClusterSettings(&opts, existing)
 		}
 	}
 	dnsResolvers, err := resolveDNSResolvers(opts.DNSResolvers)
@@ -545,7 +500,9 @@ func Run(opts Options) (*Result, error) {
 			return InstallZot(client)
 		}},
 		{"Configuring identity provider", func() error {
-			return InstallDex(client, resolvedHosts.DexHost, resolvedHosts.ConsoleHost, domainName, opts.AdminPasswordHash)
+			sent, err := InstallDex(client, resolvedHosts.DexHost, resolvedHosts.ConsoleHost, domainName, opts.AdminPasswordHash)
+			passwordSent = passwordSent || sent
+			return err
 		}},
 		{"Staging operator access", func() error {
 			return InstallOperatorRBAC(client, domainName)
@@ -637,6 +594,7 @@ func Run(opts Options) (*Result, error) {
 				Org:              opts.Org,
 				OrgDisplayName:   opts.OrgDisplayName,
 				BackupStorage:    backupStorageRef(opts.BackupStorage),
+				MachineID:        hostMachineID,
 				DNSResolvers:     opts.DNSResolvers,
 				TrustedProxies:   opts.TrustedProxies,
 			})
@@ -686,6 +644,7 @@ func Run(opts Options) (*Result, error) {
 			}
 			partialResult.KubeconfigPath = kubeconfigPath
 			partialResult.GatewayToken = gatewayToken
+			partialResult.AdminPassword = passwordInEffect(adminPassword, passwordSent)
 			return partialResult, fmt.Errorf("%s: %w", step.name, err)
 		}
 		fmt.Printf("  ✔  %s\n", step.name)
@@ -768,8 +727,8 @@ func Run(opts Options) (*Result, error) {
 			if gate.Message != "" {
 				fmt.Printf("  %s\n\n", gate.Message)
 			}
-			if _, pinned := execCommandForHostPinned(); pinned && gate.AuthMode == "oidc" {
-				fmt.Printf("  ⚠  kip is not on PATH; the kubeconfig pins this binary's location. Install kip to PATH and run: kip auth kubeconfig\n\n")
+			if KipPinned() && gate.AuthMode == "oidc" {
+				fmt.Printf("  %s\n\n", PinnedKipWarning)
 			}
 		}
 	}
@@ -824,4 +783,27 @@ func saveKubeconfig(name string, content string) (string, error) {
 	}
 
 	return path, nil
+}
+
+// inheritClusterSettings preserves resolvers, trusted proxies, and external
+// backup storage when the reinstall supplies no replacement.
+func inheritClusterSettings(opts *Options, existing *config.Cluster) {
+	if len(opts.DNSResolvers) == 0 {
+		opts.DNSResolvers = existing.DNSResolvers
+	}
+	if len(opts.TrustedProxies) == 0 {
+		opts.TrustedProxies = existing.TrustedProxies
+	}
+	if opts.BackupStorage == nil {
+		opts.BackupStorage = BackupStorageFromRef(existing.BackupStorage)
+	}
+}
+
+// passwordInEffect exposes the generated password after an attempted Dex apply,
+// since an apply error can occur after the password has changed.
+func passwordInEffect(password string, sent bool) string {
+	if !sent {
+		return ""
+	}
+	return password
 }

@@ -30,6 +30,12 @@ kip install --host <ip> [flags]
 | `--no-login` | No | `false` | Skip the inline browser sign-in during install. The machine ends up with a credential-free kubeconfig; the first operator runs `kip auth login && kip auth verify` afterwards |
 | `--firewall` | No | `true` | Install and configure UFW with k3s-correct rules. Skipped automatically if another firewall is already active. Pass `--firewall=false` only when you manage host security yourself |
 | `--no-ssh-rate-limit` | No | `false` | Open the SSH port outright instead of rate-limiting it. See below |
+| `--local` | No | `false` | Install on this machine; `--host` must reach it. See [Installing on the server itself](#installing-on-the-server-itself) |
+| `--host-maps-here` | No | `false` | With `--local`: confirm that `--host` routes to this machine, such as through NAT |
+| `--result` | No | — | With `--local`: save a result file to import on your management machine with `kip cluster add --install-result` |
+| `--via-server` | No | `true` on Windows | Run a persistent install job on the server and stream its log. Enabled by default on Windows. See [Installing from Windows](/en/windows) |
+| `--server-kip` | No | — | With `--via-server`: upload a local Linux `kip` binary; useful for unreleased builds |
+| `--cancel` | No | `false` | With `--via-server` (the default on Windows): stop the running install on `--host` or discard its uncollected result |
 | `--dns-resolver` | No | `1.1.1.1`, `8.8.8.8`, `9.9.9.9` | Upstream DNS resolver CoreDNS forwards external queries to. Repeatable, up to three IPv4 addresses (the resolv.conf nameserver limit; the cluster pod network is IPv4-only). Kipper forwards to reliable public resolvers instead of the host's `/etc/resolv.conf`, which varies by provider and can carry unreachable or rate-limited entries that break cluster DNS. The default sends your workloads' external DNS lookups to Cloudflare, Google, and Quad9. On private, split-horizon, or data-residency-sensitive networks, set your own resolvers (e.g. `--dns-resolver 10.0.0.53`), which is also how clusters resolve internal or corporate names. During install, Kipper checks each resolver is reachable from the server on port 53 and warns about any that are not |
 | `--trusted-proxy` | No | — | IP or CIDR whose `X-Forwarded-*` headers Traefik honours. Repeatable. Set it when an external load balancer or proxy sits in front of the cluster, so apps and logs see real client addresses instead of the balancer's. The kipper.run gateway is trusted automatically; with no proxy in front, leave it unset and forwarded headers are ignored |
 | `--backup-storage-bucket` | No | — | S3-compatible bucket name for Velero backups. When set, backups live off-cluster and survive a wipe. See [External backup storage](#external-backup-storage) below |
@@ -75,6 +81,25 @@ kip cluster harden --no-ssh-rate-limit
 ```
 
 Kipper also skips the rate limit on its own when it cannot share one connection for the whole install, on a machine where it cannot write to your home directory for instance. Rate-limiting a port it then needs hundreds of connections through would lock it out of your half-built server.
+
+#### Installing on the server itself
+
+For CI, cloud-init or a provider's user-data script, `kip` can run on the server and install it there, with no SSH connection at all:
+
+```bash
+kip install --local --host 203.0.113.10 --result /root/cluster-result.kip
+```
+
+Run as root with `HOME=/root`. Set `--host` to the address other machines use to reach the server; kip uses it for the cluster's certificate and API address. Hostnames must resolve on the server, and loopback addresses are rejected. If the address is absent from local interfaces, as with public addresses behind NAT, confirm that it routes to this server when prompted. For unattended installs, pass `--host-maps-here`.
+
+Local installs defer browser sign-in to your management machine. Copy the result file there and import it:
+
+```bash
+kip cluster add --install-result --ssh-key ~/.ssh/id_ed25519 cluster-result.kip
+kip auth login
+```
+
+`--ssh-key` records the local key path for maintenance commands such as `kip upgrade`. The result file holds the cluster's gateway credential and its settings, so keep it private and delete it once it is added. `--install-result` requires a new cluster name to protect existing entries. Run `kip cluster uninstall` from your management machine. It checks the recorded machine ID and local addresses to guard against uninstalling its own host.
 
 ## What it installs
 

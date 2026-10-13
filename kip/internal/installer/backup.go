@@ -4,9 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"io"
+	"os"
 	"strings"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 const veleroChartVersion = "12.0.0"
@@ -93,12 +93,19 @@ func DefaultBackupExcludedResources() []string {
 	}
 }
 
+// Uploader adds file transfer to CommandRunner. Implementations must keep file
+// contents out of command arguments because uploads can contain credentials.
+type Uploader interface {
+	CommandRunner
+	Upload(content io.Reader, remotePath string, mode os.FileMode) error
+}
+
 // InstallBackup sets up Velero for cluster backups. When cfg is nil the
 // installer deploys an in-cluster MinIO and points Velero at it (zero
 // config out of the box). When cfg is non-nil the installer skips MinIO
 // entirely and configures Velero to write to the user-provided
 // S3-compatible bucket — backups then survive a cluster wipe.
-func InstallBackup(client *ssh.Client, cfg *BackupStorageConfig) error {
+func InstallBackup(client Uploader, cfg *BackupStorageConfig) error {
 	if cfg == nil {
 		password, err := ensureMinIOPassword(client)
 		if err != nil {
@@ -122,7 +129,7 @@ func InstallBackup(client *ssh.Client, cfg *BackupStorageConfig) error {
 // first install, when the Secret is absent. This mirrors the external
 // path, which likewise preserves the existing cloud-credentials Secret on
 // upgrade.
-func ensureMinIOPassword(client *ssh.Client) (string, error) {
+func ensureMinIOPassword(client CommandRunner) (string, error) {
 	// Bracket notation because the key contains a hyphen, which kubectl's
 	// jsonpath parser does not handle in dot notation.
 	out, err := client.Run("kubectl -n velero get secret " + minioCredentialsSecret +
@@ -147,7 +154,7 @@ func ensureMinIOPassword(client *ssh.Client) (string, error) {
 // Note: backups stored here die with the cluster (Longhorn data is on
 // the cluster's own host). For durability across cluster wipes, use
 // external storage via `kip install --backup-storage-*`.
-func installInClusterMinIO(client commandRunner, password string) error {
+func installInClusterMinIO(client CommandRunner, password string) error {
 	minioManifest := fmt.Sprintf(`apiVersion: v1
 kind: Namespace
 metadata:
@@ -264,7 +271,7 @@ spec:
 // createMinIOBucket creates the velero bucket with a one-shot Job.
 // Credentials from the minio-credentials Secret reach mc through MC_HOST_kipper
 // to keep the password out of process arguments.
-func createMinIOBucket(client commandRunner) error {
+func createMinIOBucket(client CommandRunner) error {
 	jobManifest := fmt.Sprintf(`apiVersion: batch/v1
 kind: Job
 metadata:
@@ -326,7 +333,7 @@ spec:
 // the access key in the HelmChart CR would expose it to anyone with
 // read on kube-system HelmCharts, and it would leak into kubectl
 // error output if apply ever fails.
-func installVelero(client *ssh.Client, cfg *BackupStorageConfig, minioPassword string) error {
+func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword string) error {
 	if err := installVeleroCredentials(client, cfg, minioPassword); err != nil {
 		return err
 	}
@@ -426,7 +433,7 @@ spec:
 // function preserves the existing Secret instead of overwriting it.
 // The upgrade can then re-apply the Velero chart without disturbing
 // credentials the operator supplied at install time.
-func installVeleroCredentials(client *ssh.Client, cfg *BackupStorageConfig, minioPassword string) error {
+func installVeleroCredentials(client Uploader, cfg *BackupStorageConfig, minioPassword string) error {
 	// Ensure the namespace exists before we drop a Secret into it. The
 	// Velero HelmChart will create it too, but that race is fine — apply
 	// is idempotent and the namespace is harmless if it already exists.

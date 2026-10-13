@@ -1,6 +1,9 @@
 package installer
 
 import (
+	"errors"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -55,4 +58,27 @@ func TestDexImageIsDigestPinned(t *testing.T) {
 	// a re-pushed image replace the identity provider without any change
 	// here.
 	assert.Regexp(t, `image: ghcr\.io/dexidp/dex:v[0-9.]+@sha256:[0-9a-f]{64}`, dexManifestTemplate)
+}
+
+// failingRunner fails commands containing failOn.
+type failingRunner struct{ failOn string }
+
+func (f failingRunner) Run(cmd string) (string, error) {
+	if strings.Contains(cmd, f.failOn) {
+		return "", errors.New("refused")
+	}
+	return "", nil
+}
+
+func (f failingRunner) RunStdin(cmd string, _ io.Reader) (string, error) { return f.Run(cmd) }
+
+// A failed apply may have committed the password, so the caller must receive it.
+func TestInstallDexReportsWhetherThePasswordWasSent(t *testing.T) {
+	sent, err := InstallDex(failingRunner{failOn: "create namespace"}, "dex.example.com", "console.example.com", "example.com", "hash")
+	require.Error(t, err)
+	assert.False(t, sent, "a prerequisite failed before the password manifest")
+
+	sent, err = InstallDex(failingRunner{failOn: "staticPasswords"}, "dex.example.com", "console.example.com", "example.com", "hash")
+	require.Error(t, err)
+	assert.True(t, sent, "an apply that reports failure may still have committed")
 }

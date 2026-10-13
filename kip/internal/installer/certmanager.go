@@ -3,8 +3,6 @@ package installer
 import (
 	"encoding/json"
 	"fmt"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 const certManagerVersion = "v1.17.2"
@@ -28,7 +26,7 @@ spec:
 // InstallCertManager installs the controller and a Let's Encrypt ClusterIssuer.
 // It gives cert-manager the configured DNS resolvers directly so HTTP-01
 // self-checks bypass CoreDNS's negative cache during new-record propagation.
-func InstallCertManager(client *ssh.Client, email string, dnsResolvers []string) error {
+func InstallCertManager(client CommandRunner, email string, dnsResolvers []string) error {
 	url := fmt.Sprintf(
 		"https://github.com/cert-manager/cert-manager/releases/download/%s/cert-manager.yaml",
 		certManagerVersion,
@@ -65,7 +63,7 @@ func InstallCertManager(client *ssh.Client, email string, dnsResolvers []string)
 // empty it falls back to the public defaults.
 //
 // Idempotent: a strategic merge patch sets the same fields each time.
-func patchCertManagerDNSConfig(client *ssh.Client, resolvers []string) error {
+func patchCertManagerDNSConfig(client CommandRunner, resolvers []string) error {
 	patch, err := certManagerDNSPatch(resolvers)
 	if err != nil {
 		return err

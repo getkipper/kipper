@@ -4,8 +4,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // gatewayCredentialsSecretName holds the kipper.run gateway registration token
@@ -21,7 +19,7 @@ const gatewayCredentialsSecretName = "gateway-credentials"
 // the mirror existed, or by another operator, has none, and releasing a label
 // without it is impossible — the gateway keys deregistration entirely on the
 // token. Reading it here is what lets an uninstall hand the label back.
-func ReadGatewayCredentials(client commandRunner) (string, error) {
+func ReadGatewayCredentials(client CommandRunner) (string, error) {
 	out, err := client.Run(fmt.Sprintf(
 		"kubectl -n kipper-system get secret %s -o jsonpath='{.data.token}' --ignore-not-found",
 		gatewayCredentialsSecretName))
@@ -45,7 +43,7 @@ func ReadGatewayCredentials(client commandRunner) (string, error) {
 // StoreGatewayCredentials writes the gateway registration token into the
 // kipper-system/gateway-credentials Secret. A custom-domain cluster has no
 // registration, so an empty token is a no-op.
-func StoreGatewayCredentials(client *ssh.Client, token string) error {
+func StoreGatewayCredentials(client CommandRunner, token string) error {
 	if token == "" {
 		return nil
 	}
@@ -99,7 +97,7 @@ func readSecretCmd(namespace, name, key string) string {
 // Secret is genuinely absent. Any other failure is an error, so callers can
 // tell "absent" from "could not read" and never mint a fresh secret over a
 // live one.
-func readSecretValue(client *ssh.Client, namespace, name, key string) (string, error) {
+func readSecretValue(client CommandRunner, namespace, name, key string) (string, error) {
 	out, err := client.Run(readSecretCmd(namespace, name, key))
 	if err != nil {
 		return "", fmt.Errorf("reading secret %s/%s: %w", namespace, name, err)

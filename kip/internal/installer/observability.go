@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // InstallLoki installs Grafana Loki in single-binary mode with filesystem
@@ -14,14 +13,14 @@ import (
 //
 // The upgrade path uses InstallLokiWithResources directly to honor any
 // per-component overrides recorded on the PlatformConfig CR.
-func InstallLoki(client *ssh.Client, profile string) error {
+func InstallLoki(client CommandRunner, profile string) error {
 	return InstallLokiWithResources(client, platform.ResourcesForProfile(profile))
 }
 
 // InstallLokiWithResources installs Loki using the supplied memory resources.
 // Use this when the effective limits depend on more than the profile alone
 // (e.g. an upgrade reading PlatformConfig.spec.components overrides).
-func InstallLokiWithResources(client *ssh.Client, res platform.Resources) error {
+func InstallLokiWithResources(client CommandRunner, res platform.Resources) error {
 	manifest := platform.LokiHelmChart(res)
 
 	applyCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", manifest)
@@ -46,7 +45,7 @@ func InstallLokiWithResources(client *ssh.Client, res platform.Resources) error 
 // HelmChart with explicit memory resources. Used by the upgrade path to
 // preserve PlatformConfig overrides that the simple profile-only signature
 // would otherwise overwrite.
-func InstallPrometheusGrafanaWithResources(client *ssh.Client, res platform.Resources) error {
+func InstallPrometheusGrafanaWithResources(client CommandRunner, res platform.Resources) error {
 	// The chart reads Grafana's admin password from this Secret
 	// (grafana.admin.existingSecret), so it must exist before the release
 	// installs or Grafana starts with a dangling reference.
@@ -101,7 +100,7 @@ func InstallPrometheusGrafanaWithResources(client *ssh.Client, res platform.Reso
 // grafana.admin.existingSecret, so a re-run never rotates the password and
 // invalidates a saved login. The password is fed over stdin, so it never
 // appears in the command string or the process table.
-func ensureGrafanaAdminSecret(client *ssh.Client) error {
+func ensureGrafanaAdminSecret(client CommandRunner) error {
 	if _, err := client.Run(ensureNamespaceCmd(platform.MonitoringNamespace)); err != nil {
 		return fmt.Errorf("ensuring monitoring namespace: %w", err)
 	}

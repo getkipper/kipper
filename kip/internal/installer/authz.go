@@ -2,8 +2,6 @@ package installer
 
 import (
 	"fmt"
-
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // authzManifest deploys kipper-authz, the forwardAuth data plane for
@@ -220,7 +218,7 @@ spec:
 `
 
 // InstallAuthz deploys the API-key authorization service.
-func InstallAuthz(client *ssh.Client) error {
+func InstallAuthz(client CommandRunner) error {
 	applyCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", authzManifest)
 	if _, err := client.Run(applyCmd); err != nil {
 		return fmt.Errorf("applying authz manifest: %w", err)

@@ -61,7 +61,7 @@ curl -sL https://getkipper.com/install | sh
 
 Downloads the binary for your platform from the [latest release](https://github.com/getkipper/kipper/releases/latest), checks it against the published checksums, and puts `kip` in `/usr/local/bin`. Linux and macOS, on x86-64 and arm64.
 
-On Windows, use WSL for installation and the native Windows CLI for daily work. See [Installing from Windows](docs/en/windows.md).
+On Windows, download `kip-windows-amd64.exe` from the releases page and run `kip install` from PowerShell. See [Installing from Windows](docs/en/windows.md).
 
 ### Install the cluster
 

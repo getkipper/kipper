@@ -44,6 +44,7 @@ func dialStub(t *testing.T, host stubHost) (*ssh.Client, string) {
 
 	dir := t.TempDir()
 	calls := filepath.Join(dir, "calls")
+	started := filepath.Join(dir, "ufw-started")
 	badSyntax := filepath.Join(dir, "bad-syntax")
 	t.Cleanup(func() {
 		out, err := os.ReadFile(badSyntax)
@@ -77,6 +78,11 @@ func dialStub(t *testing.T, host stubHost) (*ssh.Client, string) {
 		"case \"$*\" in\n" +
 		"  *'" + fail + "'*) echo 'stub: refused' >&2; exit 1 ;;\n" +
 		"  *'ufw status'*) echo '" + host.ufwStatus + "'; exit 0 ;;\n" +
+		// ufw's chains exist, holding the SSH rule, between a start and a stop.
+		"  *'No chain/target/match'*) if test -f " + started + "; then echo present; else echo absent; fi; exit 0 ;;\n" +
+		"  *'iptables -S ufw-user-input'*) test -f " + started + " || exit 1; echo '-A ufw-user-input -p tcp -m tcp --dport 22 -j ACCEPT'; exit 0 ;;\n" +
+		"  *'ufw --force disable'*) rm -f " + started + "; exit 0 ;;\n" +
+		"  *'ufw --force enable'*) touch " + started + "; exit 0 ;;\n" +
 		// The claim write names this path too, so it is answered first.
 		"  *'mkdir -p '*) exit 0 ;;\n" +
 		"  *'firewall-managed'*) " + claimArm + "; exit 0 ;;\n" +

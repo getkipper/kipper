@@ -150,3 +150,13 @@ func TestNoControlSocketMeansNoMultiplexingFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestSSHArgsAlwaysSendKeepalives(t *testing.T) {
+	for _, controlPath := range []string{"", "/tmp/kip-test.sock"} {
+		c := &Client{cfg: Config{Host: "203.0.113.10", User: "root"}, controlPath: controlPath}
+		args := strings.Join(c.sshArgs(), " ")
+		if !strings.Contains(args, "ServerAliveInterval=15") || !strings.Contains(args, "ServerAliveCountMax=4") {
+			t.Errorf("control path %q: keepalives missing from %q", controlPath, args)
+		}
+	}
+}

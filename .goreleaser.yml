@@ -76,6 +76,5 @@ release:
     ```
 
     Windows: download `kip-windows-amd64.exe`, rename to `kip.exe`, and add to your PATH.
-    `kip install` needs WSL: it shares one SSH connection across hundreds of
-    commands, which Windows OpenSSH does not support. Every other command works
-    from the native binary.
+    Run `kip install` from PowerShell to start the installation on the server
+    and stream its progress to your machine.

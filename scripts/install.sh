@@ -18,9 +18,7 @@ detect_os() {
   case "$(uname -s)" in
     Linux*)  echo "linux" ;;
     Darwin*) echo "darwin" ;;
-    # Git Bash and MSYS2 report these. This script installs a Unix binary to
-    # /usr/local/bin, which is not how kip reaches a Windows PATH, so it names
-    # the two routes that do rather than calling the platform unsupported.
+    # Direct Windows shell users to the native binary download below.
     MINGW*|MSYS*|CYGWIN*) echo "windows" ;;
     *)       echo "unsupported" ;;
   esac
@@ -40,17 +38,9 @@ ARCH=$(detect_arch)
 
 if [ "$OS" = "windows" ]; then
   echo ""
-  echo "  This installer sets up a Unix binary, which is not how kip reaches"
-  echo "  your PATH on Windows. Two ways to install:"
-  echo ""
-  echo "    WSL      Open your Linux shell and run this same command there."
-  echo "             Needed for 'kip install', which uses SSH multiplexing"
-  echo "             that Windows OpenSSH does not support."
-  echo ""
-  echo "    Windows  Download kip-windows-amd64.exe from"
-  echo "             https://github.com/${REPO}/releases/latest"
-  echo "             rename it to kip.exe, and put it on your PATH."
-  echo "             Everything but 'kip install' works natively."
+  echo "  To install kip on Windows, download kip-windows-amd64.exe from"
+  echo "  https://github.com/${REPO}/releases/latest, rename it to kip.exe and"
+  echo "  put it on your PATH. You can install and manage clusters from PowerShell."
   echo ""
   exit 1
 fi
