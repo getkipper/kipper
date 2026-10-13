@@ -4,7 +4,7 @@
 
 ### What is Kipper?
 
-Kipper is an open source platform that installs and manages Kubernetes on Ubuntu and Debian servers. It includes a web console, automatic TLS, persistent storage, and commands for deploying apps.
+Kipper is an open source platform that installs and manages Kubernetes on Ubuntu, Debian, Rocky Linux, AlmaLinux and CentOS Stream servers. It includes a web console, automatic TLS, persistent storage, and commands for deploying apps.
 
 ### Does Kipper collect telemetry?
 
@@ -38,7 +38,7 @@ One small difference: in `kip exec`, a shell keeps drawing to the size the windo
 
 ### What servers are supported?
 
-Any Linux server with root SSH access running Ubuntu 22.04, 24.04 or 26.04, or Debian 12 or 13. Kipper also accepts Ubuntu 20.04 and Debian 11, with a warning that standard support has ended. Minimum 2GB RAM and 30GB disk.
+Any Linux server with root SSH access running Ubuntu 22.04, 24.04 or 26.04, Debian 12 or 13, or Rocky Linux, AlmaLinux or CentOS Stream 9 or 10. Kipper also accepts Ubuntu 20.04 and Debian 11, with a warning that standard support has ended. Minimum 2GB RAM and 30GB disk.
 
 ### Can I install on a cloud VM?
 
@@ -50,7 +50,7 @@ The `kip` CLI itself runs fine on ARM client machines (Linux arm64 and Apple Sil
 
 ### What other Linux distributions are supported?
 
-Ubuntu and Debian. RHEL, Rocky Linux, AlmaLinux, Fedora, openSUSE, and Alpine Linux are not currently supported. The difference is small (just the package manager command for open-iscsi), so a contribution adding one is a good first PR.
+Ubuntu and Debian, plus Rocky Linux, AlmaLinux and CentOS Stream 9 and 10. On the latter three, Kipper configures firewalld and enables k3s's SELinux support while preserving the host's SELinux mode. Red Hat Enterprise Linux itself, Fedora, openSUSE and Alpine Linux are not supported yet.
 
 ### I lost my admin password
 

@@ -156,6 +156,8 @@ choose. A node added by an older `kip` does not have the file:
 kip node repair-host --host <address>
 ```
 
+On Rocky Linux, AlmaLinux and CentOS Stream, Kipper enables `iscsid` and reads pending restarts from `dnf needs-restarting`. The needrestart drop-in applies only to Ubuntu and Debian. Schedule `iscsi-initiator-utils` updates during planned downtime: package scripts may restart `iscsid` and disrupt mounted volumes.
+
 `kip status` reports services that still need a restart to load updated libraries:
 
 ```

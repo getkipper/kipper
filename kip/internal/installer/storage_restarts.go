@@ -90,6 +90,21 @@ const (
 	StorageRestartsMachineAnnotation = "kipper.run/storage-restarts-machine"
 )
 
+// rhelFamilyOSImages contains kubelet OS image prefixes excluded from
+// Kipper's needrestart configuration checks.
+var rhelFamilyOSImages = []string{"Rocky Linux", "AlmaLinux", "CentOS Stream", "Red Hat Enterprise Linux"}
+
+// NeedrestartApplies reports whether to check a node for the needrestart drop-in.
+// Unknown or empty OS images require the check to avoid hiding missing coverage.
+func NeedrestartApplies(osImage string) bool {
+	for _, prefix := range rhelFamilyOSImages {
+		if strings.HasPrefix(osImage, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
 // ReadMachineID reads the host's own identity.
 //
 // It asks the host rather than the Kubernetes node object, because the point of

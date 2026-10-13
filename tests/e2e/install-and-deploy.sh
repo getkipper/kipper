@@ -7,7 +7,7 @@ set -euo pipefail
 #   ./tests/e2e/install-and-deploy.sh <server-ip> <ssh-key-path>
 #
 # Prerequisites:
-#   - A fresh Linux server (Ubuntu 22.04/24.04/26.04 or Debian 12/13)
+#   - A fresh Linux server (Ubuntu 22.04/24.04/26.04, Debian 12/13, or Rocky Linux/AlmaLinux/CentOS Stream 9/10)
 #   - SSH key access as root
 #   - The kip binary built: cd kip && go build -o kip .
 #
@@ -56,7 +56,8 @@ check "kip binary builds" bash -c "cd kip && go build -o kip ."
 # Step 3: Install cluster
 echo ""
 echo "Step 3: Install cluster"
-INSTALL_OUTPUT=$($KIP install --host "$HOST" --ssh-key "$SSH_KEY" --admin-email "e2e@kipper.test" 2>&1) || true
+# Fresh RHEL-family images may already run firewalld; allow kip to configure it.
+INSTALL_OUTPUT=$($KIP install --host "$HOST" --ssh-key "$SSH_KEY" --admin-email "e2e@kipper.test" --adopt-firewall 2>&1) || true
 echo "$INSTALL_OUTPUT"
 
 check "Install completed" echo "$INSTALL_OUTPUT" | grep -q "Cluster ready"

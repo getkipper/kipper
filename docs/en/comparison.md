@@ -36,7 +36,7 @@ Kipper is much younger than all of them and has not reached 1.0. Seven stars aga
 
 ## Where Kipper fits
 
-Kipper's install path is its distinguishing feature. One command over SSH takes a plain Ubuntu or Debian box and leaves you with k3s, a web console, Let's Encrypt certificates, persistent storage, an identity provider and backups, configured together.
+Kipper's install path is its distinguishing feature. One command over SSH takes a plain Ubuntu, Debian, Rocky Linux, AlmaLinux or CentOS Stream box and leaves you with k3s, a web console, Let's Encrypt certificates, persistent storage, an identity provider and backups, configured together.
 
 Your apps are ordinary Kubernetes objects, so `kubectl` works against them, the concepts your team learns transfer to any other cluster, and the resources are inspectable with standard tools. That is worth having if you want Kubernetes and have nobody to run it full time. It reduces some of the work of a later move to EKS or GKE, though anything that depends on Kipper's own ingress, storage or identity conventions still has to be rebuilt for the target platform.
 

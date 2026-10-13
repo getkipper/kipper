@@ -176,17 +176,17 @@ func checkHostWith(out io.Writer, sshConfig ssh.Config, cluster *config.Cluster,
 	reportReadOnlyVolumes(out, cluster, client, nodes)
 }
 
-// reportStorageRestartCoverage names the nodes whose host configuration is
-// missing, out of date, or was written to a machine that has since been
-// replaced.
-//
-// It reads the stamp kip writes at install and at node add, so it covers every
-// node in the cluster rather than the one this command can SSH to. The stamp
-// records that a write once succeeded: a file deleted or edited by hand
-// afterwards still reads as configured.
+// reportStorageRestartCoverage checks node annotations for missing, outdated,
+// or replaced-host needrestart configuration. Annotations record successful
+// writes; later manual file changes are invisible to this check.
 func reportStorageRestartCoverage(nodes []k8s.NodeInfo) {
 	var uncovered []string
+	withoutNeedrestart := 0
 	for _, node := range nodes {
+		if !installer.NeedrestartApplies(node.OSImage) {
+			withoutNeedrestart++
+			continue
+		}
 		covered, why := installer.StorageRestartCoverage(
 			node.Annotations[installer.StorageRestartsVersionAnnotation],
 			node.Annotations[installer.StorageRestartsMachineAnnotation],
@@ -198,8 +198,15 @@ func reportStorageRestartCoverage(nodes []k8s.NodeInfo) {
 	}
 
 	fmt.Printf("  Host configuration:\n")
+	if withoutNeedrestart > 0 {
+		fmt.Printf("    ℹ  %d node(s) run a distribution without needrestart; package updates there\n", withoutNeedrestart)
+		fmt.Printf("       may restart iscsid, so update storage packages during planned downtime\n")
+	}
 	if len(uncovered) == 0 {
-		fmt.Printf("    ✔  needrestart leaves the storage path alone on every node\n\n")
+		if withoutNeedrestart < len(nodes) {
+			fmt.Printf("    ✔  needrestart leaves the storage path alone on every node that uses it\n")
+		}
+		fmt.Printf("\n")
 		return
 	}
 

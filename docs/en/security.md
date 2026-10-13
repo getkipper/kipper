@@ -34,7 +34,7 @@ This matters because Kipper installs on whatever Linux server you point it at, a
 
 **What the firewall opens**
 
-UFW is installed with a default-deny incoming policy. The following ports are allowed:
+On Ubuntu and Debian, UFW is installed with a default-deny incoming policy; the RHEL family gets firewalld instead, described below. The following ports are allowed:
 
 | Port | Reason |
 |---|---|
@@ -48,7 +48,7 @@ The kubelet runs with `protect-kernel-defaults`, so it refuses to start unless t
 
 **Existing firewall detected**
 
-Kipper preserves an existing firewall you manage. It reconfigures UFW only when the host carries its ownership marker, `/etc/kipper/firewall-managed`. Active firewalld is always left to you.
+Kipper preserves an existing firewall you manage. It reconfigures UFW only when the host carries its ownership marker, `/etc/kipper/firewall-managed`, and firewalld only on Rocky Linux, AlmaLinux and CentOS Stream when the host carries `/etc/kipper/firewalld-managed` or you pass `--adopt-firewall`. A running firewalld anywhere else is left to you.
 
 `--firewall=false` skips firewall configuration. To take over an existing Kipper-managed firewall, remove the marker and maintain the rules yourself. Avoid changing firewall policy during an installation.
 
@@ -56,11 +56,23 @@ For a firewall you manage, allow the SSH port and ports 80, 443, and 6443 from t
 
 Cloud-side firewalls (Hetzner Cloud Firewall, AWS Security Groups, etc.) are external to the host and are not detected by Kipper. If you use one, make sure those four ports are reachable on the server.
 
+**Firewall on the RHEL family**
+
+On Rocky Linux, AlmaLinux and CentOS Stream, Kipper configures firewalld before starting k3s. The public zone allows the SSH port and TCP ports 80, 443 and 6443, and keeps `dhcpv6-client`. Explicit port rules replace the stock `ssh` service; the `cockpit` service is removed. A `kipper-pods` zone covers the pod and service networks and allows TCP ports 6443, 10250 and 9100 to the host. Forwarding policies support pod internet access with masquerading and load balancer traffic to Traefik.
+
+Kipper schedules a three-minute rollback timer before loading the rules. It then checks a fresh SSH connection; with `--via-server`, the computer running kip performs that check. If verification fails, Kipper attempts to restore the previous firewall immediately. The timer provides a fallback if the connection is lost before the change is committed. SSH is allowed without rate limiting on these hosts.
+
+Kipper starts a stopped firewalld only when its saved configuration passes checks for stock or Kipper-managed settings. For an active firewall you manage, Kipper checks public ports on the internet-facing interface and pod access to host ports 6443, 10250 and 9100. It accepts a trusted pod zone and reports missing rules or custom rules it cannot evaluate. This check does not verify forwarding between pods and the internet.
+
+Use `--adopt-firewall` to let Kipper replace the public zone and add its pod zone and forwarding policies. Adoption requires saved settings that Kipper can safely replace and matching running rules, so rollback can restore the previous configuration. Run adoption over SSH or with `--via-server`; a standalone `--local` install cannot verify external SSH access.
+
+Kipper enables k3s's SELinux support and preserves the host's SELinux mode. The k3s installer handles the `k3s-selinux` policy package. On Rocky Linux, AlmaLinux and CentOS Stream 10, Kipper installs `kernel-modules-extra` for the running kernel if a required module is missing. If that package is unavailable, update the host, reboot and retry. With `--harden`, Kipper disables Cockpit socket activation where installed.
+
 **Opting out**
 
 ```bash
 kip install --host <ip> --harden=false     # leave surplus services running
-kip install --host <ip> --firewall=false   # do not install UFW
+kip install --host <ip> --firewall=false   # manage the host firewall yourself
 ```
 
 When opted out, `kip install` still prints any findings so you know what is being left in place. Use these flags only when you manage host security yourself.
@@ -75,7 +87,7 @@ kip cluster harden --cluster storefront  # specific cluster
 kip cluster harden --firewall=false   # only disable surplus services
 ```
 
-The command is idempotent. It runs the same audit as `kip install`, then disables `rpcbind` and Cockpit socket activation where installed. It configures UFW if no other firewall is active.
+The command is idempotent. It runs the same audit as `kip install`, then disables `rpcbind` and Cockpit socket activation where installed. It configures UFW, or firewalld on Rocky Linux, AlmaLinux and CentOS Stream, under the same ownership rules as `kip install`, and accepts `--adopt-firewall` too.
 
 ### Security headers
 
@@ -254,7 +266,7 @@ Kipper sends no telemetry of its own, and the `kip` CLI does not check for updat
 Normal outbound connections include:
 
 - **The kipper.run gateway heartbeat.** Clusters with a registered `*.kipper.run` name renew it at `https://kipper.run` when the console API starts and daily thereafter. Retries happen sooner after failures or while certificate verification is pending. Requests include the subdomain and server IP, plus the management token and certificate fingerprint when available. The cluster signs gateway challenges to prove it holds the certificate's private key. A cluster that was later moved to a domain of your own keeps renewing its old name only while something still serves under it, and stops a day after the last such host is gone. See [changing the name later](/en/domains#changing-the-name-later). Clusters installed with only a custom domain do not send this heartbeat. See [what the gateway records](/en/domains#what-the-gateway-records).
-- **Software downloads.** Installation and upgrades fetch container images, Helm charts and component manifests from their registries and repositories. Nodes also download images as needed. Installation downloads k3s and installs `open-iscsi` and `nfs-common` from the server's package mirrors.
+- **Software downloads.** Installation and upgrades fetch container images, Helm charts and component manifests from their registries and repositories. Nodes also download images as needed. Installation downloads k3s and installs Longhorn's iSCSI and NFS clients from the server's package mirrors: `open-iscsi` and `nfs-common` on Ubuntu and Debian, `iscsi-initiator-utils` and `nfs-utils` on Rocky Linux, AlmaLinux and CentOS Stream. On those distributions, firewall setup installs `firewalld` if needed. Version 10 hosts also get `kernel-modules-extra` if a required module is missing. The k3s installer handles the `k3s-selinux` policy package.
 - **Let's Encrypt**, when cert-manager requests or renews a certificate for a custom domain.
 - **DNS lookups** through the configured resolvers.
 

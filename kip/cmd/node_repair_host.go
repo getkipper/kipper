@@ -13,18 +13,15 @@ import (
 var nodeRepairHostCmd = &cobra.Command{
 	Use:   "repair-host",
 	Short: "Apply host configuration to a node that predates it",
-	Long: `Writes the host configuration a node should have and records what was applied.
+	Long: `Configures needrestart on an Ubuntu or Debian node to defer storage-service
+restarts, then records the configuration on its Kubernetes node object. This
+protects Longhorn volumes from disruptions after library updates.
 
-A node added by an older kip has nothing stopping needrestart from restarting
-iscsid after a library update, which fails every Longhorn volume on it: the
-block device goes, the filesystem above it remounts read-only, and whatever was
-writing to it crash-loops until its pod is recreated.
+Use this for nodes added by older kip versions. It applies the same configuration
+as kip install and kip node add, using the same connection details, and is safe
+to repeat. Only the node specified by --host is updated.
 
-This applies the same configuration kip install and kip node add now apply,
-using the same connection details. Running it against a node that already has
-it changes nothing.
-
-Nothing here converges the fleet on its own. It repairs the node you name.`,
+On other OS families, the command prints storage package update guidance.`,
 	RunE: runNodeRepairHost,
 }
 
@@ -52,6 +49,15 @@ func runNodeRepairHost(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = nodeClient.Close() }()
 
+	host, err := installer.DetectHostOS(nodeClient)
+	if err != nil {
+		return fmt.Errorf("reading the OS of %s: %w", nodeHost, err)
+	}
+	if !host.UsesNeedrestart() {
+		fmt.Printf("  ℹ  Kipper skips needrestart configuration on %s. Update storage packages\n", nodeHost)
+		fmt.Printf("     during planned downtime: their package scripts may restart iscsid.\n\n")
+		return nil
+	}
 	if err := installer.ConfigureStorageRestarts(nodeClient); err != nil {
 		return fmt.Errorf("configuring storage restarts on %s: %w", nodeHost, err)
 	}

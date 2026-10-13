@@ -33,7 +33,7 @@ Start with a container image and a server. Kipper handles the Kubernetes setup, 
 
 ## Features
 
-- **One-command install.** Set up a supported Ubuntu or Debian server with k3s, Traefik, cert-manager, Longhorn, Dex, and a web console.
+- **One-command install.** Set up a supported Ubuntu, Debian, Rocky Linux, AlmaLinux or CentOS Stream server with k3s, Traefik, cert-manager, Longhorn, Dex, and a web console.
 - **One-command deploy.** Deploy from a container image with automatic TLS and DNS.
 - **Web console.** Dashboard with cluster health, app management, and real-time logs.
 - **Free subdomains.** Get a `*.kipper.run` address with automatic HTTPS, or use your own domain.
@@ -46,7 +46,7 @@ Kipper is pre-1.0. See [operating considerations](#operating-considerations) bef
 
 ### Prerequisites
 
-- An Ubuntu 22.04/24.04/26.04 or Debian 12/13 server with a public IP address and root SSH access. Kipper also accepts Ubuntu 20.04 and Debian 11, with a warning that standard support has ended.
+- An Ubuntu 22.04/24.04/26.04, Debian 12/13, or Rocky Linux, AlmaLinux or CentOS Stream 9/10 server with a public IP address and root SSH access. Kipper also accepts Ubuntu 20.04 and Debian 11, with a warning that standard support has ended.
 - At least 2 GB RAM and 30 GB free disk for installation; allow more capacity for your workloads. See [sizing guidance](docs/en/installation.md).
 - An SSH key authorised for the server's root account. On Windows, kip can create the key and add its public key to the server
 - Provider firewall rules allowing SSH, ports 80 and 443, and port 6443 from the computers that will manage the cluster

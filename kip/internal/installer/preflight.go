@@ -17,9 +17,16 @@ const (
 )
 
 var supportedOS = map[string][]string{
-	"ubuntu": {"20.04", "22.04", "24.04", "26.04"},
-	"debian": {"11", "12", "13"},
+	"ubuntu":    {"20.04", "22.04", "24.04", "26.04"},
+	"debian":    {"11", "12", "13"},
+	"rocky":     {"9", "10"},
+	"almalinux": {"9", "10"},
+	"centos":    {"9", "10"},
 }
+
+// majorVersionOS allows point releases within each supported major version.
+// VERSION_ID may include a minor version, such as Rocky Linux 9.6.
+var majorVersionOS = map[string]bool{"rocky": true, "almalinux": true, "centos": true}
 
 // pastStandardSupportOS retains older releases for compatibility with
 // existing clusters, with a warning about their support status.
@@ -29,8 +36,11 @@ var pastStandardSupportOS = map[string][]string{
 }
 
 var osDisplayName = map[string]string{
-	"ubuntu": "Ubuntu",
-	"debian": "Debian",
+	"ubuntu":    "Ubuntu",
+	"debian":    "Debian",
+	"rocky":     "Rocky Linux",
+	"almalinux": "AlmaLinux",
+	"centos":    "CentOS Stream",
 }
 
 // SystemInfo holds the remote server's system information
@@ -86,13 +96,18 @@ func RunPreflightChecks(sys SystemInfo) (*PreflightResult, error) {
 }
 
 func checkOS(sys SystemInfo) error {
-	versions, ok := supportedOS[strings.ToLower(sys.OS)]
+	id := strings.ToLower(sys.OS)
+	versions, ok := supportedOS[id]
 	if !ok {
-		return fmt.Errorf("unsupported OS: %s (supported: ubuntu, debian)", sys.OS)
+		return fmt.Errorf("unsupported OS: %s (supported: ubuntu, debian, rocky, almalinux, centos)", sys.OS)
 	}
 
+	version := sys.OSVersion
+	if majorVersionOS[id] {
+		version, _, _ = strings.Cut(version, ".")
+	}
 	for _, v := range versions {
-		if sys.OSVersion == v {
+		if version == v {
 			return nil
 		}
 	}

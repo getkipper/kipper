@@ -28,7 +28,8 @@ kip install --host <ip> [flags]
 | `--harden` | No | `true` | Disable surplus host services exposed on public interfaces (e.g. `rpcbind`, Cockpit). Pass `--harden=false` only when you manage host security yourself |
 | `--admin-kubeconfig` | No | `false` | Write the shared k3s admin certificate to this machine instead of a per-operator OIDC kubeconfig. The certificate is unattributed and revocable only by rotating the cluster CA. A CI escape hatch, not the everyday path |
 | `--no-login` | No | `false` | Skip the inline browser sign-in during install. The machine ends up with a credential-free kubeconfig; the first operator runs `kip auth login && kip auth verify` afterwards |
-| `--firewall` | No | `true` | Install and configure UFW with k3s-correct rules. Skipped automatically if another firewall is already active. Pass `--firewall=false` only when you manage host security yourself |
+| `--firewall` | No | `true` | Configure the host firewall with rules for k3s: UFW on Ubuntu and Debian, firewalld on Rocky Linux, AlmaLinux and CentOS Stream. Skipped if a firewall kip did not set up is already running. Pass `--firewall=false` only when you manage host security yourself |
+| `--adopt-firewall` | No | `false` | On Rocky Linux, AlmaLinux and CentOS Stream: allow Kipper to take over an active firewalld configuration after safety checks. See [Firewall on the RHEL family](/en/security#host-hardening) |
 | `--no-ssh-rate-limit` | No | `false` | Open the SSH port outright instead of rate-limiting it. See below |
 | `--local` | No | `false` | Install on this machine; `--host` must reach it. See [Installing on the server itself](#installing-on-the-server-itself) |
 | `--host-maps-here` | No | `false` | With `--local`: confirm that `--host` routes to this machine, such as through NAT |
@@ -126,7 +127,7 @@ flowchart TD
 
 Before installing, Kipper verifies:
 
-- **OS:** Ubuntu 22.04, 24.04 or 26.04, or Debian 12 or 13. Ubuntu 20.04 and Debian 11 pass the OS check with a warning: standard support has ended, and Kipper no longer tests these releases.
+- **OS:** Ubuntu 22.04, 24.04 or 26.04, Debian 12 or 13, or Rocky Linux, AlmaLinux or CentOS Stream 9 or 10. Red Hat Enterprise Linux itself is not supported yet. Ubuntu 20.04 and Debian 11 pass the OS check with a warning: standard support has ended, and Kipper no longer tests these releases.
 - **RAM:** 2 GB minimum. The `nano` sizing profile disables monitoring. The installer recommends at least 8 GB for production workloads.
 - **Disk:** 30 GB free space minimum; allow additional space for images, data, and backups.
 - **Ports:** 80 (HTTP), 443 (HTTPS), and 6443 (Kubernetes API) must not be in use by another service. The installer stops if something other than k3s, such as nginx or a Docker container, already listens on one of them

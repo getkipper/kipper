@@ -1036,3 +1036,10 @@ func TestFirewalldRollbackTimerUnloadsOnceFired(t *testing.T) {
 	assert.Contains(t, h.commands[h.index("systemd-run")], "--timer-property=RemainAfterElapse=no")
 	assert.Contains(t, h.script, "systemctl stop kipper-firewalld-rollback-")
 }
+
+func TestStorageRestartStepsOnlyWhereNeedrestartRuns(t *testing.T) {
+	assert.Empty(t, storageRestartSteps(rhel10Host, &recordingRunner{}))
+	steps := storageRestartSteps(debianHost, &recordingRunner{})
+	require.Len(t, steps, 1)
+	assert.Equal(t, "Deferring storage-path restarts", steps[0].name)
+}

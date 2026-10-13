@@ -42,9 +42,9 @@ Kipper installs on any Linux server over SSH today. Managed provisioning sits be
 
 ## Operating systems
 
-Ubuntu and Debian are supported today. Broadening the install targets makes a good first contribution.
+Ubuntu, Debian, Rocky Linux, AlmaLinux and CentOS Stream are supported today. Red Hat Enterprise Linux support awaits validation on a live installation. Contributions for other distributions are welcome.
 
-- **RHEL 9, Rocky Linux 9, AlmaLinux 9.**
+- **Red Hat Enterprise Linux 9 and 10.**
 - **Fedora**, latest two releases.
 - **openSUSE and SUSE Linux Enterprise.**
 - **Alpine Linux.** Minimal and container-native.
