@@ -270,8 +270,8 @@ func nodeIsHost(node k8s.NodeInfo, host string, all []k8s.NodeInfo) bool {
 }
 
 // reportPendingRestarts surfaces updates that still need a service restart or reboot.
-// Kipper defers storage service restarts to protect Longhorn volumes, so operators
-// need to schedule downtime to load the updated libraries.
+// Storage service restarts can disrupt Longhorn volumes, so operators need
+// to schedule downtime to load updated libraries.
 func reportPendingRestarts(out io.Writer, client *ssh.Client) {
 	say(out, "  Pending restarts:\n")
 
@@ -286,7 +286,7 @@ func reportPendingRestarts(out io.Writer, client *ssh.Client) {
 	}
 
 	if len(pending.Deferred) > 0 {
-		say(out, "    ⚠  deferred by Kipper: %s\n", strings.Join(pending.Deferred, ", "))
+		say(out, "    ⚠  storage services awaiting restart: %s\n", strings.Join(pending.Deferred, ", "))
 		say(out, "       These services need a restart to load updated libraries.\n")
 		say(out, "       Restarting them can disrupt Longhorn volumes. Schedule downtime\n")
 		say(out, "       and reboot with 'kip node reboot' instead of restarting these\n")
@@ -297,6 +297,9 @@ func reportPendingRestarts(out io.Writer, client *ssh.Client) {
 	}
 	if pending.KernelOutdated {
 		say(out, "    ⚠  a kernel update is pending; reboot with 'kip node reboot'\n")
+	}
+	if pending.RebootRequired {
+		say(out, "    ⚠  updates require a reboot; run 'kip node reboot'\n")
 	}
 	say(out, "\n")
 }

@@ -27,7 +27,7 @@ Examples:
 
 func init() {
 	clusterHardenCmd.Flags().String("ssh-key", "", "path to SSH private key (defaults to ~/.ssh/id_ed25519)")
-	clusterHardenCmd.Flags().Bool("harden", true, "disable surplus host services exposed on public interfaces (e.g. rpcbind)")
+	clusterHardenCmd.Flags().Bool("harden", true, "disable surplus host services exposed on public interfaces (e.g. rpcbind, Cockpit)")
 	clusterHardenCmd.Flags().Bool("firewall", true, "install and configure UFW with a k3s-correct ruleset (skipped if another firewall is detected)")
 	clusterHardenCmd.Flags().Bool("no-ssh-rate-limit", false, "open the SSH port outright instead of limiting it to six connections per thirty seconds per source; set this for CI, or when several operators share one NAT address")
 	clusterCmd.AddCommand(clusterHardenCmd)

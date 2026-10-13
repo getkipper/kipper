@@ -41,6 +41,9 @@ func (r *storageHostRunner) Run(command string) (string, error) {
 			return out, nil
 		}
 	}
+	if command == "cat /etc/os-release" {
+		return "ID=debian\nVERSION_ID=12\n", nil
+	}
 	return "", nil
 }
 

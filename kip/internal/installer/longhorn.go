@@ -36,6 +36,11 @@ func installLonghorn(client CommandRunner, host HostOS) error {
 	if _, err := client.Run(install); err != nil {
 		return fmt.Errorf("installing longhorn dependencies: %w", err)
 	}
+	for _, svc := range host.StorageServices() {
+		if _, err := client.Run("systemctl enable --now " + svc); err != nil {
+			return fmt.Errorf("starting %s for longhorn: %w", svc, err)
+		}
+	}
 
 	// On hosts where multipath-tools is installed (Ubuntu cloud images
 	// often include it), multipathd will grab every Longhorn iSCSI
