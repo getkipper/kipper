@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
@@ -70,7 +71,7 @@ func init() {
 	backupCreateCmd.Flags().String("ttl", "168h", "backup retention period (default 7 days)")
 	backupCreateCmd.Flags().Bool("include-system", false, "include system namespaces (kube-*, traefik, longhorn-system, monitoring, keda, velero) in the backup. Off by default because Velero recurses into its own MinIO PVC otherwise and the backup hangs.")
 
-	backupRestoreCmd.Flags().String("namespace-mapping", "", "restore to a different namespace (format: source:target)")
+	backupRestoreCmd.Flags().String("namespace-mapping", "", "restore only the source namespace into the target namespace (format: source:target)")
 	backupRestoreCmd.Flags().String("namespace", "", "restore only a specific namespace")
 	backupRestoreCmd.Flags().String("resources", "", "restore only specific resource types (comma-separated, e.g. deployments,services,secrets)")
 
@@ -220,20 +221,9 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 
 	restoreName := "restore-" + backupName + "-" + time.Now().Format("150405")
 
-	spec := map[string]interface{}{
-		"backupName": backupName,
-		// Skip cert-manager's transient issuance objects even when the
-		// backup predates the backup-side exclusion. Restoring them wedges
-		// certificate renewal (see DefaultBackupExcludedResources).
-		"excludedResources": toAnySlice(installer.DefaultBackupExcludedResources()),
-	}
-
-	if namespace != "" {
-		spec["includedNamespaces"] = []interface{}{namespace}
-	}
-
-	if resources != "" {
-		spec["includedResources"] = strings.Split(resources, ",")
+	spec, err := restoreSpec(backupName, namespace, resources, nsMapping)
+	if err != nil {
+		return err
 	}
 
 	restore := &unstructured.Unstructured{
@@ -248,15 +238,6 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 		},
 	}
 
-	if nsMapping != "" {
-		parts := strings.SplitN(nsMapping, ":", 2)
-		if len(parts) == 2 {
-			spec["namespaceMappings"] = map[string]interface{}{
-				parts[0]: parts[1],
-			}
-		}
-	}
-
 	ctx := context.Background()
 	fmt.Printf("\n  Restoring from backup %s...\n", backupName)
 
@@ -268,6 +249,33 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  ✔  Restore %s started\n", restoreName)
 	fmt.Printf("  This may take several minutes for large datasets.\n\n")
 	return nil
+}
+
+func restoreSpec(backupName, namespace, resources, mapping string) (map[string]interface{}, error) {
+	spec := map[string]interface{}{
+		"backupName": backupName,
+		// Apply certificate-issuance exclusions to older backups as well.
+		"excludedResources": toAnySlice(installer.DefaultBackupExcludedResources()),
+	}
+	if namespace != "" {
+		spec["includedNamespaces"] = []interface{}{namespace}
+	}
+	if resources != "" {
+		spec["includedResources"] = strings.Split(resources, ",")
+	}
+	if mapping != "" {
+		source, target, ok := strings.Cut(mapping, ":")
+		if !ok || source == target || len(validation.IsDNS1123Label(source)) > 0 || len(validation.IsDNS1123Label(target)) > 0 {
+			return nil, fmt.Errorf("--namespace-mapping %q must use source:target with two different valid namespace names", mapping)
+		}
+		if namespace != "" && namespace != source {
+			return nil, fmt.Errorf("--namespace-mapping %q requires --namespace %s; got %s", mapping, source, namespace)
+		}
+		// Limit the restore to the mapped source to avoid restoring unrelated namespaces.
+		spec["includedNamespaces"] = []interface{}{source}
+		spec["namespaceMapping"] = map[string]interface{}{source: target}
+	}
+	return spec, nil
 }
 
 func runBackupSchedules(cmd *cobra.Command, args []string) error {

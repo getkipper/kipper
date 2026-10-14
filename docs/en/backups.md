@@ -90,6 +90,8 @@ Useful for testing a restore without affecting the live environment:
 kip backup restore pre-migration --namespace-mapping blog-test:blog-restored
 ```
 
+This restores only `blog-test` into `blog-restored`. If you also pass `--namespace`, it must match the source namespace (`blog-test`).
+
 ### CPU and memory after a restore
 
 A restore recovers resource settings and their field ownership. User-set CPU and memory values therefore remain user settings. If ownership cannot be restored for an App value, Kipper holds it unchanged until you confirm it or enable automatic sizing. See [Values Kipper cannot attribute](/en/resource-management#held-values).
