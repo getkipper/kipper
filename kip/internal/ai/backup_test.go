@@ -20,6 +20,8 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/getkipper/kipper/kip/internal/velerolabel"
 )
 
 // veleroDynamicFake builds a dynamic fake that knows about both the
@@ -1081,41 +1083,6 @@ func TestDeleteBackupRefusesSiblingName(t *testing.T) {
 	assert.Contains(t, err.Error(), "logical primary name")
 }
 
-// TestGetValidVeleroLabel mirrors Velero's pkg/label.GetValidName so
-// our generated `velero.io/backup-name` label values match the ones
-// the Velero deletion controller computes when it builds its
-// existing-request selector. Keeping the algorithms in sync is what
-// lets Velero dedupe in-flight requests for the same backup.
-func TestGetValidVeleroLabel(t *testing.T) {
-	t.Run("short name passes through", func(t *testing.T) {
-		got := getValidVeleroLabel("snap")
-		assert.Equal(t, "snap", got)
-		assert.LessOrEqual(t, len(got), 63)
-		assert.Empty(t, validation.IsValidLabelValue(got))
-	})
-	t.Run("63-char name passes through", func(t *testing.T) {
-		name := strings.Repeat("a", 63)
-		got := getValidVeleroLabel(name)
-		assert.Equal(t, name, got)
-		assert.Equal(t, 63, len(got))
-	})
-	t.Run("64-char name is truncated and hashed", func(t *testing.T) {
-		name := strings.Repeat("a", 64)
-		got := getValidVeleroLabel(name)
-		assert.Equal(t, 63, len(got), "result must fit in label-value limit")
-		assert.Empty(t, validation.IsValidLabelValue(got))
-	})
-	t.Run("different long names produce different labels", func(t *testing.T) {
-		a := strings.Repeat("a", 200)
-		b := strings.Repeat("a", 200) + "y"
-		assert.NotEqual(t, getValidVeleroLabel(a), getValidVeleroLabel(b))
-	})
-	t.Run("deterministic for the same input", func(t *testing.T) {
-		name := strings.Repeat("a", 200)
-		assert.Equal(t, getValidVeleroLabel(name), getValidVeleroLabel(name))
-	})
-}
-
 // TestStartDeleteAdoptsExistingInFlightRequest: a previous
 // `kip ai backup delete` run created a DeleteBackupRequest that is
 // still in flight (Velero hasn't finished). On retry, StartDelete
@@ -2026,10 +1993,6 @@ func TestRestoreLabelsBackupNameAndUID(t *testing.T) {
 	}
 }
 
-// TestRestoreLabelsTruncateLongBackupName: a backup name longer than 63
-// characters must be truncated using Velero's GetValidName algorithm
-// (57-char prefix + 6 hex sha256). Anything else and Velero's own
-// selectors miss the Restore CR.
 func TestRestoreLabelsTruncateLongBackupName(t *testing.T) {
 	longName := strings.Repeat("a", 80)
 	client := veleroDynamicFake()
@@ -2047,7 +2010,7 @@ func TestRestoreLabelsTruncateLongBackupName(t *testing.T) {
 
 	got := restores.Items[0].GetLabels()["velero.io/backup-name"]
 	assert.Len(t, got, 63, "long backup names truncate to 63 chars")
-	assert.Equal(t, getValidVeleroLabel(longName), got)
+	assert.Equal(t, velerolabel.ValidName(longName), got)
 }
 
 // TestListBackupsFlagsZeroItemPrimary: a stale Completed-but-empty

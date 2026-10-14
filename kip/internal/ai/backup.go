@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/getkipper/kipper/kip/internal/velerolabel"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -847,14 +849,10 @@ func (i *Installer) adoptOrCreateDeleteRequest(ctx context.Context, backupName s
 	return i.createDeleteBackupRequest(ctx, backupName, backupUID)
 }
 
-// findErroringDeleteRequest returns the name of any
-// DeleteBackupRequest for the given backup name with non-empty
-// status.errors. Used when our watched request is gone (likely
-// deduped by Velero) — if a surviving rival has actually failed,
-// the operator needs to be pointed at THAT request, not the deleted
-// one whose name no longer resolves.
+// findErroringDeleteRequest finds a failed request for the backup so errors can
+// point to a surviving request when the watched request has disappeared.
 func (i *Installer) findErroringDeleteRequest(ctx context.Context, backupName string) (string, error) {
-	selector := "velero.io/backup-name=" + getValidVeleroLabel(backupName)
+	selector := "velero.io/backup-name=" + velerolabel.ValidName(backupName)
 	list, err := i.Dynamic.Resource(veleroDeleteRequestGVR).Namespace(VeleroNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: selector,
 	})
@@ -878,13 +876,9 @@ func (i *Installer) findErroringDeleteRequest(ctx context.Context, backupName st
 	return "", nil
 }
 
-// findInProgressDeleteRequest returns the name of any
-// DeleteBackupRequest for the given backup name whose phase is
-// InProgress. Stricter than findActiveDeleteRequest: a rival that is
-// also stuck in New/empty doesn't count, because two stalled
-// requests are no more useful than one.
+// findInProgressDeleteRequest finds a request that Velero has started processing.
 func (i *Installer) findInProgressDeleteRequest(ctx context.Context, backupName string) (string, error) {
-	selector := "velero.io/backup-name=" + getValidVeleroLabel(backupName)
+	selector := "velero.io/backup-name=" + velerolabel.ValidName(backupName)
 	list, err := i.Dynamic.Resource(veleroDeleteRequestGVR).Namespace(VeleroNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: selector,
 	})
@@ -908,18 +902,11 @@ func (i *Installer) findInProgressDeleteRequest(ctx context.Context, backupName 
 	return "", nil
 }
 
-// findActiveDeleteRequest returns the name of an already-existing
-// DeleteBackupRequest for the same backup that is still making
-// progress (phase empty/New/InProgress, no errors). Returns "" when
-// no candidate exists.
-//
-// We select by velero.io/backup-name only, not backup-uid. Velero's
-// own controller writes the UID label after it starts processing, so
-// a New (still-queued) request from a previous run can be missing
-// it. Filtering on spec.backupName provides the same safety as a
-// UID match without losing legitimate adoption candidates.
+// findActiveDeleteRequest finds a request for the backup with no recorded errors
+// whose phase is not Processed. It returns an empty string if none qualifies.
+// Requests without a UID label remain eligible; known UID mismatches are rejected.
 func (i *Installer) findActiveDeleteRequest(ctx context.Context, backupName string, backupUID types.UID) (string, error) {
-	selector := "velero.io/backup-name=" + getValidVeleroLabel(backupName)
+	selector := "velero.io/backup-name=" + velerolabel.ValidName(backupName)
 	list, err := i.Dynamic.Resource(veleroDeleteRequestGVR).Namespace(VeleroNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: selector,
 	})
@@ -934,10 +921,7 @@ func (i *Installer) findActiveDeleteRequest(ctx context.Context, backupName stri
 	}
 	for idx := range list.Items {
 		item := &list.Items[idx]
-		// Defence against a hash-collision on getValidVeleroLabel:
-		// require spec.backupName to match exactly. Without this an
-		// unrelated backup that hashes to the same label value could
-		// be adopted.
+		// Match the full name to guard against collisions in truncated label hashes.
 		spec, _, _ := unstructured.NestedString(item.Object, "spec", "backupName")
 		if spec != backupName {
 			continue
@@ -1263,7 +1247,7 @@ func (i *Installer) createDeleteBackupRequest(ctx context.Context, backupName st
 	labels := map[string]interface{}{
 		managedByLabel:              managedByValue,
 		"app.kubernetes.io/part-of": "kipper-ai",
-		"velero.io/backup-name":     getValidVeleroLabel(backupName),
+		"velero.io/backup-name":     velerolabel.ValidName(backupName),
 	}
 	if backupUID != "" {
 		labels["velero.io/backup-uid"] = string(backupUID)
@@ -1284,25 +1268,6 @@ func (i *Installer) createDeleteBackupRequest(ctx context.Context, backupName st
 		return "", fmt.Errorf("creating delete request for %s: %w", backupName, err)
 	}
 	return reqName, nil
-}
-
-// getValidVeleroLabel mirrors Velero's pkg/label.GetValidName so the
-// `velero.io/backup-name` label values we emit match the ones
-// Velero's deletion controller computes when building its existing-
-// request selector. Names ≤ 63 chars pass through; longer names are
-// truncated to 57 chars and concatenated with the first 6 hex chars
-// of the SHA-256 hash (no separator) for a final length of 63.
-//
-// Verified against
-// https://raw.githubusercontent.com/vmware-tanzu/velero/main/pkg/label/label.go.
-func getValidVeleroLabel(name string) string {
-	const dns1035Max = 63
-	if len(name) <= dns1035Max {
-		return name
-	}
-	sum := sha256.Sum256([]byte(name))
-	const charsFromLabel = dns1035Max - 6
-	return name[:charsFromLabel] + hex.EncodeToString(sum[:])[:6]
 }
 
 // boundedDeleteRequestName produces a DeleteBackupRequest name that
@@ -1450,17 +1415,12 @@ func (i *Installer) runRestore(ctx context.Context, backupName string, backupUID
 	if strings.HasSuffix(backupName, configBackupSuffix) {
 		spec["includedNamespaces"] = []interface{}{SystemNamespace, "kube-system"}
 	}
-	// Match the labels Velero's own tooling expects: `velero.io/backup-name`
-	// is what `velero restore describe`, the operator UI, and label
-	// selectors look up. backup-uid disambiguates collisions when a
-	// backup is recreated with the same name. The backup-name value goes
-	// through getValidVeleroLabel because Velero's own controllers
-	// truncate long names the same way; if we emit the raw name and
-	// Velero emits the truncated one, label selectors miss.
+	// Use Velero's name formatting so backup label selectors match long names.
+	// The UID distinguishes backups recreated with the same name.
 	labels := map[string]interface{}{
 		managedByLabel:              managedByValue,
 		"app.kubernetes.io/part-of": "kipper-ai",
-		"velero.io/backup-name":     getValidVeleroLabel(backupName),
+		"velero.io/backup-name":     velerolabel.ValidName(backupName),
 	}
 	if backupUID != "" {
 		labels["velero.io/backup-uid"] = string(backupUID)
