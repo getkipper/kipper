@@ -214,9 +214,8 @@ func configureFirewallWith(client FirewallRunner, rateLimitSSH bool) error {
 }
 
 func configureFirewall(client CommandRunner, host HostOS, rateLimitSSH bool) error {
-	// Installing the package changes no firewall: ufw ships inactive and
-	// stays that way until it is enabled below.
-	install := host.InstallPackagesCommand(false, "ufw")
+	// Refresh package lists so UFW can be installed on a fresh host.
+	install := host.InstallPackagesCommand(true, "ufw")
 	if install == "" {
 		return fmt.Errorf("installing ufw: kip cannot install packages on %s", host.ID)
 	}

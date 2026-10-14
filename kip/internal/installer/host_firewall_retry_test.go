@@ -259,3 +259,13 @@ func TestConfigureFirewall_RefusesAHostItCannotInstallPackagesOn(t *testing.T) {
 		assert.NotContains(t, cmd, "ufw ", "nothing touches the firewall")
 	}
 }
+
+func TestConfigureFirewall_RefreshesPackageListsBeforeInstallingUFW(t *testing.T) {
+	noUFWRetryDelay(t)
+	h := newUFWHost()
+
+	require.NoError(t, configureFirewall(h, debianHost, false))
+
+	assert.Contains(t, h.ran[0], "apt-get update")
+	assert.Contains(t, h.ran[0], "apt-get install -y -qq ufw")
+}
