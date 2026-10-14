@@ -881,3 +881,54 @@ func TestPlatformConfigReconciler_SkipsGrafanaSecretWhenMonitoringDisabled(t *te
 		types.NamespacedName{Namespace: platform.MonitoringNamespace, Name: platform.GrafanaAdminSecretName}, &corev1.Secret{})
 	assert.True(t, errors.IsNotFound(err), "no grafana secret should be provisioned while monitoring is disabled")
 }
+
+func TestPlatformConfigReconciler_RecreatesHelmChartEnabledWhileStillDeleting(t *testing.T) {
+	scheme := testScheme()
+	yes := true
+
+	pc := &kipperv1.PlatformConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: PlatformConfigName},
+		Spec: kipperv1.PlatformConfigSpec{
+			Profile:    platform.ProfileMedium,
+			Components: []kipperv1.ComponentOverride{{Name: componentLoki, Enabled: &yes}},
+		},
+	}
+	// Simulate a chart held by helm-controller's finalizer during deletion.
+	deleting := newHelmChart("loki", "singleBinary: {}\n")
+	deleting.SetFinalizers([]string{"wrangler.cattle.io/on-helm-chart-remove"})
+	now := metav1.Now()
+	deleting.SetDeletionTimestamp(&now)
+
+	fakeClient := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pc, deleting).
+		WithStatusSubresource(&kipperv1.PlatformConfig{}).
+		Build()
+	r := &PlatformConfigReconciler{Client: fakeClient, Scheme: scheme}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: PlatformConfigName}}
+
+	for pass := 0; pass < 2; pass++ {
+		res, err := r.Reconcile(context.Background(), request)
+		require.NoError(t, err, "pending deletion should use polling")
+		assert.Equal(t, helmChartDeletePoll, res.RequeueAfter, "poll until the old chart is deleted")
+	}
+	promtail := &unstructured.Unstructured{}
+	promtail.SetGroupVersionKind(helmChartGVK)
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "promtail", Namespace: helmChartNamespace}, promtail),
+		"create promtail while loki deletion is pending")
+
+	loki := &unstructured.Unstructured{}
+	loki.SetGroupVersionKind(helmChartGVK)
+	key := types.NamespacedName{Name: "loki", Namespace: helmChartNamespace}
+	require.NoError(t, fakeClient.Get(context.Background(), key, loki))
+	loki.SetFinalizers(nil)
+	require.NoError(t, fakeClient.Update(context.Background(), loki))
+
+	require.True(t, errors.IsNotFound(fakeClient.Get(context.Background(), key, loki)), "clearing the finalizer completes the deletion")
+
+	res, err := r.Reconcile(context.Background(), request)
+	require.NoError(t, err)
+	assert.Zero(t, res.RequeueAfter, "stop polling after recreation")
+	require.NoError(t, fakeClient.Get(context.Background(), key, loki), "recreate the chart after deletion")
+	assert.Nil(t, loki.GetDeletionTimestamp())
+}
