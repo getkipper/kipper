@@ -11,13 +11,14 @@ import (
 // HostSystemd drives the server's systemd through systemd-run and systemctl.
 type HostSystemd struct{}
 
+// systemdRunArgs delegates log redirection to the unit's shell. With SELinux enforcing, systemd
+// (init_t) may not open the job's admin_home_t log for append, so StandardOutput=append: fails.
+// Passing logPath as $0 keeps argv in "$@" and preserves argument boundaries.
 func systemdRunArgs(unit string, argv []string, logPath string) []string {
 	args := []string{
 		"--unit", unit, "--collect", "--quiet",
 		"-p", "User=root", "-p", "WorkingDirectory=/root", "--setenv=HOME=/root",
-		"-p", "StandardOutput=append:" + logPath,
-		"-p", "StandardError=append:" + logPath,
-		"--",
+		"--", "/bin/sh", "-c", `exec "$@" >>"$0" 2>&1`, logPath,
 	}
 	return append(args, argv...)
 }
@@ -56,13 +57,12 @@ func unitBusy(state string) (bool, error) {
 	case "inactive", "failed":
 		return false, nil
 	case "":
-		return false, errors.New("systemctl is-active gave no answer")
+		return false, errors.New("systemctl is-active returned no state")
 	default:
 		return true, nil
 	}
 }
 
-// Stop stops the unit.
 func (HostSystemd) Stop(unit string) error {
 	out, err := exec.Command("systemctl", "stop", unit).CombinedOutput() //nolint:gosec // a unit name built from a validated run id
 	if err != nil {
