@@ -100,7 +100,7 @@ type packageHost struct {
 
 func (h *packageHost) Run(cmd string) (string, error) {
 	h.cmds = append(h.cmds, cmd)
-	if strings.HasPrefix(cmd, "command -v ") && h.present {
+	if (strings.HasPrefix(cmd, "command -v ") || strings.HasPrefix(cmd, "rpm -q ")) && h.present {
 		return "present\n", nil
 	}
 	return "", nil
@@ -171,4 +171,46 @@ func TestConfigureFirewallSkipsInstallingUFWThatIsThere(t *testing.T) {
 	require.NoError(t, ensureInstalled(h, "ufw", "ufw", "apt-get install -y -qq ufw", &out))
 	assert.Empty(t, out.String())
 	assert.NotContains(t, strings.Join(h.cmds, "\n"), "apt-get install")
+}
+
+func TestStoragePackagesAreInstalledOnlyWhenOneIsMissing(t *testing.T) {
+	rocky := HostOS{ID: "rocky", Family: FamilyRHEL}
+
+	missing := &packageHost{}
+	var out bytes.Buffer
+	require.NoError(t, installStoragePackages(missing, rocky, &out))
+	assert.Contains(t, out.String(), "Installing iscsi-initiator-utils nfs-utils")
+	assert.Contains(t, strings.Join(missing.cmds, "\n"), "dnf install")
+
+	present := &packageHost{present: true}
+	out.Reset()
+	require.NoError(t, installStoragePackages(present, rocky, &out))
+	assert.Empty(t, out.String())
+	assert.NotContains(t, strings.Join(present.cmds, "\n"), "dnf install")
+}
+
+func TestPackagesInstalledCommandChecksEveryPackage(t *testing.T) {
+	assert.Equal(t, "rpm -q --quiet iscsi-initiator-utils nfs-utils && echo present || true",
+		HostOS{Family: FamilyRHEL}.PackagesInstalledCommand("iscsi-initiator-utils", "nfs-utils"))
+	debian := HostOS{Family: FamilyDebian}.PackagesInstalledCommand("open-iscsi", "nfs-common")
+	assert.Contains(t, debian, "dpkg-query")
+	assert.Contains(t, debian, "open-iscsi nfs-common")
+	assert.Empty(t, HostOS{}.PackagesInstalledCommand("x"))
+}
+
+func TestDebianPackagesInstalledCommandNeedsEveryPackageInstalled(t *testing.T) {
+	bin := t.TempDir()
+	run := func(states string) string {
+		//nolint:gosec // The test command needs execute permission.
+		require.NoError(t, os.WriteFile(filepath.Join(bin, "dpkg-query"), []byte("#!/bin/sh\ncase \"$4\" in\n"+states+"\n*) exit 1 ;;\nesac\n"), 0o755))
+		c := exec.Command("sh", "-c", HostOS{Family: FamilyDebian}.PackagesInstalledCommand("open-iscsi", "nfs-common"))
+		c.Env = []string{"PATH=" + bin + ":/usr/bin:/bin"}
+		out, err := c.CombinedOutput()
+		require.NoError(t, err, string(out))
+		return strings.TrimSpace(string(out))
+	}
+
+	assert.Equal(t, "present", run("open-iscsi|nfs-common) printf installed ;;"))
+	assert.Empty(t, run("open-iscsi) printf installed ;;\nnfs-common) printf config-files ;;"), "a removed package with leftover config is missing")
+	assert.Empty(t, run("open-iscsi) printf installed ;;"), "an unknown package is missing")
 }

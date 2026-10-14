@@ -143,8 +143,9 @@ func TestK3sSELinuxConfigOnlyOnRHEL(t *testing.T) {
 func TestLonghornEnablesIscsidOnRHEL(t *testing.T) {
 	r := &recordingRunner{}
 	require.NoError(t, installLonghorn(r, rhel10Host, nil))
-	assert.Contains(t, r.commands[0], "dnf install -y -q --setopt=exit_on_lock=True --refresh iscsi-initiator-utils nfs-utils")
-	assert.Equal(t, "systemctl enable --now iscsid", r.commands[1])
+	assert.Contains(t, r.commands[0], "rpm -q --quiet iscsi-initiator-utils nfs-utils")
+	assert.Contains(t, r.commands[1], "dnf install -y -q --setopt=exit_on_lock=True --refresh iscsi-initiator-utils nfs-utils")
+	assert.Equal(t, "systemctl enable --now iscsid", r.commands[2])
 }
 
 func TestStorageRestartsSkipRHEL(t *testing.T) {

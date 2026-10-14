@@ -106,6 +106,20 @@ func (h HostOS) InstallPackagesCommand(refresh bool, pkgs ...string) string {
 	return ""
 }
 
+// PackagesInstalledCommand returns a command that prints "present" when every
+// package is installed. The command exits successfully even if packages are missing.
+// It returns an empty string for unsupported families. Package names must be safe
+// as unquoted shell arguments.
+func (h HostOS) PackagesInstalledCommand(pkgs ...string) string {
+	switch h.Family {
+	case FamilyDebian:
+		return "(for p in " + strings.Join(pkgs, " ") + "; do [ \"$(dpkg-query -W -f '${db:Status-Status}' \"$p\" 2>/dev/null)\" = installed ] || exit 1; done) && echo present || true"
+	case FamilyRHEL:
+		return "rpm -q --quiet " + strings.Join(pkgs, " ") + " && echo present || true"
+	}
+	return ""
+}
+
 func packageInstallNotice(pkgs []string) string {
 	return fmt.Sprintf("  ·  Installing %s from the server's package mirrors. This may take a few minutes.\n", strings.Join(pkgs, " "))
 }

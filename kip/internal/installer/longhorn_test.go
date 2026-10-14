@@ -76,8 +76,8 @@ func TestInstallLonghorn_AppliesTheFilteredManifest(t *testing.T) {
 	require.NoError(t, installLonghorn(r, HostOS{ID: "debian", Family: FamilyDebian}, nil))
 
 	all := strings.Join(r.commands, "\n")
-	assert.Equal(t, "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq open-iscsi nfs-common", r.commands[0],
-		"the host's storage packages come first")
+	assert.Equal(t, "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq open-iscsi nfs-common", r.commands[1],
+		"storage package installation follows the package check")
 	assert.Contains(t, all, longhornSettingsFuncName+` "$dir/stock.yaml" "$dir/longhorn.yaml"`)
 	assert.Contains(t, all, `kubectl apply -f "$dir/longhorn.yaml"`)
 	assert.NotContains(t, all, "kubectl apply -f https://", "the stock manifest must not be applied unfiltered")
