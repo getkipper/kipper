@@ -2,6 +2,8 @@ package installer
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"strings"
 )
 
@@ -25,7 +27,7 @@ func InstallLonghorn(client CommandRunner) error {
 }
 
 // InstallLonghornThen installs Longhorn, calling afterPackages when non-nil
-// after installing host packages and starting required services, before
+// after ensuring host packages are installed and starting required services, before
 // configuring multipath or deploying Longhorn. A callback error stops installation.
 func InstallLonghornThen(client CommandRunner, afterPackages func() error) error {
 	host, err := DetectHostOS(client)
@@ -35,14 +37,29 @@ func InstallLonghornThen(client CommandRunner, afterPackages func() error) error
 	return installLonghorn(client, host, afterPackages)
 }
 
-func installLonghorn(client CommandRunner, host HostOS, afterPackages func() error) error {
-	install := host.InstallPackagesCommand(true, host.StoragePackages()...)
+func installStoragePackages(client CommandRunner, host HostOS, out io.Writer) error {
+	pkgs := host.StoragePackages()
+	install := host.InstallPackagesCommand(true, pkgs...)
 	if install == "" {
 		return fmt.Errorf("installing longhorn dependencies: kip cannot install packages on %s", host.ID)
 	}
-	fmt.Print(packageInstallNotice(host.StoragePackages()))
+	present, err := client.Run(host.PackagesInstalledCommand(pkgs...))
+	if err != nil {
+		return fmt.Errorf("checking longhorn dependencies: %w", err)
+	}
+	if strings.TrimSpace(present) == "present" {
+		return nil
+	}
+	_, _ = fmt.Fprint(out, packageInstallNotice(pkgs))
 	if _, err := client.Run(install); err != nil {
 		return fmt.Errorf("installing longhorn dependencies: %w", err)
+	}
+	return nil
+}
+
+func installLonghorn(client CommandRunner, host HostOS, afterPackages func() error) error {
+	if err := installStoragePackages(client, host, os.Stdout); err != nil {
+		return err
 	}
 	for _, svc := range host.StorageServices() {
 		if _, err := client.Run("systemctl enable --now " + svc); err != nil {
