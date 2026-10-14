@@ -5,10 +5,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	authnv1 "k8s.io/api/authentication/v1"
 	authzv1 "k8s.io/api/authorization/v1"
 )
@@ -100,9 +103,6 @@ func TestProveOperatorIdentity(t *testing.T) {
 }
 
 func TestProveOperatorIdentityRetriesThroughLazyJWKS(t *testing.T) {
-	// The first authenticated call after activation can 401 while the
-	// apiserver lazily fetches JWKS; a brief retry must not read that as a
-	// rejection.
 	calls := 0
 	deps := proveDeps{
 		selfReview: func(context.Context) (*authnv1.SelfSubjectReview, error) {
@@ -124,11 +124,8 @@ func TestProveOperatorIdentityRetriesThroughLazyJWKS(t *testing.T) {
 }
 
 func TestProvePersistentUnauthorizedIsRejected(t *testing.T) {
-	// A persistent 401 (never a transport error) means the token is genuinely
-	// not accepted — reject, do not treat as transport.
 	deps := fakeDeps("", nil, errors.New("Unauthorized"), false, nil)
-	// retryWindow 0: the first 401 is already past the deadline, so it is
-	// classified as a rejection with no wait.
+	// A zero retry window tests rejection without waiting.
 	got, _ := proveOperatorIdentity(context.Background(), deps, "admin@cluster.example.com", "cluster.example.com", 0)
 	assert.Equal(t, ProofAuthnRejected, got)
 }
@@ -142,15 +139,11 @@ func TestClassifyProbeError(t *testing.T) {
 func TestProbeIssuerReturnsWhenReady(t *testing.T) {
 	srv := httptestNewTLSDiscovery(t)
 	defer srv.Close()
-	// srv.URL is https://127.0.0.1:port; ProbeIssuer builds
-	// https://<host>/dex/.well-known/... so point it at the test server's
-	// host:port and accept its cert via the default client override.
 	err := probeIssuerAt(context.Background(), srv.URL+"/dex/.well-known/openid-configuration", srv.Client(), time.Second)
 	assert.NoError(t, err)
 }
 
 func TestProbeIssuerGivesUpAfterBudget(t *testing.T) {
-	// An unreachable endpoint must return an error within the budget, not hang.
 	err := probeIssuerAt(context.Background(), "https://127.0.0.1:1/dex/.well-known/openid-configuration", nil, 200*time.Millisecond)
 	assert.Error(t, err)
 }
@@ -167,8 +160,6 @@ func (b blockingRT) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func TestProbeIssuerHonoursBudgetUnderBlockingTransport(t *testing.T) {
-	// A transport that never answers must not make the probe overrun its
-	// budget: each request is bounded by the remaining deadline.
 	rt := blockingRT{released: make(chan struct{})}
 	client := &http.Client{Transport: rt}
 	start := time.Now()
@@ -179,6 +170,44 @@ func TestProbeIssuerHonoursBudgetUnderBlockingTransport(t *testing.T) {
 }
 
 func TestIssuerProbeBudget(t *testing.T) {
-	assert.Equal(t, 180*time.Second, issuerProbeBudget("dex--203-0-113-10.kipper.run"))
-	assert.Equal(t, 300*time.Second, issuerProbeBudget("dex.custom.example.com"))
+	assert.Equal(t, 180*time.Second, IssuerProbeBudget("dex--203-0-113-10.kipper.run"))
+	assert.Equal(t, 300*time.Second, IssuerProbeBudget("dex.custom.example.com"))
+}
+
+func TestProbeLoginPageWaitsForTheStylesheets(t *testing.T) {
+	var mu sync.Mutex
+	requests := map[string]int{}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests[r.URL.Path]++
+		n := requests[r.URL.Path]
+		mu.Unlock()
+		if strings.HasSuffix(r.URL.Path, ".css") && n <= 2 {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	require.NoError(t, probeLoginPageAt(context.Background(), srv.URL, srv.Client(), 10*time.Second, nil))
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 3, requests["/dex/static/main.css"], "main.css was fetched until it loaded")
+	assert.Equal(t, 3, requests["/dex/theme/styles.css"], "styles.css was fetched until it loaded")
+}
+
+func TestProbeLoginPageNamesTheAssetThatNeverLoads(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/dex/theme/styles.css" {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	err := probeLoginPageAt(context.Background(), srv.URL, srv.Client(), 1500*time.Millisecond, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "/dex/theme/styles.css")
 }

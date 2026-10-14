@@ -16,16 +16,14 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// execCommandForHost returns the exec kubeconfig's command: "kip" when it is
-// on PATH, otherwise this binary's absolute path so kubectl still finds it.
+// execCommandForHost returns the command kubectl uses to invoke kip.
 func execCommandForHost() string {
 	cmd, _ := execCommandForHostPinned()
 	return cmd
 }
 
-// execCommandForHostPinned returns the exec command and whether it is an
-// absolute path pinned because kip is not on PATH — the caller warns when
-// pinned so the operator knows to normalise with kip auth kubeconfig.
+// execCommandForHostPinned prefers kip on PATH, then this executable's path.
+// The pinned result lets callers warn that the kubeconfig depends on that location.
 func execCommandForHostPinned() (command string, pinned bool) {
 	if _, err := exec.LookPath("kip"); err == nil {
 		return "kip", false
@@ -37,7 +35,7 @@ func execCommandForHostPinned() (command string, pinned bool) {
 }
 
 // PinnedKipWarning tells the operator their kubeconfig pins this binary's path.
-const PinnedKipWarning = "⚠  kip is not on PATH; the kubeconfig pins this binary's location. Install kip to PATH and run: kip auth kubeconfig" //nolint:gosec // a notice, not a credential
+const PinnedKipWarning = "⚠  kip is not on PATH; the kubeconfig pins this binary's location. Add kip to PATH and run: kip auth kubeconfig" //nolint:gosec // a notice, not a credential
 
 // KipPinned reports whether a kubeconfig written now pins this binary's
 // absolute path, because kip is not on PATH.
@@ -46,8 +44,7 @@ func KipPinned() bool {
 	return pinned
 }
 
-// osExecutable is a seam for tests; production is os.Executable so the
-// kubeconfig can pin this binary's real path when kip is not on PATH.
+// osExecutable lets tests override the executable path.
 var osExecutable = os.Executable
 
 // ProofResult classifies the outcome of proving the operator's own token
@@ -55,26 +52,15 @@ var osExecutable = os.Executable
 type ProofResult int
 
 const (
-	// ProofPass: the token authenticates as the expected operator and is
-	// authorized as cluster-admin.
 	ProofPass ProofResult = iota
-	// ProofPassNonAdmin: authenticates as the operator but is not
-	// cluster-admin — legitimate for a non-admin re-install, not a failure.
 	ProofPassNonAdmin
-	// ProofTransportError: the API server could not be reached to decide.
 	ProofTransportError
-	// ProofAuthnRejected: the token did not authenticate as the expected
-	// prefixed identity — the authenticator is not effective.
 	ProofAuthnRejected
-	// ProofAuthzDeniedAsAdmin: authenticates as admin@<domain> but is denied
-	// cluster-admin — the kipper-initial-admin binding is not effective.
 	ProofAuthzDeniedAsAdmin
 )
 
-// NewBearerClient builds a Kubernetes client that authenticates with a raw
-// bearer token against a server it verifies with caData. It never reads the
-// on-disk kubeconfig, so the proof is of the token itself, not of whatever
-// credential the kubeconfig might still carry.
+// NewBearerClient authenticates with token and verifies the server using caData.
+// Explicit credentials ensure the identity check uses this token independently of kubeconfig.
 func NewBearerClient(server string, caData []byte, token string) (kubernetes.Interface, error) {
 	cfg := &rest.Config{
 		Host:            server,
@@ -85,9 +71,7 @@ func NewBearerClient(server string, caData []byte, token string) (kubernetes.Int
 	return kubernetes.NewForConfig(cfg)
 }
 
-// proveDeps are the two authorization checks, seamed for tests. Both are
-// creatable by system:basic-user, so no RBAC prerequisite exists beyond
-// being authenticated.
+// proveDeps allows tests to supply identity and access review results.
 type proveDeps struct {
 	selfReview   func(ctx context.Context) (*authnv1.SelfSubjectReview, error)
 	accessReview func(ctx context.Context) (*authzv1.SelfSubjectAccessReview, error)
@@ -108,14 +92,11 @@ func clientProveDeps(cs kubernetes.Interface) proveDeps {
 	}
 }
 
-// proveOperatorIdentity runs the two reviews and classifies the result
-// against the expected identity. email is the operator's logged-in email and
-// domain the cluster domain; the assertion is identity-relative — the token's
-// username must be exactly the prefixed logged-in email, so a spoofed or
-// stale token cannot pass.
+// proveOperatorIdentity checks the authenticated identity against the logged-in
+// email and checks wildcard resource access. Denied access is a failure for
+// admin@<domain>; other users may authenticate with limited access.
 func proveOperatorIdentity(ctx context.Context, deps proveDeps, email, domain string, retryWindow time.Duration) (ProofResult, string) {
-	// SelfSubjectReview: retry briefly through the lazy JWKS fetch that
-	// makes the first authenticated call after activation 401.
+	// Allow time for authentication to become ready after activation.
 	var review *authnv1.SelfSubjectReview
 	deadline := time.Now().Add(retryWindow)
 	for {
@@ -142,8 +123,7 @@ func proveOperatorIdentity(ctx context.Context, deps proveDeps, email, domain st
 	if username != wantUser {
 		return ProofAuthnRejected, fmt.Sprintf("authenticated as %q, expected %q", username, wantUser)
 	}
-	// Every group must be a built-in authenticated group or oidc:-prefixed —
-	// a live assertion of the prefix invariant.
+	// Require OIDC group namespacing, except for system:authenticated.
 	for _, g := range review.Status.UserInfo.Groups {
 		if g == "system:authenticated" || strings.HasPrefix(g, oidcGroupsPrefix) {
 			continue
@@ -168,18 +148,30 @@ func isUnauthorized(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unauthorized")
 }
 
-// ProbeIssuer waits for the Dex issuer's discovery endpoint to be reachable
-// over verified TLS before the browser login, so a fresh install does not
-// throw a raw DNS or certificate error in the operator's face while the
-// record propagates or Let's Encrypt issues. It classifies the failure so
-// the wait message is actionable, and gives up after budget with a hint. A
-// nil return means the issuer is ready.
+// ProbeIssuer waits for HTTP 200 responses from Dex discovery and login
+// stylesheets over verified TLS before browser login. The probes share a time
+// budget; notify, if provided, receives messages describing likely failure causes.
 func ProbeIssuer(ctx context.Context, dexHost string, budget time.Duration, notify func(string)) error {
-	url := fmt.Sprintf("https://%s/dex/.well-known/openid-configuration", dexHost)
-	return probeIssuerNotify(ctx, url, &http.Client{Timeout: 8 * time.Second}, budget, notify)
+	return probeLoginPageAt(ctx, "https://"+dexHost, &http.Client{Timeout: 8 * time.Second}, budget, notify)
 }
 
-// probeIssuerAt is the testable core with an injectable client and no notify.
+// loginPagePaths includes stylesheets so readiness covers login styling as well as discovery.
+var loginPagePaths = []string{
+	"/dex/.well-known/openid-configuration",
+	"/dex/static/main.css",
+	"/dex/theme/styles.css",
+}
+
+func probeLoginPageAt(ctx context.Context, base string, client *http.Client, budget time.Duration, notify func(string)) error {
+	deadline := time.Now().Add(budget)
+	for _, path := range loginPagePaths {
+		if err := probeIssuerNotify(ctx, base+path, client, time.Until(deadline), notify); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	return nil
+}
+
 func probeIssuerAt(ctx context.Context, url string, client *http.Client, budget time.Duration) error {
 	if client == nil {
 		client = &http.Client{Timeout: time.Second}
@@ -191,8 +183,7 @@ func probeIssuerNotify(ctx context.Context, url string, client *http.Client, bud
 	deadline := time.Now().Add(budget)
 	var lastClass string
 	for {
-		// Bound each request to the remaining budget so a stalled TLS
-		// handshake cannot overrun the deadline by the client's own timeout.
+		// Cap requests at the remaining budget, even if the client timeout is longer.
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return fmt.Errorf("dex issuer not ready after %s", budget)
@@ -224,10 +215,9 @@ func probeIssuerNotify(ctx context.Context, url string, client *http.Client, bud
 	}
 }
 
-// issuerProbeBudget gives a custom domain longer than a *.kipper.run host,
-// since a custom domain waits on the operator's own DNS plus Let's Encrypt,
-// while a kipper.run subdomain resolves through the gateway immediately.
-func issuerProbeBudget(dexHost string) time.Duration {
+// IssuerProbeBudget returns the Dex readiness timeout, allowing extra time
+// for DNS and certificate setup on custom domains.
+func IssuerProbeBudget(dexHost string) time.Duration {
 	if strings.HasSuffix(dexHost, ".kipper.run") {
 		return 180 * time.Second
 	}

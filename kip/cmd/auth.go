@@ -19,6 +19,7 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/dexcfg"
 	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/kip/internal/auth"
+	"github.com/getkipper/kipper/kip/internal/installer"
 )
 
 // Where Dex keeps the login config Kipper edits.
@@ -85,6 +86,14 @@ func init() {
 	rootCmd.AddCommand(authCmd)
 }
 
+// waitForLoginPage gates browser login on the readiness probe and adds retry guidance.
+func waitForLoginPage(ctx context.Context, dexHost string, probe func(context.Context, string) error) error {
+	if err := probe(ctx, dexHost); err != nil {
+		return fmt.Errorf("sign-in readiness check failed for %s: %w. Try kip auth login again shortly", dexHost, err)
+	}
+	return nil
+}
+
 func runAuthLogin(cmd *cobra.Command, args []string) error {
 	cluster, err := loadCurrentClusterConfig()
 	if err != nil {
@@ -92,6 +101,16 @@ func runAuthLogin(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\n  Logging in to %s...\n\n", cluster.ConsoleHost())
+
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := waitForLoginPage(ctx, cluster.DexHost(), func(ctx context.Context, host string) error {
+		return installer.ProbeIssuer(ctx, host, installer.IssuerProbeBudget(host), func(msg string) { fmt.Printf("  %s\n", msg) })
+	}); err != nil {
+		return err
+	}
 
 	creds, err := auth.Login(cluster.DexHost())
 	if err != nil {
