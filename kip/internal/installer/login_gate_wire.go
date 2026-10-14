@@ -29,12 +29,9 @@ func DefaultLoginGate(clusterID, dexHost string) func(ctx context.Context, domai
 						return c.Email, tok, false, nil
 					}
 				}
-				// Warm the issuer before opening a browser: a fresh install
-				// reaches here seconds after Dex starts, and DNS or certificate
-				// timing would otherwise throw a raw error at the operator.
-				// A probe failure is a client-side condition, so it defers
-				// (empty token, deferred=true) and never downgrades.
-				budget := issuerProbeBudget(dexHost)
+				// Wait for Dex discovery and stylesheets before browser login.
+				// If the probe fails, defer login so the operator can retry later.
+				budget := IssuerProbeBudget(dexHost)
 				if perr := ProbeIssuer(ctx, dexHost, budget, func(msg string) {
 					fmt.Printf("  %s\n", msg)
 				}); perr != nil {
