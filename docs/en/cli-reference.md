@@ -1076,8 +1076,11 @@ Every backup also skips cert-manager's transient issuance objects (CertificateRe
 | `--namespace-mapping` | No | — | Restore only the source namespace into the target namespace (format: `source:target`). If set, `--namespace` must match the source. |
 | `--resources` | No | — | Restore only specific resource types (comma-separated) |
 | `--allow-partial` | No | `false` | Restore a `PartiallyFailed` backup despite potentially missing data or resources |
+| `--repair-credentials` | No | `false` | Re-attach restored service credentials Secrets without prompting |
 
 Restore a `Completed` backup, or use `--allow-partial` for a `PartiallyFailed` backup. For partial backups, kip lists volumes with failed or canceled backups when details are available. Backups in other phases cannot be restored; wait for pending or running backups to finish.
+
+`kip backup restore` waits up to four hours for the restore to finish. After a `Completed` or `PartiallyFailed` restore, it checks the restored service credentials Secrets (see [Restore progress and credentials](/en/backups#restore-progress-and-credentials)). Press Ctrl-C to stop waiting; the restore continues in the cluster. The command returns an error for `Failed`, `FailedValidation`, or `PartiallyFailed` restores, even if credential repair succeeds.
 
 ## kip platform {#kip-platform}
 
