@@ -19,16 +19,23 @@ const longhornSettingsFunc = longhornSettingsFuncName + `() {
 }`
 
 // InstallLonghorn installs Longhorn for distributed persistent storage.
-// It detects the OS here so kip upgrade can run without gathering system info.
+// It detects the OS so kip upgrade can run without gathering system info.
 func InstallLonghorn(client CommandRunner) error {
+	return InstallLonghornThen(client, nil)
+}
+
+// InstallLonghornThen installs Longhorn, calling afterPackages when non-nil
+// after installing host packages and starting required services, before
+// configuring multipath or deploying Longhorn. A callback error stops installation.
+func InstallLonghornThen(client CommandRunner, afterPackages func() error) error {
 	host, err := DetectHostOS(client)
 	if err != nil {
 		return fmt.Errorf("installing longhorn dependencies: %w", err)
 	}
-	return installLonghorn(client, host)
+	return installLonghorn(client, host, afterPackages)
 }
 
-func installLonghorn(client CommandRunner, host HostOS) error {
+func installLonghorn(client CommandRunner, host HostOS, afterPackages func() error) error {
 	install := host.InstallPackagesCommand(true, host.StoragePackages()...)
 	if install == "" {
 		return fmt.Errorf("installing longhorn dependencies: kip cannot install packages on %s", host.ID)
@@ -39,6 +46,11 @@ func installLonghorn(client CommandRunner, host HostOS) error {
 	for _, svc := range host.StorageServices() {
 		if _, err := client.Run("systemctl enable --now " + svc); err != nil {
 			return fmt.Errorf("starting %s for longhorn: %w", svc, err)
+		}
+	}
+	if afterPackages != nil {
+		if err := afterPackages(); err != nil {
+			return err
 		}
 	}
 

@@ -73,7 +73,7 @@ func TestLonghornSettingsFilter_RefusesAManifestItCannotPlaceTheSettingsIn(t *te
 
 func TestInstallLonghorn_AppliesTheFilteredManifest(t *testing.T) {
 	r := &recordingRunner{}
-	require.NoError(t, installLonghorn(r, HostOS{ID: "debian", Family: FamilyDebian}))
+	require.NoError(t, installLonghorn(r, HostOS{ID: "debian", Family: FamilyDebian}, nil))
 
 	all := strings.Join(r.commands, "\n")
 	assert.Equal(t, "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq open-iscsi nfs-common", r.commands[0],
@@ -86,7 +86,7 @@ func TestInstallLonghorn_AppliesTheFilteredManifest(t *testing.T) {
 func TestInstallLonghornRefusesAHostItCannotInstallPackagesOn(t *testing.T) {
 	r := &recordingRunner{}
 
-	err := installLonghorn(r, HostOS{ID: "arch"})
+	err := installLonghorn(r, HostOS{ID: "arch"}, nil)
 
 	assert.ErrorContains(t, err, "arch")
 	assert.Empty(t, r.commands)

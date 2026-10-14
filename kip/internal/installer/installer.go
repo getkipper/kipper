@@ -98,6 +98,16 @@ func AdoptionConsent(audit FirewallAudit, firewall, adopt bool, ask func(questio
 	return ask("Allow kip to manage the running firewalld? This replaces the public zone and adds a pod zone and forwarding policies.")
 }
 
+// hardenAfterStoragePackages returns an optional hardening callback for services
+// installed after the initial host audit. Running it before Longhorn deployment
+// ensures hardening completes even if deployment fails.
+func hardenAfterStoragePackages(harden bool, client CommandRunner) func() error {
+	if !harden {
+		return nil
+	}
+	return func() error { return HardenHost(client) }
+}
+
 // storageRestartSteps schedules needrestart configuration for Debian-family hosts.
 func storageRestartSteps(host HostOS, client CommandRunner) []installStep {
 	if !host.UsesNeedrestart() {
@@ -520,7 +530,7 @@ func Run(opts Options) (*Result, error) {
 			return InstallCertManager(client, opts.AdminEmail, opts.DNSResolvers)
 		}},
 		{"Setting up storage", func() error {
-			if err := InstallLonghorn(client); err != nil {
+			if err := InstallLonghornThen(client, hardenAfterStoragePackages(opts.Harden, client)); err != nil {
 				return err
 			}
 			if !sysInfo.Host.UsesNeedrestart() {
