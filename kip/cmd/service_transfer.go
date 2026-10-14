@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/kip/internal/k8s"
 	"github.com/getkipper/kipper/kip/internal/service"
 )
 
@@ -222,7 +223,11 @@ func resolveTransferTarget(ctx context.Context, name, namespace string, database
 	if err != nil {
 		return nil, err
 	}
-	clientset := k8sClient.Clientset()
+	// Suppress PodSecurity warnings for Kipper-managed pod templates when pausing tuning.
+	clientset, err := kubernetes.NewForConfig(k8s.WithoutPodSecurityWarnings(k8sClient.RESTConfig()))
+	if err != nil {
+		return nil, fmt.Errorf("creating the Kubernetes client: %w", err)
+	}
 
 	mgr := &service.Manager{Client: clientset, Dynamic: k8sClient.Dynamic()}
 	conn, err := mgr.Info(ctx, namespace, name)

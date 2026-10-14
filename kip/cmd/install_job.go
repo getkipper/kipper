@@ -281,10 +281,20 @@ func runInstallRequest(path string) error {
 // so firewall changes are verified from outside the server.
 func jobOptions(req installjob.Request, dir string, log io.Writer) installer.Options {
 	opts := req.Options()
+	checks := 0
 	opts.ConfirmConnection = func() error {
-		return installjob.AwaitFirewallAck(dir, req.RunID, log, firewallAckTimeout, time.Second)
+		checks++
+		return installjob.AwaitFirewallAck(dir, req.RunID, log, freshConnectionMessage(checks), firewallAckTimeout, time.Second)
 	}
 	return opts
+}
+
+// The first check establishes baseline SSH access; later checks verify the loaded rules.
+func freshConnectionMessage(n int) string {
+	if n == 1 {
+		return "  Checking that kip on your machine can open a new SSH connection before changing the firewall..."
+	}
+	return "  Checking that kip on your machine can still open a new SSH connection with the new firewall rules..."
 }
 
 // firewallAckTimeout allows reconnection before the 180-second firewall rollback.

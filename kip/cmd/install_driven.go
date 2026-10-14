@@ -130,8 +130,7 @@ func runDrivenInstall(cmd *cobra.Command) error {
 		fmt.Printf("\n  Collecting the completed install result from %s.\n%s\n", host, startedBy(outcome.KipVersion))
 	default:
 		if req.NoSSHRateLimit {
-			fmt.Printf("\n  SSH rate limiting is disabled by default for this install\n")
-			fmt.Printf("  to support maintenance commands from Windows.\n")
+			fmt.Print(serverJobRateLimitNotice())
 		}
 		fmt.Printf("\n  Installing on %s. Ctrl-C disconnects; the install continues on the server.\n\n", host)
 	}
@@ -160,7 +159,7 @@ func runDrivenInstall(cmd *cobra.Command) error {
 	resOut, err := client.Run(kipCmd + " install-job result --run " + outcome.RunID)
 	if err != nil {
 		if phase != installjob.PhaseSucceeded {
-			return fmt.Errorf("the install on %s stopped before it produced a result (%s); the log above shows why, and running kip install again retries it", host, phase)
+			return stoppedJobError(host, outcome.RunID, phase)
 		}
 		return fmt.Errorf("collecting the install result: %w", err)
 	}
@@ -566,4 +565,14 @@ func existingJob(statusJSON string) bool {
 		return false
 	}
 	return st.Phase == installjob.PhaseStarting || st.Phase == installjob.PhaseRunning || st.Collectable
+}
+
+func serverJobRateLimitNotice() string {
+	return "\n  SSH rate limiting is off by default for server jobs to support Windows SSH clients.\n" +
+		"  On Ubuntu and Debian, enable it with --no-ssh-rate-limit=false.\n"
+}
+
+func stoppedJobError(host, runID, phase string) error {
+	return fmt.Errorf("the install on %s stopped before it produced a result (%s); check the log above for details. If the log is empty, run journalctl -u %s on the server. Running kip install again retries it",
+		host, phase, installjob.UnitName(runID))
 }

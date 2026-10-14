@@ -64,8 +64,33 @@ func TestInstallSummaryPrintsCredentialsAfterAFailedInstall(t *testing.T) {
 	if !strings.Contains(out.String(), generated) {
 		t.Errorf("a failed install withheld the generated password:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "Install completed with errors") {
+	if !strings.Contains(out.String(), "Install stopped with errors") {
 		t.Errorf("a failed install was reported as a clean one:\n%s", out.String())
+	}
+}
+
+func TestInstallSummaryPrintsNothingWhenAFailedInstallCreatedNoCredentials(t *testing.T) {
+	var out bytes.Buffer
+	result := finishedInstall("", false)
+	result.KubeconfigPath = ""
+	printInstallSummary(&out, result, errors.New("configuring firewall: rolled back"))
+
+	if out.Len() != 0 {
+		t.Errorf("printed a summary for an install that created no credentials:\n%s", out.String())
+	}
+}
+
+func TestInstallSummaryOmitsAnEmptyKubeconfig(t *testing.T) {
+	var out bytes.Buffer
+	result := finishedInstall(generated, false)
+	result.KubeconfigPath = ""
+	printInstallSummary(&out, result, errors.New("writing kubeconfig: permission denied"))
+
+	if strings.Contains(out.String(), "Kubeconfig:") {
+		t.Errorf("printed an empty kubeconfig line:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), generated) {
+		t.Errorf("withheld the generated password:\n%s", out.String())
 	}
 }
 

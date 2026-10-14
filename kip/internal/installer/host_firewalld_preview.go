@@ -146,12 +146,14 @@ func openedInPublicZone(zone firewalldInfo, want firewalldWant) []string {
 // Question formats the takeover preview and consent prompt.
 func (a FirewalldAdoption) Question(host string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "firewalld is running on %s with an operator-managed configuration. Kipper will replace its public zone:\n", host)
+	fmt.Fprintf(&b, "firewalld is running on %s with a configuration Kipper does not manage.\n", host)
+	b.WriteString("  Kipper will replace its public zone:\n")
 	if len(a.Removed) > 0 {
 		fmt.Fprintf(&b, "     removed: %s\n", strings.Join(a.Removed, ", "))
 	}
 	fmt.Fprintf(&b, "     opened to everyone: %s\n", strings.Join(a.Opened, ", "))
-	b.WriteString("  It also adds a zone for pod traffic and two forwarding policies. If new SSH connections fail\n")
-	b.WriteString("  afterwards, Kipper restores the previous firewall, with an automatic rollback scheduled after three minutes as a fallback. Allow takeover?")
+	b.WriteString("  It also adds a zone for pod traffic and two forwarding policies. If new SSH connections\n")
+	b.WriteString("  fail afterwards, Kipper attempts to restore the previous firewall. A fallback timer\n")
+	b.WriteString("  restores it after three minutes unless Kipper confirms the changes. Allow takeover?")
 	return b.String()
 }
