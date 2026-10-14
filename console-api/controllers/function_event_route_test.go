@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
@@ -33,34 +35,44 @@ func routingScheme() *runtime.Scheme {
 	return s
 }
 
-// A function triggered by a database event is invoked by its poll sidecar, not
-// over HTTP. It still needs a long-lived Pod, which is why it shares the
-// Deployment and Service path with an HTTP function.
+// eventTriggeredFunction uses a poller that invokes the function over local HTTP,
+// so it needs a Deployment but no public HTTP route.
 func eventTriggeredFunction() *kipperv1.Function {
 	return &kipperv1.Function{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "shop-prod"},
 		Spec: kipperv1.FunctionSpec{
 			Image:    "orders:v1",
 			Port:     8080,
-			Triggers: []kipperv1.FunctionTrigger{{Type: "postgres"}},
+			Triggers: []kipperv1.FunctionTrigger{{Type: "postgres", Config: map[string]string{"source": "db", "table": "orders"}}},
 		},
 	}
 }
 
-// Two rules decided what "serves HTTP" meant and they disagreed. The serving
-// path ran for any non-cron trigger, so an event-triggered function got an
-// Ingress pointing at the KEDA interceptor, while the HTTPScaledObject that
-// puts a host in the interceptor's routing table was created only for a
-// literal http trigger. The interceptor answers 404 for a host it has no route
-// for, so the function was published on a URL that could never reach it and no
-// request could ever wake it.
+func eventSource() []client.Object {
+	svc := &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "shop-prod", UID: types.UID("db-uid")},
+		Spec:       kipperv1.ServiceSpec{Type: "postgres"},
+	}
+	yes := true
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "db-credentials", Namespace: "shop-prod",
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: kipperv1.GroupVersion.String(), Kind: "Service", Name: "db", UID: svc.UID, Controller: &yes}},
+		},
+		Data: map[string][]byte{"HOST": []byte("db"), "PORT": []byte("5432"), "USERNAME": []byte("app"), "PASSWORD": []byte("pw")},
+	}
+	return []client.Object{svc, secret}
+}
+
+// Event functions have no HTTPScaledObject to register a route with the KEDA
+// interceptor, so an Ingress pointing there would send requests to a missing route.
 func TestReconcileChildren_EventFunctionGetsNoDeadHTTPRoute(t *testing.T) {
 	ctx := context.Background()
 	scheme := routingScheme()
 
 	fn := eventTriggeredFunction()
 	c := crfake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(fn).WithStatusSubresource(fn).Build()
+		WithObjects(append(eventSource(), fn)...).WithStatusSubresource(fn).Build()
 	r := &FunctionReconciler{Client: c, Scheme: scheme, Domain: "203-0-113-10.kipper.run"}
 
 	require.NoError(t, r.reconcileChildren(ctx, fn, "", nil, "", renderedBindings{}))
@@ -71,8 +83,6 @@ func TestReconcileChildren_EventFunctionGetsNoDeadHTTPRoute(t *testing.T) {
 		"an event-triggered function has no HTTPScaledObject, so an Ingress to the interceptor is a route that can only 404")
 }
 
-// The counterpart: an HTTP function still gets both halves, so the fix cannot
-// be "stop creating the Ingress".
 func TestReconcileChildren_HTTPFunctionGetsRouteAndScaler(t *testing.T) {
 	ctx := context.Background()
 	scheme := routingScheme()
