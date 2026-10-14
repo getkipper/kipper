@@ -18,7 +18,7 @@ To join a cluster someone has already installed, follow [Team Access](/en/team-a
 
 Kipper configures the server's firewall during installation: UFW on Ubuntu and Debian, firewalld on Rocky Linux, AlmaLinux and CentOS Stream. Kipper preserves active firewalls you manage unless you grant permission to take over firewalld.
 
-When installing over SSH from a terminal, `kip install` asks before taking over an existing firewalld configuration. With `--via-server` or without a terminal, grant permission with `--adopt-firewall`. If you keep managing firewalld yourself, Kipper checks its rules and stops if required access is missing or rules cannot be evaluated. See [host security](/en/security#host-hardening) for details.
+When installing over SSH from a terminal, `kip install` asks before taking over an eligible running firewalld and lists the proposed changes. With `--via-server`, including on Windows, the prompt appears on your computer before a new server job starts. Without a terminal, grant permission with `--adopt-firewall`. If you decline, Kipper preserves your firewall and checks required cluster access. Installation stops if required rules are missing or cannot be evaluated. See [host security](/en/security#host-hardening) for details.
 
 The free `*.kipper.run` address works with Kipper-managed DNS. To use your own domain at install time, configure its [DNS records](/en/installation#dns-for-a-domain-you-run) first.
 

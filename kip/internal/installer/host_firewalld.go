@@ -137,11 +137,11 @@ var firewalldStockFiles = map[string]bool{
 	"zones/public.xml":       true,
 }
 
-var firewalldStockPublicServices = map[string]bool{"ssh": true, "dhcpv6-client": true, "cockpit": true}
+var firewalldStockPublicServices = []string{"ssh", "dhcpv6-client", "cockpit"}
 
 // firewalldInventoryCommand lists non-directory entries with their file types
 // so the audit can reject symlinks and other non-regular files.
-const firewalldInventoryCommand = "cd " + firewalldConfigDir + " && find . -mindepth 1 ! -type d -printf '%y %P\\n'"
+const firewalldInventoryCommand = "cd " + firewalldConfigDir + " && find . -mindepth 1 ! -type d -printf '%y %P\\n' | LC_ALL=C sort"
 
 type firewalldSavedConfig struct {
 	inventory string
@@ -201,10 +201,13 @@ func (c firewalldSavedConfig) changes(claimed, adopting bool, want firewalldWant
 	if zone.Target != "" && zone.Target != "default" {
 		changes = append(changes, "public zone target "+zone.Target)
 	}
-	for _, s := range zone.Services {
-		if !firewalldStockPublicServices[s.Name] {
-			changes = append(changes, "public zone service "+s.Name)
-		}
+	var services []string
+	for _, svc := range zone.Services {
+		services = append(services, svc.Name)
+	}
+	// Treat removed services as customizations too, so hardening choices are preserved.
+	if !sameSet(services, firewalldStockPublicServices) {
+		changes = append(changes, "public zone services "+strings.Join(services, " ")+" (stock is ssh dhcpv6-client cockpit)")
 	}
 	for _, o := range zone.Other {
 		switch o.XMLName.Local {
@@ -644,7 +647,7 @@ const pendingRollbackCommand = "systemctl list-units --all --no-legend --plain '
 // configureFirewalld backs up, loads, and verifies Kipper's configuration under
 // a rollback timer. SSH and server-driven runs verify a new SSH connection
 // before commit. Other local runs may start a stopped firewall or verify a matching one.
-func configureFirewalld(client FirewallRunner, host HostOS, adopt bool) error {
+func configureFirewalld(client FirewallRunner, host HostOS, consent FirewallConsent) error {
 	install := host.InstallPackagesCommand(false, "firewalld")
 	if install == "" {
 		return fmt.Errorf("installing firewalld: kip cannot install packages on %s", host.ID)
@@ -667,7 +670,7 @@ func configureFirewalld(client FirewallRunner, host HostOS, adopt bool) error {
 	}
 	// Inspect after reserving so cooperating runs cannot change the configuration
 	// between inspection and application.
-	seen, err := inspectFirewalld(client, sshPorts, adopt)
+	seen, err := inspectFirewalld(client, sshPorts, consent)
 	if err != nil || seen.done {
 		if _, releaseErr := client.Run(run.releaseLockedCommand()); releaseErr != nil {
 			return errors.Join(err, fmt.Errorf("releasing the firewall reservation: %w", releaseErr))
@@ -735,12 +738,12 @@ type firewalldSeen struct {
 
 // inspectFirewalld checks ownership, connectivity, and configuration before
 // making changes. The caller must hold the run's reservation.
-func inspectFirewalld(client FirewallRunner, sshPorts []string, adopt bool) (firewalldSeen, error) {
+func inspectFirewalld(client FirewallRunner, sshPorts []string, consent FirewallConsent) (firewalldSeen, error) {
 	audit, err := AuditFirewall(client)
 	if err != nil {
 		return firewalldSeen{}, fmt.Errorf("re-auditing firewall: %w", err)
 	}
-	adopting := adopt && audit.Adoptable
+	adopting := consent.Adopt && audit.Adoptable
 	if audit.BlocksConfiguration() && !adopting {
 		return firewalldSeen{}, fmt.Errorf("a %s firewall became active on this host, so kip left it alone", audit.Existing)
 	}
@@ -774,8 +777,22 @@ func inspectFirewalld(client FirewallRunner, sshPorts []string, adopt bool) (fir
 		return firewalldSeen{}, err
 	}
 	if changes := saved.changes(wasClaimed, adopting, want); len(changes) > 0 {
-		return firewalldSeen{}, fmt.Errorf("the saved firewalld configuration has custom changes (%s). Remove them to let kip configure it, or use --firewall=false to manage it yourself. For manual management, also delete %s if present",
-			strings.Join(changes, ", "), firewalldClaimPath)
+		stopped := ""
+		if !wasActive {
+			stopped = " firewalld is stopped, and --adopt-firewall only takes over a running firewalld."
+		}
+		return firewalldSeen{}, fmt.Errorf("the saved firewalld configuration has custom changes (%s). Remove them to let kip configure it, or use --firewall=false to manage it yourself. For manual management, also delete %s if present.%s",
+			strings.Join(changes, ", "), firewalldClaimPath, stopped)
+	}
+	// Interactive consent applies to the previewed configuration.
+	if adopting && consent.Fingerprint != "" {
+		current, err := currentFirewalldFingerprint(client, sshPorts)
+		if err != nil {
+			return firewalldSeen{}, err
+		}
+		if current != consent.Fingerprint {
+			return firewalldSeen{}, fmt.Errorf("the running firewalld changed after you agreed to its takeover, so kip left it alone; run the command again to see the new changes")
+		}
 	}
 
 	enabled, err := client.Run("systemctl is-enabled firewalld 2>/dev/null || true")

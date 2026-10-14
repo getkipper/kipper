@@ -163,7 +163,12 @@ func ReadStatus(root string, sd Systemd) (Status, error) {
 	if err != nil || current == "" {
 		return Status{}, err
 	}
-	return status(root, current, sd)
+	st, err := status(root, current, sd)
+	// Match Claim: a missing state file makes the current-job pointer stale.
+	if errors.Is(err, os.ErrNotExist) {
+		return Status{}, nil
+	}
+	return st, err
 }
 
 // status asks systemd first and reads the state second, so a job that finished

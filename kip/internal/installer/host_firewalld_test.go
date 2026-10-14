@@ -141,6 +141,7 @@ type firewalldHost struct {
 	script                 string
 	fail                   map[string]error
 	runningDump, savedDump string
+	publicInfo             string
 	ufwActive              bool
 	failStart              string
 }
@@ -212,6 +213,8 @@ func (h *firewalldHost) Run(cmd string) (string, error) {
 		return h.loaded, nil
 	case strings.Contains(cmd, "systemctl enable --now firewalld"):
 		h.active = true
+	case cmd == "firewall-cmd --info-zone=public":
+		return h.publicInfo, nil
 	case cmd == firewalldDumpCommand(false):
 		return h.runningDump, nil
 	case cmd == firewalldDumpCommand(true):
@@ -259,7 +262,7 @@ const commitMarker = ".committed && "
 func TestConfigureFirewalldOnAFreshHost(t *testing.T) {
 	h := newFirewalldHost(t)
 
-	require.NoError(t, configureFirewalld(h, rhel10Host, false))
+	require.NoError(t, configureFirewalld(h, rhel10Host, FirewallConsent{}))
 
 	steps := []string{
 		"cp -a /etc/firewalld /etc/kipper/firewalld-backup-",
@@ -290,7 +293,7 @@ func TestConfigureFirewalldRestoresTheFirewallWhenNewConnectionsFail(t *testing.
 	h := newFirewalldHost(t)
 	h.fresh = []error{nil, errors.New("connection timed out")}
 
-	err := configureFirewalld(h, rhel10Host, false)
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "restored the previous firewall")
@@ -302,7 +305,7 @@ func TestConfigureFirewalldRestoresTheFirewallWhenTheLoadedStateDiffers(t *testi
 	h := newFirewalldHost(t)
 	h.loaded = strings.Replace(loadedFirewalld, "public (default)\n", "trusted\n  interfaces: eth1\npublic (default)\n", 1)
 
-	err := configureFirewalld(h, rhel10Host, false)
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "zone trusted is active")
@@ -314,7 +317,7 @@ func TestConfigureFirewalldRestoresTheFirewallWhenItWillNotLoad(t *testing.T) {
 	h := newFirewalldHost(t)
 	h.fail = map[string]error{"systemctl enable --now firewalld": errors.New("job failed")}
 
-	err := configureFirewalld(h, rhel10Host, false)
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{})
 
 	require.Error(t, err)
 	assert.Equal(t, []string{"full"}, h.rolledBack)
@@ -327,7 +330,7 @@ func TestConfigureFirewalldRestoresOnlyTheFilesBeforeLoading(t *testing.T) {
 	h.active, h.claimed = true, true
 	h.fail = map[string]error{"firewall-cmd --check-config": errors.New("INVALID_POLICY")}
 
-	err := configureFirewalld(h, rhel10Host, false)
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{})
 
 	require.Error(t, err)
 	assert.Equal(t, []string{"files"}, h.rolledBack)
@@ -339,7 +342,7 @@ func TestConfigureFirewalldReportsAFailedRestore(t *testing.T) {
 	h.fresh = []error{nil, errors.New("connection timed out")}
 	h.failStart = "/bin/sh /etc/kipper/firewalld-rollback-"
 
-	err := configureFirewalld(h, rhel10Host, false)
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "restoring the previous firewall failed too")
@@ -351,7 +354,7 @@ func TestConfigureFirewalldRefusesAStoppedFirewallWithSavedChanges(t *testing.T)
 	h := newFirewalldHost(t)
 	h.publicXML = strings.Replace(stockPublicZone, "<forward/>", `<rule family="ipv4"><source address="198.51.100.0/24"/><drop/></rule>`, 1)
 
-	err := configureFirewalld(h, rhel10Host, false)
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "public zone rule entry")
@@ -366,7 +369,7 @@ func TestConfigureFirewalldRefusesExtraFilesUnderItsOwnClaim(t *testing.T) {
 	h.claimed = true
 	h.inventory += "f zones/kipper-pods.xml\nf policies/block-ssh.xml\n"
 
-	err := configureFirewalld(h, rhel10Host, false)
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "policies/block-ssh.xml")
@@ -378,14 +381,14 @@ func TestConfigureFirewalldTrustsItsOwnClaimOnAStoppedFirewall(t *testing.T) {
 	h.claimed = true
 	h.inventory += "f zones/kipper-pods.xml\nf zones/public.xml.old\nf policies/kipper-pods-out.xml\n"
 
-	require.NoError(t, configureFirewalld(h, rhel10Host, false))
+	require.NoError(t, configureFirewalld(h, rhel10Host, FirewallConsent{}))
 }
 
 func TestConfigureFirewalldChangesNothingWhenASecondConnectionFailsAlready(t *testing.T) {
 	h := newFirewalldHost(t)
 	h.fresh = []error{errors.New("too many authentication failures")}
 
-	err := configureFirewalld(h, rhel10Host, false)
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "left the firewall alone")
@@ -397,7 +400,7 @@ func TestConfigureFirewalldWaitsForAnEarlierRollback(t *testing.T) {
 	h := newFirewalldHost(t)
 	h.pending = "kipper-firewalld-rollback-0123456789ab.timer\n"
 
-	err := configureFirewalld(h, rhel10Host, false)
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{})
 
 	assert.ErrorContains(t, err, "still waiting to be rolled back")
 	assert.Equal(t, -1, h.index("cp -a /etc/firewalld"))
@@ -407,7 +410,7 @@ func TestConfigureFirewalldReloadsItsOwnRunningFirewall(t *testing.T) {
 	h := newFirewalldHost(t)
 	h.active, h.claimed = true, true
 
-	require.NoError(t, configureFirewalld(h, rhel10Host, false))
+	require.NoError(t, configureFirewalld(h, rhel10Host, FirewallConsent{}))
 
 	assert.Less(t, h.index(firewalldDumpCommand(true)), h.index("cp -a /etc/firewalld"), "runtime and saved configuration are compared first")
 	assert.Equal(t, -1, h.index("--runtime-to-permanent"), "kip never saves runtime rules on the operator's behalf")
@@ -426,7 +429,7 @@ func TestConfigureFirewalldRefusesRuntimeOnlyRules(t *testing.T) {
 	h.runningDump = "== zone public\n  ports: 22/tcp 2222/tcp\n== direct\n"
 	h.savedDump = "== zone public\n  ports: 22/tcp\n== direct\n"
 
-	err := configureFirewalld(h, rhel10Host, false)
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "differs from its saved one (zone public)")
@@ -447,7 +450,7 @@ func TestConfigureFirewalldRefusesAnUnclaimedRunningFirewall(t *testing.T) {
 	h := newFirewalldHost(t)
 	h.active = true
 
-	err := configureFirewalld(h, rhel10Host, false)
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{})
 
 	assert.ErrorContains(t, err, "left it alone")
 	assert.False(t, h.claimed)
@@ -462,14 +465,14 @@ func TestConfigureFirewalldLocally(t *testing.T) {
 
 	t.Run("starts a stopped stock firewall", func(t *testing.T) {
 		h := newFirewalldHost(t)
-		require.NoError(t, configureFirewalld(localHost{h}, rhel10Host, false))
+		require.NoError(t, configureFirewalld(localHost{h}, rhel10Host, FirewallConsent{}))
 		assert.Greater(t, h.index(commitMarker), h.index("enable --now firewalld"))
 	})
 
 	t.Run("leaves its own firewall alone when it already matches", func(t *testing.T) {
 		h := newFirewalldHost(t)
 		h.active, h.claimed, h.ourFiles = true, true, ours
-		require.NoError(t, configureFirewalld(localHost{h}, rhel10Host, false))
+		require.NoError(t, configureFirewalld(localHost{h}, rhel10Host, FirewallConsent{}))
 		assert.Equal(t, -1, h.index("--reload"))
 		assert.Equal(t, -1, h.index("cp -a /etc/firewalld"))
 	})
@@ -478,7 +481,7 @@ func TestConfigureFirewalldLocally(t *testing.T) {
 		h := newFirewalldHost(t)
 		h.active, h.claimed, h.ourFiles = true, true, ours
 		h.loaded = strings.Replace(loadedFirewalld, "ports: 22/tcp", "ports: 2222/tcp", 1)
-		err := configureFirewalld(localHost{h}, rhel10Host, false)
+		err := configureFirewalld(localHost{h}, rhel10Host, FirewallConsent{})
 		assert.ErrorContains(t, err, "differs from kip's")
 		assert.Equal(t, -1, h.index("--reload"))
 	})
@@ -491,7 +494,7 @@ func TestConfigureFirewalldLocally(t *testing.T) {
 			h.ourFiles[k] = v
 		}
 		h.ourFiles["zones/public.xml"] = stockPublicZone
-		err := configureFirewalld(localHost{h}, rhel10Host, false)
+		err := configureFirewalld(localHost{h}, rhel10Host, FirewallConsent{})
 		assert.ErrorContains(t, err, "saved zones/public.xml differs")
 	})
 }
@@ -558,7 +561,7 @@ func TestFirewalldSavedChanges(t *testing.T) {
 		"default zone":     {firewalldSavedConfig{inventory: stockInventory, conf: "DefaultZone=drop\n", public: stockPublicZone}, false, `default zone "drop"`},
 		"zone drifting":    {firewalldSavedConfig{inventory: stockInventory, conf: "AllowZoneDrifting=yes\n", public: stockPublicZone}, false, "zone drifting"},
 		"public port":      {firewalldSavedConfig{inventory: stockInventory, public: strings.Replace(stockPublicZone, "<forward/>", `<port port="8080" protocol="tcp"/>`, 1)}, false, "public zone port entry"},
-		"public service":   {firewalldSavedConfig{inventory: stockInventory, public: strings.Replace(stockPublicZone, `"cockpit"`, `"http"`, 1)}, false, "public zone service http"},
+		"public service":   {firewalldSavedConfig{inventory: stockInventory, public: strings.Replace(stockPublicZone, `"cockpit"`, `"http"`, 1)}, false, "public zone services ssh dhcpv6-client http"},
 		"public target":    {firewalldSavedConfig{inventory: stockInventory, public: strings.Replace(stockPublicZone, "<zone>", `<zone target="ACCEPT">`, 1)}, false, "public zone target ACCEPT"},
 		"ours, unclaimed":  {firewalldSavedConfig{inventory: stockInventory + "f zones/kipper-pods.xml\n", public: stockPublicZone}, false, "zones/kipper-pods.xml"},
 		"claimed symlinks": {firewalldSavedConfig{inventory: stockInventory + "l zones/kipper-pods.xml\n"}, true, "zones/kipper-pods.xml is not a regular file"},
@@ -949,7 +952,7 @@ func TestConfigureFirewalldReleasesTheReservationWhenTheClaimFails(t *testing.T)
 	h := newFirewalldHost(t)
 	h.fail = map[string]error{"mktemp '/etc/kipper/firewalld-managed": errors.New("no space left on device")}
 
-	err := configureFirewalld(h, rhel10Host, false)
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{})
 
 	require.Error(t, err)
 	assert.Equal(t, []string{"files"}, h.rolledBack, "the rollback script restores the files and releases the run")
@@ -968,7 +971,7 @@ func TestRollBackFirewalldSaysWhenAnotherRunOwnsTheFirewall(t *testing.T) {
 func TestConfigureFirewalldReservesBeforeLookingAtTheHost(t *testing.T) {
 	h := newFirewalldHost(t)
 
-	require.NoError(t, configureFirewalld(h, rhel10Host, false))
+	require.NoError(t, configureFirewalld(h, rhel10Host, FirewallConsent{}))
 
 	reserved := h.index("mkdir -p /etc/kipper && exec 9>")
 	require.Greater(t, reserved, -1)
@@ -994,7 +997,7 @@ func TestConfigureFirewalldGivesTheReservationBackWhenItRefuses(t *testing.T) {
 				runner = localHost{h}
 			}
 
-			_ = configureFirewalld(runner, rhel10Host, false)
+			_ = configureFirewalld(runner, rhel10Host, FirewallConsent{})
 
 			assert.Greater(t, h.index("then rm -f /etc/kipper/firewalld-run"), h.index("mkdir -p /etc/kipper && exec 9>"))
 			assert.Equal(t, -1, h.index("cp -a /etc/firewalld"))
@@ -1007,7 +1010,7 @@ func TestConfigureFirewalldRefusesAnActiveUFW(t *testing.T) {
 	h := newFirewalldHost(t)
 	h.ufwActive = true
 
-	err := configureFirewalld(h, rhel10Host, false)
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{})
 
 	assert.ErrorContains(t, err, "ufw is active on this host")
 	assert.Equal(t, -1, h.index("cp -a /etc/firewalld"))
@@ -1039,7 +1042,7 @@ func TestPendingRollbackIgnoresAnElapsedTimer(t *testing.T) {
 
 func TestFirewalldRollbackTimerUnloadsOnceFired(t *testing.T) {
 	h := newFirewalldHost(t)
-	require.NoError(t, configureFirewalld(h, rhel10Host, false))
+	require.NoError(t, configureFirewalld(h, rhel10Host, FirewallConsent{}))
 	assert.Contains(t, h.commands[h.index("systemd-run")], "--timer-property=RemainAfterElapse=no")
 	assert.Contains(t, h.script, "systemctl stop kipper-firewalld-rollback-")
 }
@@ -1134,4 +1137,13 @@ func TestFirewalldRollbackFinishesWhenK3sWillNotRestart(t *testing.T) {
 	assert.Contains(t, out, "k3s did not restart")
 	assert.Equal(t, "<missing>", h.read(firewalldClaimPath), "the adoption claim is handed back")
 	assert.Equal(t, "<missing>", h.read(strings.TrimPrefix(h.run.reservation(), h.root)))
+}
+
+func TestFirewalldStockMeansExactlyTheVendorServices(t *testing.T) {
+	want := wantFirewalld([]string{"22"})
+	hardened := firewalldSavedConfig{inventory: stockInventory, public: strings.Replace(stockPublicZone, `  <service name="cockpit"/>`+"\n", "", 1)}
+	require.NotEqual(t, stockPublicZone, hardened.public)
+
+	assert.Contains(t, strings.Join(hardened.changes(false, false, want), "\n"), "public zone services")
+	assert.Empty(t, firewalldSavedConfig{inventory: stockInventory, public: stockPublicZone}.changes(false, false, want))
 }

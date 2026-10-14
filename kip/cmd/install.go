@@ -46,7 +46,7 @@ func init() {
 	installCmd.Flags().Bool("admin-kubeconfig", false, "write the shared k3s admin certificate to this machine instead of a per-operator OIDC kubeconfig; CI escape hatch. The certificate is unattributed and revocable only by rotation")
 	installCmd.Flags().Bool("no-login", false, "skip the inline sign-in; run kip auth login && kip auth verify later")
 	installCmd.Flags().Bool("firewall", true, "configure the host firewall for k3s: firewalld on Rocky, AlmaLinux and CentOS Stream; UFW elsewhere (firewalld takeover requires --adopt-firewall or interactive consent)")
-	installCmd.Flags().Bool("adopt-firewall", false, "take over an existing firewalld configuration on Rocky, AlmaLinux or CentOS Stream; replaces the public zone")
+	installCmd.Flags().Bool("adopt-firewall", false, "allow takeover of running firewalld on Rocky, AlmaLinux or CentOS Stream without a prompt; replaces the public zone, removes services such as Cockpit, and allows SSH and TCP ports 80, 443 and 6443 (not with --local)")
 	installCmd.Flags().String("request", "", requestFlagUsage)
 	_ = installCmd.Flags().MarkHidden("request")
 	installCmd.Flags().Bool("via-server", false, "run the install as a persistent server job and stream its log (default on Windows)")
@@ -102,6 +102,9 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	resultPath, _ := cmd.Flags().GetString("result")
 	if !local && (hostMapsHere || resultPath != "") {
 		return fmt.Errorf("--host-maps-here and --result only apply with --local")
+	}
+	if err := checkLocalAdoption(local, adoptFirewall); err != nil {
+		return err
 	}
 
 	// Canonicalise the name before anything reads it, so LAB.KIPPER.RUN and
@@ -293,4 +296,12 @@ func adoptionQuestion(isTTY bool) func(string) bool {
 		return nil
 	}
 	return confirm
+}
+
+// checkLocalAdoption requires an external SSH check before firewall takeover.
+func checkLocalAdoption(local, adopt bool) error {
+	if local && adopt {
+		return fmt.Errorf("--adopt-firewall does not combine with --local: takeover requires an external SSH check; run kip install over SSH or with --via-server")
+	}
+	return nil
 }

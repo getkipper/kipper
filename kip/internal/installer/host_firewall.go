@@ -33,10 +33,11 @@ func (a FirewallAudit) BlocksConfiguration() bool {
 // FirewallPlan is what a caller should do about the firewall on this host, and
 // what to tell the operator about it.
 type FirewallPlan struct {
-	Configure  bool
-	Notice     string
-	FlagNotice string
-	Adopt      bool
+	Configure        bool
+	Notice           string
+	FlagNotice       string
+	Adopt            bool
+	AdoptFingerprint string
 }
 
 // PlanFirewall shares firewall configuration decisions and notices between
@@ -86,7 +87,7 @@ func ApplyFirewallPlan(client FirewallRunner, plan FirewallPlan, rateLimitSSH bo
 	if !plan.Configure {
 		return nil
 	}
-	return configureFirewallWith(client, rateLimitSSH, plan.Adopt)
+	return configureFirewallWith(client, rateLimitSSH, FirewallConsent{Adopt: plan.Adopt, Fingerprint: plan.AdoptFingerprint})
 }
 
 // AuditFirewall detects whether a host firewall is already active, and whether
@@ -166,7 +167,7 @@ func claimCommandFor(claimPath, what string) string {
 
 // configureFirewallWith selects the host's firewall backend. UFW rate limiting
 // requires a runner that can continue under the limit; firewalld uses an allow rule.
-func configureFirewallWith(client FirewallRunner, rateLimitSSH, adopt bool) error {
+func configureFirewallWith(client FirewallRunner, rateLimitSSH bool, consent FirewallConsent) error {
 	host, err := DetectHostOS(client)
 	if err != nil {
 		return fmt.Errorf("configuring the firewall: %w", err)
@@ -175,7 +176,7 @@ func configureFirewallWith(client FirewallRunner, rateLimitSSH, adopt bool) erro
 		if rateLimitSSH {
 			fmt.Printf("  ℹ  Kipper's firewalld configuration allows SSH without rate limiting\n")
 		}
-		return configureFirewalld(client, host, adopt)
+		return configureFirewalld(client, host, consent)
 	}
 	return configureFirewall(client, host, rateLimitSSH && client.SurvivesSSHRateLimit())
 }
