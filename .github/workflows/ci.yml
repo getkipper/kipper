@@ -527,6 +527,7 @@ jobs:
         shell: powershell
         env:
           KIP_INSTALL_DIR: ${{ runner.temp }}\kip-ps5
+          KIP_GITHUB_TOKEN: ${{ github.token }}
         run: |
           Get-Content -Raw scripts/install.ps1 | Invoke-Expression
           $kip = Join-Path $env:KIP_INSTALL_DIR 'kip.exe'
@@ -538,6 +539,7 @@ jobs:
       - name: Install with PowerShell 7
         shell: pwsh
         env:
+          KIP_GITHUB_TOKEN: ${{ github.token }}
           KIP_INSTALL_DIR: ${{ runner.temp }}\kip-ps7
         run: |
           Get-Content -Raw scripts/install.ps1 | Invoke-Expression
