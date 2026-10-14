@@ -126,11 +126,10 @@ func TestRestoreTargetFollowsTheNamespaceMapping(t *testing.T) {
 	assert.Equal(t, "recovered", restoreTarget("shop", "shop:recovered"))
 	assert.Equal(t, "shop", restoreTarget("shop", ""))
 	assert.Equal(t, "shop", restoreTarget("shop", "blog:archive"), "a mapping for another namespace leaves this one alone")
-	assert.Equal(t, "", restoreTarget("", "shop:recovered"), "without --namespace the restore may cover several projects")
+	assert.Equal(t, "recovered", restoreTarget("", "shop:recovered"), "a mapping limits the restore to its source")
+	assert.Equal(t, "", restoreTarget("", ""), "an unscoped restore may cover several projects")
 }
 
-// kip resolves a project under the cluster's organization, so a command is printed only when it
-// reaches the namespace the restore wrote to.
 func TestRestoreFollowUpOnlyPrintsCommandsThatReachTheTarget(t *testing.T) {
 	prefixed := restoreFollowUpFor("acme-shop", "acme")
 	assert.Contains(t, prefixed, "kip service credentials --project acme-shop --repair")

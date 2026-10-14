@@ -2,11 +2,15 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"os/signal"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -14,6 +18,7 @@ import (
 
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
+	"github.com/getkipper/kipper/kip/internal/service"
 	"github.com/getkipper/kipper/kip/internal/velerolabel"
 )
 
@@ -82,6 +87,7 @@ func init() {
 	backupRestoreCmd.Flags().String("namespace", "", "restore only a specific namespace")
 	backupRestoreCmd.Flags().String("resources", "", "restore only specific resource types (comma-separated, e.g. deployments,services,secrets)")
 	backupRestoreCmd.Flags().Bool("allow-partial", false, "restore a PartiallyFailed backup despite possible missing data")
+	backupRestoreCmd.Flags().Bool("repair-credentials", false, "re-attach restored service credentials Secrets without prompting")
 
 	backupCmd.AddCommand(backupCreateCmd)
 	backupCmd.AddCommand(backupListCmd)
@@ -131,19 +137,7 @@ func toAnySlice(items []string) []interface{} {
 	return out
 }
 
-// buildBackupCR assembles the velero.io/v1 Backup unstructured object
-// for a single manual backup run. Pulled out of runBackupCreate so the
-// spec construction is unit-testable without an apiserver.
-//
-// Scoping rules:
-//   - project set → backup includes only that namespace (system
-//     exclusions are redundant here; Velero already restricts by include
-//     list).
-//   - project unset, includeSystem false → cluster-wide backup with the
-//     default exclusion list applied. Velero would otherwise recurse
-//     into its own MinIO PVC and hang.
-//   - project unset, includeSystem true → no exclusions. Escape hatch
-//     for the rare case where the operator genuinely wants everything.
+// buildBackupCR builds a manual backup with the shared resource exclusions.
 func buildBackupCR(name, project, environment, ttl string, includeSystem bool, cluster *config.Cluster) *unstructured.Unstructured {
 	spec := map[string]interface{}{
 		"ttl":                      ttl,
@@ -201,10 +195,7 @@ func runBackupList(cmd *cobra.Command, args []string) error {
 		if ns, ok, _ := unstructured.NestedStringSlice(b.Object, "spec", "includedNamespaces"); ok && len(ns) > 0 {
 			namespaces = strings.Join(ns, ", ")
 		} else if ex, ok, _ := unstructured.NestedStringSlice(b.Object, "spec", "excludedNamespaces"); ok && len(ex) > 0 {
-			// Default manual + scheduled cluster-wide backups exclude
-			// system namespaces. Distinguish from a true "all"
-			// (`--include-system`) so operators don't expect Velero or
-			// monitoring data in these backups when restoring.
+			// Distinguish namespace exclusions from an unrestricted backup.
 			namespaces = "all except system"
 		}
 
@@ -222,6 +213,7 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 	namespace, _ := cmd.Flags().GetString("namespace")
 	resources, _ := cmd.Flags().GetString("resources")
 	allowPartial, _ := cmd.Flags().GetBool("allow-partial")
+	repairCredentials, _ := cmd.Flags().GetBool("repair-credentials")
 
 	cluster, k8sClient, err := loadCurrentCluster()
 	if err != nil {
@@ -279,24 +271,44 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating restore: %w", err)
 	}
 
-	fmt.Printf("  ✔  Restore %s started\n", restoreName)
-	fmt.Printf("  This may take several minutes for large datasets.\n\n")
-	fmt.Print(restoreFollowUpFor(restoreTarget(namespace, nsMapping), cluster.Org))
-	return nil
+	fmt.Printf("  ✔  Restore %s started. Waiting for completion.\n  Press Ctrl-C to stop waiting; the restore continues in the cluster.\n", restoreName)
+
+	follow := restoreFollowUpFor(restoreTarget(namespace, nsMapping), cluster.Org)
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt)
+	go func() {
+		<-interrupts
+		fmt.Printf("\n\n  Stopped waiting. Restore %s continues on the cluster.\n", restoreName)
+		fmt.Print(follow)
+		os.Exit(130)
+	}()
+	defer signal.Stop(interrupts)
+
+	var ask func(string) bool
+	if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) { //nolint:gosec // file descriptors fit an int
+		ask = confirm
+	}
+	mgr := &service.Manager{Client: k8sClient.Clientset(), Dynamic: k8sClient.Dynamic()}
+	waitCtx, cancel := context.WithTimeout(cmd.Context(), restoreWaitLimit)
+	defer cancel()
+	steps := clusterRestoreSteps(k8sClient.Dynamic(), mgr, restoreName, ask)
+	steps.waited = func() { signal.Stop(interrupts) }
+	err = finishRestore(waitCtx, steps, os.Stdout, repairCredentials, cluster.Org)
+	if errors.Is(err, errWaitStopped) {
+		fmt.Print(follow)
+	}
+	return err
 }
 
-// restoreTarget returns the mapped namespace, or an empty string for an unscoped restore.
+// restoreTarget selects the destination namespace for follow-up commands; empty means unscoped.
 func restoreTarget(namespace, mapping string) string {
-	if namespace == "" {
-		return ""
-	}
-	if source, target, ok := strings.Cut(mapping, ":"); ok && source == namespace && target != "" {
+	if source, target, ok := strings.Cut(mapping, ":"); ok && (namespace == "" || source == namespace) && target != "" {
 		return target
 	}
 	return namespace
 }
 
-// restoreFollowUp prompts for credentials ownership repair, which requires explicit opt-in.
+// restoreFollowUp suggests an explicit credentials repair after the services appear.
 func restoreFollowUp(namespace string) string {
 	project := namespace
 	if project == "" {
@@ -306,8 +318,7 @@ func restoreFollowUp(namespace string) string {
 		"    kip service credentials --project %[1]s --repair\n\n", project)
 }
 
-// restoreFollowUpFor prints a project command only when kip resolves that project to the namespace the
-// restore wrote to; a project of an organization always resolves to <org>-<project>.
+// restoreFollowUpFor suggests a repair command only when project resolution reaches the target namespace.
 func restoreFollowUpFor(target, org string) string {
 	if target != "" && org != "" && !strings.HasPrefix(target, org+"-") {
 		return fmt.Sprintf("  The restored services are in namespace %s, outside organization %s, so kip cannot repair\n"+
