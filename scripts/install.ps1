@@ -6,7 +6,8 @@
 # PATH. The default installation requires no administrator rights.
 #
 # Set KIP_VERSION to select a release (default: latest) or KIP_INSTALL_DIR to
-# select a folder (default: %LOCALAPPDATA%\Programs\kip).
+# select a folder (default: %LOCALAPPDATA%\Programs\kip). Set KIP_GITHUB_TOKEN
+# to authenticate the latest-release lookup.
 
 # Use return on failure to keep the caller's PowerShell session open when
 # invoked through Invoke-Expression.
@@ -70,7 +71,9 @@
     if ($version -eq 'latest') {
       Write-Host '  Fetching latest version...'
       try {
-        $version = (Invoke-RestMethod -UseBasicParsing "https://api.github.com/repos/$repo/releases/latest").tag_name
+        $headers = @{}
+        if ($env:KIP_GITHUB_TOKEN) { $headers['Authorization'] = "Bearer $env:KIP_GITHUB_TOKEN" }
+        $version = (Invoke-RestMethod -UseBasicParsing -Headers $headers "https://api.github.com/repos/$repo/releases/latest").tag_name
       } catch {
         $version = $null
       }
