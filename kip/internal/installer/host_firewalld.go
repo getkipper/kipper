@@ -238,10 +238,11 @@ func readFirewalldSaved(client CommandRunner) (firewalldSavedConfig, error) {
 
 // firewalldStateCommand groups runtime queries under "== name" headings.
 // The q helper marks failed queries with "FAILED:"; the panic query is read directly.
-const firewalldStateCommand = `q() { out=$("$@" 2>&1) || { echo "FAILED: $*"; return 0; }; printf '%s\n' "$out"; }; ` +
+// Suppress stderr so diagnostic messages stay out of the parsed state.
+const firewalldStateCommand = `q() { out=$("$@" 2>/dev/null) || { echo "FAILED: $*"; return 0; }; printf '%s\n' "$out"; }; ` +
 	`echo "== state"; q firewall-cmd --state; ` +
 	`echo "== default"; q firewall-cmd --get-default-zone; ` +
-	`echo "== panic"; firewall-cmd --query-panic 2>&1; ` +
+	`echo "== panic"; firewall-cmd --query-panic 2>/dev/null; ` +
 	`echo "== direct"; q firewall-cmd --direct --get-all-chains; q firewall-cmd --direct --get-all-rules; q firewall-cmd --direct --get-all-passthroughs; ` +
 	`echo "== active-zones"; q firewall-cmd --get-active-zones; ` +
 	`echo "== policies"; q firewall-cmd --get-policies; ` +
@@ -256,8 +257,9 @@ func firewalldDumpCommand(permanent bool) string {
 	if permanent {
 		p = " --permanent"
 	}
-	fc := "firewall-cmd" + p
-	return "set -e; zones=$(" + fc + " --get-zones); policies=$(" + fc + " --get-policies); " +
+	// Exclude stderr so transient diagnostics cannot appear as configuration drift.
+	fc := "fc"
+	return "set -e; fc() { firewall-cmd" + p + ` "$@" 2>/dev/null; }; ` + "zones=$(" + fc + " --get-zones); policies=$(" + fc + " --get-policies); " +
 		`for z in $zones; do echo "== zone $z"; info=$(` + fc + ` --info-zone="$z"); printf '%s
 ' "$info" | sed -e '1s/ (.*)$//' -e '/^  interfaces:/d'; done; ` +
 		`for x in $policies; do echo "== policy $x"; info=$(` + fc + ` --info-policy="$x"); printf '%s
@@ -331,7 +333,7 @@ func parseFirewalldInfo(lines []string) firewalldInfo {
 }
 
 // allowHostIPv6Rule permits IPv6 ICMP accept rules in the stock policy.
-var allowHostIPv6Rule = regexp.MustCompile(`^rule family="ipv6" icmp-type name="[a-z-]+" accept$`)
+var allowHostIPv6Rule = regexp.MustCompile(`^rule family="ipv6" icmp-type name="[a-z0-9-]+" accept$`)
 
 // firewalldMismatches checks the queried runtime state against Kipper's expected
 // zones and policies. Failed queries and missing required fields are problems.
@@ -445,7 +447,7 @@ func firewalldMismatches(state string, want firewalldWant) []string {
 		problems = append(problems, kipperPolicyProblems(p.name, parseFirewalldInfo(sections["policy "+p.name]))...)
 	}
 	for _, p := range policies {
-		if !expected[p] {
+		if !expected[p] && !firewalldPolicyDisabled(parseFirewalldInfo(sections["policy "+p])) {
 			problems = append(problems, "policy "+p+" is loaded")
 		}
 	}
@@ -455,6 +457,10 @@ func firewalldMismatches(state string, want firewalldWant) []string {
 
 	sort.Strings(problems)
 	return problems
+}
+
+func firewalldPolicyDisabled(info firewalldInfo) bool {
+	return sameSet(info["disable"], []string{"yes"})
 }
 
 func kipperPolicyProblems(name string, info firewalldInfo) []string {
@@ -482,6 +488,10 @@ func kipperPolicyProblems(name string, info firewalldInfo) []string {
 		expect("masquerade", []string{masquerade})
 		for _, f := range []string{"services", "ports", "protocols", "forward-ports", "source-ports", "rich rules"} {
 			expect(f, nil)
+		}
+		// Accept listings that omit disable; require our policies to be enabled when reported.
+		if _, ok := info["disable"]; ok {
+			expect("disable", []string{"no"})
 		}
 		return problems
 	}

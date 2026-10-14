@@ -39,7 +39,8 @@ func operatorFirewalldCommand(sshPorts []string) string {
 		// validates the stock IPv6 policy and retained Kipper policies separately.
 		`[ -z "$(firewall-cmd --zone="$ext" --list-rich-rules 2>&1)" ] || echo "UNSUPPORTED:rich rules in zone $ext"; ` +
 		`[ -z "$(firewall-cmd --zone="$ext" --list-forward-ports 2>&1)" ] || echo "UNSUPPORTED:forward ports in zone $ext"; ` +
-		`for p in $(firewall-cmd --get-policies 2>/dev/null); do case "$p" in allow-host-ipv6) echo STOCK-POLICY ;; kipper-pods-in|kipper-pods-out) echo "KIPPER-POLICY:$p" ;; *) echo "UNSUPPORTED:policy $p" ;; esac; done; ` +
+		`if policies=$(firewall-cmd --get-policies 2>/dev/null); then for p in $policies; do case "$p" in allow-host-ipv6) echo STOCK-POLICY ;; kipper-pods-in|kipper-pods-out) echo "KIPPER-POLICY:$p" ;; ` +
+		`*) info=$(firewall-cmd --info-policy="$p" 2>/dev/null) && [ "$(printf '%s\n' "$info" | sed -n 's/^  disable: //p')" = yes ] || echo "UNSUPPORTED:policy $p" ;; esac; done; else echo UNREADABLE-POLICIES; fi; ` +
 		`[ -z "$(firewall-cmd --direct --get-all-chains 2>&1; firewall-cmd --direct --get-all-rules 2>&1; firewall-cmd --direct --get-all-passthroughs 2>&1)" ] || echo "UNSUPPORTED:direct configuration"; ` +
 		ssh +
 		need("80/tcp", "http") +
@@ -104,6 +105,8 @@ func CheckOperatorFirewalld(client CommandRunner) ([]string, error) {
 			missing = append(missing, "panic mode off")
 		case strings.HasPrefix(line, "UNSUPPORTED:"):
 			missing = append(missing, "no "+strings.TrimPrefix(line, "UNSUPPORTED:")+", which kip cannot evaluate")
+		case line == "UNREADABLE-POLICIES":
+			missing = append(missing, "a readable list of firewalld policies")
 		case line == "POD-TARGET-UNKNOWN":
 			missing = append(missing, "a readable target for the pod network's zone")
 		case line == "MISSING-POD-ZONE":
