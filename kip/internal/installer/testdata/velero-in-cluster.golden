@@ -1,0 +1,83 @@
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: velero
+  namespace: kube-system
+spec:
+  repo: https://vmware-tanzu.github.io/helm-charts
+  chart: velero
+  version: 12.0.0
+  targetNamespace: velero
+  createNamespace: true
+  valuesContent: |-
+    initContainers:
+      - name: velero-plugin-for-aws
+        image: velero/velero-plugin-for-aws:v1.10.0
+        volumeMounts:
+          - mountPath: /target
+            name: plugins
+    configuration:
+      backupStorageLocation:
+        - name: default
+          provider: aws
+          bucket: velero
+          config:
+            region: minio
+            s3ForcePathStyle: "true"
+            s3Url: http://minio.velero.svc:9000
+      volumeSnapshotLocation: []
+      uploaderType: kopia
+      defaultVolumesToFsBackup: true
+    deployNodeAgent: true
+    credentials:
+      useSecret: true
+      existingSecret: cloud-credentials
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 512Mi
+    nodeAgent:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          memory: 512Mi
+    schedules:
+      daily-apps:
+        disabled: false
+        schedule: "0 3 * * *"
+        useOwnerReferencesInBackup: false
+        template:
+          ttl: 168h0m0s
+          storageLocation: default
+          excludedNamespaces:
+            - kube-system
+            - kube-public
+            - kube-node-lease
+            - monitoring
+            - keda
+            - longhorn-system
+            - traefik
+            - velero
+          excludedResources:
+            - certificaterequests.cert-manager.io
+            - orders.acme.cert-manager.io
+            - challenges.acme.cert-manager.io
+      weekly-system:
+        disabled: false
+        schedule: "0 4 * * 0"
+        useOwnerReferencesInBackup: false
+        template:
+          ttl: 720h0m0s
+          storageLocation: default
+          includedNamespaces:
+            - dex
+            - cert-manager
+            - kipper-system
+          excludedResources:
+            - certificaterequests.cert-manager.io
+            - orders.acme.cert-manager.io
+            - challenges.acme.cert-manager.io

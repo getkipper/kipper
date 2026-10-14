@@ -66,7 +66,14 @@ Kipper starts a stopped firewalld only when its saved configuration passes check
 
 Use `--adopt-firewall` to let Kipper replace the public zone and add its pod zone and forwarding policies. Adoption requires saved settings that Kipper can safely replace and matching running rules, so rollback can restore the previous configuration. Run adoption over SSH or with `--via-server`; `--local` cannot verify external SSH access and rejects `--adopt-firewall`. Kipper starts a stopped firewalld only after its saved configuration passes checks for stock or Kipper-managed settings. For a stopped, unclaimed firewall with a saved public zone, the service list must match the expected stock services: SSH, dhcpv6-client and Cockpit. Removing Cockpit counts as a customization; restore the stock settings or use `--firewall=false` to manage the firewall yourself.
 
-Kipper enables k3s's SELinux support and preserves the host's SELinux mode. The k3s installer handles the `k3s-selinux` policy package. On Rocky Linux, AlmaLinux and CentOS Stream 10, Kipper installs `kernel-modules-extra` for the running kernel if a required module is missing. If that package is unavailable, update the host, reboot and retry. With `--harden`, Kipper disables Cockpit socket activation and stops its service when the socket listens on all interfaces.
+Kipper enables k3s's SELinux support and preserves the host's SELinux mode. The k3s installer handles the `k3s-selinux` policy package. Velero's volume backup and restore pods and Promtail need access across pod SELinux labels:
+
+- Velero's `privilegedFsBackup` setting runs volume backup and restore containers in privileged mode. The node agent keeps its default security settings. Privileged containers have all Linux capabilities and access to host devices. They bypass SELinux and seccomp confinement and the usual `/proc` and `/sys` restrictions. Kipper enables this setting on RHEL-family hosts regardless of SELinux mode, so backups remain configured for a later switch to enforcing mode.
+- Promtail ships logs to Loki using the unconfined SELinux type `spc_t`. It retains the chart's read-only root filesystem, dropped Linux capabilities and disabled privilege escalation. It also uses the runtime's default seccomp profile on every supported distribution.
+
+SELinux's `dontaudit` rules suppress some denial logs. To troubleshoot a "permission denied" error, run `semodule -DB`, reproduce the problem, and inspect denials with `ausearch -m avc -ts recent`. Then restore the rules with `semodule -B`.
+
+On Rocky Linux, AlmaLinux and CentOS Stream 10, Kipper installs `kernel-modules-extra` for the running kernel if a required module is missing. If that package is unavailable, update the host, reboot and retry. With `--harden`, Kipper disables Cockpit socket activation and stops its service when the socket listens on all interfaces.
 
 **Opting out**
 

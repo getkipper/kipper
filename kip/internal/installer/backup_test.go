@@ -1,10 +1,18 @@
 package installer
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestVeleroBSLBlock_InClusterMinIO(t *testing.T) {
@@ -173,4 +181,107 @@ func TestVeleroBSLBlock_CredentialsNotEmbedded(t *testing.T) {
 	assert.NotContains(t, bsl, "ALSO-SHOULD-NOT-APPEAR")
 	assert.NotContains(t, bsl, "aws_access_key_id")
 	assert.NotContains(t, bsl, "aws_secret_access_key")
+}
+
+func veleroValues(t *testing.T, selinux bool) map[string]any {
+	t.Helper()
+	var chart struct {
+		Spec struct {
+			ValuesContent string `yaml:"valuesContent"`
+		} `yaml:"spec"`
+	}
+	require.NoError(t, yaml.Unmarshal([]byte(veleroManifest(nil, selinux)), &chart))
+	values := map[string]any{}
+	require.NoError(t, yaml.Unmarshal([]byte(chart.Spec.ValuesContent), &values))
+	return values
+}
+
+// Preserve the existing manifests for hosts where Kipper leaves k3s SELinux support disabled.
+func TestVeleroManifestWithoutSELinuxMatchesTheGoldenFiles(t *testing.T) {
+	cases := map[string]*BackupStorageConfig{
+		"velero-in-cluster.golden": nil,
+		"velero-external.golden":   {Bucket: "kipper-backups", Region: "auto", Endpoint: "https://s3.example.com", AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: "example-secret"},
+	}
+	for name, cfg := range cases {
+		want, err := os.ReadFile(filepath.Join("testdata", name))
+		require.NoError(t, err)
+		assert.Equal(t, string(want), veleroManifest(cfg, false), name)
+	}
+}
+
+func TestVeleroManifestLeavesFsBackupUnprivilegedWithoutSELinux(t *testing.T) {
+	values := veleroValues(t, false)
+
+	assert.NotContains(t, values, "configMaps")
+	assert.NotContains(t, values, "podAnnotations")
+	assert.NotContains(t, values["nodeAgent"], "extraArgs")
+}
+
+func TestVeleroManifestRunsFsBackupPrivilegedOnSELinux(t *testing.T) {
+	values := veleroValues(t, true)
+
+	configMaps, ok := values["configMaps"].(map[string]any)
+	require.True(t, ok)
+	require.Len(t, configMaps, 1)
+	nodeAgentConfig, ok := configMaps["node-agent-config"].(map[string]any)
+	require.True(t, ok, "the chart names this ConfigMap velero-node-agent-config")
+	data, ok := nodeAgentConfig["data"].(map[string]any)
+	require.True(t, ok)
+	require.Len(t, data, 1, "node-agent refuses a ConfigMap with more than one key")
+	var raw string
+	for _, v := range data {
+		raw = v.(string)
+	}
+	var config map[string]any
+	require.NoError(t, json.Unmarshal([]byte(raw), &config))
+	assert.Equal(t, map[string]any{"privilegedFsBackup": true}, config)
+
+	nodeAgent := values["nodeAgent"].(map[string]any)
+	assert.Equal(t, []any{"--node-agent-configmap=velero-node-agent-config"}, nodeAgent["extraArgs"])
+	assert.Contains(t, nodeAgent, "resources")
+	assert.NotContains(t, nodeAgent, "containerSecurityContext", "the node agent itself stays confined")
+	assert.NotContains(t, nodeAgent, "podSecurityContext", "the node agent itself stays confined")
+
+	annotations, ok := values["podAnnotations"].(map[string]any)
+	require.True(t, ok, "node-agent reads its ConfigMap only at start, so a change must roll the pods")
+	sum := sha256.Sum256([]byte(raw))
+	assert.Equal(t, hex.EncodeToString(sum[:]), annotations["checksum/node-agent-config"])
+}
+
+type fakeVeleroHost struct {
+	osRelease string
+	cmds      []string
+}
+
+func (h *fakeVeleroHost) Run(cmd string) (string, error) {
+	h.cmds = append(h.cmds, cmd)
+	if cmd == "cat /etc/os-release" {
+		return h.osRelease, nil
+	}
+	return "", nil
+}
+
+func (h *fakeVeleroHost) RunStdin(cmd string, _ io.Reader) (string, error) { return h.Run(cmd) }
+
+func (h *fakeVeleroHost) Upload(io.Reader, string, os.FileMode) error { return nil }
+
+func (h *fakeVeleroHost) applied(t *testing.T) string {
+	t.Helper()
+	for _, cmd := range h.cmds {
+		if strings.Contains(cmd, "kind: HelmChart") {
+			return cmd
+		}
+	}
+	t.Fatal("no Velero HelmChart was applied")
+	return ""
+}
+
+func TestInstallVeleroPrivilegesFsBackupOnlyWhereK3sRunsSELinux(t *testing.T) {
+	rocky := &fakeVeleroHost{osRelease: "ID=rocky\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"10.2\"\n"}
+	require.NoError(t, installVelero(rocky, nil, "pw"))
+	assert.Contains(t, rocky.applied(t), "privilegedFsBackup")
+
+	ubuntu := &fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"24.04\"\n"}
+	require.NoError(t, installVelero(ubuntu, nil, "pw"))
+	assert.NotContains(t, ubuntu.applied(t), "privilegedFsBackup")
 }

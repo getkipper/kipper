@@ -1,6 +1,8 @@
 package platform
 
 import (
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -178,4 +180,14 @@ func TestLokiHelmChart_DeploysNoCanary(t *testing.T) {
 
 	assert.Equal(t, false, valueAt(t, values, "lokiCanary", "enabled"))
 	assert.Equal(t, false, valueAt(t, values, "test", "enabled"))
+}
+
+func TestPromtailHelmChart_RunsUnconfinedOnlyBySELinuxType(t *testing.T) {
+	values := seededValues(t, PromtailHelmChart())
+
+	assert.Equal(t, "spc_t", valueAt(t, values, "containerSecurityContext", "seLinuxOptions", "type"))
+	assert.Equal(t, "RuntimeDefault", valueAt(t, values, "containerSecurityContext", "seccompProfile", "type"))
+	security, ok := valueAt(t, values, "containerSecurityContext").(map[string]interface{})
+	require.True(t, ok)
+	assert.ElementsMatch(t, []string{"seLinuxOptions", "seccompProfile"}, slices.Collect(maps.Keys(security)), "the chart's own hardening must not be overridden")
 }

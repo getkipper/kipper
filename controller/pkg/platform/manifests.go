@@ -165,6 +165,14 @@ spec:
       - name: k3s-server-logs
         mountPath: /var/log/k3s-server
         readOnly: true
+    # spc_t allows access to pod logs across SELinux labels.
+    # Helm merges these settings with the chart's default hardening.
+    # containerd ignores seLinuxOptions where k3s runs without SELinux.
+    containerSecurityContext:
+      seLinuxOptions:
+        type: spc_t
+      seccompProfile:
+        type: RuntimeDefault
     resources:
       requests:
         cpu: 25m

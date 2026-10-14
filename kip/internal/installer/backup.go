@@ -2,7 +2,9 @@ package installer
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -117,6 +119,27 @@ func InstallBackup(client Uploader, cfg *BackupStorageConfig) error {
 		return installVelero(client, cfg, password)
 	}
 	return installVelero(client, cfg, "")
+}
+
+// veleroNodeAgentConfig enables privileged file system backup and restore pods
+// so they can access volumes across SELinux labels.
+const veleroNodeAgentConfig = `{"privilegedFsBackup": true}`
+
+const veleroSELinuxNodeAgentArgs = `      extraArgs:
+        - --node-agent-configmap=velero-node-agent-config
+`
+
+// veleroSELinuxValues includes a checksum to restart pods when the configuration
+// changes, since the node agent reads its ConfigMap at startup.
+func veleroSELinuxValues() string {
+	sum := sha256.Sum256([]byte(veleroNodeAgentConfig))
+	return fmt.Sprintf(`    configMaps:
+      node-agent-config:
+        data:
+          node-agent-config.json: '%s'
+    podAnnotations:
+      checksum/node-agent-config: %s
+`, veleroNodeAgentConfig, hex.EncodeToString(sum[:]))
 }
 
 // ensureMinIOPassword returns the in-cluster MinIO root password,
@@ -337,6 +360,24 @@ func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword stri
 	if err := installVeleroCredentials(client, cfg, minioPassword); err != nil {
 		return err
 	}
+	host, err := DetectHostOS(client)
+	if err != nil {
+		return err
+	}
+	veleroCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", veleroManifest(cfg, host.K3sSELinux()))
+	if _, err := client.Run(veleroCmd); err != nil {
+		return fmt.Errorf("applying Velero HelmChart: %w", err)
+	}
+	return nil
+}
+
+// veleroManifest renders the Velero HelmChart. selinux indicates whether Kipper
+// enables SELinux support in k3s, regardless of the host's enforcement mode.
+func veleroManifest(cfg *BackupStorageConfig, selinux bool) string {
+	nodeAgentArgs, selinuxValues := "", ""
+	if selinux {
+		nodeAgentArgs, selinuxValues = veleroSELinuxNodeAgentArgs, veleroSELinuxValues()
+	}
 	bslBlock := veleroBSLBlock(cfg)
 	// 12-space indent puts each `- ns` two levels deeper than the
 	// surrounding `excludedNamespaces:` key, matching the original
@@ -346,7 +387,7 @@ func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword stri
 	// schedule so a later restore does not wedge certificate renewal (see
 	// DefaultBackupExcludedResources).
 	excludedResourcesBlock := renderYAMLList(DefaultBackupExcludedResources(), "            ")
-	veleroManifest := fmt.Sprintf(`apiVersion: helm.cattle.io/v1
+	return fmt.Sprintf(`apiVersion: helm.cattle.io/v1
 kind: HelmChart
 metadata:
   name: velero
@@ -386,7 +427,7 @@ spec:
           memory: 64Mi
         limits:
           memory: 512Mi
-    schedules:
+%s    schedules:
       daily-apps:
         disabled: false
         schedule: "0 3 * * *"
@@ -411,13 +452,7 @@ spec:
             - kipper-system
           excludedResources:
 %s
-`, veleroChartVersion, bslBlock, excludedBlock, excludedResourcesBlock, excludedResourcesBlock)
-
-	veleroCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", veleroManifest)
-	if _, err := client.Run(veleroCmd); err != nil {
-		return fmt.Errorf("applying Velero HelmChart: %w", err)
-	}
-	return nil
+%s`, veleroChartVersion, bslBlock, nodeAgentArgs, excludedBlock, excludedResourcesBlock, excludedResourcesBlock, selinuxValues)
 }
 
 // installVeleroCredentials creates the velero namespace and the
