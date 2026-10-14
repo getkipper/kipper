@@ -222,7 +222,7 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 	resources, _ := cmd.Flags().GetString("resources")
 	allowPartial, _ := cmd.Flags().GetBool("allow-partial")
 
-	_, k8sClient, err := loadCurrentCluster()
+	cluster, k8sClient, err := loadCurrentCluster()
 	if err != nil {
 		return err
 	}
@@ -300,7 +300,40 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("  ✔  Restore %s started\n", restoreName)
 	fmt.Printf("  This may take several minutes for large datasets.\n\n")
+	fmt.Print(restoreFollowUpFor(restoreTarget(namespace, nsMapping), cluster.Org))
 	return nil
+}
+
+// restoreTarget returns the mapped namespace, or an empty string for an unscoped restore.
+func restoreTarget(namespace, mapping string) string {
+	if namespace == "" {
+		return ""
+	}
+	if source, target, ok := strings.Cut(mapping, ":"); ok && source == namespace && target != "" {
+		return target
+	}
+	return namespace
+}
+
+// restoreFollowUp prompts for credentials ownership repair, which requires explicit opt-in.
+func restoreFollowUp(namespace string) string {
+	project := namespace
+	if project == "" {
+		project = "<project>"
+	}
+	return fmt.Sprintf("  Once kip service list --project %[1]s shows the restored services, repair their credentials ownership:\n"+
+		"    kip service credentials --project %[1]s --repair\n\n", project)
+}
+
+// restoreFollowUpFor prints a project command only when kip resolves that project to the namespace the
+// restore wrote to; a project of an organization always resolves to <org>-<project>.
+func restoreFollowUpFor(target, org string) string {
+	if target != "" && org != "" && !strings.HasPrefix(target, org+"-") {
+		return fmt.Sprintf("  The restored services are in namespace %s, outside organization %s, so kip cannot repair\n"+
+			"  their credentials ownership there. Restore into a namespace that starts with %s- to use\n"+
+			"  kip service credentials --repair.\n\n", target, org, org)
+	}
+	return restoreFollowUp(target)
 }
 
 // checkRestorable requires explicit opt-in for backups that may be incomplete.

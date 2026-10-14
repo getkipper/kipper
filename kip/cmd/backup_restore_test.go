@@ -112,3 +112,32 @@ func TestPartialRestoreWarningNamesTheMissingVolumes(t *testing.T) {
 	assert.NotContains(t, warning, "web-0")
 	assert.Contains(t, partialRestoreWarning("before-reboot", nil), "before-reboot")
 }
+
+func TestRestoreFollowUpNamesTheCredentialsRepair(t *testing.T) {
+	scoped := restoreFollowUp("shop")
+	assert.Contains(t, scoped, "kip service credentials --project shop --repair")
+	assert.Contains(t, scoped, "kip service list --project shop")
+
+	all := restoreFollowUp("")
+	assert.Contains(t, all, "kip service credentials --project <project> --repair")
+}
+
+func TestRestoreTargetFollowsTheNamespaceMapping(t *testing.T) {
+	assert.Equal(t, "recovered", restoreTarget("shop", "shop:recovered"))
+	assert.Equal(t, "shop", restoreTarget("shop", ""))
+	assert.Equal(t, "shop", restoreTarget("shop", "blog:archive"), "a mapping for another namespace leaves this one alone")
+	assert.Equal(t, "", restoreTarget("", "shop:recovered"), "without --namespace the restore may cover several projects")
+}
+
+// kip resolves a project under the cluster's organization, so a command is printed only when it
+// reaches the namespace the restore wrote to.
+func TestRestoreFollowUpOnlyPrintsCommandsThatReachTheTarget(t *testing.T) {
+	prefixed := restoreFollowUpFor("acme-shop", "acme")
+	assert.Contains(t, prefixed, "kip service credentials --project acme-shop --repair")
+
+	unreachable := restoreFollowUpFor("recovered", "acme")
+	assert.NotContains(t, unreachable, "kip service credentials --project", "the project would resolve to acme-recovered")
+	assert.Contains(t, unreachable, "recovered")
+
+	assert.Contains(t, restoreFollowUpFor("shop", ""), "kip service credentials --project shop --repair")
+}
