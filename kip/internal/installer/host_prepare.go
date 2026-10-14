@@ -52,6 +52,7 @@ func ensureKernelModules(client CommandRunner, host HostOS) error {
 		for _, pkg := range pkgs {
 			versioned = append(versioned, pkg+"-"+release)
 		}
+		fmt.Print(packageInstallNotice(versioned))
 		if _, err := client.Run(host.InstallPackagesCommand(false, versioned...)); err != nil {
 			return fmt.Errorf("installing %s for missing kernel modules (%s): %w. If packages for the running kernel are unavailable, run 'dnf update', reboot, and retry",
 				strings.Join(versioned, " "), strings.Join(missing, ", "), err)

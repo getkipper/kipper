@@ -34,8 +34,8 @@ func TestParseOSReleaseRHELFamily(t *testing.T) {
 }
 
 func TestRHELPackageCommands(t *testing.T) {
-	assert.Equal(t, "dnf install -y -q --refresh iscsi-initiator-utils nfs-utils", rhel10Host.InstallPackagesCommand(true, rhel10Host.StoragePackages()...))
-	assert.Equal(t, "dnf install -y -q firewalld", rhel10Host.InstallPackagesCommand(false, "firewalld"))
+	assert.Contains(t, rhel10Host.InstallPackagesCommand(true, rhel10Host.StoragePackages()...), "dnf install -y -q --setopt=exit_on_lock=True --refresh iscsi-initiator-utils nfs-utils &&")
+	assert.Contains(t, rhel10Host.InstallPackagesCommand(false, "firewalld"), "dnf install -y -q --setopt=exit_on_lock=True firewalld &&")
 	assert.Equal(t, []string{"iscsid"}, rhel10Host.StorageServices())
 	assert.Empty(t, debianHost.StorageServices(), "open-iscsi starts iscsid itself on Debian")
 }
@@ -69,7 +69,7 @@ func (h *moduleHost) Run(cmd string) (string, error) {
 			}
 		}
 		return strings.Join(out, "\n"), nil
-	case strings.HasPrefix(cmd, "dnf install"):
+	case strings.Contains(cmd, "dnf install"):
 		for pkg, mods := range h.providing {
 			if strings.Contains(cmd, pkg) {
 				for _, m := range mods {
@@ -89,7 +89,7 @@ func TestEnsureKernelModulesInstallsWhatEL10Lacks(t *testing.T) {
 
 	require.NoError(t, ensureKernelModules(h, rhel10Host))
 
-	assert.Contains(t, strings.Join(h.commands, "\n"), "dnf install -y -q kernel-modules-extra-6.12.0-55.el10.x86_64",
+	assert.Contains(t, strings.Join(h.commands, "\n"), "dnf install -y -q --setopt=exit_on_lock=True kernel-modules-extra-6.12.0-55.el10.x86_64",
 		"the package must match the running kernel, or dnf installs modules for a kernel that is not booted")
 }
 
@@ -116,7 +116,7 @@ func TestEnsureKernelModulesReportsAFailedInstall(t *testing.T) {
 type failingInstallHost struct{ moduleHost }
 
 func (h *failingInstallHost) Run(cmd string) (string, error) {
-	if strings.HasPrefix(cmd, "dnf install") {
+	if strings.Contains(cmd, "dnf install") {
 		return "", errors.New("repository unreachable")
 	}
 	return h.moduleHost.Run(cmd)
@@ -143,7 +143,7 @@ func TestK3sSELinuxConfigOnlyOnRHEL(t *testing.T) {
 func TestLonghornEnablesIscsidOnRHEL(t *testing.T) {
 	r := &recordingRunner{}
 	require.NoError(t, installLonghorn(r, rhel10Host, nil))
-	assert.Equal(t, "dnf install -y -q --refresh iscsi-initiator-utils nfs-utils", r.commands[0])
+	assert.Contains(t, r.commands[0], "dnf install -y -q --setopt=exit_on_lock=True --refresh iscsi-initiator-utils nfs-utils")
 	assert.Equal(t, "systemctl enable --now iscsid", r.commands[1])
 }
 

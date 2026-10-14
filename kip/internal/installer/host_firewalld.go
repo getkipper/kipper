@@ -6,6 +6,8 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -662,8 +664,8 @@ func configureFirewalld(client FirewallRunner, host HostOS, consent FirewallCons
 	if install == "" {
 		return fmt.Errorf("installing firewalld: kip cannot install packages on %s", host.ID)
 	}
-	if _, err := client.Run("command -v firewall-cmd >/dev/null 2>&1 || " + install + " >/dev/null"); err != nil {
-		return fmt.Errorf("installing firewalld: %w", err)
+	if err := ensureInstalled(client, "firewall-cmd", "firewalld", install, os.Stdout); err != nil {
+		return err
 	}
 
 	sshPorts, err := readSSHPorts(client)
@@ -934,4 +936,22 @@ func rollBackFirewalld(client CommandRunner, run firewalldRun, loaded bool) erro
 	// The released reservation makes any later timer invocation harmless.
 	_, _ = client.Run("systemctl stop " + run.unit() + ".timer >/dev/null 2>&1")
 	return fmt.Errorf("kip restored the previous firewall")
+}
+
+// ensureInstalled runs install when binary is missing from the host's PATH.
+// It announces the installation on out before the quiet command runs so users
+// know work is underway while waiting for package mirrors.
+func ensureInstalled(client CommandRunner, binary, pkg, install string, out io.Writer) error {
+	present, err := client.Run("command -v " + binary + " >/dev/null 2>&1 && echo present || true")
+	if err != nil {
+		return fmt.Errorf("checking for %s: %w", pkg, err)
+	}
+	if strings.TrimSpace(present) == "present" {
+		return nil
+	}
+	_, _ = fmt.Fprint(out, packageInstallNotice([]string{pkg}))
+	if _, err := client.Run(install + " >/dev/null"); err != nil {
+		return fmt.Errorf("installing %s: %w", pkg, err)
+	}
+	return nil
 }
