@@ -108,6 +108,11 @@ func TestFirewalldAdoptionQuestionSaysWhatChanges(t *testing.T) {
 	assert.Contains(t, q, "removed: service cockpit, service ssh")
 	assert.Contains(t, q, "opened to everyone: 22/tcp, 80/tcp, 443/tcp, 6443/tcp")
 	assert.Contains(t, q, "three minutes")
+	assert.NotContains(t, q, "stock", "takeover is also offered for a customised public zone")
+	assert.NotContains(t, q, "operator-managed")
+	for _, line := range strings.Split(q, "\n") {
+		assert.LessOrEqual(t, len(line), 100, "the question must fit a terminal: %q", line)
+	}
 }
 
 func TestPreviewFirewalldAdoptionReportsAFailedRead(t *testing.T) {

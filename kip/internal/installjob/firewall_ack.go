@@ -29,13 +29,13 @@ const firewallAckPrefix = "firewall-ack-"
 // reconnecting mid-line or buffering the end of the log stream.
 const firewallCheckRepeat = 10 * time.Second
 
-// AwaitFirewallAck writes a fresh nonce to w and waits for the driver to
-// acknowledge it over a new SSH connection by writing a file in dir.
-func AwaitFirewallAck(dir, runID string, w io.Writer, timeout, poll time.Duration) error {
-	return awaitFirewallAck(dir, runID, w, timeout, poll, firewallCheckRepeat)
+// AwaitFirewallAck writes message and a fresh nonce to w and waits for the
+// driver to acknowledge it over a new SSH connection by writing a file in dir.
+func AwaitFirewallAck(dir, runID string, w io.Writer, message string, timeout, poll time.Duration) error {
+	return awaitFirewallAck(dir, runID, w, message, timeout, poll, firewallCheckRepeat)
 }
 
-func awaitFirewallAck(dir, runID string, w io.Writer, timeout, poll, repeat time.Duration) error {
+func awaitFirewallAck(dir, runID string, w io.Writer, message string, timeout, poll, repeat time.Duration) error {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return fmt.Errorf("creating the firewall check: %w", err)
@@ -47,7 +47,7 @@ func awaitFirewallAck(dir, runID string, w io.Writer, timeout, poll, repeat time
 		_ = os.Remove(f)
 	}
 
-	if _, err := fmt.Fprintf(w, "  Waiting for kip on your machine to open a new SSH connection...\n"); err != nil {
+	if _, err := fmt.Fprintln(w, message); err != nil {
 		return fmt.Errorf("asking for the firewall check: %w", err)
 	}
 	deadline := time.Now().Add(timeout)

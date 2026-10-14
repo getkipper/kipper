@@ -81,7 +81,8 @@ type Status struct {
 	Collectable bool
 }
 
-func unitName(runID string) string { return "kipper-install-" + runID }
+// UnitName returns the systemd unit name for an install job.
+func UnitName(runID string) string { return "kipper-install-" + runID }
 
 // Claim holds the job lock while choosing a running job to attach to, an
 // uncollected result to return, or a new job to stage and start.
@@ -141,7 +142,7 @@ func Claim(root string, req Request, kipPath string, sd Systemd) (Outcome, error
 	}
 	// Satisfy Cobra's required --host flag even though the job reads the request.
 	argv := []string{kipPath, "install", "--local", "--host", req.Host, "--request", filepath.Join(dir, "request.json")}
-	if err := sd.Start(unitName(req.RunID), argv, logPath); err != nil {
+	if err := sd.Start(UnitName(req.RunID), argv, logPath); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return Outcome{Action: ActionAttach, RunID: req.RunID}, nil
 		}
@@ -174,7 +175,7 @@ func ReadStatus(root string, sd Systemd) (Status, error) {
 // status asks systemd first and reads the state second, so a job that finished
 // between the two reads is never mistaken for an interrupted one.
 func status(root, runID string, sd Systemd) (Status, error) {
-	active, err := sd.Active(unitName(runID))
+	active, err := sd.Active(UnitName(runID))
 	if err != nil {
 		return Status{}, err
 	}
@@ -292,12 +293,12 @@ func Cancel(root string, sd Systemd) (string, error) {
 	if err != nil || current == "" {
 		return CancelIdle, err
 	}
-	active, err := sd.Active(unitName(current))
+	active, err := sd.Active(UnitName(current))
 	if err != nil {
 		return "", err
 	}
 	if active {
-		return CancelStopped, sd.Stop(unitName(current))
+		return CancelStopped, sd.Stop(UnitName(current))
 	}
 	if !uncollected(filepath.Join(root, current)) {
 		return CancelIdle, nil
