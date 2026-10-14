@@ -112,7 +112,7 @@ func TestFirewalldAdoptionQuestionSaysWhatChanges(t *testing.T) {
 
 func TestPreviewFirewalldAdoptionReportsAFailedRead(t *testing.T) {
 	h := runningStockFirewalld(t)
-	h.fail = map[string]error{"--permanent --get-zones": errors.New("connection reset")}
+	h.fail = map[string]error{firewalldDumpCommand(true): errors.New("connection reset")}
 
 	_, err := PreviewFirewalldAdoption(h)
 

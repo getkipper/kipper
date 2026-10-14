@@ -437,6 +437,35 @@ func TestConfigureFirewalldRefusesRuntimeOnlyRules(t *testing.T) {
 	assert.Greater(t, h.index("rm -f /etc/kipper/firewalld-run"), h.index("firewalld-run"), "the reservation is given back")
 }
 
+// Emit a notice only during the runtime dump to test for false configuration drift.
+func TestFirewalldDumpCommandIgnoresStderrNotices(t *testing.T) {
+	bin := t.TempDir()
+	fake := `#!/bin/sh
+stamp="$(dirname "$0")/started"
+[ -e "$stamp" ] || { echo "Waiting on dbus connection..." >&2; : > "$stamp"; }
+case "$*" in
+  *--info-policy=fail*) echo "policy query failed" >&2; exit 2 ;;
+  *--get-zones*) echo public ;;
+  *--get-policies*) echo "allow-host-ipv6 $(cat "$(dirname "$0")/policies" 2>/dev/null)" ;;
+  *--info-zone=public*) printf '%s\n' "public (active)" "  target: default" "  ports: 22/tcp" ;;
+  *--info-policy=*) printf '%s\n' "allow-host-ipv6 (active)" "  target: CONTINUE" ;;
+esac
+`
+	//nolint:gosec // the fake command has to be executable
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "firewall-cmd"), []byte(fake), 0o755))
+	runner := &localrun.Runner{Home: t.TempDir(), Dir: t.TempDir(), Path: bin + ":/usr/bin:/bin"}
+
+	running, err := runner.Run(firewalldDumpCommand(false))
+	require.NoError(t, err)
+	saved, err := runner.Run(firewalldDumpCommand(true))
+	require.NoError(t, err)
+	assert.Empty(t, firewalldDrift(running, saved))
+
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "policies"), []byte("fail"), 0o600))
+	_, err = runner.Run(firewalldDumpCommand(false))
+	assert.Error(t, err, "a failed query fails the dump")
+}
+
 func TestFirewalldDrift(t *testing.T) {
 	same := "== zone public\npublic\n  ports: 22/tcp \n== direct\n"
 	assert.Empty(t, firewalldDrift(same, strings.ReplaceAll(same, "22/tcp ", "22/tcp")), "trailing spaces are not drift")
@@ -542,6 +571,64 @@ func TestFirewalldMismatches(t *testing.T) {
 func TestFirewalldMismatchesReadsFirewalld2(t *testing.T) {
 	state := strings.Replace(loadedFirewalld, "public (active)\n  target: default", "public (default, active)\n  target: default\n  ingress-priority: 0\n  egress-priority: 0", 1)
 	assert.Empty(t, firewalldMismatches(state, wantFirewalld([]string{"22"})))
+}
+
+const gatewayPolicy = `== policy gateway-lan-to-world
+gateway-lan-to-world (disabled)
+  disable: yes
+  priority: 1000
+  target: ACCEPT
+  ingress-zones: internal home trusted
+  egress-zones: external public
+  services: ftp tftp
+  ports:
+  protocols:
+  masquerade: no
+  forward-ports:
+  source-ports:
+  icmp-blocks:
+  rich rules:
+`
+
+func TestFirewalldMismatchesReadsFirewalld24(t *testing.T) {
+	want := wantFirewalld([]string{"22"})
+	state := strings.Replace(loadedFirewalld, "allow-host-ipv6 kipper-pods-in kipper-pods-out", "allow-host-ipv6 gateway-lan-to-world kipper-pods-in kipper-pods-out", 1)
+	state = strings.Replace(state, `neighbour-solicitation" accept`, `neighbour-solicitation" accept`+"\n\t"+`rule family="ipv6" icmp-type name="mld2-listener-report" accept`, 1)
+	state += "\n" + gatewayPolicy
+	assert.Empty(t, firewalldMismatches(state, want))
+
+	enabled := strings.Replace(state, "  disable: yes", "  disable: no", 1)
+	assert.Contains(t, firewalldMismatches(enabled, want), "policy gateway-lan-to-world is loaded")
+
+	unlisted := strings.Replace(state, "  disable: yes\n", "", 1)
+	assert.Contains(t, firewalldMismatches(unlisted, want), "policy gateway-lan-to-world is loaded")
+
+	ownDisabled := strings.Replace(state, "kipper-pods-in (active)\n", "kipper-pods-in (disabled)\n  disable: yes\n", 1)
+	assert.Contains(t, strings.Join(firewalldMismatches(ownDisabled, want), "\n"), "policy kipper-pods-in disable")
+}
+
+func TestFirewalldStateCommandIgnoresStderrNotices(t *testing.T) {
+	bin := t.TempDir()
+	fake := `#!/bin/sh
+echo "Waiting on dbus connection..." >&2
+case "$*" in
+  --state) echo running ;;
+  --get-default-zone) echo public ;;
+  --query-panic) echo no ;;
+esac
+`
+	//nolint:gosec // the fake command has to be executable
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "firewall-cmd"), []byte(fake), 0o755))
+	runner := &localrun.Runner{Home: t.TempDir(), Dir: t.TempDir(), Path: bin + ":/usr/bin:/bin"}
+
+	state, err := runner.Run(firewalldStateCommand)
+	require.NoError(t, err)
+
+	problems := strings.Join(firewalldMismatches(state, wantFirewalld([]string{"22"})), "\n")
+	assert.NotContains(t, problems, "firewalld state")
+	assert.NotContains(t, problems, "default zone")
+	assert.NotContains(t, problems, "panic mode")
+	assert.NotContains(t, problems, "Waiting on dbus")
 }
 
 func TestFirewalldSavedChanges(t *testing.T) {
