@@ -98,10 +98,11 @@ func (h HostOS) InstallPackagesCommand(refresh bool, pkgs ...string) string {
 			install += "--refresh "
 		}
 		install += strings.Join(pkgs, " ")
-		// Allow temporary package-manager locks to clear, with at most 60 attempts
-		// and ten-second waits between them. Only lock errors (exit 200) trigger retries.
-		return "(n=0; while :; do " + install + " && exit 0; rc=$?; [ \"$rc\" -eq 200 ] || exit \"$rc\"; " +
-			"n=$((n+1)); if [ \"$n\" -ge 60 ]; then echo 'dnf is still locked by another package manager after 60 attempts' >&2; exit 200; fi; sleep 10; done)"
+		// Retry lock errors (exit 200) up to 60 attempts, waiting ten seconds between attempts.
+		// Buffer stderr so only the final attempt's diagnostics are shown.
+		return "(n=0; e=$(mktemp) || exit 1; trap 'rm -f \"$e\"' EXIT; while :; do " + install + " 2>\"$e\" && { cat \"$e\" >&2; exit 0; }; rc=$?; " +
+			"[ \"$rc\" -eq 200 ] || { cat \"$e\" >&2; exit \"$rc\"; }; n=$((n+1)); if [ \"$n\" -ge 60 ]; then cat \"$e\" >&2; " +
+			"echo 'dnf is still locked by another package manager after 60 attempts. Wait for that process to finish, then run kip install again.' >&2; exit 200; fi; sleep 10; done)"
 	}
 	return ""
 }
