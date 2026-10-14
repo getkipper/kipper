@@ -7,6 +7,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -190,12 +191,31 @@ func (r *PlatformConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		patchErrs = append(patchErrs, err)
 	}
 
-	// Returning a non-nil error makes controller-runtime re-queue. Silent
-	// swallowing here would let a transient API conflict strand a profile
-	// change forever, which is exactly the failure mode this plan exists
-	// to prevent.
-	return ctrl.Result{}, stderrors.Join(patchErrs...)
+	// Retry API failures through error backoff; poll pending deletions separately.
+	var errs []error
+	waiting := false
+	for _, err := range patchErrs {
+		if stderrors.Is(err, errHelmChartDeleting) {
+			waiting = true
+			continue
+		}
+		errs = append(errs, err)
+	}
+	if len(errs) > 0 {
+		return ctrl.Result{}, stderrors.Join(errs...)
+	}
+	if waiting {
+		// Poll so the chart can be recreated after deletion; HelmChart events are not watched.
+		return ctrl.Result{RequeueAfter: helmChartDeletePoll}, nil
+	}
+	return ctrl.Result{}, nil
 }
+
+// errHelmChartDeleting signals that an enabled component's HelmChart must
+// finish deleting before it can be recreated.
+var errHelmChartDeleting = stderrors.New("HelmChart is still being deleted")
+
+const helmChartDeletePoll = 5 * time.Second
 
 // reconcileComponentEnabled ensures the HelmChart for a component matches its
 // Enabled state in spec. When enabled is false the HelmChart is deleted (helm-
@@ -216,6 +236,8 @@ func (r *PlatformConfigReconciler) reconcileComponentEnabled(ctx context.Context
 	}
 
 	switch {
+	case enabled && exists && chart.GetDeletionTimestamp() != nil:
+		return fmt.Errorf("%s: %w", chartName, errHelmChartDeleting)
 	case enabled && !exists:
 		desired, err := unstructuredFromYAML(manifest)
 		if err != nil {
