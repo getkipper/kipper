@@ -90,6 +90,8 @@ Useful for testing a restore without affecting the live environment:
 kip backup restore pre-migration --namespace-mapping blog-test:blog-restored
 ```
 
+This restores only `blog-test` into `blog-restored`. If you also pass `--namespace`, it must match the source namespace (`blog-test`).
+
 ### Partially failed backups
 
 `kip backup restore` requires `--allow-partial` to restore a backup marked `PartiallyFailed`, because restored data or resources may be incomplete. Choose a `Completed` backup when possible. If you proceed with `--allow-partial`, kip warns about missing data and lists volumes with failed or canceled backups when those details are available.
