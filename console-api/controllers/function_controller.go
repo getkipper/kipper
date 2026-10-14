@@ -576,11 +576,13 @@ func (r *FunctionReconciler) reconcileDeployment(ctx context.Context, fn *kipper
 	// redis, minio). The sidecar polls the event source and POSTs each
 	// event to the function's /event endpoint on localhost.
 	if t := eventTrigger(fn); t != nil {
-		if sidecar, err := r.buildPollSidecar(ctx, fn, t, port, rendered); err == nil {
-			containers = append(containers, sidecar)
-		} else {
-			log.FromContext(ctx).Info("event trigger sidecar skipped", "function", fn.Name, "reason", err.Error())
+		// Build the poller before updating the Deployment so a credential failure
+		// preserves any existing poller and surfaces as a reconciliation error.
+		sidecar, err := r.buildPollSidecar(ctx, fn, t, port, rendered)
+		if err != nil {
+			return fmt.Errorf("building event trigger poller: %w", err)
 		}
+		containers = append(containers, sidecar)
 	}
 
 	podSpec := corev1.PodSpec{
@@ -831,17 +833,8 @@ func (r *FunctionReconciler) loadServiceConn(ctx context.Context, fn *kipperv1.F
 		return nil, fmt.Errorf("looking up service %q: %w", sourceName, err)
 	}
 
-	// The snapshot this pass took, not a second read of the same mutable
-	// Secret. Reading it again is how the poll sidecar and the main container
-	// ended up in one pod template carrying two credential generations: the
-	// main container gets the published environment, and the sidecar got
-	// whatever the Secret held a moment later.
-	//
-	// Which snapshot depends on the binding, not on the service: a binding that
-	// pins a database is held under its own derived name and carries that
-	// database, so asking for the shared name would find nothing and fall back
-	// to a live read of the service default — a sidecar pointed at the wrong
-	// database as well as a later password.
+	// Reuse the binding's snapshot so the poller and main container share the
+	// same credentials, including any database selected by the binding.
 	var secret corev1.Secret
 	held, err := boundCredentialSnapshot(fn, sourceName, svc.Spec.Type, rendered)
 	if err != nil {
@@ -849,8 +842,17 @@ func (r *FunctionReconciler) loadServiceConn(ctx context.Context, fn *kipperv1.F
 	}
 	if held != nil {
 		secret.Data = held
-	} else if err := r.Get(ctx, types.NamespacedName{Name: secretname.ServiceCredentials(sourceName), Namespace: namespace}, &secret); err != nil {
-		return nil, fmt.Errorf("loading credentials for service %q: %w", sourceName, err)
+	} else {
+		// Apply the same credential ownership check used by service bindings.
+		shared, err := sharedServiceCredentials(ctx, r.Client, &svc)
+		if err != nil {
+			return nil, err
+		}
+		if shared == nil {
+			return nil, fmt.Errorf("event trigger cannot load credentials for service %q: the %s Secret is missing or is not owned by that service; run kip service credentials --project %s --repair to reclaim it if its owner is absent or no longer exists",
+				sourceName, secretname.ServiceCredentials(sourceName), namespace)
+		}
+		secret = *shared
 	}
 
 	if svc.Spec.Type == "minio" {

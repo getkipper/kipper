@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -310,15 +311,11 @@ func hashInto(digest hash.Hash, name string, data map[string][]byte) {
 	}
 }
 
-// sharedServiceCredentials returns the Secret a Service owns, or nil when it is
-// absent or not the Service's own.
-//
-// Ownership is the whole check. The name is derived from a field on the
-// workload CR, and a CR can be written directly, so a binding could otherwise
-// name any `<x>-credentials` Secret in the namespace — another app's git token,
-// for one — and have this function copy it into a Secret the workload reads.
-// Requiring the Service's controller reference by UID means the object has to
-// have been created for that exact Service CR, which adoption never fakes.
+// sharedServiceCredentials returns the named credentials Secret when its
+// controller UID matches the Service, or nil if it is missing or the UID differs.
+// Matching ownership prevents workloads from reading unrelated Secrets by name.
+// Secret write access remains a trust boundary: writers can change both the
+// controller reference and the credential data.
 func sharedServiceCredentials(ctx context.Context, c client.Client, svc *kipperv1.Service) (*corev1.Secret, error) {
 	var shared corev1.Secret
 	err := c.Get(ctx, types.NamespacedName{Name: secretname.ServiceCredentials(svc.Name), Namespace: svc.Namespace}, &shared)
@@ -414,19 +411,8 @@ func writeDerivedBindingSecret(ctx context.Context, c client.Client, scheme *run
 	return c.Update(ctx, &existing)
 }
 
-// enqueueWorkloadsBoundToCredentials maps a change of a service's shared
-// credentials to a reconcile of every workload that derives a Secret from them.
-//
-// Without it a rotated password only reaches a binding whenever something else
-// happens to touch that workload, which for a stable app is never. The whole
-// point of deriving the Secret is that the rotation propagates, so the change
-// has to wake the workloads that depend on it.
-//
-// Every binding on the service is woken, whether or not it derives a Secret. A
-// binding that pins no logical namespace reads the shared credentials straight
-// through envFrom, so its running pods hold the old password just the same, and
-// "it picks the new one up on its next start" is true and useless when the next
-// start may be never.
+// workloadsBoundToCredentials enqueues workloads that consume the changed
+// service credentials through shared or derived Secrets.
 func workloadsBoundToCredentials[T any](secret client.Object, items []T, binding func(*T) (string, string, []kipperv1.ServiceBinding)) []reconcile.Request {
 	service, ok := serviceOfCredentialsSecret(secret)
 	if !ok {
@@ -439,8 +425,6 @@ func workloadsBoundToCredentials[T any](secret client.Object, items []T, binding
 			continue
 		}
 		for _, b := range bindings {
-			// Any binding on this service, pinned or not: both shapes put the
-			// rotated password into their pods.
 			if b.Name == service {
 				reqs = append(reqs, reconcile.Request{
 					NamespacedName: types.NamespacedName{Name: name, Namespace: namespace},
@@ -477,8 +461,7 @@ func serviceOfCredentialsSecret(secret client.Object) (string, bool) {
 	return service, true
 }
 
-// enqueueAppsForServiceCredentials wakes every App deriving a Secret from the
-// changed credentials.
+// enqueueAppsForServiceCredentials enqueues Apps bound to the changed credentials.
 func (r *AppReconciler) enqueueAppsForServiceCredentials(ctx context.Context, obj client.Object) []reconcile.Request {
 	var apps kipperv1.AppList
 	if err := r.List(ctx, &apps, client.InNamespace(obj.GetNamespace())); err != nil {
@@ -489,14 +472,20 @@ func (r *AppReconciler) enqueueAppsForServiceCredentials(ctx context.Context, ob
 	})
 }
 
-// enqueueFunctionsForServiceCredentials is the Function twin.
+// enqueueFunctionsForServiceCredentials enqueues Functions that use the changed
+// credentials through a service binding or an event trigger.
 func (r *FunctionReconciler) enqueueFunctionsForServiceCredentials(ctx context.Context, obj client.Object) []reconcile.Request {
 	var fns kipperv1.FunctionList
 	if err := r.List(ctx, &fns, client.InNamespace(obj.GetNamespace())); err != nil {
 		return nil
 	}
 	return workloadsBoundToCredentials(obj, fns.Items, func(f *kipperv1.Function) (string, string, []kipperv1.ServiceBinding) {
-		return f.Name, f.Namespace, f.Spec.ServiceBindings
+		bindings := f.Spec.ServiceBindings
+		// Include the event source so credential changes also refresh the poller.
+		if t := eventTrigger(f); t != nil && t.Config["source"] != "" {
+			bindings = append(slices.Clone(bindings), kipperv1.ServiceBinding{Name: t.Config["source"]})
+		}
+		return f.Name, f.Namespace, bindings
 	})
 }
 

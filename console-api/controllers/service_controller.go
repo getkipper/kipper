@@ -173,13 +173,9 @@ func (r *ServiceReconciler) reconcileCredentialsSecret(ctx context.Context, svc 
 	var existing corev1.Secret
 	err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: svc.Namespace}, &existing)
 	if err == nil {
-		// Ownership is the whole of the service's claim on these credentials,
-		// and it is what admits them into a bound workload. A Secret this
-		// Service does not own is refused there, so carrying on here would
-		// start the engine against a password no binding can use and leave the
-		// failure to surface inside somebody's application. Nothing is adopted
-		// on the strength of a name, a label or a set of keys: whoever put the
-		// object here has to say so by setting the controller reference.
+		// Require the same ownership as bindings so the engine uses credentials
+		// its workloads can read. This catches name collisions and stale owner
+		// references after a restore; Secret writers can change the reference.
 		if owner := metav1.GetControllerOf(&existing); owner == nil || owner.UID != svc.UID {
 			return &credentialsNotOursError{Secret: secretName}
 		}
