@@ -770,7 +770,25 @@ func TestFirewalldRollbackRestoresTheSavedFirewall(t *testing.T) {
 	assert.Equal(t, "<missing>", h.read("/etc/firewalld/zones/kipper-pods.xml"), "files the run added go too")
 	assert.Equal(t, "<missing>", h.read(firewalldClaimPath), "a claim the run wrote goes with it")
 	assert.Contains(t, h.callLog(), "firewall-cmd --reload")
+	assert.NotEqual(t, "<missing>", h.read(strings.TrimPrefix(h.run.started(), h.root)), "the marker tells a late commit that the rollback ran")
+}
+
+func TestFirewalldRollbackRemovesItsFilesOnceRestored(t *testing.T) {
+	h := newRollbackHost(t)
+	h.write(t, "/etc/firewalld/zones/public.xml", "before")
+	h.backUp(t)
+	h.markLoaded(t)
+	script := h.run.rollbackScript(true, false, false)
+	h.write(t, strings.TrimPrefix(h.run.script(), h.root), script)
+
+	out, err := h.sh(t, nil, script)
+
+	require.NoError(t, err, out)
+	assert.Equal(t, "<missing>", h.read(strings.TrimPrefix(h.run.backup(), h.root)+"/complete"))
+	assert.Equal(t, "<missing>", h.read(strings.TrimPrefix(h.run.script(), h.root)))
+	assert.Equal(t, "<missing>", h.read(strings.TrimPrefix(h.run.loaded(), h.root)))
 	assert.NotEqual(t, "<missing>", h.read(strings.TrimPrefix(h.run.started(), h.root)))
+	assert.NotEqual(t, "<missing>", h.read(strings.TrimPrefix(h.run.restored(), h.root)), "the success record proves the restore")
 }
 
 func TestFirewalldRollbackOfFilesOnlyLeavesTheRunningFirewall(t *testing.T) {
@@ -822,6 +840,8 @@ func TestFirewalldRollbackFailsWhenNothingReloads(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.Equal(t, "claim", h.read(firewalldClaimPath), "the claim stays until the restore has worked")
+	assert.NotEqual(t, "<missing>", h.read(strings.TrimPrefix(h.run.backup(), h.root)+"/complete"), "a failed restore keeps its backup for the next attempt")
+	assert.Equal(t, "<missing>", h.read(strings.TrimPrefix(h.run.restored(), h.root)), "a failed restore writes no success record")
 }
 
 // Exercise both marker orderings; the fake flock does not test concurrent locking.
@@ -1004,7 +1024,7 @@ func TestFirewalldFinishedRollbackIsTerminal(t *testing.T) {
 	out, err = h.sh(t, nil, h.run.rollbackScript(false, false, false))
 
 	require.NoError(t, err, out)
-	assert.Contains(t, out, "no longer holds the reservation")
+	assert.Contains(t, out, "already restored", "run A's rollback finished, so a second run of it says so and changes nothing")
 	assert.Equal(t, "run b's", h.read("/etc/firewalld/zones/public.xml"))
 	assert.Equal(t, "claim", h.read(firewalldClaimPath))
 	assert.Equal(t, calls, h.callLog(), "firewalld is not stopped under run B")
@@ -1233,4 +1253,85 @@ func TestFirewalldStockMeansExactlyTheVendorServices(t *testing.T) {
 
 	assert.Contains(t, strings.Join(hardened.changes(false, false, want), "\n"), "public zone services")
 	assert.Empty(t, firewalldSavedConfig{inventory: stockInventory, public: stockPublicZone}.changes(false, false, want))
+}
+
+// rollbackRaceHost simulates a missing rollback script with a success marker
+// available either initially or after the script attempt.
+type rollbackRaceHost struct {
+	restoredBefore, restoredAfter bool
+	ranScript                     bool
+	cmds                          []string
+}
+
+func (h *rollbackRaceHost) Run(cmd string) (string, error) {
+	h.cmds = append(h.cmds, cmd)
+	switch {
+	case strings.Contains(cmd, "echo restored"):
+		if h.restoredBefore || (h.ranScript && h.restoredAfter) {
+			return "restored\n", nil
+		}
+		return "", nil
+	case strings.HasPrefix(cmd, "/bin/sh "):
+		h.ranScript = true
+		return "", errors.New("/bin/sh: cannot open the rollback script: No such file")
+	}
+	return "", nil
+}
+
+func (h *rollbackRaceHost) RunStdin(cmd string, _ io.Reader) (string, error) { return h.Run(cmd) }
+
+func TestRollBackFirewalldReportsARestoreTheTimerDid(t *testing.T) {
+	for name, h := range map[string]*rollbackRaceHost{
+		"finished before":    {restoredBefore: true},
+		"finished meanwhile": {restoredAfter: true},
+	} {
+		err := rollBackFirewalld(h, firewalldRun{id: testRunID}, true)
+		require.Error(t, err, name)
+		assert.Contains(t, err.Error(), "restored the previous firewall", name)
+		assert.NotContains(t, err.Error(), "failed too", name)
+	}
+}
+
+func TestRollBackFirewalldReportsAFailedRestoreWithoutTheRecord(t *testing.T) {
+	err := rollBackFirewalld(&rollbackRaceHost{}, firewalldRun{id: testRunID}, true)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed too")
+}
+
+// Simulate the state an installer sees after the timer restores the firewall
+// and releases the reservation, before the installer acquires the lock.
+func TestFirewalldRollbackScriptReportsARestoreThatAlreadyHappened(t *testing.T) {
+	h := newRollbackHost(t)
+	h.backUp(t)
+	h.write(t, strings.TrimPrefix(h.run.restored(), h.root), "")
+	require.NoError(t, os.Remove(h.run.reservation()))
+
+	out, err := h.sh(t, nil, h.run.rollbackScript(true, false, false))
+
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "already restored")
+	assert.NotContains(t, out, "no longer holds the reservation")
+}
+
+type scriptOutputHost struct{ out string }
+
+func (h scriptOutputHost) Run(cmd string) (string, error) {
+	if strings.HasPrefix(cmd, "/bin/sh ") {
+		return h.out, nil
+	}
+	return "", nil
+}
+
+func (h scriptOutputHost) RunStdin(cmd string, _ io.Reader) (string, error) { return h.Run(cmd) }
+
+func TestRollBackFirewalldReadsTheScriptsAlreadyRestoredAnswer(t *testing.T) {
+	err := rollBackFirewalld(scriptOutputHost{out: "the previous firewall is already restored\n"}, firewalldRun{id: testRunID}, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kip restored the previous firewall")
+	assert.NotContains(t, err.Error(), "another firewall change")
+
+	err = rollBackFirewalld(scriptOutputHost{out: "this firewall change no longer holds the reservation; nothing to restore\n"}, firewalldRun{id: testRunID}, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "another firewall change", "without the record, losing the reservation keeps its own diagnostic")
 }

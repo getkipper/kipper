@@ -569,6 +569,7 @@ func (r firewalldRun) script() string           { return r.state("firewalld-roll
 func (r firewalldRun) committed() string        { return r.state("firewalld-" + r.id + ".committed") }
 func (r firewalldRun) loaded() string           { return r.state("firewalld-" + r.id + ".loaded") }
 func (r firewalldRun) started() string          { return r.state("firewalld-" + r.id + ".rollback") }
+func (r firewalldRun) restored() string         { return r.state("firewalld-" + r.id + ".restored") }
 func (r firewalldRun) unit() string             { return firewalldRollbackUnit + "-" + r.id }
 
 // rollbackScript restores saved files and, if loading was attempted, restores
@@ -581,6 +582,9 @@ func (r firewalldRun) rollbackScript(wasActive, wasEnabled, wasClaimed bool) str
 	fmt.Fprintf(&b, "exec 9>%s\nflock 9\n", r.root+firewalldLock)
 	b.WriteString("# Restore only an uncommitted run that still owns the reservation.\n")
 	fmt.Fprintf(&b, "if [ -e %s ]; then exit 0; fi\n", r.committed())
+	// Check for a completed restore before ownership: the timer releases the
+	// reservation, and an installer waiting on the lock can resume afterward.
+	fmt.Fprintf(&b, "if [ -e %s ]; then echo 'the previous firewall is already restored'; exit 0; fi\n", r.restored())
 	fmt.Fprintf(&b, "if ! %s; then echo 'this firewall change no longer holds the reservation; nothing to restore'; exit 0; fi\n", r.owns())
 	fmt.Fprintf(&b, "touch %s\n", r.started())
 	fmt.Fprintf(&b, "[ -e %s/complete ] || { echo 'the firewalld backup is incomplete' >&2; exit 1; }\n", r.backup())
@@ -605,6 +609,10 @@ func (r firewalldRun) rollbackScript(wasActive, wasEnabled, wasClaimed bool) str
 	b.WriteString(r.releaseCommand() + "\n")
 	// Stop the timer so later audits can proceed after a successful restore.
 	fmt.Fprintf(&b, "systemctl stop %s.timer >/dev/null 2>&1 || true\n", r.unit())
+	// Record success before deleting the script so the installer can confirm recovery.
+	fmt.Fprintf(&b, "touch %s\n", r.restored())
+	// Keep the rollback marker so a later commit can report why it was rejected.
+	fmt.Fprintf(&b, "rm -rf %s %s %s\n", r.backup(), r.loaded(), r.script())
 	return b.String()
 }
 
@@ -921,12 +929,21 @@ func rollBackFirewalld(client CommandRunner, run firewalldRun, loaded bool) erro
 	if loaded {
 		mode = ""
 	}
+	// The timer deletes the script after restoring the firewall. Check the
+	// success marker after a script error to recognize a completed restore.
+	restoredByTimer := func() bool {
+		out, err := client.Run(fmt.Sprintf("if [ -e %s ]; then echo restored; fi", run.restored()))
+		return err == nil && strings.TrimSpace(out) == "restored"
+	}
 	out, err := client.Run("/bin/sh " + run.script() + mode)
 	if err == nil && strings.Contains(out, "k3s did not restart") {
 		return fmt.Errorf("kip restored the previous firewall; k3s restart failed. Run systemctl restart k3s")
 	}
 	if err == nil && strings.Contains(out, "no longer holds the reservation") {
 		return fmt.Errorf("another firewall change holds the firewall now, so kip left it alone")
+	}
+	if err != nil && restoredByTimer() {
+		return fmt.Errorf("kip restored the previous firewall")
 	}
 	if err != nil {
 		return fmt.Errorf("restoring the previous firewall failed too (%w). An armed rollback timer may retry after its %d-second delay. If recovery fails, restore the backup from the provider's console", err, firewalldRollbackSeconds)
