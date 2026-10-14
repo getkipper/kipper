@@ -90,6 +90,10 @@ Useful for testing a restore without affecting the live environment:
 kip backup restore pre-migration --namespace-mapping blog-test:blog-restored
 ```
 
+### Partially failed backups
+
+`kip backup restore` requires `--allow-partial` to restore a backup marked `PartiallyFailed`, because restored data or resources may be incomplete. Choose a `Completed` backup when possible. If you proceed with `--allow-partial`, kip warns about missing data and lists volumes with failed or canceled backups when those details are available.
+
 ### CPU and memory after a restore
 
 A restore recovers resource settings and their field ownership. User-set CPU and memory values therefore remain user settings. If ownership cannot be restored for an App value, Kipper holds it unchanged until you confirm it or enable automatic sizing. See [Values Kipper cannot attribute](/en/resource-management#held-values).
