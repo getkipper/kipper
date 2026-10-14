@@ -978,6 +978,7 @@ func TestFirewalldCommitClearsOnlyItsOwnRun(t *testing.T) {
 	assert.Equal(t, "<missing>", h.read(strings.TrimPrefix(h.run.backup(), h.root)+"/complete"))
 	assert.Equal(t, "", h.read(strings.TrimPrefix(other.backup(), h.root)+"/complete"), "another run's backup stays")
 	assert.Equal(t, "<missing>", h.read(strings.TrimPrefix(h.run.reservation(), h.root)), "the commit releases the reservation")
+	assert.Equal(t, "<missing>", h.read(strings.TrimPrefix(h.run.committed(), h.root)), "the commit removes its marker")
 }
 
 func TestFirewalldRollbackReleasesTheReservation(t *testing.T) {

@@ -652,11 +652,12 @@ func (r firewalldRun) releaseLockedCommand() string {
 	return fmt.Sprintf("(exec 9>%s && flock 9 && %s)", r.root+firewalldLock, r.releaseCommand())
 }
 
-// commitCommand records that the run's firewall stays, unless its rollback has
-// already begun, then clears this run's rollback files.
+// commitCommand keeps this run's firewall if rollback has not begun and removes
+// its rollback files. Releasing the reservation prevents a late rollback even
+// after the commit marker is removed.
 func (r firewalldRun) commitCommand() string {
 	return r.locked(fmt.Sprintf("touch %s && %s", r.committed(), r.releaseCommand())) +
-		fmt.Sprintf(" && { systemctl stop %s.timer >/dev/null 2>&1; rm -rf %s %s %s %s; }", r.unit(), r.backup(), r.script(), r.started(), r.loaded())
+		fmt.Sprintf(" && { systemctl stop %[1]s.timer %[1]s.service >/dev/null 2>&1; rm -rf %s %s %s %s %s; }", r.unit(), r.backup(), r.script(), r.started(), r.loaded(), r.committed())
 }
 
 // pendingRollbackCommand prints any rollback unit still waiting or running.
