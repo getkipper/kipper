@@ -45,6 +45,7 @@ type Options struct {
 	LoginGate          func(ctx context.Context, domain, dexHost, server string, caData []byte) GateResult
 	ConfirmConnection  func() error
 	ConfirmAdoption    func(question string) bool
+	AdoptFingerprint   string
 }
 
 // Result contains installation outputs, including those available after a failure.
@@ -76,26 +77,47 @@ type installStep struct {
 	fn   func() error
 }
 
-// adoptionConsent requires --adopt-firewall for local installs, including
-// those driven over SSH.
-func adoptionConsent(opts Options, audit FirewallAudit) bool {
+// adoptionConsent uses supplied consent for local runs, including consent
+// collected by the SSH driver. Direct SSH installs may prompt here.
+func adoptionConsent(client CommandRunner, opts Options, audit FirewallAudit) (FirewallConsent, error) {
+	if opts.AdoptFirewall {
+		return FirewallConsent{Adopt: true, Fingerprint: opts.AdoptFingerprint}, nil
+	}
 	ask := opts.ConfirmAdoption
 	if opts.Local {
 		ask = nil
 	}
-	return AdoptionConsent(audit, opts.Firewall, opts.AdoptFirewall, ask)
+	return AdoptionConsent(client, opts.Host, audit, opts.Firewall, false, ask)
 }
 
-// AdoptionConsent returns explicit consent or uses ask, when provided, for an
-// eligible running firewalld with firewall configuration enabled.
-func AdoptionConsent(audit FirewallAudit, firewall, adopt bool, ask func(question string) bool) bool {
+// FirewallConsent authorizes takeover of an operator-managed firewalld.
+// A nonempty fingerprint restricts consent to the previewed configuration.
+type FirewallConsent struct {
+	Adopt       bool
+	Fingerprint string
+}
+
+// AdoptionConsent returns flag-based consent or prompts with a takeover preview.
+// A nil ask disables prompting. Interactive consent includes the preview fingerprint.
+func AdoptionConsent(client CommandRunner, host string, audit FirewallAudit, firewall, adopt bool, ask func(question string) bool) (FirewallConsent, error) {
 	if adopt {
-		return true
+		return FirewallConsent{Adopt: true}, nil
 	}
 	if !audit.Adoptable || !firewall || ask == nil {
-		return false
+		return FirewallConsent{}, nil
 	}
-	return ask("Allow kip to manage the running firewalld? This replaces the public zone and adds a pod zone and forwarding policies.")
+	preview, err := PreviewFirewalldAdoption(client)
+	if err != nil {
+		return FirewallConsent{}, err
+	}
+	if !preview.Possible {
+		fmt.Printf("  ℹ  kip cannot take over the running firewalld: %s\n", preview.Reason)
+		return FirewallConsent{}, nil
+	}
+	if !ask(preview.Question(host)) {
+		return FirewallConsent{}, nil
+	}
+	return FirewallConsent{Adopt: true, Fingerprint: preview.Fingerprint}, nil
 }
 
 // storageRestartSteps schedules needrestart configuration for Debian-family hosts.
@@ -174,10 +196,22 @@ func requireOperatorFirewalld(client CommandRunner, host HostOS, audit FirewallA
 		return err
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("the existing firewalld configuration requires these changes for the cluster: %s. "+
-			"Update the rules manually, or run with --firewall --adopt-firewall to let kip configure it", strings.Join(missing, "; "))
+		return fmt.Errorf("the existing firewalld configuration requires these changes for the cluster: %s. %s", strings.Join(missing, "; "), takeoverHint(client))
 	}
 	return nil
+}
+
+// takeoverHint suggests adoption when the preview passes configuration checks.
+func takeoverHint(client CommandRunner) string {
+	preview, err := PreviewFirewalldAdoption(client)
+	switch {
+	case err != nil:
+		return "Update the rules manually"
+	case preview.Possible:
+		return "Update the rules manually, or run again with --adopt-firewall to let kip replace them"
+	default:
+		return "Update the rules manually. Kipper cannot take over firewalld: " + preview.Reason
+	}
 }
 
 // Run executes the full cluster installation sequence.
@@ -313,7 +347,12 @@ func Run(opts Options) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auditing firewall: %w", err)
 	}
-	fwPlan := PlanFirewall(fwAudit, opts.Firewall, adoptionConsent(opts, fwAudit))
+	consent, err := adoptionConsent(client, opts, fwAudit)
+	if err != nil {
+		return nil, err
+	}
+	fwPlan := PlanFirewall(fwAudit, opts.Firewall, consent.Adopt)
+	fwPlan.AdoptFingerprint = consent.Fingerprint
 	if err := requireOperatorFirewalld(client, sysInfo.Host, fwAudit, fwPlan); err != nil {
 		return nil, err
 	}

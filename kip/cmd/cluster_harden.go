@@ -31,7 +31,7 @@ func init() {
 	clusterHardenCmd.Flags().String("ssh-key", "", "path to SSH private key (defaults to ~/.ssh/id_ed25519)")
 	clusterHardenCmd.Flags().Bool("harden", true, "disable surplus host services exposed on public interfaces (e.g. rpcbind, Cockpit)")
 	clusterHardenCmd.Flags().Bool("firewall", true, "configure the host firewall for k3s: firewalld on Rocky, AlmaLinux and CentOS Stream; UFW elsewhere (firewalld takeover requires --adopt-firewall or interactive consent)")
-	clusterHardenCmd.Flags().Bool("adopt-firewall", false, "take over an existing firewalld configuration on Rocky, AlmaLinux or CentOS Stream; replaces the public zone")
+	clusterHardenCmd.Flags().Bool("adopt-firewall", false, "allow takeover of running firewalld on Rocky, AlmaLinux or CentOS Stream without a prompt; replaces the public zone, removes services such as Cockpit, and allows SSH and TCP ports 80, 443 and 6443")
 	clusterHardenCmd.Flags().Bool("no-ssh-rate-limit", false, "disable UFW SSH rate limiting on Ubuntu and Debian; useful for CI or operators sharing a NAT address")
 	clusterCmd.AddCommand(clusterHardenCmd)
 }
@@ -81,7 +81,12 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("auditing firewall: %w", err)
 	}
 	isTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
-	fwPlan := installer.PlanFirewall(fwAudit, firewall, installer.AdoptionConsent(fwAudit, firewall, adoptFirewall, adoptionQuestion(isTTY)))
+	consent, err := installer.AdoptionConsent(client, cluster.Host, fwAudit, firewall, adoptFirewall, adoptionQuestion(isTTY))
+	if err != nil {
+		return fmt.Errorf("checking the running firewalld: %w", err)
+	}
+	fwPlan := installer.PlanFirewall(fwAudit, firewall, consent.Adopt)
+	fwPlan.AdoptFingerprint = consent.Fingerprint
 	fmt.Print(fwPlan.Notice)
 	fmt.Println()
 

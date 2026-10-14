@@ -106,6 +106,9 @@ func runDrivenInstall(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	if err := askToAdoptFirewall(client, kipCmd, host, &req, adoptionQuestion(isTTY)); err != nil {
+		return err
+	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return err
@@ -529,4 +532,38 @@ func confirm(question string) bool {
 	var answer string
 	_, _ = fmt.Scanln(&answer)
 	return isYes(answer)
+}
+
+// askToAdoptFirewall collects consent on the client because server jobs have no
+// terminal. Existing jobs keep their original options.
+func askToAdoptFirewall(client *ssh.Client, kipCmd, host string, req *installjob.Request, ask func(string) bool) error {
+	if req.AdoptFirewall || !req.Firewall || ask == nil {
+		return nil
+	}
+	out, err := client.Run(kipCmd + " install-job status")
+	if err != nil {
+		return fmt.Errorf("checking for an existing install on %s: %w", host, err)
+	}
+	if existingJob(lastJSONLine(out)) {
+		return nil
+	}
+	audit, err := installer.AuditFirewall(client)
+	if err != nil {
+		return fmt.Errorf("checking the firewall on %s: %w", host, err)
+	}
+	consent, err := installer.AdoptionConsent(client, host, audit, req.Firewall, false, ask)
+	if err != nil {
+		return err
+	}
+	req.AdoptFirewall, req.AdoptFingerprint = consent.Adopt, consent.Fingerprint
+	return nil
+}
+
+// existingJob reports whether install-job claim would attach to or collect a job.
+func existingJob(statusJSON string) bool {
+	var st installjob.Status
+	if err := json.Unmarshal([]byte(statusJSON), &st); err != nil || st.RunID == "" {
+		return false
+	}
+	return st.Phase == installjob.PhaseStarting || st.Phase == installjob.PhaseRunning || st.Collectable
 }

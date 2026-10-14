@@ -425,3 +425,13 @@ func TestRemoveOldKipsWaitsForTheLock(t *testing.T) {
 	_, err = os.Stat(old)
 	assert.True(t, os.IsNotExist(err))
 }
+
+func TestReadStatusTreatsAGoneJobAsNone(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "current"), []byte("run-gone\n"), 0o600))
+
+	st, err := ReadStatus(root, newFakeSystemd())
+
+	require.NoError(t, err)
+	assert.Empty(t, st.RunID)
+}

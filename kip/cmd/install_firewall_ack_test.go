@@ -109,3 +109,26 @@ func TestFirewallAckWriterOnlyAnswersAtALineStart(t *testing.T) {
 
 	assert.Equal(t, "diagnostic: "+marker, out.String())
 }
+
+func TestCheckLocalAdoption(t *testing.T) {
+	assert.ErrorContains(t, checkLocalAdoption(true, true), "does not combine with --local")
+	assert.NoError(t, checkLocalAdoption(true, false))
+	assert.NoError(t, checkLocalAdoption(false, true))
+}
+
+func TestExistingJob(t *testing.T) {
+	for status, want := range map[string]bool{
+		`{"RunID":"run-1","Phase":"running","Collectable":false}`:  true,
+		`{"RunID":"run-1","Phase":"starting","Collectable":false}`: true,
+		`{"RunID":"run-1","Phase":"succeeded","Collectable":true}`: true,
+		`{"RunID":"run-1","Phase":"failed","Collectable":false}`:   false,
+		`{"RunID":"","Phase":"","Collectable":false}`:              false,
+		``: false,
+	} {
+		assert.Equal(t, want, existingJob(status), status)
+	}
+}
+
+func TestHardenAdoptHelpNamesNoLocalFlag(t *testing.T) {
+	assert.NotContains(t, clusterHardenCmd.Flags().Lookup("adopt-firewall").Usage, "--local", "kip cluster harden has no --local")
+}
