@@ -212,12 +212,17 @@ func printInstallSummary(out io.Writer, result *installer.Result, installErr err
 		return
 	}
 	if installErr != nil {
-		_, _ = fmt.Fprintf(out, "\n  Install completed with errors (see above). Credentials saved:\n\n")
+		if result.AdminPassword == "" {
+			return
+		}
+		_, _ = fmt.Fprintf(out, "\n  Install stopped with errors (see above). Available cluster details:\n\n")
 	} else {
 		_, _ = fmt.Fprintf(out, "  Cluster ready.\n")
 	}
 	_, _ = fmt.Fprintf(out, "  Console:    %s\n", result.ConsoleURL)
-	_, _ = fmt.Fprintf(out, "  Kubeconfig: %s\n", result.KubeconfigPath)
+	if result.KubeconfigPath != "" {
+		_, _ = fmt.Fprintf(out, "  Kubeconfig: %s\n", result.KubeconfigPath)
+	}
 	if result.AdminPassword != "" && !result.CredentialsShown {
 		_, _ = fmt.Fprintf(out, "  Admin:      admin@%s\n", result.Domain)
 		_, _ = fmt.Fprintf(out, "  Password:   %s\n", result.AdminPassword)

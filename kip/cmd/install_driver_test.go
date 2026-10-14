@@ -530,3 +530,20 @@ func TestAgentHolds(t *testing.T) {
 func TestInstallErrorsPrintNoUsage(t *testing.T) {
 	assert.True(t, installCmd.SilenceUsage)
 }
+
+func TestServerJobRateLimitNoticeStatesTheDefaultAndTheOptOut(t *testing.T) {
+	notice := serverJobRateLimitNotice()
+
+	assert.Contains(t, notice, "server job")
+	assert.Contains(t, notice, "--no-ssh-rate-limit=false")
+	assert.NotContains(t, notice, "from Windows.")
+	assert.Contains(t, notice, "Ubuntu and Debian", "the option controls SSH rate limiting in kip's UFW setup")
+}
+
+func TestStoppedJobErrorPointsAtTheJournal(t *testing.T) {
+	err := stoppedJobError("203.0.113.10", "run-20261015-010203-abcd1234", "interrupted")
+
+	assert.Contains(t, err.Error(), "interrupted")
+	assert.Contains(t, err.Error(), "journalctl -u kipper-install-run-20261015-010203-abcd1234")
+	assert.Contains(t, err.Error(), "kip install again retries it")
+}

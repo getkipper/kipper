@@ -20,7 +20,9 @@ func TestFirewallAckRoundTrip(t *testing.T) {
 
 	var log syncBuffer
 	done := make(chan error, 1)
-	go func() { done <- AwaitFirewallAck(dir, "run-1", &log, 5*time.Second, 10*time.Millisecond) }()
+	go func() {
+		done <- AwaitFirewallAck(dir, "run-1", &log, "  Checking a new SSH connection...", 5*time.Second, 10*time.Millisecond)
+	}()
 
 	var nonce string
 	require.Eventually(t, func() bool {
@@ -42,10 +44,11 @@ func TestFirewallAckRoundTrip(t *testing.T) {
 
 	require.NoError(t, AckFirewall(root, "run-1", nonce))
 	require.NoError(t, <-done)
+	assert.True(t, strings.HasPrefix(log.String(), "  Checking a new SSH connection...\n"), "the job says which check it waits for")
 }
 
 func TestAwaitFirewallAckTimesOut(t *testing.T) {
-	err := AwaitFirewallAck(t.TempDir(), "run-1", &bytes.Buffer{}, 50*time.Millisecond, 10*time.Millisecond)
+	err := AwaitFirewallAck(t.TempDir(), "run-1", &bytes.Buffer{}, "check", 50*time.Millisecond, 10*time.Millisecond)
 	assert.ErrorContains(t, err, "did not confirm a new SSH connection")
 }
 
@@ -53,7 +56,7 @@ func TestAwaitFirewallAckIgnoresAnEarlierAcknowledgement(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, firewallAckPrefix+strings.Repeat("e", 32)), []byte(strings.Repeat("e", 32)+"\n"), 0o600))
 
-	err := AwaitFirewallAck(dir, "run-1", &bytes.Buffer{}, 50*time.Millisecond, 10*time.Millisecond)
+	err := AwaitFirewallAck(dir, "run-1", &bytes.Buffer{}, "check", 50*time.Millisecond, 10*time.Millisecond)
 
 	assert.Error(t, err)
 }
@@ -100,11 +103,11 @@ func (b *syncBuffer) String() string {
 
 func TestAwaitFirewallAckRepeatsItsMarker(t *testing.T) {
 	var log syncBuffer
-	_ = awaitFirewallAck(t.TempDir(), "run-1", &log, 200*time.Millisecond, 5*time.Millisecond, 40*time.Millisecond)
+	_ = awaitFirewallAck(t.TempDir(), "run-1", &log, "  Checking a new SSH connection...", 200*time.Millisecond, 5*time.Millisecond, 40*time.Millisecond)
 
 	markers := strings.Count(log.String(), FirewallCheckMarker+" run=run-1 nonce=")
 	assert.GreaterOrEqual(t, markers, 3)
-	assert.Equal(t, 1, strings.Count(log.String(), "Waiting for kip"), "the explanation is printed once")
+	assert.Equal(t, 1, strings.Count(log.String(), "Checking a new SSH connection"), "the explanation is printed once")
 }
 
 // Reconnecting clients may replay an earlier check after the current one is answered.
@@ -114,7 +117,7 @@ func TestAStaleAcknowledgementLeavesTheCurrentOneAlone(t *testing.T) {
 	require.NoError(t, os.Mkdir(dir, 0o700))
 	var log syncBuffer
 	done := make(chan error, 1)
-	go func() { done <- AwaitFirewallAck(dir, "run-1", &log, 5*time.Second, 50*time.Millisecond) }()
+	go func() { done <- AwaitFirewallAck(dir, "run-1", &log, "check", 5*time.Second, 50*time.Millisecond) }()
 	var nonce string
 	require.Eventually(t, func() bool {
 		for _, line := range strings.Split(log.String(), "\n") {

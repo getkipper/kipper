@@ -144,3 +144,12 @@ func TestRecordPushedEntryReplacesTheServersEntryForTheHost(t *testing.T) {
 	assert.Equal(t, "/root/.kip/clusters/old-name.yaml", entry.Kubeconfig)
 	assert.Equal(t, "shop", cfg.CurrentCluster, "the server's current cluster follows the rename")
 }
+
+func TestFreshConnectionMessagesNameEachCheck(t *testing.T) {
+	first, second, third := freshConnectionMessage(1), freshConnectionMessage(2), freshConnectionMessage(3)
+
+	assert.Contains(t, first, "before")
+	assert.Contains(t, second, "new firewall rules")
+	assert.NotEqual(t, first, second)
+	assert.Equal(t, second, third)
+}
