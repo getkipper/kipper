@@ -5,9 +5,9 @@ import (
 	"strings"
 )
 
-// operatorFirewalldCommand queries runtime rules for missing cluster access
-// and configurations this check cannot evaluate.
-func operatorFirewalldCommand(sshPort string) string {
+// operatorFirewalldCommand builds a shell command that reports missing cluster
+// access and runtime rules the check cannot evaluate.
+func operatorFirewalldCommand(sshPorts []string) string {
 	need := func(port, service string) string {
 		q := `firewall-cmd --zone="$ext" --query-port=` + port + " >/dev/null 2>&1"
 		if service != "" {
@@ -17,9 +17,13 @@ func operatorFirewalldCommand(sshPort string) string {
 		}
 		return q + " || echo MISSING:" + port + "; "
 	}
-	sshService := ""
-	if sshPort == "22" {
-		sshService = "ssh"
+	ssh := ""
+	for _, p := range sshPorts {
+		service := ""
+		if p == "22" {
+			service = "ssh"
+		}
+		ssh += need(p+"/tcp", service)
 	}
 	podPorts := ""
 	for _, p := range []string{"6443/tcp", kubeletPort + "/tcp", nodeExporterPort + "/tcp"} {
@@ -31,13 +35,13 @@ func operatorFirewalldCommand(sshPort string) string {
 		`ext=$( { [ -n "$dev" ] && firewall-cmd --get-zone-of-interface="$dev"; } 2>/dev/null || firewall-cmd --get-default-zone); ` +
 		`echo "ZONE:$ext"; ` +
 		`[ "$(firewall-cmd --query-panic 2>&1)" = no ] || echo PANIC; ` +
-		// Reject overrides that can invalidate port checks. The allow-host-ipv6
-		// policy is validated separately by CheckOperatorFirewalld.
+		// Reject overrides that can invalidate port checks. CheckOperatorFirewalld
+		// validates the stock IPv6 policy and retained Kipper policies separately.
 		`[ -z "$(firewall-cmd --zone="$ext" --list-rich-rules 2>&1)" ] || echo "UNSUPPORTED:rich rules in zone $ext"; ` +
 		`[ -z "$(firewall-cmd --zone="$ext" --list-forward-ports 2>&1)" ] || echo "UNSUPPORTED:forward ports in zone $ext"; ` +
-		`for p in $(firewall-cmd --get-policies 2>/dev/null); do if [ "$p" = allow-host-ipv6 ]; then echo STOCK-POLICY; else echo "UNSUPPORTED:policy $p"; fi; done; ` +
+		`for p in $(firewall-cmd --get-policies 2>/dev/null); do case "$p" in allow-host-ipv6) echo STOCK-POLICY ;; kipper-pods-in|kipper-pods-out) echo "KIPPER-POLICY:$p" ;; *) echo "UNSUPPORTED:policy $p" ;; esac; done; ` +
 		`[ -z "$(firewall-cmd --direct --get-all-chains 2>&1; firewall-cmd --direct --get-all-rules 2>&1; firewall-cmd --direct --get-all-passthroughs 2>&1)" ] || echo "UNSUPPORTED:direct configuration"; ` +
-		need(sshPort+"/tcp", sshService) +
+		ssh +
 		need("80/tcp", "http") +
 		need("443/tcp", "https") +
 		need("6443/tcp", "kube-apiserver") +
@@ -56,11 +60,11 @@ func operatorFirewalldCommand(sshPort string) string {
 // CheckOperatorFirewalld lists missing public and pod-network access and
 // unsupported runtime rules in an operator-managed firewall.
 func CheckOperatorFirewalld(client CommandRunner) ([]string, error) {
-	sshPort, err := readSSHPort(client)
+	sshPorts, err := readSSHPorts(client)
 	if err != nil {
 		return nil, err
 	}
-	out, err := client.Run(operatorFirewalldCommand(sshPort))
+	out, err := client.Run(operatorFirewalldCommand(sshPorts))
 	if err != nil {
 		return nil, fmt.Errorf("checking the running firewalld: %w", err)
 	}
@@ -72,6 +76,19 @@ func CheckOperatorFirewalld(client CommandRunner) ([]string, error) {
 		}
 		if problems := allowHostIPv6Problems(parseFirewalldInfo(strings.Split(info, "\n"))); len(problems) > 0 {
 			missing = append(missing, "the stock allow-host-ipv6 policy ("+strings.Join(problems, "; ")+")")
+		}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		name, ok := strings.CutPrefix(strings.TrimSpace(line), "KIPPER-POLICY:")
+		if !ok {
+			continue
+		}
+		info, err := client.Run("firewall-cmd --info-policy=" + shellQuote(name))
+		if err != nil {
+			return nil, fmt.Errorf("reading the %s policy: %w", name, err)
+		}
+		if problems := kipperPolicyProblems(name, parseFirewalldInfo(strings.Split(info, "\n"))); len(problems) > 0 {
+			missing = append(missing, "the "+name+" policy as Kipper wrote it ("+strings.Join(problems, "; ")+")")
 		}
 	}
 	zone := "public"

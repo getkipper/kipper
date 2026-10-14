@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/getkipper/kipper/kip/internal/infra"
 	"github.com/getkipper/kipper/kip/internal/installer"
@@ -28,9 +30,9 @@ Examples:
 func init() {
 	clusterHardenCmd.Flags().String("ssh-key", "", "path to SSH private key (defaults to ~/.ssh/id_ed25519)")
 	clusterHardenCmd.Flags().Bool("harden", true, "disable surplus host services exposed on public interfaces (e.g. rpcbind, Cockpit)")
-	clusterHardenCmd.Flags().Bool("firewall", true, "configure the host firewall for k3s: firewalld on Rocky, AlmaLinux and CentOS Stream; UFW elsewhere (preserves operator-managed firewalls unless --adopt-firewall is set)")
+	clusterHardenCmd.Flags().Bool("firewall", true, "configure the host firewall for k3s: firewalld on Rocky, AlmaLinux and CentOS Stream; UFW elsewhere (firewalld takeover requires --adopt-firewall or interactive consent)")
 	clusterHardenCmd.Flags().Bool("adopt-firewall", false, "take over an existing firewalld configuration on Rocky, AlmaLinux or CentOS Stream; replaces the public zone")
-	clusterHardenCmd.Flags().Bool("no-ssh-rate-limit", false, "open the SSH port outright instead of limiting it to six connections per thirty seconds per source; set this for CI, or when several operators share one NAT address")
+	clusterHardenCmd.Flags().Bool("no-ssh-rate-limit", false, "disable UFW SSH rate limiting on Ubuntu and Debian; useful for CI or operators sharing a NAT address")
 	clusterCmd.AddCommand(clusterHardenCmd)
 }
 
@@ -78,7 +80,8 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("auditing firewall: %w", err)
 	}
-	fwPlan := installer.PlanFirewall(fwAudit, firewall, adoptFirewall)
+	isTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+	fwPlan := installer.PlanFirewall(fwAudit, firewall, installer.AdoptionConsent(fwAudit, firewall, adoptFirewall, adoptionQuestion(isTTY)))
 	fmt.Print(fwPlan.Notice)
 	fmt.Println()
 

@@ -16,7 +16,9 @@ To join a cluster someone has already installed, follow [Team Access](/en/team-a
 - **An SSH key:** add the public key to the server's root account. You should be able to connect with `ssh root@your-server`. On Windows, kip can create the key and add its public key to the server.
 - **Provider firewall rules:** allow SSH and ports 80 and 443. Allow port 6443 from the addresses that will use the Kubernetes API, including your own computer.
 
-Kipper configures the server's firewall during installation: UFW on Ubuntu and Debian, firewalld on Rocky Linux, AlmaLinux and CentOS Stream. If an existing firewall is already active and managed separately, Kipper preserves it and reports that you need to maintain its rules. See [host security](/en/security#host-hardening) for details.
+Kipper configures the server's firewall during installation: UFW on Ubuntu and Debian, firewalld on Rocky Linux, AlmaLinux and CentOS Stream. Kipper preserves active firewalls you manage unless you grant permission to take over firewalld.
+
+When installing over SSH from a terminal, `kip install` asks before taking over an existing firewalld configuration. With `--via-server` or without a terminal, grant permission with `--adopt-firewall`. If you keep managing firewalld yourself, Kipper checks its rules and stops if required access is missing or rules cannot be evaluated. See [host security](/en/security#host-hardening) for details.
 
 The free `*.kipper.run` address works with Kipper-managed DNS. To use your own domain at install time, configure its [DNS records](/en/installation#dns-for-a-domain-you-run) first.
 

@@ -48,7 +48,7 @@ The kubelet runs with `protect-kernel-defaults`, so it refuses to start unless t
 
 **Existing firewall detected**
 
-Kipper preserves an existing firewall you manage. It reconfigures UFW only when the host carries its ownership marker, `/etc/kipper/firewall-managed`, and firewalld only on Rocky Linux, AlmaLinux and CentOS Stream when the host carries `/etc/kipper/firewalld-managed` or you pass `--adopt-firewall`. A running firewalld anywhere else is left to you.
+Kipper preserves active firewalls you manage unless you authorize firewalld adoption. It reconfigures active UFW when `/etc/kipper/firewall-managed` is present. On Rocky Linux, AlmaLinux and CentOS Stream, it reconfigures active firewalld when `/etc/kipper/firewalld-managed` is present or you grant permission with `--adopt-firewall`. When run over SSH from a terminal, `kip install` and `kip cluster harden` can also ask for permission. With `--via-server` or without a terminal, use the flag. On other distributions, you manage active firewalld yourself.
 
 `--firewall=false` skips firewall configuration. To take over an existing Kipper-managed firewall, remove the marker and maintain the rules yourself. Avoid changing firewall policy during an installation.
 
@@ -58,15 +58,15 @@ Cloud-side firewalls (Hetzner Cloud Firewall, AWS Security Groups, etc.) are ext
 
 **Firewall on the RHEL family**
 
-On Rocky Linux, AlmaLinux and CentOS Stream, Kipper configures firewalld before starting k3s. The public zone allows the SSH port and TCP ports 80, 443 and 6443, and keeps `dhcpv6-client`. Explicit port rules replace the stock `ssh` service; the `cockpit` service is removed. A `kipper-pods` zone covers the pod and service networks and allows TCP ports 6443, 10250 and 9100 to the host. Forwarding policies support pod internet access with masquerading and load balancer traffic to Traefik.
+On Rocky Linux, AlmaLinux and CentOS Stream, Kipper configures firewalld before starting k3s. The public zone allows every SSH port reported by `sshd -T` and TCP ports 80, 443 and 6443, and keeps `dhcpv6-client`. Explicit port rules replace the stock `ssh` service; the `cockpit` service is removed. A `kipper-pods` zone covers the pod and service networks and allows TCP ports 6443, 10250 and 9100 to the host. Forwarding policies support pod internet access with masquerading and load balancer traffic to Traefik.
 
-Kipper schedules a three-minute rollback timer before loading the rules. It then checks a fresh SSH connection; with `--via-server`, the computer running kip performs that check. If verification fails, Kipper attempts to restore the previous firewall immediately. The timer provides a fallback if the connection is lost before the change is committed. SSH is allowed without rate limiting on these hosts.
+Kipper schedules a three-minute rollback timer before changing firewall configuration files. After loading the rules, it checks a fresh SSH connection; with `--via-server`, the computer running kip performs that check. If verification fails, Kipper attempts to restore the previous firewall immediately. The timer provides a fallback if the connection is lost before the change is committed. SSH is allowed without rate limiting on these hosts.
 
 Kipper starts a stopped firewalld only when its saved configuration passes checks for stock or Kipper-managed settings. For an active firewall you manage, Kipper checks public ports on the internet-facing interface and pod access to host ports 6443, 10250 and 9100. It accepts a trusted pod zone and reports missing rules or custom rules it cannot evaluate. This check does not verify forwarding between pods and the internet.
 
 Use `--adopt-firewall` to let Kipper replace the public zone and add its pod zone and forwarding policies. Adoption requires saved settings that Kipper can safely replace and matching running rules, so rollback can restore the previous configuration. Run adoption over SSH or with `--via-server`; a standalone `--local` install cannot verify external SSH access.
 
-Kipper enables k3s's SELinux support and preserves the host's SELinux mode. The k3s installer handles the `k3s-selinux` policy package. On Rocky Linux, AlmaLinux and CentOS Stream 10, Kipper installs `kernel-modules-extra` for the running kernel if a required module is missing. If that package is unavailable, update the host, reboot and retry. With `--harden`, Kipper disables Cockpit socket activation where installed.
+Kipper enables k3s's SELinux support and preserves the host's SELinux mode. The k3s installer handles the `k3s-selinux` policy package. On Rocky Linux, AlmaLinux and CentOS Stream 10, Kipper installs `kernel-modules-extra` for the running kernel if a required module is missing. If that package is unavailable, update the host, reboot and retry. With `--harden`, Kipper disables Cockpit socket activation and stops its service when the socket listens on all interfaces.
 
 **Opting out**
 
@@ -87,7 +87,7 @@ kip cluster harden --cluster storefront  # specific cluster
 kip cluster harden --firewall=false   # only disable surplus services
 ```
 
-The command is idempotent. It runs the same audit as `kip install`, then disables `rpcbind` and Cockpit socket activation where installed. It configures UFW, or firewalld on Rocky Linux, AlmaLinux and CentOS Stream, under the same ownership rules as `kip install`, and accepts `--adopt-firewall` too.
+The command is idempotent. It runs the same audit as `kip install`, then disables installed `rpcbind` units and stops Cockpit when its socket listens on all interfaces. It configures UFW, or firewalld on Rocky Linux, AlmaLinux and CentOS Stream, under the same ownership rules as `kip install`, and accepts `--adopt-firewall` too. After loading firewalld, Kipper restarts k3s if it is running to restore its network rules. The restart can briefly interrupt pod networking.
 
 ### Security headers
 
