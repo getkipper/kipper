@@ -13,6 +13,7 @@ import (
 
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
+	"github.com/getkipper/kipper/kip/internal/velerolabel"
 )
 
 var backupGVR = schema.GroupVersionResource{
@@ -25,6 +26,12 @@ var restoreGVR = schema.GroupVersionResource{
 	Group:    "velero.io",
 	Version:  "v1",
 	Resource: "restores",
+}
+
+var podVolumeBackupGVR = schema.GroupVersionResource{
+	Group:    "velero.io",
+	Version:  "v1",
+	Resource: "podvolumebackups",
 }
 
 var scheduleGVR = schema.GroupVersionResource{
@@ -73,6 +80,7 @@ func init() {
 	backupRestoreCmd.Flags().String("namespace-mapping", "", "restore to a different namespace (format: source:target)")
 	backupRestoreCmd.Flags().String("namespace", "", "restore only a specific namespace")
 	backupRestoreCmd.Flags().String("resources", "", "restore only specific resource types (comma-separated, e.g. deployments,services,secrets)")
+	backupRestoreCmd.Flags().Bool("allow-partial", false, "restore a PartiallyFailed backup despite possible missing data")
 
 	backupCmd.AddCommand(backupCreateCmd)
 	backupCmd.AddCommand(backupListCmd)
@@ -212,10 +220,36 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 	nsMapping, _ := cmd.Flags().GetString("namespace-mapping")
 	namespace, _ := cmd.Flags().GetString("namespace")
 	resources, _ := cmd.Flags().GetString("resources")
+	allowPartial, _ := cmd.Flags().GetBool("allow-partial")
 
 	_, k8sClient, err := loadCurrentCluster()
 	if err != nil {
 		return err
+	}
+
+	ctx := context.Background()
+	backup, err := k8sClient.Dynamic().Resource(backupGVR).Namespace("velero").Get(ctx, backupName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("reading backup %s: %w", backupName, err)
+	}
+	// Volume backup details make partial-restore messages more specific.
+	// If the lookup fails, a general warning still explains the risk.
+	var volumes []unstructured.Unstructured
+	partial := false
+	if phase, _, _ := unstructured.NestedString(backup.Object, "status", "phase"); phase == "PartiallyFailed" {
+		partial = true
+		list, err := k8sClient.Dynamic().Resource(podVolumeBackupGVR).Namespace("velero").List(ctx, metav1.ListOptions{
+			LabelSelector: "velero.io/backup-name=" + velerolabel.ValidName(backupName),
+		})
+		if err == nil {
+			volumes = list.Items
+		}
+	}
+	if err := checkRestorable(backup, volumes, allowPartial); err != nil {
+		return err
+	}
+	if partial {
+		fmt.Print(partialRestoreWarning(backupName, volumes))
 	}
 
 	restoreName := "restore-" + backupName + "-" + time.Now().Format("150405")
@@ -257,7 +291,6 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	ctx := context.Background()
 	fmt.Printf("\n  Restoring from backup %s...\n", backupName)
 
 	_, err = k8sClient.Dynamic().Resource(restoreGVR).Namespace("velero").Create(ctx, restore, metav1.CreateOptions{})
@@ -268,6 +301,50 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  ✔  Restore %s started\n", restoreName)
 	fmt.Printf("  This may take several minutes for large datasets.\n\n")
 	return nil
+}
+
+// checkRestorable requires explicit opt-in for backups that may be incomplete.
+func checkRestorable(backup *unstructured.Unstructured, volumes []unstructured.Unstructured, allowPartial bool) error {
+	phase, _, _ := unstructured.NestedString(backup.Object, "status", "phase")
+	switch phase {
+	case "Completed":
+		return nil
+	case "PartiallyFailed":
+		if allowPartial {
+			return nil
+		}
+		failed := failedVolumes(volumes)
+		if len(failed) == 0 {
+			return fmt.Errorf("backup %s is PartiallyFailed: restored data or resources may be incomplete. Choose a Completed backup or pass --allow-partial to proceed", backup.GetName())
+		}
+		return fmt.Errorf("backup %s is PartiallyFailed: volume backups failed or were canceled for %s. Restored volumes may be missing data. Choose a Completed backup or pass --allow-partial to proceed", backup.GetName(), strings.Join(failed, ", "))
+	case "", "New", "Queued", "ReadyToStart", "InProgress", "WaitingForPluginOperations",
+		"WaitingForPluginOperationsPartiallyFailed", "Finalizing", "FinalizingPartiallyFailed":
+		return fmt.Errorf("backup %s is not ready to restore; wait for it to finish, then try again", backup.GetName())
+	default:
+		return fmt.Errorf("backup %s is %s and cannot be restored; choose a Completed backup", backup.GetName(), phase)
+	}
+}
+
+func failedVolumes(volumes []unstructured.Unstructured) []string {
+	var failed []string
+	for _, v := range volumes {
+		if p, _, _ := unstructured.NestedString(v.Object, "status", "phase"); p != "Failed" && p != "Canceled" {
+			continue
+		}
+		ns, _, _ := unstructured.NestedString(v.Object, "spec", "pod", "namespace")
+		pod, _, _ := unstructured.NestedString(v.Object, "spec", "pod", "name")
+		volume, _, _ := unstructured.NestedString(v.Object, "spec", "volume")
+		failed = append(failed, fmt.Sprintf("%s/%s volume %s", ns, pod, volume))
+	}
+	return failed
+}
+
+func partialRestoreWarning(backupName string, volumes []unstructured.Unstructured) string {
+	if failed := failedVolumes(volumes); len(failed) > 0 {
+		return fmt.Sprintf("  ⚠  Restoring PartiallyFailed backup %s: data may be missing from %s.\n", backupName, strings.Join(failed, ", "))
+	}
+	return fmt.Sprintf("  ⚠  Restoring PartiallyFailed backup %s: restored data or resources may be incomplete.\n", backupName)
 }
 
 func runBackupSchedules(cmd *cobra.Command, args []string) error {

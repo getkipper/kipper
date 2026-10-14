@@ -1075,6 +1075,9 @@ Every backup also skips cert-manager's transient issuance objects (CertificateRe
 | `--namespace` | No | — | Restore only a specific namespace |
 | `--namespace-mapping` | No | — | Restore to a different namespace (format: `source:target`) |
 | `--resources` | No | — | Restore only specific resource types (comma-separated) |
+| `--allow-partial` | No | `false` | Restore a `PartiallyFailed` backup despite potentially missing data or resources |
+
+Restore a `Completed` backup, or use `--allow-partial` for a `PartiallyFailed` backup. For partial backups, kip lists volumes with failed or canceled backups when details are available. Backups in other phases cannot be restored; wait for pending or running backups to finish.
 
 ## kip platform {#kip-platform}
 
