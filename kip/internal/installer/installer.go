@@ -454,6 +454,7 @@ func Run(opts Options) (*Result, error) {
 	if cfg, err := config.Load(); err == nil {
 		if existing := cfg.GetClusterByHost(opts.Host, clusterAddress); existing != nil {
 			clusterEntryName = existing.Name
+			fmt.Print(reinstallNameHint(existing, domainName))
 			// A reinstall registers nothing with the gateway, so inherit the
 			// token mirror rather than clearing it.
 			if gatewayToken == "" {
