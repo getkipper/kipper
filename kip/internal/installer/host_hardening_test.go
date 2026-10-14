@@ -127,3 +127,18 @@ func TestCockpitShutdownCommandFailsWhenSystemctlDoes(t *testing.T) {
 		assert.Error(t, cmd.Run(), failing)
 	}
 }
+
+func TestHardeningRunsRightAfterTheStoragePackages(t *testing.T) {
+	r := &storageHostRunner{
+		replies: map[string]string{"list-unit-files rpcbind.socket": "rpcbind.socket\n"},
+		fail:    map[string]error{"kubectl apply": errors.New("the API server went away")},
+	}
+
+	err := installLonghorn(r, debianHost, hardenAfterStoragePackages(true, r))
+
+	require.Error(t, err, "the manifest step fails")
+	all := strings.Join(r.commands, "\n")
+	assert.Contains(t, all, "systemctl mask rpcbind.socket", "hardening already ran")
+	assert.Less(t, strings.Index(all, "mask rpcbind.socket"), strings.Index(all, "kubectl apply"))
+	assert.Nil(t, hardenAfterStoragePackages(false, r), "--harden=false leaves services alone")
+}
