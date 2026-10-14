@@ -457,9 +457,6 @@ func TestReconcileBindingSecrets_RefusesToClobberAnObjectItDoesNotOwn(t *testing
 	assert.Equal(t, []byte("ours"), got.Data["NOT"], "the other owner's data must survive untouched")
 }
 
-// The Function twin of the credentials mapper. Untested until now, so a
-// rotation reaching bound Apps but not bound Functions would have looked
-// identical to everything working.
 func TestEnqueueFunctionsForServiceCredentials(t *testing.T) {
 	scheme := testScheme()
 	bound := &kipperv1.Function{
@@ -470,7 +467,11 @@ func TestEnqueueFunctionsForServiceCredentials(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "thumb", Namespace: "shop-test"},
 		Spec:       kipperv1.FunctionSpec{ServiceBindings: []kipperv1.ServiceBinding{{Name: "db"}}},
 	}
-	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(bound, shared).Build()
+	polling := &kipperv1.Function{
+		ObjectMeta: metav1.ObjectMeta{Name: "on-insert", Namespace: "shop-test"},
+		Spec:       kipperv1.FunctionSpec{Triggers: []kipperv1.FunctionTrigger{{Type: "postgres", Config: map[string]string{"source": "db", "table": "orders"}}}},
+	}
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(bound, shared, polling).Build()
 	r := &FunctionReconciler{Client: c, Scheme: scheme}
 
 	got := r.enqueueFunctionsForServiceCredentials(context.Background(),
@@ -480,7 +481,7 @@ func TestEnqueueFunctionsForServiceCredentials(t *testing.T) {
 	for _, req := range got {
 		woken[req.Name] = req.Namespace
 	}
-	assert.Equal(t, map[string]string{"resize": "shop-test", "thumb": "shop-test"}, woken,
+	assert.Equal(t, map[string]string{"resize": "shop-test", "thumb": "shop-test", "on-insert": "shop-test"}, woken,
 		"a function reading the shared credentials holds the rotated password too")
 }
 
