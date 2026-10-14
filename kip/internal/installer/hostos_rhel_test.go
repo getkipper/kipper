@@ -47,7 +47,7 @@ func TestHostTraits(t *testing.T) {
 	assert.False(t, debianHost.K3sSELinux())
 	assert.Equal(t, []string{"kernel-modules-extra"}, rhel10Host.KernelModulePackages())
 	assert.Empty(t, rhel9Host.KernelModulePackages())
-	assert.Equal(t, []string{"br_netfilter", "overlay", "iscsi_tcp"}, rhel10Host.KernelModules())
+	assert.Equal(t, []string{"br_netfilter", "overlay", "vxlan", "iscsi_tcp"}, rhel10Host.KernelModules())
 	assert.Empty(t, debianHost.KernelModules())
 }
 
@@ -85,7 +85,7 @@ func (h *moduleHost) Run(cmd string) (string, error) {
 }
 
 func TestEnsureKernelModulesInstallsWhatEL10Lacks(t *testing.T) {
-	h := &moduleHost{available: map[string]bool{"overlay": true, "iscsi_tcp": true}, providing: map[string][]string{"kernel-modules-extra": {"br_netfilter"}}}
+	h := &moduleHost{available: map[string]bool{"overlay": true, "iscsi_tcp": true}, providing: map[string][]string{"kernel-modules-extra": {"br_netfilter", "vxlan"}}}
 
 	require.NoError(t, ensureKernelModules(h, rhel10Host))
 

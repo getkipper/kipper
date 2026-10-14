@@ -327,10 +327,23 @@ func (c *Client) SurvivesSSHRateLimit() bool {
 
 // ConfirmFreshConnection runs true over a new SSH connection to verify that
 // the host accepts new sessions independently of the shared connection.
+// Retries tolerate transient handshake failures after a firewall reload.
 func (c *Client) ConfirmFreshConnection() error {
-	_, err := c.RunFresh("true")
+	var err error
+	for attempt := 1; attempt <= freshAttempts; attempt++ {
+		if _, err = c.RunFresh("true"); err == nil {
+			return nil
+		}
+		if attempt < freshAttempts {
+			time.Sleep(freshRetryDelay)
+		}
+	}
 	return err
 }
+
+const freshAttempts = 3
+
+var freshRetryDelay = 2 * time.Second
 
 // RunFresh runs command over a new SSH connection and returns combined stdout
 // and stderr. Bypassing multiplexing verifies that new connections are accepted.

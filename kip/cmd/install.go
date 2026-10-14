@@ -45,7 +45,7 @@ func init() {
 	installCmd.Flags().Bool("harden", true, "disable surplus host services exposed on public interfaces (e.g. rpcbind, Cockpit)")
 	installCmd.Flags().Bool("admin-kubeconfig", false, "write the shared k3s admin certificate to this machine instead of a per-operator OIDC kubeconfig; CI escape hatch. The certificate is unattributed and revocable only by rotation")
 	installCmd.Flags().Bool("no-login", false, "skip the inline sign-in; run kip auth login && kip auth verify later")
-	installCmd.Flags().Bool("firewall", true, "configure the host firewall for k3s: firewalld on Rocky, AlmaLinux and CentOS Stream; UFW elsewhere (preserves operator-managed firewalls unless --adopt-firewall is set)")
+	installCmd.Flags().Bool("firewall", true, "configure the host firewall for k3s: firewalld on Rocky, AlmaLinux and CentOS Stream; UFW elsewhere (firewalld takeover requires --adopt-firewall or interactive consent)")
 	installCmd.Flags().Bool("adopt-firewall", false, "take over an existing firewalld configuration on Rocky, AlmaLinux or CentOS Stream; replaces the public zone")
 	installCmd.Flags().String("request", "", requestFlagUsage)
 	_ = installCmd.Flags().MarkHidden("request")
@@ -55,7 +55,7 @@ func init() {
 	installCmd.Flags().Bool("local", false, "install on this machine; --host must reach it (for CI, cloud-init and provider user-data)")
 	installCmd.Flags().Bool("host-maps-here", false, "with --local: confirm that --host routes to this machine, such as through NAT")
 	installCmd.Flags().String("result", "", "with --local: save a result file to import on your management machine with 'kip cluster add --install-result'")
-	installCmd.Flags().Bool("no-ssh-rate-limit", false, "open the SSH port outright instead of limiting it to six connections per thirty seconds per source; set this for CI, or when several operators share one NAT address")
+	installCmd.Flags().Bool("no-ssh-rate-limit", false, "disable UFW SSH rate limiting on Ubuntu and Debian; useful for CI or operators sharing a NAT address")
 	installCmd.Flags().StringSlice("dns-resolver", nil, "upstream DNS resolver CoreDNS forwards external queries to (repeatable; default 1.1.1.1, 8.8.8.8, 9.9.9.9). Set for clusters that must reach internal/corporate DNS.")
 	installCmd.Flags().StringSlice("trusted-proxy", nil, "IP or CIDR whose X-Forwarded-* headers Traefik honours (repeatable). Set for clusters behind an external load balancer; the kipper.run gateway is trusted automatically.")
 
@@ -174,6 +174,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		Harden:             harden,
 		Firewall:           firewall,
 		AdoptFirewall:      adoptFirewall,
+		ConfirmAdoption:    adoptionQuestion(isTTY),
 		NoSSHRateLimit:     noSSHRateLimit,
 		BackupStorage:      backupStorage,
 		DNSResolvers:       dnsResolvers,
@@ -285,4 +286,11 @@ func resolveBackupStorage(cmd *cobra.Command) (*installer.BackupStorageConfig, e
 // anything gives it a version at all.
 func installingKipVersion() string {
 	return rootCmd.Version
+}
+
+func adoptionQuestion(isTTY bool) func(string) bool {
+	if !isTTY {
+		return nil
+	}
+	return confirm
 }

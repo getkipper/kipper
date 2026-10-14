@@ -76,14 +76,14 @@ func TestLocalClientUsesTheDriversConfirmation(t *testing.T) {
 }
 
 func TestRequireOperatorFirewalldRunsOnlyForALeftAloneFirewalld(t *testing.T) {
-	r := &storageHostRunner{replies: map[string]string{"get-zone-of-source": "", "query": ""}}
+	r := &storageHostRunner{replies: map[string]string{"sshd -T": "22\n", "get-zone-of-source": "", "query": ""}}
 	left := FirewallAudit{Existing: "firewalld", Adoptable: true}
 
 	require.NoError(t, requireOperatorFirewalld(r, rhel10Host, FirewallAudit{}, FirewallPlan{Configure: true}))
 	require.NoError(t, requireOperatorFirewalld(r, rhel10Host, left, FirewallPlan{Configure: true, Adopt: true}))
 	assert.Empty(t, r.commands, "nothing is checked when kip configures the firewall itself")
 
-	r.replies = map[string]string{"firewall-cmd": "MISSING:80/tcp\n"}
+	r.replies = map[string]string{"sshd -T": "22\n", "firewall-cmd": "MISSING:80/tcp\n"}
 	err := requireOperatorFirewalld(r, rhel10Host, left, FirewallPlan{})
 	assert.ErrorContains(t, err, "80/tcp open in zone public")
 
@@ -134,4 +134,29 @@ func TestRequireOperatorFirewalldRefusesTwoManagersOnTheRHELFamily(t *testing.T)
 
 	assert.ErrorContains(t, requireOperatorFirewalld(r, rhel10Host, both, FirewallPlan{}), "both running")
 	assert.NoError(t, requireOperatorFirewalld(r, debianHost, both, FirewallPlan{}), "Debian hosts keep their notice")
+}
+
+func TestAdoptionConsent(t *testing.T) {
+	adoptable := FirewallAudit{Existing: "firewalld", Adoptable: true}
+	yes := func(string) bool { return true }
+	no := func(string) bool { return false }
+
+	assert.True(t, adoptionConsent(Options{Firewall: true, AdoptFirewall: true}, FirewallAudit{}), "the flag is consent")
+	assert.True(t, adoptionConsent(Options{Firewall: true, ConfirmAdoption: yes}, adoptable))
+	assert.False(t, adoptionConsent(Options{Firewall: true, ConfirmAdoption: no}, adoptable))
+	assert.False(t, adoptionConsent(Options{Firewall: true}, adoptable), "no terminal, no flag, no consent")
+	assert.False(t, adoptionConsent(Options{Firewall: true, Local: true, ConfirmAdoption: yes}, adoptable), "a local install is not asked")
+	assert.False(t, adoptionConsent(Options{Firewall: false, ConfirmAdoption: yes}, adoptable), "--firewall=false is not asked")
+	assert.False(t, adoptionConsent(Options{Firewall: true, ConfirmAdoption: yes}, FirewallAudit{Existing: "ufw"}), "only an adoptable firewalld is asked about")
+}
+
+func TestExportedAdoptionConsent(t *testing.T) {
+	adoptable := FirewallAudit{Existing: "firewalld", Adoptable: true}
+	asked := ""
+	ask := func(q string) bool { asked = q; return true }
+
+	assert.True(t, AdoptionConsent(adoptable, true, false, ask))
+	assert.Contains(t, asked, "replaces the public zone")
+	assert.False(t, AdoptionConsent(adoptable, true, false, nil), "no terminal, no question")
+	assert.True(t, AdoptionConsent(FirewallAudit{}, true, true, nil), "the flag needs no question")
 }

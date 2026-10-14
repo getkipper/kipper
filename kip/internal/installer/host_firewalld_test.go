@@ -263,10 +263,10 @@ func TestConfigureFirewalldOnAFreshHost(t *testing.T) {
 
 	steps := []string{
 		"cp -a /etc/firewalld /etc/kipper/firewalld-backup-",
+		"systemd-run --quiet --unit=" + firewalldRollbackUnit + "-",
 		"mktemp '/etc/kipper/firewalld-managed",
 		"/etc/firewalld/zones/kipper-pods.xml",
 		"firewall-offline-cmd --check-config",
-		"systemd-run --quiet --unit=" + firewalldRollbackUnit + "-",
 		"systemctl enable --now firewalld",
 		commitMarker,
 		"systemctl restart k3s",
@@ -458,7 +458,7 @@ type localHost struct{ *firewalldHost }
 func (localHost) ConfirmFreshConnection() error { return localrun.ErrNoConnection }
 
 func TestConfigureFirewalldLocally(t *testing.T) {
-	ours := wantFirewalld("22").files()
+	ours := wantFirewalld([]string{"22"}).files()
 
 	t.Run("starts a stopped stock firewall", func(t *testing.T) {
 		h := newFirewalldHost(t)
@@ -497,7 +497,7 @@ func TestConfigureFirewalldLocally(t *testing.T) {
 }
 
 func TestFirewalldMismatches(t *testing.T) {
-	want := wantFirewalld("22")
+	want := wantFirewalld([]string{"22"})
 	require.Empty(t, firewalldMismatches(loadedFirewalld, want))
 
 	cases := map[string]struct{ old, new, problem string }{
@@ -538,11 +538,11 @@ func TestFirewalldMismatches(t *testing.T) {
 // firewalld 2.x adds fields and marks the default zone on its info line.
 func TestFirewalldMismatchesReadsFirewalld2(t *testing.T) {
 	state := strings.Replace(loadedFirewalld, "public (active)\n  target: default", "public (default, active)\n  target: default\n  ingress-priority: 0\n  egress-priority: 0", 1)
-	assert.Empty(t, firewalldMismatches(state, wantFirewalld("22")))
+	assert.Empty(t, firewalldMismatches(state, wantFirewalld([]string{"22"})))
 }
 
 func TestFirewalldSavedChanges(t *testing.T) {
-	want := wantFirewalld("22")
+	want := wantFirewalld([]string{"22"})
 	stock := firewalldSavedConfig{inventory: stockInventory, conf: "DefaultZone=public\n", public: stockPublicZone}
 	assert.Empty(t, stock.changes(false, false, want))
 	assert.Empty(t, firewalldSavedConfig{inventory: "f firewalld.conf\n"}.changes(false, false, want), "an image without a public zone file is stock")
@@ -571,7 +571,7 @@ func TestFirewalldSavedChanges(t *testing.T) {
 }
 
 func TestFirewalldFiles(t *testing.T) {
-	files := wantFirewalld("2222").files()
+	files := wantFirewalld([]string{"2222"}).files()
 
 	for path, content := range files {
 		var v any
@@ -654,6 +654,11 @@ func (h *rollbackHost) sh(t *testing.T, env []string, script string, args ...str
 	return string(out), err
 }
 
+func (h *rollbackHost) markLoaded(t *testing.T) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(h.run.loaded(), nil, 0o600))
+}
+
 func (h *rollbackHost) callLog() string {
 	b, _ := os.ReadFile(h.calls)
 	return string(b)
@@ -663,11 +668,12 @@ func TestFirewalldRollbackRestoresTheSavedFirewall(t *testing.T) {
 	h := newRollbackHost(t)
 	h.write(t, "/etc/firewalld/zones/public.xml", "before")
 	h.backUp(t)
+	h.markLoaded(t)
 	h.write(t, "/etc/firewalld/zones/public.xml", "kipper's")
 	h.write(t, "/etc/firewalld/zones/kipper-pods.xml", "kipper's")
 	h.write(t, firewalldClaimPath, "claim")
 
-	out, err := h.sh(t, nil, h.run.rollbackScript(true, false))
+	out, err := h.sh(t, nil, h.run.rollbackScript(true, false, false))
 
 	require.NoError(t, err, out)
 	assert.Equal(t, "before", h.read("/etc/firewalld/zones/public.xml"))
@@ -683,7 +689,7 @@ func TestFirewalldRollbackOfFilesOnlyLeavesTheRunningFirewall(t *testing.T) {
 	h.backUp(t)
 	h.write(t, "/etc/firewalld/zones/public.xml", "kipper's")
 
-	out, err := h.sh(t, nil, h.run.rollbackScript(true, true), "files")
+	out, err := h.sh(t, nil, h.run.rollbackScript(true, false, true), "files")
 
 	require.NoError(t, err, out)
 	assert.Equal(t, "before", h.read("/etc/firewalld/zones/public.xml"))
@@ -694,8 +700,9 @@ func TestFirewalldRollbackOfFilesOnlyLeavesTheRunningFirewall(t *testing.T) {
 func TestFirewalldRollbackStopsAFirewallThatWasStopped(t *testing.T) {
 	h := newRollbackHost(t)
 	h.backUp(t)
+	h.markLoaded(t)
 
-	out, err := h.sh(t, nil, h.run.rollbackScript(false, true))
+	out, err := h.sh(t, nil, h.run.rollbackScript(false, false, true))
 
 	require.NoError(t, err, out)
 	assert.Contains(t, h.callLog(), "systemctl disable --now firewalld")
@@ -707,7 +714,7 @@ func TestFirewalldRollbackRefusesAnIncompleteBackup(t *testing.T) {
 	h.write(t, "/etc/firewalld/zones/public.xml", "kipper's")
 	require.NoError(t, os.MkdirAll(h.run.backup()+"/etc", 0o700))
 
-	_, err := h.sh(t, nil, h.run.rollbackScript(true, false))
+	_, err := h.sh(t, nil, h.run.rollbackScript(true, false, false))
 
 	require.Error(t, err)
 	assert.Equal(t, "kipper's", h.read("/etc/firewalld/zones/public.xml"), "the live configuration is not removed")
@@ -717,10 +724,11 @@ func TestFirewalldRollbackRefusesAnIncompleteBackup(t *testing.T) {
 func TestFirewalldRollbackFailsWhenNothingReloads(t *testing.T) {
 	h := newRollbackHost(t)
 	h.backUp(t)
+	h.markLoaded(t)
 
 	h.write(t, firewalldClaimPath, "claim")
 
-	_, err := h.sh(t, []string{"FAKE_FIREWALL_CMD_EXIT=1", "FAKE_SYSTEMCTL_EXIT=1"}, h.run.rollbackScript(true, false))
+	_, err := h.sh(t, []string{"FAKE_FIREWALL_CMD_EXIT=1", "FAKE_SYSTEMCTL_EXIT=1"}, h.run.rollbackScript(true, false, false))
 
 	assert.Error(t, err)
 	assert.Equal(t, "claim", h.read(firewalldClaimPath), "the claim stays until the restore has worked")
@@ -736,7 +744,7 @@ func TestFirewalldCommitAndRollbackExcludeEachOther(t *testing.T) {
 
 		out, err := h.sh(t, nil, h.run.commitCommand())
 		require.NoError(t, err, out)
-		out, err = h.sh(t, nil, h.run.rollbackScript(true, false))
+		out, err = h.sh(t, nil, h.run.rollbackScript(true, false, false))
 		require.NoError(t, err, out)
 
 		assert.Equal(t, "kipper's", h.read("/etc/firewalld/zones/public.xml"))
@@ -746,7 +754,7 @@ func TestFirewalldCommitAndRollbackExcludeEachOther(t *testing.T) {
 	t.Run("a run whose rollback began cannot commit", func(t *testing.T) {
 		h := newRollbackHost(t)
 		h.backUp(t)
-		out, err := h.sh(t, nil, h.run.rollbackScript(true, true))
+		out, err := h.sh(t, nil, h.run.rollbackScript(true, false, true))
 		require.NoError(t, err, out)
 
 		out, err = h.sh(t, nil, h.run.commitCommand())
@@ -808,7 +816,7 @@ func TestApplyFirewallPlanUsesFirewalldOnTheRHELFamily(t *testing.T) {
 func TestFirewalldLoadLosesToARollbackThatBegan(t *testing.T) {
 	h := newRollbackHost(t)
 	h.backUp(t)
-	out, err := h.sh(t, nil, h.run.rollbackScript(false, true))
+	out, err := h.sh(t, nil, h.run.rollbackScript(false, false, true))
 	require.NoError(t, err, out)
 	before := h.callLog()
 
@@ -868,7 +876,7 @@ func TestFirewalldRollbackReleasesTheReservation(t *testing.T) {
 	out, err := h.sh(t, nil, h.run.reserveCommand())
 	require.NoError(t, err, out)
 
-	out, err = h.sh(t, nil, h.run.rollbackScript(true, true))
+	out, err = h.sh(t, nil, h.run.rollbackScript(true, false, true))
 
 	require.NoError(t, err, out)
 	assert.Equal(t, "<missing>", h.read(strings.TrimPrefix(h.run.reservation(), h.root)))
@@ -892,7 +900,7 @@ func TestFirewalldFinishedRollbackIsTerminal(t *testing.T) {
 	b := firewalldRun{id: "bbbbbbbbbbbb", root: h.root}
 	h.write(t, "/etc/firewalld/zones/public.xml", "before")
 	h.backUp(t)
-	out, err := h.sh(t, nil, h.run.rollbackScript(false, false))
+	out, err := h.sh(t, nil, h.run.rollbackScript(false, false, false))
 	require.NoError(t, err, out)
 
 	out, err = h.sh(t, nil, b.reserveCommand())
@@ -903,7 +911,7 @@ func TestFirewalldFinishedRollbackIsTerminal(t *testing.T) {
 	require.NoError(t, err, out)
 	calls := h.callLog()
 
-	out, err = h.sh(t, nil, h.run.rollbackScript(false, false))
+	out, err = h.sh(t, nil, h.run.rollbackScript(false, false, false))
 
 	require.NoError(t, err, out)
 	assert.Contains(t, out, "no longer holds the reservation")
@@ -931,7 +939,7 @@ func TestFirewalldTakeoverShutsOutTheFormerOwner(t *testing.T) {
 	out, err = h.sh(t, nil, h.run.commitCommand())
 	require.Error(t, err, out)
 
-	out, err = h.sh(t, nil, h.run.rollbackScript(true, false))
+	out, err = h.sh(t, nil, h.run.rollbackScript(true, false, false))
 	require.NoError(t, err, out)
 	assert.Contains(t, out, "no longer holds the reservation")
 	assert.Equal(t, calls, h.callLog(), "nothing is started, reloaded or stopped")
@@ -956,8 +964,7 @@ func TestRollBackFirewalldSaysWhenAnotherRunOwnsTheFirewall(t *testing.T) {
 	assert.NotContains(t, err.Error(), "restored")
 }
 
-// Another run may change the host until this one holds the reservation, so
-// nothing kip decides on is read before it.
+// Reserve before inspecting firewall state to exclude cooperating runs.
 func TestConfigureFirewalldReservesBeforeLookingAtTheHost(t *testing.T) {
 	h := newFirewalldHost(t)
 
@@ -976,7 +983,7 @@ func TestConfigureFirewalldGivesTheReservationBackWhenItRefuses(t *testing.T) {
 		"unclaimed running firewall": func(h *firewalldHost) { h.active = true },
 		"saved changes":              func(h *firewalldHost) { h.inventory += "f zones/trusted.xml\n" },
 		"local, already matching": func(h *firewalldHost) {
-			h.active, h.claimed, h.ourFiles = true, true, wantFirewalld("22").files()
+			h.active, h.claimed, h.ourFiles = true, true, wantFirewalld([]string{"22"}).files()
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1042,4 +1049,89 @@ func TestStorageRestartStepsOnlyWhereNeedrestartRuns(t *testing.T) {
 	steps := storageRestartSteps(debianHost, &recordingRunner{})
 	require.Len(t, steps, 1)
 	assert.Equal(t, "Deferring storage-path restarts", steps[0].name)
+}
+
+func TestFirewalldRollbackBeforeTheLoadRestoresOnlyFiles(t *testing.T) {
+	h := newRollbackHost(t)
+	h.write(t, "/etc/firewalld/zones/public.xml", "before")
+	h.backUp(t)
+	h.write(t, "/etc/firewalld/zones/public.xml", "half written")
+
+	out, err := h.sh(t, nil, h.run.rollbackScript(false, false, false))
+
+	require.NoError(t, err, out)
+	assert.Equal(t, "before", h.read("/etc/firewalld/zones/public.xml"))
+	assert.NotContains(t, h.callLog(), "disable")
+	assert.NotContains(t, h.callLog(), "firewall-cmd")
+}
+
+func TestFirewalldRollbackKeepsAnEnabledFirewallEnabled(t *testing.T) {
+	h := newRollbackHost(t)
+	h.backUp(t)
+	h.markLoaded(t)
+
+	out, err := h.sh(t, nil, h.run.rollbackScript(false, true, true))
+
+	require.NoError(t, err, out)
+	assert.Contains(t, h.callLog(), "systemctl stop firewalld")
+	assert.NotContains(t, h.callLog(), "disable")
+}
+
+func TestReadSSHPorts(t *testing.T) {
+	ports, err := readSSHPorts(&storageHostRunner{replies: map[string]string{"sshd -T": "22\n2222\n22\n"}})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"22", "2222"}, ports, "every port, once")
+
+	_, err = readSSHPorts(&storageHostRunner{replies: map[string]string{"sshd -T": ""}})
+	assert.ErrorContains(t, err, "left the firewall alone", "no guessing at port 22")
+
+	_, err = readSSHPorts(&storageHostRunner{replies: map[string]string{"sshd -T": "22;reboot\n"}})
+	assert.Error(t, err)
+}
+
+func TestFirewalldOpensEverySSHPort(t *testing.T) {
+	files := wantFirewalld([]string{"22", "2222"}).files()
+	assert.Contains(t, files["zones/public.xml"], `<port port="22" protocol="tcp"/>`)
+	assert.Contains(t, files["zones/public.xml"], `<port port="2222" protocol="tcp"/>`)
+}
+
+func TestFirewalldPublicPortsAreUnique(t *testing.T) {
+	assert.Equal(t, []string{"443/tcp", "22/tcp", "80/tcp", "6443/tcp"}, wantFirewalld([]string{"443", "22"}).publicPorts)
+}
+
+func TestFirewalldRollbackRestartsARunningK3s(t *testing.T) {
+	h := newRollbackHost(t)
+	h.backUp(t)
+	h.markLoaded(t)
+
+	out, err := h.sh(t, nil, h.run.rollbackScript(true, true, true))
+
+	require.NoError(t, err, out)
+	assert.Contains(t, h.callLog(), "systemctl restart k3s")
+}
+
+func TestFirewalldConfTolerantOfSpaces(t *testing.T) {
+	c := firewalldSavedConfig{inventory: stockInventory, conf: "DefaultZone = public\nAllowZoneDrifting= no\n", public: stockPublicZone}
+	assert.Empty(t, c.changes(false, false, wantFirewalld([]string{"22"})))
+
+	c.conf = "DefaultZone = drop\nAllowZoneDrifting = yes\n"
+	changes := strings.Join(c.changes(false, false, wantFirewalld([]string{"22"})), "\n")
+	assert.Contains(t, changes, `default zone "drop"`, "spaces around = do not hide a change")
+	assert.Contains(t, changes, "zone drifting")
+}
+
+func TestFirewalldRollbackFinishesWhenK3sWillNotRestart(t *testing.T) {
+	h := newRollbackHost(t)
+	h.backUp(t)
+	h.markLoaded(t)
+	h.write(t, firewalldClaimPath, "claim")
+	//nolint:gosec // the fake command has to be executable
+	require.NoError(t, os.WriteFile(filepath.Join(h.bin, "systemctl"), []byte("#!/bin/sh\ncase \"$*\" in *\"restart k3s\"*) exit 1 ;; esac\nexit 0\n"), 0o755))
+
+	out, err := h.sh(t, nil, h.run.rollbackScript(true, true, false))
+
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "k3s did not restart")
+	assert.Equal(t, "<missing>", h.read(firewalldClaimPath), "the adoption claim is handed back")
+	assert.Equal(t, "<missing>", h.read(strings.TrimPrefix(h.run.reservation(), h.root)))
 }

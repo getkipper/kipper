@@ -48,9 +48,15 @@ type firewalldWant struct {
 	podSources     []string
 }
 
-func wantFirewalld(sshPort string) firewalldWant {
+func wantFirewalld(sshPorts []string) firewalldWant {
+	var public []string
+	for _, p := range append(append([]string{}, sshPorts...), "80", "443", "6443") {
+		if !containsString(public, p+"/tcp") {
+			public = append(public, p+"/tcp")
+		}
+	}
 	return firewalldWant{
-		publicPorts:    []string{sshPort + "/tcp", "80/tcp", "443/tcp", "6443/tcp"},
+		publicPorts:    public,
 		publicServices: []string{"dhcpv6-client"},
 		podPorts:       []string{"6443/tcp", kubeletPort + "/tcp", nodeExporterPort + "/tcp"},
 		podSources:     []string{k3sPodCIDR, k3sServiceCIDR},
@@ -95,6 +101,32 @@ func (w firewalldWant) files() map[string]string {
 			p.name, p.ingress, p.egress, masquerade)
 	}
 	return files
+}
+
+var sshPortPattern = regexp.MustCompile(`^[1-9][0-9]{0,4}$`)
+
+// readSSHPorts reads all configured ports from sshd -T so firewall rules
+// preserve access through each SSH port.
+func readSSHPorts(client CommandRunner) ([]string, error) {
+	out, err := client.Run(`sshd -T 2>/dev/null | awk '$1 == "port" {print $2}'`)
+	if err != nil {
+		return nil, fmt.Errorf("reading sshd's ports: %w", err)
+	}
+	var ports []string
+	seen := map[string]bool{}
+	for _, p := range strings.Fields(out) {
+		if !sshPortPattern.MatchString(p) {
+			return nil, fmt.Errorf("sshd reported %q, which is not a port", p)
+		}
+		if !seen[p] {
+			seen[p] = true
+			ports = append(ports, p)
+		}
+	}
+	if len(ports) == 0 {
+		return nil, fmt.Errorf("could not read the ports sshd listens on (sshd -T printed none), so kip left the firewall alone")
+	}
+	return ports, nil
 }
 
 // firewalldStockFiles are the files a freshly installed firewalld may carry in
@@ -142,6 +174,7 @@ func (c firewalldSavedConfig) changes(claimed, adopting bool, want firewalldWant
 
 	for _, line := range strings.Split(c.conf, "\n") {
 		key, value, _ := strings.Cut(strings.TrimSpace(line), "=")
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
 		switch {
 		case key == "DefaultZone" && value != "public":
 			changes = append(changes, fmt.Sprintf("default zone %q", value))
@@ -406,20 +439,7 @@ func firewalldMismatches(state string, want firewalldWant) []string {
 			problems = append(problems, "policy "+p.name+" is not loaded")
 			continue
 		}
-		info := parseFirewalldInfo(sections["policy "+p.name])
-		what := "policy " + p.name
-		masquerade := "no"
-		if p.masquerade {
-			masquerade = "yes"
-		}
-		expect(what, info, "target", []string{"ACCEPT"})
-		expect(what, info, "priority", []string{"-1"})
-		expect(what, info, "ingress-zones", []string{p.ingress})
-		expect(what, info, "egress-zones", []string{p.egress})
-		expect(what, info, "masquerade", []string{masquerade})
-		for _, f := range []string{"services", "ports", "protocols", "forward-ports", "source-ports", "rich rules"} {
-			expect(what, info, f, nil)
-		}
+		problems = append(problems, kipperPolicyProblems(p.name, parseFirewalldInfo(sections["policy "+p.name]))...)
 	}
 	for _, p := range policies {
 		if !expected[p] {
@@ -432,6 +452,37 @@ func firewalldMismatches(state string, want firewalldWant) []string {
 
 	sort.Strings(problems)
 	return problems
+}
+
+func kipperPolicyProblems(name string, info firewalldInfo) []string {
+	what := "policy " + name
+	var problems []string
+	expect := func(field string, want []string) {
+		if got, ok := info[field]; !ok {
+			problems = append(problems, fmt.Sprintf("%s does not report %s", what, field))
+		} else if !sameSet(got, want) {
+			problems = append(problems, fmt.Sprintf("%s %s is %q, want %q", what, field, strings.Join(got, " "), strings.Join(want, " ")))
+		}
+	}
+	for _, p := range firewalldPolicies {
+		if p.name != name {
+			continue
+		}
+		masquerade := "no"
+		if p.masquerade {
+			masquerade = "yes"
+		}
+		expect("target", []string{"ACCEPT"})
+		expect("priority", []string{"-1"})
+		expect("ingress-zones", []string{p.ingress})
+		expect("egress-zones", []string{p.egress})
+		expect("masquerade", []string{masquerade})
+		for _, f := range []string{"services", "ports", "protocols", "forward-ports", "source-ports", "rich rules"} {
+			expect(f, nil)
+		}
+		return problems
+	}
+	return []string{what + " is not one of Kipper's"}
 }
 
 // allowHostIPv6Problems checks the policy settings and permits only ICMPv6
@@ -503,13 +554,14 @@ func (r firewalldRun) state(name string) string { return r.root + firewalldState
 func (r firewalldRun) backup() string           { return r.state("firewalld-backup-" + r.id) }
 func (r firewalldRun) script() string           { return r.state("firewalld-rollback-" + r.id + ".sh") }
 func (r firewalldRun) committed() string        { return r.state("firewalld-" + r.id + ".committed") }
+func (r firewalldRun) loaded() string           { return r.state("firewalld-" + r.id + ".loaded") }
 func (r firewalldRun) started() string          { return r.state("firewalld-" + r.id + ".rollback") }
 func (r firewalldRun) unit() string             { return firewalldRollbackUnit + "-" + r.id }
 
-// rollbackScript restores saved files and reloads or stops firewalld according
-// to its previous state. The "files" argument restores only the saved files.
+// rollbackScript restores saved files and, if loading was attempted, restores
+// firewalld's prior service state. The "files" argument limits recovery to files.
 // Commit and rollback markers enforce mutual exclusion under the shared lock.
-func (r firewalldRun) rollbackScript(wasActive, wasClaimed bool) string {
+func (r firewalldRun) rollbackScript(wasActive, wasEnabled, wasClaimed bool) string {
 	etc := r.root + firewalldConfigDir
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n# Restore the saved firewall configuration.\nset -eu\n")
@@ -521,12 +573,18 @@ func (r firewalldRun) rollbackScript(wasActive, wasClaimed bool) string {
 	fmt.Fprintf(&b, "[ -e %s/complete ] || { echo 'the firewalld backup is incomplete' >&2; exit 1; }\n", r.backup())
 	fmt.Fprintf(&b, "rm -rf %[1]s.kipper-restore\ncp -a %[2]s/etc %[1]s.kipper-restore\nrm -rf %[1]s\nmv %[1]s.kipper-restore %[1]s\n", etc, r.backup())
 	fmt.Fprintf(&b, "if command -v restorecon >/dev/null 2>&1; then restorecon -R %s; fi\n", etc)
-	b.WriteString("if [ \"${1:-}\" != files ]; then\n")
-	if wasActive {
+	fmt.Fprintf(&b, "if [ \"${1:-}\" != files ] && [ -e %s ]; then\n", r.loaded())
+	switch {
+	case wasActive:
 		b.WriteString("  firewall-cmd --reload >/dev/null || systemctl restart firewalld\n")
-	} else {
+	case wasEnabled:
+		b.WriteString("  systemctl stop firewalld\n")
+	default:
 		b.WriteString("  systemctl disable --now firewalld\n")
 	}
+	// Restart k3s to restore its network rules. Report restart failures while
+	// allowing ownership cleanup to finish.
+	b.WriteString("  if systemctl is-active --quiet k3s; then systemctl restart k3s || echo 'k3s did not restart after the firewall was restored; restart it with systemctl restart k3s'; fi\n")
 	b.WriteString("fi\n")
 	if !wasClaimed {
 		b.WriteString("rm -f " + r.root + firewalldClaimPath + "\n")
@@ -559,7 +617,7 @@ func (r firewalldRun) locked(command string) string {
 func (r firewalldRun) reserveCommand() string {
 	return fmt.Sprintf(`(mkdir -p %[1]s && exec 9>%[2]s && flock 9 || exit 1; f=%[3]s; if [ -s "$f" ] && ! %[6]s; then other=$(cat "$f"); `+
 		`case "$other" in *[!0-9a-f]*) echo "$f holds $other, which is not a run" >&2; exit 1 ;; esac; `+
-		`if systemctl is-active --quiet "%[4]s-$other.timer" || [ -n "$(find "$f" -mmin -15)" ]; then echo "another firewall change ($other) is in progress" >&2; exit 1; fi; fi; `+
+		`if systemctl is-active --quiet "%[4]s-$other.timer" || [ -n "$(find "$f" -mmin -15)" ]; then echo "another firewall change ($other) is in progress; retry once its rollback timer is inactive and its reservation in $f is at least 15 minutes old" >&2; exit 1; fi; fi; `+
 		`printf '%%s\n' %[5]s > "$f.tmp" && mv -f "$f.tmp" "$f")`,
 		r.root+firewalldStateDir, r.root+firewalldLock, r.reservation(), firewalldRollbackUnit, r.id, r.owns())
 }
@@ -577,7 +635,7 @@ func (r firewalldRun) releaseLockedCommand() string {
 // already begun, then clears this run's rollback files.
 func (r firewalldRun) commitCommand() string {
 	return r.locked(fmt.Sprintf("touch %s && %s", r.committed(), r.releaseCommand())) +
-		fmt.Sprintf(" && { systemctl stop %s.timer >/dev/null 2>&1; rm -rf %s %s %s; }", r.unit(), r.backup(), r.script(), r.started())
+		fmt.Sprintf(" && { systemctl stop %s.timer >/dev/null 2>&1; rm -rf %s %s %s %s; }", r.unit(), r.backup(), r.script(), r.started(), r.loaded())
 }
 
 // pendingRollbackCommand prints any rollback unit still waiting or running.
@@ -595,7 +653,7 @@ func configureFirewalld(client FirewallRunner, host HostOS, adopt bool) error {
 		return fmt.Errorf("installing firewalld: %w", err)
 	}
 
-	sshPort, err := readSSHPort(client)
+	sshPorts, err := readSSHPorts(client)
 	if err != nil {
 		return err
 	}
@@ -609,20 +667,25 @@ func configureFirewalld(client FirewallRunner, host HostOS, adopt bool) error {
 	}
 	// Inspect after reserving so cooperating runs cannot change the configuration
 	// between inspection and application.
-	seen, err := inspectFirewalld(client, sshPort, adopt)
+	seen, err := inspectFirewalld(client, sshPorts, adopt)
 	if err != nil || seen.done {
 		if _, releaseErr := client.Run(run.releaseLockedCommand()); releaseErr != nil {
 			return errors.Join(err, fmt.Errorf("releasing the firewall reservation: %w", releaseErr))
 		}
 		return err
 	}
-	wasActive, wasClaimed, local, want := seen.wasActive, seen.wasClaimed, seen.local, seen.want
+	wasActive, local, want := seen.wasActive, seen.local, seen.want
 
-	if err := backUpFirewalld(client, run, wasActive, wasClaimed); err != nil {
+	if err := backUpFirewalld(client, run, seen); err != nil {
 		if _, releaseErr := client.Run(run.releaseLockedCommand()); releaseErr != nil {
 			return errors.Join(err, fmt.Errorf("releasing the firewall reservation: %w", releaseErr))
 		}
 		return err
+	}
+	// Arm recovery before changing firewall files in case the installer exits.
+	arm := fmt.Sprintf("systemd-run --quiet --unit=%s --on-active=%d --timer-property=RemainAfterElapse=no /bin/sh %s", run.unit(), firewalldRollbackSeconds, run.script())
+	if _, err := client.Run(run.locked(arm)); err != nil {
+		return fmt.Errorf("could not schedule firewall rollback; the new rules were not loaded: %w", errors.Join(err, rollBackFirewalld(client, run, false)))
 	}
 	if _, err := client.Run(run.locked(claimCommandFor(firewalldClaimPath, "firewalld configuration"))); err != nil {
 		return fmt.Errorf("claiming the firewall: %w", errors.Join(err, rollBackFirewalld(client, run, false)))
@@ -631,16 +694,11 @@ func configureFirewalld(client FirewallRunner, host HostOS, adopt bool) error {
 		return errors.Join(err, rollBackFirewalld(client, run, false))
 	}
 
-	arm := fmt.Sprintf("systemd-run --quiet --unit=%s --on-active=%d --timer-property=RemainAfterElapse=no /bin/sh %s", run.unit(), firewalldRollbackSeconds, run.script())
-	if _, err := client.Run(run.locked(arm)); err != nil {
-		return fmt.Errorf("could not schedule firewall rollback; the new rules were not loaded: %w", errors.Join(err, rollBackFirewalld(client, run, false)))
-	}
-
 	load := "systemctl enable --now firewalld"
 	if wasActive {
 		load = "firewall-cmd --reload"
 	}
-	if _, err := client.Run(run.locked(load + " >/dev/null")); err != nil {
+	if _, err := client.Run(run.locked("touch " + run.loaded() + " && " + load + " >/dev/null")); err != nil {
 		return fmt.Errorf("loading the firewalld configuration: %w", errors.Join(err, rollBackFirewalld(client, run, true)))
 	}
 
@@ -662,8 +720,7 @@ func configureFirewalld(client FirewallRunner, host HostOS, adopt bool) error {
 		return fmt.Errorf("could not confirm the firewall commit; automatic rollback was scheduled with a %d-second delay: %w", firewalldRollbackSeconds, err)
 	}
 
-	// Loading firewalld rebuilds its rules, so a running k3s restarts to put
-	// its own netfilter rules back.
+	// Restart running k3s to restore its network rules after loading firewalld.
 	if _, err := client.Run("if systemctl is-active --quiet k3s; then systemctl restart k3s; fi"); err != nil {
 		return fmt.Errorf("restarting k3s after loading the firewall: %w", err)
 	}
@@ -672,13 +729,13 @@ func configureFirewalld(client FirewallRunner, host HostOS, adopt bool) error {
 
 // firewalldSeen holds the inspection result for the reserved configuration attempt.
 type firewalldSeen struct {
-	wasActive, wasClaimed, local, done bool
-	want                               firewalldWant
+	wasActive, wasEnabled, wasClaimed, local, done bool
+	want                                           firewalldWant
 }
 
 // inspectFirewalld checks ownership, connectivity, and configuration before
 // making changes. The caller must hold the run's reservation.
-func inspectFirewalld(client FirewallRunner, sshPort string, adopt bool) (firewalldSeen, error) {
+func inspectFirewalld(client FirewallRunner, sshPorts []string, adopt bool) (firewalldSeen, error) {
 	audit, err := AuditFirewall(client)
 	if err != nil {
 		return firewalldSeen{}, fmt.Errorf("re-auditing firewall: %w", err)
@@ -711,7 +768,7 @@ func inspectFirewalld(client FirewallRunner, sshPort string, adopt bool) (firewa
 		return firewalldSeen{}, fmt.Errorf("taking over a running firewalld needs a check from outside the host, so kip left it alone; run kip install over SSH or with --via-server")
 	}
 
-	want := wantFirewalld(sshPort)
+	want := wantFirewalld(sshPorts)
 	saved, err := readFirewalldSaved(client)
 	if err != nil {
 		return firewalldSeen{}, err
@@ -721,7 +778,11 @@ func inspectFirewalld(client FirewallRunner, sshPort string, adopt bool) (firewa
 			strings.Join(changes, ", "), firewalldClaimPath)
 	}
 
-	seen := firewalldSeen{wasActive: wasActive, wasClaimed: wasClaimed, local: local, want: want}
+	enabled, err := client.Run("systemctl is-enabled firewalld 2>/dev/null || true")
+	if err != nil {
+		return firewalldSeen{}, fmt.Errorf("checking whether firewalld starts at boot: %w", err)
+	}
+	seen := firewalldSeen{wasActive: wasActive, wasEnabled: strings.TrimSpace(enabled) == "enabled", wasClaimed: wasClaimed, local: local, want: want}
 	if wasActive && local {
 		seen.done = true
 		return seen, checkLocalFirewalld(client, want)
@@ -780,14 +841,14 @@ func requireSavedMatchesRunning(client CommandRunner) error {
 	return nil
 }
 
-func backUpFirewalld(client CommandRunner, run firewalldRun, wasActive, wasClaimed bool) error {
+func backUpFirewalld(client CommandRunner, run firewalldRun, seen firewalldSeen) error {
 	backup := fmt.Sprintf("(set -e; mkdir -p %[1]s; rm -rf %[2]s; mkdir -p %[2]s; cp -a %[3]s %[2]s/etc; touch %[2]s/complete)",
 		firewalldStateDir, run.backup(), firewalldConfigDir)
 	if _, err := client.Run(run.locked(backup)); err != nil {
 		return fmt.Errorf("backing up the firewalld configuration: %w", err)
 	}
 	write := fmt.Sprintf("umask 077 && cat > %[1]s.tmp && mv -f %[1]s.tmp %[1]s", run.script())
-	if _, err := client.RunStdin(run.locked(write), strings.NewReader(run.rollbackScript(wasActive, wasClaimed))); err != nil {
+	if _, err := client.RunStdin(run.locked(write), strings.NewReader(run.rollbackScript(seen.wasActive, seen.wasEnabled, seen.wasClaimed))); err != nil {
 		return fmt.Errorf("writing the firewalld rollback: %w", err)
 	}
 	return nil
@@ -834,6 +895,9 @@ func rollBackFirewalld(client CommandRunner, run firewalldRun, loaded bool) erro
 		mode = ""
 	}
 	out, err := client.Run("/bin/sh " + run.script() + mode)
+	if err == nil && strings.Contains(out, "k3s did not restart") {
+		return fmt.Errorf("kip restored the previous firewall; k3s restart failed. Run systemctl restart k3s")
+	}
 	if err == nil && strings.Contains(out, "no longer holds the reservation") {
 		return fmt.Errorf("another firewall change holds the firewall now, so kip left it alone")
 	}

@@ -134,7 +134,7 @@ func (h HostOS) K3sSELinux() bool {
 // KernelModules returns the modules to check before installing k3s and Longhorn.
 func (h HostOS) KernelModules() []string {
 	if h.Family == FamilyRHEL {
-		return []string{"br_netfilter", "overlay", "iscsi_tcp"}
+		return []string{"br_netfilter", "overlay", "vxlan", "iscsi_tcp"}
 	}
 	return nil
 }

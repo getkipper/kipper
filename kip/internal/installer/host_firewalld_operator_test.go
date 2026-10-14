@@ -26,8 +26,9 @@ var (
 	policyRule  = ""
 	forwardZone = "none"
 	// extraSources adds lines to the active zone listing, quoted for printf.
-	extraSources = ""
-	panicAnswer  = "no"
+	extraSources    = ""
+	panicAnswer     = "no"
+	kipperOutTarget = "ACCEPT"
 )
 
 // operatorFirewalldWith can add a dropping rich rule in richZone and an extra policy.
@@ -47,6 +48,7 @@ func operatorFirewalldWith(t *testing.T, extZone, open, podZone, podTarget, podP
   *--list-forward-ports*) case "$*" in *"--zone=` + forwardZone + ` "*) echo "port=443:proto=tcp:toport=8443" ;; esac ;;
   *--get-all-passthroughs*) echo "` + directEntry + `" ;;
   *--direct*) ;;
+  *--info-policy=kipper-pods-out*) printf '%s\n' "kipper-pods-out (active)" "  priority: -1" "  target: ` + kipperOutTarget + `" "  ingress-zones: kipper-pods" "  egress-zones: public" "  services: " "  ports: " "  protocols: " "  masquerade: yes" "  forward-ports: " "  source-ports: " "  rich rules: " ;;
   *--info-policy=allow-host-ipv6*) printf '%s\n' "allow-host-ipv6 (active)" "  target: CONTINUE" "  ingress-zones: ANY" "  egress-zones: HOST" "  services: " "  ports: " "  protocols: " "  masquerade: no" "  forward-ports: " "  source-ports: " "  rich rules: " "	rule family=\"ipv6\" icmp-type name=\"neighbour-solicitation\" accept" "` + policyRule + `" ;;
   *--info-service=*) svc=${*#*--info-service=}; case "$svc" in
       ssh) echo "  ports: 22/tcp" ;; http) echo "  ports: 80/tcp" ;;
@@ -179,4 +181,15 @@ func TestCheckOperatorFirewalldReportsPanicMode(t *testing.T) {
 		assert.Equal(t, []string{"panic mode off"}, missing, answer)
 	}
 	panicAnswer = "no"
+}
+
+func TestCheckOperatorFirewalldAcceptsKipsLeftoverPolicies(t *testing.T) {
+	missing := operatorFirewalldWith(t, "public", "ssh http https 6443/tcp", "trusted", "ACCEPT", "", "", "kipper-pods-out")
+	assert.Empty(t, missing)
+
+	kipperOutTarget = "DROP"
+	defer func() { kipperOutTarget = "ACCEPT" }()
+	missing = operatorFirewalldWith(t, "public", "ssh http https 6443/tcp", "trusted", "ACCEPT", "", "", "kipper-pods-out")
+	require.Len(t, missing, 1)
+	assert.Contains(t, missing[0], "the kipper-pods-out policy as Kipper wrote it")
 }

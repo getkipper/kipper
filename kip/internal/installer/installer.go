@@ -44,6 +44,7 @@ type Options struct {
 	KubeconfigMode     KubeconfigMode
 	LoginGate          func(ctx context.Context, domain, dexHost, server string, caData []byte) GateResult
 	ConfirmConnection  func() error
+	ConfirmAdoption    func(question string) bool
 }
 
 // Result contains installation outputs, including those available after a failure.
@@ -73,6 +74,28 @@ var (
 type installStep struct {
 	name string
 	fn   func() error
+}
+
+// adoptionConsent requires --adopt-firewall for local installs, including
+// those driven over SSH.
+func adoptionConsent(opts Options, audit FirewallAudit) bool {
+	ask := opts.ConfirmAdoption
+	if opts.Local {
+		ask = nil
+	}
+	return AdoptionConsent(audit, opts.Firewall, opts.AdoptFirewall, ask)
+}
+
+// AdoptionConsent returns explicit consent or uses ask, when provided, for an
+// eligible running firewalld with firewall configuration enabled.
+func AdoptionConsent(audit FirewallAudit, firewall, adopt bool, ask func(question string) bool) bool {
+	if adopt {
+		return true
+	}
+	if !audit.Adoptable || !firewall || ask == nil {
+		return false
+	}
+	return ask("Allow kip to manage the running firewalld? This replaces the public zone and adds a pod zone and forwarding policies.")
 }
 
 // storageRestartSteps schedules needrestart configuration for Debian-family hosts.
@@ -119,7 +142,7 @@ func localClient(opts Options) hostRunner {
 // requireOwnFirewalldIntact verifies the queried runtime settings against kip's
 // expected configuration when the firewall step is skipped.
 func requireOwnFirewalldIntact(client CommandRunner) error {
-	sshPort, err := readSSHPort(client)
+	sshPorts, err := readSSHPorts(client)
 	if err != nil {
 		return err
 	}
@@ -127,7 +150,7 @@ func requireOwnFirewalldIntact(client CommandRunner) error {
 	if err != nil {
 		return fmt.Errorf("reading the running firewalld configuration: %w", err)
 	}
-	if problems := firewalldMismatches(state, wantFirewalld(sshPort)); len(problems) > 0 {
+	if problems := firewalldMismatches(state, wantFirewalld(sshPorts)); len(problems) > 0 {
 		return fmt.Errorf("the firewalld kip set up has changed since configuration (%s). Run the install with --firewall to restore kip's rules", strings.Join(problems, "; "))
 	}
 	return nil
@@ -290,7 +313,7 @@ func Run(opts Options) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auditing firewall: %w", err)
 	}
-	fwPlan := PlanFirewall(fwAudit, opts.Firewall, opts.AdoptFirewall)
+	fwPlan := PlanFirewall(fwAudit, opts.Firewall, adoptionConsent(opts, fwAudit))
 	if err := requireOperatorFirewalld(client, sysInfo.Host, fwAudit, fwPlan); err != nil {
 		return nil, err
 	}
