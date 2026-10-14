@@ -266,6 +266,13 @@ func TestConfigureFirewall_RefreshesPackageListsBeforeInstallingUFW(t *testing.T
 
 	require.NoError(t, configureFirewall(h, debianHost, false))
 
-	assert.Contains(t, h.ran[0], "apt-get update")
-	assert.Contains(t, h.ran[0], "apt-get install -y -qq ufw")
+	var install string
+	for _, cmd := range h.ran {
+		if strings.Contains(cmd, "apt-get install") {
+			install = cmd
+			break
+		}
+	}
+	assert.Contains(t, install, "apt-get update")
+	assert.Contains(t, install, "apt-get install -y -qq ufw")
 }

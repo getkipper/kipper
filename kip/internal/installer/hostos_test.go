@@ -1,7 +1,11 @@
 package installer
 
 import (
+	"bytes"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -79,3 +83,92 @@ type firewallOnly struct{ osReleaseRunner }
 func (firewallOnly) SurvivesSSHRateLimit() bool { return true }
 
 func (firewallOnly) ConfirmFreshConnection() error { return nil }
+
+func TestPackageInstallNoticeNamesThePackagesAndTheWait(t *testing.T) {
+	notice := packageInstallNotice([]string{"iscsi-initiator-utils", "nfs-utils"})
+
+	assert.Contains(t, notice, "iscsi-initiator-utils nfs-utils")
+	assert.Contains(t, notice, "package mirrors")
+	assert.Contains(t, notice, "few minutes")
+	assert.True(t, strings.HasSuffix(notice, "\n"))
+}
+
+type packageHost struct {
+	present bool
+	cmds    []string
+}
+
+func (h *packageHost) Run(cmd string) (string, error) {
+	h.cmds = append(h.cmds, cmd)
+	if strings.HasPrefix(cmd, "command -v ") && h.present {
+		return "present\n", nil
+	}
+	return "", nil
+}
+
+func (h *packageHost) RunStdin(cmd string, _ io.Reader) (string, error) { return h.Run(cmd) }
+
+func TestEnsureInstalledAnnouncesOnlyARealInstall(t *testing.T) {
+	missing := &packageHost{}
+	var out bytes.Buffer
+	assert.NoError(t, ensureInstalled(missing, "firewall-cmd", "firewalld", "dnf install -y -q firewalld", &out))
+	assert.Contains(t, out.String(), "Installing firewalld")
+	assert.Contains(t, strings.Join(missing.cmds, "\n"), "dnf install -y -q firewalld")
+
+	present := &packageHost{present: true}
+	out.Reset()
+	assert.NoError(t, ensureInstalled(present, "firewall-cmd", "firewalld", "dnf install -y -q firewalld", &out))
+	assert.Empty(t, out.String())
+	assert.NotContains(t, strings.Join(present.cmds, "\n"), "dnf install")
+}
+
+func TestInstallPackagesCommandWaitsForADnfLockWithinABound(t *testing.T) {
+	bin := t.TempDir()
+	calls := filepath.Join(bin, "calls")
+	writeFake := func(name, body string) {
+		//nolint:gosec // the fake commands have to be executable
+		require.NoError(t, os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body), 0o755))
+	}
+	run := func(cmd string) (string, error) {
+		c := exec.Command("sh", "-c", cmd+" >/dev/null")
+		c.Env = []string{"PATH=" + bin + ":/usr/bin:/bin"}
+		out, err := c.CombinedOutput()
+		return string(out), err
+	}
+	count := func() int {
+		got, _ := os.ReadFile(calls)
+		return strings.Count(string(got), "x")
+	}
+	writeFake("sleep", "exit 0\n")
+	cmd := HostOS{Family: FamilyRHEL}.InstallPackagesCommand(false, "firewalld")
+	assert.Contains(t, cmd, "--setopt=exit_on_lock=True")
+
+	writeFake("dnf", "echo x >> "+calls+"\n[ $(wc -l < "+calls+") -ge 3 ] && exit 0\nexit 200\n")
+	out, err := run(cmd)
+	require.NoError(t, err, out)
+	assert.Equal(t, 3, count(), "dnf was retried until the lock was free")
+
+	require.NoError(t, os.WriteFile(calls, nil, 0o600))
+	writeFake("dnf", "echo x >> "+calls+"\nexit 200\n")
+	out, err = run(cmd)
+	require.Error(t, err)
+	assert.Contains(t, out, "another package manager")
+
+	require.NoError(t, os.WriteFile(calls, nil, 0o600))
+	writeFake("dnf", "echo x >> "+calls+"\nexit 1\n")
+	_, err = run(cmd)
+	require.Error(t, err)
+	assert.Equal(t, 1, count(), "other dnf failures are not retried")
+
+	refreshed := HostOS{Family: FamilyRHEL}.InstallPackagesCommand(true, "firewalld")
+	assert.Contains(t, refreshed, "--refresh")
+	assert.Contains(t, refreshed, "--setopt=exit_on_lock=True")
+}
+
+func TestConfigureFirewallSkipsInstallingUFWThatIsThere(t *testing.T) {
+	h := &packageHost{present: true}
+	var out bytes.Buffer
+	require.NoError(t, ensureInstalled(h, "ufw", "ufw", "apt-get install -y -qq ufw", &out))
+	assert.Empty(t, out.String())
+	assert.NotContains(t, strings.Join(h.cmds, "\n"), "apt-get install")
+}

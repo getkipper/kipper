@@ -40,6 +40,7 @@ func installLonghorn(client CommandRunner, host HostOS, afterPackages func() err
 	if install == "" {
 		return fmt.Errorf("installing longhorn dependencies: kip cannot install packages on %s", host.ID)
 	}
+	fmt.Print(packageInstallNotice(host.StoragePackages()))
 	if _, err := client.Run(install); err != nil {
 		return fmt.Errorf("installing longhorn dependencies: %w", err)
 	}

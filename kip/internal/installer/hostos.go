@@ -93,12 +93,21 @@ func (h HostOS) InstallPackagesCommand(refresh bool, pkgs ...string) string {
 		}
 		return install
 	case FamilyRHEL:
+		install := "dnf install -y -q --setopt=exit_on_lock=True "
 		if refresh {
-			return "dnf install -y -q --refresh " + strings.Join(pkgs, " ")
+			install += "--refresh "
 		}
-		return "dnf install -y -q " + strings.Join(pkgs, " ")
+		install += strings.Join(pkgs, " ")
+		// Allow temporary package-manager locks to clear, with at most 60 attempts
+		// and ten-second waits between them. Only lock errors (exit 200) trigger retries.
+		return "(n=0; while :; do " + install + " && exit 0; rc=$?; [ \"$rc\" -eq 200 ] || exit \"$rc\"; " +
+			"n=$((n+1)); if [ \"$n\" -ge 60 ]; then echo 'dnf is still locked by another package manager after 60 attempts' >&2; exit 200; fi; sleep 10; done)"
 	}
 	return ""
+}
+
+func packageInstallNotice(pkgs []string) string {
+	return fmt.Sprintf("  ·  Installing %s from the server's package mirrors. This may take a few minutes.\n", strings.Join(pkgs, " "))
 }
 
 // StoragePackages returns Longhorn's iSCSI and NFS client packages, or nil for
