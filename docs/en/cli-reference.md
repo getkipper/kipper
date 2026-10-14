@@ -1073,7 +1073,7 @@ Every backup also skips cert-manager's transient issuance objects (CertificateRe
 | Flag | Required | Default | Description |
 |---|---|---|---|
 | `--namespace` | No | — | Restore only a specific namespace |
-| `--namespace-mapping` | No | — | Restore to a different namespace (format: `source:target`) |
+| `--namespace-mapping` | No | — | Restore only the source namespace into the target namespace (format: `source:target`). If set, `--namespace` must match the source. |
 | `--resources` | No | — | Restore only specific resource types (comma-separated) |
 | `--allow-partial` | No | `false` | Restore a `PartiallyFailed` backup despite potentially missing data or resources |
 
