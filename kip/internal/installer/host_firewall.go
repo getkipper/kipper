@@ -3,6 +3,7 @@ package installer
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -187,8 +188,8 @@ func configureFirewall(client CommandRunner, host HostOS, rateLimitSSH bool) err
 	if install == "" {
 		return fmt.Errorf("installing ufw: kip cannot install packages on %s", host.ID)
 	}
-	if _, err := client.Run(install + " >/dev/null"); err != nil {
-		return fmt.Errorf("installing ufw: %w", err)
+	if err := ensureInstalled(client, "ufw", "ufw", install, os.Stdout); err != nil {
+		return err
 	}
 
 	sshPort, err := readSSHPort(client)
