@@ -155,10 +155,17 @@ func TestInstallPackagesCommandWaitsForADnfLockWithinABound(t *testing.T) {
 	assert.Contains(t, out, "another package manager")
 
 	require.NoError(t, os.WriteFile(calls, nil, 0o600))
-	writeFake("dnf", "echo x >> "+calls+"\nexit 1\n")
-	_, err = run(cmd)
+	writeFake("dnf", "echo x >> "+calls+"\necho 'metadata already locked by 2297' >&2\nexit 200\n")
+	out, err = run(cmd)
+	require.Error(t, err)
+	assert.Equal(t, 1, strings.Count(out, "already locked"), "only the last attempt's lock message is shown")
+
+	require.NoError(t, os.WriteFile(calls, nil, 0o600))
+	writeFake("dnf", "echo x >> "+calls+"\necho 'No match for argument: firewalld' >&2\nexit 1\n")
+	out, err = run(cmd)
 	require.Error(t, err)
 	assert.Equal(t, 1, count(), "other dnf failures are not retried")
+	assert.Contains(t, out, "No match for argument", "other dnf failures keep their message")
 
 	refreshed := HostOS{Family: FamilyRHEL}.InstallPackagesCommand(true, "firewalld")
 	assert.Contains(t, refreshed, "--refresh")
