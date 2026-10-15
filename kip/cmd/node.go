@@ -98,7 +98,7 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Joining worker node to cluster...\n")
 	nodeName, err := installer.JoinWorkerNode(masterClient, workerClient, cluster.Host, identity)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w; resolve the error, then rerun 'kip node add --host %s' with the same options to retry with a fresh token", err, workerHost)
 	}
 	fmt.Printf("  ✔  Worker node %s joined the cluster as %s\n\n", workerHost, nodeName)
 

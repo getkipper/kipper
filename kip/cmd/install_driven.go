@@ -248,6 +248,7 @@ func drivenRequest(cmd *cobra.Command, host string) (installjob.Request, error) 
 		Harden:           boolean("harden"),
 		Firewall:         boolean("firewall"),
 		AdoptFirewall:    boolean("adopt-firewall"),
+		ChangeNetwork:    boolean("yes"),
 		// Allow maintenance bursts from Windows, which opens a connection per command.
 		NoSSHRateLimit: !flags.Changed("no-ssh-rate-limit") || boolean("no-ssh-rate-limit"),
 		DNSResolvers:   slice("dns-resolver"),

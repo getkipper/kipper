@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -22,7 +23,7 @@ func (h *hostScript) Run(command string) (string, error) {
 	h.commands = append(h.commands, command)
 	if strings.Contains(command, "mkdir "+apiServerLockPath) {
 		if h.lockHeld {
-			return lockHeldMarker + "\n", assert.AnError
+			return lockHeldMarker + " 42\n", assert.AnError
 		}
 		return lockAcquiredMarker + "\n", nil
 	}
@@ -672,6 +673,49 @@ func TestEveryRepairCommandIsFencedByTheLock(t *testing.T) {
 	for _, c := range host.commands[acquire+1 : len(host.commands)-1] {
 		assert.Contains(t, c, lockLostMarker, "command ran without checking the lock: %.80q", c)
 	}
+}
+
+// TestEveryFencedCommandRefreshesTheLock checks that command completion renews
+// ownership so the expiry threshold applies to idle time between commands.
+func TestEveryFencedCommandRefreshesTheLock(t *testing.T) {
+	host := hostWithConfig(oldConfig)
+
+	_, err := EnsureAPIServerConfig(host, nil)
+
+	require.NoError(t, err)
+	acquire := host.indexOf("mkdir " + apiServerLockPath)
+	require.GreaterOrEqual(t, acquire, 0)
+	for _, c := range host.commands[acquire+1 : len(host.commands)-1] {
+		owner := strings.Index(c, apiServerLockPath+"/owner")
+		refresh := strings.LastIndex(c, "touch -c "+apiServerLockPath)
+		if !assert.Greater(t, refresh, owner, "command ended without refreshing the lock: %.80q", c) {
+			continue
+		}
+		assert.Contains(t, c[refresh:], "exit $rc", "the refresh must not hide the command's exit status: %.80q", c)
+	}
+}
+
+func TestADeadOwnersLockIsReclaimedWithinMinutes(t *testing.T) {
+	host := hostWithConfig(oldConfig)
+
+	_, _, err := lockAPIServerConfig(host)
+
+	require.NoError(t, err)
+	acquire := host.commands[host.indexOf("mkdir "+apiServerLockPath)]
+	assert.LessOrEqual(t, apiServerLockTTL, 180, "a killed run must be recoverable within minutes")
+	assert.Contains(t, acquire, "-gt "+strconv.Itoa(apiServerLockTTL)+" ]", "the reclaim threshold is the TTL")
+	assert.Contains(t, acquire, "stat -c %Y "+apiServerLockPath, "idleness is read from the lock directory's mtime")
+}
+
+func TestTheRefusalNamesTheLockAge(t *testing.T) {
+	host := hostWithConfig(oldConfig)
+	host.lockHeld = true
+
+	_, err := EnsureAPIServerConfig(host, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "42 seconds ago")
+	assert.Contains(t, err.Error(), strconv.Itoa(apiServerLockTTL)+" seconds", "the operator learns how long a dead owner's lock lasts")
 }
 
 func TestTheReleaseHoldsTheGuard(t *testing.T) {

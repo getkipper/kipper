@@ -62,15 +62,23 @@ func ensureKernelModules(client CommandRunner, host HostOS) error {
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("kernel %s is missing required modules (%s). Run 'dnf update', reboot, and retry",
-			release, strings.Join(missing, ", "))
+		return fmt.Errorf("kernel %s could not load required modules (%s). %s, reboot, and retry",
+			release, strings.Join(missing, ", "), kernelUpdateHint(host))
 	}
 	return nil
 }
 
-// missingKernelModules uses modprobe's dry run to check module availability.
+func kernelUpdateHint(host HostOS) string {
+	if host.Family == FamilyRHEL {
+		return "Run 'dnf update'"
+	}
+	return "Run 'apt-get update && apt-get upgrade'"
+}
+
+// missingKernelModules attempts to load each module and reports failures.
+// Loading verifies compatibility with the running kernel before installation.
 func missingKernelModules(client CommandRunner, modules []string) ([]string, error) {
-	out, err := client.Run(fmt.Sprintf(`for m in %s; do modprobe -n -q "$m" 2>/dev/null || echo "MISSING:$m"; done`,
+	out, err := client.Run(fmt.Sprintf(`for m in %s; do modprobe -q "$m" 2>/dev/null || echo "MISSING:$m"; done`,
 		strings.Join(modules, " ")))
 	if err != nil {
 		return nil, fmt.Errorf("checking kernel modules: %w", err)
