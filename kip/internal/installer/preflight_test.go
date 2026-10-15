@@ -214,3 +214,19 @@ func TestRunPreflightChecks(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkerPreflightChecksTheKubeletPortOnly(t *testing.T) {
+	sys := SystemInfo{OS: "rocky", OSVersion: "10.2", RAMMB: 3000, DiskMB: 40960,
+		PortListeners: map[int][]string{80: {"nginx"}, 10250: {"k3s-agent"}}}
+	result, err := runPreflightChecks(sys, RoleWorker)
+	assert.NoError(t, err)
+	assert.Empty(t, result.Warnings)
+
+	sys.PortListeners = map[int][]string{10250: {"kubelet"}}
+	_, err = runPreflightChecks(sys, RoleWorker)
+	assert.ErrorContains(t, err, "10250 (kubelet)")
+
+	sys.PortListeners = map[int][]string{80: {"nginx"}}
+	_, err = runPreflightChecks(sys, RoleServer)
+	assert.ErrorContains(t, err, "80 (nginx)")
+}

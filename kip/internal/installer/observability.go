@@ -28,9 +28,8 @@ func InstallLokiWithResources(client CommandRunner, res platform.Resources) erro
 		return fmt.Errorf("applying Loki HelmChart: %w", err)
 	}
 
-	// Increase inotify limits for Promtail log file watching
-	_, _ = client.Run("sysctl -w fs.inotify.max_user_instances=512")
-	_, _ = client.Run("grep -q max_user_instances /etc/sysctl.d/99-kipper.conf 2>/dev/null || echo 'fs.inotify.max_user_instances=512' >> /etc/sysctl.d/99-kipper.conf")
+	// Apply the Promtail limit during upgrades too; workers receive it when joining.
+	_ = raiseInotifyLimit(client)
 
 	// Install Promtail to ship container logs to Loki
 	promtailCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%s\nKIPEOF", platform.PromtailHelmChart())

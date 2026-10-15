@@ -13,6 +13,10 @@ import (
 // GatherSystemInfo collects OS, RAM, disk, and port information from
 // the remote server over SSH.
 func GatherSystemInfo(client CommandRunner) (SystemInfo, error) {
+	return gatherSystemInfo(client, RoleServer)
+}
+
+func gatherSystemInfo(client CommandRunner, role HostRole) (SystemInfo, error) {
 	var info SystemInfo
 
 	host, err := DetectHostOS(client)
@@ -35,7 +39,7 @@ func GatherSystemInfo(client CommandRunner) (SystemInfo, error) {
 	}
 	info.DiskMB = disk
 
-	listeners, err := gatherPortListeners(client)
+	listeners, err := gatherPortListeners(client, role.requiredPorts())
 	if err != nil {
 		return info, fmt.Errorf("checking ports: %w", err)
 	}
@@ -77,9 +81,9 @@ func gatherDisk(client CommandRunner) (int, error) {
 
 // gatherPortListeners lists the processes listening on each required port,
 // keyed by port. A listener ss cannot attribute to a process maps to "".
-func gatherPortListeners(client CommandRunner) (map[int][]string, error) {
-	filters := make([]string, 0, len(requiredPorts))
-	for _, p := range requiredPorts {
+func gatherPortListeners(client CommandRunner, ports []int) (map[int][]string, error) {
+	filters := make([]string, 0, len(ports))
+	for _, p := range ports {
 		filters = append(filters, fmt.Sprintf("sport = :%d", p))
 	}
 	output, err := client.Run(fmt.Sprintf("ss -tlnpH '( %s )'", strings.Join(filters, " or ")))

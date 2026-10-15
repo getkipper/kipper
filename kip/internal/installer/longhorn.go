@@ -38,6 +38,30 @@ func InstallLonghornThen(client CommandRunner, afterPackages func() error) error
 	return installLonghorn(client, host, afterPackages)
 }
 
+// installStorageDependencies prepares a host for Longhorn. afterPackages runs
+// after package and service setup, before multipath configuration.
+func installStorageDependencies(client CommandRunner, host HostOS, afterPackages func() error) error {
+	if err := installStoragePackages(client, host, os.Stdout); err != nil {
+		return err
+	}
+	for _, svc := range host.StorageServices() {
+		if _, err := client.Run("systemctl enable --now " + svc); err != nil {
+			return fmt.Errorf("starting %s for longhorn: %w", svc, err)
+		}
+	}
+	if afterPackages != nil {
+		if err := afterPackages(); err != nil {
+			return err
+		}
+	}
+
+	// Exclude Longhorn devices from multipathd so kubelet can format them.
+	if err := configureMultipathForLonghorn(client); err != nil {
+		return fmt.Errorf("configuring multipathd for longhorn: %w", err)
+	}
+	return nil
+}
+
 func installStoragePackages(client CommandRunner, host HostOS, out io.Writer) error {
 	pkgs := host.StoragePackages()
 	install := host.InstallPackagesCommand(true, pkgs...)
@@ -59,29 +83,8 @@ func installStoragePackages(client CommandRunner, host HostOS, out io.Writer) er
 }
 
 func installLonghorn(client CommandRunner, host HostOS, afterPackages func() error) error {
-	if err := installStoragePackages(client, host, os.Stdout); err != nil {
+	if err := installStorageDependencies(client, host, afterPackages); err != nil {
 		return err
-	}
-	for _, svc := range host.StorageServices() {
-		if _, err := client.Run("systemctl enable --now " + svc); err != nil {
-			return fmt.Errorf("starting %s for longhorn: %w", svc, err)
-		}
-	}
-	if afterPackages != nil {
-		if err := afterPackages(); err != nil {
-			return err
-		}
-	}
-
-	// On hosts where multipath-tools is installed (Ubuntu cloud images
-	// often include it), multipathd will grab every Longhorn iSCSI
-	// device and hold it open as an mpath_member, so kubelet's mkfs.ext4
-	// on freshly-provisioned PVCs fails with "apparently in use by the
-	// system". The fix is the Longhorn-recommended blacklist of
-	// SCSI devices in multipath.conf, plus a reload. No-op on hosts
-	// without multipath-tools.
-	if err := configureMultipathForLonghorn(client); err != nil {
-		return fmt.Errorf("configuring multipathd for longhorn: %w", err)
 	}
 
 	url := fmt.Sprintf(

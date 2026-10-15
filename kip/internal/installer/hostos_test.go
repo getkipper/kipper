@@ -75,7 +75,7 @@ func TestEntryPointsStopWhenTheHostCannotBeRead(t *testing.T) {
 	unreadable := osReleaseRunner{out: "NAME=nothing\n"}
 
 	assert.ErrorContains(t, InstallLonghorn(unreadable), "could not determine OS")
-	assert.ErrorContains(t, configureFirewallWith(firewallOnly{unreadable}, false, FirewallConsent{}), "could not determine OS")
+	assert.ErrorContains(t, configureFirewallWith(firewallOnly{unreadable}, false, FirewallConsent{}, RoleServer), "could not determine OS")
 }
 
 type firewallOnly struct{ osReleaseRunner }

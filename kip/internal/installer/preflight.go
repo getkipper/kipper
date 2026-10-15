@@ -54,9 +54,6 @@ type SystemInfo struct {
 	PortListeners map[int][]string
 }
 
-// requiredPorts are the ports that must be free of other services for a Kipper cluster.
-var requiredPorts = []int{80, 443, 6443}
-
 // PreflightResult contains the outcome of preflight checks.
 type PreflightResult struct {
 	Warnings []string
@@ -65,6 +62,10 @@ type PreflightResult struct {
 // RunPreflightChecks validates that the target server meets the minimum
 // requirements for a Kipper installation.
 func RunPreflightChecks(sys SystemInfo) (*PreflightResult, error) {
+	return runPreflightChecks(sys, RoleServer)
+}
+
+func runPreflightChecks(sys SystemInfo, role HostRole) (*PreflightResult, error) {
 	result := &PreflightResult{}
 
 	if err := checkOS(sys); err != nil {
@@ -79,10 +80,14 @@ func RunPreflightChecks(sys SystemInfo) (*PreflightResult, error) {
 	if err := checkDisk(sys); err != nil {
 		return nil, err
 	}
-	if err := checkPorts(sys); err != nil {
+	if err := checkPorts(sys, role); err != nil {
 		return nil, err
 	}
 
+	// Platform resource profiles are selected during server setup.
+	if role == RoleWorker {
+		return result, nil
+	}
 	switch pickProfile(sys.RAMMB) {
 	case ProfileNano:
 		result.Warnings = append(result.Warnings,
@@ -140,9 +145,9 @@ func checkDisk(sys SystemInfo) error {
 	return nil
 }
 
-func checkPorts(sys SystemInfo) error {
+func checkPorts(sys SystemInfo, role HostRole) error {
 	var held []string
-	for _, p := range requiredPorts {
+	for _, p := range role.requiredPorts() {
 		var foreign []string
 		for _, name := range sys.PortListeners[p] {
 			if isK3s(name) {
@@ -168,8 +173,7 @@ func checkPorts(sys SystemInfo) error {
 	return nil
 }
 
-// isK3s reports whether a listener belongs to k3s itself, which holds 6443 on a
-// host where kip install is being re-run.
+// isK3s recognizes process names allowed to hold ports when setup is retried.
 func isK3s(process string) bool {
-	return process == "k3s-server" || process == "k3s"
+	return process == "k3s-server" || process == "k3s" || process == "k3s-agent"
 }

@@ -555,7 +555,10 @@ func containsString(list []string, s string) bool {
 
 // firewalldRun gives each attempt its own backup, markers, and rollback unit.
 // Tests use root to redirect paths into a temporary directory.
-type firewalldRun struct{ id, root string }
+type firewalldRun struct {
+	id, root string
+	role     HostRole
+}
 
 func newFirewalldRun() (firewalldRun, error) {
 	b := make([]byte, 6)
@@ -603,7 +606,8 @@ func (r firewalldRun) rollbackScript(wasActive, wasEnabled, wasClaimed bool) str
 	}
 	// Restart k3s to restore its network rules. Report restart failures while
 	// allowing ownership cleanup to finish.
-	b.WriteString("  if systemctl is-active --quiet k3s; then systemctl restart k3s || echo 'k3s did not restart after the firewall was restored; restart it with systemctl restart k3s'; fi\n")
+	unit := r.role.k3sUnit()
+	fmt.Fprintf(&b, "  if systemctl is-active --quiet %[1]s; then systemctl restart %[1]s || echo '%[2]s; restart it with systemctl restart %[1]s'; fi\n", unit, k3sRestartFailed)
 	b.WriteString("fi\n")
 	if !wasClaimed {
 		b.WriteString("rm -f " + r.root + firewalldClaimPath + "\n")
@@ -662,13 +666,16 @@ func (r firewalldRun) commitCommand() string {
 		fmt.Sprintf(" && { systemctl stop %[1]s.timer %[1]s.service >/dev/null 2>&1; rm -rf %s %s %s %s %s; }", r.unit(), r.backup(), r.script(), r.started(), r.loaded(), r.committed())
 }
 
+// k3sRestartFailed also identifies restart failures in rollback output.
+const k3sRestartFailed = "k3s did not restart after the firewall was restored"
+
 // pendingRollbackCommand prints any rollback unit still waiting or running.
 const pendingRollbackCommand = "systemctl list-units --all --no-legend --plain '" + firewalldRollbackUnit + "-*' | awk '($3 == \"active\" || $3 == \"activating\") && $4 != \"elapsed\" {print $1}'"
 
 // configureFirewalld backs up, loads, and verifies Kipper's configuration under
 // a rollback timer. SSH and server-driven runs verify a new SSH connection
 // before commit. Other local runs may start a stopped firewall or verify a matching one.
-func configureFirewalld(client FirewallRunner, host HostOS, consent FirewallConsent) error {
+func configureFirewalld(client FirewallRunner, host HostOS, consent FirewallConsent, role HostRole) error {
 	install := host.InstallPackagesCommand(false, "firewalld")
 	if install == "" {
 		return fmt.Errorf("installing firewalld: kip cannot install packages on %s", host.ID)
@@ -686,6 +693,7 @@ func configureFirewalld(client FirewallRunner, host HostOS, consent FirewallCons
 	if err != nil {
 		return fmt.Errorf("naming the firewall change: %w", err)
 	}
+	run.role = role
 	if _, err := client.Run(run.reserveCommand()); err != nil {
 		return fmt.Errorf("reserving the firewall for this change: %w", err)
 	}
@@ -745,8 +753,9 @@ func configureFirewalld(client FirewallRunner, host HostOS, consent FirewallCons
 	}
 
 	// Restart running k3s to restore its network rules after loading firewalld.
-	if _, err := client.Run("if systemctl is-active --quiet k3s; then systemctl restart k3s; fi"); err != nil {
-		return fmt.Errorf("restarting k3s after loading the firewall: %w", err)
+	unit := role.k3sUnit()
+	if _, err := client.Run(fmt.Sprintf("if systemctl is-active --quiet %[1]s; then systemctl restart %[1]s; fi", unit)); err != nil {
+		return fmt.Errorf("restarting %s after loading the firewall: %w", unit, err)
 	}
 	return nil
 }
@@ -939,8 +948,9 @@ func rollBackFirewalld(client CommandRunner, run firewalldRun, loaded bool) erro
 		return err == nil && strings.TrimSpace(out) == "restored"
 	}
 	out, err := client.Run("/bin/sh " + run.script() + mode)
-	if err == nil && strings.Contains(out, "k3s did not restart") {
-		return fmt.Errorf("kip restored the previous firewall; k3s restart failed. Run systemctl restart k3s")
+	if err == nil && strings.Contains(out, k3sRestartFailed) {
+		unit := run.role.k3sUnit()
+		return fmt.Errorf("kip restored the previous firewall; %[1]s restart failed. Run systemctl restart %[1]s", unit)
 	}
 	if err == nil && strings.Contains(out, "no longer holds the reservation") {
 		return fmt.Errorf("another firewall change holds the firewall now, so kip left it alone")
