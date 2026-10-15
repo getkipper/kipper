@@ -199,14 +199,32 @@ func EnsureServerRecord(client CommandRunner, host string) ([]NodeRecord, error)
 
 // UnrecordedNodes lists the cluster's nodes whose machine id has no record.
 // Two nodes sharing a machine id, or a node whose name differs from its
-// record's, are errors. A record with no name matches by machine id alone.
+// record's, are errors. A record with no name, or one still joining, matches
+// by machine id alone.
 func UnrecordedNodes(client CommandRunner, records []NodeRecord) ([]string, error) {
+	out, err := listNodeIdentities(client)
+	if err != nil {
+		return nil, err
+	}
+	return unrecordedIn(out, records)
+}
+
+func listNodeIdentities(client CommandRunner) (string, error) {
 	out, err := client.Run(`kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}|{.status.nodeInfo.machineID}{"\n"}{end}' 2>/dev/null`)
 	if err != nil {
-		return nil, fmt.Errorf("listing nodes: %w", err)
+		return "", fmt.Errorf("listing nodes: %w", err)
 	}
+	return out, nil
+}
+
+func unrecordedIn(out string, records []NodeRecord) ([]string, error) {
 	recorded := map[string]string{}
 	for _, r := range records {
+		// A joining record's name is provisional until the node registers.
+		if r.State == NodeStateJoining {
+			recorded[r.MachineID] = ""
+			continue
+		}
 		recorded[r.MachineID] = r.Name
 	}
 	seen := map[string]string{}
@@ -257,6 +275,37 @@ func unrecordedNodesError(unrecorded []string) error {
 	return fmt.Errorf("unrecorded cluster nodes: %s; run 'kip node add --host <address>' for each to record it, then run this command again", strings.Join(unrecorded, ", "))
 }
 
+// RequirePeersRecordedForJoin requires records for all peers before a new node
+// joins, since firewall rules and join checks use those records. Existing cluster
+// nodes may proceed so adoption can run one node at a time or resume after interruption.
+// Conflicting node identities always fail validation.
+func RequirePeersRecordedForJoin(client CommandRunner, records []NodeRecord, machineID string) error {
+	out, err := listNodeIdentities(client)
+	if err != nil {
+		return err
+	}
+	others, err := unrecordedIn(out, WithUnrecordedHost(records, machineID))
+	if err != nil || len(others) == 0 {
+		return err
+	}
+	var withoutTarget []NodeRecord
+	for _, r := range records {
+		if r.MachineID != machineID {
+			withoutTarget = append(withoutTarget, r)
+		}
+	}
+	// Reuse the same listing so a node registering between checks cannot change the result.
+	// Removing the target's record adds an unrecorded node only if it has registered.
+	all, err := unrecordedIn(out, withoutTarget)
+	if err != nil {
+		return err
+	}
+	if len(all) > len(others) {
+		return nil
+	}
+	return unrecordedNodesError(others)
+}
+
 // WithUnrecordedHost adds an unnamed record so UnrecordedNodes accepts a host
 // awaiting registration. Existing records retain their node name checks.
 func WithUnrecordedHost(records []NodeRecord, machineID string) []NodeRecord {
@@ -266,4 +315,18 @@ func WithUnrecordedHost(records []NodeRecord, machineID string) []NodeRecord {
 		}
 	}
 	return append(append([]NodeRecord(nil), records...), NodeRecord{MachineID: machineID})
+}
+
+// ProposedNodeName uses the lowercase hostname as a provisional name.
+// Registration determines the final name.
+func ProposedNodeName(client CommandRunner) (string, error) {
+	out, err := client.Run("hostname")
+	if err != nil {
+		return "", fmt.Errorf("reading the host name: %w", err)
+	}
+	name := strings.ToLower(strings.TrimSpace(out))
+	if !nodeNamePattern.MatchString(name) {
+		return "", fmt.Errorf("the host name %q is not a valid node name", name)
+	}
+	return name, nil
 }

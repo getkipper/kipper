@@ -2,7 +2,11 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -18,10 +22,29 @@ var nodeCmd = &cobra.Command{
 }
 
 var nodeAddCmd = &cobra.Command{
-	Use:    "add",
-	Short:  "Add a worker node to the cluster (not supported)",
-	Hidden: true,
-	RunE:   runNodeAdd,
+	Use:   "add <host>",
+	Short: "Add a worker node to the cluster",
+	Long: `Prepare a host and join it to the cluster as a worker.
+
+kip uses a shared private network for cluster traffic when available, or public
+addresses otherwise. The first join sets the cluster network mode. Applying
+new network settings restarts k3s on the server. Pod traffic between nodes is
+encrypted with WireGuard. By default, kip sets up a firewall on the new node
+when it manages the server's firewall. Use --firewall or --firewall=false to
+override this default. Existing kip-managed firewalls always get updated peer
+rules. kip checks operator-managed firewalld rules on existing nodes and,
+when firewall setup is enabled, on the joining node.
+
+The worker accepts new workloads after checks pass for DNS, connectivity to
+a pod on the server, Longhorn storage, host registry authentication,
+containerd's registry mirror configuration and direct registry access, and
+kubelet access. Run the command again with the same options to resume an
+interrupted join. Running it again for a recorded worker also rejoins one
+whose agent certificates are missing or expired.`,
+	Args:         cobra.MaximumNArgs(1),
+	Hidden:       true,
+	SilenceUsage: true,
+	RunE:         runNodeAdd,
 }
 
 var nodeListCmd = &cobra.Command{
@@ -30,162 +53,547 @@ var nodeListCmd = &cobra.Command{
 	RunE:  runNodeList,
 }
 
-const nodeAddUnsupportedWarning = `
-  ⚠   kip node add is not supported.
-      Kipper's default firewall lacks rules for traffic between nodes, so pods
-      on the worker are likely to fail. Configure the worker's firewall yourself.
-      kip upgrade, harden and uninstall connect only to the server.
-      Adding a worker does not provide platform high availability.
+const nodeAddPreviewNotice = `
+  ⚠   kip node add is a preview and not yet supported.
+      Workers add capacity. The server remains the sole control plane and ingress
+      node, so the cluster still depends on it for availability.
 `
 
 func init() {
-	nodeAddCmd.Flags().String("host", "", "IP address or hostname of the node to add")
+	nodeAddCmd.Flags().String("host", "", "IP address or hostname of the node to add (same as the argument)")
 	nodeAddCmd.Flags().String("ssh-key", "", "path to SSH private key")
-	_ = nodeAddCmd.MarkFlagRequired("host")
+	nodeAddCmd.Flags().String("private-network", "", "private network the nodes share, in CIDR form; needed when it carries the default route")
+	nodeAddCmd.Flags().Bool("public", false, "use the nodes' public addresses even when they share a private network")
+	nodeAddCmd.Flags().Bool("yes", false, "apply or recover server network changes without prompting")
+	nodeAddCmd.Flags().Bool("firewall", true, "set up a host firewall on the new node (default: follow the server's kip-managed firewall setting); use --firewall=false to skip setup")
 
 	nodeCmd.AddCommand(nodeAddCmd)
 	nodeCmd.AddCommand(nodeListCmd)
 	rootCmd.AddCommand(nodeCmd)
 }
 
-func runNodeAdd(cmd *cobra.Command, args []string) error {
-	fmt.Print(nodeAddUnsupportedWarning)
-
-	workerHost, _ := cmd.Flags().GetString("host")
-	sshKey, _ := cmd.Flags().GetString("ssh-key")
-
-	if !installer.ValidNodeHost(workerHost) {
-		return fmt.Errorf("invalid --host %q: expected a hostname or IP address", workerHost)
+func nodeAddHost(cmd *cobra.Command, args []string) (string, error) {
+	flag, _ := cmd.Flags().GetString("host")
+	host := flag
+	if len(args) == 1 {
+		if flag != "" && flag != args[0] {
+			return "", fmt.Errorf("the host is given twice (%s and --host %s); give it once", args[0], flag)
+		}
+		host = args[0]
 	}
+	if host == "" {
+		return "", fmt.Errorf("name the host to add: kip node add <host>")
+	}
+	if !installer.ValidNodeHost(host) {
+		return "", fmt.Errorf("invalid host %q: expected a hostname or IP address", host)
+	}
+	return host, nil
+}
+
+func resolveIPv4(host string) (string, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.To4() == nil {
+			return "", fmt.Errorf("%s is not an IPv4 address; multi-node clusters require IPv4", host)
+		}
+		return ip.String(), nil
+	}
+	addrs, err := net.LookupHost(host)
+	if err != nil {
+		return "", fmt.Errorf("resolving %s: %w", host, err)
+	}
+	for _, a := range addrs {
+		if ip := net.ParseIP(a); ip != nil && ip.To4() != nil {
+			return ip.String(), nil
+		}
+	}
+	return "", fmt.Errorf("%s has no IPv4 address", host)
+}
+
+// peerAddress selects the source address to allow in peer firewall rules.
+func peerAddress(mode string, n installer.NodeNetwork) string {
+	if mode == installer.NetworkModePrivate {
+		return n.NodeIP
+	}
+	return n.ExternalIP
+}
+
+// nodeFirewall represents the firewall policy requested for a node during a join.
+type nodeFirewall int
+
+const (
+	existingFirewall nodeFirewall = iota
+	managedFirewall
+	followedServerFirewall
+	declinedFirewall
+)
+
+type peerFirewallAction int
+
+const (
+	configureFirewall peerFirewallAction = iota
+	checkOperatorFirewalld
+	leaveFirewall
+	refuseFirewall
+)
+
+// newNodeFirewall uses an explicit --firewall choice or inherits the server's
+// kip-managed firewall setting.
+func newNodeFirewall(cmd *cobra.Command, server installer.FirewallAudit) nodeFirewall {
+	if cmd.Flags().Changed("firewall") {
+		if on, _ := cmd.Flags().GetBool("firewall"); !on {
+			return declinedFirewall
+		}
+		return managedFirewall
+	}
+	if server.KipperManaged {
+		return managedFirewall
+	}
+	return followedServerFirewall
+}
+
+// peerFirewallActionFor keeps updates enabled for kip-managed firewalls, even
+// with --firewall=false, so existing rules allow the joining node.
+func peerFirewallActionFor(audit installer.FirewallAudit, mode nodeFirewall) peerFirewallAction {
+	switch {
+	case audit.KipperManaged:
+		return configureFirewall
+	case mode == followedServerFirewall || mode == declinedFirewall:
+		return leaveFirewall
+	case audit.Existing == "" && mode == managedFirewall:
+		return configureFirewall
+	case audit.Existing == "":
+		return leaveFirewall
+	case audit.Existing == "firewalld":
+		return checkOperatorFirewalld
+	}
+	return refuseFirewall
+}
+
+func applyPeerFirewall(out io.Writer, client installer.FirewallRunner, label string, mesh installer.FirewallMesh, mode nodeFirewall, freshLimit bool) error {
+	audit, err := installer.AuditFirewall(client)
+	if err != nil {
+		return fmt.Errorf("auditing the firewall on %s: %w", label, err)
+	}
+	switch peerFirewallActionFor(audit, mode) {
+	case configureFirewall:
+		limit, err := sshRateLimitFor(client, audit, freshLimit)
+		if err != nil {
+			return fmt.Errorf("reading the SSH rule on %s: %w", label, err)
+		}
+		plan := installer.PlanFirewall(audit, true, false)
+		plan.Mesh = mesh
+		if err := installer.ApplyFirewallPlan(client, plan, limit); err != nil {
+			return fmt.Errorf("configuring the firewall on %s: %w", label, err)
+		}
+		_, _ = fmt.Fprintf(out, "%s\n", managedFirewallNotice(label, mode))
+	case leaveFirewall:
+		_, _ = fmt.Fprintf(out, "%s\n", unmanagedFirewallNotice(label, mesh, mode))
+	case checkOperatorFirewalld:
+		missing, err := installer.CheckOperatorFirewalld(client, mesh)
+		if err != nil {
+			return fmt.Errorf("checking the firewall on %s: %w", label, err)
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("the operator-managed firewall on %s needs: %s", label, strings.Join(missing, "; "))
+		}
+	default:
+		if mode == existingFirewall {
+			harden := ""
+			if label == "the server" {
+				harden = " and run 'kip cluster harden' to let kip manage it"
+			}
+			return fmt.Errorf("kip needs to manage the %s firewall on %s to add peer rules, so the join stops even if the ports are open. Disable UFW with 'ufw disable'%s, then run 'kip node add' again", audit.Existing, label, harden)
+		}
+		return fmt.Errorf("the %s firewall on %s is managed outside kip. Pass --firewall=false to keep it and configure the required ports yourself, or disable it so kip can set up a firewall", audit.Existing, label)
+	}
+	return nil
+}
+
+func managedFirewallNotice(label string, mode nodeFirewall) string {
+	if mode == followedServerFirewall || mode == declinedFirewall {
+		return fmt.Sprintf("  ℹ  Updated peer rules on %s's existing kip-managed firewall. Existing kip-managed firewalls are updated even with --firewall=false.", label)
+	}
+	return fmt.Sprintf("  ✔  Firewall on %s opens the cluster ports to the other nodes", label)
+}
+
+func unmanagedFirewallNotice(label string, mesh installer.FirewallMesh, mode nodeFirewall) string {
+	var peers []string
+	for _, p := range mesh.Peers {
+		peers = append(peers, p.Address)
+	}
+	ports := fmt.Sprintf("In your firewall rules, allow 51820/udp and 10250/tcp from the other nodes (%s), and 9100/tcp from the server. Restrict these ports to those sources, keep 8888/tcp closed to outside traffic, and limit access to any NodePort services you expose.", strings.Join(peers, ", "))
+	switch mode {
+	case followedServerFirewall:
+		return fmt.Sprintf("  ℹ  Firewall setup skipped on %s: kip leaves firewall management to you, as on the server. %s Use --firewall to enable firewall setup on this node.", label, ports)
+	case declinedFirewall:
+		return fmt.Sprintf("  ⚠  Firewall setup skipped on %s (--firewall=false). %s", label, ports)
+	}
+	if mesh.Role == installer.RoleWorker {
+		return fmt.Sprintf("  ℹ  Manage the firewall on %s yourself: allow 51820/udp and 10250/tcp from the other nodes and 9100/tcp from the server", label)
+	}
+	return fmt.Sprintf("  ℹ  Manage the firewall on %s yourself: allow 51820/udp and 10250/tcp from the other nodes", label)
+}
+
+func sshRateLimitFor(client installer.CommandRunner, audit installer.FirewallAudit, freshLimit bool) (bool, error) {
+	if audit.KipperManaged {
+		return installer.SSHRateLimited(client)
+	}
+	return freshLimit, nil
+}
+
+func runNodeAdd(cmd *cobra.Command, args []string) error {
+	fmt.Print(nodeAddPreviewNotice)
+
+	workerHost, err := nodeAddHost(cmd, args)
+	if err != nil {
+		return err
+	}
+	sshKey, _ := cmd.Flags().GetString("ssh-key")
+	privateNetwork, _ := cmd.Flags().GetString("private-network")
+	forcePublic, _ := cmd.Flags().GetBool("public")
+	autoYes, _ := cmd.Flags().GetBool("yes")
 
 	cluster, _, err := loadCurrentCluster()
 	if err != nil {
 		return err
 	}
-
-	fmt.Printf("\n  Connecting to master (%s)...\n", cluster.Host)
-	masterClient, err := ssh.Dial(nodeSSH(cluster.Host, sshKey, cluster))
+	serverIP, err := resolveIPv4(cluster.Host)
 	if err != nil {
-		return fmt.Errorf("connecting to master: %w", err)
+		return fmt.Errorf("finding the server's address: %w", err)
 	}
-	defer func() { _ = masterClient.Close() }()
-	fmt.Printf("  ✔  Connected to master\n")
-
-	fmt.Printf("  Connecting to worker (%s)...\n", workerHost)
-	workerClient, err := ssh.Dial(nodeSSH(workerHost, sshKey, cluster))
+	workerIP, err := resolveIPv4(workerHost)
 	if err != nil {
-		return fmt.Errorf("connecting to worker: %w", err)
+		return err
 	}
-	defer func() { _ = workerClient.Close() }()
-	fmt.Printf("  ✔  Connected to worker\n\n")
+
+	fmt.Printf("\n  Connecting to the server (%s)...\n", cluster.Host)
+	server, err := ssh.Dial(nodeSSH(cluster.Host, sshKey, cluster))
+	if err != nil {
+		return fmt.Errorf("connecting to the server: %w", err)
+	}
+	defer func() { _ = server.Close() }()
+	fmt.Printf("  Connecting to %s...\n", workerHost)
+	worker, err := ssh.Dial(nodeSSH(workerHost, sshKey, cluster))
+	if err != nil {
+		return fmt.Errorf("connecting to %s: %w", workerHost, err)
+	}
+	defer func() { _ = worker.Close() }()
 
 	// Capture the host identity before setup so registration can be verified.
-	identity, err := installer.ReadHostIdentity(workerClient)
+	identity, err := installer.ReadHostIdentity(worker)
 	if err != nil {
 		return fmt.Errorf("reading what %s reports about itself: %w", workerHost, err)
 	}
 
-	// Allow unrecorded nodes so they can be adopted one at a time.
-	// Identity conflicts must be resolved before joining.
-	records, err := installer.EnsureServerRecord(masterClient, cluster.Host)
+	// Inherit the server's firewall setting before the join changes either host.
+	serverFirewall, err := installer.AuditFirewall(server)
+	if err != nil {
+		return fmt.Errorf("auditing the firewall on the server: %w", err)
+	}
+	workerFirewall := newNodeFirewall(cmd, serverFirewall)
+
+	// Recover over SSH first: an interrupted network change can leave the API down.
+	if pending, err := installer.NetworkChangePending(server); err != nil {
+		return err
+	} else if pending {
+		fmt.Printf("%s\n", installer.PendingNetworkChangeDescription())
+		if !autoYes {
+			ok, err := confirmInteractive("  Recover the unfinished pod network change now? [y/N] ")
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("recover the unfinished pod network change before adding nodes")
+			}
+		}
+		if err := installer.RecoverNetworkChange(server); err != nil {
+			return fmt.Errorf("pod network: %w", err)
+		}
+	}
+
+	records, err := installer.EnsureServerRecord(server, cluster.Host)
 	if err != nil {
 		return err
 	}
-	if _, err := installer.UnrecordedNodes(masterClient, installer.WithUnrecordedHost(records, identity.MachineID)); err != nil {
+	mirrorNodes(cluster.Name, records)
+	if err := installer.RequirePeersRecordedForJoin(server, records, identity.MachineID); err != nil {
 		return err
 	}
+	serverRec, _ := installer.ServerRecord(records)
+	if serverRec.MachineID == identity.MachineID {
+		return fmt.Errorf("%s is the cluster's server", workerHost)
+	}
+	var existing *installer.NodeRecord
+	for i := range records {
+		if records[i].MachineID == identity.MachineID {
+			existing = &records[i]
+		}
+	}
 
-	fmt.Printf("  Running preflight checks on %s...\n", workerHost)
-	sys, preflight, err := installer.PreflightWorker(workerClient)
+	// Connect to existing workers before updating their peer firewall rules.
+	peers := map[string]*ssh.Client{}
+	defer func() {
+		for _, c := range peers {
+			_ = c.Close()
+		}
+	}()
+	for _, r := range records {
+		if r.Role != installer.NodeRoleWorker || r.MachineID == identity.MachineID {
+			continue
+		}
+		c, err := ssh.Dial(nodeSSH(r.Host, sshKey, cluster))
+		if err != nil {
+			return fmt.Errorf("connecting to node %s (%s), whose firewall must admit the new node: %w", r.Name, r.Host, err)
+		}
+		peers[r.MachineID] = c
+		id, err := installer.ReadMachineID(c)
+		if err != nil || id != r.MachineID {
+			return fmt.Errorf("%s no longer answers as node %s (machine id %q, recorded %s); check the address before adding nodes", r.Host, r.Name, id, r.MachineID)
+		}
+	}
+
+	network, err := installer.PlanNetworkChange(server)
+	if err != nil {
+		return err
+	}
+	if network.Running != "wireguard" {
+		return fmt.Errorf("the server's pod network is %q, not WireGuard; run 'kip upgrade' first, then add the node", network.Running)
+	}
+
+	fmt.Printf("\n  Running preflight checks on %s...\n", workerHost)
+	sys, preflight, err := installer.PreflightWorker(worker)
 	if err != nil {
 		return fmt.Errorf("%s cannot join: %w", workerHost, err)
 	}
-	fmt.Printf("  ✔  %s %s, %d MB RAM, %d MB disk, kubelet port check passed\n", sys.OS, sys.OSVersion, sys.RAMMB, sys.DiskMB)
+	fmt.Printf("  ✔  %s %s, %d MB RAM, %d MB disk\n", sys.OS, sys.OSVersion, sys.RAMMB, sys.DiskMB)
 	for _, w := range preflight.Warnings {
 		fmt.Printf("  ⚠  %s\n", w)
 	}
-	audit, err := installer.AuditHost(workerClient)
+	plan, serverDropIn, err := prepareJoinHost(server, worker, identity.MachineID, workerHost, installer.NetworkModeOptions{
+		PrivateNetwork: privateNetwork, Public: forcePublic, ClusterMode: serverRec.Mode,
+		ServerExternalIP: serverIP, JoinerExternalIP: workerIP,
+	}, autoYes)
 	if err != nil {
-		return fmt.Errorf("auditing %s: %w", workerHost, err)
+		return err
 	}
-	if findings := audit.Findings(); len(findings) > 0 {
-		fmt.Printf("  Hardening %s (%s)...\n", workerHost, strings.Join(findings, "; "))
-		if err := installer.HardenHost(workerClient); err != nil {
-			return fmt.Errorf("hardening %s: %w", workerHost, err)
+	// A matching drop-in is still checked against the address k3s runs with.
+	if err := installer.ChangeServerNetwork(server, serverDropIn); err != nil {
+		return fmt.Errorf("moving the server's network: %w", err)
+	}
+	serverRec.Mode, serverRec.PeerAddress, serverRec.Interface = plan.Mode, peerAddress(plan.Mode, plan.Server), plan.Server.Interface
+	if err := saveNodeRecord(server, cluster.Name, serverRec); err != nil {
+		return err
+	}
+
+	rec := installer.NodeRecord{Host: workerHost, MachineID: identity.MachineID, Role: installer.NodeRoleWorker, State: installer.NodeStateJoining,
+		Mode: plan.Mode, PeerAddress: peerAddress(plan.Mode, plan.Joiner), Interface: plan.Joiner.Interface}
+	if existing != nil {
+		rec.Name = existing.Name
+	} else if rec.Name, err = installer.ProposedNodeName(worker); err != nil {
+		return err
+	}
+	if err := saveNodeRecord(server, cluster.Name, rec); err != nil {
+		return err
+	}
+	if records, err = installer.ReadNodeRecords(server); err != nil {
+		return err
+	}
+
+	fmt.Printf("\n  Opening the cluster ports between the nodes...\n")
+	if err := applyPeerFirewall(os.Stdout, server, "the server", installer.FirewallMeshFor(records, serverRec.MachineID), existingFirewall, false); err != nil {
+		return err
+	}
+	for _, r := range records {
+		if c, ok := peers[r.MachineID]; ok {
+			if err := applyPeerFirewall(os.Stdout, c, r.Name, installer.FirewallMeshFor(records, r.MachineID), existingFirewall, false); err != nil {
+				return err
+			}
 		}
 	}
-	fmt.Println()
 
-	// Defer storage-service restarts before joining so unattended upgrades
-	// preserve active Longhorn sessions once this node starts hosting volumes.
-	workerOS, err := installer.DetectHostOS(workerClient)
+	workerOS, err := installer.DetectHostOS(worker)
 	if err != nil {
 		return fmt.Errorf("reading the OS of %s: %w", workerHost, err)
 	}
+	// Defer storage-service restarts before joining so unattended upgrades
+	// preserve active Longhorn sessions once this node starts hosting volumes.
 	if workerOS.UsesNeedrestart() {
-		fmt.Printf("  Configuring host restarts for storage...\n")
-		if err := installer.ConfigureStorageRestarts(workerClient); err != nil {
+		if err := installer.ConfigureStorageRestarts(worker); err != nil {
 			return fmt.Errorf("configuring storage restarts on %s: %w", workerHost, err)
 		}
-		fmt.Printf("  ✔  Storage-path restarts deferred on %s\n\n", workerHost)
 	}
-
-	fmt.Printf("  Joining worker node to cluster...\n")
-	nodeName, err := installer.JoinWorkerNode(masterClient, workerClient, cluster.Host, identity)
+	workerCurrent, err := installer.ReadNetworkDropIn(worker)
 	if err != nil {
-		return fmt.Errorf("%w; resolve the error, then rerun 'kip node add --host %s' with the same options to retry with a fresh token", err, workerHost)
+		return err
 	}
-	fmt.Printf("  ✔  Worker node %s joined the cluster as %s\n\n", workerHost, nodeName)
-
-	// Recheck identities after joining to avoid overwriting another node's record
-	// if the new node shares its machine ID.
-	records, err = installer.ReadNodeRecords(masterClient)
-	if err == nil {
-		_, err = installer.UnrecordedNodes(masterClient, installer.WithUnrecordedHost(records, identity.MachineID))
-	}
+	workerDropIn, err := installer.RenderNetworkDropIn(workerCurrent, installer.RoleWorker, plan.Mode, plan.Joiner)
 	if err != nil {
-		return fmt.Errorf("%s joined; recording it failed: %w", nodeName, err)
+		return err
 	}
-	worker := installer.NodeRecord{Name: nodeName, Host: workerHost, MachineID: identity.MachineID, Role: installer.NodeRoleWorker, State: installer.NodeStateReady}
-	if err := installer.SaveNodeRecord(masterClient, worker); err != nil {
-		return fmt.Errorf("%w; the node joined; rerun 'kip node add --host %s' to retry recording it", err, workerHost)
+	fmt.Printf("  Preparing %s...\n", workerHost)
+	join, err := installer.PrepareWorker(server, worker, workerDropIn)
+	if err != nil {
+		return nodeAddRetry(err, workerHost)
 	}
-	if records, err := installer.ReadNodeRecords(masterClient); err == nil {
-		mirrorNodes(cluster.Name, records)
-	} else {
-		fmt.Printf("  ⚠  could not update the local copy of the node records: %v\n", err)
+	// Inherit the server's kip-managed UFW rate limit so workers use the same
+	// SSH policy. Otherwise, use the install default of rate limiting.
+	workerLimit := true
+	if audit, err := installer.AuditFirewall(server); err == nil && audit.KipperManaged && audit.Existing != "firewalld" {
+		if workerLimit, err = installer.SSHRateLimited(server); err != nil {
+			return nodeAddRetry(err, workerHost)
+		}
+	}
+	if err := applyPeerFirewall(os.Stdout, worker, workerHost, installer.FirewallMeshFor(records, identity.MachineID), workerFirewall, workerLimit); err != nil {
+		return nodeAddRetry(err, workerHost)
 	}
 
-	// Stamp after registration, when the node object is available to annotate.
+	serverURLHost := serverIP
+	if plan.Mode == installer.NetworkModePrivate {
+		serverURLHost = plan.Server.NodeIP
+	}
+	fmt.Printf("  Joining %s to the cluster...\n", workerHost)
+	nodeName, err := join.Register(server, worker, serverURLHost, identity)
+	if err != nil {
+		return nodeAddRetry(err, workerHost)
+	}
+	if nodeName != rec.Name {
+		rec.Name = nodeName
+		if err := saveNodeRecord(server, cluster.Name, rec); err != nil {
+			return nodeAddRetry(err, workerHost)
+		}
+	}
+	fmt.Printf("  ✔  %s registered as %s and is cordoned\n", workerHost, nodeName)
 	if workerOS.UsesNeedrestart() {
-		if err := installer.StampStorageRestarts(masterClient, nodeName, identity.MachineID); err != nil {
-			fmt.Printf("  ⚠   could not record host configuration for %s: %v\n      The host is configured; 'kip node repair-host' records it.\n\n", nodeName, err)
+		if err := installer.StampStorageRestarts(server, nodeName, identity.MachineID); err != nil {
+			fmt.Printf("  ⚠  could not record host configuration for %s: %v\n      The host is configured; 'kip node repair-host' records it.\n", nodeName, err)
 		}
 	}
 
-	// Address publication can lag registration. Wait for IPv4 so build egress
-	// can exclude this node; on timeout, refresh the known exclusions anyway.
-	addressMissing := false
-	fmt.Printf("  Waiting for %s to publish its address...\n", nodeName)
-	if err := installer.WaitForNodeToPublishAddress(masterClient, nodeName, 120*time.Second); err != nil {
-		addressMissing = true
-		fmt.Printf("  ⚠   %s has no address in the cluster yet: %v\n", nodeName, err)
+	fmt.Printf("  Waiting for %s and its storage services...\n", nodeName)
+	if err := installer.WaitForWorkerStorage(server, nodeName); err != nil {
+		return nodeAddRetry(err, workerHost)
+	}
+	// Finish the Velero rollout before the check taint blocks its node agent.
+	if applied, err := installer.EnsureVeleroCoversNodes(server); err != nil {
+		return nodeAddRetry(fmt.Errorf("updating backups for %s: %w", nodeName, err), workerHost)
+	} else if applied {
+		fmt.Printf("  ✔  Backups configured for SELinux hosts after joining %s\n", nodeName)
+	}
+	fmt.Printf("  Checking %s with a test pod...\n", nodeName)
+	err = installer.OpenWorkerForChecks(server, nodeName)
+	if err == nil {
+		err = installer.ValidateWorker(server, worker, join, nodeName, serverRec.Name, rec.PeerAddress)
+	}
+	if err != nil {
+		if _, cordonErr := server.Run("kubectl cordon " + nodeName + " >/dev/null"); cordonErr != nil {
+			return fmt.Errorf("%w; failed to cordon %s after the checks (%v). Run 'kubectl cordon %s', then retry 'kip node add %s' with the same options", err, nodeName, cordonErr, nodeName, workerHost)
+		}
+		return nodeAddRetry(err, workerHost)
+	}
+	fmt.Printf("  ✔  DNS, server pod connectivity, Longhorn storage, registry and kubelet checks passed\n")
+
+	if err := installer.WaitForNodeToPublishAddress(server, nodeName, 120*time.Second); err != nil {
+		return nodeAddRetry(err, workerHost)
+	}
+	if err := installer.InstallBuildIsolation(server); err != nil {
+		return nodeAddRetry(fmt.Errorf("updating build isolation for %s: %w", nodeName, err), workerHost)
 	}
 
-	fmt.Printf("  Updating build isolation for the new node...\n")
-	if err := installer.InstallBuildIsolation(masterClient); err != nil {
-		// Report isolation repair separately from the completed node join.
-		// InstallBuildIsolation attempts to seal egress if address discovery fails;
-		// an apply failure can leave the previous policy in place.
-		fmt.Printf("  ⚠   could not update build isolation: %v\n      Build pods may be able to reach %s until this is resolved. Fix the cause, then run 'kip upgrade'.\n\n", err, nodeName)
-	} else {
-		fmt.Printf("  ✔  Build isolation updated\n\n")
+	rec.State = installer.NodeStateReady
+	if err := saveNodeRecord(server, cluster.Name, rec); err != nil {
+		return nodeAddRetry(err, workerHost)
+	}
+	if err := installer.UncordonWorker(server, nodeName); err != nil {
+		// Back to the state a retry expects: cordoned and joining.
+		rec.State = installer.NodeStateJoining
+		_, cordonErr := server.Run("kubectl cordon " + nodeName + " >/dev/null")
+		saveErr := saveNodeRecord(server, cluster.Name, rec)
+		if cordonErr != nil || saveErr != nil {
+			return fmt.Errorf("%w; putting %s back to cordoned and joining also failed (%v), so cordon it with 'kubectl cordon %s' and run 'kip node add %s' again", err, nodeName, errors.Join(cordonErr, saveErr), nodeName, workerHost)
+		}
+		return nodeAddRetry(err, workerHost)
 	}
 
-	if addressMissing {
-		return fmt.Errorf("%s joined the cluster, but published no address in time, so the build egress policy does not yet block pods from reaching it; run 'kip upgrade' once 'kip node list' shows its address", nodeName)
-	}
+	fmt.Printf("\n  ✔  %s joined as worker %s (%s mode, %s)\n", workerHost, nodeName, plan.Mode, plan.Joiner.NodeIP)
+	fmt.Printf("     Apps, functions, jobs and services can now run on it. The platform stays on the server.\n\n")
+	return nil
+}
 
+// prepareJoinHost validates network options and confirms server network changes
+// before cordoning or hardening the worker.
+func prepareJoinHost(server, worker installer.CommandRunner, machineID, workerHost string, opts installer.NetworkModeOptions, autoYes bool) (installer.NetworkPlan, string, error) {
+	sshPort, err := installer.SSHPort(worker)
+	if err != nil {
+		return installer.NetworkPlan{}, "", err
+	}
+	opts.SSHPort = sshPort
+	plan, err := installer.PlanNodeNetwork(server, worker, opts)
+	if err != nil {
+		return installer.NetworkPlan{}, "", err
+	}
+	fmt.Printf("  ✔  Network: %s mode, server %s, %s %s\n", plan.Mode, plan.Server.NodeIP, workerHost, plan.Joiner.NodeIP)
+
+	currentDropIn, err := installer.ReadNetworkDropIn(server)
+	if err != nil {
+		return installer.NetworkPlan{}, "", err
+	}
+	serverDropIn, err := installer.RenderNetworkDropIn(currentDropIn, installer.RoleServer, plan.Mode, plan.Server)
+	if err != nil {
+		return installer.NetworkPlan{}, "", err
+	}
+	if serverDropIn != currentDropIn {
+		fmt.Printf("\n  The server will use %s mode for cluster traffic (address %s). This restarts\n"+
+			"  k3s and temporarily interrupts Kubernetes API access. If recovery checks\n"+
+			"  fail, kip attempts to restore the previous configuration.\n\n", plan.Mode, plan.Server.NodeIP)
+		if !autoYes {
+			ok, err := confirmInteractive("  Apply the server network changes? [y/N] ")
+			if err != nil {
+				return installer.NetworkPlan{}, "", err
+			}
+			if !ok {
+				return installer.NetworkPlan{}, "", fmt.Errorf("node join canceled; server network settings unchanged")
+			}
+		}
+	}
+	// Prevent new workloads from being scheduled during host changes.
+	existingNode, registered, err := installer.FindNodeForMachine(server, machineID)
+	if err != nil {
+		return installer.NetworkPlan{}, "", fmt.Errorf("looking for an existing node on %s: %w", workerHost, err)
+	}
+	if registered {
+		if _, err := server.Run("kubectl cordon " + existingNode + " >/dev/null"); err != nil {
+			return installer.NetworkPlan{}, "", fmt.Errorf("cordoning %s before changing it: %w", existingNode, err)
+		}
+		fmt.Printf("  ✔  %s is already node %s; cordoned until the join is checked\n", workerHost, existingNode)
+	}
+	audit, err := installer.AuditHost(worker)
+	if err != nil {
+		return installer.NetworkPlan{}, "", fmt.Errorf("auditing %s: %w", workerHost, err)
+	}
+	if findings := audit.Findings(); len(findings) > 0 {
+		fmt.Printf("  Hardening %s (%s)...\n", workerHost, strings.Join(findings, "; "))
+		if err := installer.HardenHost(worker); err != nil {
+			return installer.NetworkPlan{}, "", fmt.Errorf("hardening %s: %w", workerHost, err)
+		}
+	}
+	return plan, serverDropIn, nil
+}
+
+func nodeAddRetry(err error, host string) error {
+	return fmt.Errorf("%w; join incomplete. Fix the cause, then run 'kip node add %s' again with the same options to resume", err, host)
+}
+
+// saveNodeRecord saves the cluster record and refreshes the local cache when possible.
+func saveNodeRecord(server installer.CommandRunner, clusterName string, rec installer.NodeRecord) error {
+	if err := installer.SaveNodeRecord(server, rec); err != nil {
+		return err
+	}
+	records, err := installer.ReadNodeRecords(server)
+	if err != nil {
+		fmt.Printf("  ⚠  could not update the local copy of the node records: %v\n", err)
+		return nil
+	}
+	mirrorNodes(clusterName, records)
 	return nil
 }
 

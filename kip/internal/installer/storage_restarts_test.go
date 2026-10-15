@@ -494,3 +494,21 @@ func TestPendingRestartsTellsAFailureFromAnAbsence(t *testing.T) {
 			"it is installed; it failed, which is a different thing to go and look at")
 	})
 }
+
+func TestFindNodeForMachineSeparatesNoMatchFromFailure(t *testing.T) {
+	id := strings.Repeat("a", 32)
+	name, found, err := FindNodeForMachine(&storageHostRunner{replies: map[string]string{"nodeInfo.machineID==": "worker-1\n"}}, id)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "worker-1", name)
+
+	_, found, err = FindNodeForMachine(&storageHostRunner{}, id)
+	require.NoError(t, err, "no node is an answer, not a failure")
+	assert.False(t, found)
+
+	_, _, err = FindNodeForMachine(&storageHostRunner{fail: map[string]error{"kubectl": errors.New("connection refused")}}, id)
+	assert.Error(t, err, "a failed lookup must not read as no node")
+
+	_, _, err = FindNodeForMachine(&storageHostRunner{replies: map[string]string{"nodeInfo.machineID==": "a\nb\n"}}, id)
+	assert.ErrorIs(t, err, errSharedMachineID)
+}

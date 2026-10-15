@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestUFWRules(t *testing.T) {
@@ -77,4 +78,22 @@ func TestUFWRules(t *testing.T) {
 		}
 		assert.Greater(t, sshIdx, 0, "ssh allow rule must be present in rule list")
 	})
+}
+
+func TestSSHRateLimitedReadsTheUFWRuleForTheSSHPort(t *testing.T) {
+	limited := &routedRunner{routes: []route{
+		{contains: "sshd -T", out: "2222\n"},
+		{contains: "ufw status", out: "Status: active\n\nTo                         Action      From\n--                         ------      ----\n2222/tcp                   LIMIT       Anywhere\n80/tcp                     ALLOW       Anywhere\n"},
+	}}
+	got, err := SSHRateLimited(limited)
+	require.NoError(t, err)
+	assert.True(t, got)
+
+	open := &routedRunner{routes: []route{
+		{contains: "sshd -T", out: "22\n"},
+		{contains: "ufw status", out: "Status: active\n\n22/tcp                     ALLOW       Anywhere\n2222/tcp                   LIMIT       Anywhere\n"},
+	}}
+	got, err = SSHRateLimited(open)
+	require.NoError(t, err)
+	assert.False(t, got, "only the rule for sshd's own port counts")
 }

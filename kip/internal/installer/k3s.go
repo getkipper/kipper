@@ -718,77 +718,114 @@ func RepairHostDNS(client CommandRunner, resolvers []string) ([]string, error) {
 
 // agentInstallCommand builds an install command that reads the join token from
 // stdin to keep it out of process arguments.
-func agentInstallCommand(serverVersion, masterHost string) string {
+func agentInstallCommand(serverVersion, serverURLHost string) string {
 	return fmt.Sprintf(
 		"read -r K3S_TOKEN && export K3S_TOKEN && curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='%s' K3S_URL=https://%s:6443 sh -",
-		serverVersion, masterHost)
+		serverVersion, serverURLHost)
 }
 
-// JoinWorkerNode joins a worker with a fresh one-hour bootstrap token and returns
-// its node name after confirming registration against id. Read id before setup.
-func JoinWorkerNode(masterClient CommandRunner, workerClient CommandRunner, masterHost string, id HostIdentity) (string, error) {
+// WorkerJoin holds the server version and registry credentials for a worker join.
+type WorkerJoin struct {
+	serverVersion string
+	zotIP         string
+	pullPassword  string
+}
+
+// PrepareWorker configures host dependencies, DNS, registry access and
+// networkDropIn before agent startup. It rejects workers running newer k3s
+// versions than the server.
+func PrepareWorker(masterClient, workerClient CommandRunner, networkDropIn string) (WorkerJoin, error) {
 	if err := prepareWorkerHost(masterClient, workerClient); err != nil {
-		return "", err
+		return WorkerJoin{}, err
 	}
 
-	// The agent is pinned to the master's exact k3s version, not kip's own
-	// pin: a node newer than the control plane violates the Kubernetes skew
-	// policy, and kip's pin moves ahead of clusters installed earlier. The
-	// tag is regex-validated by the parse, so interpolating it is shell-safe.
+	// Match the server version for compatibility with older clusters.
+	// installedK3sVersion validates the tag before shell interpolation.
 	serverVersion, err := installedK3sVersion(masterClient)
 	if err != nil {
-		return "", err
+		return WorkerJoin{}, err
 	}
 	if serverVersion == "" {
-		return "", fmt.Errorf("reading k3s version from master: k3s is not installed")
+		return WorkerJoin{}, fmt.Errorf("reading k3s version from master: k3s is not installed")
 	}
 
-	// The worker gets the same probe: a re-run of node add against a host
-	// already running a newer k3s than the master must not downgrade it;
-	// decideK3sAgentJoin documents the policy.
+	// Reject newer workers to prevent an implicit downgrade on retry.
 	workerVersion, err := installedK3sVersion(workerClient)
 	if err != nil {
-		return "", err
+		return WorkerJoin{}, err
 	}
 	if err := decideK3sAgentJoin(workerVersion, serverVersion); err != nil {
-		return "", err
+		return WorkerJoin{}, err
 	}
 
-	// The worker's containerd pulls app images from the cluster registry,
-	// and k3s reads registry mirrors, credentials, and the CA only from
-	// node-local files, so they must be on the worker before the agent
-	// starts. All three come from the master, which holds the authoritative
-	// copies.
+	// Install the registry mirror, credentials and CA locally before the
+	// agent starts, using the authoritative copies from the server.
 	zotIP, err := masterClient.Run(`kubectl get svc zot -n kipper-system -o jsonpath='{.spec.clusterIP}'`)
 	if err != nil {
-		return "", fmt.Errorf("reading zot ClusterIP from master: %w", err)
+		return WorkerJoin{}, fmt.Errorf("reading zot ClusterIP from master: %w", err)
 	}
 	zotIP = strings.TrimSpace(zotIP)
 	if zotIP == "" {
-		return "", fmt.Errorf("zot service has no ClusterIP on the master")
+		return WorkerJoin{}, fmt.Errorf("zot service has no ClusterIP on the master")
 	}
 	pullPassword, err := readSecretValue(masterClient, zotNamespace, zotPullSecret, "password")
 	if err != nil {
-		return "", err
+		return WorkerJoin{}, err
 	}
 	if pullPassword == "" {
-		return "", fmt.Errorf("registry pull credential missing on the master")
+		return WorkerJoin{}, fmt.Errorf("registry pull credential missing on the master")
 	}
 	caPEM, err := readSecretValue(masterClient, zotNamespace, zotTLSSecret, `ca\.crt`)
 	if err != nil {
-		return "", err
+		return WorkerJoin{}, err
 	}
 	if caPEM == "" {
-		return "", fmt.Errorf("registry CA missing on the master")
+		return WorkerJoin{}, fmt.Errorf("registry CA missing on the master")
 	}
 	if err := writeZotNodeFiles(workerClient, caPEM, zotIP, pullPassword); err != nil {
-		return "", err
+		return WorkerJoin{}, err
 	}
+	if _, err := workerClient.RunStdin(writeDropInScript(k3sNetworkConfigPath), strings.NewReader(networkDropIn)); err != nil {
+		return WorkerJoin{}, fmt.Errorf("writing %s on the worker: %v", k3sNetworkConfigPath, withoutOutput(err))
+	}
+	return WorkerJoin{serverVersion: serverVersion, zotIP: zotIP, pullPassword: pullPassword}, nil
+}
 
+// bootstrapTaint keeps ordinary pods off a node between its registration
+// and the cordon that replaces it.
+const bootstrapTaint = "kipper.run/bootstrap"
+
+// bootstrapTaintPath holds the registration taint until the node is cordoned.
+const bootstrapTaintPath = "/etc/rancher/k3s/config.yaml.d/kipper-bootstrap.yaml"
+
+// Register joins a prepared host with a fresh one-hour bootstrap token, at
+// serverURLHost, and returns its node name after confirming registration
+// against id. The node is left cordoned, with the bootstrap taint removed.
+func (j WorkerJoin) Register(masterClient, workerClient CommandRunner, serverURLHost string, id HostIdentity) (string, error) {
+	// Another drop-in setting node-taint could replace the registration taint.
+	out, err := workerClient.Run(configFilesCommand("/etc/rancher/k3s/config.yaml.d/*.yaml", bootstrapTaintPath))
+	if err != nil {
+		return "", fmt.Errorf("reading the worker's k3s configuration: %w", err)
+	}
+	files, err := parseConfigFiles(out)
+	if err != nil {
+		return "", fmt.Errorf("reading the worker's k3s configuration: %w", err)
+	}
+	for _, f := range files {
+		for key := range f.doc {
+			if strings.TrimSuffix(key, "+") == "node-taint" {
+				return "", fmt.Errorf("%s sets node-taint, which can replace the taint that keeps workloads off the node until it is checked; move those taints to /etc/rancher/k3s/config.yaml and run the command again", f.path)
+			}
+		}
+	}
+	taint := fmt.Sprintf("cat > %s << 'KIPEOF'\nnode-taint+:\n  - %s=true:NoSchedule\nKIPEOF", bootstrapTaintPath, bootstrapTaint)
+	if _, err := workerClient.Run("mkdir -p /etc/rancher/k3s/config.yaml.d && " + taint); err != nil {
+		return "", fmt.Errorf("writing the registration taint on the worker: %w", err)
+	}
 	// Keep the token valid through registration before attempting cleanup.
 	var nodeName string
-	err = withJoinToken(masterClient, masterHost, func(token string) error {
-		if _, err := workerClient.RunStdin(agentInstallCommand(serverVersion, masterHost), strings.NewReader(token+"\n")); err != nil {
+	err = withJoinToken(masterClient, serverURLHost, func(token string) error {
+		if _, err := workerClient.RunStdin(agentInstallCommand(j.serverVersion, serverURLHost), strings.NewReader(token+"\n")); err != nil {
 			return fmt.Errorf("running k3s agent installer: %w", err)
 		}
 		name, err := waitForHostNode(masterClient, id, 2*time.Minute, 3*time.Second)
@@ -796,10 +833,20 @@ func JoinWorkerNode(masterClient CommandRunner, workerClient CommandRunner, mast
 			return fmt.Errorf("verifying worker node joined: %w", err)
 		}
 		nodeName = name
+		// The cordon takes over from the taint as soon as the Node exists.
+		if _, err := masterClient.Run("kubectl cordon " + name + " >/dev/null"); err != nil {
+			return fmt.Errorf("cordoning %s: %w", name, err)
+		}
+		if _, err := masterClient.Run(removeTaintCommand(name, bootstrapTaint)); err != nil {
+			return fmt.Errorf("removing the registration taint from %s: %w", name, err)
+		}
 		return nil
 	})
 	if err != nil {
 		return "", err
+	}
+	if _, err := workerClient.Run("rm -f " + bootstrapTaintPath); err != nil {
+		return "", fmt.Errorf("removing %s on the worker: %w", bootstrapTaintPath, err)
 	}
 	return nodeName, nil
 }

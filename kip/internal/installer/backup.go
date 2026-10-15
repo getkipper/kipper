@@ -1,14 +1,19 @@
 package installer
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
+
+	"sigs.k8s.io/yaml"
 )
 
 const veleroChartVersion = "12.0.0"
@@ -377,9 +382,102 @@ func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword stri
 	return nil
 }
 
+// EnsureVeleroCoversNodes enables privileged file system backups for RHEL-family
+// nodes when a Velero chart is present, preserving backup storage and credentials.
+// It waits for the node agent rollout and reports whether it changed the chart.
+func EnsureVeleroCoversNodes(client CommandRunner) (bool, error) {
+	values, err := client.Run("kubectl -n kube-system get helmchart velero -o jsonpath='{.spec.valuesContent}' --ignore-not-found")
+	if err != nil {
+		return false, fmt.Errorf("reading the Velero chart: %w", err)
+	}
+	if strings.TrimSpace(values) == "" {
+		return false, nil
+	}
+	rhelNode, err := clusterHasRHELNode(client)
+	if err != nil || !rhelNode {
+		return false, err
+	}
+	changed := false
+	if !strings.Contains(values, "--node-agent-configmap=") {
+		updated, err := withPrivilegedFsBackup(values)
+		if err != nil {
+			return false, err
+		}
+		patch, err := json.Marshal(map[string]any{"spec": map[string]any{"valuesContent": updated}})
+		if err != nil {
+			return false, err
+		}
+		if _, err := client.RunStdin("kubectl -n kube-system patch helmchart velero --type merge --patch-file /dev/stdin >/dev/null", bytes.NewReader(patch)); err != nil {
+			return false, fmt.Errorf("enabling privileged file system backups in the Velero chart: %w", err)
+		}
+		changed = true
+	}
+	// Check the rollout on retries too: the chart may be saved before agents restart.
+	return changed, waitForVeleroNodeAgentConfig(client, veleroNodeAgentWait)
+}
+
+// withPrivilegedFsBackup adds the node agent configuration that veleroManifest
+// renders for SELinux hosts to existing chart values.
+func withPrivilegedFsBackup(values string) (string, error) {
+	doc := map[string]any{}
+	if err := yaml.Unmarshal([]byte(values), &doc); err != nil {
+		return "", fmt.Errorf("reading the Velero chart values: %w", err)
+	}
+	var selinux map[string]any
+	if err := yaml.Unmarshal([]byte(veleroSELinuxNodeAgentArgsDoc+veleroSELinuxValues()), &selinux); err != nil {
+		return "", err
+	}
+	nodeAgent, _ := doc["nodeAgent"].(map[string]any)
+	if nodeAgent == nil {
+		nodeAgent = map[string]any{}
+	}
+	args, _ := nodeAgent["extraArgs"].([]any)
+	nodeAgent["extraArgs"] = append(args, selinux["nodeAgent"].(map[string]any)["extraArgs"].([]any)...)
+	doc["nodeAgent"] = nodeAgent
+	for _, key := range []string{"configMaps", "podAnnotations"} {
+		merged, _ := doc[key].(map[string]any)
+		if merged == nil {
+			merged = map[string]any{}
+		}
+		for k, v := range selinux[key].(map[string]any) {
+			merged[k] = v
+		}
+		doc[key] = merged
+	}
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+const veleroSELinuxNodeAgentArgsDoc = "    nodeAgent:\n" + veleroSELinuxNodeAgentArgs
+
+var veleroNodeAgentWait = 3 * time.Minute
+
+// waitForVeleroNodeAgentConfig waits until the Helm controller has rendered the
+// node agent with the configuration checksum, then for that rollout to finish.
+func waitForVeleroNodeAgentConfig(client CommandRunner, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		out, err := client.Run("kubectl -n velero get ds node-agent -o jsonpath='{.spec.template.metadata.annotations.checksum/node-agent-config}' --ignore-not-found")
+		if err == nil && strings.TrimSpace(out) != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the Velero node agents did not pick up privileged file system backups within %s; check 'kubectl -n kube-system get helmchart velero' and the helm-install-velero job", timeout)
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if _, err := client.Run(fmt.Sprintf("kubectl -n velero rollout status ds/node-agent --timeout=%ds", int(timeout.Seconds()))); err != nil {
+		return fmt.Errorf("waiting for the Velero node agents to restart: %w", err)
+	}
+	return nil
+}
+
 var rhelOSImagePrefixes = []string{"Rocky Linux", "AlmaLinux", "CentOS Stream", "Red Hat Enterprise Linux"}
 
-// clusterHasRHELNode matches reported OS images against supported RHEL distributions.
+// clusterHasRHELNode matches reported OS images against RHEL-family distributions.
 // A RHEL worker also needs privileged backups, even when the server uses another OS.
 func clusterHasRHELNode(client CommandRunner) (bool, error) {
 	out, err := client.Run(`kubectl get nodes -o jsonpath='{range .items[*]}{.status.nodeInfo.osImage}{"\n"}{end}'`)

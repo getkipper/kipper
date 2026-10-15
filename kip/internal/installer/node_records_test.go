@@ -6,6 +6,9 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // routedRunner answers each command with the reply of the first route whose
@@ -327,5 +330,51 @@ func TestWithUnrecordedHostKeepsAnExistingRecordsNameCheck(t *testing.T) {
 	got := WithUnrecordedHost([]NodeRecord{server}, workerMachine)
 	if len(got) != 2 || got[1].MachineID != workerMachine || got[1].Name != "" {
 		t.Fatalf("records = %+v, want a nameless stand-in for the new machine", got)
+	}
+}
+
+// A joining record holds the name kip expected before registration; the
+// node may register under another one, and the retry must still match it.
+func TestUnrecordedNodesMatchesAJoiningRecordByMachineID(t *testing.T) {
+	joining := NodeRecord{Name: "guessed", Host: "203.0.113.11", MachineID: workerMachine, Role: NodeRoleWorker, State: NodeStateJoining}
+	runner := &routedRunner{routes: []route{{contains: "nodeInfo.machineID}", out: "actual-name|" + workerMachine + "\n"}}}
+	unrecorded, err := UnrecordedNodes(runner, []NodeRecord{joining})
+	require.NoError(t, err)
+	assert.Empty(t, unrecorded)
+
+	joining.State = NodeStateReady
+	_, err = UnrecordedNodes(runner, []NodeRecord{joining})
+	assert.Error(t, err, "a ready record keeps its name check")
+}
+
+func TestRequirePeersRecordedForJoin(t *testing.T) {
+	const newMachine = "11111111111111111111111111111111"
+	server := NodeRecord{Name: "test-server", Host: "203.0.113.10", MachineID: serverMachine, Role: NodeRoleServer, State: NodeStateReady}
+	records := []NodeRecord{server}
+	nodes := func(listing string) *routedRunner {
+		return &routedRunner{routes: []route{{contains: "nodeInfo.machineID}", out: listing}}}
+	}
+	handJoined := "test-server|" + serverMachine + "\nhand-joined|" + workerMachine + "\n"
+
+	err := RequirePeersRecordedForJoin(nodes(handJoined), records, newMachine)
+	if err == nil || !strings.Contains(err.Error(), "hand-joined") {
+		t.Fatalf("err = %v, want a fresh join refused while hand-joined has no record", err)
+	}
+	adopting := nodes(handJoined + "other|" + newMachine + "\n")
+	if err := RequirePeersRecordedForJoin(adopting, records, newMachine); err != nil {
+		t.Fatalf("adopting one unrecorded node while another waits was refused: %v", err)
+	}
+	if len(adopting.commands) != 1 {
+		t.Fatalf("listed nodes %d times; both checks must read one listing, or a node registering in between changes the answer", len(adopting.commands))
+	}
+	resuming := append(append([]NodeRecord(nil), records...), NodeRecord{Name: "other", MachineID: newMachine, Role: NodeRoleWorker, State: NodeStateJoining})
+	if err := RequirePeersRecordedForJoin(nodes(handJoined+"other|"+newMachine+"\n"), resuming, newMachine); err != nil {
+		t.Fatalf("resuming an interrupted adoption while another node waits was refused: %v", err)
+	}
+	if err := RequirePeersRecordedForJoin(nodes(handJoined), resuming, newMachine); err == nil {
+		t.Fatal("a joining record whose host has not registered yet must not excuse an unrecorded peer")
+	}
+	if err := RequirePeersRecordedForJoin(nodes("test-server|"+serverMachine+"\n"), records, newMachine); err != nil {
+		t.Fatalf("a fresh join on a fully recorded cluster was refused: %v", err)
 	}
 }

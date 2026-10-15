@@ -116,7 +116,7 @@ func TestWithJoinTokenSucceedsWhenTheDeleteFails(t *testing.T) {
 	assert.NoError(t, withJoinToken(s, "203.0.113.10", func(string) error { return nil }), "the TTL removes the token anyway")
 }
 
-func TestJoinWorkerNodeJoinsWithAFreshTokenAndDeletesItAfterRegistration(t *testing.T) {
+func TestRegisterWorkerJoinsWithAFreshTokenAndDeletesItAfterRegistration(t *testing.T) {
 	id := HostIdentity{MachineID: strings.Repeat("a", 32), BootID: "11111111-2222-3333-4444-555555555555"}
 	server := &storageHostRunner{replies: map[string]string{ //nolint:gosec // G101: a synthetic token fixture
 		"k3s token create":            testJoinToken + "\n",
@@ -129,7 +129,9 @@ func TestJoinWorkerNodeJoinsWithAFreshTokenAndDeletesItAfterRegistration(t *test
 	}}
 	worker := &storageHostRunner{replies: map[string]string{k3sVersionProbeCmd: "KIP_K3S_ABSENT\n"}}
 
-	name, err := JoinWorkerNode(server, worker, "203.0.113.10", id)
+	join, err := PrepareWorker(server, worker, "node-ip: 192.0.2.11\n")
+	require.NoError(t, err)
+	name, err := join.Register(server, worker, "203.0.113.10", id)
 
 	require.NoError(t, err)
 	assert.Equal(t, "worker-1", name)
@@ -145,6 +147,31 @@ func TestJoinWorkerNodeJoinsWithAFreshTokenAndDeletesItAfterRegistration(t *test
 	}
 	require.NotEqual(t, -1, del, "a leftover join token lets any host that sees it join the cluster")
 	assert.Less(t, register, del, "the agent needs the token until it has registered")
+	cordon, untaint := -1, -1
+	for i, c := range server.commands {
+		if c == "kubectl cordon worker-1 >/dev/null" {
+			cordon = i
+		}
+		if strings.Contains(c, "kubectl taint nodes worker-1 "+bootstrapTaint+"-") {
+			untaint = i
+		}
+	}
+	assert.Greater(t, cordon, register, "the cordon follows registration")
+	assert.Greater(t, untaint, cordon, "the taint goes only once the cordon holds")
+	taintFile, install, removeFile := -1, -1, -1
+	for i, c := range worker.commands {
+		switch {
+		case strings.Contains(c, "cat > "+bootstrapTaintPath):
+			taintFile = i
+		case strings.Contains(c, "get.k3s.io"):
+			install = i
+		case c == "rm -f "+bootstrapTaintPath:
+			removeFile = i
+		}
+	}
+	assert.Less(t, taintFile, install, "the agent registers with the taint")
+	assert.Greater(t, removeFile, install)
+	assert.Contains(t, worker.stdin, "node-ip: 192.0.2.11\n", "the network drop-in reaches the worker")
 	for _, c := range server.commands {
 		assert.NotContains(t, c, "/var/lib/rancher/k3s/server/", "joins use a minted token, never a static one from the server's files")
 	}
@@ -180,4 +207,20 @@ func TestWithJoinTokenDeletesATokenMintedBeforeTheConnectionFailed(t *testing.T)
 	require.ErrorContains(t, err, "203.0.113.10")
 	assert.False(t, called, "an unsuccessful mint is no basis for a join")
 	assert.Equal(t, []string{"k3s token delete " + testJoinTokenID}, s.deleted())
+}
+
+// A later drop-in setting node-taint replaces the registration taint, so the
+// join refuses it before the agent starts.
+func TestRegisterWorkerRefusesAnotherNodeTaintSetting(t *testing.T) {
+	for _, body := range []string{"node-taint:\n  - a=b:NoSchedule\n", "  node-taint: []\n", "{node-taint: []}\n", "\"node-taint+\": [x]\n"} {
+		worker := &storageHostRunner{replies: map[string]string{"for f in /etc/rancher/k3s/config.yaml.d": "==> /etc/rancher/k3s/config.yaml.d/zz-site.yaml\n" + body}}
+		_, err := WorkerJoin{serverVersion: k3sVersion}.Register(&storageHostRunner{}, worker, "203.0.113.10", HostIdentity{})
+		require.ErrorContains(t, err, "zz-site.yaml sets node-taint", body)
+		for _, c := range worker.commands {
+			assert.NotContains(t, c, "get.k3s.io")
+		}
+	}
+	worker := &storageHostRunner{replies: map[string]string{"for f in /etc/rancher/k3s/config.yaml.d": "==> /etc/rancher/k3s/config.yaml.d/zz-site.yaml\nnot: [yaml\n"}}
+	_, err := WorkerJoin{serverVersion: k3sVersion}.Register(&storageHostRunner{}, worker, "203.0.113.10", HostIdentity{})
+	assert.ErrorContains(t, err, "not a YAML mapping")
 }

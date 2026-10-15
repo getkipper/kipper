@@ -441,3 +441,43 @@ func readSSHPort(client CommandRunner) (string, error) {
 	}
 	return port, nil
 }
+
+// SSHPort returns the first configured port reported by sshd -T, or "22" if
+// its output is empty. Runner errors are returned.
+func SSHPort(client CommandRunner) (string, error) {
+	return readSSHPort(client)
+}
+
+// SSHRateLimited reports whether UFW lists a LIMIT rule for the port returned
+// by SSHPort. It reads saved rules when UFW is inactive and returns command
+// errors. A missing LIMIT rule returns false.
+func SSHRateLimited(client CommandRunner) (bool, error) {
+	port, err := readSSHPort(client)
+	if err != nil {
+		return false, err
+	}
+	out, err := client.Run(ufwStatusCommand)
+	if err != nil {
+		return false, fmt.Errorf("reading the UFW rules: %w", err)
+	}
+	if strings.Contains(out, "Status: inactive") {
+		// Inactive UFW omits rules from its status output.
+		added, err := client.Run(ufwTimeout + "ufw show added")
+		if err != nil {
+			return false, fmt.Errorf("reading the saved UFW rules: %w", err)
+		}
+		for _, line := range strings.Split(added, "\n") {
+			if f := strings.Fields(line); len(f) == 3 && f[0] == "ufw" && f[1] == "limit" && (f[2] == port+"/tcp" || f[2] == port) {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && (f[0] == port+"/tcp" || f[0] == port) && f[1] == "LIMIT" {
+			return true, nil
+		}
+	}
+	return false, nil
+}

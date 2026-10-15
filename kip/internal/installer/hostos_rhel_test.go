@@ -201,7 +201,7 @@ func TestK3sEntryPointsPrepareTheHost(t *testing.T) {
 	err := InstallK3s(&storageHostRunner{fail: unreadable}, "203.0.113.10", nil, false, false)
 	assert.ErrorContains(t, err, "preparing the host for k3s")
 
-	_, err = JoinWorkerNode(&storageHostRunner{}, &storageHostRunner{fail: unreadable}, "203.0.113.10", HostIdentity{})
+	_, err = PrepareWorker(&storageHostRunner{}, &storageHostRunner{fail: unreadable}, "")
 	assert.ErrorContains(t, err, "preparing the host for k3s")
 }
 

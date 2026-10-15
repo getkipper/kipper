@@ -262,5 +262,6 @@ kubectl -n kube-system annotate helmchart <chart> kip.kipper/reapply="$(date +%s
 - [Host hardening](/en/security#host-hardening) applies firewall and service defaults.
 - [Node repair](/en/alerts#what-causes-the-session-to-drop) updates storage-related host settings.
 - [Node reboot](/en/cli-reference#kip-node-reboot) backs up and reboots the server to apply kernel or service updates, then waits for healthy nodes and components and for previously ready apps to become ready again.
+- [Worker rejoin](/en/cli-reference#kip-node-add): a worker that shows NotReady while `k3s-agent` logs `not authorized` can have missing or expired agent certificates. Run `kip node add <host>` again with the original join options; it rejoins the worker with a fresh token and keeps its name and data. If that fails, follow the cause it reports.
 - [Domain changes](/en/domains#custom-console-domain) move the cluster’s serving identity.
 - [Cluster removal](/en/cli-reference#kip-cluster-uninstall) removes the installation and cluster data.
