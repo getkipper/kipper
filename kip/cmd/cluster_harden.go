@@ -62,9 +62,12 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = provider.Close() }()
 	client := provider.Client()
 
-	if err := recordNodes(client, cluster.Name, cluster.Host); err != nil {
+	records, err := recordNodes(client, cluster.Name, cluster.Host)
+	if err != nil {
 		return err
 	}
+	server, _ := installer.ServerRecord(records)
+	mesh := installer.FirewallMeshFor(records, server.MachineID)
 
 	fmt.Printf("  Auditing host security...\n")
 	audit, err := installer.AuditHost(client)
@@ -85,12 +88,13 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("auditing firewall: %w", err)
 	}
 	isTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
-	consent, err := installer.AdoptionConsent(client, cluster.Host, fwAudit, firewall, adoptFirewall, adoptionQuestion(isTTY))
+	consent, err := installer.AdoptionConsent(client, cluster.Host, fwAudit, firewall, adoptFirewall, adoptionQuestion(isTTY), mesh)
 	if err != nil {
 		return fmt.Errorf("checking the running firewalld: %w", err)
 	}
 	fwPlan := installer.PlanFirewall(fwAudit, firewall, consent.Adopt)
 	fwPlan.AdoptFingerprint = consent.Fingerprint
+	fwPlan.Mesh = mesh
 	fmt.Print(fwPlan.Notice)
 	fmt.Println()
 

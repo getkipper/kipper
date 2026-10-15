@@ -13,13 +13,17 @@ type FirewalldAdoption struct {
 	Reason      string
 	Removed     []string
 	Opened      []string
+	Peers       []string
 	Fingerprint string
 }
 
 // PreviewFirewalldAdoption checks takeover eligibility and describes changes
 // without modifying the host. Ineligibility is reported in Reason; read failures
 // return an error.
-func PreviewFirewalldAdoption(client CommandRunner) (FirewalldAdoption, error) {
+func PreviewFirewalldAdoption(client CommandRunner, mesh FirewallMesh) (FirewalldAdoption, error) {
+	if err := mesh.validate(); err != nil {
+		return FirewalldAdoption{}, err
+	}
 	audit, err := AuditFirewall(client)
 	if err != nil {
 		return FirewalldAdoption{}, err
@@ -31,7 +35,7 @@ func PreviewFirewalldAdoption(client CommandRunner) (FirewalldAdoption, error) {
 	if err != nil {
 		return FirewalldAdoption{}, err
 	}
-	want := wantFirewalld(ports)
+	want := wantFirewalldFor(ports, mesh)
 
 	saved, err := readFirewalldSaved(client)
 	if err != nil {
@@ -61,11 +65,12 @@ func PreviewFirewalldAdoption(client CommandRunner) (FirewalldAdoption, error) {
 		Possible:    true,
 		Removed:     removedFromPublicZone(zone, want),
 		Opened:      openedInPublicZone(zone, want),
-		Fingerprint: firewalldFingerprint(public, saved, ports),
+		Peers:       openedToPeers(mesh),
+		Fingerprint: firewalldFingerprint(public, saved, ports, mesh),
 	}, nil
 }
 
-func currentFirewalldFingerprint(client CommandRunner, ports []string) (string, error) {
+func currentFirewalldFingerprint(client CommandRunner, ports []string, mesh FirewallMesh) (string, error) {
 	saved, err := readFirewalldSaved(client)
 	if err != nil {
 		return "", err
@@ -74,14 +79,15 @@ func currentFirewalldFingerprint(client CommandRunner, ports []string) (string, 
 	if err != nil {
 		return "", fmt.Errorf("reading the running public zone: %w", err)
 	}
-	return firewalldFingerprint(public, saved, ports), nil
+	return firewalldFingerprint(public, saved, ports, mesh), nil
 }
 
 // firewalldFingerprint binds consent to the running public zone, saved file
-// inventory, firewalld.conf, saved public zone, and configured SSH ports.
-func firewalldFingerprint(public string, saved firewalldSavedConfig, ports []string) string {
+// inventory, firewalld.conf, saved public zone, configured SSH ports, and the
+// host's role and peers.
+func firewalldFingerprint(public string, saved firewalldSavedConfig, ports []string, mesh FirewallMesh) string {
 	h := sha256.New()
-	for _, part := range []string{public, saved.inventory, saved.conf, saved.public, strings.Join(ports, " ")} {
+	for _, part := range []string{public, saved.inventory, saved.conf, saved.public, strings.Join(ports, " "), meshFingerprint(mesh)} {
 		h.Write([]byte(part))
 		h.Write([]byte{0})
 	}
@@ -143,17 +149,36 @@ func openedInPublicZone(zone firewalldInfo, want firewalldWant) []string {
 	return opened
 }
 
+func openedToPeers(mesh FirewallMesh) []string {
+	var peers []string
+	for _, p := range mesh.Peers {
+		peers = append(peers, p.Address+": "+strings.Join(peerPorts(p), ", "))
+	}
+	return peers
+}
+
 // Question formats the takeover preview and consent prompt.
 func (a FirewalldAdoption) Question(host string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "firewalld is running on %s with a configuration Kipper does not manage.\n", host)
+	fmt.Fprintf(&b, "firewalld is running on %s with rules managed outside Kipper.\n", host)
 	b.WriteString("  Kipper will replace its public zone:\n")
 	if len(a.Removed) > 0 {
 		fmt.Fprintf(&b, "     removed: %s\n", strings.Join(a.Removed, ", "))
 	}
 	fmt.Fprintf(&b, "     opened to everyone: %s\n", strings.Join(a.Opened, ", "))
+	for _, p := range a.Peers {
+		fmt.Fprintf(&b, "     opened to cluster node %s\n", p)
+	}
 	b.WriteString("  It also adds a zone for pod traffic and two forwarding policies. If new SSH connections\n")
 	b.WriteString("  fail afterwards, Kipper attempts to restore the previous firewall. A fallback timer\n")
 	b.WriteString("  restores it after three minutes unless Kipper confirms the changes. Allow takeover?")
 	return b.String()
+}
+
+func meshFingerprint(mesh FirewallMesh) string {
+	parts := []string{string(mesh.Role)}
+	for _, p := range mesh.Peers {
+		parts = append(parts, fmt.Sprintf("%s:%t", p.Address, p.Server))
+	}
+	return strings.Join(parts, " ")
 }

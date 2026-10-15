@@ -20,18 +20,19 @@ func checkNodeRecords(cluster *config.Cluster, sshKey string) error {
 		return fmt.Errorf("connecting to %s: %w", cluster.Host, err)
 	}
 	defer func() { _ = provider.Close() }()
-	return recordNodes(provider.Client(), cluster.Name, cluster.Host)
+	_, err := recordNodes(provider.Client(), cluster.Name, cluster.Host)
+	return err
 }
 
 // recordNodes ensures every node is recorded, creating the server record if
 // needed, then copies the records into the local cluster config.
-func recordNodes(client installer.CommandRunner, clusterName, host string) error {
+func recordNodes(client installer.CommandRunner, clusterName, host string) ([]installer.NodeRecord, error) {
 	records, err := installer.RequireRecordedNodes(client, host)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	mirrorNodes(clusterName, records)
-	return nil
+	return records, nil
 }
 
 // mirrorNodes treats local copy failures as warnings because the cluster

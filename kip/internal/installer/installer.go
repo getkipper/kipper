@@ -82,7 +82,7 @@ type installStep struct {
 
 // adoptionConsent uses supplied consent for local runs, including consent
 // collected by the SSH driver. Direct SSH installs may prompt here.
-func adoptionConsent(client CommandRunner, opts Options, audit FirewallAudit) (FirewallConsent, error) {
+func adoptionConsent(client CommandRunner, opts Options, audit FirewallAudit, mesh FirewallMesh) (FirewallConsent, error) {
 	if opts.AdoptFirewall {
 		return FirewallConsent{Adopt: true, Fingerprint: opts.AdoptFingerprint}, nil
 	}
@@ -90,7 +90,7 @@ func adoptionConsent(client CommandRunner, opts Options, audit FirewallAudit) (F
 	if opts.Local {
 		ask = nil
 	}
-	return AdoptionConsent(client, opts.Host, audit, opts.Firewall, false, ask)
+	return AdoptionConsent(client, opts.Host, audit, opts.Firewall, false, ask, mesh)
 }
 
 // FirewallConsent authorizes takeover of an operator-managed firewalld.
@@ -102,14 +102,14 @@ type FirewallConsent struct {
 
 // AdoptionConsent returns flag-based consent or prompts with a takeover preview.
 // A nil ask disables prompting. Interactive consent includes the preview fingerprint.
-func AdoptionConsent(client CommandRunner, host string, audit FirewallAudit, firewall, adopt bool, ask func(question string) bool) (FirewallConsent, error) {
+func AdoptionConsent(client CommandRunner, host string, audit FirewallAudit, firewall, adopt bool, ask func(question string) bool, mesh FirewallMesh) (FirewallConsent, error) {
 	if adopt {
 		return FirewallConsent{Adopt: true}, nil
 	}
 	if !audit.Adoptable || !firewall || ask == nil {
 		return FirewallConsent{}, nil
 	}
-	preview, err := PreviewFirewalldAdoption(client)
+	preview, err := PreviewFirewalldAdoption(client, mesh)
 	if err != nil {
 		return FirewallConsent{}, err
 	}
@@ -176,16 +176,17 @@ func localClient(opts Options) hostRunner {
 
 // requireOwnFirewalldIntact verifies the queried runtime settings against kip's
 // expected configuration when the firewall step is skipped.
-func requireOwnFirewalldIntact(client CommandRunner) error {
+func requireOwnFirewalldIntact(client CommandRunner, mesh FirewallMesh) error {
 	sshPorts, err := readSSHPorts(client)
 	if err != nil {
 		return err
 	}
-	state, err := client.Run(firewalldStateCommand)
+	want := wantFirewalldFor(sshPorts, mesh)
+	state, err := client.Run(firewalldStateCommand(want))
 	if err != nil {
 		return fmt.Errorf("reading the running firewalld configuration: %w", err)
 	}
-	if problems := firewalldMismatches(state, wantFirewalld(sshPorts)); len(problems) > 0 {
+	if problems := firewalldMismatches(state, want); len(problems) > 0 {
 		return fmt.Errorf("the firewalld kip set up has changed since configuration (%s). Run the install with --firewall to restore kip's rules", strings.Join(problems, "; "))
 	}
 	return nil
@@ -202,21 +203,21 @@ func requireOperatorFirewalld(client CommandRunner, host HostOS, audit FirewallA
 		return nil
 	}
 	if audit.KipperManaged {
-		return requireOwnFirewalldIntact(client)
+		return requireOwnFirewalldIntact(client, plan.Mesh)
 	}
-	missing, err := CheckOperatorFirewalld(client)
+	missing, err := CheckOperatorFirewalld(client, plan.Mesh)
 	if err != nil {
 		return err
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("the existing firewalld configuration requires these changes for the cluster: %s. %s", strings.Join(missing, "; "), takeoverHint(client))
+		return fmt.Errorf("the existing firewalld configuration requires these changes for the cluster: %s. %s", strings.Join(missing, "; "), takeoverHint(client, plan.Mesh))
 	}
 	return nil
 }
 
 // takeoverHint suggests adoption when the preview passes configuration checks.
-func takeoverHint(client CommandRunner) string {
-	preview, err := PreviewFirewalldAdoption(client)
+func takeoverHint(client CommandRunner, mesh FirewallMesh) string {
+	preview, err := PreviewFirewalldAdoption(client, mesh)
 	switch {
 	case err != nil:
 		return "Update the rules manually"
@@ -355,20 +356,19 @@ func Run(opts Options) (*Result, error) {
 		}
 	}
 
-	// Audit existing firewall — we never trample an admin's existing rules.
+	// Check firewall ownership before requesting takeover consent.
 	fwAudit, err := AuditFirewall(client)
 	if err != nil {
 		return nil, fmt.Errorf("auditing firewall: %w", err)
 	}
-	consent, err := adoptionConsent(client, opts, fwAudit)
+	mesh := ServerFirewallMesh(client)
+	consent, err := adoptionConsent(client, opts, fwAudit, mesh)
 	if err != nil {
 		return nil, err
 	}
 	fwPlan := PlanFirewall(fwAudit, opts.Firewall, consent.Adopt)
 	fwPlan.AdoptFingerprint = consent.Fingerprint
-	if err := requireOperatorFirewalld(client, sysInfo.Host, fwAudit, fwPlan); err != nil {
-		return nil, err
-	}
+	fwPlan.Mesh = mesh
 	configureFirewall := fwPlan.Configure
 	fmt.Print(fwPlan.Notice)
 
@@ -405,9 +405,22 @@ func Run(opts Options) (*Result, error) {
 		return nil, err
 	}
 	if k3sPreexisting {
-		if err := refuseUnrecordedNodes(client, hostMachineID); err != nil {
+		records, err := refuseUnrecordedNodes(client, hostMachineID)
+		if err != nil {
 			return nil, err
 		}
+		// Recheck previewed peers against the validated records before applying rules.
+		if final := FirewallMeshFor(records, hostMachineID); !final.equal(fwPlan.Mesh) {
+			if fwPlan.Adopt {
+				return nil, fmt.Errorf("the cluster's nodes changed while preparing the firewall; run the command again to review the changes")
+			}
+			fwPlan.Mesh = final
+		}
+	} else {
+		fwPlan.Mesh = FirewallMesh{}
+	}
+	if err := requireOperatorFirewalld(client, sysInfo.Host, fwAudit, fwPlan); err != nil {
+		return nil, err
 	}
 
 	// Register a kipper.run subdomain or use a custom domain
@@ -1040,23 +1053,38 @@ func recoverNetworkChange(client CommandRunner, opts Options) error {
 
 // refuseUnrecordedNodes checks node records and server identity before reinstalling.
 // The connected server may be unrecorded because the install will record it.
-func refuseUnrecordedNodes(client CommandRunner, serverMachineID string) error {
+func refuseUnrecordedNodes(client CommandRunner, serverMachineID string) ([]NodeRecord, error) {
 	if serverMachineID == "" {
-		return fmt.Errorf("checking the cluster's nodes: the server's machine id could not be read")
+		return nil, fmt.Errorf("checking the cluster's nodes: the server's machine id could not be read")
 	}
 	records, err := ReadNodeRecords(client)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if server, ok := ServerRecord(records); ok && server.MachineID != serverMachineID {
-		return fmt.Errorf("this host is machine %s, but the cluster records its server as machine %s (%s); check the address, then run kip install again", serverMachineID, server.MachineID, server.Name)
+		return nil, fmt.Errorf("this host is machine %s, but the cluster records its server as machine %s (%s); check the address, then run kip install again", serverMachineID, server.MachineID, server.Name)
 	}
 	unrecorded, err := UnrecordedNodes(client, WithUnrecordedHost(records, serverMachineID))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(unrecorded) > 0 {
-		return unrecordedNodesError(unrecorded)
+		return nil, unrecordedNodesError(unrecorded)
 	}
-	return nil
+	return records, nil
+}
+
+// ServerFirewallMesh reads node records for the firewall preview, returning an
+// empty mesh if the machine ID or records cannot be read. Reinstalls validate
+// the records before applying firewall rules.
+func ServerFirewallMesh(client CommandRunner) FirewallMesh {
+	machineID, err := ReadMachineID(client)
+	if err != nil {
+		return FirewallMesh{}
+	}
+	records, err := ReadNodeRecords(client)
+	if err != nil {
+		return FirewallMesh{}
+	}
+	return FirewallMeshFor(records, machineID)
 }

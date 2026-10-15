@@ -174,6 +174,18 @@ func checkHostWith(out io.Writer, sshConfig ssh.Config, cluster *config.Cluster,
 	checkHostDNSResolvers(out, cluster, client)
 	reportPendingRestarts(out, client)
 	reportReadOnlyVolumes(out, cluster, client, nodes)
+	reportUFWFailOpen(out, client)
+}
+
+// reportUFWFailOpen reports a failed restoration attempt recorded on the server.
+func reportUFWFailOpen(out io.Writer, client installer.CommandRunner) {
+	marker, err := installer.UFWFailOpen(client)
+	if err != nil || marker == "" {
+		return
+	}
+	run, at, _ := strings.Cut(marker, " ")
+	say(out, "  Host firewall:\n")
+	say(out, "    ⚠  a firewall rollback (run %s, %s) could not restore the previous firewall and attempted to switch ufw off. Check the host's firewall state. Run 'kip cluster harden' to turn it back on\n\n", run, at)
 }
 
 // reportStorageRestartCoverage checks node annotations for missing, outdated,

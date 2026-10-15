@@ -22,6 +22,9 @@ type route struct {
 	err      error
 }
 
+func (r *routedRunner) SurvivesSSHRateLimit() bool    { return true }
+func (r *routedRunner) ConfirmFreshConnection() error { return nil }
+
 func (r *routedRunner) Run(command string) (string, error) {
 	r.commands = append(r.commands, command)
 	for _, rt := range r.routes {
@@ -225,7 +228,7 @@ func TestRefuseUnrecordedNodesCountsTheServerAsRecorded(t *testing.T) {
 		{contains: "get configmap kipper-nodes", out: ""},
 		{contains: "nodeInfo.machineID}", out: "test-server|" + serverMachine + "\n"},
 	}}
-	if err := refuseUnrecordedNodes(runner, serverMachine); err != nil {
+	if _, err := refuseUnrecordedNodes(runner, serverMachine); err != nil {
 		t.Fatalf("a single-node cluster without records was refused: %v", err)
 	}
 }
@@ -235,20 +238,20 @@ func TestRefuseUnrecordedNodesStopsAReRunWithAHandJoinedNode(t *testing.T) {
 		{contains: "get configmap kipper-nodes", out: ""},
 		{contains: "nodeInfo.machineID}", out: "test-server|" + serverMachine + "\nhand-joined|" + workerMachine + "\n"},
 	}}
-	if err := refuseUnrecordedNodes(runner, serverMachine); err == nil || !strings.Contains(err.Error(), "hand-joined") {
+	if _, err := refuseUnrecordedNodes(runner, serverMachine); err == nil || !strings.Contains(err.Error(), "hand-joined") {
 		t.Fatalf("err = %v, want a refusal naming hand-joined", err)
 	}
 }
 
 func TestRefuseUnrecordedNodesFailsClosedOnCorruptRecords(t *testing.T) {
 	runner := &routedRunner{routes: []route{{contains: "get configmap kipper-nodes", out: `{"x":"not json"}`}}}
-	if err := refuseUnrecordedNodes(runner, serverMachine); err == nil {
+	if _, err := refuseUnrecordedNodes(runner, serverMachine); err == nil {
 		t.Fatal("corrupt records let the re-run through")
 	}
 }
 
 func TestRefuseUnrecordedNodesNeedsTheServersMachineID(t *testing.T) {
-	if err := refuseUnrecordedNodes(&routedRunner{}, ""); err == nil {
+	if _, err := refuseUnrecordedNodes(&routedRunner{}, ""); err == nil {
 		t.Fatal("an unknown server identity let the re-run through")
 	}
 }
@@ -259,7 +262,7 @@ func TestRefuseUnrecordedNodesRefusesAnotherMachineAsTheServer(t *testing.T) {
 		{contains: "get configmap kipper-nodes", out: recordsJSON(t, server)},
 		{contains: "nodeInfo.machineID}", out: "test-server|" + serverMachine + "\n"},
 	}}
-	if err := refuseUnrecordedNodes(runner, workerMachine); err == nil || !strings.Contains(err.Error(), "test-server") {
+	if _, err := refuseUnrecordedNodes(runner, workerMachine); err == nil || !strings.Contains(err.Error(), "test-server") {
 		t.Fatalf("err = %v, want a refusal naming the recorded server", err)
 	}
 }
