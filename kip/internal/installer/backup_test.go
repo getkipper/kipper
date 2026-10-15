@@ -250,6 +250,7 @@ func TestVeleroManifestRunsFsBackupPrivilegedOnSELinux(t *testing.T) {
 
 type fakeVeleroHost struct {
 	osRelease string
+	osImages  string
 	cmds      []string
 }
 
@@ -257,6 +258,9 @@ func (h *fakeVeleroHost) Run(cmd string) (string, error) {
 	h.cmds = append(h.cmds, cmd)
 	if cmd == "cat /etc/os-release" {
 		return h.osRelease, nil
+	}
+	if strings.Contains(cmd, ".status.nodeInfo.osImage") {
+		return h.osImages, nil
 	}
 	return "", nil
 }
@@ -284,4 +288,21 @@ func TestInstallVeleroPrivilegesFsBackupOnlyWhereK3sRunsSELinux(t *testing.T) {
 	ubuntu := &fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"24.04\"\n"}
 	require.NoError(t, installVelero(ubuntu, nil, "pw"))
 	assert.NotContains(t, ubuntu.applied(t), "privilegedFsBackup")
+}
+
+func TestInstallVeleroPrivilegesFsBackupWhenAnyNodeIsRHEL(t *testing.T) {
+	ubuntu := &fakeVeleroHost{
+		osRelease: "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"26.04\"\n",
+		osImages:  "Ubuntu 26.04 LTS\nRocky Linux 10.2 (Red Quartz)\n",
+	}
+	require.NoError(t, installVelero(ubuntu, nil, "pw"))
+	assert.Contains(t, ubuntu.applied(t), "privilegedFsBackup",
+		"a Rocky worker needs privileged backups even with an Ubuntu server")
+
+	debianOnly := &fakeVeleroHost{
+		osRelease: "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"26.04\"\n",
+		osImages:  "Ubuntu 26.04 LTS\nDebian GNU/Linux 13 (trixie)\n",
+	}
+	require.NoError(t, installVelero(debianOnly, nil, "pw"))
+	assert.NotContains(t, debianOnly.applied(t), "privilegedFsBackup")
 }

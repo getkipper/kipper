@@ -137,6 +137,8 @@ spec:
       labels:
         app: kipper-authz
     spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       serviceAccountName: kipper-authz
       affinity:
         podAntiAffinity:

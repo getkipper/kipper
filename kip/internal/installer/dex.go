@@ -112,6 +112,8 @@ spec:
       labels:
         app: dex
     spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       serviceAccountName: dex
       containers:
         - name: dex

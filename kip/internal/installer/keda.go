@@ -24,6 +24,8 @@ spec:
   targetNamespace: keda
   createNamespace: true
   valuesContent: |-
+    nodeSelector:
+      node-role.kubernetes.io/control-plane: "true"
     resources:
       operator:
         requests:
@@ -66,6 +68,8 @@ spec:
   createNamespace: true
   valuesContent: |-
     interceptor:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       resources:
         requests:
           cpu: 25m
@@ -74,6 +78,8 @@ spec:
           memory: 128Mi
     scaler:
       replicas: 1
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       resources:
         requests:
           cpu: 25m
@@ -81,6 +87,8 @@ spec:
         limits:
           memory: 64Mi
     operator:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       resources:
         requests:
           cpu: 25m

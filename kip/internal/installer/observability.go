@@ -41,6 +41,25 @@ func InstallLokiWithResources(client CommandRunner, res platform.Resources) erro
 	return nil
 }
 
+// InstallNodeExporterTLS provisions node-exporter's TLS certificate and waits for readiness.
+// Install and upgrade call it even when monitoring is disabled, so the required
+// Secret is ready when monitoring is enabled later.
+func InstallNodeExporterTLS(client CommandRunner) error {
+	if _, err := client.Run(ensureNamespaceCmd(platform.MonitoringNamespace)); err != nil {
+		return fmt.Errorf("ensuring monitoring namespace: %w", err)
+	}
+	applyCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", platform.NodeExporterTLSManifests())
+	if _, err := client.Run(applyCmd); err != nil {
+		return fmt.Errorf("applying node-exporter certificate: %w", err)
+	}
+	waitCmd := fmt.Sprintf("kubectl wait --for=condition=Ready certificate/%s -n %s --timeout=180s",
+		platform.NodeExporterCertName, platform.MonitoringNamespace)
+	if _, err := client.Run(waitCmd); err != nil {
+		return fmt.Errorf("waiting for the node-exporter certificate: %w", err)
+	}
+	return nil
+}
+
 // InstallPrometheusGrafanaWithResources installs the kube-prometheus-stack
 // HelmChart with explicit memory resources. Used by the upgrade path to
 // preserve PlatformConfig overrides that the simple profile-only signature

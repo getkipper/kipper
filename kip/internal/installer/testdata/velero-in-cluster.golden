@@ -29,6 +29,9 @@ spec:
       uploaderType: kopia
       defaultVolumesToFsBackup: true
     deployNodeAgent: true
+    # Pin the server; node agents retain their separate scheduling settings.
+    nodeSelector:
+      node-role.kubernetes.io/control-plane: "true"
     credentials:
       useSecret: true
       existingSecret: cloud-credentials

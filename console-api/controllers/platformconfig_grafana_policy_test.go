@@ -62,7 +62,7 @@ func prometheusChartExists(t *testing.T, c client.Client) bool {
 
 func TestPlatformConfigReconciler_AppliesGrafanaPolicyWithTheChart(t *testing.T) {
 	c := crfake.NewClientBuilder().WithScheme(testScheme()).
-		WithObjects(mediumPlatformConfig()).WithStatusSubresource(&kipperv1.PlatformConfig{}).Build()
+		WithObjects(mediumPlatformConfig(), nodeExporterCertSecret()).WithStatusSubresource(&kipperv1.PlatformConfig{}).Build()
 
 	_ = reconcilePlatform(t, c)
 

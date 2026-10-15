@@ -620,6 +620,12 @@ func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPre
 		return fmt.Errorf("waiting for k3s node to be ready: %w", err)
 	}
 
+	// Restore placement after k3s reapplies addon manifests. The later platform
+	// placement step retries addons that are still absent here.
+	if err := PinK3sAddonsToServer(client); err != nil {
+		fmt.Printf("  ⚠  %v\n", err)
+	}
+
 	// CoreDNS only re-reads resolv.conf at startup. On a re-run against an
 	// existing cluster it is already running with the old upstream, so roll
 	// it to pick up the curated file. On a fresh install CoreDNS reads the

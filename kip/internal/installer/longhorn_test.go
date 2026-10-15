@@ -62,6 +62,8 @@ func TestLonghornSettingsFilter_SwitchesOffUpgradeChecksAndUsageMetrics(t *testi
 
 	assert.Equal(t, false, settings["upgrade-checker"])
 	assert.Equal(t, false, settings["allow-collecting-longhorn-usage-metrics"])
+	assert.Equal(t, "block-for-eviction-if-contains-last-replica", settings["node-drain-policy"],
+		"draining must wait for eviction of a volume's last healthy replica")
 	assert.Equal(t, "longhorn-critical", settings["priority-class"], "the stock settings stay")
 }
 

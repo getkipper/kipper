@@ -598,12 +598,8 @@ func Run(opts Options) (*Result, error) {
 		}},
 	}...)
 
-	// Always include the observability steps; each one consults the
-	// effective platform state at run time and skips when the
-	// corresponding component is disabled on the cluster. This makes
-	// reinstall behavior predictable: the CR is the single source of
-	// truth even when host-side profile detection would suggest a
-	// different default.
+	// Honor the saved PlatformConfig when installing observability components.
+	// Always provision the TLS certificate so monitoring can be enabled later.
 	steps = append(steps, []installStep{
 		{"Installing log aggregation (Loki)", func() error {
 			if !effectivePlatform.LokiEnabled() {
@@ -611,6 +607,9 @@ func Run(opts Options) (*Result, error) {
 				return nil
 			}
 			return InstallLokiWithResources(client, effectivePlatform.EffectiveResources())
+		}},
+		{"Issuing the node metrics certificate", func() error {
+			return InstallNodeExporterTLS(client)
 		}},
 		{"Installing metrics and dashboards (Prometheus + Grafana)", func() error {
 			if !effectivePlatform.PrometheusEnabled() {
@@ -679,6 +678,9 @@ func Run(opts Options) (*Result, error) {
 		}},
 		{"Isolating image builds", func() error {
 			return InstallBuildIsolation(client)
+		}},
+		{"Pinning platform components to the server", func() error {
+			return PinPlatformToServer(client)
 		}},
 	}...)
 

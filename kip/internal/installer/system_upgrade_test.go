@@ -24,11 +24,13 @@ func TestSystemComponents(t *testing.T) {
 			"longhorn",
 			"keda",
 			"authz",
+			"node-exporter-tls",
 			"loki",
 			"kube-prometheus-stack",
 			"velero",
 			"zot",
 			"build-isolation",
+			"placement",
 		}
 		got := make([]string, len(components))
 		for i, c := range components {
@@ -48,6 +50,8 @@ func TestSystemComponents(t *testing.T) {
 			"nano profile should not upgrade kube-prometheus-stack")
 		assert.Contains(t, got, "traefik")
 		assert.Contains(t, got, "longhorn")
+		assert.Contains(t, got, "node-exporter-tls",
+			"enabling monitoring later needs the certificate the node-exporter pods mount")
 	})
 
 	t.Run("explicit disable wins over profile default", func(t *testing.T) {

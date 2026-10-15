@@ -130,6 +130,10 @@ func (r *PlatformConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			patchErrs = append(patchErrs, fmt.Errorf("grafana network policy: %w", err))
 			secretReady = false
 		}
+		if err := r.checkNodeExporterCert(ctx); err != nil {
+			patchErrs = append(patchErrs, err)
+			secretReady = false
+		}
 	}
 	if secretReady {
 		if err := r.reconcileComponentEnabled(ctx, "kube-prometheus-stack",
@@ -292,6 +296,29 @@ func (r *PlatformConfigReconciler) reconcileTraefikServiceMonitor(ctx context.Co
 
 	existing.Object["spec"] = desired.Object["spec"]
 	return r.Update(ctx, existing)
+}
+
+// checkNodeExporterCert requires the mounted TLS Secret before chart creation.
+// Existing charts bypass this check so older installations can still reconcile.
+func (r *PlatformConfigReconciler) checkNodeExporterCert(ctx context.Context) error {
+	chart := &unstructured.Unstructured{}
+	chart.SetGroupVersionKind(helmChartGVK)
+	err := r.Get(ctx, types.NamespacedName{Name: "kube-prometheus-stack", Namespace: helmChartNamespace}, chart)
+	if err == nil {
+		return nil
+	}
+	if !errors.IsNotFound(err) {
+		return fmt.Errorf("getting HelmChart kube-prometheus-stack: %w", err)
+	}
+
+	key := types.NamespacedName{Namespace: platform.MonitoringNamespace, Name: platform.NodeExporterCertName}
+	if err := r.Get(ctx, key, &corev1.Secret{}); err != nil {
+		if errors.IsNotFound(err) {
+			return fmt.Errorf("node-exporter certificate %s/%s is missing; run kip upgrade to issue it", key.Namespace, key.Name)
+		}
+		return fmt.Errorf("reading node-exporter certificate: %w", err)
+	}
+	return nil
 }
 
 // ensureGrafanaAdminSecret creates the monitoring namespace and random Grafana
