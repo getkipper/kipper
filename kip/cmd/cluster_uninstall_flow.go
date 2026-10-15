@@ -117,6 +117,11 @@ func uninstallCluster(cluster *config.Cluster, autoYes bool, d uninstallDeps) (u
 		return uninstallOutcome{}, fmt.Errorf("uninstalling: %w", wipeErr)
 	}
 	d.say("  ✔  Host wiped\n")
+	if workers := recordedWorkerHosts(cluster); len(workers) > 0 {
+		d.say("  ·  Server wiped. Recorded workers need separate cleanup:\n")
+		d.say("     %s\n", strings.Join(workers, ", "))
+		d.say("     Run /usr/local/bin/k3s-agent-uninstall.sh on each worker to remove k3s.\n")
+	}
 
 	stillRegistered, releaseErr := releaseName(token, cluster, d)
 	return uninstallOutcome{Wiped: true, NameStillRegistered: stillRegistered, ReleaseErr: releaseErr, SpentToken: token}, nil
@@ -287,4 +292,15 @@ type gatewayTokenReader interface {
 // readGatewayCredentialsFrom reads the release token off a cluster.
 func readGatewayCredentialsFrom(client gatewayTokenReader) (string, error) {
 	return installer.ReadGatewayCredentials(client)
+}
+
+// recordedWorkerHosts returns non-empty worker hosts from local node records.
+func recordedWorkerHosts(cluster *config.Cluster) []string {
+	var hosts []string
+	for _, n := range cluster.Nodes {
+		if n.Role == installer.NodeRoleWorker && n.Host != "" {
+			hosts = append(hosts, n.Host)
+		}
+	}
+	return hosts
 }

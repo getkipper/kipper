@@ -118,3 +118,36 @@ func TestUpdateLocksASeparateFile(t *testing.T) {
 		t.Errorf("no lock file: %v", err)
 	}
 }
+
+func TestMirrorNodesSurvivesAReload(t *testing.T) {
+	isolateHome(t)
+	if err := Update(func(cfg *Config) error {
+		cfg.AddCluster(Cluster{Name: "one", Host: "203.0.113.10"})
+		return nil
+	}); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	want := []NodeRecord{
+		{Name: "server-1", Host: "203.0.113.10", MachineID: "0123456789abcdef0123456789abcdef", Role: "server", State: "ready"},
+		{Name: "worker-1", Host: "203.0.113.11", MachineID: "fedcba9876543210fedcba9876543210", Role: "worker", Mode: "private", PeerAddress: "192.0.2.11", Interface: "eth1", State: "joining"},
+	}
+	if err := MirrorNodes("one", want); err != nil {
+		t.Fatalf("MirrorNodes: %v", err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := cfg.GetCluster("one").Nodes
+	if len(got) != len(want) {
+		t.Fatalf("nodes = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("node %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if err := MirrorNodes("missing", want); err == nil {
+		t.Error("mirroring into an unknown cluster must fail")
+	}
+}

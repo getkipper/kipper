@@ -130,6 +130,9 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	if err := recoverNetworkChange(cluster, sshKey, autoYes); err != nil {
 		return err
 	}
+	if err := checkNodeRecords(cluster, sshKey); err != nil {
+		return err
+	}
 
 	// Obtain autoscaling repair consent before upgrading components.
 	autoscaling, err := autoscalingRepairConsent(ctx, clientset, k8sClient.Dynamic(), os.Stdout, cliVersion(),

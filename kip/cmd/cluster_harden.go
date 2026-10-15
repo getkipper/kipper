@@ -62,6 +62,10 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = provider.Close() }()
 	client := provider.Client()
 
+	if err := recordNodes(client, cluster.Name, cluster.Host); err != nil {
+		return err
+	}
+
 	fmt.Printf("  Auditing host security...\n")
 	audit, err := installer.AuditHost(client)
 	if err != nil {

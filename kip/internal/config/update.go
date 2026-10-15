@@ -48,3 +48,15 @@ func Update(mutate func(*Config) error) error {
 	}
 	return SaveTo(cfg, filepath.Join(dir, "config.yaml"))
 }
+
+// MirrorNodes replaces the named cluster's local copy of its node records.
+func MirrorNodes(clusterName string, nodes []NodeRecord) error {
+	return Update(func(cfg *Config) error {
+		cluster := cfg.GetCluster(clusterName)
+		if cluster == nil {
+			return fmt.Errorf("no cluster named %q in the local config", clusterName)
+		}
+		cluster.Nodes = append([]NodeRecord(nil), nodes...)
+		return nil
+	})
+}
