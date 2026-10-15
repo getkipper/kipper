@@ -39,8 +39,8 @@ func raiseInotifyLimit(client CommandRunner) error {
 }
 
 // prepareNodeOS configures the host prerequisites shared by servers and workers.
-func prepareNodeOS(client CommandRunner) error {
-	if err := prepareHostForK3s(client); err != nil {
+func prepareNodeOS(client CommandRunner, wireGuardOptional bool) error {
+	if err := prepareHostForK3s(client, wireGuardOptional); err != nil {
 		return err
 	}
 	// protect-kernel-defaults makes the kubelet refuse to start unless these
@@ -69,7 +69,7 @@ func prepareWorkerHost(masterClient, workerClient CommandRunner) error {
 	if err := writeAgentDNSConfig(workerClient); err != nil {
 		return err
 	}
-	if err := prepareNodeOS(workerClient); err != nil {
+	if err := prepareNodeOS(workerClient, false); err != nil {
 		return err
 	}
 	if err := writeAgentKubeletConfig(workerClient); err != nil {

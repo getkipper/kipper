@@ -1086,10 +1086,15 @@ func runSystemUpgrade(host, explicitKey, fallbackKey, domain string, dnsResolver
 	if network.Needed() {
 		fmt.Printf("  ...  pod network\n")
 		start := time.Now()
-		if err := installer.ChangeNetwork(provider.Client()); err != nil {
+		warning, err := installer.UpgradeNetwork(provider.Client())
+		if err != nil {
 			return fmt.Errorf("pod network: %w", err)
 		}
-		fmt.Printf("  ✔  pod network on WireGuard (%s)\n", time.Since(start).Round(time.Second))
+		if warning != "" {
+			fmt.Printf("  ⚠  %s\n", warning)
+		} else {
+			fmt.Printf("  ✔  pod network on WireGuard (%s)\n", time.Since(start).Round(time.Second))
+		}
 	}
 	if err := installer.RunSystemUpgrade(provider.Client(), components); err != nil {
 		return err
