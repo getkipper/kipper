@@ -3,6 +3,7 @@ package installer
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +34,9 @@ var flannelLinks = map[string]struct{ link, setting string }{
 // ErrNetworkChangeNotConfirmed indicates missing consent for migration or recovery.
 var ErrNetworkChangeNotConfirmed = errors.New("pod network changes require approval and may restart k3s; re-run with --yes to approve")
 
+// ErrWireGuardUnavailable reports a server kernel that cannot load WireGuard.
+var ErrWireGuardUnavailable = errors.New("the server cannot load the wireguard kernel module")
+
 // NetworkChange describes the server's current pod network and pending recovery.
 type NetworkChange struct {
 	Running     string
@@ -56,16 +60,18 @@ func (c NetworkChange) Describe() string {
 			from = " from " + c.Running
 		}
 		fmt.Fprintf(&b, "  The pod network moves%s to WireGuard, which encrypts pod traffic\n"+
-			"  between nodes. The change restarts k3s and temporarily interrupts API access\n"+
-			"  and pod networking. If the network or previously ready workloads fail to\n"+
-			"  recover, kip attempts to restore the previous configuration and restart k3s.\n", from)
+			"  between nodes. The change restarts k3s, temporarily interrupting API access\n"+
+			"  and potentially pod traffic. If the network or previously ready workloads\n"+
+			"  fail to recover, kip attempts to restore the previous configuration\n"+
+			"  and restart k3s.\n", from)
 	}
 	return b.String()
 }
 
 const interruptedDescription = "  An earlier change to this server's pod network did not finish. If the server\n" +
-	"  runs WireGuard and previously ready workloads recover, kip marks the change\n" +
-	"  complete. Otherwise, it attempts to restore the previous configuration\n  and restart k3s.\n"
+	"  runs WireGuard, previously ready workloads recover, and any recorded target\n" +
+	"  node IP matches, kip marks the change complete. Otherwise, it attempts to\n" +
+	"  restore the previous configuration and restart k3s.\n"
 
 // NetworkChangePending reports whether an earlier network change left its
 // record on the server. It needs no Kubernetes API, so it works while k3s is
@@ -83,7 +89,8 @@ func NetworkChangePending(client CommandRunner) (bool, error) {
 func PendingNetworkChangeDescription() string { return interruptedDescription }
 
 // RecoverNetworkChange completes an interrupted change if WireGuard and
-// previously ready workloads are healthy; otherwise, it attempts a rollback.
+// previously ready workloads are healthy and any recorded target node IP matches.
+// Otherwise, it attempts a rollback.
 // It can start recovery while the Kubernetes API is unavailable.
 func RecoverNetworkChange(client CommandRunner) error {
 	locked, release, err := lockAPIServerConfig(client)
@@ -129,10 +136,11 @@ func runningFlannelBackend(client CommandRunner) (string, error) {
 type networkChangeTimeouts struct {
 	start     time.Duration
 	workloads time.Duration
+	confirm   time.Duration
 	interval  time.Duration
 }
 
-var defaultNetworkChangeTimeouts = networkChangeTimeouts{start: 5 * time.Minute, workloads: 5 * time.Minute, interval: 5 * time.Second}
+var defaultNetworkChangeTimeouts = networkChangeTimeouts{start: 5 * time.Minute, workloads: 5 * time.Minute, confirm: 30 * time.Second, interval: 5 * time.Second}
 
 // ChangeNetwork moves a single-node cluster's pod network to WireGuard.
 // It requires a loadable WireGuard kernel module and no flannel-backend drop-in.
@@ -143,7 +151,47 @@ func ChangeNetwork(client CommandRunner) error {
 	return changeNetwork(client, defaultNetworkChangeTimeouts)
 }
 
+// ChangeServerNetwork applies dropIn as kipper-network.yaml and selects WireGuard
+// using ChangeNetwork's recovery and rollback process. Completion requires the
+// server node to report the drop-in's node-ip as its InternalIP.
+func ChangeServerNetwork(client CommandRunner, dropIn string) error {
+	return changeNetworkTo(client, defaultNetworkChangeTimeouts, &dropIn)
+}
+
+// ReadNetworkDropIn returns the server's kipper-network.yaml, or "" when it
+// does not exist.
+func ReadNetworkDropIn(client CommandRunner) (string, error) {
+	out, err := client.Run(fmt.Sprintf("if [ -e %[1]s ]; then cat %[1]s; fi", k3sNetworkConfigPath))
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %v", k3sNetworkConfigPath, withoutOutput(err))
+	}
+	return out, nil
+}
+
+// UpgradeNetwork runs ChangeNetwork, returning a warning instead of an error
+// when WireGuard is unavailable so the remaining upgrade can proceed.
+func UpgradeNetwork(client CommandRunner) (warning string, err error) {
+	return upgradeNetwork(client, defaultNetworkChangeTimeouts)
+}
+
+func upgradeNetwork(client CommandRunner, t networkChangeTimeouts) (string, error) {
+	return keepNetworkWithoutWireGuard(changeNetwork(client, t))
+}
+
+// keepNetworkWithoutWireGuard lets upgrades and install re-runs proceed with the
+// current pod network when the kernel cannot load WireGuard.
+func keepNetworkWithoutWireGuard(err error) (string, error) {
+	if errors.Is(err, ErrWireGuardUnavailable) {
+		return "keeping the current pod network: the server cannot load the wireguard kernel module. kip will continue; adding nodes with 'kip node add' requires WireGuard", nil
+	}
+	return "", err
+}
+
 func changeNetwork(client CommandRunner, t networkChangeTimeouts) error {
+	return changeNetworkTo(client, t, nil)
+}
+
+func changeNetworkTo(client CommandRunner, t networkChangeTimeouts, dropIn *string) error {
 	locked, release, err := lockAPIServerConfig(client)
 	if err != nil {
 		return err
@@ -158,11 +206,28 @@ func changeNetwork(client CommandRunner, t networkChangeTimeouts) error {
 	if err != nil {
 		return err
 	}
-	if !change.Needed() {
+	nodeIP := ""
+	if dropIn != nil {
+		current, err := ReadNetworkDropIn(client)
+		if err != nil {
+			return err
+		}
+		if nodeIP, err = dropInNodeIP(*dropIn); err != nil {
+			return err
+		}
+		// Verify the live address before treating a matching file as applied.
+		if current == *dropIn {
+			if err := waitForServerNodeIP(client, nodeIP, networkChangeTimeouts{start: t.confirm, interval: t.interval}); err != nil {
+				return fmt.Errorf("%s already holds the new network settings, but k3s runs with another address: %w", k3sNetworkConfigPath, err)
+			}
+			dropIn, nodeIP = nil, ""
+		}
+	}
+	if !change.Needed() && dropIn == nil {
 		return nil
 	}
 	from, ok := flannelLinks[change.Running]
-	if !ok || change.Running == "wireguard" {
+	if !ok || (change.Running == "wireguard" && dropIn == nil) {
 		return fmt.Errorf("the server reports pod network backend %q, which kip cannot move to WireGuard", change.Running)
 	}
 	if err := checkNetworkChangeEligible(client); err != nil {
@@ -181,7 +246,7 @@ func changeNetwork(client CommandRunner, t networkChangeTimeouts) error {
 		return err
 	}
 
-	if _, err := client.RunStdin(backupNetworkScript(from.setting), strings.NewReader(strings.Join(ready, "\n")+"\n")); err != nil {
+	if _, err := client.RunStdin(backupNetworkScript(from.setting, nodeIP), strings.NewReader(strings.Join(ready, "\n")+"\n")); err != nil {
 		return fmt.Errorf("saving the k3s configuration before the network change: %w", err)
 	}
 	if _, err := client.Run("systemctl stop k3s"); err != nil {
@@ -193,17 +258,67 @@ func changeNetwork(client CommandRunner, t networkChangeTimeouts) error {
 	if _, err := client.RunStdin(replaceFileScript(k3sConfigPath), strings.NewReader(desired)); err != nil {
 		return restoreAfter(client, t, ready, fmt.Errorf("writing %s: %v", k3sConfigPath, withoutOutput(err)))
 	}
+	if dropIn != nil {
+		if _, err := client.RunStdin(writeDropInScript(k3sNetworkConfigPath), strings.NewReader(*dropIn)); err != nil {
+			return restoreAfter(client, t, ready, fmt.Errorf("writing %s: %v", k3sNetworkConfigPath, withoutOutput(err)))
+		}
+	}
 	if _, err := client.Run("systemctl start --no-block k3s"); err != nil {
 		return restoreAfter(client, t, ready, fmt.Errorf("starting k3s: %w", err))
 	}
 	if err := waitForNetwork(client, "flannel-wg", ready, t); err != nil {
 		return restoreAfter(client, t, ready, err)
 	}
+	if nodeIP != "" {
+		if err := waitForServerNodeIP(client, nodeIP, t); err != nil {
+			return restoreAfter(client, t, ready, err)
+		}
+	}
 	return clearNetworkChange(client)
 }
 
-// finishInterrupted uses the saved workload readiness to decide whether to
-// complete a pending change or restore the previous network.
+func dropInNodeIP(dropIn string) (string, error) {
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(dropIn), &doc); err != nil {
+		return "", fmt.Errorf("the network drop-in kip rendered is not valid YAML: %w", err)
+	}
+	ip, _ := doc["node-ip"].(string)
+	if a, err := netip.ParseAddr(ip); err != nil || !a.Is4() {
+		return "", fmt.Errorf("the network drop-in kip rendered has no IPv4 node-ip")
+	}
+	return ip, nil
+}
+
+// waitForServerNodeIP waits for the server node to report nodeIP as its InternalIP.
+func waitForServerNodeIP(client CommandRunner, nodeIP string, t networkChangeTimeouts) error {
+	deadline := time.Now().Add(t.start)
+	query := fmt.Sprintf(`kubectl --request-timeout=10s get nodes -l %s=true -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null`, serverNodeLabel)
+	for {
+		out, err := client.Run(query)
+		if err == nil && strings.TrimSpace(out) == nodeIP {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the server node did not report %s as its address within %s (it reports %q)", nodeIP, t.start, strings.TrimSpace(out))
+		}
+		time.Sleep(t.interval)
+	}
+}
+
+// writeDropInScript replaces path with a staged file containing stdin, with mode 0600.
+func writeDropInScript(path string) string {
+	return strings.ReplaceAll(`set -e
+mkdir -p "$(dirname TARGET)"
+staged=$(mktemp "$(dirname TARGET)"/.kipper-XXXXXX)
+trap 'rm -f "$staged"' EXIT
+cat > "$staged"
+chmod 600 "$staged"
+mv "$staged" TARGET
+trap - EXIT`, "TARGET", path)
+}
+
+// finishInterrupted checks WireGuard, saved workload readiness, and any recorded
+// target node IP before completing the change; otherwise it restores the backup.
 func finishInterrupted(client CommandRunner, t networkChangeTimeouts) error {
 	pending, err := NetworkChangePending(client)
 	if err != nil || !pending {
@@ -213,8 +328,13 @@ func finishInterrupted(client CommandRunner, t networkChangeTimeouts) error {
 	if err != nil {
 		return err
 	}
+	nodeIP, err := recordedNodeIP(client)
+	if err != nil {
+		return err
+	}
 	if running, err := runningFlannelBackend(client); err == nil && running == "wireguard" && networkIsUp(client, "flannel-wg") {
-		if err := waitForWorkloads(client, ready, t); err == nil {
+		addressed := nodeIP == "" || waitForServerNodeIP(client, nodeIP, networkChangeTimeouts{start: t.confirm, interval: t.interval}) == nil
+		if err := waitForWorkloads(client, ready, t); err == nil && addressed {
 			return clearNetworkChange(client)
 		}
 	}
@@ -247,10 +367,10 @@ func checkNetworkChangeEligible(client CommandRunner) error {
 		return fmt.Errorf("listing nodes: %w", err)
 	}
 	if nodes := strings.Fields(out); len(nodes) != 1 {
-		return fmt.Errorf("the cluster has %d nodes; kip moves the pod network to WireGuard only while the server is the only node. Remove the other nodes with 'kip node remove' (or 'kubectl delete node' for a node kip did not add), then re-run", len(nodes))
+		return fmt.Errorf("the cluster has %d nodes; changing the pod network requires the server to be the only node. For each worker, run 'k3s-agent-uninstall.sh' on the worker and 'kubectl delete node <name>' on the server. Retry this command, then rejoin each worker with 'kip node add <host>'", len(nodes))
 	}
 	if _, err := client.Run("modprobe wireguard"); err != nil {
-		return fmt.Errorf("the server cannot load the wireguard kernel module, so the pod network stays as it is: %w", err)
+		return fmt.Errorf("%w, so the pod network stays as it is: %v", ErrWireGuardUnavailable, err)
 	}
 	out, err = client.Run("grep -l '^flannel-backend:' /etc/rancher/k3s/config.yaml.d/*.yaml 2>/dev/null || true")
 	if err != nil {
@@ -272,16 +392,20 @@ done
 rm -f /run/flannel/subnet.env
 [ ! -e /run/flannel/subnet.env ]`
 
-// backupNetworkScript copies the files the change replaces, saves the ready
-// workloads it reads on stdin, and writes the record naming the backend to
-// return to.
-func backupNetworkScript(fromSetting string) string {
+// backupNetworkScript backs up configuration files and saves the ready workload
+// list from stdin before writing the recovery record. The record identifies the
+// rollback backend and any target node IP that recovery must verify.
+func backupNetworkScript(fromSetting, nodeIP string) string {
+	record := "from=" + fromSetting + `\n`
+	if nodeIP != "" {
+		record += "node-ip=" + nodeIP + `\n`
+	}
 	return strings.NewReplacer(
 		"RECORD", networkChangeRecord,
 		"BACKUP", networkChangeBackup,
 		"CONFIG", k3sConfigPath,
 		"DROPIN", k3sNetworkConfigPath,
-		"FROM", fromSetting,
+		"FROMLINE", record,
 	).Replace(`set -e
 umask 077
 rm -rf BACKUP
@@ -289,7 +413,7 @@ mkdir -p BACKUP
 cp -p "$(readlink -f CONFIG)" BACKUP/config.yaml
 if [ -e DROPIN ]; then cp -p DROPIN BACKUP/kipper-network.yaml; else touch BACKUP/kipper-network.absent; fi
 cat > BACKUP/ready-workloads
-printf 'from=FROM\n' > RECORD.tmp
+printf 'FROMLINE' > RECORD.tmp
 mv RECORD.tmp RECORD`)
 }
 
@@ -349,6 +473,22 @@ func restoreNetwork(client CommandRunner, t networkChangeTimeouts, ready []strin
 		return err
 	}
 	return clearNetworkChange(client)
+}
+
+func recordedNodeIP(client CommandRunner) (string, error) {
+	record, err := client.Run("cat " + networkChangeRecord)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", networkChangeRecord, err)
+	}
+	for _, line := range strings.Split(record, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "node-ip="); ok {
+			if a, err := netip.ParseAddr(v); err != nil || !a.Is4() {
+				return "", fmt.Errorf("%s names node-ip %q, which is not an IPv4 address", networkChangeRecord, v)
+			}
+			return v, nil
+		}
+	}
+	return "", nil
 }
 
 func clearNetworkChange(client CommandRunner) error {

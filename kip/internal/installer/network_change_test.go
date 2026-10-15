@@ -34,6 +34,9 @@ type netHost struct {
 	workloadsAfterChange string
 	started              int
 	commands             []string
+	internalIP           string
+	keepsNodeIP          bool
+	addressReadFailures  int
 }
 
 func newNetHost() *netHost {
@@ -102,7 +105,7 @@ func (h *netHost) RunStdin(cmd string, in io.Reader) (string, error) {
 	case strings.Contains(cmd, networkChangeBackup+"/config.yaml") && strings.Contains(cmd, "from="):
 		h.backupConfig, h.backupDropIn, h.backupDropInAbsent = h.config, h.dropIn, !h.dropInPresent
 		h.savedReady, h.snapshotSaved = string(stdin), true
-		h.record = "from=" + strings.SplitN(strings.SplitN(cmd, "from=", 2)[1], `\n`, 2)[0] + "\n"
+		h.record = strings.ReplaceAll(strings.SplitN(strings.SplitN(cmd, "printf '", 2)[1], "' > ", 2)[0], `\n`, "\n")
 	case strings.HasPrefix(cmd, "if [ -e "+k3sNetworkConfigPath):
 		return h.dropIn, nil
 	case strings.Contains(cmd, `mv "$staged" `+k3sNetworkConfigPath):
@@ -113,8 +116,17 @@ func (h *netHost) RunStdin(cmd string, in io.Reader) (string, error) {
 		h.links = map[string]bool{}
 	case strings.Contains(cmd, `cat > "$staged"`) && strings.Contains(cmd, k3sConfigPath):
 		h.config = string(stdin)
+	case strings.Contains(cmd, `type=="InternalIP"`):
+		if h.addressReadFailures > 0 {
+			h.addressReadFailures--
+			return "", errors.New("exit status 1")
+		}
+		return h.internalIP, nil
 	case cmd == "systemctl start --no-block k3s":
 		h.started++
+		if ip, err := dropInNodeIP(h.dropIn); err == nil && h.dropInPresent && !h.keepsNodeIP {
+			h.internalIP = ip
+		}
 		if strings.Contains(h.config, "flannel-backend: "+wireguardBackend) {
 			if h.wgFails {
 				return "", nil
@@ -159,7 +171,7 @@ func (h *netHost) index(fragment string) int {
 	return -1
 }
 
-var fastNetworkChange = networkChangeTimeouts{start: 50 * time.Millisecond, workloads: 50 * time.Millisecond, interval: time.Millisecond}
+var fastNetworkChange = networkChangeTimeouts{start: 50 * time.Millisecond, workloads: 50 * time.Millisecond, confirm: 50 * time.Millisecond, interval: time.Millisecond}
 
 func TestChangeNetworkMovesASingleNodeServerToWireGuard(t *testing.T) {
 	h := newNetHost()
@@ -217,6 +229,9 @@ func TestChangeNetworkRefusesAClusterWithAWorker(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "only node")
+	assert.Contains(t, err.Error(), "kubectl delete node", "the remedy names a command that exists")
+	assert.NotContains(t, err.Error(), "kip node remove", "kip has no node removal command yet")
+	assert.Contains(t, err.Error(), "kip node add", "a removed worker comes back with kip node add")
 	assert.Equal(t, -1, h.index("systemctl stop k3s"), "a worker's flannel would lose the server mid-change")
 }
 
@@ -405,4 +420,206 @@ func TestRecoverNetworkChangeRefusesARecordWithoutItsWorkloadList(t *testing.T) 
 
 	require.Error(t, err)
 	assert.NotEmpty(t, h.record, "without the list, finishing would skip the check that decides between done and undo")
+}
+
+const privateServerDropIn = "advertise-address: 10.0.0.3\nflannel-iface: enp7s0\nnode-external-ip: 203.0.113.10\nnode-ip: 10.0.0.3\ntls-san+:\n- 10.0.0.3\n"
+
+func TestChangeServerNetworkMovesAWireGuardServerToItsPrivateAddress(t *testing.T) {
+	h := newNetHost()
+	h.config, h.backend, h.links, h.internalIP = vxlanConfig+"flannel-backend: wireguard-native\n", "wireguard", map[string]bool{"flannel-wg": true}, "203.0.113.10"
+	dropIn := privateServerDropIn
+
+	require.NoError(t, changeNetworkTo(h, fastNetworkChange, &dropIn))
+
+	assert.Equal(t, privateServerDropIn, h.dropIn)
+	assert.Equal(t, "10.0.0.3", h.internalIP)
+	assert.Empty(t, h.record)
+	assert.Less(t, h.index("systemctl stop k3s"), h.index(`mv "$staged" `+k3sNetworkConfigPath), "the drop-in changes while k3s is stopped")
+	assert.Less(t, h.index(networkChangeBackup+"/config.yaml"), h.index("systemctl stop k3s"), "the old drop-in is backed up first")
+}
+
+func TestChangeServerNetworkAlsoMovesAVXLANServerToWireGuard(t *testing.T) {
+	h := newNetHost()
+	dropIn := privateServerDropIn
+
+	require.NoError(t, changeNetworkTo(h, fastNetworkChange, &dropIn))
+
+	assert.Contains(t, h.config, "flannel-backend: wireguard-native\n")
+	assert.Equal(t, "10.0.0.3", h.internalIP)
+}
+
+func TestChangeServerNetworkRestoresWhenTheNodeKeepsItsOldAddress(t *testing.T) {
+	h := newNetHost()
+	h.config, h.backend, h.links, h.internalIP, h.keepsNodeIP = vxlanConfig+"flannel-backend: wireguard-native\n", "wireguard", map[string]bool{"flannel-wg": true}, "203.0.113.10", true
+	dropIn := privateServerDropIn
+
+	err := changeNetworkTo(h, fastNetworkChange, &dropIn)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not report 10.0.0.3")
+	assert.Contains(t, err.Error(), "previous configuration is back in place")
+	assert.False(t, h.dropInPresent, "the server had no drop-in before")
+	assert.Empty(t, h.record)
+}
+
+func TestChangeServerNetworkDoesNothingWhenTheDropInMatches(t *testing.T) {
+	h := newNetHost()
+	h.config, h.backend, h.links = vxlanConfig+"flannel-backend: wireguard-native\n", "wireguard", map[string]bool{"flannel-wg": true}
+	h.dropIn, h.dropInPresent, h.internalIP = privateServerDropIn, true, "10.0.0.3"
+	dropIn := privateServerDropIn
+
+	require.NoError(t, changeNetworkTo(h, fastNetworkChange, &dropIn))
+
+	assert.Equal(t, -1, h.index("systemctl stop k3s"))
+}
+
+func TestChangeServerNetworkRefusesAMatchingDropInThatK3sDoesNotRun(t *testing.T) {
+	h := newNetHost()
+	h.config, h.backend, h.links = vxlanConfig+"flannel-backend: wireguard-native\n", "wireguard", map[string]bool{"flannel-wg": true}
+	h.dropIn, h.dropInPresent, h.internalIP = privateServerDropIn, true, "203.0.113.10"
+	dropIn := privateServerDropIn
+
+	err := changeNetworkTo(h, fastNetworkChange, &dropIn)
+
+	assert.ErrorContains(t, err, "k3s runs with another address")
+	assert.Equal(t, -1, h.index("systemctl stop k3s"))
+}
+
+func TestRecoveryRestoresAnInterruptedAddressMoveTheNodeDidNotTake(t *testing.T) {
+	h := newNetHost()
+	h.config, h.backend, h.links, h.internalIP = vxlanConfig+"flannel-backend: wireguard-native\n", "wireguard", map[string]bool{"flannel-wg": true}, "203.0.113.10"
+	h.record = "from=wireguard-native\nnode-ip=10.0.0.3\n"
+	h.savedReady, h.snapshotSaved = "Deployment/gate/web\n", true
+	h.backupConfig, h.backupDropInAbsent = h.config, true
+	h.dropIn, h.dropInPresent, h.keepsNodeIP = privateServerDropIn, true, true
+
+	require.NoError(t, finishInterrupted(h, fastNetworkChange))
+
+	assert.False(t, h.dropInPresent, "the backup without a drop-in is restored")
+	assert.Empty(t, h.record)
+	assert.GreaterOrEqual(t, h.index("systemctl stop k3s"), 0, "the restore ran")
+}
+
+func TestRecoveryFinishesAnInterruptedAddressMoveTheNodeTook(t *testing.T) {
+	h := newNetHost()
+	h.config, h.backend, h.links, h.internalIP = vxlanConfig+"flannel-backend: wireguard-native\n", "wireguard", map[string]bool{"flannel-wg": true}, "10.0.0.3"
+	h.record = "from=wireguard-native\nnode-ip=10.0.0.3\n"
+	h.savedReady, h.snapshotSaved = "Deployment/gate/web\n", true
+	h.dropIn, h.dropInPresent = privateServerDropIn, true
+
+	require.NoError(t, finishInterrupted(h, fastNetworkChange))
+
+	assert.Empty(t, h.record)
+	assert.Equal(t, -1, h.index("systemctl stop k3s"))
+	assert.Equal(t, privateServerDropIn, h.dropIn)
+}
+
+func TestChangeServerNetworkToleratesATransientAddressReadOnAMatchingDropIn(t *testing.T) {
+	h := newNetHost()
+	h.config, h.backend, h.links = vxlanConfig+"flannel-backend: wireguard-native\n", "wireguard", map[string]bool{"flannel-wg": true}
+	h.dropIn, h.dropInPresent, h.internalIP = privateServerDropIn, true, "10.0.0.3"
+	h.addressReadFailures = 1
+	dropIn := privateServerDropIn
+
+	require.NoError(t, changeNetworkTo(h, fastNetworkChange, &dropIn))
+
+	assert.Equal(t, -1, h.index("systemctl stop k3s"))
+}
+
+func TestRecoveryToleratesATransientAddressReadBeforeFinishing(t *testing.T) {
+	h := newNetHost()
+	h.config, h.backend, h.links, h.internalIP = vxlanConfig+"flannel-backend: wireguard-native\n", "wireguard", map[string]bool{"flannel-wg": true}, "10.0.0.3"
+	h.record = "from=wireguard-native\nnode-ip=10.0.0.3\n"
+	h.savedReady, h.snapshotSaved = "Deployment/gate/web\n", true
+	h.dropIn, h.dropInPresent = privateServerDropIn, true
+	h.addressReadFailures = 1
+
+	require.NoError(t, finishInterrupted(h, fastNetworkChange))
+
+	assert.Empty(t, h.record)
+	assert.Equal(t, -1, h.index("systemctl stop k3s"), "a healthy WireGuard server is not rolled back over one failed read")
+}
+
+func TestUpgradeNetworkLeavesAKernelWithoutWireGuardOnItsBackend(t *testing.T) {
+	h := newNetHost()
+	h.wgLoads = false
+
+	warning, err := upgradeNetwork(h, fastNetworkChange)
+
+	require.NoError(t, err, "the rest of the upgrade must still run")
+	assert.Contains(t, warning, "wireguard")
+	assert.NotContains(t, warning, "upgrade", "kip install re-runs print the same warning")
+	assert.Equal(t, -1, h.index("systemctl stop k3s"))
+	assert.Equal(t, vxlanConfig, h.config)
+}
+
+func TestUpgradeNetworkStillFailsOnOtherErrors(t *testing.T) {
+	h := newNetHost()
+	h.wgFails = true
+
+	warning, err := upgradeNetwork(h, fastNetworkChange)
+
+	require.Error(t, err)
+	assert.Empty(t, warning)
+}
+
+// installNetHost extends netHost with host preparation and k3s config capture.
+type installNetHost struct {
+	*netHost
+	written string
+}
+
+func (h *installNetHost) Run(cmd string) (string, error) {
+	return h.RunStdin(cmd, strings.NewReader(""))
+}
+
+func (h *installNetHost) RunStdin(cmd string, in io.Reader) (string, error) {
+	switch {
+	case cmd == "cat /etc/os-release":
+		return "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"26.04\"\n", nil
+	case cmd == k3sVersionProbeCmd:
+		return "k3s version " + k3sVersion + " (abc)\n", nil
+	case cmd == "uname -r":
+		return "6.8.0-test\n", nil
+	case strings.HasPrefix(cmd, "for m in "):
+		if !h.wgLoads {
+			return "MISSING:wireguard\n", nil
+		}
+		return "", nil
+	case strings.HasPrefix(cmd, "cat > "+k3sConfigPath+" << 'KIPEOF'"):
+		h.written = cmd
+		return "", nil
+	}
+	return h.netHost.RunStdin(cmd, in)
+}
+
+func TestInstallK3sKeepsVXLANOnAnExistingServerWithoutWireGuard(t *testing.T) {
+	h := &installNetHost{netHost: newNetHost()}
+	h.wgLoads = false
+
+	require.NoError(t, InstallK3s(h, "203.0.113.10", nil, true, true), "re-running install can upgrade k3s while keeping VXLAN")
+
+	assert.Equal(t, -1, h.index("systemctl stop k3s"))
+	assert.Contains(t, h.written, "flannel-backend: vxlan\n")
+	assert.NotContains(t, h.written, wireguardBackend)
+}
+
+func TestInstallK3sStillRequiresWireGuardOnAFreshServer(t *testing.T) {
+	h := &installNetHost{netHost: newNetHost()}
+	h.wgLoads = false
+
+	err := InstallK3s(h, "203.0.113.10", nil, false, false)
+
+	require.ErrorContains(t, err, "wireguard")
+	assert.Empty(t, h.written)
+}
+
+func TestInstallK3sStillRequiresWireGuardOnAnExistingWireGuardServer(t *testing.T) {
+	h := &installNetHost{netHost: newNetHost()}
+	h.backend, h.wgLoads = "wireguard", false
+
+	err := InstallK3s(h, "203.0.113.10", nil, true, true)
+
+	require.ErrorContains(t, err, "wireguard")
+	assert.Empty(t, h.written)
 }

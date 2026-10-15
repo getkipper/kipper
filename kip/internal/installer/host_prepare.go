@@ -3,6 +3,7 @@ package installer
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -14,20 +15,21 @@ var kernelReleasePattern = regexp.MustCompile(`^[0-9A-Za-z._+-]+$`)
 
 // prepareHostForK3s prepares kernel modules and family-specific configuration
 // before starting a k3s server or worker.
-func prepareHostForK3s(client CommandRunner) error {
+func prepareHostForK3s(client CommandRunner, wireGuardOptional bool) error {
 	host, err := DetectHostOS(client)
 	if err != nil {
 		return fmt.Errorf("preparing the host for k3s: %w", err)
 	}
-	if err := ensureKernelModules(client, host); err != nil {
+	if err := ensureKernelModules(client, host, wireGuardOptional); err != nil {
 		return err
 	}
 	return writeK3sHostConfig(client, host)
 }
 
 // ensureKernelModules installs missing modules for the running kernel where
-// a package is configured, and reports any modules still unavailable.
-func ensureKernelModules(client CommandRunner, host HostOS) error {
+// a package is configured, and reports any required modules still unavailable.
+// wireGuardOptional lets existing VXLAN servers continue without WireGuard.
+func ensureKernelModules(client CommandRunner, host HostOS, wireGuardOptional bool) error {
 	modules := host.KernelModules()
 	if len(modules) == 0 {
 		return nil
@@ -53,7 +55,7 @@ func ensureKernelModules(client CommandRunner, host HostOS) error {
 			versioned = append(versioned, pkg+"-"+release)
 		}
 		fmt.Print(packageInstallNotice(versioned))
-		if _, err := client.Run(host.InstallPackagesCommand(false, versioned...)); err != nil {
+		if _, err := client.Run(host.InstallPackagesCommand(false, versioned...)); err != nil && len(withoutOptional(missing, wireGuardOptional)) > 0 {
 			return fmt.Errorf("installing %s for missing kernel modules (%s): %w. If packages for the running kernel are unavailable, run 'dnf update', reboot, and retry",
 				strings.Join(versioned, " "), strings.Join(missing, ", "), err)
 		}
@@ -61,11 +63,18 @@ func ensureKernelModules(client CommandRunner, host HostOS) error {
 			return err
 		}
 	}
-	if len(missing) > 0 {
+	if missing = withoutOptional(missing, wireGuardOptional); len(missing) > 0 {
 		return fmt.Errorf("kernel %s could not load required modules (%s). %s, reboot, and retry",
 			release, strings.Join(missing, ", "), kernelUpdateHint(host))
 	}
 	return nil
+}
+
+func withoutOptional(missing []string, wireGuardOptional bool) []string {
+	if !wireGuardOptional {
+		return missing
+	}
+	return slices.DeleteFunc(slices.Clone(missing), func(m string) bool { return m == "wireguard" })
 }
 
 func kernelUpdateHint(host HostOS) string {

@@ -196,6 +196,11 @@ resolv-conf: ` + k3sResolvConfPath + `
   - "protect-kernel-defaults=true"
 `
 
+func renderK3sConfig(host, backend string) string {
+	return strings.Replace(fmt.Sprintf(k3sConfig, host),
+		"flannel-backend: "+wireguardBackend+"\n", "flannel-backend: "+backend+"\n", 1)
+}
+
 // k3sAPIServerArgs is the API server block, held apart from the rest of the
 // config because a cluster installed before it existed has it appended by
 // EnsureAPIServerConfig. Install and that repair render the same bytes, so an
@@ -564,9 +569,19 @@ func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPre
 
 	warnUnreachableResolvers(probeDNSResolvers(client, resolvers), resolvers)
 
+	var change NetworkChange
+	if k3sPreexisting {
+		if change, err = PlanNetworkChange(client); err != nil {
+			return err
+		}
+	}
+	// Allow VXLAN as a fallback when WireGuard is unavailable, provided no
+	// network change needs recovery.
+	vxlanServer := change.Running == "vxlan" && !change.Interrupted
+
 	// The kubelet sysctls must be in place before k3s installs and before an
 	// upgrade restarts the kubelet.
-	if err := prepareNodeOS(client); err != nil {
+	if err := prepareNodeOS(client, vxlanServer); err != nil {
 		return err
 	}
 
@@ -576,22 +591,25 @@ func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPre
 		return err
 	}
 
-	if k3sPreexisting {
-		change, err := PlanNetworkChange(client)
+	backend := wireguardBackend
+	if k3sPreexisting && change.Needed() {
+		if !changeNetwork {
+			return ErrNetworkChangeNotConfirmed
+		}
+		err := ChangeNetwork(client)
+		if vxlanServer {
+			var warning string
+			if warning, err = keepNetworkWithoutWireGuard(err); warning != "" {
+				fmt.Printf("  ⚠  %s\n", warning)
+				backend = flannelLinks["vxlan"].setting
+			}
+		}
 		if err != nil {
 			return err
 		}
-		if change.Needed() {
-			if !changeNetwork {
-				return ErrNetworkChangeNotConfirmed
-			}
-			if err := ChangeNetwork(client); err != nil {
-				return err
-			}
-		}
 	}
 
-	configContent := fmt.Sprintf(k3sConfig, host)
+	configContent := renderK3sConfig(host, backend)
 	writeCmd := fmt.Sprintf("cat > /etc/rancher/k3s/config.yaml << 'KIPEOF'\n%sKIPEOF", configContent)
 	if _, err := client.Run(writeCmd); err != nil {
 		return fmt.Errorf("writing k3s config: %w", err)
