@@ -2172,3 +2172,33 @@ func TestLoweringJVMCPUNeverTakesTheLimitBelowItsMinimum(t *testing.T) {
 		t.Fatalf("CPU limit = %s, want at least the jvm minimum of 500m", got.String())
 	}
 }
+
+func TestRefreshOOMCapUsesLargestNode(t *testing.T) {
+	const gi = int64(1024 * 1024 * 1024)
+	node := func(memory int64) corev1.Node {
+		return corev1.Node{Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+			corev1.ResourceMemory: *resource.NewQuantity(memory, resource.BinarySI),
+		}}}
+	}
+
+	rc := &ResourceController{}
+	rc.refreshOOMCap([]corev1.Node{node(32 * gi), node(64 * gi), node(16 * gi)})
+
+	if want := 32 * gi; rc.oomCapBytes != want {
+		t.Fatalf("oomCapBytes = %d, want %d (half of the largest node, since a pod runs on one node)", rc.oomCapBytes, want)
+	}
+}
+
+func TestRefreshOOMCapKeepsTheFloorOnSmallNodes(t *testing.T) {
+	const gi = int64(1024 * 1024 * 1024)
+	node := corev1.Node{Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+		corev1.ResourceMemory: *resource.NewQuantity(4*gi, resource.BinarySI),
+	}}}
+
+	rc := &ResourceController{}
+	rc.refreshOOMCap([]corev1.Node{node, node})
+
+	if rc.oomCapBytes != defaultOOMCapBytes {
+		t.Fatalf("oomCapBytes = %d, want the %d floor", rc.oomCapBytes, defaultOOMCapBytes)
+	}
+}

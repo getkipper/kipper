@@ -42,7 +42,7 @@ Database services (PostgreSQL, MySQL, MongoDB, OpenSearch) automatically get the
 
 ### OOM memory cap
 
-OOM doubling is capped at 50% of total node allocatable memory (minimum 8 Gi). On a 16 GB node, the cap is 8 Gi. If an OOM-killed pod is already at the cap, the controller creates a critical alert instead of doubling further.
+OOM doubling is capped at 50% of the largest node's allocatable memory, with a minimum cap of 8 Gi, because a pod runs on one node. For example, 16 Gi of allocatable memory gives a cap of 8 Gi. This cap limits automatic increases; available memory and scheduling constraints determine whether a pod fits. The 8 Gi minimum can exceed a small node's capacity. If an OOM-killed container is already at or above the cap, the controller raises a critical alert and keeps its allocation.
 
 Automatic adjustments round CPU up to the nearest 50m and memory up to the nearest 64 Mi. User bounds still take precedence. If the resulting allocation is unchanged, the controller skips the adjustment.
 
