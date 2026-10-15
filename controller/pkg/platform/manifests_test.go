@@ -132,6 +132,17 @@ func kubeStateMetricsBlock(t *testing.T, chart string) string {
 	return rest
 }
 
+func TestKubePrometheusStackHelmChart_GrafanaRollsOutWithoutASurgePod(t *testing.T) {
+	values := seededValues(t, KubePrometheusStackHelmChart(ResourcesForProfile(ProfileNano)))
+	grafana, _ := values["grafana"].(map[string]interface{})
+	strategy, _ := grafana["deploymentStrategy"].(map[string]interface{})
+	require.NotNil(t, strategy, "grafana.deploymentStrategy is missing")
+	assert.Equal(t, "RollingUpdate", strategy["type"], "Grafana should retain the rolling-update strategy.")
+	rolling, _ := strategy["rollingUpdate"].(map[string]interface{})
+	assert.EqualValues(t, 0, rolling["maxSurge"], "Grafana rollouts should require no surge pod.")
+	assert.EqualValues(t, 1, rolling["maxUnavailable"])
+}
+
 // Pin the scrape interval so chart upgrades preserve the sample density needed
 // by the traffic view's 30s CPU rate windows.
 func TestKubePrometheusStackHelmChart_PinsTheCAdvisorScrapeInterval(t *testing.T) {
@@ -190,4 +201,85 @@ func TestPromtailHelmChart_RunsUnconfinedOnlyBySELinuxType(t *testing.T) {
 	security, ok := valueAt(t, values, "containerSecurityContext").(map[string]interface{})
 	require.True(t, ok)
 	assert.ElementsMatch(t, []string{"seLinuxOptions", "seccompProfile"}, slices.Collect(maps.Keys(security)), "the chart's own hardening must not be overridden")
+}
+
+func nodeExporterValues(t *testing.T) map[string]interface{} {
+	t.Helper()
+	values := seededValues(t, KubePrometheusStackHelmChart(ResourcesForProfile(ProfileMedium)))
+	block, ok := values["prometheus-node-exporter"].(map[string]interface{})
+	require.True(t, ok, "the chart carries no prometheus-node-exporter section")
+	return block
+}
+
+func nestedValue(t *testing.T, values map[string]interface{}, path ...string) interface{} {
+	t.Helper()
+	got, found, err := unstructured.NestedFieldNoCopy(values, path...)
+	require.NoError(t, err)
+	require.True(t, found, "missing value %s", strings.Join(path, "."))
+	return got
+}
+
+// Keep the proxy on the port allowed by the host firewall and the exporter on loopback.
+func TestKubePrometheusStackHelmChart_NodeExporterBehindRBACProxy(t *testing.T) {
+	ne := nodeExporterValues(t)
+
+	assert.Equal(t, true, nestedValue(t, ne, "kubeRBACProxy", "enabled"))
+	assert.EqualValues(t, 9100, nestedValue(t, ne, "service", "port"),
+		"the proxy listens on service.port, which the peer firewall rules open")
+	assert.EqualValues(t, 8100, nestedValue(t, ne, "kubeRBACProxy", "port"),
+		"the exporter moves to 127.0.0.1 on kubeRBACProxy.port")
+	assert.Equal(t, true, nestedValue(t, ne, "kubeRBACProxy", "tls", "enabled"))
+	assert.Equal(t, true, nestedValue(t, ne, "tlsSecret", "enabled"))
+	assert.Equal(t, NodeExporterCertName, nestedValue(t, ne, "tlsSecret", "secretName"))
+}
+
+func TestKubePrometheusStackHelmChart_NodeExporterScrapedOverVerifiedTLS(t *testing.T) {
+	ne := nodeExporterValues(t)
+
+	assert.Equal(t, "https", nestedValue(t, ne, "prometheus", "monitor", "scheme"))
+	assert.Equal(t, "/var/run/secrets/kubernetes.io/serviceaccount/token",
+		nestedValue(t, ne, "prometheus", "monitor", "bearerTokenFile"))
+	tlsConfig, ok := nestedValue(t, ne, "prometheus", "monitor", "tlsConfig").(map[string]interface{})
+	require.True(t, ok)
+	assert.NotContains(t, tlsConfig, "insecureSkipVerify")
+	assert.Equal(t, NodeExporterServerName, tlsConfig["serverName"])
+	assert.Equal(t, NodeExporterCertName, nestedValue(t, tlsConfig, "ca", "secret", "name"))
+	assert.Equal(t, "ca.crt", nestedValue(t, tlsConfig, "ca", "secret", "key"))
+}
+
+func TestNodeExporterTLSManifests_IssueTheProxyCertificate(t *testing.T) {
+	var docs []map[string]interface{}
+	for _, part := range strings.Split(NodeExporterTLSManifests(), "\n---\n") {
+		var doc map[string]interface{}
+		require.NoError(t, yaml.Unmarshal([]byte(part), &doc))
+		docs = append(docs, doc)
+	}
+
+	byName := map[string]map[string]interface{}{}
+	for _, doc := range docs {
+		u := unstructured.Unstructured{Object: doc}
+		assert.Equal(t, MonitoringNamespace, u.GetNamespace(), "%s/%s", u.GetKind(), u.GetName())
+		byName[u.GetKind()+"/"+u.GetName()] = doc
+	}
+
+	serving, ok := byName["Certificate/"+NodeExporterCertName]
+	require.True(t, ok, "no serving Certificate named %s", NodeExporterCertName)
+	assert.Equal(t, NodeExporterCertName, nestedValue(t, serving, "spec", "secretName"))
+	assert.Equal(t, []interface{}{NodeExporterServerName}, nestedValue(t, serving, "spec", "dnsNames"))
+
+	issuerName, _ := nestedValue(t, serving, "spec", "issuerRef", "name").(string)
+	issuer, ok := byName["Issuer/"+issuerName]
+	require.True(t, ok, "the serving Certificate's issuer %q is not in the manifests", issuerName)
+	caSecret, _ := nestedValue(t, issuer, "spec", "ca", "secretName").(string)
+	require.NotEmpty(t, caSecret, "the serving issuer must be a CA issuer")
+
+	var caCert map[string]interface{}
+	for _, doc := range docs {
+		u := unstructured.Unstructured{Object: doc}
+		if u.GetKind() == "Certificate" && nestedValue(t, doc, "spec", "secretName") == caSecret {
+			caCert = doc
+		}
+	}
+	require.NotNil(t, caCert, "no Certificate writes the CA secret %s", caSecret)
+	assert.Equal(t, true, nestedValue(t, caCert, "spec", "isCA"))
 }

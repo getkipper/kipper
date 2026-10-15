@@ -85,6 +85,8 @@ spec:
         retention_period: 72h
     singleBinary:
       replicas: 1
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       resources:
         requests:
           cpu: 50m
@@ -96,6 +98,16 @@ spec:
         size: 10Gi
     minio:
       enabled: false
+    gateway:
+      # Allow the gateway to roll out on a single control-plane node by
+      # removing the old pod before scheduling its replacement.
+      deploymentStrategy:
+        type: RollingUpdate
+        rollingUpdate:
+          maxSurge: 0
+          maxUnavailable: 1
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
     read:
       replicas: 0
     write:
@@ -182,11 +194,6 @@ spec:
 `, HelmChartNamespace, PromtailChartVersion)
 }
 
-// KubePrometheusStackHelmChart renders the kube-prometheus-stack HelmChart
-// for the given memory resources. Grafana carries a datasource spanning every
-// tenant's logs and metrics, so it runs in auth-proxy mode behind Kipper's
-// login gate, and GrafanaNetworkPolicy must be in place before this chart is
-// submitted.
 // kube-state-metrics holds every object it watches in memory, so its peak is
 // not its steady state: an API server restart makes it re-list the lot at once.
 // A 64Mi limit carried a 23Mi steady state comfortably and still OOM-killed the
@@ -198,6 +205,82 @@ const (
 	kubeStateMetricsMemoryLimit   = "192Mi"
 )
 
+// NodeExporterServerName is the name on node-exporter's serving certificate.
+// Prometheus scrapes each node by its IP and verifies the certificate against
+// this name, so one certificate serves every node.
+const NodeExporterServerName = KubePrometheusStackRelease + "-prometheus-node-exporter." + MonitoringNamespace + ".svc"
+
+// NodeExporterCertName names the Certificate and the Secret holding
+// node-exporter's serving certificate, its key and the issuing CA's certificate.
+const NodeExporterCertName = "node-exporter-tls"
+
+// NodeExporterTLSManifests renders the CA and serving certificate resources for
+// node-exporter's TLS proxy. Apply these and wait for the serving certificate
+// before installing the monitoring chart, whose pods mount its Secret.
+func NodeExporterTLSManifests() string {
+	return `apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: node-exporter-selfsigned
+  namespace: ` + MonitoringNamespace + `
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: node-exporter-ca
+  namespace: ` + MonitoringNamespace + `
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  isCA: true
+  commonName: kipper-node-exporter-ca
+  secretName: node-exporter-ca
+  duration: 87600h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: node-exporter-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: node-exporter-ca-issuer
+  namespace: ` + MonitoringNamespace + `
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  ca:
+    secretName: node-exporter-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ` + NodeExporterCertName + `
+  namespace: ` + MonitoringNamespace + `
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  secretName: ` + NodeExporterCertName + `
+  dnsNames:
+    - ` + NodeExporterServerName + `
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: node-exporter-ca-issuer
+    kind: Issuer
+`
+}
+
+// KubePrometheusStackHelmChart renders the monitoring chart with the supplied resources.
+// Apply GrafanaNetworkPolicy first: Grafana trusts identity headers from Kipper's
+// login gate and exposes logs and metrics across tenants.
 func KubePrometheusStackHelmChart(res Resources) string {
 	return fmt.Sprintf(`apiVersion: helm.cattle.io/v1
 kind: HelmChart
@@ -213,6 +296,13 @@ spec:
   valuesContent: |-
     alertmanager:
       enabled: false
+    prometheusOperator:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      admissionWebhooks:
+        patch:
+          nodeSelector:
+            node-role.kubernetes.io/control-plane: "true"
     kubelet:
       serviceMonitor:
         # The traffic view's CPU peaks read 30s rate windows at a 10s step.
@@ -220,6 +310,8 @@ spec:
     prometheus:
       prometheusSpec:
         retention: 3d
+        nodeSelector:
+          node-role.kubernetes.io/control-plane: "true"
         resources:
           requests:
             cpu: 100m
@@ -230,6 +322,14 @@ spec:
         podMonitorSelectorNilUsesHelmValues: false
     grafana:
       enabled: true
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      # Avoid reserving CPU for a surge pod on a capacity-constrained node.
+      deploymentStrategy:
+        type: RollingUpdate
+        rollingUpdate:
+          maxSurge: 0
+          maxUnavailable: 1
       # The admin password is generated once into the grafana-admin Secret
       # (provisioned by the installer and the PlatformConfig reconciler) and
       # read from there, so it is never a static default and stays stable
@@ -301,6 +401,8 @@ spec:
       # those labels have to be allow-listed here or the join returns nothing.
       metricLabelsAllowlist:
         - pods=[app,app.kubernetes.io/managed-by]
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       resources:
         requests:
           cpu: 10m
@@ -314,6 +416,39 @@ spec:
           memory: 32Mi
         limits:
           memory: 64Mi
+      # Host-network metrics bypass the pod tunnel, so protect them with TLS
+      # and RBAC. The chart puts the proxy on service.port and binds the
+      # exporter to loopback on kubeRBACProxy.port.
+      service:
+        port: 9100
+      kubeRBACProxy:
+        enabled: true
+        port: 8100
+        tls:
+          enabled: true
+        containerSecurityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            memory: 64Mi
+      tlsSecret:
+        enabled: true
+        secretName: `+NodeExporterCertName+`
+        volumeName: `+NodeExporterCertName+`
+      prometheus:
+        monitor:
+          scheme: https
+          bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+          tlsConfig:
+            serverName: `+NodeExporterServerName+`
+            ca:
+              secret:
+                name: `+NodeExporterCertName+`
+                key: ca.crt
 `, HelmChartNamespace, KubePrometheusStackVersion,
 		res.PrometheusMemoryRequest, res.PrometheusMemoryLimit,
 		GrafanaAdminSecretName, GrafanaAdminUserKey, GrafanaAdminPasswordKey)

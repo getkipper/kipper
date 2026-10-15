@@ -203,6 +203,8 @@ spec:
       labels:
         app: zot
     spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       containers:
         - name: zot
           image: ghcr.io/project-zot/zot-linux-amd64:v2.1.3

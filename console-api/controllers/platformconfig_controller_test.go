@@ -224,7 +224,7 @@ func TestPlatformConfigReconciler_EnsuresTraefikServiceMonitor(t *testing.T) {
 
 	fakeClient := crfake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pc).
+		WithObjects(pc, nodeExporterCertSecret()).
 		WithStatusSubresource(&kipperv1.PlatformConfig{}).
 		Build()
 
@@ -789,7 +789,7 @@ func TestPlatformConfigReconciler_ProvisionsGrafanaAdminSecret(t *testing.T) {
 	}
 	fakeClient := crfake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pc).
+		WithObjects(pc, nodeExporterCertSecret()).
 		WithStatusSubresource(&kipperv1.PlatformConfig{}).
 		Build()
 
@@ -901,7 +901,7 @@ func TestPlatformConfigReconciler_RecreatesHelmChartEnabledWhileStillDeleting(t 
 
 	fakeClient := crfake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pc, deleting).
+		WithObjects(pc, deleting, nodeExporterCertSecret()).
 		WithStatusSubresource(&kipperv1.PlatformConfig{}).
 		Build()
 	r := &PlatformConfigReconciler{Client: fakeClient, Scheme: scheme}
@@ -931,4 +931,61 @@ func TestPlatformConfigReconciler_RecreatesHelmChartEnabledWhileStillDeleting(t 
 	assert.Zero(t, res.RequeueAfter, "stop polling after recreation")
 	require.NoError(t, fakeClient.Get(context.Background(), key, loki), "recreate the chart after deletion")
 	assert.Nil(t, loki.GetDeletionTimestamp())
+}
+
+// Older clusters may need kip upgrade to provision the TLS Secret before
+// monitoring can be enabled through the console.
+func TestPlatformConfigReconciler_WaitsForNodeExporterCertBeforeCreatingChart(t *testing.T) {
+	scheme := testScheme()
+	pc := &kipperv1.PlatformConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: PlatformConfigName},
+		Spec:       kipperv1.PlatformConfigSpec{Profile: platform.ProfileMedium},
+	}
+	fakeClient := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pc).
+		WithStatusSubresource(&kipperv1.PlatformConfig{}).
+		Build()
+
+	r := &PlatformConfigReconciler{Client: fakeClient, Scheme: scheme}
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: PlatformConfigName}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kip upgrade")
+
+	chart := &unstructured.Unstructured{}
+	chart.SetGroupVersionKind(helmChartGVK)
+	key := types.NamespacedName{Name: "kube-prometheus-stack", Namespace: helmChartNamespace}
+	assert.True(t, errors.IsNotFound(fakeClient.Get(context.Background(), key, chart)),
+		"the monitoring chart must wait for node-exporter's certificate")
+
+	require.NoError(t, fakeClient.Create(context.Background(), nodeExporterCertSecret()))
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: PlatformConfigName}})
+	require.NoError(t, err)
+	require.NoError(t, fakeClient.Get(context.Background(), key, chart),
+		"the chart is created once the certificate exists")
+}
+
+// Older installations can reconcile existing charts before TLS is provisioned.
+func TestPlatformConfigReconciler_ExistingChartNeedsNoNodeExporterCert(t *testing.T) {
+	scheme := testScheme()
+	pc := &kipperv1.PlatformConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: PlatformConfigName},
+		Spec:       kipperv1.PlatformConfigSpec{Profile: platform.ProfileMedium},
+	}
+	promChart := newHelmChart("kube-prometheus-stack", "prometheus: {}\n")
+	fakeClient := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pc, promChart).
+		WithStatusSubresource(&kipperv1.PlatformConfig{}).
+		Build()
+
+	r := &PlatformConfigReconciler{Client: fakeClient, Scheme: scheme}
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: PlatformConfigName}})
+	require.NoError(t, err)
+}
+
+func nodeExporterCertSecret() *corev1.Secret {
+	return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: platform.NodeExporterCertName, Namespace: platform.MonitoringNamespace,
+	}}
 }

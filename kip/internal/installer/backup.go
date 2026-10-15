@@ -221,6 +221,8 @@ spec:
       labels:
         app: minio
     spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       containers:
         - name: minio
           image: %s
@@ -364,15 +366,38 @@ func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword stri
 	if err != nil {
 		return err
 	}
-	veleroCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", veleroManifest(cfg, host.K3sSELinux()))
+	rhelNode, err := clusterHasRHELNode(client)
+	if err != nil {
+		return err
+	}
+	veleroCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", veleroManifest(cfg, host.K3sSELinux() || rhelNode))
 	if _, err := client.Run(veleroCmd); err != nil {
 		return fmt.Errorf("applying Velero HelmChart: %w", err)
 	}
 	return nil
 }
 
-// veleroManifest renders the Velero HelmChart. selinux indicates whether Kipper
-// enables SELinux support in k3s, regardless of the host's enforcement mode.
+var rhelOSImagePrefixes = []string{"Rocky Linux", "AlmaLinux", "CentOS Stream", "Red Hat Enterprise Linux"}
+
+// clusterHasRHELNode matches reported OS images against supported RHEL distributions.
+// A RHEL worker also needs privileged backups, even when the server uses another OS.
+func clusterHasRHELNode(client CommandRunner) (bool, error) {
+	out, err := client.Run(`kubectl get nodes -o jsonpath='{range .items[*]}{.status.nodeInfo.osImage}{"\n"}{end}'`)
+	if err != nil {
+		return false, fmt.Errorf("reading node operating systems: %w", err)
+	}
+	for _, image := range strings.Split(out, "\n") {
+		for _, prefix := range rhelOSImagePrefixes {
+			if strings.HasPrefix(strings.TrimSpace(image), prefix) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// veleroManifest renders the Velero HelmChart. selinux enables privileged
+// file system backups for SELinux support on any cluster node.
 func veleroManifest(cfg *BackupStorageConfig, selinux bool) string {
 	nodeAgentArgs, selinuxValues := "", ""
 	if selinux {
@@ -411,6 +436,9 @@ spec:
       uploaderType: kopia
       defaultVolumesToFsBackup: true
     deployNodeAgent: true
+    # Pin the server; node agents retain their separate scheduling settings.
+    nodeSelector:
+      node-role.kubernetes.io/control-plane: "true"
     credentials:
       useSecret: true
       existingSecret: cloud-credentials

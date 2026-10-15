@@ -29,6 +29,7 @@ func SystemComponents(domain string, dnsResolvers, trustedProxies []string, stat
 		{Name: "longhorn", Apply: InstallLonghorn},
 		{Name: "keda", Apply: InstallKEDA},
 		{Name: "authz", Apply: InstallAuthz},
+		{Name: "node-exporter-tls", Apply: InstallNodeExporterTLS},
 	}
 	if state.LokiEnabled() {
 		res := state.EffectiveResources()
@@ -65,6 +66,8 @@ func SystemComponents(domain string, dnsResolvers, trustedProxies []string, stat
 		// new builder code would fail every build. Reapplying also refreshes the
 		// egress policy's node-IP except-list for nodes added since install.
 		SystemComponent{Name: "build-isolation", Apply: InstallBuildIsolation},
+		// Apply placement after the components above create their workloads.
+		SystemComponent{Name: "placement", Apply: PinPlatformToServer},
 	)
 	return components
 }

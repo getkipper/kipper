@@ -220,6 +220,8 @@ spec:
       labels:
         app: console-api
     spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       serviceAccountName: console-api
       # console-api holds a cluster-powerful ServiceAccount, so its own pod is
       # locked down: non-root, no privilege escalation, all capabilities
@@ -354,6 +356,8 @@ spec:
       labels:
         app: console
     spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       containers:
         - name: console
           image: ghcr.io/getkipper/kipper-console:latest

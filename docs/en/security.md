@@ -44,6 +44,8 @@ On Ubuntu and Debian, UFW is installed with a default-deny incoming policy; the 
 
 On a fresh install, pods reach the host only on the specific ports k3s needs, the kubelet (`10250`) and node-exporter (`9100`), rather than every host port, so a compromised pod cannot reach SSH or other host services. Pod-to-apiserver traffic arrives on `6443` after the service address is translated, already covered above. UFW's `DEFAULT_FORWARD_POLICY` is set to `ACCEPT` so pod-to-pod and pod-to-service traffic is not blocked. A NodePort or host-network service you add yourself needs its own UFW rule, since the pod-to-host default is now deny.
 
+Prometheus collects node metrics over TLS from kube-rbac-proxy on port `9100`, using its service account token. The proxy forwards authorized requests to node-exporter on `127.0.0.1:8100`. Its authorization check requires permission to get the `services/kube-prometheus-stack-prometheus-node-exporter` subresource in `monitoring`; the chart grants this permission to Prometheus. Prometheus verifies the proxy's certificate using the CA certificate provisioned by cert-manager in `monitoring`, keeping node metrics encrypted between nodes.
+
 The kubelet runs with `protect-kernel-defaults`, so it refuses to start unless the host's kernel tunables already match the values Kubernetes expects. `kip install` sets those (OOM handling, panic-on-oops self-healing, and the kernel keyring limits containers rely on) before k3s starts, rather than letting the kubelet silently overwrite them.
 
 **Existing firewall detected**

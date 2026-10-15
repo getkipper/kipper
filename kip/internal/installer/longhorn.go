@@ -11,13 +11,14 @@ const longhornVersion = "v1.7.3"
 
 const longhornSettingsFuncName = "add_kipper_longhorn_settings"
 
-// longhornSettingsFunc copies the manifest from $1 to $2, disabling upgrade
-// checks and usage metrics before it is applied. Exactly one settings header
-// must match so a changed manifest format fails before installation.
+// longhornSettingsFunc copies the manifest from $1 to $2 with upgrade checks
+// and usage metrics disabled. Drains wait for eviction of a volume's last
+// healthy replica. Requiring exactly one settings header catches format changes
+// before installation.
 const longhornSettingsFunc = longhornSettingsFuncName + `() {
   header='  default-setting.yaml: |-'
   [ "$(grep -cxF "$header" "$1")" = 1 ] || { echo "expected exactly one default-setting block in the Longhorn manifest" >&2; return 1; }
-  awk -v header="$header" '{ print } $0 == header { print "    upgrade-checker: false"; print "    allow-collecting-longhorn-usage-metrics: false" }' "$1" > "$2"
+  awk -v header="$header" '{ print } $0 == header { print "    upgrade-checker: false"; print "    allow-collecting-longhorn-usage-metrics: false"; print "    node-drain-policy: block-for-eviction-if-contains-last-replica" }' "$1" > "$2"
 }`
 
 // InstallLonghorn installs Longhorn for distributed persistent storage.
