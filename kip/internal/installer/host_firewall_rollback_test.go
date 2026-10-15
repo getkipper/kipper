@@ -523,6 +523,17 @@ func TestAClaimedUFWThatIsSwitchedOffIsStillKipManaged(t *testing.T) {
 	assert.False(t, audit.KipperManaged, "without the claim an inactive ufw is nobody's")
 }
 
+func TestASwitchedOffUFWKeepsItsSavedSSHRateLimit(t *testing.T) {
+	h := &routedRunner{routes: []route{
+		{contains: "sshd -T", out: "22\n"},
+		{contains: "ufw status", out: "Status: inactive\n"},
+		{contains: "ufw show added", out: "Added user rules (see 'ufw status' for running firewall):\nufw limit 22/tcp\nufw allow 80/tcp\n"},
+	}}
+	limited, err := SSHRateLimited(h)
+	require.NoError(t, err)
+	assert.True(t, limited)
+}
+
 func TestArmingRefusesWhenTheUFWStatusCannotBeRead(t *testing.T) {
 	for _, marker := range []string{"status-fails", "status-garbled"} {
 		s := newUnarmedHostScene(t, true, func(s hostScene) { s.write(marker, "") })

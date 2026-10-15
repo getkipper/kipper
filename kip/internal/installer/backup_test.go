@@ -249,9 +249,11 @@ func TestVeleroManifestRunsFsBackupPrivilegedOnSELinux(t *testing.T) {
 }
 
 type fakeVeleroHost struct {
-	osRelease string
-	osImages  string
-	cmds      []string
+	osRelease   string
+	osImages    string
+	chartValues string
+	patches     []string
+	cmds        []string
 }
 
 func (h *fakeVeleroHost) Run(cmd string) (string, error) {
@@ -262,10 +264,22 @@ func (h *fakeVeleroHost) Run(cmd string) (string, error) {
 	if strings.Contains(cmd, ".status.nodeInfo.osImage") {
 		return h.osImages, nil
 	}
+	if strings.Contains(cmd, "get helmchart velero") {
+		return h.chartValues, nil
+	}
+	if strings.Contains(cmd, "checksum/node-agent-config}") {
+		return "abc", nil
+	}
 	return "", nil
 }
 
-func (h *fakeVeleroHost) RunStdin(cmd string, _ io.Reader) (string, error) { return h.Run(cmd) }
+func (h *fakeVeleroHost) RunStdin(cmd string, in io.Reader) (string, error) {
+	if strings.Contains(cmd, "patch helmchart velero") {
+		b, _ := io.ReadAll(in)
+		h.patches = append(h.patches, string(b))
+	}
+	return h.Run(cmd)
+}
 
 func (h *fakeVeleroHost) Upload(io.Reader, string, os.FileMode) error { return nil }
 
@@ -305,4 +319,79 @@ func TestInstallVeleroPrivilegesFsBackupWhenAnyNodeIsRHEL(t *testing.T) {
 	}
 	require.NoError(t, installVelero(debianOnly, nil, "pw"))
 	assert.NotContains(t, debianOnly.applied(t), "privilegedFsBackup")
+}
+
+func chartValuesContent(t *testing.T, manifest string) string {
+	t.Helper()
+	var chart struct {
+		Spec struct {
+			ValuesContent string `yaml:"valuesContent"`
+		} `yaml:"spec"`
+	}
+	require.NoError(t, yaml.Unmarshal([]byte(manifest), &chart))
+	return chart.Spec.ValuesContent
+}
+
+func parsedValues(t *testing.T, values string) map[string]any {
+	t.Helper()
+	doc := map[string]any{}
+	require.NoError(t, yaml.Unmarshal([]byte(values), &doc))
+	return doc
+}
+
+var externalStorage = &BackupStorageConfig{Bucket: "kipper-backups", Region: "auto", Endpoint: "https://s3.example.com"}
+
+func TestEnsureVeleroCoversNodesKeepsTheBackupDestinationWhenTheFirstRHELWorkerJoins(t *testing.T) {
+	h := &fakeVeleroHost{
+		osImages:    "Ubuntu 26.04 LTS\nRocky Linux 10.2 (Red Quartz)\n",
+		chartValues: chartValuesContent(t, veleroManifest(externalStorage, false)),
+	}
+
+	changed, err := EnsureVeleroCoversNodes(h)
+
+	require.NoError(t, err)
+	assert.True(t, changed)
+	require.Len(t, h.patches, 1)
+	var patch struct {
+		Spec struct {
+			ValuesContent string `json:"valuesContent"`
+		} `json:"spec"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(h.patches[0]), &patch))
+	assert.Equal(t, parsedValues(t, chartValuesContent(t, veleroManifest(externalStorage, true))), parsedValues(t, patch.Spec.ValuesContent),
+		"only the node agent settings change; the external bucket stays")
+	joined := strings.Join(h.cmds, "\n")
+	assert.NotContains(t, joined, "cloud-credentials", "the backup credentials are left alone")
+	assert.Contains(t, joined, "rollout status ds/node-agent", "backups are covered only once the agents restart")
+}
+
+func TestEnsureVeleroCoversNodesStillWaitsForTheAgentsWhenTheChartIsAlreadyChanged(t *testing.T) {
+	h := &fakeVeleroHost{
+		osImages:    "Ubuntu 26.04 LTS\nRocky Linux 10.2 (Red Quartz)\n",
+		chartValues: chartValuesContent(t, veleroManifest(nil, true)),
+	}
+
+	changed, err := EnsureVeleroCoversNodes(h)
+
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Empty(t, h.patches)
+	assert.Contains(t, strings.Join(h.cmds, "\n"), "rollout status ds/node-agent", "a retry after a failed rollout checks the agents again")
+}
+
+func TestEnsureVeleroCoversNodesLeavesANonRHELClusterAndOneWithoutVeleroAlone(t *testing.T) {
+	debian := &fakeVeleroHost{
+		osImages:    "Ubuntu 26.04 LTS\nDebian GNU/Linux 13 (trixie)\n",
+		chartValues: chartValuesContent(t, veleroManifest(nil, false)),
+	}
+	changed, err := EnsureVeleroCoversNodes(debian)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Empty(t, debian.patches)
+
+	noVelero := &fakeVeleroHost{osImages: "Rocky Linux 10.2 (Red Quartz)\n"}
+	changed, err = EnsureVeleroCoversNodes(noVelero)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Empty(t, noVelero.patches)
 }

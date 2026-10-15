@@ -289,6 +289,9 @@ func publicPlan(server, joiner CommandRunner, opts NetworkModeOptions) (NetworkP
 			return NetworkPlan{}, fmt.Errorf("public mode requires an external IPv4 address for each host; got %q", ip)
 		}
 	}
+	if !tcpReachable(joiner, netip.MustParseAddr(opts.ServerExternalIP), "6443") {
+		return NetworkPlan{}, fmt.Errorf("the new host cannot reach the server's API at %s:6443; allow it in the provider's firewall", opts.ServerExternalIP)
+	}
 	return NetworkPlan{
 		Mode:   NetworkModePublic,
 		Server: NodeNetwork{NodeIP: serverDefault.src.String(), ExternalIP: opts.ServerExternalIP},
@@ -360,7 +363,7 @@ func interfaceNetworks(client CommandRunner, iface string) ([]netip.Prefix, erro
 // defaults, then checks that they contain the server's reported pod ranges
 // and the kubernetes Service address.
 func clusterNetworks(server CommandRunner) (map[string]netip.Prefix, error) {
-	files, err := server.Run(`for f in /etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml; do if [ -e "$f" ]; then echo "==> $f"; cat "$f" || exit 1; fi; done`)
+	files, err := server.Run(configFilesCommand("/etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml", ""))
 	if err != nil {
 		return nil, fmt.Errorf("reading the server's k3s configuration: %w", err)
 	}
@@ -417,17 +420,43 @@ printf '%s\n' "$files" | awk '{gsub(/ \(ignore_errors=[a-z]+\)/, "\n"); printf "
   if [ -e "$f" ]; then rc=0; grep -h K3S_CONFIG_FILE "$f" || rc=$?; [ "$rc" -le 1 ] || exit 1; fi
 done`
 
+type configFile struct {
+	path string
+	doc  map[string]any
+}
+
+// configFilesCommand builds a shell loop over paths, a trusted shell glob list.
+// Each existing file except skip is prefixed with "==> path"; read failures abort.
+func configFilesCommand(paths, skip string) string {
+	return fmt.Sprintf(`for f in %s; do if [ -e "$f" ] && [ "$f" != %s ]; then echo "==> $f"; cat "$f" || exit 1; fi; done`, paths, shellQuote(skip))
+}
+
+// parseConfigFiles decodes the delimited YAML documents from configFilesCommand.
+func parseConfigFiles(out string) ([]configFile, error) {
+	var files []configFile
+	for _, part := range strings.Split(out, "==> ")[1:] {
+		path, body, _ := strings.Cut(part, "\n")
+		path = strings.TrimSpace(path)
+		var doc map[string]any
+		if err := yaml.Unmarshal([]byte(body), &doc); err != nil {
+			return nil, fmt.Errorf("%s is not a YAML mapping: %w", path, err)
+		}
+		files = append(files, configFile{path: path, doc: doc})
+	}
+	return files, nil
+}
+
 // cidrSettings collects cluster-cidr and service-cidr values from YAML files
 // delimited by "==> path" lines and from unit arguments. It rejects custom
 // configuration paths and unrecognized CIDR settings to avoid assuming defaults.
 func cidrSettings(files, unit string) (map[string][]string, error) {
 	settings := map[string][]string{}
-	for _, part := range strings.Split(files, "==> ")[1:] {
-		path, body, _ := strings.Cut(part, "\n")
-		var doc map[string]any
-		if err := yaml.Unmarshal([]byte(body), &doc); err != nil {
-			return nil, fmt.Errorf("%s is not a YAML mapping, so kip cannot determine the cluster networks: %w", strings.TrimSpace(path), err)
-		}
+	docs, err := parseConfigFiles(files)
+	if err != nil {
+		return nil, fmt.Errorf("%w, so kip cannot determine the cluster networks", err)
+	}
+	for _, d := range docs {
+		path, doc := d.path, d.doc
 		for key, value := range doc {
 			name := strings.TrimSuffix(key, "+")
 			if name != "cluster-cidr" && name != "service-cidr" {
@@ -441,7 +470,7 @@ func cidrSettings(files, unit string) (map[string][]string, error) {
 					settings[name] = append(settings[name], fmt.Sprint(item))
 				}
 			default:
-				return nil, fmt.Errorf("%s sets %s to %v, which kip cannot parse", strings.TrimSpace(path), key, value)
+				return nil, fmt.Errorf("%s sets %s to %v, which kip cannot parse", path, key, value)
 			}
 		}
 	}
@@ -491,9 +520,9 @@ func settingOrDefault(settings map[string][]string, name, def string) (netip.Pre
 // networkDropInKeys are the settings kip owns in kipper-network.yaml.
 var networkDropInKeys = []string{"node-ip", "node-external-ip", "flannel-iface", "advertise-address", "flannel-external-ip", "tls-san+"}
 
-// renderNetworkDropIn replaces kip-owned settings for the node's role and mode,
+// RenderNetworkDropIn replaces kip-owned settings for the node's role and mode,
 // preserving other keys from existing.
-func renderNetworkDropIn(existing string, role HostRole, mode string, n NodeNetwork) (string, error) {
+func RenderNetworkDropIn(existing string, role HostRole, mode string, n NodeNetwork) (string, error) {
 	var doc map[string]any
 	if strings.TrimSpace(existing) != "" {
 		if err := yaml.Unmarshal([]byte(existing), &doc); err != nil {

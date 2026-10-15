@@ -254,6 +254,8 @@ func StampStorageRestarts(runner CommandRunner, nodeName, machineID string) erro
 // errSharedMachineID signals ambiguous matches that polling cannot resolve.
 var errSharedMachineID = errors.New("more than one node reports this machine id")
 
+var errNoNodeForMachine = errors.New("no node reports machine id")
+
 // NodeNameForMachine finds a unique node by machine ID for host-configuration
 // stamping. Run it on the control plane. For join verification, use
 // NodeForMachineBoot to match the current boot as well.
@@ -296,7 +298,7 @@ func NodeNameForMachine(runner CommandRunner, machineID string) (string, error) 
 
 	switch len(names) {
 	case 0:
-		return "", fmt.Errorf("no node reports machine id %s", machineID)
+		return "", fmt.Errorf("%w %s", errNoNodeForMachine, machineID)
 	case 1:
 		return names[0], nil
 	default:
@@ -304,6 +306,19 @@ func NodeNameForMachine(runner CommandRunner, machineID string) (string, error) 
 		// would record a write that never happened on the other.
 		return "", fmt.Errorf("%w: nodes %s share machine id %s", errSharedMachineID, strings.Join(names, " and "), machineID)
 	}
+}
+
+// FindNodeForMachine finds a node by machine ID, returning ("", false, nil)
+// when absent. Lookup failures and duplicate machine IDs return errors.
+func FindNodeForMachine(runner CommandRunner, machineID string) (string, bool, error) {
+	name, err := NodeNameForMachine(runner, machineID)
+	if err == nil {
+		return name, true, nil
+	}
+	if errors.Is(err, errNoNodeForMachine) {
+		return "", false, nil
+	}
+	return "", false, err
 }
 
 // RestartsPending records service restarts and reboots reported by the host.

@@ -190,26 +190,26 @@ func TestParseRouteGet(t *testing.T) {
 }
 
 func TestRenderNetworkDropIn(t *testing.T) {
-	server, err := renderNetworkDropIn("", RoleServer, NetworkModePrivate, NodeNetwork{NodeIP: "10.0.0.3", ExternalIP: "203.0.113.10", Interface: "enp7s0"})
+	server, err := RenderNetworkDropIn("", RoleServer, NetworkModePrivate, NodeNetwork{NodeIP: "10.0.0.3", ExternalIP: "203.0.113.10", Interface: "enp7s0"})
 	require.NoError(t, err)
 	assert.Equal(t, "advertise-address: 10.0.0.3\nflannel-iface: enp7s0\nnode-external-ip: 203.0.113.10\nnode-ip: 10.0.0.3\ntls-san+:\n- 10.0.0.3\n", server)
 
-	worker, err := renderNetworkDropIn("", RoleWorker, NetworkModePrivate, NodeNetwork{NodeIP: "10.0.0.4", ExternalIP: "203.0.113.11", Interface: "eth1"})
+	worker, err := RenderNetworkDropIn("", RoleWorker, NetworkModePrivate, NodeNetwork{NodeIP: "10.0.0.4", ExternalIP: "203.0.113.11", Interface: "eth1"})
 	require.NoError(t, err)
 	assert.Equal(t, "flannel-iface: eth1\nnode-external-ip: 203.0.113.11\nnode-ip: 10.0.0.4\n", worker)
 
-	public, err := renderNetworkDropIn(server+"agent-token: keep-me\n", RoleServer, NetworkModePublic, NodeNetwork{NodeIP: "203.0.113.10", ExternalIP: "203.0.113.10"})
+	public, err := RenderNetworkDropIn(server+"agent-token: keep-me\n", RoleServer, NetworkModePublic, NodeNetwork{NodeIP: "203.0.113.10", ExternalIP: "203.0.113.10"})
 	require.NoError(t, err)
 	assert.Equal(t, "agent-token: keep-me\nflannel-external-ip: true\nnode-external-ip: 203.0.113.10\nnode-ip: 203.0.113.10\n", public,
 		"other keys stay and settings of the old mode go")
 }
 
 func TestRenderNetworkDropInRefusesBadInput(t *testing.T) {
-	_, err := renderNetworkDropIn("not: [yaml", RoleServer, NetworkModePublic, NodeNetwork{NodeIP: "203.0.113.10", ExternalIP: "203.0.113.10"})
+	_, err := RenderNetworkDropIn("not: [yaml", RoleServer, NetworkModePublic, NodeNetwork{NodeIP: "203.0.113.10", ExternalIP: "203.0.113.10"})
 	assert.Error(t, err)
-	_, err = renderNetworkDropIn("", RoleServer, NetworkModePrivate, NodeNetwork{NodeIP: "10.0.0.3", ExternalIP: "203.0.113.10", Interface: "eth0; reboot"})
+	_, err = RenderNetworkDropIn("", RoleServer, NetworkModePrivate, NodeNetwork{NodeIP: "10.0.0.3", ExternalIP: "203.0.113.10", Interface: "eth0; reboot"})
 	assert.Error(t, err)
-	_, err = renderNetworkDropIn("", RoleWorker, NetworkModePublic, NodeNetwork{NodeIP: "10.0.0.3\nselinux: false", ExternalIP: "203.0.113.10"})
+	_, err = RenderNetworkDropIn("", RoleWorker, NetworkModePublic, NodeNetwork{NodeIP: "10.0.0.3\nselinux: false", ExternalIP: "203.0.113.10"})
 	assert.Error(t, err)
 }
 
@@ -232,11 +232,11 @@ func TestPlanNodeNetworkRefusesAnSSHPortThatIsNotANumber(t *testing.T) {
 
 func TestRenderNetworkDropInTreatsAnEmptyDocumentAsNoSettings(t *testing.T) {
 	for _, existing := range []string{"null\n", "~\n", "---\n", "# nothing here\n"} {
-		out, err := renderNetworkDropIn(existing, RoleWorker, NetworkModePublic, NodeNetwork{NodeIP: "203.0.113.11", ExternalIP: "203.0.113.11"})
+		out, err := RenderNetworkDropIn(existing, RoleWorker, NetworkModePublic, NodeNetwork{NodeIP: "203.0.113.11", ExternalIP: "203.0.113.11"})
 		require.NoError(t, err, existing)
 		assert.Equal(t, "node-external-ip: 203.0.113.11\nnode-ip: 203.0.113.11\n", out, existing)
 	}
-	_, err := renderNetworkDropIn("- a list\n", RoleWorker, NetworkModePublic, NodeNetwork{NodeIP: "203.0.113.11", ExternalIP: "203.0.113.11"})
+	_, err := RenderNetworkDropIn("- a list\n", RoleWorker, NetworkModePublic, NodeNetwork{NodeIP: "203.0.113.11", ExternalIP: "203.0.113.11"})
 	assert.Error(t, err)
 }
 
@@ -336,4 +336,12 @@ func TestK3sUnitSettingsCommandReadsEnvironmentFilesAndFailsOnErrors(t *testing.
 		_, err = runner.Run(k3sUnitSettingsCommand)
 		assert.Error(t, err, "an unreadable environment file is not an absent setting")
 	}
+}
+
+func TestPlanNodeNetworkNeedsTheAPIInPublicMode(t *testing.T) {
+	server, joiner := networkHosts(nil, []route{{contains: "/dev/tcp/203.0.113.10/6443", err: errors.New("exit status 124")}})
+	opts := external
+	opts.Public = true
+	_, err := PlanNodeNetwork(server, joiner, opts)
+	assert.ErrorContains(t, err, "cannot reach the server's API at 203.0.113.10:6443")
 }

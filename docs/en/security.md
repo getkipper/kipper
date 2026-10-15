@@ -66,6 +66,8 @@ For a firewall you manage, allow the SSH port and ports 80, 443, and 6443 from t
 
 Cloud-side firewalls (Hetzner Cloud Firewall, AWS Security Groups, etc.) are external to the host and are not detected by Kipper. If you use one, make sure those four ports are reachable on the server.
 
+`kip node add` inherits the server's kip-managed firewall setting by default. If kip leaves the server's firewall management to you, it also leaves the joining node's firewall to you and prints the required ports. Use `--firewall` or `--firewall=false` to override this default. Existing kip-managed firewalls always get updated peer rules, even with `--firewall=false`. A UFW firewall that kip does not manage on the server or another existing node stops the join, even with the ports open. Switch it off first. On the server, run `kip cluster harden` if kip should manage it. Hetzner's Cloud Firewall does not filter traffic inside a Cloud Network. Use a host firewall to restrict access from other servers in that network.
+
 **Firewall on the RHEL family**
 
 On Rocky Linux, AlmaLinux and CentOS Stream, Kipper configures firewalld before starting k3s. The public zone allows every SSH port reported by `sshd -T` and TCP ports 80, 443 and 6443, and keeps `dhcpv6-client`. Explicit port rules replace the stock `ssh` service; the `cockpit` service is removed. A `kipper-pods` zone covers the pod and service networks and allows TCP ports 6443, 10250 and 9100 to the host. Forwarding policies support pod internet access with masquerading and load balancer traffic to Traefik.
