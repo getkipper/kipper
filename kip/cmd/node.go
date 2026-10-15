@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -31,11 +32,10 @@ var nodeListCmd = &cobra.Command{
 
 const nodeAddUnsupportedWarning = `
   ⚠   kip node add is not supported.
-      It registers the host as a k3s worker, but Kipper's default firewall has no
-      rule for traffic between nodes, so pods scheduled on the worker are likely to
-      fail. The worker gets no firewall and none of the packages Longhorn needs, and
-      kip upgrade, harden and uninstall never connect to it. A second node does not
-      make the platform highly available.
+      Kipper's default firewall lacks rules for traffic between nodes, so pods
+      on the worker are likely to fail. Configure the worker's firewall yourself.
+      kip upgrade, harden and uninstall connect only to the server.
+      Adding a worker does not provide platform high availability.
 `
 
 func init() {
@@ -94,6 +94,27 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	if _, err := installer.UnrecordedNodes(masterClient, installer.WithUnrecordedHost(records, identity.MachineID)); err != nil {
 		return err
 	}
+
+	fmt.Printf("  Running preflight checks on %s...\n", workerHost)
+	sys, preflight, err := installer.PreflightWorker(workerClient)
+	if err != nil {
+		return fmt.Errorf("%s cannot join: %w", workerHost, err)
+	}
+	fmt.Printf("  ✔  %s %s, %d MB RAM, %d MB disk, kubelet port check passed\n", sys.OS, sys.OSVersion, sys.RAMMB, sys.DiskMB)
+	for _, w := range preflight.Warnings {
+		fmt.Printf("  ⚠  %s\n", w)
+	}
+	audit, err := installer.AuditHost(workerClient)
+	if err != nil {
+		return fmt.Errorf("auditing %s: %w", workerHost, err)
+	}
+	if findings := audit.Findings(); len(findings) > 0 {
+		fmt.Printf("  Hardening %s (%s)...\n", workerHost, strings.Join(findings, "; "))
+		if err := installer.HardenHost(workerClient); err != nil {
+			return fmt.Errorf("hardening %s: %w", workerHost, err)
+		}
+	}
+	fmt.Println()
 
 	// Defer storage-service restarts before joining so unattended upgrades
 	// preserve active Longhorn sessions once this node starts hosting volumes.

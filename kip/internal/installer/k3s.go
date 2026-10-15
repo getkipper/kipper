@@ -564,14 +564,9 @@ func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPre
 
 	warnUnreachableResolvers(probeDNSResolvers(client, resolvers), resolvers)
 
-	if err := prepareHostForK3s(client); err != nil {
-		return err
-	}
-
-	// protect-kernel-defaults makes the kubelet refuse to start unless these
-	// sysctls are already set, so they must be in place before k3s installs
-	// (and before an upgrade restarts the kubelet). Applied live and persisted.
-	if err := writeKubeletSysctls(client); err != nil {
+	// The kubelet sysctls must be in place before k3s installs and before an
+	// upgrade restarts the kubelet.
+	if err := prepareNodeOS(client); err != nil {
 		return err
 	}
 
@@ -714,35 +709,7 @@ func agentInstallCommand(serverVersion, masterHost string) string {
 // JoinWorkerNode joins a worker with a fresh one-hour bootstrap token and returns
 // its node name after confirming registration against id. Read id before setup.
 func JoinWorkerNode(masterClient CommandRunner, workerClient CommandRunner, masterHost string, id HostIdentity) (string, error) {
-	// Mirror the server's curated resolvers onto the worker and point the
-	// agent at them, so CoreDNS keeps forwarding to the same upstreams if
-	// it reschedules onto this node. Re-validate the master's file rather
-	// than copying it verbatim: a partial or hand-edited file must not
-	// propagate bad DNS to a node CoreDNS may land on. Any read or
-	// validation failure falls back to the defaults.
-	masterResolv, rErr := masterClient.Run("cat " + k3sResolvConfPath)
-	resolvers, vErr := resolveDNSResolvers(parseResolvConf(masterResolv))
-	if rErr != nil || vErr != nil {
-		resolvers = DefaultDNSResolvers()
-	}
-	// The worker probes too: CoreDNS can reschedule here, and a worker
-	// often sits behind different egress rules than the master.
-	warnUnreachableResolvers(probeDNSResolvers(workerClient, resolvers), resolvers)
-	if err := writeResolvConf(workerClient, renderResolvConf(resolvers)); err != nil {
-		return "", err
-	}
-	if err := writeAgentDNSConfig(workerClient); err != nil {
-		return "", err
-	}
-	if err := prepareHostForK3s(workerClient); err != nil {
-		return "", err
-	}
-	// Match the server's kubelet hardening: sysctls (applied live) before the
-	// agent starts, then the protect-kernel-defaults drop-in.
-	if err := writeKubeletSysctls(workerClient); err != nil {
-		return "", err
-	}
-	if err := writeAgentKubeletConfig(workerClient); err != nil {
+	if err := prepareWorkerHost(masterClient, workerClient); err != nil {
 		return "", err
 	}
 

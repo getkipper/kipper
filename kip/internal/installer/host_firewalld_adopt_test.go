@@ -38,7 +38,7 @@ func TestConfigureFirewalldAdoptsWithConsent(t *testing.T) {
 	h.active = true
 	h.publicXML = `<zone><service name="http"/></zone>`
 
-	require.NoError(t, configureFirewalld(h, rhel10Host, FirewallConsent{Adopt: true}))
+	require.NoError(t, configureFirewalld(h, rhel10Host, FirewallConsent{Adopt: true}, RoleServer))
 
 	assert.Less(t, h.index(firewalldDumpCommand(true)), h.index("cp -a /etc/firewalld"), "runtime and saved configuration are compared before the take-over")
 	assert.Greater(t, h.index("firewall-cmd --reload"), h.index("systemd-run"))
@@ -50,7 +50,7 @@ func TestConfigureFirewalldRefusesToAdoptAroundOtherSavedRules(t *testing.T) {
 	h.active = true
 	h.inventory += "f policies/office.xml\n"
 
-	err := configureFirewalld(h, rhel10Host, FirewallConsent{Adopt: true})
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{Adopt: true}, RoleServer)
 
 	assert.ErrorContains(t, err, "policies/office.xml")
 	assert.False(t, h.claimed)
@@ -60,7 +60,7 @@ func TestConfigureFirewalldRefusesToAdoptLocally(t *testing.T) {
 	h := newFirewalldHost(t)
 	h.active = true
 
-	err := configureFirewalld(localHost{h}, rhel10Host, FirewallConsent{Adopt: true})
+	err := configureFirewalld(localHost{h}, rhel10Host, FirewallConsent{Adopt: true}, RoleServer)
 
 	assert.ErrorContains(t, err, "needs a check from outside the host")
 	assert.Equal(t, -1, h.index("cp -a /etc/firewalld"))
@@ -100,7 +100,7 @@ func TestConfigureFirewalldWillNotAdoptBesideUFW(t *testing.T) {
 	assert.False(t, audit.Adoptable)
 	assert.False(t, PlanFirewall(audit, true, true).Configure)
 
-	err = configureFirewalld(h, rhel10Host, FirewallConsent{Adopt: true})
+	err = configureFirewalld(h, rhel10Host, FirewallConsent{Adopt: true}, RoleServer)
 	assert.ErrorContains(t, err, "left it alone")
 	assert.Equal(t, -1, h.index("cp -a /etc/firewalld"))
 }
@@ -122,7 +122,7 @@ func TestConfigureFirewalldRefusesToAdoptOverKipNamedFiles(t *testing.T) {
 	h.active = true
 	h.inventory += "f policies/kipper-pods-out.xml\n"
 
-	err := configureFirewalld(h, rhel10Host, FirewallConsent{Adopt: true})
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{Adopt: true}, RoleServer)
 
 	assert.ErrorContains(t, err, "policies/kipper-pods-out.xml")
 	assert.Equal(t, -1, h.index("cp -a /etc/firewalld"))
@@ -194,7 +194,7 @@ func TestConfigureFirewalldRefusesAFirewallThatChangedAfterTheYes(t *testing.T) 
 	require.NoError(t, err)
 
 	h.publicInfo = strings.Replace(stockPublicInfo, "  ports:\n", "  ports: 8443/tcp\n", 1)
-	err = configureFirewalld(h, rhel10Host, FirewallConsent{Adopt: true, Fingerprint: preview.Fingerprint})
+	err = configureFirewalld(h, rhel10Host, FirewallConsent{Adopt: true, Fingerprint: preview.Fingerprint}, RoleServer)
 
 	assert.ErrorContains(t, err, "changed after you agreed")
 	assert.Equal(t, -1, h.index("cp -a /etc/firewalld"))
@@ -205,7 +205,7 @@ func TestConfigureFirewalldTakesOverTheFirewallThatWasShown(t *testing.T) {
 	preview, err := PreviewFirewalldAdoption(h)
 	require.NoError(t, err)
 
-	require.NoError(t, configureFirewalld(h, rhel10Host, FirewallConsent{Adopt: true, Fingerprint: preview.Fingerprint}))
+	require.NoError(t, configureFirewalld(h, rhel10Host, FirewallConsent{Adopt: true, Fingerprint: preview.Fingerprint}, RoleServer))
 	assert.Greater(t, h.index("firewall-cmd --reload"), -1)
 }
 
@@ -213,7 +213,7 @@ func TestHardenedStoppedFirewalldSaysAdoptionDoesNotApply(t *testing.T) {
 	h := newFirewalldHost(t)
 	h.publicXML = strings.Replace(stockPublicZone, `  <service name="cockpit"/>`+"\n", "", 1)
 
-	err := configureFirewalld(h, rhel10Host, FirewallConsent{Adopt: true})
+	err := configureFirewalld(h, rhel10Host, FirewallConsent{Adopt: true}, RoleServer)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "public zone services")
