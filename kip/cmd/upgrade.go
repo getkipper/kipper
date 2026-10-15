@@ -125,7 +125,13 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 
 	fmt.Printf("\n  Upgrading Kipper on %s...\n\n", cluster.Domain)
 
-	// Obtain repair consent before making any upgrade changes.
+	// An interrupted network change can leave k3s stopped, and everything
+	// below needs the API, so the change is settled over SSH first.
+	if err := recoverNetworkChange(cluster, sshKey, autoYes); err != nil {
+		return err
+	}
+
+	// Obtain autoscaling repair consent before upgrading components.
 	autoscaling, err := autoscalingRepairConsent(ctx, clientset, k8sClient.Dynamic(), os.Stdout, cliVersion(),
 		autoscalingConsentOptions{
 			Repair:        repairAutoscalingFlag,
@@ -1032,12 +1038,35 @@ func loadPlatformState(ctx context.Context, dyn dynamic.Interface) (installer.Pl
 func runSystemUpgrade(host, explicitKey, fallbackKey, domain string, dnsResolvers, trustedProxies []string, state installer.PlatformState, autoYes bool) error {
 	components := installer.SystemComponents(domain, dnsResolvers, trustedProxies, state)
 
+	provider := &infra.BareMetalProvider{
+		Host:           host,
+		SSHKey:         explicitKey,
+		FallbackSSHKey: fallbackKey,
+	}
+	if err := provider.Connect(); err != nil {
+		return fmt.Errorf("connecting to %s: %w", host, err)
+	}
+	defer func() { _ = provider.Close() }()
+
+	// Read before the prompt, so the one confirmation covers the network
+	// change as well as the components.
+	network, err := installer.PlanNetworkChange(provider.Client())
+	if err != nil {
+		return err
+	}
+
 	fmt.Printf("\n  System components to reconcile on %s:\n", host)
+	if network.Needed() {
+		fmt.Printf("    - pod network\n")
+	}
 	for _, c := range components {
 		fmt.Printf("    - %s\n", c.Name)
 	}
 	fmt.Printf("\n  Each component is re-applied at the version pinned in this kip build.\n")
 	fmt.Printf("  Helm-controller upgrades charts in place; a failed chart can disrupt running workloads.\n\n")
+	if network.Needed() {
+		fmt.Printf("%s\n", network.Describe())
+	}
 
 	if !autoYes {
 		ok, err := confirmInteractive("  Continue with system upgrade? [y/N] ")
@@ -1050,17 +1079,15 @@ func runSystemUpgrade(host, explicitKey, fallbackKey, domain string, dnsResolver
 		}
 	}
 
-	provider := &infra.BareMetalProvider{
-		Host:           host,
-		SSHKey:         explicitKey,
-		FallbackSSHKey: fallbackKey,
-	}
-	if err := provider.Connect(); err != nil {
-		return fmt.Errorf("connecting to %s: %w", host, err)
-	}
-	defer func() { _ = provider.Close() }()
-
 	fmt.Println()
+	if network.Needed() {
+		fmt.Printf("  ...  pod network\n")
+		start := time.Now()
+		if err := installer.ChangeNetwork(provider.Client()); err != nil {
+			return fmt.Errorf("pod network: %w", err)
+		}
+		fmt.Printf("  ✔  pod network on WireGuard (%s)\n", time.Since(start).Round(time.Second))
+	}
 	if err := installer.RunSystemUpgrade(provider.Client(), components); err != nil {
 		return err
 	}
@@ -1509,5 +1536,38 @@ func checkImageTagFlags(tag string, skipSystem bool) error {
 	if !skipSystem {
 		return fmt.Errorf("--image-tag requires --skip-system to keep system component upgrades from restoring released images")
 	}
+	return nil
+}
+
+// recoverNetworkChange obtains consent and recovers an interrupted network
+// change over SSH before upgrade steps that require the Kubernetes API.
+func recoverNetworkChange(cluster *config.Cluster, sshKey string, autoYes bool) error {
+	if cluster.Host == "" {
+		return nil
+	}
+	explicitKey, fallbackKey := resolveSSHKey(sshKey, cluster)
+	provider := &infra.BareMetalProvider{Host: cluster.Host, SSHKey: explicitKey, FallbackSSHKey: fallbackKey}
+	if err := provider.Connect(); err != nil {
+		return fmt.Errorf("connecting to %s: %w", cluster.Host, err)
+	}
+	defer func() { _ = provider.Close() }()
+	pending, err := installer.NetworkChangePending(provider.Client())
+	if err != nil || !pending {
+		return err
+	}
+	fmt.Printf("%s\n", installer.PendingNetworkChangeDescription())
+	if !autoYes {
+		ok, err := confirmInteractive("  Recover the unfinished pod network change now? [y/N] ")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("recover the unfinished pod network change before upgrading")
+		}
+	}
+	if err := installer.RecoverNetworkChange(provider.Client()); err != nil {
+		return fmt.Errorf("pod network: %w", err)
+	}
+	fmt.Printf("  ✔  pod network recovery complete\n\n")
 	return nil
 }

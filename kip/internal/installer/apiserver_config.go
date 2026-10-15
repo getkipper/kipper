@@ -25,9 +25,10 @@ const (
 	configChangedMarker = "kipper-config-changed"
 
 	// apiServerLockPath serializes repairs that share a backup and pending-write marker.
-	// The lock can be reclaimed after apiServerLockTTL seconds, between commands.
+	// Fenced commands refresh its mtime on completion. Acquisition can reclaim it
+	// after more than apiServerLockTTL seconds without a refresh, once the guard is free.
 	apiServerLockPath = "/run/kipper-apiserver-config.lock"
-	apiServerLockTTL  = 15 * 60
+	apiServerLockTTL  = 180
 
 	apiServerArgKey = "kube-apiserver-arg"
 )
@@ -153,8 +154,9 @@ const (
 )
 
 // lockAPIServerConfig returns a runner guarded by the host lock and a release function.
-// A shared flock serializes acquisition, release, and each command. Each command
-// checks the owner token so a previous owner stops after a takeover.
+// An exclusive flock on the guard file serializes acquisition, release, and
+// each command. Commands check the owner token so a previous owner stops after
+// a takeover.
 func lockAPIServerConfig(client CommandRunner) (CommandRunner, func(), error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
@@ -162,14 +164,15 @@ func lockAPIServerConfig(client CommandRunner) (CommandRunner, func(), error) {
 	}
 	token := hex.EncodeToString(buf)
 	out, err := client.Run(fmt.Sprintf(`exec 9>%[1]s.guard && flock 9 || exit 1
-if [ -d %[1]s ] && [ $(( $(date +%%s) - $(stat -c %%Y %[1]s) )) -gt %[2]d ]; then rm -rf %[1]s; fi
+if [ -d %[1]s ]; then age=$(( $(date +%%s) - $(stat -c %%Y %[1]s) )); if [ "$age" -gt %[2]d ]; then rm -rf %[1]s; else echo %[4]s "$age"; exit 5; fi; fi
 mkdir %[1]s 2>/dev/null || { echo %[4]s; exit 5; }
 echo %[3]s > %[1]s/owner || { rm -rf %[1]s; exit 1; }
 echo %[5]s`,
 		apiServerLockPath, apiServerLockTTL, token, lockHeldMarker, lockAcquiredMarker))
 	switch {
 	case strings.Contains(out, lockHeldMarker):
-		return nil, nil, fmt.Errorf("another kip run holds the API server configuration lock (%s). Wait for it to finish, then retry. A lock older than %d minutes can be reclaimed between commands", apiServerLockPath, apiServerLockTTL/60)
+		return nil, nil, fmt.Errorf("another kip run holds the API server configuration lock (%s)%s. Wait for it to finish, then retry. If it was interrupted, retry after more than %d seconds without a lock refresh to reclaim the lock",
+			apiServerLockPath, lockAgeClause(out), apiServerLockTTL)
 	case err != nil:
 		return nil, nil, fmt.Errorf("taking the API server configuration lock: %w", err)
 	case !strings.Contains(out, lockAcquiredMarker):
@@ -182,16 +185,35 @@ echo %[5]s`,
 	return fencedRunner{base: client, token: token}, release, nil
 }
 
+// lockAgeClause formats the lock age from a lock-held response.
+// It returns an empty string if the response has no valid age.
+func lockAgeClause(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == lockHeldMarker {
+			if age, err := strconv.Atoi(fields[1]); err == nil {
+				return fmt.Sprintf(", last refreshed %d seconds ago", age)
+			}
+		}
+	}
+	return ""
+}
+
 // fencedRunner runs each command only while this run still owns the host lock.
 type fencedRunner struct {
 	base  CommandRunner
 	token string
 }
 
+// fence checks ownership under the guard and refreshes the lock after the command.
+// A subshell keeps command exits and traps separate from the refresh while
+// preserving the command's exit status.
 func (f fencedRunner) fence(command string) string {
 	return fmt.Sprintf(`exec 9>%[1]s.guard && flock 9 || exit 1
 [ "$(cat %[1]s/owner 2>/dev/null)" = %[2]s ] || { echo %[3]s; exit 4; }
-%[4]s`, apiServerLockPath, f.token, lockLostMarker, command)
+(
+%[4]s
+); rc=$?; touch -c %[1]s; exit $rc`, apiServerLockPath, f.token, lockLostMarker, command)
 }
 
 func (f fencedRunner) Run(command string) (string, error) {

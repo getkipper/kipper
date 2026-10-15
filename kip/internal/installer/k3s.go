@@ -190,6 +190,7 @@ const k3sConfig = `tls-san:
   - "%s"
 disable:
   - traefik
+flannel-backend: ` + wireguardBackend + `
 resolv-conf: ` + k3sResolvConfPath + `
 ` + k3sAPIServerArgs + `kubelet-arg:
   - "protect-kernel-defaults=true"
@@ -552,7 +553,10 @@ func writeAgentKubeletConfig(client CommandRunner) error {
 // reading the existing cluster's identity): a fresh k3s server deploys
 // CoreDNS as soon as the apiserver is up, so an after-the-fact existence
 // check cannot tell a re-run from a fresh install.
-func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPreexisting bool) error {
+//
+// Existing clusters require changeNetwork consent to migrate to WireGuard.
+// Migration clears stale flannel links before the new config is written.
+func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPreexisting, changeNetwork bool) error {
 	resolvers, err := resolveDNSResolvers(dnsResolvers)
 	if err != nil {
 		return err
@@ -575,6 +579,21 @@ func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPre
 	// picks up our settings on first start.
 	if err := writeResolvConf(client, renderResolvConf(resolvers)); err != nil {
 		return err
+	}
+
+	if k3sPreexisting {
+		change, err := PlanNetworkChange(client)
+		if err != nil {
+			return err
+		}
+		if change.Needed() {
+			if !changeNetwork {
+				return ErrNetworkChangeNotConfirmed
+			}
+			if err := ChangeNetwork(client); err != nil {
+				return err
+			}
+		}
 	}
 
 	configContent := fmt.Sprintf(k3sConfig, host)
@@ -692,14 +711,9 @@ func agentInstallCommand(serverVersion, masterHost string) string {
 		serverVersion, masterHost)
 }
 
-// JoinWorkerNode joins a worker using the master's token and returns its node name
-// after confirming registration against id. Read id before changing the host.
+// JoinWorkerNode joins a worker with a fresh one-hour bootstrap token and returns
+// its node name after confirming registration against id. Read id before setup.
 func JoinWorkerNode(masterClient CommandRunner, workerClient CommandRunner, masterHost string, id HostIdentity) (string, error) {
-	token, err := masterClient.Run("cat /var/lib/rancher/k3s/server/node-token")
-	if err != nil {
-		return "", fmt.Errorf("reading node token from master: %w", err)
-	}
-
 	// Mirror the server's curated resolvers onto the worker and point the
 	// agent at them, so CoreDNS keeps forwarding to the same upstreams if
 	// it reschedules onto this node. Re-validate the master's file rather
@@ -786,17 +800,22 @@ func JoinWorkerNode(masterClient CommandRunner, workerClient CommandRunner, mast
 		return "", err
 	}
 
-	// Install k3s agent on the worker — idempotent within the join policy
-	if _, err := workerClient.RunStdin(agentInstallCommand(serverVersion, masterHost), strings.NewReader(strings.TrimSpace(token)+"\n")); err != nil {
-		return "", fmt.Errorf("running k3s agent installer: %w", err)
-	}
-
-	// Confirm registration using the host's machine and boot IDs.
-	nodeName, err := waitForHostNode(masterClient, id, 2*time.Minute, 3*time.Second)
+	// Keep the token valid through registration before attempting cleanup.
+	var nodeName string
+	err = withJoinToken(masterClient, masterHost, func(token string) error {
+		if _, err := workerClient.RunStdin(agentInstallCommand(serverVersion, masterHost), strings.NewReader(token+"\n")); err != nil {
+			return fmt.Errorf("running k3s agent installer: %w", err)
+		}
+		name, err := waitForHostNode(masterClient, id, 2*time.Minute, 3*time.Second)
+		if err != nil {
+			return fmt.Errorf("verifying worker node joined: %w", err)
+		}
+		nodeName = name
+		return nil
+	})
 	if err != nil {
-		return "", fmt.Errorf("verifying worker node joined: %w", err)
+		return "", err
 	}
-
 	return nodeName, nil
 }
 

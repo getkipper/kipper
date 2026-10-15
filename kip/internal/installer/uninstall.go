@@ -5,15 +5,13 @@ import (
 )
 
 // UninstallHost runs k3s's uninstall scripts, removes Kipper's Longhorn
-// integration and Dex hosts pin, and deletes cluster and optional AI data.
+// integration and Dex hosts pin, and deletes cluster data, optional AI data,
+// network recovery state and the API server configuration lock.
 // Missing scripts and directories are tolerated. Host firewall policy and
 // OS hardening remain configured.
 func UninstallHost(client CommandRunner) error {
-	// k3s-killall.sh stops k3s cleanly before uninstall. If the script
-	// does not exist, k3s was not installed via the standard installer
-	// and we silently skip. If it exists, we run it and propagate its
-	// exit status — a half-failed killall means an unhealthy host and
-	// we should not pretend to succeed.
+	// Stop k3s before removing its data. A failed shutdown aborts the uninstall
+	// so cleanup can be retried after the failure is resolved.
 	if _, err := client.Run("if [ -x /usr/local/bin/k3s-killall.sh ]; then /usr/local/bin/k3s-killall.sh; fi"); err != nil {
 		return fmt.Errorf("running k3s-killall.sh: %w", err)
 	}
@@ -22,18 +20,9 @@ func UninstallHost(client CommandRunner) error {
 		return fmt.Errorf("running k3s-uninstall.sh: %w", err)
 	}
 
-	// Longhorn surfaces volumes as iSCSI targets via the in-cluster
-	// iscsid + device-mapper stack. k3s-uninstall stops the cluster
-	// but does not log out the iSCSI sessions or remove the
-	// /dev/longhorn/* device nodes, so a subsequent install on the
-	// same host inherits stale block devices that confuse the new
-	// Longhorn instance.
-	//
-	// We log out only sessions whose target IQN matches Longhorn's
-	// well-known prefix (iqn.2019-10.io.longhorn:) so unrelated iSCSI
-	// storage the user may have attached to the host stays connected.
-	// Similarly we leave multipath maps alone — flushing host-wide
-	// would yank real SAN devices unrelated to Kipper.
+	// Clear stale Longhorn sessions before a future install. Restrict logout
+	// to Longhorn target IQNs and preserve multipath maps so unrelated host
+	// storage stays connected.
 	logoutLonghorn := `for iqn in $(iscsiadm -m session 2>/dev/null | awk '/iqn\.2019-10\.io\.longhorn:/{print $4}'); do
   iscsiadm -m node -T "$iqn" -u 2>/dev/null || true
 done`
@@ -41,9 +30,8 @@ done`
 		return fmt.Errorf("logging out longhorn iscsi sessions: %w", err)
 	}
 
-	// The install added a kipper-managed blacklist block to
-	// /etc/multipath.conf. Strip it on uninstall so the host returns
-	// to its pre-kip multipath state.
+	// Remove Kipper's Longhorn blacklist so it no longer affects multipath
+	// device discovery on the host.
 	stripMultipath := fmt.Sprintf("if [ -f /etc/multipath.conf ]; then %s; fi", stripKipperMultipathBlockAwk)
 	if _, err := client.Run(stripMultipath); err != nil {
 		return fmt.Errorf("stripping kipper block from /etc/multipath.conf: %w", err)
@@ -52,15 +40,14 @@ done`
 		return fmt.Errorf("reloading multipathd: %w", err)
 	}
 
-	// Sweep the data Kipper writes outside k3s's purview. Each path
-	// is independent; rm -rf is idempotent on missing paths so a
-	// single command covers them all. /dev/longhorn holds the device
-	// nodes Longhorn created; removing them ensures the next install
-	// starts from a clean slate.
-	// The dex loopback pin lives in /etc/hosts, outside every swept
-	// directory; a surviving pin would trap future host processes resolving
-	// the old cluster domain at 127.0.0.1 forever.
-	sweep := "sed -i '/# kipper-dex-pin/d' /etc/hosts; rm -rf /var/lib/longhorn /var/lib/rancher /etc/rancher /var/lib/zot /var/lib/kipper-ai /dev/longhorn"
+	// Clear residual data and device nodes for the next install, and remove
+	// the Dex pin so the old hostname can resolve normally. Removing network
+	// recovery state in /var/lib/kipper prevents recovery of the deleted cluster.
+	// Removing the configuration lock lets the next install proceed immediately
+	// after an interrupted run. Preserve /etc/kipper because its firewall
+	// ownership records still apply to the retained firewall rules.
+	sweep := fmt.Sprintf("sed -i '/# kipper-dex-pin/d' /etc/hosts; rm -rf /var/lib/longhorn /var/lib/rancher /etc/rancher /var/lib/zot /var/lib/kipper-ai /var/lib/kipper %s %s.guard /dev/longhorn",
+		apiServerLockPath, apiServerLockPath)
 	if _, err := client.Run(sweep); err != nil {
 		return fmt.Errorf("sweeping kipper data directories: %w", err)
 	}

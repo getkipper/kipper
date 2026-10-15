@@ -37,6 +37,7 @@ type Request struct {
 	Firewall         bool            `json:"firewall"`
 	AdoptFirewall    bool            `json:"adopt_firewall,omitempty"`
 	AdoptFingerprint string          `json:"adopt_fingerprint,omitempty"`
+	ChangeNetwork    bool            `json:"change_network,omitempty"`
 	NoSSHRateLimit   bool            `json:"no_ssh_rate_limit"`
 	DNSResolvers     []string        `json:"dns_resolvers,omitempty"`
 	TrustedProxies   []string        `json:"trusted_proxies,omitempty"`
@@ -96,6 +97,7 @@ func (r Request) Options() installer.Options {
 		Firewall:         r.Firewall,
 		AdoptFirewall:    r.AdoptFirewall,
 		AdoptFingerprint: r.AdoptFingerprint,
+		ChangeNetwork:    r.ChangeNetwork,
 		NoSSHRateLimit:   r.NoSSHRateLimit,
 		DNSResolvers:     r.DNSResolvers,
 		TrustedProxies:   r.TrustedProxies,

@@ -214,6 +214,7 @@ The command joins the host as a k3s worker using the control plane's k3s version
 - **Networking:** the server's default firewall lacks rules for cross-node overlay traffic, which can disrupt pod connectivity.
 - **Host setup:** the command applies kubelet hardening and, on Ubuntu and Debian, storage restart safeguards. Configure the worker's firewall and install Longhorn's iSCSI and NFS client packages manually.
 - **Maintenance:** `kip upgrade`, `kip cluster harden`, and `kip cluster uninstall` perform host operations on the configured server only. Worker maintenance and removal are manual.
+- **Join credentials:** each join attempt uses a fresh k3s bootstrap token valid for one hour. The command attempts to delete it after registration or a join failure. If cleanup fails, the token expires on its own.
 - **Availability:** ingress remains on the control-plane node, and the registry uses one replica with single-replica storage. Adding a worker alone does not provide high availability.
 
 ## kip node list {#kip-node-list}

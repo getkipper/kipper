@@ -56,6 +56,7 @@ func init() {
 	installCmd.Flags().Bool("host-maps-here", false, "with --local: confirm that --host routes to this machine, such as through NAT")
 	installCmd.Flags().String("result", "", "with --local: save a result file to import on your management machine with 'kip cluster add --install-result'")
 	installCmd.Flags().String("credentials-file", "", "save the generated admin email and password to a new local file (mode 0600); print them if saving fails")
+	installCmd.Flags().Bool("yes", false, "approve pod network migration or recovery, which may restart k3s; otherwise prompt")
 	installCmd.Flags().Bool("no-ssh-rate-limit", false, "disable UFW SSH rate limiting on Ubuntu and Debian; useful for CI or operators sharing a NAT address")
 	installCmd.Flags().StringSlice("dns-resolver", nil, "upstream DNS resolver CoreDNS forwards external queries to (repeatable; default 1.1.1.1, 8.8.8.8, 9.9.9.9). Set for clusters that must reach internal/corporate DNS.")
 	installCmd.Flags().StringSlice("trusted-proxy", nil, "IP or CIDR whose X-Forwarded-* headers Traefik honors (repeatable). Set for clusters behind an external load balancer; the kipper.run gateway is trusted automatically.")
@@ -105,6 +106,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	local, _ := cmd.Flags().GetBool("local")
 	hostMapsHere, _ := cmd.Flags().GetBool("host-maps-here")
 	resultPath, _ := cmd.Flags().GetString("result")
+	changeNetwork, _ := cmd.Flags().GetBool("yes")
 	if !local && (hostMapsHere || resultPath != "") {
 		return fmt.Errorf("--host-maps-here and --result only apply with --local")
 	}
@@ -170,28 +172,30 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	kubeconfigMode := installer.ResolveKubeconfigMode(adminKubeconfig, noLogin, isTTY)
 
 	result, installErr := installer.Run(installer.Options{
-		KipVersion:         installingKipVersion(),
-		Host:               host,
-		Local:              local,
-		Domain:             domain,
-		ConsoleDomain:      consoleDomain,
-		ConsoleAPIDomain:   consoleAPIDomain,
-		DexDomain:          dexDomain,
-		SSHKeyPath:         explicitKey,
-		FallbackSSHKeyPath: fallbackKey,
-		AdminEmail:         adminEmail,
-		Org:                org,
-		OrgDisplayName:     orgDisplayName,
-		Harden:             harden,
-		Firewall:           firewall,
-		AdoptFirewall:      adoptFirewall,
-		ConfirmAdoption:    adoptionQuestion(isTTY),
-		NoSSHRateLimit:     noSSHRateLimit,
-		BackupStorage:      backupStorage,
-		DNSResolvers:       dnsResolvers,
-		TrustedProxies:     trustedProxies,
-		KubeconfigMode:     kubeconfigMode,
-		CredentialsFile:    credentialsFile,
+		KipVersion:           installingKipVersion(),
+		Host:                 host,
+		Local:                local,
+		Domain:               domain,
+		ConsoleDomain:        consoleDomain,
+		ConsoleAPIDomain:     consoleAPIDomain,
+		DexDomain:            dexDomain,
+		SSHKeyPath:           explicitKey,
+		FallbackSSHKeyPath:   fallbackKey,
+		AdminEmail:           adminEmail,
+		Org:                  org,
+		OrgDisplayName:       orgDisplayName,
+		Harden:               harden,
+		Firewall:             firewall,
+		AdoptFirewall:        adoptFirewall,
+		ConfirmAdoption:      adoptionQuestion(isTTY),
+		ChangeNetwork:        changeNetwork,
+		ConfirmNetworkChange: adoptionQuestion(isTTY),
+		NoSSHRateLimit:       noSSHRateLimit,
+		BackupStorage:        backupStorage,
+		DNSResolvers:         dnsResolvers,
+		TrustedProxies:       trustedProxies,
+		KubeconfigMode:       kubeconfigMode,
+		CredentialsFile:      credentialsFile,
 		LoginGate: func(ctx context.Context, domain, dexHost, server string, caData []byte) installer.GateResult {
 			return installer.DefaultLoginGate(domain, dexHost)(ctx, domain, server, caData)
 		},

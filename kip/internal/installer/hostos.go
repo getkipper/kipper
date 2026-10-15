@@ -155,12 +155,13 @@ func (h HostOS) K3sSELinux() bool {
 	return h.Family == FamilyRHEL
 }
 
-// KernelModules returns the modules to check before installing k3s and Longhorn.
+// KernelModules returns the modules required by host preparation.
+// WireGuard is required on every OS family.
 func (h HostOS) KernelModules() []string {
 	if h.Family == FamilyRHEL {
-		return []string{"br_netfilter", "overlay", "vxlan", "iscsi_tcp"}
+		return []string{"br_netfilter", "overlay", "iscsi_tcp", "wireguard"}
 	}
-	return nil
+	return []string{"wireguard"}
 }
 
 // KernelModulePackages returns extra packages to install when required modules

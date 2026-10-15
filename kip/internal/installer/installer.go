@@ -20,33 +20,35 @@ import (
 
 // Options holds the parameters for a cluster installation.
 type Options struct {
-	Host               string
-	Domain             string
-	KipVersion         string
-	ConsoleDomain      string
-	ConsoleAPIDomain   string
-	DexDomain          string
-	Local              bool
-	SSHKeyPath         string
-	FallbackSSHKeyPath string
-	AdminEmail         string
-	AdminPasswordHash  string
-	GatewayURL         string
-	Org                string
-	OrgDisplayName     string
-	Harden             bool
-	Firewall           bool
-	AdoptFirewall      bool
-	NoSSHRateLimit     bool
-	BackupStorage      *BackupStorageConfig
-	DNSResolvers       []string
-	TrustedProxies     []string
-	KubeconfigMode     KubeconfigMode
-	LoginGate          func(ctx context.Context, domain, dexHost, server string, caData []byte) GateResult
-	ConfirmConnection  func() error
-	ConfirmAdoption    func(question string) bool
-	AdoptFingerprint   string
-	CredentialsFile    string
+	Host                 string
+	Domain               string
+	KipVersion           string
+	ConsoleDomain        string
+	ConsoleAPIDomain     string
+	DexDomain            string
+	Local                bool
+	SSHKeyPath           string
+	FallbackSSHKeyPath   string
+	AdminEmail           string
+	AdminPasswordHash    string
+	GatewayURL           string
+	Org                  string
+	OrgDisplayName       string
+	Harden               bool
+	Firewall             bool
+	AdoptFirewall        bool
+	NoSSHRateLimit       bool
+	BackupStorage        *BackupStorageConfig
+	DNSResolvers         []string
+	TrustedProxies       []string
+	KubeconfigMode       KubeconfigMode
+	LoginGate            func(ctx context.Context, domain, dexHost, server string, caData []byte) GateResult
+	ConfirmConnection    func() error
+	ConfirmAdoption      func(question string) bool
+	AdoptFingerprint     string
+	ChangeNetwork        bool
+	ConfirmNetworkChange func(question string) bool
+	CredentialsFile      string
 }
 
 // Result contains installation outputs, including those available after a failure.
@@ -385,13 +387,20 @@ func Run(opts Options) (*Result, error) {
 	}
 	fmt.Println()
 
-	// An existing cluster's serving identity comes from its ClusterIdentity
-	// CR, never re-derived from flags or the IP: re-deriving would replace a
-	// reconfigured identity outside the phase machine (no dual-serve, no
-	// approval, no rollback snapshot), and the reconciler's issuer guard
-	// would then hold the cluster on the wrong identity instead of
-	// converging back.
+	// An interrupted network change can leave k3s stopped, and reading the
+	// identity needs the API, so the change is settled first.
+	if err := recoverNetworkChange(client, opts); err != nil {
+		return nil, err
+	}
+
+	// Read the stored identity to preserve any completed cluster reconfiguration.
 	existingIdentity, k3sPreexisting, err := ReadExistingClusterIdentity(client)
+	if err != nil {
+		return nil, err
+	}
+
+	// Obtain network consent before domain registration and installation steps.
+	changeNetwork, err := networkChangeConsent(client, k3sPreexisting, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -528,7 +537,7 @@ func Run(opts Options) (*Result, error) {
 		}})
 	}
 	k3sStep := installStep{"Installing k3s", func() error {
-		return InstallK3s(client, opts.Host, opts.DNSResolvers, k3sPreexisting)
+		return InstallK3s(client, opts.Host, opts.DNSResolvers, k3sPreexisting, changeNetwork)
 	}}
 	var firewallStep *installStep
 	if configureFirewall {
@@ -968,4 +977,40 @@ func passwordInEffect(password string, sent bool) string {
 		return ""
 	}
 	return password
+}
+
+// networkChangeConsent requires prior approval or an interactive confirmation
+// when an existing cluster needs a network change.
+func networkChangeConsent(client CommandRunner, k3sPreexisting bool, opts Options) (bool, error) {
+	if !k3sPreexisting {
+		return false, nil
+	}
+	change, err := PlanNetworkChange(client)
+	if err != nil {
+		return false, err
+	}
+	if !change.Needed() {
+		return false, nil
+	}
+	fmt.Printf("\n%s\n", change.Describe())
+	if opts.ChangeNetwork {
+		return true, nil
+	}
+	if opts.ConfirmNetworkChange != nil && opts.ConfirmNetworkChange("Move the pod network to WireGuard now?") {
+		return true, nil
+	}
+	return false, ErrNetworkChangeNotConfirmed
+}
+
+// recoverNetworkChange requires consent before recovering an interrupted change.
+func recoverNetworkChange(client CommandRunner, opts Options) error {
+	pending, err := NetworkChangePending(client)
+	if err != nil || !pending {
+		return err
+	}
+	fmt.Printf("\n%s\n", PendingNetworkChangeDescription())
+	if !opts.ChangeNetwork && (opts.ConfirmNetworkChange == nil || !opts.ConfirmNetworkChange("Recover the unfinished pod network change now?")) {
+		return ErrNetworkChangeNotConfirmed
+	}
+	return RecoverNetworkChange(client)
 }
