@@ -38,11 +38,19 @@ On Ubuntu and Debian, UFW is installed with a default-deny incoming policy; the 
 
 | Port | Reason |
 |---|---|
-| Detected SSH port (22 by default) | Reading `sshd -T` so non-default ports are honored |
+| Every SSH port reported by `sshd -T` | Preserve access through all configured SSH ports. |
 | 80, 443 | Traefik ingress |
 | 6443 | k3s API |
 
-On a fresh install, pods reach the host only on the specific ports k3s needs, the kubelet (`10250`) and node-exporter (`9100`), rather than every host port, so a compromised pod cannot reach SSH or other host services. Pod-to-apiserver traffic arrives on `6443` after the service address is translated, already covered above. UFW's `DEFAULT_FORWARD_POLICY` is set to `ACCEPT` so pod-to-pod and pod-to-service traffic is not blocked. A NodePort or host-network service you add yourself needs its own UFW rule, since the pod-to-host default is now deny.
+On a fresh install, pods reach the host only on the specific ports k3s needs, the kubelet (`10250`) and node-exporter (`9100`), rather than every host port, so a compromised pod cannot reach SSH or other host services. Pod-to-apiserver traffic arrives on `6443` after the service address is translated, already covered above. UFW's `DEFAULT_FORWARD_POLICY` is set to `ACCEPT` so pod-to-pod and pod-to-service traffic is not blocked.
+
+Before changing UFW rules, Kipper reserves the firewall, saves its configuration and active state, and schedules a rollback on the host. Each command under the firewall lock renews the three-minute deadline. If kip stops making progress, rollback waits for the deadline and any command holding the lock, then restores the saved configuration. It also removes any ownership claim created by this run. If UFW was active, rollback starts it again, checks its chain links, and compares the loaded rules with those captured before the change. For SSH runs, Kipper checks a fresh connection before taking this snapshot. Local runs skip this connection check.
+
+If restoration or verification fails, rollback attempts to disable UFW and allow incoming traffic. `kip status` reports this attempt, but the record does not confirm the current firewall state. Run `kip cluster harden` to enable the server's firewall again.
+
+After starting UFW, the host checks its chain links and established-traffic rule for IPv4 and, where UFW manages it, IPv6. If startup or these checks fail, the same shell attempts to disable UFW to preserve SSH access. Kipper also checks the SSH rule and peer rules. Over SSH, Kipper commits a successful change after a fresh SSH connection succeeds. A `--local` install commits after successful rule configuration and checks. A failed change or connection triggers an immediate restoration attempt. Kipper retains ownership of an inactive UFW firewall it previously configured, so later firewall configuration can turn it back on.
+
+A NodePort or host-network service you add yourself needs its own UFW rule, since the pod-to-host default is now deny.
 
 Prometheus collects node metrics over TLS from kube-rbac-proxy on port `9100`, using its service account token. The proxy forwards authorized requests to node-exporter on `127.0.0.1:8100`. Its authorization check requires permission to get the `services/kube-prometheus-stack-prometheus-node-exporter` subresource in `monitoring`; the chart grants this permission to Prometheus. Prometheus verifies the proxy's certificate using the CA certificate provisioned by cert-manager in `monitoring`, keeping node metrics encrypted between nodes.
 

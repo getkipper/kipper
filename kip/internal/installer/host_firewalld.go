@@ -48,21 +48,74 @@ type firewalldWant struct {
 	publicServices []string
 	podPorts       []string
 	podSources     []string
+	peerZones      []firewalldSourceZone
+	role           HostRole
+}
+
+// firewalldSourceZone is a source zone for other nodes. It keeps the public
+// ports too, because a source zone replaces the public zone for its sources.
+type firewalldSourceZone struct {
+	name    string
+	sources []string
+	ports   []string
+}
+
+// firewalldPeerZoneFiles includes previously managed zones so they can be removed.
+var firewalldPeerZoneFiles = map[string]bool{
+	"zones/" + firewalldPeerZone + ".xml":   true,
+	"zones/" + firewalldServerZone + ".xml": true,
 }
 
 func wantFirewalld(sshPorts []string) firewalldWant {
+	return wantFirewalldFor(sshPorts, FirewallMesh{})
+}
+
+func wantFirewalldFor(sshPorts []string, mesh FirewallMesh) firewalldWant {
+	open := append([]string{}, sshPorts...)
+	if mesh.Role != RoleWorker {
+		open = append(open, "80", "443", "6443")
+	}
 	var public []string
-	for _, p := range append(append([]string{}, sshPorts...), "80", "443", "6443") {
+	for _, p := range open {
 		if !containsString(public, p+"/tcp") {
 			public = append(public, p+"/tcp")
 		}
 	}
-	return firewalldWant{
+	want := firewalldWant{
 		publicPorts:    public,
 		publicServices: []string{"dhcpv6-client"},
 		podPorts:       []string{"6443/tcp", kubeletPort + "/tcp", nodeExporterPort + "/tcp"},
 		podSources:     []string{k3sPodCIDR, k3sServiceCIDR},
+		role:           mesh.Role,
 	}
+	zones := map[string]*firewalldSourceZone{}
+	for _, p := range mesh.Peers {
+		name := firewalldPeerZone
+		if p.Server {
+			name = firewalldServerZone
+		}
+		z, ok := zones[name]
+		if !ok {
+			z = &firewalldSourceZone{name: name, ports: append(append([]string{}, public...), peerPorts(p)...)}
+			zones[name] = z
+		}
+		z.sources = append(z.sources, p.Address)
+	}
+	for _, name := range []string{firewalldPeerZone, firewalldServerZone} {
+		if z, ok := zones[name]; ok {
+			want.peerZones = append(want.peerZones, *z)
+		}
+	}
+	return want
+}
+
+// zoneNames lists every zone kip expects to be active.
+func (w firewalldWant) zoneNames() []string {
+	names := []string{"public", firewalldPodZone}
+	for _, z := range w.peerZones {
+		names = append(names, z.name)
+	}
+	return names
 }
 
 // files returns firewalld's permanent configuration as Kipper writes it,
@@ -91,6 +144,9 @@ func (w firewalldWant) files() map[string]string {
 	files := map[string]string{
 		"zones/public.xml":                   zone("Public", w.publicServices, w.publicPorts, nil),
 		"zones/" + firewalldPodZone + ".xml": zone("Kipper pods", nil, w.podPorts, w.podSources),
+	}
+	for _, z := range w.peerZones {
+		files["zones/"+z.name+".xml"] = zone("Kipper "+strings.TrimPrefix(z.name, "kipper-"), nil, z.ports, z.sources)
 	}
 	for _, p := range firewalldPolicies {
 		masquerade := ""
@@ -164,6 +220,7 @@ func (c firewalldSavedConfig) changes(claimed, adopting bool, want firewalldWant
 		}
 		base := strings.TrimSuffix(file, ".old")
 		_, isOurs := ours[base]
+		isOurs = isOurs || firewalldPeerZoneFiles[base]
 		switch {
 		case kind != "f":
 			changes = append(changes, file+" is not a regular file")
@@ -238,18 +295,20 @@ func readFirewalldSaved(client CommandRunner) (firewalldSavedConfig, error) {
 	return c, nil
 }
 
-// firewalldStateCommand groups runtime queries under "== name" headings.
-// The q helper marks failed queries with "FAILED:"; the panic query is read directly.
-// Suppress stderr so diagnostic messages stay out of the parsed state.
-const firewalldStateCommand = `q() { out=$("$@" 2>/dev/null) || { echo "FAILED: $*"; return 0; }; printf '%s\n' "$out"; }; ` +
-	`echo "== state"; q firewall-cmd --state; ` +
-	`echo "== default"; q firewall-cmd --get-default-zone; ` +
-	`echo "== panic"; firewall-cmd --query-panic 2>/dev/null; ` +
-	`echo "== direct"; q firewall-cmd --direct --get-all-chains; q firewall-cmd --direct --get-all-rules; q firewall-cmd --direct --get-all-passthroughs; ` +
-	`echo "== active-zones"; q firewall-cmd --get-active-zones; ` +
-	`echo "== policies"; q firewall-cmd --get-policies; ` +
-	`for z in public ` + firewalldPodZone + `; do echo "== zone $z"; q firewall-cmd --info-zone="$z"; done; ` +
-	`for p in $(firewall-cmd --get-policies 2>/dev/null); do echo "== policy $p"; q firewall-cmd --info-policy="$p"; done`
+// firewalldStateCommand groups runtime queries into sections for comparison.
+// The q helper marks query failures; stderr is suppressed to keep diagnostics
+// out of the parsed state. The panic query returns its yes/no result directly.
+func firewalldStateCommand(want firewalldWant) string {
+	return `q() { out=$("$@" 2>/dev/null) || { echo "FAILED: $*"; return 0; }; printf '%s\n' "$out"; }; ` +
+		`echo "== state"; q firewall-cmd --state; ` +
+		`echo "== default"; q firewall-cmd --get-default-zone; ` +
+		`echo "== panic"; firewall-cmd --query-panic 2>/dev/null; ` +
+		`echo "== direct"; q firewall-cmd --direct --get-all-chains; q firewall-cmd --direct --get-all-rules; q firewall-cmd --direct --get-all-passthroughs; ` +
+		`echo "== active-zones"; q firewall-cmd --get-active-zones; ` +
+		`echo "== policies"; q firewall-cmd --get-policies; ` +
+		`for z in ` + strings.Join(want.zoneNames(), " ") + `; do echo "== zone $z"; q firewall-cmd --info-zone="$z"; done; ` +
+		`for p in $(firewall-cmd --get-policies 2>/dev/null); do echo "== policy $p"; q firewall-cmd --info-policy="$p"; done`
+}
 
 // firewalldDumpCommand lists zones, policies, direct rules, and ipset names
 // from runtime or permanent configuration. It omits zone interface bindings
@@ -393,18 +452,24 @@ func firewalldMismatches(state string, want firewalldWant) []string {
 			activeZones[zone] += strings.TrimSpace(line) + " "
 		}
 	}
+	sourceZones := []string{firewalldPodZone}
+	for _, pz := range want.peerZones {
+		sourceZones = append(sourceZones, pz.name)
+	}
 	for z, bindings := range activeZones {
 		switch {
 		case z == "public" && strings.Contains(bindings, "sources:"):
 			problems = append(problems, "public zone has sources bound: "+strings.TrimSpace(bindings))
-		case z == firewalldPodZone && strings.Contains(bindings, "interfaces:"):
-			problems = append(problems, firewalldPodZone+" zone has interfaces bound: "+strings.TrimSpace(bindings))
-		case z != "public" && z != firewalldPodZone:
+		case containsString(sourceZones, z) && strings.Contains(bindings, "interfaces:"):
+			problems = append(problems, z+" zone has interfaces bound: "+strings.TrimSpace(bindings))
+		case z != "public" && !containsString(sourceZones, z):
 			problems = append(problems, fmt.Sprintf("zone %s is active (%s)", z, strings.TrimSpace(bindings)))
 		}
 	}
-	if _, ok := activeZones[firewalldPodZone]; !ok {
-		problems = append(problems, firewalldPodZone+" zone is not active")
+	for _, z := range sourceZones {
+		if _, ok := activeZones[z]; !ok {
+			problems = append(problems, z+" zone is not active")
+		}
 	}
 
 	expect := func(what string, info firewalldInfo, field string, want []string) {
@@ -437,6 +502,9 @@ func firewalldMismatches(state string, want firewalldWant) []string {
 	}
 	checkZone("public", want.publicServices, want.publicPorts, nil)
 	checkZone(firewalldPodZone, nil, want.podPorts, want.podSources)
+	for _, pz := range want.peerZones {
+		checkZone(pz.name, nil, pz.ports, pz.sources)
+	}
 
 	policies := strings.Fields(strings.Join(sections["policies"], " "))
 	expected := map[string]bool{"allow-host-ipv6": true}
@@ -675,7 +743,7 @@ const pendingRollbackCommand = "systemctl list-units --all --no-legend --plain '
 // configureFirewalld backs up, loads, and verifies Kipper's configuration under
 // a rollback timer. SSH and server-driven runs verify a new SSH connection
 // before commit. Other local runs may start a stopped firewall or verify a matching one.
-func configureFirewalld(client FirewallRunner, host HostOS, consent FirewallConsent, role HostRole) error {
+func configureFirewalld(client FirewallRunner, host HostOS, consent FirewallConsent, mesh FirewallMesh) error {
 	install := host.InstallPackagesCommand(false, "firewalld")
 	if install == "" {
 		return fmt.Errorf("installing firewalld: kip cannot install packages on %s", host.ID)
@@ -693,13 +761,13 @@ func configureFirewalld(client FirewallRunner, host HostOS, consent FirewallCons
 	if err != nil {
 		return fmt.Errorf("naming the firewall change: %w", err)
 	}
-	run.role = role
+	run.role = mesh.Role
 	if _, err := client.Run(run.reserveCommand()); err != nil {
 		return fmt.Errorf("reserving the firewall for this change: %w", err)
 	}
 	// Inspect after reserving so cooperating runs cannot change the configuration
 	// between inspection and application.
-	seen, err := inspectFirewalld(client, sshPorts, consent)
+	seen, err := inspectFirewalld(client, sshPorts, consent, mesh)
 	if err != nil || seen.done {
 		if _, releaseErr := client.Run(run.releaseLockedCommand()); releaseErr != nil {
 			return errors.Join(err, fmt.Errorf("releasing the firewall reservation: %w", releaseErr))
@@ -734,7 +802,7 @@ func configureFirewalld(client FirewallRunner, host HostOS, consent FirewallCons
 		return fmt.Errorf("loading the firewalld configuration: %w", errors.Join(err, rollBackFirewalld(client, run, true)))
 	}
 
-	state, err := client.Run(firewalldStateCommand)
+	state, err := client.Run(firewalldStateCommand(want))
 	if err != nil {
 		return fmt.Errorf("reading the loaded firewalld configuration: %w", errors.Join(err, rollBackFirewalld(client, run, true)))
 	}
@@ -753,7 +821,7 @@ func configureFirewalld(client FirewallRunner, host HostOS, consent FirewallCons
 	}
 
 	// Restart running k3s to restore its network rules after loading firewalld.
-	unit := role.k3sUnit()
+	unit := mesh.Role.k3sUnit()
 	if _, err := client.Run(fmt.Sprintf("if systemctl is-active --quiet %[1]s; then systemctl restart %[1]s; fi", unit)); err != nil {
 		return fmt.Errorf("restarting %s after loading the firewall: %w", unit, err)
 	}
@@ -768,7 +836,7 @@ type firewalldSeen struct {
 
 // inspectFirewalld checks ownership, connectivity, and configuration before
 // making changes. The caller must hold the run's reservation.
-func inspectFirewalld(client FirewallRunner, sshPorts []string, consent FirewallConsent) (firewalldSeen, error) {
+func inspectFirewalld(client FirewallRunner, sshPorts []string, consent FirewallConsent, mesh FirewallMesh) (firewalldSeen, error) {
 	audit, err := AuditFirewall(client)
 	if err != nil {
 		return firewalldSeen{}, fmt.Errorf("re-auditing firewall: %w", err)
@@ -801,7 +869,7 @@ func inspectFirewalld(client FirewallRunner, sshPorts []string, consent Firewall
 		return firewalldSeen{}, fmt.Errorf("taking over a running firewalld needs a check from outside the host, so kip left it alone; run kip install over SSH or with --via-server")
 	}
 
-	want := wantFirewalld(sshPorts)
+	want := wantFirewalldFor(sshPorts, mesh)
 	saved, err := readFirewalldSaved(client)
 	if err != nil {
 		return firewalldSeen{}, err
@@ -816,7 +884,7 @@ func inspectFirewalld(client FirewallRunner, sshPorts []string, consent Firewall
 	}
 	// Interactive consent applies to the previewed configuration.
 	if adopting && consent.Fingerprint != "" {
-		current, err := currentFirewalldFingerprint(client, sshPorts)
+		current, err := currentFirewalldFingerprint(client, sshPorts, mesh)
 		if err != nil {
 			return firewalldSeen{}, err
 		}
@@ -845,7 +913,7 @@ func inspectFirewalld(client FirewallRunner, sshPorts []string, consent Firewall
 // checkLocalFirewalld verifies that a claimed firewall already matches the
 // expected runtime state and saved files when no external SSH check is available.
 func checkLocalFirewalld(client CommandRunner, want firewalldWant) error {
-	state, err := client.Run(firewalldStateCommand)
+	state, err := client.Run(firewalldStateCommand(want))
 	if err != nil {
 		return fmt.Errorf("reading the loaded firewalld configuration: %w", err)
 	}
@@ -925,6 +993,18 @@ func writeFirewalldFiles(client CommandRunner, run firewalldRun, want firewalldW
 	check := "firewall-offline-cmd --check-config"
 	if running {
 		check = "firewall-cmd --check-config"
+	}
+	// Remove previously managed peer zones that are no longer needed.
+	var stale []string
+	for _, name := range []string{firewalldPeerZone, firewalldServerZone} {
+		if _, ok := files["zones/"+name+".xml"]; !ok {
+			stale = append(stale, firewalldConfigDir+"/zones/"+name+".xml")
+		}
+	}
+	if len(stale) > 0 {
+		if _, err := client.Run(run.locked("rm -f " + strings.Join(stale, " "))); err != nil {
+			return fmt.Errorf("removing peer zones no longer needed: %w", err)
+		}
 	}
 	relabel := "if command -v restorecon >/dev/null 2>&1; then restorecon -R " + firewalldConfigDir + "; fi"
 	if _, err := client.Run(run.locked(relabel + " && " + check)); err != nil {

@@ -72,7 +72,7 @@ esac
 	}
 	runner := &localrun.Runner{Home: t.TempDir(), Dir: t.TempDir(), Path: bin + ":/usr/bin:/bin"}
 
-	missing, err := CheckOperatorFirewalld(runner)
+	missing, err := CheckOperatorFirewalld(runner, FirewallMesh{})
 
 	require.NoError(t, err)
 	return missing
@@ -216,4 +216,97 @@ func TestCheckOperatorFirewalldReportsUnreadablePolicies(t *testing.T) {
 	defer func() { policiesFail = "no" }()
 	missing = operatorFirewalldWith(t, "public", "ssh http https 6443/tcp", "trusted", "ACCEPT", "", "", "")
 	assert.Equal(t, []string{"a readable list of firewalld policies"}, missing)
+}
+
+// operatorPeerFirewalld runs the operator check against a fake firewalld that
+// binds 192.0.2.10 to zone mesh, which opens meshPorts and holds rich, if set.
+func operatorPeerFirewalld(t *testing.T, mesh FirewallMesh, meshPorts, rich string) []string {
+	return operatorPeerFirewalldWith(t, mesh, meshPorts, rich, "", "")
+}
+
+// operatorPeerFirewalldWith also binds meshExtraSources to zone mesh and
+// podExtraSources to the pod zone, each with a leading space.
+func operatorPeerFirewalldWith(t *testing.T, mesh FirewallMesh, meshPorts, rich, meshExtraSources, podExtraSources string) []string {
+	t.Helper()
+	bin := t.TempDir()
+	fakes := map[string]string{
+		"sshd": "echo 'port 22'\n",
+		"ip": `case "$*" in *"route get 192.0.2.20"*) echo '192.0.2.20 dev eth1 src 192.0.2.2 uid 0' ;; *) echo 'default via 192.0.2.1 dev eth0 proto static' ;; esac
+`,
+		"firewall-cmd": `case "$*" in
+  *--get-zone-of-interface=eth0*) echo public ;;
+  *--get-zone-of-interface=eth1*) echo internal ;;
+  *--get-zone-of-source=192.0.2.10*) echo mesh ;;
+  *--get-zone-of-source=10.42.0.0/16*) echo pods ;;
+  *--get-zone-of-source=*) exit 2 ;;
+  *--query-panic*) echo no ;;
+  *--get-policies*) echo "" ;;
+  *"--zone=mesh --list-rich-rules"*) echo "` + rich + `" ;;
+  *--get-active-zones*) printf '%s\n' public "  interfaces: eth0" pods "  sources: 10.42.0.0/16` + podExtraSources + `" mesh "  sources: 192.0.2.10` + meshExtraSources + `" ;;
+  *--info-zone=pods*) echo "  target: ACCEPT" ;;
+  *--info-zone=*) echo "  target: default" ;;
+  *--info-service=https*) echo "  ports: 443/tcp" ;;
+  *"--zone=mesh --query-service=https"*) case "` + meshPorts + `" in *https*) exit 0 ;; esac; exit 1 ;;
+  *"--zone=public --query-port="*) for p in 22/tcp 80/tcp 443/tcp 6443/tcp; do [ "$*" != "${*%=$p}" ] && exit 0; done; exit 1 ;;
+  *"--zone=internal --query-port="*) for p in ` + meshPorts + `; do [ "$*" != "${*%=$p}" ] && exit 0; done; exit 1 ;;
+  *"--zone=mesh --query-port="*) for p in ` + meshPorts + `; do [ "$*" != "${*%=$p}" ] && exit 0; done; exit 1 ;;
+  *--query-*) exit 1 ;;
+  *) ;;
+esac
+`,
+	}
+	for name, body := range fakes {
+		//nolint:gosec // the fake commands have to be executable
+		require.NoError(t, os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body), 0o755))
+	}
+	runner := &localrun.Runner{Home: t.TempDir(), Dir: t.TempDir(), Path: bin + ":/usr/bin:/bin"}
+	missing, err := CheckOperatorFirewalld(runner, mesh)
+	require.NoError(t, err)
+	return missing
+}
+
+func TestOperatorFirewalldAcceptsPeerSourceZones(t *testing.T) {
+	worker := FirewallMesh{Role: RoleWorker, Peers: []FirewallPeer{{Address: "192.0.2.10", Server: true}}}
+	assert.Equal(t, []string{"9100/tcp open to cluster node 192.0.2.10"}, operatorPeerFirewalld(t, worker, "51820/udp 10250/tcp", ""))
+	assert.Empty(t, operatorPeerFirewalld(t, worker, "51820/udp 10250/tcp 9100/tcp", ""))
+}
+
+func TestOperatorFirewalldChecksOverridesInPeerZones(t *testing.T) {
+	worker := FirewallMesh{Role: RoleWorker, Peers: []FirewallPeer{{Address: "192.0.2.10", Server: true}}}
+	missing := operatorPeerFirewalld(t, worker, "51820/udp 10250/tcp 9100/tcp", `rule priority=\"-100\" source address=\"192.0.2.10\" drop`)
+	assert.Equal(t, []string{"no rich rules in zone mesh, which kip cannot evaluate"}, missing)
+}
+
+// On the server a worker's source zone replaces the external zone, so the
+// worker reaches the API only if that zone opens 6443 as well.
+func TestOperatorFirewalldNeedsTheAPIInAWorkersZone(t *testing.T) {
+	server := FirewallMesh{Role: RoleServer, Peers: []FirewallPeer{{Address: "192.0.2.10"}}}
+	assert.Contains(t, operatorPeerFirewalld(t, server, "51820/udp 10250/tcp 80/tcp 443/tcp", ""), "6443/tcp open to cluster node 192.0.2.10")
+	assert.Empty(t, operatorPeerFirewalld(t, server, "51820/udp 10250/tcp 80/tcp https 6443/tcp", ""),
+		"a port opened through its service counts")
+}
+
+// A peer using a private interface needs access in that interface's zone.
+func TestOperatorFirewalldChecksTheZoneOfThePeersInterface(t *testing.T) {
+	server := FirewallMesh{Role: RoleServer, Peers: []FirewallPeer{{Address: "192.0.2.20"}}}
+	missing := operatorPeerFirewalld(t, server, "80/tcp 443/tcp 6443/tcp", "")
+	assert.Contains(t, missing, "51820/udp open to cluster node 192.0.2.20")
+	assert.Contains(t, missing, "10250/tcp open to cluster node 192.0.2.20")
+	// The fake's mesh zone holds another address, which stays unsupported here.
+	assert.Equal(t, []string{"no sources bound to zone mesh, which kip cannot evaluate"},
+		operatorPeerFirewalld(t, server, "51820/udp 10250/tcp 80/tcp 443/tcp 6443/tcp", ""))
+}
+
+// A subnet in a peer's zone could catch another peer whose ports were checked
+// in a different zone, so only exact peer addresses may sit there.
+func TestOperatorFirewalldRefusesOtherSourcesInAPeerZone(t *testing.T) {
+	worker := FirewallMesh{Role: RoleWorker, Peers: []FirewallPeer{{Address: "192.0.2.10", Server: true}}}
+	missing := operatorPeerFirewalldWith(t, worker, "51820/udp 10250/tcp 9100/tcp", "", " 198.51.100.0/24", "")
+	assert.Equal(t, []string{"no source 198.51.100.0/24 bound to zone mesh, which kip cannot evaluate"}, missing)
+}
+
+func TestOperatorFirewalldRefusesPeerCatchingSourcesInThePodZone(t *testing.T) {
+	worker := FirewallMesh{Role: RoleWorker, Peers: []FirewallPeer{{Address: "192.0.2.10", Server: true}}}
+	missing := operatorPeerFirewalldWith(t, worker, "51820/udp 10250/tcp 9100/tcp", "", "", " 10.43.0.0/16 198.51.100.0/24")
+	assert.Equal(t, []string{"no source 198.51.100.0/24 bound to zone pods, which kip cannot evaluate"}, missing)
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -79,11 +80,13 @@ func dialStub(t *testing.T, host stubHost) (*ssh.Client, string) {
 		"  *'" + fail + "'*) echo 'stub: refused' >&2; exit 1 ;;\n" +
 		"  *'ufw status'*) echo '" + host.ufwStatus + "'; exit 0 ;;\n" +
 		"  *'/etc/os-release'*) printf 'ID=debian\\nVERSION_ID=13\\n'; exit 0 ;;\n" +
+		"  *'sshd -T'*) echo 22; exit 0 ;;\n" +
 		// ufw's chains exist, holding the SSH rule, between a start and a stop.
 		"  *'No chain/target/match'*) if test -f " + started + "; then echo present; else echo absent; fi; exit 0 ;;\n" +
-		"  *'iptables -S ufw-user-input'*) test -f " + started + " || exit 1; echo '-A ufw-user-input -p tcp -m tcp --dport 22 -j ACCEPT'; exit 0 ;;\n" +
-		"  *'ufw --force disable'*) rm -f " + started + "; exit 0 ;;\n" +
+		"  *'-S ufw-user-input'*) test -f " + started + " || exit 1; echo '-A ufw-user-input -p tcp -m tcp --dport 22 -j ACCEPT'; exit 0 ;;\n" +
+		// Match enable first because its recovery command also contains disable.
 		"  *'ufw --force enable'*) touch " + started + "; exit 0 ;;\n" +
+		"  *'ufw --force disable'*) rm -f " + started + "; exit 0 ;;\n" +
 		// The claim write names this path too, so it is answered first.
 		"  *'mkdir -p '*) exit 0 ;;\n" +
 		"  *'firewall-managed'*) " + claimArm + "; exit 0 ;;\n" +
@@ -191,11 +194,11 @@ func TestAuditFirewall(t *testing.T) {
 func TestConfigureFirewall_ClaimIsWrittenBeforeTheRulesAndTheEnable(t *testing.T) {
 	c, calls := dialStub(t, stubHost{ufwStatus: "inactive", firewalldIs: "inactive"})
 
-	require.NoError(t, configureFirewall(c, debianHost, true))
+	require.NoError(t, configureFirewall(c, debianHost, true, FirewallMesh{}))
 
 	recorded, err := os.ReadFile(calls)
 	require.NoError(t, err)
-	run := string(recorded)
+	run := withoutRollbackScript(string(recorded))
 
 	claimAt := strings.Index(run, claimWrite)
 	require.GreaterOrEqual(t, claimAt, 0, "the claim must be written at all")
@@ -266,7 +269,7 @@ func TestConfigureFirewall_LeavesNoClaimWhenItBuildsNothing(t *testing.T) {
 		ufwStatus: "inactive", firewalldIs: "inactive", failOnCommand: "apt-get install",
 	})
 
-	err := configureFirewall(c, debianHost, true)
+	err := configureFirewall(c, debianHost, true, FirewallMesh{})
 
 	require.Error(t, err)
 	recorded, readErr := os.ReadFile(calls)
@@ -280,7 +283,7 @@ func TestConfigureFirewall_LeavesNoClaimWhenItBuildsNothing(t *testing.T) {
 func TestConfigureFirewall_StopsWhenAFirewallAppearedSinceTheAudit(t *testing.T) {
 	c, calls := dialStub(t, stubHost{ufwStatus: "active", claimPresent: false})
 
-	err := configureFirewall(c, debianHost, true)
+	err := configureFirewall(c, debianHost, true, FirewallMesh{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "became active")
@@ -293,27 +296,30 @@ func TestConfigureFirewall_StopsWhenAFirewallAppearedSinceTheAudit(t *testing.T)
 		"and it must not be claimed either")
 }
 
-// A host kip cannot claim is one whose next audit would not recognize its
-// firewall, so no rules are applied to it. The stub rejects the whole compound
-// command rather than the claim half alone, so this pins the run stopping at a
-// failed first command, not which half of it failed.
+// The stub rejects the combined policy and ownership command, so this test
+// verifies that configuration stops on failure of either operation.
 func TestConfigureFirewall_StopsWhenItCannotClaimTheHost(t *testing.T) {
 	c, calls := dialStub(t, stubHost{
-		ufwStatus: "inactive", firewalldIs: "inactive", failOnCommand: "firewall-managed",
+		ufwStatus: "inactive", firewalldIs: "inactive", failOnCommand: "firewall-managed.XXXXXX",
 	})
 
-	err := configureFirewall(c, debianHost, true)
+	err := configureFirewall(c, debianHost, true, FirewallMesh{})
 
 	require.Error(t, err)
-	// Either half of that one command can be the half that failed, so the
-	// error has to name both rather than blame the policy edit.
+	// The error names both operations because either may have failed.
 	assert.Contains(t, err.Error(), "claiming the firewall")
 	assert.Contains(t, err.Error(), "forward policy")
 
 	recorded, readErr := os.ReadFile(calls)
 	require.NoError(t, readErr)
-	assert.NotContains(t, string(recorded), "ufw --force enable",
+	assert.NotContains(t, withoutRollbackScript(string(recorded)), "ufw --force enable",
 		"a firewall kip could not claim is one it must not enable")
+}
+
+// withoutRollbackScript removes the script body so assertions count executed
+// commands rather than commands saved for a later rollback.
+func withoutRollbackScript(run string) string {
+	return regexp.MustCompile(`(?s)<<'KIPEOF'.*?KIPEOF\n`).ReplaceAllString(run, "")
 }
 
 // The claim is sequenced behind the first change to ufw in one command, so it
@@ -324,7 +330,7 @@ func TestConfigureFirewall_StopsWhenItCannotClaimTheHost(t *testing.T) {
 func TestConfigureFirewall_SequencesTheClaimBehindTheFirstChange(t *testing.T) {
 	c, calls := dialStub(t, stubHost{ufwStatus: "inactive", firewalldIs: "inactive"})
 
-	require.NoError(t, configureFirewall(c, debianHost, true))
+	require.NoError(t, configureFirewall(c, debianHost, true, FirewallMesh{}))
 
 	recorded, err := os.ReadFile(calls)
 	require.NoError(t, err)

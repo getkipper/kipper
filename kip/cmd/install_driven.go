@@ -560,7 +560,8 @@ func askToAdoptFirewall(client *ssh.Client, kipCmd, host string, req *installjob
 	if err != nil {
 		return fmt.Errorf("checking the firewall on %s: %w", host, err)
 	}
-	consent, err := installer.AdoptionConsent(client, host, audit, req.Firewall, false, ask)
+	// Bind consent to the peers shown here so the job can detect changes.
+	consent, err := installer.AdoptionConsent(client, host, audit, req.Firewall, false, ask, installer.ServerFirewallMesh(client))
 	if err != nil {
 		return err
 	}
