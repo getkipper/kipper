@@ -16,8 +16,11 @@ func UninstallHost(client CommandRunner) error {
 		return fmt.Errorf("running k3s-killall.sh: %w", err)
 	}
 
-	if _, err := client.Run("if [ -x /usr/local/bin/k3s-uninstall.sh ]; then /usr/local/bin/k3s-uninstall.sh; fi"); err != nil {
-		return fmt.Errorf("running k3s-uninstall.sh: %w", err)
+	// Try both scripts to support server and worker hosts.
+	for _, script := range []string{"k3s-uninstall.sh", "k3s-agent-uninstall.sh"} {
+		if _, err := client.Run(fmt.Sprintf("if [ -x /usr/local/bin/%[1]s ]; then /usr/local/bin/%[1]s; fi", script)); err != nil {
+			return fmt.Errorf("running %s: %w", script, err)
+		}
 	}
 
 	// Clear stale Longhorn sessions before a future install. Restrict logout

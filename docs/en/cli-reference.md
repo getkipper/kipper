@@ -35,7 +35,7 @@ kip platform restart <component>      # restart a platform or cluster component
 
 ### kip cluster uninstall {#kip-cluster-uninstall}
 
-Wipes Kipper from a remote Linux server. Runs k3s's own uninstall script over SSH, sweeps the data directories Kipper writes outside k3s (Longhorn volumes, Zot blobs, AI bundle data), and removes the cluster from your local kip config.
+Wipes Kipper from a remote Linux server. Runs k3s's own uninstall script over SSH, sweeps the data directories Kipper writes outside k3s (Longhorn volumes, Zot blobs, AI bundle data), and removes the cluster from your local kip config. After wiping the server, the command lists any recorded workers. Run `/usr/local/bin/k3s-agent-uninstall.sh` on each worker to remove k3s.
 
 ```bash
 kip cluster uninstall storefront                  # interactive (prompts for cluster name)

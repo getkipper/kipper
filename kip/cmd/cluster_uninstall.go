@@ -35,6 +35,9 @@ Host firewall rules and OS hardening (rpcbind disabled etc.) are not
 reverted, because they are general OS security improvements unrelated
 to k3s.
 
+The command wipes the server and then lists any recorded workers.
+Run /usr/local/bin/k3s-agent-uninstall.sh on each worker to remove k3s.
+
 Examples:
   kip cluster uninstall storefront
   kip cluster uninstall storefront --yes

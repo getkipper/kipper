@@ -404,6 +404,11 @@ func Run(opts Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	if k3sPreexisting {
+		if err := refuseUnrecordedNodes(client, hostMachineID); err != nil {
+			return nil, err
+		}
+	}
 
 	// Register a kipper.run subdomain or use a custom domain
 	var gatewayToken string
@@ -554,6 +559,8 @@ func Run(opts Options) (*Result, error) {
 	// because re-running `kip install` re-detected a non-nano profile
 	// from the host.
 	var effectivePlatform PlatformState
+	var nodeRecords []NodeRecord
+	var clusterRegistered bool
 
 	steps = append(steps, []installStep{
 		{"Registering Kipper CRDs", func() error {
@@ -636,6 +643,20 @@ func Run(opts Options) (*Result, error) {
 		{"Creating kipper-system namespace", func() error {
 			_, err := client.Run("kubectl create namespace kipper-system --dry-run=client -o yaml | kubectl apply -f -")
 			return err
+		}},
+		{"Recording nodes", func() error {
+			records, err := EnsureServerRecord(client, opts.Host)
+			if err != nil {
+				return err
+			}
+			nodeRecords = records
+			// Refresh the local entry if it was saved before node records were available.
+			if clusterRegistered {
+				if err := config.MirrorNodes(clusterEntryName, records); err != nil {
+					fmt.Printf("       (could not update the local copy of the node records: %v)\n", err)
+				}
+			}
+			return nil
 		}},
 		{"Storing gateway credentials", func() error {
 			// Marked before the attempt, not after it. A dropped connection can
@@ -739,16 +760,17 @@ func Run(opts Options) (*Result, error) {
 	var execServer string
 	var execCA []byte
 	pastCheckpoint := false
-	// clusterRegistered tracks the second half of the install checkpoint. The
-	// default exec kubeconfig is not self-contained: `kip auth kubectl-token`
-	// resolves the cluster (and its Dex host) from this config entry, so a
-	// written exec kubeconfig without a matching registered entry is an
-	// unusable credential. Registration failures must therefore never be
-	// swallowed — the fallback below retries and fails the install loudly
-	// rather than reporting success with a broken credential.
-	clusterRegistered := false
+	// The exec kubeconfig needs this local entry to resolve the cluster and Dex
+	// host during login. Retry failed registration after the install steps and
+	// require success before reporting the install complete.
 	registerCluster := func(kubeconfigPath string) error {
 		return config.Update(func(cfg *config.Config) error {
+			nodes := nodeRecords
+			if nodes == nil {
+				if existing := cfg.GetCluster(clusterEntryName); existing != nil {
+					nodes = existing.Nodes
+				}
+			}
 			cfg.AddCluster(config.Cluster{
 				Name:             clusterEntryName,
 				Provider:         provider.Name(),
@@ -766,6 +788,7 @@ func Run(opts Options) (*Result, error) {
 				MachineID:        hostMachineID,
 				DNSResolvers:     opts.DNSResolvers,
 				TrustedProxies:   opts.TrustedProxies,
+				Nodes:            nodes,
 			})
 			cfg.CurrentCluster = clusterEntryName
 			return nil
@@ -1013,4 +1036,27 @@ func recoverNetworkChange(client CommandRunner, opts Options) error {
 		return ErrNetworkChangeNotConfirmed
 	}
 	return RecoverNetworkChange(client)
+}
+
+// refuseUnrecordedNodes checks node records and server identity before reinstalling.
+// The connected server may be unrecorded because the install will record it.
+func refuseUnrecordedNodes(client CommandRunner, serverMachineID string) error {
+	if serverMachineID == "" {
+		return fmt.Errorf("checking the cluster's nodes: the server's machine id could not be read")
+	}
+	records, err := ReadNodeRecords(client)
+	if err != nil {
+		return err
+	}
+	if server, ok := ServerRecord(records); ok && server.MachineID != serverMachineID {
+		return fmt.Errorf("this host is machine %s, but the cluster records its server as machine %s (%s); check the address, then run kip install again", serverMachineID, server.MachineID, server.Name)
+	}
+	unrecorded, err := UnrecordedNodes(client, WithUnrecordedHost(records, serverMachineID))
+	if err != nil {
+		return err
+	}
+	if len(unrecorded) > 0 {
+		return unrecordedNodesError(unrecorded)
+	}
+	return nil
 }

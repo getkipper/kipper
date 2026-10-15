@@ -54,6 +54,10 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	workerHost, _ := cmd.Flags().GetString("host")
 	sshKey, _ := cmd.Flags().GetString("ssh-key")
 
+	if !installer.ValidNodeHost(workerHost) {
+		return fmt.Errorf("invalid --host %q: expected a hostname or IP address", workerHost)
+	}
+
 	cluster, _, err := loadCurrentCluster()
 	if err != nil {
 		return err
@@ -81,6 +85,16 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("reading what %s reports about itself: %w", workerHost, err)
 	}
 
+	// Allow unrecorded nodes so they can be adopted one at a time.
+	// Identity conflicts must be resolved before joining.
+	records, err := installer.EnsureServerRecord(masterClient, cluster.Host)
+	if err != nil {
+		return err
+	}
+	if _, err := installer.UnrecordedNodes(masterClient, installer.WithUnrecordedHost(records, identity.MachineID)); err != nil {
+		return err
+	}
+
 	// Defer storage-service restarts before joining so unattended upgrades
 	// preserve active Longhorn sessions once this node starts hosting volumes.
 	workerOS, err := installer.DetectHostOS(workerClient)
@@ -101,6 +115,25 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%w; resolve the error, then rerun 'kip node add --host %s' with the same options to retry with a fresh token", err, workerHost)
 	}
 	fmt.Printf("  ✔  Worker node %s joined the cluster as %s\n\n", workerHost, nodeName)
+
+	// Recheck identities after joining to avoid overwriting another node's record
+	// if the new node shares its machine ID.
+	records, err = installer.ReadNodeRecords(masterClient)
+	if err == nil {
+		_, err = installer.UnrecordedNodes(masterClient, installer.WithUnrecordedHost(records, identity.MachineID))
+	}
+	if err != nil {
+		return fmt.Errorf("%s joined; recording it failed: %w", nodeName, err)
+	}
+	worker := installer.NodeRecord{Name: nodeName, Host: workerHost, MachineID: identity.MachineID, Role: installer.NodeRoleWorker, State: installer.NodeStateReady}
+	if err := installer.SaveNodeRecord(masterClient, worker); err != nil {
+		return fmt.Errorf("%w; the node joined; rerun 'kip node add --host %s' to retry recording it", err, workerHost)
+	}
+	if records, err := installer.ReadNodeRecords(masterClient); err == nil {
+		mirrorNodes(cluster.Name, records)
+	} else {
+		fmt.Printf("  ⚠  could not update the local copy of the node records: %v\n", err)
+	}
 
 	// Stamp after registration, when the node object is available to annotate.
 	if workerOS.UsesNeedrestart() {

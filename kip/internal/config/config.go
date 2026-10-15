@@ -35,6 +35,20 @@ type Cluster struct {
 	MachineID          string            `mapstructure:"machine_id" yaml:"machine_id,omitempty"`
 	DNSResolvers       []string          `mapstructure:"dns_resolvers"       yaml:"dns_resolvers,omitempty"`
 	TrustedProxies     []string          `mapstructure:"trusted_proxies"     yaml:"trusted_proxies,omitempty"`
+	Nodes              []NodeRecord      `mapstructure:"nodes" yaml:"nodes,omitempty"`
+}
+
+// NodeRecord is kip's record of one cluster node, kept in the kipper-nodes
+// ConfigMap and copied into the local cluster config.
+type NodeRecord struct {
+	Name        string `mapstructure:"name"         yaml:"name"                   json:"name"`
+	Host        string `mapstructure:"host"         yaml:"host"                   json:"host"`
+	MachineID   string `mapstructure:"machine_id"   yaml:"machine_id"             json:"machineID"`
+	Role        string `mapstructure:"role"         yaml:"role"                   json:"role"`
+	Mode        string `mapstructure:"mode"         yaml:"mode,omitempty"         json:"mode,omitempty"`
+	PeerAddress string `mapstructure:"peer_address" yaml:"peer_address,omitempty" json:"peerAddress,omitempty"`
+	Interface   string `mapstructure:"interface"    yaml:"interface,omitempty"    json:"interface,omitempty"`
+	State       string `mapstructure:"state"        yaml:"state"                  json:"state"`
 }
 
 // BackupStorageRef records the BSL mode and metadata for a cluster, so

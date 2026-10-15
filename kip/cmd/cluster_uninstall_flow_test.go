@@ -158,6 +158,39 @@ func TestUninstallReleasesNothingWhenTheWipeFails(t *testing.T) {
 	}
 }
 
+func TestUninstallNamesTheWorkersItLeavesBehind(t *testing.T) {
+	rec := &recorder{}
+	var out bytes.Buffer
+	d := deps(rec, &fakeHost{out: encodedToken()}, &fakeMirror{}, nil, nil, "", &out)
+	cluster := testCluster()
+	cluster.Nodes = []config.NodeRecord{
+		{Name: "server", Host: cluster.Host, Role: "server"},
+		{Name: "worker-a", Host: "203.0.113.11", Role: "worker"},
+		{Name: "worker-b", Host: "203.0.113.12", Role: "worker"},
+	}
+
+	if _, err := uninstallCluster(cluster, true, d); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	for _, want := range []string{"203.0.113.11", "203.0.113.12", "k3s-agent-uninstall.sh"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the operator must learn that %s is left to clean up, got %q", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), cluster.Host+" (server)") || strings.Count(out.String(), "203.0.113.10") > 1 {
+		t.Errorf("the server is wiped, so it is not listed as left behind, got %q", out.String())
+	}
+
+	var single bytes.Buffer
+	d = deps(rec, &fakeHost{out: encodedToken()}, &fakeMirror{}, nil, nil, "", &single)
+	if _, err := uninstallCluster(testCluster(), true, d); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if strings.Contains(single.String(), "worker") {
+		t.Errorf("a single-node cluster has no workers to mention, got %q", single.String())
+	}
+}
+
 // The cluster is unreadable but an earlier run recorded the token. That copy is
 // the only thing that can release the name.
 func TestUninstallFallsBackToTheLocallyMirroredToken(t *testing.T) {

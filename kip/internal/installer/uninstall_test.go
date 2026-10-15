@@ -20,6 +20,15 @@ func sweptPaths(t *testing.T, host *hostScript) []string {
 	return nil
 }
 
+func TestUninstallHostRunsTheAgentUninstallScriptToo(t *testing.T) {
+	host := &routedRunner{}
+
+	require.NoError(t, UninstallHost(host))
+
+	assert.True(t, host.ran("/usr/local/bin/k3s-agent-uninstall.sh"), "a worker's k3s is removed by its own script")
+	assert.True(t, host.ran("/usr/local/bin/k3s-uninstall.sh"))
+}
+
 func TestUninstallHostSweepsTheNetworkChangeRecordAndTheLock(t *testing.T) {
 	host := &hostScript{}
 
