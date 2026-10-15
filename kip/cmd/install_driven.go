@@ -43,7 +43,7 @@ func usesDriver(cmd *cobra.Command, goos string) bool {
 
 // runDrivenInstall starts or attaches to a server job, streams its log, and
 // imports its result locally. The job survives client disconnections.
-func runDrivenInstall(cmd *cobra.Command) error {
+func runDrivenInstall(cmd *cobra.Command, credentialsFile string) error {
 	host, _ := cmd.Flags().GetString("host")
 	sshKeyFlag, _ := cmd.Flags().GetString("ssh-key")
 	noLogin, _ := cmd.Flags().GetBool("no-login")
@@ -181,9 +181,7 @@ func runDrivenInstall(cmd *cobra.Command) error {
 	if res.Collected && res.Outcome == installjob.PhaseSucceeded {
 		fmt.Printf("\n  Another machine collected this install's admin password first. kip auth reset-password issues a new one.\n")
 	}
-	if res.AdminPassword != "" {
-		fmt.Printf("\n  Admin email: %s\n  Password:    %s\n  Save the password now; it is cleared from the server result after collection.\n", res.AdminEmail, res.AdminPassword)
-	}
+	announceCollectedCredentials(os.Stdout, credentialsFile, res)
 	if phase != installjob.PhaseSucceeded || res.Outcome != installjob.PhaseSucceeded {
 		return fmt.Errorf("the install on %s did not finish (%s); run kip install again to retry", host, phase)
 	}
@@ -198,6 +196,17 @@ func runDrivenInstall(cmd *cobra.Command) error {
 		return nil
 	}
 	return runAuthLogin(authLoginCmd, nil)
+}
+
+func announceCollectedCredentials(out io.Writer, credentialsFile string, res installjob.Result) {
+	if res.AdminPassword == "" {
+		return
+	}
+	_, _ = fmt.Fprintln(out)
+	if installer.SaveAdminCredentials(out, credentialsFile, res.AdminEmail, res.AdminPassword) {
+		return
+	}
+	_, _ = fmt.Fprintf(out, "  Admin email: %s\n  Password:    %s\n  Save the password now; it is cleared from the server result after collection.\n", res.AdminEmail, res.AdminPassword)
 }
 
 func startedBy(version string) string {

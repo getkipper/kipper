@@ -28,6 +28,7 @@ kip install --host <ip> [flags]
 | `--harden` | No | `true` | Disable surplus host services exposed on public interfaces (e.g. `rpcbind`, Cockpit). Pass `--harden=false` only when you manage host security yourself |
 | `--admin-kubeconfig` | No | `false` | Write the shared k3s admin certificate to this machine instead of a per-operator OIDC kubeconfig. The certificate is unattributed and revocable only by rotating the cluster CA. A CI escape hatch, not the everyday path |
 | `--no-login` | No | `false` | Skip the inline browser sign-in during install. The machine ends up with a credential-free kubeconfig; the first operator runs `kip auth login && kip auth verify` afterwards |
+| `--credentials-file` | No | — | Save the generated admin email and password to a new file on the machine running `kip`. The path must differ from `--result`. Permissions are 0600 on Unix; Windows inherits the directory's permissions. Prints the file path on success or the credentials if saving fails. See [What install writes to your machine](#what-install-writes-to-your-machine) |
 | `--firewall` | No | `true` | Configure the host firewall with rules for k3s: UFW on Ubuntu and Debian, firewalld on Rocky Linux, AlmaLinux and CentOS Stream. Preserves active firewalls you manage unless you grant permission to take over firewalld. Pass `--firewall=false` only when you manage host security yourself |
 | `--adopt-firewall` | No | `false` | On Rocky Linux, AlmaLinux and CentOS Stream: authorize takeover of a running firewalld after safety checks. Interactive SSH installs show the proposed changes and ask for permission, including with `--via-server`. Use this flag for unattended installs; it authorizes replacement of the public zone present when takeover runs. Requires SSH or `--via-server`; unavailable with `--local`. See [Firewall on the RHEL family](/en/security#host-hardening) |
 | `--no-ssh-rate-limit` | No | `false` | Disable UFW SSH rate limiting on Ubuntu and Debian. Kipper allows SSH without rate limiting on firewalld hosts. See below |
@@ -260,6 +261,8 @@ The admin account is printed first, because the sign-in asks for it.
   Sign in to finish setup (a browser will open; Ctrl+C to skip and finish later with: kip auth login)
   kubectl authenticates as admin@shop.kipper.run: the admin certificate never left the server (break-glass: ssh, then sudo k3s kubectl)
 ```
+
+To save the credentials to a file, pass `--credentials-file <path>`. The install checks the path before starting, then saves the credentials when they are available, before any sign-in prompt. It prints the file path in place of the credentials above. If saving fails, it prints the credentials so you can keep them.
 
 Headless installs (CI, no terminal, or `--no-login`) finish credential-free without the sign-in; the first operator runs `kip auth login && kip auth verify`. The admin certificate reaches your machine only when you ask for it with `--admin-kubeconfig`, when an interactive install fails partway (so you can inspect the half-built cluster), or when sign-in genuinely fails to authorize against the cluster. Each case says so loudly.
 
