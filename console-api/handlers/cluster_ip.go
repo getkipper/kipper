@@ -8,13 +8,13 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// clusterIngressIPs returns the deduped set of IPs that public traffic
-// reaches the cluster on. We prefer ExternalIPs from each node and fall
-// back to InternalIPs only when no node exposes an external one — useful
-// for single-node lab clusters where the install script binds Traefik to
-// the only address the host has.
+// ingressNodeSelector matches Traefik's nodeSelector in the installer's Helm values.
+const ingressNodeSelector = "node-role.kubernetes.io/control-plane=true"
+
+// clusterIngressIPs returns unique external IPs from nodes matching Traefik's
+// node selector, falling back to internal IPs when the external IP list is empty.
 func clusterIngressIPs(ctx context.Context, client kubernetes.Interface) ([]string, error) {
-	nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: ingressNodeSelector})
 	if err != nil {
 		return nil, err
 	}

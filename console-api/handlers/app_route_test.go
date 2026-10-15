@@ -285,7 +285,7 @@ func TestGetRouteDNSStatus(t *testing.T) {
 	otherIP := "198.51.100.7"
 
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"node-role.kubernetes.io/control-plane": "true"}},
 		Status: corev1.NodeStatus{
 			Addresses: []corev1.NodeAddress{
 				{Type: corev1.NodeExternalIP, Address: clusterIP},
@@ -384,7 +384,7 @@ func TestGetRouteDNSStatus_VerifyForcesLookupForWildcard(t *testing.T) {
 	lookupHost = func(string) ([]string, error) { return []string{"203.0.113.42"}, nil }
 
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"node-role.kubernetes.io/control-plane": "true"}},
 		Status: corev1.NodeStatus{
 			Addresses: []corev1.NodeAddress{
 				{Type: corev1.NodeExternalIP, Address: "203.0.113.42"},
@@ -455,4 +455,39 @@ func TestGetRoute_AClosedRouteWithoutPublicPathsPublishesNothing(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.True(t, resp.Health.Unpublished)
 	assert.Contains(t, resp.Health.Message, "nothing is published")
+}
+
+func TestGetRouteDNSStatus_NoIngressNodeAddressRefusesToJudgeTheRecord(t *testing.T) {
+	originalLookup := lookupHost
+	t.Cleanup(func() { lookupHost = originalLookup })
+	lookupHost = func(string) ([]string, error) { return []string{"203.0.113.42"}, nil }
+
+	unlabelledServer := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{Type: corev1.NodeExternalIP, Address: "203.0.113.42"}},
+		},
+	}
+	app := &kipperv1.App{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+		Spec: kipperv1.AppSpec{
+			Image: "nginx", Port: 80, Replicas: int32Ptr(1),
+			Route: &kipperv1.AppRoute{Host: "example.com", Path: "/"},
+		},
+	}
+	handler := &Apps{
+		Client:   fake.NewClientset(unlabelledServer),
+		CRClient: testCRClient(app),
+		Domain:   "kipper.run",
+	}
+
+	r := chi.NewRouter()
+	r.Get("/projects/{name}/apps/{app}/route/dns-status", handler.GetRouteDNSStatus)
+
+	req := httptest.NewRequest("GET", "/projects/default/apps/web/route/dns-status", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), dnsStatusMismatch)
 }

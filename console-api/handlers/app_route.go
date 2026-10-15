@@ -288,6 +288,10 @@ func (a *Apps) GetRouteDNSStatus(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, "failed to read cluster nodes")
 		return
 	}
+	if len(expected) == 0 {
+		respondError(w, http.StatusServiceUnavailable, "cannot check DNS: no IP address is available for the cluster's ingress nodes")
+		return
+	}
 
 	resolved, lookupErr := lookupHost(host)
 	resp := dnsStatusResponse{
