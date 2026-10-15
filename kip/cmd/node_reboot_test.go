@@ -402,6 +402,9 @@ func TestReadyAfterBoot(t *testing.T) {
 	assert.False(t, ok)
 	assert.Equal(t, "Loki 0/1 ready", why)
 
+	ok, _ = readyAfterBoot([]k8s.NodeInfo{{Name: "n1", Status: "Ready", BootID: "new-boot"}}, []k8s.ComponentStatus{{Name: "Promtail", Starting: true}}, "new-boot")
+	assert.False(t, ok, "a component that is still starting is not ready yet")
+
 	ok, _ = readyAfterBoot([]k8s.NodeInfo{{Name: "n1", Status: "Ready", BootID: "new-boot"}}, healthy, "new-boot")
 	assert.True(t, ok)
 }

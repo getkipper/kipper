@@ -64,11 +64,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("  Components:\n")
 	for _, comp := range health {
-		icon := "✔"
-		if !comp.Healthy {
-			icon = "✗"
+		msg := comp.Message
+		if comp.Starting {
+			msg += ", starting"
 		}
-		fmt.Printf("    %s  %-16s %s\n", icon, comp.Name, comp.Message)
+		fmt.Printf("    %s  %-16s %s\n", componentMark(comp), comp.Name, msg)
 	}
 	fmt.Println()
 
@@ -361,4 +361,15 @@ func checkHostDNSResolvers(out io.Writer, cluster *config.Cluster, client *ssh.C
 		say(out, "    ✔  %s\n", strings.Join(resolvers, ", "))
 	}
 	say(out, "\n")
+}
+
+func componentMark(c k8s.ComponentStatus) string {
+	switch {
+	case c.Healthy:
+		return "✔"
+	case c.Starting:
+		return "…"
+	default:
+		return "✗"
+	}
 }

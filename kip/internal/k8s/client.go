@@ -90,13 +90,14 @@ func (c *Client) ListNodes(ctx context.Context) ([]NodeInfo, error) {
 
 // ComponentStatus holds a cluster component's health.
 type ComponentStatus struct {
-	Name    string
-	Healthy bool
-	Message string
+	Name     string
+	Healthy  bool
+	Starting bool
+	Message  string
 }
 
-// ClusterHealth checks the health of core cluster components by
-// verifying that key deployments are available.
+// ClusterHealth checks node readiness and core workloads, distinguishing
+// unhealthy components from those whose pods appear to be starting.
 func (c *Client) ClusterHealth(ctx context.Context) ([]ComponentStatus, error) {
 	type check struct {
 		namespace string
@@ -120,6 +121,8 @@ func (c *Client) ClusterHealth(ctx context.Context) ([]ComponentStatus, error) {
 		{"kipper-system", "console-api", "Console API", "deploy"},
 		{"kipper-system", "console", "Console", "deploy"},
 	}
+
+	readyNodes := c.readyNodeNames(ctx)
 
 	var statuses []ComponentStatus
 	for _, ch := range checks {
@@ -161,7 +164,8 @@ func (c *Client) ClusterHealth(ctx context.Context) ([]ComponentStatus, error) {
 			}
 			healthy := deploy.Status.AvailableReplicas > 0
 			msg := fmt.Sprintf("%d/%d replicas available", deploy.Status.AvailableReplicas, *deploy.Spec.Replicas)
-			statuses = append(statuses, ComponentStatus{Name: ch.label, Healthy: healthy, Message: msg})
+			statuses = append(statuses, ComponentStatus{Name: ch.label, Healthy: healthy, Message: msg,
+				Starting: !healthy && c.selectedPodsStarting(ctx, readyNodes, ch.namespace, deploy.Spec.Selector)})
 
 		case "statefulset":
 			ss, err := c.clientset.AppsV1().StatefulSets(ch.namespace).Get(ctx, ch.name, metav1.GetOptions{})
@@ -179,7 +183,8 @@ func (c *Client) ClusterHealth(ctx context.Context) ([]ComponentStatus, error) {
 			}
 			healthy := ss.Status.ReadyReplicas >= desired
 			msg := fmt.Sprintf("%d/%d ready", ss.Status.ReadyReplicas, desired)
-			statuses = append(statuses, ComponentStatus{Name: ch.label, Healthy: healthy, Message: msg})
+			statuses = append(statuses, ComponentStatus{Name: ch.label, Healthy: healthy, Message: msg,
+				Starting: ss.Status.ReadyReplicas == 0 && c.selectedPodsStarting(ctx, readyNodes, ch.namespace, ss.Spec.Selector)})
 
 		case "daemonset":
 			ds, err := c.clientset.AppsV1().DaemonSets(ch.namespace).Get(ctx, ch.name, metav1.GetOptions{})
@@ -193,11 +198,43 @@ func (c *Client) ClusterHealth(ctx context.Context) ([]ComponentStatus, error) {
 			}
 			healthy := ds.Status.NumberReady > 0
 			msg := fmt.Sprintf("%d/%d ready", ds.Status.NumberReady, ds.Status.DesiredNumberScheduled)
-			statuses = append(statuses, ComponentStatus{Name: ch.label, Healthy: healthy, Message: msg})
+			statuses = append(statuses, ComponentStatus{Name: ch.label, Healthy: healthy, Message: msg,
+				Starting: !healthy && c.selectedPodsStarting(ctx, readyNodes, ch.namespace, ds.Spec.Selector)})
 		}
 	}
 
 	return statuses, nil
+}
+
+// readyNodeNames returns nodes reporting Ready; lookup failures leave the set empty.
+func (c *Client) readyNodeNames(ctx context.Context) map[string]bool {
+	ready := map[string]bool{}
+	nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return ready
+	}
+	for _, n := range nodes.Items {
+		for _, cond := range n.Status.Conditions {
+			if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
+				ready[n.Name] = true
+			}
+		}
+	}
+	return ready
+}
+
+// selectedPodsStarting requires pod-state evidence before marking a workload as
+// starting; selector and lookup errors preserve its unhealthy status.
+func (c *Client) selectedPodsStarting(ctx context.Context, readyNodes map[string]bool, namespace string, selector *metav1.LabelSelector) bool {
+	sel, err := metav1.LabelSelectorAsSelector(selector)
+	if err != nil || sel.Empty() {
+		return false
+	}
+	pods, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: sel.String()})
+	if err != nil {
+		return false
+	}
+	return podsStarting(pods.Items, readyNodes)
 }
 
 func nodeToInfo(node corev1.Node) NodeInfo {
