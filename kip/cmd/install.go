@@ -55,6 +55,7 @@ func init() {
 	installCmd.Flags().Bool("local", false, "install on this machine; --host must reach it (for CI, cloud-init and provider user-data)")
 	installCmd.Flags().Bool("host-maps-here", false, "with --local: confirm that --host routes to this machine, such as through NAT")
 	installCmd.Flags().String("result", "", "with --local: save a result file to import on your management machine with 'kip cluster add --install-result'")
+	installCmd.Flags().String("credentials-file", "", "save the generated admin email and password to a new local file (mode 0600); print them if saving fails")
 	installCmd.Flags().Bool("no-ssh-rate-limit", false, "disable UFW SSH rate limiting on Ubuntu and Debian; useful for CI or operators sharing a NAT address")
 	installCmd.Flags().StringSlice("dns-resolver", nil, "upstream DNS resolver CoreDNS forwards external queries to (repeatable; default 1.1.1.1, 8.8.8.8, 9.9.9.9). Set for clusters that must reach internal/corporate DNS.")
 	installCmd.Flags().StringSlice("trusted-proxy", nil, "IP or CIDR whose X-Forwarded-* headers Traefik honours (repeatable). Set for clusters behind an external load balancer; the kipper.run gateway is trusted automatically.")
@@ -74,8 +75,12 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	if request, _ := cmd.Flags().GetString("request"); request != "" {
 		return runInstallRequest(request)
 	}
+	credentialsFile, err := credentialsFilePath(cmd)
+	if err != nil {
+		return err
+	}
 	if usesDriver(cmd, runtime.GOOS) {
-		return runDrivenInstall(cmd)
+		return runDrivenInstall(cmd, credentialsFile)
 	}
 	if cancel, _ := cmd.Flags().GetBool("cancel"); cancel {
 		return fmt.Errorf("--cancel stops an install run with --via-server")
@@ -102,6 +107,9 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	resultPath, _ := cmd.Flags().GetString("result")
 	if !local && (hostMapsHere || resultPath != "") {
 		return fmt.Errorf("--host-maps-here and --result only apply with --local")
+	}
+	if err := checkOutputPathsDiffer(credentialsFile, resultPath); err != nil {
+		return err
 	}
 	if err := checkLocalAdoption(local, adoptFirewall); err != nil {
 		return err
@@ -183,31 +191,34 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		DNSResolvers:       dnsResolvers,
 		TrustedProxies:     trustedProxies,
 		KubeconfigMode:     kubeconfigMode,
+		CredentialsFile:    credentialsFile,
 		LoginGate: func(ctx context.Context, domain, dexHost, server string, caData []byte) installer.GateResult {
 			return installer.DefaultLoginGate(domain, dexHost)(ctx, domain, server, caData)
 		},
 	})
 
-	// Always print credentials if available, even if a later install step failed
-	printInstallSummary(os.Stdout, result, installErr)
+	// Write the result first so an undetected path collision triggers the
+	// credential save's exclusive-creation check and the summary prints the password.
+	var resultErr error
+	if resultPath != "" && result != nil {
+		resultErr = writeInstallResult(resultPath, host)
+	}
+
+	// Deliver available credentials even after a later install step fails.
+	printInstallSummary(os.Stdout, result, installErr, credentialsFile)
 
 	if resultPath != "" && result != nil {
-		if err := writeInstallResult(resultPath, host); err != nil {
-			return errors.Join(installErr, err)
+		if resultErr != nil {
+			return errors.Join(installErr, resultErr)
 		}
 		fmt.Printf("  ✔  Install result written to %s. On the machine you manage the cluster from: kip cluster add --install-result <file>\n\n", resultPath)
 	}
 	return installErr
 }
 
-// printInstallSummary closes an install with where the cluster lives and, when
-// they have not already been disclosed, the credentials to reach it.
-//
-// The credentials are skipped when the install showed them itself, which the
-// interactive path does before its sign-in prompt. Printing them again here
-// would put the same password under a second "save these now" heading in one
-// run, and leave an operator wondering which of the two to keep.
-func printInstallSummary(out io.Writer, result *installer.Result, installErr error) {
+// printInstallSummary shows cluster details and saves or prints credentials
+// unless the interactive sign-in already delivered them.
+func printInstallSummary(out io.Writer, result *installer.Result, installErr error, credentialsFile string) {
 	if result == nil {
 		return
 	}
@@ -223,7 +234,8 @@ func printInstallSummary(out io.Writer, result *installer.Result, installErr err
 	if result.KubeconfigPath != "" {
 		_, _ = fmt.Fprintf(out, "  Kubeconfig: %s\n", result.KubeconfigPath)
 	}
-	if result.AdminPassword != "" && !result.CredentialsShown {
+	if result.AdminPassword != "" && !result.CredentialsShown &&
+		!installer.SaveAdminCredentials(out, credentialsFile, "admin@"+result.Domain, result.AdminPassword) {
 		_, _ = fmt.Fprintf(out, "  Admin:      admin@%s\n", result.Domain)
 		_, _ = fmt.Fprintf(out, "  Password:   %s\n", result.AdminPassword)
 		_, _ = fmt.Fprintln(out)
@@ -231,6 +243,20 @@ func printInstallSummary(out io.Writer, result *installer.Result, installErr err
 		_, _ = fmt.Fprintf(out, "  If lost, run: kip auth reset-password\n")
 	}
 	_, _ = fmt.Fprintln(out)
+}
+
+// credentialsFilePath validates the local destination before installation.
+// Server-driven installs keep this path on the client.
+func credentialsFilePath(cmd *cobra.Command) (string, error) {
+	path, _ := cmd.Flags().GetString("credentials-file")
+	if path == "" {
+		return "", nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("--credentials-file %s: %w", path, err)
+	}
+	return abs, installer.CheckCredentialsFile(abs)
 }
 
 // resolveBackupStorage builds an installer.BackupStorageConfig from the
@@ -309,4 +335,46 @@ func checkLocalAdoption(local, adopt bool) error {
 		return fmt.Errorf("--adopt-firewall does not combine with --local: takeover requires an external SSH check; run kip install over SSH or with --via-server")
 	}
 	return nil
+}
+
+var pathSeparators = func() string {
+	if os.PathSeparator == '/' {
+		return "/"
+	}
+	return string(os.PathSeparator) + "/"
+}()
+
+// checkOutputPathsDiffer prevents the result and credentials from sharing a file.
+func checkOutputPathsDiffer(credentialsFile, resultPath string) error {
+	if credentialsFile == "" || resultPath == "" {
+		return nil
+	}
+	a, b := resolvedPath(credentialsFile), resolvedPath(resultPath)
+	if a == b || (runtime.GOOS != "linux" && strings.EqualFold(a, b)) {
+		return fmt.Errorf("--credentials-file and --result name the same file; choose two different paths")
+	}
+	return nil
+}
+
+// resolvedPath resolves symlinks in the full path or its parent, falling back
+// to lexical cleaning. Resolve symlinks before cleaning so ".." follows the
+// filesystem hierarchy.
+func resolvedPath(path string) string {
+	if !filepath.IsAbs(path) {
+		if wd, err := os.Getwd(); err == nil {
+			path = wd + string(filepath.Separator) + path
+		}
+	}
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		return real
+	}
+	i := strings.LastIndexAny(path, pathSeparators)
+	dir, base := path[:i+1], path[i+1:]
+	if base == "" || base == "." || base == ".." {
+		return filepath.Clean(path)
+	}
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		return filepath.Join(real, base)
+	}
+	return filepath.Clean(path)
 }

@@ -46,6 +46,7 @@ type Options struct {
 	ConfirmConnection  func() error
 	ConfirmAdoption    func(question string) bool
 	AdoptFingerprint   string
+	CredentialsFile    string
 }
 
 // Result contains installation outputs, including those available after a failure.
@@ -870,10 +871,12 @@ func Run(opts Options) (*Result, error) {
 	case KubeconfigExecInteractive:
 		result.AuthMode = "deferred"
 		if opts.LoginGate != nil && execServer != "" {
-			// Disclosed here rather than by the caller's closing summary: this
-			// is the only path that prompts for the password, and the summary
-			// does not run until the prompt has been answered or timed out.
-			gate := signInWithCredentials(os.Stdout, domainName, adminPassword, func() GateResult {
+			// Deliver credentials before opening the sign-in prompt that needs them.
+			shown := adminPassword
+			if SaveAdminCredentials(os.Stdout, opts.CredentialsFile, "admin@"+domainName, adminPassword) {
+				shown = ""
+			}
+			gate := signInWithCredentials(os.Stdout, domainName, shown, func() GateResult {
 				return opts.LoginGate(context.Background(), domainName, resolvedHosts.DexHost, execServer, execCA)
 			})
 			result.CredentialsShown = adminPassword != ""
