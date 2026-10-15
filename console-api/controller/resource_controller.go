@@ -78,9 +78,9 @@ type ResourceLogEntry struct {
 }
 
 const (
-	// defaultOOMCapBytes is used when node capacity cannot be determined.
+	// defaultOOMCapBytes is the OOM cap floor and fallback when node capacity is unknown.
 	defaultOOMCapBytes = int64(8 * 1024 * 1024 * 1024) // 8Gi
-	// oomCapFraction limits OOM doubling to this fraction of total node memory.
+	// oomCapFraction sets the OOM cap from the largest node's allocatable memory, subject to the floor.
 	oomCapFraction = 0.5
 	// oomActionableWindow bounds how recent an OOM must be to act on. A
 	// LastTerminationState lingers on a container until its pod is replaced, so
@@ -329,15 +329,15 @@ func (rc *ResourceController) refreshOOMCap(nodes []corev1.Node) {
 		return
 	}
 
-	// Sum allocatable memory across all nodes
-	var totalBytes int64
+	// Use one node's capacity because a pod's memory must fit on a single node.
+	var largestBytes int64
 	for _, node := range nodes {
-		if mem, ok := node.Status.Allocatable[corev1.ResourceMemory]; ok {
-			totalBytes += mem.Value()
+		if mem, ok := node.Status.Allocatable[corev1.ResourceMemory]; ok && mem.Value() > largestBytes {
+			largestBytes = mem.Value()
 		}
 	}
 
-	cap := int64(float64(totalBytes) * oomCapFraction)
+	cap := int64(float64(largestBytes) * oomCapFraction)
 	if cap < defaultOOMCapBytes {
 		cap = defaultOOMCapBytes
 	}
