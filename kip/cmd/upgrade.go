@@ -87,7 +87,7 @@ Examples:
 }
 
 func init() {
-	upgradeCmd.Flags().Bool("skip-system", false, "skip cluster system components (Traefik, Longhorn, KEDA, etc.). Upgrade only Kipper CRDs and console")
+	upgradeCmd.Flags().Bool("skip-system", false, "skip system component upgrades (Traefik, Longhorn, KEDA, etc.); update Kipper CRDs, console and trust material, check node records, and recover interrupted network changes")
 	upgradeCmd.Flags().Bool("yes", false, "skip the confirmation prompts before upgrading system components and before removing app routes that collide with Kipper's own routes; autoscaling fixes are confirmed separately, by --repair-autoscaling when there is no terminal")
 	upgradeCmd.Flags().Bool("seed-credential-grants", false, "grant each shared git credential the projects whose apps already reference it, without asking. Skips the pre-rollout prompt on a legacy cluster; a no-op everywhere else")
 	upgradeCmd.Flags().String("image-tag", "", "test a commit's console, instance proxy and data mover images (full 40-character SHA); requires --skip-system; apps using the instance proxy roll out when its image changes; omit on the next upgrade to restore released images")

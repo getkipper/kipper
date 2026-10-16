@@ -179,7 +179,7 @@ func TestPlatformManifestsPinToTheServer(t *testing.T) {
 		"zot":             {renderZotRuntimeManifest("zot-config"), 1},
 		"minio":           {minio.stdin.String(), 1},
 	} {
-		assert.Equal(t, tc.want, strings.Count(tc.manifest, serverNodeLabel+`: "true"`), name)
+		assert.Equal(t, tc.want, strings.Count(tc.manifest, ServerNodeLabel+`: "true"`), name)
 	}
 }
 
