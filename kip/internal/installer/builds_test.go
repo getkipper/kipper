@@ -1,12 +1,15 @@
 package installer
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"k8s.io/client-go/util/jsonpath"
 )
 
 // nodesJSON renders a `kubectl get nodes -o json` snapshot from per-node pod
@@ -273,5 +276,30 @@ func TestWaitForNodeToPublishAddress_WrapsLastError(t *testing.T) {
 	err := waitForNodeToPublishAddress(run, "worker-1", 20*time.Millisecond, time.Millisecond)
 	if !errors.Is(err, refused) {
 		t.Fatalf("the timeout should carry the kubectl error, got %v", err)
+	}
+}
+
+// kubectl rejects a raw line break inside a JSONPath string literal, so the
+// template must carry the escape sequence.
+func TestNodeAddressQueryIsAValidJSONPath(t *testing.T) {
+	query := nodeAddressQuery("worker-1")
+	_, quoted, ok := strings.Cut(query, "-o jsonpath='")
+	if !ok || !strings.HasSuffix(quoted, "'") {
+		t.Fatalf("expected a single-quoted JSONPath template, got %q", query)
+	}
+	parser := jsonpath.New("addresses")
+	if err := parser.Parse(strings.TrimSuffix(quoted, "'")); err != nil {
+		t.Fatalf("kubectl cannot parse the template: %v", err)
+	}
+	node := map[string]any{"status": map[string]any{"addresses": []any{
+		map[string]any{"type": "InternalIP", "address": "192.0.2.10"},
+		map[string]any{"type": "Hostname", "address": "worker-1"},
+	}}}
+	var out bytes.Buffer
+	if err := parser.Execute(&out, node); err != nil {
+		t.Fatalf("executing the template: %v", err)
+	}
+	if out.String() != "InternalIP=192.0.2.10\nHostname=worker-1\n" {
+		t.Fatalf("expected one address per line, got %q", out.String())
 	}
 }
