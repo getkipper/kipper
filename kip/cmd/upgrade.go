@@ -1045,7 +1045,7 @@ func runSystemUpgrade(host, explicitKey, fallbackKey, domain string, dnsResolver
 			return err
 		}
 		if !ok {
-			fmt.Printf("\n  System upgrade cancelled. Kipper CRDs and console were already restarted.\n\n")
+			fmt.Printf("\n  System upgrade canceled. Kipper CRDs and console were already restarted.\n\n")
 			return nil
 		}
 	}

@@ -35,7 +35,7 @@ A service-UI session slides on a 30-minute idle window: every visit within that 
 
 What a stolen session cookie grants, and nothing more: one service UI, as you, for up to the idle window (extendable by activity to the 12-hour cap), only while you still hold a role, and killed within about 30 seconds of a logout, an account removal, or a key reset. It opens no other UI (each cookie is pinned to a single host), and it fails the console API and the Kubernetes API outright.
 
-Two behaviours worth knowing:
+Two behaviors worth knowing:
 
 - If your browser is blocking cookies for a service-UI host, the sign-in can't complete and the console stops after a few attempts with a message naming the host to allow. Allow cookies for that host and reload.
 - A UI that only talks to its backend through background requests (not full page loads) can freeze once its session lapses past the idle window. Reload the page and the sign-in re-runs.
@@ -126,7 +126,7 @@ kip service share --rotate-key
 
 ### Ingress controller selector {#ingress-controller-selector}
 
-The UI port is locked down with a NetworkPolicy that only lets the cluster's ingress controller talk to it. By default Kipper expects a stock Traefik install: pods labelled `app.kubernetes.io/name: traefik`, in any namespace. If your cluster ships Traefik under a non-standard label, or runs a different ingress controller (Nginx, HAProxy), create a ConfigMap to override:
+The UI port is locked down with a NetworkPolicy that only lets the cluster's ingress controller talk to it. By default Kipper expects a stock Traefik install: pods labeled `app.kubernetes.io/name: traefik`, in any namespace. If your cluster ships Traefik under a non-standard label, or runs a different ingress controller (Nginx, HAProxy), create a ConfigMap to override:
 
 ```yaml
 apiVersion: v1

@@ -2580,7 +2580,7 @@ describe('the write controls inside the read-gated tabs', () => {
   // or not the gate existed. It reads the same canWriteApp these two prove.
   const WRITES_BY_TAB: Record<string, string[]> = {
     settings: ['Save settings', 'Save route'],
-    scale: ['Save capacity', 'Optimise'],
+    scale: ['Save capacity', 'Optimize'],
   }
 
   async function openTab(w: Awaited<ReturnType<typeof mountEnvTab>>, tab: string) {

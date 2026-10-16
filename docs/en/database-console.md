@@ -44,7 +44,7 @@ Click a table in the sidebar to open it in **Browse** mode.
 - **Insert a row:** click `+ Insert row`. Inline form auto-builds from column metadata, with `(default)` markers on server-generated columns (sequences, GENERATED ALWAYS).
 - **Delete rows:** check the boxes on the rows you want, click `Delete N`. Runs in a single transaction; rolls back on any failure.
 - **Foreign keys** render as clickable chips (`→ 42`). Click to navigate to the referenced row.
-- **Save changes:** the toolbar shows `Save N changes` once any cell is dirty. Save runs an UPDATE per row, all parameterised.
+- **Save changes:** the toolbar shows `Save N changes` once any cell is dirty. Save runs an UPDATE per row, all parameterized.
 - **Discard:** drops local edits without touching the database.
 - **CSV export** of the current page: appears in the SQL tab's result toolbar. (For larger exports, use the SQL tab with `LIMIT` / `OFFSET` then export.)
 
@@ -97,7 +97,7 @@ The Designer tab is the visual table editor. Two modes:
 Click a table in the sidebar, switch to Designer. Each column is a row showing Name, Type, Nullable, Default, and Actions:
 
 - **Rename:** the Name cell becomes an editable input. Enter applies; Esc cancels.
-- **Type…:** the Type cell becomes a grouped dropdown (Text / Numbers / Auto-increment / Boolean / Date/Time / JSON / UUID / Binary / Network / Search) with a **Custom…** option for parameterised types like `varchar(50)` or `numeric(10,2)`.
+- **Type…:** the Type cell becomes a grouped dropdown (Text / Numbers / Auto-increment / Boolean / Date/Time / JSON / UUID / Binary / Network / Search) with a **Custom…** option for parameterized types like `varchar(50)` or `numeric(10,2)`.
 - **Toggle null:** queues a NOT NULL on/off change.
 - **Drop:** queues a DROP COLUMN. Asks for confirmation because data is lost.
 

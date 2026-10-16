@@ -170,7 +170,7 @@ func runAIBackupShow(cmd *cobra.Command, _ []string) error {
 		// restorable.
 		fmt.Println("  Sibling: missing (expected: config Secret + HelmCharts will not be restored)")
 	default:
-		fmt.Println("  Sibling: none (no cross-namespace AI artefacts at backup time)")
+		fmt.Println("  Sibling: none (no cross-namespace AI artifacts at backup time)")
 	}
 	fmt.Println()
 

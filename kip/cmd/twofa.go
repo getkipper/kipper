@@ -21,7 +21,7 @@ var twofaCmd = &cobra.Command{
 var twofaBootstrapCmd = &cobra.Command{
 	Use:   "bootstrap [email]",
 	Short: "Issue a one-time 2FA enrollment code for a console user",
-	Long: `Issues a one-time code that authorises a console user to enroll their
+	Long: `Issues a one-time code that authorizes a console user to enroll their
 2FA factor. The user enters it in Console → Settings → Two-factor
 authentication, scans the QR code, and confirms.
 
@@ -48,7 +48,7 @@ var twofaRemoveCmd = &cobra.Command{
 	Short: "Remove a console user's 2FA factor",
 	Long: `Deletes the user's enrolled 2FA factor, leaving the account unenrolled.
 Re-enrollment requires a fresh bootstrap code, and the new factor waits
-out the full eligibility period before it can authorise a migration.
+out the full eligibility period before it can authorize a migration.
 
 This is the host-level recovery path for a lost phone when no recovery
 codes are left.

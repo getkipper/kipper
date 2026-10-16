@@ -15,19 +15,16 @@ import (
 // the string an operator types, so it is part of the released surface.
 type Name string
 
-// Plane is where a capability takes effect.
+// Plane is a bitmask: PlaneK grants Kubernetes RBAC rules; PlaneC gates
+// console API routes.
 type Plane uint8
 
 const (
-	// PlaneK is Kubernetes: the capability renders RBAC rules into the
-	// project's namespaces and a member holds it through their kubeconfig.
 	PlaneK Plane = 1 << iota
-	// PlaneC is the console: console-api enforces the capability on its own
-	// routes, where the actor behind a request is known.
 	PlaneC
 )
 
-// Has reports whether p includes plane q.
+// Has reports whether p and q share at least one plane.
 func (p Plane) Has(q Plane) bool { return p&q != 0 }
 
 // Claim is one group of resources and the verbs a capability asks for on them.
@@ -39,50 +36,19 @@ type Claim struct {
 	Verbs     []string
 }
 
-// Capability is one entry in the catalogue.
+// Capability describes a grant and its operator-facing effects. Claims define
+// Kubernetes rules; Touches and Action describe them. Effect describes grants
+// without rules, AlsoReads adds console-only access, and Implications describes
+// indirect grants. Only Grantable capabilities contribute to Rules.
 type Capability struct {
-	Name   Name
-	Planes Plane
-
-	// Claims are the Kubernetes rules this capability renders, and nothing
-	// else. The bound the invariant tests check is a limit on what may be
-	// claimed, never the set that ships.
-	Claims []Claim
-
-	// Touches names the resources the claims cover. It is declared rather
-	// than derived so that a test can assert the two agree: a description
-	// generated from the declaration cannot drift from what is granted.
-	Touches []string
-
-	// Action is the verb shown to an operator, for capabilities that render
-	// rules.
-	Action string
-
-	// Effect describes a capability that renders no rules, where there is
-	// nothing to generate a description from.
-	Effect string
-
-	// Grantable marks a capability a role may carry. The projection refuses
-	// to render one that is not, which is what stops a hand-written or
-	// restored object from granting something nobody authorised.
-	Grantable bool
-
-	// AlsoReads is reach the rules cannot express and no other capability
-	// names, so an Implication cannot carry it either.
-	//
-	// The console reaches APIs the rendered RBAC does not mention, because it
-	// reads them with its own service account rather than the member's:
-	// autoscaler status, pod metrics. The rules are the truth about what a
-	// kubeconfig can do and say nothing about that, so the operator granting
-	// this would be told less than the grant is worth. It joins the rendered
-	// description.
-	AlsoReads string
-
-	// Implications are what this capability grants in practice beyond its own
-	// rules. Exec into a container reads that container's environment, so it
-	// reads whatever Secret the environment came from, and no RBAC rule says
-	// so. They are declared here because this is what the console and kip
-	// show when somebody grants it.
+	Name         Name
+	Planes       Plane
+	Claims       []Claim
+	Touches      []string
+	Action       string
+	Effect       string
+	Grantable    bool
+	AlsoReads    string
 	Implications []Implication
 }
 
@@ -244,7 +210,7 @@ var catalogue = []Capability{
 		Implications: []Implication{
 			{Grants: "secrets.read", Via: "by declaring any Secret as an app's environment"},
 			{Grants: "pods.logs.read", Via: "through the diagnosis routes, which read a workload's logs and send them to the AI provider"},
-			{Grants: "workloads.read", Via: "through the optimisation route, which reads deployments, pods and their metrics"},
+			{Grants: "workloads.read", Via: "through the optimization route, which reads deployments, pods and their metrics"},
 		},
 		Claims: []Claim{{
 			APIGroup:  groupKipper,
@@ -384,7 +350,7 @@ var catalogue = []Capability{
 		// chosen code in the namespace, with the app's environment and the
 		// Secrets behind it. The rules say only that a string is read out of a
 		// Secret, which is why this has to be declared: it is the widest reach
-		// in the catalogue that no rule expresses.
+		// in the catalog that no rule expresses.
 		Implications: []Implication{
 			{Grants: "kipper.write", Via: "by posting an image of its choosing to the app's webhook"},
 			{Grants: "secrets.read", Via: "through the environment the deployed image runs with"},
@@ -397,7 +363,7 @@ var catalogue = []Capability{
 		Grantable: true,
 		// The console routes under this read more than the rules grant: the
 		// autoscale route returns the autoscaler's live status and current
-		// utilisation, and the usage route returns pod CPU and memory samples
+		// utilization, and the usage route returns pod CPU and memory samples
 		// from metrics.k8s.io. Neither API is in the claims, and neither can be,
 		// because the staged ClusterRoles that back this capability do not carry
 		// them and the bound test refuses a claim they do not.
@@ -502,12 +468,8 @@ var builtIn = map[Role][]Name{
 	},
 }
 
-// All returns the catalogue in name order.
-//
-// It copies, as does Lookup, because this package is the authorization source
-// of truth and a caller sorting or appending to what it hands back would be
-// rewriting that: the verb slices are shared between capabilities, so one
-// in-place sort would change what several of them render.
+// All returns deep copies of the catalog entries in name order. Callers may
+// modify the returned entries without changing the authorization catalog.
 func All() []Capability {
 	out := make([]Capability, 0, len(catalogue))
 	for _, c := range catalogue {
@@ -516,7 +478,8 @@ func All() []Capability {
 	return out
 }
 
-// Lookup finds a capability by name.
+// Lookup returns a deep copy of the named capability, or a zero value and false
+// if the name is unknown.
 func Lookup(name Name) (Capability, bool) {
 	for _, c := range catalogue {
 		if c.Name == name {
@@ -542,8 +505,8 @@ func (c Capability) clone() Capability {
 	return out
 }
 
-// Unknown returns the names that are not in the catalogue, so a caller can say
-// which ones rather than only that something was wrong.
+// Unknown returns unrecognized names in input order, preserving duplicates.
+// It returns nil when all names are known.
 func Unknown(names []Name) []Name {
 	var out []Name
 	for _, n := range names {
@@ -554,16 +517,9 @@ func Unknown(names []Name) []Name {
 	return out
 }
 
-// Rules renders the Kubernetes rules for a set of capabilities.
-//
-// A name that is not in the catalogue, or one that is not grantable, renders
-// nothing. That is the direction that fails safely: a role naming a capability
-// this build does not know grants less than it says rather than more, which is
-// what a rollback and a migration to an older target both need.
-//
-// The output is ordered by capability name and not by the order the names
-// arrived in, so the reconciler can compare what it renders against what is on
-// the cluster without rewriting the Role every pass.
+// Rules returns independent Kubernetes rules for known, grantable capabilities
+// in capability-name order. Duplicate input names are collapsed; unknown and
+// non-grantable names are ignored. It returns nil when no rules apply.
 func Rules(names []Name) []rbacv1.PolicyRule {
 	wanted := make(map[Name]bool, len(names))
 	for _, n := range names {
@@ -585,8 +541,8 @@ func Rules(names []Name) []rbacv1.PolicyRule {
 	return out
 }
 
-// Subset reports whether every capability in inner is also in outer. Grant
-// capping is this comparison, so it is not a convenience.
+// Subset reports whether every capability in inner is also in outer.
+// An empty inner set is always a subset.
 func Subset(inner, outer []Name) bool {
 	have := make(map[Name]bool, len(outer))
 	for _, n := range outer {
@@ -615,33 +571,19 @@ var held = func() map[Role]map[Name]bool {
 }()
 
 // Holds reports whether a built-in project role carries a capability.
-//
-// This is what an authorization gate asks. A role outside the built-ins holds
-// nothing: one reaches a Project through kubectl, a restore, or a migration
-// from a cluster that had it, and the answer a gate needs is that the member
-// can do nothing rather than an error the gate would have to decide about.
-// That is the same answer the reconciler gives such a member, which binds them
-// to no Kubernetes role either.
+// Unknown roles and capabilities return false.
 func Holds(role Role, name Name) bool {
 	return held[role][name]
 }
 
-// KnownRole reports whether a role name is one this build understands.
-//
-// It is asked where a member is resolved rather than where a route is gated. A
-// member whose role means nothing here holds no capability, so every gate would
-// refuse them anyway; what this decides is the stronger thing, that they are
-// not a member for the purpose of reading either. Admitting them as a member
-// with an empty capability set would put their project's namespaces back into
-// the cluster-wide lists, which are filtered on membership and not on any
-// capability.
+// KnownRole reports whether role names a built-in project role.
 func KnownRole(role Role) bool {
 	_, ok := held[role]
 	return ok
 }
 
-// BuiltIn returns the capability set standing for a built-in project role, or
-// nothing for a name that is not one.
+// BuiltIn returns a sorted copy of a built-in role's capability names, or nil
+// for an unknown role.
 func BuiltIn(role Role) []Name {
 	names, ok := builtIn[role]
 	if !ok {

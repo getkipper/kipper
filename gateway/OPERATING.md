@@ -198,7 +198,7 @@ Three things to have right before running it:
 - **The registry survives the update.** It lives in the `gateway-data` volume mounted at `/data`, so
   registrations, tokens and held names outlast the container. That volume is what to back up; the image
   holds nothing you need.
-- **Let it stop cleanly.** `up -d` sends SIGTERM and honours `stop_grace_period`, so the drain and the
+- **Let it stop cleanly.** `up -d` sends SIGTERM and honors `stop_grace_period`, so the drain and the
   final flush both run, as above. `docker kill` loses whatever the registry had not yet written.
 
 Read the first lines it logs. Startup re-applies the current label policy to the persisted registry and

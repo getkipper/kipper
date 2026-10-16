@@ -42,7 +42,7 @@ The Project CR is the source of truth. Deleting it cascades to all namespaces an
 
 The console uses the same default. A Project resource with an empty environment list, created directly or restored from a backup, uses the reconciler's compatibility default: `test` in namespace `myapp-test`.
 
-### Organisation prefix
+### Organization prefix
 
 If an org was set during `kip install --org acme`, namespaces are prefixed automatically:
 

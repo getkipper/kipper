@@ -50,7 +50,7 @@ spec:
     providers:
       kubernetesIngress:
         allowEmptyServices: true
-    # X-Forwarded-* is honoured only from the listed proxies: the kipper.run
+    # X-Forwarded-* is honored only from the listed proxies: the kipper.run
     # gateway (resolved at install/upgrade time) and any --trusted-proxy
     # entries. An empty list means forwarded headers are ignored, which is
     # the safe default when nothing sits in front of Traefik.
@@ -105,7 +105,7 @@ spec:
 `
 
 // renderTrustedIPs validates every entry as an IP or CIDR and renders the
-// YAML flow list for the chart values. Bare IPs are normalised to host
+// YAML flow list for the chart values. Bare IPs are normalized to host
 // prefixes. Validation doubles as heredoc safety: only canonical prefix
 // strings ever reach the manifest.
 func renderTrustedIPs(proxies []string) (string, error) {

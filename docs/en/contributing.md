@@ -103,7 +103,7 @@ To try a branch end to end before it merges, run its code on a test cluster with
    git show origin/my-branch:.github/workflows/build-images.yml | grep -q "refs/heads/main" && echo "safe to build"
    ```
 
-2. Build `kip` from that same revision, so the CRDs, data checks and CLI behaviour match the images:
+2. Build `kip` from that same revision, so the CRDs, data checks and CLI behavior match the images:
 
    ```bash
    cd kip && go build -o kip . && cd ..

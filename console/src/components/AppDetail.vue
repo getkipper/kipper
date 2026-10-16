@@ -178,26 +178,9 @@ watch(canWriteEnv, (mayWrite) => {
   editEnvValue.value = ''
 })
 
-// Losing read access is not the same as being shown no tab to open. The panel is
-// gated on activeTab alone, so a membership removed while it is open leaves
-// every value this app has on screen for as long as it stays open.
-//
-// It closes rather than moving to another tab. Someone whose project role has
-// gone has no more claim on Logs or Deploys than on Env, and picking one of them
-// would swap a tab this cannot serve for a tab it also cannot serve, still
-// showing what the previous role loaded.
-//
-// There is no cluster-role exemption here because canReadEnv already carries the
-// only one the server honours. ProjectAccessResolver gives project-independent
-// access to an admin and to nobody else, so a cluster deployer whose membership
-// is removed loses this namespace exactly as a viewer does.
-//
-// Closing needs more than a false, though. A namespace no loaded project claims
-// is a membership that has gone; a namespace two of them claim is a response
-// that could not say who owns it, which happens when the server's ownership
-// lookup fails and every declaration keeps its optimistic owned flag. Shutting
-// the panel on that would throw an entitled caller out over a failed list, so
-// the state goes either way and the panel closes only on the first.
+// Clear cached environment data when read access is lost. Close the panel only
+// when no project claims the namespace; conflicting claims may be a transient
+// ownership lookup failure and can recover on the next refresh.
 watch(canReadEnv, (mayRead) => {
   if (mayRead) {
     // A contested refresh empties the tab; the next one that settles ownership
@@ -948,31 +931,13 @@ const newSecretValue = ref('')
 const secretsLoading = ref(false)
 
 /**
- * The variable map has two kinds of publisher, and which one the server honours
- * is not decided by which the client started last.
- *
- * updateEnv replaces the whole map and returns what was stored, so its response
- * is authoritative. Two of them overlapping cannot be ordered from here at all:
- * the handler retries on conflict, so the request sent first can be the one
- * committed last, carrying the older body. They are therefore serialised — one
- * in flight at a time — which removes the question rather than guessing at it.
- *
- * A read issued while a write is in flight may be answered from either side of
- * the commit, and nothing on the client can tell which, so it stands aside.
- * That covers both interleavings: a read overtaken by a write, and a read that
- * started later but was served the earlier state.
- *
- * Getting this wrong loses data rather than merely showing something stale,
- * because the next edit sends whatever map is displayed.
- *
- * panelEpoch is what makes the bookkeeping survive a panel that leaves and
- * comes back. Comparing the app and namespace cannot tell the first visit from
- * the second, so a write abandoned on the way out would return during the
- * second visit and decrement a count that was reset without it.
+ * Identifies each panel visit so writes from an earlier visit cannot update its
+ * state. Whole-map writes are serialized, and overlapping reads are discarded
+ * to keep the next edit based on the server's latest write response.
  */
 let panelEpoch = 0
 // Reads answer to their own epoch: retiring them must not disturb the write
-// queue, which serialises whole-map replacements and is what stops two of them
+// queue, which serializes whole-map replacements and is what stops two of them
 // overlapping.
 let readEpoch = 0
 let envWritesPending = 0
@@ -991,8 +956,9 @@ function resetEnvWriteTracking() {
 
 
 /**
- * Runs one whole-map write, queued behind any other, and reports whether its
- * answer may still be published.
+ * Reserves a slot in the whole-map write queue and returns publication guards.
+ * Call ready() before sending and done() in finally to release the slot.
+ * stillHere() checks the panel visit; mayPublish() also checks read access's epoch.
  */
 function envMutation() {
   const myPanel = panelEpoch
@@ -1016,15 +982,8 @@ function envMutation() {
     onPanel,
     // Wait for the write ahead of this one, whether it succeeded or not.
     ready: () => predecessor.then(() => undefined, () => undefined),
-    // Whether this write should still be sent at all once its turn comes. A
-    // write queued behind another is not superseded by it — it carries the next
-    // edit, built on what that one returned — so only the panel decides.
-    //
-    // The panel decides, and only the panel. A role that went and came back
-    // while this waited its turn changed nothing about the edit the operator
-    // asked for, and the server authorises the request when it arrives —
-    // dropping it here would discard an acknowledged action for a permission
-    // that is present again.
+    // Keep queued edits for this panel visit; the server checks permissions
+    // when each request arrives, including after access is restored.
     stillHere: () => onPanel() && myPanel === panelEpoch,
     // The slot is held, so this is the only write that can be talking to the
     // server and its answer is the newest there is. Asking whether a later
@@ -1666,7 +1625,7 @@ function disconnectBuildLogs() {
 async function handleCancelBuild() {
   try {
     await api.cancelBuild(project.value, props.appName)
-    toast.success('Build cancelled')
+    toast.success('Build canceled')
     loadBuildStatus()
   } catch {
     toast.error('Failed to cancel build')
@@ -2096,7 +2055,7 @@ const editKeys: Record<keyof ResourceValues, keyof ResourceEdit> = {
   memoryRequest: 'memory_request', memoryLimit: 'memory_limit', cpuRequest: 'cpu_request', cpuLimit: 'cpu_limit',
 }
 
-// Track values populated by reads so later reads for this save still recognise
+// Track values populated by reads so later reads for this save still recognize
 // them as untouched.
 let latestSaved: SavedFields | undefined
 
@@ -4593,7 +4552,7 @@ function openOptimise() {
             class="inline-flex items-center gap-1.5 rounded-lg border border-emerald-600/30 bg-emerald-600/10 px-3 py-1.5 text-xs font-medium text-emerald-500 transition-colors hover:bg-emerald-600/20"
           >
             <Sparkles class="h-3.5 w-3.5" />
-            Optimise resources
+            Optimize resources
           </button>
         </div>
         <AppCapacityPanel

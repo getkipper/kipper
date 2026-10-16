@@ -209,7 +209,7 @@ func TestUnclaimedBindingsReportsANamespaceWhoseClaimNamesAnotherObject(t *testi
 
 	require.NoError(t, reportUnclaimedBindings(ctx, clientset, dyn, &out))
 
-	assert.Contains(t, out.String(), "shop-prod (labelled shop)",
+	assert.Contains(t, out.String(), "shop-prod (labeled shop)",
 		"a namespace whose claim names a replaced object was not reported at all")
 }
 

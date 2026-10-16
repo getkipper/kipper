@@ -70,7 +70,7 @@ Migration moves every secret and database a project has to whatever endpoint the
 
 **A mandatory plan.** Every migration starts from a plan report, and the server refuses a start that did not come from one. The plan is a preview, never a reservation: the start re-checks everything against live state.
 
-**Loud notifications.** Token generation, migration start, cutover, cancel, and every 2FA change alert all admins by email (when SMTP is configured), Slack, the console bell, and an unmissable line in the console-api log. The alert names the initiating user and the target endpoint, which is the detail a colleague recognises as wrong. Because a compromised admin can edit the console's SMTP and Slack settings (the change itself alerts the previous destination), hosts that want a channel no console login can silence can pin one at install time with the `KIPPER_SECURITY_SMTP_*` or `KIPPER_SECURITY_WEBHOOK` environment variables on the console-api Deployment. The installer ships them commented out.
+**Loud notifications.** Token generation, migration start, cutover, cancel, and every 2FA change alert all admins by email (when SMTP is configured), Slack, the console bell, and an unmissable line in the console-api log. The alert names the initiating user and the target endpoint, which is the detail a colleague recognizes as wrong. Because a compromised admin can edit the console's SMTP and Slack settings (the change itself alerts the previous destination), hosts that want a channel no console login can silence can pin one at install time with the `KIPPER_SECURITY_SMTP_*` or `KIPPER_SECURITY_WEBHOOK` environment variables on the console-api Deployment. The installer ships them commented out.
 
 **What this covers, and what it does not.** The 2FA gate protects against a compromised console identity. It does not protect against a compromised server or kubeconfig: anyone with root on the node or a copy of the cluster-admin kubeconfig bypasses the console entirely and can read every secret and dump every database with kubectl alone. Harden the host (`kip cluster harden`, on by default), and treat the cluster's admin kubeconfig on the server as the crown jewels: know who holds a copy, and never paste it into chat, tickets, or shell history. What `kip cluster export` produces is not that file, and carries no credential. Migration tokens are bearer credentials of the same weight while they are valid.
 
@@ -96,7 +96,7 @@ kip 2fa bootstrap admin@example.com
 2. In **Console → Settings → Two-factor authentication**, enter the code, scan the QR code with your authenticator app, and confirm with the first code the app shows. A wrong code voids the enrollment (nobody gets to guess at a pending factor), so a typo means starting over with a fresh bootstrap code.
 3. Save the recovery codes. They are shown exactly once, and each works once to replace the factor if the phone is lost.
 
-A freshly confirmed factor waits 7 days before it can authorise a migration; the plan screen shows the exact date. Hosts can adjust the wait with `KIPPER_MIGRATION_2FA_MIN_AGE_DAYS`, and lowering it below 7 logs a persistent security warning. Replacing a factor (Settings, with a current code or a recovery code) restarts the clock.
+A freshly confirmed factor waits 7 days before it can authorize a migration; the plan screen shows the exact date. Hosts can adjust the wait with `KIPPER_MIGRATION_2FA_MIN_AGE_DAYS`, and lowering it below 7 logs a persistent security warning. Replacing a factor (Settings, with a current code or a recovery code) restarts the clock.
 
 Lost the phone and the recovery codes? Host-level recovery:
 
@@ -182,7 +182,7 @@ If a project already exists on the target, confirm the overwrite by typing its n
 
 The Start button lives on the plan. Enter the 6-digit code from your authenticator app and click **Start migration**. A plan is startable for 15 minutes; after that, review a fresh one.
 
-Cancelling later takes effect immediately, aborting whatever transfer is mid-stream.
+Canceling later takes effect immediately, aborting whatever transfer is mid-stream.
 
 ### 6. Monitor progress
 

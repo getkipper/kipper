@@ -65,7 +65,7 @@ func (s *Services) MigrateData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Confirm != name {
-		respondError(w, http.StatusBadRequest, fmt.Sprintf("confirm must equal the target service name %q to authorise this destructive operation", name))
+		respondError(w, http.StatusBadRequest, fmt.Sprintf("confirm must equal the target service name %q to authorize this destructive operation", name))
 		return
 	}
 

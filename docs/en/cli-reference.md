@@ -352,7 +352,7 @@ Pass `--ssh-key <key>` to use SSH explicitly. Resetting the password requires pe
 
 ## kip discover {#kip-discover}
 
-Find Kipper-labelled workloads on the cluster that have no owning Kipper CR. Read-only.
+Find Kipper-labeled workloads on the cluster that have no owning Kipper CR. Read-only.
 
 ```bash
 kip discover
@@ -946,7 +946,7 @@ The user enters the code in **Console → Settings → Two-factor authentication
 
 ### kip 2fa remove {#kip-2fa-remove}
 
-Deletes a user's enrolled factor, leaving the account unenrolled. This is the recovery path when the phone is gone and no recovery codes are left. Re-enrollment needs a fresh bootstrap code, and the new factor waits the full eligibility period (7 days by default) before it can authorise a migration.
+Deletes a user's enrolled factor, leaving the account unenrolled. This is the recovery path when the phone is gone and no recovery codes are left. Re-enrollment needs a fresh bootstrap code, and the new factor waits the full eligibility period (7 days by default) before it can authorize a migration.
 
 See [Cluster Migration](/en/migration#two-factor-authentication) for the full 2FA and migration security model.
 

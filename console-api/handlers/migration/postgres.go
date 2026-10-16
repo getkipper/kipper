@@ -75,7 +75,7 @@ func (h *Handler) migratePostgres(ctx context.Context, session *Session, token *
 	var totalBytes int64
 	for i, db := range databases {
 		if session.IsCancelled() {
-			return fmt.Errorf("migration cancelled")
+			return fmt.Errorf("migration canceled")
 		}
 
 		tables, err := h.countPostgresTables(ctx, namespace, pod, svc.Name, username, db)
@@ -232,7 +232,7 @@ func (h *Handler) ReceiveDBPruneHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// The migrated apps read the transferred credentials Secret, but the
-	// target's postgres role keeps whatever password it initialised with
+	// target's postgres role keeps whatever password it initialized with
 	// (a fresh one if the service existed before the Secret arrived, or on
 	// a replay). Force the role password to match the Secret so apps can
 	// authenticate. psql authenticates locally via peer/trust, so this needs
@@ -332,7 +332,7 @@ func (h *Handler) importPostgresDatabase(ctx context.Context, namespace, service
 	// that listens on TCP — before touching any data, or the restore connects
 	// to the bootstrap server and is cut off mid-stream.
 	if err := h.waitPostgresReady(ctx, namespace, pod, service, username); err != nil {
-		return fmt.Errorf("waiting for %s to finish initialising: %w", service, err)
+		return fmt.Errorf("waiting for %s to finish initializing: %w", service, err)
 	}
 
 	// CREATE DATABASE cannot run inside the dump's transaction and has no

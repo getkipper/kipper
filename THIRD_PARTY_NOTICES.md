@@ -1,15 +1,15 @@
 # Third-party notices
 
 Kipper is licensed under the Apache License 2.0 (see `LICENSE`).
-Its distributed binaries and container images include the third-party open-source components listed below. Each is the property of its respective authors and is provided under the licence shown with it. This file ships alongside every GitHub release and inside the console-api and authz container images; the copy at the repository root is the canonical one.
+Its distributed binaries and container images include the third-party open-source components listed below. Each is the property of its respective authors and is provided under the license shown with it. This file ships alongside every GitHub release and inside the console-api and authz container images; the copy at the repository root is the canonical one.
 
 ## Mozilla Public License 2.0 component
 
-`github.com/go-sql-driver/mysql` is licensed under the Mozilla Public License 2.0 (MPL-2.0) and is included unmodified. Under MPL-2.0 section 3.2, its Source Code Form is available at https://github.com/go-sql-driver/mysql/tree/v1.9.3. Kipper's own code is not covered by the MPL-2.0; the licence applies only to that component's own files. The full licence text is included in the Go components section below.
+`github.com/go-sql-driver/mysql` is licensed under the Mozilla Public License 2.0 (MPL-2.0) and is included unmodified. Under MPL-2.0 section 3.2, its Source Code Form is available at https://github.com/go-sql-driver/mysql/tree/v1.9.3. Kipper's own code is not covered by the MPL-2.0; the license applies only to that component's own files. The full license text is included in the Go components section below.
 
 ## GNU Affero General Public License 3.0 components
 
-Kipper's registry serves container images of the MinIO server (`ghcr.io/getkipper/minio`, release RELEASE.2025-09-07T16-13-09Z) and the MinIO client (`ghcr.io/getkipper/mc`, release RELEASE.2025-08-13T08-35-41Z). Both are licensed under the GNU Affero General Public License 3.0 (AGPL-3.0) and are built unmodified from their upstream source. Under AGPL-3.0, the Corresponding Source is available at https://github.com/minio/minio/tree/RELEASE.2025-09-07T16-13-09Z and https://github.com/minio/mc/tree/RELEASE.2025-08-13T08-35-41Z, and the build recipe is `images/minio` in this repository. Each image carries, under `/licenses`, the full licence text, the attributions and licences of the dependencies built into it (upstream's `CREDITS`), and these source directions. Kipper's own code is not covered by the AGPL-3.0; it runs these images as separate programs.
+Kipper's registry serves container images of the MinIO server (`ghcr.io/getkipper/minio`, release RELEASE.2025-09-07T16-13-09Z) and the MinIO client (`ghcr.io/getkipper/mc`, release RELEASE.2025-08-13T08-35-41Z). Both are licensed under the GNU Affero General Public License 3.0 (AGPL-3.0) and are built unmodified from their upstream source. Under AGPL-3.0, the Corresponding Source is available at https://github.com/minio/minio/tree/RELEASE.2025-09-07T16-13-09Z and https://github.com/minio/mc/tree/RELEASE.2025-08-13T08-35-41Z, and the build recipe is `images/minio` in this repository. Each image carries, under `/licenses`, the full license text, the attributions and licenses of the dependencies built into it (upstream's `CREDITS`), and these source directions. Kipper's own code is not covered by the AGPL-3.0; it runs these images as separate programs.
 
 ## Go components (92)
 
@@ -9713,7 +9713,7 @@ Apache license:
 
 ### @babel/helper-string-parser 7.29.7
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -9742,7 +9742,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### @babel/helper-validator-identifier 7.29.7
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -9771,7 +9771,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### @babel/parser 7.29.9
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (C) 2012-2014 by various contributors (see AUTHORS)
@@ -9797,7 +9797,7 @@ THE SOFTWARE.
 
 ### @babel/types 7.29.8
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -9826,7 +9826,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### @codemirror/autocomplete 6.20.1
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -9854,7 +9854,7 @@ THE SOFTWARE.
 
 ### @codemirror/commands 6.10.3
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -9882,7 +9882,7 @@ THE SOFTWARE.
 
 ### @codemirror/lang-javascript 6.2.5
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -9910,7 +9910,7 @@ THE SOFTWARE.
 
 ### @codemirror/lang-python 6.2.1
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -9938,7 +9938,7 @@ THE SOFTWARE.
 
 ### @codemirror/lang-sql 6.10.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -9966,7 +9966,7 @@ THE SOFTWARE.
 
 ### @codemirror/language 6.12.2
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -9994,7 +9994,7 @@ THE SOFTWARE.
 
 ### @codemirror/lint 6.9.5
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -10022,7 +10022,7 @@ THE SOFTWARE.
 
 ### @codemirror/search 6.6.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -10050,7 +10050,7 @@ THE SOFTWARE.
 
 ### @codemirror/state 6.6.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -10078,7 +10078,7 @@ THE SOFTWARE.
 
 ### @codemirror/theme-one-dark 6.1.3
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -10106,7 +10106,7 @@ THE SOFTWARE.
 
 ### @codemirror/view 6.40.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -10134,7 +10134,7 @@ THE SOFTWARE.
 
 ### @jridgewell/sourcemap-codec 1.5.5
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright 2024 Justin Ridgewell <justin@ridgewell.name>
@@ -10160,7 +10160,7 @@ SOFTWARE.
 
 ### @lezer/common 1.5.1
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -10188,7 +10188,7 @@ THE SOFTWARE.
 
 ### @lezer/highlight 1.2.3
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -10216,7 +10216,7 @@ THE SOFTWARE.
 
 ### @lezer/javascript 1.5.4
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -10244,7 +10244,7 @@ THE SOFTWARE.
 
 ### @lezer/lr 1.4.8
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -10272,7 +10272,7 @@ THE SOFTWARE.
 
 ### @lezer/python 1.1.18
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -10300,7 +10300,7 @@ THE SOFTWARE.
 
 ### @marijn/find-cluster-break 1.0.2
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -10328,7 +10328,7 @@ THE SOFTWARE.
 
 ### @types/trusted-types 2.0.7
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -10356,7 +10356,7 @@ MIT License
 
 ### @vue/compiler-core 3.5.43
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -10384,7 +10384,7 @@ THE SOFTWARE.
 
 ### @vue/compiler-dom 3.5.43
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -10412,7 +10412,7 @@ THE SOFTWARE.
 
 ### @vue/compiler-sfc 3.5.43
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -10440,7 +10440,7 @@ THE SOFTWARE.
 
 ### @vue/compiler-ssr 3.5.43
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -10468,13 +10468,13 @@ THE SOFTWARE.
 
 ### @vue/devtools-api 6.6.4
 
-Licence: MIT
+License: MIT
 
-_Licence text not bundled; see the component's source repository._
+_License text not bundled; see the component's source repository._
 
 ### @vue/reactivity 3.5.43
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -10502,7 +10502,7 @@ THE SOFTWARE.
 
 ### @vue/runtime-core 3.5.43
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -10530,7 +10530,7 @@ THE SOFTWARE.
 
 ### @vue/runtime-dom 3.5.43
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -10558,7 +10558,7 @@ THE SOFTWARE.
 
 ### @vue/server-renderer 3.5.43
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -10586,7 +10586,7 @@ THE SOFTWARE.
 
 ### @vue/shared 3.5.43
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -10614,7 +10614,7 @@ THE SOFTWARE.
 
 ### @xterm/addon-fit 0.11.0
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (c) 2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
@@ -10640,7 +10640,7 @@ THE SOFTWARE.
 
 ### @xterm/addon-web-links 0.12.0
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (c) 2017, The xterm.js authors (https://github.com/xtermjs/xterm.js)
@@ -10666,7 +10666,7 @@ THE SOFTWARE.
 
 ### @xterm/xterm 6.0.0
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (c) 2017-2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
@@ -10694,7 +10694,7 @@ THE SOFTWARE.
 
 ### accepts 1.3.8
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -10724,7 +10724,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### agent-base 6.0.2
 
-Licence: MIT
+License: MIT
 
 ```
 agent-base
@@ -10876,7 +10876,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### ansi-regex 5.0.1
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -10892,7 +10892,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### ansi-styles 4.3.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -10908,7 +10908,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### array-flatten 1.1.1
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -10936,7 +10936,7 @@ THE SOFTWARE.
 
 ### asynckit 0.4.0
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -10964,7 +10964,7 @@ SOFTWARE.
 
 ### axios 1.20.0
 
-Licence: MIT
+License: MIT
 
 ```
 # Copyright (c) 2014-present Matt Zabriskie & Collaborators
@@ -10978,7 +10978,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### body-parser 1.20.8
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -11008,7 +11008,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### bytes 3.1.2
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -11038,7 +11038,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### call-bind-apply-helpers 1.0.2
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -11066,7 +11066,7 @@ SOFTWARE.
 
 ### call-bound 1.0.4
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -11094,7 +11094,7 @@ SOFTWARE.
 
 ### camelcase 5.3.1
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -11110,7 +11110,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### cliui 6.0.0
 
-Licence: ISC
+License: ISC
 
 ```
 Copyright (c) 2015, Contributors
@@ -11131,7 +11131,7 @@ ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ### codemirror 6.0.2
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -11159,7 +11159,7 @@ THE SOFTWARE.
 
 ### color-convert 2.0.1
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (c) 2011-2016 Heather Arthur <fayearthur@gmail.com>
@@ -11186,7 +11186,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### color-name 1.1.4
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -11201,7 +11201,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### combined-stream 1.0.8
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (c) 2011 Debuggable Limited <felix@debuggable.com>
@@ -11227,7 +11227,7 @@ THE SOFTWARE.
 
 ### content-disposition 0.5.4
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -11256,7 +11256,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### content-type 1.0.5
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -11285,7 +11285,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### cookie 0.7.2
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -11315,7 +11315,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### cookie-signature 1.0.7
 
-Licence: MIT
+License: MIT
 
 ```
 # cookie-signature
@@ -11363,7 +11363,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### crelt 1.0.6
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (C) 2020 by Marijn Haverbeke <marijn@haverbeke.berlin>
@@ -11389,7 +11389,7 @@ THE SOFTWARE.
 
 ### csstype 3.2.3
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (c) 2017-2018 Fredrik Nicol
@@ -11415,7 +11415,7 @@ SOFTWARE.
 
 ### debug 2.6.9
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -11440,7 +11440,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### decamelize 1.2.0
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -11468,7 +11468,7 @@ THE SOFTWARE.
 
 ### delayed-stream 1.0.0
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (c) 2011 Debuggable Limited <felix@debuggable.com>
@@ -11494,7 +11494,7 @@ THE SOFTWARE.
 
 ### depd 2.0.0
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -11523,7 +11523,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### destroy 1.2.0
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -11552,7 +11552,7 @@ THE SOFTWARE.
 
 ### dijkstrajs 1.0.3
 
-Licence: MIT
+License: MIT
 
 ```
 ```
@@ -11578,7 +11578,7 @@ THE SOFTWARE.
 
 ### dompurify 3.4.16
 
-Licence: (MPL-2.0 OR Apache-2.0)
+License: (MPL-2.0 OR Apache-2.0)
 
 ```
 Apache License
@@ -11786,7 +11786,7 @@ Apache License
 
 ### dunder-proto 1.0.1
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -11814,7 +11814,7 @@ SOFTWARE.
 
 ### ee-first 1.1.1
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -11842,7 +11842,7 @@ THE SOFTWARE.
 
 ### emoji-regex 8.0.0
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright Mathias Bynens <https://mathiasbynens.be/>
@@ -11869,7 +11869,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### encodeurl 2.0.0
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -11898,7 +11898,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### entities 7.0.1
 
-Licence: BSD-2-Clause
+License: BSD-2-Clause
 
 ```
 Copyright (c) Felix Böhm
@@ -11916,7 +11916,7 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### es-define-property 1.0.1
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -11944,7 +11944,7 @@ SOFTWARE.
 
 ### es-errors 1.3.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -11972,7 +11972,7 @@ SOFTWARE.
 
 ### es-object-atoms 1.1.2
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -12000,7 +12000,7 @@ SOFTWARE.
 
 ### es-set-tostringtag 2.1.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -12028,7 +12028,7 @@ SOFTWARE.
 
 ### escape-html 1.0.3
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -12059,7 +12059,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### estree-walker 2.0.2
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (c) 2015-20 [these people](https://github.com/Rich-Harris/estree-walker/graphs/contributors)
@@ -12073,7 +12073,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### etag 1.8.1
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -12102,7 +12102,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### express 4.22.2
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -12133,7 +12133,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### finalhandler 1.3.2
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -12162,7 +12162,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### find-up 4.1.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -12178,7 +12178,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### follow-redirects 1.16.0
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright 2014–present Olivier Lalonde <olalonde@gmail.com>, James Talmage <james@talmage.io>, Ruben Verborgh
@@ -12203,7 +12203,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### form-data 4.0.6
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (c) 2012 Felix Geisendörfer (felix@debuggable.com) and contributors
@@ -12229,7 +12229,7 @@ Copyright (c) 2012 Felix Geisendörfer (felix@debuggable.com) and contributors
 
 ### forwarded 0.2.0
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -12258,7 +12258,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### fresh 0.5.2
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -12288,7 +12288,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### function-bind 1.1.2
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (c) 2013 Raynos.
@@ -12314,7 +12314,7 @@ THE SOFTWARE.
 
 ### get-caller-file 2.0.5
 
-Licence: ISC
+License: ISC
 
 ```
 ISC License (ISC)
@@ -12327,7 +12327,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 
 ### get-intrinsic 1.3.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -12355,7 +12355,7 @@ SOFTWARE.
 
 ### get-proto 1.0.1
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -12383,7 +12383,7 @@ SOFTWARE.
 
 ### gopd 1.2.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -12411,7 +12411,7 @@ SOFTWARE.
 
 ### has-symbols 1.1.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -12439,7 +12439,7 @@ SOFTWARE.
 
 ### has-tostringtag 1.0.2
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -12467,7 +12467,7 @@ SOFTWARE.
 
 ### hasown 2.0.4
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -12495,7 +12495,7 @@ SOFTWARE.
 
 ### highlight.js 11.11.1
 
-Licence: BSD-3-Clause
+License: BSD-3-Clause
 
 ```
 BSD 3-Clause License
@@ -12531,7 +12531,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### http-errors 2.0.1
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -12560,7 +12560,7 @@ THE SOFTWARE.
 
 ### https-proxy-agent 5.0.1
 
-Licence: MIT
+License: MIT
 
 ```
 https-proxy-agent
@@ -12704,7 +12704,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### iconv-lite 0.4.24
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (c) 2011 Alexander Shtuchkin
@@ -12731,7 +12731,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### inherits 2.0.4
 
-Licence: ISC
+License: ISC
 
 ```
 The ISC License
@@ -12753,7 +12753,7 @@ PERFORMANCE OF THIS SOFTWARE.
 
 ### ipaddr.js 1.9.1
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (C) 2011-2017 whitequark <whitequark@whitequark.org>
@@ -12779,7 +12779,7 @@ THE SOFTWARE.
 
 ### is-fullwidth-code-point 3.0.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -12795,7 +12795,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### locate-path 5.0.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -12811,7 +12811,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### lucide-vue-next 0.400.0
 
-Licence: ISC
+License: ISC
 
 ```
 ISC License
@@ -12833,7 +12833,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ### magic-string 0.30.21
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright 2018 Rich Harris
@@ -12847,7 +12847,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### marked 17.0.5
 
-Licence: MIT
+License: MIT
 
 ```
 # License information
@@ -12898,7 +12898,7 @@ This software is provided by the copyright holders and contributors “as is” 
 
 ### math-intrinsics 1.1.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -12926,7 +12926,7 @@ SOFTWARE.
 
 ### media-typer 0.3.0
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -12955,7 +12955,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### merge-descriptors 1.0.3
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -12985,7 +12985,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### methods 1.1.2
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -13015,7 +13015,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### mime 1.6.0
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -13043,7 +13043,7 @@ THE SOFTWARE.
 
 ### mime-db 1.52.0
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -13073,7 +13073,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### mime-types 2.1.35
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -13103,7 +13103,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### ms 2.1.3
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -13131,7 +13131,7 @@ SOFTWARE.
 
 ### nanoid 3.3.20
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -13158,7 +13158,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### negotiator 0.6.3
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -13189,7 +13189,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### object-inspect 1.13.4
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -13217,7 +13217,7 @@ SOFTWARE.
 
 ### on-finished 2.4.1
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -13247,7 +13247,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### p-limit 2.3.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -13263,7 +13263,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### p-locate 4.1.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -13279,7 +13279,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### p-try 2.2.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -13295,7 +13295,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### parseurl 1.3.3
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -13325,7 +13325,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### path-exists 4.0.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -13341,7 +13341,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### path-to-regexp 0.1.13
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -13369,7 +13369,7 @@ THE SOFTWARE.
 
 ### picocolors 1.1.1
 
-Licence: ISC
+License: ISC
 
 ```
 ISC License
@@ -13391,7 +13391,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ### pinia 2.3.1
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -13419,7 +13419,7 @@ SOFTWARE.
 
 ### pngjs 5.0.0
 
-Licence: MIT
+License: MIT
 
 ```
 pngjs2 original work Copyright (c) 2015 Luke Page & Original Contributors
@@ -13446,7 +13446,7 @@ THE SOFTWARE.
 
 ### postcss 8.5.29
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -13473,7 +13473,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### proxy-addr 2.0.8
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -13502,7 +13502,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### proxy-from-env 2.1.0
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License
@@ -13529,7 +13529,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### qrcode 1.5.4
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -13545,7 +13545,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### qs 6.16.0
 
-Licence: BSD-3-Clause
+License: BSD-3-Clause
 
 ```
 BSD 3-Clause License
@@ -13581,7 +13581,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### range-parser 1.2.1
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -13611,7 +13611,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### raw-body 2.5.3
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -13640,7 +13640,7 @@ THE SOFTWARE.
 
 ### require-directory 2.1.1
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -13669,7 +13669,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### require-main-filename 2.0.0
 
-Licence: ISC
+License: ISC
 
 ```
 Copyright (c) 2016, Contributors
@@ -13690,7 +13690,7 @@ ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ### safe-buffer 5.2.1
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -13718,7 +13718,7 @@ THE SOFTWARE.
 
 ### safer-buffer 2.1.2
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -13746,7 +13746,7 @@ SOFTWARE.
 
 ### send 0.19.2
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -13776,7 +13776,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### serve-static 1.16.3
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -13808,7 +13808,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### set-blocking 2.0.0
 
-Licence: ISC
+License: ISC
 
 ```
 Copyright (c) 2016, Contributors
@@ -13829,7 +13829,7 @@ ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ### setprototypeof 1.2.0
 
-Licence: ISC
+License: ISC
 
 ```
 Copyright (c) 2015, Wes Todd
@@ -13849,7 +13849,7 @@ CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ### side-channel 1.1.1
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -13877,7 +13877,7 @@ SOFTWARE.
 
 ### side-channel-list 1.0.1
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -13905,7 +13905,7 @@ SOFTWARE.
 
 ### side-channel-map 1.0.1
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -13933,7 +13933,7 @@ SOFTWARE.
 
 ### side-channel-weakmap 1.0.2
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -13961,7 +13961,7 @@ SOFTWARE.
 
 ### source-map-js 1.2.2
 
-Licence: BSD-3-Clause
+License: BSD-3-Clause
 
 ```
 Copyright (c) 2009-2011, Mozilla Foundation and contributors
@@ -13995,7 +13995,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### statuses 2.0.2
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -14024,7 +14024,7 @@ THE SOFTWARE.
 
 ### string-width 4.2.3
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -14040,7 +14040,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### strip-ansi 6.0.1
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -14056,7 +14056,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### style-mod 4.1.3
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (C) 2018 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
@@ -14082,7 +14082,7 @@ THE SOFTWARE.
 
 ### toidentifier 1.0.1
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -14110,7 +14110,7 @@ SOFTWARE.
 
 ### type-is 1.6.18
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -14140,7 +14140,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### typescript 5.9.3
 
-Licence: Apache-2.0
+License: Apache-2.0
 
 ```
 Apache License
@@ -14202,7 +14202,7 @@ END OF TERMS AND CONDITIONS
 
 ### unpipe 1.0.0
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -14231,7 +14231,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### utils-merge 1.0.1
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -14258,7 +14258,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### vary 1.1.2
 
-Licence: MIT
+License: MIT
 
 ```
 (The MIT License)
@@ -14287,7 +14287,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### vue 3.5.43
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -14315,7 +14315,7 @@ THE SOFTWARE.
 
 ### vue-codemirror 6.1.1
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -14343,7 +14343,7 @@ SOFTWARE.
 
 ### vue-demi 0.14.10
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -14371,7 +14371,7 @@ SOFTWARE.
 
 ### vue-router 4.6.4
 
-Licence: MIT
+License: MIT
 
 ```
 The MIT License (MIT)
@@ -14399,7 +14399,7 @@ SOFTWARE.
 
 ### w3c-keyname 2.2.8
 
-Licence: MIT
+License: MIT
 
 ```
 Copyright (C) 2016 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
@@ -14425,7 +14425,7 @@ THE SOFTWARE.
 
 ### which-module 2.0.1
 
-Licence: ISC
+License: ISC
 
 ```
 Copyright (c) 2016, Contributors
@@ -14445,7 +14445,7 @@ THIS SOFTWARE.
 
 ### wrap-ansi 6.2.0
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -14461,7 +14461,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### y18n 4.0.3
 
-Licence: ISC
+License: ISC
 
 ```
 Copyright (c) 2015, Contributors
@@ -14481,7 +14481,7 @@ THIS SOFTWARE.
 
 ### yargs 15.4.1
 
-Licence: MIT
+License: MIT
 
 ```
 MIT License
@@ -14509,7 +14509,7 @@ THE SOFTWARE.
 
 ### yargs-parser 18.1.3
 
-Licence: ISC
+License: ISC
 
 ```
 Copyright (c) 2016, Contributors

@@ -12,5 +12,5 @@ License 3.0, built unmodified from its upstream source.
   https://github.com/getkipper/kipper/tree/KIPPER_REVISION/images/minio and
   https://github.com/getkipper/kipper/blob/KIPPER_REVISION/.github/workflows/build-minio-images.yml
 
-The full licence is in /licenses/<program>/LICENSE and the licences of the
+The full license is in /licenses/<program>/LICENSE and the licenses of the
 bundled dependencies are in /licenses/<program>/CREDITS.

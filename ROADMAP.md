@@ -26,7 +26,7 @@ Nothing carries **Now** immediately after a release, which is the case as this i
 
 The core platform is already usable end to end. You can install a production cluster on a Linux server in one command, deploy apps from an image or a Git repo, get automatic TLS and a public subdomain, and manage everything from the web console or the `kip` CLI.
 
-Also shipped: projects with test, acc and prod promotion. Cross-project app links, letting an app reach another project's app over the cluster network with that project's consent, with `kip app links` to check one is actually carrying traffic. CI/CD webhooks with deploy history and rollback. GitOps through `kip apply`. Managed stateful services (Postgres, MySQL, MongoDB, Redis, MinIO, OpenSearch, RabbitMQ). Serverless functions that scale to zero. Scheduled jobs. Centralised logs and metrics with Loki, Prometheus and Grafana. Velero backups. Project-based RBAC. Per-app API keys. Autoscaling. A web terminal and file browser. Auto Mode, which tunes resources and scaling per workload profile unless you override it. And optional AI: log analysis and error diagnosis against your own key, plus self-hosted private LLM chat on your own cluster.
+Also shipped: projects with test, acc and prod promotion. Cross-project app links, letting an app reach another project's app over the cluster network with that project's consent, with `kip app links` to check one is actually carrying traffic. CI/CD webhooks with deploy history and rollback. GitOps through `kip apply`. Managed stateful services (Postgres, MySQL, MongoDB, Redis, MinIO, OpenSearch, RabbitMQ). Serverless functions that scale to zero. Scheduled jobs. Centralized logs and metrics with Loki, Prometheus and Grafana. Velero backups. Project-based RBAC. Per-app API keys. Autoscaling. A web terminal and file browser. Auto Mode, which tunes resources and scaling per workload profile unless you override it. And optional AI: log analysis and error diagnosis against your own key, plus self-hosted private LLM chat on your own cluster.
 
 The rest of this page is what comes after that.
 
@@ -118,7 +118,7 @@ AI features run only with your own key and send data only where you've configure
 
 ## Scale and teams
 
-- **Fuller multi-tenancy.** Organisation-scoped quotas and user management on top of today's org prefixing.
+- **Fuller multi-tenancy.** Organization-scoped quotas and user management on top of today's org prefixing.
 - **Terraform provider.** Manage Kipper apps and services as infrastructure-as-code.
 
 ## High availability

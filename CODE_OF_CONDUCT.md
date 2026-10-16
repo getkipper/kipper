@@ -6,6 +6,6 @@ The short version: be respectful, assume good intent, and help keep this a welco
 
 ## Reporting
 
-If you see behaviour that breaks the Code of Conduct, report it privately to the maintainers at conduct@getkipper.com. Reports are handled confidentially. The maintainers will review every report and respond as the Contributor Covenant describes, and they will respect the privacy and safety of whoever reports an incident.
+If you see behavior that breaks the Code of Conduct, report it privately to the maintainers at conduct@getkipper.com. Reports are handled confidentially. The maintainers will review every report and respond as the Contributor Covenant describes, and they will respect the privacy and safety of whoever reports an incident.
 
 The full text of the Contributor Covenant 2.1, including the enforcement guidelines, is available at the link above.

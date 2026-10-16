@@ -9,7 +9,7 @@ Use this guide to preserve an installed [AI Bundle](/en/ai) before an uninstall 
 
 ## Backup and restore {#backup-and-restore}
 
-Snapshots are handled by Velero, which Kipper already runs as a system component. A backup grabs everything in the `kipper-ai` namespace (model cache PVC, MongoDB data, chat history, LibreChat credentials), the cluster-side `kipper-ai-config` Secret in `kipper-system` (so kip's AI client config comes back too), and the Ollama and LibreChat HelmChart CRs in `kube-system` (so helm-controller still recognises the bundle after restore).
+Snapshots are handled by Velero, which Kipper already runs as a system component. A backup grabs everything in the `kipper-ai` namespace (model cache PVC, MongoDB data, chat history, LibreChat credentials), the cluster-side `kipper-ai-config` Secret in `kipper-system` (so kip's AI client config comes back too), and the Ollama and LibreChat HelmChart CRs in `kube-system` (so helm-controller still recognizes the bundle after restore).
 
 The backup is a live filesystem snapshot. MongoDB and Meilisearch keep writing during the snapshot, so the very last in-flight chat messages may not survive a restore cleanly. For a clean checkpoint (e.g. before a risky upgrade), pause LibreChat traffic for a few seconds before running `kip ai backup`.
 
@@ -72,14 +72,14 @@ The command compares MinIO's `velero/backups/` directory against every Velero Ba
 
 ### If you wiped MinIO {#if-you-wiped-minio}
 
-`mc rm --recursive` against the `velero` bucket frees disk space immediately, but it leaves Velero's BackupRepository CR pointing at metadata that no longer exists. The next `kip ai backup` attempt fails with `repository not initialized in the provided storage`. The repository is wedged until something forces Velero to re-initialise it.
+`mc rm --recursive` against the `velero` bucket frees disk space immediately, but it leaves Velero's BackupRepository CR pointing at metadata that no longer exists. The next `kip ai backup` attempt fails with `repository not initialized in the provided storage`. The repository is wedged until something forces Velero to re-initialize it.
 
 Two ways out:
 
 ```bash
 # Preferred: kip ai backup repair detects the wedged repository and
 # guides cleanup. Once the BackupRepository CR is gone, Velero re-
-# initialises Kopia on the next backup.
+# initializes Kopia on the next backup.
 kip ai backup repair
 
 # Manual fallback if you cannot install the latest kip yet. Replace

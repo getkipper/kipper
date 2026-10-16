@@ -299,7 +299,7 @@ spec:
             # - name: KIPPER_DISABLE_OUTBOUND_MIGRATION
             #   value: "1"
             #
-            # Days a newly enrolled 2FA factor waits before it can authorise
+            # Days a newly enrolled 2FA factor waits before it can authorize
             # a migration (default 7):
             # - name: KIPPER_MIGRATION_2FA_MIN_AGE_DAYS
             #   value: "7"
@@ -484,7 +484,7 @@ func platformIngress(name, namespace, host, tlsSecret string, paths ...string) s
 func securityHeadersMiddleware(namespace string) string {
 	body, err := yaml.Marshal(serving.SecurityHeadersMiddleware(namespace).Object)
 	if err != nil {
-		// The object is a literal built in this process; marshalling it can only
+		// The object is a literal built in this process; marshaling it can only
 		// fail if that literal is malformed, which the installer tests catch.
 		panic(fmt.Sprintf("rendering security-headers middleware: %v", err))
 	}

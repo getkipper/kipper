@@ -141,9 +141,9 @@ onMounted(loadStatus)
           <p class="text-sm font-medium text-emerald-800 dark:text-emerald-300">Enrolled</p>
           <p class="mt-0.5 text-xs text-emerald-700 dark:text-slate-400">
             Since {{ status.enrolled_at ? formatDateTime(status.enrolled_at) : 'unknown' }}.
-            <template v-if="status.eligible">Eligible to authorise migrations.</template>
+            <template v-if="status.eligible">Eligible to authorize migrations.</template>
             <template v-else-if="status.eligible_at">
-              Can authorise migrations from {{ formatDateTime(status.eligible_at) }} — new factors wait {{ status.min_age_days }} days.
+              Can authorize migrations from {{ formatDateTime(status.eligible_at) }} — new factors wait {{ status.min_age_days }} days.
             </template>
           </p>
         </div>
@@ -159,8 +159,8 @@ onMounted(loadStatus)
 
       <div v-if="showReset" class="space-y-3 rounded-lg border border-slate-200 p-4 dark:border-slate-700">
         <p class="text-xs text-slate-500 dark:text-slate-400">
-          Replacing the factor voids the old one and its recovery codes. The new factor waits the full {{ status.min_age_days }} days before it can authorise a migration.
-          Confirm with a current code, or a recovery code if the device is gone.
+          Replacing this factor invalidates the current one and its recovery codes. The new factor can authorize migrations {{ status.min_age_days }} days after you confirm it.
+          Confirm with a current authentication code or a recovery code.
         </p>
         <div class="flex flex-wrap gap-3">
           <input

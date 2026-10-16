@@ -152,7 +152,7 @@ func findRevision(history []DeployEntry, revision int) *DeployEntry {
 func setHistory(app *unstructured.Unstructured, history []DeployEntry) error {
 	data, err := json.Marshal(history)
 	if err != nil {
-		return fmt.Errorf("marshalling history: %w", err)
+		return fmt.Errorf("marshaling history: %w", err)
 	}
 	annotations := app.GetAnnotations()
 	if annotations == nil {

@@ -1,9 +1,6 @@
-// Package dexcfg is the one editor of Kipper's Dex config.yaml. It round-trips
-// through a yaml.Node so every field Kipper does not manage — SSO connectors
-// written by the console at runtime, storage, oauth2 settings, and anything a
-// future Dex version adds — survives verbatim. Line-level string surgery on this
-// file (three separate sites before this package) is exactly what let host
-// reconfiguration corrupt login config, so all reads and writes go through here.
+// Package dexcfg edits Dex config.yaml through YAML nodes to preserve unmanaged
+// fields, including SSO connectors, storage, and OAuth settings. Re-serialization
+// may change formatting.
 package dexcfg
 
 import (
@@ -22,11 +19,10 @@ const (
 	adminUsername   = "admin"
 )
 
-// Config is a parsed Dex config that edits in place and re-marshals unchanged
-// except for the fields explicitly set.
+// Config holds a parsed Dex configuration for editing and YAML serialization.
 type Config struct {
-	doc  yaml.Node  // document node
-	root *yaml.Node // the top-level mapping
+	doc  yaml.Node
+	root *yaml.Node
 }
 
 // ConnectorInfo identifies a configured SSO connector, for surfacing which
@@ -37,10 +33,9 @@ type ConnectorInfo struct {
 	Name string
 }
 
-// Load parses raw Dex config.yaml. It fails closed on malformed structure a
-// cutover must never write into: a non-mapping root, duplicate top-level keys,
-// or a managed collection (staticClients/staticPasswords/connectors) that is
-// present but not a sequence.
+// Load parses Dex config.yaml and rejects malformed YAML, a non-mapping root,
+// duplicate top-level keys, and non-sequence staticClients, staticPasswords, or
+// connectors values. Missing or null collections are allowed.
 func Load(raw string) (*Config, error) {
 	c := &Config{}
 	if err := yaml.Unmarshal([]byte(raw), &c.doc); err != nil {
@@ -67,17 +62,17 @@ func Load(raw string) (*Config, error) {
 	return c, nil
 }
 
-// Marshal re-serialises the config. Untouched fields are byte-preserving up to
-// yaml.v3's re-emit; touched fields carry their new values.
+// Marshal serializes the current configuration as YAML, preserving unmanaged
+// values. Formatting may change; serialization errors are returned to the caller.
 func (c *Config) Marshal() (string, error) {
 	out, err := yaml.Marshal(&c.doc)
 	if err != nil {
-		return "", fmt.Errorf("serialising dex config: %w", err)
+		return "", fmt.Errorf("serializing dex config: %w", err)
 	}
 	return string(out), nil
 }
 
-// Issuer returns the top-level OIDC issuer URL.
+// Issuer returns the top-level OIDC issuer URL, or an empty string if absent.
 func (c *Config) Issuer() string {
 	if v := mapValue(c.root, "issuer"); v != nil {
 		return v.Value
@@ -123,7 +118,9 @@ func ensureMapping(m *yaml.Node, key string) *yaml.Node {
 	return node
 }
 
-// ConsoleRedirectURIs returns the redirect URIs of the kipper-console client.
+// ConsoleRedirectURIs returns the kipper-console redirect URIs in configuration
+// order. It returns nil if the client is missing or duplicated, or redirectURIs
+// is absent or not a sequence.
 func (c *Config) ConsoleRedirectURIs() []string {
 	client, err := staticClientByID(c.root, consoleClientID)
 	if err != nil || client == nil {
@@ -140,10 +137,8 @@ func (c *Config) ConsoleRedirectURIs() []string {
 	return out
 }
 
-// SetConsoleRedirectURIs replaces the redirect URIs of ONLY the kipper-console
-// client. The public kipper-cli client (localhost loopback) is never touched. It
-// fails closed if the console client is missing or duplicated, so a cutover can
-// never apply a config where the redirect was not actually updated.
+// SetConsoleRedirectURIs replaces the kipper-console redirect URIs, preserving
+// other clients. It returns an error if the console client is missing or duplicated.
 func (c *Config) SetConsoleRedirectURIs(uris ...string) error {
 	client, err := staticClientByID(c.root, consoleClientID)
 	if err != nil {
@@ -156,7 +151,8 @@ func (c *Config) SetConsoleRedirectURIs(uris ...string) error {
 	return nil
 }
 
-// Connectors lists the configured SSO connectors.
+// Connectors returns SSO connector metadata in configuration order, skipping
+// non-mapping entries. It returns nil if the collection is absent or null.
 func (c *Config) Connectors() []ConnectorInfo {
 	seq := mapValue(c.root, "connectors")
 	if seq == nil || seq.Kind != yaml.SequenceNode {
@@ -176,10 +172,8 @@ func (c *Config) Connectors() []ConnectorInfo {
 	return out
 }
 
-// RehostConnectors rewrites each connector's config.redirectURI to Dex's own
-// callback on the new issuer host (Dex terminates the provider callback at
-// <issuer>/callback). The provider-side allow-list is external and cannot be
-// changed from here — the caller surfaces that to the operator.
+// RehostConnectors updates existing connector config.redirectURI fields to
+// <issuer>/callback. Callers must arrange provider-side callback updates separately.
 func (c *Config) RehostConnectors(issuer string) {
 	seq := mapValue(c.root, "connectors")
 	if seq == nil || seq.Kind != yaml.SequenceNode {
@@ -199,15 +193,9 @@ func (c *Config) RehostConnectors(issuer string) {
 	}
 }
 
-// AdminEmail returns the Kipper admin static-password email. ok is false when
-// there is nothing usable to sign in as, which covers a missing admin entry and
-// an entry whose email is absent or blank alike: Dex matches a static password
-// on its email, so an empty one is not a login and reporting it as present
-// hands the caller an address nobody can authenticate with. err is set only
-// when the entry is ambiguous.
-//
-// Callers that need to tell a damaged admin entry from no admin entry ask
-// HasAdmin.
+// AdminEmail returns the admin static-password email. A missing entry or blank
+// email returns ok=false; an ambiguous entry returns an error. Use HasAdmin to
+// distinguish a missing entry from one with a blank email.
 func (c *Config) AdminEmail() (email string, ok bool, err error) {
 	entry, err := adminPassword(c.root)
 	if err != nil {
@@ -222,20 +210,15 @@ func (c *Config) AdminEmail() (email string, ok bool, err error) {
 	return "", false, nil
 }
 
-// HasAdmin reports whether the config has an unambiguous admin static-password
-// entry, whatever state its fields are in. It answers the question AdminEmail
-// cannot: whether an empty result means the admin login needs repairing or
-// there is no admin login to repair. An ambiguous admin counts as none, because
-// that is what every writer here refuses to guess at.
+// HasAdmin reports whether an unambiguous admin static-password entry exists,
+// including one with missing or blank fields.
 func (c *Config) HasAdmin() bool {
 	entry, err := adminPassword(c.root)
 	return err == nil && entry != nil
 }
 
-// SetAdminEmail rewrites the admin static-password email while preserving its
-// bcrypt hash and username — the hash is the one field that cannot be
-// recomputed, so it is never regenerated. It fails closed if no unambiguous
-// admin entry exists.
+// SetAdminEmail updates the admin email, preserving its hash and username.
+// It returns an error if the admin entry is missing or ambiguous.
 func (c *Config) SetAdminEmail(email string) error {
 	entry, err := adminPassword(c.root)
 	if err != nil {

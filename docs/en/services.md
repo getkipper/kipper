@@ -398,7 +398,7 @@ kip service delete mydb --delete-data
 `--delete-data` is irreversible. The persistent volume and all data are permanently deleted. There is no undo.
 :::
 
-What `--delete-data` removes is the volume Kipper created for the service. One that was renamed, or whose labels were changed by hand, is no longer recognisable as that service's and stays where it is, and the command says when it found nothing to remove. Recognisable means the name a StatefulSet gives a claim, `data-<service>-0`, carrying that service's `app` label. When the service itself has already gone that is the only evidence left, so name a service you no longer have carefully.
+What `--delete-data` removes is the volume Kipper created for the service. One that was renamed, or whose labels were changed by hand, is no longer recognizable as that service's and stays where it is, and the command says when it found nothing to remove. Recognizable means the name a StatefulSet gives a claim, `data-<service>-0`, carrying that service's `app` label. When the service itself has already gone that is the only evidence left, so name a service you no longer have carefully.
 
 A volume left behind is what a service of the same name lands on later, and Kipper blocks that service with `DataWithoutCredentials`: there is data on the volume and no password recorded that opens it. `kip service list` names any service in that state under the table. Run the delete again with `--delete-data` once the data is genuinely finished with.
 

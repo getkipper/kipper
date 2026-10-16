@@ -21,17 +21,12 @@ import (
 
 var projectBindingsCmd = &cobra.Command{
 	Use:   "bindings",
-	Short: "List Kipper role bindings that no project explains",
-	Long: `Lists the RoleBindings Kipper's project membership writes that no live
-project accounts for.
+	Short: "List Kipper role bindings without a current project owner",
+	Long: `Lists Kipper RoleBindings whose project no longer owns their namespace.
 
-A binding outlives the thing that explains it. A project deleted while the
-console-api was down leaves its grants behind in namespaces, and so does a
-namespace that changed hands. Nothing else on the cluster reports them: they
-carry a project's name in their own, and once that project is gone there is
-nothing left to join them to.
-
-It reads and changes nothing. What it prints is what to look at.`,
+Bindings can remain after a project is deleted or a namespace changes owners.
+Review the listed bindings before deleting them with kubectl.
+This command only reads cluster resources.`,
 	RunE: runProjectBindings,
 }
 
@@ -137,12 +132,10 @@ func reportUnclaimedBindings(ctx context.Context, clientset kubernetes.Interface
 	return nil
 }
 
-// reportDisputedNamespaces names the namespaces whose label and whose owner's
-// records point at different objects. Their bindings are left off the unclaimed
-// list because the gate still honours them in this release, so they are not
-// orphans to delete. They are worth seeing: the reconciler republishes the
-// claim at the object that is actually there, and release 2 stops reading the
-// label, at which point a namespace still in this state loses its owner.
+// reportDisputedNamespaces reports namespace claims with stale object UIDs.
+// Label-based ownership still allows access. The reconciler republishes these
+// claims; confirm that they have healed before upgrading to a version that
+// requires UID-based ownership.
 func reportDisputedNamespaces(disputed map[string]string, out io.Writer) {
 	if len(disputed) == 0 {
 		return
@@ -152,11 +145,11 @@ func reportDisputedNamespaces(disputed map[string]string, out io.Writer) {
 		names = append(names, ns)
 	}
 	sort.Strings(names)
-	_, _ = fmt.Fprintf(out, "  !   %d namespace(s) are labelled for a project whose records name a\n"+
+	_, _ = fmt.Fprintf(out, "  !   %d namespace(s) are labeled for a project whose records name a\n"+
 		"      different object of that name, which is what a namespace deleted and\n"+
 		"      recreated outside Kipper leaves behind:\n", len(names))
 	for _, ns := range names {
-		_, _ = fmt.Fprintf(out, "      - %s (labelled %s)\n", ns, disputed[ns])
+		_, _ = fmt.Fprintf(out, "      - %s (labeled %s)\n", ns, disputed[ns])
 	}
 	_, _ = fmt.Fprintf(out, "      The project still reaches them, and the reconciler republishes the\n"+
 		"      claim at the object that is there. Check they have healed before\n"+

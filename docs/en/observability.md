@@ -198,11 +198,11 @@ volume](/en/alerts#recovering-a-read-only-volume) for what to do about one.
 
 ## AI log analysis
 
-The log viewers in the web console (for apps, functions, and jobs) include an **Analyse** button. Click it to send the currently visible logs to the configured AI provider for analysis.
+The log viewers in the web console (for apps, functions, and jobs) include an **Analyze** button. Click it to send the currently visible logs to the configured AI provider for analysis.
 
 The AI scans the log output for errors, warnings, stack traces, and unusual patterns. It returns a summary of what happened, highlights the most likely root cause, and suggests next steps. This is especially useful when debugging unfamiliar stack traces or sifting through high-volume log output where the signal is buried in noise.
 
-AI log analysis works with both live streaming logs and Loki history queries. The analysis uses whatever logs are currently displayed. Use the time range and search filters to narrow the context before clicking Analyse.
+AI log analysis works with both live streaming logs and Loki history queries. The analysis uses whatever logs are currently displayed. Use the time range and search filters to narrow the context before clicking Analyze.
 
 Requires an AI provider to be configured in the Settings page. See [Configuration: AI provider settings](/en/configuration.md#ai-provider-settings) for setup.
 

@@ -33,7 +33,7 @@ func (c *Claude) Chat(ctx context.Context, system string, messages []Message) (<
 
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("marshalling request: %w", err)
+		return nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(bodyJSON))

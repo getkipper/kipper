@@ -83,7 +83,7 @@ function copyAll() {
         <span class="inline-block h-2 w-2 animate-pulse rounded-full bg-kipper-500" />
         <span class="inline-block h-2 w-2 animate-pulse rounded-full bg-kipper-500" style="animation-delay: 0.15s" />
         <span class="inline-block h-2 w-2 animate-pulse rounded-full bg-kipper-500" style="animation-delay: 0.3s" />
-        <span class="ml-1">Analysing logs...</span>
+        <span class="ml-1">Analyzing logs...</span>
       </div>
     </div>
   </div>

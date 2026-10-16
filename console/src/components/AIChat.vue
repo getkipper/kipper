@@ -388,7 +388,7 @@ watch(() => props.code, () => {
               @click="input = 'List the tables in this database with a one-line description of each'; send()"
               class="block w-full rounded-lg border border-slate-700 px-3 py-1.5 text-left text-xs text-slate-500 transition-colors hover:border-slate-600 hover:text-slate-400"
             >
-              Summarise the schema
+              Summarize the schema
             </button>
             <button
               @click="input = 'Suggest indexes that would help typical queries on this schema'; send()"

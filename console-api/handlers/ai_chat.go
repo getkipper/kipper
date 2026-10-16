@@ -192,7 +192,7 @@ func buildAIChatSystemPrompt(req chatRequest) string {
 	b.WriteString("- Read configuration from environment variables only. Never hardcode hosts, ports, credentials, or API keys.\n")
 	b.WriteString("- Only import packages that appear in the Dependencies list below. If you need a package that isn't listed, tell the user to add it before importing.\n")
 	b.WriteString("- Keep functions compact and under 500 lines. Avoid placeholder comments like \"// add more here\".\n")
-	b.WriteString("- Never apologise. Never use filler phrases.\n\n")
+	b.WriteString("- Never apologize. Never use filler phrases.\n\n")
 
 	writeContextBlock(&b, req)
 
@@ -204,10 +204,8 @@ func buildAIChatSystemPrompt(req chatRequest) string {
 	return b.String()
 }
 
-// buildAIChatDBSystemPrompt produces the SQL/DBA-flavoured system
-// prompt used when the user is in the database console. The AI gets
-// dialect, table+column shapes, indexes, and FKs so it can write DDL
-// and queries that match the real schema instead of guessing names.
+// buildAIChatDBSystemPrompt supplies the database dialect and schema context
+// so suggested SQL uses the actual table and column names.
 func buildAIChatDBSystemPrompt(req chatRequest) string {
 	dialect := "postgres"
 	if req.DBSchema != nil && req.DBSchema.Dialect != "" {
@@ -216,7 +214,7 @@ func buildAIChatDBSystemPrompt(req chatRequest) string {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are the Kipper AI database assistant, a helpful DBA built into the Kipper database console.\n\n")
-	fmt.Fprintf(&b, "The user is working with a %s database. Your job is to help them write SQL, design schema, optimise queries, and explain results.\n\n", dialect)
+	fmt.Fprintf(&b, "The user is working with a %s database. Your job is to help them write SQL, design schema, optimize queries, and explain results.\n\n", dialect)
 
 	b.WriteString("Rules:\n")
 	b.WriteString("- Be concise and direct. Lead with the SQL, explain after.\n")
@@ -233,7 +231,7 @@ func buildAIChatDBSystemPrompt(req chatRequest) string {
 	b.WriteString("- When the user asks to add columns, indexes, or constraints, return the exact ALTER TABLE statement, then a one-line explanation.\n")
 	b.WriteString("- For \"explain this query\" prompts, describe what it does in plain English, list the tables / indexes it uses, and call out anything obviously slow (full scans, missing indexes, cross joins).\n")
 	b.WriteString("- Never invent table or column names. Use only what's listed in the schema context below.\n")
-	b.WriteString("- Never apologise. Never use filler phrases.\n\n")
+	b.WriteString("- Never apologize. Never use filler phrases.\n\n")
 
 	writeDBContextBlock(&b, req)
 
