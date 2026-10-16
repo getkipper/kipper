@@ -74,7 +74,7 @@ func TestLonghornSettingsFilter_RefusesAManifestItCannotPlaceTheSettingsIn(t *te
 }
 
 func TestInstallLonghorn_AppliesTheFilteredManifest(t *testing.T) {
-	r := &recordingRunner{}
+	r := pinHost(map[string]string{"get storageclass": "", "get nodes.longhorn.io": ""})
 	require.NoError(t, installLonghorn(r, HostOS{ID: "debian", Family: FamilyDebian}, nil))
 
 	all := strings.Join(r.commands, "\n")
@@ -83,6 +83,10 @@ func TestInstallLonghorn_AppliesTheFilteredManifest(t *testing.T) {
 	assert.Contains(t, all, longhornSettingsFuncName+` "$dir/stock.yaml" "$dir/longhorn.yaml"`)
 	assert.Contains(t, all, `kubectl apply -f "$dir/longhorn.yaml"`)
 	assert.NotContains(t, all, "kubectl apply -f https://", "the stock manifest must not be applied unfiltered")
+	assert.Contains(t, all, `{"spec":{"tags":["kipper-server"]}}`, "a fresh install tags the server")
+	assert.Contains(t, all, `nodeSelector: "kipper-server"`, "and pins the single-copy class to it")
+	assert.Less(t, strings.Index(all, "patch nodes.longhorn.io"), strings.Index(all, `nodeSelector: "kipper-server"`),
+		"the tag exists before any volume can select it")
 }
 
 func TestInstallLonghornRefusesAHostItCannotInstallPackagesOn(t *testing.T) {

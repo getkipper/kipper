@@ -68,6 +68,13 @@ func TestRebootDocsNameSkipBackupForAnUnreadableNodeList(t *testing.T) {
 	assert.NotContains(t, reboot, "If the node list is unavailable, pass `--ignore-degraded-volumes`")
 }
 
+func TestNodeAddDocsSayTheDataStaysOnTheServer(t *testing.T) {
+	nodeAdd := docSection(t, "cli-reference.md", "## kip node add")
+	assert.Contains(t, nodeAdd, "Kipper configures each database, registry and in-cluster backup volume to keep one copy on the server")
+	assert.NotContains(t, nodeAdd, "the registry uses one replica with single-replica storage")
+	assert.Contains(t, nodeAdd, "otherwise the reboot refuses: the drain blocks until `--drain-timeout`, then fails, and kip cancels the reboot")
+}
+
 func TestSecurityDocsDescribeTheUFWRollback(t *testing.T) {
 	assert.Contains(t, docSection(t, "security.md", "## What Kipper provides out of the box"), "saves its configuration and active state, and schedules a rollback on the host")
 }

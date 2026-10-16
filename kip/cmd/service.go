@@ -467,6 +467,8 @@ func writeServiceInfo(ctx context.Context, out io.Writer, mgr *service.Manager, 
 		say(out, "  Endpoint:   %s\n", conn.URL)
 		say(out, "  Access Key: %s\n", conn.Username)
 		say(out, "  Secret Key: %s\n", conn.Password)
+		placement, err := mgr.Placement(ctx, namespace, name)
+		writePlacement(out, placement, err)
 		say(out, "\n")
 		return nil
 	}
@@ -480,6 +482,8 @@ func writeServiceInfo(ctx context.Context, out io.Writer, mgr *service.Manager, 
 	if conn.URL != "" {
 		say(out, "  URL:      %s\n", conn.URL)
 	}
+	placement, err := mgr.Placement(ctx, namespace, name)
+	writePlacement(out, placement, err)
 	say(out, "\n")
 
 	return nil
