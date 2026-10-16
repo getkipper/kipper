@@ -213,7 +213,7 @@ const buildNamespace = "kipper-builds"
 // nodeAddressQuery lists one node's "type=address" pairs, one per line.
 func nodeAddressQuery(nodeName string) string {
 	return "kubectl get node " + shellQuote(nodeName) +
-		` -o jsonpath='{range .status.addresses[*]}{.type}={.address}{"` + "\n" + `"}{end}'`
+		` -o jsonpath='{range .status.addresses[*]}{.type}={.address}{"\n"}{end}'`
 }
 
 // WaitForNodeToPublishAddress polls for an IPv4 InternalIP or ExternalIP
