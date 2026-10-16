@@ -207,6 +207,8 @@ Retrieve them later:
 kip service info mydb
 ```
 
+The output also shows `Pod node`, where the service is scheduled, and `Data node`, where its healthy data copies are stored. Kipper configures new service volumes to keep one copy on the server. Existing copies may still be on workers; `kip upgrade` and `kip status` report them.
+
 The hostname (`mydb.default.svc.cluster.local`) is an internal Kubernetes DNS name. Apps in the same namespace can connect directly; [network policies](/en/security#network-isolation-between-namespaces) restrict access from other namespaces.
 
 ## MinIO (S3-compatible object storage)

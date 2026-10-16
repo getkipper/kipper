@@ -174,6 +174,7 @@ func checkHostWith(out io.Writer, sshConfig ssh.Config, cluster *config.Cluster,
 	checkHostDNSResolvers(out, cluster, client)
 	reportPendingRestarts(out, client)
 	reportReadOnlyVolumes(out, cluster, client, nodes)
+	reportDataPlacement(out, client, cluster, nodes)
 	reportUFWFailOpen(out, client)
 }
 

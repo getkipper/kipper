@@ -118,7 +118,7 @@ func blockedServiceCR(name, reason, message string) *unstructured.Unstructured {
 func TestServiceInfoReportsTheRefusalWhenTheSecretIsGone(t *testing.T) {
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{manifest.ServiceGVR: "ServiceList"},
+		map[schema.GroupVersionResource]string{manifest.ServiceGVR: "ServiceList", service.LonghornReplicaGVR: "ReplicaList"},
 		blockedServiceCR("db", "DataWithoutCredentials",
 			"service db has data in data-db-0 and no PASSWORD in db-credentials"),
 	)
@@ -152,7 +152,7 @@ func healthyServiceCR(name, svcType string) *unstructured.Unstructured {
 func TestServiceInfoPrintsTheDetailsOfAHealthyService(t *testing.T) {
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{manifest.ServiceGVR: "ServiceList"},
+		map[schema.GroupVersionResource]string{manifest.ServiceGVR: "ServiceList", service.LonghornReplicaGVR: "ReplicaList"},
 		healthyServiceCR("obj", "minio"),
 	)
 	secrets := k8sfake.NewSimpleClientset(&corev1.Secret{ //nolint:staticcheck
@@ -181,7 +181,7 @@ func TestServiceInfoPrintsTheDetailsOfAHealthyService(t *testing.T) {
 func TestServiceInfoReadsTheServiceOnce(t *testing.T) {
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{manifest.ServiceGVR: "ServiceList"},
+		map[schema.GroupVersionResource]string{manifest.ServiceGVR: "ServiceList", service.LonghornReplicaGVR: "ReplicaList"},
 		healthyServiceCR("db", "postgres"),
 	)
 	secrets := k8sfake.NewSimpleClientset(&corev1.Secret{ //nolint:staticcheck

@@ -2,15 +2,17 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"os"
 
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/infra"
 	"github.com/getkipper/kipper/kip/internal/installer"
 )
 
-// checkNodeRecords validates and mirrors node records over SSH when the cluster
-// has a host address.
-func checkNodeRecords(cluster *config.Cluster, sshKey string) error {
+// checkNodesAndStorage validates and mirrors node records over SSH when the
+// cluster has a host address, then pins single-copy volumes to the server.
+func checkNodesAndStorage(cluster *config.Cluster, sshKey string) error {
 	if cluster.Host == "" {
 		return nil
 	}
@@ -20,8 +22,22 @@ func checkNodeRecords(cluster *config.Cluster, sshKey string) error {
 		return fmt.Errorf("connecting to %s: %w", cluster.Host, err)
 	}
 	defer func() { _ = provider.Close() }()
-	_, err := recordNodes(provider.Client(), cluster.Name, cluster.Host)
-	return err
+	if _, err := recordNodes(provider.Client(), cluster.Name, cluster.Host); err != nil {
+		return err
+	}
+	pinForUpgrade(os.Stdout, provider.Client())
+	return nil
+}
+
+// pinForUpgrade attempts server-only scheduling and reports failures as warnings
+// so storage problems allow the rest of the upgrade to continue.
+func pinForUpgrade(out io.Writer, client installer.CommandRunner) {
+	placement, err := installer.PinSingleCopiesToServer(client)
+	if err != nil {
+		say(out, "  ⚠  could not keep single-copy volumes on the server (%v). The upgrade continues. Run 'kip upgrade' again to retry\n", err)
+		return
+	}
+	reportSingleCopyPlacement(out, placement)
 }
 
 // recordNodes ensures every node is recorded, creating the server record if

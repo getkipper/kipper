@@ -108,25 +108,12 @@ kubectl apply -f "$dir/longhorn.yaml"`, longhornSettingsFunc, url, longhornSetti
 		return fmt.Errorf("waiting for longhorn: %w", err)
 	}
 
-	// Create a single-replica StorageClass for single-node clusters.
-	// The default longhorn class uses 3 replicas which fails on 1 node.
-	singleReplicaSC := `apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: longhorn-single
-provisioner: driver.longhorn.io
-allowVolumeExpansion: true
-reclaimPolicy: Delete
-volumeBindingMode: Immediate
-parameters:
-  numberOfReplicas: "1"
-  staleReplicaTimeout: "30"
-  fsType: ext4
-  dataEngine: v1
-`
-	scCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", singleReplicaSC)
-	if _, err := client.Run(scCmd); err != nil {
-		return fmt.Errorf("creating longhorn-single StorageClass: %w", err)
+	// Use one replica on the server for databases, the registry and backup storage.
+	if _, err := tagServerStorage(client, serverStorageWait); err != nil {
+		return err
+	}
+	if err := ensureSingleCopyClass(client, serverStorageWait); err != nil {
+		return err
 	}
 
 	return nil

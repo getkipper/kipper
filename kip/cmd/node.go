@@ -324,9 +324,12 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%s is the cluster's server", workerHost)
 	}
 	var existing *installer.NodeRecord
+	firstWorker := true
 	for i := range records {
 		if records[i].MachineID == identity.MachineID {
 			existing = &records[i]
+		} else if records[i].Role == installer.NodeRoleWorker {
+			firstWorker = false
 		}
 	}
 
@@ -430,6 +433,12 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Pin existing and new single-copy volumes before the worker can host replicas.
+	placement, err := installer.PinSingleCopiesForJoin(server)
+	if err != nil {
+		return fmt.Errorf("keeping single-copy volumes on the server: %w", err)
+	}
+	reportSingleCopyPlacement(os.Stdout, placement)
 	fmt.Printf("  Preparing %s...\n", workerHost)
 	join, err := installer.PrepareWorker(server, worker, workerDropIn)
 	if err != nil {
@@ -516,6 +525,14 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\n  ✔  %s joined as worker %s (%s mode, %s)\n", workerHost, nodeName, plan.Mode, plan.Joiner.NodeIP)
 	fmt.Printf("     Apps, functions, jobs and services can now run on it. The platform stays on the server.\n\n")
+	fmt.Print(joinDataSummary)
+	if len(placement.OffServer) > 0 {
+		fmt.Printf("\n  ⚠  %s\n", offServerJoinWarning)
+	}
+	if firstWorker && backupsInCluster(cluster.BackupStorage) {
+		fmt.Printf("\n  ⚠  %s\n", inClusterBackupWarning)
+	}
+	fmt.Println()
 	return nil
 }
 
