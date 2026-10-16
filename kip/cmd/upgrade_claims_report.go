@@ -48,7 +48,7 @@ func reportNamespacesWithoutAClaim(ctx context.Context, clientset kubernetes.Int
 		}
 		fresh = stillOrphaned(ctx, clientset, fresh)
 		if len(fresh) > 0 {
-			_, _ = fmt.Fprintf(out, "  !   Labelled for a project that is gone: %s.\n"+
+			_, _ = fmt.Fprintf(out, "  !   Labeled for a project that is gone: %s.\n"+
 				"      Nothing collects these: the project that would have deleted them no\n"+
 				"      longer exists, and no record names them. Check what is inside, then\n"+
 				"      delete them with kubectl.\n",
@@ -81,19 +81,10 @@ const claimsSettlePoll = 5 * time.Second
 // namespace on the cluster.
 const claimsSettleWait = 2 * time.Minute
 
-// namespacesWithoutAClaim returns "<namespace> (project <name>)" for each
-// namespace whose label names a project whose records do not cover it.
-//
-// It answers the resolver's question rather than a narrower one: a claim on this
-// exact object, or the namespace in what the project recorded holding, and a
-// claim naming the name at some other object rules the older record out. A
-// namespace deleted and recreated is a different object, so a claim naming the
-// one that is gone covers nothing and belongs on this list.
-// The second list is namespaces whose labelled project is not on the cluster at
-// all. Those are not waiting for anything: no pass will ever record them,
-// because there is no project left to run one. A project deleted while another
-// replica was mid-pass creating a namespace for it leaves exactly this, and so
-// does a label pointed at a project that has since gone.
+// namespacesWithoutAClaim returns sorted lists of labeled namespaces with
+// missing or stale ownership records, and namespaces whose projects are gone.
+// Entries include the namespace and project names. Terminating namespaces are
+// excluded; listing failures return an error.
 func namespacesWithoutAClaim(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface) ([]string, []string, error) {
 	namespaces, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
 		LabelSelector: labels.Project,

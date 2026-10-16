@@ -295,7 +295,7 @@ func runProjectDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	if !confirmPrompt(fmt.Sprintf("Delete project %q and ALL its environments, apps, services, and data?", name)) {
-		fmt.Println("  Cancelled.")
+		fmt.Println("  Canceled.")
 		return nil
 	}
 
@@ -308,7 +308,7 @@ func runProjectDelete(cmd *cobra.Command, args []string) error {
 
 	// Also delete the namespaces (the console-api delete handler does this too).
 	//
-	// The label lists the candidates and authorises none of them. Anyone who can
+	// The label lists the candidates and authorizes none of them. Anyone who can
 	// write a namespace can point its label at another project, so deleting on
 	// the label alone turns an ordinary project delete into the destruction of
 	// somebody else's namespace, and the operator running it would have no way
@@ -350,7 +350,7 @@ func deleteProjectCR(ctx context.Context, dyn dynamic.Interface, crName, name st
 }
 
 // collectNamespaces deletes the namespaces the project holds on record, each
-// delete naming the object it was authorised against for the same reason the
+// delete naming the object it was authorized against for the same reason the
 // project's own delete does.
 func collectNamespaces(ctx context.Context, clientset kubernetes.Interface, held []corev1.Namespace) {
 	for _, ns := range held {
@@ -639,7 +639,7 @@ func runProjectRemoveEnv(cmd *cobra.Command, args []string) error {
 	}
 
 	if !confirmTypePrompt("This action cannot be undone.", envName) {
-		fmt.Println("\n  Cancelled.")
+		fmt.Println("\n  Canceled.")
 		return nil
 	}
 

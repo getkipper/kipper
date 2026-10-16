@@ -25,7 +25,7 @@ const discoverSystemNamespace = "kipper-system"
 
 var discoverCmd = &cobra.Command{
 	Use:   "discover",
-	Short: "Find Kipper-labelled workloads that have no owning Kipper CR",
+	Short: "Find Kipper-labeled workloads that have no owning Kipper CR",
 	Long: `Scans the current cluster for Deployments, StatefulSets, and PVCs
 that carry app.kubernetes.io/managed-by=kipper but are not owned by an
 App, Service, Function, or Volume CR.
@@ -280,7 +280,7 @@ func suggestForService(s *appsv1.StatefulSet, project, env string) string {
 }
 
 // suggestForVolume builds a `kip volume create` command line that
-// recreates an orphan PVC labelled as a shared volume.
+// recreates an orphan PVC labeled as a shared volume.
 func suggestForVolume(p *corev1.PersistentVolumeClaim, name, project, env string) string {
 	parts := []string{"kip volume create", name}
 	if project != "" {

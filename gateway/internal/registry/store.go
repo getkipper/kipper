@@ -51,7 +51,7 @@ func (r *Registry) RegisterDurably(subdomain, ip, token, path string) (*Entry, O
 
 // saveLocked writes a snapshot to disk. The caller must hold saveMu.
 func (r *Registry) saveLocked(path string) error {
-	// Snapshot entries by value under the read lock. Marshalling shared pointers
+	// Snapshot entries by value under the read lock. Marshaling shared pointers
 	// after releasing it would race Register/Ping mutating LastSeen.
 	r.mu.RLock()
 	entries := make([]Entry, 0, len(r.entries))
@@ -62,7 +62,7 @@ func (r *Registry) saveLocked(path string) error {
 
 	data, err := json.MarshalIndent(valueSnapshot{Entries: entries}, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshalling registry: %w", err)
+		return fmt.Errorf("marshaling registry: %w", err)
 	}
 
 	dir := filepath.Dir(path)

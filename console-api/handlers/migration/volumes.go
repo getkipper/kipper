@@ -27,7 +27,7 @@ func (h *Handler) migrateVolumes(ctx context.Context, session *Session, token *T
 
 	for _, vol := range volumeList.Items {
 		if session.IsCancelled() {
-			return fmt.Errorf("migration cancelled")
+			return fmt.Errorf("migration canceled")
 		}
 
 		// Create Volume CR on target

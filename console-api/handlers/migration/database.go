@@ -38,7 +38,7 @@ func (h *Handler) migrateServices(ctx context.Context, session *Session, token *
 
 	for _, svc := range serviceList.Items {
 		if session.IsCancelled() {
-			return fmt.Errorf("migration cancelled")
+			return fmt.Errorf("migration canceled")
 		}
 
 		// Step: Create Service CR on target
@@ -53,12 +53,8 @@ func (h *Handler) migrateServices(ctx context.Context, session *Session, token *
 		var specMap map[string]interface{}
 		_ = json.Unmarshal(specJSON, &specMap)
 
-		// The credentials travel with the CR rather than in the bulk Secret
-		// phase, so the target can own them from the moment they land and its
-		// engine initialises against the password this cluster's data was
-		// written with. A service whose credentials are missing here cannot be
-		// migrated at all: the target would mint its own and the restored data
-		// would not know it.
+		// Sending credentials with the CR lets the target initialize the engine
+		// with the source password before restoring its data.
 		credentials, err := h.serviceCredentialsPayload(ctx, namespace, svc.Name, svc.Spec.Type)
 		if err != nil {
 			session.UpdateStep(stepName, func(s *Step) {

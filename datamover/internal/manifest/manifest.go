@@ -149,7 +149,7 @@ func BuildDir(root string, chunkSize int64) (*Manifest, error) {
 		}
 		rel, err := filepath.Rel(root, p)
 		if err != nil {
-			return fmt.Errorf("relativising %q: %w", p, err)
+			return fmt.Errorf("relativizing %q: %w", p, err)
 		}
 		if rel == "." {
 			return nil

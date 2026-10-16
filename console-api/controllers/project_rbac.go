@@ -46,10 +46,8 @@ func memberBindingProjects(ctx context.Context, reader client.Reader, obj client
 		return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: project}}}
 	}
 
-	// A generated name carries a project digest nothing can edit in place, so
-	// where the two disagree the name wins. Taking the label's word for it sent
-	// a binding to a project that could not recognise it while the project that
-	// could was never woken, which is drift routed into silence.
+	// The immutable name embeds the project digest, so it takes precedence over
+	// an edited label when deciding which project must reconcile the binding.
 	labelled := obj.GetLabels()[kipperlabels.Project]
 	if labelled != "" && strings.HasPrefix(obj.GetName(), memberbinding.Prefix(labelled)) {
 		return enqueue(labelled)
@@ -113,12 +111,8 @@ func (r *ProjectReconciler) reconcileMemberBindings(ctx context.Context, project
 				if m.Role != role {
 					continue
 				}
-				// Kubernetes username matching is exact. Membership emails come
-				// from the account store, which holds them as the IdP emits them;
-				// trimming guards against whitespace slipping in through any
-				// write path. Full canonicalisation (casing across connectors)
-				// belongs to the connector design, together with the account
-				// store that must apply the same rule.
+				// Preserve the IdP's casing for exact Kubernetes username matching;
+				// trim accidental whitespace from membership writes.
 				email := strings.TrimSpace(m.Email)
 				if email == "" {
 					continue
@@ -271,7 +265,7 @@ func (r *ProjectReconciler) revokeStaleMemberBindings(ctx context.Context, proje
 	if err := r.List(ctx, &bindings, client.MatchingLabels{
 		kipperlabels.Project: project.Name,
 	}); err != nil {
-		return fmt.Errorf("listing this project's labelled member bindings: %w", err)
+		return fmt.Errorf("listing this project's labeled member bindings: %w", err)
 	}
 	seen := map[string]bool{}
 	for i := range bindings.Items {
@@ -372,18 +366,9 @@ func (r *ProjectReconciler) deleteObserved(ctx context.Context, binding *rbacv1.
 	return err
 }
 
-// grantedSubjects is who the project still grants each built-in role, as whole
-// RBAC subjects rather than names.
-//
-// A subject is a tuple of API group, kind and name, and comparing names alone
-// kept a Group subject that happened to share a member's name. Both usernames
-// and group claims carry the same oidc: prefix on this cluster, so that is one
-// drifted field away from granting everyone in a group what the project granted
-// one person. Removing such a subject adds no access, so this stays revoke-only.
-//
-// A member holding a role this build does not know appears under none of them,
-// so the revoke pass takes their access away wherever it finds it. That is the
-// same direction every other path takes for an unrecognised role.
+// grantedSubjects returns complete RBAC subjects for each known role. Comparing
+// the kind and API group as well as the name prevents a Group from retaining
+// access intended for a User. Unknown roles receive no subjects.
 func grantedSubjects(project *kipperv1.Project) map[kipperv1.ProjectMemberRole]map[rbacv1.Subject]bool {
 	granted := make(map[kipperv1.ProjectMemberRole]map[rbacv1.Subject]bool, len(memberClusterRoles))
 	for role := range memberClusterRoles {
@@ -405,17 +390,9 @@ func grantedSubjects(project *kipperv1.Project) map[kipperv1.ProjectMemberRole]m
 	return granted
 }
 
-// managedMemberBindingRole maps a managed binding's name back to its role, in
-// either generation.
-//
-// It generates rather than parses, for the reason the whole naming scheme does:
-// a generated name is two digests and neither runs backwards. Both candidate
-// names are produced from the project and role and compared, which is three
-// comparisons per binding and needs no separator that survives every name.
-//
-// Covering both generations matters here more than anywhere: the revoke pass is
-// the security requirement, and one that recognised only the fixed names would
-// leave a departed member bound under the generated one.
+// managedMemberBindingRole matches legacy and generated binding names to a role.
+// Both forms must be recognized so revocation removes either generation.
+// Generated names contain digests, so candidates are compared rather than parsed.
 func managedMemberBindingRole(project, name string) (kipperv1.ProjectMemberRole, bool) {
 	for role := range memberClusterRoles {
 		if name == "kipper-project-"+string(role) || name == memberbinding.Name(project, string(role)) {

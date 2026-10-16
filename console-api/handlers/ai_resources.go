@@ -15,7 +15,7 @@ import (
 	"github.com/getkipper/kipper/console-api/ai"
 )
 
-const resourceOptPrompt = `You are the Kipper resource optimiser. Analyse the resource usage data below and provide specific recommendations to reduce waste or prevent issues.
+const resourceOptPrompt = `You are the Kipper resource optimizer. Analyze the resource usage data below and provide specific recommendations to reduce waste or prevent issues.
 
 Rules:
 - Be concise — bullet points, not paragraphs
@@ -25,7 +25,7 @@ Rules:
 - If resources look well-tuned, say so
 - Reference Kipper console actions, not kubectl commands`
 
-// AIResources provides AI-powered resource optimisation recommendations.
+// AIResources provides AI-powered resource optimization recommendations.
 type AIResources struct {
 	Client   kubernetes.Interface
 	Settings *AISettings
@@ -60,7 +60,7 @@ func (a *AIResources) Optimise(w http.ResponseWriter, r *http.Request) {
 	}
 
 	messages := []ai.Message{
-		{Role: "user", Content: "Analyse these resource allocations and suggest optimisations:\n\n" + summary},
+		{Role: "user", Content: "Analyze these resource allocations and suggest optimizations:\n\n" + summary},
 	}
 
 	stream, err := provider.Chat(ctx, resourceOptPrompt, messages)

@@ -45,7 +45,7 @@ function copyAll() {
     <div class="sticky top-0 z-10 flex items-center justify-between border-b border-slate-800 bg-slate-900 px-5 py-3">
       <div class="flex items-center gap-1.5 text-sm font-semibold text-emerald-400">
         <TrendingDown class="h-4 w-4" />
-        Resource Optimisation — {{ appName }}
+        Resource Optimization — {{ appName }}
       </div>
       <div class="flex items-center gap-1">
         <button
@@ -78,7 +78,7 @@ function copyAll() {
         <span class="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
         <span class="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-500" style="animation-delay: 0.15s" />
         <span class="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-500" style="animation-delay: 0.3s" />
-        <span class="ml-1">Analysing resource usage...</span>
+        <span class="ml-1">Analyzing resource usage...</span>
       </div>
     </div>
   </div>

@@ -560,10 +560,10 @@ Blueprints are pre-built `kipper.yaml` templates for common application stacks. 
 kip blueprint install wordpress --set projectName=my-blog
 ```
 
-Or generate a manifest to customise before applying:
+Or generate a manifest to customize before applying:
 
 ```bash
 kip init --blueprint wordpress --set projectName=my-blog
 ```
 
-See the [Blueprints](/en/blueprints) page for the full catalogue and usage guide.
+See the [Blueprints](/en/blueprints) page for the full catalog and usage guide.

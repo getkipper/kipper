@@ -226,7 +226,7 @@ func (u *Users) Delete(w http.ResponseWriter, r *http.Request) {
 	// re-added (the role check goes live again). Doing it first means a
 	// failure aborts before anything else changes, and removeDexUser /
 	// RemoveUser are both idempotent, so the admin simply retries. Records
-	// are labelled by an email hash too, so removal (which knows the email,
+	// are labeled by an email hash too, so removal (which knows the email,
 	// not the Dex subject) still targets them.
 	if u.UISessions != nil {
 		if err := u.UISessions.DeleteBySubject(ctx, email); err != nil {
@@ -391,7 +391,7 @@ func (u *Users) addDexUser(ctx context.Context, email, password string) error {
 
 	newYAML, err := yaml.Marshal(config)
 	if err != nil {
-		return fmt.Errorf("marshalling Dex config: %w", err)
+		return fmt.Errorf("marshaling Dex config: %w", err)
 	}
 
 	cm.Data["config.yaml"] = string(newYAML)
@@ -441,7 +441,7 @@ func (u *Users) removeDexUser(ctx context.Context, email string) error {
 
 	newYAML, err := yaml.Marshal(config)
 	if err != nil {
-		return fmt.Errorf("marshalling Dex config: %w", err)
+		return fmt.Errorf("marshaling Dex config: %w", err)
 	}
 
 	cm.Data["config.yaml"] = string(newYAML)

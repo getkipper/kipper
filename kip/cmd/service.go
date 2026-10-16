@@ -288,7 +288,7 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  ✔  Service CR created\n")
 
 	// Wait for the ServiceReconciler to create the credentials secret
-	fmt.Printf("  ...  Waiting for service to initialise\n")
+	fmt.Printf("  ...  Waiting for service to initialize\n")
 	clientset := k8sClient.Clientset()
 	secretName := secretname.ServiceCredentials(name)
 	var secret *unstructured.Unstructured
@@ -664,12 +664,8 @@ func deleteLeftovers(ctx context.Context, out io.Writer, mgr *service.Manager, d
 	return nil
 }
 
-// sayWhatBecameOfTheVolume reports the destroy for what it was.
-//
-// Nothing found is its own outcome: the volume may have gone in an earlier
-// delete, or it may be standing there under a name or label this does not
-// recognise as the service's. Saying it went either way is a claim about data
-// nobody can check afterwards.
+// sayWhatBecameOfTheVolume distinguishes deleting known service volumes from
+// finding none, so the output only confirms data removal when a volume was found.
 func sayWhatBecameOfTheVolume(out io.Writer, name string, volumes service.DataVolumes) {
 	if len(volumes) == 0 {
 		say(out, "\n  ✔  Service %q deleted. No volume of its own was found to remove.\n\n", name)

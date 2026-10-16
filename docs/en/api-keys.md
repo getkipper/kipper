@@ -53,7 +53,7 @@ Hand this section to whoever integrates against your gated API. Every denial is 
 | 503 | `gate_unavailable` | The checker can't verify keys right now, so the route fails closed | yes, about ten seconds |
 | 500 | `misconfigured` | The gate itself is misconfigured. This is a platform bug, not your request | no |
 
-Honour `Retry-After` for backoff. A monthly quota returns the seconds until the next UTC month, so stock retry middleware won't hammer the gate for days.
+Honor `Retry-After` for backoff. A monthly quota returns the seconds until the next UTC month, so stock retry middleware won't hammer the gate for days.
 
 A valid key presented to the wrong app reads as `invalid_key` (401), the same as an unknown key. The gate never tells a caller "this key is real but lacks access", so a key can't be used to probe which apps exist.
 
@@ -104,6 +104,6 @@ This endpoint uses your console session, not an API key. Days are UTC calendar d
 
 For aggregate per-app traffic (all requests, keyed or not), see [Observability](/en/observability).
 
-## Failure behaviour
+## Failure behavior
 
 The gate is fail-closed by design. During an authz outage a gated route returns a clean `503` naming `kipper-authz`, and ungated routes keep serving. The service runs two replicas with a disruption budget, so a total outage is a rare, alertable event rather than a routine one. There is no fail-open switch: a route that asked for key enforcement never silently serves anonymous traffic.

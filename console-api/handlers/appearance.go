@@ -30,7 +30,7 @@ const (
 	appearanceRetryAfterFailure = 5 * time.Second
 )
 
-// faviconColours are the tab-icon colours the console can draw. The console
+// faviconColours are the tab-icon colors the console can draw. The console
 // holds the matching tints.
 var faviconColours = map[string]struct{}{
 	"blue":   {},
@@ -44,8 +44,8 @@ var faviconColours = map[string]struct{}{
 	"grey":   {},
 }
 
-// Appearance handles how a cluster's console looks to everyone who opens it:
-// today, the colour of the browser tab icon.
+// Appearance manages the cluster-wide console tab icon color. Reads are cached
+// to limit control-plane traffic from the unauthenticated appearance endpoint.
 type Appearance struct {
 	Client kubernetes.Interface
 
@@ -55,7 +55,7 @@ type Appearance struct {
 	cached      string
 	nextRefresh time.Time
 
-	// saveMu serialises writers, so the cache cannot end up holding a colour
+	// saveMu serializes writers, so the cache cannot end up holding a color
 	// the cluster no longer has.
 	saveMu sync.Mutex
 }
@@ -64,15 +64,15 @@ type appearanceSettings struct {
 	FaviconColour string `json:"faviconColour"`
 }
 
-// Get returns the cluster's tab-icon colour. Unauthenticated: the colour is
+// Get returns the cluster's tab-icon color. Unauthenticated: the color is
 // not a secret and the login page needs it before anyone has signed in.
 // GET /api/v1/appearance
 func (a *Appearance) Get(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, appearanceSettings{FaviconColour: a.faviconColour(r.Context())})
 }
 
-// faviconColour answers from the cache when it can, and falls back to the
-// default whenever the answer is not a colour this build can draw.
+// faviconColour returns the cached tab icon color, refreshing it when due.
+// Unknown or missing colors use the default; read failures retain a cached value.
 func (a *Appearance) faviconColour(ctx context.Context) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -104,7 +104,7 @@ func (a *Appearance) faviconColour(ctx context.Context) string {
 	return a.cached
 }
 
-// Update sets the cluster's tab-icon colour. Admin-only, because it changes
+// Update sets the cluster's tab-icon color. Admin-only, because it changes
 // what every operator on this cluster sees.
 // PUT /api/v1/settings/appearance
 func (a *Appearance) Update(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +114,7 @@ func (a *Appearance) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, ok := faviconColours[req.FaviconColour]; !ok {
-		respondError(w, http.StatusBadRequest, "unknown favicon colour")
+		respondError(w, http.StatusBadRequest, "unknown favicon color")
 		return
 	}
 

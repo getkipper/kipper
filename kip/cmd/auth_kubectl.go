@@ -16,7 +16,7 @@ var authKubectlTokenCmd = &cobra.Command{
 	Short: "Emit an ExecCredential for kubectl (called by the exec kubeconfig, not by hand)",
 	Long: `Prints the session token for the cluster named by --cluster-domain in the
 Kubernetes ExecCredential format. The kubeconfig kip writes references this
-command as its credential plugin, the direct analogue of aws eks get-token:
+command as its credential plugin, the direct analog of aws eks get-token:
 kubectl runs it whenever it needs a token, the token is minutes-lived, and
 refresh happens automatically from the stored session.
 

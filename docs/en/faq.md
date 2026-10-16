@@ -22,11 +22,11 @@ Managed Kubernetes gives you the cluster but leaves you to figure out ingress, T
 
 Kipper is in active development. The core install, deploy, and management commands work on real infrastructure, and we use it for staging environments and early-stage production workloads. It has not been battle-tested at scale.
 
-### How is this funded, and could the licence change?
+### How is this funded, and could the license change?
 
 Kipper is Apache 2.0, and that grant is irrevocable for every version already published. A release you run today stays yours to use, fork and redistribute, whatever happens later.
 
-Funding is an open question. Kipper is written by one person and earns nothing today. Should that change, the likely shape is paid hosting or support around the same open codebase, with shipped features staying under the same licence. Treat that as the current intention; the paragraph above is the part to rely on.
+Funding is an open question. Kipper is written by one person and earns nothing today. Should that change, the likely shape is paid hosting or support around the same open codebase, with shipped features staying under the same license. Treat that as the current intention; the paragraph above is the part to rely on.
 
 ### Does kip work on Windows?
 

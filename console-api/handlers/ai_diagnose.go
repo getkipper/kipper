@@ -18,7 +18,7 @@ import (
 
 const diagnosePrompt = `You are the Kipper AI error diagnostician. A Kubernetes application is failing and the user needs help.
 
-Analyse the pod status, events, and logs below. Provide:
+Analyze the pod status, events, and logs below. Provide:
 1. A clear one-line summary of the problem
 2. The root cause
 3. Specific fix instructions (exact commands or config changes)

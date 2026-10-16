@@ -169,7 +169,7 @@ func runClusterDomainForward(cmd *cobra.Command, newDomain string) error {
 	// host-changing patch raises it; a resume without a host change reuses the
 	// generation the reconciler already observed when it opened the transition,
 	// because the reconciler does not re-publish observedGeneration for non-host
-	// edits (e.g. an earlier SSO acknowledgement) while parked at
+	// edits (e.g. an earlier SSO acknowledgment) while parked at
 	// AwaitingApproval. Overrides in spec make this a host change even when the
 	// domain already matches: the patch clears them.
 	barrierGen := current.Status.ObservedGeneration
@@ -355,7 +355,7 @@ func runClusterDomainRollback(cmd *cobra.Command) error {
 
 // driveCutover runs the shared no-lockout cutover from a requested spec change:
 // confirm the reconciler is responding, wait for it to dual-serve, clear the SSO
-// acknowledgement gate, verify the new hosts from outside, approve the one
+// acknowledgment gate, verify the new hosts from outside, approve the one
 // session-invalidating cutover bound to the requested target, and watch it
 // through to steady. It is used by the forward, sync, and rollback paths.
 func driveCutover(ctx context.Context, ci *clusteridentity.Client, target serving.HostSet, barrierGen int64, ack bool, label string, stager *cutoverStager) error {
@@ -377,9 +377,9 @@ func driveCutover(ctx context.Context, ci *clusteridentity.Client, target servin
 	if needsSSOAck(gate) {
 		if !ack {
 			printSSOCallbackGuidance(gate)
-			return fmt.Errorf("SSO callbacks need acknowledgement; update each provider, then re-run with --ack-sso-callbacks")
+			return fmt.Errorf("SSO callbacks need acknowledgment; update each provider, then re-run with --ack-sso-callbacks")
 		}
-		// The acknowledgement names the target Dex host, so it authorises this
+		// The acknowledgment names the target Dex host, so it authorizes this
 		// move only; a later move to another host needs a fresh one.
 		if err := ci.PatchSpec(ctx, map[string]any{"ackSSOCallbacksFor": gate.Status.Transition.To.Dex}); err != nil {
 			return err

@@ -83,14 +83,14 @@ See [When a rollout waits](/en/deploying-apps#when-a-rollout-waits) for what eac
 
 ## Autoscaling (HPA)
 
-Autoscaling adjusts the **number of pods** based on CPU and memory utilisation. It works independently from the resource controller, which adjusts **CPU and memory per pod**. Together, they give you both vertical scaling (right-sized pods) and horizontal scaling (right number of pods).
+Autoscaling adjusts the **number of pods** based on CPU and memory utilization. It works independently from the resource controller, which adjusts **CPU and memory per pod**. Together, they give you both vertical scaling (right-sized pods) and horizontal scaling (right number of pods).
 
 ### How the two controllers interact
 
 | Concern | Who owns it | What it does |
 |---|---|---|
 | CPU and memory per pod | Resource controller (auto mode) | Monitors usage, adjusts requests and limits |
-| Number of pods (replicas) | HPA (Kubernetes built-in) | Monitors utilisation %, scales between min and max |
+| Number of pods (replicas) | HPA (Kubernetes built-in) | Monitors utilization %, scales between min and max |
 | Deployment shape (image, env, volumes) | App reconciler | Syncs the Deployment to match the App CR |
 
 When autoscaling is enabled, the App reconciler stops writing `spec.replicas` to the Deployment and lets the HPA own that field. When autoscaling is disabled, the App reconciler owns replicas again.
@@ -131,7 +131,7 @@ spec:
     cpuTarget: 70
 ```
 
-The HPA checks metrics every 15 seconds. When average CPU across all pods exceeds the target, it adds pods. When utilisation drops, it removes pods (down to `minReplicas`).
+The HPA checks metrics every 15 seconds. When average CPU across all pods exceeds the target, it adds pods. When utilization drops, it removes pods (down to `minReplicas`).
 
 ### Recommended settings
 
@@ -299,7 +299,7 @@ Resource changes can be forwarded to Slack. See [Configuration](/en/configuratio
 
 Earlier versions stored automatic allocations in the same App fields as user settings. This release stores tuning recommendations separately and preserves user bounds. When upgrading:
 
-- **Save existing console-set App values again.** The old console and auto-sizer shared a field manager, so Kipper treats those values as automatic until you save them after upgrading. Values owned by kip, `kip apply` or GitOps tools are recognised immediately. Service and function spec values count as user settings.
+- **Save existing console-set App values again.** The old console and auto-sizer shared a field manager, so Kipper treats those values as automatic until you save them after upgrading. Values owned by kip, `kip apply` or GitOps tools are recognized immediately. Service and function spec values count as user settings.
 - **Wait for the upgrade to finish before setting bounds.** The old auto-sizer can still overwrite newly saved values while console-api rolls out.
 - **Check your values after a rollback and subsequent upgrade.** The old auto-sizer can overwrite them while it runs.
 - **Upgrade kip as well.** Older versions clear explicit App values when changing profiles and update service StatefulSets directly, where the reconciler can overwrite them. An older kip also cannot claim an unchanged automatic App value as a user setting.

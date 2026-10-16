@@ -26,9 +26,9 @@ function analyse() {
     @click="analyse"
     :disabled="!logs"
     class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors text-slate-400 hover:bg-slate-800 hover:text-slate-300 disabled:opacity-40 disabled:pointer-events-none"
-    :title="!logs ? 'No logs to analyse' : 'Analyse logs with AI'"
+    :title="!logs ? 'No logs to analyze' : 'Analyze logs with AI'"
   >
     <Sparkles class="h-3 w-3" />
-    Analyse
+    Analyze
   </button>
 </template>

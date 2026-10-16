@@ -39,7 +39,7 @@ func (h *Handler) migrateApps(ctx context.Context, session *Session, token *Toke
 	var arrivesStopped []string
 	for i, app := range appList.Items {
 		if session.IsCancelled() {
-			return fmt.Errorf("migration cancelled")
+			return fmt.Errorf("migration canceled")
 		}
 
 		// Carry user and held values. The target claims the userResources subset.
@@ -196,7 +196,7 @@ func (h *Handler) migrateFunctions(ctx context.Context, session *Session, token 
 
 	for i, fn := range fnList.Items {
 		if session.IsCancelled() {
-			return fmt.Errorf("migration cancelled")
+			return fmt.Errorf("migration canceled")
 		}
 
 		specJSON, _ := json.Marshal(fn.Spec)
@@ -253,7 +253,7 @@ func (h *Handler) migrateJobs(ctx context.Context, session *Session, token *Toke
 
 	for i, job := range jobList.Items {
 		if session.IsCancelled() {
-			return fmt.Errorf("migration cancelled")
+			return fmt.Errorf("migration canceled")
 		}
 
 		specJSON, _ := json.Marshal(job.Spec)
@@ -294,7 +294,7 @@ func (h *Handler) migrateJobs(ctx context.Context, session *Session, token *Toke
 const defaultHealthTimeout = 10 * time.Minute
 
 // healthTimeout returns how long waitForHealthy polls before failing the
-// migration, honouring the KIPPER_MIGRATION_HEALTH_TIMEOUT override (a Go
+// migration, honoring the KIPPER_MIGRATION_HEALTH_TIMEOUT override (a Go
 // duration such as "20m").
 func healthTimeout() time.Duration {
 	if v := os.Getenv("KIPPER_MIGRATION_HEALTH_TIMEOUT"); v != "" {
@@ -322,7 +322,7 @@ func (h *Handler) waitForHealthy(session *Session, token *Token, namespaces []st
 
 	for {
 		if session.IsCancelled() {
-			return fmt.Errorf("migration cancelled")
+			return fmt.Errorf("migration canceled")
 		}
 
 		allReady := true

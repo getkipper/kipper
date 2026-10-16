@@ -35,8 +35,8 @@ ai:
 | `clusters[].kubeconfig` | Path to the cluster's kubeconfig file |
 | `clusters[].gateway_token` | Token for managing the kipper.run subdomain. The source of truth is the `gateway-credentials` Secret on the cluster; this local copy is the disaster-recovery fallback that lets you deregister the subdomain if the cluster itself is gone. Because of it, `config.yaml` is written readable by your user only (mode 0600) |
 | `clusters[].dns_resolvers` | Resolvers CoreDNS forwards external queries to (set via `--dns-resolver` on install). Empty means the default public set. `kip status` warns when the file on the server drifts from this, and `kip cluster dns repair` restores it |
-| `clusters[].org` | Organisation short code (optional), prefixes all namespaces |
-| `clusters[].org_display_name` | Human-readable organisation name for the console |
+| `clusters[].org` | Organization short code (optional), prefixes all namespaces |
+| `clusters[].org_display_name` | Human-readable organization name for the console |
 | `current_cluster` | Which cluster `kip` commands target by default |
 | `ai` | AI provider configuration (optional, all features disabled by default) |
 
@@ -139,7 +139,7 @@ This removes the cluster from your local config and deletes the stored kubeconfi
 ### Telling the browser tabs apart
 
 With several consoles open, every tab shows the same blue icon. Give each
-cluster its own colour under **Settings → Appearance** in the console, and the
+cluster its own color under **Settings → Appearance** in the console, and the
 tab icon changes to match.
 
 ## Custom console domain
@@ -150,7 +150,7 @@ By default, the web console is available at `console--{domain}.kipper.run`. Move
 kip cluster domain kipper.example.com --yes
 ```
 
-The command derives three hosts from your domain (`console.kipper.example.com`, `console-api.kipper.example.com`, `dex.kipper.example.com`) and drives them through a no-lockout transition: the new hosts come up alongside the old ones, kip verifies them from outside with a valid certificate, and only then approves the single cutover that moves the login issuer. If verification fails, the old hosts keep serving and nothing changes. The [Domains](/en/domains#custom-console-domain) page shows the full expected output, the SSO acknowledgement flow, and the `--sync`, `--rollback`, and `--repair` modes.
+The command derives three hosts from your domain (`console.kipper.example.com`, `console-api.kipper.example.com`, `dex.kipper.example.com`) and drives them through a no-lockout transition: the new hosts come up alongside the old ones, kip verifies them from outside with a valid certificate, and only then approves the single cutover that moves the login issuer. If verification fails, the old hosts keep serving and nothing changes. The [Domains](/en/domains#custom-console-domain) page shows the full expected output, the SSO acknowledgment flow, and the `--sync`, `--rollback`, and `--repair` modes.
 
 ::: tip
 Point DNS A records for `console.`, `console-api.`, and `dex.` under your domain at the server before running the command. cert-manager issues the Let's Encrypt certificates once DNS resolves.
@@ -192,7 +192,7 @@ These keys live under `ai` in `~/.kip/config.yaml`:
 | `model` | Model name |
 | `ollama_url` | Ollama server address |
 
-The config format also accepts `features.log_analysis`, `features.anomaly_detection`, and `features.dockerfile_generation`. These fields are currently unused: they do not control the console’s Analyse button or enable and disable individual AI features.
+The config format also accepts `features.log_analysis`, `features.anomaly_detection`, and `features.dockerfile_generation`. These fields are currently unused: they do not control the console’s Analyze button or enable and disable individual AI features.
 
 To disable AI through the CLI, run `kip ai configure` and choose **None**. This saves `provider: none` locally and attempts to sync it to the cluster. Check for sync warnings; editing the local file alone leaves the console’s settings unchanged.
 

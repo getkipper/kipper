@@ -92,7 +92,7 @@ func runPromote(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n  Promote %s → %s (%s)\n", from, to, project)
 	fmt.Printf("  Apps: %s\n\n", strings.Join(appNames, ", "))
 	if !confirmPrompt(fmt.Sprintf("Promote to %s?", to)) {
-		fmt.Println("  Cancelled.")
+		fmt.Println("  Canceled.")
 		return nil
 	}
 

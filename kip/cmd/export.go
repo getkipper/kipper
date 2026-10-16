@@ -71,7 +71,7 @@ func exportSingle(ctx context.Context, dynClient dynamic.Interface, cluster *con
 
 	data, err := manifest.Marshal(m)
 	if err != nil {
-		return fmt.Errorf("marshalling manifest: %w", err)
+		return fmt.Errorf("marshaling manifest: %w", err)
 	}
 
 	if output != "" {

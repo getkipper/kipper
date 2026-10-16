@@ -39,7 +39,7 @@ flowchart LR
 
 Services in the same route group share a single Ingress and TLS certificate. Traefik handles the path-based routing, so no separate API gateway is needed.
 
-Without `--route`, each app gets its own subdomain (the default behaviour).
+Without `--route`, each app gets its own subdomain (the default behavior).
 
 ### Creating a route group {#creating-a-route-group}
 

@@ -82,7 +82,7 @@ kip blueprint install ghost \
 
 ## Generating a manifest
 
-Generate a `kipper.yaml` file that you can review and customise before applying, instead of installing directly:
+Generate a `kipper.yaml` file that you can review and customize before applying, instead of installing directly:
 
 ```bash
 kip init --blueprint wordpress --set projectName=my-blog

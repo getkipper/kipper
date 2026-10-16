@@ -155,7 +155,7 @@ Point DNS for the new hosts (`console.`, `console-api.`, `dex.` under your domai
 
 ### If your cluster uses SSO
 
-The cutover moves the Dex issuer, so each SSO provider's allowed callback URL must be updated first. kip stops, prints the new callback URL, and waits. Update every provider, then re-run with `--ack-sso-callbacks`. The acknowledgement is recorded for that specific move: a later domain change asks again.
+The cutover moves the Dex issuer, so each SSO provider's allowed callback URL must be updated first. kip stops, prints the new callback URL, and waits. Update every provider, then re-run with `--ack-sso-callbacks`. The acknowledgment is recorded for that specific move: a later domain change asks again.
 
 ### Recovering and rolling back
 
@@ -292,7 +292,7 @@ up issuance without dropping to kubectl.
 Common causes:
 
 - **DNS not pointing to the server yet.** cert-manager uses HTTP-01 challenges, so the domain must resolve to your server's IP. Check with `dig yourdomain.com`.
-- **Stale DNS caches after a recent record change.** If you created or changed the A record within the last hour, public resolvers can keep serving the previous answer until the record's TTL expires. This bites hardest when a wildcard record (`*.example.com`) already points at another server: resolvers keep synthesising the wildcard's IP for your new hostname until their cache expires. cert-manager's pre-flight self-check then reaches the wrong server, and the challenge status shows a misleading `wrong status code '404', expected '200'` or a connection error against an IP that is not your cluster. Your own machine may already see the new record while the resolvers cert-manager uses do not. Compare `dig yourdomain.com @1.1.1.1` and `dig yourdomain.com @8.8.8.8` with what you expect. Nothing is broken. Issuance retries automatically and completes once the caches expire.
+- **Stale DNS caches after a recent record change.** If you created or changed the A record within the last hour, public resolvers can keep serving the previous answer until the record's TTL expires. This bites hardest when a wildcard record (`*.example.com`) already points at another server: resolvers keep synthesizing the wildcard's IP for your new hostname until their cache expires. cert-manager's pre-flight self-check then reaches the wrong server, and the challenge status shows a misleading `wrong status code '404', expected '200'` or a connection error against an IP that is not your cluster. Your own machine may already see the new record while the resolvers cert-manager uses do not. Compare `dig yourdomain.com @1.1.1.1` and `dig yourdomain.com @8.8.8.8` with what you expect. Nothing is broken. Issuance retries automatically and completes once the caches expire.
 - **Ports 80/443 blocked.** Let's Encrypt needs to reach your server on port 80 to verify ownership.
 - **Rate limiting.** Let's Encrypt has rate limits. If you've issued too many certificates for the same domain recently, you'll need to wait. Check the cert-manager logs: `kubectl logs -n cert-manager -l app=cert-manager`.
 

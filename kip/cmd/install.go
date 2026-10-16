@@ -40,8 +40,8 @@ func init() {
 	installCmd.Flags().String("dex-domain", "", "hostname to serve Dex on (default: dex.<domain>)")
 	installCmd.Flags().String("ssh-key", "", "path to SSH private key")
 	installCmd.Flags().String("admin-email", "admin@kipper.local", "email for Let's Encrypt and admin account")
-	installCmd.Flags().String("org", "", "organisation short code (e.g. acme)")
-	installCmd.Flags().String("org-display-name", "", "organisation display name (e.g. Acme Inc)")
+	installCmd.Flags().String("org", "", "organization short code (e.g. acme)")
+	installCmd.Flags().String("org-display-name", "", "organization display name (e.g. Acme Inc)")
 	installCmd.Flags().Bool("harden", true, "disable surplus host services exposed on public interfaces (e.g. rpcbind, Cockpit)")
 	installCmd.Flags().Bool("admin-kubeconfig", false, "write the shared k3s admin certificate to this machine instead of a per-operator OIDC kubeconfig; CI escape hatch. The certificate is unattributed and revocable only by rotation")
 	installCmd.Flags().Bool("no-login", false, "skip the inline sign-in; run kip auth login && kip auth verify later")
@@ -58,7 +58,7 @@ func init() {
 	installCmd.Flags().String("credentials-file", "", "save the generated admin email and password to a new local file (mode 0600); print them if saving fails")
 	installCmd.Flags().Bool("no-ssh-rate-limit", false, "disable UFW SSH rate limiting on Ubuntu and Debian; useful for CI or operators sharing a NAT address")
 	installCmd.Flags().StringSlice("dns-resolver", nil, "upstream DNS resolver CoreDNS forwards external queries to (repeatable; default 1.1.1.1, 8.8.8.8, 9.9.9.9). Set for clusters that must reach internal/corporate DNS.")
-	installCmd.Flags().StringSlice("trusted-proxy", nil, "IP or CIDR whose X-Forwarded-* headers Traefik honours (repeatable). Set for clusters behind an external load balancer; the kipper.run gateway is trusted automatically.")
+	installCmd.Flags().StringSlice("trusted-proxy", nil, "IP or CIDR whose X-Forwarded-* headers Traefik honors (repeatable). Set for clusters behind an external load balancer; the kipper.run gateway is trusted automatically.")
 
 	installCmd.Flags().String("backup-storage-bucket", "", "S3-compatible bucket name for Velero backups (must already exist)")
 	installCmd.Flags().String("backup-storage-region", "", "AWS region (or provider equivalent, e.g. 'auto' for Cloudflare R2)")
@@ -115,7 +115,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Canonicalise the name before anything reads it, so LAB.KIPPER.RUN and
+	// Canonicalize the name before anything reads it, so LAB.KIPPER.RUN and
 	// lab.kipper.run. take the same path as the host they name.
 	domain = installer.NormaliseDomain(domain)
 

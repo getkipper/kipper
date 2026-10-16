@@ -120,7 +120,7 @@ type ResourceController struct {
 	history          map[workloadKey][]usageObservation
 	historySize      map[workloadKey]string  // the resources history was sampled at
 	skippedLogged    map[string]bool         // namespace/name of ownerless workloads already logged
-	stagedAcks       []func(context.Context) // acknowledgements waiting for this tick's alerts to be stored
+	stagedAcks       []func(context.Context) // acknowledgments waiting for this tick's alerts to be stored
 	hpaReplicas      map[string]int32        // namespace/name/uid → last seen replica count
 	restarts         map[string]time.Time    // namespace/app → latest container restart within restartAlertHold
 	changeTimestamps map[string][]time.Time  // namespace/name → recent resource or HPA change times
@@ -183,7 +183,7 @@ func NewResourceController(client kubernetes.Interface, crClient crclient.Client
 	return rc
 }
 
-// Run starts the controller loop. It blocks until the context is cancelled.
+// Run starts the controller loop. It blocks until the context is canceled.
 func (rc *ResourceController) Run(ctx context.Context) {
 	log.Printf("resource controller started (interval: %s)", checkInterval)
 	ticker := time.NewTicker(checkInterval)
@@ -1038,7 +1038,7 @@ func (rc *ResourceController) setRecommendation(ctx context.Context, app *kipper
 
 	profile := rc.recommendProfile(app)
 	message := fmt.Sprintf(
-		"This app has been frequently adjusting resources and scaling. Consider switching to the %s profile to stabilise.",
+		"This app frequently changes resources or replica counts. Consider the %s profile for more stable resource allocation.",
 		profile,
 	)
 

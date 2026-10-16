@@ -294,11 +294,9 @@ func (r *PlatformConfigReconciler) reconcileTraefikServiceMonitor(ctx context.Co
 	return r.Update(ctx, existing)
 }
 
-// ensureGrafanaAdminSecret provisions the Grafana admin credentials Secret
-// with a random password, creating the monitoring namespace and the Secret
-// only when absent. Create-if-absent (never update) is deliberate: a re-run
-// must not rotate the password and invalidate a saved login, matching the
-// installer's behaviour so both provisioners agree on one stable value.
+// ensureGrafanaAdminSecret creates the monitoring namespace and random Grafana
+// credentials if absent. Existing credentials are preserved so reconciliation
+// keeps saved logins valid.
 func (r *PlatformConfigReconciler) ensureGrafanaAdminSecret(ctx context.Context) error {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: platform.MonitoringNamespace}}
 	if err := r.Create(ctx, ns); err != nil && !errors.IsAlreadyExists(err) {
@@ -521,7 +519,7 @@ func rewriteValuesContent(content string, paths []memoryPath) (string, []string,
 
 	out, err := yaml.Marshal(values)
 	if err != nil {
-		return "", nil, fmt.Errorf("marshalling valuesContent: %w", err)
+		return "", nil, fmt.Errorf("marshaling valuesContent: %w", err)
 	}
 	return string(out), changes, nil
 }

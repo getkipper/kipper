@@ -195,7 +195,7 @@ function handlePromote(appName: string, from: string, to: string) {
       promoting.value = true
       try {
         await promoteApp(selectedProject.value!.name, appName, from, to)
-        toast.success(`${appName} promoted to ${to}: initialising...`)
+        toast.success(`${appName} promoted to ${to}: initializing...`)
         activeEnv.value = to
         // Refresh immediately and again after pods have time to start
         await refreshAfterPromotion()
@@ -220,7 +220,7 @@ function handlePromoteAll(from: string, to: string) {
       promoting.value = true
       try {
         await promoteAll(selectedProject.value!.name, from, to)
-        toast.success(`All apps promoted to ${to}: initialising...`)
+        toast.success(`All apps promoted to ${to}: initializing...`)
         activeEnv.value = to
         await refreshAfterPromotion()
       } catch {

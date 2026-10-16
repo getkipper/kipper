@@ -24,7 +24,7 @@ When you report, tell us what you found, where it lives in the code, how to repr
 Areas we especially want to hear about:
 
 - Authentication and the Dex login flow, and session or token handling.
-- Authorisation and tenant isolation, for example a project member reaching another project's data, or a non-admin gaining admin or cluster-wide access.
+- Authorization and tenant isolation, for example a project member reaching another project's data, or a non-admin gaining admin or cluster-wide access.
 - Secret handling: service credentials, git tokens, and anything that leaks them.
 - The install and upgrade path, host hardening, and the SSH bootstrap.
 - The default components Kipper deploys and how it configures them.

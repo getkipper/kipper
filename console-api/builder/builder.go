@@ -305,7 +305,7 @@ func CreateBuildJob(ctx context.Context, client kubernetes.Interface, owners nso
 	// diagnosed here; correlating an ARG value to the FROM that uses it is not
 	// worth the complexity for a best-effort diagnostic, and such a build still
 	// fails closed at Kaniko for lack of the cluster-registry credential and CA.
-	// If the check itself errors, the build still fails closed.
+	// This diagnostic is best-effort; Kaniko still enforces registry access.
 	fromCheckScript := fmt.Sprintf(
 		`if [ -f "$1" ] && sed -e ':a' -e '/\\$/N; s/\\\n//; ta' "$1" | grep -qiE '^[[:space:]]*FROM[[:space:]]+(--[^[:space:]]+[[:space:]]+)*["'"'"']?%s/'; then echo 'kipper: base images FROM the internal cluster registry are unsupported; publish shared base images to a public registry' >&2; exit 1; fi`,
 		registryHostPattern,
@@ -318,11 +318,8 @@ func CreateBuildJob(ctx context.Context, client kubernetes.Interface, owners nso
 			Labels:    buildLabels,
 			Annotations: map[string]string{
 				"kipper.run/commit": commitSHA,
-				// The source this artefact is built from, so a completion can
-				// be checked against the source the app declares by then. The
-				// app UID covers a delete and recreate, and job ordering covers
-				// a newer build, but neither covers a source that was edited
-				// without launching one.
+				// Reject completed builds if the app's source changed, including
+				// edits that did not launch a replacement build.
 				SourceFingerprintAnnotation: GitSourceFingerprint(app.Spec.Git),
 			},
 			// No App ownerRef: the App lives in the tenant namespace and
@@ -798,7 +795,7 @@ func registryAuthEntry(user, password string) (json.RawMessage, error) {
 		"auth": base64.StdEncoding.EncodeToString([]byte(user + ":" + password)),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("marshalling registry auth: %w", err)
+		return nil, fmt.Errorf("marshaling registry auth: %w", err)
 	}
 	return entry, nil
 }
@@ -833,7 +830,7 @@ func mountRegistryAuth(ctx context.Context, client kubernetes.Interface, jobName
 	}
 	pushJSON, err := json.Marshal(dockerConfig{Auths: map[string]json.RawMessage{registryEndpoint: pushEntry}})
 	if err != nil {
-		return "", fmt.Errorf("marshalling push docker config: %w", err)
+		return "", fmt.Errorf("marshaling push docker config: %w", err)
 	}
 
 	secretName := jobName + "-registry"

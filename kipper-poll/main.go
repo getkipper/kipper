@@ -308,7 +308,7 @@ func serveMinIO(ctx context.Context, addr, targetURL string) error {
 func sendEvent(ctx context.Context, targetURL string, event interface{}) error {
 	body, err := json.Marshal(event)
 	if err != nil {
-		return fmt.Errorf("marshalling event: %w", err)
+		return fmt.Errorf("marshaling event: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body)) //nolint:gosec // G704: the operator's own configured function URL

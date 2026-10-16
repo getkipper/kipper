@@ -93,7 +93,7 @@ func printRepairPlan(plan *ai.RepairPlan) {
 	fmt.Println()
 	fmt.Println("  The following actions will be performed:")
 	if len(plan.BrokenRepos) > 0 {
-		fmt.Printf("  - Delete %d broken BackupRepository CR(s) so Velero re-initialises Kopia on the next backup:\n", len(plan.BrokenRepos))
+		fmt.Printf("  - Delete %d broken BackupRepository CR(s) so Velero re-initializes Kopia on the next backup:\n", len(plan.BrokenRepos))
 		for _, name := range plan.BrokenRepos {
 			fmt.Printf("      * %s\n", name)
 		}

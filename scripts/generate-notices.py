@@ -3,11 +3,11 @@
 
 Lists every third-party component compiled into Kipper's distributed artifacts
 (the kip binary, the Go service images, and the console/runtime bundles) together
-with its licence text, so the distribution carries the attribution and notices
-those licences require. The MPL-2.0 MySQL driver is called out explicitly to
+with its license text, so the distribution carries the attribution and notices
+those licenses require. The MPL-2.0 MySQL driver is called out explicitly to
 satisfy MPL-2.0 section 3.2 (source availability of the covered component).
 
-Run from anywhere: python3 scripts/generate-notices.py
+Run from anywhere, e.g. from the repository root: python3 scripts/generate-notices.py
 Only shipped dependencies are included (test-only Go deps and npm devDependencies
 are excluded, since they are not distributed).
 """
@@ -51,8 +51,7 @@ NOTICE_FILE_NAMES = ["NOTICE", "NOTICE.txt", "NOTICE.md"]
 
 
 def find_notice_file(d):
-    """Apache-2.0 section 4(d): a bundled NOTICE file's attributions must ship
-    with the distribution, so it is carried alongside the licence text."""
+    """Return the first recognized NOTICE file path, or None if absent."""
     if not d or not os.path.isdir(d):
         return None
     for name in NOTICE_FILE_NAMES:
@@ -139,7 +138,7 @@ def render(go, npm):
     out.append("Its distributed binaries and container images include the "
                "third-party open-source components listed below. Each is the "
                "property of its respective authors and is provided under the "
-               "licence shown with it. This file ships alongside every GitHub "
+               "license shown with it. This file ships alongside every GitHub "
                "release and inside the console-api and authz container images; "
                "the copy at the repository root is the canonical one.")
     out.append("")
@@ -156,8 +155,8 @@ def render(go, npm):
                    "Public License 2.0 (MPL-2.0) and is included unmodified. Under "
                    "MPL-2.0 section 3.2, its Source Code Form is available at "
                    f"https://github.com/go-sql-driver/mysql/tree/{mysql_version}. "
-                   "Kipper's own code is not covered by the MPL-2.0; the licence "
-                   "applies only to that component's own files. The full licence "
+                   "Kipper's own code is not covered by the MPL-2.0; the license "
+                   "applies only to that component's own files. The full license "
                    "text is included in the Go components section below.")
         out.append("")
     out.append("## GNU Affero General Public License 3.0 components")
@@ -172,8 +171,8 @@ def render(go, npm):
                "https://github.com/minio/minio/tree/RELEASE.2025-09-07T16-13-09Z "
                "and https://github.com/minio/mc/tree/RELEASE.2025-08-13T08-35-41Z, "
                "and the build recipe is `images/minio` in this repository. Each "
-               "image carries, under `/licenses`, the full licence text, the "
-               "attributions and licences of the dependencies built into it "
+               "image carries, under `/licenses`, the full license text, the "
+               "attributions and licenses of the dependencies built into it "
                "(upstream's `CREDITS`), and these source directions. Kipper's "
                "own code is not covered by the AGPL-3.0; it runs these images "
                "as separate programs.")
@@ -188,7 +187,7 @@ def render(go, npm):
             out.append(c["text"])
             out.append("```")
         else:
-            out.append("_Licence text not bundled; see the component's source "
+            out.append("_License text not bundled; see the component's source "
                        "repository._")
         if c.get("notice"):
             out.append("")
@@ -205,14 +204,14 @@ def render(go, npm):
         out.append(header)
         out.append("")
         if c.get("licence"):
-            out.append(f"Licence: {c['licence']}")
+            out.append(f"License: {c['licence']}")
             out.append("")
         if c["text"]:
             out.append("```")
             out.append(c["text"])
             out.append("```")
         else:
-            out.append("_Licence text not bundled; see the component's source "
+            out.append("_License text not bundled; see the component's source "
                        "repository._")
         out.append("")
     return "\n".join(out).rstrip() + "\n"

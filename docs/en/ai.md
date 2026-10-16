@@ -134,7 +134,7 @@ client = OpenAI(
 
 response = client.chat.completions.create(
     model="qwen2.5:3b-instruct-q4_K_M",
-    messages=[{"role": "user", "content": "Summarise this changelog in one sentence."}],
+    messages=[{"role": "user", "content": "Summarize this changelog in one sentence."}],
 )
 print(response.choices[0].message.content)
 ```
@@ -151,7 +151,7 @@ const client = new OpenAI({
 
 const response = await client.chat.completions.create({
   model: "qwen2.5:3b-instruct-q4_K_M",
-  messages: [{ role: "user", content: "Summarise this changelog in one sentence." }],
+  messages: [{ role: "user", content: "Summarize this changelog in one sentence." }],
 })
 console.log(response.choices[0].message.content)
 ```

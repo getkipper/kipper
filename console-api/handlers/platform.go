@@ -81,7 +81,7 @@ type componentPatchRequest struct {
 
 // isKnownComponent gates the PATCH endpoint and the summary/detail
 // listings against the shared path table in controller/pkg/platform.
-// Centralising this means a new chart-managed component lands here for
+// Centralizing this means a new chart-managed component lands here for
 // free as soon as it's added to helmpaths.go.
 func isKnownComponent(name string) bool {
 	_, ok := platform.PathFor(name)
@@ -223,7 +223,7 @@ func (p *Platform) UpdateComponent(w http.ResponseWriter, r *http.Request) {
 	pc, err := p.fetchPlatformConfig(ctx)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			respondError(w, http.StatusNotFound, "platform config not initialised; run kip install or recreate the PlatformConfig CR")
+			respondError(w, http.StatusNotFound, "platform config not initialized; run kip install or recreate the PlatformConfig CR")
 			return
 		}
 		respondError(w, http.StatusInternalServerError, "failed to load platform config")

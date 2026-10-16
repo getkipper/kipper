@@ -340,12 +340,12 @@ In the Scale tab, **Traffic and scaling** compares traffic, resource use and des
 
 Point at a vertical marker to read about a change in the desired count:
 
-- **Solid, unlabelled:** a matching autoscaler event records the change.
+- **Solid, unlabeled:** a matching autoscaler event records the change.
 - **Dashed:** autoscaling was on before and after the change, but no matching autoscaler event is available. Older events may have expired.
-- **Solid, labelled:** the count moved to or from zero, or matched a nearby change to the autoscaling minimum or maximum.
+- **Solid, labeled:** the count moved to or from zero, or matched a nearby change to the autoscaling minimum or maximum.
 - **Dotted:** there is not enough autoscaling data to explain the change.
 
-For the 20 most recent dashed or unlabelled solid markers, available measurements cover the 2 minutes before an increase or 5 minutes before a decrease. They include CPU and memory peaks and averages for the configured targets, plus estimated request counts. Older measurements may no longer be available. Point elsewhere on a chart to read the values at that time.
+For the 20 most recent dashed or unlabeled solid markers, available measurements cover the 2 minutes before an increase or 5 minutes before a decrease. They include CPU and memory peaks and averages for the configured targets, plus estimated request counts. Older measurements may no longer be available. Point elsewhere on a chart to read the values at that time.
 
 While autoscaling is on and the app is not stopped, a guide estimates when pods may be added, up to the configured maximum. For example, a 70% CPU target gives an estimated threshold of 77% of the CPU request. This assumes the default 10% tolerance; a cluster can use a different value.
 

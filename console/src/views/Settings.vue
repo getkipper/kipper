@@ -449,7 +449,7 @@ const faviconTints = FAVICON_TINTS
 const faviconColour = ref<string>(DEFAULT_FAVICON_COLOUR)
 const savingFaviconColour = ref(false)
 
-// The colour is stored on the cluster rather than in the browser, so every
+// The color is stored on the cluster rather than in the browser, so every
 // operator who opens this console sees the same tab.
 async function handleSaveFaviconColour(colour: string) {
   if (colour === faviconColour.value || savingFaviconColour.value) return
@@ -459,13 +459,13 @@ async function handleSaveFaviconColour(colour: string) {
   try {
     await updateAppearance(colour)
     if (await applyFaviconColour(colour)) {
-      toast.success('Tab colour updated')
+      toast.success('Tab color updated')
     } else {
-      toast.info('Tab colour saved. This tab shows it after a reload.')
+      toast.info('Tab color saved. Reload this tab to see it.')
     }
   } catch {
     faviconColour.value = previous
-    toast.error('Failed to save the tab colour')
+    toast.error('Failed to save the tab color')
   } finally {
     savingFaviconColour.value = false
   }
@@ -1065,7 +1065,7 @@ onMounted(async () => {
           <Palette class="h-5 w-5 text-kipper-500" :stroke-width="1.75" />
           <div>
             <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-50">Appearance</h2>
-            <p class="text-xs text-slate-500 dark:text-slate-400">The colour of this cluster's browser tab icon, so several consoles open at once stay easy to tell apart</p>
+            <p class="text-xs text-slate-500 dark:text-slate-400">Choose a tab icon color to tell this cluster apart from other open consoles.</p>
           </div>
         </div>
 
@@ -1089,7 +1089,7 @@ onMounted(async () => {
             </button>
           </div>
           <p class="text-xs text-slate-500 dark:text-slate-400">
-            Everyone who opens this console sees the colour picked here, on any machine. Blue is the default.
+            This color applies to everyone using this console. The default is blue.
           </p>
         </div>
       </div>

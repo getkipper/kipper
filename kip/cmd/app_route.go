@@ -292,5 +292,5 @@ func confirmRouteRemoval(in io.Reader, interactive, yes bool) error {
 	if isYes(answer) {
 		return nil
 	}
-	return fmt.Errorf("route removal cancelled")
+	return fmt.Errorf("route removal canceled")
 }

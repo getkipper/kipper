@@ -31,9 +31,8 @@ type GatewayClient struct {
 	HTTPClient *http.Client
 }
 
-// NewGatewayClient creates a client with sensible defaults.
-// The base URL can be overridden via the gatewayURL parameter
-// (empty string uses the default).
+// NewGatewayClient creates a client with a 15-second HTTP timeout. An empty
+// gatewayURL selects https://kipper.run.
 func NewGatewayClient(gatewayURL string) *GatewayClient {
 	if gatewayURL == "" {
 		gatewayURL = defaultGatewayURL
@@ -51,20 +50,14 @@ type Registration struct {
 	Subdomain string `json:"subdomain"`
 	Domain    string `json:"domain"`
 	Token     string `json:"token"`
-	// Challenge is a proof-of-possession nonce, and the gateway issues one only
-	// to a caller whose token it recognised. That makes it the single signal
-	// distinguishing a renewal from a request it turned away: both answer 201
-	// with no token, and only this says the token was accepted. Empty from a
-	// gateway old enough not to ask for proof.
 	Challenge string `json:"challenge"`
 }
 
-// Register requests a *.kipper.run subdomain for the given IP.
-// Register claims a subdomain for an IP. A token, when held, identifies the
-// caller as the registration's existing owner: the gateway then renews it and
-// discloses no new token, where an anonymous call against a claimed name is
-// answered without one. Passing a token the caller already has is what lets a
-// retry after a failed install continue on the same name.
+// Register requests a subdomain for an IP, using token to renew an existing
+// registration. A new registration returns a management token. A renewal on a
+// challenge-capable gateway returns a proof nonce in Challenge; an empty token
+// and challenge can indicate a refused request despite a successful HTTP status.
+// Transport, response-decoding, and non-201 status errors are returned.
 func (c *GatewayClient) Register(subdomain, ip, token string) (*Registration, error) {
 	payload := map[string]string{
 		"subdomain": subdomain,
@@ -75,7 +68,7 @@ func (c *GatewayClient) Register(subdomain, ip, token string) (*Registration, er
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("marshalling request: %w", err)
+		return nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
 	resp, err := c.HTTPClient.Post(c.BaseURL+"/register", "application/json", bytes.NewReader(body))

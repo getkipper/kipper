@@ -15,7 +15,7 @@ Your team manages application security, dependencies, credentials, and access. S
 
 Public app routes use HTTPS. On custom domains, cert-manager obtains Let's Encrypt certificates for Traefik; shared `*.kipper.run` routes terminate public TLS at the gateway. HTTP requests redirect to HTTPS at the ingress entrypoint. Internal service connections use the protocol configured by the service.
 
-`X-Forwarded-*` headers are honoured only from trusted proxies: the kipper.run gateway (trusted automatically when your cluster uses a kipper.run domain) and any addresses you pass with `--trusted-proxy`. From anyone else they are dropped. On the kipper.run path the gateway drops any client-supplied `X-Forwarded-For` and sets it to the address it measured, so the source IP in your logs is trustworthy. If you put your own load balancer in front and trust it with `--trusted-proxy`, the logged source is only as trustworthy as that balancer: most append to the client-supplied chain rather than replacing it, so treat the leftmost address as a claim and cross-check the `forwarded_for` chain that kipper-authz logs. Source IP is used for logging only, never to decide whether a key is valid.
+`X-Forwarded-*` headers are honored only from trusted proxies: the kipper.run gateway (trusted automatically when your cluster uses a kipper.run domain) and any addresses you pass with `--trusted-proxy`. From anyone else they are dropped. On the kipper.run path the gateway drops any client-supplied `X-Forwarded-For` and sets it to the address it measured, so the source IP in your logs is trustworthy. If you put your own load balancer in front and trust it with `--trusted-proxy`, the logged source is only as trustworthy as that balancer: most append to the client-supplied chain rather than replacing it, so treat the leftmost address as a claim and cross-check the `forwarded_for` chain that kipper-authz logs. Source IP is used for logging only, never to decide whether a key is valid.
 
 On a `*.kipper.run` domain, the public TLS terminates at the gateway and the request travels to your cluster over a second HTTPS hop. Let's Encrypt cannot issue for that hop (its challenge would end at the gateway), so your cluster serves a stable Kipper-managed certificate instead, and the gateway verifies every connection against a pinned SHA-256 of that certificate's public key. Your cluster asserts the fingerprint through its daily gateway heartbeat, authenticated by the registration token it received at install time. Once the pin is active, someone sitting on the network path between the gateway and your server can only break connections visibly, never read or alter them, apart from a bounded window: for two minutes after a cluster's very first pin activation the gateway still accepts an as-yet-unseen certificate, so a lagging Traefik replica does not 502 during rollout. That two-minute tolerance is gone once proof-before-route is on, because then the served key must also hold a proof. A freshly installed cluster proxies unverified for the first moments until its console-api asserts the fingerprint, which normally happens seconds after installation completes. Rotating the pinned key is an explicit administrative step: annotate the `kipper-hop-cert` Secret in `kipper-system` with `kipper.run/rotate-key`, and the cluster stages a new key, clears it with the gateway, and swaps it in with both keys accepted during the handover.
 
@@ -38,7 +38,7 @@ On Ubuntu and Debian, UFW is installed with a default-deny incoming policy; the 
 
 | Port | Reason |
 |---|---|
-| Detected SSH port (22 by default) | Reading `sshd -T` so non-default ports are honoured |
+| Detected SSH port (22 by default) | Reading `sshd -T` so non-default ports are honored |
 | 80, 443 | Traefik ingress |
 | 6443 | k3s API |
 
@@ -112,7 +112,7 @@ Every response from your applications includes security headers enforced at the 
 
 Each app gets its own Traefik middleware with these headers. You do not need to configure them in your application.
 
-### Customising security settings per app
+### Customizing security settings per app
 
 The defaults work for most applications. Settings can be changed per app from the web console (app detail → Settings tab) or the CLI:
 
@@ -405,7 +405,7 @@ The gate protects against a compromised console identity, not against a compromi
 
 Regardless of what infrastructure-level protections Kipper provides, your team is responsible for:
 
-- **Secure application code:** parameterised queries, input validation, output encoding, CSRF protection
+- **Secure application code:** parameterized queries, input validation, output encoding, CSRF protection
 - **Dependency management:** keeping libraries and base images up to date, monitoring for CVEs
 - **Secret hygiene:** never committing credentials to git, rotating secrets regularly, using the hidden prompt (`kip app secret set <app> KEY` without `=VALUE`)
 - **Access control:** limiting who can deploy to production, using strong passwords, enrolling 2FA early so the factor is mature when a migration needs it

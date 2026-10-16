@@ -195,7 +195,7 @@ func SendSlackAlert(ctx context.Context, webhookURL string, alert Alert) error {
 	payload := map[string]string{"text": slackAlertText(alert)}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshalling slack payload: %w", err)
+		return fmt.Errorf("marshaling slack payload: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(body)) //nolint:gosec // webhook URL from admin-configured secret

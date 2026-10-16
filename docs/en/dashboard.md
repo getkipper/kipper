@@ -18,7 +18,7 @@ The dashboard monitors 13 infrastructure components that make up a Kipper cluste
 | Loki          | Log aggregation                                    |
 | Promtail      | Log collection agent                               |
 | Prometheus    | Metrics collection and alerting                    |
-| Grafana       | Metrics visualisation                              |
+| Grafana       | Metrics visualization                              |
 | Velero        | Cluster backup and restore                         |
 | Dex           | Identity and authentication provider               |
 | Console API   | Backend API for the web console                    |
@@ -54,9 +54,9 @@ If the kill is on a pod in the `monitoring` namespace (Prometheus or Loki), the 
 
 ### Node resource pressure
 
-Two cards show real-time memory and CPU utilisation for the cluster:
+Two cards show real-time memory and CPU utilization for the cluster:
 
-- **Utilisation bar:** colour-coded green (<70%), amber (70-85%), or red (>85%)
+- **Utilization bar:** color-coded green (<70%), amber (70-85%), or red (>85%)
 - **Sparkline chart:** a trend line showing the last hour of usage at a glance
 - **Totals:** current usage vs allocatable capacity
 

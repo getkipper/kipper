@@ -4,18 +4,17 @@
 Kipper ships under Apache-2.0 and must stay free of copyleft (GPL/AGPL/LGPL/SSPL)
 dependencies. This script audits every imported Go module (including test-only
 imports) and every npm package across all manifests, and exits non-zero if a
-disallowed licence appears.
+disallowed license appears.
 
 Policy:
   - PERMISSIVE (Apache-2.0, MIT, BSD, ISC, CC0, 0BSD, ...): allowed.
   - WEAK-COPYLEFT (MPL-2.0): allowed only for the specific dependencies listed
     in ACCEPTED_WEAK. A new MPL-2.0 dependency fails the gate until it has been
     reviewed and added there.
-  - COPYLEFT (GPL/AGPL/LGPL/SSPL) and unrecognised licences: fail the build.
+  - COPYLEFT (GPL/AGPL/LGPL/SSPL) and unrecognized licenses: fail the build.
 
-The standard tools (go-licenses, lichen) don't work on Go 1.25 workspaces, so
-this classifies licence files directly. GPL-family licences always carry their
-distinctive title text, so real copyleft is caught reliably.
+License files are classified by text patterns and npm metadata by SPDX tokens.
+Unrecognized licenses require manual review.
 """
 
 import glob
@@ -64,7 +63,7 @@ LICENSE_FILE_NAMES = [
 ]
 
 # Category severity. "worst" (most restrictive first) combines an SPDX AND -
-# you must comply with every licence. "best" (most permissive first) combines an
+# you must comply with every license. "best" (most permissive first) combines an
 # SPDX OR - you may choose the least restrictive arm.
 SEVERITY = ["COPYLEFT", "UNKNOWN", "WEAK-COPYLEFT", "PERMISSIVE"]
 
@@ -99,9 +98,9 @@ def find_licence_file(d):
 
 
 def classify_text(text):
-    """Classify a licence file's text into (spdx-ish id, category)."""
+    """Classify a license file's text into (spdx-ish id, category)."""
     t = text.upper()
-    # Weak-copyleft licences name the GPL family in their own text (MPL's
+    # Weak-copyleft licenses name the GPL family in their own text (MPL's
     # "Secondary Licenses" clause lists GPL/LGPL/AGPL), so match them first to
     # avoid a false copyleft flag.
     if "MOZILLA PUBLIC LICENSE" in t:
@@ -143,7 +142,7 @@ PERMISSIVE_TOKENS = ("MIT", "APACHE", "BSD", "ISC", "0BSD", "CC0",
 def classify_token(tok):
     u = tok.upper().rstrip("+")
     if not u or u in ("AND", "OR", "WITH", "SEE", "CUSTOM"):
-        return None  # operator / non-licence token
+        return None  # operator / non-license token
     if "AGPL" in u or "LGPL" in u or "SSPL" in u:
         return "COPYLEFT"
     if "GPL" in u:
@@ -166,7 +165,8 @@ def classify_spdx(spdx):
     """Classify an npm SPDX expression, respecting AND/OR/WITH precedence.
 
     OR picks the least restrictive arm (dual-licensed, you may choose); AND and
-    WITH require complying with every part, so the most restrictive wins."""
+    WITH use the most restrictive category as a conservative policy check.
+    """
     toks = re.findall(r"\(|\)|[^\s()]+", spdx.replace("/", " OR "))
     if not toks:
         return spdx, "UNKNOWN"
@@ -224,9 +224,11 @@ def licence_of_dir(d):
 
 
 def audit_go():
-    """Return rows of (name, version, licence, category) for imported Go modules,
-    including test-only imports. Each module is classified by its own root licence
-    and by the licence at every imported package directory, worst category wins."""
+    """Return (name, version, license, category) rows, including test imports.
+
+    Use the most restrictive category from module and imported-package licenses.
+    Exit with status 2 if go list fails.
+    """
     mods = {}  # path@version -> {"path","version","dirs":set}
     for m in GO_MODULES:
         env = dict(os.environ, GOWORK="off")
@@ -278,7 +280,7 @@ def own_npm_names():
 
 
 def audit_npm():
-    """Return rows of (name, version, licence, category) across all npm manifests."""
+    """Return rows of (name, version, license, category) across all npm manifests."""
     own = own_npm_names()
     rows = []
     for d in NPM_DIRS:
@@ -319,7 +321,7 @@ def report(title, rows, violations):
         elif cat == "WEAK-COPYLEFT" and ACCEPTED_WEAK.get(name) != lic:
             violations.append(f"[{title}] {name} {version} -> {lic} (weak copyleft, not in ACCEPTED_WEAK)")
         elif cat == "UNKNOWN":
-            violations.append(f"[{title}] {name} {version} -> {lic} (unrecognised licence, verify manually)")
+            violations.append(f"[{title}] {name} {version} -> {lic} (unrecognized license, verify manually)")
 
 
 def main():
@@ -337,15 +339,15 @@ def main():
             print(f"  {a}")
 
     if violations:
-        print(f"\nFAIL: {len(violations)} licence violation(s):")
+        print(f"\nFAIL: {len(violations)} license violation(s):")
         for v in violations:
             print(f"  {v}")
-        print("\nAllowed: permissive licences, plus the specific MPL-2.0 "
+        print("\nAllowed: permissive licenses, plus the specific MPL-2.0 "
               "dependencies listed in ACCEPTED_WEAK. To accept a new weak-copyleft "
               "dependency, review it and add its name to ACCEPTED_WEAK in this script.")
         sys.exit(1)
 
-    print("\nOK: all dependencies are permissively licensed.")
+    print("\nOK: all dependencies meet the license policy.")
 
 
 if __name__ == "__main__":

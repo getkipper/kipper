@@ -61,7 +61,7 @@ type Handler struct {
 	StepUp func(ctx context.Context, claims *middleware.Claims, code, operation string) error
 	// StepUpStatus reports the caller's factor state for plan blockers:
 	// state ("absent", "pending", "active"), when it becomes eligible to
-	// authorise a migration, and whether it already is.
+	// authorize a migration, and whether it already is.
 	StepUpStatus func(ctx context.Context, claims *middleware.Claims) (state string, eligibleAt time.Time, eligible bool, err error)
 
 	// receipts holds the issued plan receipts. In-memory is enough: a
@@ -121,7 +121,7 @@ func (h *Handler) GenerateTokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A migration token authorises a source cluster to write projects,
+	// A migration token authorizes a source cluster to write projects,
 	// secrets, and data into this one — including confirmed overwrites of
 	// existing projects. Its generation is a security event of its own.
 	generatedBy := ""
@@ -609,7 +609,7 @@ func (h *Handler) applyTransferredSecret(ctx context.Context, sessionID string, 
 
 // AbortHandler removes the Secrets this session created here that no
 // controller has adopted. The source calls it when a run fails or is
-// cancelled, so an abandoned migration does not strand plaintext credentials
+// canceled, so an abandoned migration does not strand plaintext credentials
 // in namespaces whose apps never arrived. Adopted Secrets stay: their
 // lifecycle belongs to the App or Function that owns them, and a retried
 // migration re-sends every secret regardless.
@@ -1047,7 +1047,7 @@ func (h *Handler) StartHandler(w http.ResponseWriter, r *http.Request) {
 
 	// The migration is now irreversibly under way on the target (its token
 	// is consumed and a session accepted), so every admin hears about it —
-	// the target endpoint is the detail a colleague would recognise as wrong.
+	// the target endpoint is the detail a colleague would recognize as wrong.
 	h.emitSecurityEvent(r.Context(), security.Event{
 		Kind:    "migration_started",
 		User:    startedBy,
@@ -1061,7 +1061,7 @@ func (h *Handler) StartHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Start migration in background
-	go h.runMigration(session, token) //nolint:gosec // G118: the migration must outlive this request; cancelling it with the HTTP context would abort mid-transfer
+	go h.runMigration(session, token) //nolint:gosec // G118: the migration must outlive this request; canceling it with the HTTP context would abort mid-transfer
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"session_id": sessionID,
@@ -1150,7 +1150,7 @@ func (h *Handler) CancelHandler(w http.ResponseWriter, r *http.Request) {
 	h.emitSecurityEvent(r.Context(), security.Event{
 		Kind:    "migration_cancelled",
 		User:    cancelledBy,
-		Summary: fmt.Sprintf("cluster migration to %s cancelled by %s", view.TargetCluster, cancelledBy),
+		Summary: fmt.Sprintf("cluster migration to %s canceled by %s", view.TargetCluster, cancelledBy),
 		Fields: []security.Field{
 			{Key: "target_cluster", Value: view.TargetCluster},
 			{Key: "projects", Value: strings.Join(view.Projects, ", ")},

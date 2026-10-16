@@ -101,17 +101,17 @@ func (h *Handler) runMigration(session *Session, token *Token) {
 
 	for _, project := range session.Projects {
 		if session.IsCancelled() {
-			log("cancelled")
+			log("canceled")
 			h.abortTarget(session, log)
 			return
 		}
 		if err := h.migrateProject(ctx, session, token, project, res); err != nil {
 			// A cancel mid-transfer surfaces as a context error from the
-			// stream it aborted; the session is already cancelled and must
+			// stream it aborted; the session is already canceled and must
 			// not be rewritten as failed.
 			if session.IsCancelled() || ctx.Err() != nil {
 				stopSaver()
-				log("cancelled mid-transfer: %v", err)
+				log("canceled mid-transfer: %v", err)
 				h.Sessions.Save(session)
 				h.abortTarget(session, log)
 				return
@@ -605,23 +605,9 @@ type transferredCredentials struct {
 	Data   map[string]string `json:"data"`
 }
 
-// createService recreates one service here: its credentials first, then the CR,
-// then the ownership that ties the two together.
-//
-// The order is what makes the result correct rather than merely tidy. An engine
-// reads its password from the credentials Secret as env when its container
-// starts, and postgres, mysql, mongodb and rabbitmq write that value into
-// persistent state the first time they initialise. Creating the CR first would
-// have the reconciler mint a password of its own, the engine initialise against
-// it, and the transferred credentials arrive afterwards to contradict a database
-// that has already made up its mind.
-//
-// Ownership goes on last because it needs the CR's UID, which does not exist
-// until the CR does. This is the only place that ties an existing Secret to a
-// Service, and it may do so because it wrote that Secret's bytes itself, in this
-// call, from a payload the sender is required to supply. Nothing here infers
-// ownership from a name, a label or a set of keys, which is what the reconciler
-// used to do and no longer does.
+// createService writes credentials before the Service CR so the target engine
+// starts with the source password. It then assigns Secret ownership using the
+// new or updated CR's UID. Credential conflicts are rejected before writing.
 func (h *Handler) createService(ctx context.Context, sessionID, name, namespace string, spec map[string]interface{}, creds *transferredCredentials) error {
 	specJSON, err := json.Marshal(spec)
 	if err != nil {
@@ -665,19 +651,10 @@ func (h *Handler) createService(ctx context.Context, sessionID, name, namespace 
 	return h.claimCredentials(ctx, service, written)
 }
 
-// refuseUnsafeCredentialHandover stops a handover that would write over
-// something this migration has no business touching, before any of it is
-// written. Checking after the write would mean the damage is already done and
-// only the ownership was refused.
-//
-// Two things disqualify a handover. A credentials Secret under any controller
-// other than the exact Service CR standing here now belongs to that controller,
-// whatever its name says: a reference naming a Service of this name whose UID
-// has moved on is a stale reference, not a permission. And a service already
-// running here with a password of its own would keep it, because the engine
-// holds what it initialised with and no service StatefulSet carries a credential
-// digest, so nothing restarts the pod. Publishing the source's password would
-// roll the bound workloads onto a credential the running database refuses.
+// refuseUnsafeCredentialHandover rejects a Secret controlled by anything other
+// than the current Service CR, or differing sensitive credentials for an
+// existing StatefulSet.
+// This check runs before writing to protect running services and their clients.
 func (h *Handler) refuseUnsafeCredentialHandover(ctx context.Context, name, namespace, serviceType string, incoming map[string][]byte) error {
 	existing, err := h.Client.CoreV1().Secrets(namespace).Get(ctx, secretname.ServiceCredentials(name), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -694,14 +671,13 @@ func (h *Handler) refuseUnsafeCredentialHandover(ctx context.Context, name, name
 			return fmt.Errorf("reading service %s: %w", name, err)
 		}
 		if apierrors.IsNotFound(err) || owner.UID != current.UID {
-			return fmt.Errorf("the credentials of %s on this cluster are controlled by %s %q, which is not the service this migration is creating, so they will not be written over",
+			return fmt.Errorf("cannot replace credentials for %s: they are controlled by %s %q",
 				name, owner.Kind, owner.Name)
 		}
 	}
 
-	// No StatefulSet means nothing has initialised against these bytes yet, so
-	// replacing them is free. This is also the replay case once the engine is
-	// up, which the value comparison below lets through.
+	// Without a StatefulSet nothing has initialized yet. An existing one must
+	// already hold identical sensitive credentials, as a replay does.
 	if _, err := h.Client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{}); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
@@ -709,15 +685,13 @@ func (h *Handler) refuseUnsafeCredentialHandover(ctx context.Context, name, name
 		return fmt.Errorf("reading the statefulset of %s: %w", name, err)
 	}
 
-	// A key missing from either side counts as a difference. Comparing only
-	// where both carry the key would let credentials with no PASSWORD at all
-	// replace a running service's, which is the same outcome by a quieter route.
+	// Compare every sensitive key so omitting a populated key is also rejected.
 	for _, key := range kipperv1.CredentialKeys(serviceType) {
 		if !kipperv1.IsSensitiveCredentialKey(key) {
 			continue
 		}
 		if !bytes.Equal(existing.Data[key], incoming[key]) {
-			return fmt.Errorf("service %s already runs on this cluster with a password of its own: taking the source's would leave its apps authenticating with a credential the running database does not accept. Remove the service here first, or migrate into a project that does not have one", name)
+			return fmt.Errorf("service %s already uses different credentials. Remove the target service first, or migrate into a project without that service", name)
 		}
 	}
 	return nil
@@ -899,7 +873,7 @@ func (h *Handler) createFunction(ctx context.Context, name, namespace string, sp
 	return err
 }
 
-// setLabel sets one label, initialising the map when the object is new.
+// setLabel sets one label, initializing the map when the object is new.
 func setLabel(meta *metav1.ObjectMeta, key, value string) {
 	if meta.Labels == nil {
 		meta.Labels = map[string]string{}

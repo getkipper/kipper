@@ -13,7 +13,7 @@ import (
 
 const logAnalysisPrompt = `You are the Kipper AI log analyst. The user is viewing logs from a Kubernetes application and needs help understanding what went wrong.
 
-Analyse the logs and provide:
+Analyze the logs and provide:
 1. A clear summary of what happened (1-2 sentences)
 2. The root cause if identifiable
 3. A suggested fix with specific actions
@@ -82,7 +82,7 @@ func (a *AILogs) AnalyseLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	messages := []ai.Message{
-		{Role: "user", Content: "Analyse these logs:\n\n```\n" + logs + "\n```"},
+		{Role: "user", Content: "Analyze these logs:\n\n```\n" + logs + "\n```"},
 	}
 
 	stream, err := provider.Chat(ctx, system, messages)

@@ -37,20 +37,10 @@ type planItem struct {
 	Kind      string `json:"kind"`
 	Name      string `json:"name"`
 	Namespace string `json:"namespace,omitempty"`
-	// Status is ok (green, will migrate), warn (amber, skipped or needs
-	// attention), or blocked (red).
-	Status string `json:"status"`
-	Detail string `json:"detail,omitempty"`
-	// Binding carries behavior-bearing identifiers that must enter the
-	// receipt digest verbatim, not through the digit-normalised Detail — a
-	// volume's app@path mounts, where a change of "web1" to "web2" or a
-	// numeric path segment would otherwise be normalised to the same string.
-	Binding string `json:"binding,omitempty"`
+	Status    string `json:"status"`
+	Detail    string `json:"detail,omitempty"`
+	Binding   string `json:"binding,omitempty"`
 
-	// Domain disposition for an app with a public route. Host is the current
-	// route host, DomainClass is custom|platform|gateway, Disposition is
-	// move|coexist|gateway, and TargetURL is where the app is reachable after
-	// cutover. Display fields; the behaviour is bound through Binding.
 	Host        string `json:"host,omitempty"`
 	DomainClass string `json:"domain_class,omitempty"`
 	Disposition string `json:"disposition,omitempty"`
@@ -66,37 +56,27 @@ type planCapacity struct {
 	FreeCPUMillis    int64 `json:"free_cpu_millis"`
 	FreeMemoryBytes  int64 `json:"free_memory_bytes"`
 	FreeStorageBytes int64 `json:"free_storage_bytes"`
-	// StorageKnown is false when the target could not measure its disk, in
-	// which case the storage comparison is skipped rather than failed.
-	StorageKnown bool `json:"storage_known"`
+	StorageKnown     bool  `json:"storage_known"`
 }
 
 // planResponse is the full report.
 type planResponse struct {
-	TargetCluster  string        `json:"target_cluster"`
-	TargetEndpoint string        `json:"target_endpoint"`
-	TargetVersion  string        `json:"target_version,omitempty"`
-	Blockers       []string      `json:"blockers"`
-	Warnings       []string      `json:"warnings"`
-	WillMigrate    []planItem    `json:"will_migrate"`
-	WillSkip       []planItem    `json:"will_skip"`
-	NotMigrated    []string      `json:"not_migrated"`
-	Conflicts      []string      `json:"conflicts"`
-	Capacity       *planCapacity `json:"capacity,omitempty"`
-	Receipt        string        `json:"receipt,omitempty"`
-	ReceiptExpires *time.Time    `json:"receipt_expires,omitempty"`
-	// OutOfBand reports whether any security-notification channel leaves the
-	// box; the console warns before start when none does.
-	OutOfBand bool `json:"out_of_band_notifications"`
-	// TargetBaseDomain is the target cluster's base domain, for the console to
-	// render coexist URLs. MoveBaseDomain echoes the consented Mode B choice and
-	// is bound into the digest.
-	TargetBaseDomain string `json:"target_base_domain,omitempty"`
-	MoveBaseDomain   bool   `json:"move_base_domain,omitempty"`
+	TargetCluster    string        `json:"target_cluster"`
+	TargetEndpoint   string        `json:"target_endpoint"`
+	TargetVersion    string        `json:"target_version,omitempty"`
+	Blockers         []string      `json:"blockers"`
+	Warnings         []string      `json:"warnings"`
+	WillMigrate      []planItem    `json:"will_migrate"`
+	WillSkip         []planItem    `json:"will_skip"`
+	NotMigrated      []string      `json:"not_migrated"`
+	Conflicts        []string      `json:"conflicts"`
+	Capacity         *planCapacity `json:"capacity,omitempty"`
+	Receipt          string        `json:"receipt,omitempty"`
+	ReceiptExpires   *time.Time    `json:"receipt_expires,omitempty"`
+	OutOfBand        bool          `json:"out_of_band_notifications"`
+	TargetBaseDomain string        `json:"target_base_domain,omitempty"`
+	MoveBaseDomain   bool          `json:"move_base_domain,omitempty"`
 
-	// arriveStopped names the apps that may arrive stopped on the target:
-	// stopped by an operator, or bound to a database whose data may stay
-	// behind.
 	arriveStopped []string
 }
 
@@ -117,11 +97,11 @@ var notMigratedList = []string{
 // operator has to look at a fresh report.
 const planReceiptTTL = 15 * time.Minute
 
-// digitRuns matches the numeric figures normalised out of digest-bound
+// digitRuns matches the numeric figures normalized out of digest-bound
 // details.
 var digitRuns = regexp.MustCompile(`[0-9]+`)
 
-// planReceipt binds one issued report to the exact migration it authorises:
+// planReceipt binds one issued report to the exact migration it authorizes:
 // the operator, the target token, the project set, the overwrites the
 // operator confirmed, and a digest of the material facts the report showed.
 type planReceipt struct {
@@ -160,18 +140,14 @@ func receiptUser(claims *middleware.Claims) string {
 // details are normalized. Blockers and available capacity are checked afresh
 // at start rather than included in the digest.
 func planDigest(resp *planResponse) string {
-	// A row's status and detail carry material semantics — the rebuild note
-	// on a git app, a size that could not be measured, the service type —
-	// so both are bound. Only the numeric figures inside the detail are
-	// normalised out: a database drifting from ~120MB to ~121MB changes
-	// nothing the operator consented to, while crossing into "skipped"
-	// moves the row between lists and changes the digest regardless.
+	// Ignore numeric drift in display details, such as estimated database size,
+	// while binding the receipt to statuses, migration choices, and exact IDs.
 	items := func(list []planItem) []string {
 		out := make([]string, 0, len(list))
 		for _, item := range list {
 			detail := digitRuns.ReplaceAllString(item.Detail, "#")
 			// Binding is appended verbatim: its identifiers are exact, so
-			// digit normalisation must not collapse "web1" and "web2".
+			// digit normalization must not collapse "web1" and "web2".
 			out = append(out, item.Kind+"/"+item.Namespace+"/"+item.Name+"/"+item.Status+"/"+detail+"/"+item.Binding)
 		}
 		sort.Strings(out)
@@ -353,7 +329,7 @@ func (h *Handler) buildPlan(ctx context.Context, claims *middleware.Claims, toke
 				"Starting a migration requires 2FA. Enroll a factor in Settings → Two-factor authentication (a host operator issues the enrollment code with: kip 2fa bootstrap <your email>).")
 		case !eligible:
 			resp.Blockers = append(resp.Blockers, fmt.Sprintf(
-				"Your 2FA factor is too new to authorise a migration: it becomes eligible on %s.",
+				"Your 2FA factor is too new to authorize a migration: it becomes eligible on %s.",
 				eligibleAt.Format("2 January 2006 15:04 MST")))
 		}
 	}
@@ -457,7 +433,7 @@ func (h *Handler) PlanHandler(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.UserFromContext(r.Context())
 
 	// Local decode only — the plan never consumes the token and never
-	// pre-authorises anything.
+	// pre-authorizes anything.
 	token, err := DecodeToken(req.Token)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())

@@ -62,7 +62,7 @@ function serverReason(e: unknown, fallback: string): string {
   const reason = response?.data?.error
   if (reason) return reason
   if (response?.status === 404) {
-    return `${fallback}. The cluster's API did not recognise this request, which usually means it is older than this console. Run kip upgrade.`
+    return `${fallback}. The cluster API may be older than this console. Run kip upgrade and try again.`
   }
   return fallback
 }

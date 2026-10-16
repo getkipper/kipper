@@ -169,7 +169,7 @@ kip app deploy --name backend --image ghcr.io/acme/api:latest --port 3000 \
   --secret API_KEY=abc123
 ```
 
-Both forms write the same `app-<app>-secrets` Secret as `kip app secret set`, with the same masking, rollback, and export behaviour.
+Both forms write the same `app-<app>-secrets` Secret as `kip app secret set`, with the same masking, rollback, and export behavior.
 
 ### Automatic previous version
 
@@ -210,7 +210,7 @@ $ kip app secret reveal backend DB_CONFIG
 | | Environment variables | Secrets |
 |---|---|---|
 | `list` output | Keys and values | Keys only (masked) |
-| `set` behaviour | Inline `KEY=VALUE` | Interactive hidden prompt |
+| `set` behavior | Inline `KEY=VALUE` | Interactive hidden prompt |
 | Console UI | Plain text | Masked with reveal button |
 | Shell history | Visible | Not recorded (interactive mode) |
 
