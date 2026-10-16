@@ -175,7 +175,6 @@ spec:
                       description: Name identifies the component.
                       type: string
                     phase:
-                      description: Phase summarises the current state.
                       enum:
                       - Running
                       - Pending

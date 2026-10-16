@@ -51,14 +51,10 @@ type ServiceResources struct {
 	MemoryLimit string `json:"memoryLimit,omitempty"`
 }
 
-// ConditionCredentialsReady says whether the service holds the credentials
-// Secret it injects into anything bound to it. It goes false for two reasons,
-// neither of which a retry clears. SecretNotOwned: another object occupies that
-// name, which a create-time check cannot always prevent, because a restore can
-// put one there and the object it collides with may be gone.
-// DataWithoutCredentials: the service has a volume an engine has already
-// initialised, and no password or username for it, so making one up would lock
-// the service out of its own data.
+// ConditionCredentialsReady reports whether the service can inject its credentials.
+// SecretNotOwned means the credentials Secret belongs to another object.
+// DataWithoutCredentials means existing data requires credentials that are missing.
+// Both failures require operator intervention.
 const ConditionCredentialsReady = servicecatalog.ConditionCredentialsReady
 
 // ConditionCleanupComplete says whether a deleting service has finished leaving.

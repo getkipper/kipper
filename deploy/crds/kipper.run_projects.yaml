@@ -70,20 +70,8 @@ spec:
               match TierEnvLimit (a drift test asserts it).
             properties:
               allowLinksFrom:
-                description: |-
-                  AllowLinksFrom names the projects whose apps may link to apps in this
-                  project. It is this project's consent, given by whoever owns it.
-
-                  A link opens a direct route to a backend, past the ingress and so past
-                  every control attached to a public route: forward auth, API keys, rate
-                  limits. The calling side declaring it is not enough, because an app's own
-                  project cannot grant access to somebody else's. Without an entry here the
-                  link is recorded and no egress is opened.
-
-                  Bounded and validated because a Project can be written straight to the
-                  API server, and this list is an authorisation: an entry that is not a
-                  project name matches nothing, but it still has to be read and stored on
-                  every reconcile of every app that links here.
+                description: AllowLinksFrom authorizes other projects to link directly
+                  to this project's apps, bypassing ingress controls.
                 items:
                   maxLength: 253
                   minLength: 1

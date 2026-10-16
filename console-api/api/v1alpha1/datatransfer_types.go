@@ -95,7 +95,6 @@ type DataTransferStatus struct {
 	// +optional
 	Attempt int32 `json:"attempt,omitempty"`
 
-	// FilesVerified and VerifyMismatches summarise the finalize report.
 	// +optional
 	FilesVerified int64 `json:"filesVerified,omitempty"`
 	// +optional

@@ -414,11 +414,11 @@ type AppAutoscale struct {
 	// +optional
 	MaxReplicas *int32 `json:"maxReplicas,omitempty"`
 
-	// CPUTarget is the target CPU utilisation percentage.
+	// CPUTarget is the target CPU usage as a percentage of requested CPU.
 	// +optional
 	CPUTarget *int32 `json:"cpuTarget,omitempty"`
 
-	// MemoryTarget is the target memory utilisation percentage.
+	// MemoryTarget is the target memory usage as a percentage of requested memory.
 	// +optional
 	MemoryTarget *int32 `json:"memoryTarget,omitempty"`
 }
