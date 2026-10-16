@@ -104,7 +104,6 @@ type ComponentStatus struct {
 	// Name identifies the component.
 	Name string `json:"name"`
 
-	// Phase summarises the current state.
 	// +kubebuilder:validation:Enum=Running;Pending;CrashLoopBackOff;OOMKilled;Disabled;Unknown
 	// +optional
 	Phase string `json:"phase,omitempty"`

@@ -54,13 +54,7 @@ type ClusterIdentitySpec struct {
 	// +optional
 	CutoverApproval string `json:"cutoverApproval,omitempty"`
 
-	// AckSSOCallbacksFor records that the operator has updated (or will
-	// update) each SSO provider's OAuth callback URL for the Dex host named
-	// here. When a host change rehosts connectors, approval is refused until
-	// this names the pending transition's target Dex host, so a silent rehost
-	// cannot lock out SSO users. Naming the host binds the acknowledgement to
-	// one move: a later transition to a different Dex host always requires a
-	// fresh acknowledgement, no clearing step needed.
+	// AckSSOCallbacksFor names the target Dex host whose SSO callbacks the operator has agreed to update.
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	AckSSOCallbacksFor string `json:"ackSSOCallbacksFor,omitempty"`

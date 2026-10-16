@@ -58,19 +58,7 @@ type ProjectSpec struct {
 	// +optional
 	Tier string `json:"tier,omitempty"`
 
-	// AllowLinksFrom names the projects whose apps may link to apps in this
-	// project. It is this project's consent, given by whoever owns it.
-	//
-	// A link opens a direct route to a backend, past the ingress and so past
-	// every control attached to a public route: forward auth, API keys, rate
-	// limits. The calling side declaring it is not enough, because an app's own
-	// project cannot grant access to somebody else's. Without an entry here the
-	// link is recorded and no egress is opened.
-	//
-	// Bounded and validated because a Project can be written straight to the
-	// API server, and this list is an authorisation: an entry that is not a
-	// project name matches nothing, but it still has to be read and stored on
-	// every reconcile of every app that links here.
+	// AllowLinksFrom authorizes other projects to link directly to this project's apps, bypassing ingress controls.
 	// +kubebuilder:validation:MaxItems=256
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=253
@@ -91,18 +79,10 @@ type ProjectSpec struct {
 // can address.
 const memberRolePattern = `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)?$`
 
-// ProjectMemberRole is a user's capability within a single project.
-//
-// The three built-ins are ordered viewer < deployer < owner. The schema does
-// not list them, because a member may also name a role this build does not
-// know: written with kubectl, restored from a backup, or carried in by a
-// migration from a cluster that had it. A closed enum would fail the whole
-// Project object in that case, and the member holding the unknown role is
-// exactly the one an operator needs to be able to remove.
-//
-// Such a member holds nothing. The projection binds only the roles it knows, so
-// an unrecognised name grants no access, and the console reports it as
-// unrecognised rather than showing it as a role.
+// ProjectMemberRole names a user's role within a project. The built-in roles
+// are viewer, deployer, and owner, in increasing order of access.
+// Unknown names are accepted so imported or restored memberships remain
+// editable, but grant no access until the role is supported by the reconciler.
 // +kubebuilder:validation:MaxLength=127
 // +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)?$`
 type ProjectMemberRole string

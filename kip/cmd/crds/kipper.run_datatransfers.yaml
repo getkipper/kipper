@@ -209,8 +209,6 @@ spec:
                   type: object
                 type: array
               filesVerified:
-                description: FilesVerified and VerifyMismatches summarise the finalize
-                  report.
                 format: int64
                 type: integer
               lastError:

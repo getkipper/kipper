@@ -56,7 +56,8 @@ spec:
                 description: Autoscale configures horizontal pod autoscaling.
                 properties:
                   cpuTarget:
-                    description: CPUTarget is the target CPU utilisation percentage.
+                    description: CPUTarget is the target CPU usage as a percentage
+                      of requested CPU.
                     format: int32
                     type: integer
                   enabled:
@@ -67,7 +68,8 @@ spec:
                     format: int32
                     type: integer
                   memoryTarget:
-                    description: MemoryTarget is the target memory utilisation percentage.
+                    description: MemoryTarget is the target memory usage as a percentage
+                      of requested memory.
                     format: int32
                     type: integer
                   minReplicas:
