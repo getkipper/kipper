@@ -384,7 +384,7 @@ func clusterNetworks(server CommandRunner) (map[string]netip.Prefix, error) {
 		return nil, err
 	}
 
-	out, err := server.Run(`kubectl get nodes -l ` + serverNodeLabel + `=true -o jsonpath='{.items[*].spec.podCIDR}' 2>/dev/null`)
+	out, err := server.Run(`kubectl get nodes -l ` + ServerNodeLabel + `=true -o jsonpath='{.items[*].spec.podCIDR}' 2>/dev/null`)
 	if err != nil {
 		return nil, fmt.Errorf("reading the cluster's pod network: %w", err)
 	}

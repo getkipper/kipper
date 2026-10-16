@@ -519,6 +519,15 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func serverNetworkConsent(mode, address string) string {
+	return fmt.Sprintf("\n  The server will use %s mode for cluster traffic (address %s). kip restarts\n"+
+		"  k3s for this. Running containers keep running; the Kubernetes API, kip\n"+
+		"  commands, console actions and any app that calls the API are unavailable\n"+
+		"  meanwhile, usually for 10 to 30 seconds and longer on small or busy\n"+
+		"  servers. If recovery checks fail, kip waits up to five minutes per check\n"+
+		"  and then attempts to restore the previous configuration.\n\n", mode, address)
+}
+
 // prepareJoinHost validates network options and confirms server network changes
 // before cordoning or hardening the worker.
 func prepareJoinHost(server, worker installer.CommandRunner, machineID, workerHost string, opts installer.NetworkModeOptions, autoYes bool) (installer.NetworkPlan, string, error) {
@@ -542,9 +551,7 @@ func prepareJoinHost(server, worker installer.CommandRunner, machineID, workerHo
 		return installer.NetworkPlan{}, "", err
 	}
 	if serverDropIn != currentDropIn {
-		fmt.Printf("\n  The server will use %s mode for cluster traffic (address %s). This restarts\n"+
-			"  k3s and temporarily interrupts Kubernetes API access. If recovery checks\n"+
-			"  fail, kip attempts to restore the previous configuration.\n\n", plan.Mode, plan.Server.NodeIP)
+		fmt.Print(serverNetworkConsent(plan.Mode, plan.Server.NodeIP))
 		if !autoYes {
 			ok, err := confirmInteractive("  Apply the server network changes? [y/N] ")
 			if err != nil {

@@ -623,3 +623,12 @@ func TestInstallK3sStillRequiresWireGuardOnAnExistingWireGuardServer(t *testing.
 	require.ErrorContains(t, err, "wireguard")
 	assert.Empty(t, h.written)
 }
+
+func TestNetworkChangeConsentStatesTheMeasuredImpact(t *testing.T) {
+	text := strings.Join(strings.Fields(NetworkChange{Running: "vxlan"}.Describe()), " ")
+	assert.Contains(t, text, "Running containers keep running")
+	assert.Contains(t, text, "any app that calls the API are unavailable meanwhile")
+	assert.Contains(t, text, "attempts to restore the previous network configuration")
+	assert.NotContains(t, text, "potentially pod traffic")
+	assert.Contains(t, text, "usually for 10 to 30 seconds and longer on small or busy servers, with the whole change taking about a minute")
+}

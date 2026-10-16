@@ -5,8 +5,8 @@ import (
 	"strings"
 )
 
-// serverNodeLabel identifies k3s server nodes, matching Traefik's selector.
-const serverNodeLabel = "node-role.kubernetes.io/control-plane"
+// ServerNodeLabel identifies k3s server nodes, matching Traefik's selector.
+const ServerNodeLabel = "node-role.kubernetes.io/control-plane"
 
 // serviceLBNodeLabel enables ServiceLB only on labeled nodes once any node
 // has this label set to true.
@@ -19,7 +19,7 @@ var k3sAddonDeployments = []string{"coredns", "metrics-server"}
 
 // serverNodeSelectorPatch is a strategic merge patch that adds the server
 // selector to a pod template while preserving other nodeSelector keys.
-var serverNodeSelectorPatch = fmt.Sprintf(`{"spec":{"template":{"spec":{"nodeSelector":{%q:"true"}}}}}`, serverNodeLabel)
+var serverNodeSelectorPatch = fmt.Sprintf(`{"spec":{"template":{"spec":{"nodeSelector":{%q:"true"}}}}}`, ServerNodeLabel)
 
 const placementRolloutTimeout = "300s"
 
@@ -29,7 +29,7 @@ const placementRolloutTimeout = "300s"
 // the Prometheus resource. It waits for rollouts even when selectors are unchanged,
 // so retries also check workloads whose previous rollout is incomplete.
 func PinPlatformToServer(client CommandRunner) error {
-	if _, err := client.Run(fmt.Sprintf("kubectl label node -l %s=true %s=true --overwrite", serverNodeLabel, serviceLBNodeLabel)); err != nil {
+	if _, err := client.Run(fmt.Sprintf("kubectl label node -l %s=true %s=true --overwrite", ServerNodeLabel, serviceLBNodeLabel)); err != nil {
 		return fmt.Errorf("labeling the server for the service load balancer: %w", err)
 	}
 	var pinned []workloadRef
@@ -107,7 +107,7 @@ var prometheusStatefulSet = workloadRef{"monitoring", "statefulset/prometheus-ku
 // It waits for the StatefulSet selector before the caller checks the rollout.
 // A missing Prometheus resource or resource type returns false without an error.
 func pinPrometheusToServer(client CommandRunner) (bool, error) {
-	cmd := fmt.Sprintf(`kubectl -n monitoring patch prometheuses.monitoring.coreos.com kube-prometheus-stack-prometheus --type merge -p '{"spec":{"nodeSelector":{%q:"true"}}}'`, serverNodeLabel)
+	cmd := fmt.Sprintf(`kubectl -n monitoring patch prometheuses.monitoring.coreos.com kube-prometheus-stack-prometheus --type merge -p '{"spec":{"nodeSelector":{%q:"true"}}}'`, ServerNodeLabel)
 	out, err := client.Run(cmd)
 	if err != nil {
 		if identityAbsentFromKubectl(out + " " + err.Error()) {
@@ -116,7 +116,7 @@ func pinPrometheusToServer(client CommandRunner) (bool, error) {
 		return false, fmt.Errorf("pinning Prometheus to the server: %w", err)
 	}
 	wait := fmt.Sprintf(`for i in $(seq 1 60); do [ "$(kubectl -n %s get %s -o jsonpath='{.spec.template.spec.nodeSelector.%s}' 2>/dev/null)" = true ] && exit 0; sleep 5; done; exit 1`,
-		prometheusStatefulSet.namespace, prometheusStatefulSet.ref, strings.ReplaceAll(serverNodeLabel, ".", `\.`))
+		prometheusStatefulSet.namespace, prometheusStatefulSet.ref, strings.ReplaceAll(ServerNodeLabel, ".", `\.`))
 	if _, err := client.Run(wait); err != nil {
 		return false, fmt.Errorf("timed out waiting for the Prometheus operator to apply the server selector to its StatefulSet: %w", err)
 	}

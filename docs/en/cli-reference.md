@@ -211,12 +211,12 @@ kip node add <host> [--ssh-key <path>] [--private-network <cidr> | --public] [--
 
 The command prepares the host (kernel modules, kubelet hardening, Longhorn's storage packages, host hardening and the firewall) and joins it as a k3s worker on the server's k3s version.
 
-- **Networking:** kip uses a shared private network when available, or public addresses otherwise. The first join sets the cluster network mode. Applying new network settings restarts k3s on the server; `--yes` confirms network changes and recovery without prompting. Use `--private-network` to select a private network that carries the default route, or `--public` to use public addresses. The server must already use WireGuard for its pod network; run `kip upgrade` first if needed.
+- **Networking:** kip uses a shared private network when available, or public addresses otherwise. The first join sets the cluster network mode. Applying new network settings restarts k3s on the server; `--yes` confirms network changes and recovery without prompting. Use `--private-network` to select a private network that carries the default route, or `--public` to use public addresses. When the hosts share a private route but the server cannot reach the new host's SSH port on it, or the new host cannot reach the API on port 6443, kip stops and names the failed connection; open the port, or pass `--public` to join over public addresses instead. The server must already use WireGuard for its pod network; run `kip upgrade` first if needed.
 - **Firewall:** By default, kip sets up a host firewall on a new node only when it manages the server's firewall. Use `--firewall` or `--firewall=false` to override this default. A kip-managed firewall allows 51820/udp and 10250/tcp from the other nodes and 9100/tcp from the server. On workers, kip opens only SSH to all sources. When configuring UFW for a worker, kip removes saved public rules for TCP ports 80, 443 and 6443 that exactly match its server rules, preserving every SSH port reported by `sshd -T`. Identical rules added by an operator are also removed. On a node without a kip-managed firewall, your rules must allow that traffic, restrict those ports to the listed sources, keep 8888/tcp closed to outside traffic, and limit access to any NodePort services. Existing kip-managed firewalls get updated peer rules on every join, even with `--firewall=false`, and keep their SSH rate limiting setting. kip checks operator-managed firewalld rules on existing nodes and, when firewall setup is enabled, on the joining node. A UFW firewall that kip does not manage on the server or another existing node stops the join, even with the ports open. Switch it off first. On the server, run `kip cluster harden` if kip should manage it. On a new node, such a firewall stops the join unless you pass `--firewall=false`. A new Ubuntu or Debian worker inherits the server's kip-managed UFW setting, with SSH rate limiting as the default. firewalld hosts allow SSH without rate limiting. Applying kip-managed firewalld rules restarts the active k3s service (`k3s-agent` on a worker). On the server, this temporarily interrupts API access. Provider firewalls must also allow the required traffic.
 - **Join checks:** before allowing new workloads, kip checks pod DNS, connectivity to CoreDNS on the server, Longhorn volume reads and writes, host authentication to the cluster registry, containerd's registry mirror configuration and direct registry access, and kubelet access from the server. The worker stays cordoned until the node and its Longhorn storage pods are ready. kip then replaces the cordon with a `kipper.run/checking` taint so Longhorn can attach the test volume. During validation, the taint blocks scheduling of pods that do not tolerate it. To resume an interrupted join, rerun the command with the same options.
 - **Records:** kip records nodes in the `kipper-nodes` ConfigMap in `kipper-system`. `kip upgrade`, `kip cluster harden` and `kip install` require records for every cluster node. Use `kip node add` to adopt an unrecorded worker. Adopt all unrecorded nodes before joining a new node.
 - **Join credentials:** each join attempt uses a fresh k3s bootstrap token valid for one hour. The command attempts to delete it after registration or a join failure. If cleanup fails, the token expires on its own. Once joined, a worker authenticates with its own agent certificates. k3s issues them for one year and renews them at each agent start while they are still valid, so a worker that restarts its agent at least once a year (`kip node reboot <worker>` does this) keeps them current. A worker whose certificates have expired or gone missing cannot reconnect: it shows NotReady and `k3s-agent` logs `failed to retrieve configuration from server: not authorized`. Run `kip node add <host>` again for that worker with the original join options. It mints a fresh join token, repeats the join and keeps the node's name and the data on its disks; workloads are kept off the node while the join is checked. If the rerun fails, follow the cause it reports.
-- **Maintenance:** `kip upgrade` and `kip cluster uninstall` perform host operations on the server only; `kip cluster harden` updates the server's firewall rules for peer access. Worker maintenance and removal are manual.
+- **Maintenance:** `kip upgrade` and `kip cluster uninstall` perform host operations on the server only; `kip cluster harden` updates the server's firewall rules for peer access. `kip node reboot <worker>` drains and reboots a worker. Other worker maintenance and removal are manual. When the first Rocky Linux, AlmaLinux or CentOS Stream node joins, `kip node add` turns on Velero's privileged file system backups, which SELinux hosts need, and waits for the backup agents to restart before it checks the worker.
 - **Availability:** ingress remains on the control-plane node, and the registry uses one replica with single-replica storage. Adding a worker alone does not provide high availability.
 
 ## kip node list {#kip-node-list}
@@ -229,21 +229,24 @@ kip node list
 
 ## kip node reboot {#kip-node-reboot}
 
-Reboots the cluster's server and waits for healthy nodes and components, then for previously ready apps to become ready again. Use it to apply a new kernel or service updates listed under Pending restarts in `kip status`.
+Reboots a server or worker and waits for the cluster and previously ready apps or workloads to be ready again. Use it to apply a new kernel or service updates listed under Pending restarts in `kip status`.
 
 ```bash
 kip node reboot
 kip node reboot --yes --skip-backup
+kip node reboot worker-1
 ```
 
 | Flag | Required | Description |
 |---|---|---|
 | `--yes` | No | Reboot without asking for confirmation |
 | `--skip-backup` | No | Reboot without taking a backup first |
-| `--ssh-key` | No | SSH private key for the server; overrides `KIP_SSH_KEY` and `cluster.ssh_key` |
+| `--ssh-key` | No | SSH private key for the node; overrides `KIP_SSH_KEY` and `cluster.ssh_key` |
 | `--timeout` | No | How long to wait for node, component, and app readiness after reboot (default `20m`) |
+| `--drain-timeout` | No | Maximum wait for a worker to drain, including volume copies to other nodes (default `30m`, minimum `1s`) |
+| `--ignore-degraded-volumes` | No | Reboot even when an attached volume is not healthy or its health cannot be read |
 
-Apps on a single-server cluster are unavailable during the reboot. The command:
+Apps on a single-server cluster are unavailable during the reboot. For a server, the command:
 
 1. Reads the server's boot ID over SSH. Stops if the server cannot be reached.
 2. Asks for confirmation, unless you pass `--yes`.
@@ -251,10 +254,26 @@ Apps on a single-server cluster are unavailable during the reboot. The command:
 4. Records apps with at least one ready replica, then reboots the server. If listing apps fails, it warns and skips the app readiness checks. If console-api uses `:latest`, it may start with a newer image. Before rebooting, run `kip upgrade --check` to check for required data updates.
 5. Waits until the server reports a new boot ID. If it still reports the old ID after three minutes, the command stops with instructions for investigating the cause.
 6. Waits for Kubernetes to report the new boot ID and for every node and component from `kip status` to pass two consecutive readiness checks.
-7. Waits for each app recorded in step 4 to have a non-terminating pod that became ready after the reboot was scheduled. If time runs out, it lists apps still waiting for readiness or reports an error if readiness could not be checked.
+7. Waits for each app recorded in step 4 to have a non-terminating pod that became ready after the reboot was scheduled. Ready, non-terminating pods on workers also count, even if they became ready before the server reboot. If time runs out, it lists apps still waiting for readiness or reports an error if readiness could not be checked.
 8. Runs the host checks from `kip status` over SSH, including Pending restarts. These checks also run if cluster or app readiness times out, even when the API server is unavailable.
 
-The `--timeout` period starts after the reboot is scheduled; backup time is separate. Boot times vary by server. If the wait times out, run `kip status` to check progress. If SSH remains unreachable, check the server through your provider’s console.
+On a cluster with workers, the server reboot checks volume health before confirmation and again before rebooting, as described below. A single-server cluster skips this check.
+
+When kip cannot read the node list, use `kip node reboot --skip-backup` to reboot the server without a backup. Add `--yes` for unattended use. kip retries the node list before rebooting. If workers are found, it applies the volume health checks described below, including `--ignore-degraded-volumes` and the exception for excess requested replicas. If the list is still unavailable, kip warns and proceeds. Volume replicas on the server are unavailable during the reboot.
+
+To reboot a worker, name it by its node name or address. Without an argument, or with the server's name or address, the command reboots the server as described above. For a worker, the command:
+
+1. Checks the worker's machine ID against its recorded ID and requires Longhorn's drain policy to copy last healthy replicas to another node (`kip upgrade` configures this policy).
+2. Lists volumes with healthy replicas on the worker and shows whether healthy copies exist elsewhere. Requires attached Longhorn volumes to report healthy before proceeding, because rebooting while a volume is degraded can reduce its availability further. Longhorn rebuilds degraded volumes on its own when healthy replicas and node capacity are available. Allow time for rebuilding, then rerun the command. A volume requesting more replicas than the cluster has nodes only triggers a warning when every node holds a healthy copy of it; a volume that has lost one of those copies still blocks. Use `--ignore-degraded-volumes` to proceed with unhealthy volumes or when volume health cannot be checked.
+3. Asks for confirmation and takes a backup, as for the server.
+4. Records fully ready Deployments, StatefulSets and DaemonSets with at least one desired pod and checks volume health again, since it can change during the confirmation and backup. Then it cordons and drains the worker. Controllers can recreate evicted pods on other nodes; DaemonSet and mirror pods stay. Evicted pods lose their `emptyDir` data. Longhorn copies volumes with their last healthy replica on the worker to another node before the drain finishes.
+5. Checks that every volume with a healthy replica still on the worker also has a healthy copy elsewhere. If draining or this check fails, the command reports the error, attempts to lift any cordon it set, and cancels the reboot. Unmanaged pods block the drain; `--drain-timeout` limits the wait.
+6. Reboots the worker and waits for its new boot ID.
+7. Lifts any cordon it set, then waits for every node and component to be ready and for the recorded workloads to be fully ready again. A worker that was already cordoned stays cordoned.
+8. Lists attached volumes still reporting unhealthy, without waiting for recovery. A volume requesting more replicas than the cluster has nodes allows the next reboot with a warning if every node holds a healthy copy.
+9. Runs the Pending restarts check on the worker.
+
+The `--timeout` period starts after the reboot is scheduled; backup and drain time are separate. Boot times vary by host. If the wait times out, run `kip status` to check progress. If SSH remains unreachable, check the host through your provider’s console.
 
 ## kip auth verify {#kip-auth-verify}
 

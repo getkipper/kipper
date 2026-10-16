@@ -60,10 +60,13 @@ func (c NetworkChange) Describe() string {
 			from = " from " + c.Running
 		}
 		fmt.Fprintf(&b, "  The pod network moves%s to WireGuard, which encrypts pod traffic\n"+
-			"  between nodes. The change restarts k3s, temporarily interrupting API access\n"+
-			"  and potentially pod traffic. If the network or previously ready workloads\n"+
-			"  fail to recover, kip attempts to restore the previous configuration\n"+
-			"  and restart k3s.\n", from)
+			"  between nodes. kip restarts k3s for this. Running containers keep running;\n"+
+			"  the Kubernetes API, kip commands, console actions and any app that calls\n"+
+			"  the API are unavailable meanwhile, usually for 10 to 30 seconds and longer\n"+
+			"  on small or busy servers, with the whole change taking about a minute. If\n"+
+			"  k3s or a previously ready workload does not recover, kip waits up to five\n"+
+			"  minutes per step, then attempts to restore the previous network\n"+
+			"  configuration and restart k3s.\n", from)
 	}
 	return b.String()
 }
@@ -121,7 +124,7 @@ func PlanNetworkChange(client CommandRunner) (NetworkChange, error) {
 
 // runningFlannelBackend requires exactly one server node reporting a backend.
 func runningFlannelBackend(client CommandRunner) (string, error) {
-	out, err := client.Run(fmt.Sprintf(`kubectl --request-timeout=20s get nodes -l %s=true -o jsonpath='{range .items[*]}{.metadata.annotations.flannel\.alpha\.coreos\.com/backend-type}{"\n"}{end}'`, serverNodeLabel))
+	out, err := client.Run(fmt.Sprintf(`kubectl --request-timeout=20s get nodes -l %s=true -o jsonpath='{range .items[*]}{.metadata.annotations.flannel\.alpha\.coreos\.com/backend-type}{"\n"}{end}'`, ServerNodeLabel))
 	if err != nil {
 		return "", fmt.Errorf("reading the server's pod network backend: %w", err)
 	}
@@ -292,7 +295,7 @@ func dropInNodeIP(dropIn string) (string, error) {
 // waitForServerNodeIP waits for the server node to report nodeIP as its InternalIP.
 func waitForServerNodeIP(client CommandRunner, nodeIP string, t networkChangeTimeouts) error {
 	deadline := time.Now().Add(t.start)
-	query := fmt.Sprintf(`kubectl --request-timeout=10s get nodes -l %s=true -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null`, serverNodeLabel)
+	query := fmt.Sprintf(`kubectl --request-timeout=10s get nodes -l %s=true -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null`, ServerNodeLabel)
 	for {
 		out, err := client.Run(query)
 		if err == nil && strings.TrimSpace(out) == nodeIP {
@@ -505,7 +508,7 @@ func networkUpCheck(link string) string {
 kubectl --request-timeout=10s get --raw /readyz >/dev/null 2>&1 || exit 0
 ip link show %s >/dev/null 2>&1 || exit 0
 [ "$(kubectl --request-timeout=10s get nodes -l %s=true -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ] || exit 0
-echo %s`, link, serverNodeLabel, networkUpMarker))
+echo %s`, link, ServerNodeLabel, networkUpMarker))
 }
 
 // boundedCommand limits each probe to 30 seconds. A polling deadline can

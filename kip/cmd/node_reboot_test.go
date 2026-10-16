@@ -257,10 +257,29 @@ func TestAppsNotServingSince(t *testing.T) {
 		pod("blog", "api", false, since.Add(time.Minute)),
 		terminating,
 		pod("shop", "cart", false, since.Add(2*time.Minute)),
-	}, since)
+	}, since, nil)
 
 	assert.Equal(t, []string{"shop/web", "blog/api", "shop/cart"}, waiting,
 		"readiness from before the reboot and a pod on its way out do not count, and namespaces stay apart")
+}
+
+func TestAppsNotServingSinceAcceptsUnchangedReadinessAwayFromTheServer(t *testing.T) {
+	since := time.Date(2026, 10, 11, 1, 0, 0, 0, time.UTC)
+	pod := func(app, node string) corev1.Pod {
+		return corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Labels: map[string]string{"app": app}},
+			Spec:       corev1.PodSpec{NodeName: node},
+			Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
+				Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(since.Add(-time.Hour)),
+			}}},
+		}
+	}
+	apps := []appRef{{Namespace: "shop", Name: "on-worker"}, {Namespace: "shop", Name: "on-server"}}
+
+	waiting := appsNotServingSince(apps, []corev1.Pod{pod("on-worker", "worker-1"), pod("on-server", "server")}, since, map[string]bool{"worker-1": true})
+
+	assert.Equal(t, []string{"shop/on-server"}, waiting,
+		"a worker pod keeps its Ready condition through a server reboot; only pods on the rebooted server need fresh readiness")
 }
 
 func TestScheduledAt(t *testing.T) {
