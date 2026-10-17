@@ -164,17 +164,13 @@ func runVolumeList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("\n  %-25s %-10s %-10s %s\n", "NAME", "SIZE", "STATUS", "ACCESS")
+	fmt.Printf("\n  %-25s %-10s %-12s %s\n", "NAME", "SIZE", "STATUS", "ACCESS")
 	for _, cr := range crList.Items {
 		size, _, _ := unstructured.NestedString(cr.Object, "spec", "size")
 		if actual, _, _ := unstructured.NestedString(cr.Object, "status", "actualSize"); actual != "" {
 			size = actual
 		}
-		phase, _, _ := unstructured.NestedString(cr.Object, "status", "phase")
-		if phase == "" {
-			phase = "Pending"
-		}
-		fmt.Printf("  %-25s %-10s %-10s %s\n", cr.GetName(), size, strings.ToLower(phase), "ReadWriteMany")
+		fmt.Printf("  %-25s %-10s %-12s %s\n", cr.GetName(), size, volumeListStatus(&cr), "ReadWriteMany")
 	}
 	fmt.Println()
 
@@ -364,4 +360,20 @@ func unmountVolume(ctx context.Context, dyn dynamic.Interface, ns, volumeName, a
 		}
 		return nil
 	})
+}
+
+// volumeListStatus returns "unsupported" when SharedStorageUnsupported is true.
+// Otherwise it returns the lowercase phase, defaulting to "pending".
+func volumeListStatus(cr *unstructured.Unstructured) string {
+	conditions, _, _ := unstructured.NestedSlice(cr.Object, "status", "conditions")
+	for _, c := range conditions {
+		if m, ok := c.(map[string]interface{}); ok && m["type"] == "SharedStorageUnsupported" && m["status"] == "True" {
+			return "unsupported"
+		}
+	}
+	phase, _, _ := unstructured.NestedString(cr.Object, "status", "phase")
+	if phase == "" {
+		phase = "Pending"
+	}
+	return strings.ToLower(phase)
 }

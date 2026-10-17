@@ -81,6 +81,8 @@ func rbacDynamic(objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
 		{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRoleBinding"},
 		{Group: "", Version: "v1", Kind: "ServiceAccount"},
 		{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"},
+		{Group: "admissionregistration.k8s.io", Version: "v1", Kind: "ValidatingAdmissionPolicy"},
+		{Group: "admissionregistration.k8s.io", Version: "v1", Kind: "ValidatingAdmissionPolicyBinding"},
 	} {
 		sch.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
 		sch.AddKnownTypeWithName(gvk.GroupVersion().WithKind(gvk.Kind+"List"), &unstructured.UnstructuredList{})
@@ -188,6 +190,11 @@ func TestReconcileClusterAPIState_AppliesSchemasAndRBACAndNeverTheAdminBinding(t
 	assert.Equal(t, "oidc:admin@shop.example", name, "only the install's own admin identity is bound")
 
 	assert.Contains(t, out.String(), "Operator roles", "the operator step has to be reported, not silently skipped")
+
+	for kind, gvr := range admissionPolicyGVRs {
+		_, getErr := dyn.Resource(gvr).Get(ctx, "kipper-shared-volumes", metav1.GetOptions{})
+		require.NoError(t, getErr, "upgrade must deliver the shared-volumes %s to existing clusters", kind)
+	}
 }
 
 // A CRD failure has to stop the upgrade there, because the RBAC that follows

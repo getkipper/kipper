@@ -26,6 +26,7 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/internal/nsowner"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/controller/pkg/projectenv"
 )
 
@@ -143,6 +144,15 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// within the effective limit. Deciding existence up front means a
 	// reordered spec can never strand an existing namespace behind a new one.
 	limit := project.EffectiveEnvLimit()
+	wantsShared := project.Spec.SharedStorage != nil && project.Spec.SharedStorage.Enabled
+	sharedSupported := true
+	if wantsShared {
+		mode, err := clusterStorageMode(ctx, r.Client)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		sharedSupported = platform.SupportsSharedVolumes(mode)
+	}
 	type envPlan struct {
 		env    kipperv1.ProjectEnvironment
 		ns     string
@@ -229,7 +239,7 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{}, fmt.Errorf("reconciling member bindings in %s: %w", pl.ns, err)
 		}
 
-		if project.Spec.SharedStorage != nil && project.Spec.SharedStorage.Enabled {
+		if wantsShared && sharedSupported {
 			if err := r.reconcileSharedStorage(ctx, &project, pl.ns); err != nil {
 				return ctrl.Result{}, fmt.Errorf("reconciling shared storage in %s: %w", pl.ns, err)
 			}
@@ -274,6 +284,7 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	r.setEnvLimitCondition(&project, len(environments) > limit, len(environments), limit)
 
 	r.setNamespaceConflictCondition(&project, namespaceConflicts)
+	setSharedStorageCondition(&project, wantsShared && !sharedSupported)
 	project.Status.Phase = "Active"
 	// What the project declares according to the API server, not what the pass
 	// started from. Both records are pruned by that set, and a claim written
@@ -437,6 +448,22 @@ func (r *ProjectReconciler) setEnvLimitCondition(project *kipperv1.Project, over
 	if changed && r.Recorder != nil {
 		r.Recorder.Event(project, corev1.EventTypeWarning, conditionEnvLimitExceeded, msg)
 	}
+}
+
+// setSharedStorageCondition sets the unsupported condition or removes it when
+// shared storage is supported or no longer requested.
+func setSharedStorageCondition(project *kipperv1.Project, unsupported bool) {
+	if !unsupported {
+		apimeta.RemoveStatusCondition(&project.Status.Conditions, conditionSharedStorageUnsupported)
+		return
+	}
+	apimeta.SetStatusCondition(&project.Status.Conditions, metav1.Condition{
+		Type:               conditionSharedStorageUnsupported,
+		Status:             metav1.ConditionTrue,
+		Reason:             "LocalStorage",
+		Message:            platform.SharedVolumesUnsupported,
+		ObservedGeneration: project.Generation,
+	})
 }
 
 // ownedNamespaces returns namespaces eligible for this project's cleanup.
@@ -733,7 +760,7 @@ func (r *ProjectReconciler) reconcileNamespace(ctx context.Context, project *kip
 
 func (r *ProjectReconciler) reconcileSharedStorage(ctx context.Context, project *kipperv1.Project, ns string) error {
 	pvcName := "shared-uploads"
-	storageClass := "longhorn"
+	storageClass := platform.LonghornSharedClass
 
 	size := "5Gi"
 	if project.Spec.SharedStorage != nil && project.Spec.SharedStorage.Size != "" {

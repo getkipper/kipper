@@ -15,6 +15,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 // Volumes provides handlers for shared volume management.
@@ -106,6 +107,16 @@ func (v *Volumes) Create(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
+
+	mode, err := clusterStorageMode(ctx, v.CRClient)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to read the storage mode")
+		return
+	}
+	if !platform.SupportsSharedVolumes(mode) {
+		respondError(w, http.StatusBadRequest, platform.SharedVolumesUnsupported)
+		return
+	}
 
 	vol := &kipperv1.Volume{
 		ObjectMeta: metav1.ObjectMeta{

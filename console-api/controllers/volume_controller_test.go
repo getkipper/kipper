@@ -6,7 +6,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -14,6 +16,7 @@ import (
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 func TestVolumeReconciler_SyncsAppVolumes(t *testing.T) {
@@ -247,4 +250,41 @@ func TestVolumeReconciler_DeletionDetachesApps(t *testing.T) {
 	var gone kipperv1.Volume
 	err = fakeClient.Get(context.Background(), crclient.ObjectKey{Namespace: "project-test", Name: "uploads"}, &gone)
 	assert.True(t, apierrors.IsNotFound(err), "the volume should be gone once the finalizer is released")
+}
+
+// A local-storage cluster has no ReadWriteMany class, so a shared volume gets
+// no claim, is mounted into no app, and says why.
+func TestVolumeReconciler_RefusesASharedVolumeOnLocalStorage(t *testing.T) {
+	scheme := testScheme()
+	app := newTestApp()
+	vol := &kipperv1.Volume{
+		ObjectMeta: metav1.ObjectMeta{Name: "uploads", Namespace: "project-test"},
+		Spec: kipperv1.VolumeSpec{
+			Size:   "5Gi",
+			Mounts: []kipperv1.VolumeMountTarget{{App: "my-app", MountPath: "/data/uploads"}},
+		},
+	}
+	fakeClient := crfake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(app, vol, localPlatformConfig()).WithStatusSubresource(vol).Build()
+	reconciler := &VolumeReconciler{Client: fakeClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "uploads", Namespace: "project-test"},
+	})
+	require.NoError(t, err)
+
+	var pvc corev1.PersistentVolumeClaim
+	err = fakeClient.Get(context.Background(), crclient.ObjectKey{Namespace: "project-test", Name: "shared-uploads"}, &pvc)
+	assert.True(t, apierrors.IsNotFound(err), "no ReadWriteMany claim is created on local storage")
+
+	var updatedApp kipperv1.App
+	require.NoError(t, fakeClient.Get(context.Background(), crclient.ObjectKey{Namespace: "project-test", Name: "my-app"}, &updatedApp))
+	assert.Empty(t, updatedApp.Spec.Volumes, "an app is not given a volume that has no claim")
+
+	var updated kipperv1.Volume
+	require.NoError(t, fakeClient.Get(context.Background(), crclient.ObjectKey{Namespace: "project-test", Name: "uploads"}, &updated))
+	cond := apimeta.FindStatusCondition(updated.Status.Conditions, conditionSharedStorageUnsupported)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, platform.SharedVolumesUnsupported, cond.Message)
 }

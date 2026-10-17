@@ -390,3 +390,34 @@ func TestPlatform_UpdateComponentPreservesOtherOverrides(t *testing.T) {
 	require.NotNil(t, byName["loki"].Enabled)
 	assert.True(t, *byName["loki"].Enabled)
 }
+
+// The console reads the storage capabilities from the summary, which every
+// signed-in user can load, to decide whether to offer shared volumes.
+func TestPlatform_SummaryReportsTheStorageCapabilities(t *testing.T) {
+	local := newPlatformConfig(platform.ProfileNano, nil, kipperv1.PlatformConfigStatus{})
+	local.Spec.Storage = platform.StorageLocal
+	for name, tc := range map[string]struct {
+		h      *Platform
+		mode   string
+		shared bool
+	}{
+		"local":        {&Platform{CRClient: testCRClient(local)}, platform.StorageLocal, false},
+		"legacy":       {&Platform{CRClient: testCRClient(newPlatformConfig(platform.ProfileSmall, nil, kipperv1.PlatformConfigStatus{}))}, platform.StorageLonghorn, true},
+		"no CR at all": {&Platform{CRClient: testCRClient()}, platform.StorageLonghorn, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			mountPlatformRoutes(tc.h).ServeHTTP(rec, httptest.NewRequest("GET", "/api/v1/platform", nil))
+			require.Equal(t, http.StatusOK, rec.Code)
+			var resp platformSummaryResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, tc.mode, resp.Storage)
+			assert.Equal(t, tc.shared, resp.SharedVolumes)
+			if tc.shared {
+				assert.Empty(t, resp.SharedVolumesNote)
+			} else {
+				assert.Equal(t, platform.SharedVolumesUnsupported, resp.SharedVolumesNote)
+			}
+		})
+	}
+}

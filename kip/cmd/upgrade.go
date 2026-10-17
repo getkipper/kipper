@@ -1349,6 +1349,13 @@ var consoleRBACGVRs = map[string]schema.GroupVersionResource{
 	"RoleBinding":        {Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings"},
 }
 
+// admissionPolicyGVRs maps the kinds in Kipper's embedded admission policies to
+// their resources.
+var admissionPolicyGVRs = map[string]schema.GroupVersionResource{
+	"ValidatingAdmissionPolicy":        {Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicies"},
+	"ValidatingAdmissionPolicyBinding": {Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicybindings"},
+}
+
 // progressf writes a progress line. A failed write to the operator's terminal
 // is not a reason to abandon an upgrade, so the error is dropped deliberately
 // rather than by omission.
@@ -1356,17 +1363,9 @@ func progressf(out io.Writer, format string, args ...interface{}) {
 	_, _ = fmt.Fprintf(out, format, args...)
 }
 
-// reconcileClusterAPIState applies everything an upgrade delivers through the
-// Kubernetes API before any workload restarts: the CRD schemas first, because
-// later steps address the kinds they register, then the RBAC that has to reach
-// existing clusters.
-//
-// It exists as a seam. Asserting on the appliers, or on the step table, proved
-// nothing three times over: each test kept passing with the production call
-// removed, because the test and runUpgrade were separate consumers of the same
-// helper. A test drives this function, so deleting a step from it fails. The
-// residual is the same one buildRouter has, that nothing can prove runUpgrade
-// still calls this, and that deletion is at least a visible one.
+// reconcileClusterAPIState updates CRDs, admission policies and RBAC in that order
+// before workloads restart. It stops on the first error and preserves existing
+// admin binding subjects.
 func reconcileClusterAPIState(ctx context.Context, dynClient dynamic.Interface, kipVersion, domain string, out io.Writer) error {
 	// A failure here has to stop the upgrade at its real cause: later steps
 	// apply objects of the kinds these CRDs register, and would otherwise die
@@ -1377,6 +1376,14 @@ func reconcileClusterAPIState(ctx context.Context, dynClient dynamic.Interface, 
 		return fmt.Errorf("updating CRD schemas: %w", err)
 	}
 	progressf(out, "  ✔  CRD schemas updated\n")
+
+	// The policies take Kipper resources as parameters, so they follow the CRDs.
+	progressf(out, "  ...  Applying admission policies\n")
+	if err := applyAdmissionPolicies(ctx, dynClient); err != nil {
+		progressf(out, "  ✗  Admission policies failed: %v\n", err)
+		return fmt.Errorf("applying admission policies: %w", err)
+	}
+	progressf(out, "  ✔  Admission policies applied\n")
 
 	// A permission added for a new feature only lands on fresh installs
 	// otherwise, so an existing cluster serves errors from every handler and
@@ -1426,11 +1433,26 @@ func upgradeRBACSteps() []rbacStep {
 	}
 }
 
+// applyAdmissionPolicies creates or updates the admission policies kip install
+// applies, so existing clusters get them on upgrade.
+func applyAdmissionPolicies(ctx context.Context, dynClient dynamic.Interface) error {
+	manifests, err := installer.AdmissionPolicyManifests()
+	if err != nil {
+		return err
+	}
+	for _, m := range manifests {
+		if err := applyManifest(ctx, dynClient, string(m), "admission policy"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // applyConsoleRBAC creates or updates the console-api ServiceAccount,
 // ClusterRole, and ClusterRoleBinding from the same manifest kip install
 // applies, so permission changes ship on upgrade too.
 func applyConsoleRBAC(ctx context.Context, dynClient dynamic.Interface) error {
-	return applyRBACManifest(ctx, dynClient, installer.ConsoleRBACManifest, "console rbac")
+	return applyManifest(ctx, dynClient, installer.ConsoleRBACManifest, "console rbac")
 }
 
 // applyOperatorClusterRoles re-applies the three project ClusterRoles the
@@ -1442,16 +1464,15 @@ func applyConsoleRBAC(ctx context.Context, dynClient dynamic.Interface) error {
 // its subjects are live state that renderAdminSubjectPatch maintains, so
 // re-applying the install-time copy would revoke every admin added since.
 func applyOperatorClusterRoles(ctx context.Context, dynClient dynamic.Interface) error {
-	return applyRBACManifest(ctx, dynClient, installer.OperatorClusterRolesManifest, "operator cluster roles")
+	return applyManifest(ctx, dynClient, installer.OperatorClusterRolesManifest, "operator cluster roles")
 }
 
-// applyRBACManifest creates or updates every document in an RBAC manifest.
-func applyRBACManifest(ctx context.Context, dynClient dynamic.Interface, manifest, what string) error {
+// applyManifest creates or updates resources from an embedded RBAC or admission
+// policy manifest in document order. It skips blank documents and stops on the
+// first parse, unsupported-kind or API error, leaving earlier changes applied.
+func applyManifest(ctx context.Context, dynClient dynamic.Interface, manifest, what string) error {
 	for _, doc := range strings.Split(manifest, "\n---\n") {
-		// A separator at either end, or a stray blank document, yields an empty
-		// segment that unmarshals to an object with no kind. Failing the whole
-		// upgrade on it would make a formatting slip in an embedded manifest an
-		// outage.
+		// YAML separators can leave empty documents that have no resource to apply.
 		if strings.TrimSpace(doc) == "" {
 			continue
 		}
@@ -1460,6 +1481,9 @@ func applyRBACManifest(ctx context.Context, dynClient dynamic.Interface, manifes
 			return fmt.Errorf("parsing %s document: %w", what, err)
 		}
 		gvr, ok := consoleRBACGVRs[obj.GetKind()]
+		if !ok {
+			gvr, ok = admissionPolicyGVRs[obj.GetKind()]
+		}
 		if !ok {
 			return fmt.Errorf("unexpected kind %q in %s manifest", obj.GetKind(), what)
 		}

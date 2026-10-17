@@ -8,6 +8,7 @@ import { useProjectsStore } from '@/stores/projects'
 import { useCapabilities } from '@/composables/useCapabilities'
 import { fetchVolumes, createVolume, deleteVolume, mountVolume, unmountVolume, type Volume } from '@/api/volumes'
 import { fetchApps } from '@/api/apps'
+import { fetchPlatformSummary } from '@/api/platform'
 import type { App } from '@/api/types'
 
 const toast = useToast()
@@ -32,8 +33,14 @@ const newSize = ref('5Gi')
 const mountVolumeName = ref('')
 const mountAppName = ref('')
 const mountPath = ref('/data')
+const sharedVolumesNote = ref('')
 
 onMounted(async () => {
+  fetchPlatformSummary()
+    .then(summary => {
+      if (summary.shared_volumes === false) sharedVolumesNote.value = summary.shared_volumes_note ?? ''
+    })
+    .catch(() => {})
   await loadVolumes()
 })
 
@@ -164,7 +171,7 @@ function statusColor(status: string): string {
       </div>
       <div class="flex items-center gap-2">
         <button
-          v-if="canInNamespace(selectedNamespace, 'kipper.write')"
+          v-if="!sharedVolumesNote && canInNamespace(selectedNamespace, 'kipper.write')"
           @click="showMount = !showMount"
           class="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-800"
         >
@@ -172,7 +179,7 @@ function statusColor(status: string): string {
           Mount
         </button>
         <button
-          v-if="canInNamespace(selectedNamespace, 'kipper.write')"
+          v-if="!sharedVolumesNote && canInNamespace(selectedNamespace, 'kipper.write')"
           @click="showCreate = !showCreate"
           class="inline-flex items-center gap-1.5 rounded-lg bg-kipper-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-kipper-700"
         >
@@ -188,6 +195,10 @@ function statusColor(status: string): string {
         </button>
       </div>
     </div>
+
+    <p v-if="sharedVolumesNote" class="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+      {{ sharedVolumesNote }}
+    </p>
 
     <!-- Create form -->
     <div v-if="showCreate" class="mb-6 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
@@ -317,7 +328,7 @@ function statusColor(status: string): string {
     <div v-else class="rounded-xl border border-dashed border-slate-300 py-16 text-center dark:border-slate-700">
       <HardDrive class="mx-auto mb-3 h-10 w-10 text-slate-400 dark:text-slate-500" :stroke-width="1.5" />
       <p class="text-sm font-medium text-slate-900 dark:text-slate-50">No shared volumes</p>
-      <p class="mt-1 max-w-sm mx-auto text-sm text-slate-500 dark:text-slate-400">
+      <p v-if="!sharedVolumesNote" class="mt-1 max-w-sm mx-auto text-sm text-slate-500 dark:text-slate-400">
         Create a shared volume with <code class="rounded-sm bg-slate-100 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-800">kip volume create uploads --size 5Gi</code>
       </p>
     </div>

@@ -12,6 +12,9 @@ export interface PlatformSummary {
   profile: string
   available_profiles: string[]
   components: PlatformSummaryComponent[]
+  storage: string
+  shared_volumes: boolean
+  shared_volumes_note?: string
 }
 
 export interface PlatformComponent {

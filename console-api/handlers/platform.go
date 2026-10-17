@@ -30,6 +30,9 @@ type platformSummaryResponse struct {
 	Profile           string                  `json:"profile"`
 	AvailableProfiles []string                `json:"available_profiles"`
 	Components        []componentSummaryEntry `json:"components"`
+	Storage           string                  `json:"storage"`
+	SharedVolumes     bool                    `json:"shared_volumes"`
+	SharedVolumesNote string                  `json:"shared_volumes_note,omitempty"`
 }
 
 type componentSummaryEntry struct {
@@ -109,6 +112,8 @@ func (p *Platform) Summary(w http.ResponseWriter, r *http.Request) {
 		if errors.IsNotFound(err) {
 			respondJSON(w, http.StatusOK, platformSummaryResponse{
 				AvailableProfiles: availableProfiles(),
+				Storage:           platform.StorageLonghorn,
+				SharedVolumes:     true,
 			})
 			return
 		}
@@ -124,6 +129,11 @@ func (p *Platform) Summary(w http.ResponseWriter, r *http.Request) {
 	summary := platformSummaryResponse{
 		Profile:           pc.Spec.Profile,
 		AvailableProfiles: availableProfiles(),
+		Storage:           platform.StorageMode(pc.Spec.Storage),
+		SharedVolumes:     platform.SupportsSharedVolumes(pc.Spec.Storage),
+	}
+	if !summary.SharedVolumes {
+		summary.SharedVolumesNote = platform.SharedVolumesUnsupported
 	}
 	for _, name := range platform.SupportedComponents() {
 		summary.Components = append(summary.Components, componentSummaryEntry{
@@ -296,6 +306,19 @@ func (p *Platform) fetchPlatformConfig(ctx context.Context) (*kipperv1.PlatformC
 		return nil, err
 	}
 	return &pc, nil
+}
+
+// clusterStorageMode reads the platform's storage mode, defaulting to Longhorn
+// when PlatformConfig or spec.storage is missing for compatibility with older clusters.
+func clusterStorageMode(ctx context.Context, c crclient.Client) (string, error) {
+	var pc kipperv1.PlatformConfig
+	if err := c.Get(ctx, crclient.ObjectKey{Name: platformConfigName}, &pc); err != nil {
+		if errors.IsNotFound(err) {
+			return platform.StorageLonghorn, nil
+		}
+		return "", err
+	}
+	return platform.StorageMode(pc.Spec.Storage), nil
 }
 
 func indexStatus(components []kipperv1.ComponentStatus) map[string]kipperv1.ComponentStatus {
