@@ -2,9 +2,11 @@ package installer
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
 )
@@ -201,4 +203,20 @@ func TestIgnoredProfileFlagNamesTheProfileCommand(t *testing.T) {
 	assert.Contains(t, note, "kip platform profile set small")
 	assert.Empty(t, ignoredProfileNote(ProfileMedium, ProfileMedium))
 	assert.Empty(t, ignoredProfileNote(ProfileMedium, ""), "no --profile given")
+}
+
+func TestInstallPlatformConfigRecordsTheStorageMode(t *testing.T) {
+	host := &hostScript{}
+	require.NoError(t, InstallPlatformConfig(host, ProfileNano, "longhorn"))
+	all := strings.Join(host.commands, "\n")
+	assert.Contains(t, all, "  storage: longhorn\n", "a new cluster records its mode")
+	assert.Contains(t, all, `kubectl patch platformconfig platform --type merge -p '{"spec":{"storage":"longhorn"}}'`,
+		"a legacy CR gets the Longhorn it already runs")
+	assert.Contains(t, all, `[ -n "$s" ] ||`, "a recorded mode is left alone")
+}
+
+func TestPlatformStateQueriesReadTheStorageMode(t *testing.T) {
+	assert.Contains(t, platformStateJSONPath, "{.spec.profile}/{.spec.storage}|")
+	state := readSavedPlatformState(&scriptedRunner{out: "'nano/local|'\n"})
+	assert.Equal(t, "local", state.Storage)
 }

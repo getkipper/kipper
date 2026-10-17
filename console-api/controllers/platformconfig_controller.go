@@ -76,6 +76,11 @@ func (r *PlatformConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		return ctrl.Result{}, err
 	}
+	if pc.Spec.Storage == "" {
+		if err := r.recordLegacyStorage(ctx, &pc); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 
 	overrides := overrideMap(pc.Spec.Components)
 	res := platform.EffectiveResources(pc.Spec.Profile, memoryOverrideMap(overrides))
@@ -273,6 +278,17 @@ func (r *PlatformConfigReconciler) reconcileComponentEnabled(ctx context.Context
 			return fmt.Errorf("deleting HelmChart %s: %w", chartName, err)
 		}
 		logger.Info("HelmChart deleted after disable", "chart", chartName)
+	}
+	return nil
+}
+
+// recordLegacyStorage persists the legacy Longhorn default. The caller must
+// check that spec.storage is empty before calling it.
+func (r *PlatformConfigReconciler) recordLegacyStorage(ctx context.Context, pc *kipperv1.PlatformConfig) error {
+	before := pc.DeepCopy()
+	pc.Spec.Storage = platform.StorageLonghorn
+	if err := r.Patch(ctx, pc, client.MergeFrom(before)); err != nil {
+		return fmt.Errorf("recording Longhorn storage: %w", err)
 	}
 	return nil
 }
