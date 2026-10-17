@@ -533,6 +533,10 @@ func runServiceUpdate(cmd *cobra.Command, args []string) error {
 	if result.StorageExpanded {
 		fmt.Printf("  ✔  Storage expanded to %s (live, no restart)\n", storage)
 	}
+	if result.StorageDeclared {
+		fmt.Printf("  ✔  Declared storage set to %s\n", storage)
+		fmt.Printf("     Local volumes use the available disk space. A migration creates the target volume at this size.\n")
+	}
 	if result.ResourcesChanged {
 		fmt.Printf("  ✔  Resource limits updated")
 		if memory != "" {

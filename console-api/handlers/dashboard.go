@@ -12,15 +12,21 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 // oomCacheTTL is how long the cluster-wide OOM-kill scan is reused. It bounds
 // the full pod list to once per interval no matter how many dashboards poll.
 const oomCacheTTL = 15 * time.Second
 
-// Dashboard provides the cluster health dashboard endpoint.
+// Dashboard provides the cluster health dashboard endpoint. A nil CRClient
+// includes all components in health checks.
 type Dashboard struct {
-	Client kubernetes.Interface
+	Client   kubernetes.Interface
+	CRClient crclient.Reader
 
 	oomMu    sync.Mutex
 	oomCache []oomKill
@@ -58,7 +64,8 @@ type componentCheck struct {
 	namespace string
 	name      string
 	label     string
-	kind      string // "deploy", "statefulset", "daemonset", or "" for k3s node check
+	kind      string
+	component string
 }
 
 // Status returns the full cluster health dashboard.
@@ -86,22 +93,47 @@ func (d *Dashboard) Status(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (d *Dashboard) checkComponents(ctx context.Context, nodes []corev1.Node, nodeErr error) []componentStatus {
-	checks := []componentCheck{
-		{"kube-system", "", "k3s", ""},
-		{"traefik", "traefik", "Traefik", "deploy"},
-		{"cert-manager", "cert-manager-webhook", "cert-manager", "deploy"},
-		{"longhorn-system", "longhorn-driver-deployer", "Longhorn", "deploy"},
-		{"keda", "keda-operator", "KEDA", "deploy"},
-		{"monitoring", "loki", "Loki", "statefulset"},
-		{"monitoring", "promtail", "Promtail", "daemonset"},
-		{"monitoring", "prometheus-kube-prometheus-stack-prometheus", "Prometheus", "statefulset"},
-		{"monitoring", "kube-prometheus-stack-grafana", "Grafana", "deploy"},
-		{"velero", "velero", "Velero", "deploy"},
-		{"dex", "dex", "Dex", "deploy"},
-		{"kipper-system", "console-api", "Console API", "deploy"},
-		{"kipper-system", "console", "Console", "deploy"},
+var dashboardChecks = []componentCheck{
+	{"kube-system", "", "k3s", "", ""},
+	{"traefik", "traefik", "Traefik", "deploy", ""},
+	{"cert-manager", "cert-manager-webhook", "cert-manager", "deploy", ""},
+	{"longhorn-system", "longhorn-driver-deployer", "Longhorn", "deploy", platform.ComponentLonghorn},
+	{"keda", "keda-operator", "KEDA", "deploy", ""},
+	{"monitoring", "loki", "Loki", "statefulset", platform.ComponentLoki},
+	{"monitoring", "promtail", "Promtail", "daemonset", platform.ComponentPromtail},
+	{"monitoring", "prometheus-kube-prometheus-stack-prometheus", "Prometheus", "statefulset", platform.ComponentPrometheus},
+	{"monitoring", "kube-prometheus-stack-grafana", "Grafana", "deploy", platform.ComponentGrafana},
+	{"velero", "velero", "Velero", "deploy", ""},
+	{"dex", "dex", "Dex", "deploy", ""},
+	{"kipper-system", "console-api", "Console API", "deploy", ""},
+	{"kipper-system", "console", "Console", "deploy", ""},
+}
+
+// installedChecks selects checks from the configured profile, component overrides
+// and storage mode. A missing reader or failed read includes all checks.
+func (d *Dashboard) installedChecks(ctx context.Context) []componentCheck {
+	if d.CRClient == nil {
+		return dashboardChecks
 	}
+	var pc kipperv1.PlatformConfig
+	if err := d.CRClient.Get(ctx, crclient.ObjectKey{Name: platformConfigName}, &pc); err != nil {
+		return dashboardChecks
+	}
+	overrides := make(map[string]*bool, len(pc.Spec.Components))
+	for _, c := range pc.Spec.Components {
+		overrides[c.Name] = c.Enabled
+	}
+	var checks []componentCheck
+	for _, ch := range dashboardChecks {
+		if ch.component == "" || platform.Installed(ch.component, overrides, pc.Spec.Profile, pc.Spec.Storage) {
+			checks = append(checks, ch)
+		}
+	}
+	return checks
+}
+
+func (d *Dashboard) checkComponents(ctx context.Context, nodes []corev1.Node, nodeErr error) []componentStatus {
+	checks := d.installedChecks(ctx)
 
 	// Each check is an independent read, so run them concurrently instead of
 	// paying a serial round-trip per component. Results stay in check order.

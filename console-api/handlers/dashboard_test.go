@@ -16,6 +16,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+
+	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 func TestDashboard_ReturnsComponentStatus(t *testing.T) {
@@ -215,4 +218,24 @@ func TestDashboard_OOMKillsFilteredPerRequestNotCached(t *testing.T) {
 	if len(got) != 1 || got[0].Pod != "blog-web-0" {
 		t.Fatalf("admin should see the cached blog OOM, got %+v", got)
 	}
+}
+
+func TestDashboard_LeavesOutWhatTheClusterDoesNotRun(t *testing.T) {
+	pc := newPlatformConfig(platform.ProfileNano, nil, kipperv1.PlatformConfigStatus{})
+	pc.Spec.Storage = platform.StorageLocal
+	handler := &Dashboard{Client: fake.NewClientset(), CRClient: testCRClient(pc)}
+
+	w := httptest.NewRecorder()
+	handler.Status(w, httptest.NewRequest("GET", "/api/v1/dashboard", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp dashboardResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	var names []string
+	for _, c := range resp.Components {
+		names = append(names, c.Name)
+	}
+	for _, absent := range []string{"Longhorn", "Loki", "Promtail", "Prometheus", "Grafana"} {
+		assert.NotContains(t, names, absent)
+	}
+	assert.Contains(t, names, "Traefik")
 }

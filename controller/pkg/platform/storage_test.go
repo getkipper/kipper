@@ -32,3 +32,15 @@ func TestSharedVolumesNeedLonghorn(t *testing.T) {
 	assert.Contains(t, SharedVolumesUnsupported, "local storage")
 	assert.Contains(t, SharedVolumesUnsupported, "Longhorn")
 }
+
+func TestInstalledFollowsProfileOverridesAndStorage(t *testing.T) {
+	assert.False(t, Installed(ComponentLonghorn, nil, ProfileNano, StorageLocal), "local storage runs no Longhorn")
+	assert.True(t, Installed(ComponentLonghorn, nil, ProfileNano, ""), "a legacy nano runs Longhorn")
+	assert.False(t, Installed(ComponentLoki, nil, ProfileNano, StorageLocal), "nano turns monitoring off")
+	assert.False(t, Installed(ComponentGrafana, nil, ProfileNano, StorageLocal), "Grafana follows Prometheus")
+	on := true
+	assert.True(t, Installed(ComponentLoki, map[string]*bool{ComponentLoki: &on}, ProfileNano, StorageLocal), "an explicit enable wins")
+	assert.True(t, Installed(ComponentPromtail, map[string]*bool{ComponentLoki: &on}, ProfileNano, StorageLocal), "Promtail follows Loki")
+	assert.True(t, Installed(ComponentPrometheus, nil, ProfileSmall, StorageLonghorn))
+	assert.True(t, Installed("dex", nil, ProfileNano, StorageLocal), "components outside the table are always there")
+}

@@ -21,6 +21,7 @@ import (
 	"k8s.io/client-go/util/retry"
 
 	"github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/controller/pkg/servicecatalog"
 	"github.com/getkipper/kipper/kip/internal/manifest"
@@ -468,15 +469,29 @@ func (m *Manager) workloadIsKippers(ctx context.Context, namespace, name string)
 // UpdateResult describes what changed during an update.
 type UpdateResult struct {
 	StorageExpanded  bool
+	StorageDeclared  bool
 	ResourcesChanged bool
 	ImageChanged     bool
 	NeedsRestart     bool
 }
 
 // Update modifies a running service's resources, storage, or image version.
-// Storage expansion is live (no restart). Resource and image changes restart the pod.
+// Storage changes update the declared size and expand claims other than local-path
+// claims without restarting the pod. StorageDeclared reports local-path claims,
+// whose requested size is left unchanged. Resource and image changes trigger a restart.
+// Invalid storage requests fail before any writes. Later failures may leave partial changes.
 func (m *Manager) Update(ctx context.Context, namespace, name string, opts Options) (*UpdateResult, error) {
 	result := &UpdateResult{}
+
+	// Validate storage first so an invalid request leaves the whole update unapplied.
+	var storage *storagePlan
+	if opts.Storage != "" {
+		plan, err := m.planStorage(ctx, namespace, name, opts.Storage)
+		if err != nil {
+			return nil, err
+		}
+		storage = plan
+	}
 
 	ss, err := m.Client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
@@ -523,19 +538,9 @@ func (m *Manager) Update(ctx context.Context, namespace, name string, opts Optio
 		}
 	}
 
-	// Expand storage (PVC patch — live, no restart needed)
-	if opts.Storage != "" {
-		pvcs, err := m.Client.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: fmt.Sprintf("app=%s", name),
-		})
-		if err == nil {
-			for i := range pvcs.Items {
-				pvcs.Items[i].Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse(opts.Storage)
-				if _, err := m.Client.CoreV1().PersistentVolumeClaims(namespace).Update(ctx, &pvcs.Items[i], metav1.UpdateOptions{}); err != nil {
-					return nil, fmt.Errorf("expanding storage: %w", err)
-				}
-				result.StorageExpanded = true
-			}
+	if storage != nil {
+		if err := m.applyStorage(ctx, namespace, name, storage, result); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1043,6 +1048,78 @@ func generatePassword(length int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b)[:length], nil
+}
+
+// storagePlan holds a validated size and the claims to update. Local-path claims
+// are excluded because their provisioner does not support expansion.
+type storagePlan struct {
+	size  resource.Quantity
+	grow  []*corev1.PersistentVolumeClaim
+	local bool
+}
+
+// planStorage validates a positive storage quantity and rejects shrinking any
+// claim outside the local-path storage class. It performs no writes.
+func (m *Manager) planStorage(ctx context.Context, namespace, name, storage string) (*storagePlan, error) {
+	size, err := resource.ParseQuantity(storage)
+	if err != nil || size.Sign() <= 0 {
+		return nil, fmt.Errorf("invalid --storage %q: use a positive size such as 10Gi", storage)
+	}
+	pvcs, err := m.Client.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("app=%s", name),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reading the volumes of %s: %w", name, err)
+	}
+	plan := &storagePlan{size: size}
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		if class := pvc.Spec.StorageClassName; class != nil && *class == platform.LocalPathClass {
+			plan.local = true
+			continue
+		}
+		if current := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; size.Cmp(current) < 0 {
+			return nil, fmt.Errorf("volume %s is %s and can only grow. Use at least %s", pvc.Name, current.String(), current.String())
+		}
+		plan.grow = append(plan.grow, pvc)
+	}
+	return plan, nil
+}
+
+// applyStorage updates the planned claims, then records the declared size on the
+// Service CR. A failure can leave earlier writes applied.
+func (m *Manager) applyStorage(ctx context.Context, namespace, name string, plan *storagePlan, result *UpdateResult) error {
+	for _, pvc := range plan.grow {
+		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = plan.size
+		if _, err := m.Client.CoreV1().PersistentVolumeClaims(namespace).Update(ctx, pvc, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("expanding storage: %w", err)
+		}
+		result.StorageExpanded = true
+	}
+	result.StorageDeclared = plan.local
+	if err := m.setServiceStorage(ctx, namespace, name, plan.size.String()); err != nil {
+		return fmt.Errorf("recording the declared size (run the command again): %w", err)
+	}
+	return nil
+}
+
+// setServiceStorage records the declared volume size, retrying update conflicts.
+func (m *Manager) setServiceStorage(ctx context.Context, namespace, name, size string) error {
+	services := m.Dynamic.Resource(manifest.ServiceGVR).Namespace(namespace)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		svc, err := services.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return fmt.Errorf("service %q not found", name)
+			}
+			return fmt.Errorf("getting service: %w", err)
+		}
+		if err := unstructured.SetNestedField(svc.Object, size, "spec", "storage"); err != nil {
+			return fmt.Errorf("setting storage: %w", err)
+		}
+		_, err = services.Update(ctx, svc, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 // setServiceResources writes fixed memory and CPU sizes to a Service CR. A
