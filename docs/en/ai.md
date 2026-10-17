@@ -53,12 +53,10 @@ Pick the size that matches the tier you intend to install (or the `--pvc-size` y
 Expand the volume in place before running `kip ai install`. The example below sizes for tier 2. Replace `90Gi` with the target from the table:
 
 ```bash
-kubectl -n velero patch pvc minio-storage \
-  --type merge \
-  -p '{"spec":{"resources":{"requests":{"storage":"90Gi"}}}}'
+kip backup storage resize --size 90Gi
 ```
 
-Longhorn supports online expansion when the volume's storage class allows it (`longhorn-single` does). Wait for `kubectl -n velero get pvc minio-storage` to show the new capacity before re-running `kip ai install`. If you would rather skip the storage check entirely (evaluation installs that will never run `kip ai backup`), pass `--skip-storage-check`. Snapshotting against an undersized MinIO produces `PartiallyFailed` Backup CRs, Kopia errors about object-storage write failures, and BackupRepository CRs pointing at half-written repo metadata. Recovery is `kip ai backup delete --name <name>` to clear the failed CRs and freeing MinIO space before re-running.
+The command waits up to five minutes for the volume to report the requested capacity. Run it again with the same size to resume waiting. For evaluation installs that will never run `kip ai backup`, pass `--skip-storage-check` to skip the capacity check. An undersized MinIO volume can cause backups to fail. Free up space or expand the volume before retrying.
 
 ## Install
 
