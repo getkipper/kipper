@@ -2,36 +2,95 @@ package installer
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
-// InstallLoki installs Grafana Loki in single-binary mode with filesystem
-// storage. Provides persistent, searchable log aggregation for all pods.
-// Memory limits come from the supplied profile.
-//
-// The upgrade path uses InstallLokiWithResources directly to honor any
-// per-component overrides recorded on the PlatformConfig CR.
+// These queries distinguish absent objects from lookup failures so an unreadable
+// StatefulSet cannot cause an update to its immutable claim template.
+const (
+	lokiTemplateQuery = `kubectl -n monitoring get statefulset loki --ignore-not-found ` +
+		`-o jsonpath='{"loki-template["}{.spec.volumeClaimTemplates[0].spec.resources.requests.storage}{"]"}' 2>/dev/null`
+	lokiClaimQuery = `kubectl -n monitoring get pvc storage-loki-0 --ignore-not-found ` +
+		`-o jsonpath='{"loki-claim["}{.spec.resources.requests.storage}{"]"}' 2>/dev/null`
+)
+
+var (
+	lokiTemplatePayload = regexp.MustCompile(`loki-template\[([^\]]*)\]`)
+	lokiClaimPayload    = regexp.MustCompile(`loki-claim\[([^\]]*)\]`)
+)
+
+// lokiStorageRequest picks the volume size the chart renders from the two
+// lookups using platform.LokiStorageSize.
+func lokiStorageRequest(templateOut, claimOut string) (string, error) {
+	templateSize, err := markedSize(lokiTemplatePayload, templateOut)
+	if err != nil {
+		return "", err
+	}
+	claimSize, err := markedSize(lokiClaimPayload, claimOut)
+	if err != nil {
+		return "", err
+	}
+	return platform.LokiStorageSize(templateSize, claimSize), nil
+}
+
+// markedSize validates the first matched quantity. An absent or empty match
+// returns an empty string. An invalid quantity returns an error.
+func markedSize(payload *regexp.Regexp, out string) (string, error) {
+	m := payload.FindStringSubmatch(out)
+	if len(m) < 2 || m[1] == "" {
+		return "", nil
+	}
+	if _, err := resource.ParseQuantity(m[1]); err != nil {
+		return "", fmt.Errorf("reading the log volume size %q: %w", m[1], err)
+	}
+	return m[1], nil
+}
+
+// lokiStorage reads the existing volume size and returns lookup or parsing errors.
+func lokiStorage(client CommandRunner) (string, error) {
+	templateOut, err := client.Run(lokiTemplateQuery)
+	if err != nil {
+		return "", fmt.Errorf("reading the log volume size: %w", err)
+	}
+	claimOut, err := client.Run(lokiClaimQuery)
+	if err != nil {
+		return "", fmt.Errorf("reading the log volume size: %w", err)
+	}
+	return lokiStorageRequest(templateOut, claimOut)
+}
+
+// InstallLoki applies Loki with memory resources from the profile and adds Promtail.
+// It preserves existing Loki storage through InstallLokiWithResources.
 func InstallLoki(client CommandRunner, profile string) error {
 	return InstallLokiWithResources(client, platform.ResourcesForProfile(profile))
 }
 
-// InstallLokiWithResources installs Loki using the supplied memory resources.
-// Use this when the effective limits depend on more than the profile alone
-// (e.g. an upgrade reading PlatformConfig.spec.components overrides).
+// InstallLokiWithResources applies Loki with the supplied memory resources and
+// adds Promtail. It preserves the existing Loki template or claim size. Lookup,
+// size parsing and apply failures return errors. It also attempts to raise
+// the host inotify limit and returns without waiting for the charts to be ready.
 func InstallLokiWithResources(client CommandRunner, res platform.Resources) error {
-	manifest := platform.LokiHelmChart(res)
+	// Preserve the immutable claim template when updating an existing StatefulSet.
+	storage, err := lokiStorage(client)
+	if err != nil {
+		return err
+	}
+	manifest := platform.LokiHelmChart(res, storage)
 
 	applyCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", manifest)
 	if _, err := client.Run(applyCmd); err != nil {
 		return fmt.Errorf("applying Loki HelmChart: %w", err)
 	}
 
-	// Apply the Promtail limit during upgrades too; workers receive it when joining.
+	// Apply the Promtail limit during upgrades too. Workers receive it when joining.
 	_ = raiseInotifyLimit(client)
 
-	// Install Promtail to ship container logs to Loki
+	// Promtail supplies Loki with container logs.
 	promtailCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%s\nKIPEOF", platform.PromtailHelmChart())
 	if _, err := client.Run(promtailCmd); err != nil {
 		return fmt.Errorf("applying Promtail HelmChart: %w", err)

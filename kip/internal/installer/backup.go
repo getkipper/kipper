@@ -175,14 +175,35 @@ func ensureMinIOPassword(client CommandRunner) (string, error) {
 	return generateMinIOPassword()
 }
 
-// installInClusterMinIO deploys MinIO with a Longhorn-backed PVC and
-// creates the velero bucket. Used as the default backup storage when
-// the user has not configured external S3-compatible storage.
-//
-// Note: backups stored here die with the cluster (Longhorn data is on
-// the cluster's own host). For durability across cluster wipes, use
-// external storage via `kip install --backup-storage-*`.
+// minioDefaultStorage is the backup volume size requested on a fresh install.
+const minioDefaultStorage = "10Gi"
+
+const minioStorageMarker = "minio-size"
+
+// minioStorageQuery includes a marker to distinguish claim sizes from SSH output.
+var minioStorageQuery = storageSizeQuery("velero", "minio-storage", minioStorageMarker)
+
+// minioStorageRequest preserves expanded backup volumes using preservedStorageRequest.
+func minioStorageRequest(out string) (string, error) {
+	size, err := preservedStorageRequest(out, minioStorageMarker, minioDefaultStorage)
+	if err != nil {
+		return "", fmt.Errorf("backup volume: %w", err)
+	}
+	return size, nil
+}
+
+// installInClusterMinIO deploys MinIO and creates the Velero bucket.
+// Backups use cluster storage. Use external S3 storage to survive cluster loss.
 func installInClusterMinIO(client CommandRunner, password string) error {
+	// Preserve existing capacity because Kubernetes rejects PVC shrink requests.
+	existing, err := client.Run(minioStorageQuery)
+	if err != nil {
+		return fmt.Errorf("reading the backup volume size: %w", err)
+	}
+	storage, err := minioStorageRequest(existing)
+	if err != nil {
+		return err
+	}
 	minioManifest := fmt.Sprintf(`apiVersion: v1
 kind: Namespace
 metadata:
@@ -208,7 +229,7 @@ spec:
   accessModes: [ReadWriteOnce]
   resources:
     requests:
-      storage: 30Gi
+      storage: %s
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -281,6 +302,7 @@ spec:
 		minioCredentialsSecret,
 		minioUserSecretKey, minioRootUser,
 		minioPasswordSecretKey, password,
+		storage,
 		minioServerImage,
 		minioCredentialsSecret, minioUserSecretKey,
 		minioCredentialsSecret, minioPasswordSecretKey)
@@ -292,7 +314,7 @@ spec:
 
 	waitCmd := "kubectl -n velero rollout status deployment/minio --timeout=120s"
 	if _, err := client.Run(waitCmd); err != nil {
-		return fmt.Errorf("waiting for MinIO: %w", err)
+		return fmt.Errorf("waiting for MinIO: %w%s", err, longhornVolumeDiagnosis(client, "velero", "minio-storage"))
 	}
 
 	return createMinIOBucket(client)

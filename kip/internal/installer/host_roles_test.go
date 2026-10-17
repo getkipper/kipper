@@ -66,7 +66,7 @@ func TestPreflightWorkerAsksOnlyAboutTheKubeletPort(t *testing.T) {
 	worker := &routedRunner{routes: []route{
 		{contains: "cat /etc/os-release", out: "ID=debian\nVERSION_ID=\"13\"\n"},
 		{contains: "MemTotal", out: "4000000\n"},
-		{contains: "df ", out: "40000000\n"},
+		{contains: "df ", out: "40000000M 45000000M /\n40000000M 45000000M /\n"},
 		{contains: "nproc", out: "2\n"},
 		{contains: "ss -tlnpH", out: "LISTEN 0 4096 *:10250 *:* users:((\"kubelet\",pid=1,fd=3))\n"},
 	}}

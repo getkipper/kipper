@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -106,9 +107,26 @@ func TestKeptProfileNotesCheckTheProfileThatStays(t *testing.T) {
 
 func TestResolveProfileHonorsAnExplicitChoice(t *testing.T) {
 	sys := SystemInfo{RAMMB: 8192, CPUs: 2}
-	assert.Equal(t, ProfileMedium, resolveProfile(ProfileMedium, sys))
-	assert.Equal(t, ProfileNano, resolveProfile(ProfileNano, sys))
-	assert.Equal(t, ProfileSmall, resolveProfile("", sys), "no --profile uses the RAM and CPU pick")
+	assert.Equal(t, ProfileMedium, resolveProfile(ProfileMedium, "", sys))
+	assert.Equal(t, ProfileNano, resolveProfile(ProfileNano, "", sys))
+	assert.Equal(t, ProfileSmall, resolveProfile("", "", sys), "no --profile uses the RAM and CPU pick")
+}
+
+func TestResolveProfileKeepsASavedProfile(t *testing.T) {
+	sys := SystemInfo{RAMMB: 8192, CPUs: 2}
+	assert.Equal(t, ProfileMedium, resolveProfile("", ProfileMedium, sys))
+	assert.Equal(t, ProfileNano, resolveProfile(ProfileMedium, ProfileNano, sys))
+}
+
+func TestReadSavedPlatformStateAcceptsOnlyAKnownProfile(t *testing.T) {
+	state := readSavedPlatformState(&scriptedRunner{out: "'small|loki=;false\nprometheus=1Gi;\n'\n"})
+	assert.Equal(t, ProfileSmall, state.Profile)
+	assert.False(t, state.LokiEnabled(), "the explicit disable travels with the profile")
+	assert.True(t, state.PrometheusEnabled())
+	assert.Equal(t, ProfileMedium, readSavedPlatformState(&scriptedRunner{out: "medium|"}).Profile)
+	assert.Empty(t, readSavedPlatformState(&scriptedRunner{out: ""}).Profile, "no cluster, no CR")
+	assert.Empty(t, readSavedPlatformState(&scriptedRunner{out: "error: the server could not be reached"}).Profile)
+	assert.Empty(t, readSavedPlatformState(&scriptedRunner{err: errors.New("ssh: connection lost")}).Profile)
 }
 
 func TestResourcesForProfile(t *testing.T) {
@@ -174,4 +192,13 @@ func TestResourcesForProfileFallsBackToSmall(t *testing.T) {
 	// Unknown profiles also need usable memory limits.
 	got = platform.ResourcesForProfile("garbage-from-future")
 	assert.Equal(t, "512Mi", got.PrometheusMemoryLimit)
+}
+
+func TestIgnoredProfileFlagNamesTheProfileCommand(t *testing.T) {
+	note := ignoredProfileNote(ProfileMedium, ProfileSmall)
+	assert.Contains(t, note, "--profile small")
+	assert.Contains(t, note, "'medium'")
+	assert.Contains(t, note, "kip platform profile set small")
+	assert.Empty(t, ignoredProfileNote(ProfileMedium, ProfileMedium))
+	assert.Empty(t, ignoredProfileNote(ProfileMedium, ""), "no --profile given")
 }

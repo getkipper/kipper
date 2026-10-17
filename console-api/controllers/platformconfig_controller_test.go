@@ -10,8 +10,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -745,6 +747,65 @@ func TestPlatformConfigReconciler_RecreatesHelmChartWhenRe_enabled(t *testing.T)
 	values, _, _ := unstructured.NestedString(loki.Object, "spec", "valuesContent")
 	assert.Contains(t, values, "memory: 256Mi", "loki request should match medium profile")
 	assert.Contains(t, values, "memory: 512Mi", "loki limit should match medium profile")
+}
+
+// Preserve the immutable claim template even when its claim has expanded.
+func TestPlatformConfigReconciler_RecreatesLokiAtTheSizeStillOnTheCluster(t *testing.T) {
+	yes, no := true, false
+	pc := func() *kipperv1.PlatformConfig {
+		return &kipperv1.PlatformConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: PlatformConfigName},
+			Spec: kipperv1.PlatformConfigSpec{
+				Profile: platform.ProfileMedium,
+				Components: []kipperv1.ComponentOverride{
+					{Name: componentLoki, Enabled: &yes},
+					{Name: componentPrometheus, Enabled: &no},
+				},
+			},
+		}
+	}
+	claim := func(size string) *corev1.PersistentVolumeClaim {
+		return &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "storage-loki-0", Namespace: platform.MonitoringNamespace},
+			Spec: corev1.PersistentVolumeClaimSpec{Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(size)},
+			}},
+		}
+	}
+	statefulSet := func(size string) *appsv1.StatefulSet {
+		return &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "loki", Namespace: platform.MonitoringNamespace},
+			Spec:       appsv1.StatefulSetSpec{VolumeClaimTemplates: []corev1.PersistentVolumeClaim{*claim(size)}},
+		}
+	}
+	unsized := statefulSet("1Gi")
+	unsized.Spec.VolumeClaimTemplates[0].Spec.Resources.Requests = nil
+
+	for name, tc := range map[string]struct {
+		objects []client.Object
+		want    string
+	}{
+		"fresh":                                {nil, "size: 5Gi"},
+		"only the claim left after a disable":  {[]client.Object{claim("10Gi")}, "size: 10Gi"},
+		"template kept over an expanded claim": {[]client.Object{statefulSet("10Gi"), claim("20Gi")}, "size: 10Gi"},
+		"template without a storage request":   {[]client.Object{unsized, claim("10Gi")}, "size: 10Gi"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			scheme := testScheme()
+			fakeClient := crfake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(append([]client.Object{pc()}, tc.objects...)...).
+				WithStatusSubresource(&kipperv1.PlatformConfig{}).Build()
+			r := &PlatformConfigReconciler{Client: fakeClient, Scheme: scheme}
+			_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: PlatformConfigName}})
+			require.NoError(t, err)
+
+			loki := &unstructured.Unstructured{}
+			loki.SetGroupVersionKind(helmChartGVK)
+			require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "loki", Namespace: helmChartNamespace}, loki))
+			values, _, _ := unstructured.NestedString(loki.Object, "spec", "valuesContent")
+			assert.Contains(t, values, tc.want)
+		})
+	}
 }
 
 func TestPlatformConfigReconciler_IgnoresUnknownCRName(t *testing.T) {
