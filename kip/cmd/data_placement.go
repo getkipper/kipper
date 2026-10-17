@@ -67,6 +67,9 @@ func writePlacement(out io.Writer, p service.Placement, err error) {
 	pod := p.PodNode
 	if pod == "" {
 		pod = "not scheduled"
+		if p.Unscheduled != "" {
+			pod += " (" + p.Unscheduled + ")"
+		}
 	}
 	say(out, "  Pod node:  %s\n", pod)
 	if err != nil {

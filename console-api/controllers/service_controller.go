@@ -556,6 +556,7 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 
 	// Init container removes lost+found created by ext4 formatting on Longhorn volumes.
 	// MySQL refuses to initialise if the data directory contains any files.
+	initCPURequest, initMemoryRequest := servicecatalog.InitContainerRequests()
 	initContainers := []corev1.Container{
 		{
 			Name:    "remove-lost-found",
@@ -566,8 +567,8 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 			},
 			Resources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("10m"),
-					corev1.ResourceMemory: resource.MustParse("16Mi"),
+					corev1.ResourceCPU:    resource.MustParse(initCPURequest),
+					corev1.ResourceMemory: resource.MustParse(initMemoryRequest),
 				},
 				Limits: corev1.ResourceList{
 					corev1.ResourceCPU:    resource.MustParse("100m"),
