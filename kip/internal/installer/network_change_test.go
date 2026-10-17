@@ -20,6 +20,10 @@ const vxlanConfig = "tls-san:\n  - \"203.0.113.10\"\ndisable:\n  - traefik\nreso
 type netHost struct {
 	config, dropIn       string
 	dropInPresent        bool
+	flannel              string
+	flannelPresent       bool
+	backupFlannel        string
+	backupFlannelAbsent  bool
 	backupConfig         string
 	backupDropIn         string
 	backupDropInAbsent   bool
@@ -104,10 +108,18 @@ func (h *netHost) RunStdin(cmd string, in io.Reader) (string, error) {
 		return h.config, nil
 	case strings.Contains(cmd, networkChangeBackup+"/config.yaml") && strings.Contains(cmd, "from="):
 		h.backupConfig, h.backupDropIn, h.backupDropInAbsent = h.config, h.dropIn, !h.dropInPresent
+		h.backupFlannel, h.backupFlannelAbsent = h.flannel, !h.flannelPresent
 		h.savedReady, h.snapshotSaved = string(stdin), true
 		h.record = strings.ReplaceAll(strings.SplitN(strings.SplitN(cmd, "printf '", 2)[1], "' > ", 2)[0], `\n`, "\n")
 	case strings.HasPrefix(cmd, "if [ -e "+k3sNetworkConfigPath):
 		return h.dropIn, nil
+	case strings.HasPrefix(cmd, "if [ -e "+flannelConfPath):
+		return h.flannel, nil
+	case strings.Contains(cmd, `mv "$staged" `+flannelConfPath):
+		if h.active {
+			return "", errors.New("the flannel configuration changed while k3s ran")
+		}
+		h.flannel, h.flannelPresent = string(stdin), true
 	case strings.Contains(cmd, `mv "$staged" `+k3sNetworkConfigPath):
 		h.dropIn, h.dropInPresent = string(stdin), true
 	case cmd == "systemctl stop k3s":
@@ -150,6 +162,14 @@ func (h *netHost) RunStdin(cmd string, in io.Reader) (string, error) {
 			h.dropIn, h.dropInPresent = "", false
 		} else {
 			h.dropIn, h.dropInPresent = h.backupDropIn, true
+		}
+		if !strings.Contains(cmd, flannelConfPath) {
+			break
+		}
+		if h.backupFlannelAbsent {
+			h.flannel, h.flannelPresent = "", false
+		} else {
+			h.flannel, h.flannelPresent = h.backupFlannel, true
 		}
 	case strings.Contains(cmd, networkChangeBackup+"/ready-workloads ]"):
 		if h.savedReady == "" && !h.snapshotSaved {
@@ -429,7 +449,7 @@ func TestChangeServerNetworkMovesAWireGuardServerToItsPrivateAddress(t *testing.
 	h.config, h.backend, h.links, h.internalIP = vxlanConfig+"flannel-backend: wireguard-native\n", "wireguard", map[string]bool{"flannel-wg": true}, "203.0.113.10"
 	dropIn := privateServerDropIn
 
-	require.NoError(t, changeNetworkTo(h, fastNetworkChange, &dropIn))
+	require.NoError(t, changeNetworkTo(h, fastNetworkChange, &dropIn, ""))
 
 	assert.Equal(t, privateServerDropIn, h.dropIn)
 	assert.Equal(t, "10.0.0.3", h.internalIP)
@@ -442,7 +462,7 @@ func TestChangeServerNetworkAlsoMovesAVXLANServerToWireGuard(t *testing.T) {
 	h := newNetHost()
 	dropIn := privateServerDropIn
 
-	require.NoError(t, changeNetworkTo(h, fastNetworkChange, &dropIn))
+	require.NoError(t, changeNetworkTo(h, fastNetworkChange, &dropIn, ""))
 
 	assert.Contains(t, h.config, "flannel-backend: wireguard-native\n")
 	assert.Equal(t, "10.0.0.3", h.internalIP)
@@ -453,7 +473,7 @@ func TestChangeServerNetworkRestoresWhenTheNodeKeepsItsOldAddress(t *testing.T) 
 	h.config, h.backend, h.links, h.internalIP, h.keepsNodeIP = vxlanConfig+"flannel-backend: wireguard-native\n", "wireguard", map[string]bool{"flannel-wg": true}, "203.0.113.10", true
 	dropIn := privateServerDropIn
 
-	err := changeNetworkTo(h, fastNetworkChange, &dropIn)
+	err := changeNetworkTo(h, fastNetworkChange, &dropIn, "")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "did not report 10.0.0.3")
@@ -468,7 +488,7 @@ func TestChangeServerNetworkDoesNothingWhenTheDropInMatches(t *testing.T) {
 	h.dropIn, h.dropInPresent, h.internalIP = privateServerDropIn, true, "10.0.0.3"
 	dropIn := privateServerDropIn
 
-	require.NoError(t, changeNetworkTo(h, fastNetworkChange, &dropIn))
+	require.NoError(t, changeNetworkTo(h, fastNetworkChange, &dropIn, ""))
 
 	assert.Equal(t, -1, h.index("systemctl stop k3s"))
 }
@@ -479,7 +499,7 @@ func TestChangeServerNetworkRefusesAMatchingDropInThatK3sDoesNotRun(t *testing.T
 	h.dropIn, h.dropInPresent, h.internalIP = privateServerDropIn, true, "203.0.113.10"
 	dropIn := privateServerDropIn
 
-	err := changeNetworkTo(h, fastNetworkChange, &dropIn)
+	err := changeNetworkTo(h, fastNetworkChange, &dropIn, "")
 
 	assert.ErrorContains(t, err, "k3s runs with another address")
 	assert.Equal(t, -1, h.index("systemctl stop k3s"))
@@ -521,7 +541,7 @@ func TestChangeServerNetworkToleratesATransientAddressReadOnAMatchingDropIn(t *t
 	h.addressReadFailures = 1
 	dropIn := privateServerDropIn
 
-	require.NoError(t, changeNetworkTo(h, fastNetworkChange, &dropIn))
+	require.NoError(t, changeNetworkTo(h, fastNetworkChange, &dropIn, ""))
 
 	assert.Equal(t, -1, h.index("systemctl stop k3s"))
 }
@@ -631,4 +651,75 @@ func TestNetworkChangeConsentStatesTheMeasuredImpact(t *testing.T) {
 	assert.Contains(t, text, "attempts to restore the previous network configuration")
 	assert.NotContains(t, text, "potentially pod traffic")
 	assert.Contains(t, text, "usually for 10 to 30 seconds and longer on small or busy servers, with the whole change taking about a minute")
+}
+
+const publicServerDropIn = "flannel-conf: " + flannelConfPath + "\nflannel-external-ip: true\nnode-external-ip: 203.0.113.10\nnode-ip: 203.0.113.10\n"
+
+func publicWireGuardServer() *netHost {
+	h := newNetHost()
+	h.config, h.backend, h.links, h.internalIP = vxlanConfig+"flannel-backend: wireguard-native\n", "wireguard", map[string]bool{"flannel-wg": true}, "203.0.113.10"
+	return h
+}
+
+func TestChangeServerNetworkWritesTheFlannelConfWhileK3sIsStopped(t *testing.T) {
+	h := publicWireGuardServer()
+	dropIn := publicServerDropIn
+
+	require.NoError(t, changeNetworkTo(h, fastNetworkChange, &dropIn, "new-conf\n"))
+
+	assert.Equal(t, "new-conf\n", h.flannel)
+	assert.Equal(t, publicServerDropIn, h.dropIn)
+	assert.Less(t, h.index(networkChangeBackup+"/config.yaml"), h.index(`mv "$staged" `+flannelConfPath), "the old file is backed up first")
+}
+
+func TestChangeServerNetworkRestoresTheFlannelConf(t *testing.T) {
+	h := publicWireGuardServer()
+	h.dropIn, h.dropInPresent, h.flannel, h.flannelPresent, h.keepsNodeIP = publicServerDropIn, true, "old-conf\n", true, true
+	dropIn := strings.ReplaceAll(publicServerDropIn, "203.0.113.10", "203.0.113.20")
+
+	err := changeNetworkTo(h, fastNetworkChange, &dropIn, "new-conf\n")
+
+	require.ErrorContains(t, err, "previous configuration is back in place")
+	assert.Equal(t, "old-conf\n", h.flannel, "a rollback brings back the MTU the server ran with")
+	assert.Equal(t, publicServerDropIn, h.dropIn)
+
+	h = publicWireGuardServer()
+	h.keepsNodeIP = true
+	dropIn = strings.ReplaceAll(publicServerDropIn, "203.0.113.10", "203.0.113.20")
+	require.Error(t, changeNetworkTo(h, fastNetworkChange, &dropIn, "new-conf\n"))
+	assert.False(t, h.flannelPresent, "a server without the file has none after a rollback")
+}
+
+func TestChangeServerNetworkAppliesAChangedFlannelConf(t *testing.T) {
+	h := publicWireGuardServer()
+	h.dropIn, h.dropInPresent, h.flannel, h.flannelPresent = publicServerDropIn, true, "old-conf\n", true
+	dropIn := publicServerDropIn
+
+	require.NoError(t, changeNetworkTo(h, fastNetworkChange, &dropIn, "new-conf\n"))
+
+	assert.Equal(t, "new-conf\n", h.flannel)
+	assert.Equal(t, 1, h.started, "k3s restarts so flannel recreates its link with the new MTU")
+
+	h.commands = nil
+	require.NoError(t, changeNetworkTo(h, fastNetworkChange, &dropIn, "new-conf\n"))
+	assert.Equal(t, -1, h.index("systemctl stop"), "matching files need no restart")
+}
+
+func TestServerNetworkChangesComparesBothFiles(t *testing.T) {
+	h := publicWireGuardServer()
+	h.dropIn, h.dropInPresent, h.flannel, h.flannelPresent = publicServerDropIn, true, "old-conf\n", true
+
+	for _, tc := range []struct {
+		dropIn, conf string
+		want         bool
+	}{
+		{publicServerDropIn, "old-conf\n", false},
+		{publicServerDropIn, "new-conf\n", true},
+		{privateServerDropIn, "", true},
+		{publicServerDropIn, "", false},
+	} {
+		got, err := ServerNetworkChanges(h, tc.dropIn, tc.conf)
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, got, "%q %q", tc.dropIn, tc.conf)
+	}
 }

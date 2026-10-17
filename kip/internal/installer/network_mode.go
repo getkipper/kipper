@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"strconv"
@@ -14,13 +15,16 @@ type NodeNetwork struct {
 	NodeIP     string
 	ExternalIP string
 	Interface  string
+	TunnelMTU  int
 }
 
-// NetworkPlan describes the network mode and addresses for the server and joining host.
+// NetworkPlan describes the network mode and addresses for the server and
+// joining host. PodNetwork is the cluster's pod CIDR, set in public mode.
 type NetworkPlan struct {
-	Mode   string
-	Server NodeNetwork
-	Joiner NodeNetwork
+	Mode       string
+	Server     NodeNetwork
+	Joiner     NodeNetwork
+	PodNetwork string
 }
 
 // NetworkModeOptions constrains network selection for a joining host.
@@ -135,8 +139,12 @@ func tcpReachable(from CommandRunner, addr netip.Addr, port string) bool {
 // PlanNodeNetwork selects addresses and a mode consistent with opts.ClusterMode.
 // Private mode requires local RFC 1918 addresses, SSH access to the joiner,
 // and API access to the server. Automatic selection excludes default-route
-// interfaces; an explicit private network allows them. Automatic selection falls
+// interfaces. An explicit private network allows them. Automatic selection falls
 // back to public mode only when no private route qualifies for the TCP checks.
+// Public mode requires external IPv4 addresses and API access to the server.
+// It resolves the cluster pod CIDR and caps each host's backend MTU at 1360 bytes,
+// rejecting interface MTUs below 1280 bytes. Invalid options or failed network
+// checks return an error before either host is changed.
 func PlanNodeNetwork(server, joiner CommandRunner, opts NetworkModeOptions) (NetworkPlan, error) {
 	var private netip.Prefix
 	if opts.PrivateNetwork != "" {
@@ -292,11 +300,55 @@ func publicPlan(server, joiner CommandRunner, opts NetworkModeOptions) (NetworkP
 	if !tcpReachable(joiner, netip.MustParseAddr(opts.ServerExternalIP), "6443") {
 		return NetworkPlan{}, fmt.Errorf("the new host cannot reach the server's API at %s:6443; allow it in the provider's firewall", opts.ServerExternalIP)
 	}
+	serverMTU, err := tunnelMTU(server, serverDefault.iface)
+	if err != nil {
+		return NetworkPlan{}, fmt.Errorf("on the server: %w", err)
+	}
+	joinerMTU, err := tunnelMTU(joiner, joinerDefault.iface)
+	if err != nil {
+		return NetworkPlan{}, fmt.Errorf("on the new host: %w", err)
+	}
+	clusterNets, err := clusterNetworks(server)
+	if err != nil {
+		return NetworkPlan{}, err
+	}
 	return NetworkPlan{
-		Mode:   NetworkModePublic,
-		Server: NodeNetwork{NodeIP: serverDefault.src.String(), ExternalIP: opts.ServerExternalIP},
-		Joiner: NodeNetwork{NodeIP: joinerDefault.src.String(), ExternalIP: opts.JoinerExternalIP},
+		Mode:       NetworkModePublic,
+		Server:     NodeNetwork{NodeIP: serverDefault.src.String(), ExternalIP: opts.ServerExternalIP, TunnelMTU: serverMTU},
+		Joiner:     NodeNetwork{NodeIP: joinerDefault.src.String(), ExternalIP: opts.JoinerExternalIP, TunnelMTU: joinerMTU},
+		PodNetwork: clusterNets["pod"].String(),
 	}, nil
+}
+
+// publicTunnelMTU is the largest MTU flannel's WireGuard backend gets in public
+// mode, in bytes. At this cap, flannel subtracts 80 bytes of overhead to leave
+// a 1280-byte tunnel MTU, matching the IPv6 minimum and allowing room for
+// internet paths with an MTU below 1500 bytes.
+const publicTunnelMTU = 1360
+
+// minTunnelMTU is the smallest backend MTU kip accepts in public mode, in bytes.
+const minTunnelMTU = 1280
+
+// tunnelMTU reads iface's MTU in bytes and caps it at publicTunnelMTU.
+// It rejects values below minTunnelMTU. Flannel otherwise derives the WireGuard
+// MTU from the interface, so a 9001-byte cloud interface can produce packets
+// that require fragmentation on paths between providers.
+func tunnelMTU(client CommandRunner, iface string) (int, error) {
+	if !interfaceNamePattern.MatchString(iface) {
+		return 0, fmt.Errorf("the default route uses interface %q, which kip cannot read", iface)
+	}
+	out, err := client.Run("cat /sys/class/net/" + iface + "/mtu")
+	if err != nil {
+		return 0, fmt.Errorf("reading the MTU of %s: %w", iface, err)
+	}
+	mtu, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil || mtu <= 0 {
+		return 0, fmt.Errorf("reading the MTU of %s: got %q", iface, strings.TrimSpace(out))
+	}
+	if mtu < minTunnelMTU {
+		return 0, fmt.Errorf("%s has an MTU of %d, below the %d bytes public mode needs for the WireGuard tunnel", iface, mtu, minTunnelMTU)
+	}
+	return min(mtu, publicTunnelMTU), nil
 }
 
 // refuseUnderlayOverlap checks both private interfaces' address networks and
@@ -518,10 +570,13 @@ func settingOrDefault(settings map[string][]string, name, def string) (netip.Pre
 }
 
 // networkDropInKeys are the settings kip owns in kipper-network.yaml.
-var networkDropInKeys = []string{"node-ip", "node-external-ip", "flannel-iface", "advertise-address", "flannel-external-ip", "tls-san+"}
+var networkDropInKeys = []string{"node-ip", "node-external-ip", "flannel-iface", "advertise-address", "flannel-external-ip", "flannel-conf", "tls-san+"}
 
 // RenderNetworkDropIn replaces kip-owned settings for the node's role and mode,
-// preserving other keys from existing.
+// preserving other keys from existing. Both node addresses must be IPv4, and
+// private mode requires a valid interface name. In public mode, a positive
+// TunnelMTU selects the file written by WriteFlannelConf. Callers must write
+// that file separately. Invalid YAML, addresses, interfaces or modes return an error.
 func RenderNetworkDropIn(existing string, role HostRole, mode string, n NodeNetwork) (string, error) {
 	var doc map[string]any
 	if strings.TrimSpace(existing) != "" {
@@ -557,6 +612,9 @@ func RenderNetworkDropIn(existing string, role HostRole, mode string, n NodeNetw
 		if role == RoleServer {
 			doc["flannel-external-ip"] = true
 		}
+		if n.TunnelMTU > 0 {
+			doc["flannel-conf"] = flannelConfPath
+		}
 	default:
 		return "", fmt.Errorf("invalid network mode %q; expected private or public", mode)
 	}
@@ -565,4 +623,55 @@ func RenderNetworkDropIn(existing string, role HostRole, mode string, n NodeNetw
 		return "", fmt.Errorf("rendering %s: %w", k3sNetworkConfigPath, err)
 	}
 	return string(out), nil
+}
+
+// flannelConfPath names the flannel configuration kip writes in public mode.
+// k3s uses it instead of generating its own, which has no MTU setting.
+const flannelConfPath = "/etc/rancher/k3s/kipper-flannel.json"
+
+// flannelConf renders k3s's WireGuard configuration for an IPv4 pod network
+// with the backend MTU set. Flannel subtracts WireGuard's overhead from it.
+func flannelConf(podNetwork string, mtu int) (string, error) {
+	p, err := netip.ParsePrefix(podNetwork)
+	if err != nil || !p.Addr().Is4() {
+		return "", fmt.Errorf("the pod network %q is not an IPv4 network", podNetwork)
+	}
+	if mtu < minTunnelMTU || mtu > publicTunnelMTU {
+		return "", fmt.Errorf("tunnel MTU %d is outside the allowed range of %d to %d bytes", mtu, minTunnelMTU, publicTunnelMTU)
+	}
+	out, err := json.Marshal(map[string]any{
+		"Network":    p.Masked().String(),
+		"EnableIPv4": true,
+		"EnableIPv6": false,
+		"Backend":    map[string]any{"Type": "wireguard", "PersistentKeepaliveInterval": 25, "MTU": mtu},
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(out) + "\n", nil
+}
+
+// RenderFlannelConf returns WireGuard JSON for an IPv4 pod network, with its
+// CIDR masked and the backend MTU set in bytes before flannel subtracts overhead.
+// It returns an error for an invalid IPv4 CIDR or an MTU outside 1280 to 1360.
+// A zero MTU returns "" without validating podNetwork, as used in private mode
+// to keep flannel's default MTU.
+func RenderFlannelConf(podNetwork string, mtu int) (string, error) {
+	if mtu == 0 {
+		return "", nil
+	}
+	return flannelConf(podNetwork, mtu)
+}
+
+// WriteFlannelConf atomically replaces the public-mode flannel configuration
+// with conf and file permissions 0600. An empty conf leaves the file unchanged.
+// It returns write errors and leaves restarting k3s to the caller.
+func WriteFlannelConf(client CommandRunner, conf string) error {
+	if conf == "" {
+		return nil
+	}
+	if _, err := client.RunStdin(writeDropInScript(flannelConfPath), strings.NewReader(conf)); err != nil {
+		return fmt.Errorf("writing %s: %v", flannelConfPath, withoutOutput(err))
+	}
+	return nil
 }

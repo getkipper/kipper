@@ -223,7 +223,7 @@ func TestPrepareJoinHostRefusesNetworkOptionsBeforeChangingTheHost(t *testing.T)
 				"cockpit.socket -p Listen": "[::]:9090 (Stream)\n",
 			}}
 
-			_, _, err := prepareJoinHost(server, worker, machineID, "192.0.2.11", tc.opts, true)
+			_, _, _, err := prepareJoinHost(server, worker, machineID, "192.0.2.11", tc.opts, true)
 
 			require.ErrorContains(t, err, tc.want)
 			for _, c := range server.commands {

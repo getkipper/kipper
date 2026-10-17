@@ -155,10 +155,47 @@ func ChangeNetwork(client CommandRunner) error {
 }
 
 // ChangeServerNetwork applies dropIn as kipper-network.yaml and selects WireGuard
-// using ChangeNetwork's recovery and rollback process. Completion requires the
-// server node to report the drop-in's node-ip as its InternalIP.
-func ChangeServerNetwork(client CommandRunner, dropIn string) error {
-	return changeNetworkTo(client, defaultNetworkChangeTimeouts, &dropIn)
+// using ChangeNetwork's recovery and rollback process. A non-empty flannelConf
+// replaces the flannel configuration referenced by public-mode drop-ins.
+// An empty flannelConf preserves the existing file. Changes to either file
+// restart k3s. The drop-in must contain a valid IPv4 node-ip, and completion
+// requires the server to report that address as its InternalIP, even when
+// the files already match.
+func ChangeServerNetwork(client CommandRunner, dropIn, flannelConf string) error {
+	return changeNetworkTo(client, defaultNetworkChangeTimeouts, &dropIn, flannelConf)
+}
+
+// ServerNetworkChanges compares the requested drop-in and flannel configuration
+// with the server's files to identify changes that require a k3s restart.
+// An empty flannelConf excludes that file from the comparison. Read failures
+// return an error. This checks file contents only, so a false result still
+// requires ChangeServerNetwork to verify the running backend and node address.
+func ServerNetworkChanges(client CommandRunner, dropIn, flannelConf string) (bool, error) {
+	current, err := ReadNetworkDropIn(client)
+	if err != nil {
+		return false, err
+	}
+	if current != dropIn {
+		return true, nil
+	}
+	if flannelConf == "" {
+		return false, nil
+	}
+	conf, err := ReadFlannelConf(client)
+	if err != nil {
+		return false, err
+	}
+	return conf != flannelConf, nil
+}
+
+// ReadFlannelConf returns the flannel configuration kip writes in public mode,
+// or "" when it does not exist.
+func ReadFlannelConf(client CommandRunner) (string, error) {
+	out, err := client.Run(fmt.Sprintf("if [ -e %[1]s ]; then cat %[1]s; fi", flannelConfPath))
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %v", flannelConfPath, withoutOutput(err))
+	}
+	return out, nil
 }
 
 // ReadNetworkDropIn returns the server's kipper-network.yaml, or "" when it
@@ -191,10 +228,10 @@ func keepNetworkWithoutWireGuard(err error) (string, error) {
 }
 
 func changeNetwork(client CommandRunner, t networkChangeTimeouts) error {
-	return changeNetworkTo(client, t, nil)
+	return changeNetworkTo(client, t, nil, "")
 }
 
-func changeNetworkTo(client CommandRunner, t networkChangeTimeouts, dropIn *string) error {
+func changeNetworkTo(client CommandRunner, t networkChangeTimeouts, dropIn *string, flannelConf string) error {
 	locked, release, err := lockAPIServerConfig(client)
 	if err != nil {
 		return err
@@ -218,8 +255,14 @@ func changeNetworkTo(client CommandRunner, t networkChangeTimeouts, dropIn *stri
 		if nodeIP, err = dropInNodeIP(*dropIn); err != nil {
 			return err
 		}
-		// Verify the live address before treating a matching file as applied.
-		if current == *dropIn {
+		currentConf := ""
+		if flannelConf != "" {
+			if currentConf, err = ReadFlannelConf(client); err != nil {
+				return err
+			}
+		}
+		// Verify the live address before treating matching files as applied.
+		if current == *dropIn && currentConf == flannelConf {
 			if err := waitForServerNodeIP(client, nodeIP, networkChangeTimeouts{start: t.confirm, interval: t.interval}); err != nil {
 				return fmt.Errorf("%s already holds the new network settings, but k3s runs with another address: %w", k3sNetworkConfigPath, err)
 			}
@@ -260,6 +303,11 @@ func changeNetworkTo(client CommandRunner, t networkChangeTimeouts, dropIn *stri
 	}
 	if _, err := client.RunStdin(replaceFileScript(k3sConfigPath), strings.NewReader(desired)); err != nil {
 		return restoreAfter(client, t, ready, fmt.Errorf("writing %s: %v", k3sConfigPath, withoutOutput(err)))
+	}
+	if dropIn != nil && flannelConf != "" {
+		if _, err := client.RunStdin(writeDropInScript(flannelConfPath), strings.NewReader(flannelConf)); err != nil {
+			return restoreAfter(client, t, ready, fmt.Errorf("writing %s: %v", flannelConfPath, withoutOutput(err)))
+		}
 	}
 	if dropIn != nil {
 		if _, err := client.RunStdin(writeDropInScript(k3sNetworkConfigPath), strings.NewReader(*dropIn)); err != nil {
@@ -408,6 +456,7 @@ func backupNetworkScript(fromSetting, nodeIP string) string {
 		"BACKUP", networkChangeBackup,
 		"CONFIG", k3sConfigPath,
 		"DROPIN", k3sNetworkConfigPath,
+		"FLANNEL", flannelConfPath,
 		"FROMLINE", record,
 	).Replace(`set -e
 umask 077
@@ -415,6 +464,7 @@ rm -rf BACKUP
 mkdir -p BACKUP
 cp -p "$(readlink -f CONFIG)" BACKUP/config.yaml
 if [ -e DROPIN ]; then cp -p DROPIN BACKUP/kipper-network.yaml; else touch BACKUP/kipper-network.absent; fi
+if [ -e FLANNEL ]; then cp -p FLANNEL BACKUP/kipper-flannel.json; else touch BACKUP/kipper-flannel.absent; fi
 cat > BACKUP/ready-workloads
 printf 'FROMLINE' > RECORD.tmp
 mv RECORD.tmp RECORD`)
@@ -424,10 +474,12 @@ var restoreScript = strings.NewReplacer(
 	"BACKUP", networkChangeBackup,
 	"CONFIG", k3sConfigPath,
 	"DROPIN", k3sNetworkConfigPath,
+	"FLANNEL", flannelConfPath,
 ).Replace(`set -e
 [ -f BACKUP/config.yaml ] || { echo "no backup of the k3s configuration in BACKUP"; exit 1; }
 cp -p BACKUP/config.yaml "$(readlink -f CONFIG)"
-if [ -f BACKUP/kipper-network.absent ]; then rm -f DROPIN; else cp -p BACKUP/kipper-network.yaml DROPIN; fi`)
+if [ -f BACKUP/kipper-network.absent ]; then rm -f DROPIN; else cp -p BACKUP/kipper-network.yaml DROPIN; fi
+if [ -f BACKUP/kipper-flannel.absent ]; then rm -f FLANNEL; elif [ -f BACKUP/kipper-flannel.json ]; then cp -p BACKUP/kipper-flannel.json FLANNEL; fi`)
 
 // restoreAfter undoes a failed change and reports cause together with how the
 // restore went.

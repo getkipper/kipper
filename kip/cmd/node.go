@@ -389,7 +389,7 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	for _, w := range preflight.Warnings {
 		fmt.Printf("  ⚠  %s\n", w)
 	}
-	plan, serverDropIn, err := prepareJoinHost(server, worker, identity.MachineID, workerHost, installer.NetworkModeOptions{
+	plan, serverDropIn, serverFlannel, err := prepareJoinHost(server, worker, identity.MachineID, workerHost, installer.NetworkModeOptions{
 		PrivateNetwork: privateNetwork, Public: forcePublic, ClusterMode: serverRec.Mode,
 		ServerExternalIP: serverIP, JoinerExternalIP: workerIP,
 	}, autoYes)
@@ -397,7 +397,7 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	// A matching drop-in is still checked against the address k3s runs with.
-	if err := installer.ChangeServerNetwork(server, serverDropIn); err != nil {
+	if err := installer.ChangeServerNetwork(server, serverDropIn, serverFlannel); err != nil {
 		return fmt.Errorf("moving the server's network: %w", err)
 	}
 	serverRec.Mode, serverRec.PeerAddress, serverRec.Interface = plan.Mode, peerAddress(plan.Mode, plan.Server), plan.Server.Interface
@@ -457,6 +457,13 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	}
 	reportSingleCopyPlacement(os.Stdout, placement)
 	fmt.Printf("  Preparing %s...\n", workerHost)
+	workerFlannel, err := installer.RenderFlannelConf(plan.PodNetwork, plan.Joiner.TunnelMTU)
+	if err != nil {
+		return err
+	}
+	if err := installer.WriteFlannelConf(worker, workerFlannel); err != nil {
+		return nodeAddRetry(fmt.Errorf("on %s: %w", workerHost, err), workerHost)
+	}
 	join, err := installer.PrepareWorker(server, worker, workerDropIn)
 	if err != nil {
 		return nodeAddRetry(err, workerHost)
@@ -563,61 +570,70 @@ func serverNetworkConsent(mode, address string) string {
 }
 
 // prepareJoinHost validates network options and confirms server network changes
-// before cordoning or hardening the worker.
-func prepareJoinHost(server, worker installer.CommandRunner, machineID, workerHost string, opts installer.NetworkModeOptions, autoYes bool) (installer.NetworkPlan, string, error) {
+// before cordoning or hardening the worker. It returns the plan and the server's
+// network drop-in and flannel configuration.
+func prepareJoinHost(server, worker installer.CommandRunner, machineID, workerHost string, opts installer.NetworkModeOptions, autoYes bool) (installer.NetworkPlan, string, string, error) {
 	sshPort, err := installer.SSHPort(worker)
 	if err != nil {
-		return installer.NetworkPlan{}, "", err
+		return installer.NetworkPlan{}, "", "", err
 	}
 	opts.SSHPort = sshPort
 	plan, err := installer.PlanNodeNetwork(server, worker, opts)
 	if err != nil {
-		return installer.NetworkPlan{}, "", err
+		return installer.NetworkPlan{}, "", "", err
 	}
 	fmt.Printf("  ✔  Network: %s mode, server %s, %s %s\n", plan.Mode, plan.Server.NodeIP, workerHost, plan.Joiner.NodeIP)
 
 	currentDropIn, err := installer.ReadNetworkDropIn(server)
 	if err != nil {
-		return installer.NetworkPlan{}, "", err
+		return installer.NetworkPlan{}, "", "", err
 	}
 	serverDropIn, err := installer.RenderNetworkDropIn(currentDropIn, installer.RoleServer, plan.Mode, plan.Server)
 	if err != nil {
-		return installer.NetworkPlan{}, "", err
+		return installer.NetworkPlan{}, "", "", err
 	}
-	if serverDropIn != currentDropIn {
+	serverFlannel, err := installer.RenderFlannelConf(plan.PodNetwork, plan.Server.TunnelMTU)
+	if err != nil {
+		return installer.NetworkPlan{}, "", "", err
+	}
+	changes, err := installer.ServerNetworkChanges(server, serverDropIn, serverFlannel)
+	if err != nil {
+		return installer.NetworkPlan{}, "", "", err
+	}
+	if changes {
 		fmt.Print(serverNetworkConsent(plan.Mode, plan.Server.NodeIP))
 		if !autoYes {
 			ok, err := confirmInteractive("  Apply the server network changes? [y/N] ")
 			if err != nil {
-				return installer.NetworkPlan{}, "", err
+				return installer.NetworkPlan{}, "", "", err
 			}
 			if !ok {
-				return installer.NetworkPlan{}, "", fmt.Errorf("node join canceled; server network settings unchanged")
+				return installer.NetworkPlan{}, "", "", fmt.Errorf("node join canceled. Server network settings are unchanged")
 			}
 		}
 	}
 	// Prevent new workloads from being scheduled during host changes.
 	existingNode, registered, err := installer.FindNodeForMachine(server, machineID)
 	if err != nil {
-		return installer.NetworkPlan{}, "", fmt.Errorf("looking for an existing node on %s: %w", workerHost, err)
+		return installer.NetworkPlan{}, "", "", fmt.Errorf("looking for an existing node on %s: %w", workerHost, err)
 	}
 	if registered {
 		if _, err := server.Run("kubectl cordon " + existingNode + " >/dev/null"); err != nil {
-			return installer.NetworkPlan{}, "", fmt.Errorf("cordoning %s before changing it: %w", existingNode, err)
+			return installer.NetworkPlan{}, "", "", fmt.Errorf("cordoning %s before changing it: %w", existingNode, err)
 		}
-		fmt.Printf("  ✔  %s is already node %s; cordoned until the join is checked\n", workerHost, existingNode)
+		fmt.Printf("  ✔  %s is already node %s and is cordoned until the join is checked\n", workerHost, existingNode)
 	}
 	audit, err := installer.AuditHost(worker)
 	if err != nil {
-		return installer.NetworkPlan{}, "", fmt.Errorf("auditing %s: %w", workerHost, err)
+		return installer.NetworkPlan{}, "", "", fmt.Errorf("auditing %s: %w", workerHost, err)
 	}
 	if findings := audit.Findings(); len(findings) > 0 {
 		fmt.Printf("  Hardening %s (%s)...\n", workerHost, strings.Join(findings, "; "))
 		if err := installer.HardenHost(worker); err != nil {
-			return installer.NetworkPlan{}, "", fmt.Errorf("hardening %s: %w", workerHost, err)
+			return installer.NetworkPlan{}, "", "", fmt.Errorf("hardening %s: %w", workerHost, err)
 		}
 	}
-	return plan, serverDropIn, nil
+	return plan, serverDropIn, serverFlannel, nil
 }
 
 func nodeAddRetry(err error, host string) error {
