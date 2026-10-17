@@ -16,8 +16,8 @@ type SystemComponent struct {
 // SystemComponents returns components reconciled by kip upgrade, honoring
 // profile overrides and explicit enable/disable choices. It reuses saved DNS
 // settings and refreshes gateway addresses for trusted-proxy configuration.
-// Dex's full manifest would overwrite users; cert-manager's full install needs
-// the admin email. Only cert-manager's DNS settings are reconciled here.
+// Dex's full manifest would overwrite users. A full cert-manager install needs
+// the admin email, so only its DNS settings are reconciled here.
 // Console and k3s upgrades have separate paths.
 func SystemComponents(domain string, dnsResolvers, trustedProxies []string, state PlatformState) []SystemComponent {
 	components := []SystemComponent{
@@ -26,11 +26,16 @@ func SystemComponents(domain string, dnsResolvers, trustedProxies []string, stat
 		}},
 		{Name: "cert-manager-dns", Apply: func(c CommandRunner) error { return patchCertManagerDNSConfig(c, dnsResolvers) }},
 		{Name: "security-middleware", Apply: InstallSecurityHardening},
-		{Name: "longhorn", Apply: InstallLonghorn},
-		{Name: "keda", Apply: InstallKEDA},
-		{Name: "authz", Apply: InstallAuthz},
-		{Name: "node-exporter-tls", Apply: InstallNodeExporterTLS},
 	}
+	// k3s manages the local-path provisioner used for local storage.
+	if platform.StorageMode(state.Storage) == StorageLonghorn {
+		components = append(components, SystemComponent{Name: "longhorn", Apply: InstallLonghorn})
+	}
+	components = append(components,
+		SystemComponent{Name: "keda", Apply: InstallKEDA},
+		SystemComponent{Name: "authz", Apply: InstallAuthz},
+		SystemComponent{Name: "node-exporter-tls", Apply: InstallNodeExporterTLS},
+	)
 	if state.LokiEnabled() {
 		res := state.EffectiveResources()
 		components = append(components,
@@ -43,24 +48,19 @@ func SystemComponents(domain string, dnsResolvers, trustedProxies []string, stat
 			SystemComponent{Name: "kube-prometheus-stack", Apply: func(c CommandRunner) error { return InstallPrometheusGrafanaWithResources(c, res) }},
 		)
 	}
-	// Velero re-applies the BSL the cluster was installed with. The
-	// state's BackupStorage is populated from the cluster's persisted
-	// config so we never silently flip an external BSL back to in-
-	// cluster mode on upgrade. Credentials are not in PlatformState
-	// (they live only as a Secret on the cluster), so an external
-	// upgrade preserves the existing cloud-credentials Secret —
-	// installVeleroCredentials applies the secret only when fresh
-	// credentials are available; the chart references it by name.
+	// Reuse the saved backup destination and its credential Secret so upgrades
+	// preserve external backups. Credentials are replaced only when supplied.
 	bs := state.BackupStorage
+	storage := platform.StorageMode(state.Storage)
 	components = append(components,
 		SystemComponent{Name: "velero", Apply: func(c CommandRunner) error {
 			u, ok := c.(Uploader)
 			if !ok {
 				return fmt.Errorf("this runner cannot upload the Velero credentials")
 			}
-			return InstallBackup(u, bs)
+			return InstallBackup(u, bs, storage)
 		}},
-		SystemComponent{Name: "zot", Apply: InstallZot},
+		SystemComponent{Name: "zot", Apply: func(c CommandRunner) error { return InstallZot(c, storage) }},
 		// Build isolation must be (re)applied on upgrade: a cluster installed
 		// before it existed has no kipper-builds namespace/RBAC/policy, so the
 		// new builder code would fail every build. Reapplying also refreshes the

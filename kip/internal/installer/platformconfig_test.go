@@ -220,3 +220,55 @@ func TestPlatformStateQueriesReadTheStorageMode(t *testing.T) {
 	state := readSavedPlatformState(&scriptedRunner{out: "'nano/local|'\n"})
 	assert.Equal(t, "local", state.Storage)
 }
+
+func TestResolveStorage(t *testing.T) {
+	for name, tc := range map[string]struct {
+		requested, profile, recorded string
+		existing, unreadable         bool
+		want, err                    string
+	}{
+		"a new nano cluster defaults to local":             {"", ProfileNano, "", false, false, StorageLocal, ""},
+		"a new small cluster defaults to longhorn":         {"", ProfileSmall, "", false, false, StorageLonghorn, ""},
+		"a new nano cluster can ask for longhorn":          {StorageLonghorn, ProfileNano, "", false, false, StorageLonghorn, ""},
+		"a new medium cluster can ask for local":           {StorageLocal, ProfileMedium, "", false, false, StorageLocal, ""},
+		"an existing cluster keeps its recorded mode":      {"", ProfileNano, StorageLocal, true, false, StorageLocal, ""},
+		"a legacy nano cluster stays on longhorn":          {"", ProfileNano, "", true, false, StorageLonghorn, ""},
+		"repeating the recorded mode is fine":              {StorageLonghorn, ProfileSmall, StorageLonghorn, true, false, StorageLonghorn, ""},
+		"switching a legacy cluster to local is refused":   {StorageLocal, ProfileNano, "", true, false, "", "runs longhorn storage"},
+		"switching a local cluster to longhorn is refused": {StorageLonghorn, ProfileNano, StorageLocal, true, false, "", "Cluster Migration"},
+		"an unreadable cluster stays on longhorn":          {"", ProfileNano, "", true, true, StorageLonghorn, ""},
+		"local on an unreadable cluster is refused":        {StorageLocal, ProfileNano, "", true, true, "", "could not be read"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := resolveStorage(tc.requested, tc.profile, tc.existing, tc.unreadable, tc.recorded)
+			if tc.err != "" {
+				assert.ErrorContains(t, err, tc.err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestDiscoverClusterStorage(t *testing.T) {
+	k3s := route{contains: "test -d /var/lib/rancher/k3s", out: "existing\n"}
+	for name, tc := range map[string]struct {
+		saved                string
+		routes               []route
+		existing, unreadable bool
+	}{
+		"a saved PlatformConfig":           {"nano", nil, true, false},
+		"no k3s on the host":               {"", []route{{contains: "test -d /var/lib/rancher/k3s", out: "fresh\n"}}, false, false},
+		"k3s with Longhorn's classes":      {"", []route{k3s, {contains: "get storageclass", out: "storageclass.storage.k8s.io/longhorn-single\n"}}, true, false},
+		"k3s without Longhorn":             {"", []route{k3s, {contains: "get storageclass", out: ""}}, false, false},
+		"k3s with Longhorn still starting": {"", []route{k3s, {contains: "get storageclass", out: "namespace/longhorn-system\n"}}, true, false},
+		"k3s that does not answer":         {"", []route{k3s, {contains: "get storageclass", err: errors.New("connection refused")}}, true, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			existing, unreadable := discoverClusterStorage(&routedRunner{routes: tc.routes}, tc.saved)
+			assert.Equal(t, tc.existing, existing, "existing")
+			assert.Equal(t, tc.unreadable, unreadable, "unreadable")
+		})
+	}
+}

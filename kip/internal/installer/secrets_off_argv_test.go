@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 type stdinHost struct {
@@ -30,7 +32,7 @@ func TestTheMinIOPasswordStaysOffTheCommandLine(t *testing.T) {
 	host := &stdinHost{}
 	const password = "synthetic-minio-value" //nolint:gosec // a test value, not a credential
 
-	require.NoError(t, installInClusterMinIO(host, password))
+	require.NoError(t, installInClusterMinIO(host, password, platform.LonghornSingleClass))
 
 	for _, c := range host.commands {
 		assert.NotContains(t, c, password, "the password must stay out of process arguments")
@@ -59,7 +61,7 @@ func TestTheBucketJobPassesTheMinIOPasswordThroughTheEnvironment(t *testing.T) {
 
 func TestTheBackupStoreDoesNotCheckForUpdates(t *testing.T) {
 	host := &stdinHost{}
-	require.NoError(t, installInClusterMinIO(host, "synthetic-minio-value"))
+	require.NoError(t, installInClusterMinIO(host, "synthetic-minio-value", platform.LonghornSingleClass))
 
 	assert.Contains(t, strings.Join(host.stdin, ""), "- name: MINIO_UPDATE\n              value: \"off\"")
 }

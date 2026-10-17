@@ -546,22 +546,18 @@ func writeAgentKubeletConfig(client CommandRunner) error {
 	return nil
 }
 
-// InstallK3s installs k3s on the remote server with Kipper's
-// opinionated configuration. Traefik is disabled because we install
-// it separately with custom settings. CoreDNS is pointed at
-// dnsResolvers (or the default public resolvers when empty) rather than
-// the host's resolv.conf. Safe to re-run — the k3s installer is
-// idempotent and will upgrade or no-op as needed.
+// InstallK3s installs or updates k3s with Kipper's configuration. Traefik is
+// installed separately. CoreDNS uses dnsResolvers or the default public resolvers
+// when empty. Repeated calls preserve versions outside the supported upgrade path.
 //
-// k3sPreexisting decides the post-install CoreDNS restart and must have
-// been sampled BEFORE this function runs (the installer does it while
-// reading the existing cluster's identity): a fresh k3s server deploys
-// CoreDNS as soon as the apiserver is up, so an after-the-fact existence
-// check cannot tell a re-run from a fresh install.
+// The caller must sample k3sPreexisting before installation so only existing
+// CoreDNS deployments are restarted to pick up resolver changes.
 //
-// Existing clusters require changeNetwork consent to migrate to WireGuard.
+// Existing clusters require changeNetwork consent to migrate to WireGuard,
+// otherwise the function returns ErrNetworkChangeNotConfirmed.
 // Migration clears stale flannel links before the new config is written.
-func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPreexisting, changeNetwork bool) error {
+// A storageMode of StorageLonghorn requires the iSCSI module on RHEL hosts.
+func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPreexisting, changeNetwork bool, storageMode string) error {
 	resolvers, err := resolveDNSResolvers(dnsResolvers)
 	if err != nil {
 		return err
@@ -581,7 +577,7 @@ func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPre
 
 	// The kubelet sysctls must be in place before k3s installs and before an
 	// upgrade restarts the kubelet.
-	if err := prepareNodeOS(client, vxlanServer); err != nil {
+	if err := prepareNodeOS(client, vxlanServer, storageMode == StorageLonghorn); err != nil {
 		return err
 	}
 

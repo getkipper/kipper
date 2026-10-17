@@ -190,3 +190,25 @@ func TestWritePlacementSaysWhyAPodIsNotScheduled(t *testing.T) {
 	writePlacement(&out, service.Placement{}, nil)
 	assert.Contains(t, out.String(), "Pod node:  not scheduled\n", "no reason yet, nothing invented")
 }
+
+// localStorageHost answers the storage-mode read with local storage and records
+// every other command.
+type localStorageHost struct{ others []string }
+
+func (h *localStorageHost) Run(cmd string) (string, error) {
+	if strings.Contains(cmd, "platformconfig platform") && strings.Contains(cmd, "spec.storage") {
+		return "local", nil
+	}
+	h.others = append(h.others, cmd)
+	return "", nil
+}
+
+func (h *localStorageHost) RunStdin(cmd string, _ io.Reader) (string, error) { return h.Run(cmd) }
+
+func TestUpgradePinsNothingOnLocalStorage(t *testing.T) {
+	var out bytes.Buffer
+	host := &localStorageHost{}
+	pinForUpgrade(&out, host)
+	assert.Empty(t, host.others, "a local-storage cluster has no Longhorn volumes to pin")
+	assert.Empty(t, out.String())
+}

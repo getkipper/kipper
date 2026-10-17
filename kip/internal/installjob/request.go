@@ -42,6 +42,7 @@ type Request struct {
 	DNSResolvers     []string        `json:"dns_resolvers,omitempty"`
 	TrustedProxies   []string        `json:"trusted_proxies,omitempty"`
 	Profile          string          `json:"profile,omitempty"`
+	Storage          string          `json:"storage,omitempty"`
 	Backup           *Backup         `json:"backup,omitempty"`
 	Entry            *config.Cluster `json:"entry,omitempty"`
 }
@@ -103,6 +104,7 @@ func (r Request) Options() installer.Options {
 		DNSResolvers:     r.DNSResolvers,
 		TrustedProxies:   r.TrustedProxies,
 		Profile:          r.Profile,
+		Storage:          r.Storage,
 	}
 	if b := r.Backup; b != nil {
 		opts.BackupStorage = &installer.BackupStorageConfig{

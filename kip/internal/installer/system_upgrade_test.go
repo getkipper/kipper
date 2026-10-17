@@ -39,6 +39,18 @@ func TestSystemComponents(t *testing.T) {
 		assert.Equal(t, want, got)
 	})
 
+	t.Run("a local-storage cluster has no Longhorn to upgrade", func(t *testing.T) {
+		components := SystemComponents("example.com", nil, nil, PlatformState{Profile: ProfileNano, Storage: StorageLocal})
+		got := make([]string, len(components))
+		for i, c := range components {
+			got[i] = c.Name
+		}
+		assert.Equal(t, []string{
+			"traefik", "cert-manager-dns", "security-middleware", "keda", "authz",
+			"node-exporter-tls", "velero", "zot", "build-isolation", "placement",
+		}, got)
+	})
+
 	t.Run("omits monitoring stack on nano profile", func(t *testing.T) {
 		components := SystemComponents("example.com", nil, nil, PlatformState{Profile: ProfileNano})
 		got := make([]string, len(components))

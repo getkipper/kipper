@@ -54,7 +54,7 @@ func TestInstallK3sWritesNoAgentToken(t *testing.T) {
 	for _, installed := range []bool{false, true} {
 		h := &k3sInstallHost{installed: installed}
 
-		require.NoError(t, InstallK3s(h, "203.0.113.10", nil, installed, false))
+		require.NoError(t, InstallK3s(h, "203.0.113.10", nil, installed, false, StorageLonghorn))
 
 		for _, c := range h.commands {
 			assert.NotContains(t, c, "agent-token", "installed=%v", installed)

@@ -254,6 +254,7 @@ func drivenRequest(cmd *cobra.Command, host string) (installjob.Request, error) 
 		DNSResolvers:   slice("dns-resolver"),
 		TrustedProxies: slice("trusted-proxy"),
 		Profile:        str("profile"),
+		Storage:        str("storage"),
 	}
 	backup, err := resolveBackupStorage(cmd)
 	if err != nil {

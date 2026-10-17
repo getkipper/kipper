@@ -15,12 +15,12 @@ var kernelReleasePattern = regexp.MustCompile(`^[0-9A-Za-z._+-]+$`)
 
 // prepareHostForK3s prepares kernel modules and family-specific configuration
 // before starting a k3s server or worker.
-func prepareHostForK3s(client CommandRunner, wireGuardOptional bool) error {
+func prepareHostForK3s(client CommandRunner, wireGuardOptional, longhorn bool) error {
 	host, err := DetectHostOS(client)
 	if err != nil {
 		return fmt.Errorf("preparing the host for k3s: %w", err)
 	}
-	if err := ensureKernelModules(client, host, wireGuardOptional); err != nil {
+	if err := ensureKernelModules(client, host, wireGuardOptional, longhorn); err != nil {
 		return err
 	}
 	return writeK3sHostConfig(client, host)
@@ -28,9 +28,10 @@ func prepareHostForK3s(client CommandRunner, wireGuardOptional bool) error {
 
 // ensureKernelModules installs missing modules for the running kernel where
 // a package is configured, and reports any required modules still unavailable.
-// wireGuardOptional lets existing VXLAN servers continue without WireGuard.
-func ensureKernelModules(client CommandRunner, host HostOS, wireGuardOptional bool) error {
-	modules := host.KernelModules()
+// Setting wireGuardOptional tolerates missing WireGuard support on existing
+// VXLAN servers. Setting longhorn requires the iSCSI module on RHEL hosts.
+func ensureKernelModules(client CommandRunner, host HostOS, wireGuardOptional, longhorn bool) error {
+	modules := host.KernelModules(longhorn)
 	if len(modules) == 0 {
 		return nil
 	}

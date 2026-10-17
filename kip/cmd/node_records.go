@@ -30,8 +30,17 @@ func checkNodesAndStorage(cluster *config.Cluster, sshKey string) error {
 }
 
 // pinForUpgrade attempts server-only scheduling and reports failures as warnings
-// so storage problems allow the rest of the upgrade to continue.
+// so storage problems allow the rest of the upgrade to continue. A local-storage
+// cluster has no Longhorn volumes to pin.
 func pinForUpgrade(out io.Writer, client installer.CommandRunner) {
+	mode, err := installer.ReadStorageMode(client)
+	if err != nil {
+		say(out, "  ⚠  could not keep single-copy volumes on the server (%v). The upgrade continues. Run 'kip upgrade' again to retry\n", err)
+		return
+	}
+	if mode == installer.StorageLocal {
+		return
+	}
 	placement, err := installer.PinSingleCopiesToServer(client)
 	if err != nil {
 		say(out, "  ⚠  could not keep single-copy volumes on the server (%v). The upgrade continues. Run 'kip upgrade' again to retry\n", err)

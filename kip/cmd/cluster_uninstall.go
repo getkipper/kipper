@@ -126,7 +126,7 @@ func (c uninstallCommand) run(cluster *config.Cluster, autoYes, keepLocal bool) 
 	say(c.Out, "    Cluster:  %s\n", cluster.Name)
 	say(c.Out, "    Host:     %s\n", cluster.Host)
 	say(c.Out, "    Kubeconfig: %s\n\n", cluster.Kubeconfig)
-	say(c.Out, "  This removes k3s, all Longhorn data, the Zot registry blobs,\n")
+	say(c.Out, "  This removes k3s, all volume data, the Zot registry blobs,\n")
 	say(c.Out, "  and any AI bundle data on the host. The action cannot be undone.\n\n")
 
 	if !autoYes && !c.Confirm(cluster) {

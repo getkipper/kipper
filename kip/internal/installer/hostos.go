@@ -156,10 +156,14 @@ func (h HostOS) K3sSELinux() bool {
 }
 
 // KernelModules returns the modules required by host preparation.
-// WireGuard is required on every OS family.
-func (h HostOS) KernelModules() []string {
+// All families include WireGuard. RHEL hosts also include bridge filtering and
+// overlay modules, plus iSCSI when longhorn is true.
+func (h HostOS) KernelModules(longhorn bool) []string {
 	if h.Family == FamilyRHEL {
-		return []string{"br_netfilter", "overlay", "iscsi_tcp", "wireguard"}
+		if longhorn {
+			return []string{"br_netfilter", "overlay", "iscsi_tcp", "wireguard"}
+		}
+		return []string{"br_netfilter", "overlay", "wireguard"}
 	}
 	return []string{"wireguard"}
 }

@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
+
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 func TestVeleroBSLBlock_InClusterMinIO(t *testing.T) {
@@ -427,17 +429,17 @@ func TestMinIOStorageRequest(t *testing.T) {
 
 func TestInstallInClusterMinIORequestsThePreservedSize(t *testing.T) {
 	host := &routedRunner{routes: []route{{contains: "get pvc minio-storage", out: "minio-size[30Gi|30Gi]"}}}
-	require.NoError(t, installInClusterMinIO(host, "pw"))
+	require.NoError(t, installInClusterMinIO(host, "pw", platform.LonghornSingleClass))
 	assert.Contains(t, strings.Join(host.stdins, ""), "storage: 30Gi\n", "an existing 30Gi claim is never shrunk")
 
 	fresh := &routedRunner{}
-	require.NoError(t, installInClusterMinIO(fresh, "pw"))
+	require.NoError(t, installInClusterMinIO(fresh, "pw", platform.LonghornSingleClass))
 	assert.Contains(t, strings.Join(fresh.stdins, ""), "storage: 10Gi\n")
 }
 
 func TestInstallInClusterMinIOStopsWhenTheSizeLookupFails(t *testing.T) {
 	host := &routedRunner{routes: []route{{contains: "get pvc minio-storage", err: errors.New("connection refused")}}}
-	err := installInClusterMinIO(host, "pw")
+	err := installInClusterMinIO(host, "pw", platform.LonghornSingleClass)
 	assert.ErrorContains(t, err, "backup volume size")
 	assert.Empty(t, host.stdins, "nothing is applied when the current size is unknown")
 }
@@ -448,7 +450,7 @@ func TestInstallInClusterMinIONamesTheLonghornConditionOnATimeout(t *testing.T) 
 		{contains: "rollout status deployment/minio", err: errors.New("exit status 1")},
 		{contains: "volumes.longhorn.io", out: "lh-volume[pvc-1234|faulted|False|insufficient storage; precheck new replica failed]"},
 	}}
-	err := installInClusterMinIO(host, "pw")
+	err := installInClusterMinIO(host, "pw", platform.LonghornSingleClass)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "pvc-1234")
 	assert.Contains(t, err.Error(), "insufficient storage; precheck new replica failed")
@@ -466,4 +468,10 @@ func TestFormatLonghornVolumeDiagnosis(t *testing.T) {
 	healthy := formatLonghornVolumeDiagnosis("lh-volume[pvc-2|healthy|True|]")
 	assert.Contains(t, healthy, "Longhorn volume pvc-2 is healthy and scheduled")
 	assert.NotContains(t, healthy, "disk")
+}
+
+func TestInstallInClusterMinIOUsesTheGivenClass(t *testing.T) {
+	host := &routedRunner{}
+	require.NoError(t, installInClusterMinIO(host, "pw", platform.LocalPathClass))
+	assert.Contains(t, strings.Join(host.stdins, ""), "storageClassName: local-path\n")
 }

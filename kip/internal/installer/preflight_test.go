@@ -1,10 +1,12 @@
 package installer
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRunPreflightChecks(t *testing.T) {
@@ -427,4 +429,41 @@ func TestWorkerPreflightChecksTheKubeletPortOnly(t *testing.T) {
 	sys.PortListeners = map[int][]string{80: {"nginx"}}
 	_, err = runPreflightChecks(sys, PlatformState{Profile: ProfileNano}, true, false, RoleServer)
 	assert.ErrorContains(t, err, "80 (nginx)")
+}
+
+// Local storage places volumes on the node's own disk with no Longhorn reserve,
+// so a fixed free-space floor replaces the Longhorn rule.
+func TestLocalStorageDiskFloor(t *testing.T) {
+	local := PlatformState{Profile: ProfileNano, Storage: StorageLocal}
+	sys := func(freeMB, sizeMB int) SystemInfo {
+		return SystemInfo{OS: "ubuntu", OSVersion: "24.04", RAMMB: 2048, CPUs: 2, DiskMB: freeMB, DiskSizeMB: sizeMB}
+	}
+
+	_, err := RunPreflightChecks(sys(9000, 20000), local, false, false)
+	assert.ErrorContains(t, err, "10240 MiB")
+
+	result, err := RunPreflightChecks(sys(15000, 20000), local, false, false)
+	require.NoError(t, err, "a 20 GB disk carries a local nano that the Longhorn rule would refuse")
+	assert.True(t, slices.ContainsFunc(result.Warnings, func(w string) bool { return strings.Contains(w, "20480 MiB") }),
+		"below 20 GiB free the install warns: %v", result.Warnings)
+
+	result, err = RunPreflightChecks(sys(30000, 40000), local, false, false)
+	require.NoError(t, err)
+	assert.False(t, slices.ContainsFunc(result.Warnings, func(w string) bool { return strings.Contains(w, "MiB free") }))
+
+	_, err = RunPreflightChecks(sys(15000, 20000), PlatformState{Profile: ProfileNano, Storage: StorageLonghorn}, true, false)
+	assert.Error(t, err, "the same disk is too small for Longhorn")
+}
+
+// Retrying a failed first install credits images already on disk towards the
+// minimum space because those images can be reused.
+func TestLocalStorageDiskFloorCreditsImagesAlreadyPresent(t *testing.T) {
+	local := PlatformState{Profile: ProfileNano, Storage: StorageLocal}
+	sys := SystemInfo{OS: "ubuntu", OSVersion: "24.04", RAMMB: 2048, CPUs: 2, DiskMB: 5000, DiskSizeMB: 20000, ImagesPresentMB: 6500}
+	_, err := RunPreflightChecks(sys, local, false, false)
+	assert.NoError(t, err, "5000 MiB free plus 6500 MiB of images already pulled clears the 10240 MiB floor")
+
+	sys.ImagesPresentMB = 0
+	_, err = RunPreflightChecks(sys, local, false, false)
+	assert.Error(t, err)
 }

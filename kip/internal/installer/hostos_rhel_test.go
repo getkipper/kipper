@@ -47,8 +47,8 @@ func TestHostTraits(t *testing.T) {
 	assert.False(t, debianHost.K3sSELinux())
 	assert.Equal(t, []string{"kernel-modules-extra"}, rhel10Host.KernelModulePackages())
 	assert.Empty(t, rhel9Host.KernelModulePackages())
-	assert.Equal(t, []string{"br_netfilter", "overlay", "iscsi_tcp", "wireguard"}, rhel10Host.KernelModules())
-	assert.Equal(t, []string{"wireguard"}, debianHost.KernelModules(), "host preparation requires WireGuard on Debian too")
+	assert.Equal(t, []string{"br_netfilter", "overlay", "iscsi_tcp", "wireguard"}, rhel10Host.KernelModules(true))
+	assert.Equal(t, []string{"wireguard"}, debianHost.KernelModules(true), "host preparation requires WireGuard on Debian too")
 }
 
 // moduleHost simulates module availability before and after package installation.
@@ -87,7 +87,7 @@ func (h *moduleHost) Run(cmd string) (string, error) {
 func TestEnsureKernelModulesInstallsWhatEL10Lacks(t *testing.T) {
 	h := &moduleHost{available: map[string]bool{"overlay": true, "iscsi_tcp": true, "wireguard": true}, providing: map[string][]string{"kernel-modules-extra": {"br_netfilter"}}}
 
-	require.NoError(t, ensureKernelModules(h, rhel10Host, false))
+	require.NoError(t, ensureKernelModules(h, rhel10Host, false, true))
 
 	assert.Contains(t, strings.Join(h.commands, "\n"), "dnf install -y -q --setopt=exit_on_lock=True kernel-modules-extra-6.12.0-55.el10.x86_64",
 		"the package must match the running kernel, or dnf installs modules for a kernel that is not booted")
@@ -96,7 +96,7 @@ func TestEnsureKernelModulesInstallsWhatEL10Lacks(t *testing.T) {
 func TestEnsureKernelModulesStopsWhenTheRunningKernelLacksOne(t *testing.T) {
 	h := &moduleHost{available: map[string]bool{"overlay": true, "iscsi_tcp": true, "wireguard": true}, providing: map[string][]string{}}
 
-	err := ensureKernelModules(h, rhel10Host, false)
+	err := ensureKernelModules(h, rhel10Host, false, true)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "br_netfilter")
@@ -106,7 +106,7 @@ func TestEnsureKernelModulesStopsWhenTheRunningKernelLacksOne(t *testing.T) {
 func TestEnsureKernelModulesReportsAFailedInstall(t *testing.T) {
 	h := &failingInstallHost{moduleHost{available: map[string]bool{"overlay": true, "iscsi_tcp": true, "wireguard": true}}}
 
-	err := ensureKernelModules(h, rhel10Host, false)
+	err := ensureKernelModules(h, rhel10Host, false, true)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "installing kernel-modules-extra-6.12.0-55.el10.x86_64")
@@ -124,14 +124,14 @@ func (h *failingInstallHost) Run(cmd string) (string, error) {
 
 func TestEnsureKernelModulesLoadsWireGuardOnDebian(t *testing.T) {
 	h := &moduleHost{available: map[string]bool{"wireguard": true}}
-	require.NoError(t, ensureKernelModules(h, debianHost, false))
+	require.NoError(t, ensureKernelModules(h, debianHost, false, true))
 	assert.Contains(t, h.commands[0], `modprobe -q "$m"`, "loading verifies compatibility with the running kernel")
 	assert.NotContains(t, h.commands[0], "modprobe -n")
 }
 
 func TestEnsureKernelModulesRefusesDebianWithoutWireGuard(t *testing.T) {
 	h := &moduleHost{available: map[string]bool{}}
-	err := ensureKernelModules(h, debianHost, false)
+	err := ensureKernelModules(h, debianHost, false, true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "wireguard")
 	assert.Contains(t, err.Error(), "apt-get", "the update hint must use the host's package manager")
@@ -198,7 +198,7 @@ func TestPendingRestartsOnRHELWithoutTheTool(t *testing.T) {
 func TestK3sEntryPointsPrepareTheHost(t *testing.T) {
 	unreadable := map[string]error{"/etc/os-release": errors.New("connection reset")}
 
-	err := InstallK3s(&storageHostRunner{fail: unreadable}, "203.0.113.10", nil, false, false)
+	err := InstallK3s(&storageHostRunner{fail: unreadable}, "203.0.113.10", nil, false, false, StorageLonghorn)
 	assert.ErrorContains(t, err, "preparing the host for k3s")
 
 	_, err = PrepareWorker(&storageHostRunner{}, &storageHostRunner{fail: unreadable}, "")
@@ -238,10 +238,23 @@ func TestDNFNeedsRestartingShell(t *testing.T) {
 
 func TestEnsureKernelModulesToleratesOnlyAnOptionalWireGuard(t *testing.T) {
 	h := &failingInstallHost{moduleHost{available: map[string]bool{"br_netfilter": true, "overlay": true, "iscsi_tcp": true}}}
-	require.NoError(t, ensureKernelModules(h, rhel10Host, true), "a failed install that only concerned wireguard must not stop a VXLAN server")
+	require.NoError(t, ensureKernelModules(h, rhel10Host, true, true), "a failed install that only concerned wireguard must not stop a VXLAN server")
 
 	h = &failingInstallHost{moduleHost{available: map[string]bool{"overlay": true, "iscsi_tcp": true}}}
-	err := ensureKernelModules(h, rhel10Host, true)
+	err := ensureKernelModules(h, rhel10Host, true, true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "br_netfilter")
+}
+
+// Local storage has no iSCSI volumes, so a RHEL host that lacks only the iSCSI
+// module installs without fetching a storage-only module package.
+func TestEnsureKernelModulesLeavesISCSIToLonghorn(t *testing.T) {
+	h := &moduleHost{available: map[string]bool{"br_netfilter": true, "overlay": true, "wireguard": true}, providing: map[string][]string{}}
+	require.NoError(t, ensureKernelModules(h, rhel10Host, false, false))
+	assert.NotContains(t, strings.Join(h.commands, "\n"), "dnf install", "no package is installed for a module local storage never uses")
+
+	h = &moduleHost{available: map[string]bool{"br_netfilter": true, "overlay": true, "wireguard": true}, providing: map[string][]string{}}
+	assert.ErrorContains(t, ensureKernelModules(h, rhel10Host, false, true), "iscsi_tcp", "Longhorn still needs it")
+
+	assert.Equal(t, []string{"br_netfilter", "overlay", "wireguard"}, rhel10Host.KernelModules(false))
 }
