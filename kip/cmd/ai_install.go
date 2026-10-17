@@ -279,6 +279,12 @@ func humanBytes(b int64) string {
 	return fmt.Sprintf("%d MiB", b/mib)
 }
 
+// minioSizeFor returns bytes rounded up to whole GiB as a storage quantity.
+func minioSizeFor(bytes int64) string {
+	const gib = int64(1) << 30
+	return fmt.Sprintf("%dGi", (bytes+gib-1)/gib)
+}
+
 // aiProfileAllowed rejects the nano profile and is called only for fresh installations.
 // A missing PlatformConfig is allowed for compatibility with older clusters.
 // Other read errors are returned.
@@ -323,8 +329,8 @@ func checkBackupStorage(ctx context.Context, clientset kubernetes.Interface, pvc
 	if !report.Sufficient {
 		return fmt.Errorf(
 			"MinIO has %s capacity, AI bundle backups need ~%s for the %s model cache. "+
-				"Resize the velero/minio-storage PVC, or pass --skip-storage-check to install without backup support",
-			humanBytes(report.MinIOCapacity), humanBytes(report.Projected), resolved,
+				"Grow it with 'kip backup storage resize --size %s', or pass --skip-storage-check to skip this capacity check",
+			humanBytes(report.MinIOCapacity), humanBytes(report.Projected), resolved, minioSizeFor(report.Projected),
 		)
 	}
 	fmt.Printf("  ✔   MinIO has %s capacity, projected backup needs %s\n",
