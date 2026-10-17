@@ -17,6 +17,7 @@ Plan the write freeze and DNS cutover together. Once applications write to the t
 - Upgrading hardware (bigger server, different provider)
 - Splitting a cluster (move some projects to a separate server)
 - Disaster recovery (restore from a running cluster to a new one)
+- Moving on from a [nano cluster](/en/nano) to a larger cluster with Longhorn storage
 
 ## How it works
 
@@ -231,6 +232,8 @@ If a route fails to apply, the cutover stops and reports which one. The session 
 - **Volumes and service storage have no size cap**: Shared volumes move through a chunked transfer that verifies every file and resumes from the last completed chunk after a network or pod failure within the run. MinIO and OpenSearch storage moves the same way as raw bytes; the service pauses on both clusters for the duration of its transfer and restarts automatically. If the console API itself restarts mid-run, the migration fails, both clusters clean up and restart paused services on their own, and a fresh migration retransfers the data.
 - **Stop apps before migrating**: The data transfer copies each volume once. Writes that land while a transfer runs are not picked up, so stop the source apps with `kip app stop --for-migration` first. The plan screen reminds you when source apps can still write.
 - **Redirect domains move at cutover**: An app's route carries one serving hostname plus any [redirect domains](/en/domains#redirect-domains). During the verification phase the target serves neither; both switch over together at cutover, and each redirect domain's DNS record must be repointed just like the main hostname's.
+- **Target volumes use the declared size**: A volume on a [local-storage](/en/nano) cluster has no size limit, so it can hold more than its service declares. The target volume is created at the declared size, so increase the declared size with `kip service update <name> --storage <size>` before migrating if the data has outgrown it.
+- **Shared volumes require a Longhorn target**: A target cluster with local storage rejects shared volumes and apps that mount them. The plan screen does not flag these incompatibilities yet. Move projects that use shared volumes to a target with Longhorn storage.
 - **Git apps build the branch head**: The rebuild on the target checks out the configured branch fresh. If the branch moved since the last deploy on the source, the target runs the newer code.
 - **Active connections**: Apps on the source cluster continue running during migration. There is no automatic traffic cutover. DNS changes propagate gradually. Writes that land on the source after its data was copied stay there, which is why the guide says to freeze writes first.
 

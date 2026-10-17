@@ -375,6 +375,9 @@ func Run(opts Options) (*Result, error) {
 	}
 	if storageMode == StorageLocal {
 		fmt.Printf("  ✔  Storage: local (volumes on this server's disk, one node)\n")
+		for _, note := range localStorageNotes(backupMode) {
+			fmt.Printf("  ℹ  %s\n", note)
+		}
 	} else {
 		fmt.Printf("  ✔  Storage: Longhorn\n")
 	}

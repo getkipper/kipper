@@ -41,6 +41,7 @@ kip install --host <ip> [flags]
 | `--cancel` | No | `false` | With `--via-server` (the default on Windows): stop the running install on `--host` or discard its uncollected result |
 | `--dns-resolver` | No | `1.1.1.1`, `8.8.8.8`, `9.9.9.9` | Upstream DNS resolver CoreDNS forwards external queries to. Repeatable, up to three IPv4 addresses (the resolv.conf nameserver limit; the cluster pod network is IPv4-only). Kipper forwards to reliable public resolvers instead of the host's `/etc/resolv.conf`, which varies by provider and can carry unreachable or rate-limited entries that break cluster DNS. The default sends your workloads' external DNS lookups to Cloudflare, Google, and Quad9. On private, split-horizon, or data-residency-sensitive networks, set your own resolvers (e.g. `--dns-resolver 10.0.0.53`), which is also how clusters resolve internal or corporate names. During install, Kipper checks each resolver is reachable from the server on port 53 and warns about any that are not |
 | `--profile` | No | Selected from RAM and CPUs | Sizing profile: `nano`, `small`, `medium`, `large` or `xlarge`. The default uses the server's RAM and CPU count. See [Preflight checks](#preflight-checks). Existing clusters keep their recorded profile. To change it, use `kip platform profile set` |
+| `--storage` | No | `local` for `nano`, `longhorn` otherwise | Volume storage: `local` keeps volumes on the server's disk and supports one node. Adding nodes requires `longhorn`. Existing clusters keep their storage mode. See [Start Small with Nano](/en/nano) |
 | `--trusted-proxy` | No | — | IP or CIDR whose `X-Forwarded-*` headers Traefik honors. Repeatable. Set it when an external load balancer or proxy sits in front of the cluster, so apps and logs see real client addresses instead of the balancer's. The kipper.run gateway is trusted automatically; with no proxy in front, leave it unset and forwarded headers are ignored |
 | `--backup-storage-bucket` | No | — | S3-compatible bucket name for Velero backups. When set, backups live off-cluster and survive a wipe. See [External backup storage](#external-backup-storage) below |
 | `--backup-storage-region` | If bucket set | — | AWS region or provider equivalent. Use the actual region for AWS S3, `auto` for Cloudflare R2, whatever your provider expects elsewhere |
@@ -132,7 +133,8 @@ Before installing, Kipper verifies:
 
 - **OS:** Ubuntu 22.04, 24.04 or 26.04, Debian 12 or 13, or Rocky Linux, AlmaLinux or CentOS Stream 9 or 10. Red Hat Enterprise Linux itself is not supported yet. Ubuntu 20.04 and Debian 11 pass the OS check with a warning: standard support has ended, and Kipper no longer tests these releases.
 - **RAM:** 2 GB minimum. The `nano` sizing profile disables monitoring. The installer recommends at least 8 GB for production workloads.
-- **Disk:** preflight checks the filesystem holding Longhorn's data (`/var/lib/longhorn`, or `/var/lib` before installation). It budgets 20 GiB for fresh system volumes: 10 GiB for MinIO backups, 5 GiB for the Zot registry and 5 GiB for Loki logs. Disabling Loki saves 5 GiB, as the `nano` profile does by default. External backup storage saves another 10 GiB. The volume budget must fit within 70% of the filesystem, so the default setup needs at least 29 GiB of total capacity, or 22 GiB without Loki. After allowing for images and system data, more than 25% of the filesystem must remain free. The estimated installation footprint is 9 GiB with monitoring or 7 GiB without it, reduced by existing containerd usage. If k3s data is on a separate filesystem, preflight checks space for that footprint there. These checks use Longhorn's default thresholds. When `kip install` reads a saved platform profile, disk shortages produce warnings so the existing installation can be updated. A 40 GB disk with sufficient free space is a starting point. Allow extra capacity for apps, backups and expanded system volumes.
+- **Disk with local storage:** a new cluster needs at least 10 GiB free on the filesystem holding k3s's data (`/var/lib/rancher/k3s`), with a warning below 20 GiB. Volumes, images and system data share that space. On an existing cluster, disk shortages produce warnings so installation can continue.
+- **Disk with Longhorn:** preflight checks the filesystem holding Longhorn's data (`/var/lib/longhorn`, or `/var/lib` before installation). It budgets 20 GiB for fresh system volumes: 10 GiB for MinIO backups, 5 GiB for the Zot registry and 5 GiB for Loki logs. Disabling Loki saves 5 GiB, as the `nano` profile does by default. External backup storage saves another 10 GiB. The volume budget must fit within 70% of the filesystem, so the default setup needs at least 29 GiB of total capacity, or 22 GiB without Loki. After allowing for images and system data, more than 25% of the filesystem must remain free. The estimated installation footprint is 9 GiB with monitoring or 7 GiB without it, reduced by existing containerd usage. If k3s data is on a separate filesystem, preflight checks space for that footprint there. These checks use Longhorn's default thresholds. When `kip install` reads a saved platform profile, disk shortages produce warnings so the existing installation can be updated. A 40 GB disk with sufficient free space is a starting point. Allow extra capacity for apps, backups and expanded system volumes.
 - **Kernel:** the server must be able to load the `wireguard` kernel module. If it cannot, host preparation stops and names the missing module. For an existing VXLAN cluster with no unfinished network change, re-running `kip install` can keep VXLAN with a warning if WireGuard is unavailable. Normal k3s upgrade rules still apply. Joining workers with `kip node add` requires WireGuard.
 - **Ports:** 80 (HTTP), 443 (HTTPS), and 6443 (Kubernetes API) must not be in use by another service. The installer stops if something other than k3s, such as nginx or a Docker container, already listens on one of them
 
@@ -164,11 +166,11 @@ The `nano` profile already disables monitoring. See [Platform Resources](/en/pla
 | [k3s](https://k3s.io) | Lightweight Kubernetes distribution |
 | [Traefik](https://traefik.io) | Ingress controller and reverse proxy |
 | [cert-manager](https://cert-manager.io) | Automatic TLS certificates via Let's Encrypt |
-| [Longhorn](https://longhorn.io) | Distributed persistent storage |
+| [Longhorn](https://longhorn.io) | Distributed persistent storage for Longhorn clusters. Local storage uses k3s's local-path provisioner. |
 | [Dex](https://dexidp.io) | Identity provider (OAuth2/OIDC) |
 | [Prometheus](https://prometheus.io) + [Grafana](https://grafana.com) | Metrics and dashboards (can be [disabled](/en/observability#disabling-monitoring)) |
 | [Loki](https://grafana.com/oss/loki/) | Log aggregation (can be [disabled](/en/observability#disabling-monitoring)) |
-| [Velero](https://velero.io) | Backup and restore |
+| [Velero](https://velero.io) | Backup and restore. Local-storage clusters require external backup storage to install Velero. |
 | [KEDA](https://keda.sh) | Event-driven autoscaling |
 | Kipper Console | Web dashboard for cluster management |
 
@@ -180,7 +182,9 @@ Re-running `kip install` updates a component that is already there rather than d
 
 ### External backup storage
 
-By default Kipper installs an in-cluster MinIO and points Velero at it. That gives every new cluster automatic backups with zero configuration, but those backups live on the cluster's own storage. A `kip cluster uninstall`, a hardware failure, or anything that wipes Longhorn data also wipes the backup bucket.
+On a Longhorn cluster, Kipper installs an in-cluster MinIO by default and points Velero at it. This provides automatic backups with zero configuration, stored on the cluster's own storage. A `kip cluster uninstall`, a hardware failure, or anything that wipes Longhorn data also wipes the backup bucket.
+
+A local-storage cluster needs external storage for backups, because a backup on the same disk would be lost if the disk failed.
 
 For a cluster you care about, point Velero at off-cluster object storage instead. The bucket must already exist, kip does not create it.
 
