@@ -179,13 +179,14 @@ func TestZotStorageRequest(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{name: "fresh install, no claim yet", out: "", want: "10Gi"},
-		{name: "noise but no claim", out: "Last login: Wed\n", want: "10Gi"},
-		{name: "claim at the default", out: "zot-size[10Gi|10Gi]", want: "10Gi"},
+		{name: "fresh install, no claim yet", out: "", want: "5Gi"},
+		{name: "noise but no claim", out: "Last login: Wed\n", want: "5Gi"},
+		{name: "claim at the default", out: "zot-size[5Gi|5Gi]", want: "5Gi"},
+		{name: "claim at the earlier default is kept", out: "zot-size[10Gi|10Gi]", want: "10Gi"},
 		{name: "claim expanded by the operator", out: "zot-size[20Gi|20Gi]", want: "20Gi"},
 		{name: "capacity grown past the request", out: "zot-size[10Gi|25Gi]", want: "25Gi"},
 		{name: "request raised, resize still pending", out: "zot-size[30Gi|10Gi]", want: "30Gi"},
-		{name: "smaller legacy claim is raised to the default", out: "zot-size[5Gi|5Gi]", want: "10Gi"},
+		{name: "smaller legacy claim is raised to the default", out: "zot-size[3Gi|3Gi]", want: "5Gi"},
 		{name: "unbound claim reports no capacity", out: "zot-size[20Gi|]", want: "20Gi"},
 		{name: "diagnostics on earlier lines", out: "Warning: deprecated\nzot-size[20Gi|20Gi]", want: "20Gi"},
 		{name: "startup output without a final newline", out: "Startup message: zot-size[20Gi|20Gi]", want: "20Gi"},
@@ -224,7 +225,7 @@ func TestZotStorageQuery_TreatsAMissingClaimAsEmpty(t *testing.T) {
 
 func TestRenderZotBaseManifest_UsesTheGivenSize(t *testing.T) {
 	m := renderZotBaseManifest("25Gi")
-	if !strings.Contains(m, "storage: 25Gi\n") || strings.Contains(m, "storage: 10Gi") {
+	if !strings.Contains(m, "storage: 25Gi\n") || strings.Contains(m, "storage: 5Gi") {
 		t.Errorf("manifest does not request 25Gi:\n%s", m)
 	}
 }

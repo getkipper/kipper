@@ -4,6 +4,10 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 const (
@@ -11,8 +15,39 @@ const (
 	minRAMMB         = 2048
 	tightRAMMB       = 3500
 	recommendedRAMMB = 8192
-	minDiskMB        = 30720 // 30GB — a 40GB disk has ~35GB free after OS install
 )
+
+// Preflight uses Longhorn's default reservation and free-space thresholds.
+const (
+	longhornReservedPercent         = 30
+	longhornMinimalAvailablePercent = 25
+)
+
+// installFootprintMB estimates image and system data usage in MiB.
+func installFootprintMB(monitoring bool) int {
+	if monitoring {
+		return 9216
+	}
+	return 7168
+}
+
+// systemVolumesMB budgets fresh system volumes in MiB using manifest defaults.
+// Existing volumes may be larger.
+func systemVolumesMB(state PlatformState, inClusterBackup bool) int {
+	sizes := []string{zotDefaultStorage}
+	if inClusterBackup {
+		sizes = append(sizes, minioDefaultStorage)
+	}
+	if state.LokiEnabled() {
+		sizes = append(sizes, platform.LokiDefaultStorage)
+	}
+	total := 0
+	for _, size := range sizes {
+		q := resource.MustParse(size)
+		total += int(q.Value() / (1024 * 1024))
+	}
+	return total
+}
 
 var supportedOS = map[string][]string{
 	"ubuntu":    {"20.04", "22.04", "24.04", "26.04"},
@@ -41,32 +76,40 @@ var osDisplayName = map[string]string{
 	"centos":    "CentOS Stream",
 }
 
-// SystemInfo holds the remote server's system information
-// gathered before installation.
+// SystemInfo holds measurements gathered before installation. Sizes are in MiB.
+// DiskMB is free space and DiskSizeMB is total capacity on the Longhorn filesystem.
+// ImageDiskMB is free space on the k3s filesystem. SeparateImageDisk indicates
+// distinct filesystems, and ImagesPresentMB measures existing containerd usage.
 type SystemInfo struct {
-	Host          HostOS
-	OS            string
-	OSVersion     string
-	RAMMB         int
-	DiskMB        int
-	CPUs          int
-	PortListeners map[int][]string
+	Host              HostOS
+	OS                string
+	OSVersion         string
+	RAMMB             int
+	DiskMB            int
+	DiskSizeMB        int
+	ImageDiskMB       int
+	SeparateImageDisk bool
+	ImagesPresentMB   int
+	CPUs              int
+	PortListeners     map[int][]string
 }
 
 type PreflightResult struct {
 	Warnings []string
 }
 
-// RunPreflightChecks validates that the target server meets the minimum
-// requirements for a Kipper installation with the given sizing profile.
-// The caller must supply a known profile. Failed checks return a nil result
-// and an error. Resource headroom concerns are returned as warnings.
+// RunPreflightChecks checks server requirements for a known platform profile
+// and its component overrides. Setting inClusterBackup includes MinIO in the
+// disk budget. Setting existingCluster reports disk shortages as warnings so
+// existing installations can be updated. Other failed checks return a nil result
+// and an error. Successful checks may include OS support and resource warnings.
 // A non-positive CPU count skips the CPU headroom check.
-func RunPreflightChecks(sys SystemInfo, profile string) (*PreflightResult, error) {
-	return runPreflightChecks(sys, profile, RoleServer)
+func RunPreflightChecks(sys SystemInfo, state PlatformState, inClusterBackup, existingCluster bool) (*PreflightResult, error) {
+	return runPreflightChecks(sys, state, inClusterBackup, existingCluster, RoleServer)
 }
 
-func runPreflightChecks(sys SystemInfo, profile string, role HostRole) (*PreflightResult, error) {
+func runPreflightChecks(sys SystemInfo, state PlatformState, inClusterBackup, existingCluster bool, role HostRole) (*PreflightResult, error) {
+	profile := state.Profile
 	result := &PreflightResult{}
 
 	if err := checkOS(sys); err != nil {
@@ -78,8 +121,12 @@ func runPreflightChecks(sys SystemInfo, profile string, role HostRole) (*Preflig
 	if err := checkRAM(sys); err != nil {
 		return nil, err
 	}
-	if err := checkDisk(sys); err != nil {
-		return nil, err
+	if err := checkDisk(sys, state, inClusterBackup, role); err != nil {
+		if !existingCluster {
+			return nil, err
+		}
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("%s. Installation will continue on this existing cluster. Low disk space may affect workloads and prevent Longhorn from placing new volumes.", sentence(err.Error())))
 	}
 	if err := checkPorts(sys, role); err != nil {
 		return nil, err
@@ -178,11 +225,42 @@ func checkRAM(sys SystemInfo) error {
 	return nil
 }
 
-func checkDisk(sys SystemInfo) error {
-	if sys.DiskMB < minDiskMB {
-		return fmt.Errorf("insufficient disk: %dMB available, %dMB required", sys.DiskMB, minDiskMB)
+// checkDisk budgets system volumes on servers and free space on all hosts.
+// Existing containerd usage reduces the estimated installation footprint.
+func checkDisk(sys SystemInfo, state PlatformState, inClusterBackup bool, role HostRole) error {
+	monitoring := false
+	if role == RoleServer {
+		monitoring = state.LokiEnabled() || state.PrometheusEnabled()
+		volumes := systemVolumesMB(state, inClusterBackup)
+		schedulable := sys.DiskSizeMB * (100 - longhornReservedPercent) / 100
+		if schedulable < volumes {
+			needed := (volumes*100 + (100 - longhornReservedPercent) - 1) / (100 - longhornReservedPercent)
+			return fmt.Errorf("insufficient disk: the filesystem holding /var/lib/longhorn is %d MiB. Longhorn places Kipper's system volumes (%d MiB on the '%s' profile) in %d%% of it, so it must be at least %d MiB. Use a server with a larger disk",
+				sys.DiskSizeMB, volumes, state.Profile, 100-longhornReservedPercent, needed)
+		}
+	}
+	footprint := max(installFootprintMB(monitoring)-sys.ImagesPresentMB, 0)
+	if sys.SeparateImageDisk {
+		if sys.ImageDiskMB <= footprint {
+			return fmt.Errorf("insufficient disk: %d MiB free on the filesystem holding k3s's data (/var/lib/rancher/k3s). Images and system data still need about %d MiB. Free up space or use a larger disk",
+				sys.ImageDiskMB, footprint)
+		}
+		footprint = 0
+	}
+	minimalFree := sys.DiskSizeMB * longhornMinimalAvailablePercent / 100
+	if sys.DiskMB-footprint <= minimalFree {
+		return fmt.Errorf("insufficient disk: %d MiB free on the filesystem holding /var/lib/longhorn. After about %d MiB of images and system data, Longhorn needs more than %d%% of the filesystem (%d MiB) kept free. Free up space or use a larger disk",
+			sys.DiskMB, footprint, longhornMinimalAvailablePercent, minimalFree)
 	}
 	return nil
+}
+
+// sentence capitalizes an initial ASCII letter for display as a warning.
+func sentence(msg string) string {
+	if msg == "" {
+		return msg
+	}
+	return strings.ToUpper(msg[:1]) + msg[1:]
 }
 
 func checkPorts(sys SystemInfo, role HostRole) error {

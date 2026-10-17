@@ -50,7 +50,7 @@ Your apps are ordinary Kubernetes objects, so `kubectl` works against them, the 
 
 ## The overhead question
 
-The real objection to Kubernetes on a small server is resource cost rather than the word itself. Kipper runs k3s, Traefik, cert-manager, Longhorn, Dex, KEDA, a registry, a logging and metrics stack, backups and its own console and API, which asks considerably more of a server than a Docker daemon does. The installer refuses less than 2 GB of RAM or 30 GB of disk, and the [getting started guide](/en/getting-started) documents 2 vCPU alongside those as the practical minimum, with 4 vCPU, 8 GB and 80 GB as what makes a cluster comfortable.
+The real objection to Kubernetes on a small server is resource cost rather than the word itself. Kipper runs k3s, Traefik, cert-manager, Longhorn, Dex, KEDA, a registry, a logging and metrics stack, backups and its own console and API, which asks considerably more of a server than a Docker daemon does. The installer requires at least 2 GB RAM and enough disk space for its system volumes and images. A 40 GB disk is a starting point. The [getting started guide](/en/getting-started) recommends at least 2 vCPU, with 4 vCPU, 8 GB RAM and an 80 GB disk for more headroom.
 
 Measured on 30 August 2026, on a fresh 4 vCPU Ubuntu 26.04 server with 7740 MiB of RAM. Two minutes after every component first reported healthy, with no service or app deployed, `free` reported **4029 MiB used**, about 3.9 GiB. A second reading, two minutes after a Postgres service, a MySQL service and an nginx app were all reporting ready and the app was serving over HTTPS, gave 4624 MiB, about 4.5 GiB. Both are whole-server figures including Ubuntu itself, rather than the sum of Kipper's own processes.
 

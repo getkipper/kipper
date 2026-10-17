@@ -44,7 +44,8 @@ func gatherSystemInfo(client CommandRunner, role HostRole) (SystemInfo, error) {
 	if err != nil {
 		return info, fmt.Errorf("detecting disk: %w", err)
 	}
-	info.DiskMB = disk
+	info.DiskMB, info.DiskSizeMB = disk.free, disk.size
+	info.ImageDiskMB, info.SeparateImageDisk, info.ImagesPresentMB = disk.imageFree, disk.separate, disk.imagesPresentMB
 
 	listeners, err := gatherPortListeners(client, role.requiredPorts())
 	if err != nil {
@@ -82,20 +83,67 @@ func gatherCPUs(client CommandRunner) (int, error) {
 	return cpus, nil
 }
 
-func gatherDisk(client CommandRunner) (int, error) {
-	// Available space on root partition in 1M blocks
-	output, err := client.Run("df -BM --output=avail / | tail -1")
-	if err != nil {
-		return 0, err
-	}
+// diskReport records filesystem capacity and containerd usage in MiB.
+type diskReport struct {
+	free, size      int
+	imageFree       int
+	separate        bool
+	imagesPresentMB int
+}
 
-	cleaned := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(output), "M"))
-	mb, err := strconv.Atoi(cleaned)
-	if err != nil {
-		return 0, fmt.Errorf("parsing disk space: %w", err)
-	}
+// k3sImageStore is where containerd keeps the images k3s pulls.
+const k3sImageStore = "/var/lib/rancher/k3s/agent/containerd"
 
-	return mb, nil
+// gatherDisk measures the filesystems holding Longhorn and k3s data, using
+// existing parent directories before installation. Containerd usage reduces
+// the estimated additional space needed on subsequent runs. The usage scan has
+// a 60-second timeout. Missing usage data leaves the full estimate in place.
+func gatherDisk(client CommandRunner) (diskReport, error) {
+	output, err := client.Run(`l=/var/lib/longhorn; [ -d "$l" ] || l=/var/lib; ` +
+		`r=/var/lib/rancher/k3s; [ -d "$r" ] || r=/var/lib/rancher; [ -d "$r" ] || r=/var/lib; ` +
+		`df -BM --output=avail,size,target "$l" "$r" | tail -n +2; ` +
+		`[ -d ` + k3sImageStore + ` ] && echo "images-present[$(timeout 60 du -sm ` + k3sImageStore + ` 2>/dev/null | cut -f1)]"; true`)
+	if err != nil {
+		return diskReport{}, err
+	}
+	return parseDiskReport(output)
+}
+
+var (
+	diskReportLine     = regexp.MustCompile(`^(\d+)M\s+(\d+)M\s+(\S+)$`)
+	imagesPresentField = regexp.MustCompile(`^images-present\[(\d+)\]$`)
+)
+
+// parseDiskReport reads two df lines (Longhorn's filesystem, then k3s's) and
+// the optional image store size, ignoring any other line.
+func parseDiskReport(output string) (diskReport, error) {
+	var report diskReport
+	var targets []string
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if m := imagesPresentField.FindStringSubmatch(line); len(m) == 2 {
+			report.imagesPresentMB, _ = strconv.Atoi(m[1])
+			continue
+		}
+		m := diskReportLine.FindStringSubmatch(line)
+		if len(m) < 4 {
+			continue
+		}
+		free, _ := strconv.Atoi(m[1])
+		size, _ := strconv.Atoi(m[2])
+		switch len(targets) {
+		case 0:
+			report.free, report.size = free, size
+		case 1:
+			report.imageFree = free
+		}
+		targets = append(targets, m[3])
+	}
+	if len(targets) != 2 {
+		return diskReport{}, fmt.Errorf("parsing disk space from %q", strings.TrimSpace(output))
+	}
+	report.separate = targets[0] != targets[1]
+	return report, nil
 }
 
 // gatherPortListeners lists the processes listening on each required port,

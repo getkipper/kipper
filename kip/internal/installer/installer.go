@@ -323,20 +323,39 @@ func Run(opts Options) (*Result, error) {
 		return nil, fmt.Errorf("gathering system info: %w", err)
 	}
 
-	platformProfile := resolveProfile(opts.Profile, sysInfo)
-	preflight, err := RunPreflightChecks(sysInfo, platformProfile)
+	// A re-run inherits the settings of the cluster entry for this host before
+	// the checks, because the disk rule depends on whether MinIO is installed.
+	if cfg, err := config.Load(); err == nil {
+		if existing := cfg.GetClusterByHost(opts.Host, clusterAddress); existing != nil {
+			inheritClusterSettings(&opts, existing)
+		}
+	}
+	saved := readSavedPlatformState(client)
+	savedProfile := saved.Profile
+	platformProfile := resolveProfile(opts.Profile, savedProfile, sysInfo)
+	saved.Profile = platformProfile
+	preflight, err := RunPreflightChecks(sysInfo, saved, opts.BackupStorage == nil, savedProfile != "")
 	if err != nil {
 		return nil, err
 	}
 	fmt.Printf("  ✔  OS: %s %s\n", sysInfo.OS, sysInfo.OSVersion)
 	fmt.Printf("  ✔  RAM: %dMB available\n", sysInfo.RAMMB)
 	fmt.Printf("  ✔  CPUs: %d\n", sysInfo.CPUs)
-	fmt.Printf("  ✔  Disk: %dMB available\n", sysInfo.DiskMB)
+	fmt.Printf("  ✔  Disk: %d MiB free of %d MiB\n", sysInfo.DiskMB, sysInfo.DiskSizeMB)
+	if sysInfo.SeparateImageDisk {
+		fmt.Printf("  ✔  Image disk: %d MiB free\n", sysInfo.ImageDiskMB)
+	}
 	fmt.Printf("  ✔  Ports: 80, 443, 6443 not held by another service\n")
 
-	if opts.Profile != "" {
+	switch {
+	case savedProfile != "":
+		fmt.Printf("  ✔  Platform profile: %s (kept from the existing cluster)\n", platformProfile)
+		if note := ignoredProfileNote(platformProfile, opts.Profile); note != "" {
+			fmt.Printf("  ⚠  %s\n", note)
+		}
+	case opts.Profile != "":
 		fmt.Printf("  ✔  Platform profile: %s (--profile)\n", platformProfile)
-	} else {
+	default:
 		fmt.Printf("  ✔  Platform profile: %s\n", platformProfile)
 		if note := profilePickNote(sysInfo.RAMMB, sysInfo.CPUs, platformProfile); note != "" {
 			fmt.Printf("  ℹ  %s\n", note)

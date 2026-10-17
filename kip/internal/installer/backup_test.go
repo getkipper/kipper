@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -394,4 +395,75 @@ func TestEnsureVeleroCoversNodesLeavesANonRHELClusterAndOneWithoutVeleroAlone(t 
 	require.NoError(t, err)
 	assert.False(t, changed)
 	assert.Empty(t, noVelero.patches)
+}
+
+// Preserve existing volume sizes because Kubernetes rejects shrinking storage.
+func TestMinIOStorageRequest(t *testing.T) {
+	tests := []struct {
+		name    string
+		out     string
+		want    string
+		wantErr bool
+	}{
+		{name: "fresh install", out: "", want: "10Gi"},
+		{name: "claim from an install before the default shrank", out: "minio-size[30Gi|30Gi]", want: "30Gi"},
+		{name: "claim at the default", out: "minio-size[10Gi|10Gi]", want: "10Gi"},
+		{name: "capacity grown past the request", out: "minio-size[10Gi|25Gi]", want: "25Gi"},
+		{name: "smaller legacy claim is raised to the default", out: "minio-size[5Gi|5Gi]", want: "10Gi"},
+		{name: "unparseable values", out: "minio-size[lots|more]", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := minioStorageRequest(tt.out)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestInstallInClusterMinIORequestsThePreservedSize(t *testing.T) {
+	host := &routedRunner{routes: []route{{contains: "get pvc minio-storage", out: "minio-size[30Gi|30Gi]"}}}
+	require.NoError(t, installInClusterMinIO(host, "pw"))
+	assert.Contains(t, strings.Join(host.stdins, ""), "storage: 30Gi\n", "an existing 30Gi claim is never shrunk")
+
+	fresh := &routedRunner{}
+	require.NoError(t, installInClusterMinIO(fresh, "pw"))
+	assert.Contains(t, strings.Join(fresh.stdins, ""), "storage: 10Gi\n")
+}
+
+func TestInstallInClusterMinIOStopsWhenTheSizeLookupFails(t *testing.T) {
+	host := &routedRunner{routes: []route{{contains: "get pvc minio-storage", err: errors.New("connection refused")}}}
+	err := installInClusterMinIO(host, "pw")
+	assert.ErrorContains(t, err, "backup volume size")
+	assert.Empty(t, host.stdins, "nothing is applied when the current size is unknown")
+}
+
+// Include storage conditions to help diagnose rollout failures.
+func TestInstallInClusterMinIONamesTheLonghornConditionOnATimeout(t *testing.T) {
+	host := &routedRunner{routes: []route{
+		{contains: "rollout status deployment/minio", err: errors.New("exit status 1")},
+		{contains: "volumes.longhorn.io", out: "lh-volume[pvc-1234|faulted|False|insufficient storage; precheck new replica failed]"},
+	}}
+	err := installInClusterMinIO(host, "pw")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pvc-1234")
+	assert.Contains(t, err.Error(), "insufficient storage; precheck new replica failed")
+	assert.Contains(t, err.Error(), "disk")
+}
+
+func TestFormatLonghornVolumeDiagnosis(t *testing.T) {
+	assert.Empty(t, formatLonghornVolumeDiagnosis(""), "no volume yet, nothing to add")
+	assert.Empty(t, formatLonghornVolumeDiagnosis("Warning: something else\n"))
+
+	unscheduled := formatLonghornVolumeDiagnosis("lh-volume[pvc-1|faulted|False|insufficient storage; precheck new replica failed]")
+	assert.Contains(t, unscheduled, "Longhorn volume pvc-1 (faulted) is not scheduled: insufficient storage; precheck new replica failed")
+	assert.Contains(t, unscheduled, "disk")
+
+	healthy := formatLonghornVolumeDiagnosis("lh-volume[pvc-2|healthy|True|]")
+	assert.Contains(t, healthy, "Longhorn volume pvc-2 is healthy and scheduled")
+	assert.NotContains(t, healthy, "disk")
 }
