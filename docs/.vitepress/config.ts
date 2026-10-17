@@ -84,6 +84,7 @@ export default withMermaid(
             items: [
               { text: 'Overview', link: '/en/' },
               { text: 'Getting Started', link: '/en/getting-started' },
+              { text: 'Start Small with Nano', link: '/en/nano' },
               { text: 'Installing from Windows', link: '/en/windows' },
               { text: 'Team Access', link: '/en/team-access' },
               { text: 'FAQ', link: '/en/faq' },

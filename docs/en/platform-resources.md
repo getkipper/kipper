@@ -10,11 +10,13 @@ At install time, `kip install` selects one of five profiles from the node's RAM 
 
 | Profile  | Detected RAM (MiB) | Prometheus | Loki   | What it's for |
 |----------|----------|------------|--------|---------------|
-| `nano`   | < 6000 | off        | off    | Demos and development. Monitoring is off by default to leave memory for apps. |
+| `nano`   | < 6000 | off        | off    | Trying Kipper, prototypes and small projects. Monitoring is off by default to leave memory for apps. |
 | `small`  | 6000–7499 | 512 Mi     | 384 Mi | Side projects and small workloads. Monitoring uses tight memory limits. |
 | `medium` | 7500–14999 | 1 Gi       | 512 Mi | Higher monitoring limits than the small profile, with capacity for apps depending on workload. |
 | `large`  | 15000–29999 | 1 Gi       | 512 Mi | Same limits as medium, more headroom for apps. |
 | `xlarge` | ≥ 30000 | 2 Gi       | 1 Gi   | Mature production with many services. |
+
+A new `nano` cluster uses local storage by default. Every `nano` cluster, including clusters upgraded to this version, runs a minimum of one KEDA HTTP interceptor instead of three. See [Start Small with Nano](/en/nano).
 
 These ranges use the RAM value printed by the installer (`MemTotal` from `/proc/meminfo`, divided by 1024). The `medium`, `large` and `xlarge` cutoffs allow a margin below advertised 8, 16 and 32 GB server sizes. Hosts below 6000 MiB get `nano` by default to leave memory for the platform and apps.
 

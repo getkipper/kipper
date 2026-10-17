@@ -52,6 +52,8 @@ This injects `S3_ENDPOINT`, `S3_ACCESS_KEY`, and `S3_SECRET_KEY` into the app. `
 
 For apps that need a traditional shared filesystem (e.g. legacy apps that read/write files to disk), Kipper provides shared volumes backed by Longhorn with ReadWriteMany (RWX) access.
 
+Shared volumes need a cluster with Longhorn storage. A cluster with [local storage](/en/nano) rejects them in `kip`, the console and the API. Use a MinIO service on these clusters instead.
+
 Shared volumes provide a filesystem path through Longhorn's RWX storage. Choose this approach when your app expects filesystem access, and account for the shared storage service when planning capacity and availability.
 
 ### Create a shared volume
