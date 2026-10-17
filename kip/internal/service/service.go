@@ -626,6 +626,7 @@ func (m *Manager) List(ctx context.Context, namespace string) ([]Status, error) 
 	}
 
 	crashLoops := CrashLoopingServices(ctx, m.Client, namespace)
+	unschedulable := UnschedulableServices(ctx, m.Client, namespace)
 
 	var services []Status
 	for _, cr := range crList.Items {
@@ -671,6 +672,10 @@ func (m *Manager) List(ctx context.Context, namespace string) ([]Status, error) 
 		if why, looping := crashLoops[name]; looping && phase != "deleting" && reason == "" {
 			phase = "crash-looping"
 			reason, message = "CrashLoopBackOff", why
+		}
+		// Readiness alone cannot distinguish scheduling failures from startup.
+		if why, stuck := unschedulable[name]; stuck && phase != "deleting" && reason == "" {
+			reason, message = "FailedScheduling", why
 		}
 
 		services = append(services, Status{

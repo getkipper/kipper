@@ -4,6 +4,10 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 const (
@@ -13,8 +17,39 @@ const (
 	// below this get rejected because k3s itself becomes unstable.
 	minRAMMB         = 2048
 	recommendedRAMMB = 8192
-	minDiskMB        = 30720 // 30GB — a 40GB disk has ~35GB free after OS install
 )
+
+// Preflight uses Longhorn's default reservation and free-space thresholds.
+const (
+	longhornReservedPercent         = 30
+	longhornMinimalAvailablePercent = 25
+)
+
+// installFootprintMB estimates image and system data usage in MiB.
+func installFootprintMB(monitoring bool) int {
+	if monitoring {
+		return 9216
+	}
+	return 7168
+}
+
+// systemVolumesMB budgets fresh system volumes in MiB using manifest defaults.
+// Existing volumes may be larger.
+func systemVolumesMB(state PlatformState, inClusterBackup bool) int {
+	sizes := []string{zotDefaultStorage}
+	if inClusterBackup {
+		sizes = append(sizes, minioDefaultStorage)
+	}
+	if state.LokiEnabled() {
+		sizes = append(sizes, platform.LokiDefaultStorage)
+	}
+	total := 0
+	for _, size := range sizes {
+		q := resource.MustParse(size)
+		total += int(q.Value() / (1024 * 1024))
+	}
+	return total
+}
 
 var supportedOS = map[string][]string{
 	"ubuntu":    {"20.04", "22.04", "24.04", "26.04"},
@@ -43,15 +78,22 @@ var osDisplayName = map[string]string{
 	"centos":    "CentOS Stream",
 }
 
-// SystemInfo holds the remote server's system information
-// gathered before installation.
+// SystemInfo holds measurements gathered before installation. Sizes are in MiB.
+// DiskMB is free space and DiskSizeMB is total capacity on the Longhorn filesystem.
+// ImageDiskMB is free space on the k3s filesystem. SeparateImageDisk indicates
+// distinct filesystems, and ImagesPresentMB measures existing containerd usage.
 type SystemInfo struct {
-	Host          HostOS
-	OS            string
-	OSVersion     string
-	RAMMB         int
-	DiskMB        int
-	PortListeners map[int][]string
+	Host              HostOS
+	OS                string
+	OSVersion         string
+	RAMMB             int
+	DiskMB            int
+	DiskSizeMB        int
+	ImageDiskMB       int
+	SeparateImageDisk bool
+	ImagesPresentMB   int
+	CPUs              int
+	PortListeners     map[int][]string
 }
 
 // PreflightResult contains the outcome of preflight checks.
@@ -59,13 +101,18 @@ type PreflightResult struct {
 	Warnings []string
 }
 
-// RunPreflightChecks validates that the target server meets the minimum
-// requirements for a Kipper installation.
-func RunPreflightChecks(sys SystemInfo) (*PreflightResult, error) {
-	return runPreflightChecks(sys, RoleServer)
+// RunPreflightChecks checks server requirements for a known platform profile
+// and its component overrides. Setting inClusterBackup includes MinIO in the
+// disk budget. Setting existingCluster reports disk shortages as warnings so
+// existing installations can be updated. Other failed checks return a nil result
+// and an error. Successful checks may include OS support and resource warnings.
+// A non-positive CPU count skips the CPU headroom check.
+func RunPreflightChecks(sys SystemInfo, state PlatformState, inClusterBackup, existingCluster bool) (*PreflightResult, error) {
+	return runPreflightChecks(sys, state, inClusterBackup, existingCluster, RoleServer)
 }
 
-func runPreflightChecks(sys SystemInfo, role HostRole) (*PreflightResult, error) {
+func runPreflightChecks(sys SystemInfo, state PlatformState, inClusterBackup, existingCluster bool, role HostRole) (*PreflightResult, error) {
+	profile := state.Profile
 	result := &PreflightResult{}
 
 	if err := checkOS(sys); err != nil {
@@ -77,8 +124,12 @@ func runPreflightChecks(sys SystemInfo, role HostRole) (*PreflightResult, error)
 	if err := checkRAM(sys); err != nil {
 		return nil, err
 	}
-	if err := checkDisk(sys); err != nil {
-		return nil, err
+	if err := checkDisk(sys, state, inClusterBackup, role); err != nil {
+		if !existingCluster {
+			return nil, err
+		}
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("%v. Installation will continue on this existing cluster. Low disk space may affect workloads and prevent Longhorn from placing new volumes.", err))
 	}
 	if err := checkPorts(sys, role); err != nil {
 		return nil, err
@@ -88,16 +139,52 @@ func runPreflightChecks(sys SystemInfo, role HostRole) (*PreflightResult, error)
 	if role == RoleWorker {
 		return result, nil
 	}
-	switch pickProfile(sys.RAMMB) {
-	case ProfileNano:
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("RAM is below 4GB (%dMB available): the 'nano' profile will be selected: monitoring (Prometheus, Loki, Grafana) is disabled by default and headroom for apps is very tight. Best for demos and dev; production workloads need 8GB or more.", sys.RAMMB))
-	case ProfileSmall:
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("RAM is below recommended 8GB (%dMB available): the 'small' profile will be selected: monitoring runs with tight limits. Disable it with 'kip platform disable prometheus' and 'kip platform disable loki' after install if you need more room for apps.", sys.RAMMB))
+	result.Warnings = append(result.Warnings, ramWarnings(sys.RAMMB, profile)...)
+	if w := cpuWarning(profile, sys.CPUs); w != "" {
+		result.Warnings = append(result.Warnings, w)
 	}
 
 	return result, nil
+}
+
+// ramWarnings uses measured RAM because CPU limits or an explicit choice can
+// select a different profile from the memory-based default.
+func ramWarnings(ramMB int, profile string) []string {
+	monitoring := profile != ProfileNano
+	switch {
+	case ramMB < nanoRAMMB:
+		w := fmt.Sprintf("RAM is below 4GB (%dMB available): headroom for apps is very tight. Use this host for demos or development. For production, start with at least 8GB.", ramMB)
+		if monitoring {
+			w += fmt.Sprintf(" The '%s' profile enables monitoring (Prometheus, Loki, Grafana) by default, which can push the host into swapping, and the install itself can fail at Zot. Use --profile nano to disable monitoring on a new cluster.", profile)
+		} else {
+			w += " The 'nano' profile keeps monitoring (Prometheus, Loki, Grafana) off."
+		}
+		return []string{w}
+	case ramMB < recommendedRAMMB && !monitoring:
+		return []string{fmt.Sprintf("RAM is below recommended 8GB (%dMB available): the 'nano' profile keeps monitoring (Prometheus, Loki, Grafana) off to leave more memory for apps.", ramMB)}
+	case ramMB < recommendedRAMMB:
+		return []string{fmt.Sprintf("RAM is below recommended 8GB (%dMB available): the '%s' profile enables monitoring by default, leaving less memory for apps. Use --profile nano on a new cluster, or disable monitoring after install with 'kip platform disable prometheus' and 'kip platform disable loki'.", ramMB, profile)}
+	}
+	return nil
+}
+
+// cpuWarning says when a profile's platform pods leave less than a default
+// database service's request on the host. It returns an empty string when the
+// estimate fits or the CPU count is non-positive.
+func cpuWarning(profile string, cpus int) string {
+	if profileFitsCPU(profile, cpus) {
+		return ""
+	}
+	return fmt.Sprintf("%d %s: the '%s' profile's platform pods request about %dm of the %dm available, leaving %dm for apps. A default database service requests %dm, which exceeds this estimate of available CPU. Use a host with more CPUs, or lower --cpu for services if capacity allows.",
+		cpus, plural(cpus, "CPU", "CPUs"), profile, platformCPURequestMilli[profile], cpus*1000,
+		max(cpuHeadroomMilli(profile, cpus), 0), defaultServiceCPURequestMilli)
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 func checkOS(sys SystemInfo) error {
@@ -138,9 +225,32 @@ func checkRAM(sys SystemInfo) error {
 	return nil
 }
 
-func checkDisk(sys SystemInfo) error {
-	if sys.DiskMB < minDiskMB {
-		return fmt.Errorf("insufficient disk: %dMB available, %dMB required", sys.DiskMB, minDiskMB)
+// checkDisk budgets system volumes on servers and free space on all hosts.
+// Existing containerd usage reduces the estimated installation footprint.
+func checkDisk(sys SystemInfo, state PlatformState, inClusterBackup bool, role HostRole) error {
+	monitoring := false
+	if role == RoleServer {
+		monitoring = state.LokiEnabled() || state.PrometheusEnabled()
+		volumes := systemVolumesMB(state, inClusterBackup)
+		schedulable := sys.DiskSizeMB * (100 - longhornReservedPercent) / 100
+		if schedulable < volumes {
+			needed := (volumes*100 + (100 - longhornReservedPercent) - 1) / (100 - longhornReservedPercent)
+			return fmt.Errorf("insufficient disk: the filesystem holding /var/lib/longhorn is %d MiB. Longhorn places Kipper's system volumes (%d MiB on the '%s' profile) in %d%% of it, so it must be at least %d MiB. Use a server with a larger disk",
+				sys.DiskSizeMB, volumes, state.Profile, 100-longhornReservedPercent, needed)
+		}
+	}
+	footprint := max(installFootprintMB(monitoring)-sys.ImagesPresentMB, 0)
+	if sys.SeparateImageDisk {
+		if sys.ImageDiskMB <= footprint {
+			return fmt.Errorf("insufficient disk: %d MiB free on the filesystem holding k3s's data (/var/lib/rancher/k3s). Images and system data still need about %d MiB. Free up space or use a larger disk",
+				sys.ImageDiskMB, footprint)
+		}
+		footprint = 0
+	}
+	minimalFree := sys.DiskSizeMB * longhornMinimalAvailablePercent / 100
+	if sys.DiskMB-footprint <= minimalFree {
+		return fmt.Errorf("insufficient disk: %d MiB free on the filesystem holding /var/lib/longhorn. After about %d MiB of images and system data, Longhorn needs more than %d%% of the filesystem (%d MiB) kept free. Free up space or use a larger disk",
+			sys.DiskMB, footprint, longhornMinimalAvailablePercent, minimalFree)
 	}
 	return nil
 }

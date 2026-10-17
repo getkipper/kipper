@@ -73,3 +73,23 @@ func CheckNewVersion(serviceType, version string) error {
 	}
 	return nil
 }
+
+// DefaultResources returns default CPU and memory requests as Kubernetes quantities.
+// Unknown service types use the standard profile.
+func DefaultResources(serviceType string) (cpu, memory string) {
+	switch serviceType {
+	case "postgres", "mysql", "mongodb":
+		return "500m", "1Gi"
+	case "opensearch":
+		return "100m", "2Gi"
+	default:
+		return "100m", "128Mi"
+	}
+}
+
+// InitContainerRequests returns CPU and memory requests for the service pod's
+// cleanup init container as Kubernetes quantities. These set the minimum
+// effective requests used by the CLI's capacity check.
+func InitContainerRequests() (cpu, memory string) {
+	return "10m", "16Mi"
+}

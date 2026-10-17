@@ -41,6 +41,7 @@ type Request struct {
 	NoSSHRateLimit   bool            `json:"no_ssh_rate_limit"`
 	DNSResolvers     []string        `json:"dns_resolvers,omitempty"`
 	TrustedProxies   []string        `json:"trusted_proxies,omitempty"`
+	Profile          string          `json:"profile,omitempty"`
 	Backup           *Backup         `json:"backup,omitempty"`
 	Entry            *config.Cluster `json:"entry,omitempty"`
 }
@@ -101,6 +102,7 @@ func (r Request) Options() installer.Options {
 		NoSSHRateLimit:   r.NoSSHRateLimit,
 		DNSResolvers:     r.DNSResolvers,
 		TrustedProxies:   r.TrustedProxies,
+		Profile:          r.Profile,
 	}
 	if b := r.Backup; b != nil {
 		opts.BackupStorage = &installer.BackupStorageConfig{

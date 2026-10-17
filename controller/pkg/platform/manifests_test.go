@@ -168,7 +168,7 @@ func valueAt(t *testing.T, values map[string]interface{}, path ...string) interf
 }
 
 func TestLokiHelmChart_SendsNoUsageReports(t *testing.T) {
-	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium)))
+	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage))
 
 	assert.Equal(t, false, valueAt(t, values, "loki", "analytics", "reporting_enabled"))
 }
@@ -187,7 +187,7 @@ func TestKubePrometheusStackHelmChart_GrafanaSendsNothingUpstream(t *testing.T) 
 
 // The canary and its dependent Helm test use top-level chart values.
 func TestLokiHelmChart_DeploysNoCanary(t *testing.T) {
-	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium)))
+	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage))
 
 	assert.Equal(t, false, valueAt(t, values, "lokiCanary", "enabled"))
 	assert.Equal(t, false, valueAt(t, values, "test", "enabled"))
@@ -282,4 +282,21 @@ func TestNodeExporterTLSManifests_IssueTheProxyCertificate(t *testing.T) {
 	}
 	require.NotNil(t, caCert, "no Certificate writes the CA secret %s", caSecret)
 	assert.Equal(t, true, nestedValue(t, caCert, "spec", "isCA"))
+}
+
+// Preserve the immutable claim template even when its claim has expanded.
+func TestLokiStorageSize(t *testing.T) {
+	assert.Equal(t, "5Gi", LokiDefaultStorage)
+	assert.Equal(t, "5Gi", LokiStorageSize("", ""), "fresh install")
+	assert.Equal(t, "10Gi", LokiStorageSize("10Gi", "10Gi"), "existing cluster")
+	assert.Equal(t, "10Gi", LokiStorageSize("10Gi", "20Gi"), "a claim expanded under an unchanged template keeps the template")
+	assert.Equal(t, "10Gi", LokiStorageSize("", "10Gi"), "only the claim is left after a disable")
+	assert.Equal(t, "10Gi", LokiStorageSize("10Gi", ""), "template without a bound claim")
+}
+
+func TestLokiHelmChart_RequestsTheGivenStorage(t *testing.T) {
+	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), "10Gi"))
+	assert.Equal(t, "10Gi", valueAt(t, values, "singleBinary", "persistence", "size"))
+	values = seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage))
+	assert.Equal(t, "5Gi", valueAt(t, values, "singleBinary", "persistence", "size"))
 }

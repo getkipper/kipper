@@ -12,6 +12,8 @@ import (
 	"github.com/spf13/cobra"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/getkipper/kipper/kip/internal/ai"
@@ -88,9 +90,14 @@ func runAIInstall(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("checking existing bundle: %w", err)
 	}
 
+	if !alreadyInstalled {
+		if err := aiProfileAllowed(ctx, client.Dynamic()); err != nil {
+			return err
+		}
+	}
 	if !alreadyInstalled && !tier.MeetsMinimum() {
-		return fmt.Errorf("best node has %s free, AI bundle needs at least 8 GiB on a single node; "+
-			"run 'kip ai configure --provider claude' to use a hosted provider instead",
+		return fmt.Errorf("best node has %s free. The AI bundle needs at least 8 GiB of free memory on one node to run a model locally. "+
+			"For diagnostics and log analysis, set up Kipper's console assistant with a hosted provider using 'kip ai configure'",
 			humanBytes(report.BestNode.FreeMemory))
 	}
 	if alreadyInstalled {
@@ -272,6 +279,31 @@ func humanBytes(b int64) string {
 	return fmt.Sprintf("%d MiB", b/mib)
 }
 
+// minioSizeFor returns bytes rounded up to whole GiB as a storage quantity.
+func minioSizeFor(bytes int64) string {
+	const gib = int64(1) << 30
+	return fmt.Sprintf("%dGi", (bytes+gib-1)/gib)
+}
+
+// aiProfileAllowed rejects the nano profile and is called only for fresh installations.
+// A missing PlatformConfig is allowed for compatibility with older clusters.
+// Other read errors are returned.
+func aiProfileAllowed(ctx context.Context, dyn dynamic.Interface) error {
+	pc, err := dyn.Resource(platformGVR).Get(ctx, platformConfigName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading PlatformConfig: %w", err)
+	}
+	profile, _, _ := unstructured.NestedString(pc.Object, "spec", "profile")
+	if profile == installer.ProfileNano {
+		return fmt.Errorf("a fresh AI bundle installation needs a profile larger than 'nano' to run a model locally. " +
+			"For diagnostics and log analysis, set up Kipper's console assistant with a hosted provider using 'kip ai configure'")
+	}
+	return nil
+}
+
 // checkBackupStorage runs the MinIO storage preflight before a fresh
 // install. The bundle's backup story (`kip ai backup` via Velero) needs
 // the velero/minio-storage PVC to be at least 3x the model cache size,
@@ -297,8 +329,8 @@ func checkBackupStorage(ctx context.Context, clientset kubernetes.Interface, pvc
 	if !report.Sufficient {
 		return fmt.Errorf(
 			"MinIO has %s capacity, AI bundle backups need ~%s for the %s model cache. "+
-				"Resize the velero/minio-storage PVC, or pass --skip-storage-check to install without backup support",
-			humanBytes(report.MinIOCapacity), humanBytes(report.Projected), resolved,
+				"Grow it with 'kip backup storage resize --size %s', or pass --skip-storage-check to skip this capacity check",
+			humanBytes(report.MinIOCapacity), humanBytes(report.Projected), resolved, minioSizeFor(report.Projected),
 		)
 	}
 	fmt.Printf("  ✔   MinIO has %s capacity, projected backup needs %s\n",

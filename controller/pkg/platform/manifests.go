@@ -47,10 +47,29 @@ const (
 	GrafanaAdminUser = "admin"
 )
 
-// LokiHelmChart renders the loki HelmChart YAML for the given memory
-// resources. Callers compose Resources from a profile (and optionally
-// per-component overrides) via ResourcesForProfile or EffectiveResources.
-func LokiHelmChart(res Resources) string {
+// LokiDefaultStorage is the log volume a fresh install requests.
+const LokiDefaultStorage = "5Gi"
+
+// LokiStorageSize returns the first non-empty size from templateSize and
+// claimSize, or LokiDefaultStorage if both are empty. This preserves the
+// immutable StatefulSet claim template, falling back to a surviving claim.
+// Callers supply valid Kubernetes storage quantities or empty strings for
+// absent objects. Values are returned unchanged without validation.
+func LokiStorageSize(templateSize, claimSize string) string {
+	switch {
+	case templateSize != "":
+		return templateSize
+	case claimSize != "":
+		return claimSize
+	default:
+		return LokiDefaultStorage
+	}
+}
+
+// LokiHelmChart renders a Loki HelmChart with the supplied memory resources
+// and storage quantity. Use ResourcesForProfile or EffectiveResources for res
+// and LokiStorageSize for storage. Values are interpolated without validation.
+func LokiHelmChart(res Resources, storage string) string {
 	return fmt.Sprintf(`apiVersion: helm.cattle.io/v1
 kind: HelmChart
 metadata:
@@ -95,7 +114,7 @@ spec:
           memory: %s
       persistence:
         enabled: true
-        size: 10Gi
+        size: %s
     minio:
       enabled: false
     gateway:
@@ -128,7 +147,7 @@ spec:
     # The chart's Helm test requires the canary.
     test:
       enabled: false
-`, HelmChartNamespace, LokiChartVersion, res.LokiMemoryRequest, res.LokiMemoryLimit)
+`, HelmChartNamespace, LokiChartVersion, res.LokiMemoryRequest, res.LokiMemoryLimit, storage)
 }
 
 // PromtailHelmChart renders the promtail HelmChart that ships container logs

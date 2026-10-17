@@ -90,6 +90,6 @@ func PreflightWorker(client CommandRunner) (SystemInfo, *PreflightResult, error)
 	if err != nil {
 		return sys, nil, fmt.Errorf("gathering system info: %w", err)
 	}
-	result, err := runPreflightChecks(sys, RoleWorker)
+	result, err := runPreflightChecks(sys, PlatformState{}, false, false, RoleWorker)
 	return sys, result, err
 }

@@ -47,7 +47,7 @@ Kipper is pre-1.0. See [operating considerations](#operating-considerations) bef
 ### Prerequisites
 
 - An Ubuntu 22.04/24.04/26.04, Debian 12/13, or Rocky Linux, AlmaLinux or CentOS Stream 9/10 server with a public IP address and root SSH access. Kipper also accepts Ubuntu 20.04 and Debian 11, with a warning that standard support has ended.
-- At least 2 GB RAM and 30 GB free disk for installation; allow more capacity for your workloads. See [sizing guidance](docs/en/installation.md).
+- At least 2 GB RAM and enough disk space for Kipper's system volumes and images. Start with a 40 GB disk and allow more capacity for your workloads. See [sizing guidance](docs/en/installation.md).
 - An SSH key authorized for the server's root account. On Windows, kip can create the key and add its public key to the server
 - Provider firewall rules allowing SSH, ports 80 and 443, and port 6443 from the computers that will manage the cluster
 

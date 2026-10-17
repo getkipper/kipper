@@ -59,6 +59,7 @@ func init() {
 	installCmd.Flags().Bool("yes", false, "approve pod network migration or recovery, which may restart k3s; otherwise prompt")
 	installCmd.Flags().Bool("no-ssh-rate-limit", false, "disable UFW SSH rate limiting on Ubuntu and Debian; useful for CI or operators sharing a NAT address")
 	installCmd.Flags().StringSlice("dns-resolver", nil, "upstream DNS resolver CoreDNS forwards external queries to (repeatable; default 1.1.1.1, 8.8.8.8, 9.9.9.9). Set for clusters that must reach internal/corporate DNS.")
+	installCmd.Flags().String("profile", "", "sizing profile: nano, small, medium, large or xlarge (default: picked from the server's RAM and CPUs)")
 	installCmd.Flags().StringSlice("trusted-proxy", nil, "IP or CIDR whose X-Forwarded-* headers Traefik honors (repeatable). Set for clusters behind an external load balancer; the kipper.run gateway is trusted automatically.")
 
 	installCmd.Flags().String("backup-storage-bucket", "", "S3-compatible bucket name for Velero backups (must already exist)")
@@ -78,6 +79,10 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 	credentialsFile, err := credentialsFilePath(cmd)
 	if err != nil {
+		return err
+	}
+	profile, _ := cmd.Flags().GetString("profile")
+	if err := checkInstallProfile(profile); err != nil {
 		return err
 	}
 	if usesDriver(cmd, runtime.GOOS) {
@@ -192,6 +197,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		ConfirmNetworkChange: adoptionQuestion(isTTY),
 		NoSSHRateLimit:       noSSHRateLimit,
 		BackupStorage:        backupStorage,
+		Profile:              profile,
 		DNSResolvers:         dnsResolvers,
 		TrustedProxies:       trustedProxies,
 		KubeconfigMode:       kubeconfigMode,
@@ -331,6 +337,14 @@ func adoptionQuestion(isTTY bool) func(string) bool {
 		return nil
 	}
 	return confirm
+}
+
+// checkInstallProfile accepts an empty --profile or one of the known names.
+func checkInstallProfile(profile string) error {
+	if profile == "" || isKnownProfile(profile) {
+		return nil
+	}
+	return fmt.Errorf("unknown profile %q (valid: nano, small, medium, large, xlarge)", profile)
 }
 
 // checkLocalAdoption requires an external SSH check before firewall takeover.

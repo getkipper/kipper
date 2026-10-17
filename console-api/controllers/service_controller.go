@@ -133,7 +133,6 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		r.reportNameTaken(ctx, &svc, err)
 		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
 	}
-
 	if err := r.reconcileHeadlessService(ctx, &svc); err != nil {
 		r.reportNameTaken(ctx, &svc, err)
 		return ctrl.Result{}, fmt.Errorf("reconciling headless service: %w", err)
@@ -155,8 +154,17 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.updateStatus(ctx, &svc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
+	lookAgain, err := r.replaceUnschedulablePod(ctx, &svc)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("replacing the waiting pod: %w", err)
+	}
 
-	return ctrl.Result{RequeueAfter: serviceRouteNameRetry(&svc)}, nil
+	after := serviceRouteNameRetry(&svc)
+	// This controller does not watch pods, so deletion conflicts need a retry.
+	if lookAgain && (after == 0 || after > pendingPodRetry) {
+		after = pendingPodRetry
+	}
+	return ctrl.Result{RequeueAfter: after}, nil
 }
 
 // serviceRouteNameRetry retries name collisions so a freed name can be claimed.
@@ -556,6 +564,7 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 
 	// Init container removes lost+found created by ext4 formatting on Longhorn volumes.
 	// MySQL refuses to initialise if the data directory contains any files.
+	initCPURequest, initMemoryRequest := servicecatalog.InitContainerRequests()
 	initContainers := []corev1.Container{
 		{
 			Name:    "remove-lost-found",
@@ -566,8 +575,8 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 			},
 			Resources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("10m"),
-					corev1.ResourceMemory: resource.MustParse("16Mi"),
+					corev1.ResourceCPU:    resource.MustParse(initCPURequest),
+					corev1.ResourceMemory: resource.MustParse(initMemoryRequest),
 				},
 				Limits: corev1.ResourceList{
 					corev1.ResourceCPU:    resource.MustParse("100m"),
@@ -682,6 +691,56 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	}
 	return r.Update(ctx, &existing)
 }
+
+// replaceUnschedulablePod deletes an owned, pending pod with no assigned node
+// when its revision differs from the StatefulSet's non-empty update revision
+// and the StatefulSet status reflects its current generation. This lets template
+// changes reach a pod whose readiness blocks a rolling update.
+// It returns lookAgain on a deletion conflict so the caller can retry.
+func (r *ServiceReconciler) replaceUnschedulablePod(ctx context.Context, svc *kipperv1.Service) (lookAgain bool, err error) {
+	// Read fresh state and wait for the controller to observe the latest spec
+	// so an outdated revision cannot trigger deletion of an up-to-date pod.
+	var sts appsv1.StatefulSet
+	if err := r.hostReader().Get(ctx, types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}, &sts); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if sts.Status.UpdateRevision == "" || sts.Status.ObservedGeneration < sts.Generation {
+		return false, nil
+	}
+	// The manager caches pods only in the monitoring namespace.
+	var pod corev1.Pod
+	if err := r.hostReader().Get(ctx, types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name + "-0"}, &pod); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	owner := metav1.GetControllerOf(&pod)
+	if owner == nil || owner.UID != sts.UID {
+		return false, nil
+	}
+	if pod.Spec.NodeName != "" || pod.Status.Phase != corev1.PodPending ||
+		pod.Labels[appsv1.ControllerRevisionHashLabelKey] == sts.Status.UpdateRevision {
+		return false, nil
+	}
+	log.FromContext(ctx).Info("Replacing an unscheduled pod to apply the updated template.", "service", svc.Name, "pod", pod.Name)
+	// Preconditions protect a pod replaced or scheduled since the read.
+	uid, version := pod.UID, pod.ResourceVersion
+	err = r.Delete(ctx, &pod, client.Preconditions{UID: &uid, ResourceVersion: &version})
+	switch {
+	case err == nil || errors.IsNotFound(err):
+		return false, nil
+	case errors.IsConflict(err):
+		return true, nil
+	}
+	return false, err
+}
+
+// pendingPodRetry limits the delay before retrying a deletion conflict.
+const pendingPodRetry = 5 * time.Second
 
 // adopt gives the service the object it has just been shown to own, so deleting
 // the service takes the object with it.

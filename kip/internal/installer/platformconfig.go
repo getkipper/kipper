@@ -2,15 +2,12 @@ package installer
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
-// Platform sizing profile names. The installer picks one based on node memory;
-// users can change it later via the console or `kip platform profile set`.
-// Re-exported from the shared platform package so callers in kip don't need
-// to import it directly.
 const (
 	ProfileNano   = platform.ProfileNano
 	ProfileSmall  = platform.ProfileSmall
@@ -19,15 +16,40 @@ const (
 	ProfileXLarge = platform.ProfileXLarge
 )
 
-// pickProfile selects a platform sizing profile from total node memory in MB.
-//
-// The thresholds sit a few percent below the marketed RAM values (3500 / 7500 /
-// 15000 / 30000 MB) because /proc/meminfo MemTotal is typically 1-3% under the
-// advertised size: kernel reservations, firmware, and so on. Without this
-// margin, a real 4 GB or 8 GB VPS would slip into the next-smaller bucket.
-func pickProfile(ramMB int) string {
+const nanoRAMMB = 3500
+
+var profilesBySize = []string{ProfileNano, ProfileSmall, ProfileMedium, ProfileLarge, ProfileXLarge}
+
+// platformCPURequestMilli estimates platform CPU requests in millicores.
+// These fixed estimates guide initial sizing. Actual requests vary with
+// enabled components, overrides, and node size.
+var platformCPURequestMilli = map[string]int{
+	ProfileNano:   1125,
+	ProfileSmall:  1430,
+	ProfileMedium: 1580,
+	ProfileLarge:  1580,
+	ProfileXLarge: 1580,
+}
+
+// defaultServiceCPURequestMilli is the request a database service gets without
+// --cpu (the "database" preset in console-api's profileResources).
+const defaultServiceCPURequestMilli = 500
+
+func cpuHeadroomMilli(profile string, cpus int) int {
+	return cpus*1000 - platformCPURequestMilli[profile]
+}
+
+// profileFitsCPU checks estimated CPU headroom for a default database service.
+// A non-positive CPU count skips the check.
+func profileFitsCPU(profile string, cpus int) bool {
+	return cpus <= 0 || cpuHeadroomMilli(profile, cpus) >= defaultServiceCPURequestMilli
+}
+
+// profileForRAM selects a profile from total memory in MiB. The thresholds
+// allow for memory reserved by the host below its advertised capacity.
+func profileForRAM(ramMB int) string {
 	switch {
-	case ramMB < 3500:
+	case ramMB < nanoRAMMB:
 		return ProfileNano
 	case ramMB < 7500:
 		return ProfileSmall
@@ -40,17 +62,85 @@ func pickProfile(ramMB int) string {
 	}
 }
 
-// InstallPlatformConfig writes the initial PlatformConfig CR named "platform"
-// with the chosen profile. It is a no-op if the CR already exists, so re-runs
-// of the installer never clobber user overrides applied via the console or
-// `kip platform`.
-//
-// Enable the route guard on new clusters; preserve existing settings on upgrade.
-//
-// Must run after InstallCRDs so the CRD schema is registered first. Even then,
-// `kubectl apply` on a CRD can return before the API server is ready to serve
-// the new kind, so we wait for the CRD to be Established before creating the
-// CR — otherwise the first create can race and fail with "no matches for kind".
+// pickProfile selects a profile from memory in MiB, lowering it as needed
+// to leave an estimated 500 millicores for a default database service.
+// Nano is the minimum, even when it exceeds the CPU budget.
+func pickProfile(ramMB, cpus int) string {
+	profile := profileForRAM(ramMB)
+	for profile != ProfileNano && !profileFitsCPU(profile, cpus) {
+		profile = profilesBySize[slices.Index(profilesBySize, profile)-1]
+	}
+	return profile
+}
+
+// profilePickNote explains a pick that the CPU count lowered below the RAM
+// pick, and is empty when RAM alone decided.
+func profilePickNote(ramMB, cpus int, picked string) string {
+	byRAM := profileForRAM(ramMB)
+	if picked == byRAM {
+		return ""
+	}
+	if !profileFitsCPU(picked, cpus) {
+		return fmt.Sprintf("%d %s: using '%s', the smallest profile, instead of '%s'. Estimated platform CPU requests are %dm with %dm available.",
+			cpus, plural(cpus, "CPU", "CPUs"), picked, byRAM, platformCPURequestMilli[picked], cpus*1000)
+	}
+	return fmt.Sprintf("%d %s: using '%s' instead of '%s' to leave an estimated %dm for a default database service. Estimated platform CPU requests are %dm on '%s'.",
+		cpus, plural(cpus, "CPU", "CPUs"), picked, byRAM, defaultServiceCPURequestMilli, platformCPURequestMilli[byRAM], byRAM)
+}
+
+// keptProfileNotes explains a retained profile and checks its CPU headroom.
+// It returns nil when the recorded profile is empty or matches the selection.
+func keptProfileNotes(resolved, kept string, cpus int) []string {
+	if kept == "" || kept == resolved {
+		return nil
+	}
+	notes := []string{fmt.Sprintf("This cluster already runs the '%s' profile and keeps it. To change it, run kip platform profile set %s.", kept, resolved)}
+	if w := cpuWarning(kept, cpus); w != "" {
+		notes = append(notes, w)
+	}
+	return notes
+}
+
+// ignoredProfileNote explains why the recorded profile takes precedence over
+// --profile. It returns "" when the request is empty or matches the saved profile.
+func ignoredProfileNote(kept, requested string) string {
+	if requested == "" || requested == kept {
+		return ""
+	}
+	return fmt.Sprintf("The requested --profile %s was ignored. This cluster keeps its saved '%s' profile. To change it, run kip platform profile set %s.", requested, kept, requested)
+}
+
+// resolveProfile prefers the saved profile, then the requested profile, then
+// a profile selected from host RAM and CPU capacity.
+func resolveProfile(requested, saved string, sys SystemInfo) string {
+	switch {
+	case saved != "":
+		return saved
+	case requested != "":
+		return requested
+	}
+	return pickProfile(sys.RAMMB, sys.CPUs)
+}
+
+// readSavedPlatformState reads the profile and overrides used for preflight.
+// Lookup failures and missing or unknown profiles return an empty state.
+func readSavedPlatformState(client CommandRunner) PlatformState {
+	out, err := client.Run("kubectl get platformconfig platform --request-timeout=15s -o " +
+		`jsonpath='{.spec.profile}|{range .spec.components[*]}{.name}={.memoryLimit};{.enabled}{"\n"}{end}' 2>/dev/null || true`)
+	if err != nil {
+		return PlatformState{}
+	}
+	state := parsePlatformStateJSONPath(strings.Trim(strings.TrimSpace(out), "'"))
+	if !slices.Contains(profilesBySize, state.Profile) {
+		return PlatformState{}
+	}
+	return state
+}
+
+// InstallPlatformConfig creates the initial "platform" CR with the chosen
+// profile and route guard enabled, preserving an existing CR and its overrides.
+// Call it after InstallCRDs. It waits up to 60 seconds for the CRD to become
+// Established and returns an error if the wait or creation fails.
 func InstallPlatformConfig(client CommandRunner, profile string) error {
 	if _, err := client.Run(
 		"kubectl wait --for=condition=Established " +
@@ -80,13 +170,9 @@ spec:
 	return nil
 }
 
-// ReadPlatformStateViaSSH fetches the active PlatformConfig CR over SSH+kubectl
-// and returns the effective state for that cluster: profile, per-component
-// memory overrides, and explicit enable/disable flags. Used by the installer
-// to honor overrides on a re-run (e.g. a user who disabled monitoring via
-// `kip platform disable loki` then runs `kip install` again — we must not
-// resurrect Loki just because we re-detected a non-nano profile from the
-// host).
+// ReadPlatformStateViaSSH reads the recorded profile, memory overrides, and
+// explicit component enablement through kubectl so reinstalls preserve them.
+// It returns an error if the command fails.
 func ReadPlatformStateViaSSH(client CommandRunner) (PlatformState, error) {
 	out, err := client.Run(
 		"kubectl get platformconfig platform -o " +

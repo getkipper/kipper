@@ -11,7 +11,9 @@ After installation, chat in your browser or configure your apps to use Ollama’
 
 ## What hardware do you need?
 
-`kip ai install` selects a default model using the available memory and GPU capacity on the best eligible node. A fresh installation requires at least **8 GiB of free memory on one node**.
+`kip ai install` selects a default model using the available memory and GPU capacity on the best eligible node. A fresh installation requires at least **8 GiB of free memory on one node** and a profile larger than `nano`.
+
+For diagnostics and log analysis, Kipper's separate console assistant can use a hosted provider. Set it up with `kip ai configure`.
 
 | Tier | Free RAM on selected node | Available GPU | Default model |
 |---|---|---|---|
@@ -37,26 +39,24 @@ The AI bundle's PVCs are typically dominated by the Ollama model cache:
 
 `kip ai install` requests model-cache storage through the cluster’s default storage class. `--pvc-size` defaults to 10 GiB for tier 1, 30 GiB for tier 2, and 60 GiB for tiers 3 and 4. Actual disk requirements also depend on the storage class’s replication and snapshot settings.
 
-If you intend to take backups of the AI bundle, the cluster's MinIO volume needs roughly 3x the model cache size to hold one snapshot plus headroom. Fresh Kipper installs ship MinIO with 30 GiB, which fits the default tier 1 install (10 GiB cache). For tier 2 (30 GiB cache) and tier 3+ (60 GiB cache), the MinIO volume needs to be expanded to 90 GiB and 180 GiB respectively, and `kip ai install` will refuse with a clear error until you do.
+If you intend to back up the AI bundle to MinIO, allow roughly three times the model cache size for a snapshot and headroom. Fresh Kipper installs request a 10 GiB MinIO volume. Existing larger volumes keep their size. Expand MinIO to at least 30 GiB for the default tier 1 cache, 90 GiB for tier 2 or 180 GiB for tier 3 and above. `kip ai install` reports an error if the existing MinIO volume is too small.
 
 Pick the size that matches the tier you intend to install (or the `--pvc-size` you plan to pass):
 
 | Install plan | Model cache PVC | MinIO needs |
 |---|---|---|
-| Tier 1 default | 10 GiB | 30 GiB (already the install default) |
+| Tier 1 default | 10 GiB | 30 GiB |
 | Tier 2 default | 30 GiB | 90 GiB |
 | Tier 3+ default | 60 GiB | 180 GiB |
 | Custom `--pvc-size N` | N | 3 × N |
 
-For clusters installed before the MinIO default was bumped (the original 5 GiB sizing), or when moving up a tier, expand the volume in place before running `kip ai install`. The example below sizes for tier 2; substitute `90Gi` with the target from the table:
+Expand the volume in place before running `kip ai install`. The example below sizes for tier 2. Replace `90Gi` with the target from the table:
 
 ```bash
-kubectl -n velero patch pvc minio-storage \
-  --type merge \
-  -p '{"spec":{"resources":{"requests":{"storage":"90Gi"}}}}'
+kip backup storage resize --size 90Gi
 ```
 
-Longhorn supports online expansion when the volume's storage class allows it (`longhorn-single` does). Wait for `kubectl -n velero get pvc minio-storage` to show the new capacity before re-running `kip ai install`. If you would rather skip the storage check entirely (evaluation installs that will never run `kip ai backup`), pass `--skip-storage-check`. Snapshotting against an undersized MinIO produces `PartiallyFailed` Backup CRs, Kopia errors about object-storage write failures, and BackupRepository CRs pointing at half-written repo metadata. Recovery is `kip ai backup delete --name <name>` to clear the failed CRs and freeing MinIO space before re-running.
+The command waits up to five minutes for the volume to report the requested capacity. Run it again with the same size to resume waiting. For evaluation installs that will never run `kip ai backup`, pass `--skip-storage-check` to skip the capacity check. An undersized MinIO volume can cause backups to fail. Free up space or expand the volume before retrying.
 
 ## Install
 

@@ -11,9 +11,117 @@ func TestRunPreflightChecks(t *testing.T) {
 	tests := []struct {
 		name                string
 		system              SystemInfo
+		profile             string
+		externalBackup      bool
 		wantError           string
 		wantWarningContains string
 	}{
+		{
+			name: "external backup storage leaves MinIO out of the volume budget",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 22000, DiskSizeMB: 25000,
+			},
+			externalBackup: true,
+		},
+		{
+			name: "fails at exactly 25% free, which Longhorn still refuses",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 19216, DiskSizeMB: 40000,
+			},
+			wantError: "insufficient disk: 19216 MiB free on the filesystem holding /var/lib/longhorn. After about 9216 MiB of images and system data, Longhorn needs more than 25% of the filesystem (10000 MiB) kept free. Free up space or use a larger disk",
+		},
+		{
+			name: "a re-run charges no image footprint, because the images are already on the disk",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 12000, DiskSizeMB: 40000, ImagesPresentMB: 9500,
+			},
+		},
+		{
+			name: "a resumed install is charged only for the images still missing",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 12000, DiskSizeMB: 40000, ImagesPresentMB: 3000,
+			},
+			wantError: "insufficient disk: 12000 MiB free on the filesystem holding /var/lib/longhorn. After about 6216 MiB of images and system data, Longhorn needs more than 25% of the filesystem (10000 MiB) kept free. Free up space or use a larger disk",
+		},
+		{
+			name: "a separate Longhorn disk keeps the image footprint on the filesystem holding k3s's data",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 30000, DiskSizeMB: 40000, SeparateImageDisk: true, ImageDiskMB: 5000,
+			},
+			wantError: "insufficient disk: 5000 MiB free on the filesystem holding k3s's data (/var/lib/rancher/k3s). Images and system data still need about 9216 MiB. Free up space or use a larger disk",
+		},
+		{
+			name: "a separate Longhorn disk passes when both filesystems have their room",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 11000, DiskSizeMB: 40000, SeparateImageDisk: true, ImageDiskMB: 12000,
+			},
+		},
+		{
+			name: "warns that a forced profile leaves no room for a default database service",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 40960, CPUs: 2,
+			},
+			profile:             ProfileMedium,
+			wantWarningContains: "500m",
+		},
+		{
+			name: "warns on a single CPU where even nano leaves no room for a default database service",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 40960, CPUs: 1,
+			},
+			wantWarningContains: "1 CPU:",
+		},
+		{
+			name: "says nothing about CPU when the profile fits",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 40960, CPUs: 2,
+			},
+			profile: ProfileSmall,
+		},
+		{
+			name: "a forced larger profile on a small host warns about monitoring memory use",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 3900, DiskMB: 40960, CPUs: 4,
+			},
+			profile:             ProfileMedium,
+			wantWarningContains: "'medium' profile enables monitoring by default, leaving less memory for apps.",
+		},
+		{
+			name: "a forced larger profile below 4 GB names the risk without calling it nano",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 3000, DiskMB: 40960, CPUs: 4,
+			},
+			profile:             ProfileSmall,
+			wantWarningContains: "The 'small' profile enables monitoring (Prometheus, Loki, Grafana) by default, which can push the host into swapping, and the install itself can fail at Zot.",
+		},
+		{
+			name: "nano on a 6 GB host does not claim the RAM is below 4 GB",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 6000, DiskMB: 40960, CPUs: 4,
+			},
+			profile:             ProfileNano,
+			wantWarningContains: "RAM is below recommended 8GB (6000MB available): the 'nano' profile keeps monitoring",
+		},
+		{
+			name: "the small profile warning suggests nano to reduce memory use",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 3900, DiskMB: 40960, CPUs: 2,
+			},
+			wantWarningContains: "--profile nano",
+		},
 		{
 			name: "passes with sufficient resources on ubuntu 22.04",
 			system: SystemInfo{
@@ -42,7 +150,7 @@ func TestRunPreflightChecks(t *testing.T) {
 				OS: "ubuntu", OSVersion: "22.04",
 				RAMMB: 3000, DiskMB: 40960,
 			},
-			wantWarningContains: "monitoring (Prometheus, Loki, Grafana) is disabled by default",
+			wantWarningContains: "RAM is below 4GB (3000MB available)",
 		},
 		{
 			name: "warns small-style for a 4 GB host",
@@ -107,12 +215,35 @@ func TestRunPreflightChecks(t *testing.T) {
 			wantError: "insufficient RAM: 1024MB available, 2048MB required",
 		},
 		{
-			name: "fails with insufficient disk",
+			name: "fails when 70% of the filesystem cannot hold the system volumes",
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "22.04",
-				RAMMB: 8192, DiskMB: 20480,
+				RAMMB: 8192, DiskMB: 22000, DiskSizeMB: 25000,
 			},
-			wantError: "insufficient disk: 20480MB available, 30720MB required",
+			wantError: "insufficient disk: the filesystem holding /var/lib/longhorn is 25000 MiB. Longhorn places Kipper's system volumes (20480 MiB on the 'medium' profile) in 70% of it, so it must be at least 29258 MiB. Use a server with a larger disk",
+		},
+		{
+			name: "a 40 GB disk passes on the small profile",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 36000, DiskSizeMB: 40000,
+			},
+		},
+		{
+			name: "a 25 GB disk passes on nano, whose system volumes are smaller",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 22000, DiskSizeMB: 25000,
+			},
+			profile: ProfileNano,
+		},
+		{
+			name: "fails when a large but full filesystem would drop below Longhorn's 25% free",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 30000, DiskSizeMB: 200000,
+			},
+			wantError: "insufficient disk: 30000 MiB free on the filesystem holding /var/lib/longhorn. After about 9216 MiB of images and system data, Longhorn needs more than 25% of the filesystem (50000 MiB) kept free. Free up space or use a larger disk",
 		},
 		{
 			name: "fails when another service holds a port",
@@ -192,7 +323,18 @@ func TestRunPreflightChecks(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := RunPreflightChecks(tt.system)
+			sys := tt.system
+			if sys.CPUs == 0 {
+				sys.CPUs = 4
+			}
+			if sys.DiskSizeMB == 0 {
+				sys.DiskSizeMB = sys.DiskMB + 4096
+			}
+			profile := tt.profile
+			if profile == "" {
+				profile = pickProfile(sys.RAMMB, sys.CPUs)
+			}
+			result, err := RunPreflightChecks(sys, PlatformState{Profile: profile}, !tt.externalBackup, false)
 			if tt.wantError != "" {
 				assert.EqualError(t, err, tt.wantError)
 				return
@@ -215,18 +357,65 @@ func TestRunPreflightChecks(t *testing.T) {
 	}
 }
 
+// Worker preflight budgets free space without reserving server system volumes.
+func TestWorkerPreflightSkipsTheSystemVolumeRule(t *testing.T) {
+	sys := SystemInfo{OS: "rocky", OSVersion: "10.2", RAMMB: 3000, DiskMB: 22000, DiskSizeMB: 25000, CPUs: 2}
+	_, err := runPreflightChecks(sys, PlatformState{}, false, false, RoleWorker)
+	assert.NoError(t, err)
+
+	sys = SystemInfo{OS: "rocky", OSVersion: "10.2", RAMMB: 3000, DiskMB: 9000, DiskSizeMB: 40000, CPUs: 2}
+	_, err = runPreflightChecks(sys, PlatformState{}, false, false, RoleWorker)
+	assert.ErrorContains(t, err, "25% of the filesystem")
+}
+
+func TestSystemVolumesFollowTheManifestConstants(t *testing.T) {
+	assert.Equal(t, 15360, systemVolumesMB(PlatformState{Profile: ProfileNano}, true), "MinIO 10Gi + Zot 5Gi")
+	assert.Equal(t, 20480, systemVolumesMB(PlatformState{Profile: ProfileSmall}, true), "plus Loki 5Gi")
+	assert.Equal(t, 20480, systemVolumesMB(PlatformState{Profile: ProfileXLarge}, true))
+	assert.Equal(t, 10240, systemVolumesMB(PlatformState{Profile: ProfileSmall}, false), "external backup storage installs no MinIO")
+}
+
+// Saved component overrides determine which volumes installation needs.
+func TestSystemVolumesFollowTheSavedLokiOverride(t *testing.T) {
+	off := PlatformState{Profile: ProfileSmall, EnabledOverrides: map[string]bool{"loki": false}}
+	assert.Equal(t, 15360, systemVolumesMB(off, true), "small with Loki disabled creates no Loki volume")
+	on := PlatformState{Profile: ProfileNano, EnabledOverrides: map[string]bool{"loki": true}}
+	assert.Equal(t, 20480, systemVolumesMB(on, true), "nano with Loki enabled creates one")
+
+	sys := SystemInfo{OS: "ubuntu", OSVersion: "22.04", RAMMB: 8192, DiskMB: 22000, DiskSizeMB: 25000, CPUs: 4}
+	_, err := RunPreflightChecks(sys, off, true, false)
+	assert.NoError(t, err, "a 25 GB disk carries small without Loki")
+	_, err = RunPreflightChecks(sys, PlatformState{Profile: ProfileSmall}, true, false)
+	assert.ErrorContains(t, err, "20480 MiB")
+}
+
+func TestDiskShortageOnAnExistingClusterIsAWarning(t *testing.T) {
+	sys := SystemInfo{OS: "ubuntu", OSVersion: "22.04", RAMMB: 8192, DiskMB: 8000, DiskSizeMB: 40000,
+		CPUs: 4, ImagesPresentMB: 9216}
+	state := PlatformState{Profile: ProfileSmall}
+
+	_, err := RunPreflightChecks(sys, state, true, false)
+	assert.ErrorContains(t, err, "insufficient disk", "a fresh install on this disk is refused")
+
+	result, err := RunPreflightChecks(sys, state, true, true)
+	if assert.NoError(t, err) && assert.NotEmpty(t, result.Warnings) {
+		assert.Contains(t, result.Warnings[0], "insufficient disk")
+		assert.Contains(t, result.Warnings[0], "new volumes")
+	}
+}
+
 func TestWorkerPreflightChecksTheKubeletPortOnly(t *testing.T) {
-	sys := SystemInfo{OS: "rocky", OSVersion: "10.2", RAMMB: 3000, DiskMB: 40960,
+	sys := SystemInfo{OS: "rocky", OSVersion: "10.2", RAMMB: 3000, DiskMB: 40960, DiskSizeMB: 45000,
 		PortListeners: map[int][]string{80: {"nginx"}, 10250: {"k3s-agent"}}}
-	result, err := runPreflightChecks(sys, RoleWorker)
+	result, err := runPreflightChecks(sys, PlatformState{}, false, false, RoleWorker)
 	assert.NoError(t, err)
 	assert.Empty(t, result.Warnings)
 
 	sys.PortListeners = map[int][]string{10250: {"kubelet"}}
-	_, err = runPreflightChecks(sys, RoleWorker)
+	_, err = runPreflightChecks(sys, PlatformState{}, false, false, RoleWorker)
 	assert.ErrorContains(t, err, "10250 (kubelet)")
 
 	sys.PortListeners = map[int][]string{80: {"nginx"}}
-	_, err = runPreflightChecks(sys, RoleServer)
+	_, err = runPreflightChecks(sys, PlatformState{Profile: ProfileNano}, true, false, RoleServer)
 	assert.ErrorContains(t, err, "80 (nginx)")
 }
