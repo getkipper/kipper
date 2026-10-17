@@ -61,6 +61,12 @@ flowchart TD
 | `--project` | `default` | Project name |
 | `--environment` | — | Target environment (e.g. test, acc, prod) |
 | `--storage` | `5Gi` (postgres/mysql/mongodb/opensearch), `1Gi` (redis/rabbitmq), `10Gi` (minio) | Storage size |
+| `--cpu` | Request `500m` (postgres/mysql/mongodb), `100m` (others). OpenSearch has a `1000m` limit. | Sets the CPU request and limit to the same value. |
+| `--memory` | `1Gi` (postgres/mysql/mongodb), `2Gi` (opensearch), `128Mi` (others) | Sets the memory request and limit to the same value. |
+
+Before creating a service, `kip service add` checks that one eligible node has enough CPU and memory after existing pod requests are deducted. If capacity is insufficient, it reports the largest remaining CPU and memory capacities and their nodes. Reduce requests with `--cpu` and `--memory`, or add capacity. If no nodes qualify, it directs you to `kip status`. The check is skipped if nodes or pods cannot be read. Passing this check does not guarantee scheduling because other constraints, such as storage availability, may apply.
+
+On a server with 8 GB RAM and 2 vCPUs, `kip install` selects the `small` profile to leave an estimated 500m CPU for a default database service. See [Preflight checks](/en/installation#preflight-checks).
 
 ## Binding to apps and functions
 
@@ -207,7 +213,7 @@ Retrieve them later:
 kip service info mydb
 ```
 
-The output also shows `Pod node`, where the service is scheduled, and `Data node`, where its healthy data copies are stored. Kipper configures new service volumes to keep one copy on the server. Existing copies may still be on workers; `kip upgrade` and `kip status` report them.
+The output also shows `Pod node`, where the service is scheduled (or `not scheduled` with the scheduler's reason), and `Data node`, where its healthy data copies are stored. Kipper configures new service volumes to keep one copy on the server. Existing copies may still be on workers. `kip upgrade` and `kip status` report them.
 
 The hostname (`mydb.default.svc.cluster.local`) is an internal Kubernetes DNS name. Apps in the same namespace can connect directly; [network policies](/en/security#network-isolation-between-namespaces) restrict access from other namespaces.
 
@@ -319,6 +325,18 @@ comes back with both, so the listing says to look before it says to restart.
 Where recreation genuinely is the remedy is a mount that went read-only
 underneath the pod, and that gets [its own
 alert](/en/alerts#read-only-volumes).
+
+When a pod cannot be scheduled, the service listing includes the scheduler's
+reason:
+
+```
+  !   db (FailedScheduling)
+      the pod cannot be scheduled: 0/1 nodes are available: 1 Insufficient cpu.
+      For insufficient CPU or memory, reduce requests with
+      'kip service update db --cpu <cpu> --memory <memory>' or add cluster capacity.
+```
+
+`kip service info` shows the same reason after `Pod node: not scheduled`.
 
 An app bound to it keeps its own status, because the app really is running. Its
 broken dependency is named under `kip app list`:

@@ -180,3 +180,13 @@ func TestStatusReportsAFirewallRollbackThatSwitchedUFWOff(t *testing.T) {
 	reportUFWFailOpen(&out, failOpenHost{})
 	assert.Empty(t, out.String())
 }
+
+func TestWritePlacementSaysWhyAPodIsNotScheduled(t *testing.T) {
+	var out bytes.Buffer
+	writePlacement(&out, service.Placement{Unscheduled: "0/1 nodes are available: 1 Insufficient cpu."}, nil)
+	assert.Contains(t, out.String(), "Pod node:  not scheduled (0/1 nodes are available: 1 Insufficient cpu.)")
+
+	out.Reset()
+	writePlacement(&out, service.Placement{}, nil)
+	assert.Contains(t, out.String(), "Pod node:  not scheduled\n", "no reason yet, nothing invented")
+}

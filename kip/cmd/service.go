@@ -239,6 +239,15 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Catch insufficient capacity before creating the service. Read failures
+	// skip this check so cluster-wide access is optional.
+	mgr := &service.Manager{Client: k8sClient.Clientset(), Dynamic: dynClient}
+	if headroom, err := mgr.NodeHeadroom(ctx); err == nil {
+		if err := service.CheckFits(headroom, serviceType, cpu, memory); err != nil {
+			return err
+		}
+	}
+
 	// Build Service CR
 	spec := map[string]interface{}{
 		"type": serviceType,
@@ -316,7 +325,7 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	snapshot, _ := (&service.Manager{Client: clientset, Dynamic: dynClient}).Read(ctx, namespace, name)
+	snapshot, _ := mgr.Read(ctx, namespace, name)
 	workload, workloadErr := clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
 	sayHowItCameUp(os.Stdout, snapshot, name, secret != nil, workloadErr == nil && ownedBy(workload, created.GetUID()))
 	if snapshot.Blocked() {
