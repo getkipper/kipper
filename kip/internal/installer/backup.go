@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 const veleroChartVersion = "12.0.0"
@@ -107,18 +109,16 @@ type Uploader interface {
 	Upload(content io.Reader, remotePath string, mode os.FileMode) error
 }
 
-// InstallBackup sets up Velero for cluster backups. When cfg is nil the
-// installer deploys an in-cluster MinIO and points Velero at it (zero
-// config out of the box). When cfg is non-nil the installer skips MinIO
-// entirely and configures Velero to write to the user-provided
-// S3-compatible bucket — backups then survive a cluster wipe.
-func InstallBackup(client Uploader, cfg *BackupStorageConfig) error {
+// InstallBackup configures Velero to use cfg's external S3-compatible bucket.
+// A nil cfg deploys in-cluster MinIO, whose backups depend on cluster storage.
+// MinIO uses local-path when storageMode is local and longhorn-single otherwise.
+func InstallBackup(client Uploader, cfg *BackupStorageConfig, storageMode string) error {
 	if cfg == nil {
 		password, err := ensureMinIOPassword(client)
 		if err != nil {
 			return err
 		}
-		if err := installInClusterMinIO(client, password); err != nil {
+		if err := installInClusterMinIO(client, password, platform.SingleWriterClass(storageMode)); err != nil {
 			return err
 		}
 		return installVelero(client, cfg, password)
@@ -194,7 +194,7 @@ func minioStorageRequest(out string) (string, error) {
 
 // installInClusterMinIO deploys MinIO and creates the Velero bucket.
 // Backups use cluster storage. Use external S3 storage to survive cluster loss.
-func installInClusterMinIO(client CommandRunner, password string) error {
+func installInClusterMinIO(client CommandRunner, password, class string) error {
 	// Preserve existing capacity because Kubernetes rejects PVC shrink requests.
 	existing, err := client.Run(minioStorageQuery)
 	if err != nil {
@@ -225,7 +225,7 @@ metadata:
   name: minio-storage
   namespace: velero
 spec:
-  storageClassName: longhorn-single
+  storageClassName: %s
   accessModes: [ReadWriteOnce]
   resources:
     requests:
@@ -302,7 +302,7 @@ spec:
 		minioCredentialsSecret,
 		minioUserSecretKey, minioRootUser,
 		minioPasswordSecretKey, password,
-		storage,
+		class, storage,
 		minioServerImage,
 		minioCredentialsSecret, minioUserSecretKey,
 		minioCredentialsSecret, minioPasswordSecretKey)

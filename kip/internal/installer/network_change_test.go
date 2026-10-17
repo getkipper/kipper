@@ -314,7 +314,7 @@ func TestNetworkChangeConsent(t *testing.T) {
 func TestInstallK3sRefusesAVXLANServerWithoutConsent(t *testing.T) {
 	h := &k3sInstallHost{installed: true, backend: "vxlan"}
 
-	err := InstallK3s(h, "203.0.113.10", nil, true, false)
+	err := InstallK3s(h, "203.0.113.10", nil, true, false, StorageLonghorn)
 
 	require.ErrorIs(t, err, ErrNetworkChangeNotConfirmed)
 	assert.Equal(t, -1, h.index("cat > /etc/rancher/k3s/config.yaml"), "the template alone would switch flannel without removing the VXLAN link")
@@ -597,7 +597,7 @@ func TestInstallK3sKeepsVXLANOnAnExistingServerWithoutWireGuard(t *testing.T) {
 	h := &installNetHost{netHost: newNetHost()}
 	h.wgLoads = false
 
-	require.NoError(t, InstallK3s(h, "203.0.113.10", nil, true, true), "re-running install can upgrade k3s while keeping VXLAN")
+	require.NoError(t, InstallK3s(h, "203.0.113.10", nil, true, true, StorageLonghorn), "re-running install can upgrade k3s while keeping VXLAN")
 
 	assert.Equal(t, -1, h.index("systemctl stop k3s"))
 	assert.Contains(t, h.written, "flannel-backend: vxlan\n")
@@ -608,7 +608,7 @@ func TestInstallK3sStillRequiresWireGuardOnAFreshServer(t *testing.T) {
 	h := &installNetHost{netHost: newNetHost()}
 	h.wgLoads = false
 
-	err := InstallK3s(h, "203.0.113.10", nil, false, false)
+	err := InstallK3s(h, "203.0.113.10", nil, false, false, StorageLonghorn)
 
 	require.ErrorContains(t, err, "wireguard")
 	assert.Empty(t, h.written)
@@ -618,7 +618,7 @@ func TestInstallK3sStillRequiresWireGuardOnAnExistingWireGuardServer(t *testing.
 	h := &installNetHost{netHost: newNetHost()}
 	h.backend, h.wgLoads = "wireguard", false
 
-	err := InstallK3s(h, "203.0.113.10", nil, true, true)
+	err := InstallK3s(h, "203.0.113.10", nil, true, true, StorageLonghorn)
 
 	require.ErrorContains(t, err, "wireguard")
 	assert.Empty(t, h.written)

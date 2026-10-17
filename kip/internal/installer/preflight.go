@@ -99,8 +99,9 @@ type PreflightResult struct {
 }
 
 // RunPreflightChecks checks server requirements for a known platform profile
-// and its component overrides. Setting inClusterBackup includes MinIO in the
-// disk budget. Setting existingCluster reports disk shortages as warnings so
+// and its component overrides. Local storage uses fixed free-space thresholds.
+// For Longhorn, setting inClusterBackup includes MinIO in the disk budget.
+// Setting existingCluster reports disk shortages as warnings so
 // existing installations can be updated. Other failed checks return a nil result
 // and an error. Successful checks may include OS support and resource warnings.
 // A non-positive CPU count skips the CPU headroom check.
@@ -121,7 +122,18 @@ func runPreflightChecks(sys SystemInfo, state PlatformState, inClusterBackup, ex
 	if err := checkRAM(sys); err != nil {
 		return nil, err
 	}
-	if err := checkDisk(sys, state, inClusterBackup, role); err != nil {
+	if role == RoleServer && state.Storage == StorageLocal {
+		warning, err := checkLocalDisk(sys)
+		switch {
+		case err != nil && !existingCluster:
+			return nil, err
+		case err != nil:
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("%s. Installation will continue on this existing cluster. Low disk space may affect workloads.", sentence(err.Error())))
+		case warning != "":
+			result.Warnings = append(result.Warnings, warning)
+		}
+	} else if err := checkDisk(sys, state, inClusterBackup, role); err != nil {
 		if !existingCluster {
 			return nil, err
 		}
@@ -223,6 +235,36 @@ func checkRAM(sys SystemInfo) error {
 		return fmt.Errorf("insufficient RAM: %dMB available, %dMB required", sys.RAMMB, minRAMMB)
 	}
 	return nil
+}
+
+// Local storage thresholds are in MiB. Volumes share the k3s filesystem with
+// images and system data.
+const (
+	localDiskFloorMB       = 10240
+	localDiskRecommendedMB = 20480
+)
+
+// checkLocalDisk checks free space for local storage, which keeps volumes on
+// the filesystem holding k3s's data. It credits existing images up to the
+// estimated installation footprint, then returns an error below the floor
+// or a warning below the recommended space.
+func checkLocalDisk(sys SystemInfo) (string, error) {
+	free := sys.DiskMB
+	if sys.SeparateImageDisk {
+		free = sys.ImageDiskMB
+	}
+	// Credit images from earlier runs to avoid budgeting for them twice,
+	// capped at the estimated image and system data footprint.
+	available := free + min(sys.ImagesPresentMB, installFootprintMB(false))
+	if available < localDiskFloorMB {
+		return "", fmt.Errorf("insufficient disk: %d MiB free on the filesystem holding k3s's data (/var/lib/rancher/k3s). Local storage needs at least %d MiB for images, system data and volumes. Existing images count towards this minimum up to the estimated installation footprint. Free up space or use a larger disk",
+			free, localDiskFloorMB)
+	}
+	if available < localDiskRecommendedMB {
+		return fmt.Sprintf("%d MiB free on the filesystem holding k3s's data. At least %d MiB is recommended for apps and their data. Local volumes can grow beyond their requested size, so monitor disk usage with 'kip status'",
+			free, localDiskRecommendedMB), nil
+	}
+	return "", nil
 }
 
 // checkDisk budgets system volumes on servers and free space on all hosts.

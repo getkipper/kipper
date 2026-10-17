@@ -39,8 +39,9 @@ func raiseInotifyLimit(client CommandRunner) error {
 }
 
 // prepareNodeOS configures the host prerequisites shared by servers and workers.
-func prepareNodeOS(client CommandRunner, wireGuardOptional bool) error {
-	if err := prepareHostForK3s(client, wireGuardOptional); err != nil {
+// Setting longhorn requires the iSCSI module on RHEL hosts.
+func prepareNodeOS(client CommandRunner, wireGuardOptional, longhorn bool) error {
+	if err := prepareHostForK3s(client, wireGuardOptional, longhorn); err != nil {
 		return err
 	}
 	// protect-kernel-defaults makes the kubelet refuse to start unless these
@@ -69,7 +70,8 @@ func prepareWorkerHost(masterClient, workerClient CommandRunner) error {
 	if err := writeAgentDNSConfig(workerClient); err != nil {
 		return err
 	}
-	if err := prepareNodeOS(workerClient, false); err != nil {
+	// Workers need the storage modules to mount Longhorn volumes.
+	if err := prepareNodeOS(workerClient, false, true); err != nil {
 		return err
 	}
 	if err := writeAgentKubeletConfig(workerClient); err != nil {

@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/installer"
 )
 
@@ -60,6 +61,7 @@ func init() {
 	installCmd.Flags().Bool("no-ssh-rate-limit", false, "disable UFW SSH rate limiting on Ubuntu and Debian; useful for CI or operators sharing a NAT address")
 	installCmd.Flags().StringSlice("dns-resolver", nil, "upstream DNS resolver CoreDNS forwards external queries to (repeatable; default 1.1.1.1, 8.8.8.8, 9.9.9.9). Set for clusters that must reach internal/corporate DNS.")
 	installCmd.Flags().String("profile", "", "sizing profile: nano, small, medium, large or xlarge (default: picked from the server's RAM and CPUs)")
+	installCmd.Flags().String("storage", "", "Volume storage: local (single node) or longhorn (supports multiple nodes). New clusters default to local for nano and longhorn for other profiles. Existing clusters keep their storage mode.")
 	installCmd.Flags().StringSlice("trusted-proxy", nil, "IP or CIDR whose X-Forwarded-* headers Traefik honors (repeatable). Set for clusters behind an external load balancer; the kipper.run gateway is trusted automatically.")
 
 	installCmd.Flags().String("backup-storage-bucket", "", "S3-compatible bucket name for Velero backups (must already exist)")
@@ -83,6 +85,10 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 	profile, _ := cmd.Flags().GetString("profile")
 	if err := checkInstallProfile(profile); err != nil {
+		return err
+	}
+	storage, _ := cmd.Flags().GetString("storage")
+	if err := checkInstallStorage(storage); err != nil {
 		return err
 	}
 	if usesDriver(cmd, runtime.GOOS) {
@@ -198,6 +204,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		NoSSHRateLimit:       noSSHRateLimit,
 		BackupStorage:        backupStorage,
 		Profile:              profile,
+		Storage:              storage,
 		DNSResolvers:         dnsResolvers,
 		TrustedProxies:       trustedProxies,
 		KubeconfigMode:       kubeconfigMode,
@@ -337,6 +344,14 @@ func adoptionQuestion(isTTY bool) func(string) bool {
 		return nil
 	}
 	return confirm
+}
+
+// checkInstallStorage accepts an empty --storage or one of the storage modes.
+func checkInstallStorage(storage string) error {
+	if storage == "" || platform.IsStorageMode(storage) {
+		return nil
+	}
+	return fmt.Errorf("unknown storage %q (valid: local, longhorn)", storage)
 }
 
 // checkInstallProfile accepts an empty --profile or one of the known names.

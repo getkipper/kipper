@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 // Builds use the push account; nodes use the read-only pull account.
@@ -41,7 +43,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: longhorn-single
+  storageClassName: %s
   resources:
     requests:
       storage: %s
@@ -69,8 +71,8 @@ const zotStorageMarker = "zot-size"
 // zotStorageQuery includes a marker to distinguish claim sizes from SSH output.
 var zotStorageQuery = storageSizeQuery(zotNamespace, "zot-data", zotStorageMarker)
 
-func renderZotBaseManifest(storage string) string {
-	return fmt.Sprintf(zotBaseManifestTemplate, storage)
+func renderZotBaseManifest(storage, class string) string {
+	return fmt.Sprintf(zotBaseManifestTemplate, class, storage)
 }
 
 // zotStorageRequest preserves expanded registry volumes using preservedStorageRequest.
@@ -441,8 +443,10 @@ func formatZotDiagnosis(logs string) string {
 
 // InstallZot deploys the Zot OCI registry with authentication and TLS, then
 // configures k3s to use the pull account. Builds use a separate push account.
-// Repeated installs reuse existing credentials.
-func InstallZot(client CommandRunner) error {
+// Repeated installs reuse existing credentials and preserve expanded volumes.
+// The volume uses local-path when storageMode is local and longhorn-single otherwise.
+// Installation restarts k3s and waits up to five minutes for node readiness.
+func InstallZot(client CommandRunner, storageMode string) error {
 	// Preserve the existing volume size before applying the storage manifest.
 	// Stop on lookup errors to avoid requesting a smaller volume.
 	existing, err := client.Run(zotStorageQuery)
@@ -453,7 +457,7 @@ func InstallZot(client CommandRunner) error {
 	if err != nil {
 		return err
 	}
-	applyBase := fmt.Sprintf("cat << 'KIPEOF' | kubectl apply -f -\n%sKIPEOF", renderZotBaseManifest(storage))
+	applyBase := fmt.Sprintf("cat << 'KIPEOF' | kubectl apply -f -\n%sKIPEOF", renderZotBaseManifest(storage, platform.SingleWriterClass(storageMode)))
 	if _, err := client.Run(applyBase); err != nil {
 		return fmt.Errorf("applying zot manifests: %w", err)
 	}

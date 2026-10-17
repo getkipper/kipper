@@ -8,6 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 func TestRenderZotHtpasswd(t *testing.T) {
@@ -224,8 +226,15 @@ func TestZotStorageQuery_TreatsAMissingClaimAsEmpty(t *testing.T) {
 }
 
 func TestRenderZotBaseManifest_UsesTheGivenSize(t *testing.T) {
-	m := renderZotBaseManifest("25Gi")
+	m := renderZotBaseManifest("25Gi", platform.LonghornSingleClass)
 	if !strings.Contains(m, "storage: 25Gi\n") || strings.Contains(m, "storage: 5Gi") {
 		t.Errorf("manifest does not request 25Gi:\n%s", m)
+	}
+}
+
+func TestRenderZotBaseManifest_UsesTheGivenClass(t *testing.T) {
+	m := renderZotBaseManifest("5Gi", platform.LocalPathClass)
+	if !strings.Contains(m, "storageClassName: local-path\n") {
+		t.Errorf("manifest does not use local-path:\n%s", m)
 	}
 }

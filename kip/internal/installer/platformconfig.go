@@ -131,6 +131,53 @@ func resolveProfile(requested, saved string, sys SystemInfo) string {
 // "<profile>/<storage>|<name>=<memoryLimit>;<enabled>" with one component per line.
 const platformStateJSONPath = `jsonpath='{.spec.profile}/{.spec.storage}|{range .spec.components[*]}{.name}={.memoryLimit};{.enabled}{"\n"}{end}'`
 
+// resolveStorage preserves an existing cluster's recorded mode, defaulting to
+// Longhorn when empty. It rejects mode changes and requests for local storage
+// when existing storage is unreadable. New clusters use the requested mode or
+// default to local for nano and Longhorn for other profiles.
+func resolveStorage(requested, profile string, existing, unreadable bool, recorded string) (string, error) {
+	if existing {
+		mode := platform.StorageMode(recorded)
+		if unreadable && requested == StorageLocal {
+			return "", fmt.Errorf("this host already runs k3s, but its storage configuration could not be read. " +
+				"Run kip install again when the cluster is reachable to verify its storage mode")
+		}
+		if requested != "" && requested != mode {
+			return "", fmt.Errorf("this cluster runs %s storage, which it keeps for its lifetime. "+
+				"To use %s storage, install a new cluster with --storage %s and move your projects to it. See Cluster Migration in the Kipper docs",
+				mode, requested, requested)
+		}
+		return mode, nil
+	}
+	switch {
+	case requested != "":
+		return requested, nil
+	case profile == ProfileNano:
+		return StorageLocal, nil
+	}
+	return StorageLonghorn, nil
+}
+
+// discoverClusterStorage reports whether the host runs a cluster whose storage
+// mode must be preserved, based on a saved profile, Longhorn's StorageClasses or
+// its namespace, which exists before the classes do. If k3s may already exist
+// and the query fails, both results are true to prevent treating an unreadable
+// cluster as a fresh installation.
+func discoverClusterStorage(client CommandRunner, savedProfile string) (existing, unreadable bool) {
+	if savedProfile != "" {
+		return true, false
+	}
+	freshness, err := client.Run("test -d /var/lib/rancher/k3s && echo existing || echo fresh")
+	if !k3sPreexistingFromSample(freshness, err) {
+		return false, false
+	}
+	out, err := client.Run("kubectl get storageclass/longhorn-single storageclass/longhorn namespace/longhorn-system --ignore-not-found -o name --request-timeout=15s")
+	if err != nil {
+		return true, true
+	}
+	return strings.TrimSpace(out) != "", false
+}
+
 // readSavedPlatformState reads the profile, storage mode and overrides for preflight.
 // Lookup failures and missing or unknown profiles return an empty state.
 func readSavedPlatformState(client CommandRunner) PlatformState {

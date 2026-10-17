@@ -25,3 +25,20 @@ func TestDrivenRequestCarriesTheProfile(t *testing.T) {
 	require.NoError(err)
 	require.Equal("small", req.Profile)
 }
+
+func TestInstallStorageFlagRefusesUnknownModes(t *testing.T) {
+	assert.NoError(t, checkInstallStorage(""))
+	assert.NoError(t, checkInstallStorage("local"))
+	assert.NoError(t, checkInstallStorage("longhorn"))
+	assert.ErrorContains(t, checkInstallStorage("nfs"), `unknown storage "nfs" (valid: local, longhorn)`)
+}
+
+func TestDrivenRequestCarriesTheStorage(t *testing.T) {
+	cmd := installCmd
+	require := assert.New(t)
+	require.NoError(cmd.Flags().Set("storage", "longhorn"))
+	t.Cleanup(func() { _ = cmd.Flags().Set("storage", "") })
+	req, err := drivenRequest(cmd, "203.0.113.10")
+	require.NoError(err)
+	require.Equal("longhorn", req.Storage)
+}

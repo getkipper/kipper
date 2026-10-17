@@ -16,7 +16,7 @@ func TestRequestRoundTripsThroughJSON(t *testing.T) {
 		Version: RequestVersion, RunID: "run-20261013-1", KipVersion: "0.29.0",
 		Host: "203.0.113.10", Domain: "shop.example", AdminEmail: "ops@shop.example",
 		OrgDisplayName: "Acme Inc", Harden: true, Firewall: true, AdoptFirewall: true, AdoptFingerprint: "0123456789abcdef", NoSSHRateLimit: true,
-		DNSResolvers: []string{"192.0.2.53"}, TrustedProxies: []string{"198.51.100.0/24"}, Profile: "small",
+		DNSResolvers: []string{"192.0.2.53"}, TrustedProxies: []string{"198.51.100.0/24"}, Profile: "small", Storage: "local",
 		Backup: &Backup{Bucket: "b", Region: "eu-west-1", AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: "secret"},
 		Entry:  &config.Cluster{Name: "shop", Host: "203.0.113.10", GatewayToken: "tok"},
 	}
@@ -30,12 +30,13 @@ func TestRequestRoundTripsThroughJSON(t *testing.T) {
 
 func TestRequestOptions(t *testing.T) {
 	req := Request{Version: RequestVersion, RunID: "r1", Host: "203.0.113.10", Domain: "shop.example",
-		Harden: true, Firewall: true, AdoptFirewall: true, AdoptFingerprint: "0123456789abcdef", NoSSHRateLimit: true, Profile: "nano",
+		Harden: true, Firewall: true, AdoptFirewall: true, AdoptFingerprint: "0123456789abcdef", NoSSHRateLimit: true, Profile: "nano", Storage: "local",
 		Backup: &Backup{Bucket: "b", Region: "auto", Endpoint: "https://s3.example.com", AccessKeyID: "k", SecretAccessKey: "s"}}
 
 	opts := req.Options()
 
 	assert.Equal(t, "nano", opts.Profile, "the profile chosen on the driver reaches the server's install")
+	assert.Equal(t, "local", opts.Storage, "and so does the storage mode")
 	assert.True(t, opts.Local, "the server runs the install on itself")
 	assert.Equal(t, "203.0.113.10", opts.Host)
 	assert.True(t, opts.NoSSHRateLimit)

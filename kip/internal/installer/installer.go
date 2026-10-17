@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/domain"
 	"github.com/getkipper/kipper/kip/internal/infra"
@@ -40,6 +41,7 @@ type Options struct {
 	NoSSHRateLimit       bool
 	BackupStorage        *BackupStorageConfig
 	Profile              string
+	Storage              string
 	DNSResolvers         []string
 	TrustedProxies       []string
 	KubeconfigMode       KubeconfigMode
@@ -332,9 +334,15 @@ func Run(opts Options) (*Result, error) {
 	}
 	saved := readSavedPlatformState(client)
 	savedProfile := saved.Profile
+	existingCluster, storageUnreadable := discoverClusterStorage(client, savedProfile)
 	platformProfile := resolveProfile(opts.Profile, savedProfile, sysInfo)
 	saved.Profile = platformProfile
-	preflight, err := RunPreflightChecks(sysInfo, saved, opts.BackupStorage == nil, savedProfile != "")
+	storageMode, err := resolveStorage(opts.Storage, platformProfile, existingCluster, storageUnreadable, saved.Storage)
+	if err != nil {
+		return nil, err
+	}
+	saved.Storage = storageMode
+	preflight, err := RunPreflightChecks(sysInfo, saved, opts.BackupStorage == nil, existingCluster)
 	if err != nil {
 		return nil, err
 	}
@@ -363,6 +371,11 @@ func Run(opts Options) (*Result, error) {
 	}
 	if platformProfile == ProfileNano {
 		fmt.Printf("  ℹ  Monitoring (Prometheus, Loki, Grafana) will be skipped to keep this nano install lean.\n")
+	}
+	if storageMode == StorageLocal {
+		fmt.Printf("  ✔  Storage: local (volumes on this server's disk, one node)\n")
+	} else {
+		fmt.Printf("  ✔  Storage: Longhorn\n")
 	}
 	for _, w := range preflight.Warnings {
 		fmt.Printf("  ⚠  %s\n", w)
@@ -576,14 +589,16 @@ func Run(opts Options) (*Result, error) {
 	var steps []installStep
 	// Configure needrestart before package installation to protect active
 	// Longhorn sessions from storage-service restarts.
-	steps = append(steps, storageRestartSteps(sysInfo.Host, client)...)
+	if storageMode == StorageLonghorn {
+		steps = append(steps, storageRestartSteps(sysInfo.Host, client)...)
+	}
 	if opts.Harden && len(findings) > 0 {
 		steps = append(steps, installStep{"Hardening host OS", func() error {
 			return HardenHost(client)
 		}})
 	}
 	k3sStep := installStep{"Installing k3s", func() error {
-		return InstallK3s(client, opts.Host, opts.DNSResolvers, k3sPreexisting, changeNetwork)
+		return InstallK3s(client, opts.Host, opts.DNSResolvers, k3sPreexisting, changeNetwork, storageMode)
 	}}
 	var firewallStep *installStep
 	if configureFirewall {
@@ -611,12 +626,15 @@ func Run(opts Options) (*Result, error) {
 			return InstallAdmissionPolicies(client)
 		}},
 		{"Recording platform sizing profile", func() error {
-			if err := InstallPlatformConfig(client, platformProfile, StorageLonghorn); err != nil {
+			if err := InstallPlatformConfig(client, platformProfile, storageMode); err != nil {
 				return err
 			}
 			state, err := ReadPlatformStateViaSSH(client)
 			if err != nil {
 				return err
+			}
+			if recorded := platform.StorageMode(state.Storage); recorded != storageMode {
+				return fmt.Errorf("the cluster's recorded storage mode (%s) differs from the mode prepared for this install (%s). Run kip install again", recorded, storageMode)
 			}
 			for _, note := range keptProfileNotes(platformProfile, state.Profile, sysInfo.CPUs) {
 				fmt.Printf("       ⚠  %s\n", note)
@@ -634,6 +652,9 @@ func Run(opts Options) (*Result, error) {
 			return InstallCertManager(client, opts.AdminEmail, opts.DNSResolvers)
 		}},
 		{"Setting up storage", func() error {
+			if storageMode == StorageLocal {
+				return checkLocalPathStorage(client)
+			}
 			if err := InstallLonghornThen(client, hardenAfterStoragePackages(opts.Harden, client)); err != nil {
 				return err
 			}
@@ -685,7 +706,7 @@ func Run(opts Options) (*Result, error) {
 
 	steps = append(steps, []installStep{
 		{"Setting up backup and restore (Velero)", func() error {
-			return InstallBackup(client, opts.BackupStorage)
+			return InstallBackup(client, opts.BackupStorage, storageMode)
 		}},
 		{"Creating kipper-system namespace", func() error {
 			_, err := client.Run("kubectl create namespace kipper-system --dry-run=client -o yaml | kubectl apply -f -")
@@ -731,7 +752,7 @@ func Run(opts Options) (*Result, error) {
 			return EnsureHopMaterial(client)
 		}},
 		{"Installing container registry (Zot)", func() error {
-			return InstallZot(client)
+			return InstallZot(client, storageMode)
 		}},
 		{"Configuring identity provider", func() error {
 			sent, err := InstallDex(client, resolvedHosts.DexHost, resolvedHosts.ConsoleHost, domainName, opts.AdminPasswordHash)

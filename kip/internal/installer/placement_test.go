@@ -163,7 +163,7 @@ func TestPlatformManifestsPinToTheServer(t *testing.T) {
 	keda := &recordingRunner{}
 	require.NoError(t, InstallKEDA(keda))
 	minio := &stdinRecorder{}
-	require.NoError(t, installInClusterMinIO(minio, "pw"))
+	require.NoError(t, installInClusterMinIO(minio, "pw", platform.LonghornSingleClass))
 
 	for name, tc := range map[string]struct {
 		manifest string
