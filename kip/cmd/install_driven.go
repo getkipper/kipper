@@ -253,6 +253,7 @@ func drivenRequest(cmd *cobra.Command, host string) (installjob.Request, error) 
 		NoSSHRateLimit: !flags.Changed("no-ssh-rate-limit") || boolean("no-ssh-rate-limit"),
 		DNSResolvers:   slice("dns-resolver"),
 		TrustedProxies: slice("trusted-proxy"),
+		Profile:        str("profile"),
 	}
 	backup, err := resolveBackupStorage(cmd)
 	if err != nil {

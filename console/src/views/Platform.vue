@@ -31,9 +31,9 @@ onMounted(() => {
 function profileBlurb(profile: string): string {
   switch (profile) {
     case 'nano':
-      return 'Sub-4 GB box. Metrics off. Good for demos and dev.'
+      return 'For hosts below 6 GB. Monitoring is off by default to leave memory for apps.'
     case 'small':
-      return '4-8 GB box. Functional but tight; apps share the room.'
+      return 'For 6-8 GB hosts. Monitoring uses tight memory limits to leave room for apps.'
     case 'medium':
       return '8-16 GB box. Real workloads, sensible defaults.'
     case 'large':

@@ -381,9 +381,9 @@ func componentLine(name, profile string, status, override map[string]interface{}
 func profileDescription(profile string) string {
 	switch profile {
 	case platform.ProfileNano:
-		return "sub-4 GB host. Monitoring disabled by default."
+		return "For hosts below 6 GB. Monitoring is off by default to leave memory for apps."
 	case platform.ProfileSmall:
-		return "4-8 GB host. Monitoring on with tight limits."
+		return "For 6-8 GB hosts. Monitoring uses tight memory limits to leave room for apps."
 	case platform.ProfileMedium:
 		return "8-16 GB host. Real workloads, sensible defaults."
 	case platform.ProfileLarge:

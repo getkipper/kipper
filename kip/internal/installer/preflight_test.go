@@ -11,9 +11,71 @@ func TestRunPreflightChecks(t *testing.T) {
 	tests := []struct {
 		name                string
 		system              SystemInfo
+		profile             string
 		wantError           string
 		wantWarningContains string
 	}{
+		{
+			name: "warns that a forced profile leaves no room for a default database service",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 40960, CPUs: 2,
+			},
+			profile:             ProfileMedium,
+			wantWarningContains: "500m",
+		},
+		{
+			name: "warns on a single CPU where even nano leaves no room for a default database service",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 40960, CPUs: 1,
+			},
+			wantWarningContains: "1 CPU:",
+		},
+		{
+			name: "says nothing about CPU when the profile fits",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 8192, DiskMB: 40960, CPUs: 2,
+			},
+			profile: ProfileSmall,
+		},
+		{
+			name: "a forced larger profile on a 4 GB host names the swapping risk",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 3900, DiskMB: 40960, CPUs: 4,
+			},
+			profile:             ProfileMedium,
+			wantWarningContains: "RAM is below recommended 8GB (3900MB available). The 'medium' profile enables monitoring (Prometheus, Loki, Grafana) by default, which can push the host into swapping",
+		},
+		{
+			name: "a forced larger profile below 4 GB names the risk without calling it nano",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 3000, DiskMB: 40960, CPUs: 4,
+			},
+			profile:             ProfileSmall,
+			wantWarningContains: "The 'small' profile enables monitoring (Prometheus, Loki, Grafana) by default, which can push the host into swapping, and the install itself can fail at Zot.",
+		},
+		{
+			name: "nano on a 6 GB host does not claim the RAM is below 4 GB",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 6000, DiskMB: 40960, CPUs: 4,
+			},
+			profile:             ProfileNano,
+			wantWarningContains: "RAM is below recommended 8GB (6000MB available): the 'nano' profile keeps monitoring",
+		},
+		{
+			name: "a forced small profile below the nano cutoff names the risk and suggests nano",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "22.04",
+				RAMMB: 5000, DiskMB: 40960, CPUs: 2,
+			},
+			profile:             ProfileSmall,
+			wantWarningContains: "which can push the host into swapping, and the install itself can fail at Zot. Use --profile nano",
+		},
 		{
 			name: "passes with sufficient resources on ubuntu 22.04",
 			system: SystemInfo{
@@ -42,15 +104,23 @@ func TestRunPreflightChecks(t *testing.T) {
 				OS: "ubuntu", OSVersion: "22.04",
 				RAMMB: 3000, DiskMB: 40960,
 			},
-			wantWarningContains: "monitoring (Prometheus, Loki, Grafana) is disabled by default",
+			wantWarningContains: "RAM is below 4GB (3000MB available)",
 		},
 		{
-			name: "warns small-style for a 4 GB host",
+			name: "a 4 GB host gets nano and its warning",
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "20.04",
 				RAMMB: 4096, DiskMB: 40960,
 			},
-			wantWarningContains: "'small' profile",
+			wantWarningContains: "the 'nano' profile keeps monitoring",
+		},
+		{
+			name: "warns small-style for a 6 GB host",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "20.04",
+				RAMMB: 6144, DiskMB: 40960,
+			},
+			wantWarningContains: "the 'small' profile enables monitoring by default, leaving less memory for apps",
 		},
 		{
 			name: "accepts debian 13",
@@ -192,7 +262,15 @@ func TestRunPreflightChecks(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := RunPreflightChecks(tt.system)
+			sys := tt.system
+			if sys.CPUs == 0 {
+				sys.CPUs = 4
+			}
+			profile := tt.profile
+			if profile == "" {
+				profile = pickProfile(sys.RAMMB, sys.CPUs)
+			}
+			result, err := RunPreflightChecks(sys, profile)
 			if tt.wantError != "" {
 				assert.EqualError(t, err, tt.wantError)
 				return
@@ -218,15 +296,15 @@ func TestRunPreflightChecks(t *testing.T) {
 func TestWorkerPreflightChecksTheKubeletPortOnly(t *testing.T) {
 	sys := SystemInfo{OS: "rocky", OSVersion: "10.2", RAMMB: 3000, DiskMB: 40960,
 		PortListeners: map[int][]string{80: {"nginx"}, 10250: {"k3s-agent"}}}
-	result, err := runPreflightChecks(sys, RoleWorker)
+	result, err := runPreflightChecks(sys, "", RoleWorker)
 	assert.NoError(t, err)
 	assert.Empty(t, result.Warnings)
 
 	sys.PortListeners = map[int][]string{10250: {"kubelet"}}
-	_, err = runPreflightChecks(sys, RoleWorker)
+	_, err = runPreflightChecks(sys, "", RoleWorker)
 	assert.ErrorContains(t, err, "10250 (kubelet)")
 
 	sys.PortListeners = map[int][]string{80: {"nginx"}}
-	_, err = runPreflightChecks(sys, RoleServer)
+	_, err = runPreflightChecks(sys, ProfileNano, RoleServer)
 	assert.ErrorContains(t, err, "80 (nginx)")
 }

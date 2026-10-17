@@ -39,6 +39,7 @@ type Options struct {
 	AdoptFirewall        bool
 	NoSSHRateLimit       bool
 	BackupStorage        *BackupStorageConfig
+	Profile              string
 	DNSResolvers         []string
 	TrustedProxies       []string
 	KubeconfigMode       KubeconfigMode
@@ -322,17 +323,25 @@ func Run(opts Options) (*Result, error) {
 		return nil, fmt.Errorf("gathering system info: %w", err)
 	}
 
-	preflight, err := RunPreflightChecks(sysInfo)
+	platformProfile := resolveProfile(opts.Profile, sysInfo)
+	preflight, err := RunPreflightChecks(sysInfo, platformProfile)
 	if err != nil {
 		return nil, err
 	}
 	fmt.Printf("  ✔  OS: %s %s\n", sysInfo.OS, sysInfo.OSVersion)
 	fmt.Printf("  ✔  RAM: %dMB available\n", sysInfo.RAMMB)
+	fmt.Printf("  ✔  CPUs: %d\n", sysInfo.CPUs)
 	fmt.Printf("  ✔  Disk: %dMB available\n", sysInfo.DiskMB)
 	fmt.Printf("  ✔  Ports: 80, 443, 6443 not held by another service\n")
 
-	platformProfile := pickProfile(sysInfo.RAMMB)
-	fmt.Printf("  ✔  Platform profile: %s\n", platformProfile)
+	if opts.Profile != "" {
+		fmt.Printf("  ✔  Platform profile: %s (--profile)\n", platformProfile)
+	} else {
+		fmt.Printf("  ✔  Platform profile: %s\n", platformProfile)
+		if note := profilePickNote(sysInfo.RAMMB, sysInfo.CPUs, platformProfile); note != "" {
+			fmt.Printf("  ℹ  %s\n", note)
+		}
+	}
 	if platformProfile == ProfileNano {
 		fmt.Printf("  ℹ  Monitoring (Prometheus, Loki, Grafana) will be skipped to keep this nano install lean.\n")
 	}
@@ -586,6 +595,9 @@ func Run(opts Options) (*Result, error) {
 			state, err := ReadPlatformStateViaSSH(client)
 			if err != nil {
 				return err
+			}
+			for _, note := range keptProfileNotes(platformProfile, state.Profile, sysInfo.CPUs) {
+				fmt.Printf("       ⚠  %s\n", note)
 			}
 			effectivePlatform = state
 			return nil
