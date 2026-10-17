@@ -2,13 +2,41 @@ package installer
 
 import (
 	"fmt"
+	"strings"
 )
+
+// firewallChangePendingMarker signals that cleanup preserved firewall state.
+const firewallChangePendingMarker = "kipper-firewall-change-pending"
+
+// clearKipperStateCommand builds a script to clear /etc/kipper beneath root
+// while holding the firewall rollback locks. A reservation or an active or activating rollback
+// unit preserves all state and prints firewallChangePendingMarker. Firewall
+// ownership and fail-open records stay with the retained firewall rules, and
+// lock files stay so all waiters keep using the same inodes. Lock, unit lookup
+// and removal failures make the script exit non-zero.
+func clearKipperStateCommand(root string) string {
+	dir := root + firewalldStateDir
+	keep := ""
+	for _, name := range []string{"firewall-managed", "firewalld-managed", "ufw.lock", "firewalld.lock", ufwFailOpenFile} {
+		keep += " ! -name " + name
+	}
+	return `if [ -d ` + dir + ` ]; then ` +
+		`exec 9>>` + dir + `/ufw.lock 8>>` + root + firewalldLock + ` && flock -w 120 9 && flock -w 120 8 || exit 1; ` +
+		`units=$(systemctl list-units --state=active,activating --plain --no-legend '` + ufwRollbackUnit + `*' '` + firewalldRollbackUnit + `*') || exit 1; ` +
+		`if [ -e ` + dir + `/ufw-run ] || [ -e ` + dir + `/firewalld-run ] || [ -n "$units" ]; then ` +
+		`echo ` + firewallChangePendingMarker + `; ` +
+		`else find ` + dir + ` -mindepth 1 -maxdepth 1` + keep + ` -exec rm -rf {} + || exit 1; fi; fi`
+}
 
 // UninstallHost runs k3s's uninstall scripts, removes Kipper's Longhorn
 // integration and Dex hosts pin, and deletes cluster data, optional AI data,
 // network recovery state and the API server configuration lock.
 // Missing scripts and directories are tolerated. Host firewall policy and
-// OS hardening remain configured.
+// OS hardening remain configured. State in /etc/kipper is cleared except for
+// firewall ownership records, fail-open records and lock files. A firewall
+// reservation or an active or activating rollback unit preserves all of that
+// state and prints a notice.
+// Failure to lock, inspect or clear that state returns an error.
 func UninstallHost(client CommandRunner) error {
 	// Stop k3s before removing its data. A failed shutdown aborts the uninstall
 	// so cleanup can be retried after the failure is resolved.
@@ -47,12 +75,20 @@ done`
 	// the Dex pin so the old hostname can resolve normally. Removing network
 	// recovery state in /var/lib/kipper prevents recovery of the deleted cluster.
 	// Removing the configuration lock lets the next install proceed immediately
-	// after an interrupted run. Preserve /etc/kipper because its firewall
-	// ownership records still apply to the retained firewall rules.
+	// after an interrupted run.
 	sweep := fmt.Sprintf("sed -i '/# kipper-dex-pin/d' /etc/hosts; rm -rf /var/lib/longhorn /var/lib/rancher /etc/rancher /var/lib/zot /var/lib/kipper-ai /var/lib/kipper %s %s.guard /dev/longhorn",
 		apiServerLockPath, apiServerLockPath)
 	if _, err := client.Run(sweep); err != nil {
 		return fmt.Errorf("sweeping kipper data directories: %w", err)
+	}
+
+	// Preserve state needed by pending firewall rollback jobs.
+	out, err := client.Run(clearKipperStateCommand(""))
+	if err != nil {
+		return fmt.Errorf("clearing /etc/kipper: %w", err)
+	}
+	if strings.Contains(out, firewallChangePendingMarker) {
+		fmt.Printf("  ℹ  A firewall change is pending, so state in /etc/kipper was preserved.\n")
 	}
 
 	return nil
