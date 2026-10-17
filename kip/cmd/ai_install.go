@@ -12,6 +12,8 @@ import (
 	"github.com/spf13/cobra"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/getkipper/kipper/kip/internal/ai"
@@ -88,9 +90,14 @@ func runAIInstall(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("checking existing bundle: %w", err)
 	}
 
+	if !alreadyInstalled {
+		if err := aiProfileAllowed(ctx, client.Dynamic()); err != nil {
+			return err
+		}
+	}
 	if !alreadyInstalled && !tier.MeetsMinimum() {
-		return fmt.Errorf("best node has %s free, AI bundle needs at least 8 GiB on a single node; "+
-			"run 'kip ai configure --provider claude' to use a hosted provider instead",
+		return fmt.Errorf("best node has %s free. The AI bundle needs at least 8 GiB of free memory on one node to run a model locally. "+
+			"For diagnostics and log analysis, set up Kipper's console assistant with a hosted provider using 'kip ai configure'",
 			humanBytes(report.BestNode.FreeMemory))
 	}
 	if alreadyInstalled {
@@ -270,6 +277,25 @@ func humanBytes(b int64) string {
 		return fmt.Sprintf("%.1f GiB", float64(b)/float64(gib))
 	}
 	return fmt.Sprintf("%d MiB", b/mib)
+}
+
+// aiProfileAllowed rejects the nano profile and is called only for fresh installations.
+// A missing PlatformConfig is allowed for compatibility with older clusters.
+// Other read errors are returned.
+func aiProfileAllowed(ctx context.Context, dyn dynamic.Interface) error {
+	pc, err := dyn.Resource(platformGVR).Get(ctx, platformConfigName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading PlatformConfig: %w", err)
+	}
+	profile, _, _ := unstructured.NestedString(pc.Object, "spec", "profile")
+	if profile == installer.ProfileNano {
+		return fmt.Errorf("a fresh AI bundle installation needs a profile larger than 'nano' to run a model locally. " +
+			"For diagnostics and log analysis, set up Kipper's console assistant with a hosted provider using 'kip ai configure'")
+	}
+	return nil
 }
 
 // checkBackupStorage runs the MinIO storage preflight before a fresh

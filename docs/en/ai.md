@@ -11,7 +11,9 @@ After installation, chat in your browser or configure your apps to use Ollama’
 
 ## What hardware do you need?
 
-`kip ai install` selects a default model using the available memory and GPU capacity on the best eligible node. A fresh installation requires at least **8 GiB of free memory on one node**.
+`kip ai install` selects a default model using the available memory and GPU capacity on the best eligible node. A fresh installation requires at least **8 GiB of free memory on one node** and a profile larger than `nano`.
+
+For diagnostics and log analysis, Kipper's separate console assistant can use a hosted provider. Set it up with `kip ai configure`.
 
 | Tier | Free RAM on selected node | Available GPU | Default model |
 |---|---|---|---|
