@@ -12,11 +12,17 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/getkipper/kipper/kip/internal/ai"
 	"github.com/getkipper/kipper/kip/internal/config"
+	"github.com/getkipper/kipper/kip/internal/installer"
 )
 
 func TestDefaultChatHost(t *testing.T) {
@@ -364,4 +370,43 @@ func TestAIUninstallCmdDeclaresOnlyForce(t *testing.T) {
 	var names []string
 	aiUninstallCmd.Flags().VisitAll(func(f *pflag.Flag) { names = append(names, f.Name) })
 	assert.Equal(t, []string{"force"}, names, "kip ai uninstall flags should be exactly [force]")
+}
+
+func platformClient(profile string) *dynamicfake.FakeDynamicClient {
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(platformGVR.GroupVersion().WithKind("PlatformConfig"), &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(platformGVR.GroupVersion().WithKind("PlatformConfigList"), &unstructured.UnstructuredList{})
+	if profile == "" {
+		return dynamicfake.NewSimpleDynamicClient(scheme)
+	}
+	pc := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "kipper.run/v1alpha1", "kind": "PlatformConfig",
+		"metadata": map[string]interface{}{"name": "platform"},
+		"spec":     map[string]interface{}{"profile": profile},
+	}}
+	return dynamicfake.NewSimpleDynamicClient(scheme, pc)
+}
+
+func TestAIInstallIsRefusedOnTheNanoProfile(t *testing.T) {
+	err := aiProfileAllowed(context.Background(), platformClient(installer.ProfileNano))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nano")
+	assert.Contains(t, err.Error(), "console assistant")
+	assert.Contains(t, err.Error(), "kip ai configure")
+
+	for _, profile := range []string{installer.ProfileSmall, installer.ProfileMedium, installer.ProfileLarge, installer.ProfileXLarge} {
+		assert.NoError(t, aiProfileAllowed(context.Background(), platformClient(profile)), profile)
+	}
+}
+
+func TestAIInstallAllowsAClusterWithoutPlatformConfig(t *testing.T) {
+	assert.NoError(t, aiProfileAllowed(context.Background(), platformClient("")))
+}
+
+func TestAIInstallStopsWhenThePlatformConfigCannotBeRead(t *testing.T) {
+	refusing := platformClient(installer.ProfileSmall)
+	refusing.PrependReactor("get", "platformconfigs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("the apiserver is busy")
+	})
+	assert.Error(t, aiProfileAllowed(context.Background(), refusing))
 }
