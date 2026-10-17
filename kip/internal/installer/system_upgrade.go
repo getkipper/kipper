@@ -34,7 +34,7 @@ func SystemComponents(domain string, dnsResolvers, trustedProxies []string, stat
 		components = append(components, SystemComponent{Name: "longhorn", Apply: InstallLonghorn})
 	}
 	components = append(components,
-		SystemComponent{Name: "keda", Apply: InstallKEDA},
+		SystemComponent{Name: "keda", Apply: func(c CommandRunner) error { return InstallKEDA(c, state.Profile) }},
 		SystemComponent{Name: "authz", Apply: InstallAuthz},
 		SystemComponent{Name: "node-exporter-tls", Apply: InstallNodeExporterTLS},
 	)

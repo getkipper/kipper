@@ -697,7 +697,7 @@ func Run(opts Options) (*Result, error) {
 			return nil
 		}},
 		{"Installing KEDA autoscaler", func() error {
-			return InstallKEDA(client)
+			return InstallKEDA(client, effectivePlatform.Profile)
 		}},
 	}...)
 

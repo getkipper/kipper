@@ -9,9 +9,11 @@ const (
 	kedaHTTPAddonChart = "0.14.1"
 )
 
-// InstallKEDA installs the KEDA event-driven autoscaler from its upstream Helm chart
-// via the k3s HelmChart CRD. KEDA enables scale-to-zero for Kipper functions.
-func InstallKEDA(client CommandRunner) error {
+// InstallKEDA applies the upstream KEDA and HTTP Add-on charts via k3s HelmChart
+// resources. The minimum HTTP interceptor count is one for ProfileNano and three
+// for all other profile values. A successful return means both resources were
+// applied, not that their workloads are ready.
+func InstallKEDA(client CommandRunner, profile string) error {
 	manifest := fmt.Sprintf(`apiVersion: helm.cattle.io/v1
 kind: HelmChart
 metadata:
@@ -46,15 +48,13 @@ spec:
 		return fmt.Errorf("applying KEDA HelmChart: %w", err)
 	}
 
-	// Wait for KEDA operator to be ready
+	// Rollout failures are ignored so the HTTP Add-on can still be applied.
 	waitCmd := "kubectl -n keda rollout status deployment/keda-operator --timeout=180s 2>/dev/null || true"
 	if _, err := client.Run(waitCmd); err != nil {
 		return fmt.Errorf("waiting for KEDA: %w", err)
 	}
 
-	// Install the HTTP Add-on for scale-to-zero HTTP functions.
-	// scaler.replicas: 1 because the chart's default of 3 is overkill
-	// for single-node Kipper clusters.
+	// A single scaler limits resource use on the control-plane node.
 	httpAddonManifest := fmt.Sprintf(`apiVersion: helm.cattle.io/v1
 kind: HelmChart
 metadata:
@@ -68,6 +68,8 @@ spec:
   createNamespace: true
   valuesContent: |-
     interceptor:
+      replicas:
+        min: %d
       nodeSelector:
         node-role.kubernetes.io/control-plane: "true"
       resources:
@@ -95,11 +97,19 @@ spec:
           memory: 32Mi
         limits:
           memory: 64Mi
-`, kedaHTTPAddonChart)
+`, kedaHTTPAddonChart, interceptorReplicas(profile))
 	httpAddonCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", httpAddonManifest)
 	if _, err := client.Run(httpAddonCmd); err != nil {
 		return fmt.Errorf("applying KEDA HTTP Add-on: %w", err)
 	}
 
 	return nil
+}
+
+// interceptorReplicas lowers the minimum replica count for nano to save memory.
+func interceptorReplicas(profile string) int {
+	if profile == ProfileNano {
+		return 1
+	}
+	return 3
 }
