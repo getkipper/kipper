@@ -14,30 +14,26 @@ func TestPickProfile(t *testing.T) {
 		ramMB int
 		want  string
 	}{
-		// nano: clearly below 4 GB.
 		{"tiny 2 GB box", 2048, ProfileNano},
 		{"3 GB reported", 3000, ProfileNano},
-		{"just under nano threshold", 3499, ProfileNano},
+		{"4 GB box reporting 3831 MB", 3831, ProfileNano},
+		{"4 GB box reporting 4096 MB", 4096, ProfileNano},
+		{"just under nano threshold", 5999, ProfileNano},
 
-		// small: marketed 4-8 GB.
-		{"4 GB box reporting 3900 MB", 3900, ProfileSmall},
-		{"4 GB box reporting 4096 MB", 4096, ProfileSmall},
+		{"6 GB box reporting 6000 MB", 6000, ProfileSmall},
 		{"6 GB box", 6144, ProfileSmall},
 		{"just under small ceiling", 7499, ProfileSmall},
 
-		// medium: marketed 8-16 GB.
 		{"8 GB box reporting 7700 MB", 7700, ProfileMedium},
 		{"8 GB box reporting 8192 MB", 8192, ProfileMedium},
 		{"12 GB box", 12288, ProfileMedium},
 		{"just under medium ceiling", 14999, ProfileMedium},
 
-		// large: marketed 16-32 GB.
 		{"16 GB box reporting 15800 MB", 15800, ProfileLarge},
 		{"16 GB box reporting 16384 MB", 16384, ProfileLarge},
 		{"24 GB box", 24576, ProfileLarge},
 		{"just under xlarge threshold", 29999, ProfileLarge},
 
-		// xlarge: marketed > 32 GB.
 		{"32 GB box reporting 30000 MB", 30000, ProfileXLarge},
 		{"32 GB box reporting 32768 MB", 32768, ProfileXLarge},
 		{"64 GB cluster node", 64253, ProfileXLarge},
@@ -46,16 +42,73 @@ func TestPickProfile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, pickProfile(tt.ramMB))
+			assert.Equal(t, tt.want, pickProfile(tt.ramMB, 8))
 		})
 	}
 }
 
 func TestPickProfileCovers64GBProductionNode(t *testing.T) {
-	// Concrete sanity check tied to the incident that motivated this work:
-	// kipper.example.com (64 GB) must land in xlarge so Prometheus gets the
-	// 2 Gi default that would have prevented the 2026-05-11 OOM.
-	assert.Equal(t, ProfileXLarge, pickProfile(64253))
+	// The xlarge profile gives Prometheus a higher memory limit on large hosts.
+	assert.Equal(t, ProfileXLarge, pickProfile(64253, 16))
+}
+
+func TestPickProfileStepsDownWhenTheCPUsCannotCarryTheRAMPick(t *testing.T) {
+	tests := []struct {
+		name  string
+		ramMB int
+		cpus  int
+		want  string
+	}{
+		{"8 GB on 2 vCPU drops from medium to small", 8192, 2, ProfileSmall},
+		{"32 GB on 2 vCPU drops from xlarge to small", 32768, 2, ProfileSmall},
+		{"4 GB on 2 vCPU gets nano from its RAM", 4096, 2, ProfileNano},
+		{"6 GB on 2 vCPU stays small", 6144, 2, ProfileSmall},
+		{"8 GB on 4 vCPU keeps medium", 8192, 4, ProfileMedium},
+		{"8 GB on 3 vCPU keeps medium", 8192, 3, ProfileMedium},
+		{"1 vCPU lands on nano, which is the floor", 8192, 1, ProfileNano},
+		{"an unknown CPU count leaves the RAM pick alone", 8192, 0, ProfileMedium},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, pickProfile(tt.ramMB, tt.cpus))
+		})
+	}
+}
+
+func TestProfilePickNoteSaysWhenTheCPUsLoweredThePick(t *testing.T) {
+	note := profilePickNote(8192, 2, ProfileSmall)
+	assert.Contains(t, note, "small")
+	assert.Contains(t, note, "medium")
+	assert.Contains(t, note, "2 CPUs")
+	assert.Contains(t, note, "500m")
+
+	assert.Empty(t, profilePickNote(8192, 4, ProfileMedium), "the RAM pick was used as is")
+	assert.Empty(t, profilePickNote(8192, 0, ProfileMedium), "no CPU count, no note")
+
+	// Nano is the minimum even when its estimated CPU requests exceed capacity.
+	floor := profilePickNote(8192, 1, ProfileNano)
+	assert.Contains(t, floor, "1 CPU")
+	assert.Contains(t, floor, "smallest")
+	assert.NotContains(t, floor, "still fits")
+}
+
+func TestKeptProfileNotesCheckTheProfileThatStays(t *testing.T) {
+	notes := keptProfileNotes(ProfileSmall, ProfileMedium, 2)
+	if assert.Len(t, notes, 2) {
+		assert.Contains(t, notes[0], "already runs the 'medium' profile")
+		assert.Contains(t, notes[0], "kip platform profile set small")
+		assert.Contains(t, notes[1], "500m")
+	}
+	assert.Len(t, keptProfileNotes(ProfileSmall, ProfileMedium, 4), 1, "medium fits 4 CPUs")
+	assert.Empty(t, keptProfileNotes(ProfileMedium, ProfileMedium, 2))
+	assert.Empty(t, keptProfileNotes(ProfileMedium, "", 2), "a fresh cluster has nothing recorded")
+}
+
+func TestResolveProfileHonorsAnExplicitChoice(t *testing.T) {
+	sys := SystemInfo{RAMMB: 8192, CPUs: 2}
+	assert.Equal(t, ProfileMedium, resolveProfile(ProfileMedium, sys))
+	assert.Equal(t, ProfileNano, resolveProfile(ProfileNano, sys))
+	assert.Equal(t, ProfileSmall, resolveProfile("", sys), "no --profile uses the RAM and CPU pick")
 }
 
 func TestResourcesForProfile(t *testing.T) {
@@ -73,7 +126,7 @@ func TestResourcesForProfile(t *testing.T) {
 			promLim:   "512Mi",
 			lokiReq:   "128Mi",
 			lokiLim:   "384Mi",
-			reasoning: "4-8 GB box: monitoring runs but tight, matching the current pre-incident defaults",
+			reasoning: "The small profile uses lower monitoring memory limits.",
 		},
 		{
 			profile:   ProfileMedium,
@@ -89,7 +142,7 @@ func TestResourcesForProfile(t *testing.T) {
 			promLim:   "1Gi",
 			lokiReq:   "256Mi",
 			lokiLim:   "512Mi",
-			reasoning: "16-32 GB box shares limits with medium; the tier exists for honest user-facing language",
+			reasoning: "The large profile shares monitoring memory limits with medium.",
 		},
 		{
 			profile:   ProfileXLarge,
@@ -97,7 +150,7 @@ func TestResourcesForProfile(t *testing.T) {
 			promLim:   "2Gi",
 			lokiReq:   "512Mi",
 			lokiLim:   "1Gi",
-			reasoning: "64 GB production node: Prometheus 2 Gi would have absorbed the 2026-05-11 OOM at ~540 MB working set",
+			reasoning: "The xlarge profile gives Prometheus and Loki higher memory limits.",
 		},
 	}
 
@@ -113,15 +166,12 @@ func TestResourcesForProfile(t *testing.T) {
 }
 
 func TestResourcesForProfileFallsBackToSmall(t *testing.T) {
-	// nano should never reach this function (install path skips observability)
-	// but if it does, we return small's conservative numbers rather than
-	// rendering an empty resources block in the manifest.
+	// Nano uses the small profile's limits if monitoring is explicitly enabled.
 	got := platform.ResourcesForProfile(ProfileNano)
 	assert.Equal(t, "512Mi", got.PrometheusMemoryLimit)
 	assert.Equal(t, "384Mi", got.LokiMemoryLimit)
 
-	// Unknown string (e.g. from a future profile not yet handled) hits the
-	// same safe default.
+	// Unknown profiles also need usable memory limits.
 	got = platform.ResourcesForProfile("garbage-from-future")
 	assert.Equal(t, "512Mi", got.PrometheusMemoryLimit)
 }

@@ -10,8 +10,9 @@ import (
 	"time"
 )
 
-// GatherSystemInfo collects OS, RAM, disk, and port information from
-// the remote server over SSH.
+// GatherSystemInfo collects host details through client, including total RAM
+// and available root disk space in MiB, the CPU count, and listeners on required
+// server ports. On error, it returns the information collected so far.
 func GatherSystemInfo(client CommandRunner) (SystemInfo, error) {
 	return gatherSystemInfo(client, RoleServer)
 }
@@ -32,6 +33,12 @@ func gatherSystemInfo(client CommandRunner, role HostRole) (SystemInfo, error) {
 		return info, fmt.Errorf("detecting RAM: %w", err)
 	}
 	info.RAMMB = ram
+
+	cpus, err := gatherCPUs(client)
+	if err != nil {
+		return info, fmt.Errorf("detecting CPUs: %w", err)
+	}
+	info.CPUs = cpus
 
 	disk, err := gatherDisk(client)
 	if err != nil {
@@ -61,6 +68,18 @@ func gatherRAM(client CommandRunner) (int, error) {
 	}
 
 	return kb / 1024, nil
+}
+
+func gatherCPUs(client CommandRunner) (int, error) {
+	output, err := client.Run("nproc")
+	if err != nil {
+		return 0, err
+	}
+	cpus, err := strconv.Atoi(strings.TrimSpace(output))
+	if err != nil {
+		return 0, fmt.Errorf("parsing nproc output: %w", err)
+	}
+	return cpus, nil
 }
 
 func gatherDisk(client CommandRunner) (int, error) {

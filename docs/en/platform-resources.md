@@ -6,17 +6,19 @@ Use sizing profiles for initial allocations and overrides for individual compone
 
 ## Sizing profiles
 
-At install time, `kip install` looks at the node's total RAM and picks one of five profiles. Each profile maps to a set of memory limits for the system components.
+At install time, `kip install` selects one of five profiles from the node's RAM and CPU count, or uses the profile specified with `--profile`. Each profile maps to a set of memory limits for the system components.
 
-| Profile  | Detected RAM (MB) | Prometheus | Loki   | What it's for |
+| Profile  | Detected RAM (MiB) | Prometheus | Loki   | What it's for |
 |----------|----------|------------|--------|---------------|
-| `nano`   | < 3500 | off        | off    | Demos, dev boxes. Monitoring disabled to give apps room to breathe. |
-| `small`  | 3500–7499 | 512 Mi     | 384 Mi | Side projects and small workloads. Monitoring runs but with tight limits. |
+| `nano`   | < 6000 | off        | off    | Demos and development. Monitoring is off by default to leave memory for apps. |
+| `small`  | 6000–7499 | 512 Mi     | 384 Mi | Side projects and small workloads. Monitoring uses tight memory limits. |
 | `medium` | 7500–14999 | 1 Gi       | 512 Mi | Higher monitoring limits than the small profile, with capacity for apps depending on workload. |
 | `large`  | 15000–29999 | 1 Gi       | 512 Mi | Same limits as medium, more headroom for apps. |
 | `xlarge` | ≥ 30000 | 2 Gi       | 1 Gi   | Mature production with many services. |
 
-These ranges use the RAM value printed by the installer (`MemTotal` from `/proc/meminfo`, divided by 1024). The cutoffs allow a margin below advertised 4, 8, 16, and 32 GB server sizes.
+These ranges use the RAM value printed by the installer (`MemTotal` from `/proc/meminfo`, divided by 1024). The `medium`, `large` and `xlarge` cutoffs allow a margin below advertised 8, 16 and 32 GB server sizes. Hosts below 6000 MiB get `nano` by default to leave memory for the platform and apps.
+
+The installer estimates platform CPU requests at about 1.1 CPU for `nano`, 1.4 for `small`, and 1.6 for `medium` and larger. It lowers the RAM-based selection until at least 0.5 CPU remains for a default database service. An 8 GB server with 2 vCPUs therefore gets `small`. On a single vCPU, it selects `nano`, the minimum, and warns about insufficient CPU capacity. On the 2 vCPU server, `kip install --profile medium` overrides the selection and triggers a warning about CPU headroom. These are sizing estimates. Actual scheduling also depends on enabled components, overrides, and other workloads.
 
 Actual memory use depends on the enabled components and workload. Check usage after installation and leave capacity for startup, backups, and updates.
 
@@ -108,4 +110,4 @@ For the curious:
 - `PlatformConfig` is a cluster-scoped CR. There's exactly one, named `platform`. It carries the active profile and per-component overrides.
 - `PlatformConfigReconciler` (in `console-api`) watches the CR. On change it patches the relevant HelmCharts' valuesContent and, for enable/disable, creates or deletes the chart entirely.
 - `PodOOMReconciler` watches pods in the `monitoring` namespace. On OOMKilled it writes a memory bump to the CR.
-- `kip install` picks the profile from `/proc/meminfo` at install time, with a small margin so a marketed 4 GB box reporting 3900 MB still lands on the `small` profile.
+- `kip install` picks the profile from `/proc/meminfo` and `nproc` at install time, allowing a margin below advertised RAM capacity and lowering the profile when estimated CPU headroom is insufficient. `--profile` selects a profile explicitly.
