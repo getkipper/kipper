@@ -410,3 +410,9 @@ func TestAIInstallStopsWhenThePlatformConfigCannotBeRead(t *testing.T) {
 	})
 	assert.Error(t, aiProfileAllowed(context.Background(), refusing))
 }
+
+func TestMinIOSizeForRoundsUpToWholeGiB(t *testing.T) {
+	const gib = int64(1) << 30
+	assert.Equal(t, "30Gi", minioSizeFor(30*gib))
+	assert.Equal(t, "5Gi", minioSizeFor(9*gib/2))
+}
