@@ -564,7 +564,7 @@ func TestPlatformConfigReconciler_NoStatusWriteAtSteadyState(t *testing.T) {
 	// the missing defaults and that counts as a status change.
 	pc := &kipperv1.PlatformConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: PlatformConfigName, ResourceVersion: "5"},
-		Spec:       kipperv1.PlatformConfigSpec{Profile: platform.ProfileMedium},
+		Spec:       kipperv1.PlatformConfigSpec{Profile: platform.ProfileMedium, Storage: platform.StorageLonghorn},
 		Status: kipperv1.PlatformConfigStatus{
 			Profile: platform.ProfileMedium,
 			Components: []kipperv1.ComponentStatus{
@@ -1049,4 +1049,25 @@ func nodeExporterCertSecret() *corev1.Secret {
 	return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
 		Name: platform.NodeExporterCertName, Namespace: platform.MonitoringNamespace,
 	}}
+}
+
+func TestPlatformConfigReconciler_RecordsLonghornOnALegacyCluster(t *testing.T) {
+	for recorded, want := range map[string]string{"": platform.StorageLonghorn, platform.StorageLocal: platform.StorageLocal} {
+		t.Run("recorded "+recorded, func(t *testing.T) {
+			scheme := testScheme()
+			pc := &kipperv1.PlatformConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: PlatformConfigName},
+				Spec:       kipperv1.PlatformConfigSpec{Profile: platform.ProfileNano, Storage: recorded},
+			}
+			fakeClient := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(pc).
+				WithStatusSubresource(&kipperv1.PlatformConfig{}).Build()
+			r := &PlatformConfigReconciler{Client: fakeClient, Scheme: scheme}
+			_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: PlatformConfigName}})
+			require.NoError(t, err)
+
+			got := &kipperv1.PlatformConfig{}
+			require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: PlatformConfigName}, got))
+			assert.Equal(t, want, got.Spec.Storage)
+		})
+	}
 }

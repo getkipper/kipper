@@ -14,6 +14,9 @@ const (
 	ProfileMedium = platform.ProfileMedium
 	ProfileLarge  = platform.ProfileLarge
 	ProfileXLarge = platform.ProfileXLarge
+
+	StorageLocal    = platform.StorageLocal
+	StorageLonghorn = platform.StorageLonghorn
 )
 
 // nanoRAMMB is the detected RAM cutoff in MiB for disabling monitoring by default
@@ -124,11 +127,15 @@ func resolveProfile(requested, saved string, sys SystemInfo) string {
 	return pickProfile(sys.RAMMB, sys.CPUs)
 }
 
-// readSavedPlatformState reads the profile and overrides used for preflight.
+// platformStateJSONPath prints a PlatformConfig as
+// "<profile>/<storage>|<name>=<memoryLimit>;<enabled>" with one component per line.
+const platformStateJSONPath = `jsonpath='{.spec.profile}/{.spec.storage}|{range .spec.components[*]}{.name}={.memoryLimit};{.enabled}{"\n"}{end}'`
+
+// readSavedPlatformState reads the profile, storage mode and overrides for preflight.
 // Lookup failures and missing or unknown profiles return an empty state.
 func readSavedPlatformState(client CommandRunner) PlatformState {
 	out, err := client.Run("kubectl get platformconfig platform --request-timeout=15s -o " +
-		`jsonpath='{.spec.profile}|{range .spec.components[*]}{.name}={.memoryLimit};{.enabled}{"\n"}{end}' 2>/dev/null || true`)
+		platformStateJSONPath + " 2>/dev/null || true")
 	if err != nil {
 		return PlatformState{}
 	}
@@ -140,10 +147,11 @@ func readSavedPlatformState(client CommandRunner) PlatformState {
 }
 
 // InstallPlatformConfig creates the initial "platform" CR with the chosen
-// profile and route guard enabled, preserving an existing CR and its overrides.
+// profile and storage mode, with route guard enabled. It preserves existing
+// settings and records Longhorn if the storage mode is empty.
 // Call it after InstallCRDs. It waits up to 60 seconds for the CRD to become
-// Established and returns an error if the wait or creation fails.
-func InstallPlatformConfig(client CommandRunner, profile string) error {
+// Established and returns an error if waiting, creation or storage recording fails.
+func InstallPlatformConfig(client CommandRunner, profile, storage string) error {
 	if _, err := client.Run(
 		"kubectl wait --for=condition=Established " +
 			"crd/platformconfigs.kipper.run --timeout=60s",
@@ -157,9 +165,10 @@ metadata:
   name: platform
 spec:
   profile: %s
+  storage: %s
   routeGuard:
     blockInternalPaths: true
-`, profile)
+`, profile, storage)
 
 	cmd := fmt.Sprintf(
 		"kubectl get platformconfig platform >/dev/null 2>&1 || "+
@@ -169,26 +178,32 @@ spec:
 	if _, err := client.Run(cmd); err != nil {
 		return fmt.Errorf("creating PlatformConfig: %w", err)
 	}
+	if _, err := client.Run(recordLegacyStorageCommand); err != nil {
+		return fmt.Errorf("recording the storage mode: %w", err)
+	}
 	return nil
 }
 
-// ReadPlatformStateViaSSH reads the recorded profile, memory overrides, and
+// recordLegacyStorageCommand writes Longhorn into a PlatformConfig recorded
+// before spec.storage existed, because every such cluster runs Longhorn.
+const recordLegacyStorageCommand = `s=$(kubectl get platformconfig platform -o jsonpath='{.spec.storage}') || exit 1; ` +
+	`[ -n "$s" ] || kubectl patch platformconfig platform --type merge -p '{"spec":{"storage":"longhorn"}}'`
+
+// ReadPlatformStateViaSSH reads the profile, storage mode, memory overrides and
 // explicit component enablement through kubectl so reinstalls preserve them.
-// It returns an error if the command fails.
+// Missing storage stays empty. Empty memory limits and unrecognised enablement
+// values leave overrides unset. It returns an error if the command fails.
 func ReadPlatformStateViaSSH(client CommandRunner) (PlatformState, error) {
-	out, err := client.Run(
-		"kubectl get platformconfig platform -o " +
-			`jsonpath='{.spec.profile}|{range .spec.components[*]}{.name}={.memoryLimit};{.enabled}{"\n"}{end}'`,
-	)
+	out, err := client.Run("kubectl get platformconfig platform -o " + platformStateJSONPath)
 	if err != nil {
 		return PlatformState{}, fmt.Errorf("reading PlatformConfig over SSH: %w", err)
 	}
 	return parsePlatformStateJSONPath(out), nil
 }
 
-// parsePlatformStateJSONPath reads "<profile>|<name>=<memoryLimit>;<enabled>"
-// with one component per line. Empty memory limits and unrecognised enablement
-// values leave the corresponding override unset.
+// parsePlatformStateJSONPath reads "<profile>/<storage>|<name>=<memoryLimit>;<enabled>"
+// with one component per line. A missing "/<storage>" leaves Storage empty.
+// Empty memory limits and unrecognised enablement values leave overrides unset.
 func parsePlatformStateJSONPath(raw string) PlatformState {
 	state := PlatformState{
 		MemoryOverrides:  map[string]string{},
@@ -199,7 +214,8 @@ func parsePlatformStateJSONPath(raw string) PlatformState {
 		return state
 	}
 	parts := strings.SplitN(raw, "|", 2)
-	state.Profile = strings.TrimSpace(parts[0])
+	profile, storage, _ := strings.Cut(strings.TrimSpace(parts[0]), "/")
+	state.Profile, state.Storage = profile, storage
 	if len(parts) < 2 {
 		return state
 	}

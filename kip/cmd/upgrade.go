@@ -19,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
@@ -981,21 +982,16 @@ var platformConfigGVR = schema.GroupVersionResource{
 	Resource: "platformconfigs",
 }
 
-// loadPlatformState reads the active sizing profile plus per-component
-// overrides from the PlatformConfig CR that `kip install` writes. NotFound
-// here means the CR is absent (never installed, deletion race, RBAC change,
-// manual kubectl delete). Treat that as fatal rather than synthesizing a
-// small profile that could downsize a real cluster.
-//
-// Any other error (RBAC, discovery lag, transient API failure) is also
-// surfaced so the upgrade aborts rather than silently downsizing
-// Prometheus and Loki.
+// loadPlatformState reads the recorded profile, storage mode and component overrides.
+// It persists Longhorn when storage is empty and uses small when the profile is empty.
+// Read and patch failures abort the upgrade, including a missing PlatformConfig,
+// to protect existing workloads from being resized using assumed defaults.
 func loadPlatformState(ctx context.Context, dyn dynamic.Interface) (installer.PlatformState, error) {
 	obj, err := dyn.Resource(platformConfigGVR).Get(ctx, "platform", metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return installer.PlatformState{}, fmt.Errorf(
-				"PlatformConfig %q not found: refusing to proceed with assumed defaults that could downsize Prometheus or Loki; run `kip install` to create it",
+				"PlatformConfig %q not found. Upgrade stopped to avoid downsizing Prometheus or Loki with assumed defaults. Run `kip install` to create it",
 				"platform")
 		}
 		return installer.PlatformState{}, err
@@ -1008,8 +1004,17 @@ func loadPlatformState(ctx context.Context, dyn dynamic.Interface) (installer.Pl
 		profile = installer.ProfileSmall
 	}
 
+	storage, _, _ := unstructured.NestedString(obj.Object, "spec", "storage")
+	if storage == "" {
+		if err := recordLegacyStorage(ctx, dyn); err != nil {
+			return installer.PlatformState{}, err
+		}
+		storage = installer.StorageLonghorn
+	}
+
 	state := installer.PlatformState{
 		Profile:          profile,
+		Storage:          storage,
 		MemoryOverrides:  map[string]string{},
 		EnabledOverrides: map[string]bool{},
 	}
@@ -1033,6 +1038,16 @@ func loadPlatformState(ctx context.Context, dyn dynamic.Interface) (installer.Pl
 	}
 
 	return state, nil
+}
+
+// recordLegacyStorage persists the legacy Longhorn default. The caller must
+// check that spec.storage is empty before calling it.
+func recordLegacyStorage(ctx context.Context, dyn dynamic.Interface) error {
+	patch := []byte(`{"spec":{"storage":"` + installer.StorageLonghorn + `"}}`)
+	if _, err := dyn.Resource(platformConfigGVR).Patch(ctx, "platform", types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("recording Longhorn storage: %w", err)
+	}
+	return nil
 }
 
 // runSystemUpgrade re-applies cluster system components (Traefik, Longhorn,

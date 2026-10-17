@@ -608,7 +608,7 @@ func Run(opts Options) (*Result, error) {
 			return InstallCRDs(client, opts.KipVersion)
 		}},
 		{"Recording platform sizing profile", func() error {
-			if err := InstallPlatformConfig(client, platformProfile); err != nil {
+			if err := InstallPlatformConfig(client, platformProfile, StorageLonghorn); err != nil {
 				return err
 			}
 			state, err := ReadPlatformStateViaSSH(client)

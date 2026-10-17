@@ -114,6 +114,13 @@ spec:
                       `kip platform internal-paths on`. App-declared internalPaths apply either way.
                     type: boolean
                 type: object
+              storage:
+                description: Storage defaults to Longhorn when omitted and is immutable
+                  once set.
+                enum:
+                - local
+                - longhorn
+                type: string
               telemetry:
                 description: |-
                   Telemetry toggles cluster-wide telemetry collection that feeds the
@@ -264,6 +271,13 @@ spec:
                 type: string
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: spec.storage cannot change on an existing cluster. Migrate to a
+            new cluster to change storage modes.
+          rule: '(has(oldSelf.spec) && has(oldSelf.spec.storage)) ? (has(self.spec)
+            && has(self.spec.storage) && self.spec.storage == oldSelf.spec.storage)
+            : (!has(self.spec) || !has(self.spec.storage) || self.spec.storage ==
+            ''longhorn'')'
     served: true
     storage: true
     subresources:

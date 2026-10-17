@@ -72,23 +72,15 @@ func SystemComponents(domain string, dnsResolvers, trustedProxies []string, stat
 	return components
 }
 
-// PlatformState captures the upgrade-relevant slice of PlatformConfig: the
-// active profile, per-component memory overrides, and explicit enable/disable
-// pointers. It is the contract between the upgrade command (which reads the
-// CR) and SystemComponents (which decides what to reapply).
+// PlatformState holds the settings used during upgrades and reinstalls.
+// Empty storage represents legacy Longhorn. Missing enablement overrides use
+// the profile default. Nil backup storage selects in-cluster MinIO.
 type PlatformState struct {
-	Profile         string
-	MemoryOverrides map[string]string
-	// EnabledOverrides maps component name to an explicit enable/disable
-	// flag. Absent entries mean "use profile default" (off for nano, on
-	// otherwise).
+	Profile          string
+	Storage          string
+	MemoryOverrides  map[string]string
 	EnabledOverrides map[string]bool
-	// BackupStorage is the BSL config the cluster was installed with,
-	// loaded from ~/.kip/config.yaml at upgrade time. Nil means the
-	// in-cluster MinIO default; non-nil makes the upgrade re-apply
-	// Velero against an external bucket. Credentials are not carried
-	// here — they stay only as a Kubernetes Secret on the cluster.
-	BackupStorage *BackupStorageConfig
+	BackupStorage    *BackupStorageConfig
 }
 
 // EffectiveResources returns memory limits that respect both the profile and
@@ -98,11 +90,13 @@ func (s PlatformState) EffectiveResources() platform.Resources {
 	return platform.EffectiveResources(s.Profile, s.MemoryOverrides)
 }
 
-// PrometheusEnabled / LokiEnabled return whether the component should be
-// included in the upgrade run. An explicit override (set via the API or
-// `kip platform`) wins over the profile default.
+// PrometheusEnabled reports whether upgrades should include Prometheus.
+// Explicit overrides take precedence over the profile default.
 func (s PlatformState) PrometheusEnabled() bool { return s.enabled("prometheus") }
-func (s PlatformState) LokiEnabled() bool       { return s.enabled("loki") }
+
+// LokiEnabled reports whether upgrades should include Loki.
+// Explicit overrides take precedence over the profile default.
+func (s PlatformState) LokiEnabled() bool { return s.enabled("loki") }
 
 func (s PlatformState) enabled(name string) bool {
 	if v, ok := s.EnabledOverrides[name]; ok {
