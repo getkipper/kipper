@@ -46,16 +46,72 @@ func TestPickProfile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, pickProfile(tt.ramMB))
+			assert.Equal(t, tt.want, pickProfile(tt.ramMB, 8))
 		})
 	}
 }
 
 func TestPickProfileCovers64GBProductionNode(t *testing.T) {
-	// Concrete sanity check tied to the incident that motivated this work:
-	// kipper.example.com (64 GB) must land in xlarge so Prometheus gets the
-	// 2 Gi default that would have prevented the 2026-05-11 OOM.
-	assert.Equal(t, ProfileXLarge, pickProfile(64253))
+	// The xlarge profile gives Prometheus a higher memory limit on large hosts.
+	assert.Equal(t, ProfileXLarge, pickProfile(64253, 16))
+}
+
+func TestPickProfileStepsDownWhenTheCPUsCannotCarryTheRAMPick(t *testing.T) {
+	tests := []struct {
+		name  string
+		ramMB int
+		cpus  int
+		want  string
+	}{
+		{"8 GB on 2 vCPU drops from medium to small", 8192, 2, ProfileSmall},
+		{"32 GB on 2 vCPU drops from xlarge to small", 32768, 2, ProfileSmall},
+		{"4 GB on 2 vCPU stays small", 4096, 2, ProfileSmall},
+		{"8 GB on 4 vCPU keeps medium", 8192, 4, ProfileMedium},
+		{"8 GB on 3 vCPU keeps medium", 8192, 3, ProfileMedium},
+		{"1 vCPU lands on nano, which is the floor", 8192, 1, ProfileNano},
+		{"an unknown CPU count leaves the RAM pick alone", 8192, 0, ProfileMedium},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, pickProfile(tt.ramMB, tt.cpus))
+		})
+	}
+}
+
+func TestProfilePickNoteSaysWhenTheCPUsLoweredThePick(t *testing.T) {
+	note := profilePickNote(8192, 2, ProfileSmall)
+	assert.Contains(t, note, "small")
+	assert.Contains(t, note, "medium")
+	assert.Contains(t, note, "2 CPUs")
+	assert.Contains(t, note, "500m")
+
+	assert.Empty(t, profilePickNote(8192, 4, ProfileMedium), "the RAM pick was used as is")
+	assert.Empty(t, profilePickNote(8192, 0, ProfileMedium), "no CPU count, no note")
+
+	// Nano is the minimum even when its estimated CPU requests exceed capacity.
+	floor := profilePickNote(8192, 1, ProfileNano)
+	assert.Contains(t, floor, "1 CPU")
+	assert.Contains(t, floor, "smallest")
+	assert.NotContains(t, floor, "still fits")
+}
+
+func TestKeptProfileNotesCheckTheProfileThatStays(t *testing.T) {
+	notes := keptProfileNotes(ProfileSmall, ProfileMedium, 2)
+	if assert.Len(t, notes, 2) {
+		assert.Contains(t, notes[0], "already runs the 'medium' profile")
+		assert.Contains(t, notes[0], "kip platform profile set small")
+		assert.Contains(t, notes[1], "500m")
+	}
+	assert.Len(t, keptProfileNotes(ProfileSmall, ProfileMedium, 4), 1, "medium fits 4 CPUs")
+	assert.Empty(t, keptProfileNotes(ProfileMedium, ProfileMedium, 2))
+	assert.Empty(t, keptProfileNotes(ProfileMedium, "", 2), "a fresh cluster has nothing recorded")
+}
+
+func TestResolveProfileHonorsAnExplicitChoice(t *testing.T) {
+	sys := SystemInfo{RAMMB: 8192, CPUs: 2}
+	assert.Equal(t, ProfileMedium, resolveProfile(ProfileMedium, sys))
+	assert.Equal(t, ProfileNano, resolveProfile(ProfileNano, sys))
+	assert.Equal(t, ProfileSmall, resolveProfile("", sys), "no --profile uses the RAM and CPU pick")
 }
 
 func TestResourcesForProfile(t *testing.T) {

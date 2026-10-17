@@ -51,6 +51,7 @@ type SystemInfo struct {
 	OSVersion     string
 	RAMMB         int
 	DiskMB        int
+	CPUs          int
 	PortListeners map[int][]string
 }
 
@@ -60,12 +61,15 @@ type PreflightResult struct {
 }
 
 // RunPreflightChecks validates that the target server meets the minimum
-// requirements for a Kipper installation.
-func RunPreflightChecks(sys SystemInfo) (*PreflightResult, error) {
-	return runPreflightChecks(sys, RoleServer)
+// requirements for a Kipper installation with the given sizing profile.
+// The caller must supply a known profile. Failed checks return a nil result
+// and an error. Resource headroom concerns are returned as warnings.
+// A non-positive CPU count skips the CPU headroom check.
+func RunPreflightChecks(sys SystemInfo, profile string) (*PreflightResult, error) {
+	return runPreflightChecks(sys, profile, RoleServer)
 }
 
-func runPreflightChecks(sys SystemInfo, role HostRole) (*PreflightResult, error) {
+func runPreflightChecks(sys SystemInfo, profile string, role HostRole) (*PreflightResult, error) {
 	result := &PreflightResult{}
 
 	if err := checkOS(sys); err != nil {
@@ -88,16 +92,52 @@ func runPreflightChecks(sys SystemInfo, role HostRole) (*PreflightResult, error)
 	if role == RoleWorker {
 		return result, nil
 	}
-	switch pickProfile(sys.RAMMB) {
-	case ProfileNano:
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("RAM is below 4GB (%dMB available): the 'nano' profile will be selected: monitoring (Prometheus, Loki, Grafana) is disabled by default and headroom for apps is very tight. Best for demos and dev; production workloads need 8GB or more.", sys.RAMMB))
-	case ProfileSmall:
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("RAM is below recommended 8GB (%dMB available): the 'small' profile will be selected: monitoring runs with tight limits. Disable it with 'kip platform disable prometheus' and 'kip platform disable loki' after install if you need more room for apps.", sys.RAMMB))
+	result.Warnings = append(result.Warnings, ramWarnings(sys.RAMMB, profile)...)
+	if w := cpuWarning(profile, sys.CPUs); w != "" {
+		result.Warnings = append(result.Warnings, w)
 	}
 
 	return result, nil
+}
+
+// ramWarnings uses measured RAM because CPU limits or an explicit choice can
+// select a different profile from the memory-based default.
+func ramWarnings(ramMB int, profile string) []string {
+	monitoring := profile != ProfileNano
+	switch {
+	case ramMB < nanoRAMMB:
+		w := fmt.Sprintf("RAM is below 4GB (%dMB available): headroom for apps is very tight. Use this host for demos or development. For production, start with at least 8GB.", ramMB)
+		if monitoring {
+			w += fmt.Sprintf(" The '%s' profile enables monitoring (Prometheus, Loki, Grafana) by default, which can push the host into swapping, and the install itself can fail at Zot. Use --profile nano to disable monitoring on a new cluster.", profile)
+		} else {
+			w += " The 'nano' profile keeps monitoring (Prometheus, Loki, Grafana) off."
+		}
+		return []string{w}
+	case ramMB < recommendedRAMMB && !monitoring:
+		return []string{fmt.Sprintf("RAM is below recommended 8GB (%dMB available): the 'nano' profile keeps monitoring (Prometheus, Loki, Grafana) off to leave more memory for apps.", ramMB)}
+	case ramMB < recommendedRAMMB:
+		return []string{fmt.Sprintf("RAM is below recommended 8GB (%dMB available): the '%s' profile enables monitoring by default, leaving less memory for apps. Use --profile nano on a new cluster, or disable monitoring after install with 'kip platform disable prometheus' and 'kip platform disable loki'.", ramMB, profile)}
+	}
+	return nil
+}
+
+// cpuWarning says when a profile's platform pods leave less than a default
+// database service's request on the host. It returns an empty string when the
+// estimate fits or the CPU count is non-positive.
+func cpuWarning(profile string, cpus int) string {
+	if profileFitsCPU(profile, cpus) {
+		return ""
+	}
+	return fmt.Sprintf("%d %s: the '%s' profile's platform pods request about %dm of the %dm available, leaving %dm for apps. A default database service requests %dm, which exceeds this estimate of available CPU. Use a host with more CPUs, or lower --cpu for services if capacity allows.",
+		cpus, plural(cpus, "CPU", "CPUs"), profile, platformCPURequestMilli[profile], cpus*1000,
+		max(cpuHeadroomMilli(profile, cpus), 0), defaultServiceCPURequestMilli)
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 func checkOS(sys SystemInfo) error {

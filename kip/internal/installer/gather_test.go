@@ -32,3 +32,26 @@ LISTEN 0      511          0.0.0.0:443       0.0.0.0:*    users:(("nginx",pid=81
 `
 	assert.Equal(t, map[int][]string{443: {"nginx"}}, parsePortListeners(out))
 }
+
+func TestGatherSystemInfoReadsTheCPUCount(t *testing.T) {
+	server := &routedRunner{routes: []route{
+		{contains: "cat /etc/os-release", out: "ID=ubuntu\nVERSION_ID=\"24.04\"\n"},
+		{contains: "MemTotal", out: "8000000\n"},
+		{contains: "df ", out: "40000M\n"},
+		{contains: "nproc", out: "2\n"},
+	}}
+	sys, err := GatherSystemInfo(server)
+	assert.NoError(t, err)
+	assert.Equal(t, 2, sys.CPUs)
+}
+
+func TestGatherSystemInfoRefusesAnUnreadableCPUCount(t *testing.T) {
+	server := &routedRunner{routes: []route{
+		{contains: "cat /etc/os-release", out: "ID=ubuntu\nVERSION_ID=\"24.04\"\n"},
+		{contains: "MemTotal", out: "8000000\n"},
+		{contains: "df ", out: "40000M\n"},
+		{contains: "nproc", out: "nproc: command not found\n"},
+	}}
+	_, err := GatherSystemInfo(server)
+	assert.ErrorContains(t, err, "detecting CPUs")
+}
