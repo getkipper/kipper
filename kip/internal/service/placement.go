@@ -16,11 +16,13 @@ var LonghornReplicaGVR = schema.GroupVersionResource{Group: "longhorn.io", Versi
 
 // Placement describes a service's pod location and healthy data replicas.
 type Placement struct {
-	PodNode   string
-	DataNodes []string
+	PodNode     string
+	Unscheduled string
+	DataNodes   []string
 }
 
-// Placement reads the service's pod location and healthy data replicas.
+// Placement reads the service's pod location, scheduler failure message and
+// healthy replica nodes in alphabetical order.
 // Missing pods and unbound claims leave the corresponding fields empty.
 // Errors may return a partial result with the pod location.
 func (m *Manager) Placement(ctx context.Context, namespace, name string) (Placement, error) {
@@ -29,6 +31,7 @@ func (m *Manager) Placement(ctx context.Context, namespace, name string) (Placem
 	switch {
 	case err == nil:
 		p.PodNode = pod.Spec.NodeName
+		p.Unscheduled = unschedulableReason(pod)
 	case !errors.IsNotFound(err):
 		return p, fmt.Errorf("reading the pod of %s: %w", name, err)
 	}
