@@ -338,6 +338,12 @@ reason:
 
 `kip service info` shows the same reason after `Pod node: not scheduled`.
 
+When a pending pod has no assigned node and its revision differs from the
+StatefulSet's update revision, Kipper deletes it so the StatefulSet can create
+one from the updated template. This lets changes from
+`kip service update <name> --cpu <cpu>` or `kip service restart <name>` reach
+a pod whose readiness would otherwise block the update.
+
 An app bound to it keeps its own status, because the app really is running. Its
 broken dependency is named under `kip app list`:
 
