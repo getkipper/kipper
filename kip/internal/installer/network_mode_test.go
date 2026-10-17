@@ -30,6 +30,8 @@ func networkHosts(serverRoutes, joinerRoutes []route) (*routedRunner, *routedRun
 	server := &routedRunner{routes: append(serverRoutes,
 		route{contains: "ip -o -4 addr show", out: serverAddrs},
 		route{contains: "route show default", out: strings.Replace(defaultViaEth0, "%s", "203.0.113.10", 1)},
+		route{contains: "/sys/class/net/eth0/mtu", out: "9001\n"},
+		route{contains: "/sys/class/net/enp7s0/mtu", out: "1450\n"},
 		route{contains: "ip -o route get 10.0.0.4", out: "10.0.0.4 via 10.0.0.1 dev enp7s0 src 10.0.0.3 uid 0 \\    cache\n"},
 		route{contains: "route show dev enp7s0", out: "10.0.0.0/16 via 10.0.0.1 proto dhcp src 10.0.0.3 metric 100\n10.0.0.1 proto dhcp scope link src 10.0.0.3 metric 100\n"},
 		route{contains: "spec.podCIDR", out: "10.42.0.0/24"},
@@ -38,6 +40,8 @@ func networkHosts(serverRoutes, joinerRoutes []route) (*routedRunner, *routedRun
 	joiner := &routedRunner{routes: append(joinerRoutes,
 		route{contains: "ip -o -4 addr show", out: joinerAddrs},
 		route{contains: "route show default", out: strings.Replace(defaultViaEth0, "%s", "203.0.113.11", 1)},
+		route{contains: "/sys/class/net/eth0/mtu", out: "1460\n"},
+		route{contains: "/sys/class/net/eth1/mtu", out: "1450\n"},
 		route{contains: "ip -o route get 10.0.0.3", out: "10.0.0.3 via 10.0.0.1 dev eth1 src 10.0.0.4 uid 0 \\    cache mtu 1450\n"},
 		route{contains: "route show dev eth1", out: "10.0.0.0/16 via 10.0.0.1 proto dhcp src 10.0.0.4 metric 1003 mtu 1450\n"},
 	)}
@@ -85,10 +89,31 @@ func TestPlanNodeNetworkFallsBackToPublicWithoutAPrivateRoute(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, NetworkPlan{
-		Mode:   NetworkModePublic,
-		Server: NodeNetwork{NodeIP: "203.0.113.10", ExternalIP: "203.0.113.10"},
-		Joiner: NodeNetwork{NodeIP: "203.0.113.11", ExternalIP: "203.0.113.11"},
-	}, plan)
+		Mode:       NetworkModePublic,
+		Server:     NodeNetwork{NodeIP: "203.0.113.10", ExternalIP: "203.0.113.10", TunnelMTU: 1360},
+		Joiner:     NodeNetwork{NodeIP: "203.0.113.11", ExternalIP: "203.0.113.11", TunnelMTU: 1360},
+		PodNetwork: "10.42.0.0/16",
+	}, plan, "jumbo-frame and 1460-byte interfaces both leave a 1280-byte tunnel")
+
+	server, joiner = networkHosts([]route{
+		{contains: "ip -o route get 10.0.0.4", out: "10.0.0.4 via 172.31.1.1 dev eth0 src 203.0.113.10 uid 0 \\    cache\n"},
+		{contains: "/sys/class/net/eth0/mtu", out: "1300\n"},
+	}, nil)
+	plan, err = PlanNodeNetwork(server, joiner, external)
+	require.NoError(t, err)
+	assert.Equal(t, 1300, plan.Server.TunnelMTU, "an interface below the cap keeps its own MTU")
+}
+
+func TestPlanNodeNetworkNeedsTheInterfaceMTUInPublicMode(t *testing.T) {
+	server, joiner := networkHosts(nil, []route{{contains: "/sys/class/net/eth0/mtu", out: "unknown"}})
+	opts := external
+	opts.Public = true
+	_, err := PlanNodeNetwork(server, joiner, opts)
+	assert.ErrorContains(t, err, "MTU of eth0")
+
+	server, joiner = networkHosts(nil, []route{{contains: "/sys/class/net/eth0/mtu", out: "1200\n"}})
+	_, err = PlanNodeNetwork(server, joiner, opts)
+	assert.ErrorContains(t, err, "eth0 has an MTU of 1200", "refused while planning, before the server changes")
 }
 
 func TestPlanNodeNetworkHonoursPublic(t *testing.T) {
@@ -202,6 +227,46 @@ func TestRenderNetworkDropIn(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "agent-token: keep-me\nflannel-external-ip: true\nnode-external-ip: 203.0.113.10\nnode-ip: 203.0.113.10\n", public,
 		"other keys stay and settings of the old mode go")
+
+	capped, err := RenderNetworkDropIn("", RoleWorker, NetworkModePublic, NodeNetwork{NodeIP: "203.0.113.11", ExternalIP: "203.0.113.11", TunnelMTU: 1360})
+	require.NoError(t, err)
+	assert.Equal(t, "flannel-conf: /etc/rancher/k3s/kipper-flannel.json\nnode-external-ip: 203.0.113.11\nnode-ip: 203.0.113.11\n", capped)
+
+	private, err := RenderNetworkDropIn(capped, RoleWorker, NetworkModePrivate, NodeNetwork{NodeIP: "10.0.0.4", ExternalIP: "203.0.113.11", Interface: "eth1"})
+	require.NoError(t, err)
+	assert.NotContains(t, private, "flannel-conf", "private mode keeps flannel's own MTU")
+}
+
+func TestFlannelConfCapsTheWireGuardMTU(t *testing.T) {
+	conf, err := flannelConf("10.42.0.0/16", 1360)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"Network":"10.42.0.0/16","EnableIPv4":true,"EnableIPv6":false,`+
+		`"Backend":{"Type":"wireguard","PersistentKeepaliveInterval":25,"MTU":1360}}`, conf)
+
+	for _, bad := range []struct {
+		network string
+		mtu     int
+	}{{"10.42.0.0/16", 0}, {"10.42.0.0/16", 1200}, {"10.42.0.0/16", 1361}, {"not-a-network", 1360}, {"fd00::/64", 1360}} {
+		_, err := flannelConf(bad.network, bad.mtu)
+		assert.Error(t, err, "%s %d", bad.network, bad.mtu)
+	}
+}
+
+func TestWriteFlannelConfWritesTheFileItNames(t *testing.T) {
+	conf, err := RenderFlannelConf("10.42.0.0/16", 1300)
+	require.NoError(t, err)
+	host := &routedRunner{}
+	require.NoError(t, WriteFlannelConf(host, conf))
+	require.Len(t, host.stdins, 1)
+	assert.Contains(t, host.stdins[0], `"MTU":1300`)
+	assert.Contains(t, host.commands[0], flannelConfPath)
+
+	conf, err = RenderFlannelConf("10.42.0.0/16", 0)
+	require.NoError(t, err)
+	assert.Empty(t, conf, "private mode has no flannel configuration")
+	host = &routedRunner{}
+	require.NoError(t, WriteFlannelConf(host, conf))
+	assert.Empty(t, host.commands)
 }
 
 func TestRenderNetworkDropInRefusesBadInput(t *testing.T) {
