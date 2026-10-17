@@ -48,3 +48,20 @@ func SupportsSharedVolumes(mode string) bool {
 // API, console and admission policy.
 const SharedVolumesUnsupported = "This cluster uses local storage. Shared volumes (ReadWriteMany) require Longhorn. " +
 	"See Cluster Migration in the Kipper docs to move to a cluster with Longhorn storage."
+
+const ComponentLonghorn = "longhorn"
+
+// Installed reports whether the configuration selects a component for installation.
+// Longhorn depends only on storage mode, with an empty mode defaulting to Longhorn.
+// Components known to PathFor use EffectiveEnabled, which honours profile defaults,
+// explicit overrides and sibling dependencies. Missing or nil overrides use defaults.
+// All other components return true.
+func Installed(component string, enabledOverrides map[string]*bool, profile, storage string) bool {
+	if component == ComponentLonghorn {
+		return StorageMode(storage) == StorageLonghorn
+	}
+	if _, ok := PathFor(component); ok {
+		return EffectiveEnabled(component, enabledOverrides, profile)
+	}
+	return true
+}

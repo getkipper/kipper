@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/alerts"
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
@@ -72,7 +73,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 
-	reportStorageRestartCoverage(nodes)
+	if client.StorageMode(ctx) == platform.StorageLocal {
+		reportLocalStorage(ctx, os.Stdout, client.Clientset(), nodes)
+	} else {
+		reportStorageRestartCoverage(nodes)
+	}
 	reportAlertDelivery(ctx, client)
 	reportCrashLoopingServices(ctx, client)
 

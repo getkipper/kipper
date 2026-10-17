@@ -20,12 +20,21 @@ func checkLocalPathStorage(client CommandRunner) error {
 }
 
 // ReadStorageMode reads the cluster's storage mode from its PlatformConfig. A
-// missing PlatformConfig or empty storage field defaults to Longhorn.
-// Command failures return an empty mode and an error.
+// missing PlatformConfig, empty storage field or a cluster without the
+// PlatformConfig resource type defaults to Longhorn. Other command failures
+// and unrecognised storage values return an empty mode and an error.
 func ReadStorageMode(client CommandRunner) (string, error) {
-	out, err := client.Run("kubectl get platformconfig platform --ignore-not-found -o jsonpath='{.spec.storage}'")
+	out, err := client.Run("kubectl get platformconfig platform --ignore-not-found -o jsonpath='{.spec.storage}' 2>&1")
 	if err != nil {
-		return "", fmt.Errorf("reading the storage mode: %w", err)
+		if identityAbsentFromKubectl(out) {
+			return StorageLonghorn, nil
+		}
+		return "", fmt.Errorf("reading the storage mode: %w: %s", err, strings.TrimSpace(out))
 	}
-	return platform.StorageMode(strings.Trim(strings.TrimSpace(out), "'")), nil
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	mode := strings.Trim(strings.TrimSpace(lines[len(lines)-1]), "'")
+	if mode != "" && !platform.IsStorageMode(mode) {
+		return "", fmt.Errorf("reading the storage mode: unexpected output %q", strings.TrimSpace(out))
+	}
+	return platform.StorageMode(mode), nil
 }

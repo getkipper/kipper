@@ -241,6 +241,15 @@ func sshRateLimitFor(client installer.CommandRunner, audit installer.FirewallAud
 	return freshLimit, nil
 }
 
+// refuseNodeAddOnLocalStorage enforces Kipper's single-node limit for local storage.
+func refuseNodeAddOnLocalStorage(mode string) error {
+	if mode != installer.StorageLocal {
+		return nil
+	}
+	return fmt.Errorf("this cluster uses local storage and supports a single node. " +
+		"To add nodes, install a Longhorn cluster with --storage longhorn and migrate your projects. See Cluster Migration in the Kipper docs")
+}
+
 func runNodeAdd(cmd *cobra.Command, args []string) error {
 	fmt.Print(nodeAddPreviewNotice)
 
@@ -309,6 +318,14 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		if err := installer.RecoverNetworkChange(server); err != nil {
 			return fmt.Errorf("pod network: %w", err)
 		}
+	}
+
+	mode, err := installer.ReadStorageMode(server)
+	if err != nil {
+		return err
+	}
+	if err := refuseNodeAddOnLocalStorage(mode); err != nil {
+		return err
 	}
 
 	records, err := installer.EnsureServerRecord(server, cluster.Host)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -14,7 +15,7 @@ import (
 // LonghornReplicaGVR identifies Longhorn replica resources.
 var LonghornReplicaGVR = schema.GroupVersionResource{Group: "longhorn.io", Version: "v1beta2", Resource: "replicas"}
 
-// Placement describes a service's pod location and healthy data replicas.
+// Placement describes a service's pod location and data nodes.
 type Placement struct {
 	PodNode     string
 	Unscheduled string
@@ -22,7 +23,8 @@ type Placement struct {
 }
 
 // Placement reads the service's pod location, scheduler failure message and
-// healthy replica nodes in alphabetical order.
+// healthy replica nodes in alphabetical order. A local-path volume's node comes
+// from its node affinity.
 // Missing pods and unbound claims leave the corresponding fields empty.
 // Errors may return a partial result with the pod location.
 func (m *Manager) Placement(ctx context.Context, namespace, name string) (Placement, error) {
@@ -50,6 +52,10 @@ func (m *Manager) Placement(ctx context.Context, namespace, name string) (Placem
 	if err != nil {
 		return p, fmt.Errorf("reading the data volume of %s: %w", name, err)
 	}
+	if node := localVolumeNode(pv); node != "" {
+		p.DataNodes = []string{node}
+		return p, nil
+	}
 	if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != "driver.longhorn.io" {
 		return p, fmt.Errorf("the data volume of %s is not a Longhorn volume", name)
 	}
@@ -67,4 +73,23 @@ func (m *Manager) Placement(ctx context.Context, namespace, name string) (Placem
 	}
 	sort.Strings(p.DataNodes)
 	return p, nil
+}
+
+// localVolumeNode returns the first single-hostname affinity match for a Local
+// or HostPath volume. It returns an empty string if no such match exists.
+func localVolumeNode(pv *corev1.PersistentVolume) string {
+	if pv.Spec.Local == nil && pv.Spec.HostPath == nil {
+		return ""
+	}
+	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
+		return ""
+	}
+	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
+		for _, req := range term.MatchExpressions {
+			if req.Key == corev1.LabelHostname && req.Operator == corev1.NodeSelectorOpIn && len(req.Values) == 1 {
+				return req.Values[0]
+			}
+		}
+	}
+	return ""
 }

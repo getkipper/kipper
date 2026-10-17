@@ -6,11 +6,14 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/config"
 )
 
@@ -96,31 +99,89 @@ type ComponentStatus struct {
 	Message  string
 }
 
+// healthCheck identifies a workload or the k3s node-readiness check.
+type healthCheck struct {
+	namespace string
+	name      string
+	label     string
+	kind      string
+	component string
+}
+
+var healthChecks = []healthCheck{
+	{"kube-system", "", "k3s", "", ""},
+	{"traefik", "traefik", "Traefik", "deploy", ""},
+	{"cert-manager", "cert-manager-webhook", "cert-manager", "deploy", ""},
+	{"longhorn-system", "longhorn-driver-deployer", "Longhorn", "deploy", platform.ComponentLonghorn},
+	{"keda", "keda-operator", "KEDA", "deploy", ""},
+	{"monitoring", "loki", "Loki", "statefulset", platform.ComponentLoki},
+	{"monitoring", "promtail", "Promtail", "daemonset", platform.ComponentPromtail},
+	{"monitoring", "prometheus-kube-prometheus-stack-prometheus", "Prometheus", "statefulset", platform.ComponentPrometheus},
+	{"monitoring", "kube-prometheus-stack-grafana", "Grafana", "deploy", platform.ComponentGrafana},
+	{"velero", "velero", "Velero", "deploy", ""},
+	{"dex", "dex", "Dex", "deploy", ""},
+	{"kipper-system", "console-api", "Console API", "deploy", ""},
+	{"kipper-system", "console", "Console", "deploy", ""},
+}
+
+var platformConfigGVR = schema.GroupVersionResource{Group: "kipper.run", Version: "v1alpha1", Resource: "platformconfigs"}
+
+// StorageMode returns the recorded storage mode, defaulting to Longhorn when
+// PlatformConfig cannot be read or its storage field is empty or invalidly typed.
+func (c *Client) StorageMode(ctx context.Context) string {
+	pc, err := c.dynamicClient.Resource(platformConfigGVR).Get(ctx, "platform", metav1.GetOptions{})
+	if err != nil {
+		return storageModeOf(nil)
+	}
+	return storageModeOf(pc)
+}
+
+func storageModeOf(pc *unstructured.Unstructured) string {
+	if pc == nil {
+		return platform.StorageLonghorn
+	}
+	storage, _, _ := unstructured.NestedString(pc.Object, "spec", "storage")
+	return platform.StorageMode(storage)
+}
+
+// installedChecks selects checks from the configured profile, component overrides
+// and storage mode. A nil PlatformConfig includes all checks.
+func installedChecks(pc *unstructured.Unstructured) []healthCheck {
+	if pc == nil {
+		return healthChecks
+	}
+	profile, _, _ := unstructured.NestedString(pc.Object, "spec", "profile")
+	storage, _, _ := unstructured.NestedString(pc.Object, "spec", "storage")
+	overrides := map[string]*bool{}
+	components, _, _ := unstructured.NestedSlice(pc.Object, "spec", "components")
+	for _, item := range components {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := m["name"].(string)
+		if enabled, ok := m["enabled"].(bool); ok && name != "" {
+			overrides[name] = &enabled
+		}
+	}
+	var checks []healthCheck
+	for _, ch := range healthChecks {
+		if ch.component == "" || platform.Installed(ch.component, overrides, profile, storage) {
+			checks = append(checks, ch)
+		}
+	}
+	return checks
+}
+
 // ClusterHealth checks node readiness and core workloads, distinguishing
 // unhealthy components from those whose pods appear to be starting.
+// PlatformConfig selects the components to check. A failed configuration read
+// includes all components. Check failures appear in the returned statuses,
+// and the returned error is always nil.
 func (c *Client) ClusterHealth(ctx context.Context) ([]ComponentStatus, error) {
-	type check struct {
-		namespace string
-		name      string
-		label     string
-		kind      string // "deploy", "statefulset", "daemonset", or "" for k3s
-	}
-
-	checks := []check{
-		{"kube-system", "", "k3s", ""},
-		{"traefik", "traefik", "Traefik", "deploy"},
-		{"cert-manager", "cert-manager-webhook", "cert-manager", "deploy"},
-		{"longhorn-system", "longhorn-driver-deployer", "Longhorn", "deploy"},
-		{"keda", "keda-operator", "KEDA", "deploy"},
-		{"monitoring", "loki", "Loki", "statefulset"},
-		{"monitoring", "promtail", "Promtail", "daemonset"},
-		{"monitoring", "prometheus-kube-prometheus-stack-prometheus", "Prometheus", "statefulset"},
-		{"monitoring", "kube-prometheus-stack-grafana", "Grafana", "deploy"},
-		{"velero", "velero", "Velero", "deploy"},
-		{"dex", "dex", "Dex", "deploy"},
-		{"kipper-system", "console-api", "Console API", "deploy"},
-		{"kipper-system", "console", "Console", "deploy"},
-	}
+	// Keep all checks on read failure so configuration errors cannot hide unhealthy components.
+	pc, _ := c.dynamicClient.Resource(platformConfigGVR).Get(ctx, "platform", metav1.GetOptions{})
+	checks := installedChecks(pc)
 
 	readyNodes := c.readyNodeNames(ctx)
 

@@ -390,7 +390,7 @@ func buildRouter(ctx context.Context, clientset kubernetes.Interface, dynClient 
 	smtpHandler := &handlers.SMTP{Client: clientset, Security: securityNotifier}
 	podsHandler := &handlers.Pods{Client: clientset}
 	filesHandler := &handlers.Files{Client: clientset, Config: restConfig}
-	dashboardHandler := &handlers.Dashboard{Client: clientset}
+	dashboardHandler := &handlers.Dashboard{Client: clientset, CRClient: crClient}
 	usageHistoryHandler := &handlers.UsageHistory{CRClient: crClient}
 	platformHandler := &handlers.Platform{CRClient: crClient, Adjustments: adjustmentsHandler}
 	users := &handlers.Users{Client: clientset, RoleStore: roleStore, Security: securityNotifier,
