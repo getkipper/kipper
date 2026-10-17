@@ -12,6 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 var backupGVR = schema.GroupVersionResource{
@@ -28,6 +30,24 @@ var scheduleGVR = schema.GroupVersionResource{
 type Backups struct {
 	Client  kubernetes.Interface
 	Dynamic dynamic.Interface
+}
+
+var platformConfigsGVR = schema.GroupVersionResource{Group: "kipper.run", Version: "v1alpha1", Resource: "platformconfigs"}
+
+// refuseWithoutBackups returns true after sending a bad-request response when
+// backups are disabled. Read failures allow the request to continue for
+// compatibility with clusters that lack a readable PlatformConfig.
+func (b *Backups) refuseWithoutBackups(w http.ResponseWriter, r *http.Request) bool {
+	pc, err := b.Dynamic.Resource(platformConfigsGVR).Get(r.Context(), platformConfigName, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	backup, _, _ := unstructured.NestedString(pc.Object, "spec", "backup")
+	if platform.BackupsConfigured(backup) {
+		return false
+	}
+	respondError(w, http.StatusBadRequest, platform.BackupsNotConfigured)
+	return true
 }
 
 type backupResponse struct {
@@ -116,6 +136,9 @@ func (b *Backups) List(w http.ResponseWriter, r *http.Request) {
 // Create creates a new backup.
 // POST /api/v1/backups
 func (b *Backups) Create(w http.ResponseWriter, r *http.Request) {
+	if b.refuseWithoutBackups(w, r) {
+		return
+	}
 	var req struct {
 		Name       string `json:"name"`
 		Namespaces string `json:"namespaces"`
@@ -170,6 +193,9 @@ func (b *Backups) Create(w http.ResponseWriter, r *http.Request) {
 // Restore creates a restore from a backup.
 // POST /api/v1/backups/{name}/restore
 func (b *Backups) Restore(w http.ResponseWriter, r *http.Request) {
+	if b.refuseWithoutBackups(w, r) {
+		return
+	}
 	backupName := r.PathValue("name")
 	if backupName == "" {
 		// Chi uses URLParam
@@ -277,6 +303,9 @@ func (b *Backups) Schedules(w http.ResponseWriter, r *http.Request) {
 // DeleteBackup removes a backup.
 // DELETE /api/v1/backups/{backup}
 func (b *Backups) DeleteBackup(w http.ResponseWriter, r *http.Request) {
+	if b.refuseWithoutBackups(w, r) {
+		return
+	}
 	parts := strings.Split(r.URL.Path, "/")
 	backupName := ""
 	for i, p := range parts {
@@ -305,6 +334,9 @@ func (b *Backups) DeleteBackup(w http.ResponseWriter, r *http.Request) {
 // ToggleSchedule enables or disables a backup schedule.
 // PUT /api/v1/backups/schedules/{schedule}
 func (b *Backups) ToggleSchedule(w http.ResponseWriter, r *http.Request) {
+	if b.refuseWithoutBackups(w, r) {
+		return
+	}
 	parts := strings.Split(r.URL.Path, "/")
 	scheduleName := ""
 	for i, p := range parts {

@@ -53,12 +53,16 @@ const ComponentLonghorn = "longhorn"
 
 // Installed reports whether the configuration selects a component for installation.
 // Longhorn depends only on storage mode, with an empty mode defaulting to Longhorn.
+// Velero depends only on backup mode, with an empty mode counting as configured.
 // Components known to PathFor use EffectiveEnabled, which honours profile defaults,
 // explicit overrides and sibling dependencies. Missing or nil overrides use defaults.
 // All other components return true.
-func Installed(component string, enabledOverrides map[string]*bool, profile, storage string) bool {
-	if component == ComponentLonghorn {
+func Installed(component string, enabledOverrides map[string]*bool, profile, storage, backup string) bool {
+	switch component {
+	case ComponentLonghorn:
 		return StorageMode(storage) == StorageLonghorn
+	case ComponentVelero:
+		return BackupsConfigured(backup)
 	}
 	if _, ok := PathFor(component); ok {
 		return EffectiveEnabled(component, enabledOverrides, profile)

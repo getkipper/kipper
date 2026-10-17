@@ -103,7 +103,7 @@ var dashboardChecks = []componentCheck{
 	{"monitoring", "promtail", "Promtail", "daemonset", platform.ComponentPromtail},
 	{"monitoring", "prometheus-kube-prometheus-stack-prometheus", "Prometheus", "statefulset", platform.ComponentPrometheus},
 	{"monitoring", "kube-prometheus-stack-grafana", "Grafana", "deploy", platform.ComponentGrafana},
-	{"velero", "velero", "Velero", "deploy", ""},
+	{"velero", "velero", "Velero", "deploy", platform.ComponentVelero},
 	{"dex", "dex", "Dex", "deploy", ""},
 	{"kipper-system", "console-api", "Console API", "deploy", ""},
 	{"kipper-system", "console", "Console", "deploy", ""},
@@ -125,7 +125,7 @@ func (d *Dashboard) installedChecks(ctx context.Context) []componentCheck {
 	}
 	var checks []componentCheck
 	for _, ch := range dashboardChecks {
-		if ch.component == "" || platform.Installed(ch.component, overrides, pc.Spec.Profile, pc.Spec.Storage) {
+		if ch.component == "" || platform.Installed(ch.component, overrides, pc.Spec.Profile, pc.Spec.Storage, pc.Spec.Backup) {
 			checks = append(checks, ch)
 		}
 	}

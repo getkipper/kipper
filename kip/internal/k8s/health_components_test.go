@@ -20,8 +20,9 @@ func labels(checks []healthCheck) []string {
 }
 
 func TestHealthChecksLeaveOutWhatTheClusterDoesNotRun(t *testing.T) {
-	got := labels(installedChecks(platformConfig(map[string]interface{}{"profile": "nano", "storage": "local"})))
+	got := labels(installedChecks(platformConfig(map[string]interface{}{"profile": "nano", "storage": "local", "backup": "none"})))
 	assert.NotContains(t, got, "Longhorn")
+	assert.NotContains(t, got, "Velero", "a cluster without backups runs no Velero")
 	assert.NotContains(t, got, "Loki")
 	assert.NotContains(t, got, "Promtail")
 	assert.NotContains(t, got, "Prometheus")

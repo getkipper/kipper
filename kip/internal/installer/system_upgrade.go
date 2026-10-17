@@ -16,6 +16,8 @@ type SystemComponent struct {
 // SystemComponents returns components reconciled by kip upgrade, honoring
 // profile overrides and explicit enable/disable choices. It reuses saved DNS
 // settings and refreshes gateway addresses for trusted-proxy configuration.
+// BackupNone omits Velero. Otherwise, BackupStorage selects its destination,
+// with nil selecting in-cluster MinIO. The Velero action requires an Uploader.
 // Dex's full manifest would overwrite users. A full cert-manager install needs
 // the admin email, so only its DNS settings are reconciled here.
 // Console and k3s upgrades have separate paths.
@@ -52,14 +54,16 @@ func SystemComponents(domain string, dnsResolvers, trustedProxies []string, stat
 	// preserve external backups. Credentials are replaced only when supplied.
 	bs := state.BackupStorage
 	storage := platform.StorageMode(state.Storage)
-	components = append(components,
-		SystemComponent{Name: "velero", Apply: func(c CommandRunner) error {
+	if platform.BackupsConfigured(state.Backup) {
+		components = append(components, SystemComponent{Name: "velero", Apply: func(c CommandRunner) error {
 			u, ok := c.(Uploader)
 			if !ok {
 				return fmt.Errorf("this runner cannot upload the Velero credentials")
 			}
 			return InstallBackup(u, bs, storage)
-		}},
+		}})
+	}
+	components = append(components,
 		SystemComponent{Name: "zot", Apply: func(c CommandRunner) error { return InstallZot(c, storage) }},
 		// Build isolation must be (re)applied on upgrade: a cluster installed
 		// before it existed has no kipper-builds namespace/RBAC/policy, so the
@@ -74,10 +78,12 @@ func SystemComponents(domain string, dnsResolvers, trustedProxies []string, stat
 
 // PlatformState holds the settings used during upgrades and reinstalls.
 // Empty storage represents legacy Longhorn. Missing enablement overrides use
-// the profile default. Nil backup storage selects in-cluster MinIO.
+// the profile default. Empty backup mode enables Velero for legacy clusters.
+// When backups are enabled, nil backup storage selects in-cluster MinIO.
 type PlatformState struct {
 	Profile          string
 	Storage          string
+	Backup           string
 	MemoryOverrides  map[string]string
 	EnabledOverrides map[string]bool
 	BackupStorage    *BackupStorageConfig

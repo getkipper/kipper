@@ -3,87 +3,109 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/k8s"
 )
 
 const gib = int64(1) << 30
 
-func summaryJSON(free, capacity int64) []byte {
-	return []byte(`{"node":{"fs":{"availableBytes":` + itoa(free) + `,"capacityBytes":` + itoa(capacity) + `}},
-"pods":[
- {"podRef":{"namespace":"shop","name":"db-0"},"volume":[{"name":"data","usedBytes":` + itoa(3*gib) + `,"pvcRef":{"namespace":"shop","name":"data-db-0"}}]},
- {"podRef":{"namespace":"shop","name":"web-1"},"volume":[{"name":"tmp","usedBytes":` + itoa(9*gib) + `}]},
- {"podRef":{"namespace":"kipper-system","name":"zot-1"},"volume":[{"name":"data","usedBytes":` + itoa(gib) + `,"pvcRef":{"namespace":"kipper-system","name":"zot-data"}}]}
-]}`)
-}
-
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 
-func TestLocalStorageReportShowsFreeSpaceAndTheLargestVolumes(t *testing.T) {
+// nodeSummary returns a kubelet summary reader for a 40 GiB disk with free bytes available.
+func nodeSummary(free int64) func(string) ([]byte, error) {
+	return func(string) ([]byte, error) {
+		return []byte(`{"node":{"fs":{"availableBytes":` + itoa(free) + `,"capacityBytes":` + itoa(40*gib) + `}}}`), nil
+	}
+}
+
+func volumesOf(usage ...volumeUsage) func() ([]volumeUsage, error) {
+	return func() ([]volumeUsage, error) { return usage, nil }
+}
+
+func report(backups bool, summary func(string) ([]byte, error), volumes func() ([]volumeUsage, error)) string {
 	var out bytes.Buffer
-	reportLocalStorageWith(&out, []k8s.NodeInfo{{Name: "server-1"}}, func(string) ([]byte, error) {
-		return summaryJSON(25*gib, 40*gib), nil
-	})
-	got := out.String()
+	reportLocalStorageWith(&out, []k8s.NodeInfo{{Name: "server-1"}}, backups, summary, volumes)
+	return out.String()
+}
+
+func TestLocalStorageReportShowsFreeSpaceAndTheLargestVolumes(t *testing.T) {
+	got := report(true, nodeSummary(25*gib), volumesOf(
+		volumeUsage{"shop/data-db-0", 3 * gib}, volumeUsage{"kipper-system/zot-data", gib}))
 	assert.Contains(t, got, "server-1: 25.0 GiB free of 40.0 GiB")
-	assert.Contains(t, got, "shop/data-db-0 3.0 GiB")
-	assert.Contains(t, got, "kipper-system/zot-data 1.0 GiB")
-	assert.NotContains(t, got, "web-1", "only claims count as volumes")
+	assert.Contains(t, got, "Largest volumes: shop/data-db-0 3.0 GiB, kipper-system/zot-data 1.0 GiB\n")
+
+	small := report(true, nodeSummary(25*gib), volumesOf(volumeUsage{"kipper-system/zot-data", 60 * 1024}))
+	assert.Contains(t, small, "kipper-system/zot-data 0 MiB")
 	assert.NotContains(t, got, "⚠")
 }
 
 func TestLocalStorageReportWarnsWhenTheDiskRunsLow(t *testing.T) {
-	var out bytes.Buffer
-	reportLocalStorageWith(&out, []k8s.NodeInfo{{Name: "server-1"}}, func(string) ([]byte, error) {
-		return summaryJSON(3*gib, 40*gib), nil
-	})
-	assert.Contains(t, out.String(), "⚠  server-1: 3.0 GiB free of 40.0 GiB")
-	assert.Contains(t, out.String(), "no size limit")
+	got := report(true, nodeSummary(3*gib), volumesOf())
+	assert.Contains(t, got, "⚠  server-1: 3.0 GiB free of 40.0 GiB")
+	assert.Contains(t, got, "no size limit")
 }
 
 func TestLocalStorageReportSaysWhenTheSummaryIsUnavailable(t *testing.T) {
-	var out bytes.Buffer
-	reportLocalStorageWith(&out, []k8s.NodeInfo{{Name: "server-1"}}, func(string) ([]byte, error) {
-		return nil, errors.New("forbidden")
-	})
-	assert.Contains(t, out.String(), "server-1: not checked (forbidden)")
+	got := report(true, func(string) ([]byte, error) { return nil, errors.New("forbidden") }, volumesOf())
+	assert.Contains(t, got, "server-1: not checked (forbidden)")
 }
 
 func TestLocalStorageReportNamesTheThreeLargestVolumesFirst(t *testing.T) {
-	summary := []byte(`{"node":{"fs":{"availableBytes":` + itoa(30*gib) + `,"capacityBytes":` + itoa(40*gib) + `}},"pods":[
- {"volume":[{"usedBytes":` + itoa(1*gib) + `,"pvcRef":{"namespace":"a","name":"one"}}]},
- {"volume":[{"usedBytes":` + itoa(4*gib) + `,"pvcRef":{"namespace":"a","name":"four"}}]},
- {"volume":[{"usedBytes":` + itoa(2*gib) + `,"pvcRef":{"namespace":"a","name":"two"}}]},
- {"volume":[{"usedBytes":` + itoa(3*gib) + `,"pvcRef":{"namespace":"a","name":"three"}}]}]}`)
-	var out bytes.Buffer
-	reportLocalStorageWith(&out, []k8s.NodeInfo{{Name: "server-1"}}, func(string) ([]byte, error) { return summary, nil })
-	assert.Contains(t, out.String(), "Largest volumes: a/four 4.0 GiB, a/three 3.0 GiB, a/two 2.0 GiB\n")
+	got := report(true, nodeSummary(30*gib), volumesOf(
+		volumeUsage{"a/one", gib}, volumeUsage{"a/four", 4 * gib}, volumeUsage{"a/two", 2 * gib}, volumeUsage{"a/three", 3 * gib}))
+	assert.Contains(t, got, "Largest volumes: a/four 4.0 GiB, a/three 3.0 GiB, a/two 2.0 GiB\n")
 }
 
 func TestLocalStorageReportTreatsMissingFiguresAsUnchecked(t *testing.T) {
-	var out bytes.Buffer
-	reportLocalStorageWith(&out, []k8s.NodeInfo{{Name: "server-1"}}, func(string) ([]byte, error) { return []byte(`{"node":{}}`), nil })
-	assert.Contains(t, out.String(), "server-1: not checked (the kubelet reported no disk figures)")
-	assert.NotContains(t, out.String(), "✔")
+	got := report(true, func(string) ([]byte, error) { return []byte(`{"node":{}}`), nil }, volumesOf())
+	assert.Contains(t, got, "server-1: not checked (the kubelet reported no disk figures)")
+	assert.NotContains(t, got, "✔")
 
-	out.Reset()
-	onlyCapacity := []byte(`{"node":{"fs":{"capacityBytes":` + itoa(40*gib) + `}}}`)
-	reportLocalStorageWith(&out, []k8s.NodeInfo{{Name: "server-1"}}, func(string) ([]byte, error) { return onlyCapacity, nil })
-	assert.Contains(t, out.String(), "not checked", "a missing free figure is no full disk")
-	assert.NotContains(t, out.String(), "0.0 GiB free")
+	onlyCapacity := func(string) ([]byte, error) {
+		return []byte(`{"node":{"fs":{"capacityBytes":` + itoa(40*gib) + `}}}`), nil
+	}
+	got = report(true, onlyCapacity, volumesOf())
+	assert.Contains(t, got, "not checked", "a missing free figure is no full disk")
+	assert.NotContains(t, got, "0.0 GiB free")
 }
 
-func TestLocalStorageReportLeavesOutVolumesWithoutUsage(t *testing.T) {
-	summary := []byte(`{"node":{"fs":{"availableBytes":` + itoa(30*gib) + `,"capacityBytes":` + itoa(40*gib) + `}},"pods":[
- {"volume":[{"pvcRef":{"namespace":"a","name":"unmeasured"}}]},
- {"volume":[{"usedBytes":` + itoa(gib) + `,"pvcRef":{"namespace":"a","name":"measured"}}]}]}`)
-	var out bytes.Buffer
-	reportLocalStorageWith(&out, []k8s.NodeInfo{{Name: "server-1"}}, func(string) ([]byte, error) { return summary, nil })
-	assert.Contains(t, out.String(), "Largest volumes: a/measured 1.0 GiB\n")
-	assert.NotContains(t, out.String(), "unmeasured")
+func TestLocalStorageReportSaysWhenVolumesCannotBeMeasured(t *testing.T) {
+	got := report(true, nodeSummary(30*gib), func() ([]volumeUsage, error) { return nil, errors.New("no SSH") })
+	assert.Contains(t, got, "Volumes: not measured (no SSH)")
 }
+
+func TestLocalStorageReportSaysWhenTheClusterHasNoBackups(t *testing.T) {
+	assert.Contains(t, report(false, nodeSummary(25*gib), volumesOf()), "⚠  "+platform.BackupsNotConfigured)
+}
+
+// The kubelet reports usage for the whole shared filesystem, so per-volume
+// measurements use du on the server's pvc-<uid>_<namespace>_<claim> directories.
+func TestLocalVolumeUsageReadsTheLocalPathDirectories(t *testing.T) {
+	host := &duHost{out: "60\t/var/lib/rancher/k3s/storage/pvc-48b2_kipper-system_zot-data/\n" +
+		"3145728\t/var/lib/rancher/k3s/storage/pvc-9f1c_shop_data-db-0/\n" +
+		"12\t/var/lib/rancher/k3s/storage/lost+found/\n"}
+	usage, err := localVolumeUsage(host)
+	require.NoError(t, err)
+	assert.Equal(t, []volumeUsage{{"kipper-system/zot-data", 60 * 1024}, {"shop/data-db-0", 3 * gib}}, usage)
+	assert.Contains(t, host.commands[0], "du -sk /var/lib/rancher/k3s/storage/*/")
+}
+
+// duHost answers every command with out and records what it was asked.
+type duHost struct {
+	out      string
+	commands []string
+}
+
+func (h *duHost) Run(cmd string) (string, error) {
+	h.commands = append(h.commands, cmd)
+	return h.out, nil
+}
+
+func (h *duHost) RunStdin(cmd string, _ io.Reader) (string, error) { return h.Run(cmd) }

@@ -39,6 +39,13 @@ func TestSystemComponents(t *testing.T) {
 		assert.Equal(t, want, got)
 	})
 
+	t.Run("a cluster without backups gets no Velero", func(t *testing.T) {
+		components := SystemComponents("example.com", nil, nil, PlatformState{Profile: ProfileNano, Storage: StorageLocal, Backup: BackupNone})
+		for _, c := range components {
+			assert.NotEqual(t, "velero", c.Name)
+		}
+	})
+
 	t.Run("a local-storage cluster has no Longhorn to upgrade", func(t *testing.T) {
 		components := SystemComponents("example.com", nil, nil, PlatformState{Profile: ProfileNano, Storage: StorageLocal})
 		got := make([]string, len(components))

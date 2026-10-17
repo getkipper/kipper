@@ -673,6 +673,12 @@ func installVeleroCredentials(client Uploader, cfg *BackupStorageConfig, minioPa
 	return nil
 }
 
+// inClusterMinIOURL is where Velero reaches the cluster's own MinIO.
+const inClusterMinIOURL = "http://minio.velero.svc:9000"
+
+// BackupsGoToMinIO reports whether s3URL exactly matches http://minio.velero.svc:9000.
+func BackupsGoToMinIO(s3URL string) bool { return s3URL == inClusterMinIOURL }
+
 // veleroBSLBlock renders the BSL block of the Velero values, branching
 // on whether external storage is configured. Returned string is pre-
 // indented to slot into the HelmChart valuesContent at the right depth.
@@ -687,7 +693,7 @@ func veleroBSLBlock(cfg *BackupStorageConfig) string {
           config:
             region: minio
             s3ForcePathStyle: "true"
-            s3Url: http://minio.velero.svc:9000`
+            s3Url: ` + inClusterMinIOURL
 	}
 
 	// External BSL. Endpoint is empty for native AWS S3 (Velero derives it from

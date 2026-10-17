@@ -44,6 +44,12 @@ func TestParsePlatformStateJSONPath(t *testing.T) {
 		assert.False(t, state.EnabledOverrides["loki"])
 	})
 
+	t.Run("the backup mode follows the storage mode", func(t *testing.T) {
+		state := parsePlatformStateJSONPath("nano/local/none|")
+		assert.Equal(t, "local", state.Storage)
+		assert.Equal(t, "none", state.Backup)
+	})
+
 	t.Run("a legacy cluster records no storage mode", func(t *testing.T) {
 		state := parsePlatformStateJSONPath("small/|")
 		assert.Equal(t, "small", state.Profile)

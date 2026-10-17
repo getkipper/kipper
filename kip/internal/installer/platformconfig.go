@@ -17,6 +17,10 @@ const (
 
 	StorageLocal    = platform.StorageLocal
 	StorageLonghorn = platform.StorageLonghorn
+
+	BackupNone      = platform.BackupNone
+	BackupInCluster = platform.BackupInCluster
+	BackupExternal  = platform.BackupExternal
 )
 
 // nanoRAMMB is the detected RAM cutoff in MiB for disabling monitoring by default
@@ -128,8 +132,9 @@ func resolveProfile(requested, saved string, sys SystemInfo) string {
 }
 
 // platformStateJSONPath prints a PlatformConfig as
-// "<profile>/<storage>|<name>=<memoryLimit>;<enabled>" with one component per line.
-const platformStateJSONPath = `jsonpath='{.spec.profile}/{.spec.storage}|{range .spec.components[*]}{.name}={.memoryLimit};{.enabled}{"\n"}{end}'`
+// "<profile>/<storage>/<backup>|<name>=<memoryLimit>;<enabled>" with one
+// component per line.
+const platformStateJSONPath = `jsonpath='{.spec.profile}/{.spec.storage}/{.spec.backup}|{range .spec.components[*]}{.name}={.memoryLimit};{.enabled}{"\n"}{end}'`
 
 // resolveStorage preserves an existing cluster's recorded mode, defaulting to
 // Longhorn when empty. It rejects mode changes and requests for local storage
@@ -158,6 +163,78 @@ func resolveStorage(requested, profile string, existing, unreadable bool, record
 	return StorageLonghorn, nil
 }
 
+// resolveBackup prefers supplied external storage, then an existing cluster's
+// recorded mode. Legacy clusters default to in-cluster MinIO. New clusters use
+// MinIO unless storage is local, because backups on the same disk cannot
+// protect against disk loss.
+func resolveBackup(external bool, storage string, existing bool, recorded string) string {
+	switch {
+	case external:
+		return BackupExternal
+	case existing && recorded != "":
+		return recorded
+	case existing:
+		return BackupInCluster
+	case storage == StorageLocal:
+		return BackupNone
+	}
+	return BackupInCluster
+}
+
+// errExternalBackupUnknown stops an install that would otherwise point an
+// external-backup cluster's Velero at a new MinIO.
+var errExternalBackupUnknown = ErrExternalBackupUnknown
+
+// ErrExternalBackupUnknown is returned when a cluster backs up to external
+// storage whose connection settings are missing from the local kip configuration.
+var ErrExternalBackupUnknown = fmt.Errorf("this cluster uses external backup storage. Its connection settings are missing from the local kip configuration. " +
+	"Run kip install again with --backup-storage-bucket and its related flags so Velero keeps writing there")
+
+// settleBackup resolves the mode from the freshly read PlatformConfig.
+// It returns errExternalBackupUnknown if external backups are recorded but
+// their connection settings are unavailable.
+func settleBackup(external bool, storage, recorded string) (string, error) {
+	mode := resolveBackup(external, storage, true, recorded)
+	if mode == BackupExternal && !external {
+		return "", errExternalBackupUnknown
+	}
+	return mode, nil
+}
+
+// settleLegacyBackup uses Velero's detected storage when no backup mode is recorded.
+// If Velero uses external storage and its connection settings are missing, it
+// returns errExternalBackupUnknown. Otherwise, it delegates to settleBackup.
+func settleLegacyBackup(external bool, storage, recorded string, writesExternally bool) (string, error) {
+	if recorded == "" && !external && writesExternally {
+		return "", errExternalBackupUnknown
+	}
+	return settleBackup(external, storage, recorded)
+}
+
+// veleroWritesExternally reports whether the cluster's default Velero backup
+// location uses an endpoint other than inClusterMinIOURL, including an empty
+// endpoint for native AWS S3. A missing location or resource type returns false.
+// Other read failures and malformed output return an error so an unreadable
+// location cannot be mistaken for in-cluster backups.
+func veleroWritesExternally(client CommandRunner) (bool, error) {
+	out, err := client.Run(`kubectl -n velero get backupstoragelocation default --request-timeout=15s -o jsonpath='bsl[{.spec.config.s3Url}]' 2>&1`)
+	if err != nil {
+		if identityAbsentFromKubectl(out) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading Velero's backup location: %w: %s", err, strings.TrimSpace(out))
+	}
+	start := strings.Index(out, "bsl[")
+	if start < 0 {
+		return false, fmt.Errorf("reading Velero's backup location: unexpected output %q", strings.TrimSpace(out))
+	}
+	end := strings.Index(out[start:], "]")
+	if end < 0 {
+		return false, fmt.Errorf("reading Velero's backup location: unexpected output %q", strings.TrimSpace(out))
+	}
+	return out[start+len("bsl["):start+end] != inClusterMinIOURL, nil
+}
+
 // discoverClusterStorage reports whether the host runs a cluster whose storage
 // mode must be preserved, based on a saved profile, Longhorn's StorageClasses or
 // its namespace, which exists before the classes do. If k3s may already exist
@@ -178,7 +255,7 @@ func discoverClusterStorage(client CommandRunner, savedProfile string) (existing
 	return strings.TrimSpace(out) != "", false
 }
 
-// readSavedPlatformState reads the profile, storage mode and overrides for preflight.
+// readSavedPlatformState reads the profile, storage and backup modes, and overrides for preflight.
 // Lookup failures and missing or unknown profiles return an empty state.
 func readSavedPlatformState(client CommandRunner) PlatformState {
 	out, err := client.Run("kubectl get platformconfig platform --request-timeout=15s -o " +
@@ -194,11 +271,12 @@ func readSavedPlatformState(client CommandRunner) PlatformState {
 }
 
 // InstallPlatformConfig creates the initial "platform" CR with the chosen
-// profile and storage mode, with route guard enabled. It preserves existing
-// settings and records Longhorn if the storage mode is empty.
-// Call it after InstallCRDs. It waits up to 60 seconds for the CRD to become
-// Established and returns an error if waiting, creation or storage recording fails.
-func InstallPlatformConfig(client CommandRunner, profile, storage string) error {
+// profile, storage mode and backup mode, with route guard enabled. It preserves
+// existing settings, including the backup mode, and records Longhorn if the
+// storage mode is empty. Call it after InstallCRDs. It waits up to
+// 60 seconds for the CRD to become Established and returns an error if waiting,
+// creation or recording fails.
+func InstallPlatformConfig(client CommandRunner, profile, storage, backup string) error {
 	if _, err := client.Run(
 		"kubectl wait --for=condition=Established " +
 			"crd/platformconfigs.kipper.run --timeout=60s",
@@ -213,9 +291,10 @@ metadata:
 spec:
   profile: %s
   storage: %s
+  backup: %s
   routeGuard:
     blockInternalPaths: true
-`, profile, storage)
+`, profile, storage, backup)
 
 	cmd := fmt.Sprintf(
 		"kubectl get platformconfig platform >/dev/null 2>&1 || "+
@@ -231,15 +310,24 @@ spec:
 	return nil
 }
 
+// RecordBackupMode patches spec.backup on the "platform" PlatformConfig,
+// replacing any recorded mode. It returns an error if the patch fails.
+func RecordBackupMode(client CommandRunner, backup string) error {
+	if _, err := client.Run(fmt.Sprintf(`kubectl patch platformconfig platform --type merge -p '{"spec":{"backup":%q}}'`, backup)); err != nil {
+		return fmt.Errorf("recording the backup mode: %w", err)
+	}
+	return nil
+}
+
 // recordLegacyStorageCommand writes Longhorn into a PlatformConfig recorded
 // before spec.storage existed, because every such cluster runs Longhorn.
 const recordLegacyStorageCommand = `s=$(kubectl get platformconfig platform -o jsonpath='{.spec.storage}') || exit 1; ` +
 	`[ -n "$s" ] || kubectl patch platformconfig platform --type merge -p '{"spec":{"storage":"longhorn"}}'`
 
-// ReadPlatformStateViaSSH reads the profile, storage mode, memory overrides and
-// explicit component enablement through kubectl so reinstalls preserve them.
-// Missing storage stays empty. Empty memory limits and unrecognised enablement
-// values leave overrides unset. It returns an error if the command fails.
+// ReadPlatformStateViaSSH reads the profile, storage and backup modes, and
+// component overrides through kubectl so reinstalls preserve them. Missing
+// modes stay empty. Empty memory limits and unrecognised enablement values
+// leave overrides unset. It returns an error if the command fails.
 func ReadPlatformStateViaSSH(client CommandRunner) (PlatformState, error) {
 	out, err := client.Run("kubectl get platformconfig platform -o " + platformStateJSONPath)
 	if err != nil {
@@ -248,8 +336,9 @@ func ReadPlatformStateViaSSH(client CommandRunner) (PlatformState, error) {
 	return parsePlatformStateJSONPath(out), nil
 }
 
-// parsePlatformStateJSONPath reads "<profile>/<storage>|<name>=<memoryLimit>;<enabled>"
-// with one component per line. A missing "/<storage>" leaves Storage empty.
+// parsePlatformStateJSONPath reads "<profile>/<storage>/<backup>|<name>=<memoryLimit>;<enabled>"
+// with one component per line. A missing storage or backup part leaves the
+// field empty.
 // Empty memory limits and unrecognised enablement values leave overrides unset.
 func parsePlatformStateJSONPath(raw string) PlatformState {
 	state := PlatformState{
@@ -261,8 +350,9 @@ func parsePlatformStateJSONPath(raw string) PlatformState {
 		return state
 	}
 	parts := strings.SplitN(raw, "|", 2)
-	profile, storage, _ := strings.Cut(strings.TrimSpace(parts[0]), "/")
-	state.Profile, state.Storage = profile, storage
+	profile, rest, _ := strings.Cut(strings.TrimSpace(parts[0]), "/")
+	storage, backup, _ := strings.Cut(rest, "/")
+	state.Profile, state.Storage, state.Backup = profile, storage, backup
 	if len(parts) < 2 {
 		return state
 	}

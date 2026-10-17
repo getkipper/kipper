@@ -404,6 +404,12 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	if bs := installer.BackupStorageFromRef(cluster.BackupStorage); bs != nil {
 		state.BackupStorage = bs
 	}
+	if err := recordLegacyBackup(ctx, k8sClient.Dynamic(), &state); err != nil {
+		return err
+	}
+	if err := requireBackupDestination(state); err != nil {
+		return err
+	}
 
 	return runSystemUpgrade(cluster.Host, explicitKey, fallbackKey, cluster.Domain, cluster.DNSResolvers, cluster.TrustedProxies, state, autoYes)
 }
@@ -982,7 +988,7 @@ var platformConfigGVR = schema.GroupVersionResource{
 	Resource: "platformconfigs",
 }
 
-// loadPlatformState reads the recorded profile, storage mode and component overrides.
+// loadPlatformState reads the recorded profile, storage and backup modes, and component overrides.
 // It persists Longhorn when storage is empty and uses small when the profile is empty.
 // Read and patch failures abort the upgrade, including a missing PlatformConfig,
 // to protect existing workloads from being resized using assumed defaults.
@@ -1012,9 +1018,11 @@ func loadPlatformState(ctx context.Context, dyn dynamic.Interface) (installer.Pl
 		storage = installer.StorageLonghorn
 	}
 
+	backup, _, _ := unstructured.NestedString(obj.Object, "spec", "backup")
 	state := installer.PlatformState{
 		Profile:          profile,
 		Storage:          storage,
+		Backup:           backup,
 		MemoryOverrides:  map[string]string{},
 		EnabledOverrides: map[string]bool{},
 	}
@@ -1048,6 +1056,65 @@ func recordLegacyStorage(ctx context.Context, dyn dynamic.Interface) error {
 		return fmt.Errorf("recording Longhorn storage: %w", err)
 	}
 	return nil
+}
+
+// requireBackupDestination rejects missing external storage settings to prevent
+// an upgrade from redirecting existing backups to in-cluster MinIO.
+func requireBackupDestination(state installer.PlatformState) error {
+	if state.Backup == installer.BackupExternal && state.BackupStorage == nil {
+		return fmt.Errorf("this cluster uses external backup storage. Its connection settings are missing from the local kip configuration. " +
+			"Run kip install again with --backup-storage-bucket and its related flags, then upgrade")
+	}
+	return nil
+}
+
+// recordLegacyBackup fills an empty backup mode in the PlatformConfig and state.
+// Saved external storage settings select external mode. Otherwise, it selects
+// in-cluster mode if Velero's default location is missing or uses in-cluster MinIO.
+// An external location without saved settings returns installer.ErrExternalBackupUnknown.
+// Read and patch failures return errors. All errors leave state unchanged.
+func recordLegacyBackup(ctx context.Context, dyn dynamic.Interface, state *installer.PlatformState) error {
+	if state.Backup != "" {
+		return nil
+	}
+	mode := installer.BackupInCluster
+	if state.BackupStorage != nil {
+		mode = installer.BackupExternal
+	} else {
+		// Check Velero's location to avoid redirecting external backups to MinIO
+		// when local storage settings are missing.
+		external, err := veleroWritesElsewhere(ctx, dyn)
+		if err != nil {
+			return err
+		}
+		if external {
+			return installer.ErrExternalBackupUnknown
+		}
+	}
+	patch := []byte(`{"spec":{"backup":"` + mode + `"}}`)
+	if _, err := dyn.Resource(platformConfigGVR).Patch(ctx, "platform", types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("recording the backup mode: %w", err)
+	}
+	state.Backup = mode
+	return nil
+}
+
+var backupStorageLocationGVR = schema.GroupVersionResource{Group: "velero.io", Version: "v1", Resource: "backupstoragelocations"}
+
+// veleroWritesElsewhere reads Velero's default backup location and reports
+// whether its s3Url differs from the exact in-cluster MinIO URL. An empty,
+// missing or non-string s3Url counts as external storage. A missing location
+// returns false. Other read failures return an error.
+func veleroWritesElsewhere(ctx context.Context, dyn dynamic.Interface) (bool, error) {
+	bsl, err := dyn.Resource(backupStorageLocationGVR).Namespace("velero").Get(ctx, "default", metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading Velero's backup location: %w", err)
+	}
+	url, _, _ := unstructured.NestedString(bsl.Object, "spec", "config", "s3Url")
+	return !installer.BackupsGoToMinIO(url), nil
 }
 
 // runSystemUpgrade re-applies cluster system components (Traefik, Longhorn,

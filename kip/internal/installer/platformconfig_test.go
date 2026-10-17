@@ -207,16 +207,17 @@ func TestIgnoredProfileFlagNamesTheProfileCommand(t *testing.T) {
 
 func TestInstallPlatformConfigRecordsTheStorageMode(t *testing.T) {
 	host := &hostScript{}
-	require.NoError(t, InstallPlatformConfig(host, ProfileNano, "longhorn"))
+	require.NoError(t, InstallPlatformConfig(host, ProfileNano, "longhorn", BackupInCluster))
 	all := strings.Join(host.commands, "\n")
 	assert.Contains(t, all, "  storage: longhorn\n", "a new cluster records its mode")
+	assert.Contains(t, all, "  backup: in-cluster\n", "and its backup mode")
 	assert.Contains(t, all, `kubectl patch platformconfig platform --type merge -p '{"spec":{"storage":"longhorn"}}'`,
 		"a legacy CR gets the Longhorn it already runs")
 	assert.Contains(t, all, `[ -n "$s" ] ||`, "a recorded mode is left alone")
 }
 
 func TestPlatformStateQueriesReadTheStorageMode(t *testing.T) {
-	assert.Contains(t, platformStateJSONPath, "{.spec.profile}/{.spec.storage}|")
+	assert.Contains(t, platformStateJSONPath, "{.spec.profile}/{.spec.storage}/{.spec.backup}|")
 	state := readSavedPlatformState(&scriptedRunner{out: "'nano/local|'\n"})
 	assert.Equal(t, "local", state.Storage)
 }
@@ -271,4 +272,96 @@ func TestDiscoverClusterStorage(t *testing.T) {
 			assert.Equal(t, tc.unreadable, unreadable, "unreadable")
 		})
 	}
+}
+
+func TestResolveBackup(t *testing.T) {
+	for name, tc := range map[string]struct {
+		external          bool
+		storage, recorded string
+		existing          bool
+		want              string
+	}{
+		"a new local cluster has no backups":            {false, StorageLocal, "", false, BackupNone},
+		"a new Longhorn cluster backs up to MinIO":      {false, StorageLonghorn, "", false, BackupInCluster},
+		"external storage wins on a new cluster":        {true, StorageLocal, "", false, BackupExternal},
+		"a legacy cluster keeps its in-cluster backups": {false, StorageLonghorn, "", true, BackupInCluster},
+		"a recorded mode stays":                         {false, StorageLocal, BackupNone, true, BackupNone},
+		"a cluster without backups can add external":    {true, StorageLocal, BackupNone, true, BackupExternal},
+		"a re-run never adds MinIO to a local cluster":  {false, StorageLocal, BackupNone, true, BackupNone},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, resolveBackup(tc.external, tc.storage, tc.existing, tc.recorded))
+		})
+	}
+}
+
+// TestSettleBackup checks that the recorded mode is preserved unless external
+// storage is supplied, and that external mode requires connection settings.
+func TestSettleBackup(t *testing.T) {
+	for name, tc := range map[string]struct {
+		external          bool
+		storage, recorded string
+		want, err         string
+	}{
+		"a recorded external mode with its destination": {true, StorageLonghorn, BackupExternal, BackupExternal, ""},
+		"a recorded external mode kip has no record of": {false, StorageLonghorn, BackupExternal, "", "--backup-storage-bucket"},
+		"a recorded none stays none":                    {false, StorageLocal, BackupNone, BackupNone, ""},
+		"a recorded in-cluster mode stays":              {false, StorageLocal, BackupInCluster, BackupInCluster, ""},
+		"a legacy cluster is in-cluster":                {false, StorageLonghorn, "", BackupInCluster, ""},
+		"external storage given now wins":               {true, StorageLocal, BackupNone, BackupExternal, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := settleBackup(tc.external, tc.storage, tc.recorded)
+			if tc.err != "" {
+				assert.ErrorContains(t, err, tc.err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestInstallPlatformConfigLeavesTheBackupModeToTheInstaller(t *testing.T) {
+	host := &hostScript{}
+	require.NoError(t, InstallPlatformConfig(host, ProfileNano, StorageLocal, BackupNone))
+	all := strings.Join(host.commands, "\n")
+	assert.Contains(t, all, "  backup: none\n", "a new cluster records its mode")
+	assert.NotContains(t, all, `"backup"`, "an existing cluster's backup mode is not patched on a guess")
+}
+
+// Clusters created before spec.backup existed can use external Velero storage
+// even when kip has no local record of its settings.
+func TestVeleroWritesExternally(t *testing.T) {
+	for name, tc := range map[string]struct {
+		out  string
+		err  error
+		want bool
+		bad  bool
+	}{
+		"in-cluster MinIO":                   {out: "bsl[http://minio.velero.svc:9000]", want: false},
+		"an S3-compatible endpoint":          {out: "bsl[https://s3.example.com]", want: true},
+		"native AWS S3":                      {out: "bsl[]", want: true},
+		"no backup location":                 {out: `Error from server (NotFound): backupstoragelocations.velero.io "default" not found`, err: errors.New("exit status 1")},
+		"a cluster without Velero's types":   {out: `error: the server doesn't have a resource type "backupstoragelocation"`, err: errors.New("exit status 1")},
+		"an API server that does not answer": {out: "The connection to the server was refused", err: errors.New("exit status 1"), bad: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := veleroWritesExternally(&scriptedRunner{out: tc.out, err: tc.err})
+			if tc.bad {
+				assert.Error(t, err, "an unreadable location must not read as in-cluster")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestSettleBackupRefusesALegacyExternalClusterWithoutItsStorage(t *testing.T) {
+	_, err := settleLegacyBackup(false, StorageLonghorn, "", true)
+	assert.ErrorIs(t, err, errExternalBackupUnknown)
+	mode, err := settleLegacyBackup(false, StorageLonghorn, "", false)
+	assert.NoError(t, err)
+	assert.Equal(t, BackupInCluster, mode)
 }

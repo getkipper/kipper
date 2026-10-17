@@ -45,7 +45,7 @@ async function mountVolumes(sharedVolumes: boolean, volumes: volumesApi.Volume[]
   vi.mocked(platformApi.fetchPlatformSummary).mockResolvedValue({
     profile: 'nano', available_profiles: [], components: [],
     storage: sharedVolumes ? 'longhorn' : 'local', shared_volumes: sharedVolumes,
-    shared_volumes_note: sharedVolumes ? undefined : NOTE,
+    shared_volumes_note: sharedVolumes ? undefined : NOTE, backups: true,
   })
 
   const wrapper = mount(Volumes, { attachTo: document.body, global: { stubs: { RouterLink: true } } })

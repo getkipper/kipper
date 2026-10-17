@@ -109,6 +109,16 @@ func (h *rebootingHost) reboot(t *testing.T) (*nodeReboot, *bytes.Buffer) {
 }
 
 func TestNodeReboot(t *testing.T) {
+	t.Run("a cluster without backups reboots without one and says so", func(t *testing.T) {
+		h := &rebootingHost{bootID: "old-boot", confirm: true}
+		r, out := h.reboot(t)
+		r.NoBackups = true
+
+		require.NoError(t, r.run("example.com", false, false))
+		assert.Equal(t, []string{"confirm", "list apps", "reboot", "report"}, h.calls)
+		assert.Contains(t, out.String(), "no backups")
+	})
+
 	t.Run("backs up, reboots, waits for the new boot and a healthy cluster, then reports", func(t *testing.T) {
 		h := &rebootingHost{bootID: "old-boot", downReads: 6, unhealthyReads: 3, confirm: true}
 		r, out := h.reboot(t)
