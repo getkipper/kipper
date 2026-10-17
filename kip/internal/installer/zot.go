@@ -4,11 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
-
-	"k8s.io/apimachinery/pkg/api/resource"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -65,51 +62,24 @@ spec:
       targetPort: 5000
 `
 
-const zotDefaultStorage = "10Gi"
+const zotDefaultStorage = "5Gi"
 
-// zotStorageQuery wraps the requested size and capacity in zot-size[...]
-// so the parser can separate them from surrounding SSH output.
-// A missing claim produces no output.
-const zotStorageQuery = `kubectl -n kipper-system get pvc zot-data --ignore-not-found ` +
-	`-o jsonpath='{"zot-size["}{.spec.resources.requests.storage}{"|"}{.status.capacity.storage}{"]"}' 2>/dev/null`
+const zotStorageMarker = "zot-size"
 
-const zotStorageMarker = "zot-size["
-
-var zotStoragePayload = regexp.MustCompile(`zot-size\[([^|\]]*)\|([^|\]]*)\]`)
+// zotStorageQuery includes a marker to distinguish claim sizes from SSH output.
+var zotStorageQuery = storageSizeQuery(zotNamespace, "zot-data", zotStorageMarker)
 
 func renderZotBaseManifest(storage string) string {
 	return fmt.Sprintf(zotBaseManifestTemplate, storage)
 }
 
-// zotStorageRequest preserves expanded volumes by choosing the largest of
-// the default size, requested size, and capacity. Output without a marker
-// uses the default; marked output must contain a valid size record.
+// zotStorageRequest preserves expanded registry volumes using preservedStorageRequest.
 func zotStorageRequest(out string) (string, error) {
-	if !strings.Contains(out, zotStorageMarker) {
-		return zotDefaultStorage, nil
+	size, err := preservedStorageRequest(out, zotStorageMarker, zotDefaultStorage)
+	if err != nil {
+		return "", fmt.Errorf("registry volume: %w", err)
 	}
-	matches := zotStoragePayload.FindAllStringSubmatch(out, -1)
-	if len(matches) == 0 {
-		return "", fmt.Errorf("could not read registry volume size from %q", out)
-	}
-	request, capacity := matches[len(matches)-1][1], matches[len(matches)-1][2]
-	if request == "" {
-		return "", fmt.Errorf("registry volume has no requested size")
-	}
-	size := resource.MustParse(zotDefaultStorage)
-	for _, f := range []string{request, capacity} {
-		if f == "" {
-			continue
-		}
-		q, err := resource.ParseQuantity(f)
-		if err != nil {
-			return "", fmt.Errorf("reading registry volume size %q: %w", f, err)
-		}
-		if q.Cmp(size) > 0 {
-			size = q
-		}
-	}
-	return size.String(), nil
+	return size, nil
 }
 
 // zotConfigJSON gives the push account read/write access and the pull account
@@ -522,7 +492,7 @@ func InstallZot(client CommandRunner) error {
 	if _, err := client.Run("kubectl -n kipper-system rollout status deployment/zot --timeout=180s"); err != nil {
 		// Include pod logs to help diagnose the rollout failure. Avoid rollback:
 		// an older revision may allow unauthenticated access.
-		return fmt.Errorf("waiting for zot: %w%s", err, zotRolloutDiagnosis(client))
+		return fmt.Errorf("waiting for zot: %w%s%s", err, longhornVolumeDiagnosis(client, zotNamespace, "zot-data"), zotRolloutDiagnosis(client))
 	}
 
 	// Remove old ConfigMaps after a successful rollout, preserving the current

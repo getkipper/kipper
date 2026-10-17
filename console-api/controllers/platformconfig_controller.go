@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -152,9 +153,11 @@ func (r *PlatformConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			patchErrs = append(patchErrs, fmt.Errorf("traefik servicemonitor: %w", err))
 		}
 	}
-	if err := r.reconcileComponentEnabled(ctx, "loki",
+	if lokiStorage, err := r.lokiStorageSize(ctx); err != nil {
+		patchErrs = append(patchErrs, fmt.Errorf("loki volume size: %w", err))
+	} else if err := r.reconcileComponentEnabled(ctx, "loki",
 		lokiEnabled,
-		platform.LokiHelmChart(res),
+		platform.LokiHelmChart(res, lokiStorage),
 		pathsByChart["loki"]); err != nil {
 		patchErrs = append(patchErrs, fmt.Errorf("loki enable/disable: %w", err))
 	}
@@ -272,6 +275,40 @@ func (r *PlatformConfigReconciler) reconcileComponentEnabled(ctx context.Context
 		logger.Info("HelmChart deleted after disable", "chart", chartName)
 	}
 	return nil
+}
+
+// lokiStorageSize preserves the existing template or claim size when recreating
+// Loki. Missing objects use the fallback in platform.LokiStorageSize.
+func (r *PlatformConfigReconciler) lokiStorageSize(ctx context.Context) (string, error) {
+	var templateSize, claimSize string
+	sts := &appsv1.StatefulSet{}
+	err := r.Get(ctx, types.NamespacedName{Name: "loki", Namespace: platform.MonitoringNamespace}, sts)
+	switch {
+	case err == nil:
+		if len(sts.Spec.VolumeClaimTemplates) > 0 {
+			templateSize = storageRequest(sts.Spec.VolumeClaimTemplates[0].Spec.Resources.Requests)
+		}
+	case !errors.IsNotFound(err):
+		return "", fmt.Errorf("reading the loki statefulset: %w", err)
+	}
+	claim := &corev1.PersistentVolumeClaim{}
+	err = r.Get(ctx, types.NamespacedName{Name: "storage-loki-0", Namespace: platform.MonitoringNamespace}, claim)
+	switch {
+	case err == nil:
+		claimSize = storageRequest(claim.Spec.Resources.Requests)
+	case !errors.IsNotFound(err):
+		return "", fmt.Errorf("reading the loki claim: %w", err)
+	}
+	return platform.LokiStorageSize(templateSize, claimSize), nil
+}
+
+// storageRequest returns the storage request, or "" when it is absent or zero.
+func storageRequest(requests corev1.ResourceList) string {
+	size, ok := requests[corev1.ResourceStorage]
+	if !ok || size.IsZero() {
+		return ""
+	}
+	return size.String()
 }
 
 // reconcileTraefikServiceMonitor ensures the ServiceMonitor scraping

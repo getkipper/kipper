@@ -131,7 +131,7 @@ Resource tuning records are excluded from backups. After a restore, Kipper creat
 ```mermaid
 flowchart LR
     A[Velero] -->|stores backups| B[MinIO]
-    B -->|backed by| C[Longhorn PVC 30Gi]
+    B -->|backed by| C[Longhorn PVC 10Gi]
     D[Node Agent] -->|reads PVC data| E[App Volumes]
     D -->|uploads to| B
     A -->|manages| D

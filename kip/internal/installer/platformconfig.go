@@ -101,13 +101,40 @@ func keptProfileNotes(resolved, kept string, cpus int) []string {
 	return notes
 }
 
-// resolveProfile returns the requested profile, or the pick from the host's
-// RAM and CPUs when none was requested.
-func resolveProfile(requested string, sys SystemInfo) string {
-	if requested != "" {
+// ignoredProfileNote explains why the recorded profile takes precedence over
+// --profile. It returns "" when the request is empty or matches the saved profile.
+func ignoredProfileNote(kept, requested string) string {
+	if requested == "" || requested == kept {
+		return ""
+	}
+	return fmt.Sprintf("The requested --profile %s was ignored. This cluster keeps its saved '%s' profile. To change it, run kip platform profile set %s.", requested, kept, requested)
+}
+
+// resolveProfile prefers the saved profile, then the requested profile, then
+// a profile selected from host RAM and CPU capacity.
+func resolveProfile(requested, saved string, sys SystemInfo) string {
+	switch {
+	case saved != "":
+		return saved
+	case requested != "":
 		return requested
 	}
 	return pickProfile(sys.RAMMB, sys.CPUs)
+}
+
+// readSavedPlatformState reads the profile and overrides used for preflight.
+// Lookup failures and missing or unknown profiles return an empty state.
+func readSavedPlatformState(client CommandRunner) PlatformState {
+	out, err := client.Run("kubectl get platformconfig platform --request-timeout=15s -o " +
+		`jsonpath='{.spec.profile}|{range .spec.components[*]}{.name}={.memoryLimit};{.enabled}{"\n"}{end}' 2>/dev/null || true`)
+	if err != nil {
+		return PlatformState{}
+	}
+	state := parsePlatformStateJSONPath(strings.Trim(strings.TrimSpace(out), "'"))
+	if !slices.Contains(profilesBySize, state.Profile) {
+		return PlatformState{}
+	}
+	return state
 }
 
 // InstallPlatformConfig creates the initial "platform" CR with the chosen
