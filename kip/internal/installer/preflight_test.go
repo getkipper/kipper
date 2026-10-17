@@ -140,10 +140,10 @@ func TestRunPreflightChecks(t *testing.T) {
 			},
 		},
 		{
-			name: "passes at exact 2048 MB floor with nano warning",
+			name: "passes at the exact 1800 MiB floor with a nano warning",
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "22.04",
-				RAMMB: 2048, DiskMB: 40960,
+				RAMMB: 1800, DiskMB: 40960,
 			},
 			wantWarningContains: "'nano' profile",
 		},
@@ -218,12 +218,20 @@ func TestRunPreflightChecks(t *testing.T) {
 			},
 		},
 		{
-			name: "fails when RAM is below the 2048 MB floor",
+			name: "a 2 GB server reporting 1905 MiB passes",
+			system: SystemInfo{
+				OS: "ubuntu", OSVersion: "24.04",
+				RAMMB: 1905, DiskMB: 40960,
+			},
+			wantWarningContains: "'nano' profile",
+		},
+		{
+			name: "fails when RAM is below the 1800 MiB floor",
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "22.04",
-				RAMMB: 1024, DiskMB: 40960,
+				RAMMB: 1799, DiskMB: 40960,
 			},
-			wantError: "insufficient RAM: 1024MB available, 2048MB required",
+			wantError: "insufficient RAM: 1799MB available, 1800MB required",
 		},
 		{
 			name: "fails when 70% of the filesystem cannot hold the system volumes",

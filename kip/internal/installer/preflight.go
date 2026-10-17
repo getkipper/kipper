@@ -12,7 +12,8 @@ import (
 
 const (
 	// minRAMMB is the minimum detected RAM in MiB accepted by preflight.
-	minRAMMB         = 2048
+	// It allows for memory reserved by the host on a 2 GB server.
+	minRAMMB         = 1800
 	tightRAMMB       = 3500
 	recommendedRAMMB = 8192
 )
