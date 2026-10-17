@@ -118,7 +118,7 @@ var healthChecks = []healthCheck{
 	{"monitoring", "promtail", "Promtail", "daemonset", platform.ComponentPromtail},
 	{"monitoring", "prometheus-kube-prometheus-stack-prometheus", "Prometheus", "statefulset", platform.ComponentPrometheus},
 	{"monitoring", "kube-prometheus-stack-grafana", "Grafana", "deploy", platform.ComponentGrafana},
-	{"velero", "velero", "Velero", "deploy", ""},
+	{"velero", "velero", "Velero", "deploy", platform.ComponentVelero},
 	{"dex", "dex", "Dex", "deploy", ""},
 	{"kipper-system", "console-api", "Console API", "deploy", ""},
 	{"kipper-system", "console", "Console", "deploy", ""},
@@ -152,6 +152,7 @@ func installedChecks(pc *unstructured.Unstructured) []healthCheck {
 	}
 	profile, _, _ := unstructured.NestedString(pc.Object, "spec", "profile")
 	storage, _, _ := unstructured.NestedString(pc.Object, "spec", "storage")
+	backup, _, _ := unstructured.NestedString(pc.Object, "spec", "backup")
 	overrides := map[string]*bool{}
 	components, _, _ := unstructured.NestedSlice(pc.Object, "spec", "components")
 	for _, item := range components {
@@ -166,7 +167,7 @@ func installedChecks(pc *unstructured.Unstructured) []healthCheck {
 	}
 	var checks []healthCheck
 	for _, ch := range healthChecks {
-		if ch.component == "" || platform.Installed(ch.component, overrides, profile, storage) {
+		if ch.component == "" || platform.Installed(ch.component, overrides, profile, storage, backup) {
 			checks = append(checks, ch)
 		}
 	}

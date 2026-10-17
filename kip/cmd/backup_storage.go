@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -57,7 +58,20 @@ func runBackupStorageResize(cmd *cobra.Command, _ []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), minioResizeTimeout+30*time.Second)
 	defer cancel()
+	if err := backupResizeGate(ctx, client.Dynamic()); err != nil {
+		return err
+	}
 	return resizeBackupStorage(ctx, client.Clientset(), size, 2*time.Second, minioResizeTimeout, os.Stdout)
+}
+
+// backupResizeGate rejects resizing when the recorded backup mode is none,
+// because that mode provides no MinIO volume. An unreadable PlatformConfig
+// allows resizing for compatibility with legacy clusters.
+func backupResizeGate(ctx context.Context, dyn dynamic.Interface) error {
+	if !backupsConfiguredOn(ctx, dyn) {
+		return errBackupsNotConfigured
+	}
+	return nil
 }
 
 // resizeBackupStorage raises the MinIO claim's storage request to size, a

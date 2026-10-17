@@ -82,6 +82,7 @@ type nodeReboot struct {
 	Prepare          func() (undo func() error, err error)
 	Settle           func(within time.Duration) error
 	Backup           func() (string, error)
+	NoBackups        bool
 	BootID           func(ssh.Config) (string, error)
 	Reboot           func(ssh.Config) (time.Time, error)
 	Healthy          func(within time.Duration, bootID string) (bool, string)
@@ -113,7 +114,10 @@ func (r *nodeReboot) run(host string, yes, skipBackup bool) error {
 		}
 	}
 
-	if !skipBackup {
+	if r.NoBackups && !skipBackup {
+		say(r.Out, "\n  ℹ  This cluster has no backups, so the reboot proceeds without one\n")
+	}
+	if !skipBackup && !r.NoBackups {
 		say(r.Out, "\n  ...  Backing up before the reboot\n")
 		name, err := r.Backup()
 		if err != nil {
@@ -258,6 +262,7 @@ func runNodeReboot(cmd *cobra.Command, args []string) error {
 			defer cancel()
 			return backupBeforeReboot(ctx, cluster, client, 10*time.Second)
 		},
+		NoBackups: !backupsConfiguredOn(context.Background(), client.Dynamic()),
 		BootID: func(cfg ssh.Config) (string, error) {
 			return onHost(cfg, func(c *ssh.Client) (string, error) { return installer.ReadBootID(c) })
 		},

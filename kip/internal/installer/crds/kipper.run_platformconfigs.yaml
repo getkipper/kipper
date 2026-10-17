@@ -53,6 +53,13 @@ spec:
               A single cluster-scoped PlatformConfig named "platform" is the source of truth;
               the reconciler ignores any other names.
             properties:
+              backup:
+                description: An omitted backup mode preserves Velero on legacy clusters.
+                enum:
+                - none
+                - in-cluster
+                - external
+                type: string
               components:
                 description: |-
                   Components is the per-component override list. Anything not listed

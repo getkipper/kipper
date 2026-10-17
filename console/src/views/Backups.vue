@@ -8,6 +8,7 @@ import NoticeCallout from '@/components/NoticeCallout.vue'
 import { useAuthStore } from '@/stores/auth'
 import { fetchBackups, fetchSchedules, createBackup, restoreBackup, deleteBackup, toggleSchedule, type Backup, type BackupSchedule } from '@/api/backups'
 import { fetchProjects, type Project } from '@/api/projects'
+import { fetchPlatformSummary } from '@/api/platform'
 
 const toast = useToast()
 const modal = useModal()
@@ -44,7 +45,14 @@ const newName = ref('')
 const newNamespaces = ref('')
 const newTtl = ref('168h0m0s')
 
+const backupsNote = ref('')
+
 onMounted(async () => {
+  fetchPlatformSummary()
+    .then(summary => {
+      if (summary.backups === false) backupsNote.value = summary.backups_note ?? ''
+    })
+    .catch(() => {})
   await loadAll()
 })
 
@@ -182,7 +190,7 @@ function statusIcon(status: string) {
       </div>
       <div class="flex items-center gap-2">
         <button
-          v-if="authStore.isAdmin"
+          v-if="!backupsNote && authStore.isAdmin"
           @click="showCreate = !showCreate"
           class="inline-flex items-center gap-1.5 rounded-lg bg-kipper-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-kipper-700"
         >
@@ -199,6 +207,10 @@ function statusIcon(status: string) {
         </button>
       </div>
     </div>
+
+    <NoticeCallout v-if="backupsNote" tone="info" class="mb-6 p-4 text-sm text-slate-700 dark:text-slate-300">
+      {{ backupsNote }}
+    </NoticeCallout>
 
     <!-- Create form -->
     <div v-if="showCreate" class="mb-6 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
@@ -395,7 +407,7 @@ function statusIcon(status: string) {
       <div v-if="!backups.length && !schedules.length" class="rounded-xl border border-dashed border-slate-300 py-16 text-center dark:border-slate-700">
         <Archive class="mx-auto mb-3 h-10 w-10 text-slate-400 dark:text-slate-500" :stroke-width="1.5" />
         <p class="text-sm font-medium text-slate-900 dark:text-slate-50">No backups yet</p>
-        <p class="mt-1 max-w-sm mx-auto text-sm text-slate-500 dark:text-slate-400">
+        <p v-if="!backupsNote" class="mt-1 max-w-sm mx-auto text-sm text-slate-500 dark:text-slate-400">
           Create a backup with <code class="rounded-sm bg-slate-100 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-800">kip backup create</code> or use the button above.
         </p>
       </div>

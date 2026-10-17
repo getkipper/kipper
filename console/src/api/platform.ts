@@ -15,6 +15,8 @@ export interface PlatformSummary {
   storage: string
   shared_volumes: boolean
   shared_volumes_note?: string
+  backups: boolean
+  backups_note?: string
 }
 
 export interface PlatformComponent {

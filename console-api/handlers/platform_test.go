@@ -421,3 +421,29 @@ func TestPlatform_SummaryReportsTheStorageCapabilities(t *testing.T) {
 		})
 	}
 }
+
+func TestPlatform_SummaryReportsWhetherTheClusterHasBackups(t *testing.T) {
+	none := newPlatformConfig(platform.ProfileNano, nil, kipperv1.PlatformConfigStatus{})
+	none.Spec.Storage, none.Spec.Backup = platform.StorageLocal, platform.BackupNone
+	for name, tc := range map[string]struct {
+		h       *Platform
+		backups bool
+	}{
+		"no backups":   {&Platform{CRClient: testCRClient(none)}, false},
+		"legacy":       {&Platform{CRClient: testCRClient(newPlatformConfig(platform.ProfileSmall, nil, kipperv1.PlatformConfigStatus{}))}, true},
+		"no CR at all": {&Platform{CRClient: testCRClient()}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			mountPlatformRoutes(tc.h).ServeHTTP(rec, httptest.NewRequest("GET", "/api/v1/platform", nil))
+			var resp platformSummaryResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, tc.backups, resp.Backups)
+			if tc.backups {
+				assert.Empty(t, resp.BackupsNote)
+			} else {
+				assert.Equal(t, platform.BackupsNotConfigured, resp.BackupsNote)
+			}
+		})
+	}
+}

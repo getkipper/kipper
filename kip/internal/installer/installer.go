@@ -342,7 +342,8 @@ func Run(opts Options) (*Result, error) {
 		return nil, err
 	}
 	saved.Storage = storageMode
-	preflight, err := RunPreflightChecks(sysInfo, saved, opts.BackupStorage == nil, existingCluster)
+	backupMode := resolveBackup(opts.BackupStorage != nil, storageMode, existingCluster, saved.Backup)
+	preflight, err := RunPreflightChecks(sysInfo, saved, backupMode == BackupInCluster, existingCluster)
 	if err != nil {
 		return nil, err
 	}
@@ -626,7 +627,7 @@ func Run(opts Options) (*Result, error) {
 			return InstallAdmissionPolicies(client)
 		}},
 		{"Recording platform sizing profile", func() error {
-			if err := InstallPlatformConfig(client, platformProfile, storageMode); err != nil {
+			if err := InstallPlatformConfig(client, platformProfile, storageMode, backupMode); err != nil {
 				return err
 			}
 			state, err := ReadPlatformStateViaSSH(client)
@@ -636,6 +637,24 @@ func Run(opts Options) (*Result, error) {
 			if recorded := platform.StorageMode(state.Storage); recorded != storageMode {
 				return fmt.Errorf("the cluster's recorded storage mode (%s) differs from the mode prepared for this install (%s). Run kip install again", recorded, storageMode)
 			}
+			// Recheck the recorded mode because the preflight read may have failed.
+			writesExternally := false
+			if state.Backup == "" && opts.BackupStorage == nil {
+				if writesExternally, err = veleroWritesExternally(client); err != nil {
+					return err
+				}
+			}
+			settled, err := settleLegacyBackup(opts.BackupStorage != nil, storageMode, state.Backup, writesExternally)
+			if err != nil {
+				return err
+			}
+			if settled != state.Backup {
+				if err := RecordBackupMode(client, settled); err != nil {
+					return err
+				}
+				state.Backup = settled
+			}
+			backupMode = settled
 			for _, note := range keptProfileNotes(platformProfile, state.Profile, sysInfo.CPUs) {
 				fmt.Printf("       ⚠  %s\n", note)
 			}
@@ -706,6 +725,10 @@ func Run(opts Options) (*Result, error) {
 
 	steps = append(steps, []installStep{
 		{"Setting up backup and restore (Velero)", func() error {
+			if backupMode == BackupNone {
+				fmt.Printf("       (Skipping backups because external backup storage is not configured.)\n")
+				return nil
+			}
 			return InstallBackup(client, opts.BackupStorage, storageMode)
 		}},
 		{"Creating kipper-system namespace", func() error {

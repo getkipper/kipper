@@ -33,6 +33,8 @@ type platformSummaryResponse struct {
 	Storage           string                  `json:"storage"`
 	SharedVolumes     bool                    `json:"shared_volumes"`
 	SharedVolumesNote string                  `json:"shared_volumes_note,omitempty"`
+	Backups           bool                    `json:"backups"`
+	BackupsNote       string                  `json:"backups_note,omitempty"`
 }
 
 type componentSummaryEntry struct {
@@ -114,6 +116,7 @@ func (p *Platform) Summary(w http.ResponseWriter, r *http.Request) {
 				AvailableProfiles: availableProfiles(),
 				Storage:           platform.StorageLonghorn,
 				SharedVolumes:     true,
+				Backups:           true,
 			})
 			return
 		}
@@ -134,6 +137,10 @@ func (p *Platform) Summary(w http.ResponseWriter, r *http.Request) {
 	}
 	if !summary.SharedVolumes {
 		summary.SharedVolumesNote = platform.SharedVolumesUnsupported
+	}
+	summary.Backups = platform.BackupsConfigured(pc.Spec.Backup)
+	if !summary.Backups {
+		summary.BackupsNote = platform.BackupsNotConfigured
 	}
 	for _, name := range platform.SupportedComponents() {
 		summary.Components = append(summary.Components, componentSummaryEntry{

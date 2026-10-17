@@ -223,6 +223,7 @@ func TestDashboard_OOMKillsFilteredPerRequestNotCached(t *testing.T) {
 func TestDashboard_LeavesOutWhatTheClusterDoesNotRun(t *testing.T) {
 	pc := newPlatformConfig(platform.ProfileNano, nil, kipperv1.PlatformConfigStatus{})
 	pc.Spec.Storage = platform.StorageLocal
+	pc.Spec.Backup = platform.BackupNone
 	handler := &Dashboard{Client: fake.NewClientset(), CRClient: testCRClient(pc)}
 
 	w := httptest.NewRecorder()
@@ -234,7 +235,7 @@ func TestDashboard_LeavesOutWhatTheClusterDoesNotRun(t *testing.T) {
 	for _, c := range resp.Components {
 		names = append(names, c.Name)
 	}
-	for _, absent := range []string{"Longhorn", "Loki", "Promtail", "Prometheus", "Grafana"} {
+	for _, absent := range []string{"Longhorn", "Loki", "Promtail", "Prometheus", "Grafana", "Velero"} {
 		assert.NotContains(t, names, absent)
 	}
 	assert.Contains(t, names, "Traefik")

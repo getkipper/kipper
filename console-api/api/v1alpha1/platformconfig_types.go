@@ -33,6 +33,11 @@ type PlatformConfigSpec struct {
 	// +kubebuilder:validation:Enum=local;longhorn
 	Storage string `json:"storage,omitempty"`
 
+	// An omitted backup mode preserves Velero on legacy clusters.
+	// +optional
+	// +kubebuilder:validation:Enum=none;in-cluster;external
+	Backup string `json:"backup,omitempty"`
+
 	// RouteGuard configures the refusals applied to every app route.
 	// +optional
 	RouteGuard *RouteGuardSpec `json:"routeGuard,omitempty"`

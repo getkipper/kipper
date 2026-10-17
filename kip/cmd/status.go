@@ -74,7 +74,17 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	if client.StorageMode(ctx) == platform.StorageLocal {
-		reportLocalStorage(ctx, os.Stdout, client.Clientset(), nodes)
+		reportLocalStorage(ctx, os.Stdout, client.Clientset(), nodes, backupsConfiguredOn(ctx, client.Dynamic()), func() ([]volumeUsage, error) {
+			if cluster.Host == "" {
+				return nil, fmt.Errorf("no host recorded for this cluster")
+			}
+			host, err := ssh.Dial(hostSSHConfig(cluster, ""))
+			if err != nil {
+				return nil, fmt.Errorf("could not reach the host over SSH: %w", err)
+			}
+			defer func() { _ = host.Close() }()
+			return localVolumeUsage(host)
+		})
 	} else {
 		reportStorageRestartCoverage(nodes)
 	}

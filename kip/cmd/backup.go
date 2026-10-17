@@ -15,7 +15,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/dynamic"
 
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/service"
@@ -96,10 +98,27 @@ func init() {
 	rootCmd.AddCommand(backupCmd)
 }
 
+// errBackupsNotConfigured is the CLI's refusal on a cluster without backups.
+var errBackupsNotConfigured = errors.New(strings.TrimSuffix(platform.BackupsNotConfigured, "."))
+
+// backupsConfiguredOn checks the recorded backup mode. Read failures count as
+// configured for compatibility with clusters that lack a readable PlatformConfig.
+func backupsConfiguredOn(ctx context.Context, dyn dynamic.Interface) bool {
+	pc, err := dyn.Resource(platformConfigGVR).Get(ctx, "platform", metav1.GetOptions{})
+	if err != nil {
+		return true
+	}
+	backup, _, _ := unstructured.NestedString(pc.Object, "spec", "backup")
+	return platform.BackupsConfigured(backup)
+}
+
 func runBackupCreate(cmd *cobra.Command, args []string) error {
 	cluster, k8sClient, err := loadCurrentCluster()
 	if err != nil {
 		return err
+	}
+	if !backupsConfiguredOn(context.Background(), k8sClient.Dynamic()) {
+		return errBackupsNotConfigured
 	}
 
 	project, _ := cmd.Flags().GetString("project")
@@ -174,6 +193,10 @@ func runBackupList(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
+	if !backupsConfiguredOn(ctx, k8sClient.Dynamic()) {
+		fmt.Printf("\n  %s\n\n", platform.BackupsNotConfigured)
+		return nil
+	}
 	backups, err := k8sClient.Dynamic().Resource(backupGVR).Namespace("velero").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("listing backups: %w", err)
@@ -221,6 +244,9 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
+	if !backupsConfiguredOn(ctx, k8sClient.Dynamic()) {
+		return errBackupsNotConfigured
+	}
 	backup, err := k8sClient.Dynamic().Resource(backupGVR).Namespace("velero").Get(ctx, backupName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("reading backup %s: %w", backupName, err)
@@ -406,6 +432,10 @@ func runBackupSchedules(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
+	if !backupsConfiguredOn(ctx, k8sClient.Dynamic()) {
+		fmt.Printf("\n  %s\n\n", platform.BackupsNotConfigured)
+		return nil
+	}
 	schedules, err := k8sClient.Dynamic().Resource(scheduleGVR).Namespace("velero").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("listing schedules: %w", err)

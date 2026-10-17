@@ -91,6 +91,27 @@ func TestPlatformConfigStorageSchema(t *testing.T) {
 		}
 	})
 
+	t.Run("the backup mode takes only the three named values", func(t *testing.T) {
+		pc := &PlatformConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "backup-unknown"},
+			Spec:       PlatformConfigSpec{Profile: "nano", Storage: "local", Backup: "tape"},
+		}
+		if err := c.Create(ctx, pc); err == nil {
+			t.Fatal("backup tape was accepted")
+		}
+		pc = &PlatformConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "backup-none"},
+			Spec:       PlatformConfigSpec{Profile: "nano", Storage: "local", Backup: "none"},
+		}
+		if err := c.Create(ctx, pc); err != nil {
+			t.Fatalf("creating with backup none: %v", err)
+		}
+		pc.Spec.Backup = "external"
+		if err := c.Update(ctx, pc); err != nil {
+			t.Fatalf("adding external backup storage later: %v", err)
+		}
+	})
+
 	t.Run("other spec changes keep working", func(t *testing.T) {
 		pc := create(t, "profile-change", "local")
 		pc.Spec.Profile = "small"
