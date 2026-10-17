@@ -161,7 +161,7 @@ func (h *stuckRolloutHost) Run(cmd string) (string, error) {
 func TestPlatformManifestsPinToTheServer(t *testing.T) {
 	res := platform.EffectiveResources(ProfileMedium, nil)
 	keda := &recordingRunner{}
-	require.NoError(t, InstallKEDA(keda))
+	require.NoError(t, InstallKEDA(keda, ProfileSmall))
 	minio := &stdinRecorder{}
 	require.NoError(t, installInClusterMinIO(minio, "pw", platform.LonghornSingleClass))
 
