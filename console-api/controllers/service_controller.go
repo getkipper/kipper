@@ -35,6 +35,7 @@ import (
 	"github.com/getkipper/kipper/console-api/share"
 	"github.com/getkipper/kipper/console-api/uisession"
 	"github.com/getkipper/kipper/controller/pkg/datavolume"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/controller/pkg/servicecatalog"
 )
@@ -560,7 +561,11 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	}
 
 	replicas := int32(1)
-	storageClass := "longhorn-single"
+	mode, err := clusterStorageMode(ctx, r.Client)
+	if err != nil {
+		return err
+	}
+	storageClass := platform.SingleWriterClass(mode)
 
 	// Init container removes lost+found created by ext4 formatting on Longhorn volumes.
 	// MySQL refuses to initialise if the data directory contains any files.
@@ -626,7 +631,7 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	}
 
 	var existing appsv1.StatefulSet
-	err := r.Get(ctx, types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}, &existing)
+	err = r.Get(ctx, types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}, &existing)
 	if errors.IsNotFound(err) {
 		return r.Create(ctx, desired)
 	}

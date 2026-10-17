@@ -605,7 +605,10 @@ func Run(opts Options) (*Result, error) {
 
 	steps = append(steps, []installStep{
 		{"Registering Kipper CRDs", func() error {
-			return InstallCRDs(client, opts.KipVersion)
+			if err := InstallCRDs(client, opts.KipVersion); err != nil {
+				return err
+			}
+			return InstallAdmissionPolicies(client)
 		}},
 		{"Recording platform sizing profile", func() error {
 			if err := InstallPlatformConfig(client, platformProfile, StorageLonghorn); err != nil {

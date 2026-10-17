@@ -1,0 +1,43 @@
+# Local storage cannot provision shared volumes, so reject Volume creation and
+# App or Function creation or updates with shared mounts. Allow requests when
+# PlatformConfig "platform" is missing for compatibility with older clusters.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kipper-shared-volumes
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: kipper.run/v1alpha1
+    kind: PlatformConfig
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["kipper.run"]
+        apiVersions: ["*"]
+        operations: ["CREATE"]
+        resources: ["volumes"]
+      - apiGroups: ["kipper.run"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["apps", "functions"]
+  variables:
+    - name: local
+      expression: "has(params.spec) && has(params.spec.storage) && params.spec.storage == 'local'"
+  validations:
+    - expression: "!variables.local || (request.resource.resource != 'volumes' && (!has(object.spec) || !has(object.spec.volumes) || size(object.spec.volumes) == 0))"
+      message: "This cluster uses local storage. Shared volumes (ReadWriteMany) require Longhorn. See Cluster Migration in the Kipper docs to move to a cluster with Longhorn storage."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kipper-shared-volumes
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  policyName: kipper-shared-volumes
+  validationActions: ["Deny"]
+  paramRef:
+    name: platform
+    parameterNotFoundAction: Allow

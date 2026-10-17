@@ -6,6 +6,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -16,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 const volumeFinalizer = "kipper.run/volume-cleanup"
@@ -56,6 +58,14 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		if err := r.Update(ctx, &vol); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	mode, err := clusterStorageMode(ctx, r.Client)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !platform.SupportsSharedVolumes(mode) {
+		return ctrl.Result{}, r.reportSharedStorageUnsupported(ctx, &vol)
 	}
 
 	if err := r.reconcilePVC(ctx, &vol); err != nil {
@@ -138,9 +148,23 @@ func (r *VolumeReconciler) syncAppVolumes(ctx context.Context, vol *kipperv1.Vol
 	return nil
 }
 
+// reportSharedStorageUnsupported persists a Pending phase and the reason shared
+// storage is unavailable, returning any status update error.
+func (r *VolumeReconciler) reportSharedStorageUnsupported(ctx context.Context, vol *kipperv1.Volume) error {
+	vol.Status.Phase = "Pending"
+	apimeta.SetStatusCondition(&vol.Status.Conditions, metav1.Condition{
+		Type:               conditionSharedStorageUnsupported,
+		Status:             metav1.ConditionTrue,
+		Reason:             "LocalStorage",
+		Message:            platform.SharedVolumesUnsupported,
+		ObservedGeneration: vol.Generation,
+	})
+	return r.Status().Update(ctx, vol)
+}
+
 func (r *VolumeReconciler) reconcilePVC(ctx context.Context, vol *kipperv1.Volume) error {
 	pvcName := "shared-" + vol.Name
-	storageClass := "longhorn"
+	storageClass := platform.LonghornSharedClass
 
 	desired := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{

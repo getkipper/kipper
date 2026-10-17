@@ -25,6 +25,12 @@ assumes an existing Kipper cluster: the `kipper-system` namespace, service
 accounts, and secrets that `kip install` creates. On its own it deploys none
 of those.
 
+## policies/
+
+These are reference copies of the ValidatingAdmissionPolicies that `kip` installs.
+`TestAdmissionPoliciesMatchDeploy` checks that they match the installer's embedded
+copies byte for byte.
+
 ## console / console-api
 
 These have no static manifest. Both are rendered per cluster by `kip install`

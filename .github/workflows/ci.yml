@@ -239,16 +239,16 @@ jobs:
             echo "::error file=deploy/crds/kustomization.yaml::out of sync — run scripts/generate-crd-kustomization.sh and commit the result"
             exit 1
           fi
-      # deploy/ is a drift-gated reference set: everything in it must be
-      # provably in sync with what kip install ships. authz.yaml is gated
-      # by TestAuthzManifestMatchesDeploy, crds/ by the steps above. Any
-      # other entry would silently drift from the installer.
+      # Reference manifests in deploy/ must match what kip install ships.
+      # TestAuthzManifestMatchesDeploy checks authz.yaml,
+      # TestAdmissionPoliciesMatchDeploy checks policies/, and the steps above
+      # check crds/. Additional entries need a drift check to stay in sync.
       - name: Check deploy/ contains only gated content
         run: |
-          unexpected=$(find deploy -mindepth 1 -maxdepth 1 ! -name 'crds' ! -name 'authz.yaml' ! -name 'README.md')
+          unexpected=$(find deploy -mindepth 1 -maxdepth 1 ! -name 'crds' ! -name 'authz.yaml' ! -name 'policies' ! -name 'README.md')
           if [ -n "$unexpected" ]; then
             echo "$unexpected"
-            echo "::error::ungated entry in deploy/ — everything in deploy/ needs a drift gate (see deploy/README.md)"
+            echo "::error::An entry in deploy/ has no drift check. Every entry needs one (see deploy/README.md)."
             exit 1
           fi
           # Inside deploy/crds the drift steps above only cover kipper.run_*.yaml
