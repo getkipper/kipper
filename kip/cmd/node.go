@@ -284,17 +284,26 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\n  Connecting to the server (%s)...\n", cluster.Host)
-	server, err := ssh.Dial(nodeSSH(cluster.Host, sshKey, cluster))
+	serverConn, err := ssh.Dial(nodeSSH(cluster.Host, sshKey, cluster))
 	if err != nil {
 		return fmt.Errorf("connecting to the server: %w", err)
 	}
-	defer func() { _ = server.Close() }()
+	defer func() { _ = serverConn.Close() }()
+	// The lease comes before anything that changes a host, and every command
+	// after this point goes through it.
+	lease, err := installer.TakeNodeLease(serverConn, "kip node add "+workerHost)
+	if err != nil {
+		return err
+	}
+	defer lease.Release()
+	server := lease.Server(serverConn)
 	fmt.Printf("  Connecting to %s...\n", workerHost)
-	worker, err := ssh.Dial(nodeSSH(workerHost, sshKey, cluster))
+	workerConn, err := ssh.Dial(nodeSSH(workerHost, sshKey, cluster))
 	if err != nil {
 		return fmt.Errorf("connecting to %s: %w", workerHost, err)
 	}
-	defer func() { _ = worker.Close() }()
+	defer func() { _ = workerConn.Close() }()
+	worker := lease.Host(workerConn)
 
 	// Capture the host identity before setup so registration can be verified.
 	identity, err := installer.ReadHostIdentity(worker)
@@ -367,9 +376,10 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// Connect to existing workers before updating their peer firewall rules.
-	peers := map[string]*ssh.Client{}
+	peers := map[string]installer.FirewallRunner{}
+	var peerConns []*ssh.Client
 	defer func() {
-		for _, c := range peers {
+		for _, c := range peerConns {
 			_ = c.Close()
 		}
 	}()
@@ -381,8 +391,10 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("connecting to node %s (%s), whose firewall must admit the new node: %w", r.Name, r.Host, err)
 		}
-		peers[r.MachineID] = c
-		id, err := installer.ReadMachineID(c)
+		peerConns = append(peerConns, c)
+		peer := lease.Host(c)
+		peers[r.MachineID] = peer
+		id, err := installer.ReadMachineID(peer)
 		if err != nil || id != r.MachineID {
 			return fmt.Errorf("%s no longer answers as node %s (machine id %q, recorded %s); check the address before adding nodes", r.Host, r.Name, id, r.MachineID)
 		}

@@ -78,10 +78,21 @@ func NodeRegistered(master CommandRunner, node string) (bool, error) {
 	return listsObject(out, "node/"+node), nil
 }
 
+// RemovalStarted reports whether state is removing or wiping. A wiping
+// worker must finish removal before it can be added again.
+func RemovalStarted(state string) bool {
+	return state == NodeStateRemoving || state == NodeStateWiping
+}
+
 // RemovalInProgress returns the first record in input order being removed,
 // excluding machineID. It returns a zero record and false if none matches.
 func RemovalInProgress(records []NodeRecord, machineID string) (NodeRecord, bool) {
-	return otherInState(records, machineID, NodeStateRemoving)
+	for _, r := range records {
+		if RemovalStarted(r.State) && r.MachineID != machineID {
+			return r, true
+		}
+	}
+	return NodeRecord{}, false
 }
 
 // JoinInProgress returns the first record in input order still joining,

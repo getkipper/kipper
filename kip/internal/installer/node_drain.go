@@ -219,19 +219,32 @@ func UncordonNode(master CommandRunner, node string) error {
 	return nil
 }
 
-// DrainNode drains a node within timeout, honoring pod disruption budgets.
-// DaemonSet and mirror pods stay. Unmanaged pods block the drain.
-// Evicted pods lose their emptyDir data. A timeout below one second returns an error.
-// Drain failures include distinct error lines in their original order, with occurrence
+// drainRound limits each kubectl drain so an interrupted kip run leaves
+// only a short drain round to finish.
+const drainRound = 2 * time.Minute
+
+// DrainNode drains a node with a total kubectl timeout budget of timeout,
+// honoring pod disruption budgets. DaemonSet and mirror pods stay, and
+// unmanaged pods block the drain. Evicted pods lose their emptyDir data.
+// Each round has a timeout of at most two minutes. Only timeout failures
+// are retried. A timeout below one second returns an error.
+// Drain failures include distinct error lines from the last round in their original order, with occurrence
 // counts for repeated lines, or the command error if no error lines are recognised.
 func DrainNode(master CommandRunner, node string, timeout time.Duration) error {
 	// kubectl reads a zero timeout as no limit.
 	if timeout < time.Second {
 		return fmt.Errorf("the drain timeout must be at least 1s, got %s", timeout)
 	}
-	out, err := master.Run(fmt.Sprintf("kubectl drain %s --ignore-daemonsets --delete-emptydir-data --timeout=%s 2>&1", node, timeout))
-	if err == nil {
-		return nil
+	var out string
+	var err error
+	for left := timeout; left > 0; left -= drainRound {
+		out, err = master.Run(fmt.Sprintf("kubectl drain %s --ignore-daemonsets --delete-emptydir-data --timeout=%s 2>&1", node, min(left, drainRound)))
+		if err == nil {
+			return nil
+		}
+		if !strings.Contains(out, "global timeout reached") && !strings.Contains(out, "drain did not complete within") {
+			break
+		}
 	}
 	reasons := drainFailureReasons(out)
 	if len(reasons) == 0 {

@@ -86,6 +86,9 @@ func (h *removalHost) Run(cmd string) (string, error) {
 	case strings.Contains(cmd, `\"state\":\"removing\"`):
 		h.workerState = installer.NodeStateRemoving
 		return "", nil
+	case strings.Contains(cmd, `\"state\":\"wiping\"`):
+		h.workerState = installer.NodeStateWiping
+		return "", nil
 	case strings.Contains(cmd, "get configmap kipper-nodes --ignore-not-found -o name"):
 		return "configmap/kipper-nodes\n", nil
 	case strings.Contains(cmd, "jsonpath='{.data}'"):
@@ -131,7 +134,10 @@ func newRemoval(h *removalHost, events *[]string) nodeRemoval {
 		HostHoldsReplicas: func() (bool, error) { return true, nil },
 		HostRunsK3s:       func() (bool, error) { return true, nil },
 		Timeout:           time.Minute, Poll: time.Millisecond, Sleep: func(time.Duration) {},
-		WipeWorker: func() error {
+		WipeWorker: func(claim func() error) error {
+			if err := claim(); err != nil {
+				return err
+			}
 			*events = append(*events, "wipe@"+strconv.Itoa(len(h.commands)))
 			return nil
 		},
@@ -205,7 +211,7 @@ func TestNodeRemovalKeepsTheRecordWhenTheWipeFails(t *testing.T) {
 	h := &removalHost{}
 	var events []string
 	r := newRemoval(h, &events)
-	r.WipeWorker = func() error { return errors.New("connecting to 203.0.113.11: no route to host") }
+	r.WipeWorker = func(func() error) error { return errors.New("connecting to 203.0.113.11: no route to host") }
 
 	require.Error(t, r.run())
 	assert.Equal(t, -1, h.index("kubectl delete node"), "a Node whose host still runs k3s would come back")
@@ -269,20 +275,37 @@ func TestWipeRemovedWorkerChecksTheHost(t *testing.T) {
 	elsewhere := func() (string, error) { return serverID, nil }
 
 	other := &removalIdentityHost{id: "cccccccccccccccccccccccccccccccc"}
-	assert.ErrorContains(t, wipeRemovedWorker(other, worker, elsewhere), "left alone")
+	assert.ErrorContains(t, wipeRemovedWorker(other, worker, elsewhere, noClaim), "left alone")
 	assert.False(t, other.uninstalled)
 
 	self := &removalIdentityHost{id: workerID}
 	here := func() (string, error) { return workerID, nil }
-	assert.ErrorContains(t, wipeRemovedWorker(self, worker, here), "machine running kip")
+	assert.ErrorContains(t, wipeRemovedWorker(self, worker, here, noClaim), "machine running kip")
 	assert.False(t, self.uninstalled)
 
 	same := &removalIdentityHost{id: workerID}
-	require.NoError(t, wipeRemovedWorker(same, worker, elsewhere))
+	require.NoError(t, wipeRemovedWorker(same, worker, elsewhere, noClaim))
 	assert.True(t, same.uninstalled)
 
 	stays := &removalIdentityHost{id: workerID, k3sStays: true}
-	assert.ErrorContains(t, wipeRemovedWorker(stays, worker, elsewhere), "still installed", "the Node is only deleted once k3s is gone")
+	assert.ErrorContains(t, wipeRemovedWorker(stays, worker, elsewhere, noClaim), "still installed", "the Node is only deleted once k3s is gone")
+}
+
+func noClaim() error { return nil }
+
+func TestWipeRemovedWorkerClaimsTheWipeAfterTheIdentityChecks(t *testing.T) {
+	worker := config.NodeRecord{Name: "worker-1", Host: "203.0.113.11", MachineID: workerID}
+	elsewhere := func() (string, error) { return serverID, nil }
+
+	claimed := false
+	other := &removalIdentityHost{id: "cccccccccccccccccccccccccccccccc"}
+	_ = wipeRemovedWorker(other, worker, elsewhere, func() error { claimed = true; return nil })
+	assert.False(t, claimed, "a replaced host leaves the record keepable")
+
+	refused := &removalIdentityHost{id: workerID}
+	err := wipeRemovedWorker(refused, worker, elsewhere, func() error { return errors.New("the claim was refused") })
+	assert.ErrorContains(t, err, "the claim was refused")
+	assert.False(t, refused.uninstalled, "nothing on the host changes without the claim")
 }
 
 type removalIdentityHost struct {
@@ -385,6 +408,90 @@ func TestKeepingARemovingNodeNeedsItsHostUnwiped(t *testing.T) {
 	assert.NoError(t, keepRemovingNode(&removalIdentityHost{id: workerID}, rec), "only a removal in progress is checked")
 }
 
+func TestKeepingRefusesAWorkerWhoseWipeWasClaimed(t *testing.T) {
+	rec := removalRecords()[1]
+	rec.State = installer.NodeStateWiping
+	err := keepRemovingNode(&k3sHost{}, rec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "can no longer be kept")
+	assert.Contains(t, err.Error(), "kip node remove worker-1")
+}
+
+func TestAWipingRecordBlocksOtherNodeChanges(t *testing.T) {
+	records := removalRecords()
+	records[1].State = installer.NodeStateWiping
+
+	assert.ErrorContains(t, removalBlocksJoin(records, "cccccccccccccccccccccccccccccccc"), "worker-1 is being removed")
+	assert.ErrorContains(t, removalBlocksReboot(records[1]), "being removed")
+}
+
+func TestTheWipeClaimComesRightBeforeTheUninstall(t *testing.T) {
+	h := &removalHost{}
+	var events []string
+	var out bytes.Buffer
+	r := newRemoval(h, &events)
+	r.Out = &out
+
+	require.NoError(t, r.run())
+	claim := h.index(`\"state\":\"wiping\"`)
+	require.GreaterOrEqual(t, claim, 0, "the wipe is claimed: %v", h.commands)
+	assert.Greater(t, claim, h.index("kubectl drain"))
+	assert.Greater(t, claim, h.index("get replicas.longhorn.io"), "the data checks run first")
+	require.NotEmpty(t, events)
+	assert.Equal(t, claim+1, atoi(t, events[0]), "the claim is the last server command before the wipe")
+	text := out.String()
+	assert.Less(t, strings.Index(text, "Draining"), strings.Index(text, "Uninstalling k3s"))
+}
+
+func TestAClaimedWipeResumesWithoutDrainingAgain(t *testing.T) {
+	h := &removalHost{workerState: installer.NodeStateWiping}
+	var events []string
+	r := newRemoval(h, &events)
+	r.Worker.State = installer.NodeStateWiping
+	r.HostHoldsReplicas = func() (bool, error) { return true, nil }
+
+	require.NoError(t, r.run())
+	assert.Equal(t, -1, h.index(`\"state\":\"removing\"`), "a claimed wipe is never turned back into a keepable removal")
+	assert.Equal(t, -1, h.index("kubectl drain"))
+	assert.Contains(t, strings.Join(events, " "), "wipe@", "the wipe runs again, since an interrupted one may not have finished")
+	assert.Greater(t, h.index(`":null`), 0)
+}
+
+func TestForcedRemovalClaimsTheWipeBeforeDeletingAnything(t *testing.T) {
+	h := &removalHost{}
+	var events []string
+	r := forcedRemoval(h, &events)
+
+	require.NoError(t, r.run())
+	claim := h.index(`\"state\":\"wiping\"`)
+	require.GreaterOrEqual(t, claim, 0, "a forced removal claims the wipe too")
+	assert.Less(t, claim, h.index("kubectl delete node"))
+	assert.Less(t, claim, atoi(t, events[0]), "before the peer rules change")
+}
+
+func TestAResumedWipeChecksTheDataAgain(t *testing.T) {
+	h := &removalHost{workerState: installer.NodeStateWiping, strandedReplica: true}
+	var events []string
+	r := newRemoval(h, &events)
+	r.Worker.State = installer.NodeStateWiping
+
+	err := r.run()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pvc-2")
+	assert.Empty(t, events, "a copy that became the only one after the claim is not wiped")
+}
+
+func TestAForcedRemovalResumesAClaimedWipe(t *testing.T) {
+	h := &removalHost{workerState: installer.NodeStateWiping}
+	var events []string
+	r := forcedRemoval(h, &events)
+	r.Worker.State = installer.NodeStateWiping
+
+	require.NoError(t, r.run())
+	assert.Equal(t, -1, h.index(`\"state\":\"removing\"`))
+	assert.Greater(t, h.index(`":null`), 0)
+}
+
 type k3sHost struct{}
 
 func (k3sHost) Run(string) (string, error)                 { return "present\n", nil }
@@ -446,7 +553,10 @@ func forcedRemoval(h *removalHost, events *[]string) nodeRemoval {
 	r.Force = true
 	fail := func() (bool, error) { return false, errors.New("the host must not be contacted") }
 	r.HostRunsK3s, r.HostHoldsReplicas = fail, fail
-	r.WipeWorker = func() error { *events = append(*events, "wipe"); return errors.New("the host must not be wiped") }
+	r.WipeWorker = func(func() error) error {
+		*events = append(*events, "wipe")
+		return errors.New("the host must not be wiped")
+	}
 	return r
 }
 

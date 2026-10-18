@@ -332,6 +332,38 @@ func (c *Client) RunStdin(command string, stdin io.Reader) (string, error) {
 	return out, nil
 }
 
+// Held provides input, output and completion for an SSH command. Closing
+// Stdin sends EOF to the command. Drain Stdout before calling Wait, which
+// waits for the SSH process to exit and returns its exit error, if any.
+type Held struct {
+	Stdin  io.WriteCloser
+	Stdout io.Reader
+	Wait   func() error
+}
+
+// Start starts the local SSH process without a command time limit and
+// discards stderr. A successful return means SSH started, so connection or
+// remote command failures can still be reported by Held.Wait. The caller
+// must close Stdin, drain Stdout and call Wait. Closing Stdin sends EOF,
+// which ends commands that exit on EOF. SSH shares kip's process group and
+// receives interrupts sent to that group.
+func (c *Client) Start(command string) (*Held, error) {
+	//nolint:gosec // ssh client is the operator's chosen execution surface; arguments are built by kip internals against the host the operator selected
+	cmd := exec.Command("ssh", append(c.sshArgs(), command)...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("starting %q on %s: %w", command, c.cfg.Host, err)
+	}
+	return &Held{Stdin: stdin, Stdout: stdout, Wait: cmd.Wait}, nil
+}
+
 // RunStream executes a command and streams stdout and stderr to the
 // given writer as the remote command produces them.
 // It is not retried. Whatever the remote side produced before the connection

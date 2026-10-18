@@ -25,6 +25,7 @@ const (
 	NodeStateJoining  = "joining"
 	NodeStateReady    = "ready"
 	NodeStateRemoving = "removing"
+	NodeStateWiping   = "wiping"
 
 	NetworkModePublic  = "public"
 	NetworkModePrivate = "private"
@@ -63,7 +64,7 @@ func validateNodeRecord(r NodeRecord) error {
 		return fmt.Errorf("node record %s has invalid role %q", r.Name, r.Role)
 	}
 	switch r.State {
-	case NodeStateJoining, NodeStateReady, NodeStateRemoving:
+	case NodeStateJoining, NodeStateReady, NodeStateRemoving, NodeStateWiping:
 	default:
 		return fmt.Errorf("node record %s has invalid state %q", r.Name, r.State)
 	}
