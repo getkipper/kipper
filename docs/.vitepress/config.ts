@@ -132,6 +132,7 @@ export default withMermaid(
             items: [
               { text: 'Dashboard', link: '/en/dashboard' },
               { text: 'Upgrades & Maintenance', link: '/en/maintenance' },
+              { text: 'Worker Nodes', link: '/en/worker-nodes' },
               { text: 'Resource Management', link: '/en/resource-management' },
               { text: 'Platform Resources', link: '/en/platform-resources' },
               { text: 'Alerts', link: '/en/alerts' },
