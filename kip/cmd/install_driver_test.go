@@ -257,7 +257,7 @@ func addLocalCluster(t *testing.T, c config.Cluster) {
 func TestSaveDrivenResult(t *testing.T) {
 	home := withFakeHome(t)
 
-	require.NoError(t, saveDrivenResult(shopResult(), "203.0.113.10", `C:\Users\ops\.ssh\id_ed25519`))
+	require.NoError(t, saveDrivenResult(shopResult(), "203.0.113.10", `C:\Users\ops\.ssh\id_ed25519`, ""))
 
 	entry := loadShop(t)
 	assert.Equal(t, `C:\Users\ops\.ssh\id_ed25519`, entry.SSHKey)
@@ -277,7 +277,7 @@ func TestSaveDrivenResultRefusesAnotherHostsEntry(t *testing.T) {
 	res := shopResult()
 	res.Cluster.Host = "198.51.100.7"
 
-	err := saveDrivenResult(res, "203.0.113.10", "")
+	err := saveDrivenResult(res, "203.0.113.10", "", "")
 
 	assert.ErrorContains(t, err, "198.51.100.7")
 	saved, err := config.Load()
@@ -290,7 +290,7 @@ func TestSaveDrivenResultLeavesAnotherClusterOfTheSameNameAlone(t *testing.T) {
 	path := stageExistingKubeconfig(t, home, kipRenderedKubeconfig(t, "https://198.51.100.7:6443"))
 	addLocalCluster(t, config.Cluster{Name: "shop", Host: "198.51.100.7", Kubeconfig: path})
 
-	err := saveDrivenResult(shopResult(), "203.0.113.10", "")
+	err := saveDrivenResult(shopResult(), "203.0.113.10", "", "")
 
 	assert.ErrorContains(t, err, "kip cluster rename")
 	assert.Equal(t, "198.51.100.7", loadShop(t).Host)
@@ -303,7 +303,7 @@ func TestSaveDrivenResultKeepsWhatThisMachineChoseForTheCluster(t *testing.T) {
 	withFakeHome(t)
 	addLocalCluster(t, config.Cluster{Name: "shop", Host: "203.0.113.10", CurrentProject: "web", CurrentEnvironment: "staging"})
 
-	require.NoError(t, saveDrivenResult(shopResult(), "203.0.113.10", ""))
+	require.NoError(t, saveDrivenResult(shopResult(), "203.0.113.10", "", ""))
 
 	entry := loadShop(t)
 	assert.Equal(t, "web", entry.CurrentProject)
@@ -314,7 +314,7 @@ func TestSaveDrivenResultKeepsAnAdminCertificate(t *testing.T) {
 	home := withFakeHome(t)
 	path := stageExistingKubeconfig(t, home, adminCertKubeconfig)
 
-	err := saveDrivenResult(shopResult(), "203.0.113.10", "")
+	err := saveDrivenResult(shopResult(), "203.0.113.10", "", "")
 
 	assert.Error(t, err)
 	kc, err := os.ReadFile(path) //nolint:gosec // inside the test's temp home
@@ -326,7 +326,7 @@ func TestSaveDrivenResultRefusesAnotherClustersKubeconfigPath(t *testing.T) {
 	home := withFakeHome(t)
 	addLocalCluster(t, config.Cluster{Name: "Shop", Host: "198.51.100.7", Kubeconfig: filepath.Join(home, ".kip", "clusters", "Shop.yaml")})
 
-	err := saveDrivenResult(shopResult(), "203.0.113.10", "")
+	err := saveDrivenResult(shopResult(), "203.0.113.10", "", "")
 
 	assert.ErrorContains(t, err, "Shop")
 }
@@ -386,15 +386,15 @@ func TestProbeFailure(t *testing.T) {
 	home := withFakeHome(t)
 	knownHosts := filepath.Join(home, ".ssh", "known_hosts")
 
-	offer, err := probeFailure("203.0.113.10", "@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\nHost key verification failed.\n")
+	offer, err := probeFailure("root", "203.0.113.10", "@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\nHost key verification failed.\n")
 	assert.False(t, offer)
 	assert.ErrorContains(t, err, knownHosts, "a changed host key names the file to fix")
 
-	offer, err = probeFailure("203.0.113.10", "root@203.0.113.10: Permission denied (publickey,password).\n")
+	offer, err = probeFailure("root", "203.0.113.10", "root@203.0.113.10: Permission denied (publickey,password).\n")
 	assert.True(t, offer, "only a refused key is worth offering to add")
 	assert.NoError(t, err)
 
-	offer, err = probeFailure("203.0.113.10", "ssh: connect to host 203.0.113.10 port 22: Connection timed out\n")
+	offer, err = probeFailure("root", "203.0.113.10", "ssh: connect to host 203.0.113.10 port 22: Connection timed out\n")
 	assert.False(t, offer)
 	assert.ErrorContains(t, err, "Connection timed out")
 }
@@ -487,9 +487,9 @@ func TestKeyCheckFailure(t *testing.T) {
 }
 
 func TestPlacementError(t *testing.T) {
-	err := placementError("203.0.113.10", "ssh: connect to host 203.0.113.10 port 22: Connection refused\n", errors.New("exit status 255"))
+	err := placementError("root", "203.0.113.10", "ssh: connect to host 203.0.113.10 port 22: Connection refused\n", errors.New("exit status 255"))
 	assert.ErrorContains(t, err, "Connection refused")
-	assert.ErrorContains(t, placementError("203.0.113.10", "", errors.New("exit status 255")), "exit status 255")
+	assert.ErrorContains(t, placementError("root", "203.0.113.10", "", errors.New("exit status 255")), "exit status 255")
 }
 
 func TestPlacementErrorNamesARefusedPassword(t *testing.T) {
@@ -497,24 +497,42 @@ func TestPlacementErrorNamesARefusedPassword(t *testing.T) {
 		"root@203.0.113.10: Permission denied (publickey,password).\n",
 		"Permission denied, please try again.\n",
 	} {
-		err := placementError("203.0.113.10", stderr, errors.New("exit status 255"))
+		err := placementError("root", "203.0.113.10", stderr, errors.New("exit status 255"))
 		assert.ErrorContains(t, err, "refused the root password", stderr)
 		assert.ErrorContains(t, err, "provider", stderr)
 	}
 }
 
 func TestPlacementErrorNamesAServerWithoutPasswordLogins(t *testing.T) {
-	err := placementError("203.0.113.10", "root@203.0.113.10: Permission denied (publickey).\n", errors.New("exit status 255"))
+	err := placementError("root", "203.0.113.10", "root@203.0.113.10: Permission denied (publickey).\n", errors.New("exit status 255"))
 
 	assert.ErrorContains(t, err, "accepts no password")
 	assert.NotContains(t, err.Error(), "reset it")
 }
 
 func TestPlacementErrorKeepsOtherPermissionErrors(t *testing.T) {
-	err := placementError("203.0.113.10", "bash: /root/.ssh/authorized_keys: Permission denied\n", errors.New("exit status 1"))
+	err := placementError("root", "203.0.113.10", "bash: /root/.ssh/authorized_keys: Permission denied\n", errors.New("exit status 1"))
 
 	assert.ErrorContains(t, err, "/root/.ssh/authorized_keys: Permission denied")
 	assert.NotContains(t, err.Error(), "root password")
+}
+
+func TestPlacementErrorNamesTheLoginUser(t *testing.T) {
+	err := placementError("ubuntu", "203.0.113.10", "ubuntu@203.0.113.10: Permission denied (publickey).\n", errors.New("exit status 255"))
+	assert.ErrorContains(t, err, "ubuntu@203.0.113.10 accepts no password")
+	assert.ErrorContains(t, err, "~ubuntu/.ssh/authorized_keys")
+
+	err = placementError("ubuntu", "203.0.113.10", "Permission denied, please try again.\n", errors.New("exit status 255"))
+	assert.ErrorContains(t, err, "refused the password of ubuntu")
+
+	_, err = probeFailure("ubuntu", "203.0.113.10", "ssh: connect to host 203.0.113.10 port 22: Connection timed out\n")
+	assert.ErrorContains(t, err, "cannot reach ubuntu@203.0.113.10")
+}
+
+func TestSaveDrivenResultKeepsTheLoginUser(t *testing.T) {
+	withFakeHome(t)
+	require.NoError(t, saveDrivenResult(shopResult(), "203.0.113.10", "", "ubuntu"))
+	assert.Equal(t, "ubuntu", loadShop(t).SSHUser)
 }
 
 func TestAgentHolds(t *testing.T) {
@@ -546,4 +564,36 @@ func TestStoppedJobErrorPointsAtTheJournal(t *testing.T) {
 	assert.Contains(t, err.Error(), "interrupted")
 	assert.Contains(t, err.Error(), "journalctl -u kipper-install-run-20261015-010203-abcd1234")
 	assert.Contains(t, err.Error(), "kip install again retries it")
+}
+
+func TestInstallSSHUserPrefersTheFlagThenTheSavedUser(t *testing.T) {
+	withFakeHome(t)
+	require.NoError(t, saveDrivenResult(shopResult(), "203.0.113.10", "", "ubuntu"))
+	t.Cleanup(func() { _ = installCmd.Flags().Set("ssh-user", "") })
+
+	assert.Equal(t, "ubuntu", installSSHUser(installCmd, "203.0.113.10"), "a re-run keeps the saved user")
+	assert.Equal(t, "root", installSSHUser(installCmd, "203.0.113.99"))
+	require.NoError(t, installCmd.Flags().Set("ssh-user", "admin"))
+	assert.Equal(t, "admin", installSSHUser(installCmd, "203.0.113.10"))
+
+	assert.Empty(t, sshUserEntry("root"), "root is the default and is not saved")
+	assert.Equal(t, "root", sshUser(&config.Cluster{}))
+	assert.Equal(t, "ubuntu", sshUser(loadShop(t)))
+}
+
+func TestEnsureKeyAccessNamesTheCloudImagesLoginUser(t *testing.T) {
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Skip("ssh-keygen is not installed")
+	}
+	dir := t.TempDir()
+	key := filepath.Join(dir, "id")
+	require.NoError(t, exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key).Run()) //nolint:gosec // a test key in a temp dir
+	bin := t.TempDir()
+	//nolint:gosec // a stub in the test's own temp dir has to be executable
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "ssh"), []byte("#!/bin/sh\necho 'Please login as the user \"ubuntu\" rather than the user \"root\".'\nexit 1\n"), 0o755))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := ensureKeyAccess("root", "203.0.113.10", key, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--ssh-user ubuntu")
 }

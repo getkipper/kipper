@@ -29,6 +29,7 @@ type Options struct {
 	DexDomain            string
 	Local                bool
 	SSHKeyPath           string
+	SSHUser              string
 	FallbackSSHKeyPath   string
 	AdminEmail           string
 	AdminPasswordHash    string
@@ -297,6 +298,7 @@ func Run(opts Options) (*Result, error) {
 
 	provider := &infra.BareMetalProvider{
 		Host:           opts.Host,
+		User:           opts.SSHUser,
 		SSHKey:         opts.SSHKeyPath,
 		FallbackSSHKey: opts.FallbackSSHKeyPath,
 	}
@@ -875,6 +877,7 @@ func Run(opts Options) (*Result, error) {
 				DexDomain:        opts.DexDomain,
 				Kubeconfig:       kubeconfigPath,
 				SSHKey:           opts.SSHKeyPath,
+				SSHUser:          opts.SSHUser,
 				GatewayToken:     gatewayToken,
 				Org:              opts.Org,
 				OrgDisplayName:   opts.OrgDisplayName,

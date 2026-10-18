@@ -169,12 +169,21 @@ func checkHost(cluster *config.Cluster, nodes []k8s.NodeInfo) {
 	checkHostWith(os.Stdout, hostSSHConfig(cluster, ""), cluster, nodes)
 }
 
+// sshUser returns the cluster's saved login user, defaulting to root when the
+// cluster is nil or has no saved user.
+func sshUser(cluster *config.Cluster) string {
+	if cluster != nil && cluster.SSHUser != "" {
+		return cluster.SSHUser
+	}
+	return "root"
+}
+
 // hostSSHConfig applies the shared SSH key precedence and disables interactive prompts.
 func hostSSHConfig(cluster *config.Cluster, keyFlag string) ssh.Config {
 	explicit, fallback := resolveSSHKey(keyFlag, cluster)
 	return ssh.Config{
 		Host:            cluster.Host,
-		User:            "root",
+		User:            sshUser(cluster),
 		KeyPath:         explicit,
 		FallbackKeyPath: fallback,
 		Options:         []string{"BatchMode=yes"},

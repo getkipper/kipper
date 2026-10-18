@@ -88,7 +88,7 @@ kip auth reset-password
   Password: 5b2bf14ef6525...
 ```
 
-If your kubeconfig requires a local session and none is available, kip retrieves the server's admin credentials over SSH and keeps them in memory. Pass `--ssh-key <key>` to use SSH explicitly, for example if your session lacks admin rights. SSH recovery requires root access to the server.
+If your kubeconfig requires a local session and none is available, kip retrieves the server's admin credentials over SSH and keeps them in memory. Pass `--ssh-key <key>` to use SSH explicitly, for example if your session lacks admin rights. SSH recovery logs in as root or as the cluster's SSH user, which needs passwordless sudo.
 
 The SSH key is selected from `--ssh-key`, then `KIP_SSH_KEY`, then the key saved for the cluster. If none is set, kip uses OpenSSH's normal key selection with `~/.ssh/id_ed25519` as a fallback.
 

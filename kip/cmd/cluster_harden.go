@@ -53,6 +53,7 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 
 	provider := &infra.BareMetalProvider{
 		Host:           cluster.Host,
+		User:           sshUser(cluster),
 		SSHKey:         explicit,
 		FallbackSSHKey: fallback,
 	}

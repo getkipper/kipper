@@ -154,6 +154,7 @@ func init() {
 	clusterExportCmd.Flags().String("cluster", "", "cluster name (defaults to current)")
 	clusterAddCmd.Flags().Bool("set-current", false, "set as the active cluster after adding")
 	clusterAddCmd.Flags().String("ssh-key", "", "SSH private key path to save for this cluster's server")
+	clusterAddCmd.Flags().String("ssh-user", "", "SSH login user to save for this cluster's nodes. For non-root users, kip runs commands through passwordless sudo")
 	clusterAddCmd.Flags().Bool("install-result", false, "import a 'kip install --local --result' file with its gateway credential, backup storage and network settings; requires a new cluster name")
 	clusterDomainCmd.Flags().Bool("repair", false, "rewrite local config from the cluster's ClusterIdentity record")
 	clusterDomainCmd.Flags().Bool("sync", false, "resume an interrupted domain change, or report an already-converged cluster")
@@ -540,6 +541,7 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 	filePath := args[0]
 	setCurrent, _ := cmd.Flags().GetBool("set-current")
 	sshKey, _ := cmd.Flags().GetString("ssh-key")
+	sshUser, _ := cmd.Flags().GetString("ssh-user")
 
 	data, err := os.ReadFile(filePath) //nolint:gosec // user-provided file path is intentional
 	if err != nil {
@@ -785,6 +787,9 @@ func runClusterAdd(cmd *cobra.Command, args []string) error {
 			if isResult {
 				extras.applyTo(&cfg.Clusters[len(cfg.Clusters)-1])
 			}
+		}
+		if sshUser != "" {
+			cfg.GetCluster(name).SSHUser = sshUserEntry(sshUser)
 		}
 		if sshKey != "" {
 			cfg.GetCluster(name).SSHKey = sshKey

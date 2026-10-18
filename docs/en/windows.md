@@ -12,7 +12,7 @@ To connect to an existing cluster, ask an administrator for a `kip cluster expor
 ## What you need
 
 - Windows 10 version 1809 or later, or Windows 11, on x64. Windows 11 on ARM runs kip through its x64 emulation; Windows 10 on ARM and 32-bit Windows are not supported. The OpenSSH client must be installed; check with `ssh -V`.
-- A fresh Ubuntu, Debian, Rocky Linux, AlmaLinux or CentOS Stream server you can reach as root, by password or with a key. See [supported releases](/en/installation#preflight-checks).
+- A fresh Ubuntu, Debian, Rocky Linux, AlmaLinux or CentOS Stream server you can reach as root, by password or with a key, or as a user with passwordless sudo (pass it with `--ssh-user`). See [supported releases](/en/installation#preflight-checks).
 
 ## Install kip
 

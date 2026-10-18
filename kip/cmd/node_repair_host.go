@@ -111,7 +111,7 @@ func nodeSSH(host, flagValue string, cluster *config.Cluster) ssh.Config {
 	explicit, fallback := resolveSSHKey(flagValue, cluster)
 	return ssh.Config{
 		Host:            host,
-		User:            "root",
+		User:            sshUser(cluster),
 		KeyPath:         explicit,
 		FallbackKeyPath: fallback,
 	}

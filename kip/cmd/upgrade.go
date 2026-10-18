@@ -411,7 +411,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	return runSystemUpgrade(cluster.Host, explicitKey, fallbackKey, cluster.Domain, cluster.DNSResolvers, cluster.TrustedProxies, state, autoYes)
+	return runSystemUpgrade(cluster.Host, sshUser(cluster), explicitKey, fallbackKey, cluster.Domain, cluster.DNSResolvers, cluster.TrustedProxies, state, autoYes)
 }
 
 // ensureTrustMaterial brings the host's copy of the cluster's certificate
@@ -443,6 +443,7 @@ func ensureTrustMaterial(cluster *config.Cluster, explicitKey, fallbackKey strin
 	}
 	provider := &infra.BareMetalProvider{
 		Host:           host,
+		User:           sshUser(cluster),
 		SSHKey:         explicitKey,
 		FallbackSSHKey: fallbackKey,
 	}
@@ -1120,11 +1121,12 @@ func veleroWritesElsewhere(ctx context.Context, dyn dynamic.Interface) (bool, er
 // runSystemUpgrade re-applies cluster system components (Traefik, Longhorn,
 // KEDA, etc.) at the versions pinned in this kip build. Prompts for
 // confirmation unless autoYes is set or stdin is not a terminal.
-func runSystemUpgrade(host, explicitKey, fallbackKey, domain string, dnsResolvers, trustedProxies []string, state installer.PlatformState, autoYes bool) error {
+func runSystemUpgrade(host, user, explicitKey, fallbackKey, domain string, dnsResolvers, trustedProxies []string, state installer.PlatformState, autoYes bool) error {
 	components := installer.SystemComponents(domain, dnsResolvers, trustedProxies, state)
 
 	provider := &infra.BareMetalProvider{
 		Host:           host,
+		User:           user,
 		SSHKey:         explicitKey,
 		FallbackSSHKey: fallbackKey,
 	}
@@ -1660,7 +1662,7 @@ func recoverNetworkChange(cluster *config.Cluster, sshKey string, autoYes bool) 
 		return nil
 	}
 	explicitKey, fallbackKey := resolveSSHKey(sshKey, cluster)
-	provider := &infra.BareMetalProvider{Host: cluster.Host, SSHKey: explicitKey, FallbackSSHKey: fallbackKey}
+	provider := &infra.BareMetalProvider{Host: cluster.Host, User: sshUser(cluster), SSHKey: explicitKey, FallbackSSHKey: fallbackKey}
 	if err := provider.Connect(); err != nil {
 		return fmt.Errorf("connecting to %s: %w", cluster.Host, err)
 	}

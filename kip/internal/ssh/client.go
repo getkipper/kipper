@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -63,7 +64,10 @@ type Config struct {
 	CommandTimeout  time.Duration
 }
 
-// Client runs commands on a remote host using a fresh SSH process per invocation.
+// Client runs commands as root on a remote host using a fresh SSH process per
+// invocation. Non-root logins use passwordless sudo with root's home directory.
+// Captured output combines command stdout and stderr, with sudo diagnostics
+// included only on failure. RunStreamTo keeps stdout and stderr separate.
 type Client struct {
 	cfg Config
 	// controlPath is the multiplexing socket, or "" when one could not be
@@ -72,27 +76,101 @@ type Client struct {
 	controlPath string
 }
 
-// Dial verifies that ssh can reach the host with the given config.
-// Returns a Client on success.
+// Dial verifies SSH access and, for non-root users, passwordless sudo access
+// to a root Bash shell. An empty User defaults to root. Connection probes retry
+// transient transport failures. Authentication and sudo failures return an error.
 func Dial(cfg Config) (*Client, error) {
 	c := &Client{cfg: cfg, controlPath: controlSocket(cfg)}
 
 	// Retry only the harmless connection probe. A failed SSH command may
 	// already have changed the host, so subsequent commands run once.
+	probe := "true"
+	if c.viaSudo() {
+		probe = sudoProbe
+	}
 	var err error
+	var out string
 	for attempt := 1; ; attempt++ {
-		var out string
-		out, err = c.attempt("true", nil, nil)
+		out, err = c.attemptRaw(probe, nil, nil)
 		if err == nil || attempt == dialAttempts || !neverReachedHost(err, out) {
 			break
 		}
 		time.Sleep(time.Duration(attempt) * dialBackoff)
 	}
 	if err != nil {
+		if c.viaSudo() && strings.Contains(out, "sudo") {
+			return nil, fmt.Errorf("connecting to %s: %s needs passwordless sudo, because kip runs its commands as root: %s", cfg.Host, cfg.User, strings.TrimSpace(out))
+		}
+		if user, ok := CloudImageUser(out); ok && !c.viaSudo() {
+			return nil, fmt.Errorf("connecting to %s: %s", cfg.Host, rootRefusedFor(user))
+		}
+		if trimmed := strings.TrimSpace(out); trimmed != "" {
+			return nil, fmt.Errorf("connecting to %s: %w: %s", cfg.Host, err, trimmed)
+		}
 		return nil, fmt.Errorf("connecting to %s: %w", cfg.Host, err)
 	}
 
 	return c, nil
+}
+
+// sudoPath includes /usr/local/bin so sudo commands can find k3s and kubectl
+// even when sudo's secure_path omits that directory.
+const sudoPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+func (c *Client) viaSudo() bool {
+	return c.cfg.User != "" && c.cfg.User != "root"
+}
+
+// cloudImageUserPattern matches the message cloud images print to a root
+// login they refuse, which names the image's own login user.
+var cloudImageUserPattern = regexp.MustCompile(`Please login as the user "([a-z_][a-z0-9_-]*)" rather than the user "root"`)
+
+// CloudImageUser extracts the suggested user from a cloud image's root-login
+// refusal message. It returns an empty string and false when no message matches.
+func CloudImageUser(output string) (string, bool) {
+	m := cloudImageUserPattern.FindStringSubmatch(output)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
+// RootRefused returns an error explaining a cloud image's root-login refusal
+// and instructing the caller to retry with --ssh-user set to user.
+func RootRefused(user string) error {
+	return errors.New(rootRefusedFor(user))
+}
+
+func rootRefusedFor(user string) string {
+	return fmt.Sprintf("the server refuses root logins and specifies %s as its login user. Run the command again with --ssh-user %s", user, user)
+}
+
+// sudoProbe checks passwordless access to the root shell used for commands.
+// Running it directly preserves sudo diagnostics for Dial.
+const sudoProbe = "LC_ALL=C sudo -n -H -- /bin/bash -c true"
+
+// remoteCommand prepares command to run as root. Non-root logins use
+// non-interactive sudo with root's home directory and combined command output.
+// A temporary file captures sudo diagnostics and is removed on shell exit.
+// Diagnostics are printed only on failure, preserving refusal details while
+// keeping warnings such as "unable to resolve host" out of successful output
+// that kip parses.
+func (c *Client) remoteCommand(command string) string {
+	if !c.viaSudo() {
+		return command
+	}
+	inner := "sudo -n -H -- /bin/bash -c " + Quote("exec 2>&1; PATH="+sudoPath+"; export PATH\n"+command)
+	return `e=$(mktemp) || exit 1; trap 'rm -f "$e"' EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; ` +
+		inner + ` 2>"$e"; rc=$?; [ "$rc" -eq 0 ] || cat "$e" >&2; exit "$rc"`
+}
+
+// remoteStreamCommand is remoteCommand for RunStreamTo, whose callers keep
+// stdout and stderr apart. sudo's messages stay on stderr there.
+func (c *Client) remoteStreamCommand(command string) string {
+	if !c.viaSudo() {
+		return command
+	}
+	return "sudo -n -H -- /bin/bash -c " + Quote("PATH="+sudoPath+"; export PATH\n"+command)
 }
 
 // masterIsServing asks OpenSSH whether a master is actually accepting commands
@@ -181,6 +259,12 @@ func (c *Client) Run(command string) (string, error) {
 // command; stream, when non-nil, receives stdout and stderr as they arrive
 // instead of them being captured.
 func (c *Client) attempt(command string, stdin []byte, stream io.Writer) (string, error) {
+	return c.attemptRaw(c.remoteCommand(command), stdin, stream)
+}
+
+// attemptRaw sends command as supplied, allowing connection probes to bypass
+// the sudo wrapper and preserve its diagnostics.
+func (c *Client) attemptRaw(command string, stdin []byte, stream io.Writer) (string, error) {
 	cmd, ctx, cancel := c.command(append(c.sshArgs(), command)...)
 	defer cancel()
 	if stdin != nil {
@@ -263,7 +347,7 @@ func (c *Client) RunStream(command string, stdout io.Writer) error {
 // RunStreamTo separates remote stdout from stderr and SSH diagnostics so callers
 // can track log offsets. It leaves retries to the caller to avoid duplicate output.
 func (c *Client) RunStreamTo(command string, stdout, stderr io.Writer) error {
-	cmd, ctx, cancel := c.command(append(c.sshArgs(), command)...)
+	cmd, ctx, cancel := c.command(append(c.sshArgs(), c.remoteStreamCommand(command))...)
 	defer cancel()
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -362,7 +446,7 @@ func (c *Client) RunFresh(command string) (string, error) {
 
 // freshConnectionArgs disables multiplexing for command.
 func (c *Client) freshConnectionArgs(command string) []string {
-	return append(c.connectionArgs(false, true), command)
+	return append(c.connectionArgs(false, true), c.remoteCommand(command))
 }
 
 // Close tears down the shared connection, so kip does not leave one open behind

@@ -269,6 +269,17 @@ func TestClusterAddRecognisesAResultWithWindowsLineEndings(t *testing.T) {
 	assert.Equal(t, "shop-backups", entry.BackupStorage.Bucket)
 }
 
+func TestClusterAddRecordsTheSSHUser(t *testing.T) {
+	home := withFakeHome(t)
+	path := exportBundle(t, home)
+	require.NoError(t, clusterAddCmd.Flags().Set("ssh-user", "ubuntu"))
+	t.Cleanup(func() { _ = clusterAddCmd.Flags().Set("ssh-user", "") })
+
+	require.NoError(t, runClusterAdd(clusterAddCmd, []string{path}))
+
+	assert.Equal(t, "ubuntu", loadShop(t).SSHUser)
+}
+
 func TestClusterAddRecordsTheSSHKey(t *testing.T) {
 	home := withFakeHome(t)
 	path := exportBundle(t, home)
