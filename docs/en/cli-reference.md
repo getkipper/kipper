@@ -184,7 +184,7 @@ kip status
 
 A component with no ready replicas (or no available replicas for a Deployment) is marked `…` and listed as starting when its pods appear to be starting up. Assigned nodes must be Ready. Pending pods can qualify before scheduling or container status is reported. Finished and deleting pods are ignored. If startup persists, check pod events, init containers, and readiness probes. `✗` means the health check found neither a healthy component nor evidence of startup; possible causes include missing pods, crash loops, image pull failures, scheduling failures, nodes that are not Ready, and lookup errors.
 
-It also audits the DNS resolvers your cluster forwards external queries to. Those live in a file on the server, so `kip status` makes a best-effort root SSH connection (reusing the key from install, then your SSH agent or `~/.ssh/id_ed25519`) to read it. Three things are checked: the file is still a safe set (IPv4 entries only, at most three), the entries still match the resolvers the cluster was configured with (`dns_resolvers` in `~/.kip/config.yaml`, or the default public set), and each resolver actually accepts connections from the server. Each problem gets its own warning, and drift or an unsafe hand-edit is fixed with `kip cluster dns repair`. If the server can't be reached over SSH, the section says so explicitly rather than pretending the check passed, and the rest of the status still prints.
+It also audits the DNS resolvers your cluster forwards external queries to. Those live in a file on the server, so `kip status` makes a best-effort SSH connection as the cluster's SSH user (reusing the key from install, then your SSH agent or `~/.ssh/id_ed25519`) to read it. Three things are checked: the file is still a safe set (IPv4 entries only, at most three), the entries still match the resolvers the cluster was configured with (`dns_resolvers` in `~/.kip/config.yaml`, or the default public set), and each resolver actually accepts connections from the server. Each problem gets its own warning, and drift or an unsafe hand-edit is fixed with `kip cluster dns repair`. If the server can't be reached over SSH, the section reports that the check could not run, and the rest of the status still prints.
 
 ## kip cluster dns repair {#kip-cluster-dns-repair}
 
@@ -367,7 +367,7 @@ kip auth reset-password
 
 Uses your local session or the authentication configured in the cluster's kubeconfig. If the kubeconfig requires a session and none is available, kip retrieves the server's admin credentials over SSH and keeps them in memory.
 
-Pass `--ssh-key <key>` to use SSH explicitly. Resetting the password requires permission to read and update Dex's ConfigMap and patch its deployment, or root SSH access to the server.
+Pass `--ssh-key <key>` to use SSH explicitly. Resetting the password requires permission to read and update Dex's ConfigMap and patch its deployment, or SSH access to the server as root or as the cluster's SSH user with passwordless sudo.
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|

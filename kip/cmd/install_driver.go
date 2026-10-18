@@ -242,8 +242,9 @@ func serverArch(uname string) (string, error) {
 }
 
 // saveDrivenResult imports the server result with a locally rendered kubeconfig
-// and SSH key. Host, cluster-name, and credential checks protect existing entries.
-func saveDrivenResult(res installjob.Result, host, sshKey string) error {
+// and the SSH key and login user. Host, cluster-name, and credential checks
+// protect existing entries.
+func saveDrivenResult(res installjob.Result, host, sshKey, sshUser string) error {
 	if res.Cluster == nil {
 		return fmt.Errorf("the install produced no cluster entry to import")
 	}
@@ -268,6 +269,7 @@ func saveDrivenResult(res installjob.Result, host, sshKey string) error {
 	}
 	entry.Kubeconfig = filepath.Join(clusters, entry.Name+".yaml")
 	entry.SSHKey = sshKey
+	entry.SSHUser = sshUser
 	entry.CurrentProject = ""
 	entry.CurrentEnvironment = ""
 	return config.Update(func(cfg *config.Config) error {

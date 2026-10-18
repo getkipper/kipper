@@ -21,6 +21,7 @@ kip install --host <ip> [flags]
 |---|---|---|---|
 | `--host` | Yes | — | IP address or hostname of the target server |
 | `--ssh-key` | No | see below | Path to SSH private key. Saved to `~/.kip/config.yaml` so subsequent `kip` commands inherit it. If unset, `kip` reads `KIP_SSH_KEY`, then `cluster.ssh_key` from config; if still unset, ssh consults your ssh-agent and `~/.ssh/config` as normal |
+| `--ssh-user` | No | Saved user for this host, otherwise `root` | User to log in as. A user other than root needs passwordless sudo, and kip runs every command through `sudo -n`. Saved to `~/.kip/config.yaml` as `ssh_user`, and used for every node of the cluster. See [Logging in as a user other than root](#logging-in-as-a-user-other-than-root) |
 | `--domain` | No | `<ip>.kipper.run` | The name the cluster serves on. A `*.kipper.run` name (`lab.kipper.run`) is registered for you on the shared gateway; anything else is a domain whose DNS you run yourself, and whose hostnames have to resolve to the server before you install (see [DNS for a domain you run](#dns-for-a-domain-you-run)). Omit it and the free name is derived from the server's address. See [choosing your own name](/en/domains#choosing-your-own-name) |
 | `--admin-email` | No | `admin@<domain>` | Email for Let's Encrypt certificates and the admin account. Defaults to `admin@<domain>` when `--domain` is a domain you run, otherwise `admin@kipper.local` |
 | `--org` | No | — | Organization short code (e.g. `acme`), used as namespace prefix |
@@ -65,6 +66,16 @@ The install looks up `console`, `console-api` and `dex`, including any per-host 
 
 Adding the record afterwards is enough on its own. cert-manager keeps retrying and issues once the hostnames resolve, and `kip auth login` finishes the sign-in that was deferred. See [troubleshooting certificates](/en/domains#troubleshooting-certificates).
 
+#### Logging in as a user other than root
+
+Cloud images from AWS, Google Cloud and Azure log you in as a default user such as `ubuntu`, `admin` or `ec2-user` and leave root login disabled. Pass that user with `--ssh-user`, and kip runs its commands through passwordless sudo, which those images grant the default user:
+
+```bash
+kip install --host 203.0.113.10 --ssh-user ubuntu --ssh-key ~/.ssh/id_ed25519
+```
+
+The user is saved with the cluster, so `kip upgrade`, `kip node add` and the other commands that connect over SSH log in the same way. Every node of the cluster needs the same user with the same key. If sudo asks for a password, kip stops and names the user. `--ssh-user` cannot be used with `--local`, which already runs as root.
+
 #### SSH rate limiting
 
 The default UFW rule rate-limits new SSH connections to six in thirty seconds from one source address. Kipper normally shares one SSH connection during installation.
@@ -104,7 +115,7 @@ kip cluster add --install-result --ssh-key ~/.ssh/id_ed25519 cluster-result.kip
 kip auth login
 ```
 
-`--ssh-key` records the local key path for maintenance commands such as `kip upgrade`. The result file holds the cluster's gateway credential and its settings, so keep it private and delete it once it is added. `--install-result` requires a new cluster name to protect existing entries. Run `kip cluster uninstall` from your management machine. It checks the recorded machine ID and local addresses to guard against uninstalling its own host.
+`--ssh-key` records the local key path for maintenance commands such as `kip upgrade`, and `--ssh-user` records the login user when the server does not accept root logins. The result file holds the cluster's gateway credential and its settings, so keep it private and delete it once it is added. `--install-result` requires a new cluster name to protect existing entries. Run `kip cluster uninstall` from your management machine. It checks the recorded machine ID and local addresses to guard against uninstalling its own host.
 
 ## What it installs
 

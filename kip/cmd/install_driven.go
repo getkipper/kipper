@@ -65,11 +65,12 @@ func runDrivenInstall(cmd *cobra.Command, credentialsFile string) error {
 	if keyPath == "" {
 		keyPath = fallbackKey
 	}
-	if err := ensureKeyAccess(host, keyPath, isTTY); err != nil {
+	user := installSSHUser(cmd, host)
+	if err := ensureKeyAccess(user, host, keyPath, isTTY); err != nil {
 		return err
 	}
 
-	client, err := ssh.Dial(ssh.Config{Host: host, User: "root", KeyPath: keyPath, Options: []string{"BatchMode=yes"}})
+	client, err := ssh.Dial(ssh.Config{Host: host, User: user, KeyPath: keyPath, Options: []string{"BatchMode=yes"}})
 	if err != nil {
 		return err
 	}
@@ -171,7 +172,7 @@ func runDrivenInstall(cmd *cobra.Command, credentialsFile string) error {
 		phase = res.Outcome
 	}
 	if res.Cluster != nil {
-		if err := saveDrivenResult(res, host, keyPath); err != nil {
+		if err := saveDrivenResult(res, host, keyPath, sshUserEntry(user)); err != nil {
 			return fmt.Errorf("%w\n\n  The result stays on the server. To discard it and start again: kip install --host %s --cancel", err, host)
 		}
 	}
@@ -386,9 +387,10 @@ func checkLinuxBinary(data []byte, arch string) error {
 	return nil
 }
 
-// ensureKeyAccess verifies key access to root@host. Interactive sessions can
+// ensureKeyAccess verifies key access to user@host. Interactive sessions can
 // create a key and authorize it through a separate SSH login.
-func ensureKeyAccess(host, keyPath string, isTTY bool) error {
+func ensureKeyAccess(user, host, keyPath string, isTTY bool) error {
+	login := user + "@" + host
 	if keyPath == "" {
 		return fmt.Errorf("no SSH key: pass --ssh-key or set KIP_SSH_KEY")
 	}
@@ -414,21 +416,25 @@ func ensureKeyAccess(host, keyPath string, isTTY bool) error {
 		return fmt.Errorf("the key %s has a passphrase, and kip's connections cannot ask for it. Start ssh-agent and add the key with: ssh-add %s", keyPath, keyPath)
 	}
 	probe := func() (bool, string) {
-		var stderr bytes.Buffer
+		var output bytes.Buffer
 		c := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", //nolint:gosec // the operator's host and key
-			"-i", keyPath, "-o", "IdentitiesOnly=yes", "root@"+host, "true")
-		c.Stderr = &stderr
-		return c.Run() == nil, stderr.String()
+			"-i", keyPath, "-o", "IdentitiesOnly=yes", login, "true")
+		// Capture stdout too because cloud images can print root-login refusals there.
+		c.Stdout, c.Stderr = &output, &output
+		return c.Run() == nil, output.String()
 	}
 	ok, stderr := probe()
 	if ok {
 		return nil
 	}
-	if offer, err := probeFailure(host, stderr); !offer {
+	if cloudUser, named := ssh.CloudImageUser(stderr); named && user == "root" {
+		return ssh.RootRefused(cloudUser)
+	}
+	if offer, err := probeFailure(user, host, stderr); !offer {
 		return err
 	}
-	if !isTTY || !confirm(fmt.Sprintf("Add the key %s to root@%s? SSH may prompt for the root password.", keyPath, host)) {
-		return fmt.Errorf("key login to root@%s does not work; add %s.pub to /root/.ssh/authorized_keys on the server", host, keyPath)
+	if !isTTY || !confirm(fmt.Sprintf("Add the key %s to %s? SSH may prompt for %s.", keyPath, login, passwordOf(user))) {
+		return fmt.Errorf("key login to %s failed. Add %s.pub to %s on the server", login, keyPath, authorizedKeysOf(user))
 	}
 	pub, err := os.ReadFile(keyPath + ".pub") //nolint:gosec // the operator's own public key
 	if errors.Is(err, os.ErrNotExist) {
@@ -438,19 +444,19 @@ func ensureKeyAccess(host, keyPath string, isTTY bool) error {
 		return fmt.Errorf("reading the public key for %s: %w", keyPath, err)
 	}
 	var placeErr bytes.Buffer
-	place := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", "root@"+host, //nolint:gosec // the operator's host
-		"umask 077 && mkdir -p /root/.ssh && cat >> /root/.ssh/authorized_keys")
+	place := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", login, //nolint:gosec // the operator's host
+		"umask 077 && mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys")
 	place.Stdin = bytes.NewReader(pub)
 	place.Stdout = os.Stdout
 	place.Stderr = io.MultiWriter(os.Stderr, &placeErr)
 	if err := place.Run(); err != nil {
 		if msg := strings.ToLower(placeErr.String()); strings.Contains(msg, "password change") || strings.Contains(msg, "expired") {
-			return fmt.Errorf("the server wants its root password changed first: run ssh root@%s once, change it, then run this again", host)
+			return fmt.Errorf("the server requires a change to %s first. Run ssh %s, change the password, then retry this command", passwordOf(user), login)
 		}
-		return placementError(host, placeErr.String(), err)
+		return placementError(user, host, placeErr.String(), err)
 	}
 	if ok, _ := probe(); !ok {
-		return fmt.Errorf("the key was added but key login to root@%s still fails", host)
+		return fmt.Errorf("the key was added but key login to %s still fails", login)
 	}
 	return nil
 }
@@ -478,13 +484,13 @@ func keyCheckFailure(path, stderr string) (bool, error) {
 var sshAuthDenied = regexp.MustCompile(`Permission denied \(([^)]*)\)`)
 
 // placementError adds recovery steps for SSH authentication failures.
-func placementError(host, stderr string, err error) error {
+func placementError(user, host, stderr string, err error) error {
 	m := sshAuthDenied.FindStringSubmatch(stderr)
 	switch {
 	case strings.Contains(stderr, "Permission denied, please try again") || (len(m) == 2 && strings.Contains(m[1], "password")):
-		return fmt.Errorf("adding the key to the server: root@%s refused the root password. Use your current password, including any change made at first login. If you have lost it, reset it in your provider's console and retry", host)
+		return fmt.Errorf("adding the key to the server: %s@%s refused %s. Use your current password, including any change made at first login. If you have lost it, reset it in your provider's console and retry", user, host, passwordOf(user))
 	case len(m) == 2:
-		return fmt.Errorf("adding the key to the server: root@%s accepts no password logins (%s). Add your public key to /root/.ssh/authorized_keys through your provider's console and retry", host, strings.TrimSpace(m[0]))
+		return fmt.Errorf("adding the key to the server: %s@%s accepts no password logins (%s). Add your public key to %s through your provider's console and retry", user, host, strings.TrimSpace(m[0]), authorizedKeysOf(user))
 	}
 	if reason := lastLine(stderr); reason != "" {
 		return fmt.Errorf("adding the key to the server: %s", reason)
@@ -524,7 +530,7 @@ func agentHolds(keyFingerprint, agentList string) bool {
 
 // probeFailure offers key placement for permission failures and reports host-key
 // or connection failures directly.
-func probeFailure(host, stderr string) (offerPlacement bool, err error) {
+func probeFailure(user, host, stderr string) (offerPlacement bool, err error) {
 	switch {
 	case strings.Contains(stderr, "REMOTE HOST IDENTIFICATION HAS CHANGED"), strings.Contains(stderr, "Host key verification failed"):
 		knownHosts := "~/.ssh/known_hosts"
@@ -535,7 +541,23 @@ func probeFailure(host, stderr string) (offerPlacement bool, err error) {
 	case strings.Contains(stderr, "Permission denied"):
 		return true, nil
 	}
-	return false, fmt.Errorf("cannot reach root@%s: %s", host, lastLine(stderr))
+	return false, fmt.Errorf("cannot reach %s@%s: %s", user, host, lastLine(stderr))
+}
+
+// passwordOf names the password SSH asks for when it logs in as user.
+func passwordOf(user string) string {
+	if user == "root" {
+		return "the root password"
+	}
+	return "the password of " + user
+}
+
+// authorizedKeysOf names user's authorized_keys file in shell notation.
+func authorizedKeysOf(user string) string {
+	if user == "root" {
+		return "/root/.ssh/authorized_keys"
+	}
+	return "~" + user + "/.ssh/authorized_keys"
 }
 
 func confirm(question string) bool {

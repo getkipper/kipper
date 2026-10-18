@@ -68,7 +68,7 @@ func dialCutoverStager(cluster *config.Cluster, fromDomain, toDomain string) (*c
 	explicit, fallback := resolveSSHKey("", cluster)
 	client, err := ssh.Dial(ssh.Config{
 		Host:            cluster.Host,
-		User:            "root",
+		User:            sshUser(cluster),
 		KeyPath:         explicit,
 		FallbackKeyPath: fallback,
 	})
@@ -709,7 +709,7 @@ func refuseDomainChangeDuringCAReplacement(ctx context.Context, cluster *config.
 		explicit, fallback := resolveSSHKey("", cluster)
 		if dialled, err := ssh.Dial(ssh.Config{
 			Host:            cluster.Host,
-			User:            "root",
+			User:            sshUser(cluster),
 			KeyPath:         explicit,
 			FallbackKeyPath: fallback,
 		}); err == nil {

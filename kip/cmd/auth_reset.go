@@ -56,7 +56,7 @@ func hasLocalSession(store *auth.Store, domain string) bool {
 // returns a client built from it. The kubeconfig stays in memory.
 func adminClientsetOverSSH(cluster *config.Cluster, sshKeyFlag string) (kubernetes.Interface, error) {
 	explicit, fallback := resolveSSHKey(sshKeyFlag, cluster)
-	provider := &infra.BareMetalProvider{Host: cluster.Host, SSHKey: explicit, FallbackSSHKey: fallback}
+	provider := &infra.BareMetalProvider{Host: cluster.Host, User: sshUser(cluster), SSHKey: explicit, FallbackSSHKey: fallback}
 	if err := provider.Connect(); err != nil {
 		return nil, fmt.Errorf("connecting to %s: %w", cluster.Host, err)
 	}

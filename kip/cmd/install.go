@@ -14,6 +14,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
+	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
 )
 
@@ -40,6 +41,7 @@ func init() {
 	installCmd.Flags().String("console-api-domain", "", "hostname to serve the console API on (default: console-api.<domain>)")
 	installCmd.Flags().String("dex-domain", "", "hostname to serve Dex on (default: dex.<domain>)")
 	installCmd.Flags().String("ssh-key", "", "path to SSH private key")
+	installCmd.Flags().String("ssh-user", "", "SSH login user. For non-root users, kip runs commands through passwordless sudo. Defaults to the user saved for this host, otherwise root")
 	installCmd.Flags().String("admin-email", "admin@kipper.local", "email for Let's Encrypt and admin account")
 	installCmd.Flags().String("org", "", "organization short code (e.g. acme)")
 	installCmd.Flags().String("org-display-name", "", "organization display name (e.g. Acme Inc)")
@@ -127,6 +129,9 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	if err := checkLocalAdoption(local, adoptFirewall); err != nil {
 		return err
 	}
+	if flagUser, _ := cmd.Flags().GetString("ssh-user"); local && flagUser != "" {
+		return fmt.Errorf("--ssh-user cannot be used with --local, which runs as root on this machine")
+	}
 
 	// Canonicalize the name before anything reads it, so LAB.KIPPER.RUN and
 	// lab.kipper.run. take the same path as the host they name.
@@ -191,6 +196,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		ConsoleAPIDomain:     consoleAPIDomain,
 		DexDomain:            dexDomain,
 		SSHKeyPath:           explicitKey,
+		SSHUser:              sshUserEntry(installSSHUser(cmd, host)),
 		FallbackSSHKeyPath:   fallbackKey,
 		AdminEmail:           adminEmail,
 		Org:                  org,
@@ -352,6 +358,28 @@ func checkInstallStorage(storage string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown storage %q (valid: local, longhorn)", storage)
+}
+
+// installSSHUser resolves the login for host from --ssh-user, then the user
+// saved for that host, then root.
+func installSSHUser(cmd *cobra.Command, host string) string {
+	if user, _ := cmd.Flags().GetString("ssh-user"); user != "" {
+		return user
+	}
+	if cfg, err := config.Load(); err == nil {
+		if entry := cfg.GetClusterByHost(host); entry != nil && entry.SSHUser != "" {
+			return entry.SSHUser
+		}
+	}
+	return "root"
+}
+
+// sshUserEntry is the value saved as a cluster's ssh_user, which is empty for root.
+func sshUserEntry(user string) string {
+	if user == "root" {
+		return ""
+	}
+	return user
 }
 
 // checkInstallProfile accepts an empty --profile or one of the known names.

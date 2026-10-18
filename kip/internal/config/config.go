@@ -25,6 +25,7 @@ type Cluster struct {
 	DexDomain          string            `mapstructure:"dex_domain"          yaml:"dex_domain,omitempty"`
 	Kubeconfig         string            `mapstructure:"kubeconfig"          yaml:"kubeconfig"`
 	SSHKey             string            `mapstructure:"ssh_key"             yaml:"ssh_key,omitempty"`
+	SSHUser            string            `mapstructure:"ssh_user"            yaml:"ssh_user,omitempty"`
 	GatewayToken       string            `mapstructure:"gateway_token"       yaml:"gateway_token,omitempty"`
 	HostWiped          bool              `mapstructure:"host_wiped"          yaml:"host_wiped,omitempty"`
 	Org                string            `mapstructure:"org"                 yaml:"org,omitempty"`

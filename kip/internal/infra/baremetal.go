@@ -9,6 +9,7 @@ import (
 
 // BareMetalProvider implements InfraProvider for existing Linux servers
 // accessed via SSH. It is the default provider for Kipper installations.
+// An empty User defaults to root. Other users require passwordless sudo.
 //
 // SSHKey is the user's explicit key choice (--ssh-key flag,
 // cluster.SSHKey from config, or KIP_SSH_KEY env var). When set, ssh
@@ -21,6 +22,7 @@ import (
 // fallback path never sets IdentitiesOnly.
 type BareMetalProvider struct {
 	Host           string
+	User           string
 	SSHKey         string
 	FallbackSSHKey string
 	client         *ssh.Client
@@ -30,7 +32,7 @@ type BareMetalProvider struct {
 func (p *BareMetalProvider) Connect() error {
 	client, err := ssh.Dial(ssh.Config{
 		Host:            p.Host,
-		User:            "root",
+		User:            p.User,
 		KeyPath:         p.SSHKey,
 		FallbackKeyPath: p.FallbackSSHKey,
 	})

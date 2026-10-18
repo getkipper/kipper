@@ -51,7 +51,7 @@ func runClusterDNSRepair(_ *cobra.Command, _ []string) error {
 	explicit, fallback := resolveSSHKey("", cluster)
 	client, err := ssh.Dial(ssh.Config{
 		Host:            cluster.Host,
-		User:            "root",
+		User:            sshUser(cluster),
 		KeyPath:         explicit,
 		FallbackKeyPath: fallback,
 	})

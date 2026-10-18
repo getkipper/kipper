@@ -168,6 +168,7 @@ func connectForUninstall(flagKey string) func(*config.Cluster) (uninstallDeps, f
 		explicit, fallback := resolveSSHKey(flagKey, cluster)
 		provider := &infra.BareMetalProvider{
 			Host:           cluster.Host,
+			User:           sshUser(cluster),
 			SSHKey:         explicit,
 			FallbackSSHKey: fallback,
 		}

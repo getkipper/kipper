@@ -86,7 +86,7 @@ func dialClusterHost(cmd *cobra.Command) (*ssh.Client, *config.Cluster, error) {
 	explicit, fallback := resolveSSHKey(flagKey, cluster)
 	client, err := ssh.Dial(ssh.Config{
 		Host:            cluster.Host,
-		User:            "root",
+		User:            sshUser(cluster),
 		KeyPath:         explicit,
 		FallbackKeyPath: fallback,
 	})
