@@ -31,6 +31,19 @@ This matters because Kipper installs on whatever Linux server you point it at, a
 
 - `rpcbind`. Disabled and the socket is masked so it cannot be re-enabled by a package upgrade. Reversible with `systemctl unmask rpcbind.socket`.
 - Cockpit. Kipper stops and disables `cockpit.socket` when installed. To re-enable the web console, run `systemctl enable --now cockpit.socket`.
+- SSH password login. Kipper turns off `PasswordAuthentication` and `KbdInteractiveAuthentication` with the drop-in `/etc/ssh/sshd_config.d/00-kipper-key-only.conf`. When it writes that file, it also changes `PermitRootLogin yes` to `prohibit-password` and preserves stricter values. See [Key-only SSH](#key-only-ssh).
+
+**Key-only SSH** {#key-only-ssh}
+
+`kip install` and `kip cluster harden` turn off SSH password login on the server after a fresh connection succeeds using only a key. This confirms that kip can log in with a key alone before changing the configuration. Every other password or keyboard-interactive login on the host stops working, so give those users keys first or pass `--allow-ssh-passwords`. Running `kip install` again, for example to rotate storage credentials, repeats this hardening step. Worker nodes joined with `kip node add` keep their SSH settings, so turn off password login on those nodes yourself.
+
+Kipper stops before changing the configuration when `/etc/ssh/sshd_config` does not include `/etc/ssh/sshd_config.d/*.conf` before its first `Match` block, when an additional Include appears inside a `Match` block or an included file, or uses a quoted or escaped path, when a `Match` block could still allow a password, or when `00-kipper-key-only.conf` holds settings Kipper does not manage. Files included at the top level, such as the crypto-policies file Rocky Linux, AlmaLinux and CentOS Stream include, are checked with the same rules. The default configurations of Ubuntu, Debian, Rocky Linux, AlmaLinux and CentOS Stream pass.
+
+Kipper checks the new configuration with `sshd -t` before reloading sshd. It then confirms three things: `sshd -T` reports both settings off and the expected `PermitRootLogin`, a new key-only login works, and a new login without a key is refused without even being offered a password. If applying the change or any subsequent check fails, Kipper immediately attempts to restore the previous configuration and reports any restoration failure. The drop-in preserves key authentication settings and stricter root-login policies. Recovery runs immediately on failure, with no timed rollback. `kip install` warns and continues if SSH hardening fails, while `kip cluster harden` returns an error. Installs run with `--via-server` or `--local` require a separate external login check, so finish SSH hardening with `kip cluster harden` from your workstation.
+
+A host whose configuration already has password login off is left as it is, including its `PermitRootLogin` setting, once a fresh connection without a key confirms that the running SSH server refuses both password and keyboard-interactive authentication for kip's login. Kipper reloads sshd only when it changes the configuration, so configuration edits made since the last reload may leave older rules in effect for other users until you reload sshd.
+
+Verify the result on the host with `sshd -T | grep -Ei 'passwordauthentication|kbdinteractiveauthentication|permitrootlogin'`.
 
 **What the firewall opens**
 

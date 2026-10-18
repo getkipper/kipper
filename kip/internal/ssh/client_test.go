@@ -186,3 +186,10 @@ func TestFreshConnectionArgsOverrideACallersControlPath(t *testing.T) {
 	assert.Less(t, strings.Index(joined, "ControlPath=none"), strings.Index(joined, "ControlPath=/tmp/elsewhere.sock"))
 	assert.Less(t, strings.Index(joined, "ControlMaster=no"), strings.Index(joined, "ControlMaster=auto"))
 }
+
+func TestPasswordRefused(t *testing.T) {
+	assert.NoError(t, passwordRefused("ubuntu@203.0.113.10: Permission denied (publickey).\r\n"))
+	assert.Error(t, passwordRefused("ubuntu@203.0.113.10: Permission denied (publickey,password).\r\n"))
+	assert.Error(t, passwordRefused("Permission denied (publickey,keyboard-interactive).\n"))
+	assert.Error(t, passwordRefused("ssh: connect to host 203.0.113.10 port 22: Connection refused\n"), "no answer proves nothing")
+}
