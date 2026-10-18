@@ -1,5 +1,7 @@
 # Binaries
 kip/kip
+kip/cmd/kip
+kipper-poll/kipper-poll
 controller/controller
 console-api/console-api
 authz/authz
@@ -40,30 +42,5 @@ __pycache__/
 .vscode/
 *.swp
 
-# Local working notes, not part of the published project
-/PROGRESS.md
-/PLAN.md
-/TO-DOS.md
-/ISSUES.md
-/BACKLOG.md
-plans/
-features/
-docs/plans/
-kipper-poll/kipper-poll
-/COMPARISON.md
-presentation/
-/whats-next.md
-
-# Built binaries
-kip/kip
-kip/cmd/kip
-
-# Session handoffs. Untracked is not enough: these carry server addresses,
-# internal domains and credentials quoted from live output, and one `git add .`
-# would publish them.
-/whats-next.md
-HANDOFF-*.md
-*handoff*.md
-
-# Local working images, never part of the published site
-/kipper-office-background.png
+# Local working files
+tmp/
