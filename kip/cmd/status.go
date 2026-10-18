@@ -49,12 +49,8 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("  Nodes:\n")
 	for _, node := range nodes {
-		icon := "✔"
-		if node.Status != "Ready" {
-			icon = "✗"
-		}
 		fmt.Printf("    %s  %-20s %-8s %-8s %s\n",
-			icon, node.Name, node.Role, node.Status, node.Version)
+			nodeMark(node), node.Name, node.Role, node.Summary(), node.Version)
 	}
 	fmt.Println()
 
@@ -95,6 +91,18 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	checkHost(cluster, nodes)
 
 	return nil
+}
+
+// nodeMark marks unready nodes with ✗ and cordoned Ready nodes with ⚠ so a
+// cordon left by an interrupted command stands out. Other nodes get ✔.
+func nodeMark(node k8s.NodeInfo) string {
+	switch {
+	case node.Status != "Ready":
+		return "✗"
+	case node.Cordoned:
+		return "⚠"
+	}
+	return "✔"
 }
 
 // reportAlertDelivery says how an alert leaves this cluster, and says it loudly
