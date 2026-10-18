@@ -117,6 +117,16 @@ func peerAddress(mode string, n installer.NodeNetwork) string {
 	return n.ExternalIP
 }
 
+// shownAddress returns the address peers use, including the node's own address
+// in public mode when NAT makes the two differ.
+func shownAddress(mode string, n installer.NodeNetwork) string {
+	peer := peerAddress(mode, n)
+	if n.NodeIP != "" && n.NodeIP != peer {
+		return peer + " (node address " + n.NodeIP + ")"
+	}
+	return peer
+}
+
 // nodeFirewall represents the firewall policy requested for a node during a join.
 type nodeFirewall int
 
@@ -582,7 +592,7 @@ func prepareJoinHost(server, worker installer.CommandRunner, machineID, workerHo
 	if err != nil {
 		return installer.NetworkPlan{}, "", "", err
 	}
-	fmt.Printf("  ✔  Network: %s mode, server %s, %s %s\n", plan.Mode, plan.Server.NodeIP, workerHost, plan.Joiner.NodeIP)
+	fmt.Printf("  ✔  Network: %s mode, server %s, %s at %s\n", plan.Mode, shownAddress(plan.Mode, plan.Server), workerHost, shownAddress(plan.Mode, plan.Joiner))
 
 	currentDropIn, err := installer.ReadNetworkDropIn(server)
 	if err != nil {
@@ -601,7 +611,7 @@ func prepareJoinHost(server, worker installer.CommandRunner, machineID, workerHo
 		return installer.NetworkPlan{}, "", "", err
 	}
 	if changes {
-		fmt.Print(serverNetworkConsent(plan.Mode, plan.Server.NodeIP))
+		fmt.Print(serverNetworkConsent(plan.Mode, shownAddress(plan.Mode, plan.Server)))
 		if !autoYes {
 			ok, err := confirmInteractive("  Apply the server network changes? [y/N] ")
 			if err != nil {
