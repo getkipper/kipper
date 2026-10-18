@@ -7,9 +7,11 @@ import (
 	stderrors "errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -95,9 +97,9 @@ var appUpdateCmd = &cobra.Command{
 }
 
 var appScaleCmd = &cobra.Command{
-	Use:   "scale [app-name]",
+	Use:   "scale <app-name> [replicas]",
 	Short: "Scale an application to a given number of replicas",
-	Args:  cobra.ExactArgs(1),
+	Args:  cobra.RangeArgs(1, 2),
 	RunE:  runAppScale,
 }
 
@@ -179,7 +181,6 @@ func init() {
 	appScaleCmd.Flags().String("project", "", "project name")
 	appScaleCmd.Flags().String("environment", "", "target environment")
 	appScaleCmd.Flags().Int("replicas", 0, "number of replicas")
-	_ = appScaleCmd.MarkFlagRequired("replicas")
 
 	appRebuildCmd.Flags().String("project", "", "project name")
 	appRebuildCmd.Flags().String("environment", "", "target environment")
@@ -739,7 +740,11 @@ func runAppDelete(cmd *cobra.Command, args []string) error {
 
 func runAppScale(cmd *cobra.Command, args []string) error {
 	appName := args[0]
-	replicas, _ := cmd.Flags().GetInt("replicas")
+	flagReplicas, _ := cmd.Flags().GetInt("replicas")
+	replicas, err := scaleCount(args, flagReplicas, cmd.Flags().Changed("replicas"))
+	if err != nil {
+		return err
+	}
 
 	ns, k8sClient, err := resolveAppNamespace(cmd, appName)
 	if err != nil {
@@ -754,12 +759,36 @@ func runAppScale(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if stopped, err := d.Stopped(ctx, ns, appName); err == nil && stopped {
-		fmt.Printf("  ✔  %s is stopped; it runs %d replicas when started\n\n", appName, replicas)
+		fmt.Printf("  ✔  %s is stopped. It will run %d replicas when started\n\n", appName, replicas)
 		return nil
 	}
 	fmt.Printf("  ✔  Scaled to %d replicas\n\n", replicas)
 
 	return nil
+}
+
+// scaleCount reads the replica count from the second argument or --replicas.
+// It requires an app name in args[0] and a count between zero and math.MaxInt32.
+// If both forms are supplied, they must agree. Requiring a count prevents
+// accidental scaling to zero when the flag is omitted.
+func scaleCount(args []string, flagValue int, flagSet bool) (int, error) {
+	if len(args) < 2 {
+		if !flagSet {
+			return 0, fmt.Errorf("specify how many replicas to run, for example: kip app scale %s 3, or use --replicas 3", args[0])
+		}
+		if flagValue < 0 || flagValue > math.MaxInt32 {
+			return 0, fmt.Errorf("invalid replica count %d for --replicas. Use a whole number from 0 to 2147483647", flagValue)
+		}
+		return flagValue, nil
+	}
+	n, err := strconv.Atoi(args[1])
+	if err != nil || n < 0 || n > math.MaxInt32 {
+		return 0, fmt.Errorf("invalid replica count %q. Use a whole number from 0 to 2147483647", args[1])
+	}
+	if flagSet && flagValue != n {
+		return 0, fmt.Errorf("the count %d and --replicas %d differ. Specify the count in one place", n, flagValue)
+	}
+	return n, nil
 }
 
 func runAppRebuild(cmd *cobra.Command, args []string) error {
