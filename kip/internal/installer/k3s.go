@@ -801,7 +801,8 @@ func (j WorkerJoin) Register(masterClient, workerClient CommandRunner, serverURL
 	// Another drop-in setting node-taint could replace the registration taint.
 	out, err := workerClient.Run(configFilesCommand("/etc/rancher/k3s/config.yaml.d/*.yaml", bootstrapTaintPath))
 	if err != nil {
-		return "", fmt.Errorf("reading the worker's k3s configuration: %w", err)
+		// Omit the Run error because its captured output may contain a token.
+		return "", errors.New("reading the worker's k3s configuration failed")
 	}
 	files, err := parseConfigFiles(out)
 	if err != nil {

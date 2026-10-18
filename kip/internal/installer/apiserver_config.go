@@ -2,7 +2,6 @@ package installer
 
 import (
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -94,8 +93,10 @@ func EnsureAPIServerConfig(client CommandRunner, notify func(string)) (changed b
 		notify("Adding the required API server arguments and restarting k3s.")
 	}
 
-	if _, err := client.Run(writeK3sConfigScript(desired)); err != nil {
-		return false, fmt.Errorf("writing %s: %w", k3sConfigPath, err)
+	// The config may contain a token, so use stdin and omit the command and
+	// captured output from errors to protect it.
+	if _, err := client.RunStdin(writeK3sConfigScript(), strings.NewReader(desired)); err != nil {
+		return false, fmt.Errorf("writing %s: %w", k3sConfigPath, withoutOutput(err))
 	}
 
 	if err := restartK3s(client); err != nil {
@@ -383,27 +384,27 @@ printf '%s\n' "$raw" | grep -c 'apiserver_authentication_config_controller_last_
 	return strings.TrimSpace(out) != "0", nil
 }
 
-// readK3sConfig returns empty content for an absent file and propagates read errors.
+// readK3sConfig returns empty content for an absent file and reports read failures
+// without command output, which may contain a token.
 func readK3sConfig(client CommandRunner) (string, error) {
 	out, err := client.Run(fmt.Sprintf(
 		"if [ ! -e %s ] && [ ! -L %s ]; then exit 0; fi; cat %s", k3sConfigPath, k3sConfigPath, k3sConfigPath))
 	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", k3sConfigPath, err)
+		return "", fmt.Errorf("reading %s failed", k3sConfigPath)
 	}
 	return out, nil
 }
 
 // writeK3sConfigScript stages and renames the config to avoid partial writes.
 // It preserves symlinks, mode, and ownership so managed paths and access
-// restrictions survive the replacement. Base64 keeps the content out of shell syntax.
-func writeK3sConfigScript(content string) string {
+// restrictions survive the replacement. The new content arrives on stdin.
+func writeK3sConfigScript() string {
 	// Preserve the original backup while the live config matches a pending write.
 	// Otherwise, back up the live config before replacing it.
 	return strings.NewReplacer(
 		"CONFIG", k3sConfigPath,
 		"BACKUP", k3sConfigBackupPath,
 		"PENDING", k3sConfigPendingPath,
-		"PAYLOAD", shellQuote(base64.StdEncoding.EncodeToString([]byte(content))),
 	).Replace(`set -e
 target=$(readlink -f CONFIG)
 mode=$(stat -c %a "$target")
@@ -413,7 +414,7 @@ if [ ! -f PENDING ] || [ "$(cat PENDING)" != "$(sha256sum "$target" | cut -d' ' 
 fi
 staged=$(mktemp "$(dirname "$target")"/.kipper-XXXXXX)
 trap 'rm -f "$staged"' EXIT
-printf %s PAYLOAD | base64 -d > "$staged"
+cat > "$staged"
 chmod "$mode" "$staged"
 chown "$owner" "$staged"
 sha256sum "$staged" | cut -d' ' -f1 > PENDING

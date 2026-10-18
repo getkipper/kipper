@@ -180,9 +180,9 @@ func renderDexManifest(dexHost, consoleHost, adminEmailDomain, adminPasswordHash
 // cluster domain used to form the admin email "admin@<adminEmailDomain>".
 //
 // The console OAuth client secret is provisioned into the dex-oidc-client Secret
-// once (generated on first install, reused on every re-run) before the Dex
-// Deployment, which references it by env — so re-running install never mints a
-// new secret and breaks the console flow.
+// before the Dex Deployment, which references it through an environment variable.
+// It is generated on first install and reused on every re-run to preserve the
+// console's OAuth flow.
 //
 // passwordSent reports an attempted apply of the admin password manifest.
 // An apply error can occur after the server has committed the change.
@@ -193,14 +193,13 @@ func InstallDex(client CommandRunner, dexHost, consoleHost, adminEmailDomain, ad
 
 	manifest := renderDexManifest(dexHost, consoleHost, adminEmailDomain, adminPasswordHash)
 
-	applyCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", manifest)
-	if _, err := client.Run(applyCmd); err != nil {
-		return true, fmt.Errorf("applying dex manifest: %w", err)
+	// The manifest contains the admin password hash, so use stdin and omit the
+	// command and captured output from errors to protect it.
+	if _, err := client.RunStdin("kubectl apply -f -", strings.NewReader(manifest)); err != nil {
+		return true, fmt.Errorf("applying dex manifest: %w", withoutOutput(err))
 	}
 
-	// Restart Dex to pick up any ConfigMap changes. On a fresh install
-	// this is a no-op (the deployment was just created). On a re-run it
-	// ensures Dex reloads the updated config.
+	// Restart Dex so it reloads any ConfigMap changes on a re-run.
 	restartCmd := "kubectl rollout restart deployment/dex -n dex"
 	if _, err := client.Run(restartCmd); err != nil {
 		return true, fmt.Errorf("restarting dex: %w", err)

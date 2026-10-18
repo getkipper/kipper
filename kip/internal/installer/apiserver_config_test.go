@@ -2,6 +2,8 @@ package installer
 
 import (
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"io"
 	"regexp"
 	"strconv"
@@ -16,6 +18,7 @@ import (
 type hostScript struct {
 	reply    func(command string) (string, error)
 	commands []string
+	stdins   map[int]string
 	lockHeld bool
 }
 
@@ -33,7 +36,12 @@ func (h *hostScript) Run(command string) (string, error) {
 	return h.reply(command)
 }
 
-func (h *hostScript) RunStdin(command string, _ io.Reader) (string, error) {
+func (h *hostScript) RunStdin(command string, in io.Reader) (string, error) {
+	b, _ := io.ReadAll(in)
+	if h.stdins == nil {
+		h.stdins = map[int]string{}
+	}
+	h.stdins[len(h.commands)] = string(b)
 	return h.Run(command)
 }
 
@@ -58,12 +66,16 @@ func (h *hostScript) indexOf(fragment string) int {
 
 var base64Payload = regexp.MustCompile(`printf %s '([A-Za-z0-9+/=]+)' \| base64 -d`)
 
-// written decodes the config payload from the first matching write command.
+// written returns the first config write's content from stdin or a base64 payload,
+// or an empty string if no matching write was recorded.
 func (h *hostScript) written(t *testing.T) string {
 	t.Helper()
-	for _, c := range h.commands {
+	for i, c := range h.commands {
 		if !strings.Contains(c, k3sConfigPath) {
 			continue
+		}
+		if in, ok := h.stdins[i]; ok && strings.Contains(c, `cat > "$staged"`) {
+			return in
 		}
 		if m := base64Payload.FindStringSubmatch(c); m != nil {
 			decoded, err := base64.StdEncoding.DecodeString(m[1])
@@ -301,7 +313,7 @@ func TestEnsureAPIServerConfigKeepsTheFilesModeAndOwner(t *testing.T) {
 
 	var write string
 	for _, c := range host.commands {
-		if strings.Contains(c, "base64 -d") {
+		if strings.Contains(c, `cat > "$staged"`) {
 			write = c
 		}
 	}
@@ -538,7 +550,7 @@ func TestARetryLeavesAConfigEditedSinceTheInterruptedWrite(t *testing.T) {
 }
 
 func TestTheWriteMarksItsConfigPendingBeforeItLands(t *testing.T) {
-	script := writeK3sConfigScript("x: 1\n")
+	script := writeK3sConfigScript()
 
 	marker := strings.Index(script, k3sConfigPendingPath)
 	rename := strings.Index(script, `mv "$staged" "$target"`)
@@ -582,7 +594,7 @@ func TestAPolicyRestartAlsoRestoresAnInterruptedConfigWrite(t *testing.T) {
 }
 
 func TestTheWriteKeepsTheBackupOfAnUnconfirmedWrite(t *testing.T) {
-	script := writeK3sConfigScript("x: 1\n")
+	script := writeK3sConfigScript()
 
 	guard := strings.Index(script, "cat "+k3sConfigPendingPath)
 	backup := strings.Index(script, "cp -p \"$target\" "+k3sConfigBackupPath)
@@ -726,4 +738,33 @@ func TestTheReleaseHoldsTheGuard(t *testing.T) {
 	require.NoError(t, err)
 	release := host.commands[len(host.commands)-1]
 	assert.Contains(t, release, "flock 9", "a takeover cannot slip between the owner check and the removal")
+}
+
+func TestTheConfigWriteKeepsTheConfigOutOfCommandsAndErrors(t *testing.T) {
+	const token = "K10example-token::server:example"
+	config := oldConfig + "token: " + token + "\n"
+	host := &hostScript{reply: func(cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, `cat > "$staged"`):
+			return "", fmt.Errorf("running %q on host: %w", cmd, errors.New("exit status 1"))
+		case strings.Contains(cmd, "cat "+k3sConfigPath):
+			return config, nil
+		case strings.Contains(cmd, "list-unit-files k3s.service"):
+			return "1", nil
+		case strings.Contains(cmd, "apiserver_authentication_config_controller_last_config_info"):
+			return "1", nil
+		}
+		return "", nil
+	}}
+
+	_, err := EnsureAPIServerConfig(host, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, host.written(t), token, "the config still carries its token")
+	for _, c := range host.commands {
+		assert.NotContains(t, c, token)
+		assert.NotContains(t, c, base64.StdEncoding.EncodeToString([]byte(token))[:16])
+	}
+	assert.NotContains(t, err.Error(), token)
+	assert.NotContains(t, err.Error(), "staged", "the failed write's command stays out of the error")
 }

@@ -2,6 +2,7 @@ package installer
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"strconv"
@@ -418,13 +419,15 @@ func interfaceNetworks(client CommandRunner, iface string) ([]netip.Prefix, erro
 // defaults, then checks that they contain the server's reported pod ranges
 // and the kubernetes Service address.
 func clusterNetworks(server CommandRunner) (map[string]netip.Prefix, error) {
+	// Omit Run errors from config and unit reads because either may include
+	// captured output containing a token.
 	files, err := server.Run(configFilesCommand("/etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml", ""))
 	if err != nil {
-		return nil, fmt.Errorf("reading the server's k3s configuration: %w", err)
+		return nil, errors.New("reading the server's k3s configuration failed")
 	}
 	unit, err := server.Run(k3sUnitSettingsCommand)
 	if err != nil {
-		return nil, fmt.Errorf("reading the server's k3s unit: %w", err)
+		return nil, errors.New("reading the server's k3s unit failed")
 	}
 	settings, err := cidrSettings(files, unit)
 	if err != nil {
