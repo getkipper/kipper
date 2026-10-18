@@ -666,10 +666,10 @@ func runNodeList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("listing nodes: %w", err)
 	}
 
-	fmt.Printf("\n  %-20s %-8s %-10s %-14s %s\n", "NAME", "ROLE", "STATUS", "VERSION", "IP")
+	fmt.Printf("\n  %-20s %-8s %-25s %-14s %s\n", "NAME", "ROLE", "STATUS", "VERSION", "IP")
 	for _, node := range nodes {
-		fmt.Printf("  %-20s %-8s %-10s %-14s %s\n",
-			node.Name, node.Role, node.Status, node.Version, node.IP)
+		fmt.Printf("  %-20s %-8s %-25s %-14s %s\n",
+			node.Name, node.Role, node.Summary(), node.Version, node.IP)
 	}
 	fmt.Println()
 

@@ -65,16 +65,26 @@ func NewFromCluster(cluster *config.Cluster) (*Client, error) {
 
 // NodeInfo holds the summary information for a single cluster node.
 type NodeInfo struct {
-	Name    string
-	Status  string
-	Role    string
-	Version string
-	IP      string
+	Name     string
+	Status   string
+	Cordoned bool
+	Role     string
+	Version  string
+	IP       string
 
 	MachineID   string
 	OSImage     string
 	Annotations map[string]string
 	BootID      string
+}
+
+// Summary returns Status with ",SchedulingDisabled" appended for a cordoned
+// node, matching kubectl's status format.
+func (n NodeInfo) Summary() string {
+	if n.Cordoned {
+		return n.Status + ",SchedulingDisabled"
+	}
+	return n.Status
 }
 
 // ListNodes returns summary info for all nodes in the cluster.
@@ -330,6 +340,7 @@ func nodeToInfo(node corev1.Node) NodeInfo {
 	return NodeInfo{
 		Name:        node.Name,
 		Status:      status,
+		Cordoned:    node.Spec.Unschedulable,
 		Role:        role,
 		Version:     node.Status.NodeInfo.KubeletVersion,
 		IP:          ip,
