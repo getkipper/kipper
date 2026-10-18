@@ -55,6 +55,8 @@ type Backup struct {
 	Endpoint        string `json:"endpoint,omitempty"`
 	AccessKeyID     string `json:"access_key_id"`
 	SecretAccessKey string `json:"secret_access_key"`
+	SSEC            bool   `json:"sse_c,omitempty"`
+	SSECKey         []byte `json:"sse_c_key,omitempty"`
 }
 
 // ParseRequest rejects unknown fields, unsupported versions, invalid run IDs,
@@ -67,7 +69,7 @@ func ParseRequest(data []byte) (Request, error) {
 		return Request{}, fmt.Errorf("reading the install request: %w", err)
 	}
 	if r.Version != RequestVersion {
-		return Request{}, fmt.Errorf("unsupported install request version %d (expected %d); use the same kip version on both machines", r.Version, RequestVersion)
+		return Request{}, fmt.Errorf("unsupported install request version %d (expected %d). Use the same kip version on both machines", r.Version, RequestVersion)
 	}
 	if !runIDPattern.MatchString(r.RunID) {
 		return Request{}, fmt.Errorf("install request run id %q is not a plain name", r.RunID)
@@ -113,7 +115,7 @@ func (r Request) Options() installer.Options {
 	if b := r.Backup; b != nil {
 		opts.BackupStorage = &installer.BackupStorageConfig{
 			Bucket: b.Bucket, Region: b.Region, Endpoint: b.Endpoint,
-			AccessKeyID: b.AccessKeyID, SecretAccessKey: b.SecretAccessKey,
+			AccessKeyID: b.AccessKeyID, SecretAccessKey: b.SecretAccessKey, SSEC: b.SSEC, SSECKey: b.SSECKey,
 		}
 	}
 	return opts

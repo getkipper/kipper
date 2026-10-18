@@ -20,6 +20,7 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/backupscope"
 	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/config"
+	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/service"
 	"github.com/getkipper/kipper/kip/internal/velerolabel"
 )
@@ -232,8 +233,37 @@ func runBackupList(cmd *cobra.Command, args []string) error {
 
 		fmt.Printf("  %-35s %-12s %-20s %s\n", b.GetName(), status, namespaces, created)
 	}
+	if bsl, err := k8sClient.Dynamic().Resource(backupStorageLocationGVR).Namespace("velero").Get(ctx, "default", metav1.GetOptions{}); err == nil {
+		config, _, _ := unstructured.NestedStringMap(bsl.Object, "spec", "config")
+		defaultKey := false
+		if secret, err := k8sClient.Clientset().CoreV1().Secrets("velero").Get(ctx, "velero-repo-credentials", metav1.GetOptions{}); err == nil {
+			defaultKey = installer.IsDefaultRepositoryKey(secret.Data["repository-password"])
+		}
+		fmt.Println()
+		for _, line := range backupProtection(config, defaultKey) {
+			fmt.Printf("  %s\n", line)
+		}
+	}
 	fmt.Println()
 	return nil
+}
+
+// backupProtection describes, from the backup location's config and whether
+// the repository key is Velero's published default, how backup objects and
+// volume data are encrypted.
+func backupProtection(config map[string]string, defaultKey bool) []string {
+	objects := "Backup objects: the store's own settings apply"
+	switch {
+	case config["customerKeyEncryptionSecret"] != "":
+		objects = "Backup objects: encrypted by the store with this cluster's SSE-C key (kip backup sse-key export)"
+	case config["serverSideEncryption"] != "":
+		objects = "Backup objects: encrypted at rest by AWS S3 (SSE-S3)"
+	}
+	volumes := "Volume data:    encrypted with the backup repository key (kip backup repository-key export)"
+	if defaultKey {
+		volumes = "Volume data:    encrypted with Velero's published default key, so only access to the bucket protects it"
+	}
+	return []string{objects, volumes}
 }
 
 func runBackupRestore(cmd *cobra.Command, args []string) error {

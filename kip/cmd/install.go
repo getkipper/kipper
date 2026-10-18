@@ -72,6 +72,8 @@ func init() {
 	installCmd.Flags().String("backup-storage-endpoint", "", "S3 endpoint URL (omit for native AWS S3, required for R2/MinIO/B2/Wasabi/Spaces)")
 	installCmd.Flags().String("backup-storage-credentials", "", "path to AWS-style credentials file (defaults to ~/.aws/credentials when --backup-storage-bucket is set)")
 	installCmd.Flags().String("backup-storage-profile", "default", "profile name within the credentials file (e.g. 'acme')")
+	installCmd.Flags().Bool("backup-storage-sse-c", false, "encrypt backup objects with SSE-C using a key kip generates on the server. Requires an external HTTPS S3-compatible store and a bucket without backups")
+	installCmd.Flags().String("backup-storage-sse-c-key-file", "", "file containing the SSE-C key used to encrypt existing backups, as saved by kip backup sse-key export (mode 0600)")
 	installCmd.Flags().String("backup-repository-key-file", "", "file containing the key used to encrypt existing volume backups (mode 0600). Required only when the bucket holds backups and this cluster has no key yet")
 
 	_ = installCmd.MarkFlagRequired("host")
@@ -305,11 +307,23 @@ func resolveBackupStorage(cmd *cobra.Command) (*installer.BackupStorageConfig, e
 	endpoint, _ := cmd.Flags().GetString("backup-storage-endpoint")
 	credsPath, _ := cmd.Flags().GetString("backup-storage-credentials")
 	profile, _ := cmd.Flags().GetString("backup-storage-profile")
+	sseC, _ := cmd.Flags().GetBool("backup-storage-sse-c")
+	sseKeyPath, _ := cmd.Flags().GetString("backup-storage-sse-c-key-file")
 
 	anySet := bucket != "" || region != "" || endpoint != "" || credsPath != "" ||
 		cmd.Flags().Changed("backup-storage-profile")
 	if !anySet {
+		if sseC || sseKeyPath != "" {
+			return nil, fmt.Errorf("SSE-C needs external backup storage. Pass --backup-storage-bucket, --backup-storage-region and --backup-storage-endpoint")
+		}
 		return nil, nil
+	}
+	var sseKey []byte
+	if sseKeyPath != "" {
+		var err error
+		if sseKey, err = installer.ReadSSECKeyFile(sseKeyPath); err != nil {
+			return nil, err
+		}
 	}
 
 	if bucket == "" {
@@ -338,13 +352,21 @@ func resolveBackupStorage(cmd *cobra.Command) (*installer.BackupStorageConfig, e
 		return nil, fmt.Errorf("loading credentials for external backup storage: %w", err)
 	}
 
-	return &installer.BackupStorageConfig{
+	cfg := &installer.BackupStorageConfig{
 		Bucket:          bucket,
 		Region:          region,
 		Endpoint:        endpoint,
 		AccessKeyID:     creds.AccessKeyID,
 		SecretAccessKey: creds.SecretAccessKey,
-	}, nil
+		SSEC:            sseC,
+		SSECKey:         sseKey,
+	}
+	if sseC || sseKey != nil {
+		if err := installer.CheckSSECStorage(cfg); err != nil {
+			return nil, err
+		}
+	}
+	return cfg, nil
 }
 
 // installingKipVersion is the version recorded on the CRDs an install writes, so

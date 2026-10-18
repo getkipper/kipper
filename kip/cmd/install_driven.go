@@ -264,7 +264,7 @@ func drivenRequest(cmd *cobra.Command, host string) (installjob.Request, error) 
 	}
 	if backup != nil {
 		req.Backup = &installjob.Backup{Bucket: backup.Bucket, Region: backup.Region, Endpoint: backup.Endpoint,
-			AccessKeyID: backup.AccessKeyID, SecretAccessKey: backup.SecretAccessKey}
+			AccessKeyID: backup.AccessKeyID, SecretAccessKey: backup.SecretAccessKey, SSEC: backup.SSEC, SSECKey: backup.SSECKey}
 	}
 	if path := str("backup-repository-key-file"); path != "" {
 		key, err := installer.ReadRepositoryKeyFile(path)

@@ -349,20 +349,17 @@ spec:
 		return fmt.Errorf("waiting for MinIO bucket job: %w", err)
 	}
 
-	// Best-effort cleanup; the bucket already exists at this point so a
+	// The bucket already exists at this point, so a
 	// leftover completed Job is harmless if the delete fails.
 	_, _ = client.Run(fmt.Sprintf("kubectl -n velero delete job/%s --ignore-not-found", minioBucketBootstrapJob))
 	return nil
 }
 
-// installVelero applies the Velero HelmChart, dispatching the BSL
-// block depending on whether the operator has configured external
-// object storage. The chart references a Secret/cloud-credentials in
-// the velero namespace (created beforehand by installVeleroCredentials)
-// rather than inlining the credentials in the chart values — embedding
-// the access key in the HelmChart CR would expose it to anyone with
-// read on kube-system HelmCharts, and it would leak into kubectl
-// error output if apply ever fails.
+// installVelero prepares the backup keys and credentials, then applies the
+// Velero HelmChart for in-cluster or external storage. The chart references
+// the cloud-credentials Secret in velero, created by installVeleroCredentials.
+// Keeping the access key out of chart values protects it from readers of
+// kube-system HelmCharts and from kubectl error output if apply fails.
 func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword string, repositoryKey []byte) error {
 	target, err := newBackupTarget(cfg, minioPassword)
 	if err != nil {
@@ -373,8 +370,18 @@ func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword stri
 	}
 	// The checks run before the credentials are written, so a refused change
 	// leaves the live backups working with their current credentials.
-	if err := prepareBackupRepository(client, target, repositoryKey); err != nil {
+	check := &bucketCheck{client: client, target: target}
+	if err := prepareBackupRepository(client, target, check, repositoryKey); err != nil {
 		return err
+	}
+	sseC, err := prepareBackupSSEC(client, cfg, target, check)
+	if err != nil {
+		return err
+	}
+	if sseC {
+		withSSEC := *cfg
+		withSSEC.SSEC = true
+		cfg = &withSSEC
 	}
 	if err := installVeleroCredentials(client, cfg, minioPassword); err != nil {
 		return err
@@ -671,8 +678,8 @@ func BackupsGoToMinIO(s3URL string) bool { return s3URL == inClusterMinIOURL }
 // veleroBSLBlock renders the BSL block of the Velero values, branching
 // on whether external storage is configured. Returned string is pre-
 // indented to slot into the HelmChart valuesContent at the right depth.
-// Credentials are NOT rendered here — they live in the cloud-credentials
-// Secret installed by installVeleroCredentials.
+// Credentials live in the cloud-credentials Secret installed by
+// installVeleroCredentials.
 func veleroBSLBlock(cfg *BackupStorageConfig) string {
 	if cfg == nil {
 		return `      backupStorageLocation:
@@ -685,20 +692,20 @@ func veleroBSLBlock(cfg *BackupStorageConfig) string {
             s3Url: ` + inClusterMinIOURL
 	}
 
-	// External BSL. Endpoint is empty for native AWS S3 (Velero derives it from
-	// the region); otherwise we set s3Url + force path style.
 	configLines := []string{fmt.Sprintf("            region: %s", cfg.Region)}
 	if cfg.Endpoint == "" {
-		// Native AWS S3 always accepts SSE-S3, so request it: backups are then
-		// encrypted at rest server-side. A custom S3-compatible endpoint is
-		// left alone — forcing SSE-S3 breaks a MinIO store that has no KMS, and
-		// the operator owns that store's encryption policy.
+		// Request SSE-S3 for encryption at rest on native AWS S3. Custom stores
+		// use their operator's policy because forcing SSE-S3 breaks MinIO
+		// without a KMS.
 		configLines = append(configLines, `            serverSideEncryption: AES256`)
 	} else {
 		configLines = append(configLines,
 			fmt.Sprintf(`            s3Url: %s`, cfg.Endpoint),
 			`            s3ForcePathStyle: "true"`,
 		)
+	}
+	if cfg.SSEC {
+		configLines = append(configLines, fmt.Sprintf(`            customerKeyEncryptionSecret: %s/%s`, sseKeySecret, sseKeyField))
 	}
 	return fmt.Sprintf(`      backupStorageLocation:
         - name: default
