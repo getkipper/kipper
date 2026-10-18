@@ -42,7 +42,6 @@ kubelet access. Run the command again with the same options to resume an
 interrupted join. Running it again for a recorded worker also rejoins one
 whose agent certificates are missing or expired.`,
 	Args:         cobra.MaximumNArgs(1),
-	Hidden:       true,
 	SilenceUsage: true,
 	RunE:         runNodeAdd,
 }
@@ -53,10 +52,9 @@ var nodeListCmd = &cobra.Command{
 	RunE:  runNodeList,
 }
 
-const nodeAddPreviewNotice = `
-  ⚠   kip node add is a preview and not yet supported.
-      Workers add capacity. The server remains the sole control plane and ingress
-      node, so the cluster still depends on it for availability.
+const nodeAddNotice = `
+  ℹ  Workers add capacity. The server remains the sole control plane and ingress
+     node, so the cluster still depends on it for availability.
 `
 
 func init() {
@@ -242,7 +240,7 @@ func sshRateLimitFor(client installer.CommandRunner, audit installer.FirewallAud
 }
 
 func runNodeAdd(cmd *cobra.Command, args []string) error {
-	fmt.Print(nodeAddPreviewNotice)
+	fmt.Print(nodeAddNotice)
 
 	workerHost, err := nodeAddHost(cmd, args)
 	if err != nil {
