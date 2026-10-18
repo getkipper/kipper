@@ -1135,6 +1135,7 @@ Every backup also skips cert-manager's transient issuance objects (CertificateRe
 | `--resources` | No | — | Restore only specific resource types (comma-separated) |
 | `--allow-partial` | No | `false` | Restore a `PartiallyFailed` backup despite potentially missing data or resources |
 | `--repair-credentials` | No | `false` | Re-attach restored service credentials Secrets without prompting |
+| `--cluster-resources` | No | `false` | Also restore projects and their resource adjustments. Existing ones remain unchanged. |
 
 Restore a `Completed` backup, or use `--allow-partial` for a `PartiallyFailed` backup. For partial backups, kip lists volumes with failed or canceled backups when details are available. Backups in other phases cannot be restored; wait for pending or running backups to finish.
 

@@ -15,6 +15,7 @@ import (
 
 	"sigs.k8s.io/yaml"
 
+	"github.com/getkipper/kipper/controller/pkg/backupscope"
 	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
@@ -68,42 +69,6 @@ func renderYAMLList(items []string, indent string) string {
 		lines[i] = indent + "- " + item
 	}
 	return strings.Join(lines, "\n")
-}
-
-// DefaultBackupExcludedNamespaces returns the namespaces every
-// cluster-wide backup must skip. The list mirrors what the daily/weekly
-// schedules already exclude: system namespaces with regenerable state
-// (kube-*, traefik, longhorn-system, keda, monitoring) and Velero's own
-// namespace — Velero must not back up the MinIO PVC that hosts its own
-// BSL bucket, or the backup hangs in InProgress as it recurses into its
-// own storage.
-//
-// `kip backup create` calls this so manual backups stay consistent with
-// the schedules. Returns a fresh slice on every call so callers can
-// mutate it safely.
-func DefaultBackupExcludedNamespaces() []string {
-	return []string{
-		"kube-system",
-		"kube-public",
-		"kube-node-lease",
-		"monitoring",
-		"keda",
-		"longhorn-system",
-		"traefik",
-		"velero",
-	}
-}
-
-// DefaultBackupExcludedResources returns transient certificate-issuance kinds
-// to omit from backups and restores. Preserving CertificateRequests can collide
-// with request names generated after a restored Certificate loses revision state.
-// Certificates and TLS Secrets remain included. Each call returns a fresh slice.
-func DefaultBackupExcludedResources() []string {
-	return []string{
-		"certificaterequests.cert-manager.io",
-		"orders.acme.cert-manager.io",
-		"challenges.acme.cert-manager.io",
-	}
 }
 
 // Uploader adds file transfer to CommandRunner. Implementations must keep file
@@ -528,14 +493,12 @@ func veleroManifest(cfg *BackupStorageConfig, selinux bool) string {
 		nodeAgentArgs, selinuxValues = veleroSELinuxNodeAgentArgs, veleroSELinuxValues()
 	}
 	bslBlock := veleroBSLBlock(cfg)
-	// 12-space indent puts each `- ns` two levels deeper than the
-	// surrounding `excludedNamespaces:` key, matching the original
-	// hand-written block so the chart YAML reads the same as before.
-	excludedBlock := renderYAMLList(DefaultBackupExcludedNamespaces(), "            ")
-	// cert-manager's transient issuance objects must be skipped in every
-	// schedule so a later restore does not wedge certificate renewal (see
-	// DefaultBackupExcludedResources).
-	excludedResourcesBlock := renderYAMLList(DefaultBackupExcludedResources(), "            ")
+	// Twelve spaces nest list items under excludedNamespaces in the chart values.
+	excludedBlock := renderYAMLList(backupscope.ExcludedNamespaces(), "            ")
+	scopeBlock := "          excludedNamespaceScopedResources:\n" +
+		renderYAMLList(backupscope.TransientResources(), "            ") +
+		"\n          includedClusterScopedResources:\n" +
+		renderYAMLList(backupscope.BackedUpClusterResources(), "            ")
 	return fmt.Sprintf(`apiVersion: helm.cattle.io/v1
 kind: HelmChart
 metadata:
@@ -589,7 +552,6 @@ spec:
           storageLocation: default
           excludedNamespaces:
 %s
-          excludedResources:
 %s
       weekly-system:
         disabled: false
@@ -602,9 +564,8 @@ spec:
             - dex
             - cert-manager
             - kipper-system
-          excludedResources:
 %s
-%s`, veleroChartVersion, veleroAWSPluginImage, bslBlock, nodeAgentArgs, excludedBlock, excludedResourcesBlock, excludedResourcesBlock, selinuxValues)
+%s`, veleroChartVersion, veleroAWSPluginImage, bslBlock, nodeAgentArgs, excludedBlock, scopeBlock, scopeBlock, selinuxValues)
 }
 
 // installVeleroCredentials creates the velero namespace and the

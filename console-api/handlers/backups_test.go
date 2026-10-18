@@ -69,3 +69,48 @@ func TestBackupsCreateOnALegacyCluster(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, list.Items, 1, "the Velero backup is created")
 }
+
+func createdSpec(t *testing.T, h *Backups, gvr schema.GroupVersionResource) map[string]interface{} {
+	t.Helper()
+	list, err := h.Dynamic.Resource(gvr).Namespace("velero").List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	return list.Items[0].Object["spec"].(map[string]interface{})
+}
+
+func TestBackupsCreateSharesTheBackupSelection(t *testing.T) {
+	for body, wantExcludedNamespaces := range map[string]bool{`{}`: true, `{"namespaces":"shop,blog"}`: false} {
+		h := &Backups{Client: fake.NewClientset(), Dynamic: backupDynamic(platform.BackupInCluster)}
+		r := chi.NewRouter()
+		r.Post("/backups", h.Create)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest("POST", "/backups", strings.NewReader(body)))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		spec := createdSpec(t, h, backupGVR)
+		assert.Contains(t, spec["includedClusterScopedResources"], "projects.kipper.run", body)
+		assert.Contains(t, spec["excludedNamespaceScopedResources"], "orders.acme.cert-manager.io", body)
+		if wantExcludedNamespaces {
+			// Excluding velero prevents backups from hanging while reading their own MinIO storage.
+			assert.Contains(t, spec["excludedNamespaces"], "velero", body)
+		} else {
+			assert.Equal(t, []interface{}{"shop", "blog"}, spec["includedNamespaces"], body)
+			assert.NotContains(t, spec, "excludedNamespaces", body)
+		}
+	}
+}
+
+func TestBackupsRestoreLeavesKipperClusterObjectsOut(t *testing.T) {
+	h := &Backups{Client: fake.NewClientset(), Dynamic: backupDynamic(platform.BackupInCluster)}
+	r := chi.NewRouter()
+	r.Post("/backups/{backup}/restore", h.Restore)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("POST", "/backups/b1/restore", nil))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	spec := createdSpec(t, h, restoreGVR)
+	assert.Contains(t, spec["excludedResources"], "projects.kipper.run")
+	assert.Contains(t, spec["excludedResources"], "clusteridentities.kipper.run")
+	assert.Contains(t, spec["excludedResources"], "orders.acme.cert-manager.io")
+	assert.NotContains(t, spec, "includeClusterResources")
+}

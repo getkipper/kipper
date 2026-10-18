@@ -17,9 +17,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
 
+	"github.com/getkipper/kipper/controller/pkg/backupscope"
 	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/config"
-	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/service"
 	"github.com/getkipper/kipper/kip/internal/velerolabel"
 )
@@ -90,6 +90,7 @@ func init() {
 	backupRestoreCmd.Flags().String("resources", "", "restore only specific resource types (comma-separated, e.g. deployments,services,secrets)")
 	backupRestoreCmd.Flags().Bool("allow-partial", false, "restore a PartiallyFailed backup despite possible missing data")
 	backupRestoreCmd.Flags().Bool("repair-credentials", false, "re-attach restored service credentials Secrets without prompting")
+	backupRestoreCmd.Flags().Bool("cluster-resources", false, "also restore projects and their resource adjustments. Existing ones remain unchanged.")
 
 	backupCmd.AddCommand(backupCreateCmd)
 	backupCmd.AddCommand(backupListCmd)
@@ -162,7 +163,11 @@ func buildBackupCR(name, project, environment, ttl string, includeSystem bool, c
 		"ttl":                      ttl,
 		"storageLocation":          "default",
 		"defaultVolumesToFsBackup": true,
-		"excludedResources":        toAnySlice(installer.DefaultBackupExcludedResources()),
+	}
+	if includeSystem && project == "" {
+		backupscope.BackupWholeCluster(spec)
+	} else {
+		backupscope.Backup(spec)
 	}
 
 	switch {
@@ -170,7 +175,7 @@ func buildBackupCR(name, project, environment, ttl string, includeSystem bool, c
 		ns := cluster.ResolveNamespace(project, environment)
 		spec["includedNamespaces"] = []interface{}{ns}
 	case !includeSystem:
-		spec["excludedNamespaces"] = toAnySlice(installer.DefaultBackupExcludedNamespaces())
+		spec["excludedNamespaces"] = toAnySlice(backupscope.ExcludedNamespaces())
 	}
 
 	return &unstructured.Unstructured{
@@ -237,6 +242,7 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 	resources, _ := cmd.Flags().GetString("resources")
 	allowPartial, _ := cmd.Flags().GetBool("allow-partial")
 	repairCredentials, _ := cmd.Flags().GetBool("repair-credentials")
+	clusterResources, _ := cmd.Flags().GetBool("cluster-resources")
 
 	cluster, k8sClient, err := loadCurrentCluster()
 	if err != nil {
@@ -273,7 +279,7 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 
 	restoreName := "restore-" + backupName + "-" + time.Now().Format("150405")
 
-	spec, err := restoreSpec(backupName, namespace, resources, nsMapping)
+	spec, err := restoreSpec(backupName, namespace, resources, nsMapping, clusterResources)
 	if err != nil {
 		return err
 	}
@@ -398,12 +404,9 @@ func partialRestoreWarning(backupName string, volumes []unstructured.Unstructure
 	return fmt.Sprintf("  ⚠  Restoring PartiallyFailed backup %s: restored data or resources may be incomplete.\n", backupName)
 }
 
-func restoreSpec(backupName, namespace, resources, mapping string) (map[string]interface{}, error) {
-	spec := map[string]interface{}{
-		"backupName": backupName,
-		// Apply certificate-issuance exclusions to older backups as well.
-		"excludedResources": toAnySlice(installer.DefaultBackupExcludedResources()),
-	}
+func restoreSpec(backupName, namespace, resources, mapping string, clusterResources bool) (map[string]interface{}, error) {
+	spec := map[string]interface{}{"backupName": backupName}
+	backupscope.Restore(spec, clusterResources)
 	if namespace != "" {
 		spec["includedNamespaces"] = []interface{}{namespace}
 	}
@@ -417,6 +420,9 @@ func restoreSpec(backupName, namespace, resources, mapping string) (map[string]i
 		}
 		if namespace != "" && namespace != source {
 			return nil, fmt.Errorf("--namespace-mapping %q requires --namespace %s; got %s", mapping, source, namespace)
+		}
+		if clusterResources {
+			return nil, fmt.Errorf("--namespace-mapping restores a copy of one namespace and cannot be combined with --cluster-resources")
 		}
 		// Limit the restore to the mapped source to avoid restoring unrelated namespaces.
 		spec["includedNamespaces"] = []interface{}{source}

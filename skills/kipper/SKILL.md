@@ -181,7 +181,7 @@ Global flag on every command: `--cluster <name>`. Most workflow commands accept 
 - `kip registry add --server <host> --username <u> --password <p> [--name] | list | remove <name>` — pull secrets for private registries.
 
 **Backups** (Velero)
-- `kip backup create [name] [--project --environment --ttl 168h --include-system] | list | restore <name> [--namespace --namespace-mapping src:target --resources] | schedules`
+- `kip backup create [name] [--project --environment --ttl 168h --include-system] | list | restore <name> [--namespace --namespace-mapping src:target --resources --cluster-resources] | schedules`
 
 **Platform and observability**
 - `kip platform status` · `kip platform profile show|set <nano|small|medium|large|xlarge>` · `kip platform resize <component> --memory <M>`

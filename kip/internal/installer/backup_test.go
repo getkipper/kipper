@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
+	"github.com/getkipper/kipper/controller/pkg/backupscope"
 	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
@@ -73,73 +74,20 @@ func TestVeleroBSLBlock_ExternalDoesNotLeakKipperPlaceholder(t *testing.T) {
 	assert.NotContains(t, bsl, "bucket: velero")
 }
 
-func TestDefaultBackupExcludedNamespaces(t *testing.T) {
-	got := DefaultBackupExcludedNamespaces()
-
-	// velero is the load-bearing one: omitting it makes manual backups
-	// recurse into the MinIO PVC that hosts the BSL bucket and hang
-	// (storefront migration 2026-05-16).
-	assert.Contains(t, got, "velero")
-
-	// Mirror schedule template's exclusion list verbatim — they must
-	// stay in sync or manual and scheduled backups capture different
-	// content.
-	assert.Equal(t, []string{
-		"kube-system", "kube-public", "kube-node-lease",
-		"monitoring", "keda", "longhorn-system", "traefik", "velero",
-	}, got)
-
-	// Independent calls return distinct slices so callers can mutate.
-	a := DefaultBackupExcludedNamespaces()
-	b := DefaultBackupExcludedNamespaces()
-	a[0] = "mutated"
-	assert.NotEqual(t, a[0], b[0])
-}
-
-func TestDefaultBackupExcludedResources(t *testing.T) {
-	got := DefaultBackupExcludedResources()
-
-	// These three transient cert-manager kinds are the load-bearing
-	// exclusion: capturing them wedges certificate renewal after a
-	// restore. The restored CertificateRequests collide with the names
-	// cert-manager wants to reissue, so certificates silently fail to
-	// renew and expire ~90 days later.
-	assert.Equal(t, []string{
-		"certificaterequests.cert-manager.io",
-		"orders.acme.cert-manager.io",
-		"challenges.acme.cert-manager.io",
-	}, got)
-
-	// The Certificate and its Secret must NOT be excluded — those are the
-	// desired state a restore needs to bring back.
-	assert.NotContains(t, got, "certificates.cert-manager.io")
-	assert.NotContains(t, got, "secrets")
-
-	// Independent calls return distinct slices so callers can mutate.
-	a := DefaultBackupExcludedResources()
-	b := DefaultBackupExcludedResources()
-	a[0] = "mutated"
-	assert.NotEqual(t, a[0], b[0])
-}
-
 func TestRenderExcludedNamespacesYAML(t *testing.T) {
 	out := renderYAMLList([]string{"kube-system", "velero"}, "            ")
 	assert.Equal(t, "            - kube-system\n            - velero", out)
 }
 
 func TestVeleroManifestSchedulesExcludeAllSystemNamespaces(t *testing.T) {
-	// The chart's daily-apps schedule must exclude the same namespaces
-	// the manual backup path excludes. The template is built from
-	// DefaultBackupExcludedNamespaces() now, but a drift between
-	// rendering and helper output (wrong indent, wrong newline, wrong
-	// order) would silently break scheduled backups.
-	excluded := DefaultBackupExcludedNamespaces()
+	// The daily-apps schedule and manual backups share these exclusions.
+	// Rendering must preserve their order, indentation and line breaks
+	// so scheduled backups receive the same valid namespace list.
+	excluded := backupscope.ExcludedNamespaces()
 	block := renderYAMLList(excluded, "            ")
 	for _, ns := range excluded {
 		assert.Contains(t, block, "- "+ns)
 	}
-	// First line carries the indent — proves we didn't accidentally
-	// strip it during refactor.
 	assert.True(t, strings.HasPrefix(block, "            -"), "indent must be preserved on first line")
 }
 
@@ -197,6 +145,17 @@ func veleroValues(t *testing.T, selinux bool) map[string]any {
 	values := map[string]any{}
 	require.NoError(t, yaml.Unmarshal([]byte(chart.Spec.ValuesContent), &values))
 	return values
+}
+
+func TestVeleroManifestSchedulesBackUpKipperClusterObjects(t *testing.T) {
+	schedules := veleroValues(t, false)["schedules"].(map[string]any)
+	require.Len(t, schedules, 2)
+	for name, schedule := range schedules {
+		template := schedule.(map[string]any)["template"].(map[string]any)
+		assert.NotContains(t, template, "excludedResources", "%s: Velero rejects old filters next to scoped ones", name)
+		assert.ElementsMatch(t, backupscope.BackedUpClusterResources(), template["includedClusterScopedResources"], name)
+		assert.ElementsMatch(t, backupscope.TransientResources(), template["excludedNamespaceScopedResources"], name)
+	}
 }
 
 // Preserve the existing manifests for hosts where Kipper leaves k3s SELinux support disabled.
