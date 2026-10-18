@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -127,6 +128,16 @@ func runAuthLogin(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func sessionStatus(tokenErr error) string {
+	switch {
+	case tokenErr == nil:
+		return "authenticated"
+	case errors.Is(tokenErr, auth.ErrDexUnreachable):
+		return "unknown because the session could not be refreshed with Dex. Try again shortly"
+	}
+	return "expired. Run: kip auth login"
+}
+
 func runAuthStatus(cmd *cobra.Command, args []string) error {
 	cluster, err := loadCurrentClusterConfig()
 	if err != nil {
@@ -148,11 +159,7 @@ func runAuthStatus(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\n  Cluster: %s\n", cluster.Domain)
 	fmt.Printf("  Email:   %s\n", creds.Email)
-	if tokenErr != nil {
-		fmt.Printf("  Status:  expired. Run: kip auth login\n")
-	} else {
-		fmt.Printf("  Status:  authenticated\n")
-	}
+	fmt.Printf("  Status:  %s\n", sessionStatus(tokenErr))
 
 	// Show both versions so a mismatch is visible when a request is unexpectedly
 	// rejected. No automatic warning: kip and console-api can stamp their

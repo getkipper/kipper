@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -607,5 +608,35 @@ func TestStoreUsableAfterFailedRefresh(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the store lock was not released after the failed refresh")
+	}
+}
+
+func TestRefreshFailureTellsAnExpiredSessionFromAnUnreachableDex(t *testing.T) {
+	for _, tc := range []struct {
+		status  int
+		expired bool
+	}{{http.StatusBadRequest, true}, {http.StatusUnauthorized, true}, {http.StatusBadGateway, false}, {http.StatusServiceUnavailable, false}} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(tc.status) }))
+		_, err := refreshToken(context.Background(), srv.URL, "ref")
+		srv.Close()
+		failure := refreshFailure("dex.example.com", err)
+		if tc.expired != errors.Is(failure, ErrSessionExpired) || tc.expired == errors.Is(failure, ErrDexUnreachable) {
+			t.Errorf("status %d is classified wrongly: %v", tc.status, failure)
+		}
+		msg := failure.Error()
+		if tc.expired != strings.Contains(msg, "session expired") {
+			t.Errorf("status %d: %q", tc.status, msg)
+		}
+		if !tc.expired && !strings.Contains(msg, "dex.example.com") {
+			t.Errorf("status %d does not name Dex: %q", tc.status, msg)
+		}
+	}
+
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close()
+	_, err := refreshToken(context.Background(), url, "ref")
+	if msg := refreshFailure("dex.example.com", err).Error(); strings.Contains(msg, "session expired") || !strings.Contains(msg, "try again") {
+		t.Errorf("an unreachable Dex should leave the session state unknown and suggest a retry: %q", msg)
 	}
 }

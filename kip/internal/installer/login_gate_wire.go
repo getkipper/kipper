@@ -2,6 +2,7 @@ package installer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -60,16 +61,22 @@ func DefaultLoginGate(clusterID, dexHost string) func(ctx context.Context, domai
 	}
 }
 
-// VerifyOperatorIdentity is the body of `kip auth verify`: with a live session
-// it builds a bearer client from server+CA and proves the token authenticates
-// and authorizes. Returns the proof result and a human detail. Never writes
-// any kubeconfig — it only reports.
+// VerifyOperatorIdentity implements kip auth verify using the stored session,
+// refreshing it if needed. It builds a bearer client from server and caData to
+// check the token's identity and permissions without writing a kubeconfig.
+// It returns the proof result and a human-readable detail. Setup failures return
+// an error and an empty detail. Store loading, ErrDexUnreachable and client
+// creation failures produce ProofTransportError. Other token errors or missing
+// credentials produce ProofAuthnRejected.
 func VerifyOperatorIdentity(ctx context.Context, clusterID, dexHost, domain, server string, caData []byte) (ProofResult, string, error) {
 	store, err := auth.Load()
 	if err != nil {
 		return ProofTransportError, "", err
 	}
 	tok, err := store.Token(clusterID, dexHost)
+	if errors.Is(err, auth.ErrDexUnreachable) {
+		return ProofTransportError, "", err
+	}
 	if err != nil {
 		return ProofAuthnRejected, "", fmt.Errorf("not authenticated. Run: kip auth login")
 	}
