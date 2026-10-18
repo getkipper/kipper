@@ -82,6 +82,11 @@ spec:
                 default: 1Gi
                 description: Storage is the persistent volume size (e.g. "5Gi", "10Gi").
                 type: string
+              tls:
+                enum:
+                - "off"
+                - "on"
+                type: string
               type:
                 description: Type is the service engine (postgres, mysql, redis, mongodb,
                   rabbitmq, opensearch, minio, mailhog).

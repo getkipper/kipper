@@ -547,18 +547,25 @@ func (m *Manager) Update(ctx context.Context, namespace, name string, opts Optio
 	return result, nil
 }
 
-// Snapshot holds a service's type and credential or name blockage from one
-// CR read, so callers make their decisions from a consistent snapshot.
+// Snapshot holds a service's type, credential or name blockage, and TLS state
+// from one CR read, so callers make decisions from a consistent snapshot.
+// TLSServing reflects the controller's TLSReady condition, and TLSWaiting
+// contains the reason when that condition is false.
 type Snapshot struct {
 	Type           string
 	BlockedReason  string
 	BlockedMessage string
+	TLS            string
+	TLSServing     bool
+	TLSWaiting     string
 }
 
 // Blocked reports whether the reconciler has refused this service anything.
 func (s Snapshot) Blocked() bool { return s.BlockedReason != "" }
 
-// Read takes that one look at the service.
+// Read returns the service type, blockage and TLS state from one Service CR
+// read. Credential blockage takes precedence over name blockage. It returns
+// an error if the dynamic client is missing or the CR cannot be read.
 func (m *Manager) Read(ctx context.Context, namespace, name string) (Snapshot, error) {
 	if m.Dynamic == nil {
 		return Snapshot{}, fmt.Errorf("service manager is not configured with a dynamic client")
@@ -575,7 +582,10 @@ func (m *Manager) Read(ctx context.Context, namespace, name string) (Snapshot, e
 	if reason == "" {
 		reason, message = blockage(cr.Object, servicecatalog.ConditionNameFree)
 	}
-	return Snapshot{Type: svcType, BlockedReason: reason, BlockedMessage: message}, nil
+	tls, _, _ := unstructured.NestedString(cr.Object, "spec", "tls")
+	_, waiting := blockage(cr.Object, servicecatalog.ConditionTLSReady)
+	return Snapshot{Type: svcType, BlockedReason: reason, BlockedMessage: message,
+		TLS: tls, TLSServing: conditionTrue(cr.Object, servicecatalog.ConditionTLSReady), TLSWaiting: waiting}, nil
 }
 
 // credentialsBlockage reads the reason and remedy off a service that the
@@ -616,6 +626,17 @@ func blockage(obj map[string]interface{}, wanted string) (string, string) {
 		return reason, message
 	}
 	return "", ""
+}
+
+func conditionTrue(obj map[string]interface{}, wanted string) bool {
+	conditions, _, _ := unstructured.NestedSlice(obj, "status", "conditions")
+	for _, entry := range conditions {
+		condition, ok := entry.(map[string]interface{})
+		if ok && condition["type"] == wanted && condition["status"] == "True" {
+			return true
+		}
+	}
+	return false
 }
 
 // List reads Service CRs and enriches them with live workload status.

@@ -190,6 +190,9 @@ func Validate(m *Manifest) error {
 		if svc.Type == "" {
 			return fmt.Errorf("service %q: type is required", name)
 		}
+		if svc.TLS != "" && svc.Type != "postgres" {
+			return fmt.Errorf("service %q: tls is supported for postgres services only", name)
+		}
 	}
 
 	for name, vol := range m.Volumes {

@@ -185,6 +185,21 @@ func TestCopier_SecretFiltering(t *testing.T) {
 			copied: false,
 		},
 		{
+			name: "a service's TLS certificate is skipped (the target service gets its own)",
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "backend-tls",
+					Namespace: "demo-test",
+					Labels: map[string]string{
+						"app.kubernetes.io/managed-by": "kipper",
+						"kipper.run/tls-for":           "backend",
+					},
+				},
+				Data: map[string][]byte{"tls.key": []byte("key")},
+			},
+			copied: false,
+		},
+		{
 			name: "per-binding secret is skipped",
 			secret: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{

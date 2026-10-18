@@ -421,6 +421,10 @@ func transferableSecret(secret *corev1.Secret, ridesWithService map[string]bool)
 	if ridesWithService[secret.Name] {
 		return false
 	}
+	// The target issues its own service certificate and key.
+	if _, ok := secret.Labels[labels.TLSFor]; ok {
+		return false
+	}
 	if isPublishedEnvironment(secret) {
 		return false
 	}

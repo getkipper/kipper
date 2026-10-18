@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
@@ -88,4 +89,10 @@ func TestTransferableSecret_LeavesAPublishedEnvironmentBehind(t *testing.T) {
 			assert.Equal(t, tc.want, transferableSecret(tc.secret, map[string]bool{}))
 		})
 	}
+}
+
+func TestTransferableSecret_LeavesAServiceCertificateBehind(t *testing.T) {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "db-tls", Labels: map[string]string{labels.TLSFor: "db"}}}
+
+	assert.False(t, transferableSecret(secret, nil), "the target cluster issues its own key from its own CA")
 }

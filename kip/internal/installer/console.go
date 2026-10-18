@@ -158,6 +158,10 @@ rules:
   - apiGroups: ["traefik.io"]
     resources: ["tlsstores"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # The console manages Postgres certificates issued by kipper-service-ca.
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates"]
+    verbs: ["get", "create", "update", "delete"]
   - apiGroups: ["helm.cattle.io"]
     resources: ["helmcharts"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]

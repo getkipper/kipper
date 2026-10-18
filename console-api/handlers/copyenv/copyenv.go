@@ -546,6 +546,9 @@ func shouldSkipSecret(s *corev1.Secret) bool {
 	if _, ok := s.Labels["kipper.run/service-type"]; ok {
 		return true
 	}
+	if _, ok := s.Labels[labels.TLSFor]; ok {
+		return true
+	}
 	if s.Labels[labels.Binding] == "true" {
 		return true
 	}

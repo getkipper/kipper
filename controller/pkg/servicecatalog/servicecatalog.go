@@ -42,6 +42,11 @@ const ConditionCleanupComplete = "CleanupComplete"
 // called something else.
 const ConditionNameFree = "NameFree"
 
+// ConditionTLSReady reports TLS readiness for Postgres with TLS enabled.
+// It is true once the StatefulSet has rolled out the issued certificate and
+// its pods are ready, or false with the reason issuance or rollout is pending.
+const ConditionTLSReady = "TLSReady"
+
 // HasAuth reports which service types Kipper configures with credentials.
 // Only those types should receive generated passwords; the remaining configured
 // services and unknown types use unauthenticated defaults.

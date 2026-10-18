@@ -27,6 +27,7 @@ func SystemComponents(domain string, dnsResolvers, trustedProxies []string, stat
 			return InstallTraefik(c, ResolveTrustedProxies(domain, trustedProxies))
 		}},
 		{Name: "cert-manager-dns", Apply: func(c CommandRunner) error { return patchCertManagerDNSConfig(c, dnsResolvers) }},
+		{Name: "service-ca", Apply: InstallServiceCA},
 		{Name: "security-middleware", Apply: InstallSecurityHardening},
 	}
 	// k3s manages the local-path provisioner used for local storage.

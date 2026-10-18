@@ -97,6 +97,7 @@ func TestRedaction_ClassifiesEveryPathConvertEmits(t *testing.T) {
 			Stopped:         &StoppedSpec{Reason: "freeing memory", ForMigration: true},
 		}},
 		Services: map[string]SvcSpec{"db": {
+			TLS:  "on",
 			Type: "postgres", Version: "16", Storage: "5Gi",
 			Resources: &ResourceSpec{CPURequest: "100m", MemoryRequest: "256Mi"},
 		}},

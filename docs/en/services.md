@@ -63,6 +63,7 @@ flowchart TD
 | `--storage` | `5Gi` (postgres/mysql/mongodb/opensearch), `1Gi` (redis/rabbitmq), `10Gi` (minio) | Storage size |
 | `--cpu` | Request `500m` (postgres/mysql/mongodb), `100m` (others). OpenSearch has a `1000m` limit. | Sets the CPU request and limit to the same value. |
 | `--memory` | `1Gi` (postgres/mysql/mongodb), `2Gi` (opensearch), `128Mi` (others) | Sets the memory request and limit to the same value. |
+| `--tls` | `on` (postgres) | Postgres only. `off` creates the service without TLS. See [Encrypted Postgres connections](#postgres-tls). |
 
 Before creating a service, `kip service add` checks that one eligible node has enough CPU and memory after existing pod requests are deducted. If capacity is insufficient, it reports the largest remaining CPU and memory capacities and their nodes. Reduce requests with `--cpu` and `--memory`, or add capacity. If no nodes qualify, it directs you to `kip status`. The check is skipped if nodes or pods cannot be read. Passing this check does not guarantee scheduling because other constraints, such as storage availability, may apply.
 
@@ -216,6 +217,41 @@ kip service info mydb
 The output also shows `Pod node`, where the service is scheduled (or `not scheduled` with the scheduler's reason), and `Data node`, where its healthy data copies are stored. Kipper configures new service volumes to keep one copy on the server. Existing copies may still be on workers. `kip upgrade` and `kip status` report them.
 
 The hostname (`mydb.default.svc.cluster.local`) is an internal Kubernetes DNS name. Apps in the same namespace can connect directly; [network policies](/en/security#network-isolation-between-namespaces) restrict access from other namespaces.
+
+## Encrypted Postgres connections {#postgres-tls}
+
+New Postgres services created through the CLI or console enable TLS by default. Each one gets a certificate from the cluster's own service certificate authority, `kipper-service-ca`, which `kip install` and a full `kip upgrade` (without `--skip-system`) provision alongside cert-manager. The certificate names the service by every form of its internal DNS name (`mydb`, `mydb.default`, `mydb.default.svc` and `mydb.default.svc.cluster.local`), is valid for a year, and is renewed 30 days before it expires.
+
+Turn TLS on for an existing service, or off for one that has it:
+
+```bash
+kip service update mydb --tls on
+kip service update mydb --tls off
+kip service add postgres --name mydb --tls off   # create without it
+```
+
+A Postgres service declared in `kipper.yaml` gets TLS only with `tls: on` in its entry, and `kip export` writes the field for services that have it. Applying a manifest that omits `tls` from the service entry turns TLS off for that service. `kip apply` lists this as a cleared field and requires `--force` to proceed.
+
+Postgres restarts once when it switches, and again whenever its certificate is renewed, which is about once a year. A new service waits up to a minute for its first certificate to avoid starting twice. If issuance takes longer, it starts with plaintext and restarts when the certificate arrives. TLS is enabled on the pod once a usable certificate has been issued, so a cluster without cert-manager keeps serving the database with plaintext. `kip service info mydb` shows `TLS: on` once Postgres has restarted with the certificate, and explains any pending issuance or rollout. Turning TLS off or deleting the service removes the certificate and its private key. Backups include the issued Secret and its private key along with the rest of the service, so a restored database or one checked with `kip backup drill` starts with TLS immediately. The copy of the key in the pod's memory volume is left out of backups.
+
+With TLS on, the server accepts both encrypted and unencrypted connections. The client chooses which to use. Set `sslmode=require` in the app's connection string (`?sslmode=require` on a JDBC or libpq URL) to have every connection encrypted. Kipper does not yet distribute the service CA to apps. Without a configured CA, `require` encrypts the connection without verifying the server's certificate. CA distribution, rejection of unencrypted connections and full verification with `sslmode=verify-full` are planned together.
+
+To see which connections use TLS:
+
+```bash
+kip exec mydb -- psql -U kipper app -c "SELECT a.usename, a.client_addr, s.ssl, s.version FROM pg_stat_ssl s JOIN pg_stat_activity a USING (pid) WHERE a.client_addr IS NOT NULL"
+```
+
+To look at the certificate itself, open a tunnel and ask for it:
+
+```bash
+kip tunnel mydb &
+openssl s_client -starttls postgres -connect localhost:5432 -showcerts </dev/null
+```
+
+The certificate names the service, not `localhost`, so desktop clients connecting through `kip tunnel` need `sslmode=require` rather than `verify-full`.
+
+Postgres continues to trust connections over its local socket inside the pod, which is how `kip exec mydb -- psql` logs in without a password. The service CA's private key is a Secret in the `cert-manager` namespace, so anyone who can read Secrets there can issue certificates signed by the cluster's service CA. Backups exclude that key, so a cluster rebuilt from backups gets a new service CA. Each restored service keeps its old certificate until its next renewal, when the new CA signs its replacement.
 
 ## MinIO (S3-compatible object storage)
 
