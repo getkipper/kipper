@@ -20,6 +20,7 @@ func TestSystemComponents(t *testing.T) {
 		want := []string{
 			"traefik",
 			"cert-manager-dns",
+			"service-ca",
 			"security-middleware",
 			"longhorn",
 			"keda",
@@ -53,7 +54,7 @@ func TestSystemComponents(t *testing.T) {
 			got[i] = c.Name
 		}
 		assert.Equal(t, []string{
-			"traefik", "cert-manager-dns", "security-middleware", "keda", "authz",
+			"traefik", "cert-manager-dns", "service-ca", "security-middleware", "keda", "authz",
 			"node-exporter-tls", "velero", "zot", "build-isolation", "placement",
 		}, got)
 	})

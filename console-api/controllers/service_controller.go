@@ -27,6 +27,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
@@ -131,6 +132,9 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if err := r.reconcileStatefulSet(ctx, &svc); err != nil {
+		if stderrors.Is(err, errAwaitingCertificate) {
+			return ctrl.Result{RequeueAfter: tlsIssuanceRetry}, nil
+		}
 		r.reportNameTaken(ctx, &svc, err)
 		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
 	}
@@ -560,6 +564,11 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 		podVolumes = append(podVolumes, mongoshConfigPodVolume(svc.Name))
 	}
 
+	certHash, awaitCertificate, err := r.reconcilePostgresTLS(ctx, svc)
+	if err != nil {
+		return err
+	}
+
 	replicas := int32(1)
 	mode, err := clusterStorageMode(ctx, r.Client)
 	if err != nil {
@@ -626,6 +635,10 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 		},
 	}
 
+	if certHash != "" {
+		applyPostgresTLS(&desired.Spec.Template, svc.Name, image, certHash)
+	}
+
 	if err := controllerutil.SetControllerReference(svc, desired, r.Scheme); err != nil {
 		return err
 	}
@@ -633,7 +646,14 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	var existing appsv1.StatefulSet
 	err = r.Get(ctx, types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}, &existing)
 	if errors.IsNotFound(err) {
-		return r.Create(ctx, desired)
+		if awaitCertificate {
+			return errAwaitingCertificate
+		}
+		r.reportTLSRollout(ctx, svc, certHash, nil)
+		if err := r.Create(ctx, desired); err != nil {
+			return err
+		}
+		return r.removeStalePostgresTLS(ctx, svc)
 	}
 	if err == nil {
 		// The same rule the finalizer deletes by, applied before the first
@@ -644,6 +664,7 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 		if err := objectIsOurs("workload", &existing, svc); err != nil {
 			return err
 		}
+		r.reportTLSRollout(ctx, svc, certHash, &existing)
 	}
 	if err != nil {
 		return err
@@ -686,6 +707,7 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	for _, v := range podVolumes {
 		existing.Spec.Template.Spec.Volumes = withVolume(existing.Spec.Template.Spec.Volumes, v)
 	}
+	syncPostgresTLSTemplate(&existing.Spec.Template, &desired.Spec.Template)
 	existing.Labels = desired.Labels
 	// Accepted is not adopted. A workload from before these records existed has
 	// no owner, and without one garbage collection has nothing to follow when
@@ -694,7 +716,10 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	if err := adopt(&existing, svc, r.Scheme); err != nil {
 		return err
 	}
-	return r.Update(ctx, &existing)
+	if err := r.Update(ctx, &existing); err != nil {
+		return err
+	}
+	return r.removeStalePostgresTLS(ctx, svc)
 }
 
 // replaceUnschedulablePod deletes an owned, pending pod with no assigned node
@@ -1308,6 +1333,7 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(serviceForTLSSecret)).
 		Complete(r)
 }
 
@@ -1587,6 +1613,13 @@ func (r *ServiceReconciler) cleanUp(ctx context.Context, svc *kipperv1.Service) 
 	// workload still running against the volume this delete meant to keep.
 	if err := r.removeOrphanedDependants(ctx, svc); err != nil {
 		return false, "DependantsNotRemoved", err
+	}
+
+	// cert-manager leaves the issued Secret behind, and with it the private key.
+	if svc.Spec.Type == "postgres" {
+		if err := r.removePostgresTLS(ctx, svc, true); err != nil {
+			return false, "TLSNotRemoved", fmt.Errorf("removing the TLS certificate: %w", err)
+		}
 	}
 
 	if svc.Annotations[datavolume.DeleteAnnotation] != "true" {

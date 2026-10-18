@@ -428,6 +428,9 @@ func exportServices(ctx context.Context, dynClient dynamic.Interface, namespace 
 		if v, ok := spec["storage"].(string); ok {
 			svc.Storage = v
 		}
+		if v, ok := spec["tls"].(string); ok {
+			svc.TLS = v
+		}
 		// Export every tuned request/limit value as-is — collapsing the
 		// pairs would lose burstable shapes and let a later apply revert
 		// the tuning.

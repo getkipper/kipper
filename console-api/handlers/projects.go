@@ -899,6 +899,9 @@ func shouldOmitSecretFromPreview(s *corev1.Secret) bool {
 	if _, ok := s.Labels["kipper.run/service-type"]; ok {
 		return true
 	}
+	if _, ok := s.Labels[kipperlabels.TLSFor]; ok {
+		return true
+	}
 	if s.Labels[kipperlabels.Binding] == "true" {
 		return true
 	}

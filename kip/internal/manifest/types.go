@@ -174,6 +174,7 @@ type SvcSpec struct {
 	Type      string        `yaml:"type"`
 	Version   string        `yaml:"version,omitempty"`
 	Storage   string        `yaml:"storage,omitempty"`
+	TLS       string        `yaml:"tls,omitempty"`
 	Resources *ResourceSpec `yaml:"resources,omitempty"`
 }
 

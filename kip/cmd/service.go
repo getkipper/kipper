@@ -138,6 +138,7 @@ func init() {
 	serviceAddCmd.Flags().String("memory", "", "memory limit (e.g. 256Mi, 1Gi)")
 	serviceAddCmd.Flags().String("cpu", "", "CPU limit (e.g. 500m, 1)")
 	serviceAddCmd.Flags().String("version", "", "image version override (e.g. 16, 8.0, 7)")
+	serviceAddCmd.Flags().String("tls", "", "Postgres only: serve TLS with a certificate from the cluster's service CA (on or off, default on)")
 	_ = serviceAddCmd.MarkFlagRequired("name")
 
 	serviceListCmd.Flags().String("project", "default", "project namespace")
@@ -152,6 +153,7 @@ func init() {
 	serviceUpdateCmd.Flags().String("memory", "", "new memory limit (e.g. 1Gi)")
 	serviceUpdateCmd.Flags().String("cpu", "", "new CPU limit (e.g. 1)")
 	serviceUpdateCmd.Flags().String("version", "", "new image version")
+	serviceUpdateCmd.Flags().String("tls", "", "Postgres only: on or off. The database restarts once to switch")
 
 	serviceRestartCmd.Flags().String("project", "default", "project namespace")
 	serviceRestartCmd.Flags().String("environment", "", "target environment")
@@ -204,11 +206,16 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 	memory, _ := cmd.Flags().GetString("memory")
 	cpu, _ := cmd.Flags().GetString("cpu")
 	version, _ := cmd.Flags().GetString("version")
+	tlsFlag, _ := cmd.Flags().GetString("tls")
 
 	if !service.IsSupported(serviceType) {
 		return fmt.Errorf("unsupported service type %q (supported: %v)", serviceType, service.SupportedTypes())
 	}
 	if err := servicecatalog.CheckNewVersion(serviceType, version); err != nil {
+		return err
+	}
+	tls, err := serviceTLSOnCreate(serviceType, tlsFlag)
+	if err != nil {
 		return err
 	}
 
@@ -257,6 +264,9 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 	}
 	if version != "" {
 		spec["version"] = version
+	}
+	if tls != "" {
+		spec["tls"] = tls
 	}
 	resources := map[string]interface{}{}
 	if memory != "" {
@@ -491,6 +501,9 @@ func writeServiceInfo(ctx context.Context, out io.Writer, mgr *service.Manager, 
 	if conn.URL != "" {
 		say(out, "  URL:      %s\n", conn.URL)
 	}
+	if snapshot.Type == "postgres" {
+		say(out, "  TLS:      %s\n", describeServiceTLS(snapshot))
+	}
 	placement, err := mgr.Placement(ctx, namespace, name)
 	writePlacement(out, placement, err)
 	say(out, "\n")
@@ -505,9 +518,13 @@ func runServiceUpdate(cmd *cobra.Command, args []string) error {
 	memory, _ := cmd.Flags().GetString("memory")
 	cpu, _ := cmd.Flags().GetString("cpu")
 	version, _ := cmd.Flags().GetString("version")
+	tls, _ := cmd.Flags().GetString("tls")
 
-	if storage == "" && memory == "" && cpu == "" && version == "" {
-		return fmt.Errorf("specify at least one of --storage, --memory, --cpu, or --version")
+	if storage == "" && memory == "" && cpu == "" && version == "" && tls == "" {
+		return fmt.Errorf("specify at least one of --storage, --memory, --cpu, --version, or --tls")
+	}
+	if tls != "" && tls != "on" && tls != "off" {
+		return fmt.Errorf("--tls must be on or off, not %q", tls)
 	}
 
 	_, k8sClient, err := loadCurrentCluster()
@@ -519,6 +536,22 @@ func runServiceUpdate(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
 	fmt.Printf("\n  Updating service %s...\n", name)
+
+	if tls != "" {
+		changed, err := setServiceTLS(ctx, k8sClient.Dynamic(), namespace, name, tls)
+		if err != nil {
+			return err
+		}
+		if changed {
+			fmt.Printf("  ✔  TLS set to %s. The database restarts once to switch\n", tls)
+		} else {
+			fmt.Printf("  ✔  TLS is already %s\n", tls)
+		}
+		if storage == "" && memory == "" && cpu == "" && version == "" {
+			fmt.Println()
+			return nil
+		}
+	}
 
 	result, err := mgr.Update(ctx, namespace, name, service.Options{
 		Storage:      storage,

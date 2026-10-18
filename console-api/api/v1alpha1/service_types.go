@@ -25,6 +25,10 @@ type ServiceSpec struct {
 	// +optional
 	Resources ServiceResources `json:"resources,omitempty"`
 
+	// +kubebuilder:validation:Enum=off;on
+	// +optional
+	TLS string `json:"tls,omitempty"`
+
 	// Bindings lists App CR names that should receive connection credentials.
 	// +optional
 	Bindings []string `json:"bindings,omitempty"`
@@ -61,6 +65,10 @@ const ConditionCredentialsReady = servicecatalog.ConditionCredentialsReady
 // It goes false with the step that could not be completed, so an operator
 // watching a service sit in deleting can see which one and why.
 const ConditionCleanupComplete = servicecatalog.ConditionCleanupComplete
+
+// ConditionTLSReady reports whether Postgres has rolled out a usable TLS
+// certificate, with a reason while issuance or rollout is pending.
+const ConditionTLSReady = servicecatalog.ConditionTLSReady
 
 // ConditionNameFree says whether the objects a service needs under its own name
 // are free. It goes false when one of them belongs to something else, which no

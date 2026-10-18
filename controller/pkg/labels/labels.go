@@ -174,6 +174,10 @@ const (
 	MiddlewareTypeRedirect = "redirect"
 )
 
+// TLSFor names the service a certificate Secret serves. cert-manager writes
+// the Secret without an owner reference, so this label is how Kipper finds it.
+const TLSFor = "kipper.run/tls-for"
+
 // Migration labels.
 //
 // Migration tags secrets owned by the cross-cluster migration flow.

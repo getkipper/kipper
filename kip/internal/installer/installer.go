@@ -697,7 +697,10 @@ func Run(opts Options) (*Result, error) {
 			return InstallSecurityHardening(client)
 		}},
 		{"Configuring cert-manager", func() error {
-			return InstallCertManager(client, opts.AdminEmail, opts.DNSResolvers)
+			if err := InstallCertManager(client, opts.AdminEmail, opts.DNSResolvers); err != nil {
+				return err
+			}
+			return InstallServiceCA(client)
 		}},
 		{"Setting up storage", func() error {
 			if storageMode == StorageLocal {
