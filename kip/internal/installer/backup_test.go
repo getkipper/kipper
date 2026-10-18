@@ -227,6 +227,8 @@ func TestVeleroManifestRunsFsBackupPrivilegedOnSELinux(t *testing.T) {
 }
 
 type fakeVeleroHost struct {
+	liveBSL     string // The default backup location as "bucket|s3Url".
+	bucket      string // The listing marker, or empty for a bucket with no backups.
 	osRelease   string
 	osImages    string
 	chartValues string
@@ -247,6 +249,24 @@ func (h *fakeVeleroHost) Run(cmd string) (string, error) {
 	}
 	if strings.Contains(cmd, "checksum/node-agent-config}") {
 		return "abc", nil
+	}
+	if strings.Contains(cmd, "get secret cloud-credentials") {
+		return "secret/cloud-credentials", nil
+	}
+	if strings.Contains(cmd, "get crd backupstoragelocations.velero.io") && h.liveBSL != "" {
+		return "customresourcedefinition.apiextensions.k8s.io/backupstoragelocations.velero.io", nil
+	}
+	if strings.Contains(cmd, "get backupstoragelocation default") {
+		return h.liveBSL, nil
+	}
+	if strings.Contains(cmd, "get job "+bucketCheckJob) {
+		return "1/", nil
+	}
+	if strings.Contains(cmd, "logs job/"+bucketCheckJob) {
+		if h.bucket != "" {
+			return h.bucket, nil
+		}
+		return bucketEmptyMarker, nil
 	}
 	return "", nil
 }
@@ -274,11 +294,11 @@ func (h *fakeVeleroHost) applied(t *testing.T) string {
 
 func TestInstallVeleroPrivilegesFsBackupOnlyWhereK3sRunsSELinux(t *testing.T) {
 	rocky := &fakeVeleroHost{osRelease: "ID=rocky\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"10.2\"\n"}
-	require.NoError(t, installVelero(rocky, nil, "pw"))
+	require.NoError(t, installVelero(rocky, nil, "pw", nil))
 	assert.Contains(t, rocky.applied(t), "privilegedFsBackup")
 
 	ubuntu := &fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"24.04\"\n"}
-	require.NoError(t, installVelero(ubuntu, nil, "pw"))
+	require.NoError(t, installVelero(ubuntu, nil, "pw", nil))
 	assert.NotContains(t, ubuntu.applied(t), "privilegedFsBackup")
 }
 
@@ -287,7 +307,7 @@ func TestInstallVeleroPrivilegesFsBackupWhenAnyNodeIsRHEL(t *testing.T) {
 		osRelease: "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"26.04\"\n",
 		osImages:  "Ubuntu 26.04 LTS\nRocky Linux 10.2 (Red Quartz)\n",
 	}
-	require.NoError(t, installVelero(ubuntu, nil, "pw"))
+	require.NoError(t, installVelero(ubuntu, nil, "pw", nil))
 	assert.Contains(t, ubuntu.applied(t), "privilegedFsBackup",
 		"a Rocky worker needs privileged backups even with an Ubuntu server")
 
@@ -295,8 +315,25 @@ func TestInstallVeleroPrivilegesFsBackupWhenAnyNodeIsRHEL(t *testing.T) {
 		osRelease: "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"26.04\"\n",
 		osImages:  "Ubuntu 26.04 LTS\nDebian GNU/Linux 13 (trixie)\n",
 	}
-	require.NoError(t, installVelero(debianOnly, nil, "pw"))
+	require.NoError(t, installVelero(debianOnly, nil, "pw", nil))
 	assert.NotContains(t, debianOnly.applied(t), "privilegedFsBackup")
+}
+
+func TestInstallVeleroCreatesTheRepositoryKeyBeforeVeleroStarts(t *testing.T) {
+	h := &fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"24.04\"\n"}
+	require.NoError(t, installVelero(h, nil, "pw", nil))
+
+	key, chart := -1, -1
+	for i, cmd := range h.cmds {
+		if strings.Contains(cmd, "/dev/urandom") && key < 0 {
+			key = i
+		}
+		if strings.Contains(cmd, "kind: HelmChart") && chart < 0 {
+			chart = i
+		}
+	}
+	require.GreaterOrEqual(t, key, 0, "the repository key is created")
+	assert.Less(t, key, chart, "Velero writes its published default key into a missing Secret at startup")
 }
 
 func chartValuesContent(t *testing.T, manifest string) string {
@@ -449,4 +486,18 @@ func TestInstallInClusterMinIOUsesTheGivenClass(t *testing.T) {
 	host := &routedRunner{}
 	require.NoError(t, installInClusterMinIO(host, "pw", platform.LocalPathClass))
 	assert.Contains(t, strings.Join(host.stdins, ""), "storageClassName: local-path\n")
+}
+
+func TestStorageCredentialsStayOutOfBackups(t *testing.T) {
+	host := &routedRunner{}
+	require.NoError(t, installInClusterMinIO(host, "pw", platform.LonghornSingleClass))
+	manifest := strings.Join(host.stdins, "")
+	_, secret, found := strings.Cut(manifest, "kind: Secret")
+	require.True(t, found)
+	secret, _, _ = strings.Cut(secret, "---")
+	assert.Contains(t, secret, "velero.io/exclude-from-backup: \"true\"")
+
+	external := &fakeVeleroHost{}
+	require.NoError(t, installVeleroCredentials(external, externalStorage, ""))
+	assert.Contains(t, strings.Join(external.cmds, "\n"), "label secret cloud-credentials velero.io/exclude-from-backup=true")
 }

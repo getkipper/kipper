@@ -41,6 +41,7 @@ type Options struct {
 	AdoptFirewall        bool
 	NoSSHRateLimit       bool
 	BackupStorage        *BackupStorageConfig
+	BackupRepositoryKey  []byte
 	Profile              string
 	Storage              string
 	DNSResolvers         []string
@@ -526,9 +527,14 @@ func Run(opts Options) (*Result, error) {
 	// reset the settings below to defaults. The same entry (and its name) is
 	// reused when the result is persisted.
 	clusterEntryName := domainName
+	// Record a new backup destination after InstallBackup succeeds so a
+	// rejected change preserves the previous entry and PlatformConfig mode.
+	var recordedBackup *config.BackupStorageRef
+	var pendingBackupMode string
 	if cfg, err := config.Load(); err == nil {
 		if existing := cfg.GetClusterByHost(opts.Host, clusterAddress); existing != nil {
 			clusterEntryName = existing.Name
+			recordedBackup = existing.BackupStorage
 			fmt.Print(reinstallNameHint(existing, domainName))
 			// A reinstall registers nothing with the gateway, so inherit the
 			// token mirror rather than clearing it.
@@ -654,7 +660,9 @@ func Run(opts Options) (*Result, error) {
 				return err
 			}
 			if settled != state.Backup {
-				if err := RecordBackupMode(client, settled); err != nil {
+				if opts.BackupStorage != nil {
+					pendingBackupMode = settled
+				} else if err := RecordBackupMode(client, settled); err != nil {
 					return err
 				}
 				state.Backup = settled
@@ -732,9 +740,23 @@ func Run(opts Options) (*Result, error) {
 		{"Setting up backup and restore (Velero)", func() error {
 			if backupMode == BackupNone {
 				fmt.Printf("       (Skipping backups because external backup storage is not configured.)\n")
+				recordedBackup = backupStorageRef(opts.BackupStorage)
 				return nil
 			}
-			return InstallBackup(client, opts.BackupStorage, storageMode)
+			if err := InstallBackup(client, opts.BackupStorage, storageMode, opts.BackupRepositoryKey); err != nil {
+				return err
+			}
+			if pendingBackupMode != "" {
+				if err := RecordBackupMode(client, pendingBackupMode); err != nil {
+					return err
+				}
+			}
+			recordedBackup = backupStorageRef(opts.BackupStorage)
+			if err := recordBackupStorage(clusterEntryName, recordedBackup); err != nil {
+				return err
+			}
+			fmt.Printf("       Save your volume backup encryption key outside the cluster: kip backup repository-key export --to <file>\n")
+			return nil
 		}},
 		{"Creating kipper-system namespace", func() error {
 			_, err := client.Run("kubectl create namespace kipper-system --dry-run=client -o yaml | kubectl apply -f -")
@@ -881,7 +903,7 @@ func Run(opts Options) (*Result, error) {
 				GatewayToken:     gatewayToken,
 				Org:              opts.Org,
 				OrgDisplayName:   opts.OrgDisplayName,
-				BackupStorage:    backupStorageRef(opts.BackupStorage),
+				BackupStorage:    recordedBackup,
 				MachineID:        hostMachineID,
 				DNSResolvers:     opts.DNSResolvers,
 				TrustedProxies:   opts.TrustedProxies,

@@ -69,3 +69,11 @@ func TestRequestNeverPrintsItsSecrets(t *testing.T) {
 	req := Request{Backup: &Backup{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: "very-secret"}}
 	assert.False(t, strings.Contains(req.String(), "very-secret"))
 }
+
+func TestRequestCarriesTheRepositoryKey(t *testing.T) {
+	req := Request{Version: RequestVersion, RunID: "r1", Host: "203.0.113.10", BackupRepositoryKey: "k3y"}
+
+	assert.Equal(t, []byte("k3y"), req.Options().BackupRepositoryKey)
+	assert.NotContains(t, req.String(), "k3y")
+	assert.Nil(t, Request{Host: "203.0.113.10"}.Options().BackupRepositoryKey, "no key means kip keeps or generates one")
+}

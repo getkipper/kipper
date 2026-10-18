@@ -265,6 +265,13 @@ func drivenRequest(cmd *cobra.Command, host string) (installjob.Request, error) 
 		req.Backup = &installjob.Backup{Bucket: backup.Bucket, Region: backup.Region, Endpoint: backup.Endpoint,
 			AccessKeyID: backup.AccessKeyID, SecretAccessKey: backup.SecretAccessKey}
 	}
+	if path := str("backup-repository-key-file"); path != "" {
+		key, err := installer.ReadRepositoryKeyFile(path)
+		if err != nil {
+			return installjob.Request{}, err
+		}
+		req.BackupRepositoryKey = string(key)
+	}
 	if cfg, err := config.Load(); err == nil {
 		if existing := cfg.GetClusterByHost(host); existing != nil {
 			entry := *existing

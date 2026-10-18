@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -81,7 +82,12 @@ type Uploader interface {
 // InstallBackup configures Velero to use cfg's external S3-compatible bucket.
 // A nil cfg deploys in-cluster MinIO, whose backups depend on cluster storage.
 // MinIO uses local-path when storageMode is local and longhorn-single otherwise.
-func InstallBackup(client Uploader, cfg *BackupStorageConfig, storageMode string) error {
+// A non-nil repositoryKey supplies a missing key and must match any existing
+// key after trimming whitespace. With nil, an existing key is kept and a new
+// key is generated only after confirming the bucket has no backups.
+// Changing the backup destination to a bucket with existing backups returns
+// an error before the live storage credentials are replaced.
+func InstallBackup(client Uploader, cfg *BackupStorageConfig, storageMode string, repositoryKey []byte) error {
 	if cfg == nil {
 		password, err := ensureMinIOPassword(client)
 		if err != nil {
@@ -90,9 +96,9 @@ func InstallBackup(client Uploader, cfg *BackupStorageConfig, storageMode string
 		if err := installInClusterMinIO(client, password, platform.SingleWriterClass(storageMode)); err != nil {
 			return err
 		}
-		return installVelero(client, cfg, password)
+		return installVelero(client, cfg, password, repositoryKey)
 	}
-	return installVelero(client, cfg, "")
+	return installVelero(client, cfg, "", repositoryKey)
 }
 
 // veleroNodeAgentConfig enables privileged file system backup and restore pods
@@ -129,10 +135,11 @@ func veleroSELinuxValues() string {
 func ensureMinIOPassword(client CommandRunner) (string, error) {
 	// Bracket notation because the key contains a hyphen, which kubectl's
 	// jsonpath parser does not handle in dot notation.
+	// Use a fixed error to keep captured credentials out of diagnostics.
 	out, err := client.Run("kubectl -n velero get secret " + minioCredentialsSecret +
-		" -o jsonpath=\"{.data['" + minioPasswordSecretKey + "']}\" --ignore-not-found")
+		" -o jsonpath=\"{.data['" + minioPasswordSecretKey + "']}\" --ignore-not-found 2>/dev/null")
 	if err != nil {
-		return "", fmt.Errorf("checking for existing minio credentials: %w", err)
+		return "", errors.New("checking for existing minio credentials failed")
 	}
 	if encoded := strings.TrimSpace(out); encoded != "" {
 		decoded, derr := base64.StdEncoding.DecodeString(encoded)
@@ -183,6 +190,8 @@ kind: Secret
 metadata:
   name: %s
   namespace: velero
+  labels:
+    velero.io/exclude-from-backup: "true"
 type: Opaque
 stringData:
   %s: %s
@@ -354,7 +363,19 @@ spec:
 // the access key in the HelmChart CR would expose it to anyone with
 // read on kube-system HelmCharts, and it would leak into kubectl
 // error output if apply ever fails.
-func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword string) error {
+func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword string, repositoryKey []byte) error {
+	target, err := newBackupTarget(cfg, minioPassword)
+	if err != nil {
+		return err
+	}
+	if _, err := client.Run("kubectl create namespace velero --dry-run=client -o yaml | kubectl apply -f -"); err != nil {
+		return fmt.Errorf("creating velero namespace: %w", err)
+	}
+	// The checks run before the credentials are written, so a refused change
+	// leaves the live backups working with their current credentials.
+	if err := prepareBackupRepository(client, target, repositoryKey); err != nil {
+		return err
+	}
 	if err := installVeleroCredentials(client, cfg, minioPassword); err != nil {
 		return err
 	}
@@ -600,6 +621,9 @@ func installVeleroCredentials(client Uploader, cfg *BackupStorageConfig, minioPa
 		if strings.TrimSpace(out) == "" {
 			return fmt.Errorf("external backup storage configured but cloud-credentials Secret is missing from the velero namespace. Reinstall with --backup-storage-credentials to bootstrap")
 		}
+		if _, err := client.Run("kubectl -n velero label secret cloud-credentials " + excludeFromBackupLabel + " --overwrite"); err != nil {
+			return fmt.Errorf("labeling velero cloud-credentials secret: %w", err)
+		}
 		return nil
 	}
 
@@ -631,7 +655,7 @@ func installVeleroCredentials(client Uploader, cfg *BackupStorageConfig, minioPa
 
 	applyCmd := "kubectl -n velero create secret generic cloud-credentials " +
 		"--from-file=cloud=/tmp/velero-cloud-credentials " +
-		"--dry-run=client -o yaml | kubectl apply -f -"
+		"--dry-run=client -o yaml | kubectl label --local -f - " + excludeFromBackupLabel + " -o yaml | kubectl apply -f -"
 	if _, err := client.Run(applyCmd); err != nil {
 		return fmt.Errorf("applying velero cloud-credentials secret: %w", err)
 	}

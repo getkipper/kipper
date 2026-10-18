@@ -1109,11 +1109,14 @@ kip backup restore weekly-20260413
 kip backup restore weekly-20260413 --namespace blog-prod      # restore one namespace
 kip backup schedules                                                # list scheduled backups
 kip backup storage resize --size 30Gi                               # grow the in-cluster MinIO volume
+kip backup repository-key export --to ~/example-backups.key         # save the key that encrypts the backups
 ```
+
+`kip backup repository-key export` saves the volume backup encryption key to a new file with mode 0600. The command asks for confirmation, which you can skip with `--yes`. On Windows, the file inherits its folder's permissions. It never overwrites an existing file. Keep the key outside the cluster because a recovery install needs it to read the volume backups. See [The backup repository key](/en/installation#backup-repository-key).
 
 `kip backup storage resize` grows the in-cluster MinIO backup volume and waits up to five minutes for it to report the requested capacity. Run it again with the same size to resume waiting. The size must be at least the volume's current storage request. Manage external backup storage through its provider.
 
-A default `kip backup create` excludes system namespaces (`kube-system`, `kube-public`, `kube-node-lease`, `traefik`, `longhorn-system`, `keda`, `monitoring`, `velero`). The exclusion is the same one the daily/weekly schedules use. Without it, Velero would try to back up its own MinIO PVC and the backup would hang. Pass `--include-system` if you really want a backup of those namespaces too.
+A default `kip backup create` excludes system namespaces (`kube-system`, `kube-public`, `kube-node-lease`, `traefik`, `longhorn-system`, `keda`, `monitoring`, `velero`). The daily schedule uses the same exclusion. Without it, Velero would try to back up its own MinIO PVC and the backup would hang. Pass `--include-system` if you really want a backup of those namespaces too.
 
 Every backup also skips cert-manager's transient issuance objects (CertificateRequests, Orders, Challenges), including when `--include-system` is set. cert-manager recreates them on demand, and restoring them stops certificates renewing.
 

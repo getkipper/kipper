@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInstallProfileFlagRefusesUnknownNames(t *testing.T) {
@@ -41,4 +44,19 @@ func TestDrivenRequestCarriesTheStorage(t *testing.T) {
 	req, err := drivenRequest(cmd, "203.0.113.10")
 	require.NoError(err)
 	require.Equal("longhorn", req.Storage)
+}
+
+func TestDrivenRequestCarriesTheRepositoryKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	path := filepath.Join(t.TempDir(), "repository.key")
+	require.NoError(t, os.WriteFile(path, []byte("k3y\n"), 0o600))
+	cmd := installCmd
+	require.NoError(t, cmd.Flags().Set("backup-repository-key-file", path))
+	t.Cleanup(func() { _ = cmd.Flags().Set("backup-repository-key-file", "") })
+
+	req, err := drivenRequest(cmd, "203.0.113.10")
+
+	require.NoError(t, err)
+	assert.Equal(t, "k3y", req.BackupRepositoryKey, "a recovery install from Windows keeps its key")
 }

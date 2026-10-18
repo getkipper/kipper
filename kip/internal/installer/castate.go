@@ -176,7 +176,8 @@ func readSecretData(client CommandRunner, name string) (map[string]string, error
 	out, err := client.Run(fmt.Sprintf(
 		"kubectl -n %s get secret %s --ignore-not-found -o jsonpath='{.data}'", hopNamespace, name))
 	if err != nil {
-		return nil, fmt.Errorf("reading %s/%s: %w", hopNamespace, name, err)
+		// A failed Run can carry the Secret's data in its error.
+		return nil, fmt.Errorf("reading %s/%s failed", hopNamespace, name)
 	}
 	raw := strings.TrimSpace(out)
 	if raw == "" {
