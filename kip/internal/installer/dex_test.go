@@ -2,6 +2,7 @@ package installer
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -70,7 +71,47 @@ func (f failingRunner) Run(cmd string) (string, error) {
 	return "", nil
 }
 
-func (f failingRunner) RunStdin(cmd string, _ io.Reader) (string, error) { return f.Run(cmd) }
+func (f failingRunner) RunStdin(cmd string, in io.Reader) (string, error) {
+	b, _ := io.ReadAll(in)
+	return f.Run(cmd + "\n" + string(b))
+}
+
+func TestInstallDexKeepsThePasswordHashOutOfCommandsAndErrors(t *testing.T) {
+	const hash = "$2a$10$exampleexampleexampleexampleexampleexampleexample12"
+	host := &dexApplyFails{failure: fmt.Errorf("running %q: %w: staticPasswords: %s", "kubectl apply -f -", errors.New("exit status 1"), hash)}
+
+	_, err := InstallDex(host, "dex.example.com", "console.example.com", "example.com", hash)
+
+	require.Error(t, err)
+	assert.Contains(t, host.stdin, hash, "the manifest still carries the hash")
+	for _, c := range host.commands {
+		assert.NotContains(t, c, hash)
+	}
+	assert.NotContains(t, err.Error(), hash)
+}
+
+// dexApplyFails fails only "kubectl apply -f -" with staticPasswords in stdin,
+// allowing prerequisite Secret writes to succeed.
+type dexApplyFails struct {
+	failure  error
+	commands []string
+	stdin    string
+}
+
+func (d *dexApplyFails) Run(cmd string) (string, error) {
+	d.commands = append(d.commands, cmd)
+	return "", nil
+}
+
+func (d *dexApplyFails) RunStdin(cmd string, in io.Reader) (string, error) {
+	b, _ := io.ReadAll(in)
+	d.commands = append(d.commands, cmd)
+	if cmd == "kubectl apply -f -" && strings.Contains(string(b), "staticPasswords") {
+		d.stdin = string(b)
+		return "", d.failure
+	}
+	return "", nil
+}
 
 // A failed apply may have committed the password, so the caller must receive it.
 func TestInstallDexReportsWhetherThePasswordWasSent(t *testing.T) {

@@ -162,7 +162,8 @@ func runDrivenInstall(cmd *cobra.Command, credentialsFile string) error {
 		if phase != installjob.PhaseSucceeded {
 			return stoppedJobError(host, outcome.RunID, phase)
 		}
-		return fmt.Errorf("collecting the install result: %w", err)
+		// Omit the Run error because its captured output may contain the admin password.
+		return fmt.Errorf("collecting the install result failed. Run kip install --via-server again on %s to collect it", host)
 	}
 	var res installjob.Result
 	if err := json.Unmarshal([]byte(lastJSONLine(resOut)), &res); err != nil {
