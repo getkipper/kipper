@@ -457,6 +457,84 @@ func (c *Client) ConfirmFreshConnection() error {
 	return err
 }
 
+// ConfirmFreshKeyOnlyConnection runs true as root over a new connection using
+// only public-key authentication. Non-root users need passwordless sudo. It
+// makes up to three attempts, waiting two seconds between failures, and returns
+// the last error if all fail. A positive CommandTimeout bounds each attempt.
+func (c *Client) ConfirmFreshKeyOnlyConnection() error {
+	keyOnly := []string{
+		"-o", "PreferredAuthentications=publickey",
+		"-o", "PasswordAuthentication=no",
+		"-o", "KbdInteractiveAuthentication=no",
+		"-o", "BatchMode=yes",
+	}
+	var err error
+	for attempt := 1; attempt <= freshAttempts; attempt++ {
+		// OpenSSH keeps the first value of each option, so these go ahead of
+		// the operator's own options.
+		args := append(append(keyOnly[:len(keyOnly):len(keyOnly)], c.connectionArgs(false, true)...), c.remoteCommand("true"))
+		cmd, ctx, cancel := c.command(args...)
+		out, runErr := cmd.CombinedOutput()
+		cancel()
+		switch {
+		case ctx.Err() == context.DeadlineExceeded:
+			err = fmt.Errorf("a new key-only SSH connection to %s did not finish within %s", c.cfg.Host, c.cfg.CommandTimeout)
+		case runErr != nil:
+			err = fmt.Errorf("opening a new key-only SSH connection to %s: %w: %s", c.cfg.Host, runErr, strings.TrimSpace(string(out)))
+		default:
+			return nil
+		}
+		if attempt < freshAttempts {
+			time.Sleep(freshRetryDelay)
+		}
+	}
+	return err
+}
+
+// ConfirmPasswordRefused makes one fresh connection attempt for the configured
+// user with public keys disabled and no interactive prompts. It returns nil
+// only when OpenSSH reports a refusal offering neither password nor
+// keyboard-interactive authentication. An accepted login, an inconclusive
+// response or timeout returns an error. A positive CommandTimeout bounds the
+// attempt.
+func (c *Client) ConfirmPasswordRefused() error {
+	noKeys := []string{
+		"-o", "PubkeyAuthentication=no",
+		"-o", "PreferredAuthentications=password,keyboard-interactive",
+		"-o", "BatchMode=yes",
+	}
+	args := append(append(noKeys[:len(noKeys):len(noKeys)], c.connectionArgs(false, true)...), c.remoteCommand("true"))
+	cmd, ctx, cancel := c.command(args...)
+	defer cancel()
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("a new SSH connection to %s did not finish within %s", c.cfg.Host, c.cfg.CommandTimeout)
+	}
+	if err == nil {
+		return fmt.Errorf("%s accepted a login without a key", c.cfg.Host)
+	}
+	return passwordRefused(string(out))
+}
+
+// passwordRefused reads the methods sshd still offers from OpenSSH's
+// "Permission denied (...)" message.
+func passwordRefused(out string) error {
+	i := strings.LastIndex(out, "Permission denied (")
+	if i < 0 {
+		return fmt.Errorf("could not tell which login methods the server offers: %s", strings.TrimSpace(out))
+	}
+	methods, _, ok := strings.Cut(out[i+len("Permission denied ("):], ")")
+	if !ok {
+		return fmt.Errorf("could not tell which login methods the server offers: %s", strings.TrimSpace(out))
+	}
+	for _, m := range strings.Split(methods, ",") {
+		if m == "password" || m == "keyboard-interactive" {
+			return fmt.Errorf("the server still offers %s login (%s)", m, methods)
+		}
+	}
+	return nil
+}
+
 const freshAttempts = 3
 
 var freshRetryDelay = 2 * time.Second

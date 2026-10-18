@@ -60,6 +60,7 @@ func init() {
 	installCmd.Flags().String("result", "", "with --local: save a result file to import on your management machine with 'kip cluster add --install-result'")
 	installCmd.Flags().String("credentials-file", "", "save the generated admin email and password to a new local file (mode 0600); print them if saving fails")
 	installCmd.Flags().Bool("yes", false, "approve pod network migration or recovery, which may restart k3s; otherwise prompt")
+	installCmd.Flags().Bool("allow-ssh-passwords", false, "leave SSH password login unchanged. By default, kip turns it off after a successful key-only login")
 	installCmd.Flags().Bool("no-ssh-rate-limit", false, "disable UFW SSH rate limiting on Ubuntu and Debian; useful for CI or operators sharing a NAT address")
 	installCmd.Flags().StringSlice("dns-resolver", nil, "upstream DNS resolver CoreDNS forwards external queries to (repeatable; default 1.1.1.1, 8.8.8.8, 9.9.9.9). Set for clusters that must reach internal/corporate DNS.")
 	installCmd.Flags().String("profile", "", "sizing profile: nano, small, medium, large or xlarge (default: picked from the server's RAM and CPUs)")
@@ -113,6 +114,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	firewall, _ := cmd.Flags().GetBool("firewall")
 	adoptFirewall, _ := cmd.Flags().GetBool("adopt-firewall")
 	noSSHRateLimit, _ := cmd.Flags().GetBool("no-ssh-rate-limit")
+	allowSSHPasswords, _ := cmd.Flags().GetBool("allow-ssh-passwords")
 	adminKubeconfig, _ := cmd.Flags().GetBool("admin-kubeconfig")
 	noLogin, _ := cmd.Flags().GetBool("no-login")
 	dnsResolvers, _ := cmd.Flags().GetStringSlice("dns-resolver")
@@ -215,6 +217,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		ChangeNetwork:        changeNetwork,
 		ConfirmNetworkChange: adoptionQuestion(isTTY),
 		NoSSHRateLimit:       noSSHRateLimit,
+		AllowSSHPasswords:    allowSSHPasswords,
 		BackupStorage:        backupStorage,
 		BackupRepositoryKey:  repositoryKey,
 		Profile:              profile,

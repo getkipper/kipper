@@ -12,8 +12,9 @@ import (
 )
 
 var clusterHardenCmd = &cobra.Command{
-	Use:   "harden",
-	Short: "Apply host hardening and firewall to an existing cluster",
+	Use:          "harden",
+	SilenceUsage: true,
+	Short:        "Apply host hardening and firewall to an existing cluster",
 	Long: `Audit the cluster's host for surplus services and an existing firewall,
 then apply Kipper's hardening defaults. Idempotent, safe to re-run.
 
@@ -32,6 +33,7 @@ func init() {
 	clusterHardenCmd.Flags().Bool("harden", true, "disable surplus host services exposed on public interfaces (e.g. rpcbind, Cockpit)")
 	clusterHardenCmd.Flags().Bool("firewall", true, "configure the host firewall for k3s: firewalld on Rocky, AlmaLinux and CentOS Stream; UFW elsewhere (firewalld takeover requires --adopt-firewall or interactive consent)")
 	clusterHardenCmd.Flags().Bool("adopt-firewall", false, "allow takeover of running firewalld on Rocky, AlmaLinux or CentOS Stream without a prompt; replaces the public zone, removes services such as Cockpit, and allows SSH and TCP ports 80, 443 and 6443")
+	clusterHardenCmd.Flags().Bool("allow-ssh-passwords", false, "leave SSH password login unchanged. By default, kip turns it off after a successful key-only login")
 	clusterHardenCmd.Flags().Bool("no-ssh-rate-limit", false, "disable UFW SSH rate limiting on Ubuntu and Debian; useful for CI or operators sharing a NAT address")
 	clusterCmd.AddCommand(clusterHardenCmd)
 }
@@ -44,6 +46,7 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 
 	flagKey, _ := cmd.Flags().GetString("ssh-key")
 	noSSHRateLimit, _ := cmd.Flags().GetBool("no-ssh-rate-limit")
+	allowSSHPasswords, _ := cmd.Flags().GetBool("allow-ssh-passwords")
 	explicit, fallback := resolveSSHKey(flagKey, cluster)
 	harden, _ := cmd.Flags().GetBool("harden")
 	firewall, _ := cmd.Flags().GetBool("firewall")
@@ -122,6 +125,19 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 		fmt.Printf("  ✔  Configuring firewall\n")
 	case fwPlan.FlagNotice != "":
 		fmt.Print(fwPlan.FlagNotice)
+	}
+
+	if harden && !allowSSHPasswords {
+		fmt.Printf("  ...  Turning off SSH password login\n")
+		changed, err := installer.EnsureKeyOnlySSH(client)
+		if err != nil {
+			return fmt.Errorf("turning off SSH password login: %w", err)
+		}
+		if changed {
+			fmt.Printf("  ✔  SSH now accepts keys only\n")
+		} else {
+			fmt.Printf("  ✔  SSH password login is off in sshd's configuration, and sshd refuses a password for kip's login\n")
+		}
 	}
 
 	fmt.Println()

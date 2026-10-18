@@ -40,6 +40,7 @@ type Options struct {
 	Firewall             bool
 	AdoptFirewall        bool
 	NoSSHRateLimit       bool
+	AllowSSHPasswords    bool
 	BackupStorage        *BackupStorageConfig
 	BackupRepositoryKey  []byte
 	Profile              string
@@ -619,6 +620,21 @@ func Run(opts Options) (*Result, error) {
 		}}
 	}
 	steps = append(steps, k3sAndFirewallSteps(sysInfo.Host, k3sStep, firewallStep)...)
+	if opts.Harden && !opts.AllowSSHPasswords {
+		// Keep installation running so SSH hardening can be retried with
+		// kip cluster harden after the reported issue is resolved.
+		steps = append(steps, installStep{"Turning off SSH password login", func() error {
+			changed, err := EnsureKeyOnlySSH(client)
+			switch {
+			case err != nil:
+				fmt.Printf("       ⚠  Could not complete SSH password hardening: %v\n", err)
+				fmt.Printf("          Resolve the reported issue, then run kip cluster harden.\n")
+			case !changed:
+				fmt.Printf("       (SSH password login is already off in sshd's configuration.)\n")
+			}
+			return nil
+		}})
+	}
 	// effectivePlatform is the cluster's actual sizing state after
 	// InstallPlatformConfig runs (which preserves an existing CR's
 	// overrides on reinstall). The observability install steps below
