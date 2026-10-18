@@ -13,6 +13,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/getkipper/kipper/controller/pkg/backupscope"
 	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
@@ -164,9 +165,12 @@ func (b *Backups) Create(w http.ResponseWriter, r *http.Request) {
 		"storageLocation":          "default",
 		"defaultVolumesToFsBackup": true,
 	}
+	backupscope.Backup(spec)
 
 	if req.Namespaces != "" {
-		spec["includedNamespaces"] = strings.Split(req.Namespaces, ",")
+		spec["includedNamespaces"] = anySlice(strings.Split(req.Namespaces, ","))
+	} else {
+		spec["excludedNamespaces"] = anySlice(backupscope.ExcludedNamespaces())
 	}
 
 	backup := &unstructured.Unstructured{
@@ -229,9 +233,8 @@ func (b *Backups) Restore(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	spec := map[string]interface{}{
-		"backupName": backupName,
-	}
+	spec := map[string]interface{}{"backupName": backupName}
+	backupscope.Restore(spec, false)
 
 	if req.Namespace != "" {
 		spec["includedNamespaces"] = []interface{}{req.Namespace}
@@ -380,4 +383,14 @@ func (b *Backups) ToggleSchedule(w http.ResponseWriter, r *http.Request) {
 		status = "paused"
 	}
 	respondJSON(w, http.StatusOK, map[string]string{"status": status})
+}
+
+// anySlice converts a string slice into the []interface{} form unstructured
+// objects need to deep-copy.
+func anySlice(items []string) []interface{} {
+	out := make([]interface{}, len(items))
+	for i, item := range items {
+		out[i] = item
+	}
+	return out
 }

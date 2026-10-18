@@ -60,6 +60,13 @@ func TestBuildBackupCR(t *testing.T) {
 			assert.Equal(t, "168h", spec["ttl"])
 			assert.Equal(t, "default", spec["storageLocation"])
 			assert.Equal(t, true, spec["defaultVolumesToFsBackup"])
+			assert.NotContains(t, spec, "excludedResources", "Velero rejects old filters next to scoped ones")
+			if tt.includeSystem {
+				assert.Equal(t, []interface{}{"*"}, spec["includedClusterScopedResources"], "a whole-cluster backup keeps every cluster-scoped kind")
+			} else {
+				assert.Contains(t, spec["includedClusterScopedResources"], "projects.kipper.run")
+			}
+			assert.Contains(t, spec["excludedNamespaceScopedResources"], "orders.acme.cert-manager.io")
 
 			if tt.wantIncluded != nil {
 				assert.Equal(t, tt.wantIncluded, spec["includedNamespaces"])

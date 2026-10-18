@@ -65,10 +65,15 @@ spec:
             - longhorn-system
             - traefik
             - velero
-          excludedResources:
+          excludedNamespaceScopedResources:
             - certificaterequests.cert-manager.io
             - orders.acme.cert-manager.io
             - challenges.acme.cert-manager.io
+          includedClusterScopedResources:
+            - projects.kipper.run
+            - resourceadjustments.kipper.run
+            - platformconfigs.kipper.run
+            - clusteridentities.kipper.run
       weekly-system:
         disabled: false
         schedule: "0 4 * * 0"
@@ -80,7 +85,12 @@ spec:
             - dex
             - cert-manager
             - kipper-system
-          excludedResources:
+          excludedNamespaceScopedResources:
             - certificaterequests.cert-manager.io
             - orders.acme.cert-manager.io
             - challenges.acme.cert-manager.io
+          includedClusterScopedResources:
+            - projects.kipper.run
+            - resourceadjustments.kipper.run
+            - platformconfigs.kipper.run
+            - clusteridentities.kipper.run

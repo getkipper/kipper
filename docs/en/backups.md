@@ -25,8 +25,9 @@ kip backup schedules
 ```
 
 ```
-  NAME           SCHEDULE       STATUS    LAST BACKUP
-  daily-full     0 3 * * *      Enabled   2026-03-18T03:00:00Z
+  NAME                      SCHEDULE        STATUS       LAST BACKUP
+  velero-daily-apps         0 3 * * *       Enabled      2026-03-18T03:00:00Z
+  velero-weekly-system      0 4 * * 0       Enabled      2026-03-15T04:00:00Z
 ```
 
 ## Manual backups
@@ -37,7 +38,7 @@ kip backup schedules
 kip backup create
 ```
 
-This skips the system namespaces (`kube-system`, `kube-public`, `kube-node-lease`, `traefik`, `longhorn-system`, `keda`, `monitoring`, `velero`) and captures everything else. The exclusion is the same one the daily and weekly schedules use. Excluding `velero` prevents the backup from capturing the MinIO volume that stores its own output.
+This skips the system namespaces (`kube-system`, `kube-public`, `kube-node-lease`, `traefik`, `longhorn-system`, `keda`, `monitoring`, `velero`) and captures everything else. The daily schedule uses the same exclusion. Excluding `velero` prevents the backup from capturing the MinIO volume that stores its own output.
 
 ### Back up the system namespaces too
 
@@ -45,7 +46,7 @@ This skips the system namespaces (`kube-system`, `kube-public`, `kube-node-lease
 kip backup create everything --include-system
 ```
 
-Use this when your recovery plan requires system resources. Review the storage warning above before including Velero’s own namespace.
+Use this when your recovery plan requires system resources. It also captures every cluster-wide object, such as ClusterIssuers and ClusterRoles. Review the storage warning above before including Velero’s own namespace.
 
 Even here, cert-manager's transient issuance objects (CertificateRequests, Orders, Challenges) stay out of the backup. cert-manager recreates them on demand; restoring stale issuance state can interfere with renewal.
 
@@ -68,10 +69,10 @@ kip backup list
 ```
 
 ```
-  NAME                          STATUS       NAMESPACES          CREATED
-  daily-full-20260318030000     Completed    all except system   2026-03-18 03:00
-  pre-migration                 Completed    blog-test     2026-03-18 14:30
-  manual-20260318-153000        Completed    all except system   2026-03-18 15:30
+  NAME                                STATUS       NAMESPACES           CREATED
+  velero-daily-apps-20260318030000    Completed    all except system    2026-03-18 03:00
+  pre-migration                       Completed    blog-test            2026-03-18 14:30
+  manual-20260318-153000              Completed    all except system    2026-03-18 15:30
 ```
 
 `all except system` means the system-namespace exclusion was applied. `all` means `--include-system` was passed, so no namespace was skipped. A namespace name means the backup was scoped via `--project`.
@@ -93,6 +94,16 @@ kip backup restore pre-migration --namespace-mapping blog-test:blog-restored
 ```
 
 This restores only `blog-test` into `blog-restored`. If you also pass `--namespace`, it must match the source namespace (`blog-test`).
+
+### Restore projects
+
+Backups also include Kipper's cluster-wide objects: projects, their resource adjustments, the platform configuration and the cluster identity. Restores exclude these by default. To restore projects and their resource adjustments, run:
+
+```bash
+kip backup restore pre-migration --cluster-resources
+```
+
+`--cluster-resources` restores projects and their resource adjustments. By default, Velero skips existing objects, preserving live project settings. This flag cannot be combined with `--namespace-mapping`. The platform configuration and cluster identity are always excluded from restores because each cluster creates its own during installation.
 
 ### Restore progress and credentials
 
@@ -124,6 +135,8 @@ Resource tuning records are excluded from backups. After a restore, Kipper creat
 | PostgreSQL data | Yes | PVC data via Kopia file-system backup |
 | Redis data | Yes | PVC data via Kopia file-system backup |
 | Longhorn volumes | Yes | Full file-system backup of volume contents |
+| Projects and resource adjustments | Yes | Restored only with `--cluster-resources` |
+| Platform configuration and cluster identity | Yes | Included in backups and always excluded from restores |
 | Resource tuning records | No | The auto-sizer rebuilds them from the running workloads |
 
 ## Architecture
