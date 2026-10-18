@@ -257,3 +257,9 @@ func TestARetryThatDoesNotManageTheFirewallStillSaysKipUpdatedItsOwnRules(t *tes
 		assert.Equal(t, "  ✔  Firewall on 192.0.2.11 opens the cluster ports to the other nodes", managedFirewallNotice("192.0.2.11", mode))
 	}
 }
+
+func TestNodeAddIsListedInHelp(t *testing.T) {
+	assert.False(t, nodeAddCmd.Hidden)
+	assert.NotContains(t, nodeAddNotice, "preview")
+	assert.Contains(t, nodeAddNotice, "sole control plane", "The notice explains that the server remains the sole control plane.")
+}
