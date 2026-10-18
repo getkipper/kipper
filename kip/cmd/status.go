@@ -19,9 +19,10 @@ import (
 )
 
 var statusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show cluster status",
-	RunE:  runStatus,
+	Use:          "status",
+	Short:        "Show cluster status",
+	RunE:         runStatus,
+	SilenceUsage: true,
 }
 
 func init() {
