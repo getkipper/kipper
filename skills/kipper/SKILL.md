@@ -216,7 +216,7 @@ kip app build-logs api --project blog --environment prod   # watch the build
 kip service add postgres --name db --project blog --environment prod
 kip service bind db web --project blog --environment prod   # prefix auto-detects to DB_
 ```
-New Postgres services created through the CLI or console enable TLS by default using the cluster's service CA. Use `--tls off` to disable it, or `kip service update db --tls on` to enable it for an existing service with one restart. The server still accepts plaintext, so have the app connect with `sslmode=require`.
+New Postgres services created through the CLI or console enable TLS by default using the cluster's service CA. Use `--tls off` to disable it, or `kip service update db --tls on` to enable it for an existing service with one restart. The server still accepts plaintext. Once the certificate is verified and its CA published, bound apps receive the CA file and its path in `DB_SSLROOTCERT` with the default binding prefix. Have the app connect with `sslmode=verify-full&sslrootcert=${DB_SSLROOTCERT}` (or `sslmode=require` where it cannot load a CA file).
 
 **Promote through environments**
 ```bash

@@ -338,11 +338,12 @@ func (r *ServiceReconciler) serviceHasData(ctx context.Context, svc *kipperv1.Se
 // convergedKey says whether the reconciler owns a key's value outright, so it is
 // recomputed on every pass and overwrites whatever is there.
 //
-// Two kinds qualify. The address keys only say where the service is, and a
-// Secret restored into another namespace carries the old namespace's host, so
+// Address keys locate the service. A Secret restored into another namespace
+// carries the old namespace's host, so
 // every workload bound to the restored service would open its connections
-// against the one it was copied from. MinIO's ACCESS_KEY is the root user the
-// StatefulSet passes at every start, so the running server answers to that name
+// against the one it was copied from. SSLROOTCERT locates the managed CA file.
+// MinIO's ACCESS_KEY is the root user the StatefulSet passes at every start,
+// so the running server answers to that name
 // whatever the Secret happens to say.
 //
 // Nothing else is overwritten. A password, and USERNAME on the types that bake
@@ -350,7 +351,7 @@ func (r *ServiceReconciler) serviceHasData(ctx context.Context, svc *kipperv1.Se
 // derived from the Service. NAME and VHOST are the operator's to choose.
 func convergedKey(svcType, key string) bool {
 	switch key {
-	case "HOST", "PORT", "ENDPOINT":
+	case "HOST", "PORT", "ENDPOINT", sslRootCertKey:
 		return true
 	case "ACCESS_KEY":
 		return svcType == "minio"
@@ -387,7 +388,7 @@ func credentialKeys() []string {
 	return []string{
 		"HOST", "PORT", "USERNAME", "PASSWORD",
 		"ENDPOINT", "ACCESS_KEY", "SECRET_KEY",
-		"NAME", "VHOST",
+		"NAME", "VHOST", sslRootCertKey,
 	}
 }
 
@@ -429,6 +430,13 @@ func (r *ServiceReconciler) repairCredentials(ctx context.Context, secret *corev
 	changed := carryLegacyMinioCredential(secret, svc.Spec.Type)
 
 	desired := credentialData(svc, "")
+	published, err := r.serviceCAPublished(ctx, svc)
+	if err != nil {
+		return fmt.Errorf("checking for the service CA: %w", err)
+	}
+	if published {
+		desired[sslRootCertKey] = []byte(serviceCAPath(svc.Name))
+	}
 
 	// The password and the identity are the two things the engine keeps and the
 	// Service cannot say, and what to do about either one turns on whether an
@@ -1333,6 +1341,7 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
+		Owns(&corev1.ConfigMap{}).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(serviceForTLSSecret)).
 		Complete(r)
 }
