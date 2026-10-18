@@ -614,15 +614,15 @@ For `kipper.run`, use the cluster's domain (such as `lab.kipper.run`) or a name 
 
 ## kip app scale {#kip-app-scale}
 
-Sets the replica count for a deployed application.
+Sets the replica count for a deployed application. Give the count as the second argument or with `--replicas`. A count is required to prevent accidental scaling to zero.
 
 ```bash
-kip app scale backend --replicas 3
+kip app scale backend 3
 ```
 
 | Flag | Required | Description |
 |---|---|---|
-| `--replicas` | Yes | Number of replicas |
+| `--replicas` | If the second argument is omitted | Number of replicas. Equivalent to the second argument. |
 | `--project`, `--environment` | No | The app's project and environment |
 
 For a stopped app, the new replica count takes effect on start. Use [`kip app stop`](#kip-app-stop-kip-app-start) to take an app out of service while preserving its count and recording a reason.
