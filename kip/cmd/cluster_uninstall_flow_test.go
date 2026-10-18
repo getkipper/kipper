@@ -17,7 +17,8 @@ import (
 // point: three review rounds turned on when the name is released relative to the
 // wipe, and nothing could assert it.
 type recorder struct {
-	events []string
+	events     []string
+	workerErrs map[string]error
 }
 
 func (r *recorder) note(event string) { r.events = append(r.events, event) }
@@ -116,6 +117,10 @@ func deps(rec *recorder, host gatewayTokenReader, mirror *fakeMirror, wipeErr, r
 	return uninstallDeps{
 		Host: host,
 		Wipe: func() error { rec.note("wipe"); return wipeErr },
+		WipeWorker: func(n config.NodeRecord) error {
+			rec.note("wipe " + n.Host)
+			return rec.workerErrs[n.Host]
+		},
 		Release: func(string) error {
 			rec.note("release")
 			return relErr
@@ -158,26 +163,55 @@ func TestUninstallReleasesNothingWhenTheWipeFails(t *testing.T) {
 	}
 }
 
-func TestUninstallNamesTheWorkersItLeavesBehind(t *testing.T) {
-	rec := &recorder{}
-	var out bytes.Buffer
-	d := deps(rec, &fakeHost{out: encodedToken()}, &fakeMirror{}, nil, nil, "", &out)
+func twoWorkerCluster() *config.Cluster {
 	cluster := testCluster()
 	cluster.Nodes = []config.NodeRecord{
 		{Name: "server", Host: cluster.Host, Role: "server"},
-		{Name: "worker-a", Host: "203.0.113.11", Role: "worker"},
-		{Name: "worker-b", Host: "203.0.113.12", Role: "worker"},
+		{Name: "worker-a", Host: "203.0.113.11", Role: "worker", MachineID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{Name: "worker-b", Host: "203.0.113.12", Role: "worker", MachineID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
 	}
+	return cluster
+}
 
-	if _, err := uninstallCluster(cluster, true, d); err != nil {
+func TestUninstallWipesTheWorkersBeforeTheServer(t *testing.T) {
+	rec := &recorder{}
+	var out bytes.Buffer
+	d := deps(rec, &fakeHost{out: encodedToken()}, &fakeMirror{}, nil, nil, "", &out)
+
+	if _, err := uninstallCluster(twoWorkerCluster(), true, d); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
-	for _, want := range []string{"203.0.113.11", "203.0.113.12", "k3s-agent-uninstall.sh"} {
+	for _, w := range []string{"wipe 203.0.113.11", "wipe 203.0.113.12"} {
+		if !rec.sawBefore(w, "wipe") {
+			t.Errorf("%s must happen before the server wipe, got %v", w, rec.events)
+		}
+	}
+	if strings.Contains(out.String(), "k3s-agent-uninstall.sh") {
+		t.Errorf("wiped workers need no manual cleanup, got %q", out.String())
+	}
+}
+
+func TestUninstallNamesTheWorkersItLeavesBehind(t *testing.T) {
+	rec := &recorder{workerErrs: map[string]error{"203.0.113.12": errors.New("ssh: no route to host")}}
+	var out bytes.Buffer
+	d := deps(rec, &fakeHost{out: encodedToken()}, &fakeMirror{}, nil, nil, "", &out)
+	cluster := twoWorkerCluster()
+
+	if _, err := uninstallCluster(cluster, true, d); err != nil {
+		t.Fatalf("an unreachable worker must not stop the server wipe: %v", err)
+	}
+	if !rec.saw("wipe") {
+		t.Fatal("the server is still wiped")
+	}
+	for _, want := range []string{"203.0.113.12", "no route to host", "k3s-agent-uninstall.sh"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("the operator must learn that %s is left to clean up, got %q", want, out.String())
 		}
 	}
-	if strings.Contains(out.String(), cluster.Host+" (server)") || strings.Count(out.String(), "203.0.113.10") > 1 {
+	if strings.Contains(out.String(), "203.0.113.11 ") && strings.Contains(out.String(), "left") && strings.Contains(out.String(), "203.0.113.11,") {
+		t.Errorf("the wiped worker is not left behind, got %q", out.String())
+	}
+	if strings.Contains(out.String(), cluster.Host+" (server)") {
 		t.Errorf("the server is wiped, so it is not listed as left behind, got %q", out.String())
 	}
 
@@ -1160,5 +1194,303 @@ func TestUninstallDoesNotMirrorOverACredentialThatArrivedMeanwhile(t *testing.T)
 	}
 	if !strings.Contains(out.String(), "Could not record") {
 		t.Errorf("did not tell the operator the mirror was refused: %q", out.String())
+	}
+}
+
+// TestWipeRecordedWorkerChecksTheMachineID verifies that a wipe checks the host's
+// recorded identity because a former worker's address may have been reassigned.
+func TestWipeRecordedWorkerChecksTheMachineID(t *testing.T) {
+	other := &routedHost{routes: map[string]string{"cat /etc/machine-id": "ffffffffffffffffffffffffffffffff\n"}}
+	err := wipeRecordedWorker(other, config.NodeRecord{Host: "203.0.113.11", MachineID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, elsewhere)
+	if err == nil || !strings.Contains(err.Error(), "left alone") {
+		t.Fatalf("a different machine must be left alone, got %v", err)
+	}
+	for _, c := range other.ran {
+		if strings.Contains(c, "uninstall") {
+			t.Fatalf("nothing is uninstalled on a different machine, ran %v", other.ran)
+		}
+	}
+
+	same := &routedHost{routes: map[string]string{"cat /etc/machine-id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"}}
+	if err := wipeRecordedWorker(same, config.NodeRecord{Host: "203.0.113.11", MachineID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, elsewhere); err != nil {
+		t.Fatalf("wipe: %v", err)
+	}
+	if !same.ranContaining("k3s-agent-uninstall.sh") {
+		t.Errorf("the recorded worker is uninstalled, ran %v", same.ran)
+	}
+
+	unknown := &routedHost{routes: map[string]string{"cat /etc/machine-id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"}}
+	if err := wipeRecordedWorker(unknown, config.NodeRecord{Host: "203.0.113.11"}, elsewhere); err == nil {
+		t.Error("a record without a machine id cannot prove the host, so it is left alone")
+	}
+}
+
+func elsewhere() (string, error) { return "cccccccccccccccccccccccccccccccc", nil }
+
+func TestWipeRecordedWorkerLeavesTheMachineRunningKipAlone(t *testing.T) {
+	self := &routedHost{routes: map[string]string{"cat /etc/machine-id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"}}
+	here := func() (string, error) { return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil }
+	err := wipeRecordedWorker(self, config.NodeRecord{Host: "203.0.113.11", MachineID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, here)
+	if err == nil || !strings.Contains(err.Error(), "machine running kip") {
+		t.Fatalf("kip must not uninstall the machine it runs on, got %v", err)
+	}
+	if self.ranContaining("uninstall") {
+		t.Errorf("nothing is uninstalled, ran %v", self.ran)
+	}
+}
+
+func TestUninstallWipesTheWorkersTheClusterRecords(t *testing.T) {
+	rec := &recorder{}
+	var out bytes.Buffer
+	d := deps(rec, &fakeHost{out: encodedToken()}, &fakeMirror{}, nil, nil, "", &out)
+	cluster := twoWorkerCluster()
+	d.ReadNodes = func() ([]config.NodeRecord, error) {
+		return []config.NodeRecord{
+			{Name: "server", Host: cluster.Host, Role: "server"},
+			cluster.Nodes[1],
+			{Name: "worker-c", Host: "203.0.113.13", Role: "worker", MachineID: "cccccccccccccccccccccccccccccccc"},
+		}, nil
+	}
+
+	var saved []config.NodeRecord
+	d.SaveNodes = func(nodes []config.NodeRecord) error { saved = nodes; return nil }
+
+	if _, err := uninstallCluster(cluster, true, d); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if rec.saw("wipe 203.0.113.13") {
+		t.Errorf("--yes never wipes a worker the confirmation did not list, got %v", rec.events)
+	}
+	if !rec.saw("wipe 203.0.113.11") {
+		t.Errorf("a confirmed worker the cluster records is wiped, got %v", rec.events)
+	}
+	if rec.saw("wipe 203.0.113.12") {
+		t.Errorf("a worker the cluster no longer records is left alone, got %v", rec.events)
+	}
+	if strings.Contains(out.String(), "worker-b (203.0.113.12") {
+		t.Errorf("a worker the cluster no longer records gets no manual cleanup advice, got %q", out.String())
+	}
+	for _, want := range []string{"also records 203.0.113.13", "no longer records 203.0.113.12", "worker-c (203.0.113.13, machine id cccc"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the operator must learn %q, got %q", want, out.String())
+		}
+	}
+	if len(saved) != 3 {
+		t.Errorf("the cluster's records are saved before the wipe, got %v", saved)
+	}
+
+	rec = &recorder{}
+	out.Reset()
+	d = deps(rec, &fakeHost{out: encodedToken()}, &fakeMirror{}, nil, nil, "y\n", &out)
+	d.ReadNodes = func() ([]config.NodeRecord, error) {
+		return []config.NodeRecord{cluster.Nodes[1], {Name: "worker-c", Host: "203.0.113.13", Role: "worker", MachineID: "cccccccccccccccccccccccccccccccc"}}, nil
+	}
+	if _, err := uninstallCluster(twoWorkerCluster(), false, d); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if !rec.saw("wipe 203.0.113.13") {
+		t.Errorf("an explicit yes wipes the extra worker, got %v", rec.events)
+	}
+
+	rec = &recorder{}
+	out.Reset()
+	d = deps(rec, &fakeHost{out: encodedToken()}, &fakeMirror{}, nil, nil, "", &out)
+	d.ReadNodes = func() ([]config.NodeRecord, error) { return nil, errors.New("the API is down") }
+	if _, err := uninstallCluster(twoWorkerCluster(), true, d); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if !rec.saw("wipe 203.0.113.11") || !strings.Contains(out.String(), "this machine's copy decides") {
+		t.Errorf("unreadable records fall back to this machine's copy and say so, got %v %q", rec.events, out.String())
+	}
+}
+
+func TestUnwipedWorkersComeWithTheIdentityToCheck(t *testing.T) {
+	var out bytes.Buffer
+	reportUnwipedWorkers(&out, []unwipedWorker{{config.NodeRecord{Name: "worker-a", Host: "203.0.113.11", MachineID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "the host now has machine id ffff"}})
+	for _, want := range []string{"worker-a (203.0.113.11, machine id aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)", "check that /etc/machine-id matches", "only then run"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q in %q", want, out.String())
+		}
+	}
+}
+
+func TestReleaseOnlyRunsListTheWorkersTheyCannotVouchFor(t *testing.T) {
+	var out bytes.Buffer
+	cluster := twoWorkerCluster()
+	cluster.HostWiped = true
+	cmd := uninstallCommand{
+		Connect: func(*config.Cluster) (uninstallDeps, func(), error) {
+			return uninstallDeps{}, func() {}, errors.New("unused")
+		},
+		ReleaseOnly: func(*config.Cluster) uninstallDeps {
+			return uninstallDeps{Release: func(string) error { return nil }, ReadMirror: func(string) string { return clusterTokenValue }, WriteMirror: func(string, string, string) error { return nil }, Out: &out}
+		},
+		RemoveLocal: func(string, string) error { return nil },
+		SetWiped:    func(string, bool) error { return nil },
+		Out:         &out,
+	}
+	_ = cmd.run(cluster, true, false)
+	for _, want := range []string{"203.0.113.11", "203.0.113.12", "cannot tell whether the worker was wiped"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q in %q", want, out.String())
+		}
+	}
+}
+
+type routedHost struct {
+	routes map[string]string
+	ran    []string
+}
+
+func (h *routedHost) Run(cmd string) (string, error) {
+	h.ran = append(h.ran, cmd)
+	for k, v := range h.routes {
+		if strings.Contains(cmd, k) {
+			return v, nil
+		}
+	}
+	return "", nil
+}
+
+func (h *routedHost) RunStdin(cmd string, _ io.Reader) (string, error) { return h.Run(cmd) }
+
+func (h *routedHost) ranContaining(s string) bool {
+	for _, c := range h.ran {
+		if strings.Contains(c, s) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestUninstallConfirmationNamesTheWorkers(t *testing.T) {
+	var out bytes.Buffer
+	cmd := uninstallCommand{
+		Connect: func(*config.Cluster) (uninstallDeps, func(), error) {
+			return uninstallDeps{}, func() {}, errors.New("unused")
+		},
+		ReleaseOnly: func(*config.Cluster) uninstallDeps { return uninstallDeps{} },
+		Confirm:     func(*config.Cluster) bool { return false },
+		Out:         &out,
+	}
+	if err := cmd.run(twoWorkerCluster(), false, false); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for _, want := range []string{"Worker:   203.0.113.11", "Worker:   203.0.113.12"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the prompt must name %q before asking, got %q", want, out.String())
+		}
+	}
+}
+
+func TestUninstallStopsWhenTheRecordsCannotBeSaved(t *testing.T) {
+	rec := &recorder{}
+	d := deps(rec, &fakeHost{out: encodedToken()}, &fakeMirror{}, nil, nil, "", io.Discard)
+	d.ReadNodes = func() ([]config.NodeRecord, error) { return twoWorkerCluster().Nodes, nil }
+	d.SaveNodes = func([]config.NodeRecord) error { return errors.New("disk full") }
+
+	if _, err := uninstallCluster(twoWorkerCluster(), true, d); err == nil || !strings.Contains(err.Error(), "nothing was wiped") {
+		t.Fatalf("an unsaved record set must stop the uninstall, got %v", err)
+	}
+	if len(rec.events) != 0 && (rec.saw("wipe") || rec.saw("wipe 203.0.113.11")) {
+		t.Errorf("nothing is wiped, got %v", rec.events)
+	}
+}
+
+// An address can pass to another machine once the server is gone, so a recorded
+// machine ID must match before wiping. Older entries without an ID can still be wiped.
+func TestWipeServerChecksTheMachineID(t *testing.T) {
+	cluster := testCluster()
+	cluster.MachineID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	other := &routedHost{routes: map[string]string{"cat /etc/machine-id": "ffffffffffffffffffffffffffffffff\n"}}
+	err := wipeServer(other, cluster)
+	if err == nil || !strings.Contains(err.Error(), "nothing was wiped") {
+		t.Fatalf("a different machine must be left alone, got %v", err)
+	}
+	if other.ranContaining("k3s-uninstall.sh") {
+		t.Errorf("nothing is uninstalled on a different machine, ran %v", other.ran)
+	}
+
+	same := &routedHost{routes: map[string]string{"cat /etc/machine-id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"}}
+	if err := wipeServer(same, cluster); err != nil {
+		t.Fatalf("wipe: %v", err)
+	}
+	if !same.ranContaining("k3s-uninstall.sh") {
+		t.Errorf("the recorded server is uninstalled, ran %v", same.ran)
+	}
+
+	legacy := &routedHost{}
+	if err := wipeServer(legacy, testCluster()); err != nil {
+		t.Fatalf("an entry without a machine id keeps the old behaviour: %v", err)
+	}
+}
+
+func TestUninstallChecksTheServerBeforeTouchingAnyWorker(t *testing.T) {
+	rec := &recorder{}
+	read := false
+	d := deps(rec, &fakeHost{out: encodedToken(), duringRun: func() { read = true }}, &fakeMirror{}, nil, nil, "", io.Discard)
+	d.CheckServer = func() error { return errors.New("203.0.113.10 now has machine id ffff") }
+
+	if _, err := uninstallCluster(twoWorkerCluster(), true, d); err == nil {
+		t.Fatal("a server that changed identity stops the uninstall")
+	}
+	if len(rec.events) != 0 {
+		t.Errorf("no worker or server is wiped and no name released, got %v", rec.events)
+	}
+	if read {
+		t.Error("no gateway token is read from a host that is not the cluster's server")
+	}
+}
+
+// Workers recorded only on the server are saved as unconfirmed until approved,
+// so retries using local records leave them for manual cleanup.
+func TestUninstallRetryKeepsSkippedWorkersUnconfirmed(t *testing.T) {
+	cluster := twoWorkerCluster()
+	extra := config.NodeRecord{Name: "worker-c", Host: "203.0.113.13", Role: "worker", MachineID: "cccccccccccccccccccccccccccccccc"}
+	var saved []config.NodeRecord
+	rec := &recorder{}
+	d := deps(rec, &fakeHost{out: encodedToken()}, &fakeMirror{}, errors.New("ssh: connection lost"), nil, "", io.Discard)
+	d.ReadNodes = func() ([]config.NodeRecord, error) {
+		return append(append([]config.NodeRecord(nil), cluster.Nodes...), extra), nil
+	}
+	d.SaveNodes = func(n []config.NodeRecord) error { saved = n; return nil }
+
+	if _, err := uninstallCluster(cluster, true, d); err == nil {
+		t.Fatal("the server wipe failed, so the run fails")
+	}
+	if rec.saw("wipe 203.0.113.13") {
+		t.Fatal("--yes never wipes a worker the confirmation did not list")
+	}
+
+	retry := testCluster()
+	retry.Nodes = saved
+	rec = &recorder{}
+	var out bytes.Buffer
+	d = deps(rec, &fakeHost{out: encodedToken()}, &fakeMirror{}, nil, nil, "", &out)
+	d.ReadNodes = func() ([]config.NodeRecord, error) { return nil, errors.New("the API is down") }
+	if _, err := uninstallCluster(retry, true, d); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if rec.saw("wipe 203.0.113.13") {
+		t.Errorf("the retry must not promote the skipped worker, got %v", rec.events)
+	}
+	if !strings.Contains(out.String(), "worker-c (203.0.113.13") {
+		t.Errorf("the skipped worker is reported for manual cleanup, got %q", out.String())
+	}
+	if !rec.saw("wipe 203.0.113.11") {
+		t.Errorf("confirmed workers are still wiped, got %v", rec.events)
+	}
+}
+
+func TestReleaseOnlyRunsAlsoListUnconfirmedWorkers(t *testing.T) {
+	cluster := twoWorkerCluster()
+	cluster.Nodes = append(cluster.Nodes, config.NodeRecord{Name: "worker-c", Host: "203.0.113.13", Role: "worker", MachineID: "cccccccccccccccccccccccccccccccc", State: unconfirmedWorker})
+	var hosts []string
+	for _, w := range notWiped(cluster, "reason") {
+		hosts = append(hosts, w.node.Host)
+	}
+	if !strings.Contains(strings.Join(hosts, " "), "203.0.113.13") {
+		t.Errorf("an unconfirmed worker is reported before its record is dropped, got %v", hosts)
 	}
 }

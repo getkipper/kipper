@@ -25,6 +25,14 @@ type uninstallDeps struct {
 	Host gatewayTokenReader
 	// Wipe destroys the cluster. Bound to the host by the caller.
 	Wipe func() error
+	// CheckServer checks server identity before reading credentials or wiping hosts. Nil skips the check.
+	CheckServer func() error
+	// Nil WipeWorker leaves workers for manual cleanup.
+	WipeWorker func(node config.NodeRecord) error
+	// Nil ReadNodes or a read error falls back to local node records.
+	ReadNodes func() ([]config.NodeRecord, error)
+	// Nil SaveNodes skips saving records locally for retries after the server wipe.
+	SaveNodes func(nodes []config.NodeRecord) error
 	// Release hands the *.kipper.run name back to the gateway.
 	Release func(token string) error
 	// ReadMirror and WriteMirror are the local copy of the release token, whose
@@ -81,6 +89,13 @@ type uninstallOutcome struct {
 // released until the wipe has succeeded. Getting either half wrong strands a
 // name permanently or takes a running cluster off the air.
 func uninstallCluster(cluster *config.Cluster, autoYes bool, d uninstallDeps) (uninstallOutcome, error) {
+	// A different machine at this address could supply its own gateway token,
+	// so check its identity before reading credentials.
+	if d.CheckServer != nil {
+		if err := d.CheckServer(); err != nil {
+			return uninstallOutcome{}, err
+		}
+	}
 	token, proceed, declined := releaseTokenFor(cluster, autoYes, d)
 	if !proceed {
 		d.say("  Aborted.\n\n")
@@ -99,6 +114,11 @@ func uninstallCluster(cluster *config.Cluster, autoYes bool, d uninstallDeps) (u
 	}
 
 	d.say("  ...  Uninstalling Kipper from %s\n", cluster.Host)
+	workers, leftBehind, err := d.workersOf(cluster, autoYes)
+	if err != nil {
+		return uninstallOutcome{}, err
+	}
+	leftBehind = append(leftBehind, d.wipeWorkers(workers)...)
 	if wipeErr := d.Wipe(); wipeErr != nil {
 		// The name is deliberately not released here. Nothing available at this
 		// point distinguishes a cluster this wipe destroyed from one it never
@@ -117,11 +137,7 @@ func uninstallCluster(cluster *config.Cluster, autoYes bool, d uninstallDeps) (u
 		return uninstallOutcome{}, fmt.Errorf("uninstalling: %w", wipeErr)
 	}
 	d.say("  ✔  Host wiped\n")
-	if workers := recordedWorkerHosts(cluster); len(workers) > 0 {
-		d.say("  ·  Server wiped. Recorded workers need separate cleanup:\n")
-		d.say("     %s\n", strings.Join(workers, ", "))
-		d.say("     Run /usr/local/bin/k3s-agent-uninstall.sh on each worker to remove k3s.\n")
-	}
+	reportUnwipedWorkers(d.Out, leftBehind)
 
 	stillRegistered, releaseErr := releaseName(token, cluster, d)
 	return uninstallOutcome{Wiped: true, NameStillRegistered: stillRegistered, ReleaseErr: releaseErr, SpentToken: token}, nil
@@ -294,13 +310,213 @@ func readGatewayCredentialsFrom(client gatewayTokenReader) (string, error) {
 	return installer.ReadGatewayCredentials(client)
 }
 
-// recordedWorkerHosts returns non-empty worker hosts from local node records.
-func recordedWorkerHosts(cluster *config.Cluster) []string {
-	var hosts []string
-	for _, n := range cluster.Nodes {
-		if n.Role == installer.NodeRoleWorker && n.Host != "" {
-			hosts = append(hosts, n.Host)
+func workersToWipe(nodes []config.NodeRecord) []config.NodeRecord {
+	var workers []config.NodeRecord
+	for _, n := range nodes {
+		if n.Role == installer.NodeRoleWorker && n.State != unconfirmedWorker {
+			workers = append(workers, n)
 		}
 	}
-	return hosts
+	return workers
+}
+
+// unconfirmedWorker marks local records of workers awaiting wipe confirmation.
+const unconfirmedWorker = "unconfirmed"
+
+// unconfirmedIn returns unconfirmed workers with a reason for manual cleanup.
+func unconfirmedIn(nodes []config.NodeRecord) []unwipedWorker {
+	var left []unwipedWorker
+	for _, n := range nodes {
+		if n.Role == installer.NodeRoleWorker && n.State == unconfirmedWorker {
+			left = append(left, unwipedWorker{n, "wiping this worker was never confirmed"})
+		}
+	}
+	return left
+}
+
+// workersOf returns workers selected for wiping and workers skipped for lack of
+// confirmation. It uses the server's records when readable, including an empty
+// result, and otherwise falls back to the local records shown at confirmation.
+// Workers absent from the server's records are excluded from both results.
+// Workers found only on the server require explicit confirmation, even with --yes.
+// If SaveNodes is set, it saves the server's records locally before any wipe so
+// retries can find workers after the server is gone. Workers awaiting confirmation
+// are marked unconfirmed so retries using local records leave them for manual
+// cleanup. A save error aborts the wipe.
+func (d uninstallDeps) workersOf(cluster *config.Cluster, autoYes bool) ([]config.NodeRecord, []unwipedWorker, error) {
+	local := workersToWipe(cluster.Nodes)
+	if d.ReadNodes == nil {
+		return local, unconfirmedIn(cluster.Nodes), nil
+	}
+	nodes, err := d.ReadNodes()
+	if err != nil {
+		d.say("  ⚠  Could not read the cluster's node records (%v), so this machine's copy decides which workers are wiped\n", err)
+		return local, unconfirmedIn(cluster.Nodes), nil
+	}
+	recorded := workersToWipe(nodes)
+	if gone := missingFrom(local, recorded); len(gone) > 0 {
+		d.say("  ·  The cluster no longer records %s, so those workers are left alone\n", workerHosts(gone))
+	}
+	extra := missingFrom(recorded, local)
+	wipe, approved := recorded, true
+	if len(extra) > 0 {
+		d.say("  ·  The cluster also records %s, which the confirmation did not list\n", workerHosts(extra))
+		approved = false
+		if !autoYes {
+			approved, _ = askToProceed(d, "Wipe those workers too?")
+		}
+		if !approved {
+			wipe = missingFrom(recorded, extra)
+		}
+	}
+	if d.SaveNodes != nil {
+		if err := d.SaveNodes(markUnconfirmed(nodes, extra, approved)); err != nil {
+			return nil, nil, fmt.Errorf("nothing was wiped because saving the cluster's node records on this machine failed: %w", err)
+		}
+	}
+	var skipped []unwipedWorker
+	if !approved {
+		for _, w := range extra {
+			skipped = append(skipped, unwipedWorker{w, "it was not part of the confirmation"})
+		}
+	}
+	return wipe, skipped, nil
+}
+
+// markUnconfirmed copies nodes and marks extra workers unconfirmed unless their
+// wipe was approved. This preserves the need for confirmation on retries.
+func markUnconfirmed(nodes, extra []config.NodeRecord, approved bool) []config.NodeRecord {
+	out := append([]config.NodeRecord(nil), nodes...)
+	if approved {
+		return out
+	}
+	for i := range out {
+		if len(missingFrom([]config.NodeRecord{out[i]}, extra)) == 0 {
+			out[i].State = unconfirmedWorker
+		}
+	}
+	return out
+}
+
+// missingFrom returns the nodes in want that have no node with the same host
+// and machine ID in have.
+func missingFrom(want, have []config.NodeRecord) []config.NodeRecord {
+	var missing []config.NodeRecord
+	for _, w := range want {
+		found := false
+		for _, h := range have {
+			if h.MachineID == w.MachineID && h.Host == w.Host {
+				found = true
+			}
+		}
+		if !found {
+			missing = append(missing, w)
+		}
+	}
+	return missing
+}
+
+func workerHosts(nodes []config.NodeRecord) string {
+	hosts := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		hosts = append(hosts, n.Host)
+	}
+	return strings.Join(hosts, ", ")
+}
+
+// unwipedWorker is a recorded worker this run did not wipe, and why.
+type unwipedWorker struct {
+	node   config.NodeRecord
+	reason string
+}
+
+// wipeWorkers attempts each worker wipe in order and returns workers whose wipe
+// failed or could not be attempted. It reports each attempted wipe's result and
+// continues after errors so the caller can proceed with the server wipe.
+func (d uninstallDeps) wipeWorkers(workers []config.NodeRecord) []unwipedWorker {
+	var left []unwipedWorker
+	for _, w := range workers {
+		if d.WipeWorker == nil {
+			left = append(left, unwipedWorker{w, "this run cannot reach the workers"})
+			continue
+		}
+		if err := d.WipeWorker(w); err != nil {
+			d.say("  ⚠  Worker %s was not wiped: %v\n", w.Host, err)
+			left = append(left, unwipedWorker{w, err.Error()})
+			continue
+		}
+		d.say("  ✔  Worker %s wiped\n", w.Host)
+	}
+	return left
+}
+
+// reportUnwipedWorkers lists workers whose cleanup is unconfirmed and the recorded
+// identity to check before manual cleanup. Addresses may have been reassigned,
+// so the instructions require a matching machine ID before removing k3s.
+func reportUnwipedWorkers(out io.Writer, left []unwipedWorker) {
+	if len(left) == 0 {
+		return
+	}
+	say(out, "  ·  Cleanup is unconfirmed for these recorded workers:\n")
+	for _, w := range left {
+		id := w.node.MachineID
+		if id == "" {
+			id = "not recorded"
+		}
+		say(out, "     %s (%s, machine id %s): %s\n", w.node.Name, w.node.Host, id, w.reason)
+	}
+	say(out, "     On each, check that /etc/machine-id matches the id above, and only then run\n")
+	say(out, "     /usr/local/bin/k3s-agent-uninstall.sh there to remove k3s.\n")
+}
+
+// wipeServer removes k3s and Kipper data after checking the machine ID recorded
+// at installation. Older entries without a recorded ID skip the identity check.
+// Identity check failures abort cleanup. Uninstall errors are returned to the caller.
+func wipeServer(client installer.CommandRunner, cluster *config.Cluster) error {
+	if err := checkServerIdentity(client, cluster); err != nil {
+		return err
+	}
+	return installer.UninstallHost(client)
+}
+
+// checkServerIdentity returns an error if the host's machine ID cannot be read,
+// is invalid or differs from the ID recorded at installation.
+// An empty recorded ID skips the check and returns nil.
+func checkServerIdentity(client installer.CommandRunner, cluster *config.Cluster) error {
+	if cluster.MachineID == "" {
+		return nil
+	}
+	id, err := installer.ReadMachineID(client)
+	if err != nil {
+		return err
+	}
+	if id != cluster.MachineID {
+		return fmt.Errorf("%s now has machine ID %s instead of the recorded %s, so nothing was wiped on this server. Check that the address still belongs to this cluster's server", cluster.Host, id, cluster.MachineID)
+	}
+	return nil
+}
+
+// wipeRecordedWorker removes k3s and Kipper data after verifying the recorded
+// machine ID, protecting machines that have inherited a worker's address.
+// Missing host or identity records, identity read failures and mismatches return
+// an error before cleanup. A matching local machine ID also blocks cleanup when
+// the local ID can be read. Errors from the uninstall are returned to the caller.
+func wipeRecordedWorker(client installer.CommandRunner, node config.NodeRecord, localMachineID func() (string, error)) error {
+	if node.Host == "" {
+		return fmt.Errorf("its record has no host")
+	}
+	if node.MachineID == "" {
+		return fmt.Errorf("its record has no machine id to check the host against, so it was left alone")
+	}
+	id, err := installer.ReadMachineID(client)
+	if err != nil {
+		return err
+	}
+	if id != node.MachineID {
+		return fmt.Errorf("the host now has machine id %s, not the recorded %s, so it was left alone", id, node.MachineID)
+	}
+	if local, err := localMachineID(); err == nil && local == id {
+		return fmt.Errorf("it is the machine running kip, so it was left alone")
+	}
+	return installer.UninstallHost(client)
 }
