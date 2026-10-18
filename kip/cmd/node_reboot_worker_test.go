@@ -486,6 +486,13 @@ func TestPostRebootVolumeReportPointsAtTheRebuildAndTheException(t *testing.T) {
 	assert.NotContains(t, out.String(), "Check their status in Longhorn", "kip does not expose the Longhorn UI")
 }
 
+func TestShownAddressNamesTheAddressPeersUse(t *testing.T) {
+	natted := installer.NodeNetwork{NodeIP: "10.0.0.5", ExternalIP: "198.51.100.7"}
+	assert.Equal(t, "198.51.100.7 (node address 10.0.0.5)", shownAddress(installer.NetworkModePublic, natted))
+	assert.Equal(t, "198.51.100.8", shownAddress(installer.NetworkModePublic, installer.NodeNetwork{NodeIP: "198.51.100.8", ExternalIP: "198.51.100.8"}))
+	assert.Equal(t, "10.0.0.3", shownAddress(installer.NetworkModePrivate, installer.NodeNetwork{NodeIP: "10.0.0.3", ExternalIP: "198.51.100.7"}))
+}
+
 func TestServerNetworkConsentStatesTheMeasuredImpact(t *testing.T) {
 	text := strings.Join(strings.Fields(serverNetworkConsent("private", "192.0.2.10")), " ")
 	assert.Contains(t, text, "The server will use private mode for cluster traffic (address 192.0.2.10)")
