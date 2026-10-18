@@ -15,6 +15,7 @@ import (
 	"github.com/getkipper/kipper/kip/internal/domain"
 	"github.com/getkipper/kipper/kip/internal/infra"
 	"github.com/getkipper/kipper/kip/internal/installer"
+	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 var clusterUninstallCmd = &cobra.Command{
@@ -29,14 +30,21 @@ from your local kip config and deletes its cached kubeconfig.
 
 This is destructive. All cluster state and persistent volume data on
 the host is removed. The command prompts for the cluster name to
-confirm; pass --yes to skip the prompt for automation.
+confirm. Pass --yes to skip the prompt for automation.
 
 Host firewall rules and OS hardening (rpcbind disabled etc.) are not
 reverted, because they are general OS security improvements unrelated
 to k3s.
 
-The command wipes the server and then lists any recorded workers.
-Run /usr/local/bin/k3s-agent-uninstall.sh on each worker to remove k3s.
+Recorded workers are wiped over SSH before the server. Each wipe first checks
+that the host's machine ID matches its recorded ID, protecting machines at reused
+addresses. Older server entries without a recorded ID skip this check.
+Workers are selected from the cluster's node records, or the local
+copy if those records cannot be read. Workers found only in the cluster's records
+require separate confirmation and are skipped with --yes. Workers whose cleanup
+is unconfirmed are listed afterwards with their recorded machine IDs. Check that
+/etc/machine-id on each host matches before running
+/usr/local/bin/k3s-agent-uninstall.sh there.
 
 Examples:
   kip cluster uninstall storefront
@@ -116,6 +124,7 @@ func (c uninstallCommand) run(cluster *config.Cluster, autoYes, keepLocal bool) 
 			// finding the same entry and keep succeeding.
 			return fmt.Errorf("no gateway credential could be read for %s, so its name was not released", cluster.Domain)
 		}
+		reportUnwipedWorkers(c.Out, notWiped(cluster, "an earlier run wiped the server, and this run cannot tell whether the worker was wiped"))
 		if err := finishUninstall(outcome, cluster, keepLocal, c.RemoveLocal, c.SetWiped, c.Out); err != nil {
 			return err
 		}
@@ -125,6 +134,9 @@ func (c uninstallCommand) run(cluster *config.Cluster, autoYes, keepLocal bool) 
 	say(c.Out, "\n  About to uninstall Kipper from:\n\n")
 	say(c.Out, "    Cluster:  %s\n", cluster.Name)
 	say(c.Out, "    Host:     %s\n", cluster.Host)
+	for _, w := range workersToWipe(cluster.Nodes) {
+		say(c.Out, "    Worker:   %s\n", w.Host)
+	}
 	say(c.Out, "    Kubeconfig: %s\n\n", cluster.Kubeconfig)
 	say(c.Out, "  This removes k3s, all Longhorn data, the Zot registry blobs,\n")
 	say(c.Out, "  and any AI bundle data on the host. The action cannot be undone.\n\n")
@@ -176,7 +188,22 @@ func connectForUninstall(flagKey string) func(*config.Cluster) (uninstallDeps, f
 		}
 		return uninstallDeps{
 			Host:        provider.Client(),
-			Wipe:        func() error { return installer.UninstallHost(provider.Client()) },
+			Wipe:        func() error { return wipeServer(provider.Client(), cluster) },
+			CheckServer: func() error { return checkServerIdentity(provider.Client(), cluster) },
+			WipeWorker: func(node config.NodeRecord) error {
+				client, err := ssh.Dial(nodeSSH(node.Host, flagKey, cluster))
+				if err != nil {
+					return err
+				}
+				defer func() { _ = client.Close() }()
+				return wipeRecordedWorker(client, node, readLocalMachineID)
+			},
+			ReadNodes: func() ([]config.NodeRecord, error) {
+				return installer.ReadNodeRecords(provider.Client())
+			},
+			SaveNodes: func(nodes []config.NodeRecord) error {
+				return config.MirrorNodes(cluster.Name, nodes)
+			},
 			Release:     domain.NewGatewayClient("").Deregister,
 			ReadMirror:  mirroredGatewayToken,
 			WriteMirror: mirrorGatewayTokenToConfig,
@@ -254,7 +281,19 @@ func (c uninstallCommand) releaseWithoutTheHost(cluster *config.Cluster, connect
 		say(c.Out, "\n  Kept the local entry for %s. Re-running offers this again.\n\n", cluster.Name)
 		return uninstallExit(outcome, cluster, false, connectErr)
 	}
+	reportUnwipedWorkers(c.Out, notWiped(cluster, "the server could not be reached, so this run did not wipe any workers"))
 	return finishUninstall(outcome, cluster, keepLocal, c.RemoveLocal, c.SetWiped, c.Out)
+}
+
+// notWiped lists locally recorded workers for cleanup when releasing the gateway
+// name without contacting a host. Unconfirmed workers retain their confirmation
+// reason, and the remaining workers receive the supplied reason.
+func notWiped(cluster *config.Cluster, reason string) []unwipedWorker {
+	var left []unwipedWorker
+	for _, w := range workersToWipe(cluster.Nodes) {
+		left = append(left, unwipedWorker{w, reason})
+	}
+	return append(left, unconfirmedIn(cluster.Nodes)...)
 }
 
 // finishUninstall applies an outcome to local state.
