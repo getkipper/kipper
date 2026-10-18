@@ -65,6 +65,7 @@ spec:
             - longhorn-system
             - traefik
             - velero
+            - kipper-restore-drill
           excludedNamespaceScopedResources:
             - certificaterequests.cert-manager.io
             - orders.acme.cert-manager.io

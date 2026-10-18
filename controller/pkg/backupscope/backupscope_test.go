@@ -73,7 +73,7 @@ func TestExcludedNamespacesKeepVeleroOut(t *testing.T) {
 	// that stores their own output, which can leave them stuck in progress.
 	assert.Equal(t, []string{
 		"kube-system", "kube-public", "kube-node-lease",
-		"monitoring", "keda", "longhorn-system", "traefik", "velero",
+		"monitoring", "keda", "longhorn-system", "traefik", "velero", DrillNamespace,
 	}, ExcludedNamespaces())
 }
 

@@ -3,10 +3,14 @@
 // the same objects.
 package backupscope
 
+// DrillNamespace is where kip backup drill restores a namespace's services.
+const DrillNamespace = "kipper-restore-drill"
+
 // ExcludedNamespaces returns the namespaces that backups of user workloads
-// skip: system namespaces with regenerable state and Velero's own namespace.
-// Velero must not back up the MinIO PVC that hosts its own bucket, or the
-// backup hangs in InProgress. Each call returns a fresh slice.
+// skip: system namespaces with regenerable state, Velero's namespace and the
+// restore drill namespace. Excluding Velero prevents it from backing up the
+// MinIO PVC that stores its own output, which can leave a backup in InProgress.
+// Each call returns a fresh slice.
 func ExcludedNamespaces() []string {
 	return []string{
 		"kube-system",
@@ -17,6 +21,7 @@ func ExcludedNamespaces() []string {
 		"longhorn-system",
 		"traefik",
 		"velero",
+		DrillNamespace,
 	}
 }
 

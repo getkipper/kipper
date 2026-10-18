@@ -8,7 +8,7 @@ import (
 )
 
 func TestRestoreSpecMapsTheNamespaceTheWayVeleroReadsIt(t *testing.T) {
-	spec, err := restoreSpec("nightly", "shop", "", "shop:shop-restored", false)
+	spec, err := restoreSpec("nightly", "shop", "", "shop:shop-restored", false, false)
 	require.NoError(t, err)
 
 	assert.Equal(t, map[string]interface{}{"shop": "shop-restored"}, spec["namespaceMapping"])
@@ -18,13 +18,13 @@ func TestRestoreSpecMapsTheNamespaceTheWayVeleroReadsIt(t *testing.T) {
 
 func TestRestoreSpecRefusesAMappingItCannotRead(t *testing.T) {
 	for _, mapping := range []string{"shop", "shop:", ":shop-restored", "shop:shop", "shop:copy:extra", "shop: ", " :copy", " shop:copy", "shop:Copy", "shop:copy_1"} {
-		_, err := restoreSpec("nightly", "shop", "", mapping, false)
+		_, err := restoreSpec("nightly", "shop", "", mapping, false, false)
 		assert.Error(t, err, mapping)
 	}
 }
 
 func TestRestoreSpecWithoutAMapping(t *testing.T) {
-	spec, err := restoreSpec("nightly", "", "deployments,secrets", "", false)
+	spec, err := restoreSpec("nightly", "", "deployments,secrets", "", false, false)
 	require.NoError(t, err)
 
 	assert.NotContains(t, spec, "namespaceMapping")
@@ -34,16 +34,16 @@ func TestRestoreSpecWithoutAMapping(t *testing.T) {
 }
 
 func TestRestoreSpecLimitsAMappedRestoreToItsSource(t *testing.T) {
-	spec, err := restoreSpec("nightly", "", "", "shop:shop-restored", false)
+	spec, err := restoreSpec("nightly", "", "", "shop:shop-restored", false, false)
 	require.NoError(t, err)
 	assert.Equal(t, []interface{}{"shop"}, spec["includedNamespaces"])
 
-	_, err = restoreSpec("nightly", "billing", "", "shop:shop-restored", false)
+	_, err = restoreSpec("nightly", "billing", "", "shop:shop-restored", false, false)
 	require.Error(t, err, "--namespace must match the mapping's source namespace")
 }
 
 func TestRestoreSpecLeavesKipperClusterObjectsOutByDefault(t *testing.T) {
-	spec, err := restoreSpec("nightly", "shop", "", "", false)
+	spec, err := restoreSpec("nightly", "shop", "", "", false, false)
 	require.NoError(t, err)
 
 	assert.Contains(t, spec["excludedResources"], "projects.kipper.run")
@@ -52,7 +52,7 @@ func TestRestoreSpecLeavesKipperClusterObjectsOutByDefault(t *testing.T) {
 }
 
 func TestRestoreSpecRestoresProjectsWhenAsked(t *testing.T) {
-	spec, err := restoreSpec("nightly", "shop", "", "", true)
+	spec, err := restoreSpec("nightly", "shop", "", "", true, false)
 	require.NoError(t, err)
 
 	assert.NotContains(t, spec["excludedResources"], "projects.kipper.run")
@@ -60,6 +60,6 @@ func TestRestoreSpecRestoresProjectsWhenAsked(t *testing.T) {
 }
 
 func TestRestoreSpecRefusesClusterObjectsIntoAMappedCopy(t *testing.T) {
-	_, err := restoreSpec("nightly", "", "", "shop:shop-restored", true)
+	_, err := restoreSpec("nightly", "", "", "shop:shop-restored", true, false)
 	assert.Error(t, err)
 }

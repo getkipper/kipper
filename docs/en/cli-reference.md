@@ -1110,6 +1110,7 @@ kip backup restore weekly-20260413 --namespace blog-prod      # restore one name
 kip backup schedules                                                # list scheduled backups
 kip backup storage resize --size 30Gi                               # grow the in-cluster MinIO volume
 kip backup repository-key export --to ~/example-backups.key         # save the key that encrypts the backups
+kip backup drill blog-prod                                          # restore blog-prod's services into an isolated namespace and count their rows
 ```
 
 `kip backup repository-key export` saves the volume backup encryption key to a new file with mode 0600. The command asks for confirmation, which you can skip with `--yes`. On Windows, the file inherits its folder's permissions. It never overwrites an existing file. Keep the key outside the cluster because a recovery install needs it to read the volume backups. See [The backup repository key](/en/installation#backup-repository-key).
@@ -1139,6 +1140,7 @@ Every backup also skips cert-manager's transient issuance objects (CertificateRe
 | `--allow-partial` | No | `false` | Restore a `PartiallyFailed` backup despite potentially missing data or resources |
 | `--repair-credentials` | No | `false` | Re-attach restored service credentials Secrets without prompting |
 | `--cluster-resources` | No | `false` | Also restore projects and their resource adjustments. Existing ones remain unchanged. |
+| `--include-ingresses` | No | `false` | With `--namespace-mapping`, also restore the copy's Ingresses, which claim the same hostnames as the source |
 
 Restore a `Completed` backup, or use `--allow-partial` for a `PartiallyFailed` backup. For partial backups, kip lists volumes with failed or canceled backups when details are available. Backups in other phases cannot be restored; wait for pending or running backups to finish.
 

@@ -38,7 +38,7 @@ kip backup schedules
 kip backup create
 ```
 
-This skips the system namespaces (`kube-system`, `kube-public`, `kube-node-lease`, `traefik`, `longhorn-system`, `keda`, `monitoring`, `velero`) and captures everything else. The daily schedule uses the same exclusion. Excluding `velero` prevents the backup from capturing the MinIO volume that stores its own output.
+This skips the system namespaces (`kube-system`, `kube-public`, `kube-node-lease`, `traefik`, `longhorn-system`, `keda`, `monitoring`, `velero`) and the restore drill's namespace (`kipper-restore-drill`), and captures everything else. The daily schedule uses the same exclusion. Excluding `velero` prevents the backup from capturing the MinIO volume that stores its own output.
 
 ### Back up the system namespaces too
 
@@ -94,6 +94,30 @@ kip backup restore pre-migration --namespace-mapping blog-test:blog-restored
 ```
 
 This restores only `blog-test` into `blog-restored`. If you also pass `--namespace`, it must match the source namespace (`blog-test`).
+
+The copy excludes the source's Ingresses because they would claim the live app's hostnames. It also excludes cert-manager Certificates because they would keep renewing certificates for those hostnames. Pass `--include-ingresses` to restore both. The copy's Secrets and connection settings retain references to the source environment's services, so check them before allowing the copy to connect.
+
+### Test a restore with a drill
+
+A drill tests whether services from the latest completed backup can be restored in a separate namespace while keeping the live environment running:
+
+```bash
+kip backup drill blog-prod
+```
+
+It restores the database and other service pods of `blog-prod`, with their volumes and credentials, into `kipper-restore-drill` from the latest completed backup that covers `blog-prod`. App pods, Deployments, Jobs, CronJobs and Ingresses are excluded to avoid starting applications that could connect to the live database or claim live hostnames. Before restoring anything, kip creates a NetworkPolicy that allows traffic between drill pods and outgoing queries to the cluster's DNS. Enforcement requires a NetworkPolicy controller. k3s runs one unless started with `--disable-network-policy`. Kubernetes still allows traffic between a pod and its node.
+
+kip then checks that every PVC-backed volume of the restored services has a completed volume restore, waits for each service to become ready, and counts rows in its user tables with `count(*)`. For Postgres, it checks all connectable, non-template databases and includes the database and schema in each table name. For MySQL, it checks tables outside the system schemas and includes the database in each table name. Direct counts remain useful after crash recovery resets Postgres statistics during startup of a restored volume. Other service types are reported as restored without a row check. Finally, kip prints the backup's name and completion time and requests deletion of the drill namespace unless `--keep` is set.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--backup` | the latest completed backup that covers the namespace | Backup to restore |
+| `--keep` | `false` | Keep the drill namespace for inspection |
+| `--clean` | `false` | Only delete a drill namespace left by `--keep` or an interrupted drill, after waiting for any drill restore still running |
+
+Record each drill's date and result with your compliance records because kip does not retain them. The drill namespace is excluded from the schedules and from `kip backup create` by default. A backup made with `--include-system` can include a retained drill.
+
+If you interrupt a drill without `--keep`, kip requests deletion of the drill namespace if its restore has already finished or is absent. If the restore is still running or its state cannot be checked, kip leaves the namespace and tells you to run `kip backup drill <namespace> --clean` later.
 
 ### Restore projects
 

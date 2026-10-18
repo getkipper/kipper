@@ -14,9 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/kip/internal/k8s"
@@ -207,12 +205,12 @@ func runServiceExport(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// transferTarget bundles what an import/export needs to talk to the service
-// pod: the engine type, the running pod, and an exec function bound to it.
+// transferTarget holds the service engine, Kubernetes client and command runner
+// bound to the selected pod for an import or export.
 type transferTarget struct {
 	svcType   string
 	clientset kubernetes.Interface
-	exec      func(ctx context.Context, command []string, stdin io.Reader, stdout, stderr io.Writer) error
+	exec      podExecFunc
 }
 
 // resolveTransferTarget looks up the service, verifies the engine supports
@@ -267,30 +265,7 @@ func resolveTransferTarget(ctx context.Context, name, namespace string, database
 	return &transferTarget{
 		svcType:   conn.Type,
 		clientset: clientset,
-		exec: func(ctx context.Context, command []string, stdin io.Reader, stdout, stderr io.Writer) error {
-			req := clientset.CoreV1().RESTClient().Post().
-				Resource("pods").
-				Name(pod.Name).
-				Namespace(namespace).
-				SubResource("exec").
-				VersionedParams(&corev1.PodExecOptions{
-					Container: container,
-					Command:   command,
-					Stdin:     stdin != nil,
-					Stdout:    true,
-					Stderr:    true,
-				}, scheme.ParameterCodec)
-
-			executor, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
-			if err != nil {
-				return fmt.Errorf("creating executor: %w", err)
-			}
-			return executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-				Stdin:  stdin,
-				Stdout: stdout,
-				Stderr: stderr,
-			})
-		},
+		exec:      podExec(clientset, restConfig, namespace, pod.Name, container),
 	}, nil
 }
 
