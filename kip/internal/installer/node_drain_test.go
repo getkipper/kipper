@@ -167,3 +167,16 @@ func TestNodeCount(t *testing.T) {
 	_, err = NodeCount(&drainHost{failures: map[string]string{"kubectl get nodes": "connection refused"}})
 	require.Error(t, err)
 }
+
+func TestDrainNodeSummarisesRepeatedEvictionErrors(t *testing.T) {
+	retry := "error when evicting pods/\"drainme-0\" -n \"gate\" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.\n"
+	h := &drainHost{failures: map[string]string{"kubectl drain": strings.Repeat(retry, 24) +
+		"error: unable to drain node \"worker-1\" due to error: global timeout reached: 2m0s\n"}}
+
+	err := DrainNode(h, "worker-1", 2*time.Minute)
+	require.Error(t, err)
+	assert.Equal(t, 1, strings.Count(err.Error(), "drainme-0"), "one line per pod, however often kubectl retried: %s", err)
+	assert.Contains(t, err.Error(), "24 attempts")
+	assert.Contains(t, err.Error(), "disruption budget")
+	assert.Less(t, len(err.Error()), 600)
+}

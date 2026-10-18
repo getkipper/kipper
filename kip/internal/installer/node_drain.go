@@ -2,6 +2,7 @@ package installer
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -219,8 +220,10 @@ func UncordonNode(master CommandRunner, node string) error {
 }
 
 // DrainNode drains a node within timeout, honoring pod disruption budgets.
-// DaemonSet and mirror pods stay; unmanaged pods block the drain.
-// Evicted pods lose their emptyDir data.
+// DaemonSet and mirror pods stay. Unmanaged pods block the drain.
+// Evicted pods lose their emptyDir data. A timeout below one second returns an error.
+// Drain failures include distinct error lines in their original order, with occurrence
+// counts for repeated lines, or the command error if no error lines are recognised.
 func DrainNode(master CommandRunner, node string, timeout time.Duration) error {
 	// kubectl reads a zero timeout as no limit.
 	if timeout < time.Second {
@@ -230,17 +233,43 @@ func DrainNode(master CommandRunner, node string, timeout time.Duration) error {
 	if err == nil {
 		return nil
 	}
-	var reasons []string
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "error") || strings.HasPrefix(line, "cannot delete") {
-			reasons = append(reasons, line)
-		}
-	}
+	reasons := drainFailureReasons(out)
 	if len(reasons) == 0 {
 		return fmt.Errorf("draining %s: %w", node, err)
 	}
-	return fmt.Errorf("draining %s: %s", node, strings.Join(reasons, "; "))
+	return fmt.Errorf("draining %s: %s", node, strings.Join(reasons, ". "))
+}
+
+// drainRetryNote matches kubectl's retry delay so errors with different delays
+// can be counted together.
+var drainRetryNote = regexp.MustCompile(` \(will retry after [^)]*\)`)
+
+// drainFailureReasons groups kubectl drain errors by first occurrence, ignoring
+// retry delays and including occurrence counts for repeated lines. kubectl
+// repeats eviction errors every few seconds until timeout, so listing each
+// error once keeps the failure message readable.
+func drainFailureReasons(out string) []string {
+	var order []string
+	counts := map[string]int{}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "error") && !strings.HasPrefix(line, "cannot delete") {
+			continue
+		}
+		line = drainRetryNote.ReplaceAllString(line, "")
+		if counts[line] == 0 {
+			order = append(order, line)
+		}
+		counts[line]++
+	}
+	reasons := make([]string, 0, len(order))
+	for _, line := range order {
+		if n := counts[line]; n > 1 {
+			line = fmt.Sprintf("%s (%d attempts)", line, n)
+		}
+		reasons = append(reasons, line)
+	}
+	return reasons
 }
 
 // WaitForWorkloadsReady waits until every workload in ready, as listed by
