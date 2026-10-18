@@ -26,8 +26,10 @@ volume has its only healthy copy there, then drains the worker. It checks that
 the host still has the machine ID recorded for the worker before it uninstalls
 k3s and wipes Kipper's data from it, deletes the node, removes its address from
 the kip-managed firewalls of the remaining nodes and drops its record. Running
-the command again resumes an interrupted removal. Before the host is wiped,
-run 'kip node add' for the worker to keep it instead. The server cannot be removed.
+the command again resumes an interrupted removal. To keep the worker, stop
+the removal and run 'kip node add' before kip records it as wiping, just
+before it reports that it is uninstalling k3s. Only one kip node add or remove
+runs on a cluster at a time. The server cannot be removed.
 
 With --force, kip deregisters a worker whose host is gone for good without
 draining or wiping it. It deletes the node, removes the worker's address from
@@ -59,14 +61,12 @@ type nodeRemoval struct {
 	Sleep          func(time.Duration)
 	Force          bool
 	AcceptDataLoss bool
-	// WipeWorker uninstalls k3s from the worker's host after checking its machine ID.
-	WipeWorker        func() error
+	// WipeWorker must call claim after identity checks and before changing the host.
+	WipeWorker        func(claim func() error) error
 	HostHoldsReplicas func() (bool, error)
 	HostRunsK3s       func() (bool, error)
-	// UpdatePeers applies the remaining peer rules and returns notes for firewalls requiring manual changes.
-	UpdatePeers func(remaining []installer.NodeRecord) ([]string, error)
-	// SaveRecords mirrors the remaining records locally.
-	SaveRecords func(remaining []installer.NodeRecord)
+	UpdatePeers       func(remaining []installer.NodeRecord) ([]string, error)
+	SaveRecords       func(remaining []installer.NodeRecord)
 }
 
 func runNodeRemove(cmd *cobra.Command, args []string) error {
@@ -110,11 +110,8 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if other, busy := installer.RemovalInProgress(records, worker.MachineID); busy {
-		return fmt.Errorf("%s is still being removed. Finish the removal first with 'kip node remove %s', or keep it with 'kip node add %s'", other.Name, other.Name, other.Host)
-	}
-	if other, busy := installer.JoinInProgress(records, worker.MachineID); busy {
-		return fmt.Errorf("%s has not finished joining, and its firewall could still admit the removed worker. First finish the join with 'kip node add %s', or remove the node with 'kip node remove %s'", other.Name, other.Host, other.Name)
+	if err := removalMayStart(records, worker.MachineID); err != nil {
+		return err
 	}
 	if err := installer.RequireEvictionDrainPolicy(server); err != nil {
 		return err
@@ -143,7 +140,7 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 		if err := refuseForceForLiveHost(worker, probe); err != nil {
 			return err
 		}
-	case worker.State != installer.NodeStateRemoving:
+	case !installer.RemovalStarted(worker.State):
 		// Verify the host before changing its record, because removal needs
 		// SSH access to finish cleaning up the host.
 		if err := checkWorkerIdentity(worker, dialWorker); err != nil {
@@ -182,37 +179,61 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	lease, err := installer.TakeNodeLease(server, "kip node remove "+worker.Name)
+	if err != nil {
+		return err
+	}
+	defer lease.Release()
+	master := lease.Server(server)
+	// The records may have changed while kip waited for confirmation.
+	if records, err = installer.ReadNodeRecords(master); err != nil {
+		return err
+	}
+	if current, found := findByMachineID(records, worker.MachineID); !found || current.State != worker.State || current.Host != worker.Host {
+		return fmt.Errorf("%s changed while kip was waiting for confirmation. Run the command again", worker.Name)
+	}
+	if err := removalMayStart(records, worker.MachineID); err != nil {
+		return err
+	}
+
+	dialHost := func(host string) (installer.FirewallRunner, func(), error) {
+		c, err := ssh.Dial(nodeSSH(host, sshKey, cluster))
+		if err != nil {
+			return nil, nil, err
+		}
+		return lease.Host(c), func() { _ = c.Close() }, nil
+	}
+	onWorker := func(use func(installer.CommandRunner) error) error {
+		client, done, err := dialHost(worker.Host)
+		if err != nil {
+			return fmt.Errorf("connecting to %s: %w. Run the command again once the host is reachable", worker.Host, err)
+		}
+		defer done()
+		return use(client)
+	}
+	if !force {
+		// Once this run has reached the worker, the worker refuses any older
+		// run's command still on its way there.
+		if err := onWorker(func(c installer.CommandRunner) error { _, err := c.Run("true"); return err }); err != nil {
+			return err
+		}
+	}
 	r := nodeRemoval{
-		Out: os.Stdout, Master: server, Worker: worker, Force: force, AcceptDataLoss: acceptDataLoss,
+		Out: os.Stdout, Master: master, Worker: worker, Force: force, AcceptDataLoss: acceptDataLoss,
 		Timeout: timeout, Poll: 10 * time.Second, Sleep: time.Sleep,
-		WipeWorker: func() error {
-			client, err := ssh.Dial(nodeSSH(worker.Host, sshKey, cluster))
-			if err != nil {
-				return fmt.Errorf("connecting to %s: %w. Run the command again once the host is reachable", worker.Host, err)
-			}
-			defer func() { _ = client.Close() }()
-			return wipeRemovedWorker(client, worker, readLocalMachineID)
+		WipeWorker: func(claim func() error) error {
+			return onWorker(func(c installer.CommandRunner) error { return wipeRemovedWorker(c, worker, readLocalMachineID, claim) })
 		},
-		HostRunsK3s: func() (bool, error) {
-			client, err := ssh.Dial(nodeSSH(worker.Host, sshKey, cluster))
-			if err != nil {
-				return false, fmt.Errorf("connecting to %s: %w. Run the command again once the host is reachable", worker.Host, err)
-			}
-			defer func() { _ = client.Close() }()
-			return hostRunsK3s(client)
+		HostRunsK3s: func() (runs bool, err error) {
+			err = onWorker(func(c installer.CommandRunner) error { runs, err = hostRunsK3s(c); return err })
+			return runs, err
 		},
-		HostHoldsReplicas: func() (bool, error) {
-			client, err := ssh.Dial(nodeSSH(worker.Host, sshKey, cluster))
-			if err != nil {
-				return false, fmt.Errorf("connecting to %s: %w. Run the command again once the host is reachable", worker.Host, err)
-			}
-			defer func() { _ = client.Close() }()
-			return hostHoldsReplicas(client)
+		HostHoldsReplicas: func() (holds bool, err error) {
+			err = onWorker(func(c installer.CommandRunner) error { holds, err = hostHoldsReplicas(c); return err })
+			return holds, err
 		},
 		UpdatePeers: func(remaining []installer.NodeRecord) ([]string, error) {
-			return updateRemainingPeers(os.Stdout, server, remaining, worker, func(host string) (*ssh.Client, error) {
-				return ssh.Dial(nodeSSH(host, sshKey, cluster))
-			})
+			return updateRemainingPeers(os.Stdout, master, remaining, worker, dialHost)
 		},
 		SaveRecords: func(remaining []installer.NodeRecord) { mirrorNodes(cluster.Name, remaining) },
 	}
@@ -220,10 +241,11 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 }
 
 // run keeps the removal record until removal and peer firewall updates
-// succeed, so an interrupted removal can resume. Forced removal skips host cleanup.
+// succeed, so an interrupted removal can resume. Forced removal skips host
+// cleanup. A record already claimed for wiping resumes at the wipe.
 func (r nodeRemoval) run() error {
 	w := r.Worker
-	if w.State != installer.NodeStateRemoving {
+	if !installer.RemovalStarted(w.State) {
 		w.State = installer.NodeStateRemoving
 		if err := installer.SaveNodeRecord(r.Master, w); err != nil {
 			return err
@@ -236,8 +258,59 @@ func (r nodeRemoval) run() error {
 		if err := r.forgetDeadHost(); err != nil {
 			return err
 		}
+		if err := r.claimTheWipe(""); err != nil {
+			return err
+		}
 		return r.finish()
 	}
+	// Resume a claimed wipe without moving workloads again. Recheck data
+	// safety because a copy elsewhere may have failed since the claim.
+	prepare := r.prepareTheWipe
+	if w.State == installer.NodeStateWiping {
+		prepare = r.guardTheWipe
+	}
+	if err := prepare(); err != nil {
+		return err
+	}
+	if err := r.WipeWorker(func() error { return r.claimTheWipe(fmt.Sprintf("  ...  Uninstalling k3s from %s\n", w.Host)) }); err != nil {
+		return fmt.Errorf("uninstalling k3s from %s: %w", w.Host, err)
+	}
+	say(r.Out, "  ✔  k3s uninstalled from %s\n", w.Host)
+	return r.finish()
+}
+
+// removalMayStart refuses a removal while another node is being removed or
+// has not finished joining.
+func removalMayStart(records []installer.NodeRecord, machineID string) error {
+	if other, busy := installer.RemovalInProgress(records, machineID); busy {
+		return fmt.Errorf("%s is still being removed. Finish the removal first with 'kip node remove %s', or keep it with 'kip node add %s'", other.Name, other.Name, other.Host)
+	}
+	if other, busy := installer.JoinInProgress(records, machineID); busy {
+		return fmt.Errorf("%s has not finished joining, and its firewall could still admit the removed worker. First finish the join with 'kip node add %s', or remove the node with 'kip node remove %s'", other.Name, other.Host, other.Name)
+	}
+	return nil
+}
+
+// claimTheWipe records that the worker can no longer be kept, then prints
+// announce. It is the last step before the host is wiped or forgotten.
+func (r nodeRemoval) claimTheWipe(announce string) error {
+	if err := r.stillRemoving(); err != nil {
+		return err
+	}
+	w := r.Worker
+	w.State = installer.NodeStateWiping
+	if err := installer.SaveNodeRecord(r.Master, w); err != nil {
+		return err
+	}
+	say(r.Out, "%s", announce)
+	return nil
+}
+
+// prepareTheWipe waits for healthy volume copies elsewhere and drains a
+// registered worker if k3s is still installed. It then checks for replicas
+// whose data may exist only on this host before allowing the wipe.
+func (r nodeRemoval) prepareTheWipe() error {
+	w := r.Worker
 	say(r.Out, "  ...  Waiting for Longhorn to copy volumes off %s (up to %s)\n", w.Name, r.Timeout)
 	if err := r.waitForCopiesElsewhere(); err != nil {
 		return err
@@ -274,15 +347,7 @@ func (r nodeRemoval) run() error {
 		say(r.Out, "  ℹ  %s is no longer registered. Finishing its removal\n", w.Name)
 	}
 
-	if err := r.guardTheWipe(); err != nil {
-		return err
-	}
-	say(r.Out, "  ...  Uninstalling k3s from %s\n", w.Host)
-	if err := r.WipeWorker(); err != nil {
-		return fmt.Errorf("uninstalling k3s from %s: %w", w.Host, err)
-	}
-	say(r.Out, "  ✔  k3s uninstalled from %s\n", w.Host)
-	return r.finish()
+	return r.guardTheWipe()
 }
 
 // forgetDeadHost checks that removal is still in progress and requires accepted
@@ -317,8 +382,8 @@ func (r nodeRemoval) finish() error {
 		return err
 	}
 
-	// The waits can take long enough for another kip run to change the
-	// records, so the peer rules come from a fresh read.
+	// Commands outside the node lease, such as an install re-run, can change
+	// the records during the waits, so the peer rules come from a fresh read.
 	current, err := installer.ReadNodeRecords(r.Master)
 	if err != nil {
 		return fmt.Errorf("%w. %s is still recorded as removing. Run the command again to finish", err, w.Name)
@@ -337,7 +402,7 @@ func (r nodeRemoval) finish() error {
 		say(r.Out, "  ⚠  %s\n", note)
 	}
 	if r.Force {
-		say(r.Out, "  ⚠  %s still holds k3s's credentials for this cluster. If it comes back, its agent can register the node again. Run /usr/local/bin/k3s-agent-uninstall.sh on it before it rejoins any network the cluster can reach, or reinstall it\n", w.Host)
+		say(r.Out, "  ⚠  %s still holds k3s's credentials for this cluster. If it comes back, its agent or a kip command already in transit to the host can register the node again. Run /usr/local/bin/k3s-agent-uninstall.sh on it before it rejoins any network the cluster can reach, or reinstall it\n", w.Host)
 	}
 	say(r.Out, "\n")
 	return nil
@@ -370,14 +435,15 @@ func (r nodeRemoval) guardTheWipe() error {
 }
 
 // stillRemoving stops removal if another command has cleared the worker's
-// removing state or deleted its record. This check and the subsequent wipe share no lock.
+// removal state or deleted its record. The node lease keeps other kip node
+// runs out. This check also catches changes made before this run took the lease.
 func (r nodeRemoval) stillRemoving() error {
 	records, err := installer.ReadNodeRecords(r.Master)
 	if err != nil {
 		return err
 	}
 	current, found := findByMachineID(records, r.Worker.MachineID)
-	if !found || current.State != installer.NodeStateRemoving {
+	if !found || !installer.RemovalStarted(current.State) {
 		return fmt.Errorf("%s is no longer recorded as being removed, so another kip run changed it. This removal has stopped", r.Worker.Name)
 	}
 	return nil
@@ -452,10 +518,13 @@ func hostRunsK3s(client installer.CommandRunner) (bool, error) {
 	return strings.TrimSpace(out) == "present", nil
 }
 
-// keepRemovingNode lets kip node add keep a node whose removal stopped before
-// its host was wiped. Once the wipe has run, k3s refuses the host's new node
-// password for the old Node, so only finishing the removal helps.
+// keepRemovingNode allows kip node add to keep a removing worker only while
+// its wipe is unclaimed and k3s is still installed. After a wipe, k3s rejects
+// the host's new node password for the old Node, so removal must finish first.
 func keepRemovingNode(worker installer.CommandRunner, rec installer.NodeRecord) error {
+	if rec.State == installer.NodeStateWiping {
+		return fmt.Errorf("the removal of %s has started wiping or forgetting its host, so the worker can no longer be kept. Finish it with 'kip node remove %s', then add the host again", rec.Name, rec.Name)
+	}
 	if rec.State != installer.NodeStateRemoving {
 		return nil
 	}
@@ -505,7 +574,7 @@ func checkWorkerIdentity(worker installer.NodeRecord, dial func() (installer.Com
 
 // removalBlocksJoin refuses a join while another node is being removed: the
 // join rewrites every node's peer rules, which would admit that node again.
-// Joining the node being removed itself keeps it instead.
+// Joining the node being removed can keep it until its wipe is claimed.
 func removalBlocksJoin(records []installer.NodeRecord, joining string) error {
 	if other, busy := installer.RemovalInProgress(records, joining); busy {
 		return fmt.Errorf("%s is being removed, and a join would give its address access again. Finish the removal with 'kip node remove %s', or keep it with 'kip node add %s', then add this node", other.Name, other.Name, other.Host)
@@ -516,7 +585,7 @@ func removalBlocksJoin(records []installer.NodeRecord, joining string) error {
 // removalBlocksReboot refuses to reboot a node being removed, because the
 // reboot uncordons it afterwards.
 func removalBlocksReboot(rec installer.NodeRecord) error {
-	if rec.State == installer.NodeStateRemoving {
+	if installer.RemovalStarted(rec.State) {
 		return fmt.Errorf("%s is being removed. Finish the removal with 'kip node remove %s', or keep it with 'kip node add %s'", rec.Name, rec.Name, rec.Host)
 	}
 	return nil
@@ -566,7 +635,9 @@ func withoutNode(records []installer.NodeRecord, machineID string) []installer.N
 // wipeRemovedWorker checks the recorded machine ID, uninstalls k3s and wipes
 // Kipper's data. It rejects the local machine when its ID can be read and
 // verifies that the k3s binary is gone and k3s-agent is inactive afterwards.
-func wipeRemovedWorker(client installer.CommandRunner, node config.NodeRecord, localMachineID func() (string, error)) error {
+// It calls claim after identity checks and before uninstalling, and stops
+// without uninstalling if claim returns an error.
+func wipeRemovedWorker(client installer.CommandRunner, node config.NodeRecord, localMachineID func() (string, error), claim func() error) error {
 	id, err := installer.ReadMachineID(client)
 	if err != nil {
 		return err
@@ -576,6 +647,9 @@ func wipeRemovedWorker(client installer.CommandRunner, node config.NodeRecord, l
 	}
 	if local, err := localMachineID(); err == nil && local == id {
 		return fmt.Errorf("it is the machine running kip. Run the command from another machine")
+	}
+	if err := claim(); err != nil {
+		return err
 	}
 	if err := installer.UninstallHost(client); err != nil {
 		return err
@@ -597,7 +671,7 @@ func wipeRemovedWorker(client installer.CommandRunner, node config.NodeRecord, l
 // loses its access there. Each worker's machine ID is checked before its
 // firewall is changed. It returns a note for each node whose firewall kip
 // does not manage, naming the access the operator has to revoke.
-func updateRemainingPeers(out io.Writer, server installer.FirewallRunner, remaining []installer.NodeRecord, removed installer.NodeRecord, dial func(host string) (*ssh.Client, error)) ([]string, error) {
+func updateRemainingPeers(out io.Writer, server installer.FirewallRunner, remaining []installer.NodeRecord, removed installer.NodeRecord, dial func(host string) (installer.FirewallRunner, func(), error)) ([]string, error) {
 	serverRec, ok := installer.ServerRecord(remaining)
 	if !ok {
 		return nil, fmt.Errorf("the node records hold no server")
@@ -628,12 +702,12 @@ func appendNote(notes []string, note string) []string {
 	return append(notes, note)
 }
 
-func revokeWorkerPeer(out io.Writer, rec installer.NodeRecord, remaining []installer.NodeRecord, removed installer.NodeRecord, dial func(host string) (*ssh.Client, error)) (string, error) {
-	c, err := dial(rec.Host)
+func revokeWorkerPeer(out io.Writer, rec installer.NodeRecord, remaining []installer.NodeRecord, removed installer.NodeRecord, dial func(host string) (installer.FirewallRunner, func(), error)) (string, error) {
+	c, done, err := dial(rec.Host)
 	if err != nil {
 		return "", fmt.Errorf("connecting to node %s (%s) to remove the old node's firewall rules: %w", rec.Name, rec.Host, err)
 	}
-	defer func() { _ = c.Close() }()
+	defer done()
 	if id, err := installer.ReadMachineID(c); err != nil || id != rec.MachineID {
 		return "", fmt.Errorf("%s no longer answers as node %s (machine ID %q, recorded %s). Check the address", rec.Host, rec.Name, id, rec.MachineID)
 	}

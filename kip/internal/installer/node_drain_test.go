@@ -77,7 +77,7 @@ func TestDrainNodeHonoursBudgetsAndBoundsTheWait(t *testing.T) {
 	require.NoError(t, DrainNode(h, "worker-1", 20*time.Minute))
 	require.Len(t, h.commands, 1)
 	cmd := h.commands[0]
-	assert.Contains(t, cmd, "kubectl drain worker-1 --ignore-daemonsets --delete-emptydir-data --timeout=20m0s")
+	assert.Contains(t, cmd, "kubectl drain worker-1 --ignore-daemonsets --delete-emptydir-data --timeout=2m0s")
 	assert.NotContains(t, cmd, "--force", "pods without a controller must stop the drain, not be deleted")
 	assert.NotContains(t, cmd, "--disable-eviction", "disruption budgets protect replicas until eviction completes")
 }
@@ -93,6 +93,55 @@ func TestDrainNodeNamesWhatCouldNotBeEvicted(t *testing.T) {
 	assert.Contains(t, err.Error(), `instance-manager-abc`)
 	assert.Contains(t, err.Error(), "global timeout reached")
 	assert.NotContains(t, err.Error(), "already cordoned")
+}
+
+// roundsHost returns replies in order. An empty reply or exhausted replies
+// means success, and a non-empty reply means failure.
+type roundsHost struct {
+	replies  []string
+	commands []string
+}
+
+func (h *roundsHost) Run(cmd string) (string, error) {
+	h.commands = append(h.commands, cmd)
+	if len(h.replies) == 0 {
+		return "", nil
+	}
+	out := h.replies[0]
+	h.replies = h.replies[1:]
+	if out == "" {
+		return "", nil
+	}
+	return out, errors.New("exit status 1")
+}
+
+func (h *roundsHost) RunStdin(cmd string, _ io.Reader) (string, error) { return h.Run(cmd) }
+
+const drainTimedOut = "error: unable to drain node \"worker-1\" due to error: global timeout reached: 2m0s\n"
+
+func TestDrainNodeRunsInShortRoundsUpToTheTimeout(t *testing.T) {
+	h := &roundsHost{replies: []string{drainTimedOut, drainTimedOut, drainTimedOut, drainTimedOut}}
+	err := DrainNode(h, "worker-1", 5*time.Minute)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "global timeout reached")
+	require.Len(t, h.commands, 3)
+	assert.Contains(t, h.commands[0], "--timeout=2m0s")
+	assert.Contains(t, h.commands[1], "--timeout=2m0s")
+	assert.Contains(t, h.commands[2], "--timeout=1m0s")
+}
+
+func TestDrainNodeStopsAtTheFirstRoundThatFinishes(t *testing.T) {
+	h := &roundsHost{replies: []string{drainTimedOut, ""}}
+	require.NoError(t, DrainNode(h, "worker-1", 30*time.Minute))
+	assert.Len(t, h.commands, 2)
+}
+
+func TestDrainNodeDoesNotRetryAnotherError(t *testing.T) {
+	h := &roundsHost{replies: []string{"error: unable to drain node \"worker-1\" due to error: cannot delete Pods that declare no controller (use --force to override): default/bare\n"}}
+	err := DrainNode(h, "worker-1", 30*time.Minute)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "default/bare")
+	assert.Len(t, h.commands, 1)
 }
 
 func TestNodeCordoned(t *testing.T) {
