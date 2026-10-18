@@ -20,6 +20,10 @@ import (
 
 const veleroChartVersion = "12.0.0"
 
+// veleroAWSPluginImage must be compatible with the chart's Velero release.
+// Plugin v1.14.x supports Velero 1.18.x, which chart 12.0.0 installs.
+const veleroAWSPluginImage = "velero/velero-plugin-for-aws:v1.14.4"
+
 // Keep these pins aligned with the server and client releases built in images/minio.
 const (
 	minioServerImage = "ghcr.io/getkipper/minio:RELEASE.2025-09-07T16-13-09Z"
@@ -546,7 +550,7 @@ spec:
   valuesContent: |-
     initContainers:
       - name: velero-plugin-for-aws
-        image: velero/velero-plugin-for-aws:v1.10.0
+        image: %s
         volumeMounts:
           - mountPath: /target
             name: plugins
@@ -600,7 +604,7 @@ spec:
             - kipper-system
           excludedResources:
 %s
-%s`, veleroChartVersion, bslBlock, nodeAgentArgs, excludedBlock, excludedResourcesBlock, excludedResourcesBlock, selinuxValues)
+%s`, veleroChartVersion, veleroAWSPluginImage, bslBlock, nodeAgentArgs, excludedBlock, excludedResourcesBlock, excludedResourcesBlock, selinuxValues)
 }
 
 // installVeleroCredentials creates the velero namespace and the

@@ -212,6 +212,22 @@ func TestVeleroManifestWithoutSELinuxMatchesTheGoldenFiles(t *testing.T) {
 	}
 }
 
+// TestVeleroAWSPluginMatchesTheChartsVelero guards compatibility because each
+// Velero minor release requires a matching AWS plugin series.
+func TestVeleroAWSPluginMatchesTheChartsVelero(t *testing.T) {
+	pluginSeries := map[string]string{
+		"12.0.0": "velero/velero-plugin-for-aws:v1.14.", // This chart installs Velero 1.18.
+	}
+	series, ok := pluginSeries[veleroChartVersion]
+	require.True(t, ok, "add the AWS plugin series for chart %s", veleroChartVersion)
+
+	values := veleroValues(t, false)
+	initContainers, _ := values["initContainers"].([]any)
+	require.Len(t, initContainers, 1)
+	image, _ := initContainers[0].(map[string]any)["image"].(string)
+	assert.True(t, strings.HasPrefix(image, series), "plugin %s is incompatible with chart %s", image, veleroChartVersion)
+}
+
 func TestVeleroManifestLeavesFsBackupUnprivilegedWithoutSELinux(t *testing.T) {
 	values := veleroValues(t, false)
 
