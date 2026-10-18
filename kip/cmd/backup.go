@@ -90,6 +90,7 @@ func init() {
 	backupRestoreCmd.Flags().String("resources", "", "restore only specific resource types (comma-separated, e.g. deployments,services,secrets)")
 	backupRestoreCmd.Flags().Bool("allow-partial", false, "restore a PartiallyFailed backup despite possible missing data")
 	backupRestoreCmd.Flags().Bool("repair-credentials", false, "re-attach restored service credentials Secrets without prompting")
+	backupRestoreCmd.Flags().Bool("include-ingresses", false, "With --namespace-mapping, also restore Ingresses and cert-manager Certificates. The copy will claim the source's hostnames and renew certificates for them.")
 	backupRestoreCmd.Flags().Bool("cluster-resources", false, "also restore projects and their resource adjustments. Existing ones remain unchanged.")
 
 	backupCmd.AddCommand(backupCreateCmd)
@@ -243,6 +244,7 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 	allowPartial, _ := cmd.Flags().GetBool("allow-partial")
 	repairCredentials, _ := cmd.Flags().GetBool("repair-credentials")
 	clusterResources, _ := cmd.Flags().GetBool("cluster-resources")
+	includeIngresses, _ := cmd.Flags().GetBool("include-ingresses")
 
 	cluster, k8sClient, err := loadCurrentCluster()
 	if err != nil {
@@ -279,7 +281,7 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 
 	restoreName := "restore-" + backupName + "-" + time.Now().Format("150405")
 
-	spec, err := restoreSpec(backupName, namespace, resources, nsMapping, clusterResources)
+	spec, err := restoreSpec(backupName, namespace, resources, nsMapping, clusterResources, includeIngresses)
 	if err != nil {
 		return err
 	}
@@ -297,6 +299,9 @@ func runBackupRestore(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\n  Restoring from backup %s...\n", backupName)
+	if nsMapping != "" {
+		fmt.Printf("  ⚠  The copy's Secrets and connection settings retain references to the source environment's services. Check them before allowing the copy to connect.\n")
+	}
 
 	_, err = k8sClient.Dynamic().Resource(restoreGVR).Namespace("velero").Create(ctx, restore, metav1.CreateOptions{})
 	if err != nil {
@@ -404,7 +409,7 @@ func partialRestoreWarning(backupName string, volumes []unstructured.Unstructure
 	return fmt.Sprintf("  ⚠  Restoring PartiallyFailed backup %s: restored data or resources may be incomplete.\n", backupName)
 }
 
-func restoreSpec(backupName, namespace, resources, mapping string, clusterResources bool) (map[string]interface{}, error) {
+func restoreSpec(backupName, namespace, resources, mapping string, clusterResources, includeIngresses bool) (map[string]interface{}, error) {
 	spec := map[string]interface{}{"backupName": backupName}
 	backupscope.Restore(spec, clusterResources)
 	if namespace != "" {
@@ -427,6 +432,12 @@ func restoreSpec(backupName, namespace, resources, mapping string, clusterResour
 		// Limit the restore to the mapped source to avoid restoring unrelated namespaces.
 		spec["includedNamespaces"] = []interface{}{source}
 		spec["namespaceMapping"] = map[string]interface{}{source: target}
+		// A copy's Ingresses would claim the live app's hostnames, and its
+		// cert-manager Certificates would keep renewing certificates for them.
+		if !includeIngresses {
+			excluded, _ := spec["excludedResources"].([]interface{})
+			spec["excludedResources"] = append(excluded, "ingresses.networking.k8s.io", "certificates.cert-manager.io")
+		}
 	}
 	return spec, nil
 }
