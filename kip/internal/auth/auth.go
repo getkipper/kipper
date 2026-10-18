@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -175,6 +176,12 @@ func (s *Store) Save() error {
 // refresh token on use, so two racing refreshes would leave one process
 // holding a revoked token. Under the lock the store is re-read, because the
 // race being guarded against is another process having refreshed already.
+// Refreshed credentials update both this Store and the file. A save failure
+// prints a warning and still returns the valid token.
+//
+// A refresh rejected with HTTP 400 or 401 returns ErrSessionExpired. Other
+// refresh failures wrap ErrDexUnreachable. Missing credentials, missing refresh
+// tokens and store access failures return other errors.
 func (s *Store) Token(clusterID, dexHost string) (string, error) {
 	creds, ok := s.Clusters[clusterID]
 	if !ok {
@@ -221,7 +228,7 @@ func (s *Store) Token(clusterID, dexHost string) (string, error) {
 	defer cancel()
 	newCreds, err := refreshToken(ctx, issuer, creds.RefreshToken)
 	if err != nil {
-		return "", fmt.Errorf("session expired. Run: kip auth login")
+		return "", refreshFailure(dexHost, err)
 	}
 
 	fresh.Clusters[clusterID] = newCreds
@@ -439,6 +446,26 @@ func exchangeCode(ctx context.Context, issuer, code, redirectURI, codeVerifier, 
 	}, nil
 }
 
+// errRefreshRejected marks HTTP 400 and 401 refresh responses as requiring a new login.
+var errRefreshRejected = errors.New("the refresh token was refused")
+
+// ErrSessionExpired means the session can only be renewed by logging in again.
+var ErrSessionExpired = errors.New("session expired. Run: kip auth login")
+
+// ErrDexUnreachable marks refresh failures other than HTTP 400 or 401 responses,
+// including connection, response parsing and token verification errors. The
+// session's state is unknown, and a retry may succeed.
+var ErrDexUnreachable = errors.New("could not refresh the session with Dex")
+
+// refreshFailure recommends a new login for a rejected refresh and a retry for
+// other failures, which may be transient while the server restarts.
+func refreshFailure(dexHost string, err error) error {
+	if errors.Is(err, errRefreshRejected) {
+		return ErrSessionExpired
+	}
+	return fmt.Errorf("%w at %s (%v). Dex may be restarting, so try again shortly. If this keeps failing, run: kip auth login", ErrDexUnreachable, dexHost, err)
+}
+
 func refreshToken(ctx context.Context, issuer, refreshTok string) (*Credentials, error) {
 	tokenURL := issuer + "/token"
 	data := url.Values{
@@ -453,6 +480,9 @@ func refreshToken(ctx context.Context, issuer, refreshTok string) (*Credentials,
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("%w (status %d)", errRefreshRejected, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("refresh failed (status %d)", resp.StatusCode)
 	}
