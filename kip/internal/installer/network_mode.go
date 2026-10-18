@@ -172,8 +172,11 @@ func PlanNodeNetwork(server, joiner CommandRunner, opts NetworkModeOptions) (Net
 		if found {
 			return plan, nil
 		}
-		if private.IsValid() || opts.ClusterMode == NetworkModePrivate {
-			return NetworkPlan{}, fmt.Errorf("no private path found%s between the server and the new host; check private network connectivity, SSH access to the new host, and API access to the server on port 6443%s", inNetwork(private), failedLeg(unreachable))
+		if opts.ClusterMode == NetworkModePrivate {
+			return NetworkPlan{}, fmt.Errorf("no private path found%s between the server and the new host. Because the cluster runs in private mode, every node must join over its private network. Attach the new host to the cluster's private network, then check that the server can reach the new host over SSH and the new host can reach the server's API on port 6443 over that network%s", inNetwork(private), failedLeg(unreachable))
+		}
+		if private.IsValid() {
+			return NetworkPlan{}, fmt.Errorf("no private path found%s between the server and the new host. Check private network connectivity, SSH access to the new host, and API access to the server on port 6443%s", inNetwork(private), failedLeg(unreachable))
 		}
 		// Later joins reuse this mode, so switching to public addresses requires
 		// an explicit choice when a private route fails its TCP checks.

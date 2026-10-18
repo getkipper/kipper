@@ -410,3 +410,15 @@ func TestPlanNodeNetworkNeedsTheAPIInPublicMode(t *testing.T) {
 	_, err := PlanNodeNetwork(server, joiner, opts)
 	assert.ErrorContains(t, err, "cannot reach the server's API at 203.0.113.10:6443")
 }
+
+func TestPlanNodeNetworkSaysAPrivateClusterNeedsAPrivatePath(t *testing.T) {
+	server, joiner := networkHosts([]route{{contains: "ip -o route get 10.0.0.4", out: "10.0.0.4 via 172.31.1.1 dev eth0 src 203.0.113.10 uid 0 \\    cache\n"}}, nil)
+	opts := external
+	opts.ClusterMode = NetworkModePrivate
+
+	_, err := PlanNodeNetwork(server, joiner, opts)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the cluster runs in private mode")
+	assert.Contains(t, err.Error(), "Attach the new host to the cluster's private network")
+}
