@@ -337,6 +337,9 @@ func runNodeReboot(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := removalBlocksReboot(rec); err != nil {
+		return err
+	}
 	if rec.Role == installer.NodeRoleServer {
 		return rebootServer()
 	}

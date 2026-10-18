@@ -285,8 +285,14 @@ func removeTaintCommand(node, key string) string {
 // setLonghornScheduling retries because Longhorn's webhook refuses node
 // changes while a newly registered node's disks are still syncing.
 func setLonghornScheduling(master CommandRunner, node string, allow bool, t joinTimeouts) error {
+	spec := `{"spec":{"allowScheduling":false}}`
+	if allow {
+		// Longhorn refuses scheduling while an eviction is requested, which an
+		// interrupted kip node remove leaves behind.
+		spec = `{"spec":{"allowScheduling":true,"evictionRequested":false}}`
+	}
 	return pollUntil(t.ready, t.interval, func() (bool, error) {
-		_, err := master.Run(fmt.Sprintf(`kubectl -n longhorn-system patch nodes.longhorn.io %s --type merge -p '{"spec":{"allowScheduling":%t}}' >/dev/null`, node, allow))
+		_, err := master.Run(fmt.Sprintf(`kubectl -n longhorn-system patch nodes.longhorn.io %s --type merge -p '%s' >/dev/null`, node, spec))
 		return err == nil, err
 	})
 }

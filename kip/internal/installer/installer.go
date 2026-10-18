@@ -1137,6 +1137,8 @@ func recoverNetworkChange(client CommandRunner, opts Options) error {
 
 // refuseUnrecordedNodes checks node records and server identity before reinstalling.
 // The connected server may be unrecorded because the install will record it.
+// A removal in progress blocks reinstalling because it would restore the
+// removed node's firewall access.
 func refuseUnrecordedNodes(client CommandRunner, serverMachineID string) ([]NodeRecord, error) {
 	if serverMachineID == "" {
 		return nil, fmt.Errorf("checking the cluster's nodes: the server's machine id could not be read")
@@ -1147,6 +1149,9 @@ func refuseUnrecordedNodes(client CommandRunner, serverMachineID string) ([]Node
 	}
 	if server, ok := ServerRecord(records); ok && server.MachineID != serverMachineID {
 		return nil, fmt.Errorf("this host is machine %s, but the cluster records its server as machine %s (%s); check the address, then run kip install again", serverMachineID, server.MachineID, server.Name)
+	}
+	if other, busy := RemovalInProgress(records, ""); busy {
+		return nil, fmt.Errorf("%s is being removed, and reinstalling now would restore firewall access for its address. Finish the removal with 'kip node remove %s', or keep the node with 'kip node add %s'", other.Name, other.Name, other.Host)
 	}
 	unrecorded, err := UnrecordedNodes(client, WithUnrecordedHost(records, serverMachineID))
 	if err != nil {

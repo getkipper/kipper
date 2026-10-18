@@ -265,7 +265,7 @@ func TestUncordonWorkerWaitsForLonghornToSchedule(t *testing.T) {
 	master := &routedRunner{routes: []route{{contains: "nodes.longhorn.io worker-1 -o jsonpath", out: "True"}}}
 	require.NoError(t, uncordonWorker(master, "worker-1", fastJoin))
 	assert.True(t, master.ran("kubectl uncordon worker-1"))
-	assert.True(t, master.ran(`nodes.longhorn.io worker-1 --type merge -p '{"spec":{"allowScheduling":true}}'`), "replicas may land on the node again")
+	assert.True(t, master.ran(`nodes.longhorn.io worker-1 --type merge -p '{"spec":{"allowScheduling":true,"evictionRequested":false}}'`), "replicas may land on the node again")
 	assert.True(t, master.ran("kubectl taint nodes worker-1 "+checkingTaint+"-"), "the check taint is removed")
 
 	master = &routedRunner{routes: []route{{contains: "nodes.longhorn.io worker-1 -o jsonpath", out: "False"}}}
