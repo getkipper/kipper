@@ -2,6 +2,7 @@ package installer
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -24,7 +25,8 @@ func ReadGatewayCredentials(client CommandRunner) (string, error) {
 		"kubectl -n kipper-system get secret %s -o jsonpath='{.data.token}' --ignore-not-found",
 		gatewayCredentialsSecretName))
 	if err != nil {
-		return "", fmt.Errorf("reading gateway credentials: %w", err)
+		// A failed Run can carry the token in its error.
+		return "", errors.New("reading gateway credentials failed")
 	}
 	// Whitespace comes off first: kubectl's jsonpath output is quoted and
 	// newline-terminated ("'abc'\n"), so trimming quotes first leaves the
@@ -100,7 +102,8 @@ func readSecretCmd(namespace, name, key string) string {
 func readSecretValue(client CommandRunner, namespace, name, key string) (string, error) {
 	out, err := client.Run(readSecretCmd(namespace, name, key))
 	if err != nil {
-		return "", fmt.Errorf("reading secret %s/%s: %w", namespace, name, err)
+		// A failed Run can carry the Secret's value in its error.
+		return "", fmt.Errorf("reading secret %s/%s failed", namespace, name)
 	}
 	encoded := strings.TrimSpace(out)
 	if encoded == "" {

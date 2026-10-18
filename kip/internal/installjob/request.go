@@ -25,26 +25,27 @@ type Request struct {
 	RunID      string `json:"run_id"`
 	KipVersion string `json:"kip_version,omitempty"`
 
-	Host             string          `json:"host"`
-	Domain           string          `json:"domain,omitempty"`
-	ConsoleDomain    string          `json:"console_domain,omitempty"`
-	ConsoleAPIDomain string          `json:"console_api_domain,omitempty"`
-	DexDomain        string          `json:"dex_domain,omitempty"`
-	AdminEmail       string          `json:"admin_email,omitempty"`
-	Org              string          `json:"org,omitempty"`
-	OrgDisplayName   string          `json:"org_display_name,omitempty"`
-	Harden           bool            `json:"harden"`
-	Firewall         bool            `json:"firewall"`
-	AdoptFirewall    bool            `json:"adopt_firewall,omitempty"`
-	AdoptFingerprint string          `json:"adopt_fingerprint,omitempty"`
-	ChangeNetwork    bool            `json:"change_network,omitempty"`
-	NoSSHRateLimit   bool            `json:"no_ssh_rate_limit"`
-	DNSResolvers     []string        `json:"dns_resolvers,omitempty"`
-	TrustedProxies   []string        `json:"trusted_proxies,omitempty"`
-	Profile          string          `json:"profile,omitempty"`
-	Storage          string          `json:"storage,omitempty"`
-	Backup           *Backup         `json:"backup,omitempty"`
-	Entry            *config.Cluster `json:"entry,omitempty"`
+	Host                string          `json:"host"`
+	Domain              string          `json:"domain,omitempty"`
+	ConsoleDomain       string          `json:"console_domain,omitempty"`
+	ConsoleAPIDomain    string          `json:"console_api_domain,omitempty"`
+	DexDomain           string          `json:"dex_domain,omitempty"`
+	AdminEmail          string          `json:"admin_email,omitempty"`
+	Org                 string          `json:"org,omitempty"`
+	OrgDisplayName      string          `json:"org_display_name,omitempty"`
+	Harden              bool            `json:"harden"`
+	Firewall            bool            `json:"firewall"`
+	AdoptFirewall       bool            `json:"adopt_firewall,omitempty"`
+	AdoptFingerprint    string          `json:"adopt_fingerprint,omitempty"`
+	ChangeNetwork       bool            `json:"change_network,omitempty"`
+	NoSSHRateLimit      bool            `json:"no_ssh_rate_limit"`
+	DNSResolvers        []string        `json:"dns_resolvers,omitempty"`
+	TrustedProxies      []string        `json:"trusted_proxies,omitempty"`
+	Profile             string          `json:"profile,omitempty"`
+	Storage             string          `json:"storage,omitempty"`
+	Backup              *Backup         `json:"backup,omitempty"`
+	Entry               *config.Cluster `json:"entry,omitempty"`
+	BackupRepositoryKey string          `json:"backup_repository_key,omitempty"`
 }
 
 // Backup carries external storage settings and credentials resolved by the client.
@@ -105,6 +106,9 @@ func (r Request) Options() installer.Options {
 		TrustedProxies:   r.TrustedProxies,
 		Profile:          r.Profile,
 		Storage:          r.Storage,
+	}
+	if r.BackupRepositoryKey != "" {
+		opts.BackupRepositoryKey = []byte(r.BackupRepositoryKey)
 	}
 	if b := r.Backup; b != nil {
 		opts.BackupStorage = &installer.BackupStorageConfig{

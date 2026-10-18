@@ -49,6 +49,7 @@ kip install --host <ip> [flags]
 | `--backup-storage-endpoint` | No | — | S3 endpoint URL. Omit for native AWS S3 (Velero derives it from the region). Required for R2, self-hosted MinIO, B2, Wasabi, DigitalOcean Spaces |
 | `--backup-storage-credentials` | No | `~/.aws/credentials` | Path to an AWS-style INI credentials file. Read only at install time and never stored back on disk |
 | `--backup-storage-profile` | No | `default` | Profile name inside the credentials file. Lets you reuse an existing AWS CLI profile like `acme` without copying it to a separate file |
+| `--backup-repository-key-file` | If the bucket holds backups and the cluster has no key | — | File containing the key used to encrypt existing volume backups, mode 0600. See [The backup repository key](#backup-repository-key) |
 
 #### DNS for a domain you run
 
@@ -232,11 +233,33 @@ The credentials file is read once at install time and never written to disk agai
 
 `kip upgrade` re-applies the Velero chart without rotating the secret, so you do not need to keep the credentials file around after install. To rotate keys, run `kip install` again with the updated credentials file pointing at the same host, which replaces the Secret in place. It re-runs the rest of the install as well, so read [what an upgrade moves](/en/maintenance#what-an-upgrade-moves-and-what-it-does-not) before doing it on a cluster with console-created users.
 
+#### The backup repository key {#backup-repository-key}
+
+Velero encrypts volume backups with a repository key. On a new cluster, `kip install` generates a random 32-byte key on the server before Velero starts, so the key never crosses the network. Resource definitions, such as Deployments and Secrets, are not encrypted by this key. On native AWS S3, they are encrypted at rest by the bucket.
+
+Save the key outside the cluster right after install, for example in a password manager:
+
+```bash
+kip backup repository-key export --to ~/example-backups.key
+```
+
+Without the key, nobody can read the volume backups, including a new cluster you install to recover from them. Anyone with the key and read access to the bucket can read them all, so keep it as safe as the bucket credentials. The command asks for confirmation, writes a new file with mode 0600 and never overwrites an existing one. On Windows, the file inherits its folder's permissions, so save it inside your user profile. The key and the storage credentials carry Velero's `exclude-from-backup` label, so backups made from this release on do not contain them. A backup made earlier with `--include-system` can still hold them.
+
+When the cluster has no repository key, `kip install` requires the key used to encrypt any backups already in the bucket:
+
+```bash
+kip install --host 203.0.113.10 --domain example.com \
+  --backup-storage-bucket example-kipper-backups --backup-storage-region eu-west-1 \
+  --backup-repository-key-file ~/example-backups.key
+```
+
+Outside Windows, the file must grant no permissions to other users, as SSH requires for a private key. The key must be a single line. A cluster keeps its key through upgrades and install re-runs. kip refuses a different key because replacing it would make existing volume backups unreadable. Clusters installed before this release keep the key Velero gave them.
+
 #### One-shot decision
 
 Backup storage is chosen at install time. No command migrates a running cluster from one mode to another, and **uninstalling to switch destroys your backups**: in in-cluster mode they live on the cluster, so `kip cluster uninstall` removes them along with everything else and there is nothing left to restore from.
 
-Re-running `kip install` with `--backup-storage-bucket` against the same host does repoint Velero at external storage, but it does not move the backups you already have, and it re-runs the rest of the install. Treat it as a change to make deliberately rather than a migration.
+Re-running `kip install` with `--backup-storage-bucket` against the same host does repoint Velero at external storage, but it does not move the backups you already have, and it re-runs the rest of the install. Treat it as a change to make deliberately rather than a migration. The new bucket must be empty: kip refuses one that already holds backups, such as another cluster's, because Velero would take those backups over and later expire them.
 
 The route that keeps your data is to install a second cluster with external storage from the start and move workloads onto it, taking anything you need off the first by a route that does not depend on its in-cluster backups. Both clusters can live in your config at once; switch between them with `kip cluster use`.
 

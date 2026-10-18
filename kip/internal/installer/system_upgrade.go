@@ -60,7 +60,7 @@ func SystemComponents(domain string, dnsResolvers, trustedProxies []string, stat
 			if !ok {
 				return fmt.Errorf("this runner cannot upload the Velero credentials")
 			}
-			return InstallBackup(u, bs, storage)
+			return InstallBackup(u, bs, storage, nil)
 		}})
 	}
 	components = append(components,

@@ -118,6 +118,17 @@ func BackupStorageFromRef(ref *config.BackupStorageRef) *BackupStorageConfig {
 	return &BackupStorageConfig{Bucket: ref.Bucket, Region: ref.Region, Endpoint: ref.Endpoint}
 }
 
+// recordBackupStorage saves ref as the backup location of the local cluster
+// entry called name. A missing entry is left alone.
+func recordBackupStorage(name string, ref *config.BackupStorageRef) error {
+	return config.Update(func(cfg *config.Config) error {
+		if c := cfg.GetCluster(name); c != nil {
+			c.BackupStorage = ref
+		}
+		return nil
+	})
+}
+
 // backupStorageRef persists the storage mode and location while credentials
 // remain in the cluster's Secret.
 func backupStorageRef(cfg *BackupStorageConfig) *config.BackupStorageRef {

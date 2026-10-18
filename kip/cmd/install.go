@@ -71,6 +71,7 @@ func init() {
 	installCmd.Flags().String("backup-storage-endpoint", "", "S3 endpoint URL (omit for native AWS S3, required for R2/MinIO/B2/Wasabi/Spaces)")
 	installCmd.Flags().String("backup-storage-credentials", "", "path to AWS-style credentials file (defaults to ~/.aws/credentials when --backup-storage-bucket is set)")
 	installCmd.Flags().String("backup-storage-profile", "default", "profile name within the credentials file (e.g. 'acme')")
+	installCmd.Flags().String("backup-repository-key-file", "", "file containing the key used to encrypt existing volume backups (mode 0600). Required only when the bucket holds backups and this cluster has no key yet")
 
 	_ = installCmd.MarkFlagRequired("host")
 
@@ -161,6 +162,12 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	var repositoryKey []byte
+	if path, _ := cmd.Flags().GetString("backup-repository-key-file"); path != "" {
+		if repositoryKey, err = installer.ReadRepositoryKeyFile(path); err != nil {
+			return err
+		}
+	}
 
 	// Pre-install there is no cluster entry to read SSH config from, so
 	// resolveSSHKey only consults the flag and KIP_SSH_KEY env var; the
@@ -209,6 +216,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		ConfirmNetworkChange: adoptionQuestion(isTTY),
 		NoSSHRateLimit:       noSSHRateLimit,
 		BackupStorage:        backupStorage,
+		BackupRepositoryKey:  repositoryKey,
 		Profile:              profile,
 		Storage:              storage,
 		DNSResolvers:         dnsResolvers,

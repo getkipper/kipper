@@ -216,7 +216,8 @@ func ensureHopLeaf(client CommandRunner, caCertPEM, caKeyPEM string) error {
 func readSecretKey(client CommandRunner, name, key string) (string, error) {
 	out, err := client.Run(readSecretKeyCmd(name, key))
 	if err != nil {
-		return "", fmt.Errorf("reading %s/%s: %w", hopNamespace, name, err)
+		// A failed Run can carry the decoded key in its error.
+		return "", fmt.Errorf("reading %s/%s failed", hopNamespace, name)
 	}
 	return strings.TrimSpace(out), nil
 }
