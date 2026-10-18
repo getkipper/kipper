@@ -77,3 +77,19 @@ func TestRequestCarriesTheRepositoryKey(t *testing.T) {
 	assert.NotContains(t, req.String(), "k3y")
 	assert.Nil(t, Request{Host: "203.0.113.10"}.Options().BackupRepositoryKey, "no key means kip keeps or generates one")
 }
+
+func TestRequestCarriesTheSSECSettings(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef")
+	req := Request{Version: RequestVersion, RunID: "r1", Host: "203.0.113.10",
+		Backup: &Backup{Bucket: "b", Region: "hel1", Endpoint: "https://hel1.example.com", SSEC: true, SSECKey: key}}
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	got, err := ParseRequest(data)
+	require.NoError(t, err)
+
+	opts := got.Options()
+	assert.True(t, opts.BackupStorage.SSEC)
+	assert.Equal(t, key, opts.BackupStorage.SSECKey)
+	assert.NotContains(t, got.String(), string(key))
+}

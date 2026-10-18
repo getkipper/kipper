@@ -18,11 +18,17 @@ import (
 
 type fakeRepoHost struct {
 	secret  string
-	liveBSL string // The default backup location as "bucket|s3Url", or empty if absent.
+	liveBSL string // The default backup location as "bucket|s3Url[|sseKeySecret]", or empty if absent.
 	bucket  string // The simulated listing result: "empty", "populated" or "fail".
 
-	cmds   []string
-	stdins []string
+	sseKey   string // The live SSE-C key Secret's raw bytes, or empty if absent.
+	sseWrite string // The SSE-C write test's log, sseWriteOKMarker when it passes.
+	sseCheck string // The SSE-C key check's log.
+	sseProbe string // The log of the check for SSE-C backups on an install without SSE-C.
+
+	cmds       []string
+	stdins     []string
+	lastSSEJob string
 }
 
 // discoveryWarning is what kubectl prints on stderr while an aggregated API,
@@ -40,6 +46,29 @@ func (h *fakeRepoHost) Run(cmd string) (string, error) {
 func (h *fakeRepoHost) run(cmd string) string {
 	h.cmds = append(h.cmds, cmd)
 	switch {
+	case strings.Contains(cmd, "get secret "+sseKeySecret) && strings.Contains(cmd, "jsonpath"):
+		return base64.StdEncoding.EncodeToString([]byte(h.sseKey))
+	case strings.Contains(cmd, "get secret "+sseKeySecret) && strings.Contains(cmd, "-o name"):
+		if h.sseKey != "" {
+			return "secret/" + sseKeySecret
+		}
+		return ""
+	case strings.Contains(cmd, "delete secret "+sseKeySecret):
+		h.sseKey = ""
+	case strings.Contains(cmd, "get job "+sseCheckJob):
+		return "1/"
+	case strings.Contains(cmd, "logs job/"+sseCheckJob):
+		switch {
+		case strings.Contains(h.lastSSEJob, sseKeyMatchMarker):
+			return h.sseCheck + "\n"
+		case strings.Contains(h.lastSSEJob, sseEncryptedMarker):
+			return h.sseProbe + "\n"
+		}
+		return h.sseWrite + "\n"
+	case strings.Contains(cmd, "kubectl apply -f -") && strings.Contains(cmd, "name: "+sseCheckJob):
+		h.lastSSEJob = cmd
+	case strings.Contains(cmd, "/dev/urandom") && strings.Contains(cmd, sseKeySecret):
+		h.sseKey = strings.Repeat("g", 32)
 	case strings.Contains(cmd, "get secret "+repositoryKeySecret) && strings.Contains(cmd, "jsonpath"):
 		return base64.StdEncoding.EncodeToString([]byte(h.secret))
 	case strings.Contains(cmd, "get secret "+repositoryKeySecret) && strings.Contains(cmd, "-o name"):
@@ -80,6 +109,9 @@ func (h *fakeRepoHost) RunStdin(cmd string, in io.Reader) (string, error) {
 	if strings.Contains(cmd, "create secret generic "+repositoryKeySecret) {
 		h.secret = string(b)
 	}
+	if strings.Contains(cmd, "create secret generic "+sseKeySecret) {
+		h.sseKey = string(b)
+	}
 	return "", nil
 }
 
@@ -97,7 +129,7 @@ var minioTarget = backupTarget{bucket: "velero", s3URL: inClusterMinIOURL, mcHos
 func TestRepositoryKeyIsGeneratedOnTheServerForAnEmptyBucket(t *testing.T) {
 	h := &fakeRepoHost{bucket: "empty"}
 
-	require.NoError(t, prepareBackupRepository(h, minioTarget, nil))
+	require.NoError(t, prepareBackupRepository(h, minioTarget, &bucketCheck{client: h, target: minioTarget}, nil))
 
 	assert.Equal(t, "generated", h.secret)
 	for _, c := range h.cmds {
@@ -111,7 +143,7 @@ func TestRepositoryKeyIsGeneratedOnTheServerForAnEmptyBucket(t *testing.T) {
 func TestExistingRepositoryKeyIsKeptAndOnlyLabelled(t *testing.T) {
 	h := &fakeRepoHost{secret: "old-key", liveBSL: "velero|" + inClusterMinIOURL, bucket: "populated"}
 
-	require.NoError(t, prepareBackupRepository(h, minioTarget, nil))
+	require.NoError(t, prepareBackupRepository(h, minioTarget, &bucketCheck{client: h, target: minioTarget}, nil))
 
 	assert.Equal(t, "old-key", h.secret)
 	assert.True(t, h.ran("label secret "+repositoryKeySecret+" velero.io/exclude-from-backup=true"))
@@ -122,7 +154,7 @@ func TestExistingRepositoryKeyIsKeptAndOnlyLabelled(t *testing.T) {
 func TestPopulatedBucketWithoutAKeyIsRefused(t *testing.T) {
 	h := &fakeRepoHost{bucket: "populated"}
 
-	err := prepareBackupRepository(h, minioTarget, nil)
+	err := prepareBackupRepository(h, minioTarget, &bucketCheck{client: h, target: minioTarget}, nil)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--backup-repository-key-file")
@@ -132,7 +164,7 @@ func TestPopulatedBucketWithoutAKeyIsRefused(t *testing.T) {
 func TestPopulatedBucketTakesTheSuppliedKeyOverStdin(t *testing.T) {
 	h := &fakeRepoHost{bucket: "populated"}
 
-	require.NoError(t, prepareBackupRepository(h, minioTarget, []byte("supplied-key")))
+	require.NoError(t, prepareBackupRepository(h, minioTarget, &bucketCheck{client: h, target: minioTarget}, []byte("supplied-key")))
 
 	assert.Equal(t, "supplied-key", h.secret)
 	for _, c := range h.cmds {
@@ -143,7 +175,7 @@ func TestPopulatedBucketTakesTheSuppliedKeyOverStdin(t *testing.T) {
 func TestBucketCheckFailureIsRefused(t *testing.T) {
 	h := &fakeRepoHost{bucket: "fail"}
 
-	err := prepareBackupRepository(h, minioTarget, nil)
+	err := prepareBackupRepository(h, minioTarget, &bucketCheck{client: h, target: minioTarget}, nil)
 
 	require.Error(t, err)
 	assert.Empty(t, h.secret)
@@ -153,7 +185,7 @@ func TestMissingKeyWithoutStorageCredentialsIsRefused(t *testing.T) {
 	h := &fakeRepoHost{bucket: "empty"}
 	noCreds := backupTarget{bucket: "kipper-backups", s3URL: "https://s3.example.com"}
 
-	err := prepareBackupRepository(h, noCreds, nil)
+	err := prepareBackupRepository(h, noCreds, &bucketCheck{client: h, target: noCreds}, nil)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--backup-repository-key-file")
@@ -162,10 +194,10 @@ func TestMissingKeyWithoutStorageCredentialsIsRefused(t *testing.T) {
 
 func TestSuppliedKeyMustMatchTheExistingOne(t *testing.T) {
 	same := &fakeRepoHost{secret: "the-key", liveBSL: "velero|" + inClusterMinIOURL}
-	require.NoError(t, prepareBackupRepository(same, minioTarget, []byte("the-key")))
+	require.NoError(t, prepareBackupRepository(same, minioTarget, &bucketCheck{client: same, target: minioTarget}, []byte("the-key")))
 
 	different := &fakeRepoHost{secret: "the-key", liveBSL: "velero|" + inClusterMinIOURL}
-	err := prepareBackupRepository(different, minioTarget, []byte("another-key"))
+	err := prepareBackupRepository(different, minioTarget, &bucketCheck{client: different, target: minioTarget}, []byte("another-key"))
 	require.Error(t, err)
 	assert.Equal(t, "the-key", different.secret)
 }
@@ -174,7 +206,7 @@ func TestMovingToAPopulatedBucketIsRefused(t *testing.T) {
 	h := &fakeRepoHost{secret: "the-key", liveBSL: "old-bucket|https://s3.example.com", bucket: "populated"}
 	target := backupTarget{bucket: "new-bucket", s3URL: "https://s3.example.com", mcHost: "https://AKIAEXAMPLE:secret@s3.example.com"} //nolint:gosec // G101: a synthetic credentials fixture
 
-	err := prepareBackupRepository(h, target, nil)
+	err := prepareBackupRepository(h, target, &bucketCheck{client: h, target: target}, nil)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "new-bucket")
@@ -184,7 +216,7 @@ func TestMovingToAnEmptyBucketKeepsTheKey(t *testing.T) {
 	h := &fakeRepoHost{secret: "the-key", liveBSL: "old-bucket|https://s3.example.com", bucket: "empty"}
 	target := backupTarget{bucket: "new-bucket", s3URL: "https://s3.example.com", mcHost: "https://AKIAEXAMPLE:secret@s3.example.com"} //nolint:gosec // G101: a synthetic credentials fixture
 
-	require.NoError(t, prepareBackupRepository(h, target, nil))
+	require.NoError(t, prepareBackupRepository(h, target, &bucketCheck{client: h, target: target}, nil))
 	assert.Equal(t, "the-key", h.secret)
 }
 
@@ -192,7 +224,7 @@ func TestBucketCheckKeepsStorageCredentialsOutOfCommands(t *testing.T) {
 	h := &fakeRepoHost{bucket: "empty"}
 	target := backupTarget{bucket: "kipper-backups", s3URL: "https://s3.example.com", mcHost: "https://AKIAEXAMPLE:ab/c+d@s3.example.com"}
 
-	require.NoError(t, prepareBackupRepository(h, target, nil))
+	require.NoError(t, prepareBackupRepository(h, target, &bucketCheck{client: h, target: target}, nil))
 
 	assert.Contains(t, h.stdins, "https://AKIAEXAMPLE:ab/c+d@s3.example.com")
 	for _, c := range h.cmds {
@@ -341,7 +373,7 @@ func TestKeysThatCannotRoundTripAreRefused(t *testing.T) {
 func TestKubectlWarningsDoNotLookLikeAMove(t *testing.T) {
 	h := &fakeRepoHost{secret: "old-key", liveBSL: "velero|" + inClusterMinIOURL}
 
-	require.NoError(t, prepareBackupRepository(h, minioTarget, nil))
+	require.NoError(t, prepareBackupRepository(h, minioTarget, &bucketCheck{client: h, target: minioTarget}, nil))
 	assert.Equal(t, "old-key", h.secret)
 	assert.False(t, h.ran(bucketCheckJob))
 }
@@ -352,10 +384,10 @@ func TestCredentialsMcCannotParseAreOnlyRefusedWhenAListingIsNeeded(t *testing.T
 	require.NoError(t, err)
 
 	existing := &fakeRepoHost{secret: "the-key", liveBSL: "kipper-backups|https://s3.example.com"}
-	require.NoError(t, prepareBackupRepository(existing, target, nil), "an unchanged location needs no listing")
+	require.NoError(t, prepareBackupRepository(existing, target, &bucketCheck{client: existing, target: target}, nil), "an unchanged location needs no listing")
 
 	fresh := &fakeRepoHost{bucket: "empty"}
-	err = prepareBackupRepository(fresh, target, nil)
+	err = prepareBackupRepository(fresh, target, &bucketCheck{client: fresh, target: target}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "':' or '@'")
 }
@@ -366,7 +398,7 @@ func TestATrailingSlashOnTheEndpointIsNotAMove(t *testing.T) {
 	require.NoError(t, err)
 
 	h := &fakeRepoHost{secret: "the-key", liveBSL: "kipper-backups|https://s3.example.com"}
-	require.NoError(t, prepareBackupRepository(h, target, nil))
+	require.NoError(t, prepareBackupRepository(h, target, &bucketCheck{client: h, target: target}, nil))
 }
 
 func TestKeysWithSurroundingSpacesAreRefused(t *testing.T) {
@@ -411,10 +443,10 @@ func TestKeysWithSurroundingUnicodeSpaceAreRefused(t *testing.T) {
 func TestSuppliedKeyMatchesALiveKeyWithSurroundingWhitespace(t *testing.T) {
 	// Velero trims the live key, and so does export, so the exported key matches.
 	h := &fakeRepoHost{secret: "\n the-key\r\n", liveBSL: "velero|" + inClusterMinIOURL} //nolint:gosec // G101: a synthetic key fixture
-	require.NoError(t, prepareBackupRepository(h, minioTarget, []byte("the-key")))
+	require.NoError(t, prepareBackupRepository(h, minioTarget, &bucketCheck{client: h, target: minioTarget}, []byte("the-key")))
 
 	other := &fakeRepoHost{secret: "\nthe-key-2\n", liveBSL: "velero|" + inClusterMinIOURL} //nolint:gosec // G101: a synthetic key fixture
-	assert.Error(t, prepareBackupRepository(other, minioTarget, []byte("the-key")))
+	assert.Error(t, prepareBackupRepository(other, minioTarget, &bucketCheck{client: other, target: minioTarget}, []byte("the-key")))
 }
 
 func TestKeysThatAreNotUTF8AreRefused(t *testing.T) {

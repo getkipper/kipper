@@ -9,33 +9,27 @@ import (
 	"github.com/getkipper/kipper/kip/internal/config"
 )
 
-// BackupStorageConfig configures Velero's BackupStorageLocation to point
-// at off-cluster S3-compatible object storage instead of the default
-// in-cluster MinIO. A non-nil config makes the installer skip the MinIO
-// deployment entirely and configure Velero with the user's bucket.
+// BackupStorageConfig selects external S3-compatible storage and skips the
+// in-cluster MinIO deployment. The bucket must already exist. Region is passed
+// to Velero unchanged, for example "auto" for R2, an AWS region for native S3,
+// or the configured region for self-hosted MinIO. An empty Endpoint selects
+// native AWS S3, which derives its endpoint from Region. Other providers need
+// an endpoint, such as https://<accountid>.r2.cloudflarestorage.com, including
+// Cloudflare R2, MinIO, Backblaze B2, Wasabi and DigitalOcean Spaces.
 //
-// All fields are required except Endpoint, which is empty for native
-// AWS S3 (Velero derives the endpoint from the region) and required for
-// every other S3-compatible provider (Cloudflare R2, MinIO, Backblaze
-// B2, Wasabi, DigitalOcean Spaces, etc.).
+// Credentials come from the local AWS credentials file and are stored in a
+// Kubernetes Secret in velero. Upgrades can omit them to reuse that Secret.
+// SSEC requests a server-generated key for a bucket without backups. SSECKey
+// supplies 32 raw bytes instead, including for recovery. An existing key is
+// retained, and an active SSE-C location stays enabled without either setting.
 type BackupStorageConfig struct {
-	// Bucket is the S3 bucket name. Must already exist; kip does not
-	// create buckets.
-	Bucket string
-	// Region is the AWS region or provider-equivalent ("auto" for R2,
-	// an AWS region for native S3, the configured region string for
-	// self-hosted MinIO — passed through to Velero verbatim).
-	Region string
-	// Endpoint is the provider URL (e.g.
-	// "https://<accountid>.r2.cloudflarestorage.com"). Empty means
-	// native AWS S3.
-	Endpoint string
-	// AccessKeyID and SecretAccessKey are the credentials Velero uses
-	// to read and write the bucket. Read from the user's local AWS
-	// credentials file at install time, then stored only as a
-	// Kubernetes Secret in the velero namespace.
+	Bucket          string
+	Region          string
+	Endpoint        string
 	AccessKeyID     string
 	SecretAccessKey string
+	SSEC            bool
+	SSECKey         []byte
 }
 
 // AWSCredentials holds a single profile's access key and secret read
@@ -47,7 +41,7 @@ type AWSCredentials struct {
 
 // LoadAWSCredentials reads access and secret keys from an INI profile, using
 // default when profile is empty. Both [NAME] and [profile NAME] headers are
-// accepted; missing key fields return an error.
+// accepted. Missing key fields return an error.
 func LoadAWSCredentials(path, profile string) (*AWSCredentials, error) {
 	if profile == "" {
 		profile = "default"
@@ -110,7 +104,8 @@ func (c *AWSCredentials) VeleroCredentialsBlock() string {
 }
 
 // BackupStorageFromRef restores external storage settings from persisted config.
-// The installer reuses the cluster's credential Secret.
+// The installer reuses the cluster's credential Secret. A nil reference or
+// a mode other than external returns nil.
 func BackupStorageFromRef(ref *config.BackupStorageRef) *BackupStorageConfig {
 	if ref == nil || ref.Mode != "external" {
 		return nil

@@ -29,7 +29,8 @@ with mode 0600, or with its folder's permissions on Windows. Without the key,
 nobody can read the backups, including a new cluster installed to recover
 from them. Keep the file off the cluster, for example in a password manager.
 
-Anyone who has the key and can read the bucket can read every backup.`,
+Anyone who has this key and can read the bucket can decrypt its volume data.
+Restoring SSE-C backups also requires the SSE-C key.`,
 	Args: cobra.NoArgs,
 	RunE: runBackupRepositoryKeyExport,
 }
@@ -54,7 +55,8 @@ func runBackupRepositoryKeyExport(cmd *cobra.Command, _ []string) error {
 	if !backupsConfiguredOn(ctx, k8sClient.Dynamic()) {
 		return errBackupsNotConfigured
 	}
-	if err := confirmKeyExport(os.Stdin, term.IsTerminal(int(os.Stdin.Fd())), yes); err != nil {
+	if err := confirmKeyExport(os.Stdin, os.Stdout, term.IsTerminal(int(os.Stdin.Fd())), yes, "backup repository key",
+		"Anyone with this key and read access to the bucket can read the backed-up volume data."); err != nil {
 		return err
 	}
 	secret, err := k8sClient.Clientset().CoreV1().Secrets("velero").Get(ctx, "velero-repo-credentials", metav1.GetOptions{})
@@ -77,14 +79,17 @@ func runBackupRepositoryKeyExport(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func confirmKeyExport(in io.Reader, interactive, yes bool) error {
+// confirmKeyExport displays the risk before asking for consent to export a key.
+// The yes flag bypasses confirmation and is required for non-interactive input.
+// It returns an error if confirmation is required but consent is not given.
+func confirmKeyExport(in io.Reader, out io.Writer, interactive, yes bool, what, risk string) error {
 	if yes {
 		return nil
 	}
 	if !interactive {
-		return errors.New("exporting the backup repository key requires confirmation. Pass --yes")
+		return fmt.Errorf("exporting the %s requires confirmation. Pass --yes", what)
 	}
-	fmt.Print("\n  Anyone with this key and read access to the bucket can read every backup. Export it? [y/N]: ")
+	_, _ = fmt.Fprintf(out, "\n  %s Export it? [y/N]: ", risk)
 	answer, _ := bufio.NewReader(in).ReadString('\n')
 	if isYes(answer) {
 		return nil

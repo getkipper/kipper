@@ -205,8 +205,7 @@ func plainEndpoint(endpoint string) (*url.URL, bool) {
 // when given, or freshly generated on the server for a bucket with no
 // backups. A populated bucket without a key is refused, because only the key
 // its backups were written with can read them.
-func prepareBackupRepository(client CommandRunner, target backupTarget, key []byte) error {
-	check := &bucketCheck{client: client, target: target}
+func prepareBackupRepository(client CommandRunner, target backupTarget, check *bucketCheck, key []byte) error {
 	if err := refuseMoveToPopulatedBucket(client, check); err != nil {
 		return err
 	}
@@ -286,18 +285,11 @@ func requireSameRepositoryKey(client CommandRunner, key []byte) error {
 // cluster's backups at a bucket that already holds backups, such as another
 // cluster's: Velero would adopt those backups and later expire them.
 func refuseMoveToPopulatedBucket(client CommandRunner, check *bucketCheck) error {
-	crd, err := client.Run("kubectl get crd backupstoragelocations.velero.io --ignore-not-found -o name 2>/dev/null")
+	live, err := liveBackupLocation(client)
 	if err != nil {
-		return fmt.Errorf("checking for Velero: %w", err)
+		return err
 	}
-	if strings.TrimSpace(crd) == "" {
-		return nil
-	}
-	live, err := client.Run(`kubectl -n velero get backupstoragelocation default --ignore-not-found -o jsonpath='{.spec.objectStorage.bucket}|{.spec.config.s3Url}' 2>/dev/null`)
-	if err != nil {
-		return fmt.Errorf("reading the current backup location: %w", err)
-	}
-	liveBucket, liveURL, _ := strings.Cut(strings.TrimSpace(live), "|")
+	liveBucket, liveURL := live.bucket, live.s3URL
 	if liveBucket == "" || (liveBucket == check.target.bucket && normalizeEndpoint(liveURL) == normalizeEndpoint(check.target.s3URL)) {
 		return nil
 	}
@@ -311,6 +303,39 @@ func refuseMoveToPopulatedBucket(client CommandRunner, check *bucketCheck) error
 			liveBucket, describeEndpoint(liveURL), check.target.bucket, describeEndpoint(check.target.s3URL))
 	}
 	return nil
+}
+
+// liveLocation is Velero's default backup location as the cluster runs it.
+// An empty bucket means Velero or the location is absent.
+type liveLocation struct {
+	bucket string
+	s3URL  string
+	sseKey string
+}
+
+func liveBackupLocation(client CommandRunner) (liveLocation, error) {
+	crd, err := client.Run("kubectl get crd backupstoragelocations.velero.io --ignore-not-found -o name 2>/dev/null")
+	if err != nil {
+		return liveLocation{}, fmt.Errorf("checking for Velero: %w", err)
+	}
+	if strings.TrimSpace(crd) == "" {
+		return liveLocation{}, nil
+	}
+	out, err := client.Run(`kubectl -n velero get backupstoragelocation default --ignore-not-found -o jsonpath='{.spec.objectStorage.bucket}|{.spec.config.s3Url}|{.spec.config.customerKeyEncryptionSecret}' 2>/dev/null`)
+	if err != nil {
+		return liveLocation{}, fmt.Errorf("reading the current backup location: %w", err)
+	}
+	fields := strings.SplitN(strings.TrimSpace(out), "|", 3)
+	for len(fields) < 3 {
+		fields = append(fields, "")
+	}
+	return liveLocation{bucket: fields[0], s3URL: fields[1], sseKey: fields[2]}, nil
+}
+
+// changesFrom reports whether target differs from the live location,
+// counting a missing location as a change.
+func (l liveLocation) changesFrom(target backupTarget) bool {
+	return l.bucket != target.bucket || normalizeEndpoint(l.s3URL) != normalizeEndpoint(target.s3URL)
 }
 
 // bucketCheck caches a successful listing result from a Job inside the
@@ -342,38 +367,9 @@ func (c *bucketCheck) populated() (bool, error) {
 }
 
 func runBucketCheck(client CommandRunner, target backupTarget) (bool, error) {
-	cleanup := fmt.Sprintf("kubectl -n velero delete job/%s secret/%s --ignore-not-found", bucketCheckJob, bucketCheckSecret)
-	_, _ = client.Run(cleanup)
-	defer func() { _, _ = client.Run(cleanup) }()
-
-	secretCmd := "kubectl -n velero create secret generic " + bucketCheckSecret +
-		" --from-file=host=/dev/stdin --dry-run=client -o yaml" +
-		" | kubectl label --local -f - " + excludeFromBackupLabel + " -o yaml | kubectl apply -f -"
-	if _, err := client.RunStdin(secretCmd, strings.NewReader(target.mcHost)); err != nil {
-		return false, fmt.Errorf("storing the bucket check credentials: %w", err)
-	}
-	if _, err := client.Run(fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", bucketCheckManifest(target.bucket))); err != nil {
-		return false, fmt.Errorf("starting the bucket check: %w", err)
-	}
-
-	deadline := time.Now().Add(bucketCheckTimeout)
-	for {
-		status, err := client.Run(fmt.Sprintf("kubectl -n velero get job %s -o jsonpath='{.status.succeeded}/{.status.failed}' 2>/dev/null", bucketCheckJob))
-		if err != nil {
-			return false, fmt.Errorf("waiting for the bucket check: %w", err)
-		}
-		if succeeded, failed, _ := strings.Cut(strings.TrimSpace(status), "/"); succeeded == "1" || failed == "1" {
-			break
-		}
-		if time.Now().After(deadline) {
-			return false, fmt.Errorf("the bucket check did not finish within %s", bucketCheckTimeout)
-		}
-		time.Sleep(2 * time.Second)
-	}
-
-	logs, err := client.Run(fmt.Sprintf("kubectl -n velero logs job/%s --tail=20", bucketCheckJob))
+	logs, err := runCheckJob(client, target, bucketCheckJob, "the bucket check", bucketCheckManifest(target.bucket))
 	if err != nil {
-		return false, fmt.Errorf("reading the bucket check result: %w", err)
+		return false, err
 	}
 	switch {
 	case strings.Contains(logs, bucketPopulatedMarker):
@@ -384,10 +380,71 @@ func runBucketCheck(client CommandRunner, target backupTarget) (bool, error) {
 	return false, fmt.Errorf("listing bucket %s failed: %s", target.bucket, strings.TrimSpace(logs))
 }
 
+// runCheckJob applies manifest for the named Job and returns its last 20 log
+// lines after success or failure. It waits up to bucketCheckTimeout. Credentials
+// travel over stdin into a temporary Secret. Cleanup attempts to delete both
+// the Job and Secret. The what argument identifies the check in errors.
+func runCheckJob(client CommandRunner, target backupTarget, job, what, manifest string) (string, error) {
+	cleanup := fmt.Sprintf("kubectl -n velero delete job/%s secret/%s --ignore-not-found", job, bucketCheckSecret)
+	_, _ = client.Run(cleanup)
+	defer func() { _, _ = client.Run(cleanup) }()
+
+	secretCmd := "kubectl -n velero create secret generic " + bucketCheckSecret +
+		" --from-file=host=/dev/stdin --dry-run=client -o yaml" +
+		" | kubectl label --local -f - " + excludeFromBackupLabel + " -o yaml | kubectl apply -f -"
+	if _, err := client.RunStdin(secretCmd, strings.NewReader(target.mcHost)); err != nil {
+		return "", fmt.Errorf("storing the credentials for %s: %w", what, err)
+	}
+	if _, err := client.Run(fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", manifest)); err != nil {
+		return "", fmt.Errorf("starting %s: %w", what, err)
+	}
+
+	deadline := time.Now().Add(bucketCheckTimeout)
+	for {
+		status, err := client.Run(fmt.Sprintf("kubectl -n velero get job %s -o jsonpath='{.status.succeeded}/{.status.failed}' 2>/dev/null", job))
+		if err != nil {
+			return "", fmt.Errorf("waiting for %s: %w", what, err)
+		}
+		if succeeded, failed, _ := strings.Cut(strings.TrimSpace(status), "/"); succeeded == "1" || failed == "1" {
+			break
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("%s did not finish within %s", what, bucketCheckTimeout)
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	logs, err := client.Run(fmt.Sprintf("kubectl -n velero logs job/%s --tail=20", job))
+	if err != nil {
+		return "", fmt.Errorf("reading the result of %s: %w", what, err)
+	}
+	return logs, nil
+}
+
 // bucketCheckManifest builds a Job that checks for top-level backups, kopia
-// or restic directories. The bucket name reaches the shell through an
-// environment variable to keep it separate from shell syntax.
+// or restic directories.
 func bucketCheckManifest(bucket string) string {
+	return checkJobManifest(bucketCheckJob, bucket,
+		fmt.Sprintf(`mc ls "kipper/$BUCKET/" > /tmp/ls && if grep -qE ' (backups|kopia|restic)/$' /tmp/ls; then echo %s; else echo %s; fi`, bucketPopulatedMarker, bucketEmptyMarker),
+		"")
+}
+
+// checkJobManifest builds a named Job running script with mc. The kipper alias
+// points to the storage endpoint. The bucket name travels in an environment
+// variable to keep it separate from shell syntax. A non-empty keySecret is
+// mounted read-only at /sse.
+func checkJobManifest(job, bucket, script, keySecret string) string {
+	mount, volume := "", ""
+	if keySecret != "" {
+		mount = `
+            - name: sse
+              mountPath: /sse
+              readOnly: true`
+		volume = fmt.Sprintf(`
+        - name: sse
+          secret:
+            secretName: %s`, keySecret)
+	}
 	return fmt.Sprintf(`apiVersion: batch/v1
 kind: Job
 metadata:
@@ -413,7 +470,7 @@ spec:
           command:
             - sh
             - -c
-            - mc ls "kipper/$BUCKET/" > /tmp/ls && if grep -qE ' (backups|kopia|restic)/$' /tmp/ls; then echo %s; else echo %s; fi
+            - %s
           env:
             - name: BUCKET
               value: %q
@@ -431,9 +488,12 @@ spec:
               drop: [ALL]
           volumeMounts:
             - name: tmp
-              mountPath: /tmp
+              mountPath: /tmp%s
       volumes:
         - name: tmp
-          emptyDir: {}
-`, bucketCheckJob, minioClientImage, bucketPopulatedMarker, bucketEmptyMarker, bucket, bucketCheckSecret)
+          emptyDir: {}%s
+`, job, minioClientImage, yamlQuote(script), bucket, bucketCheckSecret, mount, volume)
 }
+
+// yamlQuote renders s as a single-quoted YAML scalar.
+func yamlQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }

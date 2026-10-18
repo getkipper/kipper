@@ -197,6 +197,7 @@ flowchart LR
 - **cloud-credentials Secret** in the `velero` namespace holds the access key, written from the credentials file you passed at install time
 - The Velero HelmChart references the Secret by name; the credentials never appear in any HelmChart CR or kubectl-apply output
 - Local `~/.kip/config.yaml` records mode + bucket + region + endpoint, never the keys
+- With `--backup-storage-sse-c`, the store encrypts Velero's own objects with a key in the `kipper-backup-sse-key` Secret, and volume data stays encrypted by the backup repository key. See [SSE-C](/en/installation#backup-sse-c)
 
 To rotate keys later, run `kip install` again with the updated credentials file pointing at the same host. That replaces the Secret in place. Note it re-runs the rest of the install too, which is not free: see [what an upgrade moves](/en/maintenance#what-an-upgrade-moves-and-what-it-does-not).
 
