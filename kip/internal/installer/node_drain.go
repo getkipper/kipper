@@ -39,7 +39,7 @@ func RequireEvictionDrainPolicy(master CommandRunner) error {
 		return fmt.Errorf("reading Longhorn's node drain policy: %w", err)
 	}
 	if policy := strings.TrimSpace(out); policy != LonghornEvictionDrainPolicy {
-		return fmt.Errorf("the Longhorn node drain policy is %q; worker reboots require %s to copy last healthy replicas to other nodes; run 'kip upgrade'", policy, LonghornEvictionDrainPolicy)
+		return fmt.Errorf("the Longhorn node drain policy is %q. Draining a worker requires %s to copy last healthy replicas to other nodes. Run 'kip upgrade'", policy, LonghornEvictionDrainPolicy)
 	}
 	return nil
 }

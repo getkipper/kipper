@@ -378,3 +378,15 @@ func TestRequirePeersRecordedForJoin(t *testing.T) {
 		t.Fatalf("a fresh join on a fully recorded cluster was refused: %v", err)
 	}
 }
+
+func TestRefuseUnrecordedNodesStopsAReRunDuringARemoval(t *testing.T) {
+	data := `{"` + serverMachine + `":"{\"name\":\"test-server\",\"host\":\"203.0.113.10\",\"machineID\":\"` + serverMachine + `\",\"role\":\"server\",\"state\":\"ready\"}","` +
+		workerMachine + `":"{\"name\":\"worker-1\",\"host\":\"203.0.113.11\",\"machineID\":\"` + workerMachine + `\",\"role\":\"worker\",\"state\":\"removing\"}"}`
+	runner := &routedRunner{routes: []route{
+		{contains: "get configmap kipper-nodes", out: data},
+		{contains: "nodeInfo.machineID}", out: "test-server|" + serverMachine + "\nworker-1|" + workerMachine + "\n"},
+	}}
+	if _, err := refuseUnrecordedNodes(runner, serverMachine); err == nil || !strings.Contains(err.Error(), "worker-1 is being removed") {
+		t.Fatalf("err = %v, want a refusal while worker-1 is being removed", err)
+	}
+}

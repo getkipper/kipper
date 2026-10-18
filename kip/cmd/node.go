@@ -341,6 +341,9 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	mirrorNodes(cluster.Name, records)
+	if err := removalBlocksJoin(records, identity.MachineID); err != nil {
+		return err
+	}
 	if err := installer.RequirePeersRecordedForJoin(server, records, identity.MachineID); err != nil {
 		return err
 	}
@@ -355,6 +358,11 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 			existing = &records[i]
 		} else if records[i].Role == installer.NodeRoleWorker {
 			firstWorker = false
+		}
+	}
+	if existing != nil {
+		if err := keepRemovingNode(worker, *existing); err != nil {
+			return err
 		}
 	}
 

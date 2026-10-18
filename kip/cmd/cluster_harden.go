@@ -67,6 +67,9 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if other, busy := installer.RemovalInProgress(records, ""); busy {
+		return fmt.Errorf("%s is being removed, and hardening now would give its address access again. Finish the removal with 'kip node remove %s', or keep it with 'kip node add %s'", other.Name, other.Name, other.Host)
+	}
 	server, _ := installer.ServerRecord(records)
 	mesh := installer.FirewallMeshFor(records, server.MachineID)
 
