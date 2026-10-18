@@ -569,6 +569,11 @@ func (r *FunctionReconciler) reconcileDeployment(ctx context.Context, fn *kipper
 			MountPath: vm.MountPath,
 		})
 	}
+	caVolumes, caMounts, err := serviceCAVolumes(envSources, functionVolumeNames(fn), container.VolumeMounts)
+	if err != nil {
+		return err
+	}
+	container.VolumeMounts = append(container.VolumeMounts, caMounts...)
 
 	containers := []corev1.Container{container}
 
@@ -617,6 +622,7 @@ func (r *FunctionReconciler) reconcileDeployment(ctx context.Context, fn *kipper
 			},
 		})
 	}
+	podSpec.Volumes = append(podSpec.Volumes, caVolumes...)
 
 	// Image pull secret for a private third-party image (staged, owned by the
 	// fn). Resolved against the image the container actually runs — the
@@ -770,7 +776,10 @@ func (r *FunctionReconciler) reconcileCronJob(ctx context.Context, fn *kipperv1.
 		return err
 	}
 
-	podSpec := batchPodSpec(fn, "cron", pullSecrets, envSources, generation)
+	podSpec, err := batchPodSpec(fn, "cron", pullSecrets, envSources, generation)
+	if err != nil {
+		return err
+	}
 
 	successLimit := int32(3)
 	failureLimit := int32(3)
@@ -1872,6 +1881,7 @@ func (r *FunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Same reason as the App controller: a rotated service password must reach
 		// the bindings derived from it.
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.enqueueFunctionsForServiceCredentials)).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.enqueueFunctionsForServiceCA)).
 		Watches(&kipperv1.ClusterIdentity{}, handler.EnqueueRequestsFromMapFunc(r.enqueueFunctionsForClusterIdentity)).
 		Complete(r)
 }
@@ -1900,7 +1910,9 @@ func toInterfaceMap(m map[string]string) map[string]interface{} {
 // BuildBatchPodSpec builds the shared pod spec for scheduled and manual
 // Function runs, setting KIPPER_TRIGGER from trigger. It derives bindings and
 // publishes the environment generation. pullSecrets must come from the caller's
-// staging operation so the spec uses the credentials that operation authorized.
+// staging operation so the spec uses the credentials that operation authorised.
+// It returns an error if binding resolution or environment publication fails,
+// or a declared volume mount overlaps a service CA directory.
 func BuildBatchPodSpec(ctx context.Context, c client.Client, fn *kipperv1.Function, trigger string, pullSecrets []corev1.LocalObjectReference) (corev1.PodSpec, error) {
 	// No reconcile behind this call, so nothing has been resolved for it. The
 	// bindings are derived here through the same function the reconciler uses,
@@ -1942,13 +1954,13 @@ func BuildBatchPodSpec(ctx context.Context, c client.Client, fn *kipperv1.Functi
 	if err != nil {
 		return corev1.PodSpec{}, fmt.Errorf("publishing environment: %w", err)
 	}
-	return batchPodSpec(fn, trigger, pullSecrets, sources, generation), nil
+	return batchPodSpec(fn, trigger, pullSecrets, sources, generation)
 }
 
-// batchPodSpec builds the batch shape from sources already resolved. It reads
-// nothing, so it cannot reach a different answer than the pass that resolved
-// them.
-func batchPodSpec(fn *kipperv1.Function, trigger string, pullSecrets []corev1.LocalObjectReference, envSources []envSource, generation string) corev1.PodSpec {
+// batchPodSpec builds the batch pod spec from the resolved environment snapshot
+// without fetching cluster state. It rejects mounts that overlap a service CA
+// directory.
+func batchPodSpec(fn *kipperv1.Function, trigger string, pullSecrets []corev1.LocalObjectReference, envSources []envSource, generation string) (corev1.PodSpec, error) {
 	image := effectiveFunctionImage(fn)
 	isInline := fn.Spec.Source != nil && fn.Spec.Source.Code != ""
 
@@ -2004,9 +2016,15 @@ func batchPodSpec(fn *kipperv1.Function, trigger string, pullSecrets []corev1.Lo
 			},
 		})
 	}
+	caVolumes, caMounts, err := serviceCAVolumes(envSources, volumeNames(podSpec.Volumes), podSpec.Containers[0].VolumeMounts)
+	if err != nil {
+		return corev1.PodSpec{}, err
+	}
+	podSpec.Volumes = append(podSpec.Volumes, caVolumes...)
+	podSpec.Containers[0].VolumeMounts = append(podSpec.Containers[0].VolumeMounts, caMounts...)
 	podSpec.ImagePullSecrets = pullSecrets
 
-	return podSpec
+	return podSpec, nil
 }
 
 // rootPackage returns the top-level package name for a Python import

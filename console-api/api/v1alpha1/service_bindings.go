@@ -46,11 +46,11 @@ func CredentialKeys(serviceType string) []string {
 }
 
 // IsSensitiveCredentialKey reports whether a credentials Secret key must be
-// masked in previews. Only known address, identity, and namespace keys are
-// exposed. Unknown keys are masked so credentials added by an operator stay private.
+// masked in previews. Only known address, identity, namespace and CA path keys
+// are exposed. Unknown keys are masked so credentials added by an operator stay private.
 func IsSensitiveCredentialKey(key string) bool {
 	switch key {
-	case "HOST", "PORT", "USERNAME", "NAME", "VHOST", "ENDPOINT", "ACCESS_KEY", "management":
+	case "HOST", "PORT", "USERNAME", "NAME", "VHOST", "ENDPOINT", "ACCESS_KEY", "management", "SSLROOTCERT":
 		return false
 	}
 	return true

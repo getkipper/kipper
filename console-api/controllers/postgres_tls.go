@@ -87,10 +87,11 @@ func tlsSecretName(service string) string    { return service + "-tls" }
 func hbaConfigMapName(service string) string { return service + "-pg-hba" }
 
 // reconcilePostgresTLS ensures the Certificate and pg_hba ConfigMap for
-// Postgres with TLS enabled and records issuance failures in TLSReady. It returns
-// a short certificate hash when a usable key pair is available. An empty hash
-// with no error means plaintext: TLS is off, the key pair is missing or unusable,
-// or the Certificate API is missing or forbidden. Other API errors are returned.
+// Postgres with TLS enabled and records issuance failures in TLSReady. It verifies
+// the certificate and key pair and publishes the service CA before returning a
+// short certificate hash. An empty hash with no error means plaintext: TLS is off,
+// the certificate fails verification, the key pair is missing or unusable, or the
+// Certificate API is missing or forbidden. Other API errors are returned.
 // wait asks the caller to delay creating a StatefulSet during the first
 // certificate's issuance grace period. Existing StatefulSets keep running.
 func (r *ServiceReconciler) reconcilePostgresTLS(ctx context.Context, svc *kipperv1.Service) (certHash string, wait bool, err error) {
@@ -128,10 +129,19 @@ func (r *ServiceReconciler) reconcilePostgresTLS(ctx context.Context, svc *kippe
 		return "", created.IsZero() || time.Since(created.Time) < tlsIssuanceGrace, nil
 	}
 	crt := secret.Data[corev1.TLSCertKey]
+	host := fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace)
+	if problem := certificateProblem(secret, host); problem != "" {
+		r.setTLSCondition(ctx, svc, metav1.ConditionFalse, "CertificateInvalid",
+			"Postgres serves without TLS because the certificate in Secret "+secret.Name+" fails verification: "+problem)
+		return "", false, nil
+	}
 	if !usableKeyPair(crt, secret.Data[corev1.TLSPrivateKeyKey]) {
 		r.setTLSCondition(ctx, svc, metav1.ConditionFalse, "CertificateInvalid",
 			"Postgres serves without TLS because the issued certificate and key in Secret "+secret.Name+" do not form a usable pair")
 		return "", false, nil
+	}
+	if err := r.ensureServiceCA(ctx, svc, secret); err != nil {
+		return "", false, fmt.Errorf("publishing the service CA: %w", err)
 	}
 	sum := sha256.Sum256(crt)
 	return hex.EncodeToString(sum[:8]), false, nil
@@ -404,9 +414,9 @@ func (r *ServiceReconciler) removeStalePostgresTLS(ctx context.Context, svc *kip
 // removePostgresTLS deletes what TLS added, including the certificate
 // Secret, which cert-manager leaves behind. Certificates and ConfigMaps must
 // satisfy ownsTLSObject, and Secrets must carry the service's TLS label.
-// Unless always is set, it looks for the Certificate only when the pg_hba
-// ConfigMap or the Secret is still there, which the cache answers without
-// a call to the API server.
+// Unless always is set, it looks for the Certificate only when the pg_hba or
+// CA ConfigMap or the Secret still exists, which the cache answers without a
+// call to the API server.
 func (r *ServiceReconciler) removePostgresTLS(ctx context.Context, svc *kipperv1.Service, always bool) error {
 	var cm corev1.ConfigMap
 	cmFound, err := r.found(ctx, types.NamespacedName{Namespace: svc.Namespace, Name: hbaConfigMapName(svc.Name)}, &cm)
@@ -418,7 +428,12 @@ func (r *ServiceReconciler) removePostgresTLS(ctx context.Context, svc *kipperv1
 	if err != nil {
 		return err
 	}
-	if !always && !cmFound && !secretFound {
+	var caMap corev1.ConfigMap
+	caFound, err := r.found(ctx, types.NamespacedName{Namespace: svc.Namespace, Name: serviceCAConfigMapName(svc.Name)}, &caMap)
+	if err != nil {
+		return err
+	}
+	if !always && !cmFound && !secretFound && !caFound {
 		return nil
 	}
 
@@ -443,6 +458,13 @@ func (r *ServiceReconciler) removePostgresTLS(ctx context.Context, svc *kipperv1
 	if secretFound && secret.Labels[labels.TLSFor] == svc.Name {
 		if err := r.Delete(ctx, &secret); err != nil && !errors.IsNotFound(err) {
 			return err
+		}
+	}
+	if caFound {
+		if ownsTLSObject(&caMap, svc) {
+			if err := r.Delete(ctx, &caMap); err != nil && !errors.IsNotFound(err) {
+				return err
+			}
 		}
 	}
 	if cmFound {

@@ -537,6 +537,12 @@ httpd -p %d -h /www -f`, app.Name, app.Name, app.Spec.Port)}
 			MountPath: vm.MountPath,
 		})
 	}
+	caVolumes, caMounts, err := serviceCAVolumes(sources, volumeNames(podVolumes), container.VolumeMounts)
+	if err != nil {
+		return nil, err
+	}
+	podVolumes = append(podVolumes, caVolumes...)
+	container.VolumeMounts = append(container.VolumeMounts, caMounts...)
 
 	// Inject instance-id sidecar proxy when enabled
 	containers := []corev1.Container{container}
@@ -2583,6 +2589,7 @@ func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// A rotated service password has to reach the bindings that derive from
 		// it, rather than waiting for something unrelated to touch each app.
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.enqueueAppsForServiceCredentials)).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.enqueueAppsForServiceCA)).
 		// A git credential is created before the App names it, so one left
 		// behind by a write that then failed carries no owner reference and no
 		// Owns reaches it. Without this the only thing that collects it is a

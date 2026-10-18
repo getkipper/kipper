@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,15 +60,58 @@ func tlsService() *kipperv1.Service {
 	return svc
 }
 
-// issuedSecret builds a Secret with cert-manager metadata for service db
-// and a fresh self-signed certificate whose common name is cn.
+// issuedSecret builds a Secret with cert-manager metadata for service db and a
+// fresh key pair. The certificate has common name cn and the service's DNS names,
+// and ca.crt contains the signing test CA.
 func issuedSecret(t *testing.T, cn string) *corev1.Secret {
+	t.Helper()
+	return issuedSecretFor(t, cn, []string{"db", "db.ns", "db.ns.svc", "db.ns.svc.cluster.local"}, time.Now().Add(time.Hour))
+}
+
+// testCA signs test certificates the way kipper-service-ca does: a root
+// that signs leaves directly.
+type testCA struct {
+	key  *ecdsa.PrivateKey
+	cert *x509.Certificate
+	pem  []byte
+}
+
+func newTestCA(t *testing.T) *testCA {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-	tpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: cn},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	tpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test service CA"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
 	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	cert, err := x509.ParseCertificate(der)
+	require.NoError(t, err)
+	return &testCA{key: key, cert: cert, pem: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}
+}
+
+var (
+	sharedCAOnce sync.Once
+	sharedCA     *testCA
+)
+
+// sharedTestCA returns the CA shared by issuedSecret calls throughout the test
+// run, matching the shared issuer used for service certificates in a cluster.
+func sharedTestCA(t *testing.T) *testCA {
+	sharedCAOnce.Do(func() { sharedCA = newTestCA(t) })
+	return sharedCA
+}
+
+// issuedSecretFor signs a leaf for dnsNames with the shared test CA. The leaf
+// permits any extended key usage because it has no extended key usage extension.
+func issuedSecretFor(t *testing.T, cn string, dnsNames []string, notAfter time.Time) *corev1.Secret {
+	t.Helper()
+	ca := sharedTestCA(t)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tpl := &x509.Certificate{SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: cn}, DNSNames: dnsNames,
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: notAfter, KeyUsage: x509.KeyUsageDigitalSignature}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, ca.cert, &key.PublicKey, ca.key)
 	require.NoError(t, err)
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	require.NoError(t, err)
@@ -78,7 +122,7 @@ func issuedSecret(t *testing.T, cn string) *corev1.Secret {
 		Data: map[string][]byte{
 			"tls.crt": pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 			"tls.key": pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
-			"ca.crt":  []byte("ca"),
+			"ca.crt":  ca.pem,
 		},
 	}
 }

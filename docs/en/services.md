@@ -111,6 +111,7 @@ The binding injects individual connection components with a type-based prefix. T
 | `DB_USERNAME` | `kipper` |
 | `DB_PASSWORD` | `a1b2c3d4e5f6...` |
 | `DB_NAME` | `domain_service_test` |
+| `DB_SSLROOTCERT` | `/etc/kipper/service-ca/db/ca.crt` (PostgreSQL with TLS on, once its certificate is verified and its CA published. See [Encrypted Postgres connections](#postgres-tls).) |
 
 **MinIO**, prefix `S3_`:
 
@@ -234,7 +235,18 @@ A Postgres service declared in `kipper.yaml` gets TLS only with `tls: on` in its
 
 Postgres restarts once when it switches, and again whenever its certificate is renewed, which is about once a year. A new service waits up to a minute for its first certificate to avoid starting twice. If issuance takes longer, it starts with plaintext and restarts when the certificate arrives. TLS is enabled on the pod once a usable certificate has been issued, so a cluster without cert-manager keeps serving the database with plaintext. `kip service info mydb` shows `TLS: on` once Postgres has restarted with the certificate, and explains any pending issuance or rollout. Turning TLS off or deleting the service removes the certificate and its private key. Backups include the issued Secret and its private key along with the rest of the service, so a restored database or one checked with `kip backup drill` starts with TLS immediately. The copy of the key in the pod's memory volume is left out of backups.
 
-With TLS on, the server accepts both encrypted and unencrypted connections. The client chooses which to use. Set `sslmode=require` in the app's connection string (`?sslmode=require` on a JDBC or libpq URL) to have every connection encrypted. Kipper does not yet distribute the service CA to apps. Without a configured CA, `require` encrypts the connection without verifying the server's certificate. CA distribution, rejection of unencrypted connections and full verification with `sslmode=verify-full` are planned together.
+With TLS on, the server accepts both encrypted and unencrypted connections. The client chooses which to use. Once the certificate is verified and its CA published, Kipper mounts the service CA into every app and function bound to the service at `/etc/kipper/service-ca/<service>/ca.crt`, and the binding adds `<prefix>SSLROOTCERT` with that path, for example `DB_SSLROOTCERT`. Only the CA is mounted. The server's private key stays with Postgres. Kipper publishes the CA only after checking that the issued certificate chains to it, covers the service's DNS name, is currently valid and permits server authentication.
+
+To encrypt every connection and verify the database server's identity, set `sslmode=verify-full` and point the client at the CA:
+
+| Client | Setting |
+|---|---|
+| JDBC (pgjdbc) | `jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=verify-full&sslrootcert=${DB_SSLROOTCERT}` |
+| libpq, psql, psycopg | `PGSSLMODE=verify-full` and `PGSSLROOTCERT=$DB_SSLROOTCERT`, or `sslmode=verify-full&sslrootcert=...` in the URL with the path from `DB_SSLROOTCERT` |
+| Go (pgx) | `postgres://...?sslmode=verify-full&sslrootcert=...` with the path from `DB_SSLROOTCERT` |
+| Node.js (pg) | `ssl: { ca: fs.readFileSync(process.env.DB_SSLROOTCERT), rejectUnauthorized: true }` |
+
+Adding or removing the CA triggers one rollout of every app and function bound to the service, in addition to restarting Postgres. `sslmode=require` lets clients without a CA encrypt connections without verifying the server. With libpq, `require` also verifies the certificate chain if a root CA file is available. Use `verify-full` explicitly to verify both the chain and hostname. Apps opt in to verification through their connection settings. Turning TLS off on a service whose apps use `verify-full` makes their connections fail until you change those settings back. The CA stays the same across certificate renewals. When the CA changes, for example after rebuilding a cluster from backups, bound apps and functions roll out again to load the new CA.
 
 To see which connections use TLS:
 

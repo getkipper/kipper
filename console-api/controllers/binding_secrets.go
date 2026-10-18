@@ -96,12 +96,13 @@ func reconcileBindingSecrets(ctx context.Context, c client.Client, scheme *runti
 				b.Name, b.Name, secretname.ServiceCredentials(b.Name))
 		}
 
-		// A binding that pins no logical namespace reads the shared credentials
-		// straight through envFrom. There is nothing to derive, but its pods
-		// hold that password just the same, so it still has to reach the digest
-		// — otherwise a rotation rolls the workloads that pinned a database and
-		// silently leaves every other bound workload authenticating with a
-		// password the service has stopped accepting.
+		if err := hashServiceCA(ctx, c, digest, &svc, shared.Data); err != nil {
+			return nil, nil, "", err
+		}
+		// Bindings without a logical namespace use shared credentials through
+		// envFrom. Include them in the digest so password rotations also roll
+		// these pods, which would otherwise keep using a rejected password while
+		// only workloads with a pinned database receive the new one.
 		if !bindingIsDerived(b, svc.Spec.Type, true) {
 			delete(desired, name)
 			hashBindingShape(digest, i, b, svc.Spec.Type)
@@ -411,17 +412,52 @@ func writeDerivedBindingSecret(ctx context.Context, c client.Client, scheme *run
 	return c.Update(ctx, &existing)
 }
 
-// workloadsBoundToCredentials enqueues workloads that consume the changed
-// service credentials through shared or derived Secrets.
+// hashServiceCA adds the CA ConfigMap's name and ca.crt data to digest when
+// SSLROOTCERT is set, so CA replacements roll bound workloads even when the
+// file path stays the same. A missing ConfigMap leaves digest unchanged.
+// Other read errors are returned.
+func hashServiceCA(ctx context.Context, c client.Client, digest hash.Hash, svc *kipperv1.Service, credentials map[string][]byte) error {
+	if len(credentials[sslRootCertKey]) == 0 {
+		return nil
+	}
+	var cm corev1.ConfigMap
+	err := c.Get(ctx, types.NamespacedName{Namespace: svc.Namespace, Name: serviceCAConfigMapName(svc.Name)}, &cm)
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading the CA of service %q: %w", svc.Name, err)
+	}
+	hashInto(digest, cm.Name, map[string][]byte{serviceCAFile: []byte(cm.Data[serviceCAFile])})
+	return nil
+}
+
+// workloadsBoundToCredentials returns reconciliation requests for workloads
+// that consume the changed service credentials through shared or derived Secrets.
 func workloadsBoundToCredentials[T any](secret client.Object, items []T, binding func(*T) (string, string, []kipperv1.ServiceBinding)) []reconcile.Request {
 	service, ok := serviceOfCredentialsSecret(secret)
 	if !ok {
 		return nil
 	}
+	return workloadsBoundToService(secret.GetNamespace(), service, items, binding)
+}
+
+// workloadsBoundToServiceCA returns reconciliation requests for workloads bound
+// to the service identified by the ConfigMap's TLSFor label. The ConfigMap must
+// also have that service's expected CA name.
+func workloadsBoundToServiceCA[T any](cm client.Object, items []T, binding func(*T) (string, string, []kipperv1.ServiceBinding)) []reconcile.Request {
+	service := cm.GetLabels()[labels.TLSFor]
+	if service == "" || cm.GetName() != serviceCAConfigMapName(service) {
+		return nil
+	}
+	return workloadsBoundToService(cm.GetNamespace(), service, items, binding)
+}
+
+func workloadsBoundToService[T any](namespace, service string, items []T, binding func(*T) (string, string, []kipperv1.ServiceBinding)) []reconcile.Request {
 	var reqs []reconcile.Request
 	for i := range items {
-		name, namespace, bindings := binding(&items[i])
-		if namespace != secret.GetNamespace() {
+		name, ns, bindings := binding(&items[i])
+		if ns != namespace {
 			continue
 		}
 		for _, b := range bindings {
@@ -469,6 +505,30 @@ func (r *AppReconciler) enqueueAppsForServiceCredentials(ctx context.Context, ob
 	}
 	return workloadsBoundToCredentials(obj, apps.Items, func(a *kipperv1.App) (string, string, []kipperv1.ServiceBinding) {
 		return a.Name, a.Namespace, a.Spec.ServiceBindings
+	})
+}
+
+// enqueueAppsForServiceCA returns requests for Apps bound to the service whose
+// CA changed, or nil if listing Apps fails.
+func (r *AppReconciler) enqueueAppsForServiceCA(ctx context.Context, obj client.Object) []reconcile.Request {
+	var apps kipperv1.AppList
+	if err := r.List(ctx, &apps, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+	return workloadsBoundToServiceCA(obj, apps.Items, func(a *kipperv1.App) (string, string, []kipperv1.ServiceBinding) {
+		return a.Name, a.Namespace, a.Spec.ServiceBindings
+	})
+}
+
+// enqueueFunctionsForServiceCA returns requests for Functions bound to the
+// service whose CA changed, or nil if listing Functions fails.
+func (r *FunctionReconciler) enqueueFunctionsForServiceCA(ctx context.Context, obj client.Object) []reconcile.Request {
+	var fns kipperv1.FunctionList
+	if err := r.List(ctx, &fns, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+	return workloadsBoundToServiceCA(obj, fns.Items, func(f *kipperv1.Function) (string, string, []kipperv1.ServiceBinding) {
+		return f.Name, f.Namespace, f.Spec.ServiceBindings
 	})
 }
 
