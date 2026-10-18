@@ -98,4 +98,7 @@ func TestLatestBuildPodExplainsAnEmptyResult(t *testing.T) {
 			t.Errorf("error does not explain that logs expire (%q missing): %v", want, err)
 		}
 	}
+	if !strings.Contains(err.Error(), "kip app rebuild todo-app") {
+		t.Errorf("error does not name the command that starts a build: %v", err)
+	}
 }

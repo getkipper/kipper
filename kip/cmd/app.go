@@ -862,7 +862,7 @@ func latestBuildPod(ctx context.Context, clientset kubernetes.Interface, appName
 	}
 	if len(pods.Items) == 0 {
 		return nil, fmt.Errorf("no build found for %q in project namespace %s. A build's pod is removed an hour after it finishes, "+
-			"so this is also what a build that completed a while ago looks like. Run 'kip app build %s' to start a new one",
+			"so a build that finished over an hour ago also produces this result. Run 'kip app rebuild %s' to start a new one",
 			appName, appNamespace, appName)
 	}
 
