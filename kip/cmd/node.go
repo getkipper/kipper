@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -63,6 +64,7 @@ func init() {
 	nodeAddCmd.Flags().String("private-network", "", "private network the nodes share, in CIDR form; needed when it carries the default route")
 	nodeAddCmd.Flags().Bool("public", false, "use the nodes' public addresses even when they share a private network")
 	nodeAddCmd.Flags().Bool("yes", false, "apply or recover server network changes without prompting")
+	nodeAddCmd.Flags().Bool("no-ssh-rate-limit", false, "Allow SSH without UFW rate limiting on the joining node, replacing any existing limit. By default, keep its managed rule or inherit the server's setting for a new firewall.")
 	nodeAddCmd.Flags().Bool("firewall", true, "set up a host firewall on the new node (default: follow the server's kip-managed firewall setting); use --firewall=false to skip setup")
 
 	nodeCmd.AddCommand(nodeAddCmd)
@@ -177,14 +179,14 @@ func peerFirewallActionFor(audit installer.FirewallAudit, mode nodeFirewall) pee
 	return refuseFirewall
 }
 
-func applyPeerFirewall(out io.Writer, client installer.FirewallRunner, label string, mesh installer.FirewallMesh, mode nodeFirewall, freshLimit bool) error {
+func applyPeerFirewall(out io.Writer, client installer.FirewallRunner, label string, mesh installer.FirewallMesh, mode nodeFirewall, freshLimit, noRateLimit bool) error {
 	audit, err := installer.AuditFirewall(client)
 	if err != nil {
 		return fmt.Errorf("auditing the firewall on %s: %w", label, err)
 	}
 	switch peerFirewallActionFor(audit, mode) {
 	case configureFirewall:
-		limit, err := sshRateLimitFor(client, audit, freshLimit)
+		limit, err := sshRateLimitFor(client, audit, freshLimit, noRateLimit)
 		if err != nil {
 			return fmt.Errorf("reading the SSH rule on %s: %w", label, err)
 		}
@@ -242,7 +244,13 @@ func unmanagedFirewallNotice(label string, mesh installer.FirewallMesh, mode nod
 	return fmt.Sprintf("  ℹ  Manage the firewall on %s yourself: allow 51820/udp and 10250/tcp from the other nodes", label)
 }
 
-func sshRateLimitFor(client installer.CommandRunner, audit installer.FirewallAudit, freshLimit bool) (bool, error) {
+// sshRateLimitFor selects whether to limit SSH in UFW. noRateLimit disables
+// limiting. Otherwise, a managed firewall keeps its rule and a new one uses
+// freshLimit. Reading an existing rule can return a command error.
+func sshRateLimitFor(client installer.CommandRunner, audit installer.FirewallAudit, freshLimit, noRateLimit bool) (bool, error) {
+	if noRateLimit {
+		return false, nil
+	}
 	if audit.KipperManaged {
 		return installer.SSHRateLimited(client)
 	}
@@ -259,6 +267,27 @@ func refuseNodeAddOnLocalStorage(mode string) error {
 }
 
 func runNodeAdd(cmd *cobra.Command, args []string) error {
+	return explainSSHTimeout(addNode(cmd, args))
+}
+
+var sshTimeout = regexp.MustCompile(`ssh: connect to host (\S+) port (\d+): (Operation|Connection) timed out`)
+
+// explainSSHTimeout wraps SSH connection timeouts with advice about UFW rate
+// limiting, which can persist after an uninstall. It preserves nil and other errors.
+func explainSSHTimeout(err error) error {
+	if err == nil {
+		return nil
+	}
+	m := sshTimeout.FindStringSubmatch(err.Error())
+	if m == nil {
+		return err
+	}
+	return fmt.Errorf("%w\n  A UFW %s/tcp LIMIT rule on %s may be the cause. It blocks connections from an address that attempts six or more SSH connections within 30 seconds. "+
+		"The rule may remain from an earlier kip install, even after uninstalling. If the limit caused the timeout, wait a minute and run the command again, or replace the rule on that host with 'ufw allow %s/tcp'. "+
+		"Pass --no-ssh-rate-limit to allow SSH without rate limiting when kip configures the joining node's UFW firewall", err, m[2], m[1], m[2])
+}
+
+func addNode(cmd *cobra.Command, args []string) error {
 	fmt.Print(nodeAddNotice)
 
 	workerHost, err := nodeAddHost(cmd, args)
@@ -269,6 +298,7 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	privateNetwork, _ := cmd.Flags().GetString("private-network")
 	forcePublic, _ := cmd.Flags().GetBool("public")
 	autoYes, _ := cmd.Flags().GetBool("yes")
+	noRateLimit, _ := cmd.Flags().GetBool("no-ssh-rate-limit")
 
 	cluster, _, err := loadCurrentCluster()
 	if err != nil {
@@ -448,12 +478,12 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\n  Opening the cluster ports between the nodes...\n")
-	if err := applyPeerFirewall(os.Stdout, server, "the server", installer.FirewallMeshFor(records, serverRec.MachineID), existingFirewall, false); err != nil {
+	if err := applyPeerFirewall(os.Stdout, server, "the server", installer.FirewallMeshFor(records, serverRec.MachineID), existingFirewall, false, false); err != nil {
 		return err
 	}
 	for _, r := range records {
 		if c, ok := peers[r.MachineID]; ok {
-			if err := applyPeerFirewall(os.Stdout, c, r.Name, installer.FirewallMeshFor(records, r.MachineID), existingFirewall, false); err != nil {
+			if err := applyPeerFirewall(os.Stdout, c, r.Name, installer.FirewallMeshFor(records, r.MachineID), existingFirewall, false, false); err != nil {
 				return err
 			}
 		}
@@ -504,7 +534,7 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 			return nodeAddRetry(err, workerHost)
 		}
 	}
-	if err := applyPeerFirewall(os.Stdout, worker, workerHost, installer.FirewallMeshFor(records, identity.MachineID), workerFirewall, workerLimit); err != nil {
+	if err := applyPeerFirewall(os.Stdout, worker, workerHost, installer.FirewallMeshFor(records, identity.MachineID), workerFirewall, workerLimit, noRateLimit); err != nil {
 		return nodeAddRetry(err, workerHost)
 	}
 

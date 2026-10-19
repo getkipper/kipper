@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -71,20 +73,20 @@ func (h *firewallHost) ConfirmFreshConnection() error                        { r
 var testMesh = installer.FirewallMesh{Peers: []installer.FirewallPeer{{Address: "192.0.2.11"}}}
 
 func TestApplyPeerFirewallRefusesAnOperatorsUFW(t *testing.T) {
-	err := applyPeerFirewall(io.Discard, &firewallHost{ufw: "active"}, "the server", testMesh, existingFirewall, false)
+	err := applyPeerFirewall(io.Discard, &firewallHost{ufw: "active"}, "the server", testMesh, existingFirewall, false, false)
 	assert.ErrorContains(t, err, "kip needs to manage")
 	assert.ErrorContains(t, err, "so the join stops", "opening the ports by hand does not let this join continue")
 	assert.ErrorContains(t, err, "kip cluster harden")
 	assert.NotContains(t, err.Error(), "open 51820/udp")
 
-	err = applyPeerFirewall(io.Discard, &firewallHost{ufw: "active"}, "192.0.2.11", testMesh, managedFirewall, false)
+	err = applyPeerFirewall(io.Discard, &firewallHost{ufw: "active"}, "192.0.2.11", testMesh, managedFirewall, false, false)
 	assert.ErrorContains(t, err, "--firewall=false", "a joining node can keep its own firewall")
 }
 
 func TestApplyPeerFirewallLeavesAnExistingNodeWithoutFirewallAlone(t *testing.T) {
 	h := &firewallHost{ufw: "inactive", firewalld: "inactive"}
 	var out strings.Builder
-	require.NoError(t, applyPeerFirewall(&out, h, "the server", testMesh, existingFirewall, false))
+	require.NoError(t, applyPeerFirewall(&out, h, "the server", testMesh, existingFirewall, false, false))
 	for _, c := range h.commands {
 		assert.NotContains(t, c, "ufw allow", "an operator who chose no firewall keeps none")
 	}
@@ -163,7 +165,7 @@ func TestANewNodeThatFollowsTheServerKeepsAnOperatorsUFWAndSaysWhichPortsToOpen(
 	} {
 		h := &firewallHost{ufw: "active"}
 		var out strings.Builder
-		require.NoError(t, applyPeerFirewall(&out, h, "192.0.2.11", mesh, tc.mode, true), "an inherited opt-out must not fail the join")
+		require.NoError(t, applyPeerFirewall(&out, h, "192.0.2.11", mesh, tc.mode, true, false), "an inherited opt-out must not fail the join")
 		assert.Contains(t, out.String(), tc.want)
 		for _, c := range h.commands {
 			assert.NotContains(t, c, "ufw allow")
@@ -179,11 +181,11 @@ func TestNodeAddFailuresLeaveTheUsageOut(t *testing.T) {
 func TestSSHRateLimitForKeepsAManagedFirewallsOwnRule(t *testing.T) {
 	open := &firewallHost{ufw: "Status: active\n\n22/tcp                     ALLOW       Anywhere"}
 
-	limit, err := sshRateLimitFor(open, installer.FirewallAudit{Existing: "ufw", KipperManaged: true}, true)
+	limit, err := sshRateLimitFor(open, installer.FirewallAudit{Existing: "ufw", KipperManaged: true}, true, false)
 	require.NoError(t, err)
 	assert.False(t, limit, "a rejoining worker keeps its unrestricted SSH rule")
 
-	limit, err = sshRateLimitFor(open, installer.FirewallAudit{}, true)
+	limit, err = sshRateLimitFor(open, installer.FirewallAudit{}, true, false)
 	require.NoError(t, err)
 	assert.True(t, limit, "a new firewall takes the server's setting")
 }
@@ -240,7 +242,7 @@ func TestANewNodeThatDoesNotManageItsFirewallLeavesAnOperatorsFirewalldUnread(t 
 	for _, mode := range []nodeFirewall{followedServerFirewall, declinedFirewall} {
 		h := &firewallHost{firewalld: "active", ufw: "inactive", osRelease: "ID=rocky\nID_LIKE=\"rhel centos fedora\"\n"}
 		var out strings.Builder
-		require.NoError(t, applyPeerFirewall(&out, h, "192.0.2.11", testMesh, mode, true))
+		require.NoError(t, applyPeerFirewall(&out, h, "192.0.2.11", testMesh, mode, true, false))
 		assert.Contains(t, out.String(), "Firewall setup skipped on 192.0.2.11")
 		for _, c := range h.commands {
 			assert.NotContains(t, c, "firewall-cmd", "the operator's firewalld is neither checked nor changed")
@@ -262,4 +264,40 @@ func TestNodeAddIsListedInHelp(t *testing.T) {
 	assert.False(t, nodeAddCmd.Hidden)
 	assert.NotContains(t, nodeAddNotice, "preview")
 	assert.Contains(t, nodeAddNotice, "sole control plane", "The notice explains that the server remains the sole control plane.")
+}
+
+// TestSSHRateLimitForDropsTheLimitWhenAsked covers a managed rule retained
+// from an earlier install and the default for a new firewall.
+func TestSSHRateLimitForDropsTheLimitWhenAsked(t *testing.T) {
+	limited := &firewallHost{ufw: "Status: active\n\n22/tcp                     LIMIT       Anywhere"}
+
+	limit, err := sshRateLimitFor(limited, installer.FirewallAudit{Existing: "ufw", KipperManaged: true}, true, true)
+	require.NoError(t, err)
+	assert.False(t, limit)
+
+	limit, err = sshRateLimitFor(limited, installer.FirewallAudit{}, true, true)
+	require.NoError(t, err)
+	assert.False(t, limit)
+}
+
+func TestNodeAddOffersNoSSHRateLimit(t *testing.T) {
+	assert.NotNil(t, nodeAddCmd.Flags().Lookup("no-ssh-rate-limit"))
+}
+
+func TestNodeAddNamesTheSSHLimitOnATimeout(t *testing.T) {
+	err := explainSSHTimeout(errors.New(`listing the host's addresses: running "ip -o -4 addr show" on 192.0.2.11: exit status 255: ssh: connect to host 192.0.2.11 port 22: Operation timed out`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Operation timed out")
+	assert.Contains(t, err.Error(), "192.0.2.11")
+	assert.Contains(t, err.Error(), "22/tcp LIMIT")
+	assert.Contains(t, err.Error(), "ufw allow 22/tcp")
+
+	linux := fmt.Errorf("connecting to 192.0.2.11: %w", errors.New("ssh: connect to host 192.0.2.11 port 2222: Connection timed out"))
+	err = explainSSHTimeout(linux)
+	assert.ErrorIs(t, err, linux)
+	assert.Contains(t, err.Error(), "ufw allow 2222/tcp")
+
+	other := errors.New("ssh: connect to host 192.0.2.11 port 22: Connection refused")
+	assert.Equal(t, other, explainSSHTimeout(other))
+	assert.NoError(t, explainSSHTimeout(nil))
 }
