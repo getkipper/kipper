@@ -1,0 +1,283 @@
+package cmd
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/getkipper/kipper/kip/internal/installer"
+)
+
+const lockError = "ssh ops@203.0.113.10: apt-get install ufw on lab.example.org failed " +
+	"for admin@lab.example.org with password Not-A-Real-Pass1: E: Could not get lock /var/lib/dpkg/lock-frontend"
+
+func failedStepOn(host installer.HostOS, profile string) error {
+	return fmt.Errorf("install: %w", &installer.StepError{
+		Step: "Configuring firewall", Host: host, Profile: profile, Err: errors.New(lockError),
+	})
+}
+
+func failedStep() error {
+	return failedStepOn(installer.HostOS{ID: "ubuntu", VersionID: "24.04", Family: installer.FamilyDebian}, "small")
+}
+
+func linkFields(t *testing.T, link string) url.Values {
+	t.Helper()
+	u, err := url.Parse(link)
+	if err != nil {
+		t.Fatalf("not a URL: %q: %v", link, err)
+	}
+	return u.Query()
+}
+
+func TestInstallIssueLink_DescribesTheFailedStep(t *testing.T) {
+	link := installIssueLink(failedStep(), issueContext{
+		KipVersion: "v0.31.0",
+		Client:     "darwin/arm64",
+		Flags:      []string{"--host", "--profile"},
+	})
+	q := linkFields(t, link)
+
+	if got, want := q.Get("title"), `kip install failed at "Configuring firewall"`; got != want {
+		t.Errorf("title = %q, want %q", got, want)
+	}
+	if got := q.Get("kip-version"); got != "v0.31.0" {
+		t.Errorf("kip-version = %q", got)
+	}
+	if got, want := q.Get("environment"), "kip on darwin/arm64, server ubuntu 24.04, profile small"; got != want {
+		t.Errorf("environment = %q, want %q", got, want)
+	}
+	if repro := q.Get("repro"); !strings.Contains(repro, "--host --profile") {
+		t.Errorf("repro %q does not list the flags that were set", repro)
+	}
+}
+
+func TestInstallIssueLink_CarriesNoErrorText(t *testing.T) {
+	link := installIssueLink(failedStep(), issueContext{})
+
+	decoded, err := url.QueryUnescape(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"203.0.113.10", "lab.example.org", "Not-A-Real-Pass1", "dpkg"} {
+		if strings.Contains(decoded, fragment) {
+			t.Errorf("link carries %q from the error:\n%s", fragment, decoded)
+		}
+	}
+	if linkFields(t, link).Has("logs") {
+		t.Error("the logs field is for the user to paste into")
+	}
+}
+
+func TestInstallIssueLink_NamesOnlyRecognizedDistributions(t *testing.T) {
+	for _, tc := range []struct {
+		host    installer.HostOS
+		profile string
+		want    string
+	}{
+		{installer.HostOS{ID: "rocky", VersionID: "9.4"}, "medium", "server rocky 9.4, profile medium"},
+		{installer.HostOS{ID: "alice-build", VersionID: "lab.example.org", Family: installer.FamilyDebian}, "small", "server debian-like other, profile small"},
+		{installer.HostOS{ID: "acme", VersionID: "192.168.1.5"}, "x y", "server other other, profile custom"},
+		{installer.HostOS{ID: "ubuntu", VersionID: "24.04"}, "acmeproduction", "server ubuntu 24.04, profile custom"},
+	} {
+		env := linkFields(t, installIssueLink(failedStepOn(tc.host, tc.profile), issueContext{})).Get("environment")
+		if !strings.HasSuffix(env, tc.want) {
+			t.Errorf("%+v: environment = %q, want suffix %q", tc.host, env, tc.want)
+		}
+	}
+}
+
+func TestInstallIssueLink_OnlyForAFailedStep(t *testing.T) {
+	for name, err := range map[string]error{
+		"no error":          nil,
+		"preflight refusal": errors.New("the name lab.kipper.run is already registered"),
+	} {
+		if link := installIssueLink(err, issueContext{}); link != "" {
+			t.Errorf("%s: got a link %q", name, link)
+		}
+		if report := installErrorReport(err, issueContext{}); report != "" {
+			t.Errorf("%s: got an error report %q", name, report)
+		}
+	}
+}
+
+func TestInstallErrorReport_KeepsTheCauseAndScrubsTheRest(t *testing.T) {
+	report := installErrorReport(failedStep(), issueContext{
+		Secrets: []string{"Not-A-Real-Pass1"},
+		Names:   []string{"203.0.113.10", "lab.example.org", "ops"},
+	})
+
+	if !strings.Contains(report, "Could not get lock /var/lib/dpkg/lock-frontend") {
+		t.Errorf("report lost the cause: %q", report)
+	}
+	for _, private := range []string{"203.0.113.10", "lab.example.org", "Not-A-Real-Pass1", "ops@"} {
+		if strings.Contains(report, private) {
+			t.Errorf("report carries %q: %q", private, report)
+		}
+	}
+}
+
+func TestInstallErrorReport_KeepsOnlyTheLastLines(t *testing.T) {
+	var lines []string
+	for i := 1; i <= errorReportLines+5; i++ {
+		lines = append(lines, fmt.Sprintf("line %d", i))
+	}
+	err := &installer.StepError{Step: "Installing k3s", Err: errors.New(strings.Join(lines, "\n"))}
+
+	got := strings.Split(installErrorReport(err, issueContext{}), "\n")
+	if len(got) != errorReportLines {
+		t.Fatalf("got %d lines, want %d", len(got), errorReportLines)
+	}
+	if got[len(got)-1] != fmt.Sprintf("line %d", errorReportLines+5) {
+		t.Errorf("last line = %q", got[len(got)-1])
+	}
+}
+
+func TestSaveInstallErrorReport_WritesANewPrivateFile(t *testing.T) {
+	dir := t.TempDir()
+
+	path, err := saveInstallErrorReport(dir, "E: Could not get lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(path) != dir || !strings.HasPrefix(filepath.Base(path), "install-error-") || filepath.Ext(path) != ".txt" {
+		t.Errorf("path = %q", path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Windows reports 0666 for any writable file and protects it with ACLs instead.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600", info.Mode().Perm())
+	}
+	if body, _ := os.ReadFile(path); string(body) != "E: Could not get lock\n" {
+		t.Errorf("body = %q", body)
+	}
+}
+
+func TestSaveInstallErrorReport_GivesEveryReportItsOwnFile(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "install-error.txt")
+	if err := os.WriteFile(existing, []byte("admin password"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := saveInstallErrorReport(dir, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := saveInstallErrorReport(dir, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if first == second || first == existing || second == existing {
+		t.Errorf("reports reused a path: %q, %q", first, second)
+	}
+	for path, want := range map[string]string{existing: "admin password", first: "first\n", second: "second\n"} {
+		if body, _ := os.ReadFile(path); string(body) != want {
+			t.Errorf("%s holds %q, want %q", path, body, want)
+		}
+	}
+}
+
+func TestSaveInstallErrorReport_LeavesALinkedFileAlone(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "credentials.txt")
+	if err := os.WriteFile(target, []byte("admin password"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "install-error.txt")); err != nil {
+		t.Skipf("this account cannot create symlinks: %v", err)
+	}
+
+	if _, err := saveInstallErrorReport(dir, "report"); err != nil {
+		t.Fatal(err)
+	}
+
+	if body, _ := os.ReadFile(target); string(body) != "admin password" {
+		t.Errorf("the linked file was overwritten: %q", body)
+	}
+}
+
+func TestPrintInstallIssueReport_SaysWhenTheReportCouldNotBeSaved(t *testing.T) {
+	var out bytes.Buffer
+	printInstallIssueReport(&out, "https://github.com/getkipper/kipper/issues/new", "E: boom", "")
+
+	if strings.Contains(out.String(), "Also saved") {
+		t.Errorf("claimed a saved file:\n%s", out.String())
+	}
+}
+
+func TestInstallKnownValues_SplitsSecretsFromNames(t *testing.T) {
+	opts := installer.Options{
+		Host: "203.0.113.10", Domain: "lab.example.org", ConsoleDomain: "console.example.org",
+		ConsoleAPIDomain: "api.example.org", DexDomain: "login.example.org", AdminEmail: "ops@example.org",
+		SSHUser: "deploy", Org: "acme", OrgDisplayName: "Acme Corp",
+		BackupStorage: &installer.BackupStorageConfig{
+			Bucket: "acme-backups", Endpoint: "https://s3.example.net", AccessKeyID: "AKIA-not-real", SecretAccessKey: "not-a-secret",
+		},
+		BackupRepositoryKey: []byte("repo-key-not-real"),
+	}
+	result := &installer.Result{Domain: "lab.example.org", AdminPassword: "pw-not-real", GatewayToken: "gw-not-real"}
+
+	secrets, names := installKnownValues(opts, result)
+	assertHolds(t, "secrets", secrets, "AKIA-not-real", "not-a-secret", "repo-key-not-real", "pw-not-real", "gw-not-real")
+	assertHolds(t, "names", names, "203.0.113.10", "console.example.org", "api.example.org", "login.example.org",
+		"ops@example.org", "deploy", "acme", "Acme Corp", "acme-backups", "https://s3.example.net")
+}
+
+func TestInstallKnownValues_LeavesOutTheRootUser(t *testing.T) {
+	_, names := installKnownValues(installer.Options{SSHUser: "root"}, nil)
+	for _, v := range names {
+		if v == "root" {
+			t.Fatal("root would be replaced in every path such as /root")
+		}
+	}
+}
+
+func assertHolds(t *testing.T, label string, values []string, want ...string) {
+	t.Helper()
+	have := map[string]bool{}
+	for _, v := range values {
+		have[v] = true
+	}
+	for _, w := range want {
+		if !have[w] {
+			t.Errorf("%s miss %q", label, w)
+		}
+	}
+}
+
+func TestPrintInstallIssueReport_ShowsTheLinkAndTheErrorToPaste(t *testing.T) {
+	var out bytes.Buffer
+	printInstallIssueReport(&out, "https://github.com/getkipper/kipper/issues/new?template=bug_report.yml",
+		"E: Could not get lock", "/home/you/.kip/install-error.txt")
+
+	for _, want := range []string{
+		"https://github.com/getkipper/kipper/issues/new",
+		"Logs",
+		"E: Could not get lock",
+		"/home/you/.kip/install-error.txt",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestPrintInstallIssueReport_PrintsNothingWithoutALink(t *testing.T) {
+	var out bytes.Buffer
+	printInstallIssueReport(&out, "", "E: boom", "")
+
+	if out.Len() != 0 {
+		t.Errorf("printed %q", out.String())
+	}
+}

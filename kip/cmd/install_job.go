@@ -264,6 +264,7 @@ func runInstallRequest(path string) error {
 		cfg = nil
 	}
 	r := jobResult(req.RunID, installErr, adminEmail, password, cfg, req.Host)
+	r.IssueLink, r.ErrorReport = drivenIssueReport(opts, installErr, result, installingKipVersion())
 	if err := installjob.WriteResult(dir, r); err != nil {
 		return err
 	}
@@ -275,6 +276,20 @@ func runInstallRequest(path string) error {
 		fmt.Printf("\n  ✔  Installed. Collect the result on your machine to view the admin password.\n")
 	}
 	return installErr
+}
+
+// drivenIssueReport builds the bug report link and redacts the error on the
+// server, where the request's values are available. The driver saves and
+// prints the report.
+func drivenIssueReport(opts installer.Options, installErr error, result *installer.Result, kipVersion string) (link, report string) {
+	secrets, names := installKnownValues(opts, result)
+	issue := issueContext{
+		KipVersion: kipVersion,
+		Client:     "the server (server-driven install)",
+		Secrets:    secrets,
+		Names:      names,
+	}
+	return installIssueLink(installErr, issue), installErrorReport(installErr, issue)
 }
 
 // jobOptions delegates SSH connectivity checks to the client driving the job

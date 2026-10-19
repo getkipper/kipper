@@ -196,7 +196,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 	kubeconfigMode := installer.ResolveKubeconfigMode(adminKubeconfig, noLogin, isTTY)
 
-	result, installErr := installer.Run(installer.Options{
+	opts := installer.Options{
 		KipVersion:           installingKipVersion(),
 		Host:                 host,
 		Local:                local,
@@ -229,7 +229,8 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		LoginGate: func(ctx context.Context, domain, dexHost, server string, caData []byte) installer.GateResult {
 			return installer.DefaultLoginGate(domain, dexHost)(ctx, domain, server, caData)
 		},
-	})
+	}
+	result, installErr := installer.Run(opts)
 
 	// Write the result first so an undetected path collision triggers the
 	// credential save's exclusive-creation check and the summary prints the password.
@@ -240,6 +241,16 @@ func runInstall(cmd *cobra.Command, args []string) error {
 
 	// Deliver available credentials even after a later install step fails.
 	printInstallSummary(os.Stdout, result, installErr, credentialsFile)
+
+	secrets, names := installKnownValues(opts, result)
+	issue := issueContext{
+		KipVersion: installingKipVersion(),
+		Client:     runtime.GOOS + "/" + runtime.GOARCH,
+		Flags:      setFlagNames(cmd.Flags()),
+		Secrets:    secrets,
+		Names:      names,
+	}
+	reportInstallFailure(os.Stdout, installIssueLink(installErr, issue), installErrorReport(installErr, issue))
 
 	if resultPath != "" && result != nil {
 		if resultErr != nil {

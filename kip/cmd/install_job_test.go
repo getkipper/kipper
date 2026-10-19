@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/getkipper/kipper/kip/internal/config"
+	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/installjob"
 )
 
@@ -152,4 +154,33 @@ func TestFreshConnectionMessagesNameEachCheck(t *testing.T) {
 	assert.Contains(t, second, "new firewall rules")
 	assert.NotEqual(t, first, second)
 	assert.Equal(t, second, third)
+}
+
+func TestDrivenIssueReportBuildsTheLinkAndScrubsTheErrorOnTheServer(t *testing.T) {
+	opts := installer.Options{Host: "203.0.113.10", Domain: "lab.example.org", AdminEmail: "ops@example.org"}
+	err := &installer.StepError{Step: "Installing k3s", Host: installer.HostOS{ID: "debian", VersionID: "13"},
+		Err: errors.New("curl https://lab.example.org from 203.0.113.10 failed: exit status 7")}
+
+	link, report := drivenIssueReport(opts, err, nil, "v0.31.0")
+
+	decoded, decodeErr := url.QueryUnescape(link)
+	require.NoError(t, decodeErr)
+	assert.Contains(t, decoded, "server-driven install")
+	assert.Contains(t, decoded, "debian 13")
+	assert.NotContains(t, decoded, "curl")
+	assert.Contains(t, report, "exit status 7")
+	assert.NotContains(t, report, "203.0.113.10")
+	assert.NotContains(t, report, "lab.example.org")
+}
+
+func TestJobResultCarriesTheIssueReportToTheDriver(t *testing.T) {
+	r := installjob.Result{RunID: "r1", Outcome: installjob.PhaseFailed,
+		IssueLink: "https://github.com/getkipper/kipper/issues/new?template=bug_report.yml", ErrorReport: "E: boom"}
+	raw, err := json.Marshal(r)
+	require.NoError(t, err)
+
+	var back installjob.Result
+	require.NoError(t, json.Unmarshal(raw, &back))
+	assert.Equal(t, r.IssueLink, back.IssueLink)
+	assert.Equal(t, r.ErrorReport, back.ErrorReport)
 }

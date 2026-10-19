@@ -235,6 +235,7 @@ func takeoverHint(client CommandRunner, mesh FirewallMesh) string {
 }
 
 // Run executes the full cluster installation sequence.
+// A failed install step returns a partial result and a *StepError wrapping its cause.
 func Run(opts Options) (*Result, error) {
 	// Without a version the CRDs this install writes go out unstamped, and an
 	// unstamped CRD is read as predating the guard — so a later, older kip
@@ -975,7 +976,7 @@ func Run(opts Options) (*Result, error) {
 			partialResult.KubeconfigPath = kubeconfigPath
 			partialResult.GatewayToken = gatewayToken
 			partialResult.AdminPassword = passwordInEffect(adminPassword, passwordSent)
-			return partialResult, fmt.Errorf("%s: %w", step.name, err)
+			return partialResult, &StepError{Step: step.name, Host: sysInfo.Host, Profile: platformProfile, Err: err}
 		}
 		fmt.Printf("  ✔  %s\n", step.name)
 
