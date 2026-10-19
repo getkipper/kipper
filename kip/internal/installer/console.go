@@ -162,6 +162,10 @@ rules:
   - apiGroups: ["cert-manager.io"]
     resources: ["certificates"]
     verbs: ["get", "create", "update", "delete"]
+  # Updating Certificate status lets the console request a new key after a restore.
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates/status"]
+    verbs: ["update"]
   - apiGroups: ["helm.cattle.io"]
     resources: ["helmcharts"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
