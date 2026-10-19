@@ -266,3 +266,26 @@ func TestAReplacedCARollsBoundWorkloads(t *testing.T) {
 }
 
 func ptrBool(v bool) *bool { return &v }
+
+func TestARequiredServiceKeepsDeliveringItsCA(t *testing.T) {
+	svc := tlsService()
+	creds := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "ns"},
+		Data:       map[string][]byte{"HOST": []byte(dbHost), "PORT": []byte("5432"), "USERNAME": []byte("kipper"), "PASSWORD": []byte("pw"), "NAME": []byte("app")},
+	}
+	r := tlsTestReconciler(t, svc, issuedSecret(t, "cert-1"), creds)
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+	require.NoError(t, r.repairCredentials(context.Background(), creds, svc))
+	require.Equal(t, "/etc/kipper/service-ca/db/ca.crt", secretFromCluster(t, r, "db-credentials")[sslRootCertKey])
+
+	svc.Spec.TLS = "required"
+	require.NoError(t, r.Update(context.Background(), svc))
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db-credentials"}, creds))
+	require.NoError(t, r.repairCredentials(context.Background(), creds, svc))
+
+	assert.Equal(t, "/etc/kipper/service-ca/db/ca.crt", secretFromCluster(t, r, "db-credentials")[sslRootCertKey],
+		"apps verifying the server must keep their CA when TLS becomes required")
+	_, err := liveServiceCA(t, r)
+	assert.NoError(t, err)
+}

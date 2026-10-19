@@ -70,8 +70,9 @@ func certificateProblem(secret *corev1.Secret, host string) string {
 }
 
 // ensureServiceCA publishes only the CA certificate from the issued Secret in
-// the ConfigMap bound workloads mount. It rejects an existing ConfigMap unless
-// the service is its controller owner and writes only when the data changes.
+// the ConfigMap bound workloads mount. An existing ConfigMap must be owned by
+// the service or have no owner references and carry the service's tls-for label
+// for adoption. It updates the ConfigMap when the data changes or it is adopted.
 func (r *ServiceReconciler) ensureServiceCA(ctx context.Context, svc *kipperv1.Service, secret *corev1.Secret) error {
 	data := map[string]string{serviceCAFile: string(secret.Data["ca.crt"])}
 	var existing corev1.ConfigMap
@@ -103,12 +104,13 @@ func (r *ServiceReconciler) ensureServiceCA(ctx context.Context, svc *kipperv1.S
 	return r.Update(ctx, &existing)
 }
 
-// serviceCAPublished reports whether a Postgres service has TLS enabled and its
-// CA ConfigMap is its own, which allows its credentials to include
-// SSLROOTCERT. A restored ConfigMap still waiting for adoption counts, so a
-// restore does not take SSLROOTCERT away from bound apps.
+// serviceCAPublished reports whether a Postgres service has TLS configured as
+// on or required and owns its CA ConfigMap, allowing SSLROOTCERT in credentials.
+// Restored ConfigMaps eligible for adoption also count, so bound apps retain
+// SSLROOTCERT during a restore. A missing ConfigMap returns false without an
+// error. Other API errors are returned.
 func (r *ServiceReconciler) serviceCAPublished(ctx context.Context, svc *kipperv1.Service) (bool, error) {
-	if svc.Spec.Type != "postgres" || svc.Spec.TLS != "on" {
+	if svc.Spec.Type != "postgres" || !tlsEnabled(svc) {
 		return false, nil
 	}
 	var cm corev1.ConfigMap
