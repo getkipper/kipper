@@ -526,7 +526,7 @@ func unschedulableWatch(clientset kubernetes.Interface, restore string) func(con
 				}
 				seen[pod.UID] = first
 				if now.Sub(first) >= drillUnschedulableGrace {
-					return fmt.Errorf("the restored copy of %s in namespace %s has been unschedulable for %s (%s), so kip stopped waiting for restore %s. The restore is still running. Resolve the scheduler error, then wait for restore %s to finish before removing the drill namespace with kip backup drill <namespace> --clean",
+					return fmt.Errorf("the restored copy of %s in namespace %s has been unschedulable for %s (%s), so kip stopped waiting for restore %s. The restore is still running and holds up later restores. Resolve the scheduler error or end the restore with kip backup restore --cancel %s. Then remove the drill namespace with kip backup drill <namespace> --clean",
 						pod.Name, drillNamespace, drillUnschedulableGrace, c.Message, restore, restore)
 				}
 			}
