@@ -127,6 +127,8 @@ kip then checks that every PVC-backed volume of the restored services has a comp
 
 When a restored Postgres service carries a consistent dump, kip also tests the logical restore. It checks that the manifest marks the dump as complete and that each dump matches its recorded SHA-256 checksum. It then restores each database's dump into a scratch database inside the drill namespace and compares the exact per-table row counts with the counts recorded from the dump's snapshot. A dump that is incomplete, altered or restores with different counts fails the drill. Restoring the dumps requires free space on the restored data volume for a second copy of each database.
 
+The drill's copy of each service needs enough resources on a node. If kip observes a restored pod staying unschedulable for two minutes, for example because the node has no CPU or memory available, kip stops waiting, reports the scheduler's reason and leaves the restore running. Resolve the scheduling error, then wait for the restore to finish before removing the namespace with `kip backup drill <namespace> --clean`. `kip service restore-dump` behaves the same way.
+
 Finally, kip prints the backup's name and completion time and requests deletion of the drill namespace unless `--keep` is set.
 
 | Flag | Default | Description |

@@ -20,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -191,7 +192,8 @@ func restoreIntoDrill(ctx context.Context, clientset kubernetes.Interface, dyn d
 		return nil, fmt.Errorf("creating restore: %w", err)
 	}
 	fmt.Printf("  ·  Restore %s started\n", name)
-	phase, err := waitForRestorePhase(ctx, dyn, name, time.Hour)
+	unschedulable := unschedulableWatch(clientset, name)
+	phase, err := waitForRestorePhase(ctx, dyn, name, time.Hour, func() error { return unschedulable(ctx) })
 	if err != nil {
 		return nil, err
 	}
@@ -371,7 +373,7 @@ func cleanDrill(ctx context.Context, clientset kubernetes.Interface, dyn dynamic
 			continue
 		}
 		fmt.Printf("  ·  Waiting for restore %s to finish before removing the drill\n", r.GetName())
-		if _, err := waitForRestorePhase(ctx, dyn, r.GetName(), time.Hour); err != nil {
+		if _, err := waitForRestorePhase(ctx, dyn, r.GetName(), time.Hour, nil); err != nil {
 			return err
 		}
 	}
@@ -465,7 +467,7 @@ func restoreOutcome(r *unstructured.Unstructured) string {
 	return " (" + summary + ")"
 }
 
-func waitForRestorePhase(ctx context.Context, dyn dynamic.Interface, name string, limit time.Duration) (string, error) {
+func waitForRestorePhase(ctx context.Context, dyn dynamic.Interface, name string, limit time.Duration, check func() error) (string, error) {
 	deadline := time.Now().Add(limit)
 	for {
 		r, err := dyn.Resource(restoreGVR).Namespace("velero").Get(ctx, name, metav1.GetOptions{})
@@ -476,6 +478,11 @@ func waitForRestorePhase(ctx context.Context, dyn dynamic.Interface, name string
 		case "Completed", "PartiallyFailed", "Failed", "FailedValidation":
 			return phase, nil
 		}
+		if check != nil {
+			if err := check(); err != nil {
+				return "", err
+			}
+		}
 		if time.Now().After(deadline) {
 			return "", fmt.Errorf("restore %s did not finish within %s", name, limit)
 		}
@@ -484,6 +491,43 @@ func waitForRestorePhase(ctx context.Context, dyn dynamic.Interface, name string
 			return "", ctx.Err()
 		case <-time.After(5 * time.Second):
 		}
+	}
+}
+
+var drillUnschedulableGrace = 2 * time.Minute
+
+// unschedulableWatch returns a check that reports an error once a pod in the drill
+// namespace has been unschedulable on every successful poll for at least
+// drillUnschedulableGrace, since volume restoration needs the pod to be scheduled.
+// It times observations by pod UID because the condition timestamp tracks status
+// transitions and can predate the unschedulable reason.
+func unschedulableWatch(clientset kubernetes.Interface, restore string) func(context.Context) error {
+	since := map[types.UID]time.Time{}
+	return func(ctx context.Context) error {
+		pods, err := clientset.CoreV1().Pods(drillNamespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return nil //nolint:nilerr // Keep waiting for the restore and retry the pod check on the next poll.
+		}
+		now := time.Now()
+		seen := map[types.UID]time.Time{}
+		for _, pod := range pods.Items {
+			for _, c := range pod.Status.Conditions {
+				if c.Type != corev1.PodScheduled || c.Status != corev1.ConditionFalse || c.Reason != corev1.PodReasonUnschedulable {
+					continue
+				}
+				first, ok := since[pod.UID]
+				if !ok {
+					first = now
+				}
+				seen[pod.UID] = first
+				if now.Sub(first) >= drillUnschedulableGrace {
+					return fmt.Errorf("the restored copy of %s in namespace %s has been unschedulable for %s (%s), so kip stopped waiting for restore %s. The restore is still running. Resolve the scheduler error, then wait for restore %s to finish before removing the drill namespace with kip backup drill <namespace> --clean",
+						pod.Name, drillNamespace, drillUnschedulableGrace, c.Message, restore, restore)
+				}
+			}
+		}
+		since = seen
+		return nil
 	}
 }
 
