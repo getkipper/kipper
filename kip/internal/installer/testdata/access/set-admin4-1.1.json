@@ -1,0 +1,1 @@
+{"nftables": [{"metainfo": {"version": "1.1.1", "release_name": "Commodore Bullmoose #2", "json_schema_version": 1}}, {"set": {"family": "inet", "name": "admin4", "table": "kipper_access", "type": "ipv4_addr", "handle": 2, "flags": "interval", "elem": [{"elem": {"val": {"prefix": {"addr": "203.0.113.0", "len": 24}}}}, {"elem": {"val": "198.51.100.7"}}]}}]}

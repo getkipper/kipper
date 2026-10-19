@@ -1,0 +1,1 @@
+{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"set": {"family": "inet", "name": "admin4", "table": "kipper_access", "type": "ipv4_addr", "handle": 2, "flags": ["interval"], "elem": ["198.51.100.7", {"prefix": {"addr": "203.0.113.0", "len": 24}}]}}]}
