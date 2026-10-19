@@ -99,7 +99,7 @@ func (h *ufwHost) Run(cmd string) (string, error) {
 		return "claimed\n", nil
 	case strings.Contains(cmd, "sshd -T"):
 		return "22\n", nil
-	case strings.Contains(cmd, "No chain/target/match"):
+	case strings.Contains(cmd, "-N ufw-user-input"):
 		if h.chainQueryFails > 0 {
 			h.chainQueryFails--
 			return "unknown: iptables: Resource temporarily unavailable.\n", errors.New("exit status 1")

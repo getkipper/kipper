@@ -359,11 +359,12 @@ func stopUFW(client CommandRunner) error {
 	if err := runUFW(client, "ufw --force disable"); err != nil {
 		return err
 	}
-	// Only iptables' missing-chain response confirms removal. Other query
-	// failures leave the chain's state unknown.
-	out, err := client.Run(`out=$(iptables -w 5 -S ufw-user-input 2>&1); rc=$?; ` +
-		`if [ $rc -eq 0 ]; then echo present; elif printf '%s' "$out" | grep -q 'No chain/target/match'; then echo absent; ` +
-		`else echo "unknown: $out"; exit 1; fi`)
+	// Listing the whole filter table avoids the misleading "incompatible"
+	// error for missing chains in iptables-nft 1.8.9 (Debian 12).
+	// Only a successful listing can confirm that the chain is absent.
+	out, err := client.Run(`out=$(iptables -w 5 -S 2>&1); rc=$?; ` +
+		`if [ $rc -ne 0 ]; then echo "unknown: $out"; exit 1; ` +
+		`elif printf '%s\n' "$out" | grep -qx -- '-N ufw-user-input'; then echo present; else echo absent; fi`)
 	switch strings.TrimSpace(out) {
 	case "absent":
 		return nil
