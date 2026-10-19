@@ -341,9 +341,12 @@ func (h *gatewayHeartbeat) resolveFingerprint(ctx context.Context) (fp string, c
 // handlePinResponse drives the pin state machine from the gateway's answer.
 func (h *gatewayHeartbeat) handlePinResponse(ctx context.Context, resp gatewayRegisterResponse, assertFP string, candidate bool) time.Duration {
 	if resp.Pin == "" {
+		// Keep the warning on the renewal line so log readers can identify beat boundaries.
 		if !h.warnedOldGateway {
 			h.warnedOldGateway = true
-			log.Printf("gateway heartbeat: the gateway does not support certificate pinning yet; the %s.kipper.run hop stays unpinned until it is upgraded", h.subdomain)
+			log.Printf("gateway heartbeat: renewed %s.kipper.run (unpinned): the gateway does not support certificate pinning yet. The hop stays unpinned until the gateway is upgraded", h.subdomain)
+		} else {
+			log.Printf("gateway heartbeat: renewed %s.kipper.run (unpinned)", h.subdomain)
 		}
 		return heartbeatInterval
 	}
