@@ -70,6 +70,12 @@ clock. A cliff means a fleet stopped heartbeating, not that labels were released
 These are written whether or not anything polls `/status`, and each one names a condition the counters
 alone do not distinguish.
 
+- `http: proxy error: <error>` means a proxied request failed. An active request gets an HTML error
+  page if its Accept header includes `text/html`, or one line of text otherwise: 504 for a timeout,
+  including connection and TLS handshake timeouts, 502 for a refused or unreachable cluster, 502 for
+  a certificate rejected by the pin or proof checks, and a generic 502 for anything else. If the
+  request context has ended, such as when a visitor disconnects, the handler writes an empty 502.
+  Repeated errors for one cluster usually mean it is down or restarting.
 - `pin assertion for <sub> pending: asserted SPKI …, observed "…"` — the cluster claims a key the gateway
   does not see at that address. A handful during a rollout is convergence. Repeating for one cluster is
   a misconfigured hop certificate, or someone asserting a key they do not serve.
