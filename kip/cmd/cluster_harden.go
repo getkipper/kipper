@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/getkipper/kipper/kip/internal/infra"
 	"github.com/getkipper/kipper/kip/internal/installer"
 )
 
@@ -15,11 +14,16 @@ var clusterHardenCmd = &cobra.Command{
 	Use:          "harden",
 	SilenceUsage: true,
 	Short:        "Apply host hardening and firewall to an existing cluster",
-	Long: `Audit the cluster's host for surplus services and an existing firewall,
-then apply Kipper's hardening defaults. Idempotent, safe to re-run.
+	Long: `Audit every recorded node for surplus services and an existing firewall,
+then apply Kipper's hardening defaults. Safe to repeat.
 
-Mirrors the hardening that 'kip install' applies on fresh installs, so
-existing clusters can be brought up to current defaults without reinstall.
+Mirrors the hardening that 'kip install' and 'kip node add' apply, so
+existing clusters can use current defaults without reinstalling.
+The server goes first, then each worker one at a time. A worker gets the
+worker firewall: SSH open to all sources and cluster ports open to other
+nodes, with no public access to ports 80, 443 or 6443. kip stops at the first
+node it cannot reach or harden. Run the command again to finish, starting
+from the server.
 
 Examples:
   kip cluster harden
@@ -31,10 +35,10 @@ Examples:
 func init() {
 	clusterHardenCmd.Flags().String("ssh-key", "", "path to SSH private key (defaults to ~/.ssh/id_ed25519)")
 	clusterHardenCmd.Flags().Bool("harden", true, "disable surplus host services exposed on public interfaces (e.g. rpcbind, Cockpit)")
-	clusterHardenCmd.Flags().Bool("firewall", true, "configure the host firewall for k3s: firewalld on Rocky, AlmaLinux and CentOS Stream; UFW elsewhere (firewalld takeover requires --adopt-firewall or interactive consent)")
-	clusterHardenCmd.Flags().Bool("adopt-firewall", false, "allow takeover of running firewalld on Rocky, AlmaLinux or CentOS Stream without a prompt; replaces the public zone, removes services such as Cockpit, and allows SSH and TCP ports 80, 443 and 6443")
+	clusterHardenCmd.Flags().Bool("firewall", true, "configure the host firewall for k3s: firewalld on Rocky, AlmaLinux and CentOS Stream and UFW elsewhere (firewalld takeover requires --adopt-firewall or interactive consent)")
+	clusterHardenCmd.Flags().Bool("adopt-firewall", false, "allow takeover of running firewalld on Rocky, AlmaLinux or CentOS Stream without a prompt. Replaces the public zone, removes services such as Cockpit, and allows SSH on every node and public TCP ports 80, 443 and 6443 on the server")
 	clusterHardenCmd.Flags().Bool("allow-ssh-passwords", false, "leave SSH password login unchanged. By default, kip turns it off after a successful key-only login")
-	clusterHardenCmd.Flags().Bool("no-ssh-rate-limit", false, "disable UFW SSH rate limiting on Ubuntu and Debian; useful for CI or operators sharing a NAT address")
+	clusterHardenCmd.Flags().Bool("no-ssh-rate-limit", false, "disable UFW SSH rate limiting on Ubuntu and Debian. Useful for CI or operators sharing a NAT address")
 	clusterCmd.AddCommand(clusterHardenCmd)
 }
 
@@ -47,35 +51,64 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 	flagKey, _ := cmd.Flags().GetString("ssh-key")
 	noSSHRateLimit, _ := cmd.Flags().GetBool("no-ssh-rate-limit")
 	allowSSHPasswords, _ := cmd.Flags().GetBool("allow-ssh-passwords")
-	explicit, fallback := resolveSSHKey(flagKey, cluster)
 	harden, _ := cmd.Flags().GetBool("harden")
-	firewall, _ := cmd.Flags().GetBool("firewall")
-	adoptFirewall, _ := cmd.Flags().GetBool("adopt-firewall")
-
-	fmt.Printf("\n  Hardening %s (%s)...\n\n", cluster.Name, cluster.Host)
-
-	provider := &infra.BareMetalProvider{
-		Host:           cluster.Host,
-		User:           sshUser(cluster),
-		SSHKey:         explicit,
-		FallbackSSHKey: fallback,
+	isTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+	opts := hardenOptions{
+		harden:       harden,
+		rateLimitSSH: !noSSHRateLimit,
+		keyOnlySSH:   harden && !allowSSHPasswords,
+		askToAdopt:   adoptionQuestion(isTTY),
 	}
-	if err := provider.Connect(); err != nil {
-		return fmt.Errorf("connecting to %s: %w", cluster.Host, err)
-	}
-	defer func() { _ = provider.Close() }()
-	client := provider.Client()
+	opts.firewall, _ = cmd.Flags().GetBool("firewall")
+	opts.adoptFirewall, _ = cmd.Flags().GetBool("adopt-firewall")
 
-	records, err := recordNodes(client, cluster.Name, cluster.Host)
+	fmt.Printf("\n  Hardening %s (%s)...\n", cluster.Name, cluster.Host)
+
+	// The lease keeps kip node add and remove from changing peer rules while
+	// this run rewrites them from the records.
+	leased, err := leaseCluster(cluster, flagKey, "kip cluster harden")
 	if err != nil {
 		return err
 	}
-	if other, busy := installer.RemovalInProgress(records, ""); busy {
-		return fmt.Errorf("%s is being removed, and hardening now would give its address access again. Finish the removal with 'kip node remove %s', or keep it with 'kip node add %s'", other.Name, other.Name, other.Host)
-	}
-	server, _ := installer.ServerRecord(records)
-	mesh := installer.FirewallMeshFor(records, server.MachineID)
+	defer leased.close()
 
+	records, err := recordNodes(leased.server, cluster.Name, cluster.Host)
+	if err != nil {
+		return err
+	}
+	if err := nodesSettled(records); err != nil {
+		return fmt.Errorf("%w. Hardening during a join or removal could grant access to that node's address", err)
+	}
+
+	step := hardenEach(records, func(client installer.FirewallRunner, host string, mesh installer.FirewallMesh) error {
+		return hardenNode(client, host, mesh, opts)
+	})
+	if err := forEachNode(records, leased.server, leased.dialer(cluster, flagKey), step); err != nil {
+		return err
+	}
+	fmt.Println()
+	return nil
+}
+
+// hardenEach builds the per-node harden step. Each node gets the firewall for
+// its own role, with peer rules for other records that have a peer address.
+func hardenEach(records []installer.NodeRecord, harden func(client installer.FirewallRunner, host string, mesh installer.FirewallMesh) error) func(installer.NodeRecord, installer.FirewallRunner) error {
+	return func(rec installer.NodeRecord, client installer.FirewallRunner) error {
+		fmt.Printf("\n  Node %s (%s, %s)\n\n", rec.Name, rec.Host, rec.Role)
+		return harden(client, rec.Host, installer.FirewallMeshFor(records, rec.MachineID))
+	}
+}
+
+type hardenOptions struct {
+	harden, firewall, adoptFirewall bool
+	rateLimitSSH, keyOnlySSH        bool
+	askToAdopt                      func(question string) bool
+}
+
+// hardenNode audits one host, then disables surplus services, configures its
+// firewall for mesh and turns off SSH password login as opts allow. Every
+// step is safe to repeat.
+func hardenNode(client installer.FirewallRunner, host string, mesh installer.FirewallMesh, opts hardenOptions) error {
 	fmt.Printf("  Auditing host security...\n")
 	audit, err := installer.AuditHost(client)
 	if err != nil {
@@ -94,32 +127,31 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("auditing firewall: %w", err)
 	}
-	isTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
-	consent, err := installer.AdoptionConsent(client, cluster.Host, fwAudit, firewall, adoptFirewall, adoptionQuestion(isTTY), mesh)
+	consent, err := installer.AdoptionConsent(client, host, fwAudit, opts.firewall, opts.adoptFirewall, opts.askToAdopt, mesh)
 	if err != nil {
 		return fmt.Errorf("checking the running firewalld: %w", err)
 	}
-	fwPlan := installer.PlanFirewall(fwAudit, firewall, consent.Adopt)
+	fwPlan := installer.PlanFirewall(fwAudit, opts.firewall, consent.Adopt)
 	fwPlan.AdoptFingerprint = consent.Fingerprint
 	fwPlan.Mesh = mesh
 	fmt.Print(fwPlan.Notice)
 	fmt.Println()
 
 	switch {
-	case harden && len(findings) > 0:
+	case opts.harden && len(findings) > 0:
 		fmt.Printf("  ...  Hardening host OS\n")
 		if err := installer.HardenHost(client); err != nil {
 			return fmt.Errorf("hardening host: %w", err)
 		}
 		fmt.Printf("  ✔  Hardening host OS\n")
-	case !harden && len(findings) > 0:
+	case !opts.harden && len(findings) > 0:
 		fmt.Printf("  ⚠  Host hardening skipped (--harden=false)\n")
 	}
 
 	switch {
 	case fwPlan.Configure:
 		fmt.Printf("  ...  Configuring firewall\n")
-		if err := installer.ApplyFirewallPlan(client, fwPlan, !noSSHRateLimit); err != nil {
+		if err := installer.ApplyFirewallPlan(client, fwPlan, opts.rateLimitSSH); err != nil {
 			return fmt.Errorf("configuring firewall: %w", err)
 		}
 		fmt.Printf("  ✔  Configuring firewall\n")
@@ -127,7 +159,7 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 		fmt.Print(fwPlan.FlagNotice)
 	}
 
-	if harden && !allowSSHPasswords {
+	if opts.keyOnlySSH {
 		fmt.Printf("  ...  Turning off SSH password login\n")
 		changed, err := installer.EnsureKeyOnlySSH(client)
 		if err != nil {
@@ -139,7 +171,5 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 			fmt.Printf("  ✔  SSH password login is off in sshd's configuration, and sshd refuses a password for kip's login\n")
 		}
 	}
-
-	fmt.Println()
 	return nil
 }

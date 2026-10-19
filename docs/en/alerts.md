@@ -150,9 +150,11 @@ Kipper’s protection covers restarts initiated by needrestart. An upgrade of th
 Kipper writes `/etc/needrestart/conf.d/50-kipper-storage.conf` during
 `kip install` and `kip node add` to stop that, leaving `iscsid`,
 `systemd-networkd` and `systemd-resolved` for you to restart at a time you
-choose. A node added by an older `kip` does not have the file:
+choose. A node added by an older `kip` does not have the file. Repair every
+recorded node, or one node by address:
 
 ```bash
+kip node repair-host
 kip node repair-host --host <address>
 ```
 

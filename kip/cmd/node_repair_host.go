@@ -11,30 +11,37 @@ import (
 )
 
 var nodeRepairHostCmd = &cobra.Command{
-	Use:   "repair-host",
-	Short: "Apply host configuration to a node that predates it",
-	Long: `Configures needrestart on an Ubuntu or Debian node to defer storage-service
-restarts, then records the configuration on its Kubernetes node object. This
+	Use:          "repair-host",
+	Short:        "Apply host configuration to nodes that predate it",
+	SilenceUsage: true,
+	Long: `Configures needrestart on Ubuntu and Debian nodes to defer storage-service
+restarts, then records the configuration on each Kubernetes node object. This
 protects Longhorn volumes from disruptions after library updates.
 
 Use this for nodes added by older kip versions. It applies the same configuration
 as kip install and kip node add, using the same connection details, and is safe
-to repeat. Only the node specified by --host is updated.
+to repeat. Without --host it repairs every recorded node: the server first, then
+each worker one at a time, stopping at the first node it cannot reach or repair.
+Run it again to finish, starting from the server. With --host only that node
+is updated.
 
 On other OS families, the command prints storage package update guidance.
-Local storage requires no storage-service restart configuration.`,
+Local storage requires no storage-service restart configuration.
+
+Examples:
+  kip node repair-host
+  kip node repair-host --host 203.0.113.11`,
 	RunE: runNodeRepairHost,
 }
 
 func init() {
-	nodeRepairHostCmd.Flags().String("host", "", "IP address or hostname of the node to repair")
+	nodeRepairHostCmd.Flags().String("host", "", "IP address or hostname of a single node to repair (default: every recorded node)")
 	nodeRepairHostCmd.Flags().String("ssh-key", "", "path to SSH private key")
-	_ = nodeRepairHostCmd.MarkFlagRequired("host")
 
 	nodeCmd.AddCommand(nodeRepairHostCmd)
 }
 
-func runNodeRepairHost(cmd *cobra.Command, args []string) error {
+func runNodeRepairHost(cmd *cobra.Command, _ []string) error {
 	nodeHost, _ := cmd.Flags().GetString("host")
 	sshKey, _ := cmd.Flags().GetString("ssh-key")
 
@@ -43,52 +50,93 @@ func runNodeRepairHost(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Use the control plane's kubectl to read cluster settings and record the repair.
-	masterClient, err := ssh.Dial(nodeSSH(cluster.Host, sshKey, cluster))
+	// The control plane's kubectl reads cluster settings and records the repair.
+	leased, err := leaseCluster(cluster, sshKey, "kip node repair-host")
 	if err != nil {
-		return fmt.Errorf("connecting to the control plane: %w", err)
+		return err
 	}
-	defer func() { _ = masterClient.Close() }()
-	if done, err := repairHostNotNeeded(masterClient); err != nil || done {
+	defer leased.close()
+	master := leased.server
+	if done, err := repairHostNotNeeded(master); err != nil || done {
 		return err
 	}
 
-	fmt.Printf("\n  Connecting to %s...\n", nodeHost)
-	nodeClient, err := ssh.Dial(nodeSSH(nodeHost, sshKey, cluster))
-	if err != nil {
-		return fmt.Errorf("connecting to %s: %w", nodeHost, err)
+	if nodeHost != "" {
+		fmt.Printf("\n  Connecting to %s...\n", nodeHost)
+		nodeConn, err := ssh.Dial(nodeSSH(nodeHost, sshKey, cluster))
+		if err != nil {
+			return fmt.Errorf("connecting to %s: %w", nodeHost, err)
+		}
+		defer func() { _ = nodeConn.Close() }()
+		if err := repairNodeHost(master, leased.lease.Host(nodeConn), nodeHost, ""); err != nil {
+			return err
+		}
+		fmt.Println()
+		return nil
 	}
-	defer func() { _ = nodeClient.Close() }()
 
-	host, err := installer.DetectHostOS(nodeClient)
+	records, err := recordNodes(master, cluster.Name, cluster.Host)
+	if err != nil {
+		return err
+	}
+	if err := nodesSettled(records); err != nil {
+		return err
+	}
+	if err := repairHostOnNodes(records, master, leased.dialer(cluster, sshKey)); err != nil {
+		return err
+	}
+	fmt.Println()
+	return nil
+}
+
+// repairHostOnNodes repairs the server, then each worker in turn, and
+// records each one through the server using its recorded machine ID.
+// Worker identities are checked before repair.
+func repairHostOnNodes(records []installer.NodeRecord, server installer.FirewallRunner, dial nodeDialer) error {
+	return forEachNode(records, server, dial, func(rec installer.NodeRecord, client installer.FirewallRunner) error {
+		fmt.Printf("\n  Node %s (%s)\n", rec.Name, rec.Host)
+		return repairNodeHost(server, client, rec.Host, rec.MachineID)
+	})
+}
+
+// repairNodeHost defers storage-service restarts on one node and records the
+// configuration on its Kubernetes node through master. An empty machineID is
+// read from the node. If that read fails, the configuration is left in place
+// and a warning is printed instead of recording it. OS families that do not
+// use needrestart receive package update guidance instead.
+func repairNodeHost(master, node installer.CommandRunner, nodeHost, machineID string) error {
+	host, err := installer.DetectHostOS(node)
 	if err != nil {
 		return fmt.Errorf("reading the OS of %s: %w", nodeHost, err)
 	}
 	if !host.UsesNeedrestart() {
 		fmt.Printf("  ℹ  Kipper skips needrestart configuration on %s. Update storage packages\n", nodeHost)
-		fmt.Printf("     during planned downtime: their package scripts may restart iscsid.\n\n")
+		fmt.Printf("     during planned downtime: their package scripts may restart iscsid.\n")
 		return nil
 	}
-	if err := installer.ConfigureStorageRestarts(nodeClient); err != nil {
+	if err := installer.ConfigureStorageRestarts(node); err != nil {
 		return fmt.Errorf("configuring storage restarts on %s: %w", nodeHost, err)
 	}
 	fmt.Printf("  ✔  Storage-path restarts deferred\n")
 
-	machineID, err := installer.ReadMachineID(nodeClient)
-	if err != nil {
-		fmt.Printf("  ⚠   %s has no machine id: %v\n      The host is configured. kip status cannot confirm it.\n\n", nodeHost, err)
-		return nil
+	if machineID == "" {
+		id, err := installer.ReadMachineID(node)
+		if err != nil {
+			fmt.Printf("  ⚠   %s has no machine id: %v\n      The host is configured. kip status cannot confirm it.\n", nodeHost, err)
+			return nil
+		}
+		machineID = id
 	}
 
-	nodeName, err := installer.NodeNameForMachine(masterClient, machineID)
+	nodeName, err := installer.NodeNameForMachine(master, machineID)
 	if err != nil {
 		return fmt.Errorf("identifying %s: %w", nodeHost, err)
 	}
-	if err := installer.StampStorageRestarts(masterClient, nodeName, machineID); err != nil {
+	if err := installer.StampStorageRestarts(master, nodeName, machineID); err != nil {
 		return fmt.Errorf("recording host configuration for %s: %w", nodeName, err)
 	}
 
-	fmt.Printf("  ✔  %s recorded as configured\n\n", nodeName)
+	fmt.Printf("  ✔  %s recorded as configured\n", nodeName)
 	return nil
 }
 

@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/getkipper/kipper/kip/internal/installer"
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 var clusterDNSCmd = &cobra.Command{
@@ -16,15 +15,20 @@ var clusterDNSCmd = &cobra.Command{
 }
 
 var clusterDNSRepairCmd = &cobra.Command{
-	Use:   "repair",
-	Short: "Restore the curated resolver file and restart CoreDNS",
-	Long: `Rewrites /etc/rancher/k3s/resolv.conf on the host from the resolver set the
-cluster was configured with (dns_resolvers in ~/.kip/config.yaml, or the
-default public resolvers), then restarts CoreDNS so it picks the file up.
+	Use:          "repair",
+	Short:        "Restore the curated resolver file and restart CoreDNS",
+	SilenceUsage: true,
+	Long: `Rewrites /etc/rancher/k3s/resolv.conf on every recorded node from the
+resolver set the cluster was configured with (dns_resolvers in
+~/.kip/config.yaml, or the default public resolvers), then restarts CoreDNS
+so it picks the file up. The server goes first, then each worker one at a
+time. kip stops at the first node it cannot reach or repair, before the
+restart. Run the command again to finish, starting from the server.
 
-This is the scoped fix for the resolver drift 'kip status' warns about: a
-hand-edited or broken resolver file. Nothing else about the installation is
-touched.
+This repairs the resolver drift 'kip status' warns about, such as a
+hand-edited or broken resolver file. It also synchronizes node records
+with the local cluster configuration and leaves other installation
+settings unchanged.
 
 Examples:
   kip cluster dns repair`,
@@ -45,26 +49,44 @@ func runClusterDNSRepair(_ *cobra.Command, _ []string) error {
 		return err
 	}
 	if cluster.Host == "" {
-		return fmt.Errorf("no host recorded for cluster %s; DNS repair needs SSH access to the server", cluster.Name)
+		return fmt.Errorf("no host recorded for cluster %s. DNS repair needs SSH access to the server", cluster.Name)
 	}
 
-	explicit, fallback := resolveSSHKey("", cluster)
-	client, err := ssh.Dial(ssh.Config{
-		Host:            cluster.Host,
-		User:            sshUser(cluster),
-		KeyPath:         explicit,
-		FallbackKeyPath: fallback,
-	})
-	if err != nil {
-		return fmt.Errorf("connecting to %s over SSH: %w", cluster.Host, err)
-	}
-	defer func() { _ = client.Close() }()
-
-	applied, err := installer.RepairHostDNS(client, cluster.DNSResolvers)
+	leased, err := leaseCluster(cluster, "", "kip cluster dns repair")
 	if err != nil {
 		return err
 	}
-	fmt.Printf("\n  ✔  Restored resolvers on %s: %s\n", cluster.Host, strings.Join(applied, ", "))
+	defer leased.close()
+	records, err := recordNodes(leased.server, cluster.Name, cluster.Host)
+	if err != nil {
+		return err
+	}
+	if err := nodesSettled(records); err != nil {
+		return err
+	}
+
+	fmt.Println()
+	if err := repairDNSOnNodes(records, leased.server, leased.dialer(cluster, ""), cluster.DNSResolvers); err != nil {
+		return err
+	}
 	fmt.Printf("  ✔  CoreDNS restarted to pick them up\n\n")
 	return nil
+}
+
+// repairDNSOnNodes writes the resolver file on the server, then on each
+// worker, and restarts CoreDNS once every node has it. It stops at the first
+// node that fails, before the restart.
+func repairDNSOnNodes(records []installer.NodeRecord, server installer.FirewallRunner, dial nodeDialer, resolvers []string) error {
+	err := forEachNode(records, server, dial, func(rec installer.NodeRecord, client installer.FirewallRunner) error {
+		written, err := installer.WriteHostDNS(client, resolvers)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("  ✔  Restored resolvers on %s (%s): %s\n", rec.Name, rec.Host, strings.Join(written, ", "))
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return installer.RestartCoreDNS(server)
 }
