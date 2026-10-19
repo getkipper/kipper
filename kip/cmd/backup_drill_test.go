@@ -245,6 +245,7 @@ func TestADrillGivesUpOnAPodTheNodeCannotFit(t *testing.T) {
 	err := check(ctx)
 	assert.ErrorContains(t, err, "Insufficient cpu")
 	assert.ErrorContains(t, err, "kip stopped waiting for restore drill-x. The restore is still running")
+	assert.ErrorContains(t, err, "kip backup restore --cancel drill-x", "A stuck restore blocks all later restores, so the message gives the command to end it.")
 }
 
 func TestAPodThatGetsScheduledResetsTheDrillsPatience(t *testing.T) {
