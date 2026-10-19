@@ -262,9 +262,32 @@ func (c *Client) attempt(command string, stdin []byte, stream io.Writer) (string
 	return c.attemptRaw(c.remoteCommand(command), stdin, stream)
 }
 
-// attemptRaw sends command as supplied, allowing connection probes to bypass
-// the sudo wrapper and preserve its diagnostics.
+// maxInlineCommand is the byte threshold for staging commands with nil stdin.
+// OpenSSH sends shared-connection commands through a local socket. Staying below
+// macOS's default 8 KiB socket buffer size leaves room for protocol overhead to
+// avoid "mm_send_fd: sendmsg(1): Message too long" failures.
+const maxInlineCommand = 4096
+
+// stagedCommand evaluates a command from stdin in the remote user's shell,
+// keeping it in memory. Redirecting stdin from /dev/null preserves the empty
+// input used for inline commands with nil stdin. The x sentinel preserves
+// trailing newlines that command substitution would otherwise strip.
+const stagedCommand = `c=$(cat && printf x) || exit 1; c=${c%x}; eval "$c" </dev/null`
+
+// stage moves commands exceeding maxInlineCommand bytes onto stdin when stdin
+// is nil. A non-nil stdin, even if empty, preserves the caller's input and keeps
+// the command inline. Commands at or below the threshold also stay inline.
+func stage(command string, stdin []byte) (string, []byte) {
+	if stdin != nil || len(command) <= maxInlineCommand {
+		return command, stdin
+	}
+	return stagedCommand, []byte(command)
+}
+
+// attemptRaw runs command without the sudo wrapper so connection probes retain
+// their diagnostics. Long commands with nil stdin are staged through stdin.
 func (c *Client) attemptRaw(command string, stdin []byte, stream io.Writer) (string, error) {
+	command, stdin = stage(command, stdin)
 	cmd, ctx, cancel := c.command(append(c.sshArgs(), command)...)
 	defer cancel()
 	if stdin != nil {
@@ -379,8 +402,12 @@ func (c *Client) RunStream(command string, stdout io.Writer) error {
 // RunStreamTo separates remote stdout from stderr and SSH diagnostics so callers
 // can track log offsets. It leaves retries to the caller to avoid duplicate output.
 func (c *Client) RunStreamTo(command string, stdout, stderr io.Writer) error {
-	cmd, ctx, cancel := c.command(append(c.sshArgs(), c.remoteStreamCommand(command))...)
+	remote, stdin := stage(c.remoteStreamCommand(command), nil)
+	cmd, ctx, cancel := c.command(append(c.sshArgs(), remote)...)
 	defer cancel()
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	err := cmd.Run()
