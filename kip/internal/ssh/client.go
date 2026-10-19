@@ -365,14 +365,15 @@ type Held struct {
 }
 
 // Start starts the local SSH process without a command time limit and
-// discards stderr. A successful return means SSH started, so connection or
+// discards stderr. Like Run, it runs the command as root, through sudo for a
+// non-root login. A successful return means SSH started, so connection or
 // remote command failures can still be reported by Held.Wait. The caller
 // must close Stdin, drain Stdout and call Wait. Closing Stdin sends EOF,
 // which ends commands that exit on EOF. SSH shares kip's process group and
 // receives interrupts sent to that group.
 func (c *Client) Start(command string) (*Held, error) {
 	//nolint:gosec // ssh client is the operator's chosen execution surface; arguments are built by kip internals against the host the operator selected
-	cmd := exec.Command("ssh", append(c.sshArgs(), command)...)
+	cmd := exec.Command("ssh", append(c.sshArgs(), c.remoteStreamCommand(command))...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
