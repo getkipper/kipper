@@ -14,12 +14,9 @@ import (
 )
 
 // ttySizeQueue feeds remote terminal-size updates to the exec stream.
-// Initial size is sent immediately so the remote shell renders its
-// prompt at the right width. SIGWINCH on the local TTY pushes new
-// sizes onto the channel as the user resizes their window. Without
-// this the shell's prompt-redraw queries (e.g. ESC[6n "where's the
-// cursor?") get printed as text instead of being interpreted by the
-// terminal, giving "^[[47;8R"-style garbage.
+// It queues the initial stdout terminal size so the remote shell can render
+// its prompt at the right width. On Unix, SIGWINCH queues updated sizes.
+// Unavailable sizes and updates received while the queue is full are skipped.
 type ttySizeQueue struct {
 	ch chan remotecommand.TerminalSize
 }
@@ -56,8 +53,8 @@ var execCmd = &cobra.Command{
 	Long: `Opens an interactive shell in a running app, function, or service pod.
 Optionally run a specific command instead of an interactive shell.
 
-The name must identify one workload. Where it matches several, kip says which
-and stops, rather than choosing one for you.
+The name must identify one workload. If it matches several, kip lists the
+matches and stops so you can choose the intended workload.
 
 Examples:
   kip exec myapp                          # Open shell in app pod
@@ -81,7 +78,6 @@ func init() {
 func runExec(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
-	// Everything after -- is the command to run
 	var command []string
 	if cmd.ArgsLenAtDash() > 0 {
 		command = args[cmd.ArgsLenAtDash():]
@@ -95,10 +91,8 @@ func runExec(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// A shell that opens somewhere other than where the operator meant is the
-	// failure this guards against, so an unresolvable name is refused rather
-	// than resolved by list order. exec accepts a running-but-unready pod:
-	// debugging one is a legitimate reason to want a shell in it.
+	// Require a unique workload to avoid opening a shell in the wrong target.
+	// Allow running pods that are unready so they can be debugged.
 	request, err := workloadTargetFlags(cmd, cluster, name, acceptUnready)
 	if err != nil {
 		return err
@@ -115,42 +109,37 @@ func runExec(cmd *cobra.Command, args []string) error {
 	podName := target.pod.Name
 	containerName := workloadContainerName(target.pod, name)
 
-	// Build the exec request
 	kubeconfigPath := cluster.Kubeconfig
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("loading kubeconfig: %w", err)
 	}
 
+	stdinFd := int(os.Stdin.Fd())
+	interactive := term.IsTerminal(stdinFd)
+	options := execOptions(containerName, command, interactive)
 	req := clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(podName).
 		Namespace(namespace).
 		SubResource("exec").
-		VersionedParams(&corev1.PodExecOptions{
-			Container: containerName,
-			Command:   command,
-			Stdin:     true,
-			Stdout:    true,
-			Stderr:    true,
-			TTY:       true,
-		}, scheme.ParameterCodec)
+		VersionedParams(&options, scheme.ParameterCodec)
 
 	executor, err := remotecommand.NewSPDYExecutor(config, "POST", req.URL())
 	if err != nil {
 		return fmt.Errorf("creating executor: %w", err)
 	}
 
-	fmt.Printf("  Connecting to %s/%s...\n\n", namespace, podName)
+	// Keep connection status out of captured command output.
+	if interactive {
+		fmt.Fprintf(os.Stderr, "  Connecting to %s/%s...\n\n", namespace, podName)
+	}
 
-	// Put the local terminal into raw mode so keys go through to the
-	// remote shell without local echo or line-buffering, and so escape
-	// sequences (cursor queries, control keys) don't get processed
-	// twice. Restored on exit. If stdin isn't a TTY (piped input,
-	// non-interactive), skip raw mode and just stream.
-	stdinFd := int(os.Stdin.Fd())
+	// Raw mode lets the remote shell handle echo, line buffering and escape
+	// sequences (cursor queries and control keys) directly. Restore the local
+	// terminal on return. Non-terminal input can stream without raw mode.
 	var sizeQueue remotecommand.TerminalSizeQueue
-	if term.IsTerminal(stdinFd) {
+	if interactive {
 		oldState, err := term.MakeRaw(stdinFd)
 		if err != nil {
 			return fmt.Errorf("putting terminal into raw mode: %w", err)
@@ -163,7 +152,22 @@ func runExec(cmd *cobra.Command, args []string) error {
 		Stdin:             os.Stdin,
 		Stdout:            os.Stdout,
 		Stderr:            os.Stderr,
-		Tty:               true,
+		Tty:               options.TTY,
 		TerminalSizeQueue: sizeQueue,
 	})
+}
+
+// execOptions enables stdin, stdout and stderr and requests a TTY for
+// interactive sessions. The caller determines whether stdin is a terminal.
+// Non-interactive sessions use streams so piped or empty stdin can close
+// independently of the command's output.
+func execOptions(container string, command []string, interactive bool) corev1.PodExecOptions {
+	return corev1.PodExecOptions{
+		Container: container,
+		Command:   command,
+		Stdin:     true,
+		Stdout:    true,
+		Stderr:    true,
+		TTY:       interactive,
+	}
 }
