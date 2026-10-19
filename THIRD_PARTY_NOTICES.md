@@ -11,7 +11,7 @@ Its distributed binaries and container images include the third-party open-sourc
 
 Kipper's registry serves container images of the MinIO server (`ghcr.io/getkipper/minio`, release RELEASE.2025-09-07T16-13-09Z) and the MinIO client (`ghcr.io/getkipper/mc`, release RELEASE.2025-08-13T08-35-41Z). Both are licensed under the GNU Affero General Public License 3.0 (AGPL-3.0) and are built unmodified from their upstream source. Under AGPL-3.0, the Corresponding Source is available at https://github.com/minio/minio/tree/RELEASE.2025-09-07T16-13-09Z and https://github.com/minio/mc/tree/RELEASE.2025-08-13T08-35-41Z, and the build recipe is `images/minio` in this repository. Each image carries, under `/licenses`, the full license text, the attributions and licenses of the dependencies built into it (upstream's `CREDITS`), and these source directions. Kipper's own code is not covered by the AGPL-3.0; it runs these images as separate programs.
 
-## Go components (92)
+## Go components (91)
 
 ### filippo.io/edwards25519 v1.1.1
 
@@ -3187,19 +3187,6 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-```
-
-### github.com/lib/pq v1.10.9
-
-```
-Copyright (c) 2011-2013, 'pq' Contributors
-Portions Copyright (C) 2011 Blake Mizerany
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### github.com/mailru/easyjson v0.7.7

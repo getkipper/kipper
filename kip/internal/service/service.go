@@ -549,8 +549,8 @@ func (m *Manager) Update(ctx context.Context, namespace, name string, opts Optio
 
 // Snapshot holds a service's type, credential or name blockage, and TLS state
 // from one CR read, so callers make decisions from a consistent snapshot.
-// TLSServing reflects the controller's TLSReady condition, and TLSWaiting
-// contains the reason when that condition is false.
+// TLSServing requires a Serving condition for the current generation.
+// TLSWaiting contains the condition message when TLSReady is false.
 type Snapshot struct {
 	Type           string
 	BlockedReason  string
@@ -585,7 +585,7 @@ func (m *Manager) Read(ctx context.Context, namespace, name string) (Snapshot, e
 	tls, _, _ := unstructured.NestedString(cr.Object, "spec", "tls")
 	_, waiting := blockage(cr.Object, servicecatalog.ConditionTLSReady)
 	return Snapshot{Type: svcType, BlockedReason: reason, BlockedMessage: message,
-		TLS: tls, TLSServing: conditionTrue(cr.Object, servicecatalog.ConditionTLSReady), TLSWaiting: waiting}, nil
+		TLS: tls, TLSServing: ServesTLS(cr), TLSWaiting: waiting}, nil
 }
 
 // credentialsBlockage reads the reason and remedy off a service that the
@@ -628,13 +628,19 @@ func blockage(obj map[string]interface{}, wanted string) (string, string) {
 	return "", ""
 }
 
-func conditionTrue(obj map[string]interface{}, wanted string) bool {
-	conditions, _, _ := unstructured.NestedSlice(obj, "status", "conditions")
+// ServesTLS reports whether the controller has confirmed that a service's pod
+// serves TLS in the mode requested by its current spec. It requires a true
+// TLSReady condition with reason Serving for the current generation and returns
+// false when that confirmation is missing or stale.
+func ServesTLS(cr *unstructured.Unstructured) bool {
+	conditions, _, _ := unstructured.NestedSlice(cr.Object, "status", "conditions")
 	for _, entry := range conditions {
 		condition, ok := entry.(map[string]interface{})
-		if ok && condition["type"] == wanted && condition["status"] == "True" {
-			return true
+		if !ok || condition["type"] != servicecatalog.ConditionTLSReady {
+			continue
 		}
+		observed, _, _ := unstructured.NestedInt64(condition, "observedGeneration")
+		return condition["status"] == "True" && condition["reason"] == "Serving" && observed == cr.GetGeneration()
 	}
 	return false
 }

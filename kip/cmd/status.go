@@ -5,15 +5,19 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/alerts"
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/k8s"
+	"github.com/getkipper/kipper/kip/internal/manifest"
 	"github.com/getkipper/kipper/kip/internal/service"
 	"github.com/getkipper/kipper/kip/internal/ssh"
 )
@@ -87,6 +91,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 	reportAlertDelivery(ctx, client)
 	reportCrashLoopingServices(ctx, client)
+	reportPlaintextPostgres(ctx, client)
 
 	checkHost(cluster, nodes)
 
@@ -160,6 +165,52 @@ func reportCrashLoopingServices(ctx context.Context, client *k8s.Client) {
 		fmt.Printf("       %s\n", l.Message)
 	}
 	fmt.Println()
+}
+
+// reportPlaintextPostgres names Postgres services that may still accept
+// network connections without TLS. A failed listing prints nothing.
+func reportPlaintextPostgres(ctx context.Context, client *k8s.Client) {
+	list, err := client.Dynamic().Resource(manifest.ServiceGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+	open := plaintextPostgres(list.Items)
+	if len(open) == 0 {
+		return
+	}
+	fmt.Printf("  Postgres services that may still accept connections without TLS:\n")
+	for _, line := range open {
+		fmt.Printf("    ⚠  %s\n", line)
+	}
+	fmt.Printf("       Require TLS with kip service update <name> --tls required once their apps connect with TLS.\n\n")
+}
+
+// plaintextPostgres describes each Postgres service that may still let a
+// client connect without TLS: mode off or on, or mode required before the
+// controller has confirmed the restart into that mode. Results are sorted by
+// namespace and name.
+func plaintextPostgres(services []unstructured.Unstructured) []string {
+	var open []string
+	for i := range services {
+		svc := &services[i]
+		if t, _, _ := unstructured.NestedString(svc.Object, "spec", "type"); t != "postgres" {
+			continue
+		}
+		mode, _, _ := unstructured.NestedString(svc.Object, "spec", "tls")
+		where := svc.GetNamespace() + "/" + svc.GetName()
+		switch {
+		case mode == "required" && service.ServesTLS(svc):
+			continue
+		case mode == "required":
+			open = append(open, where+" (tls required, not confirmed yet)")
+		case mode == "on":
+			open = append(open, where+" (tls on)")
+		default:
+			open = append(open, where+" (tls off)")
+		}
+	}
+	sort.Strings(open)
+	return open
 }
 
 func checkHost(cluster *config.Cluster, nodes []k8s.NodeInfo) {

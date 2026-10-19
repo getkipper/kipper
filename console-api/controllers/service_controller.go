@@ -685,6 +685,11 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 		if err := objectIsOurs("workload", &existing, svc); err != nil {
 			return err
 		}
+		if awaitCertificate && tlsRequired(svc) {
+			// Rendering without a certificate would drop TLS from a service
+			// that requires it, so the running pod stays as it is.
+			return nil
+		}
 		r.reportTLSRollout(ctx, svc, certHash, &existing)
 	}
 	if err != nil {

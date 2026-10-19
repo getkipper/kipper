@@ -138,7 +138,7 @@ func init() {
 	serviceAddCmd.Flags().String("memory", "", "memory limit (e.g. 256Mi, 1Gi)")
 	serviceAddCmd.Flags().String("cpu", "", "CPU limit (e.g. 500m, 1)")
 	serviceAddCmd.Flags().String("version", "", "image version override (e.g. 16, 8.0, 7)")
-	serviceAddCmd.Flags().String("tls", "", "Postgres only: serve TLS with a certificate from the cluster's service CA (on or off, default on)")
+	serviceAddCmd.Flags().String("tls", "", "Postgres only: TLS with a certificate from the cluster's service CA: required (default), on (plaintext still accepted) or off")
 	serviceAddCmd.Flags().Bool("consistent-backups", true, "Postgres only. Add a pg_dump of every database to each backup. Use --consistent-backups=false to disable.")
 	_ = serviceAddCmd.MarkFlagRequired("name")
 
@@ -154,8 +154,9 @@ func init() {
 	serviceUpdateCmd.Flags().String("memory", "", "new memory limit (e.g. 1Gi)")
 	serviceUpdateCmd.Flags().String("cpu", "", "new CPU limit (e.g. 1)")
 	serviceUpdateCmd.Flags().String("version", "", "new image version")
-	serviceUpdateCmd.Flags().String("tls", "", "Postgres only: on or off. The database restarts once to switch")
+	serviceUpdateCmd.Flags().String("tls", "", "Postgres only: required, on or off. The database restarts once to switch")
 	serviceUpdateCmd.Flags().Bool("consistent-backups", false, "Postgres only. Add a pg_dump of every database to each backup. Use --consistent-backups=false to disable. Changing this setting restarts the database once.")
+	serviceUpdateCmd.Flags().Bool("force", false, "with --tls required, switch even while clients are connected without TLS")
 
 	serviceRestartCmd.Flags().String("project", "default", "project namespace")
 	serviceRestartCmd.Flags().String("environment", "", "target environment")
@@ -536,9 +537,12 @@ func runServiceUpdate(cmd *cobra.Command, args []string) error {
 	if storage == "" && memory == "" && cpu == "" && version == "" && tls == "" && !dumpSet {
 		return fmt.Errorf("specify at least one of --storage, --memory, --cpu, --version, --tls, or --consistent-backups")
 	}
-	if tls != "" && tls != "on" && tls != "off" {
-		return fmt.Errorf("--tls must be on or off, not %q", tls)
+	if tls != "" {
+		if err := validTLSMode(tls); err != nil {
+			return err
+		}
 	}
+	force, _ := cmd.Flags().GetBool("force")
 
 	_, k8sClient, err := loadCurrentCluster()
 	if err != nil {
@@ -550,14 +554,35 @@ func runServiceUpdate(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\n  Updating service %s...\n", name)
 
+	if tls == "required" {
+		snapshot, err := mgr.Read(ctx, namespace, name)
+		if err != nil {
+			return err
+		}
+		exec := func() (podExecFunc, error) {
+			database := ""
+			target, err := resolveTransferTarget(ctx, name, namespace, &database)
+			if err != nil {
+				return nil, err
+			}
+			return target.exec, nil
+		}
+		if err := requireTLSGate(ctx, snapshot, name, exec, force); err != nil {
+			return err
+		}
+	}
 	if tls != "" {
 		changed, err := setServiceTLS(ctx, k8sClient.Dynamic(), namespace, name, tls)
 		if err != nil {
 			return err
 		}
-		if changed {
+		switch {
+		case changed && tls == "required":
+			fmt.Printf("  ✔  TLS set to required. The database restarts once and then refuses connections without TLS.\n")
+			fmt.Printf("     The check covered only currently connected clients. Disconnected clients, such as scheduled jobs or stopped apps, were not checked.\n")
+		case changed:
 			fmt.Printf("  ✔  TLS set to %s. The database restarts once to switch\n", tls)
-		} else {
+		default:
 			fmt.Printf("  ✔  TLS is already %s\n", tls)
 		}
 		if storage == "" && memory == "" && cpu == "" && version == "" && !dumpSet {

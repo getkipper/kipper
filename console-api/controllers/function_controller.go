@@ -956,12 +956,11 @@ func (r *FunctionReconciler) buildPollSidecar(ctx context.Context, fn *kipperv1.
 
 	sourceURL := conn.URL()
 	if trigger.Type == "postgres" && !strings.Contains(sourceURL, "sslmode") {
-		// Kipper services run with sslmode=disable in-cluster; the poller
-		// needs the same so the connection succeeds.
+		// Prefer TLS so the poller can connect in all three service TLS modes.
 		if strings.Contains(sourceURL, "?") {
-			sourceURL += "&sslmode=disable"
+			sourceURL += "&sslmode=prefer"
 		} else {
-			sourceURL += "?sslmode=disable"
+			sourceURL += "?sslmode=prefer"
 		}
 	}
 
@@ -1118,7 +1117,7 @@ func buildKEDATriggers(fn *kipperv1.Function, trigger *kipperv1.FunctionTrigger,
 				"port":             fmt.Sprintf("%d", conn.Port),
 				"userName":         conn.Username,
 				"dbName":           conn.Database,
-				"sslmode":          "disable",
+				"sslmode":          "prefer",
 				"query":            countQuery,
 				"targetQueryValue": "1",
 			},

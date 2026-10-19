@@ -17,7 +17,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	_ "github.com/lib/pq"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func main() {
@@ -73,7 +73,9 @@ func pollSQL(ctx context.Context, driver, targetURL string, interval time.Durati
 		markDoneQuery = parsed
 	}
 
-	dbDriver := "postgres"
+	// pgx supports sslmode=prefer so the poller can connect in all three
+	// service TLS modes.
+	dbDriver := "pgx"
 	if driver == "mysql" {
 		dbDriver = "mysql"
 		converted, err := mysqlDSN(dsn)

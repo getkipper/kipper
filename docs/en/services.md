@@ -63,7 +63,7 @@ flowchart TD
 | `--storage` | `5Gi` (postgres/mysql/mongodb/opensearch), `1Gi` (redis/rabbitmq), `10Gi` (minio) | Storage size |
 | `--cpu` | Request `500m` (postgres/mysql/mongodb), `100m` (others). OpenSearch has a `1000m` limit. | Sets the CPU request and limit to the same value. |
 | `--memory` | `1Gi` (postgres/mysql/mongodb), `2Gi` (opensearch), `128Mi` (others) | Sets the memory request and limit to the same value. |
-| `--tls` | `on` (postgres) | Postgres only. `off` creates the service without TLS. See [Encrypted Postgres connections](#postgres-tls). |
+| `--tls` | `required` (postgres) | Postgres only. `required` refuses connections without TLS, `on` serves TLS and still accepts plaintext, `off` creates the service without TLS. See [Encrypted Postgres connections](#postgres-tls). |
 | `--consistent-backups` | `true` (postgres) | Postgres only. Adds a `pg_dump` of every database to each backup. See [Consistent database dumps](/en/backups#consistent-database-dumps). |
 
 Before creating a service, `kip service add` checks that one eligible node has enough CPU and memory after existing pod requests are deducted. If capacity is insufficient, it reports the largest remaining CPU and memory capacities and their nodes. Reduce requests with `--cpu` and `--memory`, or add capacity. If no nodes qualify, it directs you to `kip status`. The check is skipped if nodes or pods cannot be read. Passing this check does not guarantee scheduling because other constraints, such as storage availability, may apply.
@@ -222,21 +222,32 @@ The hostname (`mydb.default.svc.cluster.local`) is an internal Kubernetes DNS na
 
 ## Encrypted Postgres connections {#postgres-tls}
 
-New Postgres services created through the CLI or console enable TLS by default. Each one gets a certificate from the cluster's own service certificate authority, `kipper-service-ca`, which `kip install` and a full `kip upgrade` (without `--skip-system`) provision alongside cert-manager. The certificate names the service by every form of its internal DNS name (`mydb`, `mydb.default`, `mydb.default.svc` and `mydb.default.svc.cluster.local`), is valid for a year, and is renewed 30 days before it expires.
+New Postgres services created through the CLI or console require TLS by default: they refuse any network connection without it. Each one gets a certificate from the cluster's own service certificate authority, `kipper-service-ca`, which `kip install` and a full `kip upgrade` (without `--skip-system`) provision alongside cert-manager. The certificate names the service by every form of its internal DNS name (`mydb`, `mydb.default`, `mydb.default.svc` and `mydb.default.svc.cluster.local`), is valid for a year, and is renewed 30 days before it expires.
 
-Turn TLS on for an existing service, or off for one that has it:
+A service has one of three TLS modes:
+
+| Mode | What Postgres does |
+|---|---|
+| `required` | Serves TLS and refuses network connections without it. The default for new services. |
+| `on` | Serves TLS and still accepts connections without it. The client decides. |
+| `off` | Serves no TLS. |
 
 ```bash
-kip service update mydb --tls on
+kip service update mydb --tls on         # serve TLS, still accept plaintext
+kip service update mydb --tls required   # refuse plaintext from now on
 kip service update mydb --tls off
-kip service add postgres --name mydb --tls off   # create without it
+kip service add postgres --name mydb --tls on   # create one that still accepts plaintext
 ```
 
-A Postgres service declared in `kipper.yaml` gets TLS only with `tls: on` in its entry, and `kip export` writes the field for services that have it. Applying a manifest that omits `tls` from the service entry turns TLS off for that service. `kip apply` lists this as a cleared field and requires `--force` to proceed.
+Move an existing service to `required` in three steps to avoid unexpectedly disconnecting apps. Turn TLS `on` and wait until `kip service info mydb` shows that TLS is being served. Set `sslmode=require` or `verify-full` in every app that connects, then restart the apps so their pooled connections reconnect with TLS. Finally run `kip service update mydb --tls required`. Before switching, kip checks for clients currently connected without TLS. If it finds any, it lists them and refuses the change. `--force` allows the change despite those connections. The check covers only currently connected clients, so check scheduled jobs, stopped apps and other disconnected clients yourself.
 
-Postgres restarts once when it switches, and again whenever its certificate is renewed, which is about once a year. A new service waits up to a minute for its first certificate to avoid starting twice. If issuance takes longer, it starts with plaintext and restarts when the certificate arrives. TLS is enabled on the pod once a usable certificate has been issued, so a cluster without cert-manager keeps serving the database with plaintext. `kip service info mydb` shows `TLS: on` once Postgres has restarted with the certificate, and explains any pending issuance or rollout. Turning TLS off or deleting the service removes the certificate and its private key. Backups include the issued Secret and its private key along with the rest of the service, so a restored database or one checked with `kip backup drill` starts with TLS immediately. After a restore, Kipper asks cert-manager to issue a new key pair for the service. Postgres restarts once more to use it, replacing the key retained in the backup. The copy of the key in the pod's memory volume is left out of backups.
+A Postgres service declared in `kipper.yaml` gets TLS only with `tls: required` or `tls: on` in its entry, and `kip export` writes the field for services that have it. Applying a manifest that omits `tls` from the service entry turns TLS off for that service. `kip apply` lists this as a cleared field and requires `--force` to proceed.
 
-With TLS on, the server accepts both encrypted and unencrypted connections. The client chooses which to use. Once the certificate is verified and its CA published, Kipper mounts the service CA into every app and function bound to the service at `/etc/kipper/service-ca/<service>/ca.crt`, and the binding adds `<prefix>SSLROOTCERT` with that path, for example `DB_SSLROOTCERT`. Only the CA is mounted. The server's private key stays with Postgres. Kipper publishes the CA only after checking that the issued certificate chains to it, covers the service's DNS name, is currently valid and permits server authentication.
+Postgres restarts once when it switches between any two modes, and again whenever its certificate is renewed, which is about once a year. In mode `on`, a new service waits up to a minute for its first certificate to avoid starting twice. If issuance takes longer, a service in mode `on` starts with plaintext and restarts when the certificate arrives, so a cluster without cert-manager keeps serving it with plaintext. In mode `required`, a new service waits for a usable certificate before starting. If a running service's certificate is missing or unusable, it keeps its current pod and defers other changes, such as a resize, to preserve TLS. `kip service info mydb` shows the mode once Postgres has restarted with the certificate, and explains any pending issuance or rollout. Turning TLS off or deleting the service removes the certificate and its private key. Backups include the issued Secret and its private key along with the rest of the service, so a restored database or one checked with `kip backup drill` starts with TLS immediately. After a restore, Kipper asks cert-manager to issue a new key pair for the service. Postgres restarts once more to use it, replacing the key retained in the backup. The copy of the key in the pod's memory volume is left out of backups.
+
+Most Postgres clients try TLS first and connect to a `required` service without changes: libpq and everything built on it (psql, psycopg), pgx, and pgjdbc 42.2.5 or later all default to `sslmode=prefer`. node-postgres does not use TLS unless told to, so set `ssl` in its options. Set `sslmode=require` in an app's connection string (`?sslmode=require` on a JDBC or libpq URL) to make sure it never falls back to plaintext against a service in mode `on`. An app that connects without TLS to a `required` service gets an error saying that pg_hba.conf has no entry for its host with encryption off. Kipper's console database view and Postgres-triggered functions prefer TLS when connecting to the service. Without a configured CA, `require` encrypts the connection without verifying the server's certificate.
+
+Once the certificate is verified and its CA published, Kipper mounts the service CA into every app and function bound to the service at `/etc/kipper/service-ca/<service>/ca.crt`, and the binding adds `<prefix>SSLROOTCERT` with that path, for example `DB_SSLROOTCERT`. Only the CA is mounted. The server's private key stays with Postgres. Kipper publishes the CA only after checking that the issued certificate chains to it, covers the service's DNS name, is currently valid and permits server authentication.
 
 To encrypt every connection and verify the database server's identity, set `sslmode=verify-full` and point the client at the CA:
 
