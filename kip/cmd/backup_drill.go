@@ -90,20 +90,17 @@ func runBackupDrill(cmd *cobra.Command, args []string) error {
 		return errBackupsNotConfigured
 	}
 
-	if _, err := clientset.CoreV1().Namespaces().Get(ctx, drillNamespace, metav1.GetOptions{}); err == nil {
-		return fmt.Errorf("namespace %s already exists from an earlier drill. Remove it with kip backup drill %s --clean", drillNamespace, source)
-	} else if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("checking for namespace %s: %w", drillNamespace, err)
+	if err := refuseLeftoverDrill(ctx, clientset, source); err != nil {
+		return err
 	}
-
 	backup, err := chooseDrillBackup(ctx, dyn, source, backupName)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("\n  Drilling %s from backup %s (completed %s)\n", source, backup.GetName(), completionTime(backup))
 
-	if _, err := clientset.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: drillNamespace}}, metav1.CreateOptions{}); err != nil {
-		return fmt.Errorf("creating namespace %s: %w", drillNamespace, err)
+	if err := createDrillNamespace(ctx, clientset); err != nil {
+		return err
 	}
 	var restoreName string
 	if !keep {
@@ -113,43 +110,8 @@ func runBackupDrill(cmd *cobra.Command, args []string) error {
 			}
 		}()
 	}
-	if _, err := clientset.NetworkingV1().NetworkPolicies(drillNamespace).Create(ctx, drillNetworkPolicy(), metav1.CreateOptions{}); err != nil {
-		return fmt.Errorf("isolating namespace %s: %w", drillNamespace, err)
-	}
-
-	if restores, err := dyn.Resource(restoreGVR).Namespace("velero").List(ctx, metav1.ListOptions{}); err == nil {
-		for _, name := range unfinishedRestores(restores.Items) {
-			fmt.Printf("  ·  Restore %s is unfinished. Velero processes restore requests one at a time, so the drill may wait for it\n", name)
-		}
-	}
-
-	restoreName = "drill-" + source + "-" + time.Now().Format("20060102-150405")
-	restore := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "velero.io/v1",
-		"kind":       "Restore",
-		"metadata":   map[string]interface{}{"name": restoreName, "namespace": "velero"},
-		"spec":       drillRestoreSpec(backup.GetName(), source),
-	}}
-	if _, err := dyn.Resource(restoreGVR).Namespace("velero").Create(ctx, restore, metav1.CreateOptions{}); err != nil {
-		return fmt.Errorf("creating restore: %w", err)
-	}
-	fmt.Printf("  ·  Restore %s started\n", restoreName)
-	phase, err := waitForRestorePhase(ctx, dyn, restoreName, time.Hour)
+	pods, err := restoreIntoDrill(ctx, clientset, dyn, backup, source, &restoreName)
 	if err != nil {
-		return err
-	}
-	if phase != "Completed" {
-		return fmt.Errorf("restore %s ended with phase %s. Use kubectl -n velero describe restore %s to inspect it, and --keep on the drill command to retain restored services", restoreName, phase, restoreName)
-	}
-
-	pods, err := clientset.CoreV1().Pods(drillNamespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("listing restored pods: %w", err)
-	}
-	if len(pods.Items) == 0 {
-		return fmt.Errorf("backup %s contains no service pods from namespace %s to test", backup.GetName(), source)
-	}
-	if err := requireVolumesRestored(ctx, dyn, restoreName, pods.Items); err != nil {
 		return err
 	}
 
@@ -162,8 +124,8 @@ func runBackupDrill(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating the Kubernetes client: %w", err)
 	}
 	failed := false
-	for i := range pods.Items {
-		pod := &pods.Items[i]
+	for i := range pods {
+		pod := &pods[i]
 		if err := reportServiceRows(ctx, execClient, kubeconfig, pod); err != nil {
 			fmt.Printf("  ✘  %s: %v\n", pod.Name, err)
 			failed = true
@@ -178,6 +140,76 @@ func runBackupDrill(cmd *cobra.Command, args []string) error {
 		return errors.New("the drill could not check every restored service")
 	}
 	return nil
+}
+
+// refuseLeftoverDrill returns an error when the drill namespace exists, because
+// only one drill or dump restore can use it at a time.
+func refuseLeftoverDrill(ctx context.Context, clientset kubernetes.Interface, source string) error {
+	if _, err := clientset.CoreV1().Namespaces().Get(ctx, drillNamespace, metav1.GetOptions{}); err == nil {
+		return fmt.Errorf("namespace %s already exists from a drill or dump restore. Once any running restore finishes, remove it with kip backup drill %s --clean", drillNamespace, source)
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("checking for namespace %s: %w", drillNamespace, err)
+	}
+	return nil
+}
+
+// createDrillNamespace creates the drill namespace. Callers must register cleanup
+// only after success to avoid deleting another invocation's namespace if they
+// lose the creation race.
+func createDrillNamespace(ctx context.Context, clientset kubernetes.Interface) error {
+	if _, err := clientset.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: drillNamespace}}, metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("creating namespace %s: %w", drillNamespace, err)
+	}
+	return nil
+}
+
+// restoreIntoDrill isolates the drill namespace and restores source's services
+// from backup into it. restoreName is set before the Restore is submitted, so
+// the caller's cleanup checks it even when the submission's outcome is unknown.
+// It returns the pods after the restore completes and their PVC-backed volumes
+// have completed volume restores. An empty pod list is an error.
+func restoreIntoDrill(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, backup *unstructured.Unstructured, source string, restoreName *string) ([]corev1.Pod, error) {
+	if _, err := clientset.NetworkingV1().NetworkPolicies(drillNamespace).Create(ctx, drillNetworkPolicy(), metav1.CreateOptions{}); err != nil {
+		return nil, fmt.Errorf("isolating namespace %s: %w", drillNamespace, err)
+	}
+
+	if restores, err := dyn.Resource(restoreGVR).Namespace("velero").List(ctx, metav1.ListOptions{}); err == nil {
+		for _, name := range unfinishedRestores(restores.Items) {
+			fmt.Printf("  ·  Restore %s is unfinished. Velero processes restore requests one at a time, so the drill may wait for it\n", name)
+		}
+	}
+
+	name := "drill-" + source + "-" + time.Now().Format("20060102-150405")
+	restore := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "velero.io/v1",
+		"kind":       "Restore",
+		"metadata":   map[string]interface{}{"name": name, "namespace": "velero"},
+		"spec":       drillRestoreSpec(backup.GetName(), source),
+	}}
+	*restoreName = name
+	if _, err := dyn.Resource(restoreGVR).Namespace("velero").Create(ctx, restore, metav1.CreateOptions{}); err != nil {
+		return nil, fmt.Errorf("creating restore: %w", err)
+	}
+	fmt.Printf("  ·  Restore %s started\n", name)
+	phase, err := waitForRestorePhase(ctx, dyn, name, time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	if phase != "Completed" {
+		return nil, fmt.Errorf("restore %s ended with phase %s. Use kubectl -n velero describe restore %s to inspect it, and --keep on the drill command to retain restored services", name, phase, name)
+	}
+
+	pods, err := clientset.CoreV1().Pods(drillNamespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("listing restored pods: %w", err)
+	}
+	if len(pods.Items) == 0 {
+		return nil, fmt.Errorf("backup %s contains no service pods from namespace %s to test", backup.GetName(), source)
+	}
+	if err := requireVolumesRestored(ctx, dyn, name, pods.Items); err != nil {
+		return nil, err
+	}
+	return pods.Items, nil
 }
 
 // chooseDrillBackup returns a Completed backup covering source. An empty name

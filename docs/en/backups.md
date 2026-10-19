@@ -139,6 +139,19 @@ Record each drill's date and result with your compliance records because kip doe
 
 If you interrupt a drill without `--keep`, kip requests deletion of the drill namespace if its restore has already finished or is absent. If the restore is still running or its state cannot be checked, kip leaves the namespace and tells you to run `kip backup drill <namespace> --clean` later.
 
+### Restore a Postgres dump into a new service
+
+A volume restore brings a database back as it was on disk. To recover a database from its consistent dump, restore the dump into a new, empty Postgres service in the same namespace:
+
+```bash
+kip service add postgres --name mydb-restored
+kip service restore-dump mydb --to mydb-restored
+```
+
+kip restores the namespace's service pods, including the backup's copy of `mydb`, into the isolated drill namespace, as it does for a drill. It checks the dump manifest and every dump's SHA-256 checksum before writing to the target. Each database is then streamed through the Kubernetes API into `mydb-restored` in one transaction, so a dump that fails to load or arrives truncated leaves that database empty. If the connection to the target drops during a load, kip cannot tell whether that transaction committed and says so. Afterwards the per-table row counts must match the counts recorded with the dump. Resource tuning is paused for the target during the restore. At the end, kip requests deletion of the drill namespace if the Velero restore has finished or is absent. If the restore is still running or its state cannot be checked, kip leaves the namespace and prints cleanup instructions. If a restore fails partway through, delete and recreate the target before trying again because databases restored before the failure remain in it.
+
+The target must have no user tables in any connectable, non-template database. This check protects existing table data from being overwritten. Roles and grants are not restored. Every restored object belongs to the target's own user, which is also the user its bindings connect as, so apps can access the restored data once you bind them with `kip service bind mydb-restored <app>`. Use `--backup` to choose a specific backup instead of the default, the latest completed backup covering the namespace. `--project` and `--environment` select the namespace. Drills and dump restores share the drill namespace, so only one can run at a time.
+
 ### Restore projects
 
 Backups also include Kipper's cluster-wide objects: projects, their resource adjustments, the platform configuration and the cluster identity. Restores exclude these by default. To restore projects and their resource adjustments, run:

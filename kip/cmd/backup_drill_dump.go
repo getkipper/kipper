@@ -13,6 +13,10 @@ import (
 // on the dump volume restored with the Postgres pod.
 const drillDumpDir = "/var/lib/kipper-dump/current"
 
+// dumpCountSQL prints "schema.table|rows" for each user table when run by psql,
+// matching the backup hook's row-count files.
+const dumpCountSQL = `SELECT format('SELECT %L || ''|'' || count(*) FROM %I.%I', schemaname || '.' || tablename, schemaname, tablename) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema') ORDER BY 1 \gexec`
+
 const (
 	dumpCheckNone       = "KIPPER_DUMP_NONE"
 	dumpCheckIncomplete = "KIPPER_DUMP_INCOMPLETE"
@@ -37,7 +41,7 @@ tab=$(printf '\t')
 U="${POSTGRES_USER:-postgres}"
 W=$(mktemp -d) || exit 1
 cat > "$W/count.sql" <<'SQL'
-SELECT format('SELECT %L || ''|'' || count(*) FROM %I.%I', schemaname || '.' || tablename, schemaname, tablename) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema') ORDER BY 1 \gexec
+` + dumpCountSQL + `
 SQL
 grep "^database${tab}" "$D/manifest" > "$W/databases"
 [ -s "$W/databases" ] || { echo ` + dumpCheckIncomplete + `; rm -rf "$W"; exit 0; }
