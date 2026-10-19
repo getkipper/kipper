@@ -221,3 +221,49 @@ func TestAFailedDrillRestoreSaysWhatWentWrong(t *testing.T) {
 	r.Object["status"] = map[string]interface{}{"phase": "PartiallyFailed"}
 	assert.Empty(t, restoreOutcome(r))
 }
+
+func unschedulablePod() *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-0", Namespace: drillNamespace, UID: "pod-1"},
+		Status: corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+			Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+			Message: "0/1 nodes are available: 1 Insufficient cpu", LastTransitionTime: metav1.NewTime(time.Now().Add(-time.Hour)),
+		}}},
+	}
+}
+
+func TestADrillGivesUpOnAPodTheNodeCannotFit(t *testing.T) {
+	grace := drillUnschedulableGrace
+	drillUnschedulableGrace = 50 * time.Millisecond
+	t.Cleanup(func() { drillUnschedulableGrace = grace })
+	clientset := kubefake.NewClientset(unschedulablePod())
+	check := unschedulableWatch(clientset, "drill-x")
+	ctx := context.Background()
+
+	assert.NoError(t, check(ctx), "an old condition timestamp is not how long kip has seen the pod waiting")
+	time.Sleep(60 * time.Millisecond)
+	err := check(ctx)
+	assert.ErrorContains(t, err, "Insufficient cpu")
+	assert.ErrorContains(t, err, "kip stopped waiting for restore drill-x. The restore is still running")
+}
+
+func TestAPodThatGetsScheduledResetsTheDrillsPatience(t *testing.T) {
+	grace := drillUnschedulableGrace
+	drillUnschedulableGrace = 50 * time.Millisecond
+	t.Cleanup(func() { drillUnschedulableGrace = grace })
+	pod := unschedulablePod()
+	clientset := kubefake.NewClientset(pod)
+	check := unschedulableWatch(clientset, "drill-x")
+	ctx := context.Background()
+
+	require.NoError(t, check(ctx))
+	pod.Status.Conditions[0].Status = corev1.ConditionTrue
+	_, err := clientset.CoreV1().Pods(drillNamespace).UpdateStatus(ctx, pod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	time.Sleep(60 * time.Millisecond)
+	require.NoError(t, check(ctx))
+	pod.Status.Conditions[0].Status = corev1.ConditionFalse
+	_, err = clientset.CoreV1().Pods(drillNamespace).UpdateStatus(ctx, pod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	assert.NoError(t, check(ctx), "the wait starts again after the pod was schedulable")
+}
