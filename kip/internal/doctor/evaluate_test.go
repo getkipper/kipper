@@ -296,3 +296,31 @@ func TestCheckHeartbeat_KeepsTheFirstUnpinnedBeatWhole(t *testing.T) {
 	}}, now)
 	assert.Equal(t, Fail, r.Status, "the warning and the renewal are one line, so the beat stays whole")
 }
+
+func TestCheckTraefikCopy(t *testing.T) {
+	live, livePEM := testCert(t, "kipper hop")
+	_, otherPEM := testCert(t, "other")
+	keys := []string{spki.Fingerprint(live)}
+
+	assert.Equal(t, Pass, CheckTraefikCopy(Snapshot{TraefikCopyCert: livePEM}, keys).Status)
+
+	absent := CheckTraefikCopy(Snapshot{}, keys)
+	assert.Equal(t, Warn, absent.Status)
+	assert.Contains(t, absent.Message, "kip upgrade")
+
+	stale := CheckTraefikCopy(Snapshot{TraefikCopyCert: otherPEM}, keys)
+	assert.Equal(t, Fail, stale.Status)
+	assert.Contains(t, stale.Message, "different key")
+
+	unread := CheckTraefikCopy(Snapshot{Missing: map[Part]error{PartTraefikCopy: errors.New("no SSH")}}, keys)
+	assert.Equal(t, Skip, unread.Status)
+}
+
+func TestCheckTraefikCopy_ComparesWithTheLiveKeyOnly(t *testing.T) {
+	live, _ := testCert(t, "live")
+	_, candidatePEM := testCert(t, "candidate")
+	candidate, _ := parseCertificate(candidatePEM)
+
+	r := CheckTraefikCopy(Snapshot{TraefikCopyCert: candidatePEM}, []string{spki.Fingerprint(live), spki.Fingerprint(candidate)})
+	assert.Equal(t, Fail, r.Status, "the copy must never serve a rotation candidate")
+}

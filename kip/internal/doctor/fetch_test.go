@@ -43,6 +43,7 @@ const tlsStoresJSON = `{"items":[{"metadata":{"namespace":"kipper-system","name"
 
 func healthyRunner() *routedRunner {
 	return (&routedRunner{}).
+		on(`-n traefik get secret kipper-hop-cert`, "-----BEGIN CERTIFICATE-----\nCOPY\n-----END CERTIFICATE-----", nil).
 		on("get nodes", nodesJSON, nil).
 		on("get deployments", deploymentsJSON, nil).
 		on(`{.data.tls\.crt}`, "-----BEGIN CERTIFICATE-----\nCURRENT\n-----END CERTIFICATE-----", nil).
@@ -65,6 +66,7 @@ func TestFetchOverSSH_ReadsEveryPart(t *testing.T) {
 	assert.NotContains(t, snap.Workloads, "default/shop", "only core workloads are kept")
 	assert.Contains(t, snap.HopCert, "CURRENT")
 	assert.Empty(t, snap.HopCandidate)
+	assert.Contains(t, snap.TraefikCopyCert, "COPY")
 	assert.Equal(t, []TLSStore{{Namespace: "kipper-system", Name: "default", DefaultCert: "kipper-hop-cert"}}, snap.TLSStores)
 	assert.Equal(t, "203.0.113.10", snap.ClusterHost)
 	assert.Equal(t, "small", snap.Profile)

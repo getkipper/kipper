@@ -132,8 +132,8 @@ func fetchWithoutSSH(ctx context.Context, cluster *config.Cluster, sshErr error)
 func unreadSnapshot(cause error) doctor.Snapshot {
 	err := cause
 	missing := map[doctor.Part]error{}
-	for _, p := range []doctor.Part{doctor.PartNodes, doctor.PartWorkloads, doctor.PartHopCert, doctor.PartTLSStores,
-		doctor.PartClusterHost, doctor.PartProfile, doctor.PartHeartbeat} {
+	for _, p := range []doctor.Part{doctor.PartNodes, doctor.PartWorkloads, doctor.PartHopCert, doctor.PartTraefikCopy,
+		doctor.PartTLSStores, doctor.PartClusterHost, doctor.PartProfile, doctor.PartHeartbeat} {
 		missing[p] = err
 	}
 	return doctor.Snapshot{Missing: missing}
@@ -157,6 +157,7 @@ func collectDoctorResults(ctx context.Context, cluster *config.Cluster, runner d
 	groups = append(groups,
 		doctorGroup{"Gateway hop", []doctor.Result{
 			hopSecret,
+			doctor.CheckTraefikCopy(snap, keys),
 			doctor.CheckTLSStore(snap),
 			doctor.CheckServedCertificate(ctx, cluster.Host, cluster.DexHost(), keys),
 			doctor.CheckHeartbeat(snap, time.Now()),

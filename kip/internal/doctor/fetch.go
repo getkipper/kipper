@@ -8,6 +8,8 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/getkipper/kipper/controller/pkg/hopca"
 )
 
 // Runner runs a shell command on the cluster's server and returns its output.
@@ -26,6 +28,7 @@ const (
 	PartClusterHost Part = "cluster identity"
 	PartProfile     Part = "platform profile"
 	PartHeartbeat   Part = "gateway heartbeat log"
+	PartTraefikCopy Part = "Traefik's copy of the hop certificate"
 )
 
 // Workload identifies a Deployment to check for availability.
@@ -57,15 +60,16 @@ type TLSStore struct {
 // Snapshot holds cluster observations. Missing records read failures by part.
 // A failed part may contain partial data, which checks must treat as incomplete.
 type Snapshot struct {
-	Nodes        []corev1.Node
-	Workloads    map[string]*appsv1.Deployment
-	HopCert      string
-	HopCandidate string
-	TLSStores    []TLSStore
-	ClusterHost  string
-	Profile      string
-	Heartbeat    []string
-	Missing      map[Part]error
+	Nodes           []corev1.Node
+	Workloads       map[string]*appsv1.Deployment
+	HopCert         string
+	HopCandidate    string
+	TraefikCopyCert string
+	TLSStores       []TLSStore
+	ClusterHost     string
+	Profile         string
+	Heartbeat       []string
+	Missing         map[Part]error
 }
 
 const (
@@ -108,12 +112,17 @@ func FetchOverSSH(r Runner) Snapshot {
 		}
 	}
 
-	if cert, err := readSecretKey(r, "tls.crt"); err != nil {
+	if cert, err := readSecretKey(r, hopNamespace, hopCertName, "tls.crt"); err != nil {
 		snap.Missing[PartHopCert] = err
 	} else {
 		snap.HopCert = cert
 		// A candidate exists only during key rotation, so its absence is normal.
-		snap.HopCandidate, _ = readSecretKey(r, "candidate.crt")
+		snap.HopCandidate, _ = readSecretKey(r, hopNamespace, hopCertName, "candidate.crt")
+	}
+	if cert, err := readSecretKey(r, hopca.TraefikNamespace, hopca.TraefikCopyName, "tls.crt"); err != nil {
+		snap.Missing[PartTraefikCopy] = err
+	} else {
+		snap.TraefikCopyCert = cert
 	}
 
 	var stores struct {
@@ -178,14 +187,15 @@ func runJSON(r Runner, command string, into any) error {
 	return nil
 }
 
-// readSecretKey returns one base64-decoded field of the hop Secret. A failed run
-// is reported without its output, which could carry the decoded value.
-func readSecretKey(r Runner, key string) (string, error) {
+// readSecretKey returns one base64-decoded field of a Secret. An absent Secret
+// or field returns an empty string. Errors omit command output because it could
+// contain the decoded value.
+func readSecretKey(r Runner, namespace, name, key string) (string, error) {
 	cmd := fmt.Sprintf("set -o pipefail; kubectl -n %s get secret %s --ignore-not-found -o jsonpath='{.data.%s}' %s 2>/dev/null | base64 -d",
-		hopNamespace, hopCertName, strings.ReplaceAll(key, ".", `\.`), requestTimeout)
+		namespace, name, strings.ReplaceAll(key, ".", `\.`), requestTimeout)
 	out, err := r.Run(cmd)
 	if err != nil {
-		return "", fmt.Errorf("reading %s/%s %s failed", hopNamespace, hopCertName, key)
+		return "", fmt.Errorf("reading %s/%s %s failed", namespace, name, key)
 	}
 	return strings.TrimSpace(out), nil
 }

@@ -119,6 +119,35 @@ func CheckHopCertificate(snap Snapshot) (Result, []string) {
 	return Result{ID: id, Label: label, Status: Pass, Message: "hop certificate present"}, keys
 }
 
+// CheckTraefikCopy compares the SPKI fingerprint in Traefik's copy with keys[0],
+// the live key returned by CheckHopCertificate. Only the live key may match,
+// because Traefik loads this copy at startup before its Kubernetes provider
+// syncs and must not serve a staged candidate. A read failure or empty keys
+// skips the check. An absent copy warns, and an unreadable certificate or
+// different key fails. A match passes without checking the private key or rollout.
+func CheckTraefikCopy(snap Snapshot, keys []string) Result {
+	const id, label = "traefik-copy", "Traefik's copy"
+	if err, ok := snap.Missing[PartTraefikCopy]; ok {
+		return notChecked(id, label, PartTraefikCopy, err)
+	}
+	if len(keys) == 0 {
+		return Result{ID: id, Label: label, Status: Skip, Message: "not checked (no hop certificate to compare with)"}
+	}
+	if snap.TraefikCopyCert == "" {
+		return Result{ID: id, Label: label, Status: Warn,
+			Message: "Traefik has no copy of the hop certificate, so after a restart it waits for its Kubernetes provider (run kip upgrade)"}
+	}
+	cert, err := parseCertificate(snap.TraefikCopyCert)
+	if err != nil {
+		return Result{ID: id, Label: label, Status: Fail, Message: "Traefik's copy of the hop certificate is unreadable", Detail: err.Error()}
+	}
+	if spki.Fingerprint(cert) != keys[0] {
+		return Result{ID: id, Label: label, Status: Fail,
+			Message: "Traefik's copy holds a different key from the hop certificate. Traefik may already serve this key and will load it on its next restart. The gateway refuses this key"}
+	}
+	return Result{ID: id, Label: label, Status: Pass, Message: "Traefik's copy matches the hop certificate's public key"}
+}
+
 func parseCertificate(pemText string) (*x509.Certificate, error) {
 	block, _ := pem.Decode([]byte(pemText))
 	if block == nil {
