@@ -185,6 +185,7 @@ func runDrivenInstall(cmd *cobra.Command, credentialsFile string) error {
 	}
 	announceCollectedCredentials(os.Stdout, credentialsFile, res)
 	if phase != installjob.PhaseSucceeded || res.Outcome != installjob.PhaseSucceeded {
+		reportInstallFailure(os.Stdout, res.IssueLink, res.ErrorReport)
 		return fmt.Errorf("the install on %s did not finish (%s); run kip install again to retry", host, phase)
 	}
 	if res.Cluster != nil {

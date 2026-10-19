@@ -52,9 +52,9 @@ type State struct {
 	Phase      string    `json:"phase"`
 }
 
-// Result is what the install leaves for the driver to collect: the cluster
-// entry it saved, its credential-free kubeconfig, and the admin account's
-// email and password.
+// Result holds the saved cluster entry, credential-free kubeconfig and admin
+// email and password for the driver to collect. A failed step also includes
+// a bug report link and a redacted error for the user to review and paste.
 type Result struct {
 	RunID         string          `json:"run_id"`
 	Outcome       string          `json:"outcome"`
@@ -63,6 +63,8 @@ type Result struct {
 	Cluster       *config.Cluster `json:"cluster,omitempty"`
 	Kubeconfig    string          `json:"kubeconfig,omitempty"`
 	AdminPassword string          `json:"admin_password,omitempty"`
+	IssueLink     string          `json:"issue_link,omitempty"`
+	ErrorReport   string          `json:"error_report,omitempty"`
 }
 
 // Outcome is what a claim decided, for which run. KipVersion names the kip

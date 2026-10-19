@@ -189,6 +189,16 @@ The `nano` profile already disables monitoring. See [Platform Resources](/en/pla
 | [KEDA](https://keda.sh) | Event-driven autoscaling |
 | Kipper Console | Web dashboard for cluster management |
 
+### When an install fails
+
+When an install step fails, `kip install` names the step and prints a link to a GitHub issue form. The link contains only details kip controls: the step, the kip version, your machine's OS, the server's distribution and version, the profile, and the names of the flags you set (without their values). Opening the link sends those details to GitHub to fill in the form. Submitting the form creates a public issue.
+
+The last lines of the error appear below the link, between two marker lines, for you to paste into the form's Logs field. kip also tries to save a copy in a new `install-error-*.txt` file in `~/.kip` and prints its path. If saving fails, kip reports that failure and the excerpt remains available on screen. Before printing the excerpt, kip replaces known addresses, domains, email addresses, non-root SSH usernames, passwords, tokens and backup keys from the install, along with IP addresses, hostnames, email addresses, home directory users and credentials matched by its detection rules. Those rules preserve public dependency hosts, loopback, link-local and unspecified addresses, and the k3s pod and service IP ranges unless they match a known value from the install. Redaction is best effort, so a bare machine name or a secret in an unusual format can slip through. Read the excerpt before pasting it. Only the text between the markers is redacted this way. The rest of the terminal output may still contain private data.
+
+A server-driven install, the default on Windows, also prints the link and excerpt. Its link identifies kip as running on the server and omits the names of the flags you set because the server receives their values without a record of which flags you explicitly set.
+
+A failure early in the install often comes from the server itself, such as a package manager still busy with first-boot updates. Wait a few minutes and re-run the same command.
+
 ### Re-running install
 
 Re-running `kip install` updates a component that is already there rather than duplicating it, and it keeps the serving identity recorded in the cluster (the domain and hosts for the console, API, and login) even when the cluster has moved to a different domain since the original install. Passing a conflicting `--domain` is an error: domain changes go through `kip cluster domain`, which keeps login available throughout the change.
