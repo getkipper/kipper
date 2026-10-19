@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -146,6 +150,29 @@ func TestBeatToleratesOldGateway(t *testing.T) {
 	}
 	if !h.warnedOldGateway {
 		t.Error("expected the old-gateway warning to be recorded")
+	}
+}
+
+// TestBeatAgainstOldGatewayLogsARenewalEveryBeat verifies the outcome lines
+// that kip doctor uses to distinguish consecutive beats.
+func TestBeatAgainstOldGatewayLogsARenewalEveryBeat(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	gw := &fakeGateway{t: t, status: http.StatusCreated, body: map[string]string{}}
+	h, _ := heartbeatUnderTest(t, gw)
+
+	h.beat(context.Background())
+	h.beat(context.Background())
+
+	if got := strings.Count(buf.String(), "gateway heartbeat: renewed "); got != 2 {
+		t.Errorf("logged %d renewals over two beats, want 2:\n%s", got, buf.String())
+	}
+	if got := strings.Count(buf.String(), "does not support certificate pinning"); got != 1 {
+		t.Errorf("the old-gateway warning should still appear once, got %d", got)
+	}
+	if got := strings.Count(buf.String(), "\n"); got != 2 {
+		t.Errorf("each beat must log exactly one outcome line. Got %d lines:\n%s", got, buf.String())
 	}
 }
 
