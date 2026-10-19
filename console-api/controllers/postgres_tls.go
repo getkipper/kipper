@@ -156,14 +156,16 @@ func (r *ServiceReconciler) reconcilePostgresTLS(ctx context.Context, svc *kippe
 	}
 	crt := secret.Data[corev1.TLSCertKey]
 	host := fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace)
+	// Request key replacement before certificate verification so a restore into
+	// another namespace can use the same issuance for the new key and DNS names.
+	if err := r.replaceRestoredKey(ctx, cert, secret); err != nil {
+		return "", false, fmt.Errorf("replacing the restored TLS key: %w", err)
+	}
 	if problem := certificateProblem(secret, host); problem != "" {
 		return unserved("CertificateInvalid", "because the certificate in Secret "+secret.Name+" fails verification: "+problem, false)
 	}
 	if !usableKeyPair(crt, secret.Data[corev1.TLSPrivateKeyKey]) {
 		return unserved("CertificateInvalid", "because the issued certificate and key in Secret "+secret.Name+" do not form a usable pair", false)
-	}
-	if err := r.replaceRestoredKey(ctx, cert, secret); err != nil {
-		return "", false, fmt.Errorf("replacing the restored TLS key: %w", err)
 	}
 	if err := r.ensureServiceCA(ctx, svc, secret); err != nil {
 		return "", false, fmt.Errorf("publishing the service CA: %w", err)
