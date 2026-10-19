@@ -727,64 +727,127 @@ type WorkerJoin struct {
 	pullPassword  string
 }
 
-// PrepareWorker configures host dependencies, DNS, registry access and
-// networkDropIn before agent startup. It rejects workers running newer k3s
-// versions than the server.
-func PrepareWorker(masterClient, workerClient CommandRunner, networkDropIn string) (WorkerJoin, error) {
-	if err := prepareWorkerHost(masterClient, workerClient); err != nil {
-		return WorkerJoin{}, err
-	}
+// JoinMaterial contains the server's k3s release, registry ClusterIP, CA
+// certificate and pull password, and upstream DNS resolvers for a worker join.
+// PullPassword is secret.
+type JoinMaterial struct {
+	K3sVersion   string   `json:"k3s_version"`
+	ZotIP        string   `json:"zot_ip"`
+	RegistryCA   string   `json:"registry_ca"`
+	PullPassword string   `json:"pull_password"`
+	Resolvers    []string `json:"resolvers"`
+}
 
-	// Match the server version for compatibility with older clusters.
+// ReadJoinMaterial reads the server's k3s release, registry configuration and
+// upstream DNS resolvers. Missing, unreadable or invalid resolvers fall back
+// to DefaultDNSResolvers. It returns an error if k3s is absent or the release
+// cannot be read, or if any required registry value is unreadable or empty.
+func ReadJoinMaterial(server CommandRunner) (JoinMaterial, error) {
+	resolv, rErr := server.Run("cat " + k3sResolvConfPath)
+	resolvers, vErr := resolveDNSResolvers(parseResolvConf(resolv))
+	if rErr != nil || vErr != nil {
+		resolvers = DefaultDNSResolvers()
+	}
 	// installedK3sVersion validates the tag before shell interpolation.
-	serverVersion, err := installedK3sVersion(masterClient)
+	version, err := installedK3sVersion(server)
+	if err != nil {
+		return JoinMaterial{}, err
+	}
+	if version == "" {
+		return JoinMaterial{}, fmt.Errorf("reading k3s version from master: k3s is not installed")
+	}
+	zotIP, err := server.Run(`kubectl get svc zot -n kipper-system -o jsonpath='{.spec.clusterIP}'`)
+	if err != nil {
+		return JoinMaterial{}, fmt.Errorf("reading zot ClusterIP from master: %w", err)
+	}
+	zotIP = strings.TrimSpace(zotIP)
+	if zotIP == "" {
+		return JoinMaterial{}, fmt.Errorf("zot service has no ClusterIP on the master")
+	}
+	pullPassword, err := readSecretValue(server, zotNamespace, zotPullSecret, "password")
+	if err != nil {
+		return JoinMaterial{}, err
+	}
+	if pullPassword == "" {
+		return JoinMaterial{}, fmt.Errorf("registry pull credential missing on the master")
+	}
+	caPEM, err := readSecretValue(server, zotNamespace, zotTLSSecret, `ca\.crt`)
+	if err != nil {
+		return JoinMaterial{}, err
+	}
+	if caPEM == "" {
+		return JoinMaterial{}, fmt.Errorf("registry CA missing on the master")
+	}
+	return JoinMaterial{K3sVersion: version, ZotIP: zotIP, RegistryCA: caPEM, PullPassword: pullPassword, Resolvers: resolvers}, nil
+}
+
+var pullPasswordPattern = regexp.MustCompile(`^[A-Za-z0-9]+$`)
+
+// checked validates the values that reach worker commands and returns the
+// material with its resolvers normalised.
+func (m JoinMaterial) checked() (JoinMaterial, error) {
+	if _, err := parseK3sVersion(m.K3sVersion); err != nil {
+		return JoinMaterial{}, fmt.Errorf("server k3s release: %w", err)
+	}
+	if ip, err := netip.ParseAddr(m.ZotIP); err != nil || !ip.Is4() {
+		return JoinMaterial{}, fmt.Errorf("registry ClusterIP %q is not an IPv4 address", m.ZotIP)
+	}
+	if m.RegistryCA == "" {
+		return JoinMaterial{}, fmt.Errorf("the registry CA is required")
+	}
+	// The password reaches registries.yaml and curl's config unescaped.
+	if !pullPasswordPattern.MatchString(m.PullPassword) {
+		return JoinMaterial{}, fmt.Errorf("the registry pull credential must be nonempty and use the alphanumeric format kip generates")
+	}
+	resolvers, err := resolveDNSResolvers(m.Resolvers)
+	if err != nil {
+		return JoinMaterial{}, err
+	}
+	m.Resolvers = resolvers
+	return m, nil
+}
+
+// PrepareWorker configures host dependencies, DNS, registry access and
+// networkDropIn before agent startup, with the join material read from the
+// server. It rejects workers running newer k3s versions than the server.
+func PrepareWorker(masterClient, workerClient CommandRunner, networkDropIn string) (WorkerJoin, error) {
+	m, err := ReadJoinMaterial(masterClient)
 	if err != nil {
 		return WorkerJoin{}, err
 	}
-	if serverVersion == "" {
-		return WorkerJoin{}, fmt.Errorf("reading k3s version from master: k3s is not installed")
-	}
+	return PrepareWorkerFrom(workerClient, m, networkDropIn)
+}
 
+// PrepareWorkerFrom configures the worker as PrepareWorker does, using join
+// material read earlier so only a worker connection is needed. Before running
+// worker commands, it requires a valid k3s release, an IPv4 registry address,
+// a nonempty CA and an alphanumeric pull password. It trims and deduplicates
+// resolvers, requires at most three IPv4 addresses and uses DefaultDNSResolvers
+// when none remain. It rejects workers running a newer k3s release than the server.
+func PrepareWorkerFrom(workerClient CommandRunner, m JoinMaterial, networkDropIn string) (WorkerJoin, error) {
+	m, err := m.checked()
+	if err != nil {
+		return WorkerJoin{}, err
+	}
+	if err := prepareWorkerHost(workerClient, m.Resolvers); err != nil {
+		return WorkerJoin{}, err
+	}
 	// Reject newer workers to prevent an implicit downgrade on retry.
 	workerVersion, err := installedK3sVersion(workerClient)
 	if err != nil {
 		return WorkerJoin{}, err
 	}
-	if err := decideK3sAgentJoin(workerVersion, serverVersion); err != nil {
+	if err := decideK3sAgentJoin(workerVersion, m.K3sVersion); err != nil {
 		return WorkerJoin{}, err
 	}
-
-	// Install the registry mirror, credentials and CA locally before the
-	// agent starts, using the authoritative copies from the server.
-	zotIP, err := masterClient.Run(`kubectl get svc zot -n kipper-system -o jsonpath='{.spec.clusterIP}'`)
-	if err != nil {
-		return WorkerJoin{}, fmt.Errorf("reading zot ClusterIP from master: %w", err)
-	}
-	zotIP = strings.TrimSpace(zotIP)
-	if zotIP == "" {
-		return WorkerJoin{}, fmt.Errorf("zot service has no ClusterIP on the master")
-	}
-	pullPassword, err := readSecretValue(masterClient, zotNamespace, zotPullSecret, "password")
-	if err != nil {
-		return WorkerJoin{}, err
-	}
-	if pullPassword == "" {
-		return WorkerJoin{}, fmt.Errorf("registry pull credential missing on the master")
-	}
-	caPEM, err := readSecretValue(masterClient, zotNamespace, zotTLSSecret, `ca\.crt`)
-	if err != nil {
-		return WorkerJoin{}, err
-	}
-	if caPEM == "" {
-		return WorkerJoin{}, fmt.Errorf("registry CA missing on the master")
-	}
-	if err := writeZotNodeFiles(workerClient, caPEM, zotIP, pullPassword); err != nil {
+	// The agent needs the server's registry mirror, credentials and CA at startup.
+	if err := writeZotNodeFiles(workerClient, m.RegistryCA, m.ZotIP, m.PullPassword); err != nil {
 		return WorkerJoin{}, err
 	}
 	if _, err := workerClient.RunStdin(writeDropInScript(k3sNetworkConfigPath), strings.NewReader(networkDropIn)); err != nil {
 		return WorkerJoin{}, fmt.Errorf("writing %s on the worker: %v", k3sNetworkConfigPath, withoutOutput(err))
 	}
-	return WorkerJoin{serverVersion: serverVersion, zotIP: zotIP, pullPassword: pullPassword}, nil
+	return WorkerJoin{serverVersion: m.K3sVersion, zotIP: m.ZotIP, pullPassword: m.PullPassword}, nil
 }
 
 // bootstrapTaint keeps ordinary pods off a node between its registration
@@ -794,36 +857,19 @@ const bootstrapTaint = "kipper.run/bootstrap"
 // bootstrapTaintPath holds the registration taint until the node is cordoned.
 const bootstrapTaintPath = "/etc/rancher/k3s/config.yaml.d/kipper-bootstrap.yaml"
 
-// Register joins a prepared host with a fresh one-hour bootstrap token, at
-// serverURLHost, and returns its node name after confirming registration
-// against id. The node is left cordoned, with the bootstrap taint removed.
+// Register joins a prepared host at the IPv4 address serverURLHost with a
+// fresh one-hour bootstrap token. It returns the node name after confirming
+// registration against id. The node is left cordoned, with the bootstrap
+// taint removed.
 func (j WorkerJoin) Register(masterClient, workerClient CommandRunner, serverURLHost string, id HostIdentity) (string, error) {
-	// Another drop-in setting node-taint could replace the registration taint.
-	out, err := workerClient.Run(configFilesCommand("/etc/rancher/k3s/config.yaml.d/*.yaml", bootstrapTaintPath))
-	if err != nil {
-		// Omit the Run error because its captured output may contain a token.
-		return "", errors.New("reading the worker's k3s configuration failed")
-	}
-	files, err := parseConfigFiles(out)
-	if err != nil {
-		return "", fmt.Errorf("reading the worker's k3s configuration: %w", err)
-	}
-	for _, f := range files {
-		for key := range f.doc {
-			if strings.TrimSuffix(key, "+") == "node-taint" {
-				return "", fmt.Errorf("%s sets node-taint, which can replace the taint that keeps workloads off the node until it is checked; move those taints to /etc/rancher/k3s/config.yaml and run the command again", f.path)
-			}
-		}
-	}
-	taint := fmt.Sprintf("cat > %s << 'KIPEOF'\nnode-taint+:\n  - %s=true:NoSchedule\nKIPEOF", bootstrapTaintPath, bootstrapTaint)
-	if _, err := workerClient.Run("mkdir -p /etc/rancher/k3s/config.yaml.d && " + taint); err != nil {
-		return "", fmt.Errorf("writing the registration taint on the worker: %w", err)
+	if err := j.checkAgentStart(workerClient, serverURLHost); err != nil {
+		return "", err
 	}
 	// Keep the token valid through registration before attempting cleanup.
 	var nodeName string
-	err = withJoinToken(masterClient, serverURLHost, func(token string) error {
-		if _, err := workerClient.RunStdin(agentInstallCommand(j.serverVersion, serverURLHost), strings.NewReader(token+"\n")); err != nil {
-			return fmt.Errorf("running k3s agent installer: %w", err)
+	err := withJoinToken(masterClient, serverURLHost, func(token string) error {
+		if err := j.startCheckedAgent(workerClient, serverURLHost, token); err != nil {
+			return err
 		}
 		name, err := waitForHostNode(masterClient, id, 2*time.Minute, 3*time.Second)
 		if err != nil {
@@ -846,6 +892,57 @@ func (j WorkerJoin) Register(masterClient, workerClient CommandRunner, serverURL
 		return "", fmt.Errorf("removing %s on the worker: %w", bootstrapTaintPath, err)
 	}
 	return nodeName, nil
+}
+
+// StartAgent writes the registration taint and runs the k3s agent installer
+// against serverURLHost, an IPv4 address, with a valid k3s bootstrap token on
+// stdin. It rejects other drop-ins that set node-taint or node-taint+ because
+// they could replace the registration taint. Installer and taint-write errors
+// have the token's secret redacted. The caller must verify registration.
+func (j WorkerJoin) StartAgent(workerClient CommandRunner, serverURLHost, token string) error {
+	if !bootstrapTokenPattern.MatchString(token) {
+		return errors.New("the join token is not a k3s bootstrap token")
+	}
+	if err := j.checkAgentStart(workerClient, serverURLHost); err != nil {
+		return err
+	}
+	return redactToken(j.startCheckedAgent(workerClient, serverURLHost, token), token)
+}
+
+func (j WorkerJoin) startCheckedAgent(workerClient CommandRunner, serverURLHost, token string) error {
+	taint := fmt.Sprintf("cat > %s << 'KIPEOF'\nnode-taint+:\n  - %s=true:NoSchedule\nKIPEOF", bootstrapTaintPath, bootstrapTaint)
+	if _, err := workerClient.Run("mkdir -p /etc/rancher/k3s/config.yaml.d && " + taint); err != nil {
+		return fmt.Errorf("writing the registration taint on the worker: %w", err)
+	}
+	if _, err := workerClient.RunStdin(agentInstallCommand(j.serverVersion, serverURLHost), strings.NewReader(token+"\n")); err != nil {
+		return fmt.Errorf("running k3s agent installer: %w", err)
+	}
+	return nil
+}
+
+// checkAgentStart requires an IPv4 server address and rejects other drop-ins
+// that set node-taint or node-taint+, which could replace the registration taint.
+func (j WorkerJoin) checkAgentStart(workerClient CommandRunner, serverURLHost string) error {
+	if ip, err := netip.ParseAddr(serverURLHost); err != nil || !ip.Is4() {
+		return fmt.Errorf("the server address %q is not an IPv4 address", serverURLHost)
+	}
+	out, err := workerClient.Run(configFilesCommand("/etc/rancher/k3s/config.yaml.d/*.yaml", bootstrapTaintPath))
+	if err != nil {
+		// Omit the Run error because its captured output may contain a token.
+		return errors.New("reading the worker's k3s configuration failed")
+	}
+	files, err := parseConfigFiles(out)
+	if err != nil {
+		return fmt.Errorf("reading the worker's k3s configuration: %w", err)
+	}
+	for _, f := range files {
+		for key := range f.doc {
+			if strings.TrimSuffix(key, "+") == "node-taint" {
+				return fmt.Errorf("%s sets node-taint, which can replace the taint that keeps workloads off the node until it is checked. Move those taints to /etc/rancher/k3s/config.yaml and run the command again", f.path)
+			}
+		}
+	}
+	return nil
 }
 
 // waitForHostNode polls for registration matching both machine and boot IDs.
