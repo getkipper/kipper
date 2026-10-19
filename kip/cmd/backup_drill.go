@@ -202,7 +202,7 @@ func restoreIntoDrill(ctx context.Context, clientset kubernetes.Interface, dyn d
 		if r, err := dyn.Resource(restoreGVR).Namespace("velero").Get(ctx, name, metav1.GetOptions{}); err == nil {
 			outcome = restoreOutcome(r)
 		}
-		return nil, fmt.Errorf("restore %s ended with phase %s%s. Run the drill again with --keep to inspect what was restored", name, phase, outcome)
+		return nil, fmt.Errorf("restore %s ended with phase %s%s. Run kip backup drill %s --backup %s --keep to inspect what was restored", name, phase, outcome, source, backup.GetName())
 	}
 
 	pods, err := clientset.CoreV1().Pods(drillNamespace).List(ctx, metav1.ListOptions{})

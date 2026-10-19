@@ -112,7 +112,7 @@ The binding injects individual connection components with a type-based prefix. T
 | `DB_USERNAME` | `kipper` |
 | `DB_PASSWORD` | `a1b2c3d4e5f6...` |
 | `DB_NAME` | `domain_service_test` |
-| `DB_SSLROOTCERT` | `/etc/kipper/service-ca/db/ca.crt` (PostgreSQL with TLS on, once its certificate is verified and its CA published. See [Encrypted Postgres connections](#postgres-tls).) |
+| `DB_SSLROOTCERT` | `/etc/kipper/service-ca/db/ca.crt` (PostgreSQL with TLS `on` or `required`, once its certificate is verified and its CA published. See [Encrypted Postgres connections](#postgres-tls).) |
 
 **MinIO**, prefix `S3_`:
 
