@@ -479,6 +479,9 @@ func reportServiceRows(ctx context.Context, clientset kubernetes.Interface, rest
 	for _, c := range counts {
 		fmt.Printf("       %-50s %d\n", c.Table, c.Rows)
 	}
+	if serviceType == "postgres" {
+		return checkConsistentDump(ctx, exec, pod.Name)
+	}
 	return nil
 }
 
