@@ -290,11 +290,13 @@ func (r ufwRollback) rollBackNow(client CommandRunner) error {
 	return fmt.Errorf("kip could not confirm that the previous firewall was restored (%v). If rollback is still armed, the host attempts restoration about %d seconds after kip's last step. Check the host's firewall state. To retry, %s", err, ufwRollbackSeconds, ufwRepairHint)
 }
 
+const ufwFailOpenCommand = "cat " + firewalldStateDir + "/" + ufwFailOpenFile + " 2>/dev/null || true"
+
 // UFWFailOpen returns the run ID and UTC timestamp, separated by a space, of
 // a failed restoration that attempted to disable UFW. An empty result means
 // the marker was absent or unreadable. Runner errors are returned. The marker
 // is cleared on commit and does not describe the current firewall state.
 func UFWFailOpen(client CommandRunner) (string, error) {
-	out, err := client.Run("cat " + firewalldStateDir + "/" + ufwFailOpenFile + " 2>/dev/null || true")
+	out, err := client.Run(ufwFailOpenCommand)
 	return strings.TrimSpace(out), err
 }

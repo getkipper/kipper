@@ -39,14 +39,19 @@ func runAppInfo(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	writeAppInfo(os.Stdout, appName, info, time.Now())
+	nodes, nodesErr := workloadNodes(context.Background(), k8sClient.Clientset(), ns, appName)
+	writeAppInfo(os.Stdout, appName, info, nodes, nodesErr, time.Now())
 	return nil
 }
 
-func writeAppInfo(out io.Writer, name string, info deployer.AppInfo, now time.Time) {
+// writeAppInfo prints the app's details. nodes is the workloadNodes summary.
+// The Nodes line is left out when the summary is empty and nodesErr is nil.
+func writeAppInfo(out io.Writer, name string, info deployer.AppInfo, nodes string, nodesErr error, now time.Time) {
 	say(out, "\n  App: %s\n\n", name)
 	say(out, "  Status:  %s, %d/%d ready\n", info.Status.Status, info.Status.Ready, info.Status.Replicas)
-	say(out, "  Image:   %s\n\n", info.Status.Image)
+	say(out, "  Image:   %s\n", info.Status.Image)
+	writeWorkloadNodes(out, nodes, nodesErr)
+	say(out, "\n")
 
 	for _, line := range autoscaleStatusLines(name, info.Autoscale) {
 		say(out, "%s\n", line)

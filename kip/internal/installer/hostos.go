@@ -33,9 +33,11 @@ var familyByID = map[string]Family{
 	"centos":    FamilyRHEL,
 }
 
+const osReleaseCommand = "cat /etc/os-release"
+
 // DetectHostOS reads the host's /etc/os-release.
 func DetectHostOS(client CommandRunner) (HostOS, error) {
-	out, err := client.Run("cat /etc/os-release")
+	out, err := client.Run(osReleaseCommand)
 	if err != nil {
 		return HostOS{}, fmt.Errorf("reading /etc/os-release: %w", err)
 	}

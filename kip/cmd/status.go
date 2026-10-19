@@ -93,7 +93,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	reportCrashLoopingServices(ctx, client)
 	reportPlaintextPostgres(ctx, client)
 
-	checkHost(cluster, nodes)
+	records, recordsErr := nodeRecordsFromAPI(ctx, client.Clientset(), cluster)
+	reportRecordFallback(os.Stdout, recordsErr)
+	checkHost(cluster, nodes, records)
 
 	return nil
 }
@@ -213,11 +215,11 @@ func plaintextPostgres(services []unstructured.Unstructured) []string {
 	return open
 }
 
-func checkHost(cluster *config.Cluster, nodes []k8s.NodeInfo) {
+func checkHost(cluster *config.Cluster, nodes []k8s.NodeInfo, records []installer.NodeRecord) {
 	if cluster.Host == "" {
 		return
 	}
-	checkHostWith(os.Stdout, hostSSHConfig(cluster, ""), cluster, nodes)
+	checkHostWith(os.Stdout, hostSSHConfig(cluster, ""), cluster, nodes, records)
 }
 
 // sshUser returns the cluster's saved login user, defaulting to root when the
@@ -241,36 +243,89 @@ func hostSSHConfig(cluster *config.Cluster, keyFlag string) ssh.Config {
 	}
 }
 
-func checkHostWith(out io.Writer, sshConfig ssh.Config, cluster *config.Cluster, nodes []k8s.NodeInfo) {
+// checkHostWith runs the host checks on the server over sshConfig and on every
+// worker in records, then prints them.
+func checkHostWith(out io.Writer, sshConfig ssh.Config, cluster *config.Cluster, nodes []k8s.NodeInfo, records []installer.NodeRecord) {
+	var server installer.CommandRunner
 	client, err := ssh.Dial(sshConfig)
-	if err != nil {
-		// Show each skipped check so missing results cannot be mistaken for success.
-		say(out, "  DNS resolvers:\n")
-		say(out, "    ⚠  not checked (could not reach the host over SSH: %v)\n\n", err)
-		say(out, "  Pending restarts:\n")
-		say(out, "    ⚠  not checked (could not reach the host over SSH)\n\n")
-		say(out, "  Volume mounts:\n")
-		say(out, "    ⚠  not checked (could not reach the host over SSH)\n\n")
-		return
+	if err == nil {
+		defer func() { _ = client.Close() }()
+		server = client
 	}
-	defer func() { _ = client.Close() }()
-
-	checkHostDNSResolvers(out, cluster, client)
-	reportPendingRestarts(out, client)
-	reportReadOnlyVolumes(out, cluster, client, nodes)
-	reportDataPlacement(out, client, cluster, nodes)
-	reportUFWFailOpen(out, client)
+	workers := inspectWorkers(records, func(rec installer.NodeRecord) (installer.CommandRunner, error) {
+		return captureWorkerChecks(sshConfig, rec)
+	})
+	reportHostChecks(out, cluster, nodes, serverTarget(cluster, server, err, records), workers)
 }
 
-// reportUFWFailOpen reports a failed restoration attempt recorded on the server.
-func reportUFWFailOpen(out io.Writer, client installer.CommandRunner) {
-	marker, err := installer.UFWFailOpen(client)
-	if err != nil || marker == "" {
-		return
+// reportHostChecks reports DNS, restarts and mounts for the server, then workers,
+// marking unreachable hosts as unchecked. With workers, result prefixes identify
+// nodes, while healthy mount results name the host within the message.
+// Data placement uses the server, and firewall warnings require a readable marker.
+func reportHostChecks(out io.Writer, cluster *config.Cluster, nodes []k8s.NodeInfo, server hostTarget, workers []hostTarget) {
+	targets := append([]hostTarget{server}, workers...)
+	if len(workers) > 0 {
+		for i := range targets {
+			targets[i].prefix = targets[i].name + ": "
+		}
 	}
-	run, at, _ := strings.Cut(marker, " ")
-	say(out, "  Host firewall:\n")
-	say(out, "    ⚠  a firewall rollback (run %s, %s) could not restore the previous firewall and attempted to switch ufw off. Check the host's firewall state. Run 'kip cluster harden' to turn it back on\n\n", run, at)
+
+	say(out, "  DNS resolvers:\n")
+	for _, t := range targets {
+		if t.notChecked(out, true) {
+			continue
+		}
+		checkHostDNSResolvers(out, cluster, t)
+	}
+	say(out, "\n")
+
+	say(out, "  Pending restarts:\n")
+	for _, t := range targets {
+		if t.notChecked(out, false) {
+			continue
+		}
+		reportPendingRestarts(out, t)
+	}
+	say(out, "\n")
+
+	say(out, "  Volume mounts:\n")
+	for _, t := range targets {
+		if t.notChecked(out, false) {
+			continue
+		}
+		reportReadOnlyVolumes(out, t)
+	}
+	reportUncheckedMounts(out, cluster.Host, nodes, workers)
+	say(out, "\n")
+
+	if server.runner != nil {
+		reportDataPlacement(out, server.runner, cluster, nodes)
+	}
+	reportUFWFailOpen(out, targets)
+}
+
+// reportUFWFailOpen reports failed firewall restoration attempts recorded on
+// the nodes under one heading. It prints nothing when no marker can be read.
+func reportUFWFailOpen(out io.Writer, targets []hostTarget) {
+	heading := false
+	for _, t := range targets {
+		if t.runner == nil {
+			continue
+		}
+		marker, err := installer.UFWFailOpen(t.runner)
+		if err != nil || marker == "" {
+			continue
+		}
+		if !heading {
+			say(out, "  Host firewall:\n")
+			heading = true
+		}
+		run, at, _ := strings.Cut(marker, " ")
+		say(out, "    ⚠  %sa firewall rollback (run %s, %s) could not restore the previous firewall and attempted to switch ufw off. Check the host's firewall state. %s\n", t.prefix, run, at, t.firewallRepair)
+	}
+	if heading {
+		say(out, "\n")
+	}
 }
 
 // reportStorageRestartCoverage checks node annotations for missing, outdated,
@@ -315,39 +370,43 @@ func reportStorageRestartCoverage(nodes []k8s.NodeInfo) {
 	fmt.Printf("         kip node repair-host --host <address>\n\n")
 }
 
-// reportReadOnlyVolumes checks CSI mounts in the cluster host's mount namespace.
-// Results are scoped to that host; other known nodes are listed as unchecked.
-func reportReadOnlyVolumes(out io.Writer, cluster *config.Cluster, client *ssh.Client, nodes []k8s.NodeInfo) {
-	say(out, "  Volume mounts:\n")
-
-	readOnly, err := installer.ReadOnlyVolumeMounts(client)
+// reportReadOnlyVolumes checks CSI mounts in one node's mount namespace.
+func reportReadOnlyVolumes(out io.Writer, t hostTarget) {
+	readOnly, err := installer.ReadOnlyVolumeMounts(t.runner)
 	if err != nil {
-		say(out, "    ⚠  not checked (could not read the mounts on %s: %v)\n\n", cluster.Host, err)
+		say(out, "    ⚠  %snot checked (could not read the mounts on %s: %v)\n", t.prefix, t.where, err)
 		return
 	}
 
 	if len(readOnly) == 0 {
-		say(out, "    ✔  no read-only volumes on %s\n", cluster.Host)
-	} else {
-		for _, mount := range readOnly {
-			say(out, "    ✗  mounted read-only: %s\n", mount)
-		}
-		say(out, "       Writes to these volumes fail. Recreate the affected pod\n")
-		say(out, "       with 'kip service restart <name>'; a container restart alone\n")
-		say(out, "       cannot restore a writable mount.\n")
+		say(out, "    ✔  no read-only volumes on %s\n", t.where)
+		return
 	}
+	for _, mount := range readOnly {
+		say(out, "    ✗  %smounted read-only: %s\n", t.prefix, mount)
+	}
+	say(out, "       Writes to these volumes fail. Recreate the affected pod\n")
+	say(out, "       with 'kip service restart <name>'. A container restart alone\n")
+	say(out, "       cannot restore a writable mount.\n")
+}
 
+// reportUncheckedMounts names the nodes that are neither the configured host
+// nor a recorded worker, so no mount check reached them.
+func reportUncheckedMounts(out io.Writer, host string, nodes []k8s.NodeInfo, workers []hostTarget) {
+	recorded := map[string]bool{}
+	for _, w := range workers {
+		recorded[w.name] = true
+	}
 	var unchecked []string
 	for _, node := range nodes {
-		if !nodeIsHost(node, cluster.Host, nodes) {
+		if !nodeIsHost(node, host, nodes) && !recorded[node.Name] {
 			unchecked = append(unchecked, node.Name)
 		}
 	}
 	if len(unchecked) > 0 {
-		say(out, "    ⚠  not checked on %s (this command reads mounts on %s only)\n",
-			strings.Join(unchecked, ", "), cluster.Host)
+		say(out, "    ⚠  not checked on %s (this command reads mounts on %s and recorded workers only)\n",
+			strings.Join(unchecked, ", "), host)
 	}
-	say(out, "\n")
 }
 
 // nodeIsHost reports whether a node is the one the status command connected to.
@@ -376,88 +435,96 @@ func nodeIsHost(node k8s.NodeInfo, host string, all []k8s.NodeInfo) bool {
 // reportPendingRestarts surfaces updates that still need a service restart or reboot.
 // Storage service restarts can disrupt Longhorn volumes, so operators need
 // to schedule downtime to load updated libraries.
-func reportPendingRestarts(out io.Writer, client *ssh.Client) {
-	say(out, "  Pending restarts:\n")
-
-	pending, err := installer.PendingRestarts(client)
+func reportPendingRestarts(out io.Writer, t hostTarget) {
+	pending, err := installer.PendingRestarts(t.runner)
 	if err != nil {
-		say(out, "    ⚠  not checked (%v)\n\n", err)
+		say(out, "    ⚠  %snot checked (%v)\n", t.prefix, err)
 		return
 	}
 	if !pending.Any() {
-		say(out, "    ✔  nothing waiting on a restart\n\n")
+		say(out, "    ✔  %snothing waiting on a restart\n", t.prefix)
 		return
 	}
 
 	if len(pending.Deferred) > 0 {
-		say(out, "    ⚠  storage services awaiting restart: %s\n", strings.Join(pending.Deferred, ", "))
+		say(out, "    ⚠  %sstorage services awaiting restart: %s\n", t.prefix, strings.Join(pending.Deferred, ", "))
 		say(out, "       These services need a restart to load updated libraries.\n")
 		say(out, "       Restarting them can disrupt Longhorn volumes. Schedule downtime\n")
-		say(out, "       and reboot with 'kip node reboot' instead of restarting these\n")
+		say(out, "       and reboot with '%s' instead of restarting these\n", t.reboot)
 		say(out, "       services directly.\n")
 	}
 	if len(pending.Other) > 0 {
-		say(out, "    ⚠  waiting on a restart: %s\n", strings.Join(pending.Other, ", "))
+		say(out, "    ⚠  %swaiting on a restart: %s\n", t.prefix, strings.Join(pending.Other, ", "))
 	}
 	if pending.KernelOutdated {
-		say(out, "    ⚠  a kernel update is pending; reboot with 'kip node reboot'\n")
+		say(out, "    ⚠  %sa kernel update is pending. Reboot with '%s'\n", t.prefix, t.reboot)
 	}
 	if pending.RebootRequired {
-		say(out, "    ⚠  updates require a reboot; run 'kip node reboot'\n")
+		say(out, "    ⚠  %supdates require a reboot. Run '%s'\n", t.prefix, t.reboot)
 	}
-	say(out, "\n")
 }
 
 // checkHostDNSResolvers checks resolver validity, configuration, and reachability.
 // Read failures are reported as unchecked so status can continue with other checks.
-func checkHostDNSResolvers(out io.Writer, cluster *config.Cluster, client *ssh.Client) {
-	say(out, "  DNS resolvers:\n")
-
-	body, err := client.Run("cat " + installer.ResolvConfPath())
+func checkHostDNSResolvers(out io.Writer, cluster *config.Cluster, t hostTarget) {
+	body, err := installer.ReadResolvConf(t.runner)
 	if err != nil {
-		say(out, "    ⚠  not checked (could not read %s on the host: %v)\n\n", installer.ResolvConfPath(), err)
+		say(out, "    ⚠  %snot checked (could not read %s on the host: %v)\n", t.prefix, installer.ResolvConfPath(), err)
 		return
 	}
 
 	resolvers, problem := installer.CheckResolvConf(body)
 	if problem != nil {
-		say(out, "    ⚠  %s\n", problem)
+		say(out, "    ⚠  %s%s\n", t.prefix, problem)
+		if t.dnsRepair != "" {
+			say(out, "%s", t.dnsRepair)
+			return
+		}
 		say(out, "       run 'kip cluster dns repair' to restore the configured resolvers,\n")
-		say(out, "       or fix the nameserver entries in %s by hand\n\n", installer.ResolvConfPath())
+		say(out, "       or fix the nameserver entries in %s by hand\n", installer.ResolvConfPath())
 		return
 	}
 
 	// Report configuration drift and reachability independently.
 	healthy := true
-	configured := cluster.DNSResolvers
-	if len(configured) == 0 {
-		configured = installer.DefaultDNSResolvers()
-	}
+	configured := configuredResolvers(cluster)
 	if !installer.ResolversMatch(resolvers, configured) {
 		healthy = false
-		say(out, "    ⚠  live resolvers (%s) differ from the configured set (%s)\n",
-			strings.Join(resolvers, ", "), strings.Join(configured, ", "))
-		say(out, "       Run 'kip cluster dns repair' to restore %s\n", installer.ResolvConfPath())
-		say(out, "       to the configured set, or update dns_resolvers in\n")
-		say(out, "       ~/.kip/config.yaml if the new set is intended\n")
+		say(out, "    ⚠  %slive resolvers (%s) differ from the configured set (%s)\n",
+			t.prefix, strings.Join(resolvers, ", "), strings.Join(configured, ", "))
+		if t.dnsRepair != "" {
+			say(out, "%s", t.dnsRepair)
+		} else {
+			say(out, "       Run 'kip cluster dns repair' to restore %s\n", installer.ResolvConfPath())
+			say(out, "       to the configured set, or update dns_resolvers in\n")
+			say(out, "       ~/.kip/config.yaml if the new set is intended\n")
+		}
 	}
 
-	unreachable, probeErr := installer.ProbeResolvers(client, resolvers)
+	unreachable, probeErr := installer.ProbeResolvers(t.runner, resolvers)
 	switch {
 	case probeErr != nil:
 		healthy = false
-		say(out, "    ⚠  reachability not checked (probing the resolvers from the host failed: %v)\n", probeErr)
+		say(out, "    ⚠  %sreachability not checked (probing the resolvers from the host failed: %v)\n", t.prefix, probeErr)
 	case len(unreachable) > 0:
 		healthy = false
 		for _, r := range unreachable {
-			say(out, "    ⚠  resolver %s did not accept a TCP connection on port 53 from the host\n", r)
+			say(out, "    ⚠  %sresolver %s did not accept a TCP connection on port 53 from the host\n", t.prefix, r)
 		}
 	}
 
 	if healthy {
-		say(out, "    ✔  %s\n", strings.Join(resolvers, ", "))
+		say(out, "    ✔  %s%s\n", t.prefix, strings.Join(resolvers, ", "))
 	}
-	say(out, "\n")
+}
+
+// configuredResolvers returns the cluster's resolver set, or the defaults
+// when none is configured.
+func configuredResolvers(cluster *config.Cluster) []string {
+	if len(cluster.DNSResolvers) > 0 {
+		return cluster.DNSResolvers
+	}
+	return installer.DefaultDNSResolvers()
 }
 
 func componentMark(c k8s.ComponentStatus) string {

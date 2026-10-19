@@ -186,6 +186,8 @@ A component with no ready replicas (or no available replicas for a Deployment) i
 
 It also audits the DNS resolvers your cluster forwards external queries to. Those live in a file on the server, so `kip status` makes a best-effort SSH connection as the cluster's SSH user (reusing the key from install, then your SSH agent or `~/.ssh/id_ed25519`) to read it. Three things are checked: the file is still a safe set (IPv4 entries only, at most three), the entries still match the resolvers the cluster was configured with (`dns_resolvers` in `~/.kip/config.yaml`, or the default public set), and each resolver actually accepts connections from the server. Each problem gets its own warning, and drift or an unsafe hand-edit is fixed with `kip cluster dns repair`. If the server can't be reached over SSH, the section reports that the check could not run, and the rest of the status still prints.
 
+On a cluster with workers, the host checks (DNS resolvers, pending restarts, read-only volume mounts and a firewall rollback that attempted to switch UFW off) cover the server and every recorded worker. Results identify the node by name or, for healthy server mounts, by its configured host address. kip finds workers in node records read through the Kubernetes API. If those records are missing, unreadable or invalid, it uses the local copy and warns when the read or validation fails. It runs all of a worker's checks as one SSH command to reduce connections against the worker's firewall rate limit. Each worker's resolvers are probed from that worker. `kip cluster dns repair` repairs the server's resolver file only, so a resolver warning on a worker asks you to fix that worker's file by hand. Before reporting a worker's results, kip confirms that the address still answers with the worker's recorded machine ID. A worker that cannot be reached, or that answers as another machine, is listed as not checked and the rest of the status still prints. On a single-node cluster, results retain their layout without node-name prefixes.
+
 ## kip doctor {#kip-doctor}
 
 ```bash
@@ -273,7 +275,7 @@ For a worker whose host is powered off or gone for good, `--force` deregisters i
 
 ## kip node list {#kip-node-list}
 
-Lists all nodes in the cluster with role, status, version, and IP.
+Lists all nodes in the cluster with role, status, version, and IP. When a worker is recorded, the table also shows each node's network mode (`public` or `private`) and the address kip reaches it at over SSH. A node without a record shows `-` in both columns.
 
 ```bash
 kip node list
@@ -564,6 +566,7 @@ kip app info backend --project shop --environment prod
 
   Status:  running, 2/2 ready
   Image:   ghcr.io/acme/api:v1
+  Nodes:   server-1 (1 pod), worker-1 (1 pod)
 
   Autoscaling: on (CPU 70%)
   Desired: 2 (set by autoscaling)   Min: 2   Max: 5
@@ -583,6 +586,8 @@ kip app info backend --project shop --environment prod
   ✘  BindingDatabasesReady: DatabaseCreateFailed
            binding "db": creating "shop" in service "db": no running pod found for service "db"
 ```
+
+On a cluster with workers, the Nodes line names the nodes the app's pods run on, with the number of pods on each and any pods not yet scheduled. Finished pods are excluded. A single-node cluster leaves it out.
 
 The Conditions section shows the app's controller-reported conditions: ✔ for `True`, ✘ for `False`, and ⚠ for an unknown status. Read each reason and message for context: `RolloutComplete: False` can mean pods are still being replaced, while `RouteReady: True` can include a warning about a shared route name.
 
@@ -853,10 +858,13 @@ kip function create process-image --image myregistry/processor:v1 --port 8080 --
 kip function create db-sync --trigger postgres --source mydb --query "SELECT * FROM events WHERE processed = false" --project blog
 kip function create cache-worker --trigger redis --source cache --list jobs --project blog
 kip function list --project blog
+kip function info process-image --project blog
 kip function logs process-image --project blog
 kip function logs process-image --project blog -f
 kip function delete process-image --project blog
 ```
+
+`kip function info <name>` shows a function's status, trigger, image and URL. On a cluster with workers it also names the nodes its pods run on, as `kip app info` does.
 
 ### kip function create flags {#kip-function-create-flags}
 

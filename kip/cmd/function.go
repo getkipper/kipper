@@ -39,6 +39,13 @@ var functionListCmd = &cobra.Command{
 	RunE:  runFunctionList,
 }
 
+var functionInfoCmd = &cobra.Command{
+	Use:   "info [name]",
+	Short: "Show a function's status and the nodes it runs on",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runFunctionInfo,
+}
+
 var functionLogsCmd = &cobra.Command{
 	Use:   "logs [name]",
 	Short: "Print function logs",
@@ -167,6 +174,8 @@ func init() {
 	functionListCmd.Flags().String("project", "", "project name")
 	functionListCmd.Flags().String("environment", "", "target environment")
 
+	functionInfoCmd.Flags().String("project", "", "project name")
+	functionInfoCmd.Flags().String("environment", "", "target environment")
 	functionLogsCmd.Flags().String("project", "", "project name")
 	functionLogsCmd.Flags().String("environment", "", "target environment")
 	addLogFlags(functionLogsCmd, 100)
@@ -204,6 +213,7 @@ func init() {
 
 	functionCmd.AddCommand(functionCreateCmd)
 	functionCmd.AddCommand(functionListCmd)
+	functionCmd.AddCommand(functionInfoCmd)
 	functionCmd.AddCommand(functionLogsCmd)
 	functionCmd.AddCommand(functionDeleteCmd)
 	functionCmd.AddCommand(functionBindCmd)
@@ -445,6 +455,36 @@ func printFunctions(ctx context.Context, mgr *function.Manager, namespace string
 	fmt.Println()
 
 	return nil
+}
+
+func runFunctionInfo(cmd *cobra.Command, args []string) error {
+	name := args[0]
+	ns, k8sClient, err := resolveAppNamespace(cmd, name)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	fn, err := (&function.Manager{Dynamic: k8sClient.Dynamic()}).Get(ctx, ns, name)
+	if err != nil {
+		return err
+	}
+	nodes, nodesErr := workloadNodes(ctx, k8sClient.Clientset(), ns, name)
+	writeFunctionInfo(os.Stdout, fn, nodes, nodesErr)
+	return nil
+}
+
+// writeFunctionInfo prints a function's details, including its URL when set.
+// The Nodes line is omitted when the summary is empty and nodesErr is nil.
+func writeFunctionInfo(out io.Writer, fn function.Status, nodes string, nodesErr error) {
+	say(out, "\n  Function: %s\n\n", fn.Name)
+	say(out, "  Status:  %s, %d ready\n", fn.Status, fn.Ready)
+	say(out, "  Trigger: %s\n", fn.Trigger)
+	say(out, "  Image:   %s\n", fn.Image)
+	if fn.URL != "" {
+		say(out, "  URL:     %s\n", fn.URL)
+	}
+	writeWorkloadNodes(out, nodes, nodesErr)
+	say(out, "\n")
 }
 
 func runFunctionLogs(cmd *cobra.Command, args []string) error {

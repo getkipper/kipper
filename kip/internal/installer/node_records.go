@@ -16,8 +16,9 @@ import (
 type NodeRecord = config.NodeRecord
 
 const (
-	nodeRecordsNamespace = "kipper-system"
-	nodeRecordsConfigMap = "kipper-nodes"
+	// NodeRecordsNamespace and NodeRecordsConfigMap locate the node records.
+	NodeRecordsNamespace = "kipper-system"
+	NodeRecordsConfigMap = "kipper-nodes"
 
 	NodeRoleServer = "server"
 	NodeRoleWorker = "worker"
@@ -89,7 +90,7 @@ func validateNodeRecord(r NodeRecord) error {
 // name. A missing ConfigMap reads as no records; an unreadable one is an error.
 func ReadNodeRecords(client CommandRunner) ([]NodeRecord, error) {
 	out, err := client.Run(fmt.Sprintf("kubectl -n %s get configmap %s --ignore-not-found -o jsonpath='{.data}' 2>/dev/null",
-		nodeRecordsNamespace, nodeRecordsConfigMap))
+		NodeRecordsNamespace, NodeRecordsConfigMap))
 	if err != nil {
 		return nil, fmt.Errorf("reading the node records: %w", err)
 	}
@@ -103,8 +104,16 @@ func parseNodeRecords(out string) ([]NodeRecord, error) {
 	}
 	var data map[string]string
 	if err := json.Unmarshal([]byte(out), &data); err != nil {
-		return nil, fmt.Errorf("%w: %s/%s is not a map of records", errInvalidNodeRecords, nodeRecordsNamespace, nodeRecordsConfigMap)
+		return nil, fmt.Errorf("%w: %s/%s is not a map of records", errInvalidNodeRecords, NodeRecordsNamespace, NodeRecordsConfigMap)
 	}
+	return ParseNodeRecordData(data)
+}
+
+// ParseNodeRecordData validates the data of the kipper-nodes ConfigMap and
+// returns its records, servers first, then by name within each role.
+// Nil or empty data returns an empty slice. Malformed records, invalid fields
+// and keys that differ from the record's machine ID return an error and no records.
+func ParseNodeRecordData(data map[string]string) ([]NodeRecord, error) {
 	records := make([]NodeRecord, 0, len(data))
 	for key, value := range data {
 		var r NodeRecord
@@ -150,7 +159,7 @@ func SaveNodeRecord(client CommandRunner, r NodeRecord) error {
 	}
 	// A concurrent run may create the ConfigMap first; the patch then applies to it.
 	cmd := fmt.Sprintf("{ kubectl -n %[1]s create configmap %[2]s >/dev/null 2>&1 || true; } && kubectl -n %[1]s patch configmap %[2]s --type merge --patch-file /dev/stdin >/dev/null",
-		nodeRecordsNamespace, nodeRecordsConfigMap)
+		NodeRecordsNamespace, NodeRecordsConfigMap)
 	if _, err := client.RunStdin(cmd, strings.NewReader(string(patch))); err != nil {
 		return fmt.Errorf("recording node %s: %w", r.Name, err)
 	}
