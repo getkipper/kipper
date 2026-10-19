@@ -186,7 +186,7 @@ func (c *Client) masterIsServing() bool {
 		return false
 	}
 	//nolint:gosec // the socket path is derived from the operator's own connection parameters
-	return exec.Command("ssh", c.sshArgsWith("-O", "check")...).Run() == nil
+	return withoutLocale(exec.Command("ssh", c.sshArgsWith("-O", "check")...)).Run() == nil
 }
 
 // controlSocket hashes connection options and key selection as well as the
@@ -373,7 +373,7 @@ type Held struct {
 // receives interrupts sent to that group.
 func (c *Client) Start(command string) (*Held, error) {
 	//nolint:gosec // ssh client is the operator's chosen execution surface; arguments are built by kip internals against the host the operator selected
-	cmd := exec.Command("ssh", append(c.sshArgs(), c.remoteStreamCommand(command))...)
+	cmd := withoutLocale(exec.Command("ssh", append(c.sshArgs(), c.remoteStreamCommand(command))...))
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -607,14 +607,43 @@ func (c *Client) Close() error {
 func (c *Client) command(args ...string) (*exec.Cmd, context.Context, context.CancelFunc) {
 	if c.cfg.CommandTimeout <= 0 {
 		//nolint:gosec // ssh client is the operator's chosen execution surface; arguments are built by kip internals against the host the operator selected
-		return exec.Command("ssh", args...), context.Background(), func() {}
+		return withoutLocale(exec.Command("ssh", args...)), context.Background(), func() {}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.CommandTimeout)
 	//nolint:gosec // ssh client is the operator's chosen execution surface; arguments are built by kip internals against the host the operator selected
-	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd := withoutLocale(exec.CommandContext(ctx, "ssh", args...))
 	ownProcessGroup(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	return cmd, ctx, cancel
+}
+
+// withoutLocale sets cmd's environment to EnvironWithoutLocale and returns cmd.
+// SSH configurations can forward locale variables through SendEnv, as macOS does
+// with "SendEnv LANG LC_*". An unavailable locale, for example on a Debian cloud
+// image with only C.UTF-8, can cause shell warnings in output kip parses.
+// Removing these variables lets the host choose its locale unless SSH
+// configuration supplies one explicitly.
+func withoutLocale(cmd *exec.Cmd) *exec.Cmd {
+	cmd.Env = EnvironWithoutLocale()
+	return cmd
+}
+
+// EnvironWithoutLocale returns a new environment slice for SSH subprocesses,
+// excluding LANG, LANGUAGE and names beginning with LC_, matched case-insensitively.
+// It preserves the order and contents of other entries and leaves kip's environment
+// unchanged.
+func EnvironWithoutLocale() []string {
+	env := []string{}
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		// Windows matches variable names case-insensitively.
+		name = strings.ToUpper(name)
+		if name == "LANG" || name == "LANGUAGE" || strings.HasPrefix(name, "LC_") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return env
 }
 
 // fileExists returns true when the path exists and is not a directory.

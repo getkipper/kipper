@@ -80,7 +80,7 @@ func (h *ufwHost) Run(cmd string) (string, error) {
 		}
 		cmd = strings.TrimSuffix(cmd[strings.Index(cmd, ".deadline; ")+len(".deadline; "):], ")")
 	}
-	cmd = strings.ReplaceAll(cmd, "timeout -k 10 60 ", "")
+	cmd = strings.ReplaceAll(cmd, ufwTimeout, "")
 	cmd = strings.ReplaceAll(cmd, "iptables -w 5 ", "iptables ")
 	switch {
 	case strings.Contains(cmd, "systemd-run"):

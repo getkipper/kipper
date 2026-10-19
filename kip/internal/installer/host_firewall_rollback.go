@@ -16,8 +16,9 @@ const (
 	// ufwRollbackSeconds is the rollback delay renewed before each locked command.
 	// Rollback waits for the command holding the firewall lock to finish.
 	ufwRollbackSeconds = 180
-	// ufwTimeout allows 60 seconds per command, then a 10-second termination grace period.
-	ufwTimeout = "timeout -k 10 60 "
+	// ufwTimeout allows 60 seconds per command, then a 10-second termination grace
+	// period. The C locale keeps ufw's status words in English for kip's parser.
+	ufwTimeout = "LC_ALL=C LANGUAGE=C timeout -k 10 60 "
 	// ufwRefusedMarker identifies commands refused after rollback or loss of ownership.
 	// Splitting it in shell commands avoids matching echoed command text.
 	ufwRefusedMarker = "kip-ufw-change-refused"
