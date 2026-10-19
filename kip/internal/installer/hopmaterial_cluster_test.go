@@ -1,9 +1,12 @@
 package installer
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
+	"maps"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -19,9 +22,18 @@ import (
 // else entirely and still pass, which is the failure this whole file exists to
 // close.
 type fakeCluster struct {
-	t       *testing.T
-	files   map[string]string
-	secrets map[string]map[string]string
+	t        *testing.T
+	files    map[string]string
+	secrets  map[string]map[string]string
+	commands []string
+	// Keep the copy separate because both namespaces use the same Secret name.
+	traefikCopy       map[string]string
+	copyVersion       int
+	traefikAnnotation string
+	restarts          int
+	rolloutWaits      int
+	// Mimic kubectl errors containing the object, including plain and base64 key material.
+	failWritesEchoingInput bool
 }
 
 func newFakeCluster(t *testing.T) *fakeCluster {
@@ -34,13 +46,19 @@ func newFakeCluster(t *testing.T) *fakeCluster {
 }
 
 var (
-	readSecretKeyPattern = regexp.MustCompile(`get secret (\S+) --ignore-not-found -o jsonpath='\{\.data\.(\S+)\}'`)
-	readFilePattern      = regexp.MustCompile(`^if \[ ! -e (\S+) \] && \[ ! -L \S+ \]; then exit 0; fi; cat \S+$`)
-	writeFilePattern     = regexp.MustCompile(`^cat > (\S+)\.kipper-tmp && chmod \S+ \S+\.kipper-tmp && mv \S+\.kipper-tmp (\S+)$`)
-	createSecretPattern  = regexp.MustCompile(`create secret tls (\S+) --cert=`)
+	readSecretKeyPattern   = regexp.MustCompile(`get secret (\S+) --ignore-not-found -o jsonpath='\{\.data\.(\S+)\}'`)
+	readFilePattern        = regexp.MustCompile(`^if \[ ! -e (\S+) \] && \[ ! -L \S+ \]; then exit 0; fi; cat \S+$`)
+	writeFilePattern       = regexp.MustCompile(`^cat > (\S+)\.kipper-tmp && chmod \S+ \S+\.kipper-tmp && mv \S+\.kipper-tmp (\S+)$`)
+	createSecretPattern    = regexp.MustCompile(`create secret tls (\S+) --cert=`)
+	traefikCopyPattern     = regexp.MustCompile(`-n traefik create secret generic kipper-hop-cert `)
+	readCopyVersionPattern = regexp.MustCompile(`^kubectl -n traefik get secret kipper-hop-cert -o jsonpath='\{\.metadata\.resourceVersion\}'$`)
+	readRestartPattern     = regexp.MustCompile(`^kubectl -n traefik get deployment traefik -o jsonpath='\{\.spec\.template\.metadata\.annotations\.kipper\\\.run/hop-copy-version\}'$`)
+	restartPattern         = regexp.MustCompile(`^kubectl -n traefik patch deployment traefik --type merge -p '\{"spec":\{"template":\{"metadata":\{"annotations":\{"kipper\.run/hop-copy-version":"([0-9]+)"\}\}\}\}\}'$`)
+	rolloutPattern         = regexp.MustCompile(`^kubectl -n traefik rollout status deployment/traefik --timeout=\d+s$`)
 )
 
 func (f *fakeCluster) Run(command string) (string, error) {
+	f.commands = append(f.commands, command)
 	switch {
 	case strings.Contains(command, "create namespace"), strings.Contains(command, "kind: TLSStore"):
 		return "", nil
@@ -50,17 +68,40 @@ func (f *fakeCluster) Run(command string) (string, error) {
 	case readSecretKeyPattern.MatchString(command):
 		m := readSecretKeyPattern.FindStringSubmatch(command)
 		return f.secrets[m[1]][strings.ReplaceAll(m[2], `\.`, ".")], nil
+	case readCopyVersionPattern.MatchString(command):
+		return strconv.Itoa(f.copyVersion), nil
+	case readRestartPattern.MatchString(command):
+		return f.traefikAnnotation, nil
+	case restartPattern.MatchString(command):
+		f.traefikAnnotation = restartPattern.FindStringSubmatch(command)[1]
+		f.restarts++
+		return "", nil
+	case rolloutPattern.MatchString(command):
+		f.rolloutWaits++
+		return "", nil
 	}
 	f.t.Fatalf("the fake cluster was sent a command it does not model: %q", command)
 	return "", nil
 }
 
 func (f *fakeCluster) RunStdin(command string, stdin io.Reader) (string, error) {
+	f.commands = append(f.commands, command)
 	body, err := io.ReadAll(stdin)
 	if err != nil {
 		f.t.Fatalf("reading stdin: %v", err)
 	}
+	if f.failWritesEchoingInput && (traefikCopyPattern.MatchString(command) || createSecretPattern.MatchString(command)) {
+		return "", fmt.Errorf("error when applying patch: %s %s", base64.StdEncoding.EncodeToString(body), body)
+	}
 	switch {
+	case traefikCopyPattern.MatchString(command):
+		cert, key := splitCertAndKey(string(body))
+		written := map[string]string{"tls.crt": cert, "tls.key": key, "hop.yaml": hopYAMLIn(command)}
+		if !maps.Equal(written, f.traefikCopy) {
+			f.traefikCopy = written
+			f.copyVersion++
+		}
+		return "", nil
 	case writeFilePattern.MatchString(command):
 		m := writeFilePattern.FindStringSubmatch(command)
 		f.files[m[1]] = string(body)
@@ -80,6 +121,18 @@ func (f *fakeCluster) RunStdin(command string, stdin io.Reader) (string, error) 
 	}
 	f.t.Fatalf("the fake cluster was sent a command it does not model: %q", command)
 	return "", nil
+}
+
+// hopYAMLIn returns the file-provider configuration the copy command writes, which travels in the command
+// itself since it holds nothing secret.
+func hopYAMLIn(command string) string {
+	marker := strings.Index(command, "<<'HOPEOF'")
+	end := strings.LastIndex(command, "\nHOPEOF")
+	if marker < 0 || end < 0 {
+		return ""
+	}
+	start := marker + strings.Index(command[marker:], "\n") + 1
+	return command[start:end] + "\n"
 }
 
 // splitCertAndKey mirrors the awk in tlsSecretCmd: certificate blocks to one
@@ -251,4 +304,192 @@ func TestAFreshClusterIsGivenAnAuthorityAndAnAnchor(t *testing.T) {
 		t.Error("the certificate and key were not stored in their own fields")
 	}
 	_ = hostnames.GatewayDomain
+}
+
+func TestHopMaterialWritesTraefiksCopyOfTheLeaf(t *testing.T) {
+	cluster := newFakeCluster(t)
+
+	if err := EnsureHopMaterial(cluster); err != nil {
+		t.Fatal(err)
+	}
+
+	leaf := cluster.secrets[hopCertSecret]
+	if cluster.traefikCopy["tls.crt"] != leaf["tls.crt"] || cluster.traefikCopy["tls.key"] != leaf["tls.key"] {
+		t.Error("Traefik's copy must hold the live leaf pair")
+	}
+	if cluster.traefikCopy["hop.yaml"] != hopca.TraefikFileConfig {
+		t.Errorf("hop.yaml = %q", cluster.traefikCopy["hop.yaml"])
+	}
+}
+
+func TestHopMaterialKeepsTheCopysKeyOffTheCommandLine(t *testing.T) {
+	cluster := newFakeCluster(t)
+	if err := EnsureHopMaterial(cluster); err != nil {
+		t.Fatal(err)
+	}
+	keyBody := strings.Split(strings.TrimSpace(cluster.secrets[hopCertSecret]["tls.key"]), "\n")[1]
+	for _, c := range cluster.commands {
+		if strings.Contains(c, keyBody) {
+			t.Errorf("a command carries the private key: %q", c)
+		}
+	}
+}
+
+func TestHopMaterialLeavesTheTLSStoreForAfterTraefik(t *testing.T) {
+	cluster := newFakeCluster(t)
+	if err := EnsureHopMaterial(cluster); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cluster.commands {
+		if strings.Contains(c, "kind: TLSStore") {
+			t.Error("the TLSStore needs Traefik's CRDs, so it is applied by ServeHopCertificate after Traefik")
+		}
+	}
+
+	before := len(cluster.commands)
+	if err := ServeHopCertificate(cluster); err != nil {
+		t.Fatal(err)
+	}
+	applied := false
+	for _, c := range cluster.commands[before:] {
+		applied = applied || strings.Contains(c, "kind: TLSStore")
+	}
+	if !applied {
+		t.Error("ServeHopCertificate did not apply the TLSStore")
+	}
+}
+
+func TestRestartTraefikOntoCopyRestartsTraefikOntoTheCopy(t *testing.T) {
+	cluster := newFakeCluster(t)
+	if err := EnsureHopMaterial(cluster); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RestartTraefikOntoCopy(cluster); err != nil {
+		t.Fatal(err)
+	}
+	if cluster.traefikAnnotation != strconv.Itoa(cluster.copyVersion) || cluster.restarts != 1 {
+		t.Errorf("annotation = %q after %d restarts, want %d after one", cluster.traefikAnnotation, cluster.restarts, cluster.copyVersion)
+	}
+	if cluster.rolloutWaits != 1 {
+		t.Errorf("waited for the rollout %d times, want once", cluster.rolloutWaits)
+	}
+}
+
+func TestRestartTraefikOntoCopyLeavesTraefikRunningWhenItServesTheCopy(t *testing.T) {
+	cluster := newFakeCluster(t)
+	if err := EnsureHopMaterial(cluster); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestartTraefikOntoCopy(cluster); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureHopMaterial(cluster); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestartTraefikOntoCopy(cluster); err != nil {
+		t.Fatal(err)
+	}
+	if cluster.restarts != 1 {
+		t.Errorf("Traefik restarted %d times, want once: a rerun must leave it running", cluster.restarts)
+	}
+}
+
+// A rerun after a rollout that timed out finds the annotation already set, and must still wait for the rollout
+// rather than report success while Traefik serves the old copy.
+func TestRestartTraefikOntoCopyWaitsForTheRolloutOnARerun(t *testing.T) {
+	cluster := newFakeCluster(t)
+	if err := EnsureHopMaterial(cluster); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestartTraefikOntoCopy(cluster); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RestartTraefikOntoCopy(cluster); err != nil {
+		t.Fatal(err)
+	}
+	if cluster.rolloutWaits != 2 {
+		t.Errorf("waited for the rollout %d times over two runs, want each run to wait", cluster.rolloutWaits)
+	}
+}
+
+func TestRestartTraefikOntoCopyRestartsTraefikAfterTheCopyIsRewritten(t *testing.T) {
+	cluster := newFakeCluster(t)
+	if err := EnsureHopMaterial(cluster); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestartTraefikOntoCopy(cluster); err != nil {
+		t.Fatal(err)
+	}
+	cluster.traefikCopy["tls.crt"] = "edited out of band"
+	cluster.copyVersion++
+
+	if err := EnsureHopMaterial(cluster); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestartTraefikOntoCopy(cluster); err != nil {
+		t.Fatal(err)
+	}
+	if cluster.restarts != 2 || cluster.traefikAnnotation != strconv.Itoa(cluster.copyVersion) {
+		t.Errorf("annotation = %q after %d restarts, want %d after two", cluster.traefikAnnotation, cluster.restarts, cluster.copyVersion)
+	}
+}
+
+// The certificate and key are read in separate commands, so a rotation landing between them hands back a
+// certificate for one key and the other key. Traefik cannot load such a pair, so it must never reach the copy.
+func TestHopMaterialNeverWritesAMismatchedPairIntoTraefiksCopy(t *testing.T) {
+	ca, caKey, leaf, leafKey := authorityFixture(t)
+	rotated, _, err := hopca.NewLeaf([]byte(ca), []byte(caKey), hostnames.GatewayDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cluster := newFakeCluster(t)
+	cluster.files[hopCAPath] = ca
+	cluster.secrets[hopCASecret] = map[string]string{"tls.crt": ca, "tls.key": caKey}
+	cluster.secrets[hopCertSecret] = map[string]string{"tls.crt": string(rotated), "tls.key": leafKey}
+	cluster.traefikCopy = map[string]string{"tls.crt": leaf, "tls.key": leafKey, "hop.yaml": hopca.TraefikFileConfig}
+
+	if err := EnsureHopMaterial(cluster); err == nil {
+		t.Error("a certificate that does not belong to the key must stop the run")
+	}
+	if cluster.traefikCopy["tls.crt"] != leaf {
+		t.Error("Traefik's copy was overwritten with a mismatched pair")
+	}
+}
+
+func TestHopMaterialKeepsKeyMaterialOutOfWriteErrors(t *testing.T) {
+	// A first run creates the material, so the next run's writes are updates that can fail.
+	cluster := newFakeCluster(t)
+	if err := EnsureHopMaterial(cluster); err != nil {
+		t.Fatal(err)
+	}
+	key := cluster.secrets[hopCertSecret]["tls.key"]
+	keyBody := strings.Split(strings.TrimSpace(key), "\n")[1]
+
+	cluster.failWritesEchoingInput = true
+	err := EnsureHopMaterial(cluster)
+	if err == nil {
+		t.Fatal("expected the failed copy write to surface")
+	}
+	for _, leak := range []string{keyBody, base64.StdEncoding.EncodeToString([]byte(key))[:40], "PRIVATE KEY"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("the error carries key material: %v", err)
+		}
+	}
+}
+
+func TestSecretWriteKeepsTheAlreadyExistsSignal(t *testing.T) {
+	cluster := newFakeCluster(t)
+	if err := EnsureHopMaterial(cluster); err != nil {
+		t.Fatal(err)
+	}
+	err := createTLSSecret(cluster, hopCASecret, "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----", "-----BEGIN PRIVATE KEY-----\ny\n-----END PRIVATE KEY-----")
+	if !isAlreadyExists(err) {
+		t.Errorf("an existing authority must still read as AlreadyExists, got %v", err)
+	}
+	if strings.Contains(err.Error(), "PRIVATE KEY") {
+		t.Errorf("the error carries key material: %v", err)
+	}
 }

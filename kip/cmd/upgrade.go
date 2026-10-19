@@ -88,7 +88,7 @@ Examples:
 }
 
 func init() {
-	upgradeCmd.Flags().Bool("skip-system", false, "skip system component upgrades (Traefik, Longhorn, KEDA, etc.). Still update Kipper CRDs, console and trust material, check node records, pin single-copy volumes to the server, and recover interrupted network changes")
+	upgradeCmd.Flags().Bool("skip-system", false, "skip system component upgrades (Traefik, Longhorn, KEDA, etc.). Still update Kipper CRDs, console and trust material (restarting Traefik when its copy of the hop certificate changes), check node records, pin single-copy volumes to the server, and recover interrupted network changes")
 	upgradeCmd.Flags().Bool("yes", false, "skip the confirmation prompts before upgrading system components and before removing app routes that collide with Kipper's own routes; autoscaling fixes are confirmed separately, by --repair-autoscaling when there is no terminal")
 	upgradeCmd.Flags().Bool("seed-credential-grants", false, "grant each shared git credential the projects whose apps already reference it, without asking. Skips the pre-rollout prompt on a legacy cluster; a no-op everywhere else")
 	upgradeCmd.Flags().String("image-tag", "", "test a commit's console, instance proxy and data mover images (full 40-character SHA); requires --skip-system; apps using the instance proxy roll out when its image changes; omit on the next upgrade to restore released images")
@@ -428,12 +428,20 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 // arguments before anything asks it to load an authentication config, because
 // on an old cluster there is no flag for it to load one with.
 var (
-	ensureHopMaterial     = func(c *ssh.Client) error { return installer.EnsureHopMaterial(c) }
+	ensureHopMaterial = func(c *ssh.Client) error {
+		if err := installer.EnsureHopMaterial(c); err != nil {
+			return err
+		}
+		return installer.ServeHopCertificate(c)
+	}
 	ensureAPIServerConfig = func(c *ssh.Client, notify func(string)) (bool, error) {
 		return installer.EnsureAPIServerConfig(c, notify)
 	}
-	syncOperatorAuth   = installer.SyncOperatorAuthIfConfigured
-	ensureOperatorAuth = installer.EnsureOperatorAuth
+	syncOperatorAuth       = installer.SyncOperatorAuthIfConfigured
+	ensureOperatorAuth     = installer.EnsureOperatorAuth
+	restartTraefikOntoCopy = func(c *ssh.Client) error {
+		return installer.RestartTraefikOntoCopy(c)
+	}
 )
 
 func ensureTrustMaterial(cluster *config.Cluster, explicitKey, fallbackKey string) error {
@@ -455,8 +463,24 @@ func ensureTrustMaterial(cluster *config.Cluster, explicitKey, fallbackKey strin
 	return reconcileHostTrust(provider.Client(), cluster.DexHost())
 }
 
-// reconcileHostTrust is everything an upgrade does on the server itself.
+// reconcileHostTrust repairs host trust before restarting Traefik to load its
+// copy of the hop certificate, so a stalled rollout cannot delay the trust
+// repair. Restart errors are logged rather than returned. The system upgrade
+// retries the rollout, and console-api retries copy synchronization and restart
+// requests on later heartbeats.
 func reconcileHostTrust(client *ssh.Client, dexHost string) error {
+	if err := reconcileTrust(client, dexHost); err != nil {
+		return err
+	}
+	if err := restartTraefikOntoCopy(client); err != nil {
+		fmt.Printf("  ⚠  Traefik has not finished restarting onto its copy of the hop certificate: %v\n", err)
+	}
+	return nil
+}
+
+// reconcileTrust repairs the certificate authority, the trust anchor and the
+// API server's view of them.
+func reconcileTrust(client *ssh.Client, dexHost string) error {
 	fmt.Printf("\n  ...  Certificate authority and trust anchor\n")
 	if err := ensureHopMaterial(client); err != nil {
 		return fmt.Errorf("ensuring the cluster certificate authority: %w", err)

@@ -1,14 +1,15 @@
 // Package hopcert provisions the cluster's stable gateway-hop serving
 // certificate. The kipper.run gateway verifies its proxied TLS hop against a
 // pinned SPKI fingerprint instead of WebPKI, so this certificate's job is to
-// hold a stable keypair: Traefik serves it for every SNI without a named
-// certificate via the default TLSStore, replacing the generated fallback
-// certificate whose key changes on every dynamic-config rebuild and could
-// never hold a pin. The gateway heartbeat asserts the fingerprint returned
+// hold a stable keypair: Traefik serves it from its own copy for *.kipper.run
+// names and via the default TLSStore for every other SNI without a named
+// certificate. This replaces the generated fallback certificate, whose key
+// changes on every dynamic-config rebuild and cannot hold a stable pin. The gateway heartbeat asserts the fingerprint returned
 // here (see gateway_heartbeat.go).
 package hopcert
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/x509"
@@ -22,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -47,9 +49,9 @@ const (
 	Namespace = "kipper-system"
 
 	// RotateAnnotation on the Secret requests an explicit key rotation. The
-	// next Ensure stages a candidate keypair; the heartbeat asserts its
+	// next Ensure stages a candidate keypair. The heartbeat asserts its
 	// fingerprint and swaps it live only after the gateway acknowledges it in
-	// the accepted set, so a rotation never opens a 502 window.
+	// the accepted set, so the pin admits the new key before Traefik serves it.
 	RotateAnnotation = "kipper.run/rotate-key"
 
 	// candidateCertKey and candidateKeyKey stage the rotation keypair inside
@@ -72,23 +74,21 @@ const (
 var tlsStoreGVK = schema.GroupVersionKind{Group: "traefik.io", Version: "v1alpha1", Kind: "TLSStore"}
 
 // State reports what Ensure provisioned and what the heartbeat should assert.
+// Fingerprints are SHA-256 hashes of the keys' SPKI. An empty CandidateFingerprint
+// means no rotation is staged. Otherwise, the heartbeat asserts the candidate
+// instead of the live Fingerprint and promotes it after gateway acknowledgment.
+// ForeignStores lists conflicting default TLSStores outside kipper-system in
+// sorted order. Any entry blocks pin assertion because Traefik may serve a
+// different certificate until the conflict is removed.
 type State struct {
-	// Fingerprint is the SPKI SHA-256 of the live serving keypair.
-	Fingerprint string
-	// CandidateFingerprint is the staged rotation keypair's SPKI, empty when
-	// no rotation is in flight. When set, the heartbeat asserts it instead of
-	// Fingerprint and calls PromoteCandidate once the gateway acknowledges.
+	Fingerprint          string
 	CandidateFingerprint string
-	// ForeignStores lists TLSStore objects named "default" outside
-	// kipper-system. Traefik cannot serve two default stores coherently, so
-	// any entry here means the hop certificate may not be what the cluster
-	// serves — the heartbeat must not assert the fingerprint until the
-	// conflict is removed.
-	ForeignStores []string
+	ForeignStores        []string
 }
 
 // Ensure idempotently provisions the hop keypair Secret and the default
-// TLSStore, stages a requested key rotation, and reissues a certificate
+// TLSStore, synchronizes Traefik's copy and requests a restart when its version
+// changes, stages a requested key rotation, and reissues a certificate
 // nearing expiry (same key, same fingerprint). It never regenerates a live
 // key on its own: a changed key needs the two-phase rotation or the gateway
 // would 502 the cluster until re-observation.
@@ -109,6 +109,9 @@ func Ensure(ctx context.Context, client kubernetes.Interface, cr crclient.Client
 	cert, err := hopca.ParseCert(secret.Data[corev1.TLSCertKey])
 	if err != nil {
 		return State{}, fmt.Errorf("parsing hop certificate: %w", err)
+	}
+	if err := writeTraefikCopy(ctx, client, secret); err != nil {
+		return State{}, err
 	}
 
 	if err := reconcileTLSStore(ctx, cr); err != nil {
@@ -132,7 +135,7 @@ func Ensure(ctx context.Context, client kubernetes.Interface, cr crclient.Client
 
 // SigningKey loads the live hop-certificate private key from the Secret so
 // console-api can sign the gateway's registration proof-of-possession
-// challenge (B16). It is the key whose public half Traefik serves at the
+// challenge. It is the key whose public half Traefik serves at the
 // cluster IP, so a signature over it proves possession of the destination's
 // key to the gateway. It follows the live key across rotation (PromoteCandidate
 // swaps this same key), so a beat after a rotation re-proves with the new key.
@@ -156,11 +159,13 @@ func SigningKey(ctx context.Context, client kubernetes.Interface) (*ecdsa.Privat
 	return key, nil
 }
 
-// PromoteCandidate makes the staged rotation keypair the live one in a single
-// Secret update, after the gateway acknowledged its fingerprint. Traefik's
-// provider hot-swaps the served certificate; the gateway accepts old and new
-// throughout (current + pending/previous), so no request window 502s.
-// Idempotent: with no candidate staged it does nothing.
+// PromoteCandidate makes the staged rotation keypair live in a single Secret
+// update, synchronizes Traefik's copy and requests a restart without waiting for
+// the rollout. Call it after the gateway acknowledges the candidate fingerprint,
+// so the pin accepts both keys during the handover (current plus pending/previous).
+// With no candidate, it does nothing. If updating the copy or requesting the
+// restart fails after promotion, the error identifies that partial success and
+// the next Ensure retries the remaining work.
 func PromoteCandidate(ctx context.Context, client kubernetes.Interface) error {
 	secret, err := client.CoreV1().Secrets(Namespace).Get(ctx, SecretName, metav1.GetOptions{})
 	if err != nil {
@@ -173,10 +178,87 @@ func PromoteCandidate(ctx context.Context, client kubernetes.Interface) error {
 	secret.Data[corev1.TLSPrivateKeyKey] = secret.Data[candidateKeyKey]
 	delete(secret.Data, candidateCertKey)
 	delete(secret.Data, candidateKeyKey)
-	if _, err := client.CoreV1().Secrets(Namespace).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+	updated, err := client.CoreV1().Secrets(Namespace).Update(ctx, secret, metav1.UpdateOptions{})
+	if err != nil {
 		return fmt.Errorf("promoting candidate hop certificate: %w", err)
 	}
+	if err := writeTraefikCopy(ctx, client, updated); err != nil {
+		return fmt.Errorf("candidate promoted, but synchronizing Traefik's copy or requesting its restart failed: %w", err)
+	}
 	return nil
+}
+
+// writeTraefikCopy synchronizes Traefik's copy with the live pair in secret and
+// requests a restart when needed. Reading this file at startup lets Traefik
+// serve the hop key before its Kubernetes provider loads the TLSStore.
+// Only the live pair is copied, so a staged candidate stays unserved.
+func writeTraefikCopy(ctx context.Context, client kubernetes.Interface, secret *corev1.Secret) error {
+	want := hopca.TraefikCopyData(secret.Data[corev1.TLSCertKey], secret.Data[corev1.TLSPrivateKeyKey])
+	secrets := client.CoreV1().Secrets(hopca.TraefikNamespace)
+	existing, err := secrets.Get(ctx, hopca.TraefikCopyName, metav1.GetOptions{})
+	if k8serrors.IsNotFound(err) {
+		created, err := secrets.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      hopca.TraefikCopyName,
+				Namespace: hopca.TraefikNamespace,
+				Labels:    map[string]string{managedByLabel: managedByValue},
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: want,
+		}, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("creating Traefik's copy of the hop certificate: %w", err)
+		}
+		return restartTraefik(ctx, client, created.ResourceVersion)
+	}
+	if err != nil {
+		return fmt.Errorf("reading Traefik's copy of the hop certificate: %w", err)
+	}
+	if !sameData(existing.Data, want) {
+		existing.Data = want
+		// kubectl apply keeps the whole Secret in this annotation, which would
+		// carry a retired key along after a rotation.
+		delete(existing.Annotations, corev1.LastAppliedConfigAnnotation)
+		if existing, err = secrets.Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("updating Traefik's copy of the hop certificate: %w", err)
+		}
+	}
+	return restartTraefik(ctx, client, existing.ResourceVersion)
+}
+
+// restartTraefik requests a restart when the pod template's copy version differs
+// from the Secret's resourceVersion, because file-provider reloads are unreliable.
+// Comparing versions also triggers a restart after repairs that restore the same
+// certificate and retries failed restart requests. A missing Deployment is skipped.
+func restartTraefik(ctx context.Context, client kubernetes.Interface, copyVersion string) error {
+	deployments := client.AppsV1().Deployments(hopca.TraefikNamespace)
+	dep, err := deployments.Get(ctx, hopca.TraefikDeploymentName, metav1.GetOptions{})
+	if k8serrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading Traefik's Deployment: %w", err)
+	}
+	if dep.Spec.Template.Annotations[hopca.TraefikCopyAnnotation] == copyVersion {
+		return nil
+	}
+	if _, err := deployments.Patch(ctx, hopca.TraefikDeploymentName, types.MergePatchType,
+		hopca.TraefikRestartPatch(copyVersion), metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("restarting Traefik onto its copy of the hop certificate: %w", err)
+	}
+	return nil
+}
+
+func sameData(a, b map[string][]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range b {
+		if !bytes.Equal(a[k], v) {
+			return false
+		}
+	}
+	return true
 }
 
 // ensureCA returns the cluster's certificate authority, creating it only if no

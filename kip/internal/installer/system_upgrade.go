@@ -24,7 +24,10 @@ type SystemComponent struct {
 func SystemComponents(domain string, dnsResolvers, trustedProxies []string, state PlatformState) []SystemComponent {
 	components := []SystemComponent{
 		{Name: "traefik", Apply: func(c CommandRunner) error {
-			return InstallTraefik(c, ResolveTrustedProxies(domain, trustedProxies))
+			if err := InstallTraefik(c, ResolveTrustedProxies(domain, trustedProxies)); err != nil {
+				return err
+			}
+			return RestartTraefikOntoCopy(c)
 		}},
 		{Name: "cert-manager-dns", Apply: func(c CommandRunner) error { return patchCertManagerDNSConfig(c, dnsResolvers) }},
 		{Name: "service-ca", Apply: InstallServiceCA},

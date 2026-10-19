@@ -79,7 +79,7 @@ leaked, someone who has left had access to it, or a server was compromised. If n
 leave it alone. Replacing an authority is riskier than the thing it prevents.
 
 There is no `kip` command that does this for you, and that is a decision rather than an omission.
-The change spans two Kubernetes Secrets and two files on the host, and nothing can change all four as
+The change spans three Kubernetes Secrets and two files on the host, and nothing can change all five as
 one transaction. A tool that got half way and stopped would leave your cluster serving a certificate
 the API server refuses, which locks every operator out of the login path. So each phase below ends at
 a gate you verify yourself before carrying on, and the cluster is safe to sit at any of them
@@ -412,23 +412,79 @@ kubectl -n kipper-system get secret kipper-hop-ca -o jsonpath='{.data.previous\.
 
 ```bash
 NEW_LEAF_B64=$(base64 -w0 < new-leaf.crt)
+NEW_PUB=$(openssl x509 -in new-leaf.crt -noout -pubkey)
+RV=$(kubectl -n kipper-system get secret kipper-hop-cert -o jsonpath='{.metadata.resourceVersion}')
+LIVE_PUB=$(kubectl -n kipper-system get secret kipper-hop-cert -o jsonpath='{.data.tls\.key}' \
+  | base64 -d | openssl pkey -pubout)
 
-if [ -n "$NEW_LEAF_B64" ]; then
+if [ -n "$NEW_LEAF_B64" ] && [ -n "$NEW_PUB" ] && [ -n "$RV" ] && [ "$NEW_PUB" = "$LIVE_PUB" ]; then
   kubectl -n kipper-system patch secret kipper-hop-cert --type merge \
-    -p "{\"data\":{\"tls.crt\":\"$NEW_LEAF_B64\"}}"
+    -p "{\"metadata\":{\"resourceVersion\":\"$RV\"},\"data\":{\"tls.crt\":\"$NEW_LEAF_B64\"}}"
 else
-  echo "STOP: the certificate is empty — do not continue"
+  echo "STOP: the certificate is empty or does not match the live key. Do not continue."
 fi
 ```
+
+The block first compares the new certificate with the current live key, which may have been rotated
+since the certificate was signed in 2.1. The patch includes the Secret's resource version from before
+that read, so a concurrent rotation causes a conflict instead of pairing the certificate with a
+different key. A conflict can also mean Kipper has already re-signed the certificate under the
+authority promoted in 2.2, so run the block again. If it then stops on the key check, the key was
+rotated: in a new shell define `save` again from "Before you start"
+and read `SAN` as in 1.1, then fetch the current pair with
+`save kipper-hop-cert 'tls\.crt' leaf.crt && save kipper-hop-cert 'tls\.key' leaf.key` and redo 2.1 and 2.3.
 
 Only `tls.crt` is written. The private key is never part of any patch on this
 page: the gateway pins its public half, so anything that replaces it takes the
 cluster off the gateway.
 
+Traefik serves its own copy of the certificate from the `traefik` namespace, so give the copy the
+same certificate. The function below checks that the live key matches the new certificate, then
+writes both to the copy. This also repairs a copy that fell behind a key rotation. The key travels
+through files and pipes to keep it off the command line, and the function removes its key file on
+exit. A running Traefik does not reliably pick up changes to this mounted copy, so the function then
+records the copy's new version on Traefik's Deployment to trigger a restart and waits for the rollout:
+
+```bash
+update_traefik_copy() (
+  local cert=$1 version live_pub cert_pub
+  umask 077
+  trap 'rm -f live.key hop.yaml' EXIT
+  if ! kubectl -n kipper-system get secret kipper-hop-cert -o jsonpath='{.data.tls\.key}' \
+      | base64 -d > live.key || [ ! -s live.key ] \
+    || ! kubectl -n traefik get secret kipper-hop-cert -o jsonpath='{.data.hop\.yaml}' \
+      | base64 -d > hop.yaml || [ ! -s hop.yaml ]; then
+    echo "STOP: could not read the live key or Traefik's copy. If the copy is missing, run kip upgrade first."; return 1
+  fi
+  if ! live_pub=$(openssl pkey -in live.key -pubout) || ! cert_pub=$(openssl x509 -in "$cert" -noout -pubkey) \
+    || [ -z "$live_pub" ] || [ "$live_pub" != "$cert_pub" ]; then
+    echo "STOP: $cert does not match the live key. Traefik's copy is unchanged."; return 1
+  fi
+  if ! kubectl -n traefik create secret generic kipper-hop-cert --from-file=tls.crt="$cert" \
+      --from-file=tls.key=live.key --from-file=hop.yaml=hop.yaml --dry-run=client -o yaml \
+      | kubectl apply -f - > /dev/null 2>&1; then
+    echo "STOP: writing Traefik's copy failed. Its output is withheld because it can contain the private key."; return 1
+  fi
+  if ! version=$(kubectl -n traefik get secret kipper-hop-cert -o jsonpath='{.metadata.resourceVersion}') \
+    || [ -z "$version" ] \
+    || ! kubectl -n traefik patch deployment traefik --type merge \
+      -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"kipper.run/hop-copy-version\":\"$version\"}}}}}"; then
+    echo "STOP: Traefik's copy is updated, but restarting Traefik failed. Check the error, then run it again."; return 1
+  fi
+  if ! kubectl -n traefik rollout status deployment/traefik --timeout=300s; then
+    echo "STOP: Traefik was restarted, but its rollout has not finished. Check the Traefik pods, then run it again."; return 1
+  fi
+)
+update_traefik_copy new-leaf.crt
+```
+
+If it prints a `STOP` message, fix the cause and run `update_traefik_copy new-leaf.crt` again. Each
+step is safe to repeat.
+
 ### Gate 2
 
-This is the one that matters. Traefik reloads its certificate store on its own schedule, so the Secret
-saying one thing does not mean the wire says it. Ask the wire.
+This gate verifies the certificate Traefik actually serves. Updating the Secrets alone cannot
+confirm that, so check the live connection.
 
 ```bash
 kip cluster ca status
@@ -446,7 +502,7 @@ comes back against the authority the cluster now says is active.
 If it shows ✗, read the `Resume at` line printed underneath it. Under this ordering the usual reason
 is that step 2.3 has not landed, so the authority moved and the certificate has not followed, and the
 status says so directly by resuming you at 2.3. If it resumes you at gate 2 instead, then 2.3 did land
-and the wire simply has not caught up: Traefik reloads on its own schedule, so wait a minute and check
+and the wire has not caught up. Check that the Traefik rollout at the end of 2.3 finished, then check
 again before investigating.
 
 **Do not go to phase 3 until that line shows ✔.** If it shows `–`, your cluster has no
@@ -604,6 +660,36 @@ On the node:
 ```bash
 cd /root/ca-replacement
 
+update_traefik_copy() (
+  local cert=$1 version live_pub cert_pub
+  umask 077
+  trap 'rm -f live.key hop.yaml' EXIT
+  if ! kubectl -n kipper-system get secret kipper-hop-cert -o jsonpath='{.data.tls\.key}' \
+      | base64 -d > live.key || [ ! -s live.key ] \
+    || ! kubectl -n traefik get secret kipper-hop-cert -o jsonpath='{.data.hop\.yaml}' \
+      | base64 -d > hop.yaml || [ ! -s hop.yaml ]; then
+    echo "STOP: could not read the live key or Traefik's copy. If the copy is missing, run kip upgrade first."; return 1
+  fi
+  if ! live_pub=$(openssl pkey -in live.key -pubout) || ! cert_pub=$(openssl x509 -in "$cert" -noout -pubkey) \
+    || [ -z "$live_pub" ] || [ "$live_pub" != "$cert_pub" ]; then
+    echo "STOP: $cert does not match the live key. Traefik's copy is unchanged."; return 1
+  fi
+  if ! kubectl -n traefik create secret generic kipper-hop-cert --from-file=tls.crt="$cert" \
+      --from-file=tls.key=live.key --from-file=hop.yaml=hop.yaml --dry-run=client -o yaml \
+      | kubectl apply -f - > /dev/null 2>&1; then
+    echo "STOP: writing Traefik's copy failed. Its output is withheld because it can contain the private key."; return 1
+  fi
+  if ! version=$(kubectl -n traefik get secret kipper-hop-cert -o jsonpath='{.metadata.resourceVersion}') \
+    || [ -z "$version" ] \
+    || ! kubectl -n traefik patch deployment traefik --type merge \
+      -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"kipper.run/hop-copy-version\":\"$version\"}}}}}"; then
+    echo "STOP: Traefik's copy is updated, but restarting Traefik failed. Check the error, then run it again."; return 1
+  fi
+  if ! kubectl -n traefik rollout status deployment/traefik --timeout=300s; then
+    echo "STOP: Traefik was restarted, but its rollout has not finished. Check the Traefik pods, then run it again."; return 1
+  fi
+)
+
 restore_authority() {
   local f SAN RV CA_B64 CAKEY_B64 LEAF_B64
   for f in backup-ca.crt backup-ca.key backup-anchor.crt; do
@@ -658,19 +744,22 @@ restore_authority() {
       -p "{\"metadata\":{\"resourceVersion\":\"$RV\"},\"data\":{\"tls.crt\":\"$LEAF_B64\"}}"; then
     echo "STOP: authority restored; certificate patch failed. Check the error for a concurrent Secret update or another failure, then retry."; return 1
   fi
+  if ! update_traefik_copy restored-leaf.crt; then
+    echo "STOP: authority and certificate restored. Updating Traefik's copy or completing its rollout failed. Fix the cause above, then run restore_authority again."; return 1
+  fi
   if ! cp backup-anchor.crt /etc/rancher/k3s/.kipper-hop-ca.crt.restore \
     || ! mv /etc/rancher/k3s/.kipper-hop-ca.crt.restore /etc/rancher/k3s/kipper-hop-ca.crt; then
-    echo "STOP: authority and certificate restored; anchor file update failed. Check the error, then retry."; return 1
+    echo "STOP: authority, certificate and Traefik's copy restored. Updating the anchor file failed. Check the error, then retry."; return 1
   fi
   echo "RESTORED"
 }
 restore_authority
 ```
 
-`RESTORED` means both Secret patches and the anchor file replacement succeeded. A `STOP` message
-identifies the failed step. After resolving the error, rerun the function; it reads the current key
-again and issues a fresh certificate under the saved authority. In a new shell, set
-`KUBECONFIG=/etc/rancher/k3s/k3s.yaml`, return to `/root/ca-replacement`, and paste the function again.
+`RESTORED` means the Secret patches, Traefik's rollout onto its copy and the anchor file replacement
+succeeded. A `STOP` message identifies the failed step. After resolving the error, rerun the function.
+It reads the current key again and issues a fresh certificate under the saved authority. In a new shell, set
+`KUBECONFIG=/etc/rancher/k3s/k3s.yaml`, return to `/root/ca-replacement`, and paste both functions again.
 
 The explicit `null` values remove the pending and previous authority entries, clearing the
 unfinished replacement state.

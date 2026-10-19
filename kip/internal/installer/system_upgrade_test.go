@@ -1,9 +1,11 @@
 package installer
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSystemComponents(t *testing.T) {
@@ -150,4 +152,30 @@ func TestPlatformStateEffectiveResources(t *testing.T) {
 			"upgrade-time render must clamp request to limit, not produce request > limit")
 		assert.Equal(t, "128Mi", got.PrometheusMemoryLimit)
 	})
+}
+
+// Unreliable file reloads require a restart to load the hop-certificate copy.
+// The chart must be reapplied first so the restarted pods mount the copy.
+func TestSystemComponentsRestartTraefikOntoItsCopyAfterReapplyingTheChart(t *testing.T) {
+	var traefik *SystemComponent
+	for _, c := range SystemComponents("example.com", nil, nil, PlatformState{Profile: ProfileMedium}) {
+		if c.Name == "traefik" {
+			traefik = &c
+		}
+	}
+	require.NotNil(t, traefik)
+	host := &routedRunner{routes: []route{{contains: "jsonpath='{.metadata.resourceVersion}'", out: "7"}}}
+
+	require.NoError(t, traefik.Apply(host))
+
+	chart, restart := -1, -1
+	for i, c := range host.commands {
+		if chart < 0 && strings.Contains(c, "kind: HelmChart") {
+			chart = i
+		}
+		if strings.Contains(c, "patch deployment traefik") {
+			restart = i
+		}
+	}
+	assert.True(t, chart >= 0 && restart > chart, "chart applied at %d, Traefik restarted at %d", chart, restart)
 }

@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+
+	"github.com/getkipper/kipper/controller/pkg/hopca"
 )
 
 // traefikManifestTemplate carries one %s per entrypoint for the rendered
@@ -104,6 +106,25 @@ spec:
           enabled: true
 `
 
+// renderTraefikManifest uses the trustedIPs YAML flow list and adds the
+// file-provider settings for the hop certificate. The appended settings belong
+// inside valuesContent, the HelmChart's final field, so their indentation matters.
+func renderTraefikManifest(trustedIPs string) string {
+	var hop strings.Builder
+	hop.WriteString("    # Traefik reads its copy of the hop certificate from a file at startup, so it\n")
+	hop.WriteString("    # serves the hop key before its Kubernetes provider has loaded the TLSStore. The\n")
+	hop.WriteString("    # copy is optional: without it Traefik starts and serves as before.\n")
+	hop.WriteString("    deployment:\n      additionalVolumes:\n        - name: kipper-hop\n          secret:\n")
+	fmt.Fprintf(&hop, "            secretName: %s\n            optional: true\n", hopca.TraefikCopyName)
+	hop.WriteString("    additionalVolumeMounts:\n      - name: kipper-hop\n")
+	fmt.Fprintf(&hop, "        mountPath: %s\n        readOnly: true\n", hopca.TraefikMountPath)
+	hop.WriteString("    additionalArguments:\n")
+	for _, arg := range hopca.TraefikFileArgs {
+		fmt.Fprintf(&hop, "      - %q\n", arg)
+	}
+	return fmt.Sprintf(traefikManifestTemplate, trustedIPs, trustedIPs) + hop.String()
+}
+
 // renderTrustedIPs validates every entry as an IP or CIDR and renders the
 // YAML flow list for the chart values. Bare IPs are normalized to host
 // prefixes. Validation doubles as heredoc safety: only canonical prefix
@@ -175,7 +196,7 @@ func InstallTraefik(client CommandRunner, trustedProxies []string) error {
 	if err != nil {
 		return err
 	}
-	manifest := fmt.Sprintf(traefikManifestTemplate, trusted, trusted)
+	manifest := renderTraefikManifest(trusted)
 
 	applyCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", manifest)
 	if _, err := client.Run(applyCmd); err != nil {

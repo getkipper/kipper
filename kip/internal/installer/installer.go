@@ -691,8 +691,20 @@ func Run(opts Options) (*Result, error) {
 			effectivePlatform = state
 			return nil
 		}},
+		// Traefik reads its copy of the hop certificate at startup, so the material
+		// must exist before Traefik starts. The TLSStore follows Traefik because it
+		// needs Traefik's CRDs.
+		{"Minting the cluster certificate authority", func() error {
+			return EnsureHopMaterial(client)
+		}},
 		{"Installing Traefik ingress", func() error {
 			return InstallTraefik(client, ResolveTrustedProxies(domainName, opts.TrustedProxies))
+		}},
+		{"Serving the hop certificate", func() error {
+			if err := ServeHopCertificate(client); err != nil {
+				return err
+			}
+			return RestartTraefikOntoCopy(client)
 		}},
 		{"Applying security hardening", func() error {
 			return InstallSecurityHardening(client)
@@ -817,9 +829,6 @@ func Run(opts Options) (*Result, error) {
 				return nil
 			}
 			return StoreGatewayCredentials(client, gatewayToken)
-		}},
-		{"Minting the cluster certificate authority", func() error {
-			return EnsureHopMaterial(client)
 		}},
 		{"Installing container registry (Zot)", func() error {
 			return InstallZot(client, storageMode)
