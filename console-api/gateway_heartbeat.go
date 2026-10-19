@@ -352,15 +352,15 @@ func (h *gatewayHeartbeat) handlePinResponse(ctx context.Context, resp gatewayRe
 	}
 	h.warnedOldGateway = false
 
-	// For a staged rotation, any acknowledgement — pending or active — means
-	// the candidate fingerprint is in the gateway's accepted set, so swapping
-	// it live cannot 502. Only then does the candidate reach Traefik.
+	// For a staged rotation, either a pending or active acknowledgment means
+	// the candidate fingerprint is in the gateway's accepted set, so the pin
+	// admits it once it is live. Only then does the candidate reach Traefik.
 	if candidate {
 		if err := hopcert.PromoteCandidate(ctx, h.client); err != nil {
 			log.Printf("gateway heartbeat: promoting rotated hop certificate: %v", err)
 			return h.backoff()
 		}
-		log.Printf("gateway heartbeat: gateway acknowledged the rotated hop key (%s); serving it now", resp.Pin)
+		log.Printf("gateway heartbeat: gateway acknowledged the rotated hop key (%s). Restarting Traefik to load it", resp.Pin)
 		return convergeRetry
 	}
 
@@ -369,10 +369,10 @@ func (h *gatewayHeartbeat) handlePinResponse(ctx context.Context, resp gatewayRe
 		log.Printf("gateway heartbeat: renewed %s.kipper.run (hop pin active)", h.subdomain)
 		return heartbeatInterval
 	case "pending":
-		// Observation hasn't confirmed the asserted key yet: Traefik may
-		// still be loading the TLSStore, or something on-path answered the
-		// gateway's verify dial with a different certificate. Loud, and
-		// retried soon — a real mismatch stays visible beat after beat.
+		// Traefik may still be rolling out the copy or loading the TLSStore, or
+		// something on the network path answered the gateway's verification
+		// connection with a different certificate. Log and retry soon so a
+		// persistent mismatch remains visible on every heartbeat.
 		log.Printf("gateway heartbeat: hop pin for %s.kipper.run is pending: asserted SPKI %s, gateway observed %q",
 			h.subdomain, assertFP, resp.ObservedFingerprint)
 		return convergeRetry

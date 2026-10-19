@@ -1,6 +1,8 @@
 package installer
 
 import (
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -10,47 +12,104 @@ import (
 )
 
 // CommandRunner runs installer shell commands on the cluster host.
-// SSH and local runners implement it; tests can substitute a fake.
+// SSH and local runners implement it, and tests can substitute a fake.
 type CommandRunner interface {
 	Run(command string) (string, error)
 	RunStdin(command string, stdin io.Reader) (string, error)
 }
 
-// EnsureHopMaterial provisions the certificate the cluster serves on the
-// gateway hop, the authority that signs it, and the copy of that authority the
-// API server verifies against.
+// EnsureHopMaterial provisions the gateway-hop certificate, its signing
+// authority, and the authority's trust anchor for the API server. It also writes
+// Traefik's copy of the certificate, which Traefik loads from a file at startup.
+// Run it before installing Traefik, then call ServeHopCertificate once Traefik's
+// CRDs are available to apply the default TLSStore.
 //
-// It runs before operator authentication because that step's probe, and the API
-// server moments later, both fetch OIDC discovery from a gateway-fronted Dex
-// host. That host is served the hop certificate, which no public authority
-// signed, so without an anchor in place first neither can verify it and the
-// install stops with a certificate error that names cert-manager, which was
-// never involved.
+// It must also run before operator authentication. That step's probe and the
+// API server both fetch OIDC discovery from a gateway-fronted Dex host serving
+// the hop certificate. Because no public authority signed it, both need the
+// trust anchor first. Otherwise, installation fails with a certificate error
+// naming cert-manager, even though cert-manager is not involved.
 //
-// Console-api's reconciler owns this material from its first run onward:
-// rotation, reissue and the TLSStore are its job. This function exists because
-// that reconciler does not exist yet at install time, and waiting for it would
-// put a bootstrap dependency on a pod that has not been deployed.
+// Console-api reconciles rotation, reissue and the TLSStore once deployed.
+// Installation provisions this material first to avoid a bootstrap dependency
+// on a reconciler pod that has not yet been deployed.
 func EnsureHopMaterial(client CommandRunner) error {
-	if _, err := client.Run(ensureNamespaceCmd(hopNamespace)); err != nil {
-		return fmt.Errorf("ensuring %s namespace: %w", hopNamespace, err)
+	for _, ns := range []string{hopNamespace, hopca.TraefikNamespace} {
+		if _, err := client.Run(ensureNamespaceCmd(ns)); err != nil {
+			return fmt.Errorf("ensuring %s namespace: %w", ns, err)
+		}
 	}
 
 	caCertPEM, caKeyPEM, err := ensureHopCA(client)
 	if err != nil {
 		return err
 	}
-	if err := ensureHopLeaf(client, caCertPEM, caKeyPEM); err != nil {
+	leafCertPEM, leafKeyPEM, err := ensureHopLeaf(client, caCertPEM, caKeyPEM)
+	if err != nil {
 		return err
 	}
-	if _, err := client.Run(applyTLSStoreCmd()); err != nil {
-		return fmt.Errorf("pointing Traefik's default certificate at the hop certificate: %w", err)
+	// The key and certificate are read in separate commands, so a rotation
+	// between them returns a pair Traefik cannot load.
+	if _, err := tls.X509KeyPair([]byte(leafCertPEM), []byte(leafKeyPEM)); err != nil {
+		return fmt.Errorf("the hop certificate and key in %s/%s do not belong together: %w. A key rotation while "+
+			"kip read them can cause this, so run the command again. If it persists, the Secret itself holds a "+
+			"mismatched pair", hopNamespace, hopCertSecret, err)
+	}
+	if _, err := client.RunStdin(traefikCopyCmd(), strings.NewReader(leafCertPEM+"\n"+leafKeyPEM+"\n")); err != nil {
+		return secretWriteError(hopca.TraefikNamespace, hopca.TraefikCopyName, err)
 	}
 	// The API server reads this file, and so does the operator-auth probe. It is
 	// written last so a failure above never leaves an anchor for material that
 	// does not exist.
 	if err := ensureAnchorCovers(client, caCertPEM); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ServeHopCertificate points Traefik's default TLSStore at the hop certificate,
+// for clients that send no server name or one without a matching certificate.
+// It needs Traefik's CRDs, so it runs after Traefik is installed.
+func ServeHopCertificate(client CommandRunner) error {
+	if _, err := client.Run(applyTLSStoreCmd()); err != nil {
+		return fmt.Errorf("pointing Traefik's default certificate at the hop certificate: %w", err)
+	}
+	return nil
+}
+
+// RestartTraefikOntoCopy requests a restart when the pod template's copy version
+// differs from the Secret's resourceVersion, then waits up to 300 seconds for
+// the rollout, because file-provider reloads of the mounted copy are unreliable.
+// Every call waits, including retries after a timeout. Read,
+// patch and rollout errors are returned to the caller.
+//
+// Call it after applying the Traefik HelmChart. helm-controller applies chart
+// changes asynchronously, so the wait can cover pods from the previous chart.
+// Helm preserves the annotation, and later pods read the copy at startup.
+func RestartTraefikOntoCopy(client CommandRunner) error {
+	copyVersion, err := client.Run(fmt.Sprintf("kubectl -n %s get secret %s -o jsonpath='{.metadata.resourceVersion}'",
+		hopca.TraefikNamespace, hopca.TraefikCopyName))
+	if err != nil {
+		return fmt.Errorf("reading Traefik's copy of the hop certificate: %w", err)
+	}
+	copyVersion = strings.TrimSpace(copyVersion)
+	if copyVersion == "" {
+		return errors.New("reading Traefik's copy of the hop certificate: it has no resourceVersion")
+	}
+	current, err := client.Run(fmt.Sprintf("kubectl -n %s get deployment %s -o jsonpath='{.spec.template.metadata.annotations.%s}'",
+		hopca.TraefikNamespace, hopca.TraefikDeploymentName, strings.ReplaceAll(hopca.TraefikCopyAnnotation, ".", `\.`)))
+	if err != nil {
+		return fmt.Errorf("reading Traefik's Deployment: %w", err)
+	}
+	if strings.TrimSpace(current) != copyVersion {
+		if _, err := client.Run(fmt.Sprintf("kubectl -n %s patch deployment %s --type merge -p '%s'",
+			hopca.TraefikNamespace, hopca.TraefikDeploymentName, hopca.TraefikRestartPatch(copyVersion))); err != nil {
+			return fmt.Errorf("restarting Traefik onto its copy of the hop certificate: %w", err)
+		}
+	}
+	if _, err := client.Run(fmt.Sprintf("kubectl -n %s rollout status deployment/%s --timeout=300s",
+		hopca.TraefikNamespace, hopca.TraefikDeploymentName)); err != nil {
+		return fmt.Errorf("waiting for Traefik to serve its copy of the hop certificate: %w", err)
 	}
 	return nil
 }
@@ -174,39 +233,38 @@ func isAlreadyExists(err error) bool {
 // here rather than leaving it to console-api matters on an upgrade or a cutover:
 // the reconciler would not converge until its next heartbeat, up to a day away,
 // and the probe runs in the next few seconds.
-func ensureHopLeaf(client CommandRunner, caCertPEM, caKeyPEM string) error {
-	keyPEM, err := readSecretKey(client, hopCertSecret, "tls.key")
+func ensureHopLeaf(client CommandRunner, caCertPEM, caKeyPEM string) (certPEM, keyPEM string, err error) {
+	keyPEM, err = readSecretKey(client, hopCertSecret, "tls.key")
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	existingCert, err := readSecretKey(client, hopCertSecret, "tls.crt")
 	if err != nil {
-		return err
+		return "", "", err
 	}
 
 	if keyPEM != "" && hopca.SignedBy([]byte(existingCert), []byte(caCertPEM)) {
-		return nil
+		return existingCert, keyPEM, nil
 	}
 
-	var certPEM string
 	if keyPEM != "" {
 		signed, err := hopca.SignLeaf([]byte(caCertPEM), []byte(caKeyPEM), []byte(keyPEM), hostnames.GatewayDomain)
 		if err != nil {
-			return fmt.Errorf("re-signing the hop certificate under the cluster authority: %w", err)
+			return "", "", fmt.Errorf("re-signing the hop certificate under the cluster authority: %w", err)
 		}
 		certPEM = string(signed)
 	} else {
 		leafCert, leafKey, err := hopca.NewLeaf([]byte(caCertPEM), []byte(caKeyPEM), hostnames.GatewayDomain)
 		if err != nil {
-			return fmt.Errorf("minting the hop certificate: %w", err)
+			return "", "", fmt.Errorf("minting the hop certificate: %w", err)
 		}
 		certPEM, keyPEM = string(leafCert), string(leafKey)
 	}
 
 	if err := applyTLSSecret(client, hopCertSecret, certPEM, keyPEM); err != nil {
-		return fmt.Errorf("storing the hop certificate: %w", err)
+		return "", "", fmt.Errorf("storing the hop certificate: %w", err)
 	}
-	return nil
+	return certPEM, keyPEM, nil
 }
 
 // readSecretKey returns one key of a Secret, empty when the Secret does not
@@ -237,21 +295,34 @@ func createTLSSecret(client CommandRunner, name, certPEM, keyPEM string) error {
 }
 
 // applyTLSSecret upserts a kubernetes.io/tls Secret. The material is piped
-// through stdin rather than the command line, so no private key reaches the
-// process table or an error message.
+// through stdin to keep the private key out of the process table. Write errors
+// are sanitized because kubectl can echo the key.
 func applyTLSSecret(client CommandRunner, name, certPEM, keyPEM string) error {
 	return writeTLSSecret(client, name, certPEM, keyPEM, true)
 }
 
 func writeTLSSecret(client CommandRunner, name, certPEM, keyPEM string, upsert bool) error {
-	_, err := client.RunStdin(tlsSecretCmd(name, upsert), strings.NewReader(certPEM+"\n"+keyPEM+"\n"))
-	return err
+	if _, err := client.RunStdin(tlsSecretCmd(name, upsert), strings.NewReader(certPEM+"\n"+keyPEM+"\n")); err != nil {
+		return secretWriteError(hopNamespace, name, err)
+	}
+	return nil
+}
+
+// secretWriteError reports a failed Secret write without its output: kubectl
+// can echo the attempted object, private key included, when an apply fails. An
+// AlreadyExists failure keeps that word so callers can still tell a lost create
+// race from a real failure.
+func secretWriteError(namespace, name string, err error) error {
+	if isAlreadyExists(err) {
+		return fmt.Errorf("writing %s/%s failed: AlreadyExists", namespace, name)
+	}
+	return fmt.Errorf("writing %s/%s failed. Its output is withheld because it can contain the private key", namespace, name)
 }
 
 // tlsSecretCmd builds the command that turns a PEM pair on stdin into a
 // kubernetes.io/tls Secret. The material never appears in the command string, so
-// no private key reaches the process table or an error message, and the temp
-// copy is removed however the command exits.
+// the key stays out of the process table. The caller sanitizes write errors
+// because kubectl can echo the key. The temporary copy is removed on exit.
 //
 // upsert distinguishes the two callers. The hop certificate is replaced on
 // adoption and reissue, so it applies. The authority is created and only
@@ -264,6 +335,27 @@ func tlsSecretCmd(name string, upsert bool) string {
 	return `set -o pipefail; tmp=$(mktemp -d) && trap 'rm -rf "$tmp"' EXIT && ` +
 		`awk '/^-----BEGIN CERTIFICATE-----$/,/^-----END CERTIFICATE-----$/{print > "'"$tmp"'/tls.crt"} ` +
 		`/^-----BEGIN PRIVATE KEY-----$/,/^-----END PRIVATE KEY-----$/{print > "'"$tmp"'/tls.key"}' && ` + write
+}
+
+// traefikCopyCmd writes Traefik's copy of the hop certificate from a PEM pair on
+// stdin, the same way tlsSecretCmd keeps the key off the command line. The
+// file-provider configuration holds nothing secret and travels in the command.
+// Leave unchanged data alone because apply can add kubectl's last-applied
+// annotation and change the resourceVersion, triggering an unnecessary restart.
+func traefikCopyCmd() string {
+	configKey := strings.ReplaceAll(hopca.TraefikConfigKey, ".", `\.`)
+	return `set -o pipefail; tmp=$(mktemp -d) && trap 'rm -rf "$tmp"' EXIT && ` +
+		`b64() { base64 -w0 < "$1" 2>/dev/null || base64 < "$1" | tr -d '\n'; } && ` +
+		`awk '/^-----BEGIN CERTIFICATE-----$/,/^-----END CERTIFICATE-----$/{print > "'"$tmp"'/tls.crt"} ` +
+		`/^-----BEGIN PRIVATE KEY-----$/,/^-----END PRIVATE KEY-----$/{print > "'"$tmp"'/tls.key"}' && ` +
+		`cat > "$tmp/` + hopca.TraefikConfigKey + `" <<'HOPEOF' && ` +
+		fmt.Sprintf(`{ [ "$(kubectl -n %s get secret %s --ignore-not-found -o jsonpath='{.data.tls\.crt} {.data.tls\.key} {.data.%s}')" = `+
+			`"$(b64 "$tmp/tls.crt") $(b64 "$tmp/tls.key") $(b64 "$tmp/%s")" ] || `,
+			hopca.TraefikNamespace, hopca.TraefikCopyName, configKey, hopca.TraefikConfigKey) +
+		fmt.Sprintf(`kubectl -n %s create secret generic %s --from-file=tls.crt="$tmp/tls.crt" --from-file=tls.key="$tmp/tls.key" `+
+			`--from-file=%s="$tmp/%s" --dry-run=client -o yaml | kubectl apply -f -; }`,
+			hopca.TraefikNamespace, hopca.TraefikCopyName, hopca.TraefikConfigKey, hopca.TraefikConfigKey) +
+		"\n" + hopca.TraefikFileConfig + "HOPEOF"
 }
 
 // writeFileCmd writes stdin to path atomically with the given mode.

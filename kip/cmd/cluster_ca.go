@@ -198,8 +198,9 @@ func printCAStatus(clusterName string, s installer.CAStatus) {
 		fmt.Printf("  Apply it with:  %s\n", s.NextCommand())
 	case s.ServedByActive != nil && !*s.ServedByActive:
 		fmt.Printf("  This cluster is not serving a certificate the current authority signed.\n")
-		fmt.Printf("  Traefik reloads its certificate store on its own schedule, so give it a\n")
-		fmt.Printf("  minute and check again before investigating.\n")
+		fmt.Printf("  Traefik serves its own copy of the certificate and picks up a new one when\n")
+		fmt.Printf("  it restarts, so check that its rollout finished (kubectl -n traefik rollout\n")
+		fmt.Printf("  status deployment/traefik), then check again before investigating.\n")
 	}
 	fmt.Println()
 }

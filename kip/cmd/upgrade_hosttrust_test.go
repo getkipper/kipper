@@ -18,9 +18,9 @@ func stageHostTrust(t *testing.T, synced bool, changed bool) *[]string {
 	t.Helper()
 	var order []string
 
-	hop, api, sync, ensure := ensureHopMaterial, ensureAPIServerConfig, syncOperatorAuth, ensureOperatorAuth
+	hop, api, sync, ensure, restart := ensureHopMaterial, ensureAPIServerConfig, syncOperatorAuth, ensureOperatorAuth, restartTraefikOntoCopy
 	t.Cleanup(func() {
-		ensureHopMaterial, ensureAPIServerConfig, syncOperatorAuth, ensureOperatorAuth = hop, api, sync, ensure
+		ensureHopMaterial, ensureAPIServerConfig, syncOperatorAuth, ensureOperatorAuth, restartTraefikOntoCopy = hop, api, sync, ensure, restart
 	})
 
 	ensureHopMaterial = func(*ssh.Client) error {
@@ -39,6 +39,10 @@ func stageHostTrust(t *testing.T, synced bool, changed bool) *[]string {
 		order = append(order, "issuer:"+hosts[0])
 		return nil
 	}
+	restartTraefikOntoCopy = func(*ssh.Client) error {
+		order = append(order, "traefik")
+		return nil
+	}
 	return &order
 }
 
@@ -50,7 +54,7 @@ func TestUpgradeRepairsTheAPIServerBeforeLoadingTrustIntoIt(t *testing.T) {
 
 	require.NoError(t, reconcileHostTrust(nil, "dex.shop.example"))
 
-	assert.Equal(t, []string{"hop", "apiserver", "sync", "issuer:dex.shop.example"}, *order)
+	assert.Equal(t, []string{"hop", "apiserver", "sync", "issuer:dex.shop.example", "traefik"}, *order)
 }
 
 // A cluster that already has an issuer is synced and left there; configuring it
@@ -60,7 +64,7 @@ func TestUpgradeStopsAtTheSyncWhenAnIssuerIsAlreadyConfigured(t *testing.T) {
 
 	require.NoError(t, reconcileHostTrust(nil, "dex.shop.example"))
 
-	assert.Equal(t, []string{"hop", "apiserver", "sync"}, *order)
+	assert.Equal(t, []string{"hop", "apiserver", "sync", "traefik"}, *order)
 }
 
 // Without a domain there is no issuer to point the API server at, and the
@@ -70,7 +74,7 @@ func TestUpgradeRepairsTheAPIServerEvenWithNoIssuerToConfigure(t *testing.T) {
 
 	require.NoError(t, reconcileHostTrust(nil, ""))
 
-	assert.Equal(t, []string{"hop", "apiserver", "sync"}, *order)
+	assert.Equal(t, []string{"hop", "apiserver", "sync", "traefik"}, *order)
 }
 
 // Dex being unreachable leaves the cluster where it started, so it is reported
@@ -97,4 +101,21 @@ func TestUpgradeStopsWhenTheAPIServerRepairFails(t *testing.T) {
 
 	require.Error(t, err)
 	assert.NotContains(t, *order, "sync", "nothing may load trust into an API server that was not repaired")
+}
+
+// The trust step may rewrite Traefik's copy of the hop certificate. Unreliable file
+// reloads require a restart even when the system upgrade is skipped. A stalled
+// rollout is logged rather than returned as an error because trust repair has
+// completed. The system upgrade retries the rollout, and console-api retries copy
+// synchronization and restart requests.
+func TestUpgradeRestartsTraefikOntoItsCopyAndCarriesOnIfTheRolloutStalls(t *testing.T) {
+	order := stageHostTrust(t, true, false)
+	restartTraefikOntoCopy = func(*ssh.Client) error {
+		*order = append(*order, "traefik")
+		return assert.AnError
+	}
+
+	require.NoError(t, reconcileHostTrust(nil, "dex.shop.example"))
+
+	assert.Equal(t, []string{"hop", "apiserver", "sync", "traefik"}, *order)
 }

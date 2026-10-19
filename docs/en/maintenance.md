@@ -62,7 +62,7 @@ kip upgrade --yes --repair-autoscaling  # also apply autoscaling fixes without a
 
 | Flag | Default | Description |
 |---|---|---|
-| `--skip-system` | `false` | Skip the cluster components (Traefik, Longhorn, KEDA, Velero, Zot, monitoring). CRDs, console, and the cluster's own trust material still move. Use this in production to avoid touching component versions. |
+| `--skip-system` | `false` | Skip the cluster components (Traefik, Longhorn, KEDA, Velero, Zot, monitoring). CRDs, console, and the cluster's own trust material are still updated, and Traefik is restarted when its copy of the hop certificate changes. Use this in production to avoid touching component versions. |
 | `--yes` | `false` | Confirm cluster-component upgrades and removal of app routes that collide with installed platform routes. Required for these steps in non-interactive contexts (CI, scripts). Autoscaling fixes are confirmed separately, so a run without a terminal also needs `--repair-autoscaling` when there are fixes to apply |
 | `--check` | `false` | Run the upgrade's data checks and report what it would fix, without changing anything. Needs no SSH key. Exits non-zero when something needs a decision. See [Checking before an upgrade](#checking-before-an-upgrade) |
 | `--repair-autoscaling` | `false` | Apply the autoscaling fixes the upgrade lists without asking. Required in non-interactive contexts when there are fixes to apply |
@@ -243,6 +243,72 @@ path refuses downgrades and upgrades at most one Kubernetes minor per run,
 because the Kubernetes skew policy forbids skipping minors. A server further
 behind stays untouched with a warning and needs the intermediate minor upgrades
 first.
+
+### Downgrading console-api {#downgrading-console-api}
+
+Traefik serves the hop certificate of a `*.kipper.run` cluster from its own copy, the Secret
+`kipper-hop-cert` in the `traefik` namespace, and console-api keeps that copy up to date. An older
+console-api, installed by an older kip with `--skip-system` or by using `--image-tag` with an older commit,
+does not maintain the copy. If it rotates the hop key, Traefik keeps serving the retired key, and the
+cluster stops routing through the kipper.run gateway once the old key's proof runs out. `kip doctor`
+reports this as Traefik's copy holding a different key.
+
+Once the downgrade has finished and only older console-api pods are running, remove the copy and restart
+Traefik. Traefik then serves the hop certificate through its default TLSStore, which the older console-api
+maintains. If you remove the copy earlier, a console-api that maintains it recreates it. Any `kip upgrade`
+run by a kip that maintains the copy also recreates it, including one using `--image-tag` with an older commit.
+
+A finished rollout can still leave a newer console-api pod terminating. The function below therefore waits
+until every console-api pod belongs to the current revision, printing the pods it is waiting for, and then
+removes the copy. It prints the current revision's image for reference and leaves the copy unchanged if
+any read before deletion fails. At the end, it displays any recreated copy so you can check that deletion
+persisted. Run it while no other console-api rollout is in progress, and rerun it if it stops partway:
+
+```bash
+remove_traefik_copy() (
+  local rev hash pods
+  kubectl -n kipper-system rollout status deployment console-api || return 1
+  if ! rev=$(kubectl -n kipper-system get deployment console-api \
+      -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}') || [ -z "$rev" ]; then
+    echo "STOP: could not read console-api's revision. The copy is unchanged."; return 1
+  fi
+  if ! hash=$(kubectl -n kipper-system get replicaset -l app=console-api \
+      -o jsonpath="{range .items[?(@.metadata.annotations.deployment\.kubernetes\.io/revision==\"$rev\")]}{.metadata.labels.pod-template-hash}{' '}{end}"); then
+    echo "STOP: could not read console-api's ReplicaSets. The copy is unchanged."; return 1
+  fi
+  hash=${hash% }
+  if [ -z "$hash" ] || [ "$hash" != "${hash% *}" ]; then
+    echo "STOP: could not find exactly one current console-api ReplicaSet. The copy is unchanged."; return 1
+  fi
+  if ! kubectl -n kipper-system get deployment console-api -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'; then
+    echo "STOP: could not read console-api's image. The copy is unchanged."; return 1
+  fi
+  while :; do
+    if ! pods=$(kubectl -n kipper-system get pods -l "app=console-api,pod-template-hash!=$hash" -o name); then
+      echo "STOP: could not list console-api's pods. The copy is unchanged."; return 1
+    fi
+    [ -z "$pods" ] && break
+    echo "waiting for: $pods"
+    sleep 2
+  done
+  kubectl -n traefik delete secret kipper-hop-cert --ignore-not-found &&
+  kubectl -n traefik rollout restart deployment traefik &&
+  kubectl -n traefik rollout status deployment traefik &&
+  kubectl -n traefik get secret kipper-hop-cert --ignore-not-found
+)
+remove_traefik_copy
+```
+
+The last command prints nothing when the copy is gone. If it prints the Secret, a console-api or kip that
+maintains the copy recreated it. Check the image above and any concurrent `kip upgrade`, then rerun the
+function once the downgrade has finished.
+Until a console-api or kip that maintains the copy creates it again, a rebooted Traefik serves the hop
+certificate only once it has loaded the TLSStore, as it did before the copy existed.
+
+Repeat these steps after every `kip upgrade` by a kip that maintains the copy while an older console-api stays
+in place. The same steps recover a cluster that is already serving a retired key. An older `kip upgrade`
+without `--skip-system` needs no extra step, because it reapplies a Traefik chart that does not read the
+copy. Upgrading console-api again to a version that maintains the copy creates or repairs it.
 
 ### Recovering from a failed chart upgrade {#recovering-from-a-failed-chart-upgrade}
 

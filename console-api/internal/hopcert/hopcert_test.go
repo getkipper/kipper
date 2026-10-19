@@ -9,12 +9,15 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	k8stesting "k8s.io/client-go/testing"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -620,5 +624,312 @@ func TestASelfIssuedButNotSelfSignedLeafIsNotTreatedAsLegacy(t *testing.T) {
 
 	if _, err := Ensure(context.Background(), client, newCRClient(t)); err == nil {
 		t.Error("a leaf that only claims to be self-issued must not be read as predating the authority")
+	}
+}
+
+func traefikCopy(t *testing.T, client *fake.Clientset) *corev1.Secret {
+	t.Helper()
+	copySecret, err := client.CoreV1().Secrets(hopca.TraefikNamespace).Get(context.Background(), hopca.TraefikCopyName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reading Traefik's copy: %v", err)
+	}
+	return copySecret
+}
+
+func liveSecret(t *testing.T, client *fake.Clientset) *corev1.Secret {
+	t.Helper()
+	secret, err := client.CoreV1().Secrets(Namespace).Get(context.Background(), SecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return secret
+}
+
+func assertCopyHoldsLivePair(t *testing.T, client *fake.Clientset) {
+	t.Helper()
+	live := liveSecret(t, client)
+	want := hopca.TraefikCopyData(live.Data[corev1.TLSCertKey], live.Data[corev1.TLSPrivateKeyKey])
+	got := traefikCopy(t, client).Data
+	if len(got) != len(want) {
+		t.Fatalf("copy holds %d keys, want %d", len(got), len(want))
+	}
+	for k, v := range want {
+		if !bytes.Equal(got[k], v) {
+			t.Errorf("copy key %s differs from the live pair", k)
+		}
+	}
+}
+
+func TestEnsureWritesTraefiksCopyOfTheLivePair(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	if _, err := Ensure(context.Background(), client, newCRClient(t)); err != nil {
+		t.Fatal(err)
+	}
+	assertCopyHoldsLivePair(t, client)
+}
+
+func TestEnsureKeepsTheCopyOnTheLiveKeyWhileARotationIsStaged(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	cr := newCRClient(t)
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	secret := liveSecret(t, client)
+	secret.Annotations = map[string]string{RotateAnnotation: "requested"}
+	_, _ = client.CoreV1().Secrets(Namespace).Update(context.Background(), secret, metav1.UpdateOptions{})
+
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	assertCopyHoldsLivePair(t, client)
+	if _, has := traefikCopy(t, client).Data[candidateCertKey]; has {
+		t.Error("the copy must never carry a rotation candidate")
+	}
+}
+
+func TestPromoteCandidateUpdatesTraefiksCopy(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	cr := newCRClient(t)
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	secret := liveSecret(t, client)
+	secret.Annotations = map[string]string{RotateAnnotation: "requested"}
+	_, _ = client.CoreV1().Secrets(Namespace).Update(context.Background(), secret, metav1.UpdateOptions{})
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := PromoteCandidate(context.Background(), client); err != nil {
+		t.Fatal(err)
+	}
+	assertCopyHoldsLivePair(t, client)
+}
+
+func TestEnsureRepairsADriftedCopy(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	cr := newCRClient(t)
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	drifted := traefikCopy(t, client)
+	drifted.Data["tls.crt"] = []byte("stale")
+	_, _ = client.CoreV1().Secrets(hopca.TraefikNamespace).Update(context.Background(), drifted, metav1.UpdateOptions{})
+
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	assertCopyHoldsLivePair(t, client)
+}
+
+func traefikDeployment() *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: hopca.TraefikDeploymentName, Namespace: hopca.TraefikNamespace},
+	}
+}
+
+func traefikRestartAnnotation(t *testing.T, client *fake.Clientset) string {
+	t.Helper()
+	dep, err := client.AppsV1().Deployments(hopca.TraefikNamespace).Get(context.Background(), hopca.TraefikDeploymentName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reading Traefik's Deployment: %v", err)
+	}
+	return dep.Spec.Template.Annotations[hopca.TraefikCopyAnnotation]
+}
+
+// withResourceVersions gives each Secret write a fresh resourceVersion, as the
+// API server does. The fake client otherwise leaves it empty.
+func withResourceVersions(client *fake.Clientset) *fake.Clientset {
+	n := 0
+	stamp := func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if w, ok := a.(interface{ GetObject() runtime.Object }); ok {
+			if secret, ok := w.GetObject().(*corev1.Secret); ok {
+				n++
+				secret.ResourceVersion = strconv.Itoa(n)
+			}
+		}
+		return false, nil, nil
+	}
+	client.PrependReactor("create", "secrets", stamp)
+	client.PrependReactor("update", "secrets", stamp)
+	return client
+}
+
+func assertTraefikStartedOnTheCopy(t *testing.T, client *fake.Clientset) {
+	t.Helper()
+	want := traefikCopy(t, client).ResourceVersion
+	if want == "" {
+		t.Fatal("the copy has no resourceVersion; the fake is not stamping writes")
+	}
+	if got := traefikRestartAnnotation(t, client); got != want {
+		t.Errorf("restart annotation = %q, want the copy's resourceVersion %q", got, want)
+	}
+}
+
+func deploymentPatches(client *fake.Clientset) int {
+	n := 0
+	for _, a := range client.Actions() {
+		if a.GetVerb() == "patch" && a.GetResource().Resource == "deployments" {
+			n++
+		}
+	}
+	return n
+}
+
+func TestEnsureRestartsTraefikOntoTheCopy(t *testing.T) {
+	client := withResourceVersions(fake.NewSimpleClientset(traefikDeployment()))
+	if _, err := Ensure(context.Background(), client, newCRClient(t)); err != nil {
+		t.Fatal(err)
+	}
+	assertTraefikStartedOnTheCopy(t, client)
+}
+
+func TestEnsureLeavesTraefikRunningWhenItServesTheCopy(t *testing.T) {
+	client := withResourceVersions(fake.NewSimpleClientset(traefikDeployment()))
+	cr := newCRClient(t)
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	before := deploymentPatches(client)
+
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	if deploymentPatches(client) != before {
+		t.Error("Traefik was restarted although it already serves the copy")
+	}
+}
+
+func TestPromoteCandidateRestartsTraefikOntoTheNewKey(t *testing.T) {
+	client := withResourceVersions(fake.NewSimpleClientset(traefikDeployment()))
+	cr := newCRClient(t)
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	before := traefikRestartAnnotation(t, client)
+	secret := liveSecret(t, client)
+	secret.Annotations = map[string]string{RotateAnnotation: "requested"}
+	_, _ = client.CoreV1().Secrets(Namespace).Update(context.Background(), secret, metav1.UpdateOptions{})
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := PromoteCandidate(context.Background(), client); err != nil {
+		t.Fatal(err)
+	}
+	if traefikRestartAnnotation(t, client) == before {
+		t.Error("Traefik was not restarted onto the promoted key")
+	}
+	assertTraefikStartedOnTheCopy(t, client)
+}
+
+// Traefik can load an out-of-band edit and miss the subsequent repair, so restoring
+// the original certificate must still trigger a restart.
+func TestEnsureRestartsTraefikWhenItRepairsTheCopyToTheSameCertificate(t *testing.T) {
+	client := withResourceVersions(fake.NewSimpleClientset(traefikDeployment()))
+	cr := newCRClient(t)
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	drifted := traefikCopy(t, client)
+	drifted.Data["tls.crt"] = []byte("edited out of band")
+	_, _ = client.CoreV1().Secrets(hopca.TraefikNamespace).Update(context.Background(), drifted, metav1.UpdateOptions{})
+	before := deploymentPatches(client)
+
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	assertCopyHoldsLivePair(t, client)
+	if deploymentPatches(client) == before {
+		t.Error("the repaired copy was written but Traefik was not restarted onto it")
+	}
+	assertTraefikStartedOnTheCopy(t, client)
+}
+
+func TestEnsureRetriesARestartThatFailed(t *testing.T) {
+	client := withResourceVersions(fake.NewSimpleClientset(traefikDeployment()))
+	cr := newCRClient(t)
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	drifted := traefikCopy(t, client)
+	drifted.Data["tls.crt"] = []byte("edited out of band")
+	_, _ = client.CoreV1().Secrets(hopca.TraefikNamespace).Update(context.Background(), drifted, metav1.UpdateOptions{})
+	failOnce := true
+	client.PrependReactor("patch", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if failOnce {
+			failOnce = false
+			return true, nil, k8serrors.NewInternalError(errors.New("boom"))
+		}
+		return false, nil, nil
+	})
+	if _, err := Ensure(context.Background(), client, cr); err == nil {
+		t.Fatal("a failed restart must fail Ensure")
+	}
+
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	assertTraefikStartedOnTheCopy(t, client)
+}
+
+func TestEnsureWorksBeforeTraefikIsInstalled(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	if _, err := Ensure(context.Background(), client, newCRClient(t)); err != nil {
+		t.Fatalf("a cluster without Traefik's Deployment yet must not fail: %v", err)
+	}
+	assertCopyHoldsLivePair(t, client)
+}
+
+func TestPromoteCandidateSaysThePromotionLandedWhenTraefiksCopyFails(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	cr := newCRClient(t)
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	secret := liveSecret(t, client)
+	secret.Annotations = map[string]string{RotateAnnotation: "requested"}
+	_, _ = client.CoreV1().Secrets(Namespace).Update(context.Background(), secret, metav1.UpdateOptions{})
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	client.PrependReactor("update", "secrets", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.GetNamespace() == hopca.TraefikNamespace {
+			return true, nil, k8serrors.NewInternalError(errors.New("boom"))
+		}
+		return false, nil, nil
+	})
+
+	err := PromoteCandidate(context.Background(), client)
+	if err == nil || !strings.Contains(err.Error(), "promoted") {
+		t.Errorf("error = %v, want one saying the candidate was promoted", err)
+	}
+	if len(liveSecret(t, client).Data[candidateCertKey]) != 0 {
+		t.Error("the promotion itself should have landed")
+	}
+}
+
+// kubectl apply keeps the whole Secret, private key included, in its last-applied annotation, so an update by
+// the console-api must not carry a retired key along in it.
+func TestUpdatingTraefiksCopyDropsTheLastAppliedKey(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	cr := newCRClient(t)
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	applied := traefikCopy(t, client)
+	applied.Annotations = map[string]string{corev1.LastAppliedConfigAnnotation: `{"data":{"tls.key":"cmV0aXJlZA=="}}`, "keep": "me"}
+	applied.Data["tls.crt"] = []byte("edited out of band")
+	_, _ = client.CoreV1().Secrets(hopca.TraefikNamespace).Update(context.Background(), applied, metav1.UpdateOptions{})
+
+	if _, err := Ensure(context.Background(), client, cr); err != nil {
+		t.Fatal(err)
+	}
+	got := traefikCopy(t, client).Annotations
+	if _, has := got[corev1.LastAppliedConfigAnnotation]; has {
+		t.Error("the copy still carries kubectl's last-applied annotation with the old key")
+	}
+	if got["keep"] != "me" {
+		t.Error("other annotations must survive")
 	}
 }

@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
+
+	"github.com/getkipper/kipper/controller/pkg/hopca"
 )
 
 func TestRenderTrustedIPs(t *testing.T) {
@@ -46,7 +48,7 @@ func TestRenderTrustedIPs(t *testing.T) {
 func TestTraefikManifestTransportPosture(t *testing.T) {
 	trusted, err := renderTrustedIPs([]string{"203.0.113.7"})
 	require.NoError(t, err)
-	manifest := fmt.Sprintf(traefikManifestTemplate, trusted, trusted)
+	manifest := renderTraefikManifest(trusted)
 
 	// Cleartext HTTP must redirect before any route (and any API key) is
 	// processed, and forwarded headers are trusted only from the list.
@@ -64,7 +66,7 @@ func TestTraefikManifestTransportPosture(t *testing.T) {
 // substring presence (a value at the wrong path is silently ignored by Helm).
 func traefikValues(t *testing.T) map[string]any {
 	t.Helper()
-	manifest := fmt.Sprintf(traefikManifestTemplate, "[]", "[]")
+	manifest := renderTraefikManifest("[]")
 
 	dec := yaml.NewDecoder(strings.NewReader(manifest))
 	for {
@@ -114,7 +116,7 @@ func TestTraefikManifestPinsPatchedVersion(t *testing.T) {
 		dig(t, values, "image", "digest"))
 
 	// The chart version pin itself (asserted on the HelmChart spec).
-	manifest := fmt.Sprintf(traefikManifestTemplate, "[]", "[]")
+	manifest := renderTraefikManifest("[]")
 	assert.Contains(t, manifest, "version: 41.0.2")
 }
 
@@ -214,4 +216,33 @@ func TestTraefikSendsNothingUpstream(t *testing.T) {
 
 	assert.Equal(t, false, dig(t, values, "global", "checkNewVersion"))
 	assert.Equal(t, false, dig(t, values, "global", "sendAnonymousUsage"))
+}
+
+// Traefik reads its copy of the hop certificate from a file at startup, so it serves the hop key before its
+// Kubernetes provider has loaded the TLSStore. The copy is optional, so Traefik still starts without it.
+func TestTraefikReadsItsCopyOfTheHopCertificate(t *testing.T) {
+	values := traefikValues(t)
+
+	volumes, ok := dig(t, values, "deployment", "additionalVolumes").([]any)
+	require.True(t, ok)
+	require.Len(t, volumes, 1)
+	volume := volumes[0].(map[string]any)
+	secret := volume["secret"].(map[string]any)
+	assert.Equal(t, hopca.TraefikCopyName, secret["secretName"])
+	assert.Equal(t, true, secret["optional"], "a missing copy must not stop Traefik from starting")
+
+	mounts, ok := dig(t, values, "additionalVolumeMounts").([]any)
+	require.True(t, ok)
+	mount := mounts[0].(map[string]any)
+	assert.Equal(t, volume["name"], mount["name"])
+	assert.Equal(t, hopca.TraefikMountPath, mount["mountPath"])
+	assert.Equal(t, true, mount["readOnly"])
+
+	args, ok := dig(t, values, "additionalArguments").([]any)
+	require.True(t, ok)
+	var got []string
+	for _, a := range args {
+		got = append(got, a.(string))
+	}
+	assert.Equal(t, hopca.TraefikFileArgs, got)
 }
