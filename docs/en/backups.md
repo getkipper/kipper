@@ -174,6 +174,20 @@ After the credentials check, a `PartiallyFailed` restore returns an error, even 
 
 For an unattended restore, pass `--repair-credentials` under the same condition. If you decline, or run without a terminal and omit the flag, kip shows how to repair the credentials later with `kip service credentials --repair`.
 
+### Cancel a stuck restore
+
+Velero works on one restore at a time. A restore stuck in `InProgress`, for example while waiting for a volume restore that never finishes, holds up every restore and drill behind it. A drill lists the names of restores ahead of it in the queue. Cancel a restore by name:
+
+```bash
+kip backup restore --cancel restore-blog-prod-20261019-090611
+```
+
+kip asks Velero's node agent to cancel the restore's unfinished volume restores, which usually lets the restore end as `PartiallyFailed`. If it is still `InProgress` after five minutes, kip restarts the Velero server, which marks `InProgress` restores `Failed` when it starts. A restart also fails backups and other restores that are `InProgress`. Unless you pass `--force`, kip blocks the restart and lists their names. A backup that starts after this check can still be affected by the restart.
+
+kip reports success only once the restore has ended and none of its volume restores is still running. The Restore object is retained as a record of what happened. Objects and volume data restored before cancellation remain in place and may be incomplete, so remove a drill's namespace afterwards with `kip backup drill <namespace> --clean`.
+
+This command cannot cancel restic volume restores or restores that use CSI data movement.
+
 ### Partially failed backups
 
 `kip backup restore` requires `--allow-partial` to restore a backup marked `PartiallyFailed`, because restored data or resources may be incomplete. Choose a `Completed` backup when possible. If you proceed with `--allow-partial`, kip warns about missing data and lists volumes with failed or canceled backups when those details are available.

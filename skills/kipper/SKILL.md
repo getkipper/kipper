@@ -182,7 +182,7 @@ Global flag on every command: `--cluster <name>`. Most workflow commands accept 
 - `kip registry add --server <host> --username <u> --password <p> [--name] | list | remove <name>` — pull secrets for private registries.
 
 **Backups** (Velero)
-- `kip backup create [name] [--project --environment --ttl 168h --include-system] | list | restore <name> [--namespace --namespace-mapping src:target --resources --cluster-resources --include-ingresses] | drill <namespace> [--backup --keep --clean] | schedules | repository-key export --to <file> | sse-key export --to <file>` (save the volume backup encryption key and, on clusters using `--backup-storage-sse-c`, the SSE-C key. Recovering SSE-C backups requires both keys)
+- `kip backup create [name] [--project --environment --ttl 168h --include-system] | list | restore <name> [--namespace --namespace-mapping src:target --resources --cluster-resources --include-ingresses] | restore --cancel <restore> [--force] (end a stuck restore that blocks the queue) | drill <namespace> [--backup --keep --clean] | schedules | repository-key export --to <file> | sse-key export --to <file>` (save the volume backup encryption key and, on clusters using `--backup-storage-sse-c`, the SSE-C key. Recovering SSE-C backups requires both keys)
 
 **Platform and observability**
 - `kip platform status` · `kip platform profile show|set <nano|small|medium|large|xlarge>` · `kip platform resize <component> --memory <M>`

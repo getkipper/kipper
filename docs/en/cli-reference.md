@@ -1147,6 +1147,8 @@ Every backup also skips cert-manager's transient issuance objects (CertificateRe
 | `--repair-credentials` | No | `false` | Re-attach restored service credentials Secrets without prompting |
 | `--cluster-resources` | No | `false` | Also restore projects and their resource adjustments. Existing ones remain unchanged. |
 | `--include-ingresses` | No | `false` | With `--namespace-mapping`, also restore the copy's Ingresses, which claim the same hostnames as the source |
+| `--cancel` | No | — | Cancel the named restore while it is `InProgress` instead of starting one. Takes no backup name. See [Cancel a stuck restore](/en/backups#cancel-a-stuck-restore). |
+| `--force` | No | `false` | With `--cancel`, allow a Velero restart that also fails `InProgress` backups and other restores |
 
 Restore a `Completed` backup, or use `--allow-partial` for a `PartiallyFailed` backup. For partial backups, kip lists volumes with failed or canceled backups when details are available. Backups in other phases cannot be restored; wait for pending or running backups to finish.
 
