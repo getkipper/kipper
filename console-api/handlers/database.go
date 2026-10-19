@@ -1,17 +1,20 @@
-// Package handlers — database.go provides the browser-native SQL surface
-// for Kipper-managed services. The console-api opens a short-lived
-// connection per request using the credentials Secret already on the
-// cluster; the browser never sees credentials.
+// Package handlers provides HTTP endpoints, including the database console
+// for Kipper-managed services. The console-api reuses connection pools with
+// credentials from the cluster's Secret. The browser never sees credentials.
 //
-// G1 ships read-only schema browsing, ad-hoc query execution, and a
-// safety-railed result envelope. Per-driver code is isolated behind the
-// dbDriver interface so adding MongoDB / Redis later doesn't ripple
-// into the HTTP layer.
+// The database console supports read-only schema browsing and ad-hoc SQL
+// execution with query timeouts and row limits. Driver-specific helpers keep
+// database details separate from the HTTP handlers so support for databases
+// such as MongoDB or Redis can be added without restructuring the HTTP layer.
 package handlers
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,10 +32,12 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/console-api/controllers"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 
 	_ "github.com/go-sql-driver/mysql"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // validDBName bounds a caller-supplied database name to a plain identifier
@@ -46,9 +51,9 @@ const (
 	poolIdleTTL         = 5 * time.Minute
 )
 
-// Database provides the HTTP face of the database console. The struct
-// holds an in-memory pool of *sql.DB keyed by service-namespace+name so
-// repeated queries don't pay reconnection cost.
+// Database serves the database console's HTTP endpoints. It caches connection
+// pools by driver, DSN and CA hash so repeated queries can reuse connections
+// and a CA change creates a new pool.
 type Database struct {
 	Client   kubernetes.Interface
 	CRClient crclient.Client
@@ -65,15 +70,19 @@ type pooledConn struct {
 }
 
 // dbDriverInfo carries everything needed to talk to a specific service.
+// serverCA is set for a Postgres service with TLS on or required, whose
+// certificate must verify against it for serverName.
 type dbDriverInfo struct {
-	driver string // "postgres" or "mysql"
-	dsn    string
+	driver     string
+	dsn        string
+	serverCA   []byte
+	serverName string
 }
 
 // queryRequest is what the browser POSTs to /db/query.
 type queryRequest struct {
 	SQL         string `json:"sql"`
-	Database    string `json:"database,omitempty"` // optional, defaults to the credentials' NAME
+	Database    string `json:"database,omitempty"`
 	Limit       int    `json:"limit,omitempty"`
 	NoLimit     bool   `json:"no_limit,omitempty"`
 	Transaction bool   `json:"transaction,omitempty"`
@@ -116,9 +125,9 @@ type schemaSchema struct {
 
 type schemaRelation struct {
 	Name    string `json:"name"`
-	Kind    string `json:"kind"` // "table" | "view"
+	Kind    string `json:"kind"`
 	Columns int    `json:"columns"`
-	Rows    *int64 `json:"rows,omitempty"` // approximate; nil when unknown
+	Rows    *int64 `json:"rows,omitempty"` // Rows is an estimate, or nil when unknown.
 }
 
 // databaseEntry describes one selectable database for the picker.
@@ -285,10 +294,10 @@ func (d *Database) Schema(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, resp)
 }
 
-// connect resolves the credentials Secret for a service and returns a
-// pooled *sql.DB. The pool is keyed by driver+DSN, so two services with
-// the same name in different namespaces get separate handles (their
-// DSNs differ in host or credentials).
+// connect resolves the service's credentials and returns a pool after a
+// successful ping. Pools are keyed by driver, DSN and CA hash, so services
+// with different hosts or credentials use separate pools and CA changes
+// take effect on the next request.
 func (d *Database) connect(ctx context.Context, svcName, namespace, database string) (*sql.DB, dbDriverInfo, error) {
 	info, err := d.driverInfo(ctx, svcName, namespace, database)
 	if err != nil {
@@ -299,7 +308,8 @@ func (d *Database) connect(ctx context.Context, svcName, namespace, database str
 	if d.conns == nil {
 		d.conns = make(map[string]*pooledConn)
 	}
-	key := info.driver + "|" + info.dsn
+	caSum := sha256.Sum256(info.serverCA)
+	key := info.driver + "|" + info.dsn + "|" + hex.EncodeToString(caSum[:])
 	pc := d.conns[key]
 	if pc != nil && time.Since(pc.lastUsed) > poolIdleTTL {
 		pc.closeOnce.Do(func() { _ = pc.db.Close() })
@@ -307,7 +317,7 @@ func (d *Database) connect(ctx context.Context, svcName, namespace, database str
 		pc = nil
 	}
 	if pc == nil {
-		db, openErr := sql.Open(info.driver, info.dsn)
+		db, openErr := openDB(info)
 		if openErr != nil {
 			d.mu.Unlock()
 			return nil, info, fmt.Errorf("open: %w", openErr)
@@ -366,10 +376,17 @@ func (d *Database) driverInfo(ctx context.Context, svcName, namespace, overrideD
 
 	switch svc.Spec.Type {
 	case "postgres":
-		// Prefer TLS so the database console can connect in all three service TLS modes.
-		dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=prefer",
+		dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s",
 			host, port, user, pw, defaultDB(name, "postgres"))
-		return dbDriverInfo{driver: "pgx", dsn: dsn}, nil
+		if svc.Spec.TLS != "on" && svc.Spec.TLS != "required" {
+			return dbDriverInfo{driver: "pgx", dsn: dsn + " sslmode=prefer"}, nil
+		}
+		ca, err := d.serviceCA(ctx, svcName, namespace)
+		if err != nil {
+			return dbDriverInfo{}, fmt.Errorf("service %q has TLS %s, which requires certificate verification in the database view. Connection failed because %w", svcName, svc.Spec.TLS, err)
+		}
+		return dbDriverInfo{driver: "pgx", dsn: dsn + " sslmode=verify-full", serverCA: ca,
+			serverName: fmt.Sprintf("%s.%s.svc.cluster.local", svcName, namespace)}, nil
 	case "mysql":
 		dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&multiStatements=false",
 			user, pw, host, port, defaultDB(name, ""))
@@ -377,6 +394,39 @@ func (d *Database) driverInfo(ctx context.Context, svcName, namespace, overrideD
 	default:
 		return dbDriverInfo{}, fmt.Errorf("service type %q not yet supported by the database console", svc.Spec.Type)
 	}
+}
+
+// serviceCA reads the CA that verifies a Postgres service's certificate from
+// the service's TLS Secret.
+func (d *Database) serviceCA(ctx context.Context, svcName, namespace string) ([]byte, error) {
+	secret, err := d.Client.CoreV1().Secrets(namespace).Get(ctx, controllers.TLSSecretName(svcName), metav1.GetOptions{})
+	if k8serrors.IsNotFound(err) {
+		return nil, errors.New("its certificate has not been issued yet")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading its TLS Secret failed: %w", err)
+	}
+	return controllers.ServiceCA(secret, svcName)
+}
+
+// openDB creates a pool without connecting. When serverCA is set, connections
+// require TLS 1.2 or later and verify the server's certificate and DNS name
+// against that CA, with no plaintext fallback.
+func openDB(info dbDriverInfo) (*sql.DB, error) {
+	if info.serverCA == nil {
+		return sql.Open(info.driver, info.dsn)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(info.serverCA) {
+		return nil, errors.New("the service CA holds no usable certificate")
+	}
+	cfg, err := pgx.ParseConfig(info.dsn)
+	if err != nil {
+		return nil, err
+	}
+	cfg.TLSConfig = &tls.Config{RootCAs: roots, ServerName: info.serverName, MinVersion: tls.VersionTLS12}
+	cfg.Fallbacks = nil
+	return stdlib.OpenDB(*cfg), nil
 }
 
 func defaultDB(name, fallback string) string {
