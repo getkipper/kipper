@@ -33,6 +33,7 @@ const (
 
 	ResourceTypeFunction     = "function"
 	ResourceTypeSharedVolume = "shared-volume"
+	ResourceTypeVolumeHolder = "volume-holder"
 )
 
 // Project and environment labels applied to namespaces.
@@ -237,3 +238,9 @@ const ExcludeFromBackup = "velero.io/exclude-from-backup"
 // Kipper owns of a given Kubernetes kind. Callers that need a more specific
 // filter should append additional selectors (e.g. ServiceType=postgres).
 const KipperManagedSelector = ManagedBy + "=" + Kipper
+
+// WorkloadPodSelector selects Kipper-managed pods except volume holders,
+// keeping backup infrastructure out of workload metrics and alerts. Pods
+// without a resource-type label are included, covering apps, functions, jobs
+// and services.
+const WorkloadPodSelector = KipperManagedSelector + "," + ResourceType + "!=" + ResourceTypeVolumeHolder

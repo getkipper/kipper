@@ -50,20 +50,7 @@ func jobOwner(job *kipperv1.Job) workloadOwner {
 // say it created it for this workload.
 func childProvenance(obj client.Object, owner workloadOwner) (bool, string) {
 	if ref := metav1.GetControllerOf(obj); ref != nil {
-		gv, err := schema.ParseGroupVersion(ref.APIVersion)
-		if err != nil {
-			return false, fmt.Sprintf("carries an unreadable controller reference %q", ref.APIVersion)
-		}
-		// The group is compared rather than the whole apiVersion, because that
-		// is the level SetControllerReference itself compares at: a reference
-		// written under another served version of the same CRD still names
-		// this workload.
-		if ref.UID == owner.obj.GetUID() && ref.Kind == owner.kind &&
-			ref.Name == owner.obj.GetName() && gv.Group == kipperv1.GroupVersion.Group {
-			return true, ""
-		}
-		return false, fmt.Sprintf("is controlled by %s %q, not by this %s",
-			ref.Kind, ref.Name, owner.kind)
+		return controllerRefNames(ref, owner.obj, owner.kind)
 	}
 
 	l := obj.GetLabels()
@@ -84,6 +71,23 @@ func childProvenance(obj client.Object, owner workloadOwner) (bool, string) {
 		return false, fmt.Sprintf("belongs to a %s, not to this %s", t, owner.resourceType)
 	}
 	return true, ""
+}
+
+// controllerRefNames checks whether ref names owner, a Kipper object of the
+// given kind, and returns a reason on failure. The caller must supply a
+// non-nil controller reference.
+func controllerRefNames(ref *metav1.OwnerReference, owner client.Object, kind string) (bool, string) {
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return false, fmt.Sprintf("carries an unreadable controller reference %q", ref.APIVersion)
+	}
+	// Comparing API groups, as SetControllerReference does, preserves ownership
+	// across served versions of the same CRD.
+	if ref.UID == owner.GetUID() && ref.Kind == kind &&
+		ref.Name == owner.GetName() && gv.Group == kipperv1.GroupVersion.Group {
+		return true, ""
+	}
+	return false, fmt.Sprintf("is controlled by %s %q, not by this %s", ref.Kind, ref.Name, kind)
 }
 
 // JobOwnsChild reports whether obj is the child this Job's reconciler builds,

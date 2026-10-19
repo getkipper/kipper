@@ -33,9 +33,10 @@ metadata:
   name: console-api
 rules:
   # Workloads, config and storage the console manages across every project namespace.
+  # The update permission lets the Volume controller adopt restored holder pods by setting their owner reference.
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch", "create", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]

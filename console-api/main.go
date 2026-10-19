@@ -1041,13 +1041,12 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client, clientset 
 		HealthProbeBindAddress: "0", // disable — console-api has its own health endpoint
 		Metrics:                metricsOptions(),
 		Cache: cache.Options{
-			// The OOM watcher is the only controller that watches Pods,
-			// and it only cares about monitoring/{prometheus,loki}.
-			// Without this scoping the manager would list/watch every Pod
-			// in every namespace, adding tens of MB of cache and
-			// API-server load on a busy cluster.
+			// Scope Pod watches to monitoring for the Prometheus and Loki OOM
+			// watcher, and to volume holders elsewhere for the Volume controller.
+			// This avoids caching every Pod across the cluster and reduces
+			// API-server load.
 			ByObject: map[crclient.Object]cache.ByObject{
-				&corev1.Pod{}: {Namespaces: map[string]cache.Config{"monitoring": {}}},
+				&corev1.Pod{}: {Namespaces: controllers.PodCacheNamespaces()},
 			},
 		},
 	})
@@ -1076,7 +1075,7 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client, clientset 
 		{"Function", (&controllers.FunctionReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Domain: domain, Recorder: mgr.GetEventRecorderFor("function-controller"), Provision: bindingDatabaseProvisioner(clientset, cfg)}).SetupWithManager}, //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
 		{"Job", (&controllers.JobReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Recorder: mgr.GetEventRecorderFor("job-controller")}).SetupWithManager},                                                                                       //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
 		{"WorkloadName", (&controllers.WorkloadNameReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme()}).SetupWithManager},
-		{"Volume", (&controllers.VolumeReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+		{"Volume", (&controllers.VolumeReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Recorder: mgr.GetEventRecorderFor("volume-controller")}).SetupWithManager},    //nolint:staticcheck // VolumeReconciler consumes record.EventRecorder. Migration to GetEventRecorder/events.EventRecorder is a separate change.
 		{"Project", (&controllers.ProjectReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), APIReader: mgr.GetAPIReader(), Recorder: mgr.GetEventRecorderFor("project-controller")}).SetupWithManager}, //nolint:staticcheck // ProjectReconciler consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
 		{"Build", (&controllers.BuildReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), APIReader: mgr.GetAPIReader()}).SetupWithManager},
 		{"PlatformConfig", (&controllers.PlatformConfigReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
