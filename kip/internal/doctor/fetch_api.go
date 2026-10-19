@@ -29,11 +29,12 @@ var (
 
 // FetchViaAPI reads a Snapshot through the Kubernetes API, for an operator who
 // cannot reach the server over SSH. It never reads a Secret, so the hop
-// certificate is reported as unread. Other read failures are recorded in Missing
-// while the remaining reads continue. Heartbeat contains at most 20 lines from
-// the last 48 hours, oldest first, from the pod with the newest heartbeat.
+// certificate and Traefik's copy are reported as unread. Other read failures
+// are recorded in Missing while the remaining reads continue. Heartbeat contains
+// at most 20 lines from the last 48 hours, oldest first, from the pod with the
+// newest heartbeat.
 func FetchViaAPI(ctx context.Context, cs kubernetes.Interface, dyn dynamic.Interface) Snapshot {
-	snap := Snapshot{Workloads: map[string]*appsv1.Deployment{}, Missing: map[Part]error{PartHopCert: errSecretsNeedSSH}}
+	snap := Snapshot{Workloads: map[string]*appsv1.Deployment{}, Missing: map[Part]error{PartHopCert: errSecretsNeedSSH, PartTraefikCopy: errSecretsNeedSSH}}
 
 	if nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{}); err != nil {
 		snap.Missing[PartNodes] = err

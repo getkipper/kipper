@@ -198,7 +198,7 @@ The checks are grouped by where a problem could occur:
 
 - **Host:** the server answers over SSH, k3s is running, and how long ago the server booted.
 - **Kubernetes:** the API server answers, it accepts your login, the nodes are Ready, and Traefik, CoreDNS, cert-manager, Dex and the Console API are running.
-- **Gateway hop** (kipper.run clusters only): the hop certificate is in place, the default TLSStore points Traefik at it, port 443 actually serves it, the gateway heartbeat renews the name, and the cluster registers the address kip has on record.
+- **Gateway hop** (kipper.run clusters only): the hop certificate is in place, Traefik's own copy of it matches, the default TLSStore points Traefik at it, port 443 actually serves it, the gateway heartbeat renews the name, and the cluster registers the address kip has on record.
 - **kipper.run gateway** (kipper.run clusters only): the gateway is up and routes the cluster's name to it.
 
 Checks that cannot run are marked as not checked. For example, reading the hop certificate requires SSH access. When a check fails, `kip doctor` prints a link to a prefilled GitHub issue form and a report to paste into it, as a failed `kip install` does. The link contains only check names and statuses, the kip version, your machine's OS and architecture, the server's distribution and version, the sizing profile and the names of the flags you set. The report replaces recognised addresses, hostnames and credentials with placeholders. The command exits with status 1 when a check fails.
