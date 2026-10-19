@@ -6,16 +6,19 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/getkipper/kipper/controller/pkg/backupscope"
 	"github.com/getkipper/kipper/controller/pkg/platform"
@@ -255,8 +258,71 @@ func runBackupList(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  %s\n", line)
 		}
 	}
+	reportVolumesOutsideBackups(ctx, k8sClient.Clientset())
 	fmt.Println()
 	return nil
+}
+
+// reportVolumesOutsideBackups prints volumes whose files would be omitted from
+// a backup with the current mounts. It prints nothing if either resource listing fails.
+func reportVolumesOutsideBackups(ctx context.Context, clientset kubernetes.Interface) {
+	pvcs, err := clientset.CoreV1().PersistentVolumeClaims("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+	pods, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+	outside := volumesOutsideBackups(pvcs.Items, pods.Items)
+	if len(outside) == 0 {
+		return
+	}
+	fmt.Printf("\n  ⚠  No regular container in a running pod mounts these volumes, so the next backup would omit their files:\n")
+	for _, v := range outside {
+		fmt.Printf("       %s\n", v)
+	}
+	fmt.Printf("     Backups copy files from volumes mounted by regular containers in running pods. This also excludes\n")
+	fmt.Printf("     volumes used only by a stopped app. Start the app before the backup runs, or remove a volume you no longer need.\n")
+}
+
+// volumesOutsideBackups returns sorted namespace/name entries for claims without
+// a regular-container mount in a running pod. Only regular-container mounts count
+// for file-system backups, so init-container-only mounts are reported too.
+// It skips namespaces and claims explicitly excluded from user-workload backups
+// because those omissions are intentional. It returns nil when no claims qualify.
+func volumesOutsideBackups(pvcs []corev1.PersistentVolumeClaim, pods []corev1.Pod) []string {
+	excluded := map[string]bool{}
+	for _, ns := range backupscope.ExcludedNamespaces() {
+		excluded[ns] = true
+	}
+	mounted := map[string]bool{}
+	for _, pod := range pods {
+		if pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		inContainer := map[string]bool{}
+		for _, c := range pod.Spec.Containers {
+			for _, m := range c.VolumeMounts {
+				inContainer[m.Name] = true
+			}
+		}
+		for _, v := range pod.Spec.Volumes {
+			if v.PersistentVolumeClaim != nil && inContainer[v.Name] {
+				mounted[pod.Namespace+"/"+v.PersistentVolumeClaim.ClaimName] = true
+			}
+		}
+	}
+	var outside []string
+	for _, pvc := range pvcs {
+		key := pvc.Namespace + "/" + pvc.Name
+		if excluded[pvc.Namespace] || mounted[key] || pvc.Labels["velero.io/exclude-from-backup"] == "true" {
+			continue
+		}
+		outside = append(outside, key)
+	}
+	sort.Strings(outside)
+	return outside
 }
 
 // backupProtection describes, from the backup location's config and whether
