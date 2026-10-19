@@ -62,7 +62,15 @@ kip cluster uninstall storefront
 #   ✔  Local config entry for storefront removed
 ```
 
-This is destructive. All cluster state and persistent volume data on the host is removed. The command does **not** revert host firewall rules or OS hardening (rpcbind disabled, etc.), because those are general OS security improvements unrelated to k3s.
+This is destructive. All cluster state and persistent volume data on the host is removed.
+
+On each host whose firewall kip manages, the uninstall removes the rules kip added: ports 80, 443 and 6443, pod access to the kubelet (`10250`) and node-exporter (`9100`), and the rules for the cluster's other nodes. Rules for ports used by SSH are kept. On UFW it also saves the routed-traffic policy as deny, which UFW applies the next time it starts, for example after a reboot. On firewalld it deletes the entire `kipper-pods`, `kipper-peers` and `kipper-server` zones and kip's two forwarding policies, including anything added to them by hand.
+
+The firewall stays running or stopped, so a host where it was on keeps it on. SSH stays allowed. Rules you added yourself stay unless they match a kip rule or belong to one of the deleted firewalld zones or policies. kip leaves the firewall alone and prints a warning when another firewall change is pending on the host. It also skips firewalld cleanup if the running configuration differs from the saved configuration, because reloading to apply the removal would discard unsaved rules.
+
+The ownership file, `/etc/kipper/firewall-managed` or `/etc/kipper/firewalld-managed`, stays, so a later `kip install` on the host manages the firewall again and adds its rules back. On firewalld that install replaces the public zone, as it always does, so add your own public-zone rules again afterwards. Delete the ownership file to manage the firewall yourself from then on.
+
+If the rules cannot be removed, the uninstall prints a warning and continues. OS hardening, such as disabling rpcbind, remains in place because it is a general OS security improvement unrelated to k3s.
 
 Use `--keep-local-config` when you plan to reinstall immediately, so the existing cluster name and kubeconfig path stay in `~/.kip/config.yaml` for the new install to refresh.
 
@@ -251,7 +259,7 @@ kip node remove worker-1
 kip node remove 203.0.113.11 --yes
 ```
 
-kip records the worker as being removed, stops Longhorn from placing volume copies on it and asks Longhorn to move the copies already there. It waits until no volume has its only healthy copy on the worker, then cordons and drains it. It checks that the host still has the machine ID recorded for the worker, uninstalls k3s and wipes Kipper's data from it, and checks that k3s is gone before it deletes the node. It then removes the worker's address from the firewall on every remaining node whose firewall kip manages, names each node whose firewall it does not manage so you can remove the address there yourself, and deletes the worker's record.
+kip records the worker as being removed, stops Longhorn from placing volume copies on it and asks Longhorn to move the copies already there. It waits until no volume has its only healthy copy on the worker, then cordons and drains it. It checks that the host still has the machine ID recorded for the worker, uninstalls k3s, wipes Kipper's data and removes the firewall rules kip added there, as [`kip cluster uninstall`](#kip-cluster-uninstall) does. It checks that k3s is gone before deleting the node. It then removes the worker's address from the firewall on every remaining node whose firewall kip manages, names each node whose firewall it does not manage so you can remove the address there yourself, and deletes the worker's record.
 
 If a step fails, the worker stays recorded as being removed. Fix the cause and run the command again to resume, even if the node itself has already been deleted. Without `--force`, the worker's host has to be reachable over SSH for the first run and for every rerun, because kip only deletes the node after it has checked the host's machine ID and wiped it.
 

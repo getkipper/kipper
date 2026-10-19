@@ -41,7 +41,7 @@ func TestUninstallHostSweepsTheNetworkChangeRecordAndTheLock(t *testing.T) {
 	assert.Contains(t, swept, "/var/lib/kipper", "a network change record left behind makes the next install recover a cluster that no longer exists")
 	assert.Contains(t, swept, apiServerLockPath, "a lock held by a dead run must not outlive the cluster")
 	assert.Contains(t, swept, apiServerLockPath+".guard")
-	assert.NotContains(t, swept, "/etc/kipper", "the firewall claim stays with the firewall rules the uninstall keeps")
+	assert.NotContains(t, swept, "/etc/kipper", "the firewall claim stays with the firewall the uninstall keeps")
 }
 
 // stateScene is a host root with a populated /etc/kipper and stand-ins for

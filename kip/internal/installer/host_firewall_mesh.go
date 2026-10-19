@@ -106,7 +106,7 @@ func staleUFWPeerRules(added string, mesh FirewallMesh) []string {
 }
 
 // ufwServerOnlyRules lists the public ingress and API rules kip adds on servers.
-// Uninstalling Kipper preserves these rules, so a worker join must remove them.
+// A host that was a server can still carry them, so a worker join removes them.
 var ufwServerOnlyRules = []string{"ufw allow 80/tcp", "ufw allow 443/tcp", "ufw allow 6443/tcp"}
 
 // staleUFWRoleRules returns commands to delete saved server port rules on workers,
