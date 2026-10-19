@@ -89,7 +89,7 @@ func cancelRestore(ctx context.Context, clientset kubernetes.Interface, dyn dyna
 		if phase, done, err = waitWhileCanceling(ctx, dyn, name, uid, restoreCancelWait); err != nil {
 			return err
 		} else if !done {
-			return fmt.Errorf("restore %s is still %s after Velero restarted, or its volume restores are still running. Check it again with kip backup list", name, phase)
+			return fmt.Errorf("restore %s is still %s after Velero restarted, or its volume restores are still running. Run kip backup restore --cancel %s again to continue waiting for the restore and its volume restores to finish", name, phase, name)
 		}
 	}
 	return reportCanceledRestore(name, phase, restarted)
