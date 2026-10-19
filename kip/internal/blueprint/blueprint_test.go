@@ -760,3 +760,27 @@ func TestInstallCommandRendersForEveryBuiltin(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, InstallCommand(ghost.Metadata), "--set domain=https://app.example.com")
 }
+
+func TestBuiltinPostgresBlueprintsKeepAcceptingPlaintext(t *testing.T) {
+	metas, err := List()
+	require.NoError(t, err)
+	checked := 0
+	for _, meta := range metas {
+		b, err := Get(meta.Name)
+		require.NoError(t, err)
+		params := map[string]string{}
+		for _, p := range b.Metadata.Parameters {
+			params[p.Name] = "x"
+		}
+		params["domain"] = "app.example.com"
+		m, err := b.Render(params)
+		require.NoError(t, err, meta.Name)
+		for name, svc := range m.Services {
+			if svc.Type == "postgres" {
+				checked++
+				assert.Equal(t, "on", svc.TLS, "%s/%s: its app is set up without TLS, so a required default would cut it off", meta.Name, name)
+			}
+		}
+	}
+	assert.GreaterOrEqual(t, checked, 7, "every built-in blueprint with Postgres was rendered")
+}
