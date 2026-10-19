@@ -196,7 +196,11 @@ func restoreIntoDrill(ctx context.Context, clientset kubernetes.Interface, dyn d
 		return nil, err
 	}
 	if phase != "Completed" {
-		return nil, fmt.Errorf("restore %s ended with phase %s. Use kubectl -n velero describe restore %s to inspect it, and --keep on the drill command to retain restored services", name, phase, name)
+		outcome := ""
+		if r, err := dyn.Resource(restoreGVR).Namespace("velero").Get(ctx, name, metav1.GetOptions{}); err == nil {
+			outcome = restoreOutcome(r)
+		}
+		return nil, fmt.Errorf("restore %s ended with phase %s%s. Run the drill again with --keep to inspect what was restored", name, phase, outcome)
 	}
 
 	pods, err := clientset.CoreV1().Pods(drillNamespace).List(ctx, metav1.ListOptions{})
@@ -432,6 +436,33 @@ func deleteDrillNamespace(ctx context.Context, clientset kubernetes.Interface) e
 		return fmt.Errorf("deleting namespace %s: %w", drillNamespace, err)
 	}
 	return nil
+}
+
+// restoreOutcome formats a finished restore's positive error and warning counts
+// and failure reason, for example " (2 errors, 1 warning: reason)". It returns ""
+// when no positive counts or failure reason are available.
+func restoreOutcome(r *unstructured.Unstructured) string {
+	errs, _, _ := unstructured.NestedInt64(r.Object, "status", "errors")
+	warnings, _, _ := unstructured.NestedInt64(r.Object, "status", "warnings")
+	reason, _, _ := unstructured.NestedString(r.Object, "status", "failureReason")
+	var parts []string
+	if errs > 0 {
+		parts = append(parts, fmt.Sprintf("%d %s", errs, plural(int(errs), "error", "errors")))
+	}
+	if warnings > 0 {
+		parts = append(parts, fmt.Sprintf("%d %s", warnings, plural(int(warnings), "warning", "warnings")))
+	}
+	summary := strings.Join(parts, ", ")
+	switch {
+	case reason != "" && summary != "":
+		summary += ": " + reason
+	case reason != "":
+		summary = reason
+	}
+	if summary == "" {
+		return ""
+	}
+	return " (" + summary + ")"
 }
 
 func waitForRestorePhase(ctx context.Context, dyn dynamic.Interface, name string, limit time.Duration) (string, error) {
