@@ -377,6 +377,8 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 
 	// Connect to existing workers before updating their peer firewall rules.
 	peers := map[string]installer.FirewallRunner{}
+	accessNodes := map[string]accessNode{serverRec.MachineID: {rec: serverRec, node: server, base: serverConn}}
+	touched := []accessNode{accessNodes[serverRec.MachineID]}
 	var peerConns []*ssh.Client
 	defer func() {
 		for _, c := range peerConns {
@@ -394,10 +396,23 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		peerConns = append(peerConns, c)
 		peer := lease.Host(c)
 		peers[r.MachineID] = peer
+		accessNodes[r.MachineID] = accessNode{rec: r, node: peer, base: c}
+		touched = append(touched, accessNodes[r.MachineID])
 		id, err := installer.ReadMachineID(peer)
 		if err != nil || id != r.MachineID {
 			return fmt.Errorf("%s no longer answers as node %s (machine id %q, recorded %s); check the address before adding nodes", r.Host, r.Name, id, r.MachineID)
 		}
+	}
+
+	// A recorded retry or an unrecorded worker can already hold a list.
+	joinerState, err := installer.ReadAccessGuardState(worker)
+	if err != nil {
+		return fmt.Errorf("%s: %w", workerHost, err)
+	}
+	joinerHeader := []installer.AccessNodeHeader{joinerState.Header(workerHost)}
+	access, _, err := prepareNodeAccess(newNodeAccessCluster(os.Stdout, server, cluster), touched, joinerHeader, "node add "+workerHost, true)
+	if err != nil {
+		return err
 	}
 
 	network, err := installer.PlanNetworkChange(server)
@@ -416,6 +431,17 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  ✔  %s %s, %d MB RAM, %d MB disk\n", sys.OS, sys.OSVersion, sys.RAMMB, sys.DiskMB)
 	for _, w := range preflight.Warnings {
 		fmt.Printf("  ⚠  %s\n", w)
+	}
+	if access.on {
+		// The joiner reaches the server's API port during planning and
+		// joining, before the next load puts its peer address in cluster4.
+		addrs, err := installer.JoinerAddresses(worker, workerIP)
+		if err != nil {
+			return err
+		}
+		if err := installer.AddJoiningAddresses(server, addrs); err != nil {
+			return err
+		}
 	}
 	plan, serverDropIn, serverFlannel, err := prepareJoinHost(server, worker, identity.MachineID, workerHost, installer.NetworkModeOptions{
 		PrivateNetwork: privateNetwork, Public: forcePublic, ClusterMode: serverRec.Mode,
@@ -448,11 +474,17 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\n  Opening the cluster ports between the nodes...\n")
+	if err := access.load(accessNodes[serverRec.MachineID], records, ""); err != nil {
+		return err
+	}
 	if err := applyPeerFirewall(os.Stdout, server, "the server", installer.FirewallMeshFor(records, serverRec.MachineID), existingFirewall, false); err != nil {
 		return err
 	}
 	for _, r := range records {
 		if c, ok := peers[r.MachineID]; ok {
+			if err := access.load(accessNodes[r.MachineID], records, ""); err != nil {
+				return err
+			}
 			if err := applyPeerFirewall(os.Stdout, c, r.Name, installer.FirewallMeshFor(records, r.MachineID), existingFirewall, false); err != nil {
 				return err
 			}
@@ -524,6 +556,10 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		}
 	}
 	fmt.Printf("  ✔  %s registered as %s and is cordoned\n", workerHost, nodeName)
+	// The guard needs the k3s binary that Register installs.
+	if err := access.load(accessNode{rec: rec, node: worker, base: workerConn}, records, ""); err != nil {
+		return nodeAddRetry(err, workerHost)
+	}
 	if workerOS.UsesNeedrestart() {
 		if err := installer.StampStorageRestarts(server, nodeName, identity.MachineID); err != nil {
 			fmt.Printf("  ⚠  could not record host configuration for %s: %v\n      The host is configured; 'kip node repair-host' records it.\n", nodeName, err)

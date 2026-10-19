@@ -196,15 +196,15 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	dialHost := func(host string) (installer.FirewallRunner, func(), error) {
+	dialHost := func(host string) (installer.FirewallRunner, installer.FirewallRunner, func(), error) {
 		c, err := ssh.Dial(nodeSSH(host, sshKey, cluster))
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return lease.Host(c), func() { _ = c.Close() }, nil
+		return lease.Host(c), c, func() { _ = c.Close() }, nil
 	}
 	onWorker := func(use func(installer.CommandRunner) error) error {
-		client, done, err := dialHost(worker.Host)
+		client, _, done, err := dialHost(worker.Host)
 		if err != nil {
 			return fmt.Errorf("connecting to %s: %w. Run the command again once the host is reachable", worker.Host, err)
 		}
@@ -215,6 +215,9 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 		// Once this run has reached the worker, the worker refuses any older
 		// run's command still on its way there.
 		if err := onWorker(func(c installer.CommandRunner) error { _, err := c.Run("true"); return err }); err != nil {
+			return err
+		}
+		if err := onWorker(func(c installer.CommandRunner) error { return checkRemovalTargetAccess(master, c, worker.Name) }); err != nil {
 			return err
 		}
 	}
@@ -233,7 +236,10 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 			return holds, err
 		},
 		UpdatePeers: func(remaining []installer.NodeRecord) ([]string, error) {
-			return updateRemainingPeers(os.Stdout, master, remaining, worker, dialHost)
+			access := func(nodes []accessNode) (*nodeAccess, []string, error) {
+				return prepareNodeAccess(newNodeAccessCluster(os.Stdout, master, cluster), nodes, nil, "node remove "+worker.Name, false)
+			}
+			return updateRemainingPeers(os.Stdout, accessNode{node: master, base: server}, remaining, worker, dialHost, access)
 		},
 		SaveRecords: func(remaining []installer.NodeRecord) { mirrorNodes(cluster.Name, remaining) },
 	}
@@ -669,24 +675,50 @@ func wipeRemovedWorker(client installer.CommandRunner, node config.NodeRecord, l
 // updateRemainingPeers rewrites the peer rules on the server and every
 // remaining worker whose firewall kip manages, so the removed node's address
 // loses its access there. Each worker's machine ID is checked before its
-// firewall is changed. It returns a note for each node whose firewall kip
-// does not manage, naming the access the operator has to revoke.
-func updateRemainingPeers(out io.Writer, server installer.FirewallRunner, remaining []installer.NodeRecord, removed installer.NodeRecord, dial func(host string) (installer.FirewallRunner, func(), error)) ([]string, error) {
+// firewall is changed. Where the cluster has an operator access list, each
+// node's access table is rebuilt from the remaining node records first. It returns a
+// note for each node whose firewall kip does not manage, naming the access
+// the operator has to revoke, and for each node without an access table.
+func updateRemainingPeers(out io.Writer, server accessNode, remaining []installer.NodeRecord, removed installer.NodeRecord, dial func(host string) (fenced, base installer.FirewallRunner, done func(), err error), access func([]accessNode) (*nodeAccess, []string, error)) ([]string, error) {
 	serverRec, ok := installer.ServerRecord(remaining)
 	if !ok {
 		return nil, fmt.Errorf("the node records hold no server")
 	}
-	var manual []string
-	note, err := revokePeer(out, server, "the server", installer.FirewallMeshFor(remaining, serverRec.MachineID), removed)
-	if err != nil {
-		return nil, err
-	}
-	manual = appendNote(manual, note)
+	server.rec = serverRec
+	nodes := []accessNode{server}
+	var closers []func()
+	defer func() {
+		for _, done := range closers {
+			done()
+		}
+	}()
 	for _, rec := range remaining {
 		if rec.Role != installer.NodeRoleWorker {
 			continue
 		}
-		note, err := revokeWorkerPeer(out, rec, remaining, removed, dial)
+		c, base, done, err := dial(rec.Host)
+		if err != nil {
+			return nil, fmt.Errorf("connecting to node %s (%s) to remove the old node's firewall rules: %w", rec.Name, rec.Host, err)
+		}
+		closers = append(closers, done)
+		if id, err := installer.ReadMachineID(c); err != nil || id != rec.MachineID {
+			return nil, fmt.Errorf("%s no longer answers as node %s (machine ID %q, recorded %s). Check the address", rec.Host, rec.Name, id, rec.MachineID)
+		}
+		nodes = append(nodes, accessNode{rec: rec, node: c, base: base})
+	}
+	acc, manual, err := access(nodes)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range nodes {
+		if err := acc.load(n, remaining, removed.MachineID); err != nil {
+			return nil, err
+		}
+		label := n.rec.Name
+		if n.rec.Role == installer.NodeRoleServer {
+			label = "the server"
+		}
+		note, err := revokePeer(out, n.node, label, installer.FirewallMeshFor(remaining, n.rec.MachineID), removed)
 		if err != nil {
 			return nil, err
 		}
@@ -700,18 +732,6 @@ func appendNote(notes []string, note string) []string {
 		return notes
 	}
 	return append(notes, note)
-}
-
-func revokeWorkerPeer(out io.Writer, rec installer.NodeRecord, remaining []installer.NodeRecord, removed installer.NodeRecord, dial func(host string) (installer.FirewallRunner, func(), error)) (string, error) {
-	c, done, err := dial(rec.Host)
-	if err != nil {
-		return "", fmt.Errorf("connecting to node %s (%s) to remove the old node's firewall rules: %w", rec.Name, rec.Host, err)
-	}
-	defer done()
-	if id, err := installer.ReadMachineID(c); err != nil || id != rec.MachineID {
-		return "", fmt.Errorf("%s no longer answers as node %s (machine ID %q, recorded %s). Check the address", rec.Host, rec.Name, id, rec.MachineID)
-	}
-	return revokePeer(out, c, rec.Name, installer.FirewallMeshFor(remaining, rec.MachineID), removed)
 }
 
 // revokePeer rewrites a kip-managed firewall for mesh, which drops the rules

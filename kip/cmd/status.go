@@ -260,6 +260,7 @@ func checkHostWith(out io.Writer, sshConfig ssh.Config, cluster *config.Cluster,
 	reportReadOnlyVolumes(out, cluster, client, nodes)
 	reportDataPlacement(out, client, cluster, nodes)
 	reportUFWFailOpen(out, client)
+	reportAccessGuard(out, client, client)
 }
 
 // reportUFWFailOpen reports a failed restoration attempt recorded on the server.
