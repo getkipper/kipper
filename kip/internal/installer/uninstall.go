@@ -17,7 +17,7 @@ const firewallChangePendingMarker = "kipper-firewall-change-pending"
 func clearKipperStateCommand(root string) string {
 	dir := root + firewalldStateDir
 	keep := ""
-	for _, name := range []string{"firewall-managed", "firewalld-managed", "ufw.lock", "firewalld.lock", ufwFailOpenFile} {
+	for _, name := range []string{"firewall-managed", "firewalld-managed", "ufw.lock", "firewalld.lock", "access.lock", ufwFailOpenFile} {
 		keep += " ! -name " + name
 	}
 	return `if [ -d ` + dir + ` ]; then ` +
@@ -32,10 +32,12 @@ func clearKipperStateCommand(root string) string {
 // integration and Dex hosts pin, and deletes cluster data, optional AI data,
 // network recovery state and the API server configuration lock.
 // Missing scripts and directories are tolerated. Host firewall policy and
-// OS hardening remain configured. State in /etc/kipper is cleared except for
-// firewall ownership records, fail-open records and lock files. A firewall
-// reservation or an active or activating rollback unit preserves all of that
-// state and prints a notice.
+// OS hardening remain configured, except for the operator access table: it
+// is removed after k3s is gone, because a reused host must not boot with the
+// list of a cluster that no longer exists. State in /etc/kipper is cleared
+// except for firewall ownership records, fail-open records and lock files. A
+// firewall reservation or an active or activating rollback unit preserves
+// all of that state and prints a notice.
 // Failure to lock, inspect or clear that state returns an error.
 func UninstallHost(client CommandRunner) error {
 	// Stop k3s before removing its data. A failed shutdown aborts the uninstall
@@ -80,6 +82,10 @@ done`
 		apiServerLockPath, apiServerLockPath)
 	if _, err := client.Run(sweep); err != nil {
 		return fmt.Errorf("sweeping kipper data directories: %w", err)
+	}
+
+	if err := RemoveAccessGuard(client); err != nil {
+		return err
 	}
 
 	// Preserve state needed by pending firewall rollback jobs.

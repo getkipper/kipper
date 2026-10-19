@@ -69,6 +69,9 @@ func (h *shellHost) Start(command string) (*ssh.Held, error) {
 
 func (h *shellHost) SurvivesSSHRateLimit() bool    { return true }
 func (h *shellHost) ConfirmFreshConnection() error { return nil }
+func (h *shellHost) ObservedAddress(string) (string, error) {
+	return "", errors.New("no fresh connection in this test")
+}
 
 // killFirst kills the process group of the first session started, which is
 // what a server-side kill of an abandoned lease session does.
@@ -140,7 +143,7 @@ func TestNodeLeaseRefusesASecondRunAndNamesTheFirst(t *testing.T) {
 
 	_, err := takeNodeLease(c.server, c.dir, c.stateDir, "kip node add 192.0.2.10")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "another kip node command is running on this cluster (kip node remove worker-1)")
+	assert.Contains(t, err.Error(), "another kip node or cluster access command is running on this cluster (kip node remove worker-1)")
 }
 
 func TestNodeLeaseIsFreeAgainAfterRelease(t *testing.T) {

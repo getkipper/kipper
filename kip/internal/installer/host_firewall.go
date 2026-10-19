@@ -85,6 +85,10 @@ type FirewallRunner interface {
 	// ConfirmFreshConnection verifies access over a new SSH connection.
 	// It returns localrun.ErrNoConnection when commands run locally.
 	ConfirmFreshConnection() error
+	// ObservedAddress opens one new SSH connection over family ("4" or "6")
+	// and returns the client address the host saw. It returns
+	// localrun.ErrNoConnection when commands run locally.
+	ObservedAddress(family string) (string, error)
 }
 
 // ApplyFirewallPlan configures firewalld on RHEL-family hosts or UFW elsewhere

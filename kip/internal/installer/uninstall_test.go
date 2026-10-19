@@ -134,3 +134,22 @@ func TestUninstallHostReportsAPendingFirewallChange(t *testing.T) {
 	require.NoError(t, UninstallHost(host), "A pending firewall change must allow uninstall to succeed.")
 	assert.Contains(t, strings.Join(host.commands, "\n"), clearKipperStateCommand(""))
 }
+
+func TestUninstallHostRemovesTheAccessTableAfterK3sAndBeforeTheStateSweep(t *testing.T) {
+	host := &routedRunner{}
+	require.NoError(t, UninstallHost(host))
+	k3s, removal, clear := -1, -1, -1
+	for i, c := range host.commands {
+		switch {
+		case strings.Contains(c, "k3s-agent-uninstall.sh"):
+			k3s = i
+		case c == removeAccessCommand(""):
+			removal = i
+		case c == clearKipperStateCommand(""):
+			clear = i
+		}
+	}
+	require.GreaterOrEqual(t, removal, 0, "the access table is removed so a reused host boots open")
+	assert.Less(t, k3s, removal, "no workload is exposed while the guard still runs")
+	assert.Equal(t, removal+1, clear)
+}

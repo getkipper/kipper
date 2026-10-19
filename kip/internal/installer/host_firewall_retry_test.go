@@ -39,6 +39,10 @@ type ufwHost struct {
 
 func (h *ufwHost) SurvivesSSHRateLimit() bool { return true }
 
+func (h *ufwHost) ObservedAddress(string) (string, error) {
+	return "", errors.New("no fresh connection in this test")
+}
+
 func (h *ufwHost) ConfirmFreshConnection() error {
 	h.ran = append(h.ran, "fresh connection")
 	if h.local {

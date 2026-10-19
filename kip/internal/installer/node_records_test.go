@@ -17,6 +17,7 @@ type routedRunner struct {
 	routes   []route
 	commands []string
 	stdins   []string
+	observed map[string]string
 }
 
 type route struct {
@@ -27,6 +28,12 @@ type route struct {
 
 func (r *routedRunner) SurvivesSSHRateLimit() bool    { return true }
 func (r *routedRunner) ConfirmFreshConnection() error { return nil }
+func (r *routedRunner) ObservedAddress(family string) (string, error) {
+	if a, ok := r.observed[family]; ok {
+		return a, nil
+	}
+	return "", errors.New("no IPv" + family + " connection in this test")
+}
 
 func (r *routedRunner) Run(command string) (string, error) {
 	r.commands = append(r.commands, command)

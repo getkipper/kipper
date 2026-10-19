@@ -104,7 +104,7 @@ func takeNodeLease(server LeaseServer, dir, stateDir, purpose string) (*NodeLeas
 			if who == "" {
 				who = "an earlier kip node command"
 			}
-			return nil, fmt.Errorf("another kip node command is running on this cluster (%s). Wait for it to finish, or stop it, then run this command again", who)
+			return nil, fmt.Errorf("another kip node or cluster access command is running on this cluster (%s). Wait for it to finish, or stop it, then run this command again", who)
 		case strings.HasPrefix(line, leaseBusy):
 			return nil, fmt.Errorf("a command from an interrupted kip node run is still running on the server after %d seconds%s. Run this command again once it has finished", leaseWaitSecs, stillRunning(string(rest)))
 		}

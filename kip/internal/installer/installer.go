@@ -74,6 +74,7 @@ type hostRunner interface {
 	Uploader
 	SurvivesSSHRateLimit() bool
 	ConfirmFreshConnection() error
+	ObservedAddress(family string) (string, error)
 }
 
 var (
@@ -1023,6 +1024,10 @@ func Run(opts Options) (*Result, error) {
 		if err := registerCluster(kubeconfigPath); err != nil {
 			return nil, err
 		}
+	}
+
+	if w := LeftoverAccessWarning(client); w != "" {
+		fmt.Printf("  ⚠  %s\n\n", w)
 	}
 
 	result := &Result{

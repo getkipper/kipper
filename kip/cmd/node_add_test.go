@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -67,6 +68,9 @@ func (h *firewallHost) Run(command string) (string, error) {
 func (h *firewallHost) RunStdin(command string, _ io.Reader) (string, error) { return h.Run(command) }
 func (h *firewallHost) SurvivesSSHRateLimit() bool                           { return true }
 func (h *firewallHost) ConfirmFreshConnection() error                        { return nil }
+func (h *firewallHost) ObservedAddress(string) (string, error) {
+	return "", errors.New("no fresh connection in this test")
+}
 
 var testMesh = installer.FirewallMesh{Peers: []installer.FirewallPeer{{Address: "192.0.2.11"}}}
 
@@ -206,6 +210,9 @@ func (h *joinHost) Run(command string) (string, error) {
 func (h *joinHost) RunStdin(command string, _ io.Reader) (string, error) { return h.Run(command) }
 func (h *joinHost) SurvivesSSHRateLimit() bool                           { return true }
 func (h *joinHost) ConfirmFreshConnection() error                        { return nil }
+func (h *joinHost) ObservedAddress(string) (string, error) {
+	return "", errors.New("no fresh connection in this test")
+}
 
 func TestPrepareJoinHostRefusesNetworkOptionsBeforeChangingTheHost(t *testing.T) {
 	const machineID = "0123456789abcdef0123456789abcdef"
