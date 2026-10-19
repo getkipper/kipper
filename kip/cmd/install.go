@@ -233,6 +233,11 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		},
 	}
 	result, installErr := installer.Run(opts)
+	// Worker upgrades use this machine's SSH credentials. A --local install
+	// leaves them to the client that started the server job, if any.
+	if installErr == nil && !local {
+		installErr = upgradeAgentsDirect(host, opts.SSHUser, explicitKey, fallbackKey)
+	}
 
 	// Write the result first so an undetected path collision triggers the
 	// credential save's exclusive-creation check and the summary prints the password.

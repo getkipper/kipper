@@ -194,6 +194,11 @@ func runDrivenInstall(cmd *cobra.Command, credentialsFile string) error {
 			fmt.Printf("  %s\n", installer.PinnedKipWarning)
 		}
 	}
+	// Worker upgrades use this machine's SSH credentials after the server job finishes.
+	workerSSH := ssh.Config{User: user, KeyPath: keyPath, Options: []string{"BatchMode=yes"}}
+	if err := upgradeAgentsAfterInstall(os.Stdout, client, sshDialer(workerSSH)); err != nil {
+		return err
+	}
 	if noLogin {
 		fmt.Printf("\n  Sign in later with: kip auth login\n\n")
 		return nil

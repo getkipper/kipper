@@ -72,4 +72,6 @@ Services that ran on a lost worker may stay unavailable until it returns. Losing
 - **Certificates:** a worker's agent certificates last a year and are renewed whenever its agent starts while they are still valid, so reboot each worker at least once a year. A worker whose certificates have expired or are missing shows `NotReady`. Run `kip node add <host>` again with the original options to rejoin it.
 - **Listing nodes:** `kip node list` shows every node with its role, status and address.
 
-`kip upgrade` acts on the server's host only, so upgrading k3s on a worker is a manual step today. For what [`kip cluster uninstall`](/en/cli-reference#kip-cluster-uninstall) does with the workers, and for other worker maintenance, see [Maintenance](/en/cli-reference#kip-node-add) in the CLI reference.
+- **k3s upgrades:** rerunning `kip install` upgrades k3s on the server, then brings each worker recorded as `ready` to the same version, one at a time and without a drain. See [k3s upgrades](/en/maintenance#k3s-upgrades).
+
+`kip upgrade` acts on the server's host only. For what [`kip cluster uninstall`](/en/cli-reference#kip-cluster-uninstall) does with the workers, and for other worker maintenance, see [Maintenance](/en/cli-reference#kip-node-add) in the CLI reference.

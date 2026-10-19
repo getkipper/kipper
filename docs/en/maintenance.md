@@ -244,6 +244,39 @@ because the Kubernetes skew policy forbids skipping minors. A server further
 behind stays untouched with a warning and needs the intermediate minor upgrades
 first.
 
+### k3s upgrades {#k3s-upgrades}
+
+On a cluster with workers, rerunning `kip install` checks every recorded
+worker's reported k3s version before the install steps start. It stops before
+upgrading k3s if a worker runs a newer version than the server will run. Use a
+kip release that installs at least that worker's version.
+
+It also stops if the server upgrade would leave a worker more than three
+Kubernetes minor versions behind when it was previously within that limit.
+Three minor versions is the limit in the
+[Kubernetes version skew policy](https://kubernetes.io/releases/version-skew-policy/#kubelet)
+for kubelets at version 1.25 or later. Bring such a worker to the server's current
+version first with `kip node add <host>`. Workers already beyond that limit are
+handled by the worker upgrade that follows.
+
+Once the server install finishes, kip upgrades workers recorded as `ready` to
+the server's k3s version, one at a time in name order. Before upgrading each
+worker, it checks that the host is the recorded machine and that its installed
+k3s matches either the version its Node reports or the target version from an
+earlier attempt. It then reruns the k3s install script with the worker's saved
+join settings. `k3s-agent` restarts while existing pods keep running, without a
+drain. kip waits up to five minutes for each worker to report Ready on the target
+version, including workers already on that version, and stops at the first
+upgrade failure or readiness timeout. Rerunning `kip install` resumes the
+upgrades and skips workers already reporting Ready on the server's version.
+Workers recorded as joining, being removed or being wiped are left unchanged.
+kip holds the same lock as `kip node add` and `kip node remove` while upgrading
+workers, so it stops if another command holds that lock.
+
+By default on Windows, and with `--via-server`, the install runs as a job on the
+server. The machine running the CLI upgrades the workers after the job finishes.
+`kip install --local` upgrades the server only.
+
 ### Recovering from a failed chart upgrade {#recovering-from-a-failed-chart-upgrade}
 
 If a system component upgrade fails (helm release ends in `failed` state), subsequent `kip upgrade` runs may hang on `helm uninstall --wait` while helm-controller tries to reset the release. The fix is to drop the stale helm release secrets and let helm-controller do a fresh install:

@@ -459,6 +459,9 @@ func Run(opts Options) (*Result, error) {
 		if err != nil {
 			return nil, err
 		}
+		if err := checkClusterK3sSkew(client, records); err != nil {
+			return nil, err
+		}
 		// Recheck previewed peers against the validated records before applying rules.
 		if final := FirewallMeshFor(records, hostMachineID); !final.equal(fwPlan.Mesh) {
 			if fwPlan.Adopt {
