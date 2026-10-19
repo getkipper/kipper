@@ -30,6 +30,8 @@ kip cluster domain --repair           # rewrite local config from the cluster
 kip cluster hosts                     # show the hostnames kip uses for a cluster
 kip cluster hosts --dex dex.example.com # correct one without contacting the cluster
 kip cluster dns repair                # restore the curated DNS resolvers and restart CoreDNS
+kip cluster access show               # the operator access list and a check of every node
+kip cluster access allow --here       # restrict SSH and the API to listed operator addresses
 kip platform restart <component>      # restart a platform or cluster component
 ```
 
@@ -62,9 +64,28 @@ kip cluster uninstall storefront
 #   ✔  Local config entry for storefront removed
 ```
 
-This is destructive. All cluster state and persistent volume data on the host is removed. The command does **not** revert host firewall rules or OS hardening (rpcbind disabled, etc.), because those are general OS security improvements unrelated to k3s.
+This is destructive. All cluster state and persistent volume data on the host is removed. The command does **not** revert host firewall rules or OS hardening (rpcbind disabled, etc.), because those are general OS security improvements unrelated to k3s. It does remove the [operator access list](#kip-cluster-access) from each wiped host, so a reused host never boots with a list from a cluster that no longer exists.
 
 Use `--keep-local-config` when you plan to reinstall immediately, so the existing cluster name and kubeconfig path stay in `~/.kip/config.yaml` for the new install to refresh.
+
+### kip cluster access {#kip-cluster-access}
+
+Restricts new connections to every node's SSH ports and to the Kubernetes API (6443) to a list of operator prefixes. Ports 80 and 443 stay public. The list is opt-in. A cluster without one is unchanged. See [Operator access list](/en/security#operator-access) for how it works, what happens at boot and how to recover from the provider console.
+
+```bash
+kip cluster access show                       # the list, recent changes and a check of every node
+kip cluster access show --json                # the same as JSON
+kip cluster access allow --here               # add the address this workstation connects from
+kip cluster access allow 203.0.113.0/24 2001:db8::/48 --note office
+kip cluster access revoke 198.51.100.7/32     # remove prefixes
+kip cluster access apply                      # load the recorded list on every node again
+kip cluster access apply --accept-older-record # restore an older record's list after reviewing it
+kip cluster access reset --yes                # remove the list and open SSH and the API
+```
+
+Every verb takes `--ssh-key`. A bare address is a `/32` or `/128`. `0.0.0.0/0` and `::/0` are refused, because `reset` is the way to open the ports. `--here` adds an IPv4 address as a `/32` and an IPv6 address as the `/64` around it. Each change is loaded on the workers first and the server last. A node keeps the change only after a new SSH connection works from a listed address. The server also checks that the API still answers. kip refuses a list that would not admit your workstation, revoking the last entry, any change while a node is unreachable or a worker's removal is unfinished, and any change while the API does not answer from your workstation.
+
+`show` exits 1 unless every node enforces the record. It reports nodes it cannot reach as not verified, a live table that differs from the saved files, a node that booted closed, a failed `kipper-access` service, an enabled `nftables.service`, and a saved table the installed `nft` would reject at the next boot. `reset` removes the list from every reachable node, including a worker whose removal has not finished, and deletes the record only when every node has been reset. Run it again once an unreachable node is back. Run it from your workstation, because on the cluster's own host kip cannot see the address you connect from.
 
 ### kip platform restart {#kip-platform-restart}
 
@@ -237,6 +258,7 @@ The command prepares the host (kernel modules, kubelet hardening, Longhorn's sto
 - **Provider firewalls:** A cloud provider's firewall or security group must allow 51820/udp and 10250/tcp in both directions between the nodes, 9100/tcp from the server to each worker, and 6443/tcp from each worker to the server. Allow either node to initiate traffic on 51820/udp and 10250/tcp, even if the join succeeds without these rules. A stateful security group allows replies to WireGuard traffic initiated by the server, so a join can pass while the server's inbound 51820/udp rule is missing. Once the connection tracking entry expires, for example after a long idle period or a reboot, the provider can block tunnel traffic initiated by the worker.
 - **Join checks:** before allowing new workloads, kip checks pod DNS, connectivity to CoreDNS on the server, Longhorn volume reads and writes, host authentication to the cluster registry, containerd's registry mirror configuration and direct registry access, and kubelet access from the server. The worker stays cordoned until the node and its Longhorn storage pods are ready. kip then replaces the cordon with a `kipper.run/checking` taint so Longhorn can attach the test volume. During validation, the taint blocks scheduling of pods that do not tolerate it. To resume an interrupted join, rerun the command with the same options.
 - **Records:** kip records nodes in the `kipper-nodes` ConfigMap in `kipper-system`. `kip upgrade`, `kip cluster harden` and `kip install` require records for every cluster node. Use `kip node add` to adopt an unrecorded worker. Adopt all unrecorded nodes before joining a new node.
+- **Operator access list:** on a cluster with an [operator access list](#kip-cluster-access), the server and every existing worker must already enforce it, and your workstation's address must be on it. kip loads the list on the server and each existing worker before their peer firewall changes, and on the new worker right after it registers. While the node joins, the server admits the new host's addresses on 6443. An abandoned join leaves that entry until the next `kip cluster access apply` or reboot. `kip node remove` drops the removed node from the other nodes' lists and notes any node without one.
 - **Join credentials:** each join attempt uses a fresh k3s bootstrap token valid for one hour. The command attempts to delete it after registration or a join failure. If cleanup fails, the token expires on its own. Once joined, a worker authenticates with its own agent certificates. k3s issues them for one year and renews them at each agent start while they are still valid, so a worker that restarts its agent at least once a year (`kip node reboot <worker>` does this) keeps them current. A worker whose certificates have expired or gone missing cannot reconnect: it shows NotReady and `k3s-agent` logs `failed to retrieve configuration from server: not authorized`. Run `kip node add <host>` again for that worker with the original join options. It mints a fresh join token, repeats the join and keeps the node's name and the data on its disks; workloads are kept off the node while the join is checked. If the rerun fails, follow the cause it reports.
 - **Maintenance:** `kip upgrade` performs host operations on the server only. [`kip cluster uninstall`](#kip-cluster-uninstall) wipes the recorded workers before the server. `kip cluster harden` updates the server's firewall rules for peer access. `kip node reboot <worker>` drains and reboots a worker, and `kip node remove <worker>` removes one. Other worker maintenance is manual. When the first Rocky Linux, AlmaLinux or CentOS Stream node joins, `kip node add` turns on Velero's privileged file system backups, which SELinux hosts need, and waits for the backup agents to restart before it checks the worker.
 - **Availability:** ingress stays on the control-plane node. Kipper configures each database, registry and in-cluster backup volume to keep one copy on the server. Workers add CPU and memory; high availability requires additional data copies and control-plane redundancy.

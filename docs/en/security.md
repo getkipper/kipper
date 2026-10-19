@@ -121,6 +121,72 @@ kip cluster harden --firewall=false   # only disable surplus services
 
 The command is idempotent. It runs the same audit as `kip install`, then disables installed `rpcbind` units and stops Cockpit when its socket listens on all interfaces. It configures UFW, or firewalld on Rocky Linux, AlmaLinux and CentOS Stream, under the same ownership rules as `kip install`, and accepts `--adopt-firewall` too. After loading firewalld, Kipper restarts k3s if it is running to restore its network rules. The restart can briefly interrupt pod networking.
 
+### Operator access list {#operator-access}
+
+By default, SSH and the Kubernetes API (6443) accept connections from any address and rely on key-only SSH and API authentication. An operator access list adds a second layer: new connections to every node's SSH ports and to 6443 are accepted only from the prefixes you list. Ports 80 and 443 stay public. The nodes, the cluster's pods and a host that is joining keep reaching the API, and the server keeps reaching each worker's SSH port.
+
+The list is opt-in. A cluster without one behaves as before. Start it from your workstation:
+
+```bash
+kip cluster access allow --here                  # the address your SSH connection comes from
+kip cluster access allow 203.0.113.0/24 --note office
+kip cluster access show                          # the list, recent changes, and a check of every node
+kip cluster access revoke 198.51.100.7/32
+kip cluster access apply                         # load the recorded list on every node again
+kip cluster access reset --yes                   # remove the list and open SSH and the API
+```
+
+`--here` opens a new SSH connection over each address family the server's name resolves to and adds the address the server saw. An IPv4 address becomes a `/32`. An IPv6 address becomes the `/64` around it, because workstations rotate temporary IPv6 addresses inside their `/64`, so `--here` grants your whole subnet. Pass a `/128` to `allow` to admit one IPv6 address, for example on a VPS whose provider shares a `/64` between customers.
+
+Add a stable second prefix, such as an office range or a VPN exit. A single `/32` changes with DHCP, your ISP or a corporate NAT with several outgoing addresses, and `kip status` warns while the list has one entry.
+
+**Who the list affects**
+
+The list restricts every kubeconfig issued for the cluster, not only kip. A CI pipeline that deploys with a kubeconfig needs its outgoing addresses listed. Git webhooks reach the console on 443 and need nothing. Behind a jump host, `--here` records the jump host's address, so add your workstation's prefix with `allow` if kubectl runs from there. Workloads on the cluster's own workers that call the server's public address are refused too, because they leave through the worker's public address. Use the in-cluster API address instead, as everything Kipper runs already does.
+
+**How it is enforced**
+
+Each node gets an nftables table, `inet kipper_access`, whose input chain runs before UFW and firewalld (priority `filter - 10`). It accepts established connections first, so a change never cuts an open session, and it drops new connections to the SSH ports and 6443 from everyone else. UFW and firewalld keep their rules and are never reloaded by these commands, which is why `ufw status` and `firewall-cmd --list-all` still show the SSH port and 6443 as open to everyone. Check the list itself with:
+
+```bash
+nft list table inet kipper_access
+systemctl status kipper-access
+cat /etc/kipper/access/table.nft /etc/kipper/access/operators.nft
+```
+
+The record lives in the `kipper-access` ConfigMap in `kipper-system`. It holds the prefixes, who added each one and from which address, and the last 100 changes. Those addresses identify your own staff, so treat the record as personal data your organization controls.
+
+Each change is loaded on every node, workers first and the server last, and checked there before it is kept: a new SSH connection over each address family must arrive from a listed address, and on the server the API must answer too. A failed check restores the previous list on that node at once. If kip stops in the middle of a change, the node restores its previous list about 180 seconds after kip's last step. kip refuses a change when the API does not answer from your workstation beforehand, since it could not check it afterwards. It also refuses a change that would not admit the address your nodes see for your workstation, refuses to revoke the last entry (`reset` opens the ports instead), and stops before changing anything when a node cannot be reached. Revoking an address refuses its new connections. Sessions it already has stay open until they end.
+
+`kip node add` carries the list to the new node and adds the new node to every existing node's list. While the node joins, the server temporarily admits the joining host's addresses on 6443. If a join is abandoned, that temporary entry stays on the server until the next `apply`, a restart of `kipper-access` or a reboot, and `show` reports it. `kip node remove` removes the node's addresses from the other nodes' lists. `kip cluster uninstall` removes the table from every host it wipes, so a reused host never boots with a list from a cluster that no longer exists.
+
+**At boot**
+
+`kipper-access.service` loads the table before SSH and k3s start. There are four outcomes:
+
+1. The node has no list: the service is skipped and the node boots as it would without one.
+2. The list loads: the node enforces it before any connection is accepted.
+3. The operator prefixes cannot be loaded: the node boots closed. It admits the cluster but no operator address, and `kip status` and `show` say so. Add your address from the provider console (below), then run `kip cluster access apply`.
+4. nftables cannot load the table at all, for example because the `nftables` package was removed: the service fails and the node falls back to the host firewall's rules behind key-only SSH and API authentication. `kip status`, `kip cluster access show` and `kip node reboot` report it, and `kip cluster access apply` restores the list. `show` also checks the saved table with the installed `nft`, so an upgrade that would break the next boot is reported before that boot.
+
+Every other failure (a failed change, a lost lease, a restart of the service, a crashed kip or an orderly reboot) leaves a node with the last checked list or a narrower one, never a wider list than you asked for. Case 4 and deliberate changes by root on the host, such as deleting the table, are reported rather than prevented.
+
+**nftables.service**
+
+Enabling the distribution's own `nftables.service` conflicts with the list. Its configuration starts with `flush ruleset`, and stopping it runs `nft flush ruleset`, which removes UFW's and firewalld's rules as well as the access table. kip refuses to load a list while `nftables.service` is enabled or running and `show` reports it. Disable it with `systemctl disable --now nftables`. kip loads its table from `kipper-access.service`.
+
+**When your address changes**
+
+1. From another listed address, run `kip cluster access allow --here` and, if you like, `kip cluster access revoke` for the old one.
+2. From the provider's console, run this on every node that refuses you, in the order `kip node list` prints them, then `kip cluster access allow --here` from your workstation to make it permanent. The line is the same on every supported distribution and lasts until the next change or reboot. Use `admin6` for an IPv6 address.
+
+   ```bash
+   nft add element inet kipper_access admin4 { 198.51.100.9 }
+   ```
+
+   `nft delete table inet kipper_access` removes the whole list from that node until the next change or reboot.
+3. When the service failed at boot (case 4 above), the node is reachable on the host firewall's rules. `systemctl status kipper-access` names the cause and `kip cluster access apply` restores the list.
+
 ### Security headers
 
 Every response from your applications includes security headers enforced at the ingress level:

@@ -174,6 +174,10 @@ After the credentials check, a `PartiallyFailed` restore returns an error, even 
 
 For an unattended restore, pass `--repair-credentials` under the same condition. If you decline, or run without a terminal and omit the flag, kip shows how to repair the credentials later with `kip service credentials --repair`.
 
+### Operator access list after a restore
+
+A restore that recreates the `kipper-access` ConfigMap in `kipper-system` can bring back an older [operator access list](/en/security#operator-access) than the nodes enforce. kip then refuses access changes and `kip node add` to avoid reopening prefixes the newer list revoked. Run `kip cluster access apply --accept-older-record` to see what the record would admit again on each node and apply it. Once that apply succeeds, `allow` and `revoke` work from the restored list again. To keep the newer list instead, restore the record from a backup of `kipper-system` taken after that list was applied.
+
 ### Cancel a stuck restore
 
 Velero works on one restore at a time. A restore stuck in `InProgress`, for example while waiting for a volume restore that never finishes, holds up every restore and drill behind it. A drill lists the names of restores ahead of it in the queue. Cancel a restore by name:
