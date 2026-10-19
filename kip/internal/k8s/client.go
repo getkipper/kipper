@@ -139,7 +139,14 @@ var platformConfigGVR = schema.GroupVersionResource{Group: "kipper.run", Version
 // StorageMode returns the recorded storage mode, defaulting to Longhorn when
 // PlatformConfig cannot be read or its storage field is empty or invalidly typed.
 func (c *Client) StorageMode(ctx context.Context) string {
-	pc, err := c.dynamicClient.Resource(platformConfigGVR).Get(ctx, "platform", metav1.GetOptions{})
+	return ReadStorageMode(ctx, c.dynamicClient)
+}
+
+// ReadStorageMode reads the recorded storage mode using a dynamic client.
+// It defaults to Longhorn when PlatformConfig cannot be read or its storage
+// field is empty or has the wrong type.
+func ReadStorageMode(ctx context.Context, dyn dynamic.Interface) string {
+	pc, err := dyn.Resource(platformConfigGVR).Get(ctx, "platform", metav1.GetOptions{})
 	if err != nil {
 		return storageModeOf(nil)
 	}

@@ -62,6 +62,8 @@ Shared volumes provide a filesystem path through Longhorn's RWX storage. Choose 
 kip volume create uploads --size 10Gi --project blog --environment prod
 ```
 
+`kip volume create` refuses creation when eligible Longhorn disks have insufficient capacity for the volume and names the node with the most room.
+
 ```
   ✔  Shared volume "uploads" created (10Gi)
   Access mode: ReadWriteMany (multiple pods can mount this)

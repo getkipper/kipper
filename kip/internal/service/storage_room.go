@@ -1,0 +1,497 @@
+package service
+
+import (
+	"cmp"
+	"context"
+	"fmt"
+	"math"
+	"slices"
+	"strconv"
+	"strings"
+
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/getkipper/kipper/controller/pkg/platform"
+	"github.com/getkipper/kipper/kip/internal/k8s"
+	"github.com/getkipper/kipper/kip/internal/manifest"
+)
+
+var (
+	longhornNodeGVR    = schema.GroupVersionResource{Group: "longhorn.io", Version: "v1beta2", Resource: "nodes"}
+	longhornSettingGVR = schema.GroupVersionResource{Group: "longhorn.io", Version: "v1beta2", Resource: "settings"}
+)
+
+const longhornProvisioner = "driver.longhorn.io"
+
+// NewVolume describes a proposed volume for a storage check. Shared volumes use
+// the ReadWriteMany class, and others use the cluster's single-writer class.
+// CheckStorageRoom skips volumes whose Claim already exists in Namespace.
+type NewVolume struct {
+	Name      string
+	Shared    bool
+	Bytes     int64
+	Namespace string
+	Claim     string
+}
+
+// DefaultStorage is the Service CRD's default for spec.storage, which the API
+// server fills in for every type when a command leaves the field out.
+const DefaultStorage = "1Gi"
+
+// ServiceVolumes lists the volumes a new service creates: its data volume and,
+// for Postgres with consistent backups, a dump volume of the same size. An
+// empty storage selects the Service CRD's default size. Invalid Kubernetes
+// storage quantities return an error. Sizes are converted to whole bytes,
+// rounding fractional bytes away from zero.
+func ServiceVolumes(namespace, name, serviceType, storage string, consistentBackups bool) ([]NewVolume, error) {
+	if storage == "" {
+		storage = DefaultStorage
+	}
+	size, err := resource.ParseQuantity(storage)
+	if err != nil {
+		return nil, fmt.Errorf("storage size %q: %w", storage, err)
+	}
+	volumes := []NewVolume{{Name: "data", Bytes: size.Value(), Namespace: namespace, Claim: "data-" + name + "-0"}}
+	if consistentBackups && serviceType == "postgres" {
+		volumes = append(volumes, NewVolume{Name: "dump", Bytes: size.Value(), Namespace: namespace, Claim: name + "-dump"})
+	}
+	return volumes, nil
+}
+
+// SharedVolume describes a shared volume backed by the claim "shared-" + name
+// in namespace, with the requested size in bytes.
+func SharedVolume(namespace, name string, bytes int64) NewVolume {
+	return NewVolume{Name: name, Shared: true, Bytes: bytes, Namespace: namespace, Claim: "shared-" + name}
+}
+
+// DumpVolume describes the dump volume needed when enabling consistent backups.
+// It returns nil when the service is missing, is not Postgres, or already has
+// consistent backups enabled. Non-empty storage overrides the service's size
+// to reflect a size change in the same command. Otherwise, it uses the service's
+// storage size, falling back to DefaultStorage when empty. Read failures and
+// invalid storage quantities return an error.
+func (m *Manager) DumpVolume(ctx context.Context, namespace, name, storage string) ([]NewVolume, error) {
+	svc, err := m.Dynamic.Resource(manifest.ServiceGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading service %s: %w", name, err)
+	}
+	serviceType, _, _ := unstructured.NestedString(svc.Object, "spec", "type")
+	on, _, _ := unstructured.NestedBool(svc.Object, "spec", "consistentBackups")
+	if serviceType != "postgres" || on {
+		return nil, nil
+	}
+	if storage == "" {
+		storage, _, _ = unstructured.NestedString(svc.Object, "spec", "storage")
+	}
+	volumes, err := ServiceVolumes(namespace, name, serviceType, storage, true)
+	if err != nil {
+		return nil, err
+	}
+	return volumes[1:], nil
+}
+
+// StorageRoom describes the capacity in bytes for new replicas on one node's
+// disk, after applying Longhorn's reservation and scheduling settings.
+type StorageRoom struct {
+	Node  string
+	Bytes int64
+}
+
+type longhornSettings struct {
+	overProvisioning int64
+	minimalAvailable int64
+}
+
+// CheckStorageRoom checks capacity for one replica of each proposed volume
+// without changing cluster state. It returns an error for a definite shortage,
+// using sizeOption as the size flag or field in the error's hint. Read failures,
+// no eligible disks, or an inconclusive placement return a warning and nil error.
+// Existing claims, local storage and classes using other provisioners are skipped.
+// An empty warning and nil error mean the check passed or was skipped.
+// Capacity is a snapshot, so passing this check does not guarantee scheduling.
+func (m *Manager) CheckStorageRoom(ctx context.Context, volumes []NewVolume, sizeOption string) (warning string, err error) {
+	if len(volumes) == 0 {
+		return "", nil
+	}
+	mode := k8s.ReadStorageMode(ctx, m.Dynamic)
+	if mode == platform.StorageLocal {
+		return "", nil
+	}
+	volumes, err = m.withoutClaims(ctx, volumes)
+	if err != nil {
+		return notChecked(err), nil
+	}
+	var disks []longhornDisk
+	var read bool
+	var wanted []placement
+	for _, class := range []string{platform.SingleWriterClass(mode), platform.LonghornSharedClass} {
+		var inClass []NewVolume
+		for _, v := range volumes {
+			if v.Shared == (class == platform.LonghornSharedClass) {
+				inClass = append(inClass, v)
+			}
+		}
+		if len(inClass) == 0 {
+			continue
+		}
+		selector, longhorn, err := m.classNodeSelector(ctx, class)
+		if err != nil {
+			return notChecked(err), nil
+		}
+		if !longhorn {
+			continue
+		}
+		if !read {
+			nodes, settings, err := m.longhornState(ctx)
+			if err != nil {
+				return notChecked(err), nil
+			}
+			disks, read = schedulingDisks(nodes, settings), true
+		}
+		eligible := withTags(disks, selector)
+		if len(eligible) == 0 {
+			return notChecked(fmt.Errorf("no Longhorn node can currently accept %s volumes", class)), nil
+		}
+		for _, v := range inClass {
+			wanted = append(wanted, placement{volume: v, class: class, disks: eligible})
+		}
+	}
+	return place(disks, wanted, sizeOption)
+}
+
+func (m *Manager) withoutClaims(ctx context.Context, volumes []NewVolume) ([]NewVolume, error) {
+	var out []NewVolume
+	for _, v := range volumes {
+		if v.Claim != "" {
+			_, err := m.Client.CoreV1().PersistentVolumeClaims(v.Namespace).Get(ctx, v.Claim, metav1.GetOptions{})
+			if err == nil {
+				continue
+			}
+			if !errors.IsNotFound(err) {
+				return nil, fmt.Errorf("reading the claim %s: %w", v.Claim, err)
+			}
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+// ServerStorageRoom returns the largest capacity for a new single-copy volume
+// among eligible disks, choosing the first node name alphabetically on a tie.
+// It returns an error for local storage or a non-Longhorn single-writer class,
+// read failures, or no eligible disks. Zero capacity with nil error means the
+// eligible disks have no room for a new replica.
+func (m *Manager) ServerStorageRoom(ctx context.Context) (StorageRoom, error) {
+	mode := k8s.ReadStorageMode(ctx, m.Dynamic)
+	class := platform.SingleWriterClass(mode)
+	selector, longhorn, err := m.classNodeSelector(ctx, class)
+	if err != nil {
+		return StorageRoom{}, err
+	}
+	if mode == platform.StorageLocal || !longhorn {
+		return StorageRoom{}, fmt.Errorf("the %s class does not use Longhorn", class)
+	}
+	nodes, settings, err := m.longhornState(ctx)
+	if err != nil {
+		return StorageRoom{}, err
+	}
+	disks := schedulingDisks(nodes, settings)
+	eligible := withTags(disks, selector)
+	if len(eligible) == 0 {
+		return StorageRoom{}, fmt.Errorf("no Longhorn node can currently accept %s volumes", class)
+	}
+	best := disks[roomiest(disks, eligible)]
+	return StorageRoom{Node: best.node, Bytes: best.room}, nil
+}
+
+func notChecked(err error) string {
+	return fmt.Sprintf("Longhorn's free space was not checked (%v). If the disk is full, the new volume stays unscheduled and its pod waits.", err)
+}
+
+// classNodeSelector returns the Longhorn node tags a class requires, and false
+// when the class is not provisioned by Longhorn.
+func (m *Manager) classNodeSelector(ctx context.Context, class string) ([]string, bool, error) {
+	sc, err := m.Client.StorageV1().StorageClasses().Get(ctx, class, metav1.GetOptions{})
+	if err != nil {
+		return nil, false, fmt.Errorf("reading the %s StorageClass: %w", class, err)
+	}
+	if sc.Provisioner != longhornProvisioner {
+		return nil, false, nil
+	}
+	var tags []string
+	for _, tag := range strings.Split(sc.Parameters["nodeSelector"], ",") {
+		if tag = strings.TrimSpace(tag); tag != "" {
+			tags = append(tags, tag)
+		}
+	}
+	return tags, true, nil
+}
+
+func (m *Manager) longhornState(ctx context.Context) ([]unstructured.Unstructured, longhornSettings, error) {
+	var settings longhornSettings
+	for _, s := range []struct {
+		name string
+		into *int64
+	}{
+		{"storage-over-provisioning-percentage", &settings.overProvisioning},
+		{"storage-minimal-available-percentage", &settings.minimalAvailable},
+	} {
+		name, into := s.name, s.into
+		setting, err := m.Dynamic.Resource(longhornSettingGVR).Namespace("longhorn-system").Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return nil, settings, fmt.Errorf("reading the Longhorn setting %s: %w", name, err)
+		}
+		value, _, _ := unstructured.NestedString(setting.Object, "value")
+		if *into, err = strconv.ParseInt(value, 10, 64); err != nil {
+			return nil, settings, fmt.Errorf("reading the Longhorn setting %s: %w", name, err)
+		}
+	}
+	list, err := m.Dynamic.Resource(longhornNodeGVR).Namespace("longhorn-system").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, settings, fmt.Errorf("listing Longhorn nodes: %w", err)
+	}
+	return list.Items, settings, nil
+}
+
+// longhornDisk is a disk that takes new replicas, with its node's Longhorn
+// tags and the room Longhorn would still schedule on it.
+type longhornDisk struct {
+	node string
+	tags []string
+	room int64
+}
+
+// schedulingDisks selects filesystem disks using node readiness, scheduling
+// and eviction checks based on longhorn-manager v1.7.3. Disks marked with
+// DiskPressure remain eligible so a refusal can report their remaining capacity.
+// This is a capacity estimate, not the full Longhorn scheduling check.
+func schedulingDisks(nodes []unstructured.Unstructured, settings longhornSettings) []longhornDisk {
+	var disks []longhornDisk
+	for i := range nodes {
+		node := nodes[i].Object
+		allow, _, _ := unstructured.NestedBool(node, "spec", "allowScheduling")
+		tags, _, _ := unstructured.NestedStringSlice(node, "spec", "tags")
+		conditions, _, _ := unstructured.NestedSlice(node, "status", "conditions")
+		if !allow || !conditionTrue(conditions, "Ready") || !conditionTrue(conditions, "Schedulable") {
+			continue
+		}
+		specs, _, _ := unstructured.NestedMap(node, "spec", "disks")
+		for name := range specs {
+			spec, _, _ := unstructured.NestedMap(specs, name)
+			status, found, _ := unstructured.NestedMap(node, "status", "diskStatus", name)
+			if !found || !diskTakesReplicas(spec, status) {
+				continue
+			}
+			disks = append(disks, longhornDisk{node: nodes[i].GetName(), tags: tags, room: schedulableRoom(
+				int64Field(status, "storageMaximum"), int64Field(spec, "storageReserved"),
+				int64Field(status, "storageScheduled"), int64Field(status, "storageAvailable"), settings)})
+		}
+	}
+	return disks
+}
+
+// withTags returns indexes of disks whose node carries every selector tag.
+// An empty selector includes all disks.
+func withTags(disks []longhornDisk, selector []string) []int {
+	var out []int
+	for i, d := range disks {
+		if hasAllTags(d.tags, selector) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+func diskTakesReplicas(spec, status map[string]interface{}) bool {
+	allow, _, _ := unstructured.NestedBool(spec, "allowScheduling")
+	evicting, _, _ := unstructured.NestedBool(spec, "evictionRequested")
+	diskType, _, _ := unstructured.NestedString(spec, "diskType")
+	if !allow || evicting || (diskType != "" && diskType != "filesystem") {
+		return false
+	}
+	conditions, _, _ := unstructured.NestedSlice(status, "conditions")
+	for _, c := range conditions {
+		cond, _ := c.(map[string]interface{})
+		if cond["type"] == "Schedulable" {
+			return cond["status"] == "True" || cond["reason"] == "DiskPressure"
+		}
+	}
+	return false
+}
+
+// schedulableRoom returns the largest new replica size allowed by Longhorn
+// v1.7.3's IsSchedulableToDisk capacity check, assuming zero actual usage for a
+// new replica. Available space must exceed the minimal-available percentage of
+// maximum capacity. Scheduled space plus the new size must fit within
+// (maximum - reserved) times the over-provisioning percentage.
+func schedulableRoom(maximum, reserved, scheduled, available int64, s longhornSettings) int64 {
+	if maximum <= 0 || available <= 0 || available <= int64(float64(maximum)*float64(s.minimalAvailable)/100) {
+		return 0
+	}
+	return max(int64(float64(maximum-reserved)*float64(s.overProvisioning)/100)-scheduled, 0)
+}
+
+// placement is a new volume and the disks Longhorn may put a copy of it on.
+// Each volume counts one copy, allowing for Longhorn to start replicated
+// volumes degraded when configured to allow creation with fewer replicas.
+type placement struct {
+	volume NewVolume
+	class  string
+	disks  []int
+}
+
+// place refuses when a shortage is certain for any volume: it is larger than
+// any of its disks has room for, or the volumes need more than their disks have
+// together. Otherwise it puts each volume, largest first, on its eligible disk
+// with the most room left, so volumes of both classes draw on the same disks.
+// Longhorn makes its own placement choices, so failure to place a volume here
+// produces only a warning.
+func place(disks []longhornDisk, wanted []placement, sizeOption string) (string, error) {
+	for _, p := range wanted {
+		if certainlyShort(disks, wanted, p) {
+			return "", shortage(disks, wanted, p, sizeOption)
+		}
+	}
+	room := make([]int64, len(disks))
+	for i, d := range disks {
+		room[i] = d.room
+	}
+	sorted := slices.Clone(wanted)
+	slices.SortStableFunc(sorted, func(a, b placement) int { return cmp.Compare(b.volume.Bytes, a.volume.Bytes) })
+	for _, p := range sorted {
+		best := p.disks[0]
+		for _, i := range p.disks[1:] {
+			if room[i] > room[best] {
+				best = i
+			}
+		}
+		if room[best] >= p.volume.Bytes {
+			room[best] -= p.volume.Bytes
+			continue
+		}
+		need, free := total(wanted, disks, allDisks(wanted))
+		return fmt.Sprintf("Longhorn has %s free for scheduling on eligible disks, and these volumes need %s. The check could not find a placement. If Longhorn also cannot place them, a volume stays unscheduled and its pod waits.",
+			FormatSize(free), FormatSize(need)), nil
+	}
+	return "", nil
+}
+
+func certainlyShort(disks []longhornDisk, wanted []placement, p placement) bool {
+	if disks[roomiest(disks, p.disks)].room < p.volume.Bytes {
+		return true
+	}
+	var sameClass []placement
+	for _, w := range wanted {
+		if w.class == p.class {
+			sameClass = append(sameClass, w)
+		}
+	}
+	if need, free := total(sameClass, disks, p.disks); need > free {
+		return true
+	}
+	need, free := total(wanted, disks, allDisks(wanted))
+	return need > free
+}
+
+// total returns the requested bytes and the listed disks' original capacity.
+func total(wanted []placement, disks []longhornDisk, indexes []int) (need, free int64) {
+	for _, w := range wanted {
+		need += w.volume.Bytes
+	}
+	for _, i := range indexes {
+		free += disks[i].room
+	}
+	return need, free
+}
+
+func allDisks(wanted []placement) []int {
+	var all []int
+	for _, w := range wanted {
+		for _, i := range w.disks {
+			if !slices.Contains(all, i) {
+				all = append(all, i)
+			}
+		}
+	}
+	return all
+}
+
+// roomiest returns the index of the disk with the most room, choosing the first
+// node name alphabetically on a tie. indexes must be non-empty.
+func roomiest(disks []longhornDisk, indexes []int) int {
+	best := indexes[0]
+	for _, i := range indexes[1:] {
+		if disks[i].room > disks[best].room || (disks[i].room == disks[best].room && disks[i].node < disks[best].node) {
+			best = i
+		}
+	}
+	return best
+}
+
+func shortage(disks []longhornDisk, wanted []placement, p placement, sizeOption string) error {
+	parts := make([]string, len(wanted))
+	for i, w := range wanted {
+		parts[i] = w.volume.Name + " " + FormatSize(w.volume.Bytes)
+	}
+	need, _ := total(wanted, disks, nil)
+	best := disks[roomiest(disks, p.disks)]
+	hint := fmt.Sprintf("Free space with kip service delete <name> --delete-data or kip volume delete <name> --delete-data, grow the server's disk, or request less storage with %s.", sizeOption)
+	if p.class == platform.LonghornSharedClass {
+		return fmt.Errorf("not enough storage on any node: Longhorn can schedule at most %s more, on %s, and this needs %s (%s). %s",
+			FormatSize(best.room), best.node, FormatSize(need), strings.Join(parts, ", "), hint)
+	}
+	return fmt.Errorf("not enough storage on the server: Longhorn can schedule %s more on %s, and this needs %s (%s). %s",
+		FormatSize(best.room), best.node, FormatSize(need), strings.Join(parts, ", "), hint)
+}
+
+// FormatSize formats bytes as binary units. Whole Gi values are exact, other
+// values of at least 1Gi round down to tenths of a Gi, and smaller values use
+// whole Mi truncated towards zero.
+func FormatSize(bytes int64) string {
+	const gib = 1 << 30
+	switch {
+	case bytes >= gib && bytes%gib == 0:
+		return fmt.Sprintf("%dGi", bytes/gib)
+	case bytes >= gib:
+		return fmt.Sprintf("%.1fGi", math.Floor(float64(bytes)*10/gib)/10)
+	}
+	return fmt.Sprintf("%dMi", bytes/(1<<20))
+}
+
+func conditionTrue(conditions []interface{}, conditionType string) bool {
+	for _, c := range conditions {
+		cond, _ := c.(map[string]interface{})
+		if cond["type"] == conditionType {
+			return cond["status"] == "True"
+		}
+	}
+	return false
+}
+
+func hasAllTags(tags, selector []string) bool {
+	for _, want := range selector {
+		if !slices.Contains(tags, want) {
+			return false
+		}
+	}
+	return true
+}
+
+// int64Field reads a number that JSON decoding may have left as int64 or float64.
+// Missing fields and other types return zero.
+func int64Field(obj map[string]interface{}, field string) int64 {
+	switch n := obj[field].(type) {
+	case int64:
+		return n
+	case float64:
+		return int64(n)
+	}
+	return 0
+}

@@ -64,6 +64,8 @@ Kipper configures each database, registry and in-cluster backup volume to keep o
 
 A copy reported as not pinned can move to another worker during a reboot instead: run `kip upgrade` to pin it first.
 
+Single-copy volumes are stored on the server, so adding workers leaves database storage capacity unchanged. Longhorn excludes part of the server's disk from scheduling. By default, 30% of the default disk is reserved, and more than 25% must remain available to schedule a new replica, so scheduling capacity runs out before the disk is full. `kip service add`, `kip apply` and `kip service update --consistent-backups` refuse new volumes when the server's disks have a definite capacity shortage. `kip status` warns when the roomiest eligible disk has less than 5Gi available for scheduling. See [Stateful Services](/en/services#options).
+
 Services that ran on a lost worker may stay unavailable until it returns. Losing the server makes the cluster unavailable. Recovering from the loss of its disk requires a surviving backup. `kip service info <name>` shows where a service runs and where its data is stored.
 
 ## Looking after workers
