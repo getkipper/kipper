@@ -19,7 +19,7 @@ kip install --host <ip> [flags]
 
 | Flag | Required | Default | Description |
 |---|---|---|---|
-| `--host` | Yes | — | IP address or hostname of the target server |
+| `--host` | Yes | — | IP address or hostname of the target server. When kip identifies a single IPv4 address and confirms it is absent from the server's interfaces, as with a public address behind NAT, kip records it as the node's external address so DNS checks for custom domains use it. Re-running `kip install` applies this setting to clusters installed before this feature was added |
 | `--ssh-key` | No | see below | Path to SSH private key. Saved to `~/.kip/config.yaml` so subsequent `kip` commands inherit it. If unset, `kip` reads `KIP_SSH_KEY`, then `cluster.ssh_key` from config; if still unset, ssh consults your ssh-agent and `~/.ssh/config` as normal |
 | `--ssh-user` | No | Saved user for this host, otherwise `root` | User to log in as. A user other than root needs passwordless sudo, and kip runs every command through `sudo -n`. Saved to `~/.kip/config.yaml` as `ssh_user`, and used for every node of the cluster. See [Logging in as a user other than root](#logging-in-as-a-user-other-than-root) |
 | `--domain` | No | `<ip>.kipper.run` | The name the cluster serves on. A `*.kipper.run` name (`lab.kipper.run`) is registered for you on the shared gateway; anything else is a domain whose DNS you run yourself, and whose hostnames have to resolve to the server before you install (see [DNS for a domain you run](#dns-for-a-domain-you-run)). Omit it and the free name is derived from the server's address. See [choosing your own name](/en/domains#choosing-your-own-name) |

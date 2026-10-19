@@ -3,11 +3,14 @@ package installer
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"sigs.k8s.io/yaml"
 )
 
 // k3sVersion is the exact k3s release every install runs. Unpinned installs
@@ -196,9 +199,93 @@ resolv-conf: ` + k3sResolvConfPath + `
   - "protect-kernel-defaults=true"
 `
 
-func renderK3sConfig(host, backend string) string {
+// renderK3sConfig renders the server config. externalIP is either empty or a
+// YAML node-external-ip setting that advertises the node's external address.
+func renderK3sConfig(host, backend, externalIP string) string {
 	return strings.Replace(fmt.Sprintf(k3sConfig, host),
-		"flannel-backend: "+wireguardBackend+"\n", "flannel-backend: "+backend+"\n", 1)
+		"flannel-backend: "+wireguardBackend+"\n", "flannel-backend: "+backend+"\n", 1) + externalIP
+}
+
+func externalIPSetting(value any) (string, error) {
+	out, err := yaml.Marshal(map[string]any{"node-external-ip": value})
+	return string(out), err
+}
+
+// lookupHostIPs resolves a host name given as --host.
+var lookupHostIPs = net.LookupIP
+
+// natExternalIP returns host's IPv4 address when it is absent from the server's
+// interfaces, as behind NAT, or "" when it is local. known is false for an IPv6
+// host, a hostname resolving to zero or multiple distinct IPv4 addresses, or an
+// unreadable interface list or one with no valid IPv4 entries. Advertising the
+// NAT address lets DNS checks use the ingress address instead of a private one.
+func natExternalIP(client CommandRunner, host string) (ip string, known bool) {
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		ips, err := lookupHostIPs(host)
+		if err != nil {
+			return "", false
+		}
+		for _, ip := range ips {
+			v4 := ip.To4()
+			if v4 == nil {
+				continue
+			}
+			// SSH may have reached any of several addresses, so none of them is
+			// known to be this server's.
+			a := netip.AddrFrom4([4]byte(v4))
+			if addr.IsValid() && a != addr {
+				return "", false
+			}
+			addr = a
+		}
+	}
+	if !addr.Is4() {
+		return "", false
+	}
+	out, err := client.Run("ip -o -4 addr show")
+	if err != nil {
+		return "", false
+	}
+	seen := false
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 || fields[2] != "inet" {
+			continue
+		}
+		p, err := netip.ParsePrefix(fields[3])
+		if err != nil {
+			continue
+		}
+		if p.Addr() == addr {
+			return "", true
+		}
+		seen = true
+	}
+	if !seen {
+		return "", false
+	}
+	return addr.String(), true
+}
+
+// configuredExternalIP renders the existing k3s node-external-ip setting as YAML,
+// preserving its value. It returns "" when the config or setting is absent or
+// the value is null. Read and parse errors stop the caller from overwriting
+// the existing config.
+func configuredExternalIP(client CommandRunner) (string, error) {
+	out, err := client.Run("test ! -f " + k3sConfigPath + " || cat " + k3sConfigPath)
+	if err != nil {
+		return "", fmt.Errorf("reading %s to keep its external address: %w", k3sConfigPath, err)
+	}
+	var config map[string]any
+	if err := yaml.Unmarshal([]byte(out), &config); err != nil {
+		return "", fmt.Errorf("reading %s to keep its external address: %w", k3sConfigPath, err)
+	}
+	value, ok := config["node-external-ip"]
+	if !ok || value == nil {
+		return "", nil
+	}
+	return externalIPSetting(value)
 }
 
 // k3sAPIServerArgs is the API server block, held apart from the rest of the
@@ -550,6 +637,11 @@ func writeAgentKubeletConfig(client CommandRunner) error {
 // installed separately. CoreDNS uses dnsResolvers or the default public resolvers
 // when empty. Repeated calls preserve versions outside the supported upgrade path.
 //
+// A single IPv4 address supplied by host or resolved from it is advertised as
+// the node's external address when absent from the server's interfaces. A local
+// address clears that setting. If detection is inconclusive, the existing
+// setting is preserved, and an unreadable or invalid config causes an error.
+//
 // The caller must sample k3sPreexisting before installation so only existing
 // CoreDNS deployments are restarted to pick up resolver changes.
 //
@@ -605,7 +697,16 @@ func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPre
 		}
 	}
 
-	configContent := renderK3sConfig(host, backend)
+	var externalIP string
+	if ip, known := natExternalIP(client, host); !known {
+		externalIP, err = configuredExternalIP(client)
+	} else if ip != "" {
+		externalIP, err = externalIPSetting(ip)
+	}
+	if err != nil {
+		return err
+	}
+	configContent := renderK3sConfig(host, backend, externalIP)
 	writeCmd := fmt.Sprintf("cat > /etc/rancher/k3s/config.yaml << 'KIPEOF'\n%sKIPEOF", configContent)
 	if _, err := client.Run(writeCmd); err != nil {
 		return fmt.Errorf("writing k3s config: %w", err)
