@@ -646,6 +646,16 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	if certHash != "" {
 		applyPostgresTLS(&desired.Spec.Template, svc.Name, image, certHash)
 	}
+	if wantsConsistentBackups(svc) {
+		size, err := resource.ParseQuantity(storage)
+		if err != nil {
+			return fmt.Errorf("reading the storage size %q: %w", storage, err)
+		}
+		if err := r.ensureDumpClaim(ctx, svc, storageClass, size); err != nil {
+			return fmt.Errorf("reconciling the dump volume: %w", err)
+		}
+		applyConsistentBackups(&desired.Spec.Template, svc.Name, size)
+	}
 
 	if err := controllerutil.SetControllerReference(svc, desired, r.Scheme); err != nil {
 		return err
@@ -661,7 +671,10 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 		if err := r.Create(ctx, desired); err != nil {
 			return err
 		}
-		return r.removeStalePostgresTLS(ctx, svc)
+		if err := r.removeStalePostgresTLS(ctx, svc); err != nil {
+			return err
+		}
+		return r.removeDumpClaim(ctx, svc)
 	}
 	if err == nil {
 		// The same rule the finalizer deletes by, applied before the first
@@ -716,6 +729,7 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 		existing.Spec.Template.Spec.Volumes = withVolume(existing.Spec.Template.Spec.Volumes, v)
 	}
 	syncPostgresTLSTemplate(&existing.Spec.Template, &desired.Spec.Template)
+	syncDumpTemplate(&existing.Spec.Template, &desired.Spec.Template, svc.Name)
 	existing.Labels = desired.Labels
 	// Accepted is not adopted. A workload from before these records existed has
 	// no owner, and without one garbage collection has nothing to follow when
@@ -727,7 +741,10 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	if err := r.Update(ctx, &existing); err != nil {
 		return err
 	}
-	return r.removeStalePostgresTLS(ctx, svc)
+	if err := r.removeStalePostgresTLS(ctx, svc); err != nil {
+		return err
+	}
+	return r.removeDumpClaim(ctx, svc)
 }
 
 // replaceUnschedulablePod deletes an owned, pending pod with no assigned node

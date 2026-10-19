@@ -218,6 +218,8 @@ kip service bind db web --project blog --environment prod   # prefix auto-detect
 ```
 New Postgres services created through the CLI or console enable TLS by default using the cluster's service CA. Use `--tls off` to disable it, or `kip service update db --tls on` to enable it for an existing service with one restart. The server still accepts plaintext. Once the certificate is verified and its CA published, bound apps receive the CA file and its path in `DB_SSLROOTCERT` with the default binding prefix. Have the app connect with `sslmode=verify-full&sslrootcert=${DB_SSLROOTCERT}` (or `sslmode=require` where it cannot load a CA file).
 
+New Postgres services include a consistent `pg_dump` of every database in each backup. Pass `--consistent-backups=false` to disable dumps when creating a service. For an existing service, enable dumps with `kip service update db --consistent-backups`, which restarts the database once if the setting changes. `kip backup list` shows the dump status and volume count for each backup.
+
 **Promote through environments**
 ```bash
 kip app promote web --from test --to acc --project blog

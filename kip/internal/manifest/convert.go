@@ -339,6 +339,9 @@ func convertService(name, namespace string, svc SvcSpec) Resource {
 	if svc.TLS != "" {
 		spec["tls"] = svc.TLS
 	}
+	if svc.ConsistentBackups {
+		spec["consistentBackups"] = true
+	}
 	if svc.Resources != nil {
 		resources := map[string]interface{}{}
 		for key, value := range map[string]string{

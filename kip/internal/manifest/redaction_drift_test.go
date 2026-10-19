@@ -98,7 +98,7 @@ func TestRedaction_ClassifiesEveryPathConvertEmits(t *testing.T) {
 		}},
 		Services: map[string]SvcSpec{"db": {
 			TLS:  "on",
-			Type: "postgres", Version: "16", Storage: "5Gi",
+			Type: "postgres", Version: "16", Storage: "5Gi", ConsistentBackups: true,
 			Resources: &ResourceSpec{CPURequest: "100m", MemoryRequest: "256Mi"},
 		}},
 		Volumes: map[string]VolSpec{"uploads": {Size: "10Gi", Mounts: []MountSpec{{App: "api", MountPath: "/data"}}}},

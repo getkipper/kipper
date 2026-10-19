@@ -139,6 +139,7 @@ func init() {
 	serviceAddCmd.Flags().String("cpu", "", "CPU limit (e.g. 500m, 1)")
 	serviceAddCmd.Flags().String("version", "", "image version override (e.g. 16, 8.0, 7)")
 	serviceAddCmd.Flags().String("tls", "", "Postgres only: serve TLS with a certificate from the cluster's service CA (on or off, default on)")
+	serviceAddCmd.Flags().Bool("consistent-backups", true, "Postgres only. Add a pg_dump of every database to each backup. Use --consistent-backups=false to disable.")
 	_ = serviceAddCmd.MarkFlagRequired("name")
 
 	serviceListCmd.Flags().String("project", "default", "project namespace")
@@ -154,6 +155,7 @@ func init() {
 	serviceUpdateCmd.Flags().String("cpu", "", "new CPU limit (e.g. 1)")
 	serviceUpdateCmd.Flags().String("version", "", "new image version")
 	serviceUpdateCmd.Flags().String("tls", "", "Postgres only: on or off. The database restarts once to switch")
+	serviceUpdateCmd.Flags().Bool("consistent-backups", false, "Postgres only. Add a pg_dump of every database to each backup. Use --consistent-backups=false to disable. Changing this setting restarts the database once.")
 
 	serviceRestartCmd.Flags().String("project", "default", "project namespace")
 	serviceRestartCmd.Flags().String("environment", "", "target environment")
@@ -207,6 +209,7 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 	cpu, _ := cmd.Flags().GetString("cpu")
 	version, _ := cmd.Flags().GetString("version")
 	tlsFlag, _ := cmd.Flags().GetString("tls")
+	dumpFlag, _ := cmd.Flags().GetBool("consistent-backups")
 
 	if !service.IsSupported(serviceType) {
 		return fmt.Errorf("unsupported service type %q (supported: %v)", serviceType, service.SupportedTypes())
@@ -215,6 +218,10 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	tls, err := serviceTLSOnCreate(serviceType, tlsFlag)
+	if err != nil {
+		return err
+	}
+	consistentBackups, err := consistentBackupsOnCreate(serviceType, cmd.Flags().Changed("consistent-backups"), dumpFlag)
 	if err != nil {
 		return err
 	}
@@ -267,6 +274,9 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 	}
 	if tls != "" {
 		spec["tls"] = tls
+	}
+	if consistentBackups {
+		spec["consistentBackups"] = true
 	}
 	resources := map[string]interface{}{}
 	if memory != "" {
@@ -520,8 +530,11 @@ func runServiceUpdate(cmd *cobra.Command, args []string) error {
 	version, _ := cmd.Flags().GetString("version")
 	tls, _ := cmd.Flags().GetString("tls")
 
-	if storage == "" && memory == "" && cpu == "" && version == "" && tls == "" {
-		return fmt.Errorf("specify at least one of --storage, --memory, --cpu, --version, or --tls")
+	dumpSet := cmd.Flags().Changed("consistent-backups")
+	dumpOn, _ := cmd.Flags().GetBool("consistent-backups")
+
+	if storage == "" && memory == "" && cpu == "" && version == "" && tls == "" && !dumpSet {
+		return fmt.Errorf("specify at least one of --storage, --memory, --cpu, --version, --tls, or --consistent-backups")
 	}
 	if tls != "" && tls != "on" && tls != "off" {
 		return fmt.Errorf("--tls must be on or off, not %q", tls)
@@ -546,6 +559,21 @@ func runServiceUpdate(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  ✔  TLS set to %s. The database restarts once to switch\n", tls)
 		} else {
 			fmt.Printf("  ✔  TLS is already %s\n", tls)
+		}
+		if storage == "" && memory == "" && cpu == "" && version == "" && !dumpSet {
+			fmt.Println()
+			return nil
+		}
+	}
+	if dumpSet {
+		changed, err := setConsistentBackups(ctx, k8sClient.Dynamic(), namespace, name, dumpOn)
+		if err != nil {
+			return err
+		}
+		if changed {
+			fmt.Printf("  ✔  Consistent backups turned %s. The database restarts once to apply the change.\n", onOff(dumpOn))
+		} else {
+			fmt.Printf("  ✔  Consistent backups are already %s\n", onOff(dumpOn))
 		}
 		if storage == "" && memory == "" && cpu == "" && version == "" {
 			fmt.Println()

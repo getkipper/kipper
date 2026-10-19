@@ -193,6 +193,9 @@ func Validate(m *Manifest) error {
 		if svc.TLS != "" && svc.Type != "postgres" {
 			return fmt.Errorf("service %q: tls is supported for postgres services only", name)
 		}
+		if svc.ConsistentBackups && svc.Type != "postgres" {
+			return fmt.Errorf("service %q: consistentBackups is supported for postgres services only", name)
+		}
 	}
 
 	for name, vol := range m.Volumes {

@@ -69,13 +69,29 @@ kip backup list
 ```
 
 ```
-  NAME                                STATUS       NAMESPACES           CREATED
-  velero-daily-apps-20260318030000    Completed    all except system    2026-03-18 03:00
-  pre-migration                       Completed    blog-test            2026-03-18 14:30
-  manual-20260318-153000              Completed    all except system    2026-03-18 15:30
+  NAME                                STATUS       NAMESPACES           CREATED           DUMPS
+  velero-daily-apps-20260318030000    Completed    all except system    2026-03-18 03:00  complete (2)
+  pre-migration                       Completed    blog-test            2026-03-18 14:30  complete (1)
+  manual-20260318-153000              Completed    all except system    2026-03-18 15:30  -
 ```
 
-`all except system` means the system-namespace exclusion was applied. `all` means `--include-system` was passed, so no namespace was skipped. A namespace name means the backup was scoped via `--project`.
+`all except system` means the system-namespace exclusion was applied. `all` means `--include-system` was passed, so no namespace was skipped. A namespace name means the backup was scoped via `--project`. DUMPS reports the status of [consistent database dumps](#consistent-database-dumps) and counts their volumes: `pending` while the backup runs, `complete (n)` when the backup completed, all recorded dump volumes were copied, and hook attempts were recorded without failures. `failed` means the backup, a hook or a volume copy failed, or hook attempts are missing. `-` means validation failed or a completed backup has no dump records or hook failures. `unknown` means a failed backup has neither dump records nor hook failures, or kip cannot read the volume copy records.
+
+### Consistent database dumps {#consistent-database-dumps}
+
+A volume backup copies a running database's files, so restoring it requires crash recovery. New Postgres services therefore also put a `pg_dump` of every database into each backup. Before Velero copies the service's volumes, a hook in the Postgres container dumps each database from one snapshot, counts every table's rows in that same snapshot, and dumps the roles. The dumps go to a separate dump volume of the same size as the data volume, which the backup copies along with the data, and a hook removes them once the copy is done. A manifest next to the dumps lists each database with its dump's size, SHA-256 checksum and `pg_dump` exit code, and ends with `complete true` when all dump and row-count sessions succeed.
+
+If a dump fails, Velero continues with the volume backup, records the hook failure, and `kip backup list` shows `failed` for that backup. The hook refuses to start unless the dump volume has room for the data directory excluding the write-ahead log. Insufficient free space on the dump volume can show `failed` even for a healthy database. Increasing the service's storage expands both volumes when the storage class supports expansion. Where the dump volume shares a disk with the database, as local volumes do, it also keeps the larger of 2 GiB and a tenth of that disk free. A database whose name contains a line break or a tab makes the dump fail, because the manifest cannot record it.
+
+Enable or disable consistent dumps for an existing service. Changing the setting restarts the database once:
+
+```bash
+kip service update mydb --consistent-backups
+kip service update mydb --consistent-backups=false
+kip service add postgres --name mydb --consistent-backups=false   # Create a service with consistent dumps disabled.
+```
+
+For a Postgres service declared in `kipper.yaml`, set `consistentBackups: true` to enable consistent dumps. Omitting this field from the service's manifest entry disables consistent dumps when the manifest is applied. If the field is currently set, `kip apply` lists it as a field to be cleared and requires `--force` to proceed. Each database uses a consistent snapshot. Databases are dumped sequentially, so their snapshots represent different points in time. Each service stores its current set of dumps on its own dump volume and removes the previous set before starting a new one.
 
 ## Restoring from a backup
 
@@ -212,5 +228,5 @@ kip backup create --ttl 720h  # 30 days
 ## Limitations
 
 - **In-cluster mode**: backups are stored inside the cluster, so a host loss or `kip cluster uninstall` takes the backups with it. Configure [external backup storage](#external-s3-compatible-storage) for clusters that hold data you care about.
-- Database backups capture the file-system state of the PVC. For the most consistent database backups, consider running `pg_dump` before the backup or using the database's native backup tools alongside Velero.
+- Database volumes are copied while the database runs. Postgres services with [consistent backups](#consistent-database-dumps) also include a `pg_dump` per database. MySQL and MongoDB include only the volume copy, so use their native tools alongside Velero when you need a logical dump.
 - Backup storage mode is chosen at install time, and there is no command that migrates a running cluster from one mode to another. **Do not uninstall in order to switch.** In in-cluster mode the backups live on the cluster, so `kip cluster uninstall` removes them along with everything else, and a backup taken just beforehand is gone before you can restore it. Re-running `kip install` with `--backup-storage-bucket` does repoint Velero at external storage, but it leaves your existing backups behind and re-runs the rest of the install, so it is a deliberate change rather than a migration. The route that keeps your data is to install a second cluster with external storage and move workloads onto it. See [One-shot decision](/en/installation#one-shot-decision).

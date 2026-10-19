@@ -214,7 +214,14 @@ func runBackupList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("\n  %-35s %-12s %-20s %s\n", "NAME", "STATUS", "NAMESPACES", "CREATED")
+	// Keep backup listings available when dump status cannot be read.
+	var pvbs []unstructured.Unstructured
+	pvbList, pvbErr := k8sClient.Dynamic().Resource(podVolumeBackupGVR).Namespace("velero").List(ctx, metav1.ListOptions{})
+	if pvbErr == nil {
+		pvbs = pvbList.Items
+	}
+
+	fmt.Printf("\n  %-35s %-12s %-20s %-17s %s\n", "NAME", "STATUS", "NAMESPACES", "CREATED", "DUMPS")
 	for _, b := range backups.Items {
 		status := "Unknown"
 		if s, ok, _ := unstructured.NestedString(b.Object, "status", "phase"); ok {
@@ -231,7 +238,11 @@ func runBackupList(cmd *cobra.Command, args []string) error {
 
 		created := b.GetCreationTimestamp().Format("2006-01-02 15:04")
 
-		fmt.Printf("  %-35s %-12s %-20s %s\n", b.GetName(), status, namespaces, created)
+		dumps := "unknown"
+		if pvbErr == nil {
+			dumps = backupDumps(b, pvbs)
+		}
+		fmt.Printf("  %-35s %-12s %-20s %-17s %s\n", b.GetName(), status, namespaces, created, dumps)
 	}
 	if bsl, err := k8sClient.Dynamic().Resource(backupStorageLocationGVR).Namespace("velero").Get(ctx, "default", metav1.GetOptions{}); err == nil {
 		config, _, _ := unstructured.NestedStringMap(bsl.Object, "spec", "config")

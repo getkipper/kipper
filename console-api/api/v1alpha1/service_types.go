@@ -32,6 +32,9 @@ type ServiceSpec struct {
 	// Bindings lists App CR names that should receive connection credentials.
 	// +optional
 	Bindings []string `json:"bindings,omitempty"`
+
+	// +optional
+	ConsistentBackups bool `json:"consistentBackups,omitempty"`
 }
 
 // ServiceResources configures CPU and memory for the service. Request
