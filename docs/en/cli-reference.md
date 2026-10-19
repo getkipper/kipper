@@ -1136,6 +1136,9 @@ kip backup storage resize --size 30Gi                               # grow the i
 kip backup repository-key export --to ~/example-backups.key         # save the key that encrypts the backups
 kip backup drill blog-prod                                          # restore blog-prod's services into an isolated namespace and count their rows
 kip backup sse-key export --to ~/example-backups-sse.key            # save the SSE-C key, on clusters installed with --backup-storage-sse-c
+kip backup mirror add uploads --source s3://... --target s3://... ...  # copy an S3 bucket daily into a locked bucket
+kip backup mirror status uploads                                    # last run, preflight result and copy totals
+kip backup mirror remove uploads                                    # stop the mirror. Both buckets stay as they are
 ```
 
 `kip backup repository-key export` saves the volume backup encryption key to a new file with mode 0600. The command asks for confirmation, which you can skip with `--yes`. On Windows, the file inherits its folder's permissions. It never overwrites an existing file. Keep the key outside the cluster because a recovery install needs it to read the volume backups. See [The backup repository key](/en/installation#backup-repository-key).
@@ -1147,6 +1150,33 @@ kip backup sse-key export --to ~/example-backups-sse.key            # save the S
 A default `kip backup create` excludes system namespaces (`kube-system`, `kube-public`, `kube-node-lease`, `traefik`, `longhorn-system`, `keda`, `monitoring`, `velero`). The daily schedule uses the same exclusion. Without it, Velero would try to back up its own MinIO PVC and the backup would hang. Pass `--include-system` if you really want a backup of those namespaces too.
 
 Every backup also skips cert-manager's transient issuance objects (CertificateRequests, Orders, Challenges), including when `--include-system` is set. cert-manager recreates them on demand, and restoring them stops certificates renewing.
+
+### kip backup mirror {#kip-backup-mirror}
+
+`kip backup mirror add <name>` copies an S3 bucket once per schedule into a bucket at another endpoint that is versioned and carries an Object Lock default retention in compliance mode. It first runs the mirror's checks against both buckets from your machine and creates cluster resources only after all checks pass: the endpoints differ, source versioning is enabled, the target's default retention is `COMPLIANCE` and at least `--retention-days`, a canary written to the target is locked and cannot be deleted by version, and the source key is denied writing and deleting the canary key in the source. It then creates the Secret `backup-mirror-<name>` holding both keys and a CronJob of the same name in the `velero` namespace, then attempts to add the Prometheus alert `KipperBackupMirrorStale`. Each run repeats the checks, then runs `rclone sync` and `rclone check`.
+
+```bash
+kip backup mirror add uploads \
+  --source s3://eu-1.objects.example.com/app-uploads --source-region eu-1 \
+  --target s3://eu-2.objects.example.com/app-uploads-backup --target-region eu-2 \
+  --source-credentials ~/.aws/mirror --target-credentials ~/.aws/mirror \
+  --retention-days 30
+kip backup mirror status [name]
+kip backup mirror remove uploads
+```
+
+| Flag | Required | Default | Description |
+|---|---|---|---|
+| `--source`, `--target` | Yes | — | Buckets as `s3://endpoint/bucket` |
+| `--source-region`, `--target-region` | Yes | — | Region as the provider names it |
+| `--source-credentials`, `--target-credentials` | Yes | — | AWS-format credentials files. The same file may serve both sides |
+| `--source-profile`, `--target-profile` | No | `default` | Profile within each credentials file |
+| `--retention-days` | Yes | — | Minimum default retention of the target bucket, in days |
+| `--schedule` | No | `0 3 * * *` | Cron schedule, in the cluster's time zone |
+| `--max-delete` | No | `-1` (off) | Maximum objects one run may delete from the target. Exceeding it fails the run without a retry |
+| `--image-tag` | No | — | Run the mirror image built from this commit (full 40-character SHA) |
+
+`status` shows the schedule, the last run and its outcome, the time since the last success, the preflight result and the last sync's totals, for one mirror or all of them. `remove` deletes the CronJob, the Secret and the alert and leaves both buckets untouched. To change a mirror, remove it and add it again. See [Mirror an S3 bucket into a locked bucket](/en/backups#backup-mirror) for the bucket setup and the restore procedure.
 
 ### kip backup create flags {#kip-backup-create-flags}
 

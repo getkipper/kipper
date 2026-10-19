@@ -1,7 +1,7 @@
 # Third-party notices
 
 Kipper is licensed under the Apache License 2.0 (see `LICENSE`).
-Its distributed binaries and container images include the third-party open-source components listed below. Each is the property of its respective authors and is provided under the license shown with it. This file ships alongside every GitHub release and inside the console-api and authz container images; the copy at the repository root is the canonical one.
+Its distributed binaries and container images include the third-party open-source components listed below. Each is the property of its respective authors and is provided under the license shown with it. This file ships alongside every GitHub release and inside the console-api, authz and kipper-mirror container images. The copy at the repository root is the canonical one.
 
 ## Mozilla Public License 2.0 component
 
@@ -11,7 +11,11 @@ Its distributed binaries and container images include the third-party open-sourc
 
 Kipper's registry serves container images of the MinIO server (`ghcr.io/getkipper/minio`, release RELEASE.2025-09-07T16-13-09Z) and the MinIO client (`ghcr.io/getkipper/mc`, release RELEASE.2025-08-13T08-35-41Z). Both are licensed under the GNU Affero General Public License 3.0 (AGPL-3.0) and are built unmodified from their upstream source. Under AGPL-3.0, the Corresponding Source is available at https://github.com/minio/minio/tree/RELEASE.2025-09-07T16-13-09Z and https://github.com/minio/mc/tree/RELEASE.2025-08-13T08-35-41Z, and the build recipe is `images/minio` in this repository. Each image carries, under `/licenses`, the full license text, the attributions and licenses of the dependencies built into it (upstream's `CREDITS`), and these source directions. Kipper's own code is not covered by the AGPL-3.0; it runs these images as separate programs.
 
-## Go components (91)
+## Component of the backup mirror image
+
+The backup mirror image (`ghcr.io/getkipper/kipper-mirror`) includes rclone v1.75.2, licensed under the MIT License and built unmodified from https://github.com/rclone/rclone/tree/v1.75.2. The build recipe is `images/kipper-mirror/Dockerfile` in this repository. The image carries rclone's license, and the license and notice files of every module compiled into rclone, under `/licenses/rclone`.
+
+## Go components (92)
 
 ### filippo.io/edwards25519 v1.1.1
 
@@ -5491,6 +5495,32 @@ Copyright 2014-2015 The Prometheus Authors
 
 This product includes software developed at
 SoundCloud Ltd. (http://soundcloud.com/).
+```
+
+### github.com/robfig/cron/v3 v3.0.1
+
+```
+Copyright (C) 2012 Rob Figueiredo
+All Rights Reserved.
+
+MIT LICENSE
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### github.com/rs/xid v1.6.0

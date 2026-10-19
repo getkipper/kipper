@@ -15,6 +15,7 @@ are excluded, since they are not distributed).
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -25,6 +26,8 @@ GO_MODULES = ["kip", "console-api", "controller", "gateway", "sidecar", "kipper-
 NPM_DIRS = ["console", "kipper-runtime-node"]
 LICENSE_CHECKER = "license-checker@25.0.1"
 OWN_GO_PREFIX = "github.com/getkipper/kipper"
+
+MIRROR_DOCKERFILE = os.path.join("images", "kipper-mirror", "Dockerfile")
 
 LICENSE_FILE_NAMES = [
     "LICENSE", "LICENCE", "COPYING", "LICENSE.md", "LICENSE.txt",
@@ -130,7 +133,20 @@ def npm_components():
     return [seen[k] for k in sorted(seen)]
 
 
-def render(go, npm):
+def rclone_version():
+    """Read the mirror image's rclone release from its Dockerfile.
+
+    Exit with status 2 if RCLONE_VERSION is missing.
+    """
+    with open(os.path.join(REPO, MIRROR_DOCKERFILE)) as f:
+        m = re.search(r"^ARG RCLONE_VERSION=(\S+)$", f.read(), re.MULTILINE)
+    if not m:
+        print(f"error: no RCLONE_VERSION in {MIRROR_DOCKERFILE}", file=sys.stderr)
+        sys.exit(2)
+    return m.group(1)
+
+
+def render(go, npm, rclone):
     out = []
     out.append("# Third-party notices")
     out.append("")
@@ -139,8 +155,8 @@ def render(go, npm):
                "third-party open-source components listed below. Each is the "
                "property of its respective authors and is provided under the "
                "license shown with it. This file ships alongside every GitHub "
-               "release and inside the console-api and authz container images; "
-               "the copy at the repository root is the canonical one.")
+               "release and inside the console-api, authz and kipper-mirror container images. "
+               "The copy at the repository root is the canonical one.")
     out.append("")
     # Point the MPL-2.0 source link at the exact version that ships, read from
     # the scanned components so a dependency bump can't leave a stale tag here.
@@ -176,6 +192,16 @@ def render(go, npm):
                "(upstream's `CREDITS`), and these source directions. Kipper's "
                "own code is not covered by the AGPL-3.0; it runs these images "
                "as separate programs.")
+    out.append("")
+    out.append("## Component of the backup mirror image")
+    out.append("")
+    out.append("The backup mirror image (`ghcr.io/getkipper/kipper-mirror`) includes "
+               f"rclone {rclone}, licensed under the MIT License and built "
+               "unmodified from https://github.com/rclone/rclone/tree/"
+               f"{rclone}. The build recipe is `{MIRROR_DOCKERFILE}` in this "
+               "repository. The image carries rclone's license, and the license "
+               "and notice files of every module compiled into rclone, under "
+               "`/licenses/rclone`.")
     out.append("")
     out.append(f"## Go components ({len(go)})")
     out.append("")
@@ -220,7 +246,7 @@ def render(go, npm):
 def main():
     go = go_components()
     npm = npm_components()
-    content = render(go, npm)
+    content = render(go, npm, rclone_version())
     dest = os.path.join(REPO, "THIRD_PARTY_NOTICES.md")
     with open(dest, "w") as f:
         f.write(content)
