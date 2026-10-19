@@ -675,3 +675,16 @@ func TestARequiredServiceKeepsItsPodWhenItsCertificateFailsVerification(t *testi
 	assert.Equal(t, before, liveStatefulSet(t, r).Spec.Template, "a certificate for another name must not turn required into plaintext")
 	assert.Equal(t, "CertificateInvalid", tlsCondition(t, r).Reason)
 }
+
+func TestAKeyRestoredIntoAnotherNamespaceIsReplacedAtOnce(t *testing.T) {
+	svc := tlsService()
+	copied := issuedSecretFor(t, "cert-1", []string{"db", "db.source", "db.source.svc", "db.source.svc.cluster.local"}, time.Now().Add(time.Hour))
+	copied.Labels[veleroRestoreNameLabel] = "restore-1"
+	r := tlsTestReconciler(t, svc, copied)
+
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+	issuing := issuingCondition(t, r)
+	require.NotNil(t, issuing, "a mapped restore brings a key for the old names, which must be replaced like any restored key")
+	assert.Equal(t, "True", issuing["status"])
+}
