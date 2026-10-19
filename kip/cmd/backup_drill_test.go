@@ -211,3 +211,13 @@ func TestCleanKeepsWaitingWhileTheNamespaceTerminates(t *testing.T) {
 	stuck := kubefake.NewClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: drillNamespace}})
 	assert.ErrorIs(t, waitForDrillNamespaceGone(ctx, stuck, time.Minute), context.Canceled)
 }
+
+func TestAFailedDrillRestoreSaysWhatWentWrong(t *testing.T) {
+	r := &unstructured.Unstructured{Object: map[string]interface{}{"status": map[string]interface{}{
+		"phase": "PartiallyFailed", "errors": int64(2), "warnings": int64(1)}}}
+	assert.Equal(t, " (2 errors, 1 warning)", restoreOutcome(r))
+	r.Object["status"] = map[string]interface{}{"phase": "Failed", "failureReason": "found a restore with status InProgress during the server starting"}
+	assert.Equal(t, " (found a restore with status InProgress during the server starting)", restoreOutcome(r))
+	r.Object["status"] = map[string]interface{}{"phase": "PartiallyFailed"}
+	assert.Empty(t, restoreOutcome(r))
+}
