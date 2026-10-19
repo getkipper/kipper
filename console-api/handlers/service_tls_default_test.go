@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestNewPostgresServicesServeTLS(t *testing.T) {
-	assert.Equal(t, "on", newServiceTLS("postgres"))
+func TestNewPostgresServicesRequireTLS(t *testing.T) {
+	assert.Equal(t, "required", newServiceTLS("postgres"))
 	assert.Equal(t, "", newServiceTLS("redis"), "other types do not serve TLS yet")
 }

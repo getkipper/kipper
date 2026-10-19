@@ -25,7 +25,7 @@ type ServiceSpec struct {
 	// +optional
 	Resources ServiceResources `json:"resources,omitempty"`
 
-	// +kubebuilder:validation:Enum=off;on
+	// +kubebuilder:validation:Enum=off;on;required
 	// +optional
 	TLS string `json:"tls,omitempty"`
 

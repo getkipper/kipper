@@ -20,3 +20,12 @@ func TestTLSOnAServiceThatCannotServeItIsRefused(t *testing.T) {
 
 	assert.Error(t, Validate(m), "the CLI refuses it, so kipper.yaml must too")
 }
+
+func TestOnlyKnownTLSModesAreAccepted(t *testing.T) {
+	for _, mode := range []string{"required", "on", "off"} {
+		m := &Manifest{Project: "shop", Services: map[string]SvcSpec{"db": {Type: "postgres", TLS: mode}}}
+		assert.NoError(t, Validate(m), mode)
+	}
+	m := &Manifest{Project: "shop", Services: map[string]SvcSpec{"db": {Type: "postgres", TLS: "strict"}}}
+	assert.Error(t, Validate(m), "the CRD would refuse it at apply time")
+}

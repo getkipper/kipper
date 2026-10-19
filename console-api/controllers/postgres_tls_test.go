@@ -330,10 +330,82 @@ func TestAnUnusableCertificateIsNotServed(t *testing.T) {
 }
 
 func TestPgHBAFollowsThePasswordMethodOfTheVersion(t *testing.T) {
-	assert.Contains(t, postgresHBA(""), "scram-sha-256")
-	assert.Contains(t, postgresHBA("16-alpine"), "scram-sha-256")
-	assert.Contains(t, postgresHBA("13"), "host all all all md5", "Postgres 13 stores md5 passwords, which scram-sha-256 would reject")
-	assert.Contains(t, postgresHBA("12.4-bookworm"), "md5")
+	assert.Contains(t, postgresHBA("", false), "scram-sha-256")
+	assert.Contains(t, postgresHBA("16-alpine", false), "scram-sha-256")
+	assert.Contains(t, postgresHBA("13", false), "host all all all md5", "Postgres 13 stores md5 passwords, which scram-sha-256 would reject")
+	assert.Contains(t, postgresHBA("12.4-bookworm", false), "md5")
+}
+
+func TestRequiredTLSAcceptsOnlyTLSNetworkConnections(t *testing.T) {
+	assert.Equal(t, "local all all trust\nhostssl all all all scram-sha-256\n", postgresHBA("16", true))
+	assert.Equal(t, "local all all trust\nhostssl all all all md5\n", postgresHBA("13", true))
+}
+
+func requiredService() *kipperv1.Service {
+	svc := tlsService()
+	svc.Spec.TLS = "required"
+	return svc
+}
+
+func TestARequiredServiceServesTLSAndRefusesPlaintext(t *testing.T) {
+	svc := requiredService()
+	r := tlsTestReconciler(t, svc, issuedSecret(t, "cert-1"))
+
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+	tpl := liveStatefulSet(t, r).Spec.Template
+	assert.Contains(t, tpl.Spec.Containers[0].Args, "ssl=on")
+	var cm corev1.ConfigMap
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db-pg-hba"}, &cm))
+	assert.Contains(t, cm.Data["pg_hba.conf"], "hostssl all all all")
+	assert.NotContains(t, cm.Data["pg_hba.conf"], "\nhost all")
+}
+
+func TestSwitchingBetweenOnAndRequiredRestartsPostgres(t *testing.T) {
+	svc := tlsService()
+	r := tlsTestReconciler(t, svc, issuedSecret(t, "cert-1"))
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+	before := liveStatefulSet(t, r).Spec.Template.Annotations[tlsCertHashAnnotation]
+
+	svc.Spec.TLS = "required"
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+	after := liveStatefulSet(t, r).Spec.Template.Annotations[tlsCertHashAnnotation]
+
+	assert.NotEqual(t, before, after, "pg_hba is read at start, so the new mode needs a restart")
+	live := liveStatefulSet(t, r)
+	r.reportTLSRollout(context.Background(), svc, after, &live)
+	assert.NotEqual(t, "Serving", tlsCondition(t, r).Reason, "the old pod still accepts plaintext until it has restarted")
+}
+
+func TestANewRequiredServiceWaitsForItsCertificateBeyondTheGrace(t *testing.T) {
+	svc := requiredService()
+	r := tlsTestReconciler(t, svc)
+	_, err := r.ensureCertificate(context.Background(), svc)
+	require.NoError(t, err)
+	cert := liveCertificate(t, r)
+	cert.SetCreationTimestamp(metav1.NewTime(time.Now().Add(-2 * tlsIssuanceGrace)))
+	require.NoError(t, r.Update(context.Background(), cert))
+
+	err = r.reconcileStatefulSet(context.Background(), svc)
+
+	require.ErrorIs(t, err, errAwaitingCertificate, "a service that requires TLS never starts with plaintext")
+	assert.True(t, kerrors.IsNotFound(r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &appsv1.StatefulSet{})))
+}
+
+func TestARequiredServiceKeepsItsPodWhenItsCertificateBreaks(t *testing.T) {
+	svc := requiredService()
+	r := tlsTestReconciler(t, svc, issuedSecret(t, "cert-1"))
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+	before := liveStatefulSet(t, r).Spec.Template
+
+	broken := issuedSecret(t, "cert-1")
+	broken.Data["tls.key"] = []byte("not a key")
+	require.NoError(t, r.Update(context.Background(), broken))
+	svc.Spec.Storage = "2Gi"
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+	assert.Equal(t, before, liveStatefulSet(t, r).Spec.Template, "rendering without the certificate would drop TLS")
+	assert.Equal(t, "CertificateInvalid", tlsCondition(t, r).Reason)
 }
 
 func TestAnUnchangedCertificateIsNotWrittenAgain(t *testing.T) {
@@ -588,4 +660,18 @@ func TestAKeyIssuedWhileTheRestoreLabelComesOffIsKeptAndNotReplacedAgain(t *test
 	assert.Equal(t, replacement, secret.Data, "the label removal must never write the restored key back")
 	assert.NotContains(t, secret.Labels, veleroRestoreNameLabel)
 	assert.Equal(t, 1, renewals, "one restore asks for one new key")
+}
+
+func TestARequiredServiceKeepsItsPodWhenItsCertificateFailsVerification(t *testing.T) {
+	svc := requiredService()
+	r := tlsTestReconciler(t, svc, issuedSecret(t, "cert-1"))
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+	before := liveStatefulSet(t, r).Spec.Template
+
+	wrongName := issuedSecretFor(t, "cert-2", []string{"other"}, time.Now().Add(time.Hour))
+	require.NoError(t, r.Update(context.Background(), wrongName))
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+	assert.Equal(t, before, liveStatefulSet(t, r).Spec.Template, "a certificate for another name must not turn required into plaintext")
+	assert.Equal(t, "CertificateInvalid", tlsCondition(t, r).Reason)
 }

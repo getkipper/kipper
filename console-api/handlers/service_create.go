@@ -308,10 +308,10 @@ func ours(ref *metav1.OwnerReference) bool {
 	return schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind).Group == kipperv1.GroupVersion.Group
 }
 
-// newServiceTLS enables TLS by default for Postgres, the only supported type.
+// newServiceTLS requires TLS by default for Postgres, the only supported type.
 func newServiceTLS(serviceType string) string {
 	if serviceType == "postgres" {
-		return "on"
+		return "required"
 	}
 	return ""
 }

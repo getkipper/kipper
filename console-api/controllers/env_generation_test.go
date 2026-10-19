@@ -681,6 +681,7 @@ func TestBuildPollSidecar_UsesThePassSnapshotRatherThanASecondRead(t *testing.T)
 		"the sidecar must carry the credential this pass published, not a later read of it")
 	assert.NotContains(t, sourceURL, "rotated",
 		"one pod template must not carry two credential generations")
+	assert.Contains(t, sourceURL, "sslmode=prefer", "the poller must reach a service that requires TLS")
 }
 
 // A binding that pins a database is held under its own derived name and carries

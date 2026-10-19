@@ -60,10 +60,11 @@ const (
 )
 
 // postgresHBA trusts local socket connections used by Kipper's exec-based
-// tools and requires passwords for all network connections, including loopback,
-// with or without TLS. It uses md5 before Postgres 14 and scram-sha-256 for
-// later versions or an empty version, matching the catalog default.
-func postgresHBA(version string) string {
+// tools and requires passwords for all network connections, including loopback.
+// With required set, only TLS network connections are accepted. It uses md5
+// before Postgres 14 and scram-sha-256 for later versions or an empty version,
+// matching the catalog default.
+func postgresHBA(version string, required bool) string {
 	method := "scram-sha-256"
 	major := version
 	if i := strings.IndexFunc(version, func(r rune) bool { return r < '0' || r > '9' }); i >= 0 {
@@ -72,10 +73,23 @@ func postgresHBA(version string) string {
 	if n, err := strconv.Atoi(major); err == nil && n < 14 {
 		method = "md5"
 	}
+	if required {
+		return "local all all trust\nhostssl all all all " + method + "\n"
+	}
 	return "local all all trust\nhost all all all " + method + "\n"
 }
 
-// tlsIssuanceGrace is how long a new service waits for its first certificate
+// tlsEnabled reports whether a Postgres service should serve TLS.
+func tlsEnabled(svc *kipperv1.Service) bool {
+	return svc.Spec.TLS == "on" || tlsRequired(svc)
+}
+
+// tlsRequired reports whether the service is configured to require TLS.
+func tlsRequired(svc *kipperv1.Service) bool {
+	return svc.Spec.TLS == "required"
+}
+
+// tlsIssuanceGrace lets a new service in mode on wait for its first certificate
 // before starting with plaintext, to avoid a second start during initialisation.
 const (
 	tlsIssuanceGrace = 60 * time.Second
@@ -92,18 +106,30 @@ func hbaConfigMapName(service string) string { return service + "-pg-hba" }
 // reconcilePostgresTLS ensures the Certificate and pg_hba ConfigMap for
 // Postgres with TLS enabled and records issuance failures in TLSReady. It verifies
 // the certificate and key pair and publishes the service CA before returning a
-// short certificate hash. An empty hash with no error means plaintext: TLS is off,
-// the certificate fails verification, the key pair is missing or unusable, or the
-// Certificate API is missing or forbidden. Other API errors are returned.
-// wait asks the caller to delay creating a StatefulSet during the first
-// certificate's issuance grace period. Existing StatefulSets keep running.
+// short certificate hash, with a mode suffix when TLS is required. An empty hash
+// with no error means TLS is off, the certificate fails verification, the key
+// pair is missing or unusable, or the Certificate API is missing or forbidden.
+// Other API errors are returned. wait delays StatefulSet creation during the
+// first certificate's issuance grace period. Required mode waits indefinitely
+// for a usable certificate and also defers changes to existing StatefulSets,
+// leaving their pods running.
 func (r *ServiceReconciler) reconcilePostgresTLS(ctx context.Context, svc *kipperv1.Service) (certHash string, wait bool, err error) {
 	if svc.Spec.Type != "postgres" {
 		return "", false, nil
 	}
-	if svc.Spec.TLS != "on" {
+	if !tlsEnabled(svc) {
 		r.clearTLSCondition(ctx, svc)
 		return "", false, nil
+	}
+	// Required mode waits for a usable certificate to preserve TLS, keeping
+	// any existing pod running.
+	unserved := func(reason, why string, grace bool) (string, bool, error) {
+		msg := "Postgres serves without TLS " + why
+		if tlsRequired(svc) {
+			msg = "Postgres requires TLS, so startup and changes are paused " + why
+		}
+		r.setTLSCondition(ctx, svc, metav1.ConditionFalse, reason, msg)
+		return "", grace || tlsRequired(svc), nil
 	}
 	secret, err := r.issuedSecret(ctx, svc)
 	if err != nil {
@@ -112,9 +138,7 @@ func (r *ServiceReconciler) reconcilePostgresTLS(ctx context.Context, svc *kippe
 	cert, err := r.ensureCertificate(ctx, svc)
 	if err != nil {
 		if meta.IsNoMatchError(err) || errors.IsForbidden(err) {
-			r.setTLSCondition(ctx, svc, metav1.ConditionFalse, "CertManagerUnavailable",
-				"Postgres serves without TLS until cert-manager and the service CA are available: "+err.Error())
-			return "", false, nil
+			return unserved("CertManagerUnavailable", "until cert-manager and the service CA are available: "+err.Error(), false)
 		}
 		return "", false, fmt.Errorf("reconciling the TLS certificate: %w", err)
 	}
@@ -122,26 +146,21 @@ func (r *ServiceReconciler) reconcilePostgresTLS(ctx context.Context, svc *kippe
 		return "", false, fmt.Errorf("reconciling pg_hba: %w", err)
 	}
 	if secret == nil {
-		msg := "Postgres serves without TLS until cert-manager issues its certificate"
+		why := "until cert-manager issues its certificate"
 		if ready := certificateReadyMessage(cert); ready != "" {
-			msg += " (" + ready + ")"
+			why += " (" + ready + ")"
 		}
-		msg += ". If issuance remains pending, run a full kip upgrade to install the service CA"
-		r.setTLSCondition(ctx, svc, metav1.ConditionFalse, "Issuing", msg)
+		why += ". If issuance remains pending, run a full kip upgrade to install the service CA"
 		created := cert.GetCreationTimestamp()
-		return "", created.IsZero() || time.Since(created.Time) < tlsIssuanceGrace, nil
+		return unserved("Issuing", why, created.IsZero() || time.Since(created.Time) < tlsIssuanceGrace)
 	}
 	crt := secret.Data[corev1.TLSCertKey]
 	host := fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace)
 	if problem := certificateProblem(secret, host); problem != "" {
-		r.setTLSCondition(ctx, svc, metav1.ConditionFalse, "CertificateInvalid",
-			"Postgres serves without TLS because the certificate in Secret "+secret.Name+" fails verification: "+problem)
-		return "", false, nil
+		return unserved("CertificateInvalid", "because the certificate in Secret "+secret.Name+" fails verification: "+problem, false)
 	}
 	if !usableKeyPair(crt, secret.Data[corev1.TLSPrivateKeyKey]) {
-		r.setTLSCondition(ctx, svc, metav1.ConditionFalse, "CertificateInvalid",
-			"Postgres serves without TLS because the issued certificate and key in Secret "+secret.Name+" do not form a usable pair")
-		return "", false, nil
+		return unserved("CertificateInvalid", "because the issued certificate and key in Secret "+secret.Name+" do not form a usable pair", false)
 	}
 	if err := r.replaceRestoredKey(ctx, cert, secret); err != nil {
 		return "", false, fmt.Errorf("replacing the restored TLS key: %w", err)
@@ -150,6 +169,11 @@ func (r *ServiceReconciler) reconcilePostgresTLS(ctx context.Context, svc *kippe
 		return "", false, fmt.Errorf("publishing the service CA: %w", err)
 	}
 	sum := sha256.Sum256(crt)
+	// Including the mode in the rollout marker triggers a restart to load the
+	// new pg_hba rules and lets the rollout report confirm the mode change.
+	if tlsRequired(svc) {
+		return hex.EncodeToString(sum[:8]) + "-required", false, nil
+	}
 	return hex.EncodeToString(sum[:8]), false, nil
 }
 
@@ -210,12 +234,15 @@ func (r *ServiceReconciler) reportTLSRollout(ctx context.Context, svc *kipperv1.
 		return
 	}
 	if live != nil && live.Spec.Template.Annotations[tlsCertHashAnnotation] == certHash && statefulSetRolledOut(live) {
-		r.setTLSCondition(ctx, svc, metav1.ConditionTrue, "Serving",
-			"Postgres serves TLS with a certificate from the cluster's service CA")
+		msg := "Postgres serves TLS with a certificate from the cluster's service CA"
+		if tlsRequired(svc) {
+			msg += " and refuses network connections without TLS"
+		}
+		r.setTLSCondition(ctx, svc, metav1.ConditionTrue, "Serving", msg)
 		return
 	}
 	r.setTLSCondition(ctx, svc, metav1.ConditionFalse, "RollingOut",
-		"The certificate has been issued. Postgres will serve it once its pod has restarted with it")
+		"The certificate has been issued. Once its pod restarts, Postgres will serve it using the service's configured TLS mode")
 }
 
 // statefulSetRolledOut reports whether sts has replicas and every one of them
@@ -418,7 +445,7 @@ func (r *ServiceReconciler) ensureCertificate(ctx context.Context, svc *kipperv1
 }
 
 func (r *ServiceReconciler) ensureHBAConfigMap(ctx context.Context, svc *kipperv1.Service) error {
-	data := map[string]string{"pg_hba.conf": postgresHBA(svc.Spec.Version)}
+	data := map[string]string{"pg_hba.conf": postgresHBA(svc.Spec.Version, tlsRequired(svc))}
 	var existing corev1.ConfigMap
 	err := r.Get(ctx, types.NamespacedName{Namespace: svc.Namespace, Name: hbaConfigMapName(svc.Name)}, &existing)
 	if errors.IsNotFound(err) {
@@ -459,7 +486,7 @@ func (r *ServiceReconciler) ensureHBAConfigMap(ctx context.Context, svc *kipperv
 // TLS is off. Call it after removing those references from the StatefulSet
 // template. The running pod may still be rolling out that change.
 func (r *ServiceReconciler) removeStalePostgresTLS(ctx context.Context, svc *kipperv1.Service) error {
-	if svc.Spec.Type != "postgres" || svc.Spec.TLS == "on" {
+	if svc.Spec.Type != "postgres" || tlsEnabled(svc) {
 		return nil
 	}
 	return r.removePostgresTLS(ctx, svc, false)

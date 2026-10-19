@@ -332,9 +332,8 @@ func (d *Database) connect(ctx context.Context, svcName, namespace, database str
 	return pc.db, info, nil
 }
 
-// driverInfo reads the credentials Secret and builds a DSN. Only
-// postgres and mysql are wired in G1; other types return an error so
-// the UI can show a "not yet supported" state.
+// driverInfo reads the credentials Secret and builds a Postgres or MySQL DSN.
+// Other types return an error so the UI can show a "not yet supported" state.
 func (d *Database) driverInfo(ctx context.Context, svcName, namespace, overrideDB string) (dbDriverInfo, error) {
 	// The override reaches the DSN as the database name. Without this the
 	// value flows into a pgx keyword/value DSN, where a space injects
@@ -367,7 +366,8 @@ func (d *Database) driverInfo(ctx context.Context, svcName, namespace, overrideD
 
 	switch svc.Spec.Type {
 	case "postgres":
-		dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		// Prefer TLS so the database console can connect in all three service TLS modes.
+		dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=prefer",
 			host, port, user, pw, defaultDB(name, "postgres"))
 		return dbDriverInfo{driver: "pgx", dsn: dsn}, nil
 	case "mysql":
