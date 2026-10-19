@@ -236,7 +236,7 @@ var printable = map[string]struct{}{
 	// Workload shape.
 	"image": {}, "replicas": {}, "port": {}, "runtime": {},
 	"schedule": {}, "storage": {}, "size": {}, "type": {},
-	"version": {}, "noSecurityHeaders": {}, "source.handler": {}, "tls": {},
+	"version": {}, "noSecurityHeaders": {}, "source.handler": {}, "tls": {}, "consistentBackups": {},
 
 	// Resources, on every kind that carries them.
 	"resources.cpuRequest": {}, "resources.cpuLimit": {},

@@ -171,11 +171,12 @@ type BuildResources struct {
 // a service to catalog defaults; Profile has no meaning for services and
 // stays empty.
 type SvcSpec struct {
-	Type      string        `yaml:"type"`
-	Version   string        `yaml:"version,omitempty"`
-	Storage   string        `yaml:"storage,omitempty"`
-	TLS       string        `yaml:"tls,omitempty"`
-	Resources *ResourceSpec `yaml:"resources,omitempty"`
+	Type              string        `yaml:"type"`
+	Version           string        `yaml:"version,omitempty"`
+	Storage           string        `yaml:"storage,omitempty"`
+	TLS               string        `yaml:"tls,omitempty"`
+	ConsistentBackups bool          `yaml:"consistentBackups,omitempty"`
+	Resources         *ResourceSpec `yaml:"resources,omitempty"`
 }
 
 // VolSpec defines a shared volume in the manifest.

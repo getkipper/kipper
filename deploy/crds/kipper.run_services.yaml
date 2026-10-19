@@ -58,6 +58,8 @@ spec:
                 items:
                   type: string
                 type: array
+              consistentBackups:
+                type: boolean
               resources:
                 description: Resources configures CPU and memory for the service.
                 properties:

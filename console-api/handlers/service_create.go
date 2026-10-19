@@ -123,9 +123,10 @@ func (s *Services) Create(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		Spec: kipperv1.ServiceSpec{
-			Type:    req.Type,
-			TLS:     newServiceTLS(req.Type),
-			Storage: storage,
+			Type:              req.Type,
+			TLS:               newServiceTLS(req.Type),
+			Storage:           storage,
+			ConsistentBackups: newServiceConsistentBackups(req.Type),
 			Resources: kipperv1.ServiceResources{
 				CPURequest:    req.CPURequest,
 				CPULimit:      req.CPULimit,
@@ -313,4 +314,9 @@ func newServiceTLS(serviceType string) string {
 		return "on"
 	}
 	return ""
+}
+
+// newServiceConsistentBackups matches the Postgres dump default in kip service add.
+func newServiceConsistentBackups(serviceType string) bool {
+	return serviceType == "postgres"
 }
