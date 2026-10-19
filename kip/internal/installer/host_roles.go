@@ -49,6 +49,11 @@ func prepareNodeOS(client CommandRunner, wireGuardOptional, longhorn bool) error
 	if err := writeKubeletSysctls(client); err != nil {
 		return err
 	}
+	if longhorn {
+		if err := DisableNFSDirectoryDelegations(client); err != nil {
+			return err
+		}
+	}
 	return raiseInotifyLimit(client)
 }
 

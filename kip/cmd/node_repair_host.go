@@ -13,9 +13,12 @@ import (
 var nodeRepairHostCmd = &cobra.Command{
 	Use:   "repair-host",
 	Short: "Apply host configuration to a node that predates it",
-	Long: `Configures needrestart on an Ubuntu or Debian node to defer storage-service
-restarts, then records the configuration on its Kubernetes node object. This
-protects Longhorn volumes from disruptions after library updates.
+	Long: `Turns off NFS directory delegations to keep Longhorn's shared volumes
+accessible on Linux 7.0 and later. Longhorn 1.7.3's shared volume server rejects
+these requests. On Ubuntu or Debian, it then configures needrestart to defer
+storage-service restarts and records that configuration on the Kubernetes node
+object. Deferring restarts protects Longhorn volumes from disruptions after
+library updates.
 
 Use this for nodes added by older kip versions. It applies the same configuration
 as kip install and kip node add, using the same connection details, and is safe
@@ -59,6 +62,11 @@ func runNodeRepairHost(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("connecting to %s: %w", nodeHost, err)
 	}
 	defer func() { _ = nodeClient.Close() }()
+
+	if err := installer.DisableNFSDirectoryDelegations(nodeClient); err != nil {
+		return fmt.Errorf("repairing %s: %w", nodeHost, err)
+	}
+	fmt.Printf("  ✔  NFS client configured for shared volumes\n")
 
 	host, err := installer.DetectHostOS(nodeClient)
 	if err != nil {
