@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -45,6 +46,8 @@ const (
 	// backupVolumesExcludesAnnotation names pod volumes Velero's file-system
 	// backup skips.
 	backupVolumesExcludesAnnotation = "backup.velero.io/backup-volumes-excludes"
+	// veleroRestoreNameLabel identifies the restore that created an object.
+	veleroRestoreNameLabel = "velero.io/restore-name"
 
 	postgresTLSDir       = "/etc/kipper/tls"
 	postgresTLSSourceDir = "/etc/kipper/tls-source"
@@ -140,11 +143,62 @@ func (r *ServiceReconciler) reconcilePostgresTLS(ctx context.Context, svc *kippe
 			"Postgres serves without TLS because the issued certificate and key in Secret "+secret.Name+" do not form a usable pair")
 		return "", false, nil
 	}
+	if err := r.replaceRestoredKey(ctx, cert, secret); err != nil {
+		return "", false, fmt.Errorf("replacing the restored TLS key: %w", err)
+	}
 	if err := r.ensureServiceCA(ctx, svc, secret); err != nil {
 		return "", false, fmt.Errorf("publishing the service CA: %w", err)
 	}
 	sum := sha256.Sum256(crt)
 	return hex.EncodeToString(sum[:8]), false, nil
+}
+
+// replaceRestoredKey requests a new key pair for a restored Secret because the
+// backup retains a copy of its private key. The restored key remains available
+// until its replacement arrives. Once issuance is requested or already in
+// progress, it removes the restore label to prevent repeated requests.
+// Errors updating the Certificate status or reading or updating the Secret are returned.
+func (r *ServiceReconciler) replaceRestoredKey(ctx context.Context, cert *unstructured.Unstructured, secret *corev1.Secret) error {
+	if secret.Labels[veleroRestoreNameLabel] == "" {
+		return nil
+	}
+	conditions, _, _ := unstructured.NestedSlice(cert.Object, "status", "conditions")
+	kept := make([]interface{}, 0, len(conditions)+1)
+	issuing := false
+	for _, c := range conditions {
+		m, ok := c.(map[string]interface{})
+		if ok && m["type"] == "Issuing" {
+			issuing = m["status"] == "True"
+			continue
+		}
+		kept = append(kept, c)
+	}
+	if !issuing {
+		kept = append(kept, map[string]interface{}{
+			"type": "Issuing", "status": "True", "reason": "ManuallyTriggered",
+			"message":            "Kipper requested a new private key to replace the one restored from a backup",
+			"lastTransitionTime": time.Now().UTC().Format(time.RFC3339),
+		})
+		if err := unstructured.SetNestedSlice(cert.Object, kept, "status", "conditions"); err != nil {
+			return err
+		}
+		if err := r.Status().Update(ctx, cert); err != nil {
+			return err
+		}
+	}
+	// Re-read the Secret on conflicts to preserve any key cert-manager issued
+	// while the restore label was being removed, without requesting issuance again.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var live corev1.Secret
+		if err := r.Get(ctx, client.ObjectKeyFromObject(secret), &live); err != nil {
+			return err
+		}
+		if live.Labels[veleroRestoreNameLabel] == "" {
+			return nil
+		}
+		delete(live.Labels, veleroRestoreNameLabel)
+		return r.Update(ctx, &live)
+	})
 }
 
 // reportTLSRollout records whether Postgres serves the certificate whose

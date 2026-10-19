@@ -35,6 +35,11 @@ import (
 
 func tlsTestReconciler(t *testing.T, objs ...crclient.Object) *ServiceReconciler {
 	t.Helper()
+	return tlsTestReconcilerWith(t, interceptor.Funcs{}, objs...)
+}
+
+func tlsTestReconcilerWith(t *testing.T, funcs interceptor.Funcs, objs ...crclient.Object) *ServiceReconciler {
+	t.Helper()
 	mapper := meta.NewDefaultRESTMapper(nil)
 	mapper.Add(certificateGVK, meta.RESTScopeNamespace)
 	for _, gvk := range []schema.GroupVersionKind{
@@ -47,7 +52,8 @@ func tlsTestReconciler(t *testing.T, objs ...crclient.Object) *ServiceReconciler
 	}
 	return &ServiceReconciler{
 		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithRESTMapper(mapper).WithObjects(objs...).
-			WithStatusSubresource(&kipperv1.Service{}, &appsv1.StatefulSet{}).Build(),
+			WithStatusSubresource(&kipperv1.Service{}, &appsv1.StatefulSet{}, certificateWithStatus()).
+			WithInterceptorFuncs(funcs).Build(),
 		Scheme:      testScheme(),
 		ShareGrants: share.NewGrantStore(k8sfake.NewClientset()),
 	}
@@ -502,4 +508,84 @@ func TestRestoredTLSObjectsAreRemovedWithoutBeingAdoptedFirst(t *testing.T) {
 			assert.True(t, kerrors.IsNotFound(r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db-pg-hba"}, &corev1.ConfigMap{})))
 		})
 	}
+}
+
+func certificateWithStatus() *unstructured.Unstructured {
+	cert := &unstructured.Unstructured{}
+	cert.SetGroupVersionKind(certificateGVK)
+	return cert
+}
+
+func issuingCondition(t *testing.T, r *ServiceReconciler) map[string]interface{} {
+	t.Helper()
+	conditions, _, _ := unstructured.NestedSlice(liveCertificate(t, r).Object, "status", "conditions")
+	for _, c := range conditions {
+		if m, ok := c.(map[string]interface{}); ok && m["type"] == "Issuing" {
+			return m
+		}
+	}
+	return nil
+}
+
+func TestARestoredPrivateKeyIsReplaced(t *testing.T) {
+	svc := tlsService()
+	restored := issuedSecret(t, "cert-1")
+	restored.Labels[veleroRestoreNameLabel] = "restore-1"
+	r := tlsTestReconciler(t, svc, restored)
+
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+	issuing := issuingCondition(t, r)
+	require.NotNil(t, issuing, "cert-manager must issue a new key for a key that came out of a backup")
+	assert.Equal(t, "True", issuing["status"])
+	var secret corev1.Secret
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db-tls"}, &secret))
+	assert.NotContains(t, secret.Labels, veleroRestoreNameLabel, "one restore asks for one new key")
+	assert.Contains(t, liveStatefulSet(t, r).Spec.Template.Spec.Containers[0].Args, "ssl=on", "the restored key serves until its replacement arrives")
+}
+
+func TestAKeyIssuedInTheClusterIsNotReplaced(t *testing.T) {
+	svc := tlsService()
+	r := tlsTestReconciler(t, svc, issuedSecret(t, "cert-1"))
+
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+	assert.Nil(t, issuingCondition(t, r))
+}
+
+func TestAKeyIssuedWhileTheRestoreLabelComesOffIsKeptAndNotReplacedAgain(t *testing.T) {
+	svc := tlsService()
+	restored := issuedSecret(t, "cert-1")
+	restored.Labels[veleroRestoreNameLabel] = "restore-1"
+	replacement := issuedSecret(t, "cert-2").Data
+	renewals, raced := 0, false
+	r := tlsTestReconcilerWith(t, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c crclient.Client, sub string, obj crclient.Object, opts ...crclient.SubResourceUpdateOption) error {
+			if obj.GetObjectKind().GroupVersionKind().Kind == "Certificate" {
+				renewals++
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+		Update: func(ctx context.Context, c crclient.WithWatch, obj crclient.Object, opts ...crclient.UpdateOption) error {
+			if s, ok := obj.(*corev1.Secret); ok && s.Name == "db-tls" && !raced {
+				// Simulate concurrent issuance to verify that label removal preserves the new key.
+				raced = true
+				var live corev1.Secret
+				require.NoError(t, c.Get(ctx, crclient.ObjectKeyFromObject(s), &live))
+				live.Data = replacement
+				require.NoError(t, c.Update(ctx, &live))
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	}, svc, restored)
+
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+	require.NoError(t, r.reconcileStatefulSet(context.Background(), svc))
+
+	var secret corev1.Secret
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db-tls"}, &secret))
+	assert.True(t, raced)
+	assert.Equal(t, replacement, secret.Data, "the label removal must never write the restored key back")
+	assert.NotContains(t, secret.Labels, veleroRestoreNameLabel)
+	assert.Equal(t, 1, renewals, "one restore asks for one new key")
 }
