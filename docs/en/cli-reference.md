@@ -186,6 +186,27 @@ A component with no ready replicas (or no available replicas for a Deployment) i
 
 It also audits the DNS resolvers your cluster forwards external queries to. Those live in a file on the server, so `kip status` makes a best-effort SSH connection as the cluster's SSH user (reusing the key from install, then your SSH agent or `~/.ssh/id_ed25519`) to read it. Three things are checked: the file is still a safe set (IPv4 entries only, at most three), the entries still match the resolvers the cluster was configured with (`dns_resolvers` in `~/.kip/config.yaml`, or the default public set), and each resolver actually accepts connections from the server. Each problem gets its own warning, and drift or an unsafe hand-edit is fixed with `kip cluster dns repair`. If the server can't be reached over SSH, the section reports that the check could not run, and the rest of the status still prints.
 
+## kip doctor {#kip-doctor}
+
+```bash
+kip doctor
+```
+
+Diagnoses a cluster that installed but does not work and provides a way to report failed checks. It first reads the cluster over SSH as the cluster's SSH user, reusing the key from install. If SSH is unavailable, it reads through the Kubernetes API. Using SSH lets it diagnose problems even when the API rejects your login. This can happen after a restart when Traefik serves its built-in fallback certificate: the API server can no longer load Dex's discovery document, so commands using your API login fail, including `kip status`.
+
+The checks are grouped by where a problem could occur:
+
+- **Host:** the server answers over SSH, k3s is running, and how long ago the server booted.
+- **Kubernetes:** the API server answers, it accepts your login, the nodes are Ready, and Traefik, CoreDNS, cert-manager, Dex and the Console API are running.
+- **Gateway hop** (kipper.run clusters only): the hop certificate is in place, the default TLSStore points Traefik at it, port 443 actually serves it, the gateway heartbeat renews the name, and the cluster registers the address kip has on record.
+- **kipper.run gateway** (kipper.run clusters only): the gateway is up and routes the cluster's name to it.
+
+Checks that cannot run are marked as not checked. For example, reading the hop certificate requires SSH access. When a check fails, `kip doctor` prints a link to a prefilled GitHub issue form and a report to paste into it, as a failed `kip install` does. The link contains only check names and statuses, the kip version, your machine's OS and architecture, the server's distribution and version, the sizing profile and the names of the flags you set. The report replaces recognised addresses, hostnames and credentials with placeholders. The command exits with status 1 when a check fails.
+
+| Flag | Meaning |
+|---|---|
+| `--ssh-key` | Private key for the server, if it is not the one recorded at install. |
+
 ## kip cluster dns repair {#kip-cluster-dns-repair}
 
 Restores the curated DNS resolver file on the server and restarts CoreDNS to pick it up. This is the scoped fix for the resolver drift `kip status` warns about; nothing else about the installation is touched.

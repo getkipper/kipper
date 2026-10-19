@@ -48,7 +48,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// Node summary
 	nodes, err := client.ListNodes(ctx)
 	if err != nil {
-		return fmt.Errorf("listing nodes: %w", err)
+		return nodesUnavailableError(err)
 	}
 
 	fmt.Printf("  Nodes:\n")
