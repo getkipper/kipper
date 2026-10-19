@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -69,9 +70,20 @@ var backupListCmd = &cobra.Command{
 
 var backupRestoreCmd = &cobra.Command{
 	Use:   "restore [backup-name]",
-	Short: "Restore from a backup",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runBackupRestore,
+	Short: "Restore from a backup, or cancel a running restore with --cancel",
+	Args: func(cmd *cobra.Command, args []string) error {
+		if cmd.Flags().Changed("cancel") {
+			if name, _ := cmd.Flags().GetString("cancel"); name == "" {
+				return errors.New("--cancel needs the name of the restore to cancel")
+			}
+			return cobra.NoArgs(cmd, args)
+		}
+		if force, _ := cmd.Flags().GetBool("force"); force {
+			return errors.New("--force works only with --cancel")
+		}
+		return cobra.ExactArgs(1)(cmd, args)
+	},
+	RunE: runBackupRestore,
 }
 
 var backupScheduleCmd = &cobra.Command{
@@ -93,6 +105,8 @@ func init() {
 	backupRestoreCmd.Flags().Bool("repair-credentials", false, "re-attach restored service credentials Secrets without prompting")
 	backupRestoreCmd.Flags().Bool("include-ingresses", false, "With --namespace-mapping, also restore Ingresses and cert-manager Certificates. The copy will claim the source's hostnames and renew certificates for them.")
 	backupRestoreCmd.Flags().Bool("cluster-resources", false, "also restore projects and their resource adjustments. Existing ones remain unchanged.")
+	backupRestoreCmd.Flags().String("cancel", "", "cancel the named restore while it is InProgress, so the restores queued behind it can run")
+	backupRestoreCmd.Flags().Bool("force", false, "with --cancel, allow a Velero restart that also fails InProgress backups and other restores")
 
 	backupCmd.AddCommand(backupCreateCmd)
 	backupCmd.AddCommand(backupListCmd)
@@ -277,7 +291,28 @@ func backupProtection(config map[string]string, defaultKey bool) []string {
 	return []string{objects, volumes}
 }
 
+func runBackupRestoreCancel(cmd *cobra.Command, name string) error {
+	for _, flag := range []string{"namespace-mapping", "namespace", "resources", "allow-partial", "repair-credentials", "include-ingresses", "cluster-resources"} {
+		if cmd.Flags().Changed(flag) {
+			return fmt.Errorf("--cancel cannot be combined with --%s", flag)
+		}
+	}
+	force, _ := cmd.Flags().GetBool("force")
+	_, k8sClient, err := loadCurrentCluster()
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fmt.Printf("\n  Canceling restore %s\n", name)
+	return cancelRestore(ctx, k8sClient.Clientset(), k8sClient.Dynamic(), name, force)
+}
+
 func runBackupRestore(cmd *cobra.Command, args []string) error {
+	if cmd.Flags().Changed("cancel") {
+		name, _ := cmd.Flags().GetString("cancel")
+		return runBackupRestoreCancel(cmd, name)
+	}
 	backupName := args[0]
 	nsMapping, _ := cmd.Flags().GetString("namespace-mapping")
 	namespace, _ := cmd.Flags().GetString("namespace")

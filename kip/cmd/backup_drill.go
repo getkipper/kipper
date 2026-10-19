@@ -387,7 +387,12 @@ func unfinishedRestores(restores []unstructured.Unstructured) []string {
 }
 
 func restoreFinished(r *unstructured.Unstructured) bool {
-	switch phase, _, _ := unstructured.NestedString(r.Object, "status", "phase"); phase {
+	phase, _, _ := unstructured.NestedString(r.Object, "status", "phase")
+	return restorePhaseFinal(phase)
+}
+
+func restorePhaseFinal(phase string) bool {
+	switch phase {
 	case "Completed", "PartiallyFailed", "Failed", "FailedValidation":
 		return true
 	}
