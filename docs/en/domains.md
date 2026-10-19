@@ -83,6 +83,19 @@ sequenceDiagram
 
 A wildcard DNS record (`*.kipper.run`) points all subdomains to the Kipper Gateway. The gateway looks up the cluster IP from its registry and reverse-proxies the request. TLS is terminated at the gateway using a Let's Encrypt wildcard certificate.
 
+### When the gateway can't reach your cluster
+
+If the gateway can't get a response from your cluster, it returns a short error page when the request's `Accept` header includes `text/html`, as it typically does in a browser. Otherwise, it returns one line of text, as it typically does for a command-line client. The page explains the failure so you know where to look:
+
+| Status | Page says | Usual cause |
+|---|---|---|
+| 504 | This site isn't answering | The server is off, or a firewall drops connections to port 443, so the connection or its TLS handshake timed out. |
+| 502 | This site can't be reached right now | The server refused the connection, often while it restarts or before Traefik is listening. |
+| 502 | This site isn't ready yet | The cluster presented a certificate the gateway doesn't accept. This usually clears within a few minutes of a restart, once Traefik has loaded the cluster's certificate. |
+| 502 | Something went wrong reaching this site | Anything else, such as the cluster closing the connection before it answered. |
+
+Start with `kip status` in each case. The page also links to a GitHub issue form, prefilled with the error status, kind, time, and a fixed explanation and reproduction step. The link keeps the site's address and the visitor's address private. With proof enforcement enabled, a name that has not proven control, or whose proof has lapsed, still returns 404 without this error page, so the gateway never confirms that an unproven name is registered.
+
 ### What the gateway records
 
 The gateway stores what it needs to route and to check who holds a name: each registered name, the address of its cluster, the name's management token, its certificate fingerprints, and the state of its proof of control. It logs each registration with the name and address, each release with the name, and a refused registration with the name once that name has passed validation. An unknown name sent in a proof request is logged quoted and cut to 63 characters.

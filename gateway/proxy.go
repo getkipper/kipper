@@ -388,7 +388,8 @@ func (p *Proxy) buildProxy(host string, entry *registry.Entry, pinned bool) *htt
 	}
 
 	return &httputil.ReverseProxy{
-		Transport: transport,
+		Transport:    transport,
+		ErrorHandler: serveProxyError,
 		// Rewrite replaces inbound forwarded headers with the client address measured
 		// by trusted-header middleware. Avoid SetXForwarded, which preserves inbound XFF.
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -423,20 +424,19 @@ func (p *Proxy) verifyPin(subdomain string) func(tls.ConnectionState) error {
 			return err
 		}
 		if p.EnforceProof && !p.Registry.ProofAuthorizes(subdomain, observed) {
-			return fmt.Errorf("cluster for %s presented SPKI %s, which holds no current proof of possession", subdomain, observed)
+			return &unexpectedCertificateError{fmt.Sprintf("cluster for %s presented SPKI %s, which holds no current proof of possession", subdomain, observed)}
 		}
 		return nil
 	}
 }
 
-// checkPin enforces the subdomain's accepted-fingerprint set (B5).
-//
-// Policy: with no enforced pin the handshake is accepted and logged (unpinned
-// grace — availability wins until the cluster's first token-authenticated
-// assertion lands). Once pins exist, the leaf SPKI must match the current,
-// pending, or previous fingerprint; anything else fails the handshake and the
-// client sees the proxy's normal 502. A pending match is the observation proof
-// that promotes it to enforced.
+// checkPin checks the subdomain's accepted fingerprints. A pending match promotes
+// the pin and calls OnPinChange if promotion succeeds. With no current pin, it
+// accepts and logs the handshake while awaiting a token-authenticated assertion.
+// Once pinned, it accepts the current, pending, or previous fingerprint and
+// tolerates other keys during the first-pin settle window while Traefik converges.
+// Other mismatches return unexpectedCertificateError for a 502 response.
+// verifyPin separately enforces proof of possession when enabled.
 func (p *Proxy) checkPin(subdomain, observed string) error {
 	pins := p.Registry.PinState(subdomain)
 
@@ -463,7 +463,7 @@ func (p *Proxy) checkPin(subdomain, observed string) error {
 		log.Printf("first-pin settle for %s: accepted SPKI %s (does not match the pin yet); enforcement begins when the settle window ends", subdomain, observed)
 		return nil
 	}
-	return fmt.Errorf("cluster for %s presented SPKI %s, which matches no pinned fingerprint", subdomain, observed)
+	return &unexpectedCertificateError{fmt.Sprintf("cluster for %s presented SPKI %s, which matches no pinned fingerprint", subdomain, observed)}
 }
 
 // logGrace surfaces an unpinned-grace handshake at most once per
