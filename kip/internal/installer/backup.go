@@ -394,9 +394,51 @@ func installVelero(client Uploader, cfg *BackupStorageConfig, minioPassword stri
 	if err != nil {
 		return err
 	}
+	if err := configureRestoreHelper(client); err != nil {
+		return err
+	}
 	veleroCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", veleroManifest(cfg, host.K3sSELinux() || rhelNode))
 	if _, err := client.Run(veleroCmd); err != nil {
 		return fmt.Errorf("applying Velero HelmChart: %w", err)
+	}
+	return nil
+}
+
+// restoreHelperConfig sets the requests of the restore-wait init container that
+// Velero adds to each pod whose volumes it restores. The container only waits
+// for the volume restore, and Velero's default of 100m CPU can keep a restored
+// pod from fitting on a small, busy server. Velero keeps its default limits.
+const restoreHelperConfig = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fs-restore-action-config
+  namespace: velero
+  labels:
+    app.kubernetes.io/managed-by: kipper
+    velero.io/plugin-config: ""
+    velero.io/pod-volume-restore: RestoreItemAction
+data:
+  cpuRequest: 10m
+  memRequest: 16Mi
+`
+
+// configureRestoreHelper applies restoreHelperConfig unless the velero namespace
+// has a matching restore helper ConfigMap under another name. This preserves
+// those operator settings because Velero refuses volume restores when multiple
+// ConfigMaps match. Otherwise, fs-restore-action-config is created or reapplied.
+func configureRestoreHelper(client CommandRunner) error {
+	names, err := client.Run("kubectl -n velero get configmap -l velero.io/plugin-config,velero.io/pod-volume-restore=RestoreItemAction -o jsonpath='{.items[*].metadata.name}'")
+	if err != nil {
+		return fmt.Errorf("reading Velero's restore helper settings: %w", err)
+	}
+	for _, name := range strings.Fields(names) {
+		if name != "fs-restore-action-config" {
+			return nil
+		}
+	}
+	helperCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", restoreHelperConfig)
+	if _, err := client.Run(helperCmd); err != nil {
+		return fmt.Errorf("configuring Velero's restore helper: %w", err)
 	}
 	return nil
 }
