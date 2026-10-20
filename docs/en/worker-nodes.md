@@ -70,6 +70,7 @@ Services that ran on a lost worker may stay unavailable until it returns. Losing
 
 - **Reboots:** [`kip node reboot <worker>`](/en/cli-reference#kip-node-reboot) takes a backup, drains the worker, reboots it and waits for previously ready workloads to become ready again. The CLI reference lists when it cancels and what a drain removes.
 - **Certificates:** a worker's agent certificates last a year and are renewed whenever its agent starts while they are still valid, so reboot each worker at least once a year. A worker whose certificates have expired or are missing shows `NotReady`. Run `kip node add <host>` again with the original options to rejoin it.
-- **Listing nodes:** `kip node list` shows every node with its role, status and address.
+- **Listing nodes:** `kip node list` shows every node with its role, status and address. When a worker is recorded, it also shows each node's network mode and SSH address.
+- **Health:** `kip status` runs its host checks on the server and every recorded worker, and names a worker it could not reach. `kip app info` and `kip function info` name the nodes a workload's pods run on, and `kip service info` shows the node a service runs on and where its data is.
 
 `kip upgrade` acts on the server's host only, so upgrading k3s on a worker is a manual step today. For what [`kip cluster uninstall`](/en/cli-reference#kip-cluster-uninstall) does with the workers, and for other worker maintenance, see [Maintenance](/en/cli-reference#kip-node-add) in the CLI reference.

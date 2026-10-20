@@ -111,7 +111,7 @@ func NeedrestartApplies(osImage string) bool {
 // stamping it is to notice a node reimaged under the same name. An identity
 // read from the object it is compared against would always agree.
 func ReadMachineID(runner CommandRunner) (string, error) {
-	out, err := runner.Run("cat /etc/machine-id")
+	out, err := runner.Run(machineIDCommand)
 	if err != nil {
 		return "", fmt.Errorf("reading machine id: %w", err)
 	}
@@ -126,6 +126,11 @@ func ReadMachineID(runner CommandRunner) (string, error) {
 	}
 	return id, nil
 }
+
+const (
+	machineIDCommand = "cat /etc/machine-id"
+	mountsCommand    = "cat /proc/mounts"
+)
 
 // machineIDPattern is the format systemd guarantees: 32 lowercase hex
 // characters. Nothing else is a machine id, and a worker is not the right place
@@ -347,9 +352,7 @@ func PendingRestarts(runner CommandRunner) (RestartsPending, error) {
 	}
 
 	// Distinguish a missing tool from a failed check so operators can act on the error.
-	out, err := runner.Run(
-		"if ! command -v needrestart >/dev/null 2>&1; then echo NEEDRESTART-ABSENT; " +
-			"elif ! needrestart -b; then echo NEEDRESTART-FAILED; fi")
+	out, err := runner.Run(needrestartCommand)
 	if err != nil {
 		return RestartsPending{}, fmt.Errorf("reading pending restarts: %w", err)
 	}
@@ -388,6 +391,9 @@ func PendingRestarts(runner CommandRunner) (RestartsPending, error) {
 	}
 	return pending, nil
 }
+
+const needrestartCommand = "if ! command -v needrestart >/dev/null 2>&1; then echo NEEDRESTART-ABSENT; " +
+	"elif ! needrestart -b; then echo NEEDRESTART-FAILED; fi"
 
 // Require both exit code 1 and the reboot message to distinguish a reboot hint
 // from a failed dnf command. LC_ALL=C keeps the message check stable.
@@ -447,7 +453,7 @@ func pendingRestartsDNF(runner CommandRunner) (RestartsPending, error) {
 // which node it asked. The controller's log-based detector is the signal that
 // covers every node.
 func ReadOnlyVolumeMounts(runner CommandRunner) ([]string, error) {
-	out, err := runner.Run("cat /proc/mounts")
+	out, err := runner.Run(mountsCommand)
 	if err != nil {
 		return nil, fmt.Errorf("reading mounts: %w", err)
 	}

@@ -161,7 +161,7 @@ func DeleteNodeRecord(client CommandRunner, machineID string) error {
 	}
 	// A missing ConfigMap allows a retry to succeed. A failed read must stop removal.
 	cmd := fmt.Sprintf(`found=$(kubectl -n %[1]s get configmap %[2]s --ignore-not-found -o name 2>/dev/null) || exit 1; [ "$found" = configmap/%[2]s ] || exit 0; kubectl -n %[1]s patch configmap %[2]s --type merge --patch-file /dev/stdin >/dev/null`,
-		nodeRecordsNamespace, nodeRecordsConfigMap)
+		NodeRecordsNamespace, NodeRecordsConfigMap)
 	if _, err := client.RunStdin(cmd, strings.NewReader(string(patch))); err != nil {
 		return fmt.Errorf("removing the record of %s: %w", machineID, err)
 	}

@@ -172,12 +172,14 @@ func (f failOpenHost) RunStdin(cmd string, _ io.Reader) (string, error) { return
 
 func TestStatusReportsAFirewallRollbackThatSwitchedUFWOff(t *testing.T) {
 	var out bytes.Buffer
-	reportUFWFailOpen(&out, failOpenHost{marker: "abc123 2026-10-16T12:00:00Z\n"})
+	server := serverTarget(&config.Cluster{Host: "203.0.113.10"}, failOpenHost{marker: "abc123 2026-10-16T12:00:00Z\n"}, nil, nil)
+	reportUFWFailOpen(&out, []hostTarget{server})
 	assert.Contains(t, out.String(), "run abc123, 2026-10-16T12:00:00Z")
 	assert.Contains(t, out.String(), "Run 'kip cluster harden' to turn it back on")
 
 	out.Reset()
-	reportUFWFailOpen(&out, failOpenHost{})
+	server.runner = failOpenHost{}
+	reportUFWFailOpen(&out, []hostTarget{server})
 	assert.Empty(t, out.String())
 }
 
