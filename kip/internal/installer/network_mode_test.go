@@ -128,16 +128,24 @@ func TestPlanNodeNetworkHonoursPublic(t *testing.T) {
 	assert.False(t, server.ran("route get 10.0.0.4"), "--public skips the private lookup")
 }
 
-// A host whose default route leaves through the private LAN only counts as
-// private when the operator names the network.
+// TestPlanNodeNetworkUsesANamedPrivateNetworkOnTheDefaultRoute covers a private
+// LAN carrying the default route, as on cloud VMs in one VPC. A working path
+// requires an explicit network choice, while a failed check allows public fallback.
 func TestPlanNodeNetworkUsesANamedPrivateNetworkOnTheDefaultRoute(t *testing.T) {
 	lanServer := []route{{contains: "route show default", out: "default via 192.168.1.1 dev enp7s0 src 10.0.0.3\n"}}
 	lanJoiner := []route{{contains: "route show default", out: "default via 192.168.1.1 dev eth1 src 10.0.0.4\n"}}
 
 	server, joiner := networkHosts(lanServer, lanJoiner)
+	_, err := PlanNodeNetwork(server, joiner, external)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--private-network 10.0.0.0/24")
+	assert.Contains(t, err.Error(), "--public")
+
+	unreachable := append([]route{{contains: "/dev/tcp/10.0.0.4/", err: errors.New("exit status 124")}}, lanServer...)
+	server, joiner = networkHosts(unreachable, lanJoiner)
 	plan, err := PlanNodeNetwork(server, joiner, external)
 	require.NoError(t, err)
-	assert.Equal(t, NetworkModePublic, plan.Mode, "without --private-network the default route is not private")
+	assert.Equal(t, NetworkModePublic, plan.Mode, "a shared network that fails its checks leaves public mode as the fallback")
 
 	server, joiner = networkHosts(lanServer, lanJoiner)
 	opts := external

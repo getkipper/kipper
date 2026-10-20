@@ -140,8 +140,11 @@ func tcpReachable(from CommandRunner, addr netip.Addr, port string) bool {
 // PlanNodeNetwork selects addresses and a mode consistent with opts.ClusterMode.
 // Private mode requires local RFC 1918 addresses, SSH access to the joiner,
 // and API access to the server. Automatic selection excludes default-route
-// interfaces. An explicit private network allows them. Automatic selection falls
-// back to public mode only when no private route qualifies for the TCP checks.
+// interfaces. An explicit private network allows them. With no cluster mode set,
+// automatic selection falls back to public mode only when no private route
+// qualifies for the TCP checks. Before falling back, it checks for a shared
+// default-route network and returns an error asking for an explicit network
+// choice if that network passes the private path checks.
 // Public mode requires external IPv4 addresses and API access to the server.
 // It resolves the cluster pod CIDR and caps each host's backend MTU at 1360 bytes,
 // rejecting interface MTUs below 1280 bytes. Invalid options or failed network
@@ -184,8 +187,41 @@ func PlanNodeNetwork(server, joiner CommandRunner, opts NetworkModeOptions) (Net
 		if unreachable != "" {
 			return NetworkPlan{}, fmt.Errorf("kip found a private route between the hosts, but %s. Open that port on the private network and re-run, or add --public to join over public addresses instead; later nodes will also use public addresses", unreachable)
 		}
+		if shared, ok := sharedDefaultNetwork(server, joiner, opts); ok {
+			return NetworkPlan{}, fmt.Errorf("the hosts reach each other over the private network %s on their default network interfaces. Using this network requires an explicit choice. Re-run with --private-network %s to join over it, or with --public to join over public addresses. Later nodes will use the same mode", shared, shared)
+		}
 	}
 	return publicPlan(server, joiner, opts)
+}
+
+// sharedDefaultNetwork checks the smallest /24, /16 or /8 prefix containing both
+// hosts' private IPv4 default-route source addresses. It returns that prefix only
+// if privatePath finds a usable path within it. Lookup or path-check failures
+// return false so automatic selection can continue to public mode.
+func sharedDefaultNetwork(server, joiner CommandRunner, opts NetworkModeOptions) (netip.Prefix, bool) {
+	serverDefault, err := defaultRoute(server)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	joinerDefault, err := defaultRoute(joiner)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	a, b := serverDefault.src, joinerDefault.src
+	if !a.Is4() || !b.Is4() || !a.IsPrivate() || !b.IsPrivate() {
+		return netip.Prefix{}, false
+	}
+	for _, bits := range []int{24, 16, 8} {
+		p := netip.PrefixFrom(a, bits).Masked()
+		if !p.Contains(b) {
+			continue
+		}
+		if _, found, _, err := privatePath(server, joiner, p, opts); err == nil && found {
+			return p, true
+		}
+		return netip.Prefix{}, false
+	}
+	return netip.Prefix{}, false
 }
 
 func failedLeg(unreachable string) string {
