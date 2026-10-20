@@ -396,8 +396,34 @@ func (w *workerReboot) preview() error {
 	if err != nil {
 		return err
 	}
+	if err := w.lastCopiesCanMove(volumes); err != nil {
+		return err
+	}
 	reportNodeVolumes(w.Out, w.Node, volumes)
 	return volumeGate(w.Out, w.Master, w.IgnoreVolumes)
+}
+
+// lastCopiesCanMove rejects a drain when the preflight check finds no destination
+// for a volume's last healthy copy. This avoids waiting for the drain timeout
+// after other pods may have been evicted. Read failures produce a warning and
+// allow the drain to proceed, since it still waits for Longhorn to copy replicas.
+func (w *workerReboot) lastCopiesCanMove(volumes []installer.NodeVolume) error {
+	var last []installer.NodeVolume
+	for _, v := range volumes {
+		if v.LastCopy() {
+			last = append(last, v)
+		}
+	}
+	blocked, err := installer.LastCopiesWithoutRoom(w.Master, w.Node, last)
+	if err != nil {
+		say(w.Out, "  ⚠  could not check where Longhorn can copy the volumes on %s (%v). The drain still waits for those copies.\n", w.Node, err)
+		return nil
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s holds the only healthy copy of %s, and no other node can take a copy:\n    %s\n  Without a destination for the copy, the drain would time out and cancel the reboot of %s. Free disk space or make a disk schedulable on a node the volume may use, then run this command again",
+		w.Node, plural(len(blocked), "a volume", "volumes"), strings.Join(blocked, "\n    "), w.Node)
 }
 
 // prepare returns cleanup for the cordon it adds, preserving an existing cordon.
@@ -414,6 +440,11 @@ func (w *workerReboot) prepare() (func() error, error) {
 	}
 	// Recheck just before cordoning: health may change during confirmation and backup.
 	if err := volumeGate(w.Out, w.Master, w.IgnoreVolumes); err != nil {
+		return nil, err
+	}
+	if volumes, err := installer.VolumesOnNode(w.Master, w.Node); err != nil {
+		say(w.Out, "  ⚠  could not check where Longhorn can copy the volumes on %s (%v). The drain still waits for those copies.\n", w.Node, err)
+	} else if err := w.lastCopiesCanMove(volumes); err != nil {
 		return nil, err
 	}
 

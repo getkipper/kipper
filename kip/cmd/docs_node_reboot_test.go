@@ -72,7 +72,8 @@ func TestNodeAddDocsSayTheDataStaysOnTheServer(t *testing.T) {
 	nodeAdd := docSection(t, "cli-reference.md", "## kip node add")
 	assert.Contains(t, nodeAdd, "Kipper configures each database, registry and in-cluster backup volume to keep one copy on the server")
 	assert.NotContains(t, nodeAdd, "the registry uses one replica with single-replica storage")
-	assert.Contains(t, nodeAdd, "otherwise the reboot refuses: the drain blocks until `--drain-timeout`, then fails, and kip cancels the reboot")
+	assert.Contains(t, nodeAdd, "Otherwise the reboot names the volume and stops before cordoning the worker")
+	assert.Contains(t, nodeAdd, "or capacity changes after that check, the drain blocks until `--drain-timeout`, then fails, and kip cancels the reboot")
 }
 
 func TestSecurityDocsDescribeTheUFWRollback(t *testing.T) {
