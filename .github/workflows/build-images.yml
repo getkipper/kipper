@@ -1,6 +1,6 @@
 name: Build and publish images
 
-# Builds and publishes the nine code images on a push to main, or on demand.
+# Builds and publishes the ten code images on a push to main, or on demand.
 # A run dispatched from a branch publishes only the commit tag, never :latest.
 # paths-ignore keeps a docs-only change from running the matrix; the docs
 # image has its own workflow that triggers on exactly those paths.
@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
 
 # One run per ref, for the same reason CI has one: three merges in ten minutes
-# should not run three nine-image matrices to completion when only the last
+# should not run three ten-image matrices to completion when only the last
 # one's images are ever pulled.
 concurrency:
   group: build-images-${{ github.ref }}
@@ -61,6 +61,11 @@ jobs:
           - image: kipper-datamover
             context: datamover
             dockerfile: datamover/Dockerfile
+          # The mirror image carries the kip binary, which imports the
+          # sibling controller module, so it builds from the repo root.
+          - image: kipper-mirror
+            context: .
+            dockerfile: images/kipper-mirror/Dockerfile
           - image: kipper-runtime-node
             context: kipper-runtime-node
             dockerfile: kipper-runtime-node/Dockerfile
