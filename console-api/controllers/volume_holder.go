@@ -50,8 +50,12 @@ const (
 	holderRetryInterval = time.Minute
 
 	// holderStartGrace limits how long a holder may start or terminate before
-	// the Volume reports a problem. An active restore has no start deadline.
+	// the Volume reports a problem. A restore has its own deadline.
 	holderStartGrace = 10 * time.Minute
+
+	// holderRestoreDeadline is the maximum pod age before a holder with an
+	// unfinished restore is replaced.
+	holderRestoreDeadline = 24 * time.Hour
 )
 
 // volumeHolderCommand sleeps until the pod is stopped and exits at once on
@@ -199,10 +203,11 @@ func holderProvenance(pod *corev1.Pod, vol *kipperv1.Volume) (bool, string) {
 // condition for the caller to persist. It returns a retry delay, or zero to
 // wait for a watched event, and any API error that prevents reconciliation.
 //
-// Pending holders are preserved so Velero's init container can finish restoring
-// their data. Replacing one would interrupt the restore. Velero restores pods
-// before custom resources, so a restored holder can precede its Volume. An
-// ownerless holder is adopted once its labels and claim establish ownership.
+// Pending holders are preserved until the restore deadline so Velero's init
+// container can finish restoring their data. Replacing one interrupts the
+// restore. Velero restores pods before custom resources, so a restored holder
+// can precede its Volume. An ownerless holder is adopted once its labels and
+// claim establish ownership.
 func (r *VolumeReconciler) reconcileHolder(ctx context.Context, vol *kipperv1.Volume, pvc *corev1.PersistentVolumeClaim) (time.Duration, error) {
 	if ok, why := claimProvenance(pvc, vol); !ok {
 		r.setHolderCondition(vol, "ForeignClaim", fmt.Sprintf(
@@ -283,8 +288,7 @@ func (r *VolumeReconciler) reconcileHolder(ctx context.Context, vol *kipperv1.Vo
 	case ended:
 		// A terminal pod cannot restart or support backups or restores.
 		// Deletion triggers reconciliation to create its replacement.
-		uid := pod.UID
-		if err := r.Delete(ctx, &pod, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
+		if err := r.replaceHolder(ctx, vol, &pod); err != nil {
 			return 0, fmt.Errorf("removing ended backup holder: %w", err)
 		}
 		r.setHolderCondition(vol, "Starting", "The backup holder ended and is being replaced.")
@@ -292,8 +296,32 @@ func (r *VolumeReconciler) reconcileHolder(ctx context.Context, vol *kipperv1.Vo
 	case podReady(&pod):
 		r.setHolderReady(vol)
 		return 0, nil
+	case restoreUnfinished(&pod) && holderAge(&pod) >= holderRestoreDeadline:
+		// Velero's restore container waits for a done file that a failed
+		// volume restore never writes, so the pod would stay in its init
+		// container and keep the volume out of later backups.
+		r.setHolderCondition(vol, "RestoreStuck", fmt.Sprintf(
+			"The volume restore is still unfinished %s after the backup holder was created. The backup holder is being replaced so backups include the volume again. Restore again if the files are incomplete.", holderRestoreDeadline))
+		if err := r.replaceHolder(ctx, vol, &pod); err != nil {
+			return 0, fmt.Errorf("removing stuck backup holder: %w", err)
+		}
+		return 0, nil
 	}
 	return r.reportHolderNotReady(vol, &pod), nil
+}
+
+// replaceHolder saves vol's status before deleting pod to trigger replacement.
+// Saving first preserves restore warnings before their evidence is deleted.
+// If saving fails, the pod remains for the next reconciliation.
+func (r *VolumeReconciler) replaceHolder(ctx context.Context, vol *kipperv1.Volume, pod *corev1.Pod) error {
+	if err := r.Status().Update(ctx, vol); err != nil {
+		return fmt.Errorf("saving volume status: %w", err)
+	}
+	uid := pod.UID
+	if err := r.Delete(ctx, pod, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // reportHolderNotReady records why a holder that has not ended is not ready
@@ -310,13 +338,10 @@ func (r *VolumeReconciler) reportHolderNotReady(vol *kipperv1.Volume, pod *corev
 			"The backup holder's container %s is failing: %s %s", name, waiting.Reason, waiting.Message))
 		return 0
 	}
+	age := holderAge(pod)
 	if restoreUnfinished(pod) {
 		r.setHolderCondition(vol, "Restoring", "The backup holder is waiting for a restore to write the volume's files.")
-		return 0
-	}
-	var age time.Duration
-	if !pod.CreationTimestamp.IsZero() {
-		age = time.Since(pod.CreationTimestamp.Time)
+		return holderRestoreDeadline - age
 	}
 	if age >= holderStartGrace {
 		r.setHolderCondition(vol, "NotStarting", fmt.Sprintf(
@@ -325,6 +350,15 @@ func (r *VolumeReconciler) reportHolderNotReady(vol *kipperv1.Volume, pod *corev
 	}
 	r.setHolderCondition(vol, "Starting", "The backup holder is starting.")
 	return holderStartGrace - age
+}
+
+// holderAge returns the time since pod was created, or zero if its creation
+// time is unset.
+func holderAge(pod *corev1.Pod) time.Duration {
+	if pod.CreationTimestamp.IsZero() {
+		return 0
+	}
+	return time.Since(pod.CreationTimestamp.Time)
 }
 
 // failingContainer returns the first container waiting for a non-empty reason
@@ -373,10 +407,17 @@ func (r *VolumeReconciler) setHolderReady(vol *kipperv1.Volume) {
 	})
 }
 
-// setHolderCondition sets BackupHolderReady to false. When the condition
-// changes and a recorder is available, reasons other than Starting or Restoring
-// also emit a warning event to draw the operator's attention.
+// setHolderCondition sets BackupHolderReady to false, preserving RestoreStuck
+// and RestoreInterrupted warnings when the new reason is Starting. When the
+// condition changes and a recorder is available, reasons other than Starting
+// or Restoring also emit a warning event to draw the operator's attention.
 func (r *VolumeReconciler) setHolderCondition(vol *kipperv1.Volume, reason, message string) {
+	if reason == "Starting" {
+		if c := apimeta.FindStatusCondition(vol.Status.Conditions, conditionBackupHolderReady); c != nil &&
+			(c.Reason == "RestoreStuck" || c.Reason == "RestoreInterrupted") {
+			return
+		}
+	}
 	changed := apimeta.SetStatusCondition(&vol.Status.Conditions, metav1.Condition{
 		Type:               conditionBackupHolderReady,
 		Status:             metav1.ConditionFalse,

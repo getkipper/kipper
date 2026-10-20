@@ -556,8 +556,8 @@ func TestVolumeHolderStartingIsRecheckedAfterTheGrace(t *testing.T) {
 	assert.LessOrEqual(t, res.RequeueAfter, holderStartGrace)
 }
 
-// A restore can take hours, so a restoring holder has no start grace.
-func TestVolumeHolderRestoringHasNoStartGrace(t *testing.T) {
+// A restore can take hours, so restoring holders have a longer deadline.
+func TestVolumeHolderRestoringOutlastsTheStartGrace(t *testing.T) {
 	vol := sharedVolume()
 	pod := restoredHolder()
 	pod.OwnerReferences = []metav1.OwnerReference{volumeControllerRef(vol)}
@@ -565,9 +565,47 @@ func TestVolumeHolderRestoringHasNoStartGrace(t *testing.T) {
 	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "restore-wait",
 		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
 	h := newHolderHarness(t, interceptor.Funcs{}, vol, sharedClaim(vol), pod)
-	h.reconcile(t)
+	res := h.reconcile(t)
 
 	assert.Equal(t, "Restoring", h.holderCondition(t).Reason)
+	assert.Positive(t, res.RequeueAfter, "the restore deadline is checked without a pod event")
+	assert.LessOrEqual(t, res.RequeueAfter, holderRestoreDeadline-10*holderStartGrace+time.Minute)
+}
+
+// A failed volume restore leaves Velero's restore container waiting indefinitely
+// for its completion file. Replacing it after the deadline lets backups resume
+// while the Volume retains the restore warning.
+func TestVolumeHolderStuckInARestoreIsReplaced(t *testing.T) {
+	vol := sharedVolume()
+	pod := restoredHolder()
+	pod.UID = "stuck"
+	pod.OwnerReferences = []metav1.OwnerReference{volumeControllerRef(vol)}
+	pod.CreationTimestamp = metav1.NewTime(metav1.Now().Add(-holderRestoreDeadline - time.Minute))
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "restore-wait",
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
+	h := newHolderHarness(t, interceptor.Funcs{}, vol, sharedClaim(vol), pod)
+	h.reconcile(t)
+
+	if p, ok := h.holder(t); ok {
+		assert.NotEqual(t, types.UID("stuck"), p.UID, "the stuck holder is replaced")
+	}
+	cond := h.holderCondition(t)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "RestoreStuck", cond.Reason)
+	events := h.events()
+	require.Len(t, events, 1)
+	assert.Contains(t, events[0], "BackupHolderRestoreStuck")
+
+	h.reconcile(t)
+	assert.Equal(t, "RestoreStuck", h.holderCondition(t).Reason)
+	fresh, ok := h.holder(t)
+	require.True(t, ok)
+	fresh.Status.Phase = corev1.PodRunning
+	fresh.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	require.NoError(t, h.client.Status().Update(context.Background(), fresh))
+	h.reconcile(t)
+	assert.Equal(t, "Running", h.holderCondition(t).Reason)
 }
 
 // Replacing a terminal holder lets backups resume. A warning event on the
@@ -656,4 +694,50 @@ func TestVolumeHolderRemovedDuringARestoreIsReported(t *testing.T) {
 	events := h.events()
 	require.Len(t, events, 1)
 	assert.Contains(t, events[0], "BackupHolderRestoreInterrupted")
+}
+
+// Saving the restore warning before deleting the pod preserves the evidence
+// needed to retry if the status update fails.
+func TestVolumeHolderRestoreWarningIsSavedBeforeThePodGoes(t *testing.T) {
+	cases := map[string]func(*corev1.Pod){
+		"stuck": func(p *corev1.Pod) {
+			p.CreationTimestamp = metav1.NewTime(metav1.Now().Add(-holderRestoreDeadline - time.Minute))
+		},
+		"interrupted": func(p *corev1.Pod) {
+			p.Status.Phase = corev1.PodFailed
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			vol := sharedVolume()
+			pod := restoredHolder()
+			pod.UID = "carrier"
+			pod.OwnerReferences = []metav1.OwnerReference{volumeControllerRef(vol)}
+			mutate(pod)
+			failed := false
+			h := newHolderHarness(t, interceptor.Funcs{
+				SubResourceUpdate: func(ctx context.Context, c crclient.Client, sub string, obj crclient.Object, opts ...crclient.SubResourceUpdateOption) error {
+					if !failed {
+						failed = true
+						return apierrors.NewConflict(schema.GroupResource{Resource: "volumes"}, obj.GetName(), errors.New("stale"))
+					}
+					return c.SubResource(sub).Update(ctx, obj, opts...)
+				},
+			}, vol, sharedClaim(vol), pod)
+
+			_, err := h.reconciler.Reconcile(context.Background(), ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: "uploads", Namespace: holderTestNamespace},
+			})
+			require.Error(t, err)
+			kept, ok := h.holder(t)
+			require.True(t, ok, "the pod stays while its warning is unsaved")
+			assert.Equal(t, types.UID("carrier"), kept.UID)
+
+			h.reconcile(t)
+			h.reconcile(t)
+			cond := h.holderCondition(t)
+			require.NotNil(t, cond)
+			assert.Contains(t, []string{"RestoreStuck", "RestoreInterrupted"}, cond.Reason)
+		})
+	}
 }
