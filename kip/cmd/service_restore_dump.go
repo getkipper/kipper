@@ -31,9 +31,10 @@ var serviceRestoreDumpCmd = &cobra.Command{
 	Use:   "restore-dump <service> --to <target>",
 	Short: "Restore a Postgres service's consistent dump from a backup into another empty Postgres service",
 	Long: `Restores a Postgres service's consistent pg_dump from a backup
-into another Postgres service in the same namespace. The namespace's service
-pods are first restored from the backup into the isolated namespace
-kipper-restore-drill. The source service's dump manifest and checksums are
+into another Postgres service in the same namespace. First, the source service's
+pod, credentials, TLS objects, and data and dump volumes are restored from the
+backup into the isolated namespace kipper-restore-drill. The restore is limited
+to that service. Its dump manifest and checksums are
 checked, then each database is streamed through the Kubernetes API into the
 target in one transaction per database. Row counts in the target must match
 the counts recorded with the dump.
@@ -194,7 +195,7 @@ func runServiceRestoreDump(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  ⚠  %v\n", err)
 		}
 	}()
-	pods, err := restoreIntoDrill(ctx, clientset, dyn, backup, namespace, &restoreName)
+	pods, err := restoreIntoDrill(ctx, clientset, dyn, backup, namespace, source, &restoreName)
 	if err != nil {
 		return err
 	}
