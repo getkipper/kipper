@@ -58,7 +58,9 @@ second copy of the services. To check one Postgres service's backup, use
 kip service restore-dump.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
-	RunE:         runBackupDrill,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return reportInterrupt(runBackupDrill(cmd, args))
+	},
 }
 
 func init() {
@@ -531,6 +533,17 @@ func deleteDrillModifiers(ctx context.Context, clientset kubernetes.Interface) e
 		}
 	}
 	return nil
+}
+
+// reportInterrupt replaces "context canceled" with "interrupted" in errors
+// matching context.Canceled, including cancellation by Ctrl-C or SIGTERM.
+// It preserves the rest of the message but discards the error chain.
+// Other inputs, including nil, pass through unchanged.
+func reportInterrupt(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return errors.New(strings.ReplaceAll(err.Error(), context.Canceled.Error(), "interrupted"))
+	}
+	return err
 }
 
 func deleteDrillNamespace(ctx context.Context, clientset kubernetes.Interface) error {

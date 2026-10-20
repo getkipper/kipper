@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -468,4 +469,18 @@ func TestADrillStopsWhenThePlatformConfigCannotBeRead(t *testing.T) {
 		return true, nil, apierrors.NewServiceUnavailable("the apiserver is busy")
 	})
 	assert.Error(t, drillProfileAllowed(context.Background(), refusing))
+}
+
+func TestAnInterruptedDrillSaysSoInsteadOfContextCanceled(t *testing.T) {
+	err := reportInterrupt(fmt.Errorf("waiting for restore drill-shop-1: %w", context.Canceled))
+	require.Error(t, err)
+	assert.Equal(t, "waiting for restore drill-shop-1: interrupted", err.Error())
+
+	load := fmt.Errorf("database app: %w. Databases listed above were restored. Delete and recreate pg2 before trying again", context.Canceled)
+	assert.Equal(t, "database app: interrupted. Databases listed above were restored. Delete and recreate pg2 before trying again",
+		reportInterrupt(load).Error(), "the recovery advice around the cancellation stays")
+
+	other := errors.New("restore drill-shop-1 ended with phase Failed")
+	assert.Equal(t, other, reportInterrupt(other))
+	assert.NoError(t, reportInterrupt(nil))
 }
