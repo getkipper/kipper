@@ -725,7 +725,7 @@ func revokePeer(out io.Writer, client installer.FirewallRunner, label string, me
 	if !audit.KipperManaged {
 		return fmt.Sprintf("kip does not manage the firewall on %s, so it did not change it. Remove any rules there that admit %s on 51820/udp, 10250/tcp or 9100/tcp", label, peerAddressOf(removed)), nil
 	}
-	return "", applyPeerFirewall(out, client, label, mesh, existingFirewall, false)
+	return "", applyPeerFirewall(out, client, label, mesh, existingFirewall, false, false)
 }
 
 // peerAddressOf is the address other nodes' firewalls admit for node.
