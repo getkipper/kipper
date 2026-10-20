@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	stderrors "errors"
 	"fmt"
@@ -100,8 +101,33 @@ const (
 // first certificate is being issued.
 var errAwaitingCertificate = stderrors.New("waiting for the first TLS certificate")
 
-func tlsSecretName(service string) string    { return service + "-tls" }
+// TLSSecretName names the Secret into which cert-manager writes a Postgres
+// service's certificate, key and CA.
+func TLSSecretName(service string) string { return service + "-tls" }
+
 func hbaConfigMapName(service string) string { return service + "-pg-hba" }
+
+// tlsSecretOwnedBy checks the service label and Certificate annotation to
+// avoid using another service's TLS Secret.
+func tlsSecretOwnedBy(secret *corev1.Secret, service string) bool {
+	return secret.Labels[labels.TLSFor] == service && secret.Annotations[certificateNameAnnotation] == TLSSecretName(service)
+}
+
+// ServiceCA returns the ca.crt bytes from a non-nil Postgres TLS Secret for
+// clients to use as trust roots. It returns an error if the service label or
+// Certificate annotation differs from the expected value, or ca.crt contains
+// no parseable PEM certificates. The returned slice shares the Secret's data.
+// Callers must verify the server's certificate and DNS name when connecting.
+func ServiceCA(secret *corev1.Secret, service string) ([]byte, error) {
+	if !tlsSecretOwnedBy(secret, service) {
+		return nil, fmt.Errorf("the TLS Secret %s was not issued for service %s", secret.Name, service)
+	}
+	ca := secret.Data[serviceCAFile]
+	if !x509.NewCertPool().AppendCertsFromPEM(ca) {
+		return nil, fmt.Errorf("the TLS Secret %s holds no usable CA certificate", secret.Name)
+	}
+	return ca, nil
+}
 
 // reconcilePostgresTLS ensures the Certificate and pg_hba ConfigMap for
 // Postgres with TLS enabled and records issuance failures in TLSReady. It verifies
@@ -324,14 +350,14 @@ func usableKeyPair(crt, key []byte) bool {
 // expected name, to avoid serving another service's key.
 func (r *ServiceReconciler) issuedSecret(ctx context.Context, svc *kipperv1.Service) (*corev1.Secret, error) {
 	var secret corev1.Secret
-	err := r.Get(ctx, types.NamespacedName{Namespace: svc.Namespace, Name: tlsSecretName(svc.Name)}, &secret)
+	err := r.Get(ctx, types.NamespacedName{Namespace: svc.Namespace, Name: TLSSecretName(svc.Name)}, &secret)
 	if errors.IsNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if secret.Labels[labels.TLSFor] != svc.Name || secret.Annotations[certificateNameAnnotation] != tlsSecretName(svc.Name) {
+	if !tlsSecretOwnedBy(&secret, svc.Name) {
 		return nil, &nameTakenError{Kind: "Secret", Name: secret.Name, Namespace: svc.Namespace}
 	}
 	if len(secret.Data[corev1.TLSCertKey]) == 0 || len(secret.Data[corev1.TLSPrivateKeyKey]) == 0 {
@@ -382,11 +408,11 @@ func (r *ServiceReconciler) clearTLSCondition(ctx context.Context, svc *kipperv1
 func (r *ServiceReconciler) ensureCertificate(ctx context.Context, svc *kipperv1.Service) (*unstructured.Unstructured, error) {
 	desired := &unstructured.Unstructured{}
 	desired.SetGroupVersionKind(certificateGVK)
-	desired.SetName(tlsSecretName(svc.Name))
+	desired.SetName(TLSSecretName(svc.Name))
 	desired.SetNamespace(svc.Namespace)
 	desired.SetLabels(map[string]string{kipperLabel: kipperValue, "app": svc.Name, labels.TLSFor: svc.Name})
 	spec := map[string]interface{}{
-		"secretName": tlsSecretName(svc.Name),
+		"secretName": TLSSecretName(svc.Name),
 		"secretTemplate": map[string]interface{}{
 			"labels": map[string]interface{}{
 				kipperLabel:   kipperValue,
@@ -507,7 +533,7 @@ func (r *ServiceReconciler) removePostgresTLS(ctx context.Context, svc *kipperv1
 		return err
 	}
 	var secret corev1.Secret
-	secretFound, err := r.found(ctx, types.NamespacedName{Namespace: svc.Namespace, Name: tlsSecretName(svc.Name)}, &secret)
+	secretFound, err := r.found(ctx, types.NamespacedName{Namespace: svc.Namespace, Name: TLSSecretName(svc.Name)}, &secret)
 	if err != nil {
 		return err
 	}
@@ -523,7 +549,7 @@ func (r *ServiceReconciler) removePostgresTLS(ctx context.Context, svc *kipperv1
 	// Delete the Certificate first to prevent cert-manager from recreating the Secret.
 	cert := &unstructured.Unstructured{}
 	cert.SetGroupVersionKind(certificateGVK)
-	err = r.Get(ctx, types.NamespacedName{Namespace: svc.Namespace, Name: tlsSecretName(svc.Name)}, cert)
+	err = r.Get(ctx, types.NamespacedName{Namespace: svc.Namespace, Name: TLSSecretName(svc.Name)}, cert)
 	switch {
 	case err == nil:
 		if ownsTLSObject(cert, svc) {
@@ -623,7 +649,7 @@ func applyPostgresTLS(tpl *corev1.PodTemplateSpec, svcName, image, certHash stri
 
 func postgresTLSVolumes(svcName string) []corev1.Volume {
 	return []corev1.Volume{
-		{Name: tlsSourceVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: tlsSecretName(svcName)}}},
+		{Name: tlsSourceVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: TLSSecretName(svcName)}}},
 		{Name: tlsVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}},
 		{Name: hbaVolume, VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
 			LocalObjectReference: corev1.LocalObjectReference{Name: hbaConfigMapName(svcName)},
