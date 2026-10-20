@@ -48,8 +48,8 @@ func TestRepairHostConnectsAsRoot(t *testing.T) {
 		"writing host configuration needs root, as kip node add does")
 }
 
-// repairHost is an Ubuntu node that logs needrestart writes and, on the
-// server, node annotations.
+// repairHost is an Ubuntu node that logs NFS client and needrestart writes and,
+// on the server, node annotations.
 type repairHost struct {
 	eachHost
 	name  string
@@ -61,6 +61,8 @@ func (h *repairHost) Run(command string) (string, error) {
 	switch {
 	case command == "cat /etc/os-release":
 		return "ID=ubuntu\nVERSION_ID=\"24.04\"\n", nil
+	case strings.Contains(command, "/etc/modprobe.d/kipper-nfs.conf"):
+		*h.log = append(*h.log, "nfs "+h.name)
 	case strings.HasPrefix(command, "mkdir -p /etc/needrestart"):
 		*h.log = append(*h.log, "configure "+h.name)
 	case strings.HasPrefix(command, "kubectl get nodes"):
@@ -87,9 +89,9 @@ func TestRepairHostOnEveryNodeConfiguresEachAndRecordsItFromTheServer(t *testing
 	require.NoError(t, repairHostOnNodes(eachRecords(), server, dial))
 
 	assert.Equal(t, []string{
-		"configure server", "server records 'server'",
-		"configure worker-a", "server records 'worker-a'",
-		"configure worker-b", "server records 'worker-b'",
+		"nfs server", "configure server", "server records 'server'",
+		"nfs worker-a", "configure worker-a", "server records 'worker-a'",
+		"nfs worker-b", "configure worker-b", "server records 'worker-b'",
 	}, log)
 }
 

@@ -56,6 +56,8 @@ Shared volumes need a cluster with Longhorn storage. A cluster with [local stora
 
 Shared volumes provide a filesystem path through Longhorn's RWX storage. Choose this approach when your app expects filesystem access, and account for the shared storage service when planning capacity and availability.
 
+On Linux 7.0 and later, the NFS client requests directory delegations, which Longhorn 1.7.3's shared volume server rejects. Apps then get "Remote I/O error" when accessing subdirectories, and backups skip the volume's files. `kip install` and `kip node add` turn off directory delegations on the node they set up. For clusters set up by older kip versions, run `kip node repair-host` once. It covers every recorded node.
+
 ### Create a shared volume
 
 ```bash
