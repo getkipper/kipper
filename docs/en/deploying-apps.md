@@ -121,6 +121,8 @@ Configure your Git provider to send push events to the webhook URL. Kipper valid
 kip app build-logs backend --project blog --environment test
 ```
 
+The command follows each build stage in turn until the build finishes, so scripts can wait for the result. It exits with a non-zero status when the build fails and reports the first failed stage and its exit code when available. Otherwise, it reports the build pod's reason and message.
+
 ### How it works
 
 ```mermaid
