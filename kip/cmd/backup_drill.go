@@ -188,10 +188,11 @@ func createDrillNamespace(ctx context.Context, clientset kubernetes.Interface) e
 
 // restoreIntoDrill isolates the drill namespace and restores services from the
 // source namespace's backup into it. A non-empty service limits the restore to
-// that service. It sets *restoreName before submitting the Restore so the caller
-// can check it during cleanup even when the submission's outcome is unknown.
-// It returns the pods after the restore completes and their PVC-backed volumes
-// have completed volume restores. An empty pod list is an error.
+// that service and lowers its restored pod's resource requests for scheduling.
+// It sets *restoreName before creating the modifier or submitting the Restore,
+// so cleanup can check the Restore even if the submission's outcome is unknown.
+// It returns the pods once the restore and their PVC-backed volume restores
+// have completed. An empty pod list is an error.
 func restoreIntoDrill(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, backup *unstructured.Unstructured, source, service string, restoreName *string) ([]corev1.Pod, error) {
 	if _, err := clientset.NetworkingV1().NetworkPolicies(drillNamespace).Create(ctx, drillNetworkPolicy(), metav1.CreateOptions{}); err != nil {
 		return nil, fmt.Errorf("isolating namespace %s: %w", drillNamespace, err)
@@ -204,13 +205,22 @@ func restoreIntoDrill(ctx context.Context, clientset kubernetes.Interface, dyn d
 	}
 
 	name := "drill-" + source + "-" + time.Now().Format("20060102-150405")
+	spec := drillRestoreSpec(backup.GetName(), source, service)
+	*restoreName = name
+	if service != "" {
+		// The copy is used only to read dump files, so lower its scheduling
+		// requests to help it fit alongside the source and target.
+		if _, err := clientset.CoreV1().ConfigMaps("velero").Create(ctx, minimalRequestsModifier(name), metav1.CreateOptions{}); err != nil {
+			return nil, fmt.Errorf("creating the resource modifier for restore %s: %w", name, err)
+		}
+		spec["resourceModifier"] = map[string]interface{}{"kind": "ConfigMap", "name": name}
+	}
 	restore := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "velero.io/v1",
 		"kind":       "Restore",
 		"metadata":   map[string]interface{}{"name": name, "namespace": "velero"},
-		"spec":       drillRestoreSpec(backup.GetName(), source, service),
+		"spec":       spec,
 	}}
-	*restoreName = name
 	if _, err := dyn.Resource(restoreGVR).Namespace("velero").Create(ctx, restore, metav1.CreateOptions{}); err != nil {
 		return nil, fmt.Errorf("creating restore: %w", err)
 	}
@@ -351,6 +361,32 @@ func drillRestoreSpec(backupName, source, service string) map[string]interface{}
 	return spec
 }
 
+const drillModifierLabel = "kipper.run/drill-modifier"
+
+// minimalRequestsModifier returns a Velero resource modifier ConfigMap with the given name.
+// It replaces the requests of each restored pod's first container with 1m CPU
+// and 1 MiB of memory, preserving the backed-up limits. The smallest positive
+// CPU request is 1m, and Postgres needs more than 1 MiB of memory, so these
+// requests fit within a working Postgres service's limits.
+func minimalRequestsModifier(name string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "velero",
+			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kipper", drillModifierLabel: "true"},
+		},
+		Data: map[string]string{"rules.yaml": `version: v1
+resourceModifierRules:
+- conditions:
+    groupResource: pods
+  patches:
+  - operation: add
+    path: /spec/containers/0/resources/requests
+    value: '{"cpu":"1m","memory":"1Mi"}'
+`},
+	}
+}
+
 // drillNetworkPolicy allows traffic between drill pods and outgoing DNS queries
 // to kube-dns in kube-system on TCP and UDP port 53. Enforcement requires a
 // NetworkPolicy controller and retains Kubernetes' node-traffic exemptions.
@@ -378,7 +414,8 @@ func drillNetworkPolicy() *networkingv1.NetworkPolicy {
 	}
 }
 
-// finishDrill requests namespace deletion if the restore has finished or is absent.
+// finishDrill deletes drill modifiers and requests namespace deletion if the
+// restore has finished or is absent.
 // A running restore could recreate the namespace, so a running or unknown restore
 // state returns an error with cleanup instructions instead.
 func finishDrill(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, restoreName, source string) error {
@@ -392,12 +429,16 @@ func finishDrill(ctx context.Context, clientset kubernetes.Interface, dyn dynami
 			return fmt.Errorf("restore %s is still running. Once it finishes, remove the drill with kip backup drill %s --clean", restoreName, source)
 		}
 	}
+	if err := deleteDrillModifiers(ctx, clientset); err != nil {
+		return err
+	}
 	return deleteDrillNamespace(ctx, clientset)
 }
 
 // cleanDrill waits up to an hour for each unfinished restore named with the
-// drill- prefix, then requests namespace deletion and waits up to five minutes
-// for removal. A restore wait error leaves the namespace in place.
+// drill- prefix, then deletes drill modifiers, requests namespace deletion and
+// waits up to five minutes for removal. A restore wait error leaves the
+// modifiers and namespace in place.
 func cleanDrill(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface) error {
 	list, err := dyn.Resource(restoreGVR).Namespace("velero").List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -412,6 +453,9 @@ func cleanDrill(ctx context.Context, clientset kubernetes.Interface, dyn dynamic
 		if _, err := waitForRestorePhase(ctx, dyn, r.GetName(), time.Hour, nil); err != nil {
 			return err
 		}
+	}
+	if err := deleteDrillModifiers(ctx, clientset); err != nil {
+		return err
 	}
 	if err := deleteDrillNamespace(ctx, clientset); err != nil {
 		return err
@@ -471,6 +515,22 @@ func restorePhaseFinal(phase string) bool {
 		return true
 	}
 	return false
+}
+
+// deleteDrillModifiers deletes ConfigMaps in velero carrying drillModifierLabel.
+// Callers must ensure all drill restores have finished so their modifiers
+// remain available until Velero has read them.
+func deleteDrillModifiers(ctx context.Context, clientset kubernetes.Interface) error {
+	list, err := clientset.CoreV1().ConfigMaps("velero").List(ctx, metav1.ListOptions{LabelSelector: drillModifierLabel})
+	if err != nil {
+		return fmt.Errorf("listing drill resource modifiers: %w", err)
+	}
+	for _, cm := range list.Items {
+		if err := clientset.CoreV1().ConfigMaps("velero").Delete(ctx, cm.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting ConfigMap velero/%s: %w", cm.Name, err)
+		}
+	}
+	return nil
 }
 
 func deleteDrillNamespace(ctx context.Context, clientset kubernetes.Interface) error {
