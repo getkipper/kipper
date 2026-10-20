@@ -105,7 +105,7 @@ func TestConfigureUFWProtectsEverySSHPortOnAWorker(t *testing.T) {
 			{contains: "command -v ufw", out: "present\n"},
 			{contains: "sshd -T", out: "22\n443\n"},
 			{contains: "ufw show added", out: "ufw allow 22/tcp\nufw allow 80/tcp\nufw allow 443/tcp\nufw allow 6443/tcp\n"},
-			{contains: "No chain/target/match", out: "absent\n"},
+			{contains: "-N ufw-user-input", out: "absent\n"},
 			{contains: "-S ufw-user-input", out: chain},
 		}
 	}
@@ -163,7 +163,7 @@ func TestConfigureUFWAddsPeerRulesAndChecksThemLoaded(t *testing.T) {
 		{contains: "command -v ufw", out: "present\n"},
 		{contains: "sshd -T", out: "22\n"},
 		{contains: "ufw show added", out: "ufw allow 443/tcp\nufw allow from 192.0.2.99 to any port 51820 proto udp comment 'kipper-peer'\n"},
-		{contains: "No chain/target/match", out: "absent\n"},
+		{contains: "-N ufw-user-input", out: "absent\n"},
 		{contains: "-S ufw-user-input", out: "-A ufw-user-input -p tcp --dport 22 -j ACCEPT\n"},
 	}}
 	err := configureFirewall(ufw, HostOS{ID: "ubuntu", Family: FamilyDebian}, false, workerMesh)

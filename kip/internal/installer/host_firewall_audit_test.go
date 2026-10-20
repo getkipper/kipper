@@ -82,7 +82,7 @@ func dialStub(t *testing.T, host stubHost) (*ssh.Client, string) {
 		"  *'/etc/os-release'*) printf 'ID=debian\\nVERSION_ID=13\\n'; exit 0 ;;\n" +
 		"  *'sshd -T'*) echo 22; exit 0 ;;\n" +
 		// ufw's chains exist, holding the SSH rule, between a start and a stop.
-		"  *'No chain/target/match'*) if test -f " + started + "; then echo present; else echo absent; fi; exit 0 ;;\n" +
+		"  *'-N ufw-user-input'*) if test -f " + started + "; then echo present; else echo absent; fi; exit 0 ;;\n" +
 		"  *'-S ufw-user-input'*) test -f " + started + " || exit 1; echo '-A ufw-user-input -p tcp -m tcp --dport 22 -j ACCEPT'; exit 0 ;;\n" +
 		// Match enable first because its recovery command also contains disable.
 		"  *'ufw --force enable'*) touch " + started + "; exit 0 ;;\n" +
