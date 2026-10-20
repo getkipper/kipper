@@ -483,3 +483,16 @@ func TestANeverReadyContainerIsNotACrashLoop(t *testing.T) {
 
 	assert.Empty(t, rc.crashLoopEpisode, "no episode opens for a pod that is only waiting for its check")
 }
+
+// The Volume reports holder failures, so app alerts exclude holders.
+func TestACrashLoopingVolumeHolderRaisesNoAppAlert(t *testing.T) {
+	holder := crashLoopingReplica("shop-prod", "", "volume-holder-uploads")
+	delete(holder.Labels, "app")
+	holder.Labels["kipper.run/resource-type"] = "volume-holder"
+	holder.Labels["kipper.run/volume-name"] = "uploads"
+	rc := NewResourceController(fake.NewClientset(holder), nil)
+	rc.readPreviousLog = func(context.Context, string, string, string) string { return "" }
+
+	assert.Empty(t, rc.checkPodProblems(context.Background()))
+	assert.Empty(t, rc.crashLoopEpisode, "no episode is opened for a holder")
+}

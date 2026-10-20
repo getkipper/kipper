@@ -11,9 +11,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
@@ -25,7 +27,9 @@ const volumeFinalizer = "kipper.run/volume-cleanup"
 // VolumeReconciler reconciles a Volume CR.
 type VolumeReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Recorder  record.EventRecorder
 }
 
 func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -68,8 +72,14 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, r.reportSharedStorageUnsupported(ctx, &vol)
 	}
 
-	if err := r.reconcilePVC(ctx, &vol); err != nil {
+	pvc, err := r.reconcilePVC(ctx, &vol)
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling pvc: %w", err)
+	}
+
+	retry, err := r.reconcileHolder(ctx, &vol, pvc)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling backup holder: %w", err)
 	}
 
 	if err := r.syncAppVolumes(ctx, &vol); err != nil {
@@ -80,7 +90,7 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: retry}, nil
 }
 
 // syncAppVolumes ensures each App CR referenced in Volume.Spec.Mounts has a
@@ -162,8 +172,11 @@ func (r *VolumeReconciler) reportSharedStorageUnsupported(ctx context.Context, v
 	return r.Status().Update(ctx, vol)
 }
 
-func (r *VolumeReconciler) reconcilePVC(ctx context.Context, vol *kipperv1.Volume) error {
-	pvcName := "shared-" + vol.Name
+// reconcilePVC returns vol's claim, creating it if missing. It adopts ownerless
+// claims, including restored claims, when Kipper's labels establish ownership.
+// Existing claims otherwise remain unchanged.
+func (r *VolumeReconciler) reconcilePVC(ctx context.Context, vol *kipperv1.Volume) (*corev1.PersistentVolumeClaim, error) {
+	pvcName := sharedClaimName(vol.Name)
 	storageClass := platform.LonghornSharedClass
 
 	desired := &corev1.PersistentVolumeClaim{
@@ -188,19 +201,35 @@ func (r *VolumeReconciler) reconcilePVC(ctx context.Context, vol *kipperv1.Volum
 	}
 
 	if err := controllerutil.SetControllerReference(vol, desired, r.Scheme); err != nil {
-		return err
+		return nil, err
 	}
 
 	var existing corev1.PersistentVolumeClaim
 	err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: vol.Namespace}, &existing)
 	if errors.IsNotFound(err) {
-		return r.Create(ctx, desired)
+		if err := r.Create(ctx, desired); err != nil {
+			return nil, err
+		}
+		return desired, nil
 	}
-	return err // PVCs cannot be updated (immutable spec)
+	if err != nil {
+		return nil, err
+	}
+	if metav1.GetControllerOf(&existing) == nil {
+		if ok, _ := claimProvenance(&existing, vol); ok {
+			if err := controllerutil.SetControllerReference(vol, &existing, r.Scheme); err != nil {
+				return nil, err
+			}
+			if err := r.Update(ctx, &existing); err != nil {
+				return nil, fmt.Errorf("adopting claim: %w", err)
+			}
+		}
+	}
+	return &existing, nil
 }
 
 func (r *VolumeReconciler) updateStatus(ctx context.Context, vol *kipperv1.Volume) error {
-	pvcName := "shared-" + vol.Name
+	pvcName := sharedClaimName(vol.Name)
 
 	var pvc corev1.PersistentVolumeClaim
 	err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: vol.Namespace}, &pvc)
@@ -235,9 +264,14 @@ func (r *VolumeReconciler) updateStatus(ctx context.Context, vol *kipperv1.Volum
 	return r.Status().Update(ctx, vol)
 }
 
+// SetupWithManager watches Volumes, their claims, and holder pods. Holders are
+// mapped by label so restored, ownerless holders also trigger reconciliation
+// of their Volume. The manager's Pod cache must include holder pods, as
+// configured by PodCacheNamespaces.
 func (r *VolumeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kipperv1.Volume{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(volumeForHolder)).
 		Complete(r)
 }

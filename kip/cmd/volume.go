@@ -182,12 +182,22 @@ func runVolumeList(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\n  %-25s %-10s %-12s %s\n", "NAME", "SIZE", "STATUS", "ACCESS")
+	var warnings []string
 	for _, cr := range crList.Items {
 		size, _, _ := unstructured.NestedString(cr.Object, "spec", "size")
 		if actual, _, _ := unstructured.NestedString(cr.Object, "status", "actualSize"); actual != "" {
 			size = actual
 		}
 		fmt.Printf("  %-25s %-10s %-12s %s\n", cr.GetName(), size, volumeListStatus(&cr), "ReadWriteMany")
+		if w := volumeBackupWarning(&cr); w != "" {
+			warnings = append(warnings, fmt.Sprintf("%s: %s", cr.GetName(), w))
+		}
+	}
+	for _, w := range warnings {
+		fmt.Printf("\n  ⚠  %s", w)
+	}
+	if len(warnings) > 0 {
+		fmt.Println()
 	}
 	fmt.Println()
 
@@ -393,4 +403,24 @@ func volumeListStatus(cr *unstructured.Unstructured) string {
 		phase = "Pending"
 	}
 	return strings.ToLower(phase)
+}
+
+// volumeBackupWarning returns the message of a false BackupHolderReady
+// condition that needs attention, such as a rejected holder. It returns an
+// empty string for Starting or Restoring, a missing message, or no false
+// condition.
+func volumeBackupWarning(cr *unstructured.Unstructured) string {
+	conditions, _, _ := unstructured.NestedSlice(cr.Object, "status", "conditions")
+	for _, c := range conditions {
+		m, ok := c.(map[string]interface{})
+		if !ok || m["type"] != "BackupHolderReady" || m["status"] != "False" {
+			continue
+		}
+		if m["reason"] == "Starting" || m["reason"] == "Restoring" {
+			return ""
+		}
+		msg, _ := m["message"].(string)
+		return msg
+	}
+	return ""
 }

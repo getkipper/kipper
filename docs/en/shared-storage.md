@@ -115,6 +115,8 @@ kip volume list --project blog --environment prod
   uploads                   10Gi       bound      ReadWriteMany
 ```
 
+If a volume's [backup holder](#backups) cannot run, a warning below the table explains why.
+
 ### Delete a shared volume
 
 ```bash
@@ -122,6 +124,16 @@ kip volume delete uploads --delete-data --project blog --environment prod
 ```
 
 The `--delete-data` flag is required to prevent accidental data loss.
+
+### Backups
+
+Backups copy a volume's files through a running pod that mounts it. Kipper runs a small holder pod named `volume-holder-<name>` for each shared volume so backups include its files even when no app mounts it, for example while every app using it is stopped. The holder mounts the volume read-only and sleeps. It runs as a non-root user without a service account token or open ports, and it requests 1m CPU and 8Mi memory, with limits of 10m CPU and 16Mi memory that count towards the project's quota. Deleting the volume deletes its holder.
+
+A restore brings the holder back along with the volume, and Velero writes the volume's files through it before the holder starts. Kipper adopts the restored holder once the volume itself is restored. Until then, the holder has no owner, so `kip node reboot` and `kip node remove` refuse to drain its node and identify the `volume-holder-<name>` pod in the error.
+
+`kip volume list` adds a warning line for a volume whose holder cannot run: the project's quota or an admission policy rejects it, it cannot be scheduled, its container fails, or it has not started within ten minutes. Kipper records the reason on the volume's `BackupHolderReady` condition and retries a rejected holder every minute. Until the holder runs, the volume's files are backed up only while an app mounts it. A holder that is evicted is replaced. A holder on a node that goes down stays terminating until the node is back or removed with `kip node remove`, and `kip volume list` warns after ten minutes of termination.
+
+If a restored holder stops before its restore finishes, or is still waiting for its restore 24 hours after the holder was created, Kipper replaces it so later backups include the volume again. The 24-hour limit prevents a failed volume restore from leaving the holder waiting indefinitely. Kipper records a warning event on the volume, and `kip volume list` warns until the new holder runs. When the restore finishes, `kip backup restore` reports the restore failure. Restore again if the volume's files are incomplete.
 
 ### Web console
 
