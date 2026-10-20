@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/getkipper/kipper/kip/internal/deployer"
 	"github.com/getkipper/kipper/kip/internal/manifest"
+	"github.com/getkipper/kipper/kip/internal/service"
 )
 
 var volumeCmd = &cobra.Command{
@@ -96,7 +98,8 @@ func init() {
 func runVolumeCreate(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	size, _ := cmd.Flags().GetString("size")
-	if _, err := resource.ParseQuantity(size); err != nil {
+	quantity, err := resource.ParseQuantity(size)
+	if err != nil {
 		return fmt.Errorf("invalid --size %q: %w", size, err)
 	}
 
@@ -108,6 +111,20 @@ func runVolumeCreate(cmd *cobra.Command, args []string) error {
 	ns := cluster.ResolveNamespace(project, environment)
 	if ns == "" {
 		return fmt.Errorf("no project context. Set one with `kip project use <name>` or pass --project")
+	}
+
+	ctx := context.Background()
+	_, err = k8sClient.Dynamic().Resource(manifest.VolumeGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+	if err == nil {
+		fmt.Printf("  Volume %q already exists in %s\n", name, ns)
+		return nil
+	}
+	if !errors.IsNotFound(err) {
+		return fmt.Errorf("checking volume %q: %w", name, err)
+	}
+	mgr := &service.Manager{Client: k8sClient.Clientset(), Dynamic: k8sClient.Dynamic()}
+	if err := refuseWithoutStorageRoom(ctx, os.Stdout, mgr, []service.NewVolume{service.SharedVolume(ns, name, quantity.Value())}, "--size"); err != nil {
+		return err
 	}
 
 	// The Volume CR is the model: the volume reconciler provisions the
@@ -127,7 +144,7 @@ func runVolumeCreate(cmd *cobra.Command, args []string) error {
 		"spec": map[string]interface{}{"size": size},
 	}}
 
-	_, err = k8sClient.Dynamic().Resource(manifest.VolumeGVR).Namespace(ns).Create(context.Background(), vol, metav1.CreateOptions{})
+	_, err = k8sClient.Dynamic().Resource(manifest.VolumeGVR).Namespace(ns).Create(ctx, vol, metav1.CreateOptions{})
 	if errors.IsAlreadyExists(err) {
 		fmt.Printf("  Volume %q already exists in %s\n", name, ns)
 		return nil

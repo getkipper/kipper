@@ -88,6 +88,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		})
 	} else {
 		reportStorageRestartCoverage(nodes)
+		reportServerStorageRoom(ctx, os.Stdout, &service.Manager{Client: client.Clientset(), Dynamic: client.Dynamic()})
 	}
 	reportAlertDelivery(ctx, client)
 	reportCrashLoopingServices(ctx, client)
