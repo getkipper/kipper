@@ -13,7 +13,11 @@ const (
 	accessRecordConfigMap = "kipper-access"
 	accessRecordKey       = "record"
 	accessRecordVersion   = 1
-	accessHistoryLimit    = 100
+	// accessRecordVersionOps is the version of a record with operator
+	// devices. A record without them stays at version 1, so an older kip
+	// keeps working on a cluster that never used devices.
+	accessRecordVersionOps = 2
+	accessHistoryLimit     = 100
 )
 
 // ErrInvalidAccessRecord reports an access record that is present but cannot
@@ -21,11 +25,14 @@ const (
 var ErrInvalidAccessRecord = errors.New("the operator access record is invalid")
 
 // AccessRecord is the cluster's operator access list in the kipper-access
-// ConfigMap. History is bounded to the last 100 changes.
+// ConfigMap. Writes retain the last 100 history entries. Version 2 requires
+// Ops and supports registered Devices.
 type AccessRecord struct {
 	Version    int            `json:"version"`
 	Generation int            `json:"generation"`
 	Sources    []AccessSource `json:"sources"`
+	Ops        *AccessOps     `json:"ops,omitempty"`
+	Devices    []AccessDevice `json:"devices,omitempty"`
 	History    []AccessChange `json:"history,omitempty"`
 }
 
@@ -44,6 +51,7 @@ type AccessChange struct {
 	By         string            `json:"by,omitempty"`
 	Action     string            `json:"action"`
 	Prefixes   []string          `json:"prefixes,omitempty"`
+	Device     string            `json:"device,omitempty"`
 	Generation int               `json:"generation"`
 	Nodes      map[string]string `json:"nodes,omitempty"`
 }
@@ -63,11 +71,23 @@ func (r AccessRecord) Prefixes() ([]netip.Prefix, error) {
 }
 
 func (r AccessRecord) validate() error {
-	if r.Version != accessRecordVersion {
+	switch r.Version {
+	case accessRecordVersion:
+		if r.Ops != nil || len(r.Devices) > 0 {
+			return errors.New("a version 1 record cannot hold operator devices")
+		}
+	case accessRecordVersionOps:
+		if r.Ops == nil {
+			return errors.New("a version 2 record needs its operator range")
+		}
+		if err := r.validateOps(); err != nil {
+			return err
+		}
+	default:
 		return fmt.Errorf("this version of kip cannot read access record version %d", r.Version)
 	}
-	if len(r.Sources) == 0 {
-		return errors.New("it lists no operator prefixes")
+	if len(r.Sources) == 0 && r.ActiveDevices() == 0 {
+		return errors.New("it lists no operator prefixes and no active device")
 	}
 	if r.Generation < 1 {
 		return fmt.Errorf("generation %d must be at least 1", r.Generation)
@@ -118,9 +138,14 @@ func ReadAccessRecord(client CommandRunner) (AccessRecord, bool, error) {
 }
 
 // WriteAccessRecord creates or replaces the record, keeping the last 100
-// history entries. It validates the record before writing and returns an error
+// history entries. It selects version 2 when Ops is set and version 1 otherwise.
+// It validates the record before writing and returns an error
 // if validation or a Kubernetes command fails.
 func WriteAccessRecord(client CommandRunner, rec AccessRecord) error {
+	rec.Version = accessRecordVersion
+	if rec.Ops != nil {
+		rec.Version = accessRecordVersionOps
+	}
 	if err := rec.validate(); err != nil {
 		return fmt.Errorf("writing the operator access record: %w", err)
 	}
