@@ -14,6 +14,23 @@ var rootCmd = &cobra.Command{
 	Long: `Kipper gives small teams a production-ready Kubernetes cluster on any
 Linux root server, with a web console, automatic SSL, and one-command
 app deployments, without requiring Kubernetes expertise.`,
+	PersistentPreRunE: silenceUsageAfterValidation,
+}
+
+// silenceUsageAfterValidation preserves the existing usage setting for unknown
+// flags, invalid arguments, and missing required or conflicting flags, then
+// suppresses usage for subsequent command errors. Cobra parses flags and validates
+// arguments before this hook. Required flags and flag groups are checked here
+// because Cobra normally validates them after the hook.
+func silenceUsageAfterValidation(cmd *cobra.Command, _ []string) error {
+	if err := cmd.ValidateRequiredFlags(); err != nil {
+		return err
+	}
+	if err := cmd.ValidateFlagGroups(); err != nil {
+		return err
+	}
+	cmd.SilenceUsage = true
+	return nil
 }
 
 func init() {
