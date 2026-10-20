@@ -44,11 +44,15 @@ func newNodeAccessCluster(out io.Writer, server installer.FirewallRunner, cluste
 // it refuses only a leftover table. With one it refuses a stale record and
 // a workstation address outside the list. A node without a table is
 // refused when requireTables is set, and otherwise skipped with a note.
+// With requireTables, any problem reported by AccessHostState.Problem also
+// blocks the command, including a table missing from the kernel, because a
+// join adds the joining host's addresses to the live table.
 func prepareNodeAccess(c *accessCluster, nodes []accessNode, inspect []installer.AccessNodeHeader, action string, requireTables bool) (*nodeAccess, []string, error) {
 	c.defaults()
 	a := &nodeAccess{c: c, action: action, baselines: map[string]accessBaseline{}, skip: map[string]bool{}}
 	headers := append([]installer.AccessNodeHeader(nil), inspect...)
 	var missing []accessNode
+	var broken error
 	for _, n := range nodes {
 		st, err := c.state(n.node)
 		if err != nil {
@@ -57,6 +61,8 @@ func prepareNodeAccess(c *accessCluster, nodes []accessNode, inspect []installer
 		headers = append(headers, st.Header(n.rec.Name))
 		if !st.HasTable() {
 			missing = append(missing, n)
+		} else if p := st.Problem(); p != "" && broken == nil {
+			broken = fmt.Errorf("%s: %s", n.rec.Name, p)
 		}
 	}
 	rec, present, err := installer.ReadAccessRecord(c.server)
@@ -68,6 +74,9 @@ func prepareNodeAccess(c *accessCluster, nodes []accessNode, inspect []installer
 	}
 	if err := installer.StaleAccessRecord(rec.Generation, headers); err != nil {
 		return nil, nil, err
+	}
+	if requireTables && broken != nil {
+		return nil, nil, broken
 	}
 	var notes []string
 	for _, n := range missing {

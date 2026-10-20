@@ -123,7 +123,8 @@ func newAccessFixture(t *testing.T, observed map[string]string) *accessFixture {
 			return []int{22}, nil
 		},
 		state: func(r installer.CommandRunner) (installer.AccessHostState, error) {
-			return installer.AccessHostState{Table: f.headers[r.(installer.FirewallRunner)], Operators: f.headers[r.(installer.FirewallRunner)]}, nil
+			table := f.headers[r.(installer.FirewallRunner)]
+			return installer.AccessHostState{Table: table, Operators: table, Live: table != ""}, nil
 		},
 		live: func(installer.CommandRunner) (installer.AccessLive, error) {
 			return installer.AccessLive{Sets: map[string][]netip.Prefix{"admin4": {netip.MustParsePrefix("198.51.100.0/24")}}}, nil
@@ -449,6 +450,66 @@ func TestAccessReportMatchesWhenEveryNodeEnforcesTheRecord(t *testing.T) {
 	require.Len(t, r.Nodes, 1)
 	assert.Equal(t, 2, r.Nodes[0].Generation)
 	assert.Contains(t, r.Nodes[0].Admitted, "IPv4 SSH from 198.51.100.7")
+}
+
+// An operator without an IPv6 route cannot open IPv6 connections, so these
+// failures do not indicate a problem with a list containing only IPv4 prefixes.
+func TestAccessReportCountsAFailedFamilyOnlyWhenTheListHoldsIt(t *testing.T) {
+	f := newAccessFixture(t, map[string]string{"4": "198.51.100.7"})
+	f.server.store(t, installer.AccessRecord{Version: 1, Generation: 2, Sources: []installer.AccessSource{{Prefix: "198.51.100.0/24"}}})
+	f.committed(f.server, 2)
+	f.c.state = func(installer.CommandRunner) (installer.AccessHostState, error) {
+		return installer.AccessHostState{Table: f.headers[f.server], Operators: f.headers[f.server], Live: true, UnitEnabled: "enabled"}, nil
+	}
+	f.c.live = func(installer.CommandRunner) (installer.AccessLive, error) {
+		live := installer.AccessLive{Sets: map[string][]netip.Prefix{"admin4": {netip.MustParsePrefix("198.51.100.0/24")}}}
+		live.Chain.Hook, live.Chain.Priority, live.Chain.Policy, live.Chain.Rules = "input", -10, "accept", 8
+		return live, nil
+	}
+	f.c.readyz = func(family string) error {
+		if family == "6" {
+			return errors.New("dial tcp [2001:db8::10]:6443: connect: network is unreachable")
+		}
+		return nil
+	}
+
+	r := f.c.report([]showNode{{rec: f.c.nodes[0].rec, client: f.server}})
+
+	assert.True(t, r.Match, r.Nodes[0].Problems)
+	assert.Empty(t, r.Nodes[0].Problems)
+	notes := strings.Join(r.Nodes[0].Notes, "\n")
+	assert.Contains(t, notes, "a new IPv6 SSH connection failed")
+	assert.Contains(t, notes, "the Kubernetes API did not answer over IPv6")
+	var out bytes.Buffer
+	printAccessReport(&out, r)
+	assert.Contains(t, out.String(), "server: matches")
+	assert.Contains(t, out.String(), "a new IPv6 SSH connection failed")
+
+	f.server.observed = map[string]string{}
+	r = f.c.report([]showNode{{rec: f.c.nodes[0].rec, client: f.server}})
+	assert.False(t, r.Match)
+	assert.Contains(t, strings.Join(r.Nodes[0].Problems, "\n"), "a new IPv4 SSH connection failed")
+
+	f.server.observed = map[string]string{"4": "198.51.100.7"}
+	f.server.store(t, installer.AccessRecord{Version: 1, Generation: 2, Sources: []installer.AccessSource{{Prefix: "198.51.100.0/24"}, {Prefix: "2001:db8::/32"}}})
+	r = f.c.report([]showNode{{rec: f.c.nodes[0].rec, client: f.server}})
+	assert.False(t, r.Match)
+	problems := strings.Join(r.Nodes[0].Problems, "\n")
+	assert.Contains(t, problems, "a new IPv6 SSH connection failed")
+	assert.Contains(t, problems, "the Kubernetes API did not answer over IPv6")
+}
+
+func TestAccessReportCountsEveryFailedFamilyWithoutAList(t *testing.T) {
+	f := newAccessFixture(t, map[string]string{})
+	f.c.readyz = func(string) error { return errors.New("dial tcp 192.0.2.10:6443: i/o timeout") }
+
+	r := f.c.report([]showNode{{rec: f.c.nodes[0].rec, client: f.server}})
+
+	assert.False(t, r.Match)
+	problems := strings.Join(r.Nodes[0].Problems, "\n")
+	assert.Contains(t, problems, "a new IPv4 SSH connection failed")
+	assert.Contains(t, problems, "the Kubernetes API did not answer over IPv4")
+	assert.Empty(t, r.Nodes[0].Notes)
 }
 
 func TestAccessReportFlagsDifferencesAndUnreachableNodes(t *testing.T) {

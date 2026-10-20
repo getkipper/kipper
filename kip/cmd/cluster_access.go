@@ -850,6 +850,7 @@ type accessNodeReport struct {
 	Generation int      `json:"generation,omitempty"`
 	Problems   []string `json:"problems,omitempty"`
 	Admitted   []string `json:"admitted,omitempty"`
+	Notes      []string `json:"notes,omitempty"`
 }
 
 // accessReport is show's result.
@@ -888,6 +889,23 @@ func (c *accessCluster) report(nodes []showNode) accessReport {
 		}
 	}
 	admin, _ := rec.Prefixes()
+	listed := map[string]bool{}
+	for _, p := range admin {
+		if p.Addr().Is4() {
+			listed["4"] = true
+		} else {
+			listed["6"] = true
+		}
+	}
+	// An address family absent from the access list may be unroutable from
+	// this workstation, so connection failures in that family are only notes.
+	failed := func(nr *accessNodeReport, family, msg string) {
+		if !present || listed[family] {
+			nr.Problems = append(nr.Problems, msg)
+		} else {
+			nr.Notes = append(nr.Notes, msg)
+		}
+	}
 	r.Match = err == nil
 	for _, n := range nodes {
 		nr := accessNodeReport{Name: n.rec.Name, Host: n.rec.Host}
@@ -934,7 +952,7 @@ func (c *accessCluster) report(nodes []showNode) accessReport {
 		for _, f := range c.families(n.rec.Host) {
 			addr, err := n.client.ObservedAddress(f)
 			if err != nil {
-				nr.Problems = append(nr.Problems, fmt.Sprintf("a new IPv%s SSH connection failed: %s", f, firstErrLine(err)))
+				failed(&nr, f, fmt.Sprintf("a new IPv%s SSH connection failed: %s", f, firstErrLine(err)))
 				continue
 			}
 			nr.Admitted = append(nr.Admitted, "IPv"+f+" SSH from "+addr)
@@ -942,7 +960,7 @@ func (c *accessCluster) report(nodes []showNode) accessReport {
 		if n.rec.Role == installer.NodeRoleServer && c.readyz != nil {
 			for _, f := range c.apiFamilies {
 				if err := c.readyz(f); err != nil {
-					nr.Problems = append(nr.Problems, fmt.Sprintf("the Kubernetes API did not answer over IPv%s: %s", f, firstErrLine(err)))
+					failed(&nr, f, fmt.Sprintf("the Kubernetes API did not answer over IPv%s: %s", f, firstErrLine(err)))
 				} else {
 					nr.Admitted = append(nr.Admitted, "IPv"+f+" API")
 				}
@@ -1004,11 +1022,14 @@ func printAccessReport(out io.Writer, r accessReport) {
 	for _, n := range r.Nodes {
 		if len(n.Problems) == 0 {
 			say(out, "    ✔  %s: matches (%s)\n", n.Name, strings.Join(n.Admitted, ", "))
-			continue
+		} else {
+			say(out, "    ⚠  %s:\n", n.Name)
+			for _, p := range n.Problems {
+				say(out, "         %s\n", p)
+			}
 		}
-		say(out, "    ⚠  %s:\n", n.Name)
-		for _, p := range n.Problems {
-			say(out, "         %s\n", p)
+		for _, note := range n.Notes {
+			say(out, "         %s (the list has no prefix for this address family)\n", note)
 		}
 	}
 	say(out, "\n  To check a node yourself:\n")

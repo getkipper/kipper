@@ -50,6 +50,26 @@ func TestNodeAddRefusesANodeWithoutATable(t *testing.T) {
 	assert.Contains(t, err.Error(), "kip cluster access apply")
 }
 
+// Adding a node adds the joining host's addresses to the server's live table,
+// so the committed table must be loaded first.
+func TestNodeAddRefusesATableMissingFromTheKernel(t *testing.T) {
+	f := newAccessFixture(t, map[string]string{"4": "198.51.100.7"})
+	f.server.store(t, listedRecord())
+	f.committed(f.server, 4)
+	f.c.state = func(installer.CommandRunner) (installer.AccessHostState, error) {
+		return installer.AccessHostState{Table: f.headers[f.server], Operators: f.headers[f.server], UnitEnabled: "enabled", UnitActive: "active"}, nil
+	}
+
+	_, _, err := prepareNodeAccess(f.c, f.c.nodes, nil, "node add 192.0.2.12", true)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server: access table missing from the kernel")
+	assert.Contains(t, err.Error(), "kip cluster access apply")
+
+	_, _, err = prepareNodeAccess(f.c, f.c.nodes, nil, "node remove worker-1", false)
+	require.NoError(t, err, "removal loads the table again, so it goes ahead")
+}
+
 func TestNodeAddPointsAnUnfinishedJoinAtItsOwnRetry(t *testing.T) {
 	f := newAccessFixture(t, map[string]string{"4": "198.51.100.7"})
 	f.server.store(t, listedRecord())
