@@ -46,9 +46,8 @@ func TestPublishEnvGeneration_WritesAnImmutableSecretNamedForItsContent(t *testi
 		"the generation must be garbage-collected with its workload")
 }
 
-// Republishing identical content is the common case: most passes change
-// nothing. An immutable Secret cannot have moved, so the name is the whole
-// check and there is no write to make.
+// Most passes republish identical content. Once validation confirms the existing
+// immutable Secret matches, publishing needs no write.
 func TestPublishEnvGeneration_RepublishingTheSameContentWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme()
@@ -179,7 +178,315 @@ func TestPublishEnvGeneration_RefusesAnObjectThatCannotCarryTheGuarantee(t *test
 	}
 }
 
-// The D14 scenario, and the reason the whole change exists.
+// restoredEnvGeneration models an App's generation restored with its original
+// labels and content, extra Velero labels and no owner references.
+func restoredEnvGeneration(app *kipperv1.App, env map[string]string) *corev1.Secret {
+	immutable := true
+	data := make(map[string][]byte, len(env))
+	for k, v := range env {
+		data[k] = []byte(v)
+	}
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretname.EnvGeneration(secretname.KindApp, app.Name, envDigest(env)),
+			Namespace: app.Namespace,
+			Labels: map[string]string{
+				"app":                    app.Name,
+				kipperLabel:              kipperValue,
+				resourceTypeLabel:        "app",
+				"velero.io/backup-name":  "nightly",
+				"velero.io/restore-name": "nightly-restore",
+			},
+		},
+		Immutable: &immutable,
+		Type:      corev1.SecretTypeOpaque,
+		Data:      data,
+	}
+}
+
+func appEnvLabels(app *kipperv1.App) map[string]string {
+	return map[string]string{"app": app.Name, kipperLabel: kipperValue, resourceTypeLabel: "app"}
+}
+
+// A generation restored without owner references still holds the App's published
+// environment. Adopting it lets the App publish again without manual deletion.
+func TestPublishEnvGeneration_AdoptsAGenerationARestoreBroughtBackWithoutAnOwner(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+	app := newTestApp()
+	app.UID = types.UID("uid-my-app")
+
+	env := map[string]string{"MODE": "live", "DB_PASSWORD": "s3cret"}
+	restored := restoredEnvGeneration(app, env)
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, restored).Build()
+
+	name, err := publishEnvGeneration(ctx, c, scheme, app, secretname.KindApp, env, appEnvLabels(app))
+	require.NoError(t, err)
+	assert.Equal(t, restored.Name, name)
+
+	var got corev1.Secret
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: name, Namespace: app.Namespace}, &got))
+	assert.True(t, metav1.IsControlledBy(&got, app),
+		"the adopted generation must be garbage-collected with its workload")
+	assert.Equal(t, []byte("s3cret"), got.Data["DB_PASSWORD"])
+}
+
+// Generation names are guessable, so adoption requires matching content and
+// identity labels as well as the absence of owner references.
+func TestPublishEnvGeneration_AdoptsOnlyAGenerationThatMatchesThisWorkload(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+	app := newTestApp()
+	app.UID = types.UID("uid-my-app")
+	other := newTestApp()
+	other.Name = "other-app"
+	other.UID = types.UID("uid-other-app")
+
+	env := map[string]string{"MODE": "live"}
+
+	cases := []struct {
+		name    string
+		mutate  func(s *corev1.Secret)
+		wantErr string
+	}{
+		{
+			name: "controlled by another workload",
+			mutate: func(s *corev1.Secret) {
+				s.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(other,
+					kipperv1.GroupVersion.WithKind("App"))}
+			},
+			wantErr: "not controlled by this workload",
+		},
+		{
+			name: "owned without a controller reference",
+			mutate: func(s *corev1.Secret) {
+				s.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: "v1", Kind: "ConfigMap", Name: "anything", UID: "uid-anything",
+				}}
+			},
+			wantErr: "not controlled by this workload",
+		},
+		{
+			name:    "mutable",
+			mutate:  func(s *corev1.Secret) { s.Immutable = nil },
+			wantErr: "mutable",
+		},
+		{
+			name:    "of another type",
+			mutate:  func(s *corev1.Secret) { s.Type = corev1.SecretTypeDockerConfigJson },
+			wantErr: "of type",
+		},
+		{
+			name:    "labelled for another app",
+			mutate:  func(s *corev1.Secret) { s.Labels["app"] = "other-app" },
+			wantErr: "not controlled by this workload",
+		},
+		{
+			name:    "labelled for another kind of workload",
+			mutate:  func(s *corev1.Secret) { s.Labels[resourceTypeLabel] = "function" },
+			wantErr: "not controlled by this workload",
+		},
+		{
+			name:    "without the resource type label",
+			mutate:  func(s *corev1.Secret) { delete(s.Labels, resourceTypeLabel) },
+			wantErr: "not controlled by this workload",
+		},
+		{
+			name:    "not managed by Kipper",
+			mutate:  func(s *corev1.Secret) { delete(s.Labels, kipperLabel) },
+			wantErr: "not controlled by this workload",
+		},
+		{
+			name:    "different content under a matching digest",
+			mutate:  func(s *corev1.Secret) { s.Data["MODE"] = []byte("something else") },
+			wantErr: "different value",
+		},
+		{
+			name:    "an extra variable under a matching digest",
+			mutate:  func(s *corev1.Secret) { s.Data["EXTRA"] = []byte("the pod would read this too") },
+			wantErr: "holds 2 variables",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			secret := restoredEnvGeneration(app, env)
+			tc.mutate(secret)
+			c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, other, secret).Build()
+
+			_, err := publishEnvGeneration(ctx, c, scheme, app, secretname.KindApp, env, appEnvLabels(app))
+			require.Error(t, err, "a generation that does not match this workload must not be served")
+			assert.Contains(t, err.Error(), tc.wantErr)
+
+			var got corev1.Secret
+			require.NoError(t, c.Get(ctx, crclient.ObjectKeyFromObject(secret), &got))
+			assert.False(t, metav1.IsControlledBy(&got, app), "and it must not be adopted")
+		})
+	}
+}
+
+// Functions and Jobs share the publication path but use their own identity
+// labels to adopt generations restored without owner references.
+func TestPublishEnvGeneration_AdoptsRestoredFunctionAndJobGenerations(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+	env := map[string]string{"MODE": "live"}
+	immutable := true
+
+	fn := &kipperv1.Function{ObjectMeta: metav1.ObjectMeta{
+		Name: "worker", Namespace: "project-test", UID: "uid-worker"}}
+	job := &kipperv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "nightly", Namespace: "project-test", UID: "uid-nightly"}}
+
+	cases := []struct {
+		name   string
+		owner  crclient.Object
+		kind   secretname.Kind
+		labels map[string]string
+	}{
+		{name: "function", owner: fn, kind: secretname.KindFunction, labels: functionLabels(fn)},
+		{name: "job", owner: job, kind: secretname.KindJob, labels: jobLabels(job)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			restored := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      secretname.EnvGeneration(tc.kind, tc.owner.GetName(), envDigest(env)),
+					Namespace: "project-test",
+					Labels:    tc.labels,
+				},
+				Immutable: &immutable,
+				Type:      corev1.SecretTypeOpaque,
+				Data:      map[string][]byte{"MODE": []byte("live")},
+			}
+			c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(tc.owner, restored).Build()
+
+			_, err := publishEnvGeneration(ctx, c, scheme, tc.owner, tc.kind, env, tc.labels)
+			require.NoError(t, err)
+
+			var got corev1.Secret
+			require.NoError(t, c.Get(ctx, crclient.ObjectKeyFromObject(restored), &got))
+			assert.True(t, metav1.IsControlledBy(&got, tc.owner))
+		})
+	}
+}
+
+// A missing key reads as nil, which bytes.Equal treats as equal to an empty
+// value. Replacing an empty variable with another key also preserves the map
+// size, so validation must check that each expected key exists.
+func TestPublishEnvGeneration_RefusesAVariableSwappedForAnEmptyOne(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+	app := newTestApp()
+	app.UID = types.UID("uid-my-app")
+
+	env := map[string]string{"EMPTY": "", "MODE": "live"}
+	planted := restoredEnvGeneration(app, env)
+	planted.Data = map[string][]byte{"LD_PRELOAD": []byte("/tmp/theirs.so"), "MODE": []byte("live")}
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, planted).Build()
+
+	_, err := publishEnvGeneration(ctx, c, scheme, app, secretname.KindApp, env, appEnvLabels(app))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"EMPTY"`)
+
+	var got corev1.Secret
+	require.NoError(t, c.Get(ctx, crclient.ObjectKeyFromObject(planted), &got))
+	assert.False(t, metav1.IsControlledBy(&got, app), "and it must not be adopted")
+
+	// Confirm that an empty value remains valid when its key is present.
+	restored := restoredEnvGeneration(app, env)
+	c = crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, restored).Build()
+	_, err = publishEnvGeneration(ctx, c, scheme, app, secretname.KindApp, env, appEnvLabels(app))
+	require.NoError(t, err)
+}
+
+// A Function's trigger can change independently of its environment, leaving the
+// generation with its original trigger label. Adoption uses stable identity
+// labels so that this generation remains reusable.
+func TestPublishEnvGeneration_AdoptsAFunctionGenerationWrittenBeforeATriggerChange(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+	env := map[string]string{"MODE": "live"}
+	immutable := true
+
+	fn := &kipperv1.Function{ObjectMeta: metav1.ObjectMeta{
+		Name: "worker", Namespace: "project-test", UID: "uid-worker"}}
+	written := functionLabels(fn)
+	fn.Spec.Triggers = []kipperv1.FunctionTrigger{{Type: "cron"}}
+	require.NotEqual(t, written, functionLabels(fn), "the trigger label must differ for this to test anything")
+
+	restored := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretname.EnvGeneration(secretname.KindFunction, fn.Name, envDigest(env)),
+			Namespace: fn.Namespace,
+			Labels:    written,
+		},
+		Immutable: &immutable,
+		Type:      corev1.SecretTypeOpaque,
+		Data:      map[string][]byte{"MODE": []byte("live")},
+	}
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(fn, restored).Build()
+
+	_, err := publishEnvGeneration(ctx, c, scheme, fn, secretname.KindFunction, env, functionLabels(fn))
+	require.NoError(t, err)
+
+	var got corev1.Secret
+	require.NoError(t, c.Get(ctx, crclient.ObjectKeyFromObject(restored), &got))
+	assert.True(t, metav1.IsControlledBy(&got, fn))
+}
+
+// Adoption requires identity labels from the caller to establish the expected
+// workload, even when the content matches.
+func TestPublishEnvGeneration_DoesNotAdoptWithoutIdentityLabels(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+	app := newTestApp()
+	app.UID = types.UID("uid-my-app")
+
+	env := map[string]string{"MODE": "live"}
+	restored := restoredEnvGeneration(app, env)
+	restored.Labels = nil
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(app, restored).Build()
+
+	_, err := publishEnvGeneration(ctx, c, scheme, app, secretname.KindApp, env, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not controlled by this workload")
+}
+
+// Reconciliation must report the environment as published after adopting a
+// restored generation.
+func TestReconcile_PublishesOverARestoredGeneration(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+
+	app := newTestApp()
+	app.UID = types.UID("uid-my-app")
+	app.Spec.Env = map[string]string{"LOG_LEVEL": "info"}
+	restored := restoredEnvGeneration(app, map[string]string{"LOG_LEVEL": "info"})
+
+	c := crfake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(app, restored).WithStatusSubresource(app).Build()
+	r := &AppReconciler{Client: c, Scheme: scheme}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{
+		Name: app.Name, Namespace: app.Namespace,
+	}})
+	require.NoError(t, err)
+
+	var got kipperv1.App
+	require.NoError(t, c.Get(ctx, types.NamespacedName{
+		Name: app.Name, Namespace: app.Namespace}, &got))
+	cond := apimeta.FindStatusCondition(got.Status.Conditions, kipperv1.ConditionEnvPublished)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status, cond.Message)
+	assert.Equal(t, restored.Name, got.Status.PublishedEnv)
+
+	var secret corev1.Secret
+	require.NoError(t, c.Get(ctx, crclient.ObjectKeyFromObject(restored), &secret))
+	assert.True(t, metav1.IsControlledBy(&secret, &got))
+}
+
+// Publishing one generation prevents mixed credentials during rotation.
 //
 // A rotation writes the binding Secret and the env Secret as two API calls. A
 // pod that started between them took the new discrete DB_PASSWORD from one and

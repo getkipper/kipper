@@ -106,3 +106,71 @@ func TestReconcileMongoshConfig_RefusesAConfigMapTheServiceDoesNotControl(t *tes
 		})
 	}
 }
+
+// A MongoDB service must be able to reuse its mongosh ConfigMap when a restore
+// leaves the ConfigMap without owner references.
+func TestReconcileMongoshConfig_AdoptsTheConfigMapARestoreBroughtBack(t *testing.T) {
+	svc := bareService("mongodb")
+	svc.UID = "uid-db"
+	restored := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "db-mongosh", Namespace: "ns",
+			Labels: map[string]string{kipperLabel: kipperValue, "app": "db", "velero.io/restore-name": "nightly"},
+		},
+		Data: map[string]string{"mongosh.conf": mongoshConf},
+	}
+	r := &ServiceReconciler{
+		Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc, restored).Build(),
+		Scheme: testScheme(),
+	}
+
+	require.NoError(t, r.reconcileMongoshConfig(context.Background(), svc))
+	var cm corev1.ConfigMap
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db-mongosh"}, &cm))
+	assert.True(t, metav1.IsControlledBy(&cm, svc), "the restored ConfigMap must be collected with its service")
+}
+
+// Only a ConfigMap labelled for this service and holding exactly its config is
+// adopted.
+func TestReconcileMongoshConfig_AdoptsOnlyItsOwnRestoredConfigMap(t *testing.T) {
+	cases := map[string]func(cm *corev1.ConfigMap){
+		"different content": func(cm *corev1.ConfigMap) { cm.Data["mongosh.conf"] = "mongosh: {}\n" },
+		"an extra key":      func(cm *corev1.ConfigMap) { cm.Data["extra"] = "theirs" },
+		"binary data beside the config": func(cm *corev1.ConfigMap) {
+			cm.BinaryData = map[string][]byte{"extra": []byte("theirs")}
+		},
+		"an empty key in place of the config": func(cm *corev1.ConfigMap) {
+			cm.Data = map[string]string{"other": ""}
+		},
+		"labelled for another":  func(cm *corev1.ConfigMap) { cm.Labels["app"] = "other" },
+		"not managed by Kipper": func(cm *corev1.ConfigMap) { delete(cm.Labels, kipperLabel) },
+		"owned without a controller reference": func(cm *corev1.ConfigMap) {
+			cm.OwnerReferences = []metav1.OwnerReference{{APIVersion: "v1", Kind: "ConfigMap", Name: "x", UID: "uid-x"}}
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			svc := bareService("mongodb")
+			svc.UID = "uid-db"
+			existing := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "db-mongosh", Namespace: "ns",
+					Labels: map[string]string{kipperLabel: kipperValue, "app": "db"},
+				},
+				Data: map[string]string{"mongosh.conf": mongoshConf},
+			}
+			mutate(existing)
+			want := existing.DeepCopy().Data
+			r := &ServiceReconciler{
+				Client: crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(svc, existing).Build(),
+				Scheme: testScheme(),
+			}
+
+			assert.Error(t, r.reconcileMongoshConfig(context.Background(), svc))
+			var cm corev1.ConfigMap
+			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db-mongosh"}, &cm))
+			assert.False(t, metav1.IsControlledBy(&cm, svc), "it must not be adopted")
+			assert.Equal(t, want, cm.Data, "nor rewritten")
+		})
+	}
+}

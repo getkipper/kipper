@@ -812,3 +812,9 @@ func TestRetireEnvSecrets_MarksThenSweepsAnUnreadProjection(t *testing.T) {
 		Name: "db-app-api-credentials", Namespace: "shop-test"}, &corev1.Secret{})),
 		"and a matured mark with nothing reading it is swept")
 }
+
+// A missing key and a key holding an empty value are different maps.
+func TestStringMapEqual_TellsAMissingKeyFromAnEmptyValue(t *testing.T) {
+	assert.False(t, stringMapEqual(map[string]string{"other": ""}, map[string]string{"conf": "x"}))
+	assert.True(t, stringMapEqual(map[string]string{"a": ""}, map[string]string{"a": ""}))
+}
