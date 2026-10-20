@@ -42,9 +42,9 @@ func (t hostTarget) notChecked(out io.Writer, withDetail bool) bool {
 	return true
 }
 
-// serverTarget describes the configured host. runner is nil when dialErr says
-// why it could not be reached. The server's record, when there is one, gives
-// it its node name.
+// serverTarget describes the configured host, using its recorded node name for
+// display when available and cluster.Host otherwise. A nil runner marks the
+// host as unreachable, with dialErr providing the failure details.
 func serverTarget(cluster *config.Cluster, runner installer.CommandRunner, dialErr error, records []installer.NodeRecord) hostTarget {
 	t := hostTarget{
 		name:           cluster.Host,
@@ -55,7 +55,7 @@ func serverTarget(cluster *config.Cluster, runner installer.CommandRunner, dialE
 	}
 	for _, r := range records {
 		if r.Role == installer.NodeRoleServer {
-			t.name = r.Name
+			t.name, t.where = r.Name, r.Name
 		}
 	}
 	if runner == nil {

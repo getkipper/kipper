@@ -113,7 +113,7 @@ func TestHostChecksCoverEveryWorker(t *testing.T) {
 	assert.Contains(t, got, "    ✔  worker-2: 1.1.1.1, 8.8.8.8, 9.9.9.9\n")
 	assert.Contains(t, got, "    ✔  server-1: nothing waiting on a restart\n")
 	assert.Contains(t, got, "    ⚠  worker-1: a kernel update is pending. Reboot with 'kip node reboot worker-1'\n")
-	assert.Contains(t, got, "    ✔  no read-only volumes on 203.0.113.10\n")
+	assert.Contains(t, got, "    ✔  no read-only volumes on server-1\n", "The server is displayed by node name, like the workers.")
 	assert.Contains(t, got, "    ✗  worker-1: mounted read-only: /var/lib/kubelet/pods/abc/volumes/kubernetes.io~csi/pvc-1/mount\n")
 	assert.Contains(t, got, "    ✔  no read-only volumes on worker-2\n")
 	assert.NotContains(t, got, "not checked on", "every node was checked")
