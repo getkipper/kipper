@@ -281,13 +281,13 @@ func hashBindingShape(digest hash.Hash, index int, b kipperv1.ServiceBinding, se
 	_, _ = fmt.Fprintf(digest, "\x00%d\x00%s\x00%s\x00%s", index, b.Name, prefix, b.Database)
 }
 
-// stringMapEqual compares two label sets.
+// stringMapEqual compares keys and values, treating nil and empty maps as equal.
 func stringMapEqual(a, b map[string]string) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for k, v := range a {
-		if b[k] != v {
+		if bv, ok := b[k]; !ok || bv != v {
 			return false
 		}
 	}

@@ -25,11 +25,10 @@ import (
 // publishEnvGeneration writes one generation of a workload's environment and
 // returns the name a pod template can reference.
 //
-// The Secret is immutable, so the name and the content are the same fact: a pod
-// that reads the name reads that content or fails to start, never a later
-// revision of it. Publishing is therefore idempotent — a generation already
-// present with the same name needs no write, because there is no way for its
-// content to have moved.
+// The immutable Secret binds the name to fixed content, so a pod reads that
+// content or fails to start. Publishing is idempotent: a valid generation this
+// workload controls needs no write. A matching generation restored without an
+// owner is adopted with one metadata update.
 func publishEnvGeneration(ctx context.Context, c client.Client, scheme *runtime.Scheme,
 	owner client.Object, kind secretname.Kind, env, labels map[string]string) (string, error) {
 	name := secretname.EnvGeneration(kind, owner.GetName(), envDigest(env))
@@ -42,7 +41,7 @@ func publishEnvGeneration(ctx context.Context, c client.Client, scheme *runtime.
 	var existing corev1.Secret
 	err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: owner.GetNamespace()}, &existing)
 	if err == nil {
-		return name, validateEnvGeneration(&existing, owner, data)
+		return name, acceptEnvGeneration(ctx, c, scheme, &existing, owner, data, labels)
 	}
 	if !errors.IsNotFound(err) {
 		return "", err
@@ -71,36 +70,77 @@ func publishEnvGeneration(ctx context.Context, c client.Client, scheme *runtime.
 		if err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: owner.GetNamespace()}, &existing); err != nil {
 			return "", err
 		}
-		return name, validateEnvGeneration(&existing, owner, data)
+		return name, acceptEnvGeneration(ctx, c, scheme, &existing, owner, data, labels)
 	}
 	return name, nil
 }
 
-// validateEnvGeneration refuses a generation that cannot carry the guarantee its
-// name implies.
+// acceptEnvGeneration validates an existing generation and adopts it if it has
+// no owner references and its identity labels match, allowing reuse after a restore.
+func acceptEnvGeneration(ctx context.Context, c client.Client, scheme *runtime.Scheme,
+	existing *corev1.Secret, owner client.Object, data map[string][]byte, labels map[string]string) error {
+	adopt := restoredWithoutOwner(existing, owner, labels)
+	if err := validateEnvGeneration(existing, owner, data, adopt); err != nil {
+		return err
+	}
+	if !adopt {
+		return nil
+	}
+	if err := controllerutil.SetControllerReference(owner, existing, scheme); err != nil {
+		return fmt.Errorf("setting owner reference: %w", err)
+	}
+	if err := c.Update(ctx, existing); err != nil {
+		return fmt.Errorf("adopting env generation %q in %s: %w", existing.Name, existing.Namespace, err)
+	}
+	return nil
+}
+
+// restoredWithoutOwner identifies adoption candidates by the absence of owner
+// references and matching Kipper, workload name and workload kind labels.
+// This allows reuse of generations restored without owner references. Other
+// labels, such as a Function's trigger, can change independently of the
+// environment, so only identity labels are compared. Content is checked separately.
+func restoredWithoutOwner(existing *corev1.Secret, owner client.Object, labels map[string]string) bool {
+	if len(existing.OwnerReferences) > 0 {
+		return false
+	}
+	if labels[kipperLabel] != kipperValue || labels["app"] != owner.GetName() || labels[resourceTypeLabel] == "" {
+		return false
+	}
+	for _, k := range []string{kipperLabel, "app", resourceTypeLabel} {
+		if existing.Labels[k] != labels[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// validateEnvGeneration checks immutability, Secret type, ownership and exact
+// content so the generation provides the environment its name promises.
+// Content-derived names are guessable, so the name alone cannot establish who
+// wrote the Secret. Immutability keeps content fixed, and ownership prevents
+// reuse of another workload's Secret.
 //
-// The name is derived from the content, which makes it guessable, so finding an
-// object there is not evidence that this controller wrote it. A mutable Secret
-// does not hold still; a foreign one is somebody else's to change; and matching
-// bytes under a matching digest is the one thing that must be true for the name
-// to mean what the pod template says it means.
-func validateEnvGeneration(existing *corev1.Secret, owner client.Object, data map[string][]byte) error {
+// When adopting is true, the ownership check is skipped. The caller must first
+// check that owner references are absent and identity labels match, then adopt
+// the generation after validation succeeds.
+func validateEnvGeneration(existing *corev1.Secret, owner client.Object, data map[string][]byte, adopting bool) error {
 	where := fmt.Sprintf("env generation %q in %s", existing.Name, existing.Namespace)
 
 	if existing.Immutable == nil || !*existing.Immutable {
-		return fmt.Errorf("%s is mutable; a pod cannot be pointed at an environment that can change under it", where)
+		return fmt.Errorf("%s is mutable. A pod requires an environment that stays fixed", where)
 	}
 	if existing.Type != "" && existing.Type != corev1.SecretTypeOpaque {
 		return fmt.Errorf("%s is of type %q, not %q", where, existing.Type, corev1.SecretTypeOpaque)
 	}
-	if !metav1.IsControlledBy(existing, owner) {
-		return fmt.Errorf("%s is not controlled by this workload; remove it or rename the workload", where)
+	if !adopting && !metav1.IsControlledBy(existing, owner) {
+		return fmt.Errorf("%s is not controlled by this workload. Remove it or rename the workload", where)
 	}
 	if len(existing.Data) != len(data) {
 		return fmt.Errorf("%s holds %d variables where this environment has %d", where, len(existing.Data), len(data))
 	}
 	for k, v := range data {
-		if !bytes.Equal(existing.Data[k], v) {
+		if held, ok := existing.Data[k]; !ok || !bytes.Equal(held, v) {
 			return fmt.Errorf("%s holds a different value for %q under a matching digest", where, k)
 		}
 	}

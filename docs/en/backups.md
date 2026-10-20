@@ -170,6 +170,8 @@ kip backup restore pre-migration --cluster-resources
 
 After a `Completed` or `PartiallyFailed` restore, kip checks restored service credentials Secrets. Those with no live owner need to be re-attached to their matching service. On a terminal, kip lists the affected services and asks for confirmation. Confirm only if nobody else could write Secrets in those projects during the restore, since repair relies on labels that those writers could also set.
 
+The published environment of an app, function or job and a MongoDB service's shell configuration can also be restored without an owner. Kipper re-attaches these automatically, without prompting, when their identity labels match the workload or service and their contents match exactly what it would write.
+
 After the credentials check, a `PartiallyFailed` restore returns an error, even if credential repair succeeds.
 
 For an unattended restore, pass `--repair-credentials` under the same condition. If you decline, or run without a terminal and omit the flag, kip shows how to repair the credentials later with `kip service credentials --repair`.
