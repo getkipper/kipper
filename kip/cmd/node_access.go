@@ -148,7 +148,7 @@ func (a *nodeAccess) load(n accessNode, records []installer.NodeRecord, exclude 
 	}
 	outcome, err := a.c.applyOn(n, b, in, a.apiOn)
 	if err != nil {
-		outcome += ": " + firstErrLine(err)
+		outcome = accessOutcome(n.rec.Name, outcome, err)
 	}
 	a.next.History[len(a.next.History)-1].Nodes[n.rec.Name] = outcome
 	if werr := installer.WriteAccessRecord(a.c.server, a.next); werr != nil {

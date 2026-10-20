@@ -98,12 +98,13 @@ type accessFixture struct {
 	headers map[installer.FirewallRunner]string
 	applied []installer.AccessApply
 	result  map[string]error
+	refused map[string]error
 	removed []installer.FirewallRunner
 }
 
 func newAccessFixture(t *testing.T, observed map[string]string) *accessFixture {
 	t.Helper()
-	f := &accessFixture{out: &bytes.Buffer{}, server: &accessHost{observed: observed}, headers: map[installer.FirewallRunner]string{}, result: map[string]error{}}
+	f := &accessFixture{out: &bytes.Buffer{}, server: &accessHost{observed: observed}, headers: map[installer.FirewallRunner]string{}, result: map[string]error{}, refused: map[string]error{}}
 	server := installer.NodeRecord{Name: "server", Host: "192.0.2.10", PeerAddress: "10.0.0.10", MachineID: accessServerID, Role: installer.NodeRoleServer}
 	f.c = &accessCluster{
 		out:     f.out,
@@ -129,6 +130,9 @@ func newAccessFixture(t *testing.T, observed map[string]string) *accessFixture {
 		},
 		apply: func(a installer.AccessApply) (string, error) {
 			f.applied = append(f.applied, a)
+			if err := f.refused[a.Label]; err != nil {
+				return "", err
+			}
 			if err := f.result[a.Label]; err != nil {
 				return installer.AccessRestored, err
 			}
@@ -549,4 +553,33 @@ func TestAccessChangeRefusesWhileARemovalIsUnfinished(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "kip node remove worker-1")
 	assert.Empty(t, f.server.writes)
+}
+
+func TestAccessRefusalBeforeAChangeIsShownOncePerNode(t *testing.T) {
+	f := newAccessFixture(t, map[string]string{"4": "198.51.100.7"})
+	f.server.store(t, listedRecord())
+	f.committed(f.server, 4)
+	conflict := "nftables.service is enabled or running on this host"
+	f.refused["server"] = errors.New("server: " + conflict)
+
+	require.Error(t, f.c.change("apply", nil, false))
+
+	rec := f.server.stored(t)
+	assert.Equal(t, "not changed: "+conflict, rec.History[0].Nodes["server"], "The node name belongs in the key only, so omit it from the outcome.")
+
+	f.c.families = func(string) []string { return []string{"4"} }
+	f.c.state = func(installer.CommandRunner) (installer.AccessHostState, error) {
+		return installer.AccessHostState{Table: f.headers[f.server], Operators: f.headers[f.server], Live: true, UnitEnabled: "enabled", NftablesService: true}, nil
+	}
+	f.c.live = func(installer.CommandRunner) (installer.AccessLive, error) { return installer.AccessLive{}, nil }
+	var out bytes.Buffer
+	printAccessReport(&out, f.c.report([]showNode{{rec: f.c.nodes[0].rec, client: f.server}}))
+	assert.Equal(t, 1, strings.Count(out.String(), conflict), out.String())
+	assert.Contains(t, out.String(), "server: not changed")
+}
+
+func TestAccessReportShowsAnEarlyEntryWithoutAnOutcomeAsNotChanged(t *testing.T) {
+	var out bytes.Buffer
+	printAccessReport(&out, accessReport{Present: true, Generation: 2, History: []installer.AccessChange{{Action: "apply", Generation: 2, Nodes: map[string]string{"server": ": server: refused"}}}})
+	assert.Contains(t, out.String(), "server: not changed\n")
 }

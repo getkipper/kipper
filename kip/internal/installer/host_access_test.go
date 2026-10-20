@@ -595,6 +595,9 @@ func TestAccessReserveInstallsTheUnitAndArmsTheTimer(t *testing.T) {
 		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(), f)
 	}
 	assert.Equal(t, accessUnit(), s.file(accessUnitPath))
+	unit, err := os.Stat(s.path(accessUnitPath))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o644), unit.Mode().Perm(), "The unit must be readable by everyone to avoid systemd warnings.")
 	assert.True(t, s.exists("enabled-"+accessUnitName))
 	calls := s.calls()
 	assert.Contains(t, calls, "sync -f "+s.path(accessDir))
@@ -626,7 +629,24 @@ func TestAccessReserveStopsWhenAFileCannotBeWritten(t *testing.T) {
 }
 
 func TestWriteIfChangedChecksTheWrittenSize(t *testing.T) {
-	assert.Contains(t, writeIfChanged("/x", "abc\n", ""), "[ \"$(wc -c < /x.kip-new)\" -eq 4 ] || exit 1")
+	assert.Contains(t, writeIfChanged("/x", "abc\n", "", ""), "[ \"$(wc -c < /x.kip-new)\" -eq 4 ] || exit 1")
+}
+
+func TestAccessReserveMakesAnUnchangedPrivateUnitReadable(t *testing.T) {
+	t.Parallel()
+	s := newAccessScene(t)
+	s.write(accessUnitPath, accessUnit())
+	require.NoError(t, s.arm(1, "198.51.100.0/24"))
+	unit, err := os.Stat(s.path(accessUnitPath))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o644), unit.Mode().Perm())
+}
+
+func TestAccessReserveMakesTheUnitReadableBeforeSystemdReloads(t *testing.T) {
+	cmd := accessRun{id: "abc123"}.reserveAndArmCommand("t", "o", 1)
+	chmod := strings.Index(cmd, "chmod 0644 "+accessUnitPath+".kip-new")
+	require.GreaterOrEqual(t, chmod, 0)
+	assert.Less(t, chmod, strings.Index(cmd, "daemon-reload"))
 }
 
 func TestAccessReserveOpensTheLockForAppend(t *testing.T) {

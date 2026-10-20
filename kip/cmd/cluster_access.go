@@ -204,6 +204,17 @@ func (c *accessCluster) baseline(n accessNode) (accessBaseline, error) {
 	return b, nil
 }
 
+// accessOutcome formats a failed change for the node's history entry using
+// the first line of err, which must be non-nil. An empty outcome means the live
+// access table was left unchanged. The node's name is already the entry's key,
+// so its prefix is removed from the error.
+func accessOutcome(name, outcome string, err error) string {
+	if outcome == "" {
+		outcome = "not changed"
+	}
+	return outcome + ": " + strings.TrimPrefix(firstErrLine(err), name+": ")
+}
+
 func firstErrLine(err error) string {
 	line, _, _ := strings.Cut(err.Error(), "\n")
 	return line
@@ -359,7 +370,7 @@ func (c *accessCluster) change(action string, edit accessEdit, acceptOlder bool)
 		}
 		outcome, err := c.applyOn(n, baselines[n.rec.MachineID], intents[n.rec.MachineID], apiOn)
 		if err != nil {
-			outcomes[n.rec.Name] = outcome + ": " + firstErrLine(err)
+			outcomes[n.rec.Name] = accessOutcome(n.rec.Name, outcome, err)
 			failure = err
 			continue
 		}
@@ -977,8 +988,14 @@ func printAccessReport(out io.Writer, r accessReport) {
 					names = append(names, name)
 				}
 				sort.Strings(names)
+				// Keep history brief because current problems are listed below.
+				// Full history details are available with --json.
 				for _, name := range names {
-					say(out, "      %s: %s\n", name, h.Nodes[name])
+					outcome, _, _ := strings.Cut(h.Nodes[name], ": ")
+					if outcome == "" {
+						outcome = "not changed"
+					}
+					say(out, "      %s: %s\n", name, outcome)
 				}
 			}
 		}

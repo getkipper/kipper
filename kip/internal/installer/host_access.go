@@ -173,12 +173,18 @@ func writeFile(path, body string) string {
 }
 
 // writeIfChanged builds a command that replaces path with body through a
-// temporary file only when the bytes differ, and runs onChange afterwards.
-// A failed write leaves path as it was and exits.
-func writeIfChanged(path, body, onChange string) string {
+// temporary file and runs onChange only when the bytes differ. If mode is set,
+// it is applied before replacement or to the existing file if the bytes match.
+// A failed write leaves path unchanged and exits the shell.
+func writeIfChanged(path, body, mode, onChange string) string {
 	tmp := path + ".kip-new"
 	cmd := writeFile(tmp, body)
-	cmd += fmt.Sprintf("if cmp -s %[1]s %[2]s; then rm -f %[1]s; else mv -f %[1]s %[2]s || exit 1", tmp, path)
+	keep := "rm -f " + tmp
+	if mode != "" {
+		cmd += fmt.Sprintf("chmod %s %s || exit 1\n", mode, tmp)
+		keep += fmt.Sprintf("; chmod %s %s || exit 1", mode, path)
+	}
+	cmd += fmt.Sprintf("if cmp -s %[1]s %[2]s; then %[3]s; else mv -f %[1]s %[2]s || exit 1", tmp, path, keep)
 	if onChange != "" {
 		cmd += "; " + onChange
 	}
@@ -204,8 +210,10 @@ func (r accessRun) reserveAndArmCommand(table, operators string, generation int)
 		fmt.Fprintf(&b, "g=$(sed -n '1s/^# kipper-access generation \\([0-9][0-9]*\\)$/\\1/p' %s 2>/dev/null)\n", r.file(f))
 		fmt.Fprintf(&b, "if [ -n \"$g\" ] && [ \"$g\" -gt %d ]; then echo \"this host already holds access generation $g, newer than %d, so an older change cannot replace it\" >&2; exit 1; fi\n", generation, generation)
 	}
-	b.WriteString(writeIfChanged(r.script(), accessScript(r.root), ""))
-	b.WriteString(writeIfChanged(r.root+accessUnitPath, accessUnit(), "systemctl daemon-reload || exit 1"))
+	b.WriteString(writeIfChanged(r.script(), accessScript(r.root), "", ""))
+	// The shell's umask keeps access files private. This unit contains no secrets,
+	// so make it readable by everyone to avoid systemd warnings on each reload.
+	b.WriteString(writeIfChanged(r.root+accessUnitPath, accessUnit(), "0644", "systemctl daemon-reload || exit 1"))
 	fmt.Fprintf(&b, "systemctl enable %s >/dev/null 2>&1; systemctl is-enabled --quiet %s || { echo 'systemd did not enable %s' >&2; exit 1; }\n", accessUnitName, accessUnitName, accessUnitName)
 	for _, c := range []struct{ name, body string }{{"next-table.nft", table}, {"next-operators.nft", operators}} {
 		b.WriteString(writeFile(r.file(c.name)+".kip-new", c.body))
