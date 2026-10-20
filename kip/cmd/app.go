@@ -921,27 +921,94 @@ func runAppBuildLogs(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("  Streaming build logs for %s (pod: %s)...\n\n", appName, latest.Name)
+	return followBuild(ctx, clientset, latest, os.Stdout, 2*time.Second)
+}
 
-	// Stream all container logs (init + main)
-	for _, c := range append(latest.Spec.InitContainers, latest.Spec.Containers...) {
-		tailLines := int64(1000)
-		logReq := clientset.CoreV1().Pods(labels.BuildsNamespace).GetLogs(latest.Name, &corev1.PodLogOptions{
-			Container: c.Name,
-			Follow:    true,
-			TailLines: &tailLines,
+// followBuild streams stage logs in pod specification order, starting with init
+// containers and the last 1000 lines of each log. It waits for each stage to
+// start and stops reading stages if the pod finishes before one starts.
+// Errors opening log streams are printed and skipped. Once the pod finishes,
+// it returns buildOutcome's result. Pod lookup errors and context cancellation
+// stop polling.
+func followBuild(ctx context.Context, clientset kubernetes.Interface, pod *corev1.Pod, out io.Writer, interval time.Duration) error {
+	pods := clientset.CoreV1().Pods(pod.Namespace)
+	for _, c := range append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...) {
+		current, err := waitForBuildPod(ctx, pods.Get, pod.Name, interval, func(p *corev1.Pod) bool {
+			state := buildContainerState(p, c.Name)
+			return state.Running != nil || state.Terminated != nil || buildFinished(p)
 		})
-
-		stream, streamErr := logReq.Stream(ctx)
-		if streamErr != nil {
+		if err != nil {
+			return err
+		}
+		if state := buildContainerState(current, c.Name); state.Running == nil && state.Terminated == nil {
+			break
+		}
+		tailLines := int64(1000)
+		stream, err := pods.GetLogs(pod.Name, &corev1.PodLogOptions{Container: c.Name, Follow: true, TailLines: &tailLines}).Stream(ctx)
+		if err != nil {
+			_, _ = fmt.Fprintf(out, "--- %s ---\n  ⚠  could not read this stage's log: %v\n", c.Name, err)
 			continue
 		}
-
-		fmt.Printf("--- %s ---\n", c.Name)
-		_, _ = io.Copy(os.Stdout, stream)
+		_, _ = fmt.Fprintf(out, "--- %s ---\n", c.Name)
+		_, _ = io.Copy(out, stream)
 		_ = stream.Close()
 	}
+	final, err := waitForBuildPod(ctx, pods.Get, pod.Name, interval, buildFinished)
+	if err != nil {
+		return err
+	}
+	return buildOutcome(final)
+}
 
-	return nil
+func buildFinished(p *corev1.Pod) bool {
+	return p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed
+}
+
+// waitForBuildPod polls at interval until done accepts the pod, a lookup fails,
+// or the context is cancelled. It returns the accepted pod or an error.
+func waitForBuildPod(ctx context.Context, get func(context.Context, string, metav1.GetOptions) (*corev1.Pod, error), name string, interval time.Duration, done func(*corev1.Pod) bool) (*corev1.Pod, error) {
+	for {
+		p, err := get(ctx, name, metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			return nil, fmt.Errorf("the build pod %s was removed before the build finished", name)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading the build pod %s: %w", name, err)
+		}
+		if done(p) {
+			return p, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+}
+
+func buildContainerState(p *corev1.Pod, name string) corev1.ContainerState {
+	for _, s := range append(append([]corev1.ContainerStatus{}, p.Status.InitContainerStatuses...), p.Status.ContainerStatuses...) {
+		if s.Name == name {
+			return s.State
+		}
+	}
+	return corev1.ContainerState{}
+}
+
+// buildOutcome returns nil for a successful pod. Otherwise, it returns an error
+// naming the first stage in specification order with a non-zero exit code and
+// includes its exit code and reason. If none is found, it uses the pod's reason
+// and message.
+func buildOutcome(p *corev1.Pod) error {
+	if p.Status.Phase == corev1.PodSucceeded {
+		return nil
+	}
+	for _, c := range append(append([]corev1.Container{}, p.Spec.InitContainers...), p.Spec.Containers...) {
+		if t := buildContainerState(p, c.Name).Terminated; t != nil && t.ExitCode != 0 {
+			return fmt.Errorf("the build failed: stage %s exited with code %d (%s)", c.Name, t.ExitCode, t.Reason)
+		}
+	}
+	return fmt.Errorf("the build failed: %s", strings.TrimSpace(p.Status.Reason+" "+p.Status.Message))
 }
 
 // parseEnvVars turns KEY=VALUE strings into a map. A malformed entry (no '=',
