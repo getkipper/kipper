@@ -181,3 +181,12 @@ func TestARuleRestrictedToNamedObjectsGrantsNothingToTheBound(t *testing.T) {
 		t.Error("an unrestricted rule stopped granting, so the bound now under-reports what the operator holds")
 	}
 }
+
+// The Volume controller adopts a restored volume holder pod by writing its
+// owner reference, which is an update on the pod.
+func TestConsoleClusterRoleCanAdoptVolumeHolders(t *testing.T) {
+	console := parseConsoleClusterRole(t)
+	for _, verb := range []string{"get", "list", "watch", "create", "update", "delete"} {
+		require.True(t, grants(console, "", "pods", verb), "console-api needs %s on pods", verb)
+	}
+}

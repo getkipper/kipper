@@ -170,6 +170,7 @@ Global flag on every command: `--cluster <name>`. Most workflow commands accept 
 
 **Shared volumes** (Longhorn RWX)
 - `kip volume create <name> --size 5Gi | list | mount <volume> <app> --path /data | unmount <volume> <app> | delete <volume> [--delete-data]` — `mount` and `unmount` act on an app, so they resolve it by name across the cluster rather than from the active project (see Orientation); the other three use the saved context.
+- Each shared volume has a holder pod `volume-holder-<name>` that mounts it read-only so backups copy its files even when no app mounts it. The holder is a separate infrastructure pod and is deleted with the volume. `kip volume list` warns when a holder cannot run, for example because a quota or admission policy rejected it.
 
 **Blueprints and GitOps**
 - `kip blueprint list | info <name> | install <name> [--project --environment --set key=value]` — one-command app stacks.

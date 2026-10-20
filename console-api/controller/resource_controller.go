@@ -431,9 +431,9 @@ func (rc *ResourceController) fetchPodMetrics(ctx context.Context) (map[string][
 		return nil, fmt.Errorf("parsing metrics response: %w", err)
 	}
 
-	// Fetch all pods to get labels, OOMKill status, and stuck status
+	// Workload labels and failure states supplement the metrics API response.
 	pods, err := rc.client.CoreV1().Pods("").List(ctx, metav1.ListOptions{
-		LabelSelector: labels.KipperManagedSelector,
+		LabelSelector: labels.WorkloadPodSelector,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing pods: %w", err)
@@ -1864,14 +1864,14 @@ func (rc *ResourceController) appendLogEntries(ctx context.Context, newEntries [
 	}
 }
 
-// checkPodProblems lists all Kipper-managed pods and fires a warning alert
-// for any container stuck in ImagePullBackOff/ErrImagePull or crash-looping
-// for a non-OOM reason. OOM crash loops are left to the OOM path, which
-// raises the memory limit. Each pod/container is alerted at most once per
-// hour to avoid alert storms.
+// checkPodProblems checks Kipper workload pods for image pull failures and
+// non-OOM crash loops. OOM-only crash loops use the memory adjustment path.
+// Image pull and crash-loop alerts are limited to once per workload per hour
+// to avoid alert storms. Read-only volume diagnoses have separate deduplication
+// so a recent crash-loop alert cannot delay a new diagnosis.
 func (rc *ResourceController) checkPodProblems(ctx context.Context) []alertBatch {
 	pods, err := rc.client.CoreV1().Pods("").List(ctx, metav1.ListOptions{
-		LabelSelector: labels.KipperManagedSelector,
+		LabelSelector: labels.WorkloadPodSelector,
 	})
 	if err != nil {
 		return nil
