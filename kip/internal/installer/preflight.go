@@ -12,9 +12,9 @@ import (
 
 const (
 	// minRAMMB is the minimum detected RAM in MiB accepted by preflight.
-	// It allows for memory reserved by the host on a 2 GB server.
-	minRAMMB         = 1800
-	tightRAMMB       = 3500
+	// It allows for host-reserved memory on a 4 GB server. Memory use during
+	// installs and upgrades exceeds the capacity of 2 GB servers.
+	minRAMMB         = 3500
 	recommendedRAMMB = 8192
 )
 
@@ -163,14 +163,6 @@ func ramWarnings(ramMB int, profile string) []string {
 	monitoring := profile != ProfileNano
 	risk := fmt.Sprintf(" The '%s' profile enables monitoring (Prometheus, Loki, Grafana) by default, which can push the host into swapping, and the install itself can fail at Zot. Use --profile nano to disable monitoring on a new cluster.", profile)
 	switch {
-	case ramMB < tightRAMMB:
-		w := fmt.Sprintf("RAM is below 4GB (%dMB available): headroom for apps is very tight. Use this host for demos or development. For production, start with at least 8GB.", ramMB)
-		if monitoring {
-			w += risk
-		} else {
-			w += " The 'nano' profile keeps monitoring (Prometheus, Loki, Grafana) off."
-		}
-		return []string{w}
 	case ramMB < recommendedRAMMB && !monitoring:
 		return []string{fmt.Sprintf("RAM is below recommended 8GB (%dMB available): the 'nano' profile keeps monitoring (Prometheus, Loki, Grafana) off to leave more memory for apps.", ramMB)}
 	case ramMB < nanoRAMMB:
@@ -233,7 +225,7 @@ func pastStandardSupportWarning(sys SystemInfo) string {
 
 func checkRAM(sys SystemInfo) error {
 	if sys.RAMMB < minRAMMB {
-		return fmt.Errorf("insufficient RAM: %dMB available, %dMB required", sys.RAMMB, minRAMMB)
+		return fmt.Errorf("insufficient RAM: %dMB available, %dMB required. Use a server with at least 4 GB RAM", sys.RAMMB, minRAMMB)
 	}
 	return nil
 }

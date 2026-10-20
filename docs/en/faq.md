@@ -38,7 +38,7 @@ One small difference: in `kip exec`, a shell keeps drawing to the size the windo
 
 ### What servers are supported?
 
-Any Linux server with SSH access as root, or as a user with passwordless sudo, running Ubuntu 22.04, 24.04 or 26.04, Debian 12 or 13, or Rocky Linux, AlmaLinux or CentOS Stream 9 or 10. Kipper also accepts Ubuntu 20.04 and Debian 11, with a warning that standard support has ended. You need at least 2 GB RAM and enough disk space for Kipper's system volumes and images. Start with a 40 GB disk and allow more space for your workloads. See [preflight checks](/en/installation#preflight-checks) for the capacity requirements.
+Any Linux server with SSH access as root, or as a user with passwordless sudo, running Ubuntu 22.04, 24.04 or 26.04, Debian 12 or 13, or Rocky Linux, AlmaLinux or CentOS Stream 9 or 10. Kipper also accepts Ubuntu 20.04 and Debian 11, with a warning that standard support has ended. You need at least 4 GB RAM and enough disk space for Kipper's system volumes and images. Start with a 40 GB disk and allow more space for your workloads. See [preflight checks](/en/installation#preflight-checks) for the capacity requirements.
 
 ### Can I install on a cloud VM?
 

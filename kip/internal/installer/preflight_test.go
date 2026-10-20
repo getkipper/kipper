@@ -99,10 +99,10 @@ func TestRunPreflightChecks(t *testing.T) {
 			wantWarningContains: "RAM is below recommended 8GB (3900MB available). The 'medium' profile enables monitoring (Prometheus, Loki, Grafana) by default, which can push the host into swapping",
 		},
 		{
-			name: "a forced larger profile below 4 GB names the risk without calling it nano",
+			name: "a forced larger profile on a 4 GB host names the risk without calling it nano",
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "22.04",
-				RAMMB: 3000, DiskMB: 40960, CPUs: 4,
+				RAMMB: 3600, DiskMB: 40960, CPUs: 4,
 			},
 			profile:             ProfileSmall,
 			wantWarningContains: "The 'small' profile enables monitoring (Prometheus, Loki, Grafana) by default, which can push the host into swapping, and the install itself can fail at Zot.",
@@ -140,20 +140,20 @@ func TestRunPreflightChecks(t *testing.T) {
 			},
 		},
 		{
-			name: "passes at the exact 1800 MiB floor with a nano warning",
+			name: "passes at the exact 3500 MiB floor with a nano warning",
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "22.04",
-				RAMMB: 1800, DiskMB: 40960,
+				RAMMB: 3500, DiskMB: 40960,
 			},
 			wantWarningContains: "'nano' profile",
 		},
 		{
-			name: "warns nano-style in the 3 GB range",
+			name: "a 4 GB server reporting 3867 MiB passes with nano",
 			system: SystemInfo{
-				OS: "ubuntu", OSVersion: "22.04",
-				RAMMB: 3000, DiskMB: 40960,
+				OS: "ubuntu", OSVersion: "24.04",
+				RAMMB: 3867, DiskMB: 40960,
 			},
-			wantWarningContains: "RAM is below 4GB (3000MB available)",
+			wantWarningContains: "'nano' profile",
 		},
 		{
 			name: "a 4 GB host gets nano and its warning",
@@ -218,20 +218,20 @@ func TestRunPreflightChecks(t *testing.T) {
 			},
 		},
 		{
-			name: "a 2 GB server reporting 1905 MiB passes",
+			name: "a 2 GB server reporting 1905 MiB is refused",
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "24.04",
 				RAMMB: 1905, DiskMB: 40960,
 			},
-			wantWarningContains: "'nano' profile",
+			wantError: "insufficient RAM: 1905MB available, 3500MB required. Use a server with at least 4 GB RAM",
 		},
 		{
-			name: "fails when RAM is below the 1800 MiB floor",
+			name: "fails when RAM is below the 3500 MiB floor",
 			system: SystemInfo{
 				OS: "ubuntu", OSVersion: "22.04",
-				RAMMB: 1799, DiskMB: 40960,
+				RAMMB: 3499, DiskMB: 40960,
 			},
-			wantError: "insufficient RAM: 1799MB available, 1800MB required",
+			wantError: "insufficient RAM: 3499MB available, 3500MB required. Use a server with at least 4 GB RAM",
 		},
 		{
 			name: "fails when 70% of the filesystem cannot hold the system volumes",
@@ -378,11 +378,11 @@ func TestRunPreflightChecks(t *testing.T) {
 
 // Worker preflight budgets free space without reserving server system volumes.
 func TestWorkerPreflightSkipsTheSystemVolumeRule(t *testing.T) {
-	sys := SystemInfo{OS: "rocky", OSVersion: "10.2", RAMMB: 3000, DiskMB: 22000, DiskSizeMB: 25000, CPUs: 2}
+	sys := SystemInfo{OS: "rocky", OSVersion: "10.2", RAMMB: 4096, DiskMB: 22000, DiskSizeMB: 25000, CPUs: 2}
 	_, err := runPreflightChecks(sys, PlatformState{}, false, false, RoleWorker)
 	assert.NoError(t, err)
 
-	sys = SystemInfo{OS: "rocky", OSVersion: "10.2", RAMMB: 3000, DiskMB: 9000, DiskSizeMB: 40000, CPUs: 2}
+	sys = SystemInfo{OS: "rocky", OSVersion: "10.2", RAMMB: 4096, DiskMB: 9000, DiskSizeMB: 40000, CPUs: 2}
 	_, err = runPreflightChecks(sys, PlatformState{}, false, false, RoleWorker)
 	assert.ErrorContains(t, err, "25% of the filesystem")
 }
@@ -424,7 +424,7 @@ func TestDiskShortageOnAnExistingClusterIsAWarning(t *testing.T) {
 }
 
 func TestWorkerPreflightChecksTheKubeletPortOnly(t *testing.T) {
-	sys := SystemInfo{OS: "rocky", OSVersion: "10.2", RAMMB: 3000, DiskMB: 40960, DiskSizeMB: 45000,
+	sys := SystemInfo{OS: "rocky", OSVersion: "10.2", RAMMB: 4096, DiskMB: 40960, DiskSizeMB: 45000,
 		PortListeners: map[int][]string{80: {"nginx"}, 10250: {"k3s-agent"}}}
 	result, err := runPreflightChecks(sys, PlatformState{}, false, false, RoleWorker)
 	assert.NoError(t, err)
@@ -444,7 +444,7 @@ func TestWorkerPreflightChecksTheKubeletPortOnly(t *testing.T) {
 func TestLocalStorageDiskFloor(t *testing.T) {
 	local := PlatformState{Profile: ProfileNano, Storage: StorageLocal}
 	sys := func(freeMB, sizeMB int) SystemInfo {
-		return SystemInfo{OS: "ubuntu", OSVersion: "24.04", RAMMB: 2048, CPUs: 2, DiskMB: freeMB, DiskSizeMB: sizeMB}
+		return SystemInfo{OS: "ubuntu", OSVersion: "24.04", RAMMB: 4096, CPUs: 2, DiskMB: freeMB, DiskSizeMB: sizeMB}
 	}
 
 	_, err := RunPreflightChecks(sys(9000, 20000), local, false, false)
@@ -467,7 +467,7 @@ func TestLocalStorageDiskFloor(t *testing.T) {
 // minimum space because those images can be reused.
 func TestLocalStorageDiskFloorCreditsImagesAlreadyPresent(t *testing.T) {
 	local := PlatformState{Profile: ProfileNano, Storage: StorageLocal}
-	sys := SystemInfo{OS: "ubuntu", OSVersion: "24.04", RAMMB: 2048, CPUs: 2, DiskMB: 5000, DiskSizeMB: 20000, ImagesPresentMB: 6500}
+	sys := SystemInfo{OS: "ubuntu", OSVersion: "24.04", RAMMB: 4096, CPUs: 2, DiskMB: 5000, DiskSizeMB: 20000, ImagesPresentMB: 6500}
 	_, err := RunPreflightChecks(sys, local, false, false)
 	assert.NoError(t, err, "5000 MiB free plus 6500 MiB of images already pulled clears the 10240 MiB floor")
 
