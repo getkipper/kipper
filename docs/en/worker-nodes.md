@@ -73,4 +73,6 @@ Services that ran on a lost worker may stay unavailable until it returns. Losing
 - **Listing nodes:** `kip node list` shows every node with its role, status and address. When a worker is recorded, it also shows each node's network mode and SSH address.
 - **Health:** `kip status` runs its host checks on the server and every recorded worker, and names a worker it could not reach. `kip app info` and `kip function info` name the nodes a workload's pods run on, and `kip service info` shows the node a service runs on and where its data is.
 
-`kip upgrade` acts on the server's host only, so upgrading k3s on a worker is a manual step today. For what [`kip cluster uninstall`](/en/cli-reference#kip-cluster-uninstall) does with the workers, and for other worker maintenance, see [Maintenance](/en/cli-reference#kip-node-add) in the CLI reference.
+- **k3s upgrades:** rerunning `kip install` upgrades k3s on the server, then brings each worker recorded as `ready` to the same version, one at a time and without a drain. See [k3s upgrades](/en/maintenance#k3s-upgrades).
+
+`kip upgrade` acts on the server's host only. For what [`kip cluster uninstall`](/en/cli-reference#kip-cluster-uninstall) does with the workers, and for other worker maintenance, see [Maintenance](/en/cli-reference#kip-node-add) in the CLI reference.
