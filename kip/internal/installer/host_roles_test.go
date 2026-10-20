@@ -10,9 +10,8 @@ func TestPrepareWorkerHostInstallsStorageAndRaisesInotify(t *testing.T) {
 		{contains: "cat /etc/os-release", out: "ID=rocky\nVERSION_ID=\"10.2\"\nID_LIKE=\"rhel centos fedora\"\n"},
 		{contains: "rpm -q", out: "missing\n"},
 	}}
-	master := &routedRunner{routes: []route{{contains: "cat " + k3sResolvConfPath, out: "nameserver 1.1.1.1\n"}}}
 
-	if err := prepareWorkerHost(master, worker); err != nil {
+	if err := prepareWorkerHost(worker, []string{"1.1.1.1"}); err != nil {
 		t.Fatalf("prepareWorkerHost: %v\n%s", err, strings.Join(worker.commands, "\n"))
 	}
 	for _, want := range []string{
@@ -36,8 +35,7 @@ func TestPrepareWorkerHostHardensAfterTheStoragePackages(t *testing.T) {
 		{contains: "cat /etc/os-release", out: "ID=debian\nVERSION_ID=\"13\"\n"},
 		{contains: "list-unit-files rpcbind.socket", out: "rpcbind.socket\n"},
 	}}
-	master := &routedRunner{}
-	if err := prepareWorkerHost(master, worker); err != nil {
+	if err := prepareWorkerHost(worker, []string{"1.1.1.1"}); err != nil {
 		t.Fatal(err)
 	}
 	install, mask := -1, -1
