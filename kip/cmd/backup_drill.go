@@ -28,6 +28,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/getkipper/kipper/controller/pkg/backupscope"
+	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/k8s"
 	"github.com/getkipper/kipper/kip/internal/velerolabel"
 )
@@ -51,7 +52,10 @@ allows traffic between the restored pods and outgoing cluster DNS queries.
 It requires a NetworkPolicy controller and allows the node traffic exempted by
 Kubernetes. For Postgres and MySQL, the drill counts rows in user tables across
 databases with count(*). The drill namespace is deleted afterwards unless
---keep is set or the restore is still running or its state cannot be checked.`,
+--keep is set or the restore is still running or its state cannot be checked.
+The nano profile blocks drills because small servers lack the memory for a
+second copy of the services. To check one Postgres service's backup, use
+kip service restore-dump.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runBackupDrill,
@@ -62,6 +66,21 @@ func init() {
 	backupDrillCmd.Flags().Bool("keep", false, "keep the drill namespace for inspection. Delete it later with --clean")
 	backupDrillCmd.Flags().Bool("clean", false, "delete the drill namespace left by --keep or an interrupted drill after waiting for running drill restores")
 	backupCmd.AddCommand(backupDrillCmd)
+}
+
+// drillProfileAllowed rejects nano because a second copy of a namespace's
+// services exceeds small servers' memory capacity. A missing PlatformConfig
+// is allowed for compatibility with older clusters. Other read errors are returned.
+func drillProfileAllowed(ctx context.Context, dyn dynamic.Interface) error {
+	profile, err := clusterProfile(ctx, dyn)
+	if err != nil {
+		return err
+	}
+	if profile == installer.ProfileNano {
+		return fmt.Errorf("a backup drill restores a second copy of the namespace's services and needs a profile larger than 'nano'. " +
+			"To check one Postgres service's backup, restore its database dump with 'kip service restore-dump'")
+	}
+	return nil
 }
 
 type tableCount struct {
@@ -89,6 +108,9 @@ func runBackupDrill(cmd *cobra.Command, args []string) error {
 	}
 	if !backupsConfiguredOn(ctx, dyn) {
 		return errBackupsNotConfigured
+	}
+	if err := drillProfileAllowed(ctx, dyn); err != nil {
+		return err
 	}
 
 	if err := refuseLeftoverDrill(ctx, clientset, source); err != nil {

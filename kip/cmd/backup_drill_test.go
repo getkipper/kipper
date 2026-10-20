@@ -20,6 +20,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/getkipper/kipper/controller/pkg/backupscope"
+	"github.com/getkipper/kipper/kip/internal/installer"
 )
 
 func backupObject(name, phase, completed string, included, excluded []interface{}) unstructured.Unstructured {
@@ -348,4 +349,27 @@ func TestAPodThatGetsScheduledResetsTheDrillsPatience(t *testing.T) {
 	_, err = clientset.CoreV1().Pods(drillNamespace).UpdateStatus(ctx, pod, metav1.UpdateOptions{})
 	require.NoError(t, err)
 	assert.NoError(t, check(ctx), "the wait starts again after the pod was schedulable")
+}
+
+func TestADrillIsRefusedOnTheNanoProfile(t *testing.T) {
+	err := drillProfileAllowed(context.Background(), platformClient(installer.ProfileNano))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nano")
+	assert.Contains(t, err.Error(), "kip service restore-dump")
+
+	for _, profile := range []string{installer.ProfileSmall, installer.ProfileMedium, installer.ProfileLarge, installer.ProfileXLarge} {
+		assert.NoError(t, drillProfileAllowed(context.Background(), platformClient(profile)), profile)
+	}
+}
+
+func TestADrillIsAllowedOnAClusterWithoutPlatformConfig(t *testing.T) {
+	assert.NoError(t, drillProfileAllowed(context.Background(), platformClient("")))
+}
+
+func TestADrillStopsWhenThePlatformConfigCannotBeRead(t *testing.T) {
+	refusing := platformClient(installer.ProfileSmall)
+	refusing.PrependReactor("get", "platformconfigs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("the apiserver is busy")
+	})
+	assert.Error(t, drillProfileAllowed(context.Background(), refusing))
 }

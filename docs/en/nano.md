@@ -17,6 +17,8 @@ When you need more, you install a larger cluster and move your projects to it wi
 - **No monitoring by default.** Prometheus, Loki and Grafana stay off. Turn them on later with `kip platform enable prometheus` and `kip platform enable loki` if the server has room.
 - **Backups to external storage only.** A cluster on local storage omits Velero and MinIO unless you supply `--backup-storage-bucket`, because a backup on the same disk would be lost if the disk failed. Add [external backup storage](/en/backups#external-s3-compatible-storage) when you want backups.
 
+For now, nano blocks `kip backup drill` because running a second copy of a namespace's services exceeds a small server's memory capacity. To check one Postgres service's backup, restore its database dump with `kip service restore-dump`.
+
 ```bash
 kip install --host 203.0.113.10 --admin-email admin@example.com
 ```

@@ -12,7 +12,6 @@ import (
 	"github.com/spf13/cobra"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
@@ -289,14 +288,10 @@ func minioSizeFor(bytes int64) string {
 // A missing PlatformConfig is allowed for compatibility with older clusters.
 // Other read errors are returned.
 func aiProfileAllowed(ctx context.Context, dyn dynamic.Interface) error {
-	pc, err := dyn.Resource(platformGVR).Get(ctx, platformConfigName, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
+	profile, err := clusterProfile(ctx, dyn)
 	if err != nil {
-		return fmt.Errorf("reading PlatformConfig: %w", err)
+		return err
 	}
-	profile, _, _ := unstructured.NestedString(pc.Object, "spec", "profile")
 	if profile == installer.ProfileNano {
 		return fmt.Errorf("a fresh AI bundle installation needs a profile larger than 'nano' to run a model locally. " +
 			"For diagnostics and log analysis, set up Kipper's console assistant with a hosted provider using 'kip ai configure'")
