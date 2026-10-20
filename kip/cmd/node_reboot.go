@@ -363,7 +363,7 @@ func runNodeReboot(cmd *cobra.Command, args []string) error {
 	r.ServingApps = nil
 	r.Prepare = w.prepare
 	r.Settle = w.settle
-	r.Report = func(out io.Writer, cfg ssh.Config) { reportWorkerAfterReboot(out, cfg) }
+	r.Report = func(out io.Writer, cfg ssh.Config) { reportWorkerAfterReboot(out, cfg, rec.Name) }
 	return r.run(rec.Name, yes, skipBackup)
 }
 
@@ -643,14 +643,16 @@ func reportNodeVolumes(out io.Writer, node string, volumes []installer.NodeVolum
 	}
 }
 
-func reportWorkerAfterReboot(out io.Writer, cfg ssh.Config) {
+func reportWorkerAfterReboot(out io.Writer, cfg ssh.Config, node string) {
 	c, err := ssh.Dial(cfg)
 	if err != nil {
 		say(out, "  Pending restarts:\n    ⚠  not checked (could not reach the host over SSH: %v)\n\n", err)
 		return
 	}
 	defer func() { _ = c.Close() }()
-	reportPendingRestarts(out, c)
+	say(out, "  Pending restarts:\n")
+	reportPendingRestarts(out, hostTarget{runner: c, reboot: "kip node reboot " + node})
+	say(out, "\n")
 }
 
 // rebootSSHConfig limits command duration because a booting server can accept
@@ -788,7 +790,9 @@ func reportHostAfterReboot(out io.Writer, sshConfig ssh.Config, cluster *config.
 		// SSH host checks can proceed even if the API request fails.
 		say(out, "  ⚠  could not list nodes: %v\n\n", err)
 	}
-	checkHostWith(out, sshConfig, cluster, nodes)
+	records, recordsErr := nodeRecordsFromAPI(ctx, client.Clientset(), cluster)
+	reportRecordFallback(out, recordsErr)
+	checkHostWith(out, sshConfig, cluster, nodes, records)
 }
 
 // rebootCommand delays reboot so SSH can return the scheduling result.

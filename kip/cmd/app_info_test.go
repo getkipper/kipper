@@ -48,7 +48,7 @@ func TestWriteAppInfo(t *testing.T) {
 
 	t.Run("shows status, scaling and resources", func(t *testing.T) {
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", sampleAppInfo(), now)
+		writeAppInfo(&out, "api", sampleAppInfo(), "", nil, now)
 		got := out.String()
 
 		assert.Contains(t, got, "  App: api\n")
@@ -68,14 +68,14 @@ func TestWriteAppInfo(t *testing.T) {
 		info := sampleAppInfo()
 		info.Autoscale.Policy.Enabled = false
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", info, now)
+		writeAppInfo(&out, "api", info, "", nil, now)
 
 		assert.Contains(t, out.String(), "           Kipper adjusts the request between 200m and 1\n")
 	})
 
 	t.Run("says when the autoscaler tracks a resource", func(t *testing.T) {
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", sampleAppInfo(), now)
+		writeAppInfo(&out, "api", sampleAppInfo(), "", nil, now)
 
 		assert.Contains(t, out.String(), "           the autoscaler tracks CPU, so Kipper leaves the CPU request alone\n")
 	})
@@ -85,7 +85,7 @@ func TestWriteAppInfo(t *testing.T) {
 		target := int32(80)
 		info.Autoscale.Policy.MemoryTarget = &target
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", info, now)
+		writeAppInfo(&out, "api", info, "", nil, now)
 
 		assert.Contains(t, out.String(), "           the autoscaler tracks memory, so Kipper only raises it after an out-of-memory kill\n")
 	})
@@ -97,7 +97,7 @@ func TestWriteAppInfo(t *testing.T) {
 		info.Autoscale.HPAMetrics = map[string]bool{"memory": true}
 		info.CPU.Mode = provenance.ModeAutomatic
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", info, now)
+		writeAppInfo(&out, "api", info, "", nil, now)
 
 		assert.NotContains(t, out.String(), "tracks CPU", "an unusable policy's CPU target is not what the autoscaler tracks")
 		assert.Contains(t, out.String(), "tracks memory, so Kipper only raises it after an out-of-memory kill")
@@ -109,7 +109,7 @@ func TestWriteAppInfo(t *testing.T) {
 		info.Autoscale.Policy.MinReplicas = &six
 		info.Autoscale.HPAExists = false
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", info, now)
+		writeAppInfo(&out, "api", info, "", nil, now)
 
 		assert.NotContains(t, out.String(), "the autoscaler tracks")
 	})
@@ -121,7 +121,7 @@ func TestWriteAppInfo(t *testing.T) {
 		info.Autoscale.HPAExists = false
 		info.Autoscale.HPAUnreadable = true
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", info, now)
+		writeAppInfo(&out, "api", info, "", nil, now)
 
 		assert.Contains(t, out.String(), "           CPU sizing unknown: permission denied when reading the autoscaler\n")
 		assert.NotContains(t, out.String(), "Kipper adjusts the request")
@@ -131,7 +131,7 @@ func TestWriteAppInfo(t *testing.T) {
 		info := sampleAppInfo()
 		info.Memory.RecommendedRequest, info.Memory.RecommendedLimit = "2048Mi", "2Gi"
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", info, now)
+		writeAppInfo(&out, "api", info, "", nil, now)
 
 		assert.NotContains(t, out.String(), "recommendation", "2048Mi and 2Gi are the same size")
 	})
@@ -141,7 +141,7 @@ func TestWriteAppInfo(t *testing.T) {
 		info.CPU = deployer.ResourceInfo{Mode: provenance.ModeFixed, Request: deployer.SpecValue{Value: "500m", Source: provenance.User}, LiveRequest: "500m", LiveLimit: "500m"}
 		info.Memory = deployer.ResourceInfo{Mode: provenance.ModeHeld, LiveRequest: "1Gi", LiveLimit: "1Gi"}
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", info, now)
+		writeAppInfo(&out, "api", info, "", nil, now)
 
 		assert.Contains(t, out.String(), "           fixed at the size you set\n")
 		assert.Contains(t, out.String(), "           kept until you set them; original ownership is unknown\n")
@@ -151,7 +151,7 @@ func TestWriteAppInfo(t *testing.T) {
 		info := sampleAppInfo()
 		info.Memory.RecommendedRequest, info.Memory.RecommendedLimit = "2Gi", "2Gi"
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", info, now)
+		writeAppInfo(&out, "api", info, "", nil, now)
 
 		assert.Contains(t, out.String(), "           sized by Kipper\n")
 		assert.NotContains(t, out.String(), "recommendation")
@@ -162,7 +162,7 @@ func TestWriteAppInfo(t *testing.T) {
 		info.Template = deployer.TemplateMissing
 		info.Autoscale.LastScaleTime = nil
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", info, now)
+		writeAppInfo(&out, "api", info, "", nil, now)
 
 		assert.Contains(t, out.String(), "  CPU:     not deployed yet\n")
 		assert.NotContains(t, out.String(), "Last scaled")
@@ -172,7 +172,7 @@ func TestWriteAppInfo(t *testing.T) {
 		info := sampleAppInfo()
 		info.Template = deployer.TemplateUnreadable
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", info, now)
+		writeAppInfo(&out, "api", info, "", nil, now)
 
 		assert.Contains(t, out.String(), "  CPU:     unknown (the Deployment could not be read)\n")
 		assert.NotContains(t, out.String(), "not deployed")
@@ -182,7 +182,7 @@ func TestWriteAppInfo(t *testing.T) {
 		info := sampleAppInfo()
 		info.CPU.LiveLimit = ""
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", info, now)
+		writeAppInfo(&out, "api", info, "", nil, now)
 
 		assert.Contains(t, out.String(), "  CPU:     request 300m, limit not set\n")
 	})
@@ -191,7 +191,7 @@ func TestWriteAppInfo(t *testing.T) {
 		info := sampleAppInfo()
 		info.Status.RolloutWaiting = "1 of 2 pods updated"
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", info, now)
+		writeAppInfo(&out, "api", info, "", nil, now)
 
 		assert.Contains(t, out.String(), "  Rollout incomplete: some pods may still use earlier values.\n")
 	})
@@ -209,7 +209,7 @@ func TestWriteAppInfo_Conditions(t *testing.T) {
 			{Type: "LinksOpen", Status: "Unknown", Reason: "Pending"},
 		}
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", info, now)
+		writeAppInfo(&out, "api", info, "", nil, now)
 		got := out.String()
 
 		assert.Contains(t, got, "  Conditions\n")
@@ -221,8 +221,20 @@ func TestWriteAppInfo_Conditions(t *testing.T) {
 
 	t.Run("prints no section when the app has no conditions", func(t *testing.T) {
 		var out bytes.Buffer
-		writeAppInfo(&out, "api", sampleAppInfo(), now)
+		writeAppInfo(&out, "api", sampleAppInfo(), "", nil, now)
 
 		assert.NotContains(t, out.String(), "Conditions")
 	})
+}
+
+func TestWriteAppInfoNamesTheNodesOnlyWhenThereAreSeveral(t *testing.T) {
+	now := time.Date(2026, 10, 10, 23, 0, 0, 0, time.UTC)
+	var out bytes.Buffer
+	writeAppInfo(&out, "api", sampleAppInfo(), "server-1 (1 pod), worker-1 (1 pod)", nil, now)
+	assert.Contains(t, out.String(), "  Image:   ghcr.io/acme/api:v1\n  Nodes:   server-1 (1 pod), worker-1 (1 pod)\n\n")
+
+	out.Reset()
+	writeAppInfo(&out, "api", sampleAppInfo(), "", nil, now)
+	assert.Contains(t, out.String(), "  Image:   ghcr.io/acme/api:v1\n\n")
+	assert.NotContains(t, out.String(), "Nodes:")
 }

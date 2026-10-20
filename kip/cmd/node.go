@@ -11,8 +11,13 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 
+	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
+	"github.com/getkipper/kipper/kip/internal/k8s"
 	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
@@ -683,7 +688,7 @@ func saveNodeRecord(server installer.CommandRunner, clusterName string, rec inst
 }
 
 func runNodeList(cmd *cobra.Command, args []string) error {
-	_, client, err := loadCurrentCluster()
+	cluster, client, err := loadCurrentCluster()
 	if err != nil {
 		return err
 	}
@@ -693,13 +698,72 @@ func runNodeList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("listing nodes: %w", err)
 	}
-
-	fmt.Printf("\n  %-20s %-8s %-25s %-14s %s\n", "NAME", "ROLE", "STATUS", "VERSION", "IP")
-	for _, node := range nodes {
-		fmt.Printf("  %-20s %-8s %-25s %-14s %s\n",
-			node.Name, node.Role, node.Summary(), node.Version, node.IP)
+	records, recordsErr := nodeRecordsFromAPI(ctx, client.Clientset(), cluster)
+	writeNodeList(os.Stdout, nodes, records)
+	if recordsErr != nil {
+		say(os.Stdout, "  ⚠  could not read the node records (%v). Modes and addresses come from this machine's copy\n\n", recordsErr)
 	}
-	fmt.Println()
-
 	return nil
+}
+
+// writeNodeList prints the node table. Once a worker is recorded, it adds
+// each node's network mode and SSH address. A missing record shows "-" in both
+// columns, and a missing mode shows "-" in the mode column.
+func writeNodeList(out io.Writer, nodes []k8s.NodeInfo, records []installer.NodeRecord) {
+	byName := map[string]installer.NodeRecord{}
+	workers := false
+	for _, r := range records {
+		byName[r.Name] = r
+		workers = workers || r.Role == installer.NodeRoleWorker
+	}
+
+	if !workers {
+		say(out, "\n  %-20s %-8s %-25s %-14s %s\n", "NAME", "ROLE", "STATUS", "VERSION", "IP")
+		for _, node := range nodes {
+			say(out, "  %-20s %-8s %-25s %-14s %s\n", node.Name, node.Role, node.Summary(), node.Version, node.IP)
+		}
+		say(out, "\n")
+		return
+	}
+
+	say(out, "\n  %-20s %-8s %-25s %-14s %-16s %-9s %s\n", "NAME", "ROLE", "STATUS", "VERSION", "IP", "MODE", "ADDRESS")
+	for _, node := range nodes {
+		mode, address := "-", "-"
+		if r, ok := byName[node.Name]; ok {
+			address = r.Host
+			if r.Mode != "" {
+				mode = r.Mode
+			}
+		}
+		say(out, "  %-20s %-8s %-25s %-14s %-16s %-9s %s\n", node.Name, node.Role, node.Summary(), node.Version, node.IP, mode, address)
+	}
+	say(out, "\n")
+}
+
+// nodeRecordsFromAPI reads the node records through the Kubernetes API. A
+// missing ConfigMap yields the local copy without an error.
+// Unreadable or invalid records return the local copy together with the error.
+func nodeRecordsFromAPI(ctx context.Context, client kubernetes.Interface, cluster *config.Cluster) ([]installer.NodeRecord, error) {
+	cm, err := client.CoreV1().ConfigMaps(installer.NodeRecordsNamespace).Get(ctx, installer.NodeRecordsConfigMap, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return cluster.Nodes, nil
+	}
+	if err != nil {
+		return cluster.Nodes, fmt.Errorf("reading the node records: %w", err)
+	}
+	records, err := installer.ParseNodeRecordData(cm.Data)
+	if err != nil {
+		return cluster.Nodes, err
+	}
+	return records, nil
+}
+
+// reportRecordFallback warns that the worker list came from the local copy
+// and prints nothing when err is nil.
+func reportRecordFallback(out io.Writer, err error) {
+	if err == nil {
+		return
+	}
+	say(out, "  Node records:\n")
+	say(out, "    ⚠  not read from the cluster (%v). Worker checks use this machine's copy, which can miss workers added from another machine\n\n", err)
 }

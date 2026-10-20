@@ -154,6 +154,23 @@ func (m *Manager) Delete(ctx context.Context, namespace, name string) error {
 	return err
 }
 
+// Get reads a function's display status from its Function custom resource.
+// It defaults a missing trigger to http and a missing phase to idle.
+// It returns an error if Dynamic is nil, the function is absent or the read fails.
+func (m *Manager) Get(ctx context.Context, namespace, name string) (Status, error) {
+	if m.Dynamic == nil {
+		return Status{}, fmt.Errorf("function manager is not configured with a dynamic client")
+	}
+	cr, err := m.Dynamic.Resource(manifest.FunctionGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return Status{}, fmt.Errorf("function %q not found", name)
+	}
+	if err != nil {
+		return Status{}, fmt.Errorf("reading function %s: %w", name, err)
+	}
+	return functionStatusFromCR(cr), nil
+}
+
 // List returns all functions in a namespace by reading Function CRs.
 func (m *Manager) List(ctx context.Context, namespace string) ([]Status, error) {
 	if m.Dynamic == nil {
