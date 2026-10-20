@@ -14,19 +14,23 @@ import (
 const (
 	accessTable   = "inet kipper_access"
 	accessAPIPort = 6443
-	// accessChainRules is the number of rules in the rendered input chain.
+	// accessChainRules is the number of rules in the rendered input chain
+	// without operator devices. The device rule adds one.
 	accessChainRules = 8
 	accessHeader     = "# kipper-access generation "
 )
 
 // AccessIntent is everything one node's access table is rendered from.
-// Server4 is the zero Addr on the server.
+// Server4 is the zero Addr on the server. Devices admits connections that
+// arrive through the operator interface. WireGuard authenticates registered
+// peers, and the kipper_ops table restricts their traffic.
 type AccessIntent struct {
 	Generation int
 	Admin      []netip.Prefix
 	Ports      []int
 	Cluster4   []netip.Prefix
 	Server4    netip.Addr
+	Devices    bool
 }
 
 // ParseAccessPrefix reads a canonical operator prefix or a bare host address.
@@ -60,10 +64,11 @@ func ParseAccessPrefix(s string) (netip.Prefix, error) {
 }
 
 // RenderAccessTable renders table.nft: the chain and every set, with the
-// operator sets empty. Loading it alone blocks new operator connections while
-// admitting the configured pods and peers. Joining addresses must be added
-// separately to the initially empty joining4 set. It rejects an empty operator
-// list, missing or invalid SSH ports, SSH on 80 or 443, and IPv6 cluster addresses.
+// operator sets empty. Loading it alone blocks new connections from operator
+// prefixes while admitting the configured pods, peers and, when enabled, devices.
+// Joining addresses must be added separately to the initially empty joining4 set.
+// It rejects an empty operator list unless devices are enabled, missing or invalid
+// SSH ports, SSH on 80 or 443, and IPv6 cluster addresses.
 func RenderAccessTable(in AccessIntent) (string, error) {
 	if err := in.validate(); err != nil {
 		return "", err
@@ -95,6 +100,9 @@ func RenderAccessTable(in AccessIntent) (string, error) {
 	fmt.Fprintf(&b, "    tcp dport %d ip saddr @cluster4 accept\n", accessAPIPort)
 	fmt.Fprintf(&b, "    tcp dport %d ip saddr @joining4 accept\n", accessAPIPort)
 	fmt.Fprintf(&b, "    tcp dport { %s } ip saddr @server4 accept\n", ssh)
+	if in.Devices {
+		fmt.Fprintf(&b, "    %s tcp dport { %s } accept\n", accessDeviceMatch, ports)
+	}
 	fmt.Fprintf(&b, "    tcp dport { %s } counter drop\n", ports)
 	b.WriteString("  }\n}\n")
 	return b.String(), nil
@@ -127,7 +135,7 @@ func RenderAccessOperators(in AccessIntent) (string, error) {
 }
 
 func (in AccessIntent) validate() error {
-	if len(in.Admin) == 0 {
+	if len(in.Admin) == 0 && !in.Devices {
 		return errors.New("the access list has no operator prefixes. 'kip cluster access reset' opens the ports")
 	}
 	if len(in.Ports) == 0 {
@@ -470,8 +478,20 @@ type accessChainShape struct {
 	Dropped  int64
 }
 
-func (s accessChainShape) matches() bool {
-	return s.Hook == "input" && s.Priority == -10 && s.Policy == "accept" && s.Rules == accessChainRules
+// accessDeviceMatch is the match of the device rule in table.nft.
+const accessDeviceMatch = `iifname "` + opsInterface + `"`
+
+// expectedAccessRules is the input chain's rule count for a committed
+// table.nft: one more when it carries the device rule.
+func expectedAccessRules(table string) int {
+	if strings.Contains(table, accessDeviceMatch) {
+		return accessChainRules + 1
+	}
+	return accessChainRules
+}
+
+func (s accessChainShape) matches(rules int) bool {
+	return s.Hook == "input" && s.Priority == -10 && s.Policy == "accept" && s.Rules == rules
 }
 
 // parseChainShape reads the hook, priority, policy, rule count and drop
