@@ -259,10 +259,11 @@ func checkHostWith(out io.Writer, sshConfig ssh.Config, cluster *config.Cluster,
 	reportHostChecks(out, cluster, nodes, serverTarget(cluster, server, err, records), workers)
 }
 
-// reportHostChecks reports DNS, restarts and mounts for the server, then workers,
+// reportHostChecks reports host checks for the server, then workers,
 // marking unreachable hosts as unchecked. With workers, result prefixes identify
 // nodes, while healthy mount results name the host within the message.
 // Data placement uses the server, and firewall warnings require a readable marker.
+// Operator access reporting requires a server runner to read the cluster record.
 func reportHostChecks(out io.Writer, cluster *config.Cluster, nodes []k8s.NodeInfo, server hostTarget, workers []hostTarget) {
 	targets := append([]hostTarget{server}, workers...)
 	if len(workers) > 0 {
@@ -303,6 +304,9 @@ func reportHostChecks(out io.Writer, cluster *config.Cluster, nodes []k8s.NodeIn
 		reportDataPlacement(out, server.runner, cluster, nodes)
 	}
 	reportUFWFailOpen(out, targets)
+	if server.runner != nil {
+		reportAccessGuards(out, server.runner, targets)
+	}
 }
 
 // reportUFWFailOpen reports failed firewall restoration attempts recorded on

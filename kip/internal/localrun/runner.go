@@ -79,6 +79,11 @@ func (r *Runner) ConfirmFreshConnection() error {
 	return ErrNoConnection
 }
 
+// ObservedAddress returns ErrNoConnection.
+func (r *Runner) ObservedAddress(string) (string, error) {
+	return "", ErrNoConnection
+}
+
 // SurvivesSSHRateLimit returns true because commands run locally.
 func (r *Runner) SurvivesSSHRateLimit() bool {
 	return true

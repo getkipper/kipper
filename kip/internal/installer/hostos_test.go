@@ -2,6 +2,7 @@ package installer
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -83,6 +84,9 @@ type firewallOnly struct{ osReleaseRunner }
 func (firewallOnly) SurvivesSSHRateLimit() bool { return true }
 
 func (firewallOnly) ConfirmFreshConnection() error { return nil }
+func (firewallOnly) ObservedAddress(string) (string, error) {
+	return "", errors.New("no fresh connection in this test")
+}
 
 func TestPackageInstallNoticeNamesThePackagesAndTheWait(t *testing.T) {
 	notice := packageInstallNotice([]string{"iscsi-initiator-utils", "nfs-utils"})

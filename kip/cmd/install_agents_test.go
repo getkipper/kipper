@@ -34,8 +34,9 @@ func (s recordsOnlyServer) Start(command string) (*ssh.Held, error) {
 	s.t.Fatalf("the node lease was taken for %q", command)
 	return nil, nil
 }
-func (recordsOnlyServer) SurvivesSSHRateLimit() bool    { return true }
-func (recordsOnlyServer) ConfirmFreshConnection() error { return nil }
+func (recordsOnlyServer) SurvivesSSHRateLimit() bool             { return true }
+func (recordsOnlyServer) ConfirmFreshConnection() error          { return nil }
+func (recordsOnlyServer) ObservedAddress(string) (string, error) { return "", nil }
 
 func TestUpgradeAgentsAfterInstallSkipsASingleNodeCluster(t *testing.T) {
 	server := recordsOnlyServer{t: t, records: `{"0123456789abcdef0123456789abcdef":"{\"name\":\"server-1\",\"host\":\"203.0.113.10\",\"machineID\":\"0123456789abcdef0123456789abcdef\",\"role\":\"server\",\"state\":\"ready\"}"}`}

@@ -363,7 +363,7 @@ func runNodeReboot(cmd *cobra.Command, args []string) error {
 	r.ServingApps = nil
 	r.Prepare = w.prepare
 	r.Settle = w.settle
-	r.Report = func(out io.Writer, cfg ssh.Config) { reportWorkerAfterReboot(out, cfg, rec.Name) }
+	r.Report = func(out io.Writer, cfg ssh.Config) { reportWorkerAfterReboot(out, cfg, rec.Name, master) }
 	return r.run(rec.Name, yes, skipBackup)
 }
 
@@ -674,7 +674,7 @@ func reportNodeVolumes(out io.Writer, node string, volumes []installer.NodeVolum
 	}
 }
 
-func reportWorkerAfterReboot(out io.Writer, cfg ssh.Config, node string) {
+func reportWorkerAfterReboot(out io.Writer, cfg ssh.Config, node string, server installer.CommandRunner) {
 	c, err := ssh.Dial(cfg)
 	if err != nil {
 		say(out, "  Pending restarts:\n    ⚠  not checked (could not reach the host over SSH: %v)\n\n", err)
@@ -684,6 +684,7 @@ func reportWorkerAfterReboot(out io.Writer, cfg ssh.Config, node string) {
 	say(out, "  Pending restarts:\n")
 	reportPendingRestarts(out, hostTarget{runner: c, reboot: "kip node reboot " + node})
 	say(out, "\n")
+	reportAccessGuard(out, server, c)
 }
 
 // rebootSSHConfig limits command duration because a booting server can accept
