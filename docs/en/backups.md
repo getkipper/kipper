@@ -129,6 +129,8 @@ When a restored Postgres service carries a consistent dump, kip also tests the l
 
 The drill's copy of each service needs enough resources on a node. If kip observes a restored pod staying unschedulable for two minutes, for example because the node has no CPU or memory available, kip stops waiting, reports the scheduler's reason and leaves the restore running. Resolve the scheduling error or end the restore with `kip backup restore --cancel <restore>` (see [Cancel a stuck restore](#cancel-a-stuck-restore)). Then remove the namespace with `kip backup drill <namespace> --clean`. `kip service restore-dump` behaves the same way.
 
+kip refuses a drill on a cluster with the `nano` profile. Running a second copy of every service in the namespace exceeds a small server's memory capacity. To check one Postgres service's backup on a `nano` cluster, restore its database dump with `kip service restore-dump`. The limit will be lifted once drills run reliably on small servers.
+
 Finally, kip prints the backup's name and completion time and requests deletion of the drill namespace unless `--keep` is set.
 
 | Flag | Default | Description |

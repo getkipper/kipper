@@ -254,6 +254,21 @@ func getPlatformConfig(ctx context.Context, dyn dynamic.Interface) (*unstructure
 	return pc, nil
 }
 
+// clusterProfile returns the cluster's platform profile. It returns "" if
+// PlatformConfig is absent, as on older clusters, or spec.profile is missing or
+// is not a string. Other read errors are returned.
+func clusterProfile(ctx context.Context, dyn dynamic.Interface) (string, error) {
+	pc, err := dyn.Resource(platformGVR).Get(ctx, platformConfigName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading PlatformConfig: %w", err)
+	}
+	profile, _, _ := unstructured.NestedString(pc.Object, "spec", "profile")
+	return profile, nil
+}
+
 // mutatePlatformConfig fetches the CR, applies mutate, and writes it back.
 // Retries once on a stale-resource-version conflict so concurrent CLI and
 // console edits don't bounce off each other.

@@ -1159,6 +1159,8 @@ kip backup drill blog-prod                                          # restore bl
 kip backup sse-key export --to ~/example-backups-sse.key            # save the SSE-C key, on clusters installed with --backup-storage-sse-c
 ```
 
+The `nano` profile blocks `kip backup drill` because running a second copy of a namespace's services exceeds a small server's memory capacity. Use `kip service restore-dump` to check one Postgres service's backup. See [Test a restore with a drill](/en/backups#test-a-restore-with-a-drill).
+
 `kip backup repository-key export` saves the volume backup encryption key to a new file with mode 0600. The command asks for confirmation, which you can skip with `--yes`. On Windows, the file inherits its folder's permissions. It never overwrites an existing file. Keep the key outside the cluster because a recovery install needs it to read the volume backups. See [The backup repository key](/en/installation#backup-repository-key).
 
 `kip backup sse-key export` does the same for the SSE-C key of a cluster installed with `--backup-storage-sse-c`, writing it as base64 text that `--backup-storage-sse-c-key-file` reads back. See [SSE-C](/en/installation#backup-sse-c).
