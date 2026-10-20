@@ -352,9 +352,10 @@ func scanChangesWith(ctx context.Context, dyn dynamic.Interface, namespace strin
 		}
 		liveSpec, _, _ := unstructured.NestedMap(live.Object, "spec")
 		newSpec, _ := res.Object.Object["spec"].(map[string]interface{})
-		// Use the same credential, stop-record and replica resolution as the write
-		// path so previews and field-removal checks agree with the applied spec.
+		// Match the write path's resolution of omitted and cluster-managed fields
+		// so previews and field-removal checks agree with the applied spec.
 		effective := withLiveStopRecord(effectiveSpecForDiff(name, newSpec), liveSpec)
+		effective = withLiveServiceTLS(res.Object.GetKind(), effective, liveSpec)
 		if res.Object.GetKind() == "App" {
 			effective = withResolvedReplicas(effective, liveSpec)
 			effective = withLiveAutomaticResources(effective, liveSpec, live.GetManagedFields())
@@ -366,15 +367,16 @@ func scanChangesWith(ctx context.Context, dyn dynamic.Interface, namespace strin
 	return out, nil
 }
 
-// objectForCreate resolves omitted App replicas and removes app-owned git
-// credential references, which are managed by the cluster. It preserves the
-// manifest for the update path if creation loses an AlreadyExists race.
+// objectForCreate defaults omitted App replicas and Postgres TLS settings and
+// removes app-owned git credential references, which are managed by the cluster.
+// It preserves the manifest for the update path if creation loses an
+// AlreadyExists race.
 func objectForCreate(name string, object *unstructured.Unstructured) *unstructured.Unstructured {
 	spec, isSpec := object.Object["spec"].(map[string]interface{})
 	if !isSpec {
 		return object
 	}
-	resolved := spec
+	resolved := withNewServiceTLS(object.GetKind(), spec)
 	if object.GetKind() == "App" {
 		resolved = withResolvedReplicas(spec, nil)
 	}
@@ -688,6 +690,7 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 		}
 		liveSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
 		newSpec = withLiveStopRecord(newSpec, liveSpec)
+		newSpec = withLiveServiceTLS(res.Object.GetKind(), newSpec, liveSpec)
 		if res.Object.GetKind() == "App" {
 			newSpec = withResolvedReplicas(newSpec, liveSpec)
 			newSpec = withLiveAutomaticResources(newSpec, liveSpec, existing.GetManagedFields())
