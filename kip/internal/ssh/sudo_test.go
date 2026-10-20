@@ -1,9 +1,11 @@
 package ssh
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -128,4 +130,26 @@ func TestRemoteCommandRemovesItsTemporaryFileWhenInterrupted(t *testing.T) {
 
 	_, err := os.Stat(filepath.Join(dir, "stderr"))
 	assert.True(t, os.IsNotExist(err), "the trap removes the file when the shell is terminated")
+}
+
+func TestAHeldCommandRunsThroughSudoForANonRootUser(t *testing.T) {
+	for user, wantSudo := range map[string]bool{"ubuntu": true, "root": false} {
+		dir := t.TempDir()
+		args := filepath.Join(dir, "args")
+		stub := filepath.Join(dir, "ssh")
+		//nolint:gosec // The stub must be executable to run from the test's temporary directory.
+		require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\nfor last; do :; done\nprintf '%s' \"$last\" > "+args+"\n"), 0o755))
+		t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		c := &Client{cfg: Config{Host: "203.0.113.10", User: user}}
+
+		held, err := c.Start("exec 7>/run/kipper-node-lifecycle.lock")
+		require.NoError(t, err)
+		require.NoError(t, held.Stdin.Close())
+		_, _ = io.ReadAll(held.Stdout)
+		require.NoError(t, held.Wait())
+
+		sent, err := os.ReadFile(args)
+		require.NoError(t, err)
+		assert.Equal(t, wantSudo, strings.Contains(string(sent), "sudo -n -H"), "%s: a held command such as the node lease writes under /run, which only root may", user)
+	}
 }

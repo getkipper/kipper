@@ -428,6 +428,7 @@ func ensureKeyAccess(user, host, keyPath string, isTTY bool) error {
 		var output bytes.Buffer
 		c := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", //nolint:gosec // the operator's host and key
 			"-i", keyPath, "-o", "IdentitiesOnly=yes", login, "true")
+		c.Env = ssh.EnvironWithoutLocale()
 		// Capture stdout too because cloud images can print root-login refusals there.
 		c.Stdout, c.Stderr = &output, &output
 		return c.Run() == nil, output.String()
@@ -455,6 +456,7 @@ func ensureKeyAccess(user, host, keyPath string, isTTY bool) error {
 	var placeErr bytes.Buffer
 	place := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", login, //nolint:gosec // the operator's host
 		"umask 077 && mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys")
+	place.Env = ssh.EnvironWithoutLocale()
 	place.Stdin = bytes.NewReader(pub)
 	place.Stdout = os.Stdout
 	place.Stderr = io.MultiWriter(os.Stderr, &placeErr)
