@@ -169,7 +169,7 @@ func TestARestoreWhoseSubmissionFailedIsStillChecked(t *testing.T) {
 	backup.SetName("b1")
 	var restoreName string
 
-	_, err := restoreIntoDrill(context.Background(), clientset, dyn, backup, "blog-prod", &restoreName)
+	_, err := restoreIntoDrill(context.Background(), clientset, dyn, backup, "blog-prod", "", &restoreName)
 
 	require.Error(t, err)
 	assert.NotEmpty(t, restoreName, "cleanup must ask Velero about a restore that may have been accepted")
