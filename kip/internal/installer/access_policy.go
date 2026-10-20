@@ -220,13 +220,19 @@ func AccessHeaderGeneration(file string) (int, bool) {
 	return n, err == nil
 }
 
-// accessPeers returns the peer addresses a node's cluster4 set admits on
-// 6443: every other record's PeerAddress except self, exclude and wiping
-// nodes. A record that would contribute without a PeerAddress is refused.
+// accessPeers returns sorted IPv4 peer addresses for cluster4 to admit on port
+// 6443, skipping the excluded machine ID and wiping nodes. It includes self so
+// the server's pods can reach its advertised API address when provider NAT
+// returns their traffic with that same address as the source. A missing self
+// address is skipped. Other missing addresses and invalid or non-IPv4 addresses
+// return an error.
 func accessPeers(records []NodeRecord, self, exclude string) ([]netip.Addr, error) {
 	var peers []netip.Addr
 	for _, r := range records {
-		if r.MachineID == self || (exclude != "" && r.MachineID == exclude) || r.State == NodeStateWiping {
+		if (exclude != "" && r.MachineID == exclude) || r.State == NodeStateWiping {
+			continue
+		}
+		if r.MachineID == self && r.PeerAddress == "" {
 			continue
 		}
 		if r.PeerAddress == "" {

@@ -1016,12 +1016,32 @@ func TestAccessIntentForAWorkerAdmitsTheServerOnSSH(t *testing.T) {
 	in, err := AccessIntentFor(3, prefixes(t, "198.51.100.0/24"), []int{22}, pod, records, worker1, "")
 	require.NoError(t, err)
 	assert.Equal(t, "192.0.2.10", in.Server4.String())
-	assert.Equal(t, prefixes(t, "10.42.0.0/16", "192.0.2.10/32"), in.Cluster4)
+	assert.Equal(t, prefixes(t, "10.42.0.0/16", "192.0.2.10/32", "192.0.2.11/32"), in.Cluster4)
 
 	in, err = AccessIntentFor(3, prefixes(t, "198.51.100.0/24"), []int{22}, pod, records, serverID, "")
 	require.NoError(t, err)
 	assert.False(t, in.Server4.IsValid(), "the server admits no worker on its SSH ports")
-	assert.Equal(t, prefixes(t, "10.42.0.0/16", "192.0.2.11/32"), in.Cluster4)
+	assert.Equal(t, prefixes(t, "10.42.0.0/16", "192.0.2.10/32", "192.0.2.11/32"), in.Cluster4)
+}
+
+// TestAccessIntentForAServerAdmitsItsOwnExternalAddressOnTheAPI covers the rule
+// needed when a public-mode server's pods reach its advertised external API
+// address through provider NAT and their traffic returns with that address as
+// the source.
+func TestAccessIntentForAServerAdmitsItsOwnExternalAddressOnTheAPI(t *testing.T) {
+	records := []NodeRecord{
+		{Name: "server", MachineID: serverID, Role: NodeRoleServer, State: NodeStateReady, Mode: NetworkModePublic, PeerAddress: "203.0.113.10"},
+		{Name: "worker-1", MachineID: worker1, Role: NodeRoleWorker, State: NodeStateReady, Mode: NetworkModePublic, PeerAddress: "203.0.113.11"},
+	}
+	pod := netip.MustParsePrefix("10.42.0.0/16")
+	in, err := AccessIntentFor(3, prefixes(t, "198.51.100.0/24"), []int{22}, pod, records, serverID, "")
+	require.NoError(t, err)
+	assert.Contains(t, in.Cluster4, netip.MustParsePrefix("203.0.113.10/32"))
+
+	table, err := RenderAccessTable(in)
+	require.NoError(t, err)
+	assert.Contains(t, table, "set cluster4 { type ipv4_addr; flags interval; elements = { 10.42.0.0/16, 203.0.113.10, 203.0.113.11 } }")
+	assert.Contains(t, table, "tcp dport 6443 ip saddr @cluster4 accept")
 }
 
 func mustShell(t *testing.T, s *accessScene, command string) string {

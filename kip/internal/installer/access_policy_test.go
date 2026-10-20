@@ -188,7 +188,7 @@ const (
 	worker3  = "00000000000000000000000000000004"
 )
 
-func TestAccessPeersAdmitsEveryOtherLiveNode(t *testing.T) {
+func TestAccessPeersAdmitsEveryLiveNode(t *testing.T) {
 	records := []NodeRecord{
 		peerRecord("server", serverID, NodeRoleServer, NodeStateReady, "192.0.2.10"),
 		peerRecord("worker-1", worker1, NodeRoleWorker, NodeStateReady, "192.0.2.11"),
@@ -197,11 +197,11 @@ func TestAccessPeersAdmitsEveryOtherLiveNode(t *testing.T) {
 	}
 	peers, err := accessPeers(records, serverID, "")
 	require.NoError(t, err)
-	assert.Equal(t, []string{"192.0.2.11", "192.0.2.12", "192.0.2.13"}, addrStrings(peers), "a removing node keeps reaching 6443 while it drains")
+	assert.Equal(t, []string{"192.0.2.10", "192.0.2.11", "192.0.2.12", "192.0.2.13"}, addrStrings(peers), "a removing node keeps reaching 6443 while it drains")
 
 	peers, err = accessPeers(records, worker1, worker3)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"192.0.2.10", "192.0.2.12"}, addrStrings(peers), "self and the excluded record contribute nothing")
+	assert.Equal(t, []string{"192.0.2.10", "192.0.2.11", "192.0.2.12"}, addrStrings(peers), "the excluded record contributes nothing")
 }
 
 func TestAccessPeersSkipsAWipingNode(t *testing.T) {
@@ -212,6 +212,21 @@ func TestAccessPeersSkipsAWipingNode(t *testing.T) {
 	peers, err := accessPeers(records, serverID, "")
 	require.NoError(t, err)
 	assert.Empty(t, peers)
+}
+
+func TestAccessPeersLeavesOutSelfWhenExcludedOrWiping(t *testing.T) {
+	records := []NodeRecord{
+		peerRecord("server", serverID, NodeRoleServer, NodeStateReady, "192.0.2.10"),
+		peerRecord("worker-1", worker1, NodeRoleWorker, NodeStateReady, "192.0.2.11"),
+	}
+	peers, err := accessPeers(records, worker1, worker1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"192.0.2.10"}, addrStrings(peers))
+
+	records[1].State = NodeStateWiping
+	peers, err = accessPeers(records, worker1, "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"192.0.2.10"}, addrStrings(peers))
 }
 
 func TestAccessPeersRefusesARecordWithoutAPeerAddress(t *testing.T) {
