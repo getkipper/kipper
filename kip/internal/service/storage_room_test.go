@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -294,6 +295,42 @@ func TestStorageRoomWarnsWhenLonghornCannotBeRead(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, warning, "forbidden")
+}
+
+func TestStorageRoomSaysNothingToAUserWhoMayNotReadLonghorn(t *testing.T) {
+	forbidden := func(resource string) k8stesting.ReactionFunc {
+		return func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: resource}, "", fmt.Errorf("user cannot read it"))
+		}
+	}
+	t.Run("storage classes", func(t *testing.T) {
+		clientset := kipperClasses()
+		clientset.PrependReactor("get", "storageclasses", forbidden("storageclasses"))
+		mgr := storageManager(clientset, defaultSettings()...)
+
+		warning, err := mgr.CheckStorageRoom(context.Background(), postgresVolumes(t, "1Gi"), "--storage")
+
+		require.NoError(t, err)
+		assert.Empty(t, warning)
+	})
+	t.Run("longhorn nodes", func(t *testing.T) {
+		mgr := longhornCluster(healthyNode("server-1", []string{"kipper-server"}, roomyDisk("default-disk", liveMaximum, liveReserved, liveScheduled)))
+		mgr.Dynamic.(*dynamicfake.FakeDynamicClient).PrependReactor("list", "nodes", forbidden("nodes"))
+
+		warning, err := mgr.CheckStorageRoom(context.Background(), postgresVolumes(t, "1Gi"), "--storage")
+
+		require.NoError(t, err)
+		assert.Empty(t, warning)
+	})
+	t.Run("longhorn settings", func(t *testing.T) {
+		mgr := longhornCluster(healthyNode("server-1", []string{"kipper-server"}, roomyDisk("default-disk", liveMaximum, liveReserved, liveScheduled)))
+		mgr.Dynamic.(*dynamicfake.FakeDynamicClient).PrependReactor("get", "settings", forbidden("settings"))
+
+		warning, err := mgr.CheckStorageRoom(context.Background(), postgresVolumes(t, "1Gi"), "--storage")
+
+		require.NoError(t, err)
+		assert.Empty(t, warning)
+	})
 }
 
 func TestStorageRoomWarnsWhenASettingIsMissing(t *testing.T) {

@@ -112,8 +112,10 @@ type longhornSettings struct {
 
 // CheckStorageRoom checks capacity for one replica of each proposed volume
 // without changing cluster state. It returns an error for a definite shortage,
-// using sizeOption as the size flag or field in the error's hint. Read failures,
-// no eligible disks, or an inconclusive placement return a warning and nil error.
+// using sizeOption as the size flag or field in the error's hint. A Kubernetes
+// Forbidden error skips the check with an empty warning and nil error. Other read
+// failures, no eligible disks, or an inconclusive placement return a warning and
+// nil error.
 // Existing claims, local storage and classes using other provisioners are skipped.
 // Pending Longhorn volumes count towards demand if they fit on an eligible disk,
 // including service and shared volumes whose claims are still being created.
@@ -383,7 +385,12 @@ func holdRoom(disks []longhornDisk, pending []placement) []longhornDisk {
 	return disks
 }
 
+// notChecked returns an empty string for Kubernetes Forbidden errors and a
+// warning for other failures.
 func notChecked(err error) string {
+	if errors.IsForbidden(err) {
+		return ""
+	}
 	return fmt.Sprintf("Longhorn's free space was not checked (%v). If the disk is full, the new volume stays unscheduled and its pod waits.", err)
 }
 
