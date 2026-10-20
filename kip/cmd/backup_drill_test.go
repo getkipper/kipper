@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"sigs.k8s.io/yaml"
 
 	"github.com/getkipper/kipper/controller/pkg/backupscope"
 	"github.com/getkipper/kipper/kip/internal/installer"
@@ -158,6 +160,84 @@ func TestADumpRestoreSubmitsARestoreLimitedToTheService(t *testing.T) {
 		"another service's pod would bring its data and dump volumes into the restore")
 }
 
+// submitDrillRestore intercepts the Restore submission and stops before waiting
+// for completion. It returns the submitted Restore, any modifier ConfigMap and
+// the fake Kubernetes client.
+func submitDrillRestore(t *testing.T, service string) (*unstructured.Unstructured, *corev1.ConfigMap, *kubefake.Clientset) {
+	t.Helper()
+	clientset := kubefake.NewClientset()
+	var modifier *corev1.ConfigMap
+	clientset.PrependReactor("create", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		modifier = action.(k8stesting.CreateAction).GetObject().(*corev1.ConfigMap)
+		return false, nil, nil
+	})
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{restoreGVR: "RestoreList"})
+	var submitted *unstructured.Unstructured
+	dyn.PrependReactor("create", "restores", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		submitted = action.(k8stesting.CreateAction).GetObject().(*unstructured.Unstructured)
+		return true, nil, errors.New("stop after the submission")
+	})
+	backup := &unstructured.Unstructured{}
+	backup.SetName("daily-2")
+	var restoreName string
+
+	_, err := restoreIntoDrill(context.Background(), clientset, dyn, backup, "shop-prod", service, &restoreName)
+
+	require.Error(t, err)
+	require.NotNil(t, submitted)
+	return submitted, modifier, clientset
+}
+
+func TestADumpRestoreGivesTheRestoredCopySmallRequests(t *testing.T) {
+	restore, modifier, clientset := submitDrillRestore(t, "orders")
+
+	require.NotNil(t, modifier, "a 4 GB server may lack capacity to schedule a copy with the source's 500m CPU and 1Gi memory requests")
+	assert.Equal(t, "velero", modifier.Namespace, "Velero reads resource modifiers from its own namespace")
+	ref, _, _ := unstructured.NestedStringMap(restore.Object, "spec", "resourceModifier")
+	assert.Equal(t, map[string]string{"kind": "ConfigMap", "name": modifier.Name}, ref)
+
+	require.Len(t, modifier.Data, 1, "Velero rejects a modifier ConfigMap with more than one key")
+	var rules struct {
+		Version               string `json:"version"`
+		ResourceModifierRules []struct {
+			Conditions struct {
+				GroupResource string `json:"groupResource"`
+			} `json:"conditions"`
+			Patches []struct {
+				Operation string `json:"operation"`
+				Path      string `json:"path"`
+				Value     string `json:"value"`
+			} `json:"patches"`
+		} `json:"resourceModifierRules"`
+	}
+	for _, data := range modifier.Data {
+		require.NoError(t, yaml.Unmarshal([]byte(data), &rules))
+	}
+	assert.Equal(t, "v1", rules.Version)
+	require.Len(t, rules.ResourceModifierRules, 1)
+	rule := rules.ResourceModifierRules[0]
+	assert.Equal(t, "pods", rule.Conditions.GroupResource)
+	require.Len(t, rule.Patches, 1)
+	patch := rule.Patches[0]
+	assert.Equal(t, "add", patch.Operation, "add replaces the requests and leaves the limits alone")
+	assert.Equal(t, "/spec/containers/0/resources/requests", patch.Path, "service pods run one container")
+	var requests corev1.ResourceList
+	require.NoError(t, json.Unmarshal([]byte(patch.Value), &requests), "Velero passes a value starting with { through as a JSON object")
+	assert.LessOrEqual(t, requests.Cpu().MilliValue(), int64(1), "a service may set a CPU limit as low as 1m")
+	assert.LessOrEqual(t, requests.Memory().Value(), int64(1<<20), "a request above the service's own limit gets the pod rejected, and no Postgres runs under 1Mi")
+
+	_, err := clientset.CoreV1().ConfigMaps("velero").Get(context.Background(), modifier.Name, metav1.GetOptions{})
+	assert.NoError(t, err, "a queued restore fails validation if its modifier is gone when Velero reaches it")
+}
+
+func TestADrillRestoresPodsWithTheirOwnRequests(t *testing.T) {
+	restore, modifier, _ := submitDrillRestore(t, "")
+
+	assert.Nil(t, modifier)
+	_, found, _ := unstructured.NestedFieldNoCopy(restore.Object, "spec", "resourceModifier")
+	assert.False(t, found)
+}
+
 func TestDrillNetworkPolicyDeniesEverythingButDNSAndTheNamespace(t *testing.T) {
 	np := drillNetworkPolicy()
 
@@ -229,7 +309,7 @@ func TestMappedRestoreLeavesIngressesOutByDefault(t *testing.T) {
 }
 
 func TestFinishDrillKeepsTheNamespaceWhileTheRestoreStateIsUnknown(t *testing.T) {
-	clientset := kubefake.NewClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: drillNamespace}})
+	clientset := kubefake.NewClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: drillNamespace}}, minimalRequestsModifier("drill-shop-1"))
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{restoreGVR: "RestoreList"})
 	dyn.PrependReactor("get", "restores", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("the server is currently unable to handle the request")
@@ -241,15 +321,31 @@ func TestFinishDrillKeepsTheNamespaceWhileTheRestoreStateIsUnknown(t *testing.T)
 	assert.Contains(t, err.Error(), "--clean")
 	_, getErr := clientset.CoreV1().Namespaces().Get(context.Background(), drillNamespace, metav1.GetOptions{})
 	assert.NoError(t, getErr, "the namespace stays while the restore may still be writing to it")
+	_, getErr = clientset.CoreV1().ConfigMaps("velero").Get(context.Background(), "drill-shop-1", metav1.GetOptions{})
+	assert.NoError(t, getErr, "the restore may not have read its modifier yet")
 }
 
 func TestFinishDrillDeletesTheNamespaceOnceTheRestoreIsGone(t *testing.T) {
-	clientset := kubefake.NewClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: drillNamespace}})
+	clientset := kubefake.NewClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: drillNamespace}}, minimalRequestsModifier("drill-shop-1"))
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{restoreGVR: "RestoreList"})
 
 	require.NoError(t, finishDrill(context.Background(), clientset, dyn, "drill-shop-1", "shop"))
 	_, getErr := clientset.CoreV1().Namespaces().Get(context.Background(), drillNamespace, metav1.GetOptions{})
 	assert.Error(t, getErr)
+	_, getErr = clientset.CoreV1().ConfigMaps("velero").Get(context.Background(), "drill-shop-1", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(getErr), "the restore's modifier goes with the drill")
+}
+
+func TestCleanRemovesRestoreModifiersOnceTheRestoresHaveFinished(t *testing.T) {
+	other := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "velero-settings", Namespace: "velero"}}
+	clientset := kubefake.NewClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: drillNamespace}}, minimalRequestsModifier("drill-shop-1"), other)
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{restoreGVR: "RestoreList"})
+
+	require.NoError(t, cleanDrill(context.Background(), clientset, dyn))
+	_, getErr := clientset.CoreV1().ConfigMaps("velero").Get(context.Background(), "drill-shop-1", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(getErr), "an interrupted restore-dump leaves its modifier for --clean")
+	_, getErr = clientset.CoreV1().ConfigMaps("velero").Get(context.Background(), "velero-settings", metav1.GetOptions{})
+	assert.NoError(t, getErr, "other ConfigMaps in the velero namespace stay")
 }
 
 func TestUnfinishedRestoresNamesWhatADrillWouldWaitBehind(t *testing.T) {
