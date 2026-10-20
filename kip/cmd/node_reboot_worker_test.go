@@ -26,7 +26,9 @@ type drainingServer struct {
 	health     string
 	degradeOn  string
 	healthErr  bool
+	replicaErr bool
 	nodes      string
+	longhorn   string
 }
 
 func (s *drainingServer) Run(cmd string) (string, error) {
@@ -35,9 +37,21 @@ func (s *drainingServer) Run(cmd string) (string, error) {
 		s.health = dbDegraded
 	}
 	switch {
+	case strings.Contains(cmd, "nodes.longhorn.io") && strings.HasSuffix(cmd, "-o json"):
+		if s.longhorn == "" {
+			return longhornNodes("True"), nil
+		}
+		return s.longhorn, nil
+	case strings.Contains(cmd, "volumes.longhorn.io") && strings.HasSuffix(cmd, "-o json"):
+		return `{"items":[{"metadata":{"name":"pvc-db"},"spec":{"size":"1073741824","nodeSelector":["kipper-server"]},"status":{"actualSize":1073741824}}]}`, nil
+	case strings.Contains(cmd, "settings.longhorn.io storage-"):
+		return "", nil
 	case strings.Contains(cmd, "node-drain-policy"):
 		return s.policy, nil
 	case strings.Contains(cmd, "replicas.longhorn.io"):
+		if s.replicaErr && !s.drained {
+			return "connection refused", errors.New("exit status 1")
+		}
 		if s.drained && s.afterDrain != nil {
 			return strings.Join(s.afterDrain, "\n"), nil
 		}
@@ -93,6 +107,17 @@ const (
 	evictionPolicy   = installer.LonghornEvictionDrainPolicy
 	drainBudgetError = "error when evicting pods/\"instance-manager-abc\" -n \"longhorn-system\" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.\nerror: unable to drain node \"worker-1\" due to error: global timeout reached: 30m0s"
 )
+
+// longhornNodes lists the worker being rebooted and a server tagged for
+// single-copy volumes. The server's single disk has the given Schedulable status.
+func longhornNodes(serverDisk string) string {
+	node := func(name, tags, schedulable string) string {
+		return `{"metadata":{"name":"` + name + `"},"spec":{"allowScheduling":true,"tags":[` + tags + `],"disks":{"disk-1":{"allowScheduling":true}}},` +
+			`"status":{"conditions":[{"type":"Ready","status":"True"},{"type":"Schedulable","status":"True"}],"diskStatus":{"disk-1":{"conditions":[{"type":"Schedulable","status":"` + schedulable +
+			`","message":"Disk disk-1 on node ` + name + ` is not schedulable for more replica"}],"storageAvailable":32212254720,"storageMaximum":42949672960}}}}`
+	}
+	return `{"items":[` + node("server", `"kipper-server"`, serverDisk) + "," + node("worker-1", "", "True") + `]}`
+}
 
 func newWorkerReboot(s *drainingServer) (*workerReboot, *bytes.Buffer) {
 	var out bytes.Buffer
@@ -499,4 +524,40 @@ func TestServerNetworkConsentStatesTheMeasuredImpact(t *testing.T) {
 	assert.Contains(t, text, "Running containers keep running")
 	assert.Contains(t, text, "usually for 10 to 30 seconds and longer on small or busy servers")
 	assert.Contains(t, text, "attempts to restore the previous configuration")
+}
+
+// TestWorkerRebootRefusesALastCopyWithNowhereToGo verifies that a blocked copy
+// leaves the node untouched, avoiding a drain timeout after other pods may
+// have been evicted.
+func TestWorkerRebootRefusesALastCopyWithNowhereToGo(t *testing.T) {
+	s := &drainingServer{policy: evictionPolicy, replicas: []string{dbOnlyOnWorker}, longhorn: longhornNodes("False")}
+	w, out := newWorkerReboot(s)
+
+	err := w.preview()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "shop/data-db-0 (server: disk disk-1 is not schedulable: Disk disk-1 on node server is not schedulable for more replica)")
+	assert.NotContains(t, out.String(), "Longhorn copies the volume to another node during the drain")
+
+	_, err = w.prepare()
+	require.Error(t, err, "the disk can fill up between the preview and the cordon")
+	assert.False(t, s.ran("kubectl cordon"))
+	assert.False(t, s.ran("kubectl drain"))
+}
+
+func TestWorkerRebootOnlyWarnsWhenLonghornNodesCannotBeRead(t *testing.T) {
+	s := &drainingServer{policy: evictionPolicy, replicas: []string{dbOnlyOnWorker}, longhorn: "error: the server is currently unable to handle the request"}
+	w, out := newWorkerReboot(s)
+
+	require.NoError(t, w.preview())
+	assert.Contains(t, out.String(), "could not check where Longhorn can copy the volumes on worker-1")
+}
+
+func TestWorkerRebootDrainsWhenTheReplicasCannotBeReadBeforeTheCordon(t *testing.T) {
+	s := &drainingServer{policy: evictionPolicy, replicaErr: true, afterDrain: []string{dbMovedToServer}}
+	w, out := newWorkerReboot(s)
+
+	_, err := w.prepare()
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "could not check where Longhorn can copy the volumes on worker-1")
+	assert.True(t, s.ran("kubectl drain worker-1 "))
 }
