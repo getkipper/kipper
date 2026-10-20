@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -114,6 +115,8 @@ type longhornSettings struct {
 // using sizeOption as the size flag or field in the error's hint. Read failures,
 // no eligible disks, or an inconclusive placement return a warning and nil error.
 // Existing claims, local storage and classes using other provisioners are skipped.
+// Pending Longhorn volumes count towards demand if they fit on an eligible disk,
+// including service and shared volumes whose claims are still being created.
 // An empty warning and nil error mean the check passed or was skipped.
 // Capacity is a snapshot, so passing this check does not guarantee scheduling.
 func (m *Manager) CheckStorageRoom(ctx context.Context, volumes []NewVolume, sizeOption string) (warning string, err error) {
@@ -128,6 +131,7 @@ func (m *Manager) CheckStorageRoom(ctx context.Context, volumes []NewVolume, siz
 	if err != nil {
 		return notChecked(err), nil
 	}
+	var nodes []unstructured.Unstructured
 	var disks []longhornDisk
 	var read bool
 	var wanted []placement
@@ -149,8 +153,8 @@ func (m *Manager) CheckStorageRoom(ctx context.Context, volumes []NewVolume, siz
 			continue
 		}
 		if !read {
-			nodes, settings, err := m.longhornState(ctx)
-			if err != nil {
+			var settings longhornSettings
+			if nodes, settings, err = m.longhornState(ctx); err != nil {
 				return notChecked(err), nil
 			}
 			disks, read = schedulingDisks(nodes, settings), true
@@ -163,7 +167,14 @@ func (m *Manager) CheckStorageRoom(ctx context.Context, volumes []NewVolume, siz
 			wanted = append(wanted, placement{volume: v, class: class, disks: eligible})
 		}
 	}
-	return place(disks, wanted, sizeOption)
+	if len(wanted) == 0 {
+		return "", nil
+	}
+	pending, err := m.unscheduledClaims(ctx, mode, nodes, disks)
+	if err != nil {
+		return notChecked(err), nil
+	}
+	return place(disks, wanted, placeable(disks, pending), sizeOption)
 }
 
 func (m *Manager) withoutClaims(ctx context.Context, volumes []NewVolume) ([]NewVolume, error) {
@@ -183,11 +194,13 @@ func (m *Manager) withoutClaims(ctx context.Context, volumes []NewVolume) ([]New
 	return out, nil
 }
 
-// ServerStorageRoom returns the largest capacity for a new single-copy volume
-// among eligible disks, choosing the first node name alphabetically on a tie.
+// ServerStorageRoom estimates the largest capacity for a new single-copy volume
+// among eligible disks after placing pending volumes largest first on the disk
+// with the most room. Ties favour the first node name alphabetically.
+// Longhorn may choose a different placement.
 // It returns an error for local storage or a non-Longhorn single-writer class,
 // read failures, or no eligible disks. Zero capacity with nil error means the
-// eligible disks have no room for a new replica.
+// estimated placement leaves no room for a new replica on eligible disks.
 func (m *Manager) ServerStorageRoom(ctx context.Context) (StorageRoom, error) {
 	mode := k8s.ReadStorageMode(ctx, m.Dynamic)
 	class := platform.SingleWriterClass(mode)
@@ -207,8 +220,167 @@ func (m *Manager) ServerStorageRoom(ctx context.Context) (StorageRoom, error) {
 	if len(eligible) == 0 {
 		return StorageRoom{}, fmt.Errorf("no Longhorn node can currently accept %s volumes", class)
 	}
+	pending, err := m.unscheduledClaims(ctx, mode, nodes, disks)
+	if err != nil {
+		return StorageRoom{}, err
+	}
+	disks = holdRoom(disks, pending)
 	best := disks[roomiest(disks, eligible)]
 	return StorageRoom{Node: best.node, Bytes: best.room}, nil
+}
+
+// unscheduledClaims returns pending demand from Longhorn claims without a volume
+// or without a replica in any disk's scheduledReplica, which Longhorn v1.7.3
+// sums into storageScheduled. It also includes service and shared volumes whose
+// claims are still being created. This accounts for recently requested volumes
+// before their sizes appear in disk totals. Resources being deleted are excluded.
+// Only positive sizes with an eligible Longhorn disk are included.
+func (m *Manager) unscheduledClaims(ctx context.Context, mode string, nodes []unstructured.Unstructured, disks []longhornDisk) ([]placement, error) {
+	claims, err := m.Client.CoreV1().PersistentVolumeClaims(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("listing volume claims: %w", err)
+	}
+	pvs, err := m.Client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("listing persistent volumes: %w", err)
+	}
+	handles := map[string]string{}
+	for _, pv := range pvs.Items {
+		if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == longhornProvisioner {
+			handles[pv.Name] = pv.Spec.CSI.VolumeHandle
+		}
+	}
+	counted := scheduledVolumes(nodes)
+	type classDisks struct {
+		disks    []int
+		longhorn bool
+	}
+	classes := map[string]classDisks{}
+	classOf := func(class string) (classDisks, error) {
+		if known, ok := classes[class]; ok {
+			return known, nil
+		}
+		selector, longhorn, err := m.classNodeSelector(ctx, class)
+		if err != nil && !errors.IsNotFound(err) {
+			return classDisks{}, err
+		}
+		classes[class] = classDisks{disks: withTags(disks, selector), longhorn: longhorn}
+		return classes[class], nil
+	}
+	var pending []placement
+	hold := func(v NewVolume, class string) error {
+		known, err := classOf(class)
+		if err != nil || !known.longhorn || len(known.disks) == 0 || v.Bytes <= 0 {
+			return err
+		}
+		v.Name = v.Namespace + "/" + v.Claim
+		pending = append(pending, placement{volume: v, class: class, disks: known.disks})
+		return nil
+	}
+	existing := map[string]bool{}
+	for _, c := range claims.Items {
+		existing[c.Namespace+"/"+c.Name] = true
+		if c.DeletionTimestamp != nil || c.Spec.StorageClassName == nil {
+			continue
+		}
+		if volume := handles[c.Spec.VolumeName]; c.Spec.VolumeName != "" && (counted[volume] || counted[c.Spec.VolumeName]) {
+			continue
+		}
+		size := c.Spec.Resources.Requests[corev1.ResourceStorage]
+		if err := hold(NewVolume{Bytes: size.Value(), Namespace: c.Namespace, Claim: c.Name}, *c.Spec.StorageClassName); err != nil {
+			return nil, err
+		}
+	}
+	// kip service add waits for the credentials Secret, which the reconciler
+	// writes before the StatefulSet, so the next command can run before claims exist.
+	services, err := m.Dynamic.Resource(manifest.ServiceGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("listing services: %w", err)
+	}
+	for _, svc := range services.Items {
+		if svc.GetDeletionTimestamp() != nil {
+			continue
+		}
+		serviceType, _, _ := unstructured.NestedString(svc.Object, "spec", "type")
+		storage, _, _ := unstructured.NestedString(svc.Object, "spec", "storage")
+		dump, _, _ := unstructured.NestedBool(svc.Object, "spec", "consistentBackups")
+		volumes, err := ServiceVolumes(svc.GetNamespace(), svc.GetName(), serviceType, storage, dump)
+		if err != nil {
+			continue
+		}
+		for _, v := range volumes {
+			if !existing[v.Namespace+"/"+v.Claim] {
+				if err := hold(v, platform.SingleWriterClass(mode)); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	shared, err := m.Dynamic.Resource(manifest.VolumeGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("listing shared volumes: %w", err)
+	}
+	for _, vol := range shared.Items {
+		size, _, _ := unstructured.NestedString(vol.Object, "spec", "size")
+		q, err := resource.ParseQuantity(size)
+		if vol.GetDeletionTimestamp() != nil || err != nil {
+			continue
+		}
+		if v := SharedVolume(vol.GetNamespace(), vol.GetName(), q.Value()); !existing[v.Namespace+"/"+v.Claim] {
+			if err := hold(v, platform.LonghornSharedClass); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return pending, nil
+}
+
+// scheduledVolumes returns the Longhorn volumes with a replica in some disk's
+// scheduledReplica. Longhorn names a replica <volume>-r-<id>.
+func scheduledVolumes(nodes []unstructured.Unstructured) map[string]bool {
+	volumes := map[string]bool{}
+	for i := range nodes {
+		statuses, _, _ := unstructured.NestedMap(nodes[i].Object, "status", "diskStatus")
+		for name := range statuses {
+			replicas, _, _ := unstructured.NestedMap(statuses, name, "scheduledReplica")
+			for replica := range replicas {
+				if cut := strings.LastIndex(replica, "-r-"); cut > 0 {
+					volumes[replica[:cut]] = true
+				}
+			}
+		}
+	}
+	return volumes
+}
+
+// placeable returns pending volumes that individually fit on an eligible disk.
+// Volumes too large for every eligible disk consume no scheduling capacity
+// because Longhorn cannot place them with the current capacity.
+func placeable(disks []longhornDisk, pending []placement) []placement {
+	var out []placement
+	for _, p := range pending {
+		if disks[roomiest(disks, p.disks)].room >= p.volume.Bytes {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// holdRoom estimates remaining capacity on a copy of disks by placing pending
+// volumes largest first on the eligible disk with the most room. Volumes that
+// no longer fit after earlier placements are skipped.
+// Longhorn may place them differently, so the result serves as an estimate for
+// kip status and never as proof of a shortage.
+func holdRoom(disks []longhornDisk, pending []placement) []longhornDisk {
+	disks = slices.Clone(disks)
+	sorted := slices.Clone(placeable(disks, pending))
+	slices.SortStableFunc(sorted, func(a, b placement) int { return cmp.Compare(b.volume.Bytes, a.volume.Bytes) })
+	for _, p := range sorted {
+		if best := roomiest(disks, p.disks); disks[best].room >= p.volume.Bytes {
+			disks[best].room -= p.volume.Bytes
+		}
+	}
+	return disks
 }
 
 func notChecked(err error) string {
@@ -347,23 +519,24 @@ type placement struct {
 	disks  []int
 }
 
-// place refuses when a shortage is certain for any volume: it is larger than
-// any of its disks has room for, or the volumes need more than their disks have
-// together. Otherwise it puts each volume, largest first, on its eligible disk
-// with the most room left, so volumes of both classes draw on the same disks.
-// Longhorn makes its own placement choices, so failure to place a volume here
-// produces only a warning.
-func place(disks []longhornDisk, wanted []placement, sizeOption string) (string, error) {
+// place refuses when a shortage is certain for any new volume: it is larger
+// than any of its disks has room for, or the new and pending volumes need more
+// than their disks have together. Otherwise it puts every volume, largest
+// first, on its eligible disk with the most room left, so volumes of both
+// classes draw on the same disks. Longhorn makes its own placement choices, so
+// failure to place a volume here produces only a warning.
+func place(disks []longhornDisk, wanted, pending []placement, sizeOption string) (string, error) {
+	all := append(slices.Clone(pending), wanted...)
 	for _, p := range wanted {
-		if certainlyShort(disks, wanted, p) {
-			return "", shortage(disks, wanted, p, sizeOption)
+		if certainlyShort(disks, all, p) {
+			return "", shortage(disks, wanted, pending, p, sizeOption)
 		}
 	}
 	room := make([]int64, len(disks))
 	for i, d := range disks {
 		room[i] = d.room
 	}
-	sorted := slices.Clone(wanted)
+	sorted := slices.Clone(all)
 	slices.SortStableFunc(sorted, func(a, b placement) int { return cmp.Compare(b.volume.Bytes, a.volume.Bytes) })
 	for _, p := range sorted {
 		best := p.disks[0]
@@ -376,7 +549,7 @@ func place(disks []longhornDisk, wanted []placement, sizeOption string) (string,
 			room[best] -= p.volume.Bytes
 			continue
 		}
-		need, free := total(wanted, disks, allDisks(wanted))
+		need, free := total(all, disks, allDisks(all))
 		return fmt.Sprintf("Longhorn has %s free for scheduling on eligible disks, and these volumes need %s. The check could not find a placement. If Longhorn also cannot place them, a volume stays unscheduled and its pod waits.",
 			FormatSize(free), FormatSize(need)), nil
 	}
@@ -435,20 +608,36 @@ func roomiest(disks []longhornDisk, indexes []int) int {
 	return best
 }
 
-func shortage(disks []longhornDisk, wanted []placement, p placement, sizeOption string) error {
-	parts := make([]string, len(wanted))
-	for i, w := range wanted {
-		parts[i] = w.volume.Name + " " + FormatSize(w.volume.Bytes)
-	}
+func shortage(disks []longhornDisk, wanted, pending []placement, p placement, sizeOption string) error {
 	need, _ := total(wanted, disks, nil)
 	best := disks[roomiest(disks, p.disks)]
+	var sharing []placement
+	for _, q := range pending {
+		if slices.ContainsFunc(q.disks, func(i int) bool { return slices.Contains(p.disks, i) }) {
+			sharing = append(sharing, q)
+		}
+	}
+	needs := FormatSize(need) + " (" + describe(wanted) + ")"
+	if len(sharing) > 0 {
+		held, _ := total(sharing, disks, nil)
+		needs += fmt.Sprintf(" in addition to %s for volumes awaiting Longhorn scheduling (%s)", FormatSize(held), describe(sharing))
+	}
 	hint := fmt.Sprintf("Free space with kip service delete <name> --delete-data or kip volume delete <name> --delete-data, grow the server's disk, or request less storage with %s.", sizeOption)
 	if p.class == platform.LonghornSharedClass {
-		return fmt.Errorf("not enough storage on any node: Longhorn can schedule at most %s more, on %s, and this needs %s (%s). %s",
-			FormatSize(best.room), best.node, FormatSize(need), strings.Join(parts, ", "), hint)
+		return fmt.Errorf("not enough storage on any node: Longhorn can schedule at most %s more, on %s, and this needs %s. %s",
+			FormatSize(best.room), best.node, needs, hint)
 	}
-	return fmt.Errorf("not enough storage on the server: Longhorn can schedule %s more on %s, and this needs %s (%s). %s",
-		FormatSize(best.room), best.node, FormatSize(need), strings.Join(parts, ", "), hint)
+	return fmt.Errorf("not enough storage on the server: Longhorn can schedule %s more on %s, and this needs %s. %s",
+		FormatSize(best.room), best.node, needs, hint)
+}
+
+// describe lists volume names and sizes in input order, separated by commas.
+func describe(volumes []placement) string {
+	parts := make([]string, len(volumes))
+	for i, v := range volumes {
+		parts[i] = v.volume.Name + " " + FormatSize(v.volume.Bytes)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // FormatSize formats bytes as binary units. Whole Gi values are exact, other

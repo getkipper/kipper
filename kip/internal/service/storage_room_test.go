@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -18,6 +19,8 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/yaml"
+
+	"github.com/getkipper/kipper/kip/internal/manifest"
 )
 
 // A server disk observed in a live cluster: 40424828928 bytes, 30% reserved for
@@ -35,6 +38,7 @@ type testDisk struct {
 	schedulable, reason                     string
 	allowScheduling, evictionRequested      bool
 	diskType                                string
+	replicas                                map[string]int64
 }
 
 func roomyDisk(name string, maximum, reserved, scheduled int64) testDisk {
@@ -70,6 +74,7 @@ func longhornNodeObject(n testNode) *unstructured.Unstructured {
 			"storageMaximum":   d.maximum,
 			"storageScheduled": d.scheduled,
 			"storageAvailable": d.available,
+			"scheduledReplica": scheduledReplicas(d.replicas),
 			"conditions": []interface{}{
 				map[string]interface{}{"type": "Ready", "status": "True"},
 				map[string]interface{}{"type": "Schedulable", "status": d.schedulable, "reason": d.reason},
@@ -133,7 +138,7 @@ func kipperClasses() *fake.Clientset {
 
 func storageManager(clientset *fake.Clientset, objects ...runtime.Object) *Manager {
 	return &Manager{Client: clientset, Dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{longhornNodeGVR: "NodeList"}, objects...)}
+		map[schema.GroupVersionResource]string{longhornNodeGVR: "NodeList", manifest.ServiceGVR: "ServiceList", manifest.VolumeGVR: "VolumeList"}, objects...)}
 }
 
 func defaultSettings() []runtime.Object {
@@ -559,4 +564,203 @@ func TestStorageRoomWarnsWhenAClaimCannotBeRead(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, warning, "forbidden")
+}
+
+func scheduledReplicas(replicas map[string]int64) map[string]interface{} {
+	out := map[string]interface{}{}
+	for name, size := range replicas {
+		out[name] = size
+	}
+	return out
+}
+
+// claim creates a claim in the shop namespace with the given class and size.
+// A non-empty volume names the persistent volume it is bound to.
+func claim(name, class, size, volume string) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "shop"},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &class,
+			VolumeName:       volume,
+			Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(size)}},
+		},
+	}
+}
+
+func longhornPV(name, handle string) *corev1.PersistentVolume {
+	return &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{
+			CSI: &corev1.CSIPersistentVolumeSource{Driver: "driver.longhorn.io", VolumeHandle: handle},
+		}},
+	}
+}
+
+func serverWithRoomFor(t *testing.T, room int64, replicas map[string]int64, objects ...runtime.Object) *Manager {
+	t.Helper()
+	clientset := kipperClasses()
+	for _, o := range objects {
+		require.NoError(t, clientset.Tracker().Add(o))
+	}
+	disk := roomyDisk("default-disk", gi(40), gi(12), gi(28)-room)
+	disk.replicas = replicas
+	return storageManager(clientset, append(defaultSettings(), longhornNodeObject(healthyNode("server-1", []string{"kipper-server"}, disk)))...)
+}
+
+// A service requests a 2Gi data volume, then the next command enables dumps
+// before Longhorn schedules it. The server still reports 3.1Gi free because
+// its scheduled total has yet to include the data volume.
+func TestStorageRoomCountsAClaimLonghornHasNotScheduledYet(t *testing.T) {
+	mgr := serverWithRoomFor(t, gi(3.1), nil,
+		claim("data-db-0", "longhorn-single", "2Gi", "pvc-data"), longhornPV("pvc-data", "pvc-data"))
+
+	_, err := mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "dump", Bytes: gi(2), Namespace: "shop", Claim: "db-dump"}}, "--storage")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "shop/data-db-0")
+}
+
+func TestStorageRoomCountsAClaimWithoutAVolumeYet(t *testing.T) {
+	mgr := serverWithRoomFor(t, gi(3.1), nil, claim("data-db-0", "longhorn-single", "2Gi", ""))
+
+	_, err := mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "dump", Bytes: gi(2), Namespace: "shop", Claim: "db-dump"}}, "--storage")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "shop/data-db-0")
+}
+
+// Once a replica appears in a disk's scheduled total, counting its size again
+// would reject a volume that fits.
+func TestStorageRoomDoesNotCountAScheduledClaimTwice(t *testing.T) {
+	mgr := serverWithRoomFor(t, gi(3.1), map[string]int64{"pvc-data-r-1a2b3c4d": gi(2)},
+		claim("data-db-0", "longhorn-single", "2Gi", "pvc-data"), longhornPV("pvc-data", "pvc-data"))
+
+	warning, err := mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "dump", Bytes: gi(2), Namespace: "shop", Claim: "db-dump"}}, "--storage")
+
+	require.NoError(t, err)
+	assert.Empty(t, warning)
+}
+
+// A pending volume too large for every disk consumes no scheduling capacity,
+// so smaller volumes can still fit.
+func TestStorageRoomIgnoresAPendingClaimThatCannotFit(t *testing.T) {
+	mgr := serverWithRoomFor(t, gi(3.1), nil,
+		claim("data-huge-0", "longhorn-single", "50Gi", "pvc-huge"), longhornPV("pvc-huge", "pvc-huge"))
+
+	warning, err := mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "dump", Bytes: gi(2), Namespace: "shop", Claim: "db-dump"}}, "--storage")
+
+	require.NoError(t, err)
+	assert.Empty(t, warning)
+}
+
+func TestStorageRoomIgnoresClaimsOutsideLonghorn(t *testing.T) {
+	deleting := claim("data-old-0", "longhorn-single", "2Gi", "")
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+	deleting.Finalizers = []string{"kubernetes.io/pvc-protection"}
+	mgr := serverWithRoomFor(t, gi(3.1), nil, claim("data-local-0", "local-path", "2Gi", ""), deleting)
+
+	warning, err := mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "dump", Bytes: gi(2), Namespace: "shop", Claim: "db-dump"}}, "--storage")
+
+	require.NoError(t, err)
+	assert.Empty(t, warning)
+}
+
+func TestStorageRoomWarnsWhenClaimsCannotBeListed(t *testing.T) {
+	mgr := serverWithRoomFor(t, gi(3.1), nil)
+	mgr.Client.(*fake.Clientset).PrependReactor("list", "persistentvolumeclaims", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("persistentvolumeclaims is forbidden")
+	})
+
+	warning, err := mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "dump", Bytes: gi(2), Namespace: "shop", Claim: "db-dump"}}, "--storage")
+
+	require.NoError(t, err)
+	assert.Contains(t, warning, "forbidden")
+}
+
+func TestServerStorageRoomLeavesOutPendingClaims(t *testing.T) {
+	mgr := serverWithRoomFor(t, gi(3), nil, claim("data-db-0", "longhorn-single", "2Gi", ""))
+
+	room, err := mgr.ServerStorageRoom(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, gi(1), room.Bytes)
+}
+
+// kip service add waits for credentials, which the reconciler writes before
+// the StatefulSet, so the next command can run before the claim exists.
+func TestStorageRoomCountsAServiceWhoseClaimDoesNotExistYet(t *testing.T) {
+	mgr := serverWithRoomFor(t, gi(3.1), nil)
+	db := sizedServiceCR("db", "postgres", "2Gi", false)
+	db.SetNamespace("shop")
+	_, err := mgr.Dynamic.Resource(manifest.ServiceGVR).Namespace("shop").Create(context.Background(), db, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	_, err = mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "dump", Bytes: gi(2), Namespace: "shop", Claim: "db-dump"}}, "--storage")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "shop/data-db-0")
+}
+
+func TestStorageRoomCountsASharedVolumeWhoseClaimDoesNotExistYet(t *testing.T) {
+	mgr := serverWithRoomFor(t, gi(3.1), nil)
+	_, err := mgr.Dynamic.Resource(manifest.VolumeGVR).Namespace("shop").Create(context.Background(), &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "kipper.run/v1alpha1", "kind": "Volume",
+		"metadata": map[string]interface{}{"name": "uploads", "namespace": "shop"},
+		"spec":     map[string]interface{}{"size": "2Gi"},
+	}}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	_, err = mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "dump", Bytes: gi(2), Namespace: "shop", Claim: "db-dump"}}, "--storage")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "shop/shared-uploads")
+}
+
+// Once the claim exists, it accounts for the service's volume, avoiding
+// double counting.
+func TestStorageRoomCountsAServiceWithItsClaimOnce(t *testing.T) {
+	mgr := serverWithRoomFor(t, gi(5), nil, claim("data-db-0", "longhorn-single", "2Gi", ""))
+	db := sizedServiceCR("db", "postgres", "2Gi", false)
+	db.SetNamespace("shop")
+	_, err := mgr.Dynamic.Resource(manifest.ServiceGVR).Namespace("shop").Create(context.Background(), db, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	warning, err := mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "cache", Bytes: gi(1.5), Namespace: "shop", Claim: "data-cache-0"}}, "--storage")
+
+	require.NoError(t, err, "2Gi counted once plus 1.5Gi of new storage fits in 5Gi. Counting the 2Gi twice would exceed 5Gi.")
+	assert.Empty(t, warning)
+}
+
+// An estimated placement of pending volumes cannot prove a shortage because
+// Longhorn may choose differently. The 3Gi claim can fit on disk-b, leaving
+// disk-a free for the new 5Gi volume.
+func TestStorageRoomDoesNotRefuseOnAGuessedPlacementOfPendingClaims(t *testing.T) {
+	clientset := kipperClasses()
+	require.NoError(t, clientset.Tracker().Add(claim("data-db-0", "longhorn-single", "3Gi", "")))
+	maximum, reserved := gi(40), gi(4)
+	mgr := storageManager(clientset, append(defaultSettings(), longhornNodeObject(healthyNode("server-1", []string{"kipper-server"},
+		roomyDisk("disk-a", maximum, reserved, maximum-reserved-gi(5)),
+		roomyDisk("disk-b", maximum, reserved, maximum-reserved-gi(4)),
+	)))...)
+
+	_, err := mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "data", Bytes: gi(5), Namespace: "shop", Claim: "data-new-0"}}, "--storage")
+
+	require.NoError(t, err)
+}
+
+// A shared volume Longhorn has not scheduled yet can go to the worker, so it
+// leaves the server's room to the new single-copy volume.
+func TestStorageRoomLetsPendingSharedVolumesUseOtherNodes(t *testing.T) {
+	clientset := kipperClasses()
+	require.NoError(t, clientset.Tracker().Add(claim("shared-uploads", "longhorn", "3Gi", "")))
+	maximum, reserved := gi(40), gi(4)
+	mgr := storageManager(clientset, append(defaultSettings(),
+		longhornNodeObject(healthyNode("server-1", []string{"kipper-server"}, roomyDisk("default-disk", maximum, reserved, maximum-reserved-gi(3)))),
+		longhornNodeObject(healthyNode("worker-1", nil, roomyDisk("default-disk", maximum, reserved, maximum-reserved-gi(3)))),
+	)...)
+
+	_, err := mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "data", Bytes: gi(3), Namespace: "shop", Claim: "data-new-0"}}, "--storage")
+
+	require.NoError(t, err)
 }
