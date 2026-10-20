@@ -225,7 +225,7 @@ func TestRenderNetworkDropIn(t *testing.T) {
 
 	public, err := RenderNetworkDropIn(server+"agent-token: keep-me\n", RoleServer, NetworkModePublic, NodeNetwork{NodeIP: "203.0.113.10", ExternalIP: "203.0.113.10"})
 	require.NoError(t, err)
-	assert.Equal(t, "agent-token: keep-me\nflannel-external-ip: true\nnode-external-ip: 203.0.113.10\nnode-ip: 203.0.113.10\n", public,
+	assert.Equal(t, "advertise-address: 203.0.113.10\nagent-token: keep-me\nflannel-external-ip: true\nnode-external-ip: 203.0.113.10\nnode-ip: 203.0.113.10\n", public,
 		"other keys stay and settings of the old mode go")
 
 	capped, err := RenderNetworkDropIn("", RoleWorker, NetworkModePublic, NodeNetwork{NodeIP: "203.0.113.11", ExternalIP: "203.0.113.11", TunnelMTU: 1360})
@@ -235,6 +235,15 @@ func TestRenderNetworkDropIn(t *testing.T) {
 	private, err := RenderNetworkDropIn(capped, RoleWorker, NetworkModePrivate, NodeNetwork{NodeIP: "10.0.0.4", ExternalIP: "203.0.113.11", Interface: "eth1"})
 	require.NoError(t, err)
 	assert.NotContains(t, private, "flannel-conf", "private mode keeps flannel's own MTU")
+}
+
+// Workers in other networks reach the API through the server's external
+// address, so a public-mode server advertises it even when kip install put the
+// private address in the base config.
+func TestRenderNetworkDropInAdvertisesThePublicServersExternalAddress(t *testing.T) {
+	out, err := RenderNetworkDropIn("", RoleServer, NetworkModePublic, NodeNetwork{NodeIP: "172.31.28.180", ExternalIP: "203.0.113.10"})
+	require.NoError(t, err)
+	assert.Contains(t, out, "advertise-address: 203.0.113.10\n")
 }
 
 func TestFlannelConfCapsTheWireGuardMTU(t *testing.T) {

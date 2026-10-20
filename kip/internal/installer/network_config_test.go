@@ -15,8 +15,10 @@ import (
 // k3sInstallHost simulates a fresh or existing Ubuntu installation for InstallK3s.
 type k3sInstallHost struct {
 	installed bool
+	version   string
 	backend   string
 	addrs     string
+	route     string
 	external  string
 	configErr bool
 	commands  []string
@@ -28,12 +30,20 @@ func (h *k3sInstallHost) Run(cmd string) (string, error) {
 	case "cat /etc/os-release":
 		return "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"26.04\"\n", nil
 	case k3sVersionProbeCmd:
+		if h.version != "" {
+			return "k3s version " + h.version + " (abc)\n", nil
+		}
 		if h.installed {
 			return "k3s version " + k3sVersion + " (abc)\n", nil
 		}
 		return "KIP_K3S_ABSENT\n", nil
 	case "ip -o -4 addr show":
 		return h.addrs, nil
+	case "ip -4 -o route get 203.0.113.10":
+		if h.route == "" {
+			return "", errors.New("exit status 2")
+		}
+		return h.route, nil
 	}
 	if strings.HasPrefix(cmd, "test ! -f /etc/rancher/k3s/config.yaml") {
 		if h.configErr {
@@ -91,16 +101,41 @@ func (h *k3sInstallHost) k3sConfig(t *testing.T) string {
 const (
 	privateAddrs = "1: lo    inet 127.0.0.1/8 scope host lo\n2: ens5    inet 172.31.28.180/20 brd 172.31.31.255 scope global dynamic ens5\n"
 	publicAddrs  = "1: lo    inet 127.0.0.1/8 scope host lo\n2: eth0    inet 203.0.113.10/32 scope global dynamic eth0\n"
+	privateRoute = "203.0.113.10 via 172.31.16.1 dev ens5 src 172.31.28.180 uid 0 \\    cache \n"
 )
 
 // Behind NAT, advertising the external address lets DNS checks use it instead
 // of the private address on the node's interface.
 func TestInstallK3sAdvertisesANATAddressAsExternal(t *testing.T) {
-	h := &k3sInstallHost{addrs: privateAddrs}
+	h := &k3sInstallHost{addrs: privateAddrs, route: privateRoute}
 
 	require.NoError(t, InstallK3s(h, "203.0.113.10", nil, false, false, StorageLonghorn))
 
 	assert.Contains(t, h.k3sConfig(t), "node-external-ip: 203.0.113.10\n")
+}
+
+// k3s advertises the API server on node-external-ip unless advertise-address
+// says otherwise. Pods reach the API through that address, and a host behind
+// NAT often cannot reach its own public address.
+func TestInstallK3sKeepsAdvertisingTheAPIOnThePrivateAddressBehindNAT(t *testing.T) {
+	h := &k3sInstallHost{addrs: privateAddrs, route: privateRoute}
+
+	require.NoError(t, InstallK3s(h, "203.0.113.10", nil, false, false, StorageLonghorn))
+
+	assert.Contains(t, h.k3sConfig(t), "advertise-address: 172.31.28.180\n")
+}
+
+// Advertising only the external address would also move the API endpoint there,
+// so a fresh install leaves both settings unset when the source address is unknown.
+func TestInstallK3sSkipsTheExternalAddressWhenThePrivateOneIsUnknown(t *testing.T) {
+	for _, route := range []string{"", "203.0.113.10 dev ens5 uid 0\n", "203.0.113.10 via 172.31.16.1 dev ens5 src fe80::1 uid 0\n"} {
+		h := &k3sInstallHost{addrs: privateAddrs, route: route}
+
+		require.NoError(t, InstallK3s(h, "203.0.113.10", nil, false, false, StorageLonghorn))
+
+		assert.NotContains(t, h.k3sConfig(t), "node-external-ip", "route %q", route)
+		assert.NotContains(t, h.k3sConfig(t), "advertise-address", "route %q", route)
+	}
 }
 
 func TestInstallK3sLeavesALocalAddressAlone(t *testing.T) {
@@ -117,7 +152,7 @@ func TestInstallK3sResolvesAHostName(t *testing.T) {
 	lookupHostIPs = func(string) ([]net.IP, error) {
 		return []net.IP{net.ParseIP("2001:db8::1"), net.ParseIP("203.0.113.10")}, nil
 	}
-	h := &k3sInstallHost{addrs: privateAddrs}
+	h := &k3sInstallHost{addrs: privateAddrs, route: privateRoute}
 
 	require.NoError(t, InstallK3s(h, "server.example.com", nil, false, false, StorageLonghorn))
 
@@ -146,6 +181,22 @@ func TestInstallK3sKeepsTheExternalAddressWhenTheListIsUnreadable(t *testing.T) 
 	}
 }
 
+func TestInstallK3sKeepsBothAddressesWhenThePrivateOneIsUnknownOnARerun(t *testing.T) {
+	h := &k3sInstallHost{installed: true, addrs: privateAddrs, external: "advertise-address: 172.31.28.180\nnode-external-ip: 203.0.113.10\n"}
+
+	require.NoError(t, InstallK3s(h, "203.0.113.10", nil, true, false, StorageLonghorn))
+
+	assert.Contains(t, h.k3sConfig(t), "advertise-address: 172.31.28.180\nnode-external-ip: 203.0.113.10\n")
+}
+
+func TestInstallK3sKeepsTheAdvertisedAddressWhenTheListIsUnreadable(t *testing.T) {
+	h := &k3sInstallHost{installed: true, external: "advertise-address: 172.31.28.180\nnode-external-ip: 203.0.113.10\n"}
+
+	require.NoError(t, InstallK3s(h, "203.0.113.10", nil, true, false, StorageLonghorn))
+
+	assert.Contains(t, h.k3sConfig(t), "advertise-address: 172.31.28.180\nnode-external-ip: 203.0.113.10\n")
+}
+
 // k3s accepts lists and dual-stack values, so kip preserves the existing form.
 func TestInstallK3sKeepsAnyExistingExternalAddressForm(t *testing.T) {
 	for existing, want := range map[string]string{
@@ -159,6 +210,40 @@ func TestInstallK3sKeepsAnyExistingExternalAddressForm(t *testing.T) {
 
 		assert.Contains(t, h.k3sConfig(t), want, "existing %q", existing)
 	}
+}
+
+// The k3s script checks its binary, service and environment files for changes.
+// A config written by an interrupted run may match the next run's config while
+// k3s still uses older settings, so every re-run forces a restart.
+func TestInstallK3sRestartsK3sOnARerun(t *testing.T) {
+	unchanged := renderK3sConfig("203.0.113.10", wireguardBackend, "")
+	for _, tc := range []struct {
+		name, existing     string
+		installed, restart bool
+	}{
+		{name: "changed", installed: true, existing: "tls-san:\n  - \"203.0.113.10\"\n", restart: true},
+		{name: "unchanged", installed: true, existing: unchanged, restart: true},
+		{name: "fresh", installed: false},
+	} {
+		h := &k3sInstallHost{installed: tc.installed, addrs: publicAddrs, external: tc.existing}
+
+		require.NoError(t, InstallK3s(h, "203.0.113.10", nil, tc.installed, false, StorageLonghorn))
+
+		i := h.index("get.k3s.io")
+		require.NotEqual(t, -1, i, tc.name)
+		assert.Equal(t, tc.restart, strings.Contains(h.commands[i], "INSTALL_K3S_FORCE_RESTART=true"), tc.name)
+		assert.Equal(t, -1, h.index("systemctl restart k3s"), tc.name)
+	}
+}
+
+func TestInstallK3sRestartsK3sItLeavesAtItsVersionOnARerun(t *testing.T) {
+	newer := "v1.99.0+k3s1"
+	h := &k3sInstallHost{installed: true, version: newer, addrs: publicAddrs, external: "tls-san:\n  - \"203.0.113.10\"\n"}
+
+	require.NoError(t, InstallK3s(h, "203.0.113.10", nil, true, false, StorageLonghorn))
+
+	assert.Equal(t, -1, h.index("get.k3s.io"))
+	assert.NotEqual(t, -1, h.index("systemctl restart k3s"))
 }
 
 func TestInstallK3sStopsWhenTheExistingConfigIsUnreadable(t *testing.T) {

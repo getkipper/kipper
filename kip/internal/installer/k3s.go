@@ -168,10 +168,10 @@ func decideK3sInstall(installed, pin string) (run bool, skipReason string, err e
 		return false, "", err
 	}
 	if newer {
-		return false, fmt.Sprintf("server already runs k3s %s, newer than the %s this kip installs. Leaving k3s unchanged. Upgrade kip to manage this cluster's k3s", installed, pin), nil
+		return false, fmt.Sprintf("server already runs k3s %s, newer than the %s this kip installs. Keeping that version and restarting k3s to load its config. Upgrade kip to manage this cluster's k3s", installed, pin), nil
 	}
 	if iv[0] != pv[0] || pv[1]-iv[1] > 1 {
-		return false, fmt.Sprintf("server runs k3s %s, more than one Kubernetes minor behind the %s this kip installs. Leaving k3s unchanged. Upgrade k3s one minor at a time first, then re-run kip install", installed, pin), nil
+		return false, fmt.Sprintf("server runs k3s %s, more than one Kubernetes minor behind the %s this kip installs. Keeping that version and restarting k3s to load its config. Upgrade k3s one minor at a time first, then re-run kip install", installed, pin), nil
 	}
 	return true, "", nil
 }
@@ -199,17 +199,27 @@ resolv-conf: ` + k3sResolvConfPath + `
   - "protect-kernel-defaults=true"
 `
 
-// renderK3sConfig renders the server config. externalIP is either empty or a
-// YAML node-external-ip setting that advertises the node's external address.
-func renderK3sConfig(host, backend, externalIP string) string {
+// renderK3sConfig renders the server config. addresses is either empty or
+// YAML settings for the node's external address and the API's advertised address.
+func renderK3sConfig(host, backend, addresses string) string {
 	return strings.Replace(fmt.Sprintf(k3sConfig, host),
-		"flannel-backend: "+wireguardBackend+"\n", "flannel-backend: "+backend+"\n", 1) + externalIP
+		"flannel-backend: "+wireguardBackend+"\n", "flannel-backend: "+backend+"\n", 1) + addresses
 }
 
-func externalIPSetting(value any) (string, error) {
-	out, err := yaml.Marshal(map[string]any{"node-external-ip": value})
+// addressSettings renders the given address settings as YAML, or "" when there
+// are none.
+func addressSettings(settings map[string]any) (string, error) {
+	if len(settings) == 0 {
+		return "", nil
+	}
+	out, err := yaml.Marshal(settings)
 	return string(out), err
 }
+
+// k3sAddressKeys are the address settings an install writes and preserves.
+// k3s advertises the API server on node-external-ip unless advertise-address
+// is set, so the two are written together.
+var k3sAddressKeys = []string{"advertise-address", "node-external-ip"}
 
 // lookupHostIPs resolves a host name given as --host.
 var lookupHostIPs = net.LookupIP
@@ -268,24 +278,48 @@ func natExternalIP(client CommandRunner, host string) (ip string, known bool) {
 	return addr.String(), true
 }
 
-// configuredExternalIP renders the existing k3s node-external-ip setting as YAML,
-// preserving its value. It returns "" when the config or setting is absent or
-// the value is null. Read and parse errors stop the caller from overwriting
-// the existing config.
-func configuredExternalIP(client CommandRunner) (string, error) {
+// routeSourceIP returns the source IPv4 address selected by the host's route to dst.
+// The caller must supply a bare IPv4 literal because dst enters a shell command.
+// ok is false if the route lookup fails or yields no valid IPv4 source address.
+func routeSourceIP(client CommandRunner, dst string) (ip string, ok bool) {
+	out, err := client.Run("ip -4 -o route get " + dst)
+	if err != nil {
+		return "", false
+	}
+	fields := strings.Fields(out)
+	for i := 0; i+1 < len(fields); i++ {
+		if fields[i] != "src" {
+			continue
+		}
+		a, err := netip.ParseAddr(fields[i+1])
+		if err != nil || !a.Is4() {
+			return "", false
+		}
+		return a.String(), true
+	}
+	return "", false
+}
+
+// configuredAddresses renders the existing k3s address settings as YAML,
+// preserving non-null values for k3sAddressKeys. It returns "" when none remain
+// or the config is absent or null. Read and parse errors stop the caller from
+// overwriting the existing config.
+func configuredAddresses(client CommandRunner) (string, error) {
 	out, err := client.Run("test ! -f " + k3sConfigPath + " || cat " + k3sConfigPath)
 	if err != nil {
-		return "", fmt.Errorf("reading %s to keep its external address: %w", k3sConfigPath, err)
+		return "", fmt.Errorf("reading %s to keep its address settings: %w", k3sConfigPath, err)
 	}
 	var config map[string]any
 	if err := yaml.Unmarshal([]byte(out), &config); err != nil {
-		return "", fmt.Errorf("reading %s to keep its external address: %w", k3sConfigPath, err)
+		return "", fmt.Errorf("reading %s to keep its address settings: %w", k3sConfigPath, err)
 	}
-	value, ok := config["node-external-ip"]
-	if !ok || value == nil {
-		return "", nil
+	settings := map[string]any{}
+	for _, k := range k3sAddressKeys {
+		if value := config[k]; value != nil {
+			settings[k] = value
+		}
 	}
-	return externalIPSetting(value)
+	return addressSettings(settings)
 }
 
 // k3sAPIServerArgs is the API server block, held apart from the rest of the
@@ -638,12 +672,17 @@ func writeAgentKubeletConfig(client CommandRunner) error {
 // when empty. Repeated calls preserve versions outside the supported upgrade path.
 //
 // A single IPv4 address supplied by host or resolved from it is advertised as
-// the node's external address when absent from the server's interfaces. A local
-// address clears that setting. If detection is inconclusive, the existing
-// setting is preserved, and an unreadable or invalid config causes an error.
+// the node's external address when absent from the server's interfaces. The API
+// server is advertised on the source IPv4 address of the host's route to that
+// external address.
+// A local address clears both settings. If detection is inconclusive, the
+// existing settings are preserved, and an unreadable or invalid config causes
+// an error. On an existing cluster, k3s is restarted so that it runs with the
+// config written here.
 //
-// The caller must sample k3sPreexisting before installation so only existing
-// CoreDNS deployments are restarted to pick up resolver changes.
+// The caller must sample k3sPreexisting before installation to ensure existing
+// k3s services reload their configuration and existing CoreDNS deployments
+// restart to pick up resolver changes.
 //
 // Existing clusters require changeNetwork consent to migrate to WireGuard,
 // otherwise the function returns ErrNetworkChangeNotConfirmed.
@@ -697,16 +736,21 @@ func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPre
 		}
 	}
 
-	var externalIP string
-	if ip, known := natExternalIP(client, host); !known {
-		externalIP, err = configuredExternalIP(client)
+	var addresses string
+	ip, known := natExternalIP(client, host)
+	var private string
+	if known && ip != "" {
+		private, known = routeSourceIP(client, ip)
+	}
+	if !known {
+		addresses, err = configuredAddresses(client)
 	} else if ip != "" {
-		externalIP, err = externalIPSetting(ip)
+		addresses, err = addressSettings(map[string]any{"advertise-address": private, "node-external-ip": ip})
 	}
 	if err != nil {
 		return err
 	}
-	configContent := renderK3sConfig(host, backend, externalIP)
+	configContent := renderK3sConfig(host, backend, addresses)
 	writeCmd := fmt.Sprintf("cat > /etc/rancher/k3s/config.yaml << 'KIPEOF'\n%sKIPEOF", configContent)
 	if _, err := client.Run(writeCmd); err != nil {
 		return fmt.Errorf("writing k3s config: %w", err)
@@ -719,12 +763,10 @@ func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPre
 		return err
 	}
 
-	// The install script only runs when converging on the pin is supported —
-	// fresh install, re-install, or an at-most-one-minor upgrade. Anything
-	// else (an older kip re-run against a newer cluster, or a cluster too
-	// far behind) leaves k3s alone and lets the rest of the install proceed;
-	// decideK3sInstall documents the policy. Within that envelope the script
-	// is idempotent: re-running it will upgrade or no-op safely.
+	// decideK3sInstall limits the script to fresh installs, re-installs and
+	// upgrades of at most one minor within the same major. Newer clusters and
+	// those too far behind keep their version while the rest of the install
+	// proceeds. Re-running the script within these limits is safe.
 	installed, err := installedK3sVersion(client)
 	if err != nil {
 		return err
@@ -734,12 +776,24 @@ func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPre
 		return err
 	}
 	if runInstall {
-		installCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='%s' INSTALL_K3S_EXEC='server' sh -", k3sVersion)
+		// The script's change detection covers its binary, service and environment
+		// files. Force a restart to load the config written by this run or an
+		// interrupted earlier run, even if those files are unchanged.
+		force := ""
+		if k3sPreexisting {
+			force = "INSTALL_K3S_FORCE_RESTART=true "
+		}
+		installCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | %sINSTALL_K3S_VERSION='%s' INSTALL_K3S_EXEC='server' sh -", force, k3sVersion)
 		if _, err := client.Run(installCmd); err != nil {
 			return fmt.Errorf("running k3s installer: %w", err)
 		}
 	} else {
 		fmt.Printf("  ⚠  %s\n", skipReason)
+		if k3sPreexisting {
+			if _, err := client.Run("systemctl restart k3s"); err != nil {
+				return fmt.Errorf("restarting k3s to load its new config: %w", err)
+			}
+		}
 	}
 
 	// A freshly installed k3s has not registered its node the instant the
