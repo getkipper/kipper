@@ -227,19 +227,23 @@ func TestVeleroManifestRunsFsBackupPrivilegedOnSELinux(t *testing.T) {
 }
 
 type fakeVeleroHost struct {
-	liveBSL     string // The default backup location as "bucket|s3Url".
-	bucket      string // The listing marker, or empty for a bucket with no backups.
-	osRelease   string
-	osImages    string
-	chartValues string
-	patches     []string
-	cmds        []string
+	liveBSL       string // The default backup location as "bucket|s3Url".
+	bucket        string // The listing marker, or empty for a bucket with no backups.
+	osRelease     string
+	osImages      string
+	chartValues   string
+	helperConfigs string
+	patches       []string
+	cmds          []string
 }
 
 func (h *fakeVeleroHost) Run(cmd string) (string, error) {
 	h.cmds = append(h.cmds, cmd)
 	if cmd == "cat /etc/os-release" {
 		return h.osRelease, nil
+	}
+	if strings.Contains(cmd, "get configmap -l velero.io/plugin-config") {
+		return h.helperConfigs, nil
 	}
 	if strings.Contains(cmd, ".status.nodeInfo.osImage") {
 		return h.osImages, nil
@@ -334,6 +338,55 @@ func TestInstallVeleroCreatesTheRepositoryKeyBeforeVeleroStarts(t *testing.T) {
 	}
 	require.GreaterOrEqual(t, key, 0, "the repository key is created")
 	assert.Less(t, key, chart, "Velero writes its published default key into a missing Secret at startup")
+}
+
+func TestInstallVeleroGivesTheRestoreHelperSmallRequests(t *testing.T) {
+	h := &fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"24.04\"\n"}
+	require.NoError(t, installVelero(h, nil, "pw", nil))
+
+	var applied string
+	for _, cmd := range h.cmds {
+		if strings.Contains(cmd, "velero.io/pod-volume-restore") {
+			applied = cmd
+		}
+	}
+	require.NotEmpty(t, applied, "Velero's restore-wait init container asks for 100m CPU by default, more than a full 4 GB server has left")
+	_, manifest, found := strings.Cut(applied, "\n")
+	require.True(t, found)
+	manifest = strings.TrimSuffix(manifest, "KIPEOF")
+	var cm struct {
+		Kind     string `yaml:"kind"`
+		Metadata struct {
+			Namespace string            `yaml:"namespace"`
+			Labels    map[string]string `yaml:"labels"`
+		} `yaml:"metadata"`
+		Data map[string]string `yaml:"data"`
+	}
+	require.NoError(t, yaml.Unmarshal([]byte(manifest), &cm))
+	assert.Equal(t, "ConfigMap", cm.Kind)
+	assert.Equal(t, "velero", cm.Metadata.Namespace)
+	assert.Contains(t, cm.Metadata.Labels, "velero.io/plugin-config", "Velero finds plugin settings by this label")
+	assert.Equal(t, "RestoreItemAction", cm.Metadata.Labels["velero.io/pod-volume-restore"])
+	assert.Equal(t, "10m", cm.Data["cpuRequest"])
+	assert.Equal(t, "16Mi", cm.Data["memRequest"])
+}
+
+func TestInstallVeleroKeepsAnOperatorsOwnRestoreHelperConfig(t *testing.T) {
+	h := &fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"24.04\"\n", helperConfigs: "custom-restore-helper"}
+	require.NoError(t, installVelero(h, nil, "pw", nil))
+
+	for _, cmd := range h.cmds {
+		assert.NotContains(t, cmd, "name: fs-restore-action-config",
+			"Velero fails every volume restore when two ConfigMaps match its restore helper selector")
+	}
+
+	ours := &fakeVeleroHost{osRelease: "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"24.04\"\n", helperConfigs: "fs-restore-action-config"}
+	require.NoError(t, installVelero(ours, nil, "pw", nil))
+	applied := false
+	for _, cmd := range ours.cmds {
+		applied = applied || strings.Contains(cmd, "name: fs-restore-action-config")
+	}
+	assert.True(t, applied, "an upgrade reapplies Kipper's own config")
 }
 
 func chartValuesContent(t *testing.T, manifest string) string {
