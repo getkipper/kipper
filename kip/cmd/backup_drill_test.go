@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
@@ -59,7 +60,7 @@ func TestLatestBackupForPicksTheNewestCompletedBackupCoveringTheNamespace(t *tes
 }
 
 func TestDrillRestoreSpecRestoresOnlyServicesIntoTheDrillNamespace(t *testing.T) {
-	spec := drillRestoreSpec("daily-2", "shop-prod")
+	spec := drillRestoreSpec("daily-2", "shop-prod", "")
 
 	assert.Equal(t, "daily-2", spec["backupName"])
 	assert.Equal(t, []interface{}{"shop-prod"}, spec["includedNamespaces"])
@@ -74,6 +75,86 @@ func TestDrillRestoreSpecRestoresOnlyServicesIntoTheDrillNamespace(t *testing.T)
 	assert.NotContains(t, spec, "labelSelector", "Velero accepts either labelSelector or orLabelSelectors, but rejects requests containing both.")
 	assert.NotContains(t, spec, "includeClusterResources", "the PV behind each restored PVC still gets provisioned")
 	assert.Contains(t, spec["excludedResources"], "projects.kipper.run")
+}
+
+// restoreSelects reports whether objectLabels matches any of the spec's
+// orLabelSelectors, as Velero does for directly selected resources.
+func restoreSelects(t *testing.T, spec map[string]interface{}, objectLabels map[string]string) bool {
+	t.Helper()
+	selectors, ok := spec["orLabelSelectors"].([]interface{})
+	require.True(t, ok, "the restore selects objects by orLabelSelectors")
+	for _, s := range selectors {
+		var sel metav1.LabelSelector
+		require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(s.(map[string]interface{}), &sel))
+		selector, err := metav1.LabelSelectorAsSelector(&sel)
+		require.NoError(t, err)
+		if selector.Matches(labels.Set(objectLabels)) {
+			return true
+		}
+	}
+	return false
+}
+
+// postgresServiceObjects returns representative labels on a Postgres service's
+// resources, keyed by object description.
+func postgresServiceObjects(service string) map[string]map[string]string {
+	return map[string]map[string]string{
+		"pod":                {"app": service, "app.kubernetes.io/managed-by": "kipper", "kipper.run/service-type": "postgres"},
+		"credentials Secret": {"app": service, "app.kubernetes.io/managed-by": "kipper", "kipper.run/service-type": "postgres"},
+		"TLS Secret":         {"app.kubernetes.io/managed-by": "kipper", "kipper.run/tls-for": service},
+		"pg_hba ConfigMap":   {"app": service, "app.kubernetes.io/managed-by": "kipper", "kipper.run/tls-for": service},
+		"data PVC":           {"app": service},
+		"dump PVC":           {"app": service, "app.kubernetes.io/managed-by": "kipper", "kipper.run/dump-for": service},
+	}
+}
+
+func TestADumpRestoreSelectsOnlyTheNamedServicesObjects(t *testing.T) {
+	spec := drillRestoreSpec("daily-2", "shop-prod", "orders")
+
+	assert.Equal(t, map[string]interface{}{"shop-prod": drillNamespace}, spec["namespaceMapping"])
+	assert.NotContains(t, spec, "labelSelector", "Velero accepts either labelSelector or orLabelSelectors, but rejects requests containing both.")
+	own := postgresServiceObjects("orders")
+	for _, object := range []string{"pod", "credentials Secret", "TLS Secret", "pg_hba ConfigMap"} {
+		assert.True(t, restoreSelects(t, spec, own[object]), "the restored pod needs the service's %s to start", object)
+	}
+	for object, objectLabels := range postgresServiceObjects("billing") {
+		assert.False(t, restoreSelects(t, spec, objectLabels), "another service's %s stays out of a dump restore", object)
+	}
+	assert.False(t, restoreSelects(t, spec, map[string]string{"app": "orders"}),
+		"an app pod that shares the service's name stays out")
+}
+
+func TestADrillStillSelectsEveryService(t *testing.T) {
+	spec := drillRestoreSpec("daily-2", "shop-prod", "")
+
+	for _, service := range []string{"orders", "billing"} {
+		objects := postgresServiceObjects(service)
+		for _, object := range []string{"pod", "credentials Secret", "TLS Secret", "pg_hba ConfigMap"} {
+			assert.True(t, restoreSelects(t, spec, objects[object]), "the drill restores %s's %s", service, object)
+		}
+	}
+}
+
+func TestADumpRestoreSubmitsARestoreLimitedToTheService(t *testing.T) {
+	clientset := kubefake.NewClientset()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{restoreGVR: "RestoreList"})
+	var submitted *unstructured.Unstructured
+	dyn.PrependReactor("create", "restores", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		submitted = action.(k8stesting.CreateAction).GetObject().(*unstructured.Unstructured)
+		return true, nil, errors.New("stop after the submission")
+	})
+	backup := &unstructured.Unstructured{}
+	backup.SetName("daily-2")
+	var restoreName string
+
+	_, err := restoreIntoDrill(context.Background(), clientset, dyn, backup, "shop-prod", "orders", &restoreName)
+
+	require.Error(t, err)
+	require.NotNil(t, submitted)
+	spec, _, _ := unstructured.NestedMap(submitted.Object, "spec")
+	assert.True(t, restoreSelects(t, spec, postgresServiceObjects("orders")["pod"]))
+	assert.False(t, restoreSelects(t, spec, postgresServiceObjects("billing")["pod"]),
+		"another service's pod would bring its data and dump volumes into the restore")
 }
 
 func TestDrillNetworkPolicyDeniesEverythingButDNSAndTheNamespace(t *testing.T) {

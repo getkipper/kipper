@@ -111,7 +111,7 @@ func runBackupDrill(cmd *cobra.Command, args []string) error {
 			}
 		}()
 	}
-	pods, err := restoreIntoDrill(ctx, clientset, dyn, backup, source, &restoreName)
+	pods, err := restoreIntoDrill(ctx, clientset, dyn, backup, source, "", &restoreName)
 	if err != nil {
 		return err
 	}
@@ -164,12 +164,13 @@ func createDrillNamespace(ctx context.Context, clientset kubernetes.Interface) e
 	return nil
 }
 
-// restoreIntoDrill isolates the drill namespace and restores source's services
-// from backup into it. restoreName is set before the Restore is submitted, so
-// the caller's cleanup checks it even when the submission's outcome is unknown.
+// restoreIntoDrill isolates the drill namespace and restores services from the
+// source namespace's backup into it. A non-empty service limits the restore to
+// that service. It sets *restoreName before submitting the Restore so the caller
+// can check it during cleanup even when the submission's outcome is unknown.
 // It returns the pods after the restore completes and their PVC-backed volumes
 // have completed volume restores. An empty pod list is an error.
-func restoreIntoDrill(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, backup *unstructured.Unstructured, source string, restoreName *string) ([]corev1.Pod, error) {
+func restoreIntoDrill(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, backup *unstructured.Unstructured, source, service string, restoreName *string) ([]corev1.Pod, error) {
 	if _, err := clientset.NetworkingV1().NetworkPolicies(drillNamespace).Create(ctx, drillNetworkPolicy(), metav1.CreateOptions{}); err != nil {
 		return nil, fmt.Errorf("isolating namespace %s: %w", drillNamespace, err)
 	}
@@ -185,7 +186,7 @@ func restoreIntoDrill(ctx context.Context, clientset kubernetes.Interface, dyn d
 		"apiVersion": "velero.io/v1",
 		"kind":       "Restore",
 		"metadata":   map[string]interface{}{"name": name, "namespace": "velero"},
-		"spec":       drillRestoreSpec(backup.GetName(), source),
+		"spec":       drillRestoreSpec(backup.GetName(), source, service),
 	}}
 	*restoreName = name
 	if _, err := dyn.Resource(restoreGVR).Namespace("velero").Create(ctx, restore, metav1.CreateOptions{}); err != nil {
@@ -208,6 +209,9 @@ func restoreIntoDrill(ctx context.Context, clientset kubernetes.Interface, dyn d
 	pods, err := clientset.CoreV1().Pods(drillNamespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("listing restored pods: %w", err)
+	}
+	if len(pods.Items) == 0 && service != "" {
+		return nil, fmt.Errorf("backup %s contains no pod for service %s in namespace %s", backup.GetName(), service, source)
 	}
 	if len(pods.Items) == 0 {
 		return nil, fmt.Errorf("backup %s contains no service pods from namespace %s to test", backup.GetName(), source)
@@ -293,23 +297,33 @@ func labelExists(key string) map[string]interface{} {
 	return map[string]interface{}{"matchExpressions": []interface{}{map[string]interface{}{"key": key, "operator": "Exists"}}}
 }
 
-// drillRestoreSpec selects source's service-labelled pods, Secrets and ConfigMaps
-// for the drill namespace. Velero adds each pod's PVC and PV as dependencies.
-// Including PVs lets Velero clear the PVC's old binding so a fresh volume can
-// receive the restored files.
-func drillRestoreSpec(backupName, source string) map[string]interface{} {
+// drillRestoreSpec selects service-labelled pods, Secrets and ConfigMaps from
+// source for the drill namespace. A non-empty service limits the selection to
+// that service. Velero adds the selected pods' PVCs and PVs as dependencies,
+// limiting volumes to the selected services. Including PVs lets Velero clear
+// each PVC's old binding so a fresh volume can receive the restored files.
+func drillRestoreSpec(backupName, source, service string) map[string]interface{} {
+	// TLS services also need certificate Secrets and pg_hba ConfigMaps
+	// labelled with their service name under tls-for. Include these
+	// alongside the pods and credentials selected by service-type.
+	selectors := []interface{}{
+		labelExists("kipper.run/service-type"),
+		labelExists("kipper.run/tls-for"),
+	}
+	if service != "" {
+		ownPods := labelExists("kipper.run/service-type")
+		ownPods["matchLabels"] = map[string]interface{}{"app": service}
+		selectors = []interface{}{
+			ownPods,
+			map[string]interface{}{"matchLabels": map[string]interface{}{"kipper.run/tls-for": service}},
+		}
+	}
 	spec := map[string]interface{}{
 		"backupName":         backupName,
 		"includedNamespaces": []interface{}{source},
 		"namespaceMapping":   map[string]interface{}{source: drillNamespace},
 		"includedResources":  []interface{}{"pods", "persistentvolumeclaims", "persistentvolumes", "secrets", "configmaps"},
-		// TLS services also need certificate Secrets and pg_hba ConfigMaps
-		// labelled with their service name under tls-for. Include these
-		// alongside the pods and credentials selected by service-type.
-		"orLabelSelectors": []interface{}{
-			labelExists("kipper.run/service-type"),
-			labelExists("kipper.run/tls-for"),
-		},
+		"orLabelSelectors":   selectors,
 	}
 	backupscope.Restore(spec, false)
 	return spec
