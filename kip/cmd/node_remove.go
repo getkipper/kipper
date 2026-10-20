@@ -36,7 +36,6 @@ draining or wiping it. It deletes the node, removes the worker's address from
 kip-managed firewalls and drops its record. Resume an interrupted forced removal
 with --force and include --accept-data-loss again if it was needed.`,
 	Args:         cobra.ExactArgs(1),
-	Hidden:       true,
 	SilenceUsage: true,
 	RunE:         runNodeRemove,
 }

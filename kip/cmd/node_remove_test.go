@@ -610,3 +610,7 @@ func TestForceIsRefusedForAHostThatStillAnswers(t *testing.T) {
 	}
 	assert.NoError(t, refuseForceForLiveHost(worker, replaced), "another machine at the address is not the worker")
 }
+
+func TestNodeRemoveIsListedInHelp(t *testing.T) {
+	assert.False(t, nodeRemoveCmd.Hidden)
+}
