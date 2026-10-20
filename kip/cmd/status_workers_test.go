@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
@@ -39,6 +40,8 @@ func (h statusHost) Run(cmd string) (string, error) {
 		return "nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 9.9.9.9\n", nil
 	case strings.Contains(cmd, "/dev/tcp/"):
 		return "1.1.1.1 ok\n8.8.8.8 ok\n9.9.9.9 ok\n", nil
+	case strings.Contains(cmd, "kipper-access.service"):
+		return "----kip-access----\n----kip-access----\nenabled \nactive \nnftables  \n", nil
 	case strings.Contains(cmd, "longhorn"), strings.Contains(cmd, "kubectl"):
 		return "", nil
 	}
@@ -184,6 +187,23 @@ func TestWorkerDNSWarningsOfferTheRepairCommand(t *testing.T) {
 		"       Run 'kip cluster dns repair' to restore "+installer.ResolvConfPath()+"\n")
 	assert.Equal(t, 2, strings.Count(got, "Run 'kip cluster dns repair' to restore"), "the repair command restores the file on the server and every worker")
 	assert.NotContains(t, got, "repairs the server only")
+}
+
+func TestStatusChecksOperatorAccessOnEveryWorker(t *testing.T) {
+	var out bytes.Buffer
+	cluster := &config.Cluster{Host: "203.0.113.10", BackupStorage: &config.BackupStorageRef{Mode: "external"}}
+	records := statusRecords()[:2]
+	server := serverTarget(cluster, statusHost{machineID: statusServerID}, nil, records)
+	workers := inspectWorkers(records, func(installer.NodeRecord) (installer.CommandRunner, error) {
+		return statusHost{machineID: statusWorker1ID}, nil
+	})
+
+	reportHostChecks(&out, cluster, []k8s.NodeInfo{{Name: "server-1"}, {Name: "worker-1"}}, server, workers)
+
+	_, access, found := strings.Cut(out.String(), "Operator access:")
+	require.True(t, found)
+	assert.Contains(t, access, "server-1: open to every address")
+	assert.Contains(t, access, "worker-1: open to every address")
 }
 
 // The server being unreachable over SSH says nothing about the workers: they

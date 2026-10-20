@@ -239,6 +239,10 @@ func (h *firewalldHost) RunStdin(cmd string, stdin io.Reader) (string, error) {
 
 func (h *firewalldHost) SurvivesSSHRateLimit() bool { return true }
 
+func (h *firewalldHost) ObservedAddress(string) (string, error) {
+	return "", errors.New("no fresh connection in this test")
+}
+
 func (h *firewalldHost) ConfirmFreshConnection() error {
 	h.freshCalls++
 	if h.freshCalls <= len(h.fresh) {
@@ -487,7 +491,8 @@ func TestConfigureFirewalldRefusesAnUnclaimedRunningFirewall(t *testing.T) {
 
 type localHost struct{ *firewalldHost }
 
-func (localHost) ConfirmFreshConnection() error { return localrun.ErrNoConnection }
+func (localHost) ConfirmFreshConnection() error          { return localrun.ErrNoConnection }
+func (localHost) ObservedAddress(string) (string, error) { return "", localrun.ErrNoConnection }
 
 func TestConfigureFirewalldLocally(t *testing.T) {
 	ours := wantFirewalld([]string{"22"}).files()

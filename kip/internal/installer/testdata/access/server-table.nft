@@ -1,0 +1,21 @@
+# kipper-access generation 7
+table inet kipper_access
+delete table inet kipper_access
+table inet kipper_access {
+  set admin4 { type ipv4_addr; flags interval; }
+  set admin6 { type ipv6_addr; flags interval; }
+  set cluster4 { type ipv4_addr; flags interval; elements = { 10.42.0.0/16, 192.0.2.11 } }
+  set joining4 { type ipv4_addr; }
+  set server4 { type ipv4_addr; }
+  chain input {
+    type filter hook input priority filter - 10; policy accept;
+    ct state established,related accept
+    iif "lo" accept
+    tcp dport { 22, 6443 } ip saddr @admin4 accept
+    tcp dport { 22, 6443 } ip6 saddr @admin6 accept
+    tcp dport 6443 ip saddr @cluster4 accept
+    tcp dport 6443 ip saddr @joining4 accept
+    tcp dport { 22 } ip saddr @server4 accept
+    tcp dport { 22, 6443 } counter drop
+  }
+}

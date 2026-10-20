@@ -41,6 +41,7 @@ var hostCheckCommands = []string{
 	ufwFailOpenCommand,
 	k3sResolvConfCommand,
 	liveDNSProbeCommand,
+	accessStateCommand(""),
 }
 
 // CaptureHostChecks runs every host check command on client as one remote
