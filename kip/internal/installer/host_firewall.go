@@ -422,10 +422,15 @@ func ufwRules(sshPorts []string, rateLimitSSH bool, role HostRole) []string {
 	if role != RoleWorker {
 		rules = append(rules, "ufw allow 80/tcp", "ufw allow 443/tcp", "ufw allow 6443/tcp")
 	}
-	return append(rules,
+	return append(rules, ufwPodRules()...)
+}
+
+// ufwPodRules returns rules allowing pods to reach the host's kubelet and node-exporter.
+func ufwPodRules() []string {
+	return []string{
 		fmt.Sprintf("ufw allow from %s to any port %s proto tcp", k3sPodCIDR, kubeletPort),
 		fmt.Sprintf("ufw allow from %s to any port %s proto tcp", k3sPodCIDR, nodeExporterPort),
-	)
+	}
 }
 
 // readSSHPort returns the first port reported by sshd -T, or "22" if its

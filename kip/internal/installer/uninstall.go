@@ -9,9 +9,9 @@ import (
 const firewallChangePendingMarker = "kipper-firewall-change-pending"
 
 // clearKipperStateCommand builds a script to clear /etc/kipper beneath root
-// while holding the firewall rollback locks. A reservation or an active or activating rollback
-// unit preserves all state and prints firewallChangePendingMarker. Firewall
-// ownership and fail-open records stay with the retained firewall rules, and
+// while holding the firewall rollback locks. A reservation or an active or
+// activating rollback unit preserves all state and prints firewallChangePendingMarker.
+// Firewall ownership and fail-open records stay with the retained firewall rules, and
 // lock files stay so all waiters keep using the same inodes. Lock, unit lookup
 // and removal failures make the script exit non-zero.
 func clearKipperStateCommand(root string) string {
@@ -28,14 +28,15 @@ func clearKipperStateCommand(root string) string {
 		`else find ` + dir + ` -mindepth 1 -maxdepth 1` + keep + ` -exec rm -rf {} + || exit 1; fi; fi`
 }
 
-// UninstallHost runs k3s's uninstall scripts, removes Kipper's Longhorn
-// integration and Dex hosts pin, and deletes cluster data, optional AI data,
-// network recovery state and the API server configuration lock.
-// Missing scripts and directories are tolerated. Host firewall policy and
-// OS hardening remain configured. State in /etc/kipper is cleared except for
-// firewall ownership records, fail-open records and lock files. A firewall
-// reservation or an active or activating rollback unit preserves all of that
-// state and prints a notice.
+// UninstallHost runs k3s's uninstall scripts, removes the host firewall rules
+// kip added, Kipper's Longhorn integration and Dex hosts pin, and deletes
+// cluster data, optional AI data, network recovery state and the API server
+// configuration lock. Missing scripts and directories are tolerated. A firewall
+// kip manages stays running or stopped with SSH allowed. Failures to remove
+// firewall rules produce warnings and cleanup continues. OS hardening remains
+// configured. State in /etc/kipper is cleared except for firewall ownership
+// records, fail-open records and lock files. A firewall reservation or an active
+// or activating rollback unit preserves all of that state and prints a notice.
 // Failure to lock, inspect or clear that state returns an error.
 func UninstallHost(client CommandRunner) error {
 	// Stop k3s before removing its data. A failed shutdown aborts the uninstall
@@ -49,6 +50,12 @@ func UninstallHost(client CommandRunner) error {
 		if _, err := client.Run(fmt.Sprintf("if [ -x /usr/local/bin/%[1]s ]; then /usr/local/bin/%[1]s; fi", script)); err != nil {
 			return fmt.Errorf("running %s: %w", script, err)
 		}
+	}
+
+	if acted, err := removeKipperFirewall(client); err != nil {
+		fmt.Printf("  ⚠  kip's firewall rules may still be on this host: %v\n", err)
+	} else if acted {
+		fmt.Printf("  ✔  kip's firewall rules removed. The firewall's running state is unchanged, with SSH allowed\n")
 	}
 
 	// Clear stale Longhorn sessions before a future install. Restrict logout
