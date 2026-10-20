@@ -204,6 +204,8 @@ Velero backs up what lives in the cluster. Files an app keeps in an external S3 
 
 The mirror runs as a CronJob in the `velero` namespace. Every run first checks that the protection is in place and refuses to copy anything when it is not. Then it runs `rclone sync` and `rclone check`, so deletions in the source become delete markers in the mirror and the check confirms that every source object arrived. Each upload asks for a compliance lock as long as the bucket's default retention, which makes rclone send the checksum that S3 requires of a write into a locked bucket. A default given in years is counted in calendar days plus one, so no upload is locked for less than the default. Any S3-compatible store that supports versioning and Object Lock works.
 
+Both endpoints must support HTTPS and be reachable from your machine because `kip` checks them before creating the mirror. The cluster's built-in backup storage uses plain HTTP inside the cluster, so it cannot be a mirror source.
+
 ### Prepare the buckets
 
 Set the buckets up with your provider's console or the AWS CLI before running `kip`. Kipper creates no buckets and changes no bucket settings.
