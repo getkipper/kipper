@@ -176,7 +176,7 @@ func TestConfigureFirewall_BoundsEveryUFWCommand(t *testing.T) {
 	h.startFails = 1
 	require.NoError(t, configureFirewall(h, debianHost, false, FirewallMesh{}))
 	for _, c := range h.ran {
-		assert.False(t, bareUFW.MatchString(strings.ReplaceAll(c, "timeout -k 10 60 ufw ", "")), "ufw without a timeout: %s", c)
+		assert.False(t, bareUFW.MatchString(strings.ReplaceAll(c, ufwTimeout+"ufw ", "")), "ufw without a timeout: %s", c)
 	}
 }
 
@@ -671,4 +671,20 @@ func TestARestoreThatChangesTheIPv6InputPolicyIsNotReportedAsRestored(t *testing
 	s.advance(ufwRollbackSeconds + 1)
 	s.rollBack()
 	assert.True(t, s.failedOpen(), "reloading the saved IPv6 deny changes what admitted SSH over IPv6")
+}
+
+// kip parses ufw's English status words, so an active firewall must be recognised
+// even when the host's default locale translates ufw's status line.
+func TestUFWStatusIsReadInEnglishOnATranslatedHost(t *testing.T) {
+	bin := t.TempDir()
+	//nolint:gosec // the stand-ins have to be executable
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "timeout"), []byte("#!/bin/sh\nshift 3\nexec \"$@\"\n"), 0o755))
+	//nolint:gosec // the stand-ins have to be executable
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "ufw"), []byte("#!/bin/sh\n"+
+		`if [ "$LC_ALL" = C ] && [ "$LANGUAGE" = C ]; then echo 'Status: active'; else echo 'Estado: activo'; fi`+"\n"), 0o755))
+	cmd := exec.Command("sh", "-c", ufwStateCommand)
+	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "LANG=es_ES.UTF-8", "LANGUAGE=es"}
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	assert.Equal(t, "active\n", string(out))
 }
