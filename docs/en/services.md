@@ -44,7 +44,7 @@ flowchart TD
     A --> B[Service CR - kipper.run/v1alpha1]
 
     B -->|reconciler| C[StatefulSet with 1 replica]
-    B -->|reconciler| D[PersistentVolumeClaim - 5Gi default]
+    B -->|reconciler| D[PersistentVolumeClaim - 1Gi default]
     B -->|reconciler| E[Headless K8s Service for DNS]
     B -->|reconciler| F[Credentials Secret]
 
@@ -60,13 +60,17 @@ flowchart TD
 | `--name` | Required | Service name |
 | `--project` | `default` | Project name |
 | `--environment` | — | Target environment (e.g. test, acc, prod) |
-| `--storage` | `5Gi` (postgres/mysql/mongodb/opensearch), `1Gi` (redis/rabbitmq), `10Gi` (minio) | Storage size |
+| `--storage` | `1Gi` | Storage size |
 | `--cpu` | Request `500m` (postgres/mysql/mongodb), `100m` (others). OpenSearch has a `1000m` limit. | Sets the CPU request and limit to the same value. |
 | `--memory` | `1Gi` (postgres/mysql/mongodb), `2Gi` (opensearch), `128Mi` (others) | Sets the memory request and limit to the same value. |
 | `--tls` | `required` (postgres) | Postgres only. `required` refuses connections without TLS, `on` serves TLS and still accepts plaintext, `off` creates the service without TLS. See [Encrypted Postgres connections](#postgres-tls). |
 | `--consistent-backups` | `true` (postgres) | Postgres only. Adds a `pg_dump` of every database to each backup. See [Consistent database dumps](/en/backups#consistent-database-dumps). |
 
-Before creating a service, `kip service add` checks that one eligible node has enough CPU and memory after existing pod requests are deducted. If capacity is insufficient, it reports the largest remaining CPU and memory capacities and their nodes. Reduce requests with `--cpu` and `--memory`, or add capacity. If no nodes qualify, it directs you to `kip status`. The check is skipped if nodes or pods cannot be read. Passing this check does not guarantee scheduling because other constraints, such as storage availability, may apply.
+Before creating a service, `kip service add` checks that one eligible node has enough CPU and memory after existing pod requests are deducted. If capacity is insufficient, it reports the largest remaining CPU and memory capacities and their nodes. Reduce requests with `--cpu` and `--memory`, or add capacity. If no nodes qualify, it directs you to `kip status`. The check is skipped if nodes or pods cannot be read.
+
+On a cluster with Longhorn storage, `kip service add` also checks capacity for the service's volumes: the data volume, plus a dump volume of the same size for Postgres with consistent backups. It uses Longhorn's reported maximum, reserved, scheduled and available space for each disk, together with the `storage-over-provisioning-percentage` and `storage-minimal-available-percentage` settings. Pending Longhorn volumes that fit on an eligible disk also count against that space. This includes volumes from a service created moments earlier, so consecutive commands account for those volumes even before their claims exist. Single-copy volumes are scheduled on the server, so the check covers the server's disks only. A definite shortage stops creation. The error names the server and reports its remaining scheduling capacity and the service's storage requirements. Free space with `kip service delete <name> --delete-data`, grow the server's disk, or request less storage with `--storage`. If Longhorn's state cannot be read or no node can accept new volumes, kip prints a warning and proceeds with creation. An inconclusive placement also produces a warning. Existing claims are reused and excluded from the check. Clusters on local storage skip this check. Passing the capacity checks does not guarantee scheduling because other constraints may apply.
+
+`kip service update --consistent-backups` runs the same check for the dump volume it adds. Before writing anything, `kip apply` checks new services' volumes, new shared volumes and dump volumes for existing Postgres services whose consistent backups the manifest enables.
 
 On a server with 8 GB RAM and 2 vCPUs, `kip install` selects the `small` profile to leave an estimated 500m CPU for a default database service. See [Preflight checks](/en/installation#preflight-checks).
 

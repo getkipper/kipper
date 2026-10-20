@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/getkipper/kipper/kip/internal/deployer"
 	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/manifest"
+	"github.com/getkipper/kipper/kip/internal/service"
 	"github.com/getkipper/kipper/kip/internal/workload"
 )
 
@@ -170,6 +172,14 @@ func applyPlans(ctx context.Context, dyn dynamic.Interface, clientset kubernetes
 			return 0, 0, fmt.Errorf("refusing to clear %d field(s) the manifest does not carry; add them to the manifest, run 'kip export' to fold the live state in, or re-run with --force", len(allClears))
 		}
 		fmt.Printf("  --force given, clearing them.\n")
+	}
+	mgr := &service.Manager{Client: clientset, Dynamic: dyn}
+	volumes, err := newVolumesInPlans(ctx, mgr, plans)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := refuseWithoutStorageRoom(ctx, os.Stdout, mgr, volumes, "the manifest's storage and size fields"); err != nil {
+		return 0, 0, err
 	}
 
 	// Everything below writes. Kubernetes has no transaction across objects, so

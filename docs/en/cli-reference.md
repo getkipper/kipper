@@ -194,7 +194,9 @@ A component with no ready replicas (or no available replicas for a Deployment) i
 
 It also audits the DNS resolvers your cluster forwards external queries to. Those live in a file on the server, so `kip status` makes a best-effort SSH connection as the cluster's SSH user (reusing the key from install, then your SSH agent or `~/.ssh/id_ed25519`) to read it. Three things are checked: the file is still a safe set (IPv4 entries only, at most three), the entries still match the resolvers the cluster was configured with (`dns_resolvers` in `~/.kip/config.yaml`, or the default public set), and each resolver actually accepts connections from the server. Each problem gets its own warning, and drift or an unsafe hand-edit is fixed with `kip cluster dns repair`. If the server can't be reached over SSH, the section reports that the check could not run, and the rest of the status still prints.
 
-On a cluster with workers, the host checks (DNS resolvers, pending restarts, read-only volume mounts and a firewall rollback that attempted to switch UFW off) cover the server and every recorded worker. Results identify the node by name or, for healthy server mounts, by its configured host address. kip finds workers in node records read through the Kubernetes API. If those records are missing, unreadable or invalid, it uses the local copy and warns when the read or validation fails. It runs all of a worker's checks as one SSH command to reduce connections against the worker's firewall rate limit. Each worker's resolvers are probed from that worker. `kip cluster dns repair` restores the resolver file on the server and every worker. Before reporting a worker's results, kip confirms that the address still answers with the worker's recorded machine ID. A worker that cannot be reached, or that answers as another machine, is listed as not checked and the rest of the status still prints. On a single-node cluster, results retain their layout without node-name prefixes.
+On a cluster with workers, the host checks (DNS resolvers, pending restarts, read-only volume mounts and a firewall rollback that attempted to switch UFW off) cover the server and every recorded worker. Results identify each node by its recorded name. kip finds workers in node records read through the Kubernetes API. If those records are missing, unreadable or invalid, it uses the local copy and warns when the read or validation fails. It runs all of a worker's checks as one SSH command to reduce connections against the worker's firewall rate limit. Each worker's resolvers are probed from that worker. `kip cluster dns repair` restores the resolver file on the server and every worker. Before reporting a worker's results, kip confirms that the address still answers with the worker's recorded machine ID. A worker that cannot be reached, or that answers as another machine, is listed as not checked and the rest of the status still prints. On a single-node cluster, results retain their layout without node-name prefixes.
+
+On a cluster with Longhorn storage, a Storage section appears when the server's roomiest eligible disk has less than 5Gi available for scheduling new volumes. This is the default volume size for `kip volume create`.
 
 ## kip doctor {#kip-doctor}
 
@@ -926,6 +928,8 @@ kip volume delete uploads --delete-data --project blog --environment test
 | `--project` | No | `default` | Project name |
 | `--environment` | No | — | Target environment |
 
+Before creating the volume, `kip volume create` checks whether at least one Longhorn node has capacity for a copy, using Longhorn's reserved space, over-provisioning and minimal-available settings. If capacity is insufficient, it refuses creation and reports the node with the most room and its remaining capacity. If Longhorn's state cannot be read, it prints a warning and proceeds with creation.
+
 ### kip volume mount flags {#kip-volume-mount-flags}
 
 | Flag | Required | Default | Description |
@@ -1245,6 +1249,8 @@ kip apply --project blog --environment prod  # override project/environment
 | `--dry-run` | No | `false` | Print what would be applied without making changes |
 | `--project` | No | from manifest | Override the project name |
 | `--environment` | No | from manifest | Override the environment |
+
+Before writing anything, `kip apply` checks Longhorn's capacity for the volumes the manifest adds, using the same check as [`kip service add`](/en/services#options). This covers new services' volumes, new shared volumes and dump volumes for existing Postgres services whose `consistentBackups` the manifest enables.
 
 ## kip diff {#kip-diff}
 

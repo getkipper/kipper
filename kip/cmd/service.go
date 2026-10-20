@@ -262,6 +262,13 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	volumes, err := service.ServiceVolumes(namespace, name, serviceType, storage, consistentBackups)
+	if err != nil {
+		return err
+	}
+	if err := refuseWithoutStorageRoom(ctx, os.Stdout, mgr, volumes, "--storage"); err != nil {
+		return err
+	}
 
 	// Build Service CR
 	spec := map[string]interface{}{
@@ -553,6 +560,18 @@ func runServiceUpdate(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
 	fmt.Printf("\n  Updating service %s...\n", name)
+
+	// Turning consistent backups on creates the dump volume, so it is checked
+	// before any change is written.
+	if dumpSet && dumpOn {
+		dump, err := mgr.DumpVolume(ctx, namespace, name, storage)
+		if err != nil {
+			return err
+		}
+		if err := refuseWithoutStorageRoom(ctx, os.Stdout, mgr, dump, "--storage"); err != nil {
+			return err
+		}
+	}
 
 	if tls == "required" {
 		snapshot, err := mgr.Read(ctx, namespace, name)
