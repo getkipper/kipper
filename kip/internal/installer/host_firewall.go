@@ -188,7 +188,12 @@ func configureFirewallWith(client FirewallRunner, rateLimitSSH bool, consent Fir
 		}
 		return configureFirewalld(client, host, consent, mesh)
 	}
-	return configureFirewall(client, host, rateLimitSSH && client.SurvivesSSHRateLimit(), mesh)
+	if rateLimitSSH && !client.SurvivesSSHRateLimit() {
+		// Opening a new SSH connection for each command can hit UFW's rate limit.
+		fmt.Printf("  ℹ  UFW allows SSH without rate limiting because kip cannot reuse a single SSH connection from this machine to this host.\n")
+		rateLimitSSH = false
+	}
+	return configureFirewall(client, host, rateLimitSSH, mesh)
 }
 
 func configureFirewall(client FirewallRunner, host HostOS, rateLimitSSH bool, mesh FirewallMesh) error {

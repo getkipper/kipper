@@ -100,7 +100,7 @@ You can change your mind later:
 kip cluster harden --no-ssh-rate-limit
 ```
 
-Kipper also skips the rate limit on its own when it cannot share one connection for the whole install, on a machine where it cannot write to your home directory for instance. Rate-limiting a port it then needs hundreds of connections through would lock it out of your half-built server.
+Kipper also skips the rate limit automatically when it cannot reuse a single connection throughout installation, for example when it cannot write to your home directory. The hundreds of connections needed in that case would hit the rate limit and lock Kipper out before installation finishes. Kipper displays a notice when it skips the limit. To add the limit later, run `kip cluster harden` from a machine where Kipper can reuse its SSH connection.
 
 #### Installing on the server itself
 
