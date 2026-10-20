@@ -59,15 +59,8 @@ func prepareNodeOS(client CommandRunner, wireGuardOptional, longhorn bool) error
 
 // prepareWorkerHost configures DNS, kubelet settings, and storage dependencies
 // before the k3s agent starts.
-func prepareWorkerHost(masterClient, workerClient CommandRunner) error {
-	// Validate the server's upstream resolvers for CoreDNS on this worker.
-	// Use defaults if reading or validation fails.
-	masterResolv, rErr := masterClient.Run("cat " + k3sResolvConfPath)
-	resolvers, vErr := resolveDNSResolvers(parseResolvConf(masterResolv))
-	if rErr != nil || vErr != nil {
-		resolvers = DefaultDNSResolvers()
-	}
-	// The worker probes too: it often sits behind different egress rules.
+func prepareWorkerHost(workerClient CommandRunner, resolvers []string) error {
+	// Probe from the worker because its egress rules may differ from the server's.
 	warnUnreachableResolvers(probeDNSResolvers(workerClient, resolvers), resolvers)
 	if err := writeResolvConf(workerClient, renderResolvConf(resolvers)); err != nil {
 		return err
