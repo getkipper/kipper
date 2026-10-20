@@ -170,7 +170,7 @@ Several rails to keep destructive changes deliberate:
 
 ## Permissions
 
-The database console runs SQL through the console-api using the service's existing credentials Secret. The browser never sees credentials.
+The database console runs SQL through the console-api using the service's existing credentials Secret. The browser never sees credentials. For a Postgres service with TLS `on` or `required`, the console-api verifies the server's certificate against the service CA and requires TLS for every connection. While certificate issuance is pending, the console reports this and keeps the connection closed.
 
 - **Schema browsing, row reads, and query history** require `database.read` in the service’s project.
 - **Running SQL, editing rows or schema, and saving snippets** require `database.write`, held by project deployers and owners. Cluster admins also have access.

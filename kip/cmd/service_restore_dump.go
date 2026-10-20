@@ -18,13 +18,13 @@ import (
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	utilexec "k8s.io/client-go/util/exec"
 
 	"github.com/getkipper/kipper/kip/internal/k8s"
-	"github.com/getkipper/kipper/kip/internal/manifest"
+	"github.com/getkipper/kipper/kip/internal/service"
 )
 
 var serviceRestoreDumpCmd = &cobra.Command{
@@ -40,7 +40,8 @@ target in one transaction per database. Row counts in the target must match
 the counts recorded with the dump.
 
 The target must exist and have no user tables in any connectable, non-template
-database. This check protects existing table data from being overwritten.
+database. To protect existing table data from being overwritten, kip checks
+this before the restore starts and again immediately before the first load.
 Create it with kip service add postgres --name <target>, then bind apps to it
 once the restore has finished. Roles and grants are not restored. Every object
 belongs to the target's own user, which is the user its bindings connect as.`,
@@ -149,14 +150,6 @@ func runServiceRestoreDump(cmd *cobra.Command, args []string) error {
 		return errBackupsNotConfigured
 	}
 
-	svc, err := dyn.Resource(manifest.ServiceGVR).Namespace(namespace).Get(ctx, target, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("reading target service %s in %s: %w. Create it first with kip service add postgres --name %s", target, namespace, err, target)
-	}
-	if kind, _, _ := unstructured.NestedString(svc.Object, "spec", "type"); kind != "postgres" {
-		return fmt.Errorf("target service %s is %s. A Postgres dump restores only into a Postgres service", target, kind)
-	}
-
 	kubeconfig, err := clientcmd.BuildConfigFromFlags("", cluster.Kubeconfig)
 	if err != nil {
 		return fmt.Errorf("loading kubeconfig: %w", err)
@@ -165,12 +158,9 @@ func runServiceRestoreDump(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating the Kubernetes client: %w", err)
 	}
-	targetPod, err := clientset.CoreV1().Pods(namespace).Get(ctx, target+"-0", metav1.GetOptions{})
+	targetPod, err := readyTargetPod(ctx, clientset, dyn, namespace, target)
 	if err != nil {
-		return fmt.Errorf("reading the pod of target service %s: %w", target, err)
-	}
-	if !podReady(targetPod) {
-		return fmt.Errorf("target service %s is not ready yet. Try again once kip service info %s shows it running", target, target)
+		return err
 	}
 	dst := podExec(execClient, kubeconfig, namespace, targetPod.Name, workloadContainerName(targetPod, target))
 	if err := requireEmptyPostgres(ctx, dst, target); err != nil {
@@ -224,6 +214,43 @@ func runServiceRestoreDump(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("pausing the resource tuner of %s: %w", target, err)
 	}
 	defer resume()
+	if err := loadDumps(ctx, src, dst, target, entries); err != nil {
+		return err
+	}
+	fmt.Printf("\n  Restored %d %s into %s. Bind apps to it with kip service bind %s <app>.\n\n", len(entries), plural(len(entries), "database", "databases"), target, target)
+	return nil
+}
+
+// readyTargetPod returns the target Postgres service's ready pod. Otherwise,
+// its error includes any TLSReady failure message from the controller, such as
+// a pending certificate or a pod restart needed to load it.
+func readyTargetPod(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, namespace, target string) (*corev1.Pod, error) {
+	snapshot, err := (&service.Manager{Dynamic: dyn}).Read(ctx, namespace, target)
+	if err != nil {
+		return nil, fmt.Errorf("reading target service %s in %s: %w. Create it first with kip service add postgres --name %s", target, namespace, err, target)
+	}
+	if snapshot.Type != "postgres" {
+		return nil, fmt.Errorf("target service %s is %s. A Postgres dump restores only into a Postgres service", target, snapshot.Type)
+	}
+	pod, err := clientset.CoreV1().Pods(namespace).Get(ctx, target+"-0", metav1.GetOptions{})
+	if err == nil && podReady(pod) {
+		return pod, nil
+	}
+	if snapshot.TLSWaiting != "" {
+		return nil, fmt.Errorf("target service %s is not serving TLS yet: %s. Try again once kip service info %s shows it running", target, strings.TrimSuffix(snapshot.TLSWaiting, "."), target)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading the pod of target service %s: %w", target, err)
+	}
+	return nil, fmt.Errorf("target service %s is not ready yet. Try again once kip service info %s shows it running", target, target)
+}
+
+// loadDumps rechecks that the target has no user tables before loading the dumps,
+// because an app may have been bound and created tables during the backup restore.
+func loadDumps(ctx context.Context, src, dst podExecFunc, target string, entries []dumpEntry) error {
+	if err := requireEmptyPostgres(ctx, dst, target); err != nil {
+		return err
+	}
 	for _, e := range entries {
 		tables, err := restoreDumpEntry(ctx, src, dst, e)
 		if err != nil {
@@ -231,7 +258,6 @@ func runServiceRestoreDump(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("  ✔  %s: restored. Row counts match the dump's snapshot (%d %s)\n", e.Database, tables, plural(tables, "table", "tables"))
 	}
-	fmt.Printf("\n  Restored %d %s into %s. Bind apps to it with kip service bind %s <app>.\n\n", len(entries), plural(len(entries), "database", "databases"), target, target)
 	return nil
 }
 
