@@ -49,7 +49,9 @@ belongs to the target's own user, which is the user its bindings connect as.`,
   kip service restore-dump mydb --to mydb-restored --backup velero-daily-apps-20261019030050`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
-	RunE:         runServiceRestoreDump,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return reportInterrupt(runServiceRestoreDump(cmd, args))
+	},
 }
 
 func init() {
