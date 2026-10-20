@@ -78,17 +78,24 @@ func (ca *testCA) issue(t *testing.T, dnsName string) tls.Certificate {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
-// fakePostgres answers the Postgres SSLRequest. With a certificate it accepts
-// TLS and counts completed handshakes. Without one it refuses TLS. Any startup
-// message sent without TLS is counted as a plaintext connection.
+// fakePostgres answers Postgres SSL requests, accepting TLS with a certificate
+// and refusing it otherwise. It counts completed TLS handshakes and plaintext
+// startups. Only SSL requests and plaintext startup headers count as contacted.
+// Other complete opening headers count as stray and are ignored, including
+// CancelRequest, which pgx sends separately after a failed startup.
+// Incomplete opening headers are ignored.
 type fakePostgres struct {
 	addr       *net.TCPAddr
 	handshakes atomic.Int32
 	plaintext  atomic.Int32
-	accepted   atomic.Int32
+	contacted  atomic.Int32
+	stray      atomic.Int32
 }
 
-const sslRequestCode = 80877103
+const (
+	sslRequestCode  = 80877103
+	protocolVersion = 196608
+)
 
 func startFakePostgres(t *testing.T, cert *tls.Certificate) *fakePostgres {
 	t.Helper()
@@ -102,7 +109,6 @@ func startFakePostgres(t *testing.T, cert *tls.Certificate) *fakePostgres {
 			if err != nil {
 				return
 			}
-			f.accepted.Add(1)
 			go f.serve(conn, cert)
 		}
 	}()
@@ -116,8 +122,15 @@ func (f *fakePostgres) serve(conn net.Conn, cert *tls.Certificate) {
 	if _, err := io.ReadFull(conn, head); err != nil {
 		return
 	}
-	if binary.BigEndian.Uint32(head[4:]) != sslRequestCode {
+	switch binary.BigEndian.Uint32(head[4:]) {
+	case sslRequestCode:
+		f.contacted.Add(1)
+	case protocolVersion:
+		f.contacted.Add(1)
 		f.plaintext.Add(1)
+		return
+	default:
+		f.stray.Add(1)
 		return
 	}
 	if cert == nil {
@@ -230,7 +243,7 @@ func TestTheDatabaseViewRefusesATLSServiceWithoutAnIssuedCA(t *testing.T) {
 		err := connectToDB(databaseFor(t, "required", server, tc.caPEM, tc.tlsFor))
 
 		require.Error(t, err, name)
-		assert.Zero(t, server.accepted.Load(), "%s: nothing may be sent to the server", name)
+		assert.Zero(t, server.contacted.Load(), "%s: no SSL request or plaintext startup may reach the server", name)
 	}
 }
 
@@ -241,5 +254,26 @@ func TestTheDatabaseViewPrefersTLSForAServiceWithTLSOff(t *testing.T) {
 		_ = connectToDB(databaseFor(t, mode, server, nil, ""))
 
 		assert.Positive(t, server.plaintext.Load(), "mode %q falls back to plaintext", mode)
+	}
+}
+
+func TestTheFakePostgresCountsOnlyStartupTraffic(t *testing.T) {
+	cancelRequest := make([]byte, 16)
+	binary.BigEndian.PutUint32(cancelRequest[0:], 16)
+	binary.BigEndian.PutUint32(cancelRequest[4:], 80877102)
+	for name, opening := range map[string][]byte{
+		"pgx's CancelRequest after a failed startup": cancelRequest,
+		"another protocol":                           []byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n"),
+	} {
+		server := startFakePostgres(t, nil)
+		conn, err := net.Dial("tcp", server.addr.String())
+		require.NoError(t, err)
+		_, err = conn.Write(opening)
+		require.NoError(t, err)
+		_ = conn.Close()
+
+		require.Eventually(t, func() bool { return server.stray.Load() == 1 }, 5*time.Second, 10*time.Millisecond, name)
+		assert.Zero(t, server.plaintext.Load(), "%s is not a plaintext startup", name)
+		assert.Zero(t, server.contacted.Load(), name)
 	}
 }
