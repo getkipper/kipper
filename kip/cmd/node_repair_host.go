@@ -14,9 +14,12 @@ var nodeRepairHostCmd = &cobra.Command{
 	Use:          "repair-host",
 	Short:        "Apply host configuration to nodes that predate it",
 	SilenceUsage: true,
-	Long: `Configures needrestart on Ubuntu and Debian nodes to defer storage-service
-restarts, then records the configuration on each Kubernetes node object. This
-protects Longhorn volumes from disruptions after library updates.
+	Long: `Turns off NFS directory delegations to keep Longhorn's shared volumes
+accessible on Linux 7.0 and later. Longhorn 1.7.3's shared volume server rejects
+these requests. On Ubuntu or Debian, it then configures needrestart to defer
+storage-service restarts and records that configuration on each Kubernetes node
+object. Deferring restarts protects Longhorn volumes from disruptions after
+library updates.
 
 Use this for nodes added by older kip versions. It applies the same configuration
 as kip install and kip node add, using the same connection details, and is safe
@@ -99,12 +102,18 @@ func repairHostOnNodes(records []installer.NodeRecord, server installer.Firewall
 	})
 }
 
-// repairNodeHost defers storage-service restarts on one node and records the
-// configuration on its Kubernetes node through master. An empty machineID is
-// read from the node. If that read fails, the configuration is left in place
-// and a warning is printed instead of recording it. OS families that do not
-// use needrestart receive package update guidance instead.
+// repairNodeHost turns off NFS directory delegations on one node, defers its
+// storage-service restarts and records that configuration on its Kubernetes
+// node through master. An empty machineID is read from the node. If that read
+// fails, the configuration is left in place and a warning is printed instead of
+// recording it. OS families that do not use needrestart receive package update
+// guidance instead.
 func repairNodeHost(master, node installer.CommandRunner, nodeHost, machineID string) error {
+	if err := installer.DisableNFSDirectoryDelegations(node); err != nil {
+		return fmt.Errorf("repairing %s: %w", nodeHost, err)
+	}
+	fmt.Printf("  ✔  NFS client configured for shared volumes\n")
+
 	host, err := installer.DetectHostOS(node)
 	if err != nil {
 		return fmt.Errorf("reading the OS of %s: %w", nodeHost, err)
