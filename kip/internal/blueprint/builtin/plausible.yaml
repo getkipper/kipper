@@ -40,3 +40,5 @@ services:
   db:
     type: postgres
     storage: "{{ .dbStorage }}"
+    # Enable TLS while allowing plaintext connections for this app configuration.
+    tls: "on"
