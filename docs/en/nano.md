@@ -1,11 +1,11 @@
 ---
 title: 'Start small with a nano Kubernetes cluster'
-description: 'Run a full Kipper cluster on a 2 to 4 GB server with local storage, then move to a larger cluster when you need more.'
+description: 'Run a full Kipper cluster on a 4 GB server with local storage, then move to a larger cluster when you need more.'
 ---
 
 # Start Small with Nano
 
-Kubernetes has a reputation for needing big servers and a lot of setup. With minimal setup, nano gives you a full Kubernetes cluster with Kipper's console, builds, services and functions on a server with 2 to 4 GB of RAM and 20 GiB of free disk space. It suits anyone who wants to try Kipper, run a prototype, test an idea or give a QA team its own cluster, and it is a real cluster rather than a demo mode.
+Kubernetes has a reputation for needing big servers and a lot of setup. With minimal setup, nano gives you a full Kubernetes cluster with Kipper's console, builds, services and functions on a server with 4 GB of RAM and 20 GiB of free disk space. It suits anyone who wants to try Kipper, run a prototype, test an idea or give a QA team its own cluster, and it is a real cluster rather than a demo mode.
 
 When you need more, you install a larger cluster and move your projects to it with [Cluster Migration](/en/migration).
 
