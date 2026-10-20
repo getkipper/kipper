@@ -580,7 +580,8 @@ var networkDropInKeys = []string{"node-ip", "node-external-ip", "flannel-iface",
 
 // RenderNetworkDropIn replaces kip-owned settings for the node's role and mode,
 // preserving other keys from existing. Both node addresses must be IPv4, and
-// private mode requires a valid interface name. In public mode, a positive
+// private mode requires a valid interface name. Servers advertise the API on
+// NodeIP in private mode and ExternalIP in public mode. In public mode, a positive
 // TunnelMTU selects the file written by WriteFlannelConf. Callers must write
 // that file separately. Invalid YAML, addresses, interfaces or modes return an error.
 func RenderNetworkDropIn(existing string, role HostRole, mode string, n NodeNetwork) (string, error) {
@@ -616,6 +617,9 @@ func RenderNetworkDropIn(existing string, role HostRole, mode string, n NodeNetw
 		}
 	case NetworkModePublic:
 		if role == RoleServer {
+			// Workers in other networks need the external API address, overriding
+			// any private address written to the base config by kip install.
+			doc["advertise-address"] = n.ExternalIP
 			doc["flannel-external-ip"] = true
 		}
 		if n.TunnelMTU > 0 {

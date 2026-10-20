@@ -240,9 +240,9 @@ docs, not as a way to catch up a cluster.
 **k3s** deserves its own note: re-running `kip install` moves the server onto the
 k3s release this kip version pins, which briefly restarts the control plane. That
 path refuses downgrades and upgrades at most one Kubernetes minor per run,
-because the Kubernetes skew policy forbids skipping minors. A server further
-behind stays untouched with a warning and needs the intermediate minor upgrades
-first.
+because the Kubernetes skew policy forbids skipping minors. For a server further
+behind, kip keeps the installed version and warns that the intermediate minor
+upgrades are needed first. Every re-run restarts k3s so that it loads the configuration kip wrote.
 
 ### k3s upgrades {#k3s-upgrades}
 
