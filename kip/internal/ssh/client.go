@@ -536,29 +536,40 @@ func passwordRefused(out string) error {
 }
 
 // ObservedAddress opens one new connection over family ("4" or "6") and
-// returns the client address the host saw for it. The command runs in the
-// remote shell without sudo because env_reset drops SSH_CONNECTION. It makes a
-// single attempt, so it counts once against an SSH rate limit.
+// returns the client address the host saw for it. It reads SSH_CONNECTION in
+// the remote shell to preserve the variable that sudo's env_reset drops. It
+// makes a single attempt, so it counts once against an SSH rate limit. A marker
+// and leading newline separate the address from banners and shell startup
+// output on stdout. SSH warnings on stderr are used only for failure details.
+// It returns an empty address and an error for an invalid family, a connection
+// failure or a missing or malformed marked line. A positive CommandTimeout
+// bounds the attempt.
 func (c *Client) ObservedAddress(family string) (string, error) {
 	if family != "4" && family != "6" {
 		return "", fmt.Errorf("unknown address family %q", family)
 	}
-	args := append(c.connectionArgs(false, true, "-"+family), `printf '%s' "$SSH_CONNECTION"`)
+	args := append(c.connectionArgs(false, true, "-"+family), `printf '\n`+observedMarker+` %s\n' "$SSH_CONNECTION"`)
 	cmd, ctx, cancel := c.command(args...)
 	defer cancel()
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if ctx.Err() == context.DeadlineExceeded {
 		return "", fmt.Errorf("a new IPv%s SSH connection to %s did not finish within %s", family, c.cfg.Host, c.cfg.CommandTimeout)
 	}
 	if err != nil {
-		return "", fmt.Errorf("opening a new IPv%s SSH connection to %s: %w: %s", family, c.cfg.Host, err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("opening a new IPv%s SSH connection to %s: %w: %s", family, c.cfg.Host, err, strings.TrimSpace(stderr.String()))
 	}
-	fields := strings.Fields(string(out))
-	if len(fields) != 4 {
-		return "", fmt.Errorf("%s did not report the connection's address in SSH_CONNECTION (got %q)", c.cfg.Host, strings.TrimSpace(string(out)))
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 5 && fields[0] == observedMarker {
+			return fields[1], nil
+		}
 	}
-	return fields[0], nil
+	return "", fmt.Errorf("%s did not report the connection's address in SSH_CONNECTION (got %q, stderr %q)", c.cfg.Host, strings.TrimSpace(string(out)), strings.TrimSpace(stderr.String()))
 }
+
+const observedMarker = "kip-ssh-connection"
 
 const freshAttempts = 3
 

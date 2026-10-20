@@ -26,7 +26,7 @@ func fakeSSH(t *testing.T, out string, exit int) string {
 // sudo's env_reset drops SSH_CONNECTION, so the address is read by the remote
 // shell itself, over a fresh connection pinned to one family.
 func TestObservedAddressReadsSSHConnectionOutsideSudo(t *testing.T) {
-	calls := fakeSSH(t, "198.51.100.7 51514 203.0.113.10 22", 0)
+	calls := fakeSSH(t, "kip-ssh-connection 198.51.100.7 51514 203.0.113.10 22\n", 0)
 	c := &Client{cfg: Config{Host: "demo.example.com", User: "ubuntu"}, controlPath: "/tmp/kip-test.sock"}
 	addr, err := c.ObservedAddress("4")
 	require.NoError(t, err)
@@ -35,7 +35,7 @@ func TestObservedAddressReadsSSHConnectionOutsideSudo(t *testing.T) {
 	b, err := os.ReadFile(calls)
 	require.NoError(t, err)
 	args := strings.Split(strings.TrimSpace(string(b)), "\n")
-	assert.Equal(t, `printf '%s' "$SSH_CONNECTION"`, args[len(args)-1], "the raw command, not wrapped in sudo")
+	assert.Equal(t, `printf '\nkip-ssh-connection %s\n' "$SSH_CONNECTION"`, args[len(args)-1], "the raw command, not wrapped in sudo")
 	assert.Equal(t, "ubuntu@demo.example.com", args[len(args)-2])
 	assert.Contains(t, args, "-4")
 	assert.Contains(t, args, "ControlPath=none", "a fresh connection, not the shared one")
@@ -43,7 +43,7 @@ func TestObservedAddressReadsSSHConnectionOutsideSudo(t *testing.T) {
 }
 
 func TestObservedAddressPinsIPv6(t *testing.T) {
-	calls := fakeSSH(t, "2001:db8:1:2::abcd 51514 2001:db8::10 22", 0)
+	calls := fakeSSH(t, "kip-ssh-connection 2001:db8:1:2::abcd 51514 2001:db8::10 22\n", 0)
 	c := &Client{cfg: Config{Host: "demo.example.com", User: "root"}}
 	addr, err := c.ObservedAddress("6")
 	require.NoError(t, err)
@@ -66,4 +66,46 @@ func TestObservedAddressReportsAFailedConnection(t *testing.T) {
 	assert.Error(t, err)
 	_, err = c.ObservedAddress("5")
 	assert.ErrorContains(t, err, "family")
+}
+
+// fakeSSHWith installs an ssh stand-in that prints stdout and stderr.
+func fakeSSHWith(t *testing.T, stdout, stderr string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s' '" + stderr + "' >&2\nprintf '%s' '" + stdout + "'\n"
+	//nolint:gosec // a stub in the test's own temp dir has to be executable
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestObservedAddressIgnoresWarningsAndBanners(t *testing.T) {
+	fakeSSHWith(t,
+		"Welcome to the host\nkip-ssh-connection 198.51.100.7 51514 203.0.113.10 22\n",
+		"Warning: Permanently added 203.0.113.10 (ED25519) to the list of known hosts.\nAuthorized access only\nbash: warning: setlocale: LC_ALL: cannot change locale\n")
+	c := &Client{cfg: Config{Host: "demo.example.com", User: "root"}}
+	addr, err := c.ObservedAddress("4")
+	require.NoError(t, err)
+	assert.Equal(t, "198.51.100.7", addr)
+}
+
+func TestObservedAddressExplainsAFailureWithStderr(t *testing.T) {
+	fakeSSHWith(t, "", "Authorized access only\n")
+	c := &Client{cfg: Config{Host: "demo.example.com", User: "root"}}
+	_, err := c.ObservedAddress("4")
+	assert.ErrorContains(t, err, "SSH_CONNECTION")
+	assert.ErrorContains(t, err, "Authorized access only")
+}
+
+// A shell startup file can leave stdout without a final newline. The stand-in
+// reproduces this so the generated remote command must supply the newline.
+func TestObservedAddressSurvivesStartupOutputWithoutANewline(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\nfor last; do :; done\nprintf 'Welcome '\nSSH_CONNECTION='198.51.100.7 51514 203.0.113.10 22' sh -c \"$last\"\n"
+	//nolint:gosec // a stub in the test's own temp dir has to be executable
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	c := &Client{cfg: Config{Host: "demo.example.com", User: "root"}}
+	addr, err := c.ObservedAddress("4")
+	require.NoError(t, err)
+	assert.Equal(t, "198.51.100.7", addr)
 }

@@ -25,7 +25,9 @@ const (
 	// accessRollbackSeconds is the rollback delay renewed by every locked
 	// command of a run.
 	accessRollbackSeconds = 180
-	accessTimeout         = "timeout -k 10 60 "
+	// accessTimeout bounds command execution and sets the C locale so scripts
+	// can identify an absent table by nft's untranslated error text.
+	accessTimeout = "LC_ALL=C LANGUAGE=C timeout -k 10 60 "
 	// accessRefusedMarker identifies commands refused after a rollback or
 	// loss of the reservation. Commands print it in two halves so an echoed
 	// command line never matches.
@@ -64,7 +66,8 @@ WantedBy=sysinit.target
 // redirect host paths into a temporary directory.
 func accessScript(root string) string {
 	d := root + accessDir
-	return `d=` + d + `
+	return `export LC_ALL=C LANGUAGE=C
+d=` + d + `
 umask 077
 pair() {
   printf 'include "%s"\ninclude "%s"\n' "$1" "$2" | ` + accessTimeout + `nft -f -
@@ -514,7 +517,8 @@ func AddJoiningAddresses(server CommandRunner, addrs []netip.Addr) error {
 // refuses while guard files remain, because it cannot see the kernel table.
 func removeAccessCommand(root string) string {
 	d := root + accessDir
-	return fmt.Sprintf(`if [ -d %[9]s ]; then exec 9>>%[1]s && flock -w 120 9 || exit 1; fi
+	return fmt.Sprintf(`export LC_ALL=C LANGUAGE=C
+if [ -d %[9]s ]; then exec 9>>%[1]s && flock -w 120 9 || exit 1; fi
 if ! command -v nft >/dev/null 2>&1 && { [ -e %[4]s ] || [ -e %[8]s ]; }; then
   echo 'nft is not installed, so kip cannot confirm that the operator access table is gone. Install nftables and run the command again' >&2; exit 1
 fi

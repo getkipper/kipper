@@ -31,6 +31,10 @@ type accessScene struct {
 }
 
 const fakeNft = `echo "nft $*" >> LOG
+# Simulate a translated missing-table error unless the command sets the C locale.
+absent() {
+  if [ "$LC_ALL" = C ]; then echo "Error: No such file or directory" >&2; else echo "Fehler: Datei oder Verzeichnis nicht gefunden" >&2; fi
+}
 check=; file=
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -66,9 +70,9 @@ if [ -n "$file" ]; then
   exit 0
 fi
 case "$1 $2" in
-  "list table") [ -e ROOT/kernel ] || { echo "Error: No such file or directory" >&2; exit 1; } ;;
+  "list table") [ -e ROOT/kernel ] || { absent; exit 1; } ;;
   "delete table") [ -e ROOT/nft-delete-fails ] && { echo "Error: Device or resource busy" >&2; exit 1; }
-    [ -e ROOT/kernel ] || { echo "Error: No such file or directory" >&2; exit 1; }; rm -f ROOT/kernel ;;
+    [ -e ROOT/kernel ] || { absent; exit 1; }; rm -f ROOT/kernel ;;
   "add element") shift 2; echo "add element $*" >> ROOT/kernel ;;
 esac
 exit 0`
@@ -479,6 +483,16 @@ func TestAccessRollbackOfAFirstApplyTreatsAnUnreadableTableAsAFailure(t *testing
 	_, err := s.script("rollback abc123")
 	require.Error(t, err)
 	assert.Equal(t, "failed\n", s.file(accessDir+"/abc123.outcome"))
+}
+
+func TestAccessRollbackOfAFirstApplyThatNeverLoadedIsRemovedInAnyLocale(t *testing.T) {
+	t.Parallel()
+	s := newAccessScene(t)
+	require.NoError(t, s.arm(1, "198.51.100.0/24"))
+	s.advance(accessRollbackSeconds + 1)
+	_, err := s.script("rollback abc123")
+	require.NoError(t, err)
+	assert.Equal(t, "removed\n", s.file(accessDir+"/abc123.outcome"))
 }
 
 func TestAccessRollbackLeavesACommittedOrForeignRunAlone(t *testing.T) {
