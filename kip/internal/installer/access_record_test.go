@@ -56,7 +56,7 @@ func TestReadAccessRecordRefusesAnInvalidRecord(t *testing.T) {
 	empty := sampleAccessRecord()
 	empty.Sources = nil
 	version := sampleAccessRecord()
-	version.Version = 2
+	version.Version = 3
 	bad := sampleAccessRecord()
 	bad.Sources[0].Prefix = "203.0.113.7/24"
 	dup := sampleAccessRecord()
