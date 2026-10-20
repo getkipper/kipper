@@ -403,10 +403,10 @@ func ResolversMatch(live, configured []string) bool {
 // network better than the probe does.
 func warnUnreachableResolvers(unreachable, all []string) {
 	for _, r := range unreachable {
-		fmt.Printf("  ⚠  DNS resolver %s did not accept a TCP connection on port 53 from the server\n", r)
+		fmt.Printf("  ⚠  DNS resolver %s did not accept a TCP connection on port 53 from this node\n", r)
 	}
 	if len(unreachable) > 0 && len(unreachable) == len(all) {
-		fmt.Printf("  ⚠  no configured DNS resolver accepted a TCP connection on port 53, external DNS is likely broken in the cluster. Check that the server allows outbound port 53, or pass --dns-resolver with a resolver your network can reach\n")
+		fmt.Printf("  ⚠  no configured DNS resolver accepted a TCP connection on port 53. External DNS is likely broken in the cluster. Check that this node allows outbound port 53, or pass --dns-resolver with a resolver your network can reach\n")
 	}
 }
 
@@ -693,11 +693,13 @@ func k3sPreexistingFromSample(output string, err error) bool {
 	return !fresh || existing
 }
 
-// RepairHostDNS rewrites the curated resolv.conf from the given resolver set
-// (the defaults when empty) and restarts CoreDNS to pick it up. It is the
-// scoped remediation for resolver drift on a live cluster; nothing else about
-// the installation is touched. Returns the resolver set it wrote.
-func RepairHostDNS(client CommandRunner, resolvers []string) ([]string, error) {
+// WriteHostDNS rewrites /etc/rancher/k3s/resolv.conf on one node and returns
+// the resolver addresses written, preserving their order. It trims whitespace,
+// drops empty entries and duplicates, and uses the defaults if none remain.
+// It returns an error for invalid IPv4 addresses, more than three distinct
+// addresses or a failed write. Failed reachability probes only print warnings.
+// Call RestartCoreDNS after writing all nodes so CoreDNS loads the files.
+func WriteHostDNS(client CommandRunner, resolvers []string) ([]string, error) {
 	cleaned, err := resolveDNSResolvers(resolvers)
 	if err != nil {
 		return nil, err
@@ -706,10 +708,17 @@ func RepairHostDNS(client CommandRunner, resolvers []string) ([]string, error) {
 	if err := writeResolvConf(client, renderResolvConf(cleaned)); err != nil {
 		return nil, err
 	}
-	if _, err := client.Run("kubectl -n kube-system rollout restart deploy/coredns"); err != nil {
-		return nil, fmt.Errorf("restarting CoreDNS to pick up the resolvers: %w", err)
-	}
 	return cleaned, nil
+}
+
+// RestartCoreDNS requests a CoreDNS rollout restart through the server's
+// kubectl so new pods load the resolver files. It returns command errors
+// without waiting for the rollout to complete.
+func RestartCoreDNS(server CommandRunner) error {
+	if _, err := server.Run("kubectl -n kube-system rollout restart deploy/coredns"); err != nil {
+		return fmt.Errorf("restarting CoreDNS to pick up the resolvers: %w", err)
+	}
+	return nil
 }
 
 // agentInstallCommand builds an install command that reads the join token from

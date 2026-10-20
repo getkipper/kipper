@@ -35,7 +35,7 @@ This matters because Kipper installs on whatever Linux server you point it at, a
 
 **Key-only SSH** {#key-only-ssh}
 
-`kip install` and `kip cluster harden` turn off SSH password login on the server after a fresh connection succeeds using only a key. This confirms that kip can log in with a key alone before changing the configuration. Every other password or keyboard-interactive login on the host stops working, so give those users keys first or pass `--allow-ssh-passwords`. Running `kip install` again, for example to rotate storage credentials, repeats this hardening step. Worker nodes joined with `kip node add` keep their SSH settings, so turn off password login on those nodes yourself.
+`kip install` turns off SSH password login on the server. `kip cluster harden` does the same on every recorded node. Both require a successful fresh connection using only a key before changing that node's SSH settings. This confirms that kip can log in with a key alone before changing the configuration. Every other password or keyboard-interactive login on the host stops working, so give those users keys first or pass `--allow-ssh-passwords`. Running `kip install` again, for example to rotate storage credentials, repeats this hardening step. `kip node add` leaves a worker's SSH settings as they are, so run `kip cluster harden` after joining workers to turn off password login on them.
 
 Kipper stops before changing the configuration when `/etc/ssh/sshd_config` does not include `/etc/ssh/sshd_config.d/*.conf` before its first `Match` block, when an additional Include appears inside a `Match` block or an included file, or uses a quoted or escaped path, when a `Match` block could still allow a password, or when `00-kipper-key-only.conf` holds settings Kipper does not manage. Files included at the top level, such as the crypto-policies file Rocky Linux, AlmaLinux and CentOS Stream include, are checked with the same rules. The default configurations of Ubuntu, Debian, Rocky Linux, AlmaLinux and CentOS Stream pass.
 
@@ -119,7 +119,7 @@ kip cluster harden --cluster storefront  # specific cluster
 kip cluster harden --firewall=false   # only disable surplus services
 ```
 
-The command is idempotent. It runs the same audit as `kip install`, then disables installed `rpcbind` units and stops Cockpit when its socket listens on all interfaces. It configures UFW, or firewalld on Rocky Linux, AlmaLinux and CentOS Stream, under the same ownership rules as `kip install`, and accepts `--adopt-firewall` too. After loading firewalld, Kipper restarts k3s if it is running to restore its network rules. The restart can briefly interrupt pod networking.
+The command is idempotent. It hardens every recorded node: the server first, then each worker one at a time, each with the firewall for its role. A worker allows SSH from all sources and cluster ports from other nodes, with no public access to ports 80, 443 or 6443. kip stops at the first node it cannot reach or harden, names it, and starts again from the server on a rerun. It runs the same audit as `kip install`, then disables installed `rpcbind` units and stops Cockpit when its socket listens on all interfaces. It configures UFW, or firewalld on Rocky Linux, AlmaLinux and CentOS Stream, under the same ownership rules as `kip install`, and accepts `--adopt-firewall` too. After loading firewalld, Kipper restarts k3s if it is running to restore its network rules. The restart can briefly interrupt pod networking.
 
 ### Security headers
 
