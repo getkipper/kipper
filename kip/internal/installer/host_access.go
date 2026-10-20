@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -565,6 +566,7 @@ func LeftoverAccessWarning(client CommandRunner) string {
 // AccessHostState is what one host reports about its access guard.
 type AccessHostState struct {
 	Table, Operators string
+	PeersGeneration  int
 	Closed, Failed   bool
 	UnitEnabled      string
 	UnitActive       string
@@ -583,8 +585,8 @@ func (s AccessHostState) Sources() int {
 	return len(fileElements(s.Operators, "admin4")) + len(fileElements(s.Operators, "admin6"))
 }
 
-// Header returns the highest valid generation from either committed file
-// for stale-record and orphaned-table checks.
+// Header returns the highest valid generation from table.nft, operators.nft
+// and peers.conf for stale-record and orphaned-table checks.
 func (s AccessHostState) Header(name string) AccessNodeHeader {
 	h := AccessNodeHeader{Name: name, Present: s.HasTable(), Sources: s.Sources()}
 	if g, ok := s.Generation(); ok {
@@ -592,6 +594,9 @@ func (s AccessHostState) Header(name string) AccessNodeHeader {
 	}
 	if g, ok := AccessHeaderGeneration(s.Operators); ok && g > h.Generation {
 		h.Generation, h.Present = g, true
+	}
+	if s.PeersGeneration > h.Generation {
+		h.Generation, h.Present = s.PeersGeneration, true
 	}
 	return h
 }
@@ -629,7 +634,8 @@ echo "enabled $(systemctl is-enabled %[3]s 2>/dev/null)"
 echo "active $(systemctl is-active %[3]s 2>/dev/null)"
 command -v nft >/dev/null 2>&1 && nft list table %[4]s >/dev/null 2>&1 && echo live
 echo "nftables $(systemctl is-enabled nftables.service 2>/dev/null) $(systemctl is-active nftables.service 2>/dev/null)"
-true`, d, accessStateSeparator, accessUnitName, accessTable)
+echo "peers $(sed -n '1s/^# kipper-ops generation \([0-9][0-9]*\)$/\1/p' %[5]s/peers.conf 2>/dev/null)"
+true`, d, accessStateSeparator, accessUnitName, accessTable, root+opsDir)
 }
 
 // ReadAccessGuardState reads a host's access guard without changing it.
@@ -666,6 +672,12 @@ func parseAccessState(out string) (AccessHostState, error) {
 		case "active":
 			if len(f) > 1 {
 				s.UnitActive = f[1]
+			}
+		case "peers":
+			if len(f) > 1 {
+				if g, err := strconv.Atoi(f[1]); err == nil && len(f[1]) <= 18 {
+					s.PeersGeneration = g
+				}
 			}
 		case "nftables":
 			for _, v := range f[1:] {
@@ -830,8 +842,8 @@ func AccessDrift(st AccessHostState, live AccessLive) []string {
 	switch {
 	case live.ChainError != "":
 		drift = append(drift, "the input chain could not be read: "+live.ChainError)
-	case !live.Chain.matches():
-		drift = append(drift, fmt.Sprintf("the input chain has hook %s, priority %d, policy %s and %d rules. kip expects input, -10, accept and %d", live.Chain.Hook, live.Chain.Priority, live.Chain.Policy, live.Chain.Rules, accessChainRules))
+	case !live.Chain.matches(expectedAccessRules(st.Table)):
+		drift = append(drift, fmt.Sprintf("the input chain has hook %s, priority %d, policy %s and %d rules. kip expects input, -10, accept and %d", live.Chain.Hook, live.Chain.Priority, live.Chain.Policy, live.Chain.Rules, expectedAccessRules(st.Table)))
 	}
 	if live.CommittedCheck != "" {
 		drift = append(drift, "the installed nft rejects the committed files, so the next boot would not load them: "+firstLine(live.CommittedCheck))

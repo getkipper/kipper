@@ -310,10 +310,10 @@ func TestParseChainShape(t *testing.T) {
 	shape, err := parseChainShape(string(b))
 	require.NoError(t, err)
 	assert.Equal(t, accessChainShape{Hook: "input", Priority: -10, Policy: "accept", Rules: 8, Dropped: 12}, shape)
-	assert.True(t, shape.matches())
+	assert.True(t, shape.matches(accessChainRules))
 
 	shape.Priority = 0
-	assert.False(t, shape.matches())
+	assert.False(t, shape.matches(accessChainRules))
 	_, err = parseChainShape(`{"nftables":[{"metainfo":{}}]}`)
 	assert.Error(t, err)
 }
