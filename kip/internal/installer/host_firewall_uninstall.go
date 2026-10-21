@@ -143,12 +143,13 @@ func firewalldServerPorts(sshPorts []string) []string {
 	return ports
 }
 
-// firewalldUninstallCommand deletes kip's forwarding policies and its pod,
-// peer and server zones, including any operator additions. It closes public
-// server ports except those used by sshd. It also closes the operator tunnel's
-// port recorded in peers.conf and removes firewalld's .old copies of kip's
-// files. A running firewalld is changed permanently and reloaded.
-// A stopped firewalld is changed offline and stays stopped.
+// firewalldUninstallCommand builds a command to delete kip's forwarding policies
+// and pod, peer and server zones, including any operator additions. It closes
+// public server ports except those used by sshd and removes firewalld's .old
+// copies of kip's files. The operator tunnel's port stays open so uninstall can
+// finish over the tunnel. ScheduleOpsRemoval schedules its closure separately.
+// A running firewalld has its saved configuration updated and is reloaded.
+// A stopped firewalld is updated offline and stays stopped.
 func firewalldUninstallCommand(root string, sshPorts []string) string {
 	var policies, ports, old []string
 	for _, p := range firewalldPolicies {
@@ -166,8 +167,7 @@ func firewalldUninstallCommand(root string, sshPorts []string) string {
 		`has() { for x in $1; do [ "$x" = "$2" ] && return 0; done; return 1; }; ` +
 		`have=$(fc --get-policies); for p in ` + strings.Join(policies, " ") + `; do if has "$have" "$p"; then fc --delete-policy="$p" >/dev/null; fi; done; ` +
 		`have=$(fc --get-zones); for z in ` + strings.Join(zones, " ") + `; do if has "$have" "$z"; then fc --delete-zone="$z" >/dev/null; fi; done; ` +
-		`ops=$(` + opsPortCommand(root) + `); ` +
-		`for p in ` + strings.Join(ports, " ") + ` ${ops:+$ops/udp}; do rc=0; fc --zone=public --query-port="$p" >/dev/null || rc=$?; ` +
+		`for p in ` + strings.Join(ports, " ") + `; do rc=0; fc --zone=public --query-port="$p" >/dev/null || rc=$?; ` +
 		`case $rc in 0) fc --zone=public --remove-port="$p" >/dev/null ;; 1) ;; *) echo "firewalld could not say whether port $p is open" >&2; exit 1 ;; esac; done; ` +
 		`rm -f ` + strings.Join(old, " ") + `; ` +
 		`if [ -n "$running" ]; then firewall-cmd --reload >/dev/null; fi`

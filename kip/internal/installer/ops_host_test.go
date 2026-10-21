@@ -700,6 +700,37 @@ func TestOpsRemoveClosesTheTunnelPortInKipsFirewalld(t *testing.T) {
 	}
 }
 
+func TestScheduledOpsRemovalClosesTheTunnelPortAfterUninstallClearsItsState(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	s.withFirewalld(true, true)
+	require.NoError(t, s.applySample())
+	queued := filepath.Join(s.root, "queued")
+	//nolint:gosec // The stand-in must be executable.
+	require.NoError(t, os.WriteFile(filepath.Join(s.bin, "systemd-run"), []byte("#!/bin/sh\nshift 3\necho \"$@\" > "+queued+"\n"), 0o755))
+	require.NoError(t, scheduleOpsRemoval(s, s.root))
+	_, err := s.Run(clearKipperStateCommand(s.root))
+	require.NoError(t, err)
+	require.False(t, s.exists(opsDir), "uninstall clears the operator state before the timer fires")
+
+	job, err := os.ReadFile(queued)
+	require.NoError(t, err)
+	_, err = s.Run(string(job))
+	require.NoError(t, err)
+	assert.False(t, s.exists("fw-saved-public-443_udp"))
+	assert.False(t, s.exists("fw-public-443_udp"))
+}
+
+func TestScheduledOpsRemovalLeavesAnOperatorFirewalldAlone(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	s.withFirewalld(false, true)
+	s.write("fw-port-open", "")
+	require.NoError(t, s.applySample())
+	require.NoError(t, scheduleOpsRemoval(s, s.root))
+	assert.NotContains(t, s.calls(), "--remove-port")
+}
+
 func TestApplyOpsNodeOpensTheTunnelPortInUFW(t *testing.T) {
 	s := newOpsScene(t)
 	s.prepared(sampleDevices())
