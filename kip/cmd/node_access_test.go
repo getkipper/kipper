@@ -458,3 +458,196 @@ func TestReportAccessGuardCountsRegisteredDevices(t *testing.T) {
 	reportAccessGuard(&out, server, host)
 	assert.Contains(t, out.String(), "⚠  the operator interface kipops is down. Run 'kip cluster access show'")
 }
+
+var testJoinerKey = wordKey("joinjoinjoinjoinjoinjoinjoinjoin")
+
+// joinerFixture is a device-only cluster with this workstation's device
+// active and a joining worker whose tunnel answers only once its operator
+// interface is loaded. events records the order of loads and probes.
+type joinerFixture struct {
+	*deviceFixture
+	joiner     accessNode
+	records    []installer.NodeRecord
+	events     []string
+	joinerUp   bool
+	joinerOps  error
+	joinerDown bool
+}
+
+func newJoinerFixture(t *testing.T) *joinerFixture {
+	t.Helper()
+	f := &joinerFixture{deviceFixture: newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})}
+	f.deviceRecord(t)
+	host := &accessHost{observed: map[string]string{"4": "198.51.100.7"}}
+	rec := installer.NodeRecord{Name: "worker-2", Host: "192.0.2.12", PeerAddress: "10.0.0.12", MachineID: accessWorkerID, Role: installer.NodeRoleWorker, State: installer.NodeStateJoining}
+	f.joiner = accessNode{rec: rec, node: host, base: host}
+	f.records = append(append([]installer.NodeRecord(nil), f.c.records...), rec)
+	f.c.opsKey = func(r installer.CommandRunner) (string, error) {
+		if r == host {
+			return testJoinerKey, nil
+		}
+		return testNodeKey, nil
+	}
+	f.c.applyOps = func(r installer.CommandRunner, in installer.OpsNodeIntent, _ string) error {
+		if r == host {
+			f.events = append(f.events, "ops worker-2")
+			if f.joinerOps != nil {
+				return f.joinerOps
+			}
+			f.joinerUp = true
+		}
+		f.opsCalls = append(f.opsCalls, in)
+		return nil
+	}
+	f.c.tunnel = func(n accessNode) (installer.AddressObserver, error) {
+		return observeFunc(func(string) (string, error) {
+			if n.rec.MachineID == accessWorkerID {
+				f.events = append(f.events, "tunnel worker-2")
+				if !f.joinerUp || f.joinerDown {
+					return "", errors.New("dial tcp 10.99.0.2:22: i/o timeout")
+				}
+			}
+			return "10.99.0.129", nil
+		}), nil
+	}
+	return f
+}
+
+func TestNodeAddReachesAJoinerOnADeviceOnlyClusterThroughTheTunnel(t *testing.T) {
+	f := newJoinerFixture(t)
+	a, _, err := prepareNodeAccess(f.c, f.c.nodes, nil, "node add 192.0.2.12", true)
+	require.NoError(t, err)
+
+	require.NoError(t, a.prepareJoiner(f.joiner, f.records))
+
+	assert.Equal(t, []string{"ops worker-2", "tunnel worker-2"}, f.events, "the interface comes up before the baseline")
+	assert.Empty(t, f.applied, "the joiner's access table waits for its join")
+	stored := f.server.stored(t)
+	on, ok := stored.Ops.Node(accessWorkerID)
+	require.True(t, ok, "the record gives the joiner an operator address")
+	assert.Equal(t, testJoinerKey, on.PublicKey)
+	assert.Equal(t, "node add 192.0.2.12", stored.History[len(stored.History)-1].Action)
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	var names []string
+	for _, n := range cfg.Clusters[0].Ops.Nodes {
+		names = append(names, n.Name)
+	}
+	assert.Contains(t, names, "worker-2", "this workstation's node list has the joiner")
+
+	assert.Equal(t, "operator@198.51.100.7", stored.History[len(stored.History)-1].By)
+
+	require.NoError(t, a.load(f.c.nodes[0], f.records, ""))
+	require.NoError(t, a.load(f.joiner, f.records, ""))
+	assert.Equal(t, []string{"ops worker-2", "tunnel worker-2", "ops worker-2"}, f.events, "the load reuses the baseline")
+	require.Len(t, f.applied, 2)
+	assert.Equal(t, "worker-2", f.applied[1].Label)
+	assert.NotNil(t, f.applied[1].Tunnel, "the joiner's table is checked through the tunnel")
+	assert.Empty(t, f.applied[1].Intent.Admin)
+	assert.Equal(t, map[string]string{"server": installer.AccessCommitted, "worker-2": installer.AccessCommitted}, f.server.stored(t).History[len(stored.History)-1].Nodes)
+}
+
+func TestNodeAddRefusesAJoinerTheTunnelCannotReach(t *testing.T) {
+	f := newJoinerFixture(t)
+	f.joinerDown = true
+	a, _, err := prepareNodeAccess(f.c, f.c.nodes, nil, "node add 192.0.2.12", true)
+	require.NoError(t, err)
+
+	err = a.prepareJoiner(f.joiner, f.records)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UDP port 443")
+	assert.Contains(t, err.Error(), "kip cluster access allow")
+	assert.Empty(t, f.applied)
+}
+
+func TestNodeAddStopsBeforeTheJoinWhenTheJoinerCannotTakeDevices(t *testing.T) {
+	f := newJoinerFixture(t)
+	f.joinerOps = errors.New("firewalld runs on this node")
+	a, _, err := prepareNodeAccess(f.c, f.c.nodes, nil, "node add 192.0.2.12", true)
+	require.NoError(t, err)
+
+	err = a.prepareJoiner(f.joiner, f.records)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "firewalld")
+	assert.Equal(t, []string{"ops worker-2"}, f.events)
+}
+
+func TestNodeAddChecksAJoinerWithoutDevicesBeforeItJoins(t *testing.T) {
+	f := newAccessFixture(t, map[string]string{"4": "198.51.100.7"})
+	f.server.store(t, listedRecord())
+	f.committed(f.server, 4)
+	a, _, err := prepareNodeAccess(f.c, f.c.nodes, nil, "node add", true)
+	require.NoError(t, err)
+	joiner := &accessHost{observed: map[string]string{"4": "192.0.2.99"}}
+	rec := installer.NodeRecord{Name: "worker-2", Host: "192.0.2.12", PeerAddress: "10.0.0.12", MachineID: accessWorkerID, Role: installer.NodeRoleWorker}
+
+	err = a.prepareJoiner(accessNode{rec: rec, node: joiner, base: joiner}, append(f.c.records, rec))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "allow --here")
+	assert.Empty(t, f.server.writes, "nothing is recorded for a refused joiner")
+}
+
+func TestNodeAddOverTheTunnelOnlyNamesThePortWhenTheJoinerIsUnreachable(t *testing.T) {
+	f := newJoinerFixture(t)
+	f.c.noDirect = true
+	f.joinerDown = true
+	a, _, err := prepareNodeAccess(f.c, f.c.nodes, nil, "node add 192.0.2.12", true)
+	require.NoError(t, err)
+
+	err = a.prepareJoiner(f.joiner, f.records)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UDP port 443")
+	assert.NotContains(t, err.Error(), "changed nothing", "the joiner's record and interface have changed by now")
+}
+
+func TestNodeAddWithoutADeviceLoadsTheJoinersInterfaceBeforeTheCheck(t *testing.T) {
+	f := newJoinerFixture(t)
+	f.deviceRecord(t, "198.51.100.0/24")
+	f.c.device, f.c.useTunnel = nil, false
+	a, _, err := prepareNodeAccess(f.c, f.c.nodes, nil, "node add 192.0.2.12", true)
+	require.NoError(t, err)
+
+	require.NoError(t, a.prepareJoiner(f.joiner, f.records))
+
+	assert.Equal(t, []string{"ops worker-2"}, f.events, "a workstation without a device checks only the direct path")
+	_, ok := f.server.stored(t).Ops.Node(accessWorkerID)
+	assert.True(t, ok)
+	assert.False(t, a.tunnelled(accessWorkerID))
+}
+
+func TestNodeAddOverTheDirectPathPointsAtTheTunnel(t *testing.T) {
+	f := newJoinerFixture(t)
+	f.deviceRecord(t, "198.51.100.0/24")
+	f.c.useTunnel = false
+	f.joiner.base.(*accessHost).observed["4"] = "192.0.2.99"
+	a, _, err := prepareNodeAccess(f.c, f.c.nodes, nil, "node add 192.0.2.12", true)
+	require.NoError(t, err)
+
+	err = a.prepareJoiner(f.joiner, f.records)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--via auto")
+}
+
+func TestNodeAddAgainKeepsTheJoinersOperatorAddress(t *testing.T) {
+	f := newJoinerFixture(t)
+	rec := f.server.stored(t)
+	rec.Ops.Nodes = append(rec.Ops.Nodes, installer.AccessOpsNode{MachineID: accessWorkerID, Address: "10.99.0.2", PublicKey: testJoinerKey})
+	rec.Ops.NextNode = 3
+	f.server.store(t, rec)
+	a, _, err := prepareNodeAccess(f.c, f.c.nodes, nil, "node add 192.0.2.12", true)
+	require.NoError(t, err)
+
+	require.NoError(t, a.prepareJoiner(f.joiner, f.records))
+
+	stored := f.server.stored(t)
+	on, ok := stored.Ops.Node(accessWorkerID)
+	require.True(t, ok)
+	assert.Equal(t, "10.99.0.2", on.Address)
+	assert.Equal(t, 3, stored.Ops.NextNode, "no new address is handed out")
+	assert.True(t, a.tunnelled(accessWorkerID))
+}

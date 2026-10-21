@@ -415,6 +415,17 @@ func TestOpsNodeKeyRetriesTheSyncAfterAFailure(t *testing.T) {
 	assert.Less(t, strings.Index(s.calls(), synced), strings.Index(s.calls(), "wg pubkey"))
 }
 
+func TestOpsNodeKeyInstallsNftablesFirst(t *testing.T) {
+	s := newOpsScene(t)
+	require.NoError(t, os.Remove(filepath.Join(s.bin, "nft")))
+
+	_, err := opsNodeKey(s, io.Discard, s.root)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "installing nftables", "a joining node may not have nft yet")
+	assert.NotContains(t, s.calls(), "wg genkey")
+}
+
 func TestOpsNodeKeyRefusesAKernelWithoutWireGuard(t *testing.T) {
 	s := newOpsScene(t)
 	require.NoError(t, os.RemoveAll(filepath.Join(s.root, "sys", "module", "wireguard")))
