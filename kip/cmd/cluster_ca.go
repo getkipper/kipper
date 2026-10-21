@@ -105,6 +105,18 @@ func runClusterCAStatus(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// caPhaseNote describes the stored authorities and anchor during a replacement.
+func caPhaseNote(phase installer.CAPhase) string {
+	switch phase {
+	case installer.CAPhaseStaged:
+		return "the new authority is stored but not trusted yet"
+	case installer.CAPhaseNarrowed:
+		return "the old authority is still stored but has been removed from the anchor file"
+	default:
+		return "the cluster trusts one authority more than it strictly needs to"
+	}
+}
+
 func printCAStatus(clusterName string, s installer.CAStatus) {
 	fmt.Printf("\n  Certificate authority: %s\n\n", clusterName)
 
@@ -159,7 +171,7 @@ func printCAStatus(clusterName string, s installer.CAStatus) {
 	// Show the resume point alongside any trust warning below.
 	if s.Phase != installer.CAPhaseSteady {
 		fmt.Printf("  A replacement is part-way through (%s). This is a safe state to sit in:\n", s.Phase)
-		fmt.Printf("  the cluster trusts one authority more than it strictly needs to, which\n")
+		fmt.Printf("  %s, which\n", caPhaseNote(s.Phase))
 		fmt.Printf("  affects nothing. Finish it before changing this cluster's domain.\n")
 		fmt.Printf("  Resume at %s:\n", s.Resume)
 		fmt.Printf("  %s\n\n", caDocsURL)
