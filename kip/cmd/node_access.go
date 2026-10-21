@@ -26,6 +26,7 @@ type nodeAccess struct {
 	apiOn      []string
 	skip       map[string]bool
 	next       installer.AccessRecord
+	begun      bool
 	written    bool
 }
 
@@ -131,8 +132,9 @@ func prepareNodeAccess(c *accessCluster, nodes []accessNode, inspect []installer
 }
 
 // load renders n's table from records and loads it, unless the cluster
-// has no access list or n was skipped. The first load records the new
-// generation. exclude is the machine ID of a node being removed, or empty.
+// has no access list or n was skipped. It records the new generation if
+// prepareJoiner has not already done so. exclude is the machine ID of a node
+// being removed, or empty.
 func (a *nodeAccess) load(n accessNode, records []installer.NodeRecord, exclude string) error {
 	if a == nil || !a.on || a.skip[n.rec.MachineID] {
 		return nil
@@ -157,28 +159,8 @@ func (a *nodeAccess) load(n accessNode, records []installer.NodeRecord, exclude 
 		return fmt.Errorf("%s: %w", n.rec.Name, err)
 	}
 	in.Devices = len(a.record.Devices) > 0
-	if !a.written {
-		a.next = a.record
-		if a.record.Ops != nil {
-			ops := *a.record.Ops
-			ops.Nodes = append([]installer.AccessOpsNode(nil), a.record.Ops.Nodes...)
-			a.next.Ops = &ops
-		}
-		a.next.Generation = a.generation
-		a.next.History = append(a.next.History, installer.AccessChange{At: a.c.now().UTC().Format(time.RFC3339), By: a.c.actor(b), Action: a.action, Generation: a.generation, Nodes: map[string]string{}})
-	}
-	opsChanged, err := a.updateOps(n, exclude)
-	if err != nil {
-		return err
-	}
-	if !a.written || opsChanged {
-		if err := installer.WriteAccessRecord(a.c.server, a.next); err != nil {
-			return err
-		}
-		a.written = true
-	}
-	a.c.records = records
-	if err := a.c.refreshManifest(a.next, map[string][]int{n.rec.MachineID: ports}); err != nil {
+	a.begin(b)
+	if err := a.recordOps(n, records, exclude, ports); err != nil {
 		return err
 	}
 	outcome, err := a.c.applyOn(n, b, in, a.apiOn, a.next, ports)
@@ -196,6 +178,95 @@ func (a *nodeAccess) load(n accessNode, records []installer.NodeRecord, exclude 
 		return err
 	}
 	return nil
+}
+
+// prepareJoiner verifies access to n before it joins and saves the baseline
+// for its later load. When operator state exists, it first records n's operator
+// address and key, refreshes this workstation's device node list if present,
+// and loads n's operator interface. This lets the check use the tunnel and
+// rejects nodes that cannot support devices before they join.
+// It does nothing when a is nil or the cluster has no access record.
+func (a *nodeAccess) prepareJoiner(n accessNode, records []installer.NodeRecord) error {
+	if a == nil || !a.on {
+		return nil
+	}
+	if a.record.Ops != nil {
+		ports, err := a.c.ports(n.node)
+		if err != nil {
+			return fmt.Errorf("%s: %w", n.rec.Name, err)
+		}
+		srv, _ := installer.ServerRecord(records)
+		a.begin(a.baselines[srv.MachineID])
+		if err := a.recordOps(n, records, "", ports); err != nil {
+			return err
+		}
+		if err := a.c.applyOpsOn(n, a.next, ports); err != nil {
+			return err
+		}
+	}
+	b, err := a.c.baseline(n)
+	tunnelFailed := a.record.Ops != nil && a.c.useTunnel && !b.tunnel
+	if err != nil {
+		if tunnelFailed {
+			return fmt.Errorf("kip could not reach %s through device %s. Check that the provider's firewall lets UDP port %d reach it", n.rec.Name, a.c.device.name, a.record.Ops.Port)
+		}
+		return err
+	}
+	if err := a.c.lockoutGuard(a.admin, map[string]accessBaseline{n.rec.MachineID: b}, []accessNode{n}, a.record); err != nil {
+		switch {
+		case tunnelFailed:
+			return fmt.Errorf("%w. kip could not reach %s through device %s either. Check that the provider's firewall lets UDP port %d reach it", err, n.rec.Name, a.c.device.name, a.record.Ops.Port)
+		case a.record.Ops != nil && a.c.deviceActiveIn(a.record):
+			return fmt.Errorf("%w. Run the command with '--via auto' so kip reaches %s through device %s, or list this workstation's address with 'kip cluster access allow --here'", err, n.rec.Name, a.c.device.name)
+		}
+		return fmt.Errorf("%w. This workstation's address is not in the operator access list. Run 'kip cluster access allow --here' first", err)
+	}
+	a.baselines[n.rec.MachineID] = b
+	return nil
+}
+
+// tunnelled reports whether this workstation reached the node with machine
+// ID id through its device tunnel during the baseline check.
+func (a *nodeAccess) tunnelled(id string) bool {
+	if a == nil {
+		return false
+	}
+	return a.baselines[id].tunnel
+}
+
+// begin starts the next record from the current one with this change's
+// history entry, once per command. b names the actor.
+func (a *nodeAccess) begin(b accessBaseline) {
+	if a.begun {
+		return
+	}
+	a.next = a.record
+	if a.record.Ops != nil {
+		ops := *a.record.Ops
+		ops.Nodes = append([]installer.AccessOpsNode(nil), a.record.Ops.Nodes...)
+		a.next.Ops = &ops
+	}
+	a.next.Generation = a.generation
+	a.next.History = append(a.next.History, installer.AccessChange{At: a.c.now().UTC().Format(time.RFC3339), By: a.c.actor(b), Action: a.action, Generation: a.generation, Nodes: map[string]string{}})
+	a.begun = true
+}
+
+// recordOps updates the operator state for n, writes the record the first
+// time and whenever the operator state changes, and refreshes this
+// workstation's device node list, if present, with n's SSH ports.
+func (a *nodeAccess) recordOps(n accessNode, records []installer.NodeRecord, exclude string, ports []int) error {
+	opsChanged, err := a.updateOps(n, exclude)
+	if err != nil {
+		return err
+	}
+	if !a.written || opsChanged {
+		if err := installer.WriteAccessRecord(a.c.server, a.next); err != nil {
+			return err
+		}
+		a.written = true
+	}
+	a.c.records = records
+	return a.c.refreshManifest(a.next, map[string][]int{n.rec.MachineID: ports})
 }
 
 // updateOps drops the removed node exclude from the operator state and gives

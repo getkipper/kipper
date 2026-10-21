@@ -323,8 +323,9 @@ func opsRoute(fields []string) bool {
 	return false
 }
 
-// OpsNodeKey installs wireguard-tools when missing, rejects nodes running
-// firewalld and checks kernel WireGuard support. It creates the node's private
+// OpsNodeKey installs nftables and wireguard-tools when missing and checks
+// kernel WireGuard support. It rejects nodes with active firewalld or with
+// nftables.service enabled, active or activating. It creates the node's private
 // key if absent or empty and returns the public key. Preparation, key generation
 // and key validation failures return an error.
 // The private key stays on the node. Installation output is written to out.
@@ -335,6 +336,11 @@ func OpsNodeKey(client CommandRunner, out io.Writer) (string, error) {
 func opsNodeKey(client CommandRunner, out io.Writer, root string) (string, error) {
 	host, err := DetectHostOS(client)
 	if err != nil {
+		return "", err
+	}
+	// Prepare nftables here because a joining node loads its operator table
+	// before its access table.
+	if err := prepareAccessHost(client, out); err != nil {
 		return "", err
 	}
 	install := host.InstallPackagesCommand(true, "wireguard-tools")

@@ -20,6 +20,7 @@ import (
 	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/k8s"
 	"github.com/getkipper/kipper/kip/internal/ssh"
+	"github.com/getkipper/kipper/kip/internal/transport"
 )
 
 var nodeCmd = &cobra.Command{
@@ -333,7 +334,20 @@ func addNode(cmd *cobra.Command, args []string) error {
 	defer lease.Release()
 	server := lease.Server(serverConn)
 	fmt.Printf("  Connecting to %s...\n", workerHost)
-	workerConn, err := dialNodeSSH(workerHost, sshKey, cluster)
+	// A host missing from the device's node list needs a direct connection
+	// to prepare its operator interface, even with --via tunnel.
+	joinerMode := transport.Mode(cluster)
+	if _, known := transport.NodeForHost(cluster, workerHost); !known {
+		if joinerMode == transport.Tunnel {
+			fmt.Printf("  ℹ  %s is not yet in this workstation's device node list, so kip connects to it directly to prepare its operator interface\n", workerHost)
+		}
+		joinerMode = transport.Direct
+	}
+	workerCfg, err := nodeSSHVia(workerHost, sshKey, cluster, joinerMode)
+	if err != nil {
+		return fmt.Errorf("connecting to %s: %w", workerHost, err)
+	}
+	workerConn, err := ssh.Dial(workerCfg)
 	if err != nil {
 		return fmt.Errorf("connecting to %s: %w", workerHost, err)
 	}
@@ -510,6 +524,16 @@ func addNode(cmd *cobra.Command, args []string) error {
 	}
 	if records, err = installer.ReadNodeRecords(server); err != nil {
 		return err
+	}
+	if err := access.prepareJoiner(accessNode{rec: rec, node: worker, base: workerConn}, records); err != nil {
+		return nodeAddRetry(err, workerHost)
+	}
+	if access.tunnelled(identity.MachineID) {
+		// The joiner's access table can close the direct path. Use the tunnel
+		// so commands still connect after SSH's idle multiplexing timeout.
+		if workerConn, worker, err = rejoinThroughTunnel(workerConn, lease, workerHost, sshKey, cluster, identity.MachineID); err != nil {
+			return nodeAddRetry(err, workerHost)
+		}
 	}
 
 	fmt.Printf("\n  Opening the cluster ports between the nodes...\n")
@@ -739,8 +763,34 @@ func prepareJoinHost(server, worker installer.CommandRunner, machineID, workerHo
 	return plan, serverDropIn, serverFlannel, nil
 }
 
+// rejoinThroughTunnel reconnects to host through this workstation's device
+// tunnel and verifies its machine ID against id before closing old. The joiner
+// must already be in the device's node list. On error, old stays open and is
+// returned with its lease-bound runner.
+func rejoinThroughTunnel(old *ssh.Client, lease *installer.NodeLease, host, sshKey string, cluster *config.Cluster, id string) (*ssh.Client, installer.FirewallRunner, error) {
+	cfg, err := nodeSSHVia(host, sshKey, cluster, transport.Tunnel)
+	if err != nil {
+		return old, lease.Host(old), err
+	}
+	conn, err := ssh.Dial(cfg)
+	if err != nil {
+		return old, lease.Host(old), fmt.Errorf("connecting to %s through the tunnel: %w", host, err)
+	}
+	runner := lease.Host(conn)
+	got, err := installer.ReadMachineID(runner)
+	if err == nil && got != id {
+		err = fmt.Errorf("it answered as machine id %q, not %s", got, id)
+	}
+	if err != nil {
+		_ = conn.Close()
+		return old, lease.Host(old), fmt.Errorf("checking %s through the tunnel: %w", host, err)
+	}
+	_ = old.Close()
+	return conn, runner, nil
+}
+
 func nodeAddRetry(err error, host string) error {
-	return fmt.Errorf("%w; join incomplete. Fix the cause, then run 'kip node add %s' again with the same options to resume", err, host)
+	return fmt.Errorf("%w. The join is incomplete. Fix the cause, then run 'kip node add %s' again with the same options to resume", err, host)
 }
 
 // saveNodeRecord saves the cluster record and refreshes the local cache when possible.
