@@ -156,13 +156,15 @@ kubectl get clusteridentities -o jsonpath='{.items[*].status.transition.phase}';
 
 Empty output means none is in flight.
 
-Then set up the shell on the node. Use a directory that survives you closing the terminal, because
-you may want to stop between phases and come back tomorrow:
+Then set up the shell on the node. Use a directory that persists after you close the terminal, because
+you may want to stop between phases and come back tomorrow. The `umask` gives newly created private-key
+files permissions that allow only root to read or write them:
 
 ```bash
 ssh root@203.0.113.10
 export HOST=demo-cluster.kipper.run
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+umask 077
 mkdir -p /root/ca-replacement && cd /root/ca-replacement
 ```
 
