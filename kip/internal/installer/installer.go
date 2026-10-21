@@ -100,7 +100,7 @@ func adoptionConsent(client CommandRunner, opts Options, audit FirewallAudit, me
 	return AdoptionConsent(client, opts.Host, audit, opts.Firewall, false, ask, mesh)
 }
 
-// FirewallConsent authorizes takeover of an operator-managed firewalld.
+// FirewallConsent authorizes takeover of an operator-managed firewalld or UFW.
 // A nonempty fingerprint restricts consent to the previewed configuration.
 type FirewallConsent struct {
 	Adopt       bool
@@ -109,6 +109,9 @@ type FirewallConsent struct {
 
 // AdoptionConsent returns flag-based consent or prompts with a takeover preview.
 // A nil ask disables prompting. Interactive consent includes the preview fingerprint.
+// Declined, disabled or ineligible prompts return zero consent. Refusals found
+// during preview are printed to stdout, and preview errors are returned.
+// Flag-based consent skips the preview and leaves eligibility checks to the caller.
 func AdoptionConsent(client CommandRunner, host string, audit FirewallAudit, firewall, adopt bool, ask func(question string) bool, mesh FirewallMesh) (FirewallConsent, error) {
 	if adopt {
 		return FirewallConsent{Adopt: true}, nil
@@ -116,18 +119,27 @@ func AdoptionConsent(client CommandRunner, host string, audit FirewallAudit, fir
 	if !audit.Adoptable || !firewall || ask == nil {
 		return FirewallConsent{}, nil
 	}
-	preview, err := PreviewFirewalldAdoption(client, mesh)
+	possible, reason, question, fingerprint, err := previewAdoption(client, host, audit, mesh)
 	if err != nil {
 		return FirewallConsent{}, err
 	}
-	if !preview.Possible {
-		fmt.Printf("  ℹ  kip cannot take over the running firewalld: %s\n", preview.Reason)
+	if !possible {
+		fmt.Printf("  ℹ  kip cannot take over the running %s: %s\n", audit.Existing, reason)
 		return FirewallConsent{}, nil
 	}
-	if !ask(preview.Question(host)) {
+	if !ask(question) {
 		return FirewallConsent{}, nil
 	}
-	return FirewallConsent{Adopt: true, Fingerprint: preview.Fingerprint}, nil
+	return FirewallConsent{Adopt: true, Fingerprint: fingerprint}, nil
+}
+
+func previewAdoption(client CommandRunner, host string, audit FirewallAudit, mesh FirewallMesh) (possible bool, reason, question, fingerprint string, err error) {
+	if audit.Existing == "ufw" {
+		p, err := PreviewUFWAdoption(client, mesh)
+		return p.Possible, p.Reason, p.Question(host), p.Fingerprint, err
+	}
+	p, err := PreviewFirewalldAdoption(client, mesh)
+	return p.Possible, p.Reason, p.Question(host), p.Fingerprint, err
 }
 
 // hardenAfterStoragePackages returns an optional hardening callback for services

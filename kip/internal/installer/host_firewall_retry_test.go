@@ -2,6 +2,7 @@ package installer
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"slices"
@@ -14,7 +15,7 @@ import (
 	"github.com/getkipper/kipper/kip/internal/localrun"
 )
 
-// ufwHost models a Kipper-managed firewall whose saved and live rules can diverge.
+// ufwHost models a firewall whose ownership, saved rules and live rules can diverge.
 type ufwHost struct {
 	saved             map[string]bool
 	started           bool
@@ -35,6 +36,13 @@ type ufwHost struct {
 	local             bool
 	rolledBackNow     int
 	ran               []string
+	unclaimed         bool
+	claimWritten      bool
+	osRelease         string
+	// Empty sshListening defaults to a listening socket on port 22.
+	sshListening string
+	opsPort      string
+	onRun        func(cmd string)
 }
 
 func (h *ufwHost) SurvivesSSHRateLimit() bool { return true }
@@ -63,6 +71,9 @@ var errUFW = errors.New("exit status 1: ERROR: Could not load logging rules")
 
 func (h *ufwHost) Run(cmd string) (string, error) {
 	h.ran = append(h.ran, cmd)
+	if h.onRun != nil {
+		h.onRun(cmd)
+	}
 	if strings.Contains(cmd, "rollback.sh; }; cat ") {
 		h.rolledBackNow++
 		h.rolledBack = true
@@ -94,15 +105,31 @@ func (h *ufwHost) Run(cmd string) (string, error) {
 	case strings.Contains(cmd, "list-units"):
 		return "", nil
 	case strings.Contains(cmd, "/etc/os-release"):
+		if h.osRelease != "" {
+			return h.osRelease, nil
+		}
 		return "ID=debian\nVERSION_ID=13\n", nil
+	case strings.Contains(cmd, "DEFAULT_FORWARD_POLICY"):
+		h.claimWritten = true
+		return "", nil
 	case strings.Contains(cmd, "systemctl is-active firewalld"):
 		return "inactive\n", nil
 	case strings.Contains(cmd, "ufw status"):
 		return "active\n", nil
 	case strings.Contains(cmd, "test -s "+firewallClaimPath):
+		if h.unclaimed && !h.claimWritten {
+			return "", nil
+		}
 		return "claimed\n", nil
 	case strings.Contains(cmd, "sshd -T"):
 		return "22\n", nil
+	case strings.Contains(cmd, "/peers.conf"):
+		return h.opsPort, nil
+	case strings.Contains(cmd, "ss -Hltn"):
+		if h.sshListening != "" {
+			return h.sshListening, nil
+		}
+		return "LISTEN 0      4096         0.0.0.0:22        0.0.0.0:*\nLISTEN 0      4096            [::]:22           [::]:*\n", nil
 	case strings.Contains(cmd, "-N ufw-user-input"):
 		if h.chainQueryFails > 0 {
 			h.chainQueryFails--
@@ -119,6 +146,15 @@ func (h *ufwHost) Run(cmd string) (string, error) {
 		out := "-N ufw-user-input\n"
 		if h.live["ufw allow 22/tcp"] {
 			out += "-A ufw-user-input -p tcp -m tcp --dport 22 -j ACCEPT\n"
+		}
+		for _, rule := range slices.Sorted(maps.Keys(h.live)) {
+			if f := strings.Fields(rule); len(f) >= 10 && f[2] == "from" && f[6] == "port" && f[8] == "proto" {
+				source := f[3]
+				if !strings.Contains(source, "/") {
+					source += "/32"
+				}
+				out += fmt.Sprintf("-A ufw-user-input -s %s -p %s -m %s --dport %s -j ACCEPT\n", source, f[9], f[9], f[7])
+			}
 		}
 		return out, nil
 	case strings.Contains(cmd, "ufw --force enable"):
@@ -158,8 +194,8 @@ func (h *ufwHost) Run(cmd string) (string, error) {
 			return "", errUFW
 		}
 		return strings.Join(slices.Sorted(maps.Keys(h.saved)), "\n") + "\n", nil
-	case strings.HasPrefix(cmd, "ufw delete "):
-		rule := "ufw " + strings.TrimSuffix(strings.TrimPrefix(cmd, "ufw delete "), " >/dev/null")
+	case strings.HasPrefix(cmd, "ufw delete "), strings.HasPrefix(cmd, "ufw route delete "):
+		rule := strings.Replace(strings.TrimSuffix(cmd, " >/dev/null"), " delete ", " ", 1)
 		delete(h.saved, rule)
 		delete(h.live, rule)
 		return "", nil
@@ -195,14 +231,14 @@ func noUFWRetryDelay(t *testing.T) {
 	t.Cleanup(func() { ufwRetryDelay = saved })
 }
 
-// A rule that was saved but never loaded makes its retry a no-op; only a full
-// reload from the saved rules gets SSH back into netfilter.
+// TestConfigureFirewall_LoadsSavedRulesAfterAHalfAppliedRule checks recovery
+// when retrying a saved rule is a no-op. A full reload restores SSH in netfilter.
 func TestConfigureFirewall_LoadsSavedRulesAfterAHalfAppliedRule(t *testing.T) {
 	noUFWRetryDelay(t)
 	h := newUFWHost()
 	h.ruleLiveFails["ufw allow 22/tcp"] = 1
 
-	require.NoError(t, configureFirewall(h, debianHost, false, FirewallMesh{}))
+	require.NoError(t, configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{}))
 
 	assert.True(t, h.live["ufw allow 22/tcp"], "SSH is allowed in the loaded firewall, not only on disk")
 }
@@ -212,19 +248,17 @@ func TestConfigureFirewall_ChecksTheLoadedRules(t *testing.T) {
 	h := newUFWHost()
 	h.startLoadsNothing = 1
 
-	require.NoError(t, configureFirewall(h, debianHost, false, FirewallMesh{}))
+	require.NoError(t, configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{}))
 
 	assert.True(t, h.live["ufw allow 22/tcp"])
 }
 
-// TestConfigureFirewall_RetriesListingTheSavedRules verifies that transient
-// listing failures are retried before rollback is needed.
 func TestConfigureFirewall_RetriesListingTheSavedRules(t *testing.T) {
 	noUFWRetryDelay(t)
 	h := newUFWHost()
 	h.listFails = 2
 
-	require.NoError(t, configureFirewall(h, debianHost, false, FirewallMesh{}))
+	require.NoError(t, configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{}))
 
 	listings := 0
 	for _, c := range h.ran {
@@ -241,7 +275,7 @@ func TestConfigureFirewall_RetriesAFailedStart(t *testing.T) {
 	h := newUFWHost()
 	h.startFails = 2
 
-	require.NoError(t, configureFirewall(h, debianHost, false, FirewallMesh{}))
+	require.NoError(t, configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{}))
 
 	assert.True(t, h.live["ufw allow 22/tcp"])
 }
@@ -251,7 +285,7 @@ func TestConfigureFirewall_LeavesTheHostReachableWhenUFWWillNotLoad(t *testing.T
 	h := newUFWHost()
 	h.startFails = 100
 
-	err := configureFirewall(h, debianHost, false, FirewallMesh{})
+	err := configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ufw failed to load its rules")
@@ -260,7 +294,8 @@ func TestConfigureFirewall_LeavesTheHostReachableWhenUFWWillNotLoad(t *testing.T
 	assert.False(t, h.started, "ufw is off, so its default deny no longer applies")
 }
 
-// A confirmed stop ensures the next start loads all saved rules.
+// TestConfigureFirewall_StartsOnlyAfterAConfirmedStop checks that a confirmed
+// stop lets the next start load all saved rules.
 func TestConfigureFirewall_StartsOnlyAfterAConfirmedStop(t *testing.T) {
 	noUFWRetryDelay(t)
 	h := newUFWHost()
@@ -271,7 +306,7 @@ func TestConfigureFirewall_StartsOnlyAfterAConfirmedStop(t *testing.T) {
 	h.live["ufw allow 22/tcp"] = true
 	h.stopFails = ufwAttempts
 
-	require.NoError(t, configureFirewall(h, debianHost, false, FirewallMesh{}))
+	require.NoError(t, configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{}))
 
 	assert.True(t, h.live["ufw allow 80/tcp"], "the whole saved ruleset is loaded, not only what survived")
 }
@@ -286,7 +321,7 @@ func TestConfigureFirewall_ChecksTheStopRemovedTheChains(t *testing.T) {
 	h.live["ufw allow 22/tcp"] = true
 	h.stopLeavesChains = 1
 
-	require.NoError(t, configureFirewall(h, debianHost, false, FirewallMesh{}))
+	require.NoError(t, configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{}))
 
 	assert.True(t, h.live["ufw allow 80/tcp"])
 }
@@ -298,7 +333,7 @@ func TestConfigureFirewall_SaysWhenItCouldNotSwitchUFWOff(t *testing.T) {
 	h.startFails = 100
 	h.stopFails = 100
 
-	err := configureFirewall(h, debianHost, false, FirewallMesh{})
+	err := configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{})
 
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "left not active")
@@ -310,7 +345,7 @@ func TestConfigureFirewall_ReportsARuleItCouldNotSave(t *testing.T) {
 	h := newUFWHost()
 	h.ruleFails["ufw allow 80/tcp"] = 100
 
-	err := configureFirewall(h, debianHost, false, FirewallMesh{})
+	err := configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ufw allow 80/tcp")
@@ -328,7 +363,7 @@ func TestConfigureFirewall_TreatsAFailedChainQueryAsUnknown(t *testing.T) {
 	h.stopLeavesChains = 100
 	h.chainQueryFails = 100
 
-	err := configureFirewall(h, debianHost, false, FirewallMesh{})
+	err := configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "disabling ufw also failed")
@@ -337,7 +372,7 @@ func TestConfigureFirewall_TreatsAFailedChainQueryAsUnknown(t *testing.T) {
 func TestConfigureFirewall_RefusesAHostItCannotInstallPackagesOn(t *testing.T) {
 	h := newUFWHost()
 
-	err := configureFirewall(h, HostOS{ID: "arch"}, false, FirewallMesh{})
+	err := configureFirewall(h, HostOS{ID: "arch"}, false, FirewallConsent{}, FirewallMesh{})
 
 	assert.ErrorContains(t, err, "arch")
 	for _, cmd := range h.ran {
@@ -349,7 +384,7 @@ func TestConfigureFirewall_RefreshesPackageListsBeforeInstallingUFW(t *testing.T
 	noUFWRetryDelay(t)
 	h := newUFWHost()
 
-	require.NoError(t, configureFirewall(h, debianHost, false, FirewallMesh{}))
+	require.NoError(t, configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{}))
 
 	var install string
 	for _, cmd := range h.ran {
