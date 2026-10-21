@@ -122,11 +122,11 @@ func TestServiceInfoReportsTheRefusalWhenTheSecretIsGone(t *testing.T) {
 		blockedServiceCR("db", "DataWithoutCredentials",
 			"service db has data in data-db-0 and no PASSWORD in db-credentials"),
 	)
-	// No Secret anywhere, which is exactly what DataWithoutCredentials means.
+	// Leave the Secret absent to verify that the blockage is reported before credentials are read.
 	mgr := &service.Manager{Client: k8sfake.NewSimpleClientset(), Dynamic: dyn} //nolint:staticcheck
 
 	var out bytes.Buffer
-	err := writeServiceInfo(context.Background(), &out, mgr, "default", "db")
+	err := writeServiceInfo(context.Background(), &out, mgr, "default", "db", false)
 
 	require.NoError(t, err, "the command failed on the missing Secret instead of explaining it")
 	printed := out.String()
@@ -145,10 +145,9 @@ func healthyServiceCR(name, svcType string) *unstructured.Unstructured {
 	}}
 }
 
-// A service with nothing wrong prints what it always printed, and the shape it
-// prints comes from the type in the same read that found nothing wrong. MinIO is
-// the type that proves it: an empty type would take the host-and-port branch
-// instead of the S3 one.
+// TestServiceInfoPrintsTheDetailsOfAHealthyService checks that a healthy service's
+// output uses the type from the snapshot. MinIO distinguishes this from an empty
+// type, which would select the host-and-port output instead of the S3 output.
 func TestServiceInfoPrintsTheDetailsOfAHealthyService(t *testing.T) {
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
@@ -166,11 +165,12 @@ func TestServiceInfoPrintsTheDetailsOfAHealthyService(t *testing.T) {
 	mgr := &service.Manager{Client: secrets, Dynamic: dyn}
 
 	var out bytes.Buffer
-	require.NoError(t, writeServiceInfo(context.Background(), &out, mgr, "default", "obj"))
+	require.NoError(t, writeServiceInfo(context.Background(), &out, mgr, "default", "obj", false))
 
 	printed := out.String()
 	assert.Contains(t, printed, "Endpoint:", "the S3 shape needs the type the snapshot carried")
 	assert.Contains(t, printed, "obj.default.svc.cluster.local")
+	assert.NotContains(t, printed, "s3cret", "the secret key stays hidden unless asked for")
 	assert.NotContains(t, printed, "  !   ", "a healthy service was given a warning")
 }
 
@@ -194,7 +194,7 @@ func TestServiceInfoReadsTheServiceOnce(t *testing.T) {
 	mgr := &service.Manager{Client: secrets, Dynamic: dyn}
 
 	var out bytes.Buffer
-	require.NoError(t, writeServiceInfo(context.Background(), &out, mgr, "default", "db"))
+	require.NoError(t, writeServiceInfo(context.Background(), &out, mgr, "default", "db", false))
 
 	reads := 0
 	for _, action := range dyn.Actions() {

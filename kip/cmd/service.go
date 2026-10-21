@@ -147,6 +147,7 @@ func init() {
 
 	serviceInfoCmd.Flags().String("project", "default", "project namespace")
 	serviceInfoCmd.Flags().String("environment", "", "target environment")
+	serviceInfoCmd.Flags().Bool("show-secrets", false, "Show the password or secret key, including in connection URLs that contain credentials.")
 
 	serviceUpdateCmd.Flags().String("project", "default", "project namespace")
 	serviceUpdateCmd.Flags().String("environment", "", "target environment")
@@ -363,30 +364,7 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	if secret != nil {
-		fmt.Printf("\n")
-		fmt.Printf("  Connection details:\n")
-		if endpoint, _ := secret.Object["ENDPOINT"].(string); endpoint != "" {
-			// S3 service (minio): endpoint URL + access key / secret key.
-			accessKey, _ := secret.Object["ACCESS_KEY"].(string)
-			secretKey, _ := secret.Object["SECRET_KEY"].(string)
-			fmt.Printf("    Endpoint:   %s\n", endpoint)
-			fmt.Printf("    Access Key: %s\n", accessKey)
-			fmt.Printf("    Secret Key: %s\n", secretKey)
-		} else {
-			host, _ := secret.Object["HOST"].(string)
-			port, _ := secret.Object["PORT"].(string)
-			username, _ := secret.Object["USERNAME"].(string)
-			password, _ := secret.Object["PASSWORD"].(string)
-			database, _ := secret.Object["NAME"].(string)
-
-			fmt.Printf("    Host:     %s\n", host)
-			fmt.Printf("    Port:     %s\n", port)
-			if username != "" {
-				fmt.Printf("    Username: %s\n", username)
-				fmt.Printf("    Password: %s\n", password)
-				fmt.Printf("    Database: %s\n", database)
-			}
-		}
+		writeCreatedCredentials(os.Stdout, secret.Object)
 	}
 
 	fmt.Printf("\n")
@@ -461,6 +439,7 @@ func writeBlockedNotice(out io.Writer, name, reason, message string) {
 func runServiceInfo(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	namespace := resolveServiceNamespace(cmd)
+	showSecrets, _ := cmd.Flags().GetBool("show-secrets")
 
 	_, k8sClient, err := loadCurrentCluster()
 	if err != nil {
@@ -468,18 +447,17 @@ func runServiceInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	mgr := &service.Manager{Client: k8sClient.Clientset(), Dynamic: k8sClient.Dynamic()}
-	return writeServiceInfo(context.Background(), os.Stdout, mgr, namespace, name)
+	return writeServiceInfo(context.Background(), os.Stdout, mgr, namespace, name, showSecrets)
 }
 
-// writeServiceInfo prints what an operator asked to know about one service.
+// writeServiceInfo prints connection details and placement, or the reason a
+// service is blocked. Reporting a blockage before reading credentials preserves
+// the remedy when the Secret is missing and avoids directing operators to debug
+// connections with credentials the engine may reject.
 //
-// A refusal is reported instead of the connection details rather than above
-// them. The details are read out of the very Secret the refusal is about, so in
-// the case this exists for there is nothing left to read and the command would
-// fail with "not found", burying the remedy. Where something is still readable
-// it is a credential the engine will not accept, and printing it sends an
-// operator to debug a connection that was never going to work.
-func writeServiceInfo(ctx context.Context, out io.Writer, mgr *service.Manager, namespace, name string) error {
+// Passwords and secret keys are masked unless showSecrets is set, to keep them
+// out of terminal logs, CI output and session transcripts.
+func writeServiceInfo(ctx context.Context, out io.Writer, mgr *service.Manager, namespace, name string, showSecrets bool) error {
 	snapshot, err := mgr.Read(ctx, namespace, name)
 	if err != nil {
 		return err
@@ -490,22 +468,26 @@ func writeServiceInfo(ctx context.Context, out io.Writer, mgr *service.Manager, 
 		return nil
 	}
 
-	// The type comes from the snapshot that answered the question above, so the
-	// command cannot decide it is healthy from one read of the service and then
-	// describe a different one.
+	// Use the same snapshot for the type and blockage check so a concurrent
+	// service change cannot make the two reads disagree.
 	conn, err := mgr.Connection(ctx, namespace, name, snapshot.Type)
 	if err != nil {
 		return err
 	}
+	masked := !showSecrets && conn.Password != ""
+	if masked {
+		hidden := conn.Masked()
+		conn = &hidden
+	}
 
 	say(out, "\n  Service: %s\n\n", name)
 	if conn.Type == "minio" {
-		// S3 service: endpoint URL + access key / secret key.
 		say(out, "  Endpoint:   %s\n", conn.URL)
 		say(out, "  Access Key: %s\n", conn.Username)
 		say(out, "  Secret Key: %s\n", conn.Password)
 		placement, err := mgr.Placement(ctx, namespace, name)
 		writePlacement(out, placement, err)
+		writeSecretsHint(out, masked)
 		say(out, "\n")
 		return nil
 	}
@@ -524,9 +506,48 @@ func writeServiceInfo(ctx context.Context, out io.Writer, mgr *service.Manager, 
 	}
 	placement, err := mgr.Placement(ctx, namespace, name)
 	writePlacement(out, placement, err)
+	writeSecretsHint(out, masked)
 	say(out, "\n")
 
 	return nil
+}
+
+func writeSecretsHint(out io.Writer, masked bool) {
+	if masked {
+		say(out, "\n  Add --show-secrets to print the secret.\n")
+	}
+}
+
+// writeCreatedCredentials prints a new service's connection details from its
+// credentials Secret values, with the password or secret key masked.
+func writeCreatedCredentials(out io.Writer, values map[string]interface{}) {
+	say(out, "\n")
+	say(out, "  Connection details:\n")
+	masked := false
+	if endpoint, _ := values["ENDPOINT"].(string); endpoint != "" {
+		accessKey, _ := values["ACCESS_KEY"].(string)
+		say(out, "    Endpoint:   %s\n", endpoint)
+		say(out, "    Access Key: %s\n", accessKey)
+		say(out, "    Secret Key: %s\n", service.SecretMask)
+		masked = true
+	} else {
+		host, _ := values["HOST"].(string)
+		port, _ := values["PORT"].(string)
+		username, _ := values["USERNAME"].(string)
+		database, _ := values["NAME"].(string)
+
+		say(out, "    Host:     %s\n", host)
+		say(out, "    Port:     %s\n", port)
+		if username != "" {
+			say(out, "    Username: %s\n", username)
+			say(out, "    Password: %s\n", service.SecretMask)
+			say(out, "    Database: %s\n", database)
+			masked = true
+		}
+	}
+	if masked {
+		say(out, "    Print the secret with 'kip service info <name> --show-secrets'.\n")
+	}
 }
 
 func runServiceUpdate(cmd *cobra.Command, args []string) error {

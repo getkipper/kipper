@@ -204,21 +204,24 @@ The app restarts automatically when a binding is added or removed.
 
 ## Connection details
 
-After creating a service, the connection details are displayed:
+After creating a service, the connection details are displayed with the password masked:
 
 ```
   Host:     mydb.default.svc.cluster.local
   Port:     5432
   Username: kipper
-  Password: a1b2c3d4e5f6...
+  Password: ********
   Database: app
 ```
 
-Retrieve them later:
+Retrieve the connection details later with `kip service info`. Add `--show-secrets` to reveal the password, including in the connection URL:
 
 ```bash
 kip service info mydb
+kip service info mydb --show-secrets
 ```
+
+kip masks passwords and S3 secret keys by default because terminal logs and CI output can retain them, and shared screens can expose them. `kip service bind` supplies credentials to apps through environment variables, so you can connect apps without copying passwords by hand.
 
 The output also shows `Pod node`, where the service is scheduled (or `not scheduled` with the scheduler's reason), and `Data node`, where its healthy data copies are stored. Kipper configures new service volumes to keep one copy on the server. Existing copies may still be on workers. `kip upgrade` and `kip status` report them.
 
@@ -340,7 +343,7 @@ kip tunnel mydb
   Press Ctrl+C to close
 ```
 
-Open your database client and connect to `localhost:5432` with the credentials from `kip service info mydb`.
+Open your database client and connect to `localhost:5432` with the credentials from `kip service info mydb --show-secrets`.
 
 If the default port is already in use on your machine, pick a different one:
 

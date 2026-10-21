@@ -138,7 +138,7 @@ Now open your database client and connect to:
 - **Host:** localhost
 - **Port:** 5432
 - **Username:** kipper
-- **Password:** (from `kip service info mydb`)
+- **Password:** (from `kip service info mydb --show-secrets`)
 - **Database:** app
 
 ### Use a custom local port
