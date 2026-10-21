@@ -779,10 +779,28 @@ func (m *Manager) Connection(ctx context.Context, namespace, name, svcType strin
 	return conn, nil
 }
 
+// SecretMask stands in for a password or secret key that is not shown.
+const SecretMask = "********"
+
+// Masked returns a copy of c with a non-empty Password replaced by SecretMask.
+// For known service types, it rebuilds the URL with the masked password where
+// the URL format includes credentials. For unknown types, the URL is unchanged
+// and may still contain credentials. An empty Password leaves the copy unchanged.
+func (c ConnectionInfo) Masked() ConnectionInfo {
+	if c.Password == "" {
+		return c
+	}
+	c.Password = SecretMask
+	if spec, ok := catalog[c.Type]; ok {
+		c.URL = c.formatURL(spec.URLFormat, c.Type)
+	}
+	return c
+}
+
 // formatURL builds a display URL from the connection components and the
-// catalog's URLFormat. The URL is for CLI display and internal use only —
-// it is not stored in Kubernetes secrets because different frameworks need
-// different URL schemes (e.g. postgres:// vs jdbc:postgresql://).
+// catalog's URLFormat for CLI display and internal use. Kubernetes Secrets
+// store the components so frameworks can use their own URL schemes, such as
+// postgres:// or jdbc:postgresql://. Unknown service types return an empty string.
 func (c *ConnectionInfo) formatURL(urlFormat, svcType string) string {
 	switch svcType {
 	case "postgres", "mysql":
@@ -794,8 +812,7 @@ func (c *ConnectionInfo) formatURL(urlFormat, svcType string) string {
 	case "redis", "opensearch":
 		return fmt.Sprintf(urlFormat, c.Host, c.Port)
 	case "minio":
-		// S3 has no user:pass@host URL form; show the plain endpoint and
-		// keep the secret key out of the connection URL.
+		// S3 clients use a plain endpoint URL and separate credentials.
 		return fmt.Sprintf(urlFormat, c.Host, c.Port)
 	default:
 		return ""

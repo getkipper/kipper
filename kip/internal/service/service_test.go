@@ -768,3 +768,23 @@ func TestUpdateRefusesAMinIOReleaseKipperDoesNotBuild(t *testing.T) {
 	ss, _ := client.AppsV1().StatefulSets("default").Get(ctx, "storage", metav1.GetOptions{})
 	assert.Equal(t, "ghcr.io/getkipper/minio:RELEASE.2025-09-07T16-13-09Z", ss.Spec.Template.Spec.Containers[0].Image)
 }
+
+func TestMaskedHidesThePasswordInEveryField(t *testing.T) {
+	conn := ConnectionInfo{Type: "postgres", Host: "db.default.svc.cluster.local", Port: 5432, Username: "app", Password: "s3cr3t-pw", Database: "app"}
+	conn.URL = conn.formatURL(catalog["postgres"].URLFormat, "postgres")
+
+	masked := conn.Masked()
+
+	assert.Equal(t, "app", masked.Username)
+	assert.NotContains(t, masked.Password+masked.URL, "s3cr3t-pw")
+	assert.Equal(t, "postgres://app:"+SecretMask+"@db.default.svc.cluster.local:5432/app", masked.URL)
+	assert.Equal(t, "s3cr3t-pw", conn.Password, "the original keeps its password")
+
+	s3 := ConnectionInfo{Type: "minio", Host: "files", Port: 9000, Username: "access", Password: "secret-key"}
+	s3.URL = s3.formatURL(catalog["minio"].URLFormat, "minio")
+	assert.Equal(t, SecretMask, s3.Masked().Password)
+	assert.Equal(t, s3.URL, s3.Masked().URL)
+
+	open := ConnectionInfo{Type: "redis", Host: "cache", Port: 6379}
+	assert.Equal(t, open, open.Masked(), "nothing to hide without a password")
+}

@@ -124,9 +124,36 @@ func TestServiceInfoShowsWhereTheServiceRunsAndWhereItsDataIs(t *testing.T) {
 	mgr := &service.Manager{Client: client, Dynamic: dyn}
 
 	var out bytes.Buffer
-	require.NoError(t, writeServiceInfo(context.Background(), &out, mgr, "default", "db"))
+	require.NoError(t, writeServiceInfo(context.Background(), &out, mgr, "default", "db", false))
 	assert.Contains(t, out.String(), "Pod node:  worker-2")
 	assert.Contains(t, out.String(), "Data node: server-1 (1 copy)", "a failed replica is not a copy, and replicas are found by the PV's volume handle")
+}
+
+func TestServiceInfoShowsThePasswordOnlyWhenAsked(t *testing.T) {
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{manifest.ServiceGVR: "ServiceList", service.LonghornReplicaGVR: "ReplicaList"},
+		healthyServiceCR("db", "postgres"),
+	)
+	client := k8sfake.NewSimpleClientset( //nolint:staticcheck
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: "default"},
+			Data: map[string][]byte{"HOST": []byte("db.default.svc.cluster.local"), "PORT": []byte("5432"),
+				"USERNAME": []byte("app"), "PASSWORD": []byte("s3cr3t-pw"), "NAME": []byte("app")},
+		},
+	)
+	mgr := &service.Manager{Client: client, Dynamic: dyn}
+
+	var out bytes.Buffer
+	require.NoError(t, writeServiceInfo(context.Background(), &out, mgr, "default", "db", false))
+	assert.NotContains(t, out.String(), "s3cr3t-pw", "a terminal log or transcript keeps what is printed")
+	assert.Contains(t, out.String(), "Username: app")
+	assert.Contains(t, out.String(), "--show-secrets")
+
+	out.Reset()
+	require.NoError(t, writeServiceInfo(context.Background(), &out, mgr, "default", "db", true))
+	assert.Contains(t, out.String(), "Password: s3cr3t-pw")
+	assert.Contains(t, out.String(), "postgres://app:s3cr3t-pw@")
 }
 
 func TestStatusDoesNotPromiseAMoveForAnUnpinnedCopy(t *testing.T) {
@@ -213,4 +240,21 @@ func TestUpgradePinsNothingOnLocalStorage(t *testing.T) {
 	pinForUpgrade(&out, host)
 	assert.Empty(t, host.others, "a local-storage cluster has no Longhorn volumes to pin")
 	assert.Empty(t, out.String())
+}
+
+func TestServiceAddMasksTheNewPassword(t *testing.T) {
+	var out bytes.Buffer
+	writeCreatedCredentials(&out, map[string]interface{}{"HOST": "db.default.svc.cluster.local", "PORT": "5432", "USERNAME": "app", "PASSWORD": "s3cr3t-pw", "NAME": "app"})
+	assert.Contains(t, out.String(), "    Username: app\n    Password: "+service.SecretMask+"\n")
+	assert.NotContains(t, out.String(), "s3cr3t-pw")
+	assert.Contains(t, out.String(), "--show-secrets")
+
+	out.Reset()
+	writeCreatedCredentials(&out, map[string]interface{}{"ENDPOINT": "http://obj:9000", "ACCESS_KEY": "kipper", "SECRET_KEY": "s3cret"})
+	assert.Contains(t, out.String(), "    Access Key: kipper\n    Secret Key: "+service.SecretMask+"\n")
+	assert.NotContains(t, out.String(), "s3cret")
+
+	out.Reset()
+	writeCreatedCredentials(&out, map[string]interface{}{"HOST": "cache", "PORT": "6379"})
+	assert.NotContains(t, out.String(), "--show-secrets", "a service without a password has nothing to reveal")
 }

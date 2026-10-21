@@ -821,7 +821,8 @@ Manage stateful services (databases, caches) with persistent storage.
 kip service add postgres --name mydb         # deploy PostgreSQL
 kip service add redis --name cache           # deploy Redis
 kip service list                             # list all services
-kip service info mydb                        # show connection details
+kip service info mydb                        # show connection details, password masked
+kip service info mydb --show-secrets         # include the password
 kip service share mailhog --expires 72h      # shareable link to a service web UI
 kip service import mydb --file dump.sql      # load a database dump
 kip service export mydb --file nightly.dump  # dump a database to a local file
