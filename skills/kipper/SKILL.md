@@ -60,9 +60,8 @@ If the Secret has your value but the pod doesn't, the pod just needs a restart (
 - Local config lives in `~/.kip/`: `config.yaml` (clusters + kubeconfigs), `auth.json` (Dex session tokens). Per-cluster kubeconfigs are under `~/.kip/clusters/<name>.yaml`.
 - Select a cluster: `kip cluster list`, then `kip cluster use <name>`. Override per command with `--cluster <name>` or the `KIP_CLUSTER` env var.
 - Set a default project/environment for the active cluster with `kip project use <project>[/<env>]`. **Then pass `--project` and `--environment` anyway on anything that writes.** The saved context is honored by some commands and ignored by others, the split does not follow the command tree, and the failure is silent: a command that ignores it does not say so. These are the behaviors that have been traced against source; treat the grouping as the commands that were checked rather than a rule you can extrapolate from:
-  - *Honors it* — `kip app list`; the `service` and `job` commands; `kip function create/list/bind/unbind`; `kip volume create/list/delete`.
+  - *Honors it*: `kip app list`, `kip app deploy`, `kip app rebuild`, the `service` and `job` commands, `kip function create/list/bind/unbind`, and `kip volume create/list/delete`.
   - *Honors the saved project but not the environment* — `kip project allow-links` / `links`.
-  - *Falls back to the literal project `default`* — **`kip app deploy`, `kip app rebuild`**. With `shop/prod` active a flagless deploy creates the app in `default`.
   - *Searches every namespace for the workload by name, refusing an ambiguous match* — most other app- and function-scoped commands (`logs`, `restart`, `update`, `delete`, `scale`, `env`, `secret`, …) **and `kip volume mount` / `unmount`**, which are the two volume commands that act on an app rather than on the volume alone. They find it wherever it lives and stop rather than guess.
   - *Honors it, and refuses an ambiguous match* — **`kip exec`, `kip tunnel`**. With a project known, from the flags or from `kip project use`, they look only there, and a project holding no such workload is an error rather than a reason to search elsewhere. Without one they search every namespace. Either way a name matching more than one workload lists the matches and stops. `--kind app|function|service` separates an app from a service of the same name inside one namespace, which naming the project cannot.
   - *Neither, because the project comes from somewhere else* — `kip apply` and `kip diff` read it from each manifest unless a flag overrides; `kip export` and `kip app promote` require `--project` outright; `kip backup create` with no project deliberately means every non-system namespace.
@@ -216,7 +215,7 @@ kip app deploy --name api --git https://github.com/acme/api.git --branch main \
   --git-token "$TOKEN" --port 3000 --project blog --environment prod
 kip app build-logs api --project blog --environment prod   # watch the build
 ```
-`kip app deploy` creates the workload and stores the credential but does not build. Trigger the first build with `kip app rebuild api --project blog --environment prod` (rebuild is one of the commands that ignore the active project — see Orientation), or wire a webhook with `kip app webhook enable`.
+`kip app deploy` creates the workload and stores the credential. The first build needs a separate trigger. Run `kip app rebuild api --project blog --environment prod`, or configure a webhook with `kip app webhook enable`.
 
 **Add a database and bind it to an app** (injects `DB_*` connection env)
 ```bash
