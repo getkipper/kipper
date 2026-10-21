@@ -217,7 +217,7 @@ func applyPeerFirewall(out io.Writer, client installer.FirewallRunner, label str
 		if mode == existingFirewall {
 			harden := ""
 			if label == "the server" {
-				harden = " and run 'kip cluster harden' to let kip manage it"
+				harden = ", or let kip manage it with 'kip cluster harden --adopt-firewall'"
 			}
 			return fmt.Errorf("kip needs to manage the %s firewall on %s to add peer rules, so the join stops even if the ports are open. Disable UFW with 'ufw disable'%s, then run 'kip node add' again", audit.Existing, label, harden)
 		}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"time"
 )
@@ -56,6 +57,8 @@ func PlanFirewall(audit FirewallAudit, wantFirewall, adopt bool) FirewallPlan {
 		plan.Notice = "  ✔  No existing host firewall\n"
 	case audit.KipperManaged:
 		plan.Notice = "  ✔  Existing firewall was set up by kip\n"
+	case adopting && audit.Existing == "ufw":
+		plan.Notice = "  ⚠  Existing UFW detected. kip will replace its rules with Kipper's (--adopt-firewall).\n"
 	case adopting:
 		plan.Notice = "  ⚠  Existing firewalld detected. kip will replace its public zone and add a pod zone and forwarding policies (--adopt-firewall).\n"
 	default:
@@ -63,6 +66,9 @@ func PlanFirewall(audit FirewallAudit, wantFirewall, adopt bool) FirewallPlan {
 			"  ⚠  Existing firewall detected (%s). Skipping kip's firewall step to avoid trampling your rules.\n"+
 				"     Your firewall is now your responsibility. Review it regularly and make sure\n"+
 				"     22, 80, 443, and 6443 are reachable.\n", audit.Existing)
+		if audit.Adoptable {
+			plan.Notice += "     To let kip take it over, run the command again over SSH with --adopt-firewall.\n"
+		}
 	}
 
 	if !wantFirewall && mayConfigure {
@@ -102,7 +108,9 @@ func ApplyFirewallPlan(client FirewallRunner, plan FirewallPlan, rateLimitSSH bo
 
 // AuditFirewall detects active host firewall managers and Kipper ownership.
 // An inactive UFW installation retains ownership if its claim file is present.
-// Runner errors and UFW status timeouts are returned.
+// An active, unclaimed UFW is adoptable only on a detected Debian-family host.
+// Failure to detect that host's OS leaves UFW under operator control.
+// Other probe errors and UFW status timeouts are returned.
 func AuditFirewall(client CommandRunner) (FirewallAudit, error) {
 	var audit FirewallAudit
 
@@ -140,6 +148,10 @@ func AuditFirewall(client CommandRunner) (FirewallAudit, error) {
 	if strings.TrimSpace(out) == "active" {
 		audit.Existing = "ufw"
 		audit.KipperManaged = firewallClaimed(client)
+		if !audit.KipperManaged {
+			host, err := DetectHostOS(client)
+			audit.Adoptable = err == nil && host.Family == FamilyDebian
+		}
 		return audit, nil
 	}
 	// Retain ownership so later configuration can reactivate kip-managed UFW.
@@ -197,10 +209,13 @@ func configureFirewallWith(client FirewallRunner, rateLimitSSH bool, consent Fir
 		fmt.Printf("  ℹ  UFW allows SSH without rate limiting because kip cannot reuse a single SSH connection from this machine to this host.\n")
 		rateLimitSSH = false
 	}
-	return configureFirewall(client, host, rateLimitSSH, mesh)
+	return configureFirewall(client, host, rateLimitSSH, consent, mesh)
 }
 
-func configureFirewall(client FirewallRunner, host HostOS, rateLimitSSH bool, mesh FirewallMesh) error {
+// configureFirewall loads kip's UFW rules with rollback protection. Consent
+// allows takeover of an eligible, unclaimed UFW, preserving kip's rules and
+// allow or limit rules for configured SSH ports while removing other saved rules.
+func configureFirewall(client FirewallRunner, host HostOS, rateLimitSSH bool, consent FirewallConsent, mesh FirewallMesh) error {
 	// Refresh package lists so UFW can be installed on a fresh host.
 	install := host.InstallPackagesCommand(true, "ufw")
 	if install == "" {
@@ -221,20 +236,28 @@ func configureFirewall(client FirewallRunner, host HostOS, rateLimitSSH bool, me
 	if err != nil {
 		return fmt.Errorf("re-auditing firewall: %w", err)
 	}
-	if audit.BlocksConfiguration() {
+	adopting := consent.Adopt && audit.Adoptable && audit.Existing == "ufw"
+	if audit.BlocksConfiguration() && !adopting {
 		return fmt.Errorf("a %s firewall became active on this host, so kip left it alone", audit.Existing)
+	}
+	var takeover *ufwTakeover
+	if adopting {
+		if takeover, err = checkUFWAdoption(client, consent, mesh, sshPorts); err != nil {
+			return err
+		}
 	}
 
 	rollback, err := armUFWRollback(client)
 	if err != nil {
 		return err
 	}
-	return rollback.finish(client, loadUFW(rollback.runner(client), sshPorts, rateLimitSSH, mesh))
+	return rollback.finish(client, loadUFW(rollback.runner(client), sshPorts, rateLimitSSH, mesh, takeover))
 }
 
-// loadUFW saves and loads kip's rules. The caller must arm rollback and
-// provide a runner that guards commands with the rollback lock.
-func loadUFW(client CommandRunner, sshPorts []string, rateLimitSSH bool, mesh FirewallMesh) error {
+// loadUFW saves and loads kip's rules. Takeover also removes foreign saved
+// rules, preserving allow and limit rules for configured SSH ports. The caller
+// must arm rollback and provide a runner that guards commands with its lock.
+func loadUFW(client CommandRunner, sshPorts []string, rateLimitSSH bool, mesh FirewallMesh, takeover *ufwTakeover) error {
 	// Allow forwarding for kube-proxy NAT and Flannel pod traffic.
 	forwardCmd := `sed -i 's|^DEFAULT_FORWARD_POLICY=.*|DEFAULT_FORWARD_POLICY="ACCEPT"|' /etc/default/ufw`
 
@@ -251,6 +274,9 @@ func loadUFW(client CommandRunner, sshPorts []string, rateLimitSSH bool, mesh Fi
 	if err != nil {
 		return err
 	}
+	if takeover != nil && !slices.Equal(ops, takeover.ops) {
+		return fmt.Errorf("the operator tunnel's port changed after kip checked the takeover rules, so kip stopped. Run the command again to review the changes")
+	}
 	var ruleErr error
 	for _, rule := range append(append(ufwRules(sshPorts, rateLimitSSH, mesh.Role), ufwPeerRules(mesh)...), ops...) {
 		if err := runUFW(client, rule); err != nil {
@@ -259,7 +285,7 @@ func loadUFW(client CommandRunner, sshPorts []string, rateLimitSSH bool, mesh Fi
 		}
 	}
 	if ruleErr == nil {
-		ruleErr = removeStaleRules(client, mesh, sshPorts)
+		ruleErr = removeStaleRules(client, mesh, sshPorts, takeover, ops)
 	}
 
 	if err := loadSavedRules(client, sshPorts); err != nil {
@@ -280,14 +306,27 @@ func loadUFW(client CommandRunner, sshPorts []string, rateLimitSSH bool, mesh Fi
 }
 
 // removeStaleRules deletes obsolete peer rules and, on workers, saved server
-// port rules, except those for configured SSH ports. It stops at the first
-// command error.
-func removeStaleRules(client CommandRunner, mesh FirewallMesh, sshPorts []string) error {
+// port rules, except those for configured SSH ports. Takeover also removes
+// foreign rules, preserving allow and limit rules for configured SSH ports.
+// It deletes nothing if a foreign rule was absent from the checked listing or
+// cannot be safely deleted. It stops at the first command error.
+func removeStaleRules(client CommandRunner, mesh FirewallMesh, sshPorts []string, takeover *ufwTakeover, ops []string) error {
 	added, err := runUFWOutput(client, "ufw show added")
 	if err != nil {
 		return fmt.Errorf("listing ufw's rules: %w", err)
 	}
-	for _, rule := range append(staleUFWPeerRules(added, mesh), staleUFWRoleRules(added, mesh, sshPorts)...) {
+	stale := append(staleUFWPeerRules(added, mesh), staleUFWRoleRules(added, mesh, sshPorts)...)
+	if takeover != nil {
+		for _, rule := range foreignUFWRules(added, ufwWantedRules(sshPorts, mesh, ops), sshPorts) {
+			if !takeover.approved[ufwRuleKey(rule)] || !ufwRuleDeletable(rule) {
+				return fmt.Errorf("the UFW rule %s appeared after kip checked the takeover rules, so kip stopped. Run the command again to review it", strings.TrimPrefix(rule, "ufw "))
+			}
+			if cmd := ufwDeleteCommand(rule); !slices.Contains(stale, cmd) {
+				stale = append(stale, cmd)
+			}
+		}
+	}
+	for _, rule := range stale {
 		if err := runUFW(client, rule); err != nil {
 			return fmt.Errorf("applying %q: %w", rule, err)
 		}

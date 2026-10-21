@@ -194,7 +194,7 @@ func TestAuditFirewall(t *testing.T) {
 func TestConfigureFirewall_ClaimIsWrittenBeforeTheRulesAndTheEnable(t *testing.T) {
 	c, calls := dialStub(t, stubHost{ufwStatus: "inactive", firewalldIs: "inactive"})
 
-	require.NoError(t, configureFirewall(c, debianHost, true, FirewallMesh{}))
+	require.NoError(t, configureFirewall(c, debianHost, true, FirewallConsent{}, FirewallMesh{}))
 
 	recorded, err := os.ReadFile(calls)
 	require.NoError(t, err)
@@ -269,7 +269,7 @@ func TestConfigureFirewall_LeavesNoClaimWhenItBuildsNothing(t *testing.T) {
 		ufwStatus: "inactive", firewalldIs: "inactive", failOnCommand: "apt-get install",
 	})
 
-	err := configureFirewall(c, debianHost, true, FirewallMesh{})
+	err := configureFirewall(c, debianHost, true, FirewallConsent{}, FirewallMesh{})
 
 	require.Error(t, err)
 	recorded, readErr := os.ReadFile(calls)
@@ -283,7 +283,7 @@ func TestConfigureFirewall_LeavesNoClaimWhenItBuildsNothing(t *testing.T) {
 func TestConfigureFirewall_StopsWhenAFirewallAppearedSinceTheAudit(t *testing.T) {
 	c, calls := dialStub(t, stubHost{ufwStatus: "active", claimPresent: false})
 
-	err := configureFirewall(c, debianHost, true, FirewallMesh{})
+	err := configureFirewall(c, debianHost, true, FirewallConsent{}, FirewallMesh{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "became active")
@@ -303,7 +303,7 @@ func TestConfigureFirewall_StopsWhenItCannotClaimTheHost(t *testing.T) {
 		ufwStatus: "inactive", firewalldIs: "inactive", failOnCommand: "firewall-managed.XXXXXX",
 	})
 
-	err := configureFirewall(c, debianHost, true, FirewallMesh{})
+	err := configureFirewall(c, debianHost, true, FirewallConsent{}, FirewallMesh{})
 
 	require.Error(t, err)
 	// The error names both operations because either may have failed.
@@ -330,7 +330,7 @@ func withoutRollbackScript(run string) string {
 func TestConfigureFirewall_SequencesTheClaimBehindTheFirstChange(t *testing.T) {
 	c, calls := dialStub(t, stubHost{ufwStatus: "inactive", firewalldIs: "inactive"})
 
-	require.NoError(t, configureFirewall(c, debianHost, true, FirewallMesh{}))
+	require.NoError(t, configureFirewall(c, debianHost, true, FirewallConsent{}, FirewallMesh{}))
 
 	recorded, err := os.ReadFile(calls)
 	require.NoError(t, err)

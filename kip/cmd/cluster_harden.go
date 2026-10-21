@@ -35,8 +35,8 @@ Examples:
 func init() {
 	clusterHardenCmd.Flags().String("ssh-key", "", "path to SSH private key (defaults to ~/.ssh/id_ed25519)")
 	clusterHardenCmd.Flags().Bool("harden", true, "disable surplus host services exposed on public interfaces (e.g. rpcbind, Cockpit)")
-	clusterHardenCmd.Flags().Bool("firewall", true, "configure the host firewall for k3s: firewalld on Rocky, AlmaLinux and CentOS Stream and UFW elsewhere (firewalld takeover requires --adopt-firewall or interactive consent)")
-	clusterHardenCmd.Flags().Bool("adopt-firewall", false, "allow takeover of running firewalld on Rocky, AlmaLinux or CentOS Stream without a prompt. Replaces the public zone, removes services such as Cockpit, and allows SSH on every node and public TCP ports 80, 443 and 6443 on the server")
+	clusterHardenCmd.Flags().Bool("firewall", true, "configure the host firewall for k3s: firewalld on Rocky, AlmaLinux and CentOS Stream and UFW elsewhere. Taking over a running firewall without a Kipper ownership marker requires --adopt-firewall or interactive consent")
+	clusterHardenCmd.Flags().Bool("adopt-firewall", false, "take over a running firewall without prompting when it has no Kipper ownership marker: UFW on Ubuntu and Debian, firewalld on Rocky, AlmaLinux or CentOS Stream. Replaces UFW rules or the firewalld public zone, removing services such as Cockpit, and allows SSH on every node and public TCP ports 80, 443 and 6443 on the server")
 	clusterHardenCmd.Flags().Bool("allow-ssh-passwords", false, "leave SSH password login unchanged. By default, kip turns it off after a successful key-only login")
 	clusterHardenCmd.Flags().Bool("no-ssh-rate-limit", false, "disable UFW SSH rate limiting on Ubuntu and Debian. Useful for CI or operators sharing a NAT address")
 	clusterCmd.AddCommand(clusterHardenCmd)
@@ -129,7 +129,7 @@ func hardenNode(client installer.FirewallRunner, host string, mesh installer.Fir
 	}
 	consent, err := installer.AdoptionConsent(client, host, fwAudit, opts.firewall, opts.adoptFirewall, opts.askToAdopt, mesh)
 	if err != nil {
-		return fmt.Errorf("checking the running firewalld: %w", err)
+		return fmt.Errorf("checking the running firewall: %w", err)
 	}
 	fwPlan := installer.PlanFirewall(fwAudit, opts.firewall, consent.Adopt)
 	fwPlan.AdoptFingerprint = consent.Fingerprint

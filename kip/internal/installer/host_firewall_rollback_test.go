@@ -81,7 +81,7 @@ func TestGuardedEnableSwitchesAHalfLoadedFirewallOffOnTheHost(t *testing.T) {
 func TestConfigureFirewall_ArmsTheRollbackBeforeTheFirstChange(t *testing.T) {
 	noUFWRetryDelay(t)
 	h := newUFWHost()
-	require.NoError(t, configureFirewall(h, debianHost, false, FirewallMesh{}))
+	require.NoError(t, configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{}))
 
 	arm, firstChange := -1, -1
 	for i, c := range h.ran {
@@ -105,7 +105,7 @@ func TestConfigureFirewall_ArmsTheRollbackBeforeTheFirstChange(t *testing.T) {
 func TestConfigureFirewall_CancelsTheRollbackOnlyAfterAFreshConnection(t *testing.T) {
 	noUFWRetryDelay(t)
 	h := newUFWHost()
-	require.NoError(t, configureFirewall(h, debianHost, false, FirewallMesh{}))
+	require.NoError(t, configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{}))
 
 	enable, fresh, cancel := -1, -1, -1
 	for i, c := range h.ran {
@@ -127,7 +127,7 @@ func TestConfigureFirewall_RestoresThePreviousFirewallWhenNewConnectionsFail(t *
 	noUFWRetryDelay(t)
 	h := newUFWHost()
 	h.freshFails = true
-	err := configureFirewall(h, debianHost, false, FirewallMesh{})
+	err := configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "kip restored the previous firewall")
 	assert.Equal(t, 1, h.rolledBackNow)
@@ -140,7 +140,7 @@ func TestConfigureFirewall_SaysWhenTheRestoreHadToSwitchUFWOff(t *testing.T) {
 	noUFWRetryDelay(t)
 	h := newUFWHost()
 	h.freshFails, h.restoreFails = true, true
-	err := configureFirewall(h, debianHost, false, FirewallMesh{})
+	err := configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "attempted to switch ufw off")
 	assert.Contains(t, err.Error(), "kip cluster harden")
@@ -151,7 +151,7 @@ func TestConfigureFirewall_LocalRunsRestoreTooWhenTheChangeFails(t *testing.T) {
 	h := newUFWHost()
 	h.local = true
 	h.startFails = 100
-	err := configureFirewall(h, debianHost, false, FirewallMesh{})
+	err := configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{})
 	require.Error(t, err)
 	assert.Equal(t, 1, h.rolledBackNow, "a failed local change is not committed")
 	for _, c := range h.ran {
@@ -163,7 +163,7 @@ func TestConfigureFirewall_ReportsARollbackThatAlreadyRan(t *testing.T) {
 	noUFWRetryDelay(t)
 	h := newUFWHost()
 	h.rolledBack = true
-	err := configureFirewall(h, debianHost, false, FirewallMesh{})
+	err := configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rollback has begun")
 }
@@ -174,7 +174,7 @@ func TestConfigureFirewall_BoundsEveryUFWCommand(t *testing.T) {
 	noUFWRetryDelay(t)
 	h := newUFWHost()
 	h.startFails = 1
-	require.NoError(t, configureFirewall(h, debianHost, false, FirewallMesh{}))
+	require.NoError(t, configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{}))
 	for _, c := range h.ran {
 		assert.False(t, bareUFW.MatchString(strings.ReplaceAll(c, ufwTimeout+"ufw ", "")), "ufw without a timeout: %s", c)
 	}
@@ -184,7 +184,7 @@ func TestConfigureFirewall_StopsChangingTheFirewallOnceTheRollbackRan(t *testing
 	noUFWRetryDelay(t)
 	h := newUFWHost()
 	h.rollbackAfter = 3
-	err := configureFirewall(h, debianHost, false, FirewallMesh{})
+	err := configureFirewall(h, debianHost, false, FirewallConsent{}, FirewallMesh{})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errUFWChangeRefused)
 	refused := 0

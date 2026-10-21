@@ -110,7 +110,7 @@ func TestConfigureUFWProtectsEverySSHPortOnAWorker(t *testing.T) {
 		}
 	}
 	ufw := &routedRunner{routes: routes("-A ufw-user-input -p tcp --dport 22 -j ACCEPT\n-A ufw-user-input -p tcp --dport 443 -j ACCEPT\n")}
-	require.NoError(t, configureFirewall(ufw, HostOS{ID: "ubuntu", Family: FamilyDebian}, false, FirewallMesh{Role: RoleWorker}))
+	require.NoError(t, configureFirewall(ufw, HostOS{ID: "ubuntu", Family: FamilyDebian}, false, FirewallConsent{}, FirewallMesh{Role: RoleWorker}))
 	assert.True(t, ufw.ran("ufw allow 22/tcp"))
 	assert.True(t, ufw.ran("ufw allow 443/tcp"), "the second SSH port is opened like the first")
 	assert.True(t, ufw.ran("ufw delete allow 80/tcp"))
@@ -118,7 +118,7 @@ func TestConfigureUFWProtectsEverySSHPortOnAWorker(t *testing.T) {
 	assert.False(t, ufw.ran("ufw delete allow 443/tcp"), "a port sshd listens on is never deleted")
 
 	ufw = &routedRunner{routes: routes("-A ufw-user-input -p tcp --dport 22 -j ACCEPT\n")}
-	err := configureFirewall(ufw, HostOS{ID: "ubuntu", Family: FamilyDebian}, false, FirewallMesh{Role: RoleWorker})
+	err := configureFirewall(ufw, HostOS{ID: "ubuntu", Family: FamilyDebian}, false, FirewallConsent{}, FirewallMesh{Role: RoleWorker})
 	require.Error(t, err, "a loaded firewall without the second SSH port must fail the change")
 	assert.Contains(t, err.Error(), "SSH port 443")
 }
@@ -135,7 +135,7 @@ func TestConfigureUFWKeepsTheOperatorTunnelPort(t *testing.T) {
 		{contains: "-N ufw-user-input", out: "absent\n"},
 		{contains: "-S ufw-user-input", out: "-A ufw-user-input -p tcp --dport 22 -j ACCEPT\n"},
 	}}
-	require.NoError(t, configureFirewall(ufw, HostOS{ID: "ubuntu", Family: FamilyDebian}, false, FirewallMesh{Role: RoleWorker}))
+	require.NoError(t, configureFirewall(ufw, HostOS{ID: "ubuntu", Family: FamilyDebian}, false, FirewallConsent{}, FirewallMesh{Role: RoleWorker}))
 	assert.True(t, ufw.ran("ufw allow 443/udp comment kipper-ops"), "a firewall change keeps the devices' tunnel open")
 }
 
@@ -182,7 +182,7 @@ func TestConfigureUFWAddsPeerRulesAndChecksThemLoaded(t *testing.T) {
 		{contains: "-N ufw-user-input", out: "absent\n"},
 		{contains: "-S ufw-user-input", out: "-A ufw-user-input -p tcp --dport 22 -j ACCEPT\n"},
 	}}
-	err := configureFirewall(ufw, HostOS{ID: "ubuntu", Family: FamilyDebian}, false, workerMesh)
+	err := configureFirewall(ufw, HostOS{ID: "ubuntu", Family: FamilyDebian}, false, FirewallConsent{}, workerMesh)
 	require.Error(t, err, "peer rules missing from the live chain must fail the change")
 	assert.Contains(t, err.Error(), "51820/udp from 192.0.2.10")
 	assert.True(t, ufw.ran("ufw allow from 192.0.2.12 to any port 10250 proto tcp comment 'kipper-peer'"))
