@@ -188,7 +188,10 @@ func requireOwnFirewalldIntact(client CommandRunner, mesh FirewallMesh) error {
 	if err != nil {
 		return err
 	}
-	want := wantFirewalldFor(sshPorts, mesh)
+	want, err := wantFirewalldOn(client, sshPorts, mesh)
+	if err != nil {
+		return err
+	}
 	state, err := client.Run(firewalldStateCommand(want))
 	if err != nil {
 		return fmt.Errorf("reading the running firewalld configuration: %w", err)

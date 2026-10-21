@@ -392,3 +392,16 @@ func TestFirewalldUninstallCommandOnAStoppedFirewalld(t *testing.T) {
 	assert.NotContains(t, calls, "--remove-port=443/tcp", "sshd listening on 443 keeps that port open")
 	assert.NotContains(t, calls, "--reload", "a stopped firewalld is not started")
 }
+
+func TestFirewalldUninstallCommandClosesTheTunnelPort(t *testing.T) {
+	s := newFirewalldUninstallScene(t, true, "kipper-pods public", "kipper-pods-in", "22/tcp\n443/udp")
+	peers, err := RenderOpsPeers(9, 443, sampleDevices())
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(s.root, opsDir), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(s.root, opsDir, "peers.conf"), []byte(peers), 0o600))
+
+	s.run("22")
+
+	assert.Contains(t, s.calls(), "firewall-cmd --zone=public --remove-port=443/udp\n", "a reused host keeps no tunnel port open")
+	assert.Equal(t, []string{"22/tcp"}, s.state("public-ports"))
+}

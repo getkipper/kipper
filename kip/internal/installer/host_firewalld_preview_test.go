@@ -154,3 +154,15 @@ func TestPreviewNamesServicesTheTakeoverAdds(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, stock.Opened, "service dhcpv6-client", "a service already there is not news")
 }
+
+func TestPreviewKeepsTheTunnelPortTheOperatorOpened(t *testing.T) {
+	h := runningStockFirewalld(t)
+	h.publicInfo = strings.Replace(stockPublicInfo, "  ports:\n", "  ports: 443/udp\n", 1)
+	h.opsPort = "443\n"
+
+	a, err := PreviewFirewalldAdoption(h, FirewallMesh{})
+
+	require.NoError(t, err)
+	assert.NotContains(t, a.Removed, "port 443/udp", "the takeover keeps the tunnel port")
+	assert.Contains(t, a.Opened, "443/udp")
+}
