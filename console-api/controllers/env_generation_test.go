@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -977,12 +978,7 @@ func TestBuildPollSidecar_UsesThePassSnapshotRatherThanASecondRead(t *testing.T)
 	sidecar, err := r.buildPollSidecar(ctx, fn, trigger, 8080, rendered)
 	require.NoError(t, err)
 
-	var sourceURL string
-	for _, e := range sidecar.Env {
-		if e.Name == "KIPPER_SOURCE_URL" {
-			sourceURL = e.Value
-		}
-	}
+	sourceURL := pollSourceURL(t, c, fn, sidecar)
 	require.NotEmpty(t, sourceURL)
 	assert.Contains(t, sourceURL, "snapshotted",
 		"the sidecar must carry the credential this pass published, not a later read of it")
@@ -1037,12 +1033,7 @@ func TestBuildPollSidecar_UsesThePinnedBindingsOwnSnapshot(t *testing.T) {
 	sidecar, err := r.buildPollSidecar(ctx, fn, trigger, 8080, rendered)
 	require.NoError(t, err)
 
-	var sourceURL string
-	for _, e := range sidecar.Env {
-		if e.Name == "KIPPER_SOURCE_URL" {
-			sourceURL = e.Value
-		}
-	}
+	sourceURL := pollSourceURL(t, c, fn, sidecar)
 	require.NotEmpty(t, sourceURL)
 	assert.Contains(t, sourceURL, "resize_test",
 		"the poller must watch the database the binding pinned, not the service default")
@@ -1063,6 +1054,388 @@ func TestBuildPollSidecar_RefusesAnAmbiguousBinding(t *testing.T) {
 	_, err := boundCredentialSnapshot(fn, "db", "postgres", renderedBindings{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bound more than once")
+}
+
+// Project viewers can read Deployments but cannot read Secrets. Storing the
+// source URL directly in the sidecar's environment exposed its service password
+// to every project viewer.
+func TestBuildPollSidecar_KeepsThePasswordOutOfThePodTemplate(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+
+	fn := &kipperv1.Function{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "resize", Namespace: "media-test", UID: types.UID("uid-resize"),
+		},
+		Spec: kipperv1.FunctionSpec{
+			Runtime:         "node",
+			ServiceBindings: []kipperv1.ServiceBinding{{Name: "db", Prefix: "DB_"}},
+		},
+	}
+	svc := &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "db", Namespace: fn.Namespace, UID: types.UID("uid-db"),
+		},
+		Spec: kipperv1.ServiceSpec{Type: "postgres"},
+	}
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(fn, svc).Build()
+	r := &FunctionReconciler{Client: c, Scheme: scheme}
+
+	credentials := func(password string) renderedBindings {
+		rendered := renderedBindings{}
+		rendered.keep("db-credentials", map[string][]byte{
+			"HOST": []byte("db"), "PORT": []byte("5432"), "NAME": []byte("app"),
+			"USERNAME": []byte("kipper"), "PASSWORD": []byte(password),
+		})
+		return rendered
+	}
+	trigger := &kipperv1.FunctionTrigger{
+		Type:   "postgres",
+		Config: map[string]string{"source": "db", "query": "SELECT 1"},
+	}
+
+	first, err := r.buildPollSidecar(ctx, fn, trigger, 8080, credentials("first-password"))
+	require.NoError(t, err)
+	assert.NotContains(t, fmt.Sprintf("%+v", first), "first-password", "the pod template must not carry the password")
+	assert.Contains(t, pollSourceURL(t, c, fn, first), "first-password")
+
+	var stored corev1.Secret
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: fn.Namespace, Name: pollSourceName(t, first)}, &stored))
+	assert.True(t, metav1.IsControlledBy(&stored, fn), "the Secret goes with the Function")
+	require.NotNil(t, stored.Immutable)
+	assert.True(t, *stored.Immutable, "a version must keep the content its name promises")
+
+	// Password rotation changes the template's Secret name to trigger a rollout.
+	// If the template update fails, it still references the first password.
+	second, err := r.buildPollSidecar(ctx, fn, trigger, 8080, credentials("second-password"))
+	require.NoError(t, err)
+	assert.NotEqual(t, pollSourceName(t, first), pollSourceName(t, second))
+	assert.Contains(t, pollSourceURL(t, c, fn, second), "second-password")
+	assert.Contains(t, pollSourceURL(t, c, fn, first), "first-password")
+}
+
+// A content digest is predictable from known content, so a matching Secret name
+// alone cannot establish that the Function can safely use it.
+func TestBuildPollSidecar_RefusesASourceSecretItDoesNotControl(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+
+	fn := &kipperv1.Function{
+		ObjectMeta: metav1.ObjectMeta{Name: "resize", Namespace: "media-test", UID: types.UID("uid-resize")},
+		Spec:       kipperv1.FunctionSpec{ServiceBindings: []kipperv1.ServiceBinding{{Name: "db"}}},
+	}
+	svc := &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: fn.Namespace, UID: types.UID("uid-db")},
+		Spec:       kipperv1.ServiceSpec{Type: "redis"},
+	}
+	rendered := renderedBindings{}
+	rendered.keep("db-credentials", map[string][]byte{"HOST": []byte("db"), "PORT": []byte("6379")})
+	trigger := &kipperv1.FunctionTrigger{Type: "redis", Config: map[string]string{"source": "db", "list": "jobs"}}
+
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(fn, svc).Build()
+	r := &FunctionReconciler{Client: c, Scheme: scheme}
+	sidecar, err := r.buildPollSidecar(ctx, fn, trigger, 8080, rendered)
+	require.NoError(t, err)
+	name := pollSourceName(t, sidecar)
+
+	immutable := true
+	planted := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: fn.Namespace},
+		Immutable:  &immutable,
+		Data:       map[string][]byte{pollSourceKey: []byte("redis://elsewhere:6379")},
+	}
+	c = crfake.NewClientBuilder().WithScheme(scheme).WithObjects(fn, svc, planted).Build()
+	r = &FunctionReconciler{Client: c, Scheme: scheme}
+	_, err = r.buildPollSidecar(ctx, fn, trigger, 8080, rendered)
+	require.Error(t, err)
+}
+
+// A trigger can name a service without a Function binding. Rotating that service's
+// password leaves the binding hash unchanged, so the source Secret's name must
+// change to roll the pod onto the new password.
+func TestFunctionReconcileDeployment_RollsThePollerWhenItsSourcePasswordChanges(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+
+	fn := &kipperv1.Function{
+		ObjectMeta: metav1.ObjectMeta{Name: "resize", Namespace: "media-test", UID: types.UID("uid-resize")},
+		Spec: kipperv1.FunctionSpec{
+			Image: "resizer:1", Port: 8080,
+			Triggers: []kipperv1.FunctionTrigger{{Type: "postgres", Config: map[string]string{"source": "db", "query": "SELECT 1"}}},
+		},
+	}
+	svc := &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: fn.Namespace, UID: types.UID("uid-db")},
+		Spec:       kipperv1.ServiceSpec{Type: "postgres"},
+	}
+	shared := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: secretname.ServiceCredentials("db"), Namespace: fn.Namespace,
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(svc, kipperv1.GroupVersion.WithKind("Service"))},
+		},
+		Data: map[string][]byte{
+			"HOST": []byte("db"), "PORT": []byte("5432"), "NAME": []byte("app"),
+			"USERNAME": []byte("kipper"), "PASSWORD": []byte("first-password"),
+		},
+	}
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(fn, svc, shared).Build()
+	r := &FunctionReconciler{Client: c, Scheme: scheme}
+
+	poller := func() corev1.Container {
+		t.Helper()
+		require.NoError(t, r.reconcileDeployment(ctx, fn, "", nil, "gen-1", renderedBindings{}))
+		var d appsv1.Deployment
+		require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: fn.Namespace, Name: fn.Name}, &d))
+		assert.NotContains(t, fmt.Sprintf("%+v", d.Spec.Template), "password", "the template must not carry the password")
+		for _, ct := range d.Spec.Template.Spec.Containers {
+			if ct.Name == "kipper-poll" {
+				return ct
+			}
+		}
+		t.Fatal("no kipper-poll container")
+		return corev1.Container{}
+	}
+
+	before := poller()
+	shared.Data["PASSWORD"] = []byte("second-password")
+	require.NoError(t, c.Update(ctx, shared))
+	after := poller()
+
+	assert.NotEqual(t, pollSourceName(t, before), pollSourceName(t, after),
+		"a running poller keeps the old password unless the template changes")
+	assert.Contains(t, pollSourceURL(t, c, fn, after), "second-password")
+}
+
+// After the poller's URL moves into a Secret, Deployment history still contains
+// literal URLs that project viewers can read. Cleanup removes scaled-down
+// ReplicaSets once all their pods have gone, allowing active rollouts to finish.
+func TestDropPollPasswordHistory_DeletesOnlyScaledDownLiteralHistory(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+
+	fn := &kipperv1.Function{ObjectMeta: metav1.ObjectMeta{Name: "resize", Namespace: "media-test", UID: types.UID("uid-resize")}}
+	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		Name: fn.Name, Namespace: fn.Namespace, UID: types.UID("uid-dep"),
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(fn, kipperv1.GroupVersion.WithKind("Function"))},
+	}}
+	other := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: fn.Namespace, UID: types.UID("uid-other")}}
+
+	zero, one := int32(0), int32(1)
+	literal := corev1.PodSpec{Containers: []corev1.Container{{
+		Name: "kipper-poll", Env: []corev1.EnvVar{{Name: pollSourceKey, Value: "postgres://kipper@db:5432/app"}},
+	}}}
+	referenced := corev1.PodSpec{Containers: []corev1.Container{{
+		Name: "kipper-poll", Env: []corev1.EnvVar{{Name: pollSourceKey, ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "function-resize-poll-source-0123456789ab"}, Key: pollSourceKey},
+		}}},
+	}}}
+	set := func(name string, owner *appsv1.Deployment, replicas *int32, running int32, spec corev1.PodSpec) *appsv1.ReplicaSet {
+		return &appsv1.ReplicaSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: fn.Namespace, UID: types.UID("uid-" + name),
+				Labels:          map[string]string{"app": owner.Name},
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(owner, appsv1.SchemeGroupVersion.WithKind("Deployment"))},
+			},
+			Spec:   appsv1.ReplicaSetSpec{Replicas: replicas, Template: corev1.PodTemplateSpec{Spec: spec}},
+			Status: appsv1.ReplicaSetStatus{Replicas: running},
+		}
+	}
+	retired := set("resize-old", dep, &zero, 0, literal)
+	draining := set("resize-draining", dep, &zero, 1, literal)
+	running := set("resize-running", dep, &one, 1, literal)
+	current := set("resize-current", dep, &zero, 0, referenced)
+	foreign := set("other-old", other, &zero, 0, literal)
+	// Model the gap where Status.Replicas excludes a terminating pod that still
+	// exists. Ownership must protect the ReplicaSet until the pod disappears.
+	terminating := set("resize-terminating", dep, &zero, 0, literal)
+	shuttingDown := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "resize-terminating-x", Namespace: fn.Namespace, Labels: map[string]string{"app": fn.Name},
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(terminating, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))},
+	}}
+
+	c := crfake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(fn, dep, other, retired, draining, running, current, foreign, terminating, shuttingDown).Build()
+	r := &FunctionReconciler{Client: c, Scheme: scheme}
+
+	retry := r.dropPollPasswordHistory(ctx, fn)
+
+	exists := func(name string) bool {
+		return c.Get(ctx, types.NamespacedName{Namespace: fn.Namespace, Name: name}, &appsv1.ReplicaSet{}) == nil
+	}
+	assert.False(t, exists(retired.Name), "scaled-down history holding the password must go")
+	assert.True(t, exists(draining.Name), "a ReplicaSet with pods left finishes its rollout first")
+	assert.True(t, exists(running.Name))
+	assert.True(t, exists(current.Name), "history that reads the Secret holds no password")
+	assert.True(t, exists(foreign.Name), "another Deployment's history is not this Function's to clear")
+	assert.True(t, exists(terminating.Name), "a set whose pod is still shutting down waits for it")
+	assert.Equal(t, pollHistoryRetry, retry, "nothing else brings the controller back when the last pod goes")
+
+	require.NoError(t, c.Delete(ctx, shuttingDown))
+	for _, rs := range []*appsv1.ReplicaSet{draining, running} {
+		require.NoError(t, c.Delete(ctx, rs))
+	}
+	assert.Zero(t, r.dropPollPasswordHistory(ctx, fn), "with the history gone there is nothing to come back for")
+	assert.False(t, exists(terminating.Name), "and the set whose pod finished is gone")
+}
+
+func TestDropPollPasswordHistory_LeavesADeploymentTheFunctionDoesNotControl(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+
+	fn := &kipperv1.Function{ObjectMeta: metav1.ObjectMeta{Name: "resize", Namespace: "media-test", UID: types.UID("uid-resize")}}
+	stranger := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: fn.Name, Namespace: fn.Namespace, UID: types.UID("uid-stranger")}}
+	zero := int32(0)
+	history := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "resize-old", Namespace: fn.Namespace, UID: types.UID("uid-resize-old"),
+			Labels:          map[string]string{"app": fn.Name},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(stranger, appsv1.SchemeGroupVersion.WithKind("Deployment"))},
+		},
+		Spec: appsv1.ReplicaSetSpec{Replicas: &zero, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "kipper-poll", Env: []corev1.EnvVar{{Name: pollSourceKey, Value: "postgres://kipper@db:5432/app"}},
+		}}}}},
+	}
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(fn, stranger, history).Build()
+	r := &FunctionReconciler{Client: c, Scheme: scheme}
+
+	assert.Zero(t, r.dropPollPasswordHistory(ctx, fn))
+	assert.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: fn.Namespace, Name: history.Name}, &appsv1.ReplicaSet{}))
+}
+
+// A Function switched to cron-only triggers runs as Jobs. Its earlier event
+// trigger's Deployment would otherwise retain its poller, source Secret and
+// any password stored directly in the template before the upgrade.
+func TestRemoveServingDeployment_DeletesOnlyTheFunctionsOwn(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+
+	fn := &kipperv1.Function{ObjectMeta: metav1.ObjectMeta{Name: "resize", Namespace: "media-test", UID: types.UID("uid-resize")}}
+	owned := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		Name: fn.Name, Namespace: fn.Namespace, UID: types.UID("uid-dep"),
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(fn, kipperv1.GroupVersion.WithKind("Function"))},
+	}}
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(fn, owned).Build()
+	r := &FunctionReconciler{Client: c, Scheme: scheme}
+
+	require.NoError(t, r.removeServingDeployment(ctx, fn))
+	err := c.Get(ctx, types.NamespacedName{Namespace: fn.Namespace, Name: fn.Name}, &appsv1.Deployment{})
+	assert.True(t, apierrors.IsNotFound(err), "the leftover Deployment must go: %v", err)
+	require.NoError(t, r.removeServingDeployment(ctx, fn), "nothing left to remove is not an error")
+
+	foreign := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: fn.Name, Namespace: fn.Namespace}}
+	require.NoError(t, c.Create(ctx, foreign))
+	require.NoError(t, r.removeServingDeployment(ctx, fn))
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: fn.Namespace, Name: fn.Name}, &appsv1.Deployment{}),
+		"a Deployment the Function does not control is left alone")
+}
+
+// The Function's own Deployment keeps its poller source current, just like its
+// published environment. Retirement marks and rescan timers are only needed
+// once those Secrets are no longer current.
+func TestRetireEnvSecrets_TreatsThePollSourceTheDeploymentReadsAsCurrent(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+
+	fn := &kipperv1.Function{ObjectMeta: metav1.ObjectMeta{Name: "resize", Namespace: "media-test", UID: types.UID("uid-resize")}}
+	immutable := true
+	source := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: secretname.PollSource(fn.Name, "0123456789ab"), Namespace: fn.Namespace,
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(fn, kipperv1.GroupVersion.WithKind("Function"))},
+		},
+		Immutable: &immutable,
+		Data:      map[string][]byte{pollSourceKey: []byte("redis://db:6379")},
+	}
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: fn.Name, Namespace: fn.Namespace,
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(fn, kipperv1.GroupVersion.WithKind("Function"))},
+		},
+		Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "kipper-poll", Env: []corev1.EnvVar{{Name: pollSourceKey, ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: source.Name}, Key: pollSourceKey},
+			}}},
+		}}}}},
+	}
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(fn, source, dep).Build()
+
+	wait, _, err := retireEnvSecrets(ctx, c, c, fn, secretname.KindFunction, "function-resize-env-current", nil)
+	require.NoError(t, err)
+	assert.Zero(t, wait, "a steady Function must not wake every hour for its own poller source")
+	var kept corev1.Secret
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: fn.Namespace, Name: source.Name}, &kept))
+	assert.Empty(t, kept.Annotations[unreferencedSinceAnnotation])
+}
+
+// An unreferenced source version follows the environment retirement rule:
+// mark it first, then delete it after the grace period. Retirement is independent
+// of trigger type, so switching a Function to cron-only triggers still allows
+// its old poller sources to be retired.
+func TestRetireEnvSecrets_RetiresAnUnreadPollSource(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+
+	fn := &kipperv1.Function{ObjectMeta: metav1.ObjectMeta{Name: "resize", Namespace: "media-test", UID: types.UID("uid-resize")}}
+	immutable := true
+	old := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: secretname.PollSource(fn.Name, "0123456789ab"), Namespace: fn.Namespace,
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(fn, kipperv1.GroupVersion.WithKind("Function"))},
+		},
+		Immutable: &immutable,
+		Data:      map[string][]byte{pollSourceKey: []byte("postgres://kipper:old@db:5432/app")},
+	}
+	read := old.DeepCopy()
+	read.Name = secretname.PollSource(fn.Name, "ba9876543210")
+	reader := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "resize-abc", Namespace: fn.Namespace},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "kipper-poll", Env: []corev1.EnvVar{{Name: pollSourceKey, ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: read.Name}, Key: pollSourceKey},
+			}}},
+		}}},
+	}
+	c := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(fn, old, read, reader).Build()
+
+	retire := func() {
+		t.Helper()
+		_, _, err := retireEnvSecrets(ctx, c, c, fn, secretname.KindFunction, "function-resize-env-current", nil)
+		require.NoError(t, err)
+	}
+	retire()
+	var marked corev1.Secret
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: fn.Namespace, Name: old.Name}, &marked))
+	require.NotEmpty(t, marked.Annotations[unreferencedSinceAnnotation], "an unread version is marked")
+	var kept corev1.Secret
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: fn.Namespace, Name: read.Name}, &kept))
+	assert.Empty(t, kept.Annotations[unreferencedSinceAnnotation], "a version a pod reads through a secretKeyRef is not marked")
+
+	marked.Annotations[unreferencedSinceAnnotation] = time.Now().Add(-2 * envRetirementGrace).UTC().Format(time.RFC3339Nano)
+	require.NoError(t, c.Update(ctx, &marked))
+	retire()
+
+	assert.False(t, secretExists(t, ctx, c, old.Name, fn.Namespace), "and deleted once the mark has matured")
+	assert.True(t, secretExists(t, ctx, c, read.Name, fn.Namespace), "a version a pod reads through a secretKeyRef stays")
+}
+
+func pollSourceName(t *testing.T, poller corev1.Container) string {
+	t.Helper()
+	for _, e := range poller.Env {
+		if e.Name == pollSourceKey {
+			require.NotNil(t, e.ValueFrom, "the source URL must come from a Secret")
+			require.NotNil(t, e.ValueFrom.SecretKeyRef)
+			return e.ValueFrom.SecretKeyRef.Name
+		}
+	}
+	t.Fatal("the poller has no source URL")
+	return ""
+}
+
+func pollSourceURL(t *testing.T, c crclient.Client, fn *kipperv1.Function, poller corev1.Container) string {
+	t.Helper()
+	var s corev1.Secret
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: fn.Namespace, Name: pollSourceName(t, poller)}, &s))
+	return string(s.Data[pollSourceKey])
 }
 
 // A held generation is a pod being pointed at an object again, so it is checked

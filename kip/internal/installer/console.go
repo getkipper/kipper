@@ -82,13 +82,14 @@ rules:
   - apiGroups: ["apps"]
     resources: ["daemonsets"]
     verbs: ["get", "list"]
-  # Read-only, and both for the same question: which pods a Deployment actually
-  # owns, and what still reads an environment before it is retired. A selector
-  # match is not ownership, and a template with no pod right now still produces
-  # one later.
+  # Reading ReplicaSets and ReplicationControllers identifies pod ownership
+  # and environment consumers before retirement. A selector match alone cannot
+  # establish ownership, and a template can create pods later even if none exist now.
+  # Deleting scaled-down ReplicaSets removes Function history whose templates
+  # still contain an event poller's password as a literal value.
   - apiGroups: ["apps"]
     resources: ["replicasets"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "delete"]
   - apiGroups: [""]
     resources: ["replicationcontrollers"]
     verbs: ["get", "list"]

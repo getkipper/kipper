@@ -47,6 +47,7 @@ func TestNames(t *testing.T) {
 		{Binding("db", KindApp, "api"), "db-app-api-credentials"},
 		{Binding("db", KindFunction, "api"), "db-function-api-credentials"},
 		{ServiceCredentials("db"), "db-credentials"},
+		{PollSource("resize", "0123456789ab"), "function-resize-poll-source-0123456789ab"},
 	}
 	for _, tc := range tests {
 		if tc.got != tc.want {

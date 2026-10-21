@@ -108,7 +108,7 @@ func (r *AppReconciler) hostReader() client.Reader {
 // +kubebuilder:rbac:groups=kipper.run,resources=apps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kipper.run,resources=apps/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list
+// +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;delete
 // +kubebuilder:rbac:groups=core,resources=replicationcontrollers,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete

@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/getkipper/kipper/controller/pkg/secretname"
@@ -51,17 +52,17 @@ const (
 	envRetirementGrace = time.Hour
 )
 
-// envConsumers is every Secret name something in this namespace still reads
-// through envFrom.
+// envConsumers returns Secret names referenced through envFrom or secretKeyRef
+// by workload templates and unfinished pods in the namespace.
 //
 // It scans templates rather than walking ownership, which is both simpler and
 // safer: a Job created by a CronJob is a Job like any other, so the
 // grandchildren that an ownership walk has to be taught about are already here.
-// A pod counts for as long as it exists, because a container restart re-reads
-// envFrom, and a pod that has finished cannot restart.
+// Unfinished pods count because a container restart re-reads its environment.
+// Completed pods cannot restart.
 //
-// The reads are authoritative. A cached list that has not caught up says exactly
-// what an empty one says, and only one of them means it.
+// The caller must supply an authoritative reader because a stale cached list
+// can incorrectly report that a Secret has no consumers.
 func envConsumers(ctx context.Context, reader client.Reader, namespace string) (map[string]bool, error) {
 	names := map[string]bool{}
 
@@ -70,6 +71,11 @@ func envConsumers(ctx context.Context, reader client.Reader, namespace string) (
 			for _, ef := range c.EnvFrom {
 				if ef.SecretRef != nil {
 					names[ef.SecretRef.Name] = true
+				}
+			}
+			for _, e := range c.Env {
+				if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+					names[e.ValueFrom.SecretKeyRef.Name] = true
 				}
 			}
 		}
@@ -173,6 +179,27 @@ func retireEnvSecrets(ctx context.Context, c client.Client, reader client.Reader
 
 	prefix := secretname.EnvGenerationPrefix(kind, owner.GetName())
 	legacy := secretname.Env(kind, owner.GetName())
+	pollPrefix := ""
+	// Poller source Secrets referenced by the Function's own Deployment are
+	// current, so they need no retirement rescan until that Deployment changes.
+	currentPoll := map[string]bool{}
+	if kind == secretname.KindFunction {
+		pollPrefix = secretname.PollSourcePrefix(owner.GetName())
+		var dep appsv1.Deployment
+		err := reader.Get(ctx, types.NamespacedName{Namespace: owner.GetNamespace(), Name: owner.GetName()}, &dep)
+		if err != nil && !errors.IsNotFound(err) {
+			return 0, 0, fmt.Errorf("reading deployment %s: %w", owner.GetName(), err)
+		}
+		if err == nil && metav1.IsControlledBy(&dep, owner) {
+			for _, c := range dep.Spec.Template.Spec.Containers {
+				for _, e := range c.Env {
+					if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+						currentPoll[e.ValueFrom.SecretKeyRef.Name] = true
+					}
+				}
+			}
+		}
+	}
 
 	var soonest time.Duration
 	var doomed []*corev1.Secret
@@ -182,15 +209,17 @@ func retireEnvSecrets(ctx context.Context, c client.Client, reader client.Reader
 
 	for i := range mine.Items {
 		s := &mine.Items[i]
-		// Three kinds of object retire under one rule. A generation, the
-		// pre-generation env Secret now that nothing recreates it, and a derived
-		// credential projection whose binding has gone. A second rule for the
-		// third would drift from this one, and the drifted one would be wrong.
+		// Use the same retirement safeguards for environment generations, legacy
+		// environment Secrets that are no longer recreated, credential projections
+		// whose bindings were removed, and superseded poller sources. Separate
+		// rules could drift and leave one kind without those safeguards.
 		var mine, preGeneration bool
 		switch {
 		case s.Name == legacy:
 			mine, preGeneration = metav1.IsControlledBy(s, owner), true
 		case strings.HasPrefix(s.Name, prefix):
+			mine = metav1.IsControlledBy(s, owner)
+		case pollPrefix != "" && strings.HasPrefix(s.Name, pollPrefix):
 			mine = metav1.IsControlledBy(s, owner)
 		case s.Labels[derivedBindingLabel] == "true" && !keepProjections[s.Name]:
 			// derivedSecretBelongsTo rather than a controller check, because a
@@ -210,7 +239,8 @@ func retireEnvSecrets(ctx context.Context, c client.Client, reader client.Reader
 		// any other. Skipping it entirely would leave a mark from before a
 		// rollback lying on the environment the rollback moved back to, and the
 		// next roll-forward would delete it with no grace at all.
-		if s.Name == current || consumers[s.Name] {
+		isCurrent := s.Name == current || currentPoll[s.Name]
+		if isCurrent || consumers[s.Name] {
 			// Only objects from before the move count. A retained ReplicaSet
 			// naming the generation it rolled off is ordinary deployment
 			// history, and counting it would leave the gate permanently open.
@@ -220,11 +250,10 @@ func retireEnvSecrets(ctx context.Context, c client.Client, reader client.Reader
 			if err := clearUnreferencedMark(ctx, c, s); err != nil {
 				return 0, 0, err
 			}
-			// Something outside this workload holds it open, and nothing brings
-			// this controller back when that goes away. current is the
-			// exception: it is this workload's own, and the next pass to change
-			// it is what supersedes it.
-			if s.Name != current && (soonest == 0 || envRetirementRescan < soonest) {
+			// A remaining consumer may disappear without triggering reconciliation,
+			// so schedule a rescan. The current environment and poller sources are
+			// superseded by this workload's own reconciliation and need no timer.
+			if !isCurrent && (soonest == 0 || envRetirementRescan < soonest) {
 				soonest = envRetirementRescan
 			}
 			continue
