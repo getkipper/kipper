@@ -32,8 +32,10 @@ confirm. Pass --yes to skip the prompt for automation.
 
 On a host whose firewall kip manages, the rules kip added are removed:
 ports 80, 443 and 6443, pod access to the kubelet and node-exporter, and
-the rules for the cluster's other nodes. The firewall stays running or stopped,
-with SSH allowed. Rules you added stay, except copies of kip's own rules and
+the rules for the cluster's other nodes. The operator tunnel's UDP port
+is scheduled to close about ten seconds after its host is wiped, giving an
+uninstall session through the tunnel time to finish. The firewall stays running
+or stopped, with SSH allowed. Rules you added stay, except copies of kip's own rules and
 anything inside the firewalld zones and policies kip created. A later kip install
 adds kip's rules again. OS hardening, such as disabling rpcbind, remains in place.
 
