@@ -551,10 +551,22 @@ func runClusterAccessDeviceAdd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer s.close()
+	defer func() { s.close() }()
 	rec, err := s.c.enroll(req)
 	if err != nil {
 		return err
+	}
+	// A session opened before enrolment may use direct connections, which
+	// removing this workstation's addresses would close.
+	s.c.throughTunnel = func() (*accessCluster, error) {
+		s.close()
+		transport.Override = transport.Tunnel
+		t, err := openAccessSession(cmd, "device add", false)
+		if err != nil {
+			return nil, err
+		}
+		s = t
+		return t.c, nil
 	}
 	interactive := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) //nolint:gosec // file descriptors fit an int
 	return s.c.offerDeviceOnly(rec, deviceOnly, os.Stdin, interactive)
@@ -695,7 +707,8 @@ func (c *accessCluster) prepareOps() (map[string]string, error) {
 
 // offerDeviceOnly empties the address list only when all its entries are
 // this workstation's 'allow --here' prefixes. It requires deviceOnly or an
-// affirmative answer read from in when interactive is true.
+// affirmative answer read from in when interactive is true. If throughTunnel
+// is set, it opens the session used for the change.
 func (c *accessCluster) offerDeviceOnly(rec installer.AccessRecord, deviceOnly bool, in io.Reader, interactive bool) error {
 	if len(rec.Sources) == 0 {
 		say(c.out, "  ✔  The access list is empty, so SSH and the API already accept only registered devices\n\n")
@@ -739,7 +752,15 @@ func (c *accessCluster) offerDeviceOnly(rec installer.AccessRecord, deviceOnly b
 			return nil
 		}
 	}
-	if err := c.change("revoke", revokeEdit(own), false); err != nil {
+	d := c
+	if c.throughTunnel != nil {
+		say(c.out, "  ...  Continuing through the tunnel\n")
+		var err error
+		if d, err = c.throughTunnel(); err != nil {
+			return fmt.Errorf("the device is active. kip could not open a session through the tunnel (%w), so the access list is unchanged. Run 'kip cluster access revoke %s' once 'kip cluster access show' reaches every node", err, strings.Join(own, " "))
+		}
+	}
+	if err := d.change("revoke", revokeEdit(own), false); err != nil {
 		return err
 	}
 	say(c.out, "  ✔  SSH and the API now accept only registered devices. From unlisted networks the tunnel on UDP %d is the only way in\n\n", rec.Ops.Port)

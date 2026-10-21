@@ -223,9 +223,21 @@ func clusterProvider(cluster *config.Cluster, host, explicitKey, fallbackKey str
 // dialNodeSSH connects to the cluster node at host, through this
 // workstation's device tunnel when the command uses it.
 func dialNodeSSH(host, flagValue string, cluster *config.Cluster) (*ssh.Client, error) {
+	conn, _, err := dialNode(host, flagValue, cluster)
+	return conn, err
+}
+
+// dialNode connects to host using the selected transport and reports whether
+// the SSH configuration uses the device tunnel, even if the dial fails.
+func dialNode(host, flagValue string, cluster *config.Cluster) (*ssh.Client, bool, error) {
 	cfg, err := nodeSSH(host, flagValue, cluster)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return ssh.Dial(cfg)
+	tunnel := false
+	for _, o := range cfg.Options {
+		tunnel = tunnel || strings.HasPrefix(o, "ProxyCommand=")
+	}
+	conn, err := ssh.Dial(cfg)
+	return conn, tunnel, err
 }

@@ -63,6 +63,9 @@ func newDeviceFixture(t *testing.T, state string, observed map[string]string) *d
 	f.c.cluster = f.cluster
 	f.c.device = &localDevice{name: "laptop", address: netip.MustParseAddr("10.99.0.129"), public: public, state: state}
 	f.c.useTunnel = state == config.OpsActive
+	for i := range f.c.nodes {
+		f.c.nodes[i].tunnel = f.c.useTunnel
+	}
 	f.c.tunnel = func(accessNode) (installer.AddressObserver, error) {
 		return observeFunc(func(string) (string, error) {
 			if f.tunnelErr != nil {
@@ -1002,4 +1005,58 @@ func TestApplyGivesANodeMissingFromTheOpsStateItsInterface(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, testWorkerKey, on.PublicKey)
 	assert.Len(t, f.opsCalls, 2, "both interfaces are loaded")
+}
+
+func TestDeviceOnlyRunsTheChangeThroughTheTunnel(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	rec := f.deviceRecord(t, "198.51.100.7/32")
+	f.c.lastBaselines = map[string]accessBaseline{accessServerID: {observed: map[string]netip.Addr{"4": netip.MustParseAddr("198.51.100.7")}}}
+	opened := 0
+	f.c.throughTunnel = func() (*accessCluster, error) {
+		opened++
+		return f.c, nil
+	}
+
+	require.NoError(t, f.c.offerDeviceOnly(rec, true, nil, false))
+
+	assert.Equal(t, 1, opened)
+	assert.Empty(t, f.server.stored(t).Sources)
+}
+
+func TestDeviceOnlyKeepsTheListWhenTheTunnelSessionFails(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	rec := f.deviceRecord(t, "198.51.100.7/32")
+	f.c.lastBaselines = map[string]accessBaseline{accessServerID: {observed: map[string]netip.Addr{"4": netip.MustParseAddr("198.51.100.7")}}}
+	f.c.throughTunnel = func() (*accessCluster, error) { return nil, errors.New("the tunnel did not come up") }
+
+	err := f.c.offerDeviceOnly(rec, true, nil, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kip cluster access revoke 198.51.100.7/32")
+	assert.Empty(t, f.server.writes)
+}
+
+func TestRevokeRefusesToCloseTheDirectPathItsSessionUses(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	f.deviceRecord(t, "198.51.100.7/32")
+	f.c.nodes[0].tunnel = false
+
+	err := f.c.change("revoke", revokeEdit([]string{"198.51.100.7/32"}), false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "connected to server directly")
+	assert.Empty(t, f.server.writes)
+	assert.Empty(t, f.applied)
+}
+
+func TestRevokeOfOneFamilyRefusesWhileTheSessionIsDirect(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7", "6": "2001:db8:1:2::9"})
+	f.deviceRecord(t, "198.51.100.7/32", "2001:db8:1:2::/64")
+	f.c.nodes[0].tunnel = false
+
+	err := f.c.change("revoke", revokeEdit([]string{"2001:db8:1:2::/64"}), false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "connected to server directly", "the session may run over the family the change closes")
+	assert.Empty(t, f.server.writes)
 }
