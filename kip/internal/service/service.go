@@ -809,7 +809,7 @@ func (c *ConnectionInfo) formatURL(urlFormat, svcType string) string {
 		return fmt.Sprintf(urlFormat, c.Username, c.Password, c.Host, c.Port, c.Database)
 	case "rabbitmq":
 		return fmt.Sprintf(urlFormat, c.Username, c.Password, c.Host, c.Port)
-	case "redis", "opensearch":
+	case "redis", "opensearch", "mailhog":
 		return fmt.Sprintf(urlFormat, c.Host, c.Port)
 	case "minio":
 		// S3 clients use a plain endpoint URL and separate credentials.

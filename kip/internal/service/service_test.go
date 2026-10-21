@@ -788,3 +788,10 @@ func TestMaskedHidesThePasswordInEveryField(t *testing.T) {
 	open := ConnectionInfo{Type: "redis", Host: "cache", Port: 6379}
 	assert.Equal(t, open, open.Masked(), "nothing to hide without a password")
 }
+
+func TestEveryCatalogServiceHasAConnectionURL(t *testing.T) {
+	for name, spec := range catalog {
+		conn := ConnectionInfo{Type: name, Host: "svc", Port: spec.Port, Username: "app", Password: "pw", Database: "app"}
+		assert.NotEmpty(t, conn.formatURL(spec.URLFormat, name), name)
+	}
+}
