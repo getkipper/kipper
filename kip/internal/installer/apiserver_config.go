@@ -3,6 +3,7 @@ package installer
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -218,11 +219,37 @@ func (f fencedRunner) fence(command string) string {
 }
 
 func (f fencedRunner) Run(command string) (string, error) {
-	return f.base.Run(f.fence(command))
+	fenced := f.fence(command)
+	out, err := f.base.Run(fenced)
+	return out, fencedError(fenced, command, err)
 }
 
 func (f fencedRunner) RunStdin(command string, stdin io.Reader) (string, error) {
-	return f.base.RunStdin(f.fence(command), stdin)
+	fenced := f.fence(command)
+	out, err := f.base.RunStdin(fenced, stdin)
+	return out, fencedError(fenced, command, err)
+}
+
+// commandError names the requested command without the lock wrapper and its owner
+// token. For wrapped runner errors, it exposes the same cause so withoutOutput
+// can still discard the command.
+type commandError struct {
+	message string
+	err     error
+}
+
+func (e commandError) Error() string { return e.message }
+func (e commandError) Unwrap() error { return e.err }
+
+func fencedError(fenced, command string, err error) error {
+	if err == nil {
+		return nil
+	}
+	cause := errors.Unwrap(err)
+	if cause == nil {
+		cause = err
+	}
+	return commandError{message: strings.Replace(err.Error(), strconv.Quote(fenced), strconv.Quote(command), 1), err: cause}
 }
 
 // pendingWriteIsUnchanged reports whether the config matches the pending checksum.
