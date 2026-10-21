@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/netip"
 	"net/url"
@@ -82,7 +83,8 @@ var clusterAccessDeviceRepinCmd = &cobra.Command{
 	Short: "Trust a node's new WireGuard key after its host was reinstalled",
 	Long: `kip pins each node's WireGuard key like an SSH host key and refuses a node
 whose key changed. After a legitimate reinstall, repin reads the node's key
-again over a direct SSH connection and trusts it.`,
+again over a direct SSH connection, trusts it and records it in the access
+record. Then run repin for that node on every other workstation with a device.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runClusterAccessDeviceRepin,
@@ -107,7 +109,9 @@ type localDevice struct {
 }
 
 // loadLocalDevice returns the cluster's pending or active local device, or nil
-// for any other state. An unreadable or invalid key file returns an error.
+// for any other state. A missing or invalid key file marks the device stale
+// and returns nil, so kip continues over the direct path. Path resolution,
+// other read failures and failures to save the stale state return an error.
 func loadLocalDevice(cluster *config.Cluster) (*localDevice, error) {
 	ops := cluster.Ops
 	if ops == nil || (ops.State != config.OpsActive && ops.State != config.OpsPending) {
@@ -118,15 +122,30 @@ func loadLocalDevice(cluster *config.Cluster) (*localDevice, error) {
 		return nil, err
 	}
 	raw, err := os.ReadFile(path) //nolint:gosec // kip's own key file for this cluster
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, loseLocalDevice(cluster, fmt.Sprintf("its key %s is missing", path))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("reading the device key: %w", err)
 	}
 	pub, err := devicePublicKey(strings.TrimSpace(string(raw)))
 	if err != nil {
-		return nil, fmt.Errorf("the device key in %s: %w", path, err)
+		return nil, loseLocalDevice(cluster, fmt.Sprintf("its key %s is not a valid key (%v)", path, err))
 	}
 	addr, _ := netip.ParseAddr(ops.Address)
 	return &localDevice{name: ops.Device, address: addr, public: pub, state: ops.State}, nil
+}
+
+// loseLocalDevice marks this workstation's device stale because its key cannot
+// be used, and tells the operator how to retire it.
+func loseLocalDevice(cluster *config.Cluster, why string) error {
+	say(os.Stderr, "  ⚠  This workstation cannot use its device %s because %s. kip continues over the direct path. Remove the device with 'kip cluster access device remove %s' from a listed address, then add it again\n", cluster.Ops.Device, why, cluster.Ops.Device)
+	return updateLocalOps(cluster, func(o *config.Ops) *config.Ops {
+		if o != nil {
+			o.State = config.OpsStale
+		}
+		return o
+	})
 }
 
 // newDeviceKey returns a fresh WireGuard private key, clamped as wg genkey
@@ -229,7 +248,7 @@ func manifestFor(cluster *config.Cluster, ops *installer.AccessOps, records []in
 		}
 		k, ok := known[r.MachineID]
 		if ok && k.PublicKey != on.PublicKey {
-			return nil, fmt.Errorf("the WireGuard key of %s changed. If its host was reinstalled, trust the new key with 'kip cluster access device repin %s'", r.Name, r.Name)
+			return nil, fmt.Errorf("the WireGuard key of %s changed. If its host was reinstalled or the cluster's devices were reset, trust the new key with 'kip cluster access device repin %s'", r.Name, r.Name)
 		}
 		out = append(out, config.OpsNode{
 			MachineID: r.MachineID, Name: r.Name, Host: r.Host,
@@ -239,20 +258,35 @@ func manifestFor(cluster *config.Cluster, ops *installer.AccessOps, records []in
 		})
 		if p, ok := ports[r.MachineID]; ok {
 			out[len(out)-1].SSHPorts = p
+		} else if len(k.SSHPorts) == 0 {
+			// Match the direct path's default until an access change reads
+			// the node's SSH ports.
+			out[len(out)-1].SSHPorts = []int{22}
 		}
 	}
 	return out, nil
 }
 
-// refreshManifest writes the local node manifest for next, when this
-// workstation holds a device.
+// refreshManifest writes the local node manifest for next, when next still
+// lists this workstation's device. A pinned key that changed is an error,
+// except in a direct session with an active device, where kip warns and keeps
+// the old pins.
 func (c *accessCluster) refreshManifest(next installer.AccessRecord, ports map[string][]int) error {
 	if c.device == nil || next.Ops == nil || c.cluster == nil {
 		return nil
 	}
+	if _, ok := next.DeviceByKey(c.device.public); !ok {
+		return nil
+	}
 	nodes, err := manifestFor(c.cluster, next.Ops, c.records, ports)
 	if err != nil {
-		return err
+		// Keeping the WireGuard pins allows direct recovery, such as
+		// removing a stolen device, without trusting a changed key.
+		if c.useTunnel || c.device.state != config.OpsActive {
+			return err
+		}
+		say(c.out, "  ⚠  %v. kip keeps the old node list and continues over the direct path\n", err)
+		return nil
 	}
 	return updateLocalOps(c.cluster, func(o *config.Ops) *config.Ops {
 		if o == nil {
@@ -261,6 +295,26 @@ func (c *accessCluster) refreshManifest(next installer.AccessRecord, ports map[s
 		o.Nodes = nodes
 		return o
 	})
+}
+
+// syncManifest refreshes the local node manifest from the server's access
+// record, so that nodes another workstation added become reachable through
+// the tunnel. An active device the record no longer lists is marked stale first.
+// Pinned keys stay pinned, as refreshManifest describes. Without a recorded
+// server node it leaves the manifest alone.
+func (c *accessCluster) syncManifest() error {
+	if srv, ok := installer.ServerRecord(c.records); !ok || srv.MachineID == "" {
+		return nil
+	}
+	rec, present, err := installer.ReadAccessRecord(c.server)
+	if err != nil {
+		return err
+	}
+	c.checkStaleDevice(rec, present)
+	if !present {
+		return nil
+	}
+	return c.refreshManifest(rec, nil)
 }
 
 // checkStaleDevice marks the local device stale when a successfully read
@@ -564,8 +618,10 @@ func (c *accessCluster) enroll(req deviceRequest) (installer.AccessRecord, error
 		return rec, err
 	}
 	if err := updateLocalOps(cluster, func(o *config.Ops) *config.Ops {
+		// Pins from an earlier device describe node keys that a reset or
+		// another workstation's enrollment may have replaced since.
 		keep := []config.OpsNode(nil)
-		if o != nil {
+		if o != nil && o.State == config.OpsPending {
 			keep = o.Nodes
 		}
 		return &config.Ops{Device: req.name, State: config.OpsPending, APIHost: req.apiHost, Nodes: keep}
@@ -675,9 +731,11 @@ func (c *accessCluster) checkOpsRange(r string, rec installer.AccessRecord) erro
 	}
 	nets := map[string][]netip.Prefix{}
 	c.defaults()
-	if pod, err := c.pod(); err == nil {
-		nets["the pod network"] = []netip.Prefix{pod}
+	pod, err := c.pod()
+	if err != nil {
+		return err
 	}
+	nets["the pod network"] = []netip.Prefix{pod}
 	service, err := c.service()
 	if err != nil {
 		return err
@@ -760,25 +818,35 @@ func runClusterAccessDeviceRemove(cmd *cobra.Command, args []string) error {
 	return s.c.removeDevice(name, local)
 }
 
-// removeDevice removes device name from every node, and forgets this
-// workstation's key when local is that device. A local device the record no
-// longer lists is only forgotten.
+// removeDevice removes device name from every node and forgets this
+// workstation's key when local is that device. It reapplies an existing record
+// to finish a previous removal. If the record is absent and local is the
+// requested device, it only forgets that local device.
 func (c *accessCluster) removeDevice(name string, local *localDevice) error {
 	own := local != nil && local.name == name
-	if own {
-		rec, _, err := installer.ReadAccessRecord(c.server)
-		if err != nil {
+	rec, present, err := installer.ReadAccessRecord(c.server)
+	if err != nil {
+		return err
+	}
+	if own && !present {
+		if err := forgetLocalDevice(c.cluster); err != nil {
 			return err
 		}
-		if _, ok := rec.DeviceByKey(local.public); !ok {
-			if err := forgetLocalDevice(c.cluster); err != nil {
-				return err
-			}
-			say(c.out, "  ✔  The cluster no longer lists device %s, so kip removed only this workstation's key\n\n", name)
-			return nil
-		}
+		say(c.out, "  ✔  The cluster has no access record, so kip removed only this workstation's key\n\n")
+		return nil
 	}
-	if err := c.change("device-removed", removeDeviceEdit(name), false); err != nil {
+	_, listed := rec.Device(name)
+	if own {
+		_, listed = rec.DeviceByKey(local.public)
+	}
+	action, edit := "device-removed", removeDeviceEdit(name)
+	if !listed && (own || removedEarlier(rec, name)) {
+		// A removal that stopped after writing the record leaves the device
+		// loaded on the nodes it had not reached, so load the record everywhere.
+		say(c.out, "  ...  The cluster no longer lists device %s. Loading the record on every node so that none still admits it\n", name)
+		action, edit = "apply", nil
+	}
+	if err := c.change(action, edit, false); err != nil {
 		return err
 	}
 	if own {
@@ -845,7 +913,37 @@ func runClusterAccessDeviceRepin(cmd *cobra.Command, args []string) error {
 	} else {
 		say(cmd.OutOrStdout(), "  ✔  %s's WireGuard key is the pinned one\n", name)
 	}
-	return nil
+	s, err := openAccessSession(cmd, "device repin", false)
+	if err != nil {
+		return err
+	}
+	defer s.close()
+	return s.c.recordNodeKey(node.MachineID, name, key)
+}
+
+// recordNodeKey makes key, which this workstation read from the node
+// directly, the recorded WireGuard key of the node with machineID. Other
+// workstations then refuse the node until they repin it too.
+func (c *accessCluster) recordNodeKey(machineID, name, key string) error {
+	rec, present, err := installer.ReadAccessRecord(c.server)
+	if err != nil || !present || rec.Ops == nil {
+		return err
+	}
+	if on, ok := rec.Ops.Node(machineID); !ok || on.PublicKey == key {
+		return nil
+	}
+	return c.change("repin", func(rec installer.AccessRecord, _ map[string]netip.Addr) (installer.AccessRecord, []string, error) {
+		ops := *rec.Ops
+		ops.Nodes = append([]installer.AccessOpsNode(nil), rec.Ops.Nodes...)
+		for i := range ops.Nodes {
+			if ops.Nodes[i].MachineID == machineID {
+				ops.Nodes[i].PublicKey = key
+			}
+		}
+		next := rec
+		next.Ops = &ops
+		return next, []string{name}, nil
+	}, false)
 }
 
 // addDeviceEdit records each node's operator address and its key from keys,
@@ -926,12 +1024,22 @@ func (c *accessCluster) activateDevice(name, public string) (installer.AccessRec
 	return rec, nil
 }
 
-// removeDeviceEdit removes the device name, and refuses to remove the last
+// removedEarlier reports whether rec's history records a removal of device name.
+func removedEarlier(rec installer.AccessRecord, name string) bool {
+	for _, h := range rec.History {
+		if h.Action == "device-removed" && h.Device == name {
+			return true
+		}
+	}
+	return false
+}
+
+// removeDeviceEdit removes the device name and refuses to remove the last
 // active device while the address list is empty.
 func removeDeviceEdit(name string) accessEdit {
 	return func(rec installer.AccessRecord, _ map[string]netip.Addr) (installer.AccessRecord, []string, error) {
 		if _, ok := rec.Device(name); !ok {
-			return rec, nil, fmt.Errorf("the cluster has no device called %s. 'kip cluster access device list' shows them", name)
+			return rec, nil, fmt.Errorf("the cluster has no device called %s. 'kip cluster access device list' shows them, and 'kip cluster access apply' finishes a removal that stopped part way", name)
 		}
 		next := rec
 		next.Devices = nil

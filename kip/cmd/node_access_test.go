@@ -444,14 +444,14 @@ func TestReportAccessGuardCountsRegisteredDevices(t *testing.T) {
 	var out bytes.Buffer
 
 	host := &heldHost{gen: 4, operators: "198.51.100.0/24",
-		ops: "dir=1\ntable=1\n" + strings.Repeat("rule=input\n", 6) + "hook=input input\n" + strings.Repeat("rule=forward\n", 2) + "hook=forward forward\nrule=raw\nhook=raw prerouting\n" +
+		ops: "dir=1\nenabled=1\ntable=1\ntablesum=abc\nloadedsum=abc\n" + strings.Repeat("rule=input\n", 6) + "hook=input input\n" + strings.Repeat("rule=forward\n", 2) + "hook=forward forward\nrule=raw\nhook=raw prerouting\n" +
 			"up=1\nmtu=1380\nroute=10.99.0.128/25\nkey=" + testNodeKey + "\nport=443\naddress=10.99.0.1/32\npeer=" + testWorkerKey + "\t10.99.0.129/32\n"}
 
 	reportAccessGuard(&out, server, host)
 
 	assert.Contains(t, out.String(), "✔  restricted to one source and one device (generation 4)")
 	assert.NotContains(t, out.String(), "the list has one entry", "a registered device is a second way in")
-	assert.NotContains(t, out.String(), "operator interface")
+	assert.NotContains(t, out.String(), "⚠")
 
 	out.Reset()
 	host.ops = "dir=1\n"

@@ -33,7 +33,7 @@ func stateRecord() AccessRecord {
 
 // matchingState is a node whose interface matches stateRecord.
 func matchingState() OpsHostState {
-	return OpsHostState{Dir: true, Table: true, Up: true, PublicKey: stateNodeKey, Port: 443, Address: "10.99.0.1/32",
+	return OpsHostState{Dir: true, Enabled: true, Table: true, Up: true, PublicKey: stateNodeKey, Port: 443, Address: "10.99.0.1/32",
 		MTU: opsMTU, Routes: []string{"10.99.0.128/25"}, Chains: renderedOpsChains(), TableSum: "abc", LoadedSum: "abc",
 		Peers: map[string]string{stateDeviceKey: "10.99.0.129/32", stateOtherKey: "10.99.0.130/32"}}
 }
@@ -83,6 +83,16 @@ func TestOpsDriftNamesEachDifference(t *testing.T) {
 		`device laptop is loaded with allowed IPs "10.99.0.0/24", not 10.99.0.129/32`,
 		"device desktop (pending) is not loaded",
 		"peer dW5yZWNvcmRlZHVucmVjb3JkZWR1bnJlY29yZGVkMTI= is loaded but not recorded. Run 'kip cluster access apply'",
+	}, OpsDrift(st, stateRecord(), "m-1"))
+}
+
+func TestOpsDriftNoticesWhatARebootWouldLose(t *testing.T) {
+	st := matchingState()
+	st.Enabled, st.Missing = false, []string{"peers.conf"}
+
+	assert.Equal(t, []string{
+		"kipper-ops.service is not enabled, so the operator interface would not come back after a reboot. Run 'kip cluster access apply'",
+		"/etc/kipper/ops/peers.conf, which the interface loads at boot, is missing or empty. Run 'kip cluster access apply'",
 	}, OpsDrift(st, stateRecord(), "m-1"))
 }
 

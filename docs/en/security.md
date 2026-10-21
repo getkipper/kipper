@@ -207,7 +207,7 @@ The first `device add` installs `wireguard-tools` on every node, creates a key o
 
 With an active device the access list may be empty. SSH and the API then take new connections from outside the cluster only through registered devices, and from an unlisted network the tunnel is the only way in. Connections that are already open, loopback and the cluster's own nodes, including one that is joining, are still admitted, as with any access list. `--device-only` empties the list after the device is active, and only when the list holds nothing but this workstation's own address. In a terminal, `device add` asks. A change is still checked before it is kept: kip refuses one that would leave neither the tunnel nor a listed address working for both SSH and the API.
 
-With `via auto`, the default, kip uses the tunnel and falls back to the direct path when the tunnel does not come up within 10 seconds, for example on a network that blocks UDP. `--via` sets the path for one command. The interface on each node accepts SSH, the API, ping and ICMP errors from the device range, which includes a pending device while kip checks it. It drops everything else, forwards nothing and reaches no other host or pod.
+With `via auto`, the default, kip uses the tunnel and falls back to the direct path when the tunnel does not come up within 10 seconds, for example on a network that blocks UDP. `--via` sets the path for one command. The interface on each node accepts SSH, the API, ping and ICMP errors from the device range, which includes a pending device while kip checks it. It drops everything else, forwards nothing and reaches no other host or pod. Those rules are in a separate `kipper_ops` table. Flushing a node's ruleset with `nft flush ruleset`, or starting Debian's `nftables.service` with a configuration that flushes the ruleset, removes both this table and the access table while the interface stays up. `kip cluster access show` reports both, and `kip cluster access apply` or a reboot loads them again.
 
 **Other tools**
 
@@ -221,7 +221,7 @@ kip cluster access kubeconfig                       # a <context>-tunnel context
 
 **A lost or stolen device**
 
-Remove it from another device or a listed address with `kip cluster access device remove <name>`. When no other way in is left, revoke the device from the provider's console on every node, then allow a recovery address:
+Remove it from another device or a listed address with `kip cluster access device remove <name>`. `device remove` requires every node to be reachable when it starts. It saves the removal in the access record first, then removes the device from each node. A node that becomes unreachable before its update keeps the device until `kip cluster access apply` reaches it. If a node is unreachable, revoke the device on the other nodes from the provider console as described below. Remove a permanently lost node with `kip node remove <node> --force`. When no other way in is left, revoke the device from the provider's console on every node, then allow a recovery address:
 
 ```bash
 sh /etc/kipper/ops/ops.sh revoke-device laptop     # on every node, from the console
@@ -230,11 +230,19 @@ nft add element inet kipper_access admin4 { 198.51.100.9 }
 
 From that address, `kip cluster access allow --here --via direct` records it, and `kip cluster access device remove laptop --via direct` removes the device for good. kip refuses every other change, and `kip node add`, while a node has revoked a device the record still lists, because a new node would otherwise admit it again.
 
+When this workstation's device key file is missing or damaged, the next `kip cluster access` command warns, stops using the device and continues over the direct path. Remove the device from a listed address and add it again.
+
 **Reboot, reset and uninstall**
 
-`kipper-ops.service` loads the interface at boot. `kip status` and `kip cluster access show` compare each node's interface, port, address and loaded devices with the record, and its `kipper_ops` table with the one kip loaded. `kip cluster access reset` opens SSH and the API, then checks that every node answers a direct SSH connection and that the API answers directly. Only then does it remove the interfaces and the record over a new direct session and forget this workstation's device. When a node or the API does not answer directly, the tunnel stays and a rerun finishes the reset. `kip cluster uninstall` removes the interface, its table, the UFW rule and `/etc/kipper/ops/` from every host it wipes.
+`kipper-ops.service` loads the interface at boot. `kip status` and `kip cluster access show` compare each node's interface, port, address and loaded devices with the record, and its `kipper_ops` table with the one kip loaded. They also check that `kipper-ops.service` is enabled and its files are in place, so that the interface comes back after a reboot. `show` also updates this workstation's list of nodes, so a node added from another workstation becomes reachable through the tunnel. A reinstalled node gets a new WireGuard key, and kip refuses that node until `kip cluster access device repin <node>` reads the new key over a direct connection and records it. Then run `repin` for that node on every other workstation with a device. `kip cluster access reset` opens SSH and the API, then checks that every node answers a direct SSH connection and that the API answers directly. Only then does it remove the interfaces and the record over a new direct session and forget this workstation's device. When a node or the API does not answer directly, the tunnel stays and a rerun finishes the reset. Removing the last device leaves the interfaces and the UDP port in place on every node, ready for the next device. Use `reset` to remove them. `kip cluster uninstall` attempts to disable `kipper-ops.service` immediately on every host it wipes and schedules removal of the interface, its table, the UFW rule and `/etc/kipper/ops/` about ten seconds later. This lets uninstall finish over the tunnel first. If the scheduled removal fails after the service has been disabled, the interface remains until the next reboot.
 
-`kip node add` gives the new node its interface. On a cluster whose list is empty, the new node is reached directly while it joins, so list your workstation's address for the duration of the join.
+`kip node add` gives the new node its interface. On a cluster whose list is empty, the new node is reached directly while it joins, so list your workstation's address for the duration of the join. When connected through the tunnel, kip cannot see your workstation's public address, so `allow --here` fails. Specify the address explicitly:
+
+```bash
+kip cluster access allow 203.0.113.5/32    # this workstation's public address
+kip node add 192.0.2.20
+kip cluster access revoke 203.0.113.5/32
+```
 
 ### Security headers
 

@@ -123,6 +123,22 @@ func TestConfigureUFWProtectsEverySSHPortOnAWorker(t *testing.T) {
 	assert.Contains(t, err.Error(), "SSH port 443")
 }
 
+func TestConfigureUFWKeepsTheOperatorTunnelPort(t *testing.T) {
+	delay := ufwRetryDelay
+	ufwRetryDelay = 0
+	t.Cleanup(func() { ufwRetryDelay = delay })
+	ufw := &routedRunner{routes: []route{
+		{contains: "command -v ufw", out: "present\n"},
+		{contains: "sshd -T", out: "22\n"},
+		{contains: "/etc/kipper/ops/peers.conf", out: "443\n"},
+		{contains: "ufw show added", out: "ufw allow 22/tcp\n"},
+		{contains: "-N ufw-user-input", out: "absent\n"},
+		{contains: "-S ufw-user-input", out: "-A ufw-user-input -p tcp --dport 22 -j ACCEPT\n"},
+	}}
+	require.NoError(t, configureFirewall(ufw, HostOS{ID: "ubuntu", Family: FamilyDebian}, false, FirewallMesh{Role: RoleWorker}))
+	assert.True(t, ufw.ran("ufw allow 443/udp comment kipper-ops"), "a firewall change keeps the devices' tunnel open")
+}
+
 func TestUFWPeerRulesMissingReadsTheLiveChain(t *testing.T) {
 	chain := `-N ufw-user-input
 -A ufw-user-input -s 192.0.2.10/32 -p udp -m udp --dport 51820 -j ACCEPT

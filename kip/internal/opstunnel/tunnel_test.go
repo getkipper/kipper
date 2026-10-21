@@ -207,3 +207,37 @@ func TestReloadReplacesTheNodes(t *testing.T) {
 	_, ok = tun.Node("m-2")
 	assert.True(t, ok, "a refused manifest leaves the nodes as they were")
 }
+
+func TestReloadWithAnUnchangedManifestKeepsTheSession(t *testing.T) {
+	node, workstation := newKeyPair(t), newKeyPair(t)
+	port := startNode(t, node, workstation)
+	m := Manifest{PrivateKey: b64(workstation.private), Address: deviceAddr, Nodes: []Node{{
+		MachineID: "m-1", Name: "node-1", Endpoint: fmt.Sprintf("127.0.0.1:%d", port),
+		PublicKey: b64(node.public), Address: nodeAddr, SSHPorts: []int{22},
+	}}}
+	tun, err := Up(m, t.Logf)
+	require.NoError(t, err)
+	defer tun.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	c, err := tun.Dial(ctx, "m-1", 22)
+	require.NoError(t, err)
+	_ = c.Close()
+	require.True(t, handshaken(t, tun))
+
+	require.NoError(t, tun.Reload(m))
+
+	assert.True(t, handshaken(t, tun), "rewriting the same peers would drop the session until the next handshake")
+}
+
+func handshaken(t *testing.T, tun *Tunnel) bool {
+	t.Helper()
+	cfg, err := tun.dev.IpcGet()
+	require.NoError(t, err)
+	for _, line := range strings.Split(cfg, "\n") {
+		if v, ok := strings.CutPrefix(line, "last_handshake_time_sec="); ok {
+			return v != "0"
+		}
+	}
+	return false
+}

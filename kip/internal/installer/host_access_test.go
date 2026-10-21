@@ -874,6 +874,21 @@ func TestApplyAccessGuardRollsBackWhenTheAPIStopsAnswering(t *testing.T) {
 	assert.Equal(t, "7", s.kernelGeneration())
 }
 
+func TestApplyAccessGuardNamesTheTunnelWhenTheAPIStopsAnsweringThroughIt(t *testing.T) {
+	t.Parallel()
+	s := newAccessScene(t)
+	s.commit("203.0.113.0/24")
+	s.write("readyz-fails", "")
+	_, err := ApplyAccessGuard(AccessApply{
+		Node: s, Base: s, Label: "server", Intent: s.intent(8, "198.51.100.0/24"), Families: []string{"4"},
+		ReadyzOn: []string{"t"}, Readyz: func(string) error { return s.readyzErr() },
+		Out: io.Discard, root: s.root,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the Kubernetes API did not answer through the device tunnel")
+	assert.NotContains(t, err.Error(), "IPvt")
+}
+
 func TestApplyAccessGuardFirstApplyRollsBackToNoTable(t *testing.T) {
 	t.Parallel()
 	s := newAccessScene(t)

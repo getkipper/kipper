@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -229,16 +230,31 @@ func (b *bufferedConn) CloseWrite() error {
 	return b.Close()
 }
 
+// errProcessGone marks a failure to connect to the tunnel process or exchange
+// a dial request and reply. The caller has not received a stream, so it can retry.
+var errProcessGone = errors.New("the tunnel process stopped")
+
+// processGone marks err as retryable unless the context has ended or the
+// connection deadline has expired, so retries respect the request time limit.
+func processGone(ctx context.Context, err error) error {
+	if ctx.Err() != nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", errProcessGone, err)
+}
+
 // DialVia asks the tunnel process listening on socket for a connection to
 // port on the node with machineID. The returned connection carries the
 // stream once the process answers ok. The request uses the context deadline,
 // or 15 seconds if none is set. The deadline is cleared before returning.
 // Connection, protocol and remote dial errors are returned to the caller.
+// ErrDeviceChanged is preserved so callers can restart the tunnel process.
+// The caller must close the returned connection.
 func DialVia(ctx context.Context, socket, machineID string, port int) (net.Conn, error) {
 	var nd net.Dialer
 	c, err := nd.DialContext(ctx, "unix", socket)
 	if err != nil {
-		return nil, err
+		return nil, processGone(ctx, err)
 	}
 	if dl, ok := ctx.Deadline(); ok {
 		_ = c.SetDeadline(dl)
@@ -247,13 +263,13 @@ func DialVia(ctx context.Context, socket, machineID string, port int) (net.Conn,
 	}
 	if _, err := fmt.Fprintf(c, "dial %s %d\n", machineID, port); err != nil {
 		_ = c.Close()
-		return nil, err
+		return nil, processGone(ctx, err)
 	}
 	r := bufio.NewReader(c)
 	line, err := r.ReadString('\n')
 	if err != nil {
 		_ = c.Close()
-		return nil, fmt.Errorf("the tunnel process closed the connection: %w", err)
+		return nil, fmt.Errorf("the tunnel process closed the connection: %w", processGone(ctx, err))
 	}
 	_ = c.SetDeadline(time.Time{})
 	line = strings.TrimSpace(line)

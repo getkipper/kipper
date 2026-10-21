@@ -120,7 +120,7 @@ func opsManifest(cluster *config.Cluster) (opstunnel.Manifest, error) {
 	}
 	key, err := os.ReadFile(keyPath) //nolint:gosec // the path is kip's own key file for this cluster
 	if err != nil {
-		return opstunnel.Manifest{}, fmt.Errorf("reading the device key: %w", err)
+		return opstunnel.Manifest{}, fmt.Errorf("reading the device key: %w. 'kip cluster access show' stops using a device whose key is lost", err)
 	}
 	addr, err := netip.ParseAddr(ops.Address)
 	if err != nil {

@@ -387,7 +387,11 @@ func (r accessRun) loadAndVerify(a AccessApply) error {
 			return err
 		}
 		if err := a.Readyz(family); err != nil {
-			return fmt.Errorf("the Kubernetes API did not answer over IPv%s with the new access table: %w", family, err)
+			path := "over IPv" + family
+			if family == "t" {
+				path = "through the device tunnel"
+			}
+			return fmt.Errorf("the Kubernetes API did not answer %s with the new access table: %w", path, err)
 		}
 	}
 	return nil
