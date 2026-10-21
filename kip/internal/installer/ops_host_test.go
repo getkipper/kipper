@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -175,6 +176,7 @@ func TestRenderOpsTableRefusesABadIntent(t *testing.T) {
 	for name, mutate := range map[string]func(*OpsNodeIntent){
 		"no ssh ports":   func(in *OpsNodeIntent) { in.SSHPorts = nil },
 		"bad port":       func(in *OpsNodeIntent) { in.Port = 70000 },
+		"mesh port":      func(in *OpsNodeIntent) { in.Port = 51820 },
 		"ipv6 address":   func(in *OpsNodeIntent) { in.Address = netip.MustParseAddr("fd00::1") },
 		"wrong prefix":   func(in *OpsNodeIntent) { in.Devices = netip.MustParsePrefix("10.99.0.0/24") },
 		"bad ssh port":   func(in *OpsNodeIntent) { in.SSHPorts = []int{0} },
@@ -520,13 +522,182 @@ func TestALeftoverOperatorInterfaceIsNotCalledARestriction(t *testing.T) {
 	assert.Contains(t, err.Error(), "kip cluster access reset")
 }
 
-func TestOpsNodeKeyRefusesANodeRunningFirewalld(t *testing.T) {
+func TestOpsNodeKeyAcceptsANodeRunningFirewalld(t *testing.T) {
 	s := newOpsScene(t)
 	s.write("active-firewalld", "")
+	require.NoError(t, os.WriteFile(filepath.Join(s.bin, "wg-present"), nil, 0o600))
 	_, err := opsNodeKey(s, io.Discard, s.root)
+	require.NoError(t, err)
+}
+
+// fakeFirewallCmd stores each zone's running and saved ports in separate files.
+// firewall-offline-cmd changes only the saved configuration.
+const fakeFirewallCmd = `echo "$(basename "$0") $*" >> LOG
+saved=; [ "$(basename "$0")" = firewall-offline-cmd ] && saved=saved-
+[ "$1" = --permanent ] && { saved=saved-; shift; }
+z=${1#--zone=}; p=$(printf '%s' "${2#*=}" | tr / _); f="ROOT/fw-$saved$z-$p"
+case "$2" in
+  --query-port=*) [ -e "$f" ] || [ -e ROOT/fw-port-open ] ;;
+  --add-port=*) touch "$f" ;;
+  --remove-port=*) rm -f "$f" ;;
+  *) [ "$1" = --get-default-zone ] && echo public ;;
+esac`
+
+// withFirewalld sets up kip's firewalld zones for a server with one peer.
+// claimed controls kip's ownership marker, and active controls the service state.
+func (s *opsScene) withFirewalld(claimed, active bool) {
+	s.t.Helper()
+	stub := "#!/bin/sh\n" + strings.ReplaceAll(strings.ReplaceAll(fakeFirewallCmd, "ROOT", s.root), "LOG", filepath.Join(s.root, "calls.log")) + "\n"
+	for _, name := range []string{"firewall-cmd", "firewall-offline-cmd"} {
+		//nolint:gosec // the stand-ins have to be executable
+		require.NoError(s.t, os.WriteFile(filepath.Join(s.bin, name), []byte(stub), 0o755))
+	}
+	want := wantFirewalldFor([]string{"22"}, FirewallMesh{Role: RoleServer, Peers: []FirewallPeer{{Address: "192.0.2.20"}}})
+	require.NoError(s.t, os.MkdirAll(filepath.Join(s.root, firewalldConfigDir, "zones"), 0o750))
+	require.NoError(s.t, os.MkdirAll(filepath.Join(s.root, firewalldConfigDir, "policies"), 0o750))
+	for name, body := range want.files() {
+		s.write(firewalldConfigDir+"/"+name, body)
+	}
+	if claimed {
+		s.write(firewalldClaimPath, "firewalld configuration\n")
+	}
+	if active {
+		s.write("active-firewalld", "")
+	}
+}
+
+func (s *opsScene) applySample() error {
+	s.t.Helper()
+	peers, err := RenderOpsPeers(9, 443, sampleDevices())
+	require.NoError(s.t, err)
+	return applyOpsNode(s, sampleOpsIntent(), peers, s.root)
+}
+
+func TestApplyOpsNodeOpensTheTunnelPortInKipsFirewalldWithoutAReload(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	s.withFirewalld(true, true)
+	require.NoError(t, s.applySample())
+
+	for _, zone := range []string{"public", firewalldPeerZone} {
+		assert.True(t, s.exists("fw-saved-"+zone+"-443_udp"), "%s saves the port", zone)
+		assert.True(t, s.exists("fw-"+zone+"-443_udp"), "%s opens the port now", zone)
+	}
+	assert.False(t, s.exists("fw-saved-"+firewalldPodZone+"-443_udp"))
+	calls := s.calls()
+	assert.Less(t, strings.Index(calls, "firewall-cmd --zone=public --add-port=443/udp"), strings.Index(calls, "wg syncconf"), "the port opens before the interface comes up")
+	assert.NotContains(t, calls, "--reload", "a reload would drop k3s's rules")
+	assert.NotContains(t, calls, "firewall-offline-cmd")
+
+	require.NoError(t, s.applySample())
+	assert.Equal(t, 1, strings.Count(s.calls(), "firewall-cmd --permanent --zone=public --add-port=443/udp"), "a second apply saves nothing new")
+	assert.Equal(t, 1, strings.Count(s.calls(), "firewall-cmd --zone=public --add-port=443/udp"), "a second apply opens nothing new")
+}
+
+func TestApplyOpsNodeSavesTheTunnelPortInAStoppedKipFirewalld(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	s.withFirewalld(true, false)
+	require.NoError(t, s.applySample())
+	assert.True(t, s.exists("fw-saved-public-443_udp"), "starting firewalld later keeps the port")
+	assert.NotContains(t, s.calls(), "firewall-cmd --", "a stopped firewalld takes only the offline tool")
+}
+
+func TestApplyOpsNodeWaitsForAFirewalldChangeInProgress(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	s.withFirewalld(true, true)
+	s.write("units", firewalldRollbackUnit+"-0123456789ab.timer loaded active waiting kip\n")
+	before := s.file(opsDir + "/peers.conf")
+	err := s.applySample()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "firewalld")
-	assert.NotContains(t, s.calls(), "wg genkey", "nothing is set up on a node the tunnel cannot reach")
+	assert.Contains(t, err.Error(), "firewall change")
+	assert.NotContains(t, s.calls(), "--add-port")
+	assert.Equal(t, before, s.file(opsDir+"/peers.conf"), "nothing is written")
+}
+
+func TestApplyOpsNodeWaitsForAFirewalldChangeThatHoldsItsReservation(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	s.withFirewalld(true, true)
+	s.write(firewalldStateDir+"/firewalld-run", "0123456789ab\n")
+	err := s.applySample()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "firewall change")
+	assert.NotContains(t, s.calls(), "--add-port")
+}
+
+func TestValidOpsPortKeepsClearOfTheClusterWireGuardPort(t *testing.T) {
+	require.NoError(t, ValidOpsPort(443))
+	for _, p := range []int{0, 70000, 51820} {
+		assert.Error(t, ValidOpsPort(p), p)
+	}
+}
+
+func TestApplyOpsNodeFencesOutAnExpiredFirewalldReservation(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	s.withFirewalld(true, true)
+	run := firewalldStateDir + "/firewalld-run"
+	s.write(run, "0123456789ab\n")
+	old := time.Now().Add(-20 * time.Minute)
+	require.NoError(t, os.Chtimes(filepath.Join(s.root, run), old, old))
+	require.NoError(t, s.applySample())
+	assert.False(t, s.exists(run), "the run that left it fails its ownership check when it resumes")
+	assert.True(t, s.exists("fw-saved-public-443_udp"))
+}
+
+func TestApplyOpsNodeWaitsForAFirewalldChangeOnAnUnclaimedHost(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	s.withFirewalld(false, false)
+	s.write(firewalldStateDir+"/firewalld-run", "0123456789ab\n")
+	before := s.file(opsDir + "/peers.conf")
+	err := s.applySample()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "firewall change")
+	assert.Equal(t, before, s.file(opsDir+"/peers.conf"), "a firewalld being set up reads peers.conf too")
+}
+
+func TestOpsRemoveWaitsForAFirewalldChange(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	s.withFirewalld(true, true)
+	require.NoError(t, s.applySample())
+	s.write(firewalldStateDir+"/firewalld-run", "0123456789ab\n")
+	err := removeOpsNode(s, s.root)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "firewall change")
+	assert.True(t, s.exists("link"), "the interface stays until the change has finished")
+	assert.True(t, s.exists("fw-saved-public-443_udp"))
+}
+
+func TestApplyOpsNodeRefusesAnOperatorFirewalldWithoutTheTunnelPort(t *testing.T) {
+	s := newOpsScene(t)
+	s.withFirewalld(false, true)
+	s.write(opsDir+"/ops.sh", opsScript(s.root))
+	s.write(opsDir+"/kipops.key", "c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0MDA=\n")
+	err := s.applySample()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "firewall-cmd --zone=public --add-port=443/udp && firewall-cmd --permanent --zone=public --add-port=443/udp")
+	assert.False(t, s.exists(opsDir+"/peers.conf"), "nothing is written")
+	assert.NotContains(t, s.calls(), "--add-port", "kip leaves an operator's firewalld alone")
+
+	s.write("fw-port-open", "")
+	require.NoError(t, s.applySample(), "a port the operator opened is enough")
+	assert.NotContains(t, s.calls(), "--add-port")
+}
+
+func TestOpsRemoveClosesTheTunnelPortInKipsFirewalld(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	s.withFirewalld(true, true)
+	require.NoError(t, s.applySample())
+	require.NoError(t, removeOpsNode(s, s.root))
+	for _, zone := range []string{"public", firewalldPeerZone} {
+		assert.False(t, s.exists("fw-saved-"+zone+"-443_udp"), zone)
+		assert.False(t, s.exists("fw-"+zone+"-443_udp"), zone)
+	}
 }
 
 func TestApplyOpsNodeOpensTheTunnelPortInUFW(t *testing.T) {

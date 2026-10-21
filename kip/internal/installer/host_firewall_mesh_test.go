@@ -283,8 +283,9 @@ func TestAdoptionQuestionListsThePeers(t *testing.T) {
 
 func TestFirewalldFingerprintCoversThePeers(t *testing.T) {
 	saved := firewalldSavedConfig{inventory: stockInventory}
-	a := firewalldFingerprint("public", saved, []string{"22"}, serverMesh)
-	assert.Equal(t, a, firewalldFingerprint("public", saved, []string{"22"}, serverMesh))
-	assert.NotEqual(t, a, firewalldFingerprint("public", saved, []string{"22"}, FirewallMesh{}))
-	assert.NotEqual(t, a, firewalldFingerprint("public", saved, []string{"22"}, FirewallMesh{Role: RoleServer, Peers: serverMesh.Peers[:1]}))
+	a := firewalldFingerprint("public", saved, []string{"22"}, serverMesh, "")
+	assert.Equal(t, a, firewalldFingerprint("public", saved, []string{"22"}, serverMesh, ""))
+	assert.NotEqual(t, a, firewalldFingerprint("public", saved, []string{"22"}, FirewallMesh{}, ""))
+	assert.NotEqual(t, a, firewalldFingerprint("public", saved, []string{"22"}, serverMesh, "443/udp"), "consent covers the tunnel port")
+	assert.NotEqual(t, a, firewalldFingerprint("public", saved, []string{"22"}, FirewallMesh{Role: RoleServer, Peers: serverMesh.Peers[:1]}, ""))
 }

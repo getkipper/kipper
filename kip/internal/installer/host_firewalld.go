@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -32,7 +33,7 @@ const (
 )
 
 // firewalldPolicies name the forwarding policies Kipper writes. firewalld
-// limits policy names to 17 characters. Pod egress is masqueraded; ingress
+// limits policy names to 17 characters. Pod egress is masqueraded. Ingress
 // covers traffic the service load balancer DNATs from the public interface to
 // pods.
 var firewalldPolicies = []struct {
@@ -50,6 +51,7 @@ type firewalldWant struct {
 	podSources     []string
 	peerZones      []firewalldSourceZone
 	role           HostRole
+	opsPort        string
 }
 
 // firewalldSourceZone is a source zone for other nodes. It keeps the public
@@ -68,6 +70,20 @@ var firewalldPeerZoneFiles = map[string]bool{
 
 func wantFirewalld(sshPorts []string) firewalldWant {
 	return wantFirewalldFor(sshPorts, FirewallMesh{})
+}
+
+// wantFirewalldOn is wantFirewalldFor plus the operator tunnel's port read
+// from the node's peers.conf.
+func wantFirewalldOn(client CommandRunner, sshPorts []string, mesh FirewallMesh) (firewalldWant, error) {
+	want := wantFirewalldFor(sshPorts, mesh)
+	port, err := readOpsPort(client)
+	if err != nil {
+		return want, err
+	}
+	if port != 0 {
+		want.opsPort = fmt.Sprintf("%d/udp", port)
+	}
+	return want, nil
 }
 
 func wantFirewalldFor(sshPorts []string, mesh FirewallMesh) firewalldWant {
@@ -118,6 +134,15 @@ func (w firewalldWant) zoneNames() []string {
 	return names
 }
 
+// outsidePorts adds the operator tunnel's port, last, to the ports of a zone
+// that traffic from outside the cluster reaches.
+func (w firewalldWant) outsidePorts(ports []string) []string {
+	if w.opsPort == "" {
+		return ports
+	}
+	return append(append([]string{}, ports...), w.opsPort)
+}
+
 // files returns firewalld's permanent configuration as Kipper writes it,
 // keyed by path relative to /etc/firewalld. The public zone file replaces the
 // stock one in full.
@@ -142,11 +167,11 @@ func (w firewalldWant) files() map[string]string {
 	}
 
 	files := map[string]string{
-		"zones/public.xml":                   zone("Public", w.publicServices, w.publicPorts, nil),
+		"zones/public.xml":                   zone("Public", w.publicServices, w.outsidePorts(w.publicPorts), nil),
 		"zones/" + firewalldPodZone + ".xml": zone("Kipper pods", nil, w.podPorts, w.podSources),
 	}
 	for _, z := range w.peerZones {
-		files["zones/"+z.name+".xml"] = zone("Kipper "+strings.TrimPrefix(z.name, "kipper-"), nil, z.ports, z.sources)
+		files["zones/"+z.name+".xml"] = zone("Kipper "+strings.TrimPrefix(z.name, "kipper-"), nil, w.outsidePorts(z.ports), z.sources)
 	}
 	for _, p := range firewalldPolicies {
 		masquerade := ""
@@ -500,10 +525,10 @@ func firewalldMismatches(state string, want firewalldWant) []string {
 			}
 		}
 	}
-	checkZone("public", want.publicServices, want.publicPorts, nil)
+	checkZone("public", want.publicServices, want.outsidePorts(want.publicPorts), nil)
 	checkZone(firewalldPodZone, nil, want.podPorts, want.podSources)
 	for _, pz := range want.peerZones {
-		checkZone(pz.name, nil, pz.ports, pz.sources)
+		checkZone(pz.name, nil, want.outsidePorts(pz.ports), pz.sources)
 	}
 
 	policies := strings.Fields(strings.Join(sections["policies"], " "))
@@ -869,7 +894,10 @@ func inspectFirewalld(client FirewallRunner, sshPorts []string, consent Firewall
 		return firewalldSeen{}, fmt.Errorf("taking over a running firewalld needs a check from outside the host, so kip left it alone; run kip install over SSH or with --via-server")
 	}
 
-	want := wantFirewalldFor(sshPorts, mesh)
+	want, err := wantFirewalldOn(client, sshPorts, mesh)
+	if err != nil {
+		return firewalldSeen{}, err
+	}
 	saved, err := readFirewalldSaved(client)
 	if err != nil {
 		return firewalldSeen{}, err
@@ -884,7 +912,7 @@ func inspectFirewalld(client FirewallRunner, sshPorts []string, consent Firewall
 	}
 	// Interactive consent applies to the previewed configuration.
 	if adopting && consent.Fingerprint != "" {
-		current, err := currentFirewalldFingerprint(client, sshPorts, mesh)
+		current, err := currentFirewalldFingerprint(client, sshPorts, mesh, want.opsPort)
 		if err != nil {
 			return firewalldSeen{}, err
 		}
@@ -922,7 +950,7 @@ func checkLocalFirewalld(client CommandRunner, want firewalldWant) error {
 	paths := sortedKeys(files)
 	for _, p := range paths {
 		got, err := client.Run("cat " + firewalldConfigDir + "/" + p)
-		if err != nil || got != files[p] {
+		if err != nil || !sameFirewalldFile(got, files[p]) {
 			problems = append(problems, "saved "+p+" differs")
 		}
 	}
@@ -930,6 +958,32 @@ func checkLocalFirewalld(client CommandRunner, want firewalldWant) error {
 		return fmt.Errorf("firewalld is running with a configuration that differs from kip's (%s). Run kip install over SSH to change it, or stop firewalld first", strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// sameFirewalldFile compares saved files while allowing space-indented lines
+// to appear in any order within the same line positions. All other lines must
+// match exactly. This assumes one child element per line, as rendered by files,
+// and accommodates firewalld versions that reorder a zone's elements on rewrite.
+func sameFirewalldFile(got, want string) bool {
+	a, b := strings.Split(got, "\n"), strings.Split(want, "\n")
+	if len(a) != len(b) {
+		return false
+	}
+	var childrenA, childrenB []string
+	for i := range a {
+		child := strings.HasPrefix(a[i], " ")
+		switch {
+		case child != strings.HasPrefix(b[i], " "):
+			return false
+		case child:
+			childrenA, childrenB = append(childrenA, a[i]), append(childrenB, b[i])
+		case a[i] != b[i]:
+			return false
+		}
+	}
+	sort.Strings(childrenA)
+	sort.Strings(childrenB)
+	return slices.Equal(childrenA, childrenB)
 }
 
 func firewalldClaimed(client CommandRunner) bool {

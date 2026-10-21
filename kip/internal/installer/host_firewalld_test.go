@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -144,6 +145,7 @@ type firewalldHost struct {
 	publicInfo             string
 	ufwActive              bool
 	failStart              string
+	opsPort                string
 }
 
 func newFirewalldHost(t *testing.T) *firewalldHost {
@@ -184,6 +186,8 @@ func (h *firewalldHost) Run(cmd string) (string, error) {
 		return "", nil
 	case strings.HasPrefix(cmd, "sshd -T"):
 		return "22\n", nil
+	case strings.Contains(cmd, opsDir+"/peers.conf"):
+		return h.opsPort, nil
 	case strings.Contains(cmd, "ufw status"):
 		if h.ufwActive {
 			return "active\n", nil
@@ -530,6 +534,22 @@ func TestConfigureFirewalldLocally(t *testing.T) {
 		h.ourFiles["zones/public.xml"] = stockPublicZone
 		err := configureFirewalld(localHost{h}, rhel10Host, FirewallConsent{}, FirewallMesh{})
 		assert.ErrorContains(t, err, "saved zones/public.xml differs")
+	})
+
+	t.Run("accepts a saved file firewall-cmd rewrote in its own order", func(t *testing.T) {
+		h := newFirewalldHost(t)
+		h.active, h.claimed = true, true
+		h.ourFiles = map[string]string{}
+		for k, v := range ours {
+			h.ourFiles[k] = v
+		}
+		pods := ours["zones/"+firewalldPodZone+".xml"]
+		lines := strings.Split(pods, "\n")
+		slices.Reverse(lines[2 : len(lines)-2])
+		h.ourFiles["zones/"+firewalldPodZone+".xml"] = strings.Join(lines, "\n")
+		require.NotEqual(t, pods, h.ourFiles["zones/"+firewalldPodZone+".xml"])
+		require.NoError(t, configureFirewalld(localHost{h}, rhel10Host, FirewallConsent{}, FirewallMesh{}))
+		assert.Equal(t, -1, h.index("--reload"))
 	})
 }
 
@@ -1374,4 +1394,55 @@ func TestApplyFirewallPlanCarriesTheWorkerRole(t *testing.T) {
 	require.NoError(t, ApplyFirewallPlan(h, FirewallPlan{Configure: true, Mesh: FirewallMesh{Role: RoleWorker}}, false))
 
 	assert.Greater(t, h.index("systemctl restart k3s-agent"), h.index(commitMarker))
+}
+
+func TestFirewalldOpensTheTunnelPortLastInEveryZoneForOutsideTraffic(t *testing.T) {
+	want := wantFirewalldFor([]string{"22"}, FirewallMesh{Role: RoleServer, Peers: []FirewallPeer{{Address: "192.0.2.20"}}})
+	want.opsPort = "443/udp"
+	files := want.files()
+	last := `  <port port="443" protocol="udp"/>` + "\n  <forward/>"
+	assert.Contains(t, files["zones/public.xml"], last)
+	assert.Contains(t, files["zones/"+firewalldPeerZone+".xml"], last, "a peer zone replaces public for its sources")
+	assert.NotContains(t, files["zones/"+firewalldPodZone+".xml"], `protocol="udp"`)
+}
+
+func TestFirewalldMismatchesExpectTheTunnelPort(t *testing.T) {
+	want := wantFirewalld([]string{"22"})
+	want.opsPort = "443/udp"
+	assert.Contains(t, strings.Join(firewalldMismatches(loadedFirewalld, want), "\n"), "zone public ports")
+
+	open := strings.Replace(loadedFirewalld, "  ports: 22/tcp 80/tcp 443/tcp 6443/tcp", "  ports: 22/tcp 80/tcp 443/tcp 6443/tcp 443/udp", 1)
+	require.NotEqual(t, loadedFirewalld, open)
+	assert.Empty(t, firewalldMismatches(open, want))
+}
+
+func TestWantFirewalldOnReadsTheTunnelPort(t *testing.T) {
+	s := newOpsScene(t)
+	want, err := wantFirewalldOn(opsRootRunner{s}, []string{"22"}, FirewallMesh{})
+	require.NoError(t, err)
+	assert.Empty(t, want.opsPort, "a node without an operator interface opens no tunnel port")
+
+	peers, err := RenderOpsPeers(9, 51821, sampleDevices())
+	require.NoError(t, err)
+	s.write(opsDir+"/peers.conf", peers)
+	want, err = wantFirewalldOn(opsRootRunner{s}, []string{"22"}, FirewallMesh{})
+	require.NoError(t, err)
+	assert.Equal(t, "51821/udp", want.opsPort)
+}
+
+func TestSavedFirewalldFileMatchesInFirewalldsOwnOrder(t *testing.T) {
+	want := wantFirewalldFor([]string{"22"}, FirewallMesh{Role: RoleServer, Peers: []FirewallPeer{{Address: "192.0.2.20"}}})
+	want.opsPort = "443/udp"
+	rendered := want.files()["zones/"+firewalldPeerZone+".xml"]
+	source := `  <source address="192.0.2.20"/>` + "\n"
+	require.Contains(t, rendered, source)
+	// firewalld 2 writes sources after the ports when firewall-cmd changes a zone.
+	rewritten := strings.Replace(strings.Replace(rendered, source, "", 1), "  <forward/>", strings.TrimSuffix(source, "\n")+"\n  <forward/>", 1)
+	require.NotEqual(t, rendered, rewritten)
+	assert.True(t, sameFirewalldFile(rewritten, rendered))
+	assert.False(t, sameFirewalldFile(strings.Replace(rendered, `  <port port="443" protocol="udp"/>`+"\n", "", 1), rendered))
+	assert.False(t, sameFirewalldFile(rendered+rendered, rendered), "a repeated entry is a difference")
+	port := `  <port port="443" protocol="udp"/>` + "\n"
+	outside := strings.Replace(strings.Replace(rendered, port, "", 1), "</zone>\n", "</zone>\n"+port, 1)
+	assert.False(t, sameFirewalldFile(outside, rendered), "an element outside the root is a difference")
 }

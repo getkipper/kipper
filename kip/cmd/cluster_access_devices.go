@@ -540,8 +540,8 @@ func runClusterAccessDeviceAdd(cmd *cobra.Command, args []string) error {
 	if _, err := installer.ParseOpsRange(req.rng); err != nil {
 		return err
 	}
-	if req.port < 1 || req.port > 65535 {
-		return fmt.Errorf("%d is not a UDP port", req.port)
+	if err := installer.ValidOpsPort(req.port); err != nil {
+		return err
 	}
 	if req.apiHost, err = apiHost(cluster); err != nil {
 		return err

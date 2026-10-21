@@ -39,8 +39,8 @@ func (in OpsNodeIntent) validate() error {
 	if !in.Devices.Addr().Is4() || in.Devices.Bits() != 25 {
 		return fmt.Errorf("the device range %s is not an IPv4 /25", in.Devices)
 	}
-	if in.Port < 1 || in.Port > 65535 {
-		return fmt.Errorf("%d is not a port", in.Port)
+	if err := ValidOpsPort(in.Port); err != nil {
+		return err
 	}
 	if len(in.SSHPorts) == 0 {
 		return errors.New("no SSH listener ports were found")
@@ -49,6 +49,18 @@ func (in OpsNodeIntent) validate() error {
 		if p < 1 || p > 65535 {
 			return fmt.Errorf("%d is not a port", p)
 		}
+	}
+	return nil
+}
+
+// ValidOpsPort returns an error unless port is between 1 and 65535 and differs from
+// the cluster's WireGuard port, 51820.
+func ValidOpsPort(port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("%d is not a UDP port", port)
+	}
+	if strconv.Itoa(port) == wireguardPort {
+		return fmt.Errorf("UDP %d carries the cluster's own WireGuard network, so the tunnel needs another port", port)
 	}
 	return nil
 }
@@ -261,8 +273,6 @@ func opsPrepareCommand(root string) string {
 	b.WriteString("(umask 077\n")
 	fmt.Fprintf(&b, "mkdir -p %s && mkdir -p -m 0700 %s && chmod 0700 %s || exit 1\n", root+"/etc/kipper", d, d)
 	fmt.Fprintf(&b, "exec 9>>%s && flock 9 || exit 1\n", root+accessLock)
-	// Kipper's firewalld zones do not open the tunnel's UDP port yet.
-	b.WriteString("systemctl is-active --quiet firewalld && { echo 'firewalld runs on this node, and kip cannot open the operator tunnel port in it yet, so operator devices are not supported on this node' >&2; exit 1; }\n")
 	b.WriteString("modprobe wireguard >/dev/null 2>&1\n")
 	fmt.Fprintf(&b, "[ -d %s/sys/module/wireguard ] || { echo 'this kernel has no WireGuard module, so the node cannot take part in operator devices' >&2; exit 1; }\n", root)
 	b.WriteString(writeIfChanged(d+"/ops.sh", opsScript(root), "", ""))
@@ -324,10 +334,10 @@ func opsRoute(fields []string) bool {
 }
 
 // OpsNodeKey installs nftables and wireguard-tools when missing and checks
-// kernel WireGuard support. It rejects nodes with active firewalld or with
-// nftables.service enabled, active or activating. It creates the node's private
-// key if absent or empty and returns the public key. Preparation, key generation
-// and key validation failures return an error.
+// kernel WireGuard support. It rejects nodes with nftables.service enabled,
+// active or activating. It creates the node's private key if absent or empty
+// and returns the public key. Preparation, key generation and key validation
+// failures return an error.
 // The private key stays on the node. Installation output is written to out.
 func OpsNodeKey(client CommandRunner, out io.Writer) (string, error) {
 	return opsNodeKey(client, out, "")
@@ -365,11 +375,15 @@ func opsNodeKey(client CommandRunner, out io.Writer, root string) (string, error
 }
 
 // ApplyOpsNode writes the node's ops table, interface settings and peers,
-// enables the boot unit and saves a rule allowing the tunnel's UDP port when
-// UFW is installed, even if inactive. It loads the table before the interface.
-// nft checks the table before anything is written. OpsNodeKey must have run
-// on the node first. Validation or remote command failures return an error.
-// Failures after the nft check may leave partially applied changes.
+// enables the boot unit and allows the tunnel's UDP port in installed UFW
+// or kip-managed firewalld, saving the rule even when the firewall is inactive.
+// An active, externally managed firewalld must already allow the port in both
+// its running and saved configuration before the node's configuration is written.
+// It loads the table before the interface.
+//
+// OpsNodeKey must have run on the node first. nft checks the table before
+// configuration files are written. Validation or remote command failures return
+// an error. Failures after the nft check may leave partially applied changes.
 func ApplyOpsNode(client CommandRunner, in OpsNodeIntent, peers string) error {
 	return applyOpsNode(client, in, peers, "")
 }
@@ -387,6 +401,7 @@ func applyOpsNode(client CommandRunner, in OpsNodeIntent, peers, root string) er
 	b.WriteString("(umask 077\n")
 	fmt.Fprintf(&b, "exec 9>>%s && flock 9 || exit 1\n", root+accessLock)
 	fmt.Fprintf(&b, "[ -s %s/ops.sh ] && [ -s %s/kipops.key ] || { echo 'the operator interface was not prepared on this node' >&2; exit 1; }\n", d, d)
+	b.WriteString(opsFirewalldCheck(root, in.Port))
 	b.WriteString(writeIfChanged(d+"/ops.nft", table, "", ""))
 	b.WriteString(writeIfChanged(d+"/iface", renderOpsInterface(in), "", ""))
 	b.WriteString(writeIfChanged(d+"/peers.conf", peers, "", ""))
@@ -395,6 +410,7 @@ func applyOpsNode(client CommandRunner, in OpsNodeIntent, peers, root string) er
 	fmt.Fprintf(&b, "systemctl enable %s >/dev/null 2>&1; systemctl is-enabled --quiet %s || { echo 'systemd did not enable %s' >&2; exit 1; }\n", opsUnitName, opsUnitName, opsUnitName)
 	// Saving the rule while UFW is inactive keeps the port open when it is enabled.
 	fmt.Fprintf(&b, "if command -v ufw >/dev/null 2>&1; then ufw allow %d/udp comment kipper-ops >/dev/null || exit 1; fi\n", in.Port)
+	b.WriteString(opsFirewalldOpen(root, in.Port))
 	fmt.Fprintf(&b, "command -v restorecon >/dev/null 2>&1 && restorecon -R %s %s; true) &&\n", d, root+opsUnitPath)
 	fmt.Fprintf(&b, "sh %s/ops.sh load", d)
 	if _, err := client.Run(b.String()); err != nil {
@@ -404,11 +420,13 @@ func applyOpsNode(client CommandRunner, in OpsNodeIntent, peers, root string) er
 }
 
 // RemoveOpsNode disables the boot unit, then removes the operator interface,
-// its table, boot unit file, UFW rule and directory, in that order. Interface
-// removal must succeed before the table is removed, so a failed removal leaves
-// its guard in place. Interface and table inspection failures are treated as
-// absence, and UFW removal failures are ignored. Other failures return an error,
-// and removal can be retried.
+// its table, boot unit file, firewall rules and directory, in that order.
+// Firewall cleanup removes the tunnel port from UFW and kip-managed firewalld
+// zones. A pending firewalld change stops removal before the interface is removed.
+// Interface removal must succeed before the table is removed, so a failed removal
+// leaves its guard in place. Interface and table inspection failures are treated
+// as absence, and firewall rule removal failures are ignored. Other failures
+// return an error, and removal can be retried.
 // The connection must bypass the tunnel because removing the interface closes it.
 // A node with neither the operator directory nor the boot unit file is left alone.
 func RemoveOpsNode(client CommandRunner) error {
@@ -444,23 +462,88 @@ func opsPortCommand(root string) string {
 	return fmt.Sprintf("sed -n 's/^ListenPort = \\([0-9][0-9]*\\)$/\\1/p' %s/peers.conf 2>/dev/null | head -n 1", root+opsDir)
 }
 
-// opsUFWRules returns a rule allowing the tunnel's UDP port from peers.conf
-// so UFW reloads preserve tunnel access. It returns nil if no port is found
-// and an error if the remote command fails or the port is not an integer.
-func opsUFWRules(client CommandRunner) ([]string, error) {
+// readOpsPort returns the first numeric ListenPort from peers.conf, or 0 if
+// the file is unreadable or has no matching entry. It returns an error if the
+// remote command fails or its output cannot be represented as an int.
+func readOpsPort(client CommandRunner) (int, error) {
 	out, err := client.Run(opsPortCommand(""))
 	if err != nil {
-		return nil, fmt.Errorf("reading the operator tunnel's port: %w", err)
+		return 0, fmt.Errorf("reading the operator tunnel's port: %w", err)
 	}
 	text := strings.TrimSpace(out)
 	if text == "" {
-		return nil, nil
+		return 0, nil
 	}
 	port, err := strconv.Atoi(text)
 	if err != nil {
-		return nil, fmt.Errorf("the operator tunnel's port %q is not a number", text)
+		return 0, fmt.Errorf("the operator tunnel's port %q is not a number", text)
+	}
+	return port, nil
+}
+
+// opsUFWRules returns a rule allowing the tunnel's UDP port from peers.conf
+// so UFW reloads preserve tunnel access. It returns nil if no port is found.
+func opsUFWRules(client CommandRunner) ([]string, error) {
+	port, err := readOpsPort(client)
+	if err != nil || port == 0 {
+		return nil, err
 	}
 	return []string{fmt.Sprintf("ufw allow %d/udp comment kipper-ops", port)}, nil
+}
+
+// opsFirewalldZones includes public and peer zones because source-based peer
+// zones take precedence over public, and each must allow the tunnel's port.
+const opsFirewalldZones = "public " + firewalldPeerZone + " " + firewalldServerZone
+
+// opsFirewalldWait returns shell code that takes the firewalld lock when
+// firewall-cmd is installed. It rejects a reservation less than 15 minutes old
+// or a pending rollback because that change relies on settings read earlier.
+// Otherwise it removes the reservation, so the previous run fails its ownership
+// check if it resumes.
+func opsFirewalldWait(root string) string {
+	run := root + firewalldStateDir + "/firewalld-run"
+	return fmt.Sprintf("if command -v firewall-cmd >/dev/null 2>&1; then\n"+
+		"  exec 8>%s && flock 8 || exit 1\n"+
+		"  [ -z \"$(find %s -mmin -15 2>/dev/null)$(%s)\" ] || { echo 'a firewall change is in progress on this node. Run the command again once it has finished' >&2; exit 1; }\n"+
+		"  rm -f %s || exit 1\n"+
+		"fi\n", root+firewalldLock, run, pendingRollbackCommand, run)
+}
+
+// opsFirewalldCheck returns shell code with the locking and reservation checks
+// from opsFirewalldWait.
+// For an active, externally managed firewalld, it requires the port in both the
+// running and saved configuration of the default-route interface's zone, falling
+// back to the default zone if the lookup fails. On failure, it prints the
+// commands needed to open the port.
+func opsFirewalldCheck(root string, port int) string {
+	var b strings.Builder
+	b.WriteString(opsFirewalldWait(root))
+	fmt.Fprintf(&b, "if [ ! -s %s ] && systemctl is-active --quiet firewalld; then\n", root+firewalldClaimPath)
+	b.WriteString(`  dev=$(ip route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i+1); exit}}')` + "\n")
+	b.WriteString(`  z=$( { [ -n "$dev" ] && firewall-cmd --get-zone-of-interface="$dev"; } 2>/dev/null || firewall-cmd --get-default-zone)` + "\n")
+	fmt.Fprintf(&b, "  { firewall-cmd --zone=\"$z\" --query-port=%[1]d/udp && firewall-cmd --permanent --zone=\"$z\" --query-port=%[1]d/udp; } >/dev/null 2>&1 || "+
+		"{ echo \"firewalld on this node is managed outside kip. The operator tunnel port %[1]d/udp must be open in both the running and saved configuration of zone $z. Open it with 'firewall-cmd --zone=$z --add-port=%[1]d/udp && firewall-cmd --permanent --zone=$z --add-port=%[1]d/udp', then run the command again\" >&2; exit 1; }\n", port)
+	b.WriteString("fi\n")
+	return b.String()
+}
+
+// opsFirewalldOpen returns shell code that adds the tunnel's port to existing
+// kip-managed zones using firewalld's tools. New ports are appended to match
+// firewalldWant.files. For a running firewalld, it updates both the saved and
+// running configuration without a reload to preserve k3s's network rules.
+// For a stopped firewalld, it updates only the saved configuration.
+// The code from opsFirewalldCheck must have run first.
+func opsFirewalldOpen(root string, port int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "if [ -s %s ]; then\n", root+firewalldClaimPath)
+	b.WriteString("  fw=; fc=firewall-offline-cmd; systemctl is-active --quiet firewalld && { fw=1; fc='firewall-cmd --permanent'; }\n")
+	fmt.Fprintf(&b, "  for z in %s; do\n", opsFirewalldZones)
+	fmt.Fprintf(&b, "    [ -f %s/zones/$z.xml ] || continue\n", root+firewalldConfigDir)
+	fmt.Fprintf(&b, "    $fc --zone=$z --query-port=%[1]d/udp >/dev/null 2>&1 || $fc --zone=$z --add-port=%[1]d/udp >/dev/null || exit 1\n", port)
+	fmt.Fprintf(&b, "    [ -z \"$fw\" ] || firewall-cmd --zone=$z --query-port=%[1]d/udp >/dev/null 2>&1 || firewall-cmd --zone=$z --add-port=%[1]d/udp >/dev/null || exit 1\n", port)
+	b.WriteString("  done\n")
+	b.WriteString("fi\n")
+	return b.String()
 }
 
 // opsRemoveCommand writes the removal script and runs it with run, passing
@@ -477,19 +560,30 @@ func opsRemoveCommand(root, run string) string {
 }
 
 // opsRemoveScript removes the operator interface under the access lock.
-// Its argument is the tunnel port whose UFW rule should also be removed,
-// or empty to skip that rule. Interface and table inspection failures are
-// treated as absence, and UFW removal failures are ignored. Other failures
-// stop cleanup. The script deletes itself on exit.
+// Its argument is the tunnel port whose UFW rule and entries in kip's
+// firewalld zones should also be removed, or empty to skip them. Interface
+// and table inspection failures are treated as absence, and firewall removal
+// failures are ignored. Other failures stop cleanup. The script deletes
+// itself on exit.
 func opsRemoveScript(root string) string {
 	return `export LC_ALL=C LANGUAGE=C
 trap 'rm -f "$0"' EXIT
 exec 9>>` + root + accessLock + ` && flock 9 || exit 1
-if [ -e ` + root + opsUnitPath + ` ]; then systemctl disable ` + opsUnitName + ` >/dev/null 2>&1 || exit 1; fi
+` + opsFirewalldWait(root) + `if [ -e ` + root + opsUnitPath + ` ]; then systemctl disable ` + opsUnitName + ` >/dev/null 2>&1 || exit 1; fi
 if ip link show ` + opsInterface + ` >/dev/null 2>&1; then ip link del ` + opsInterface + ` || exit 1; fi
 if nft list table ` + opsTable + ` >/dev/null 2>&1; then nft delete table ` + opsTable + ` || exit 1; fi
 rm -f ` + root + opsUnitPath + ` && systemctl daemon-reload || exit 1
 if [ -n "$1" ] && command -v ufw >/dev/null 2>&1; then ufw delete allow "$1/udp" >/dev/null 2>&1; fi
+if [ -n "$1" ] && [ -s ` + root + firewalldClaimPath + ` ]; then
+  for z in ` + opsFirewalldZones + `; do
+    [ -f ` + root + firewalldConfigDir + `/zones/$z.xml ] || continue
+    if systemctl is-active --quiet firewalld; then
+      firewall-cmd --permanent --zone=$z --remove-port="$1/udp"; firewall-cmd --zone=$z --remove-port="$1/udp"
+    else
+      firewall-offline-cmd --zone=$z --remove-port="$1/udp"
+    fi >/dev/null 2>&1
+  done
+fi
 rm -rf ` + root + opsDir + `
 `
 }

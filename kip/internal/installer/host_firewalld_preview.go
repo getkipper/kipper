@@ -18,8 +18,9 @@ type FirewalldAdoption struct {
 }
 
 // PreviewFirewalldAdoption checks takeover eligibility and describes changes
-// without modifying the host. Ineligibility is reported in Reason; read failures
-// return an error.
+// without modifying the host. Ineligibility is reported with Possible false
+// and an explanation in Reason. Invalid mesh input and read failures return
+// an error.
 func PreviewFirewalldAdoption(client CommandRunner, mesh FirewallMesh) (FirewalldAdoption, error) {
 	if err := mesh.validate(); err != nil {
 		return FirewalldAdoption{}, err
@@ -35,7 +36,10 @@ func PreviewFirewalldAdoption(client CommandRunner, mesh FirewallMesh) (Firewall
 	if err != nil {
 		return FirewalldAdoption{}, err
 	}
-	want := wantFirewalldFor(ports, mesh)
+	want, err := wantFirewalldOn(client, ports, mesh)
+	if err != nil {
+		return FirewalldAdoption{}, err
+	}
 
 	saved, err := readFirewalldSaved(client)
 	if err != nil {
@@ -66,11 +70,11 @@ func PreviewFirewalldAdoption(client CommandRunner, mesh FirewallMesh) (Firewall
 		Removed:     removedFromPublicZone(zone, want),
 		Opened:      openedInPublicZone(zone, want),
 		Peers:       openedToPeers(mesh),
-		Fingerprint: firewalldFingerprint(public, saved, ports, mesh),
+		Fingerprint: firewalldFingerprint(public, saved, ports, mesh, want.opsPort),
 	}, nil
 }
 
-func currentFirewalldFingerprint(client CommandRunner, ports []string, mesh FirewallMesh) (string, error) {
+func currentFirewalldFingerprint(client CommandRunner, ports []string, mesh FirewallMesh, opsPort string) (string, error) {
 	saved, err := readFirewalldSaved(client)
 	if err != nil {
 		return "", err
@@ -79,15 +83,15 @@ func currentFirewalldFingerprint(client CommandRunner, ports []string, mesh Fire
 	if err != nil {
 		return "", fmt.Errorf("reading the running public zone: %w", err)
 	}
-	return firewalldFingerprint(public, saved, ports, mesh), nil
+	return firewalldFingerprint(public, saved, ports, mesh, opsPort), nil
 }
 
 // firewalldFingerprint binds consent to the running public zone, saved file
-// inventory, firewalld.conf, saved public zone, configured SSH ports, and the
-// host's role and peers.
-func firewalldFingerprint(public string, saved firewalldSavedConfig, ports []string, mesh FirewallMesh) string {
+// inventory, firewalld.conf, saved public zone, configured SSH ports, the
+// host's role and peers, and the operator tunnel's port.
+func firewalldFingerprint(public string, saved firewalldSavedConfig, ports []string, mesh FirewallMesh, opsPort string) string {
 	h := sha256.New()
-	for _, part := range []string{public, saved.inventory, saved.conf, saved.public, strings.Join(ports, " "), meshFingerprint(mesh)} {
+	for _, part := range []string{public, saved.inventory, saved.conf, saved.public, strings.Join(ports, " "), meshFingerprint(mesh), opsPort} {
 		h.Write([]byte(part))
 		h.Write([]byte{0})
 	}
@@ -102,7 +106,7 @@ func removedFromPublicZone(zone firewalldInfo, want firewalldWant) []string {
 		}
 	}
 	for _, p := range zone["ports"] {
-		if !containsString(want.publicPorts, p) {
+		if !containsString(want.outsidePorts(want.publicPorts), p) {
 			removed = append(removed, "port "+p)
 		}
 	}
@@ -140,7 +144,7 @@ func removedFromPublicZone(zone firewalldInfo, want firewalldWant) []string {
 // openedInPublicZone includes all resulting public ports, even those already
 // open, plus newly added services.
 func openedInPublicZone(zone firewalldInfo, want firewalldWant) []string {
-	opened := append([]string{}, want.publicPorts...)
+	opened := want.outsidePorts(want.publicPorts)
 	for _, s := range want.publicServices {
 		if !containsString(zone["services"], s) {
 			opened = append(opened, "service "+s)
