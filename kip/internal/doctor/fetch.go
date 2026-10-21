@@ -69,6 +69,7 @@ type Snapshot struct {
 	ClusterHost     string
 	Profile         string
 	Heartbeat       []string
+	Backups         BackupState
 	Missing         map[Part]error
 }
 
@@ -168,6 +169,12 @@ func FetchOverSSH(r Runner) Snapshot {
 			}
 		}
 		snap.Heartbeat = newestHeartbeatLines(lines)
+	}
+
+	if state, err := fetchBackupsOverSSH(r); err != nil {
+		snap.Missing[PartBackups] = err
+	} else {
+		snap.Backups = state
 	}
 	return snap
 }

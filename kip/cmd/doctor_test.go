@@ -211,3 +211,13 @@ func TestKubernetesAPIChecks_ShowAsNotCheckedWithoutAKubeconfig(t *testing.T) {
 		}
 	}
 }
+
+func TestAnUnreadClusterLeavesBackupsUnchecked(t *testing.T) {
+	snap := unreadSnapshot(errors.New("no SSH connection and no API client"))
+
+	r := doctor.CheckBackups(snap, time.Now())
+
+	if r.Status != doctor.Skip || !strings.Contains(r.Detail, "no SSH connection and no API client") || strings.Contains(r.Message, "not set up") {
+		t.Errorf("an unread cluster should name why backups were not checked, got %v: %s", r.Status, r.Message)
+	}
+}

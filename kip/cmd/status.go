@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,6 +16,7 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/alerts"
 	"github.com/getkipper/kipper/kip/internal/config"
+	"github.com/getkipper/kipper/kip/internal/doctor"
 	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/k8s"
 	"github.com/getkipper/kipper/kip/internal/manifest"
@@ -95,6 +97,8 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		reportServerStorageRoom(ctx, os.Stdout, &service.Manager{Client: client.Clientset(), Dynamic: client.Dynamic()})
 	}
 	reportAlertDelivery(ctx, client)
+	state, err := doctor.ReadBackupsViaAPI(ctx, client.Dynamic())
+	writeBackupHealth(os.Stdout, state, err, time.Now())
 	reportCrashLoopingServices(ctx, client)
 	reportPlaintextPostgres(ctx, client)
 
@@ -115,6 +119,21 @@ func nodeMark(node k8s.NodeInfo) string {
 		return "⚠"
 	}
 	return "✔"
+}
+
+// writeBackupHealth prints the outcome of the newest scheduled backups, as kip
+// doctor judges them. readErr reports that the backups could not be read.
+func writeBackupHealth(out io.Writer, state doctor.BackupState, readErr error, now time.Time) {
+	snap := doctor.Snapshot{Backups: state}
+	if readErr != nil {
+		snap.Missing = map[doctor.Part]error{doctor.PartBackups: readErr}
+	}
+	r := doctor.CheckBackups(snap, now)
+	message := r.Message
+	if r.Status == doctor.Skip && r.Detail != "" {
+		message += ": " + r.Detail
+	}
+	say(out, "  Backups:\n    %s  %s\n\n", doctorMarks[r.Status], message)
 }
 
 // reportAlertDelivery says how an alert leaves this cluster, and says it loudly

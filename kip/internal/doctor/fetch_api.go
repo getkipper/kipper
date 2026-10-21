@@ -78,6 +78,12 @@ func FetchViaAPI(ctx context.Context, cs kubernetes.Interface, dyn dynamic.Inter
 	} else {
 		snap.Heartbeat = lines
 	}
+
+	if state, err := ReadBackupsViaAPI(ctx, dyn); err != nil {
+		snap.Missing[PartBackups] = err
+	} else {
+		snap.Backups = state
+	}
 	return snap
 }
 

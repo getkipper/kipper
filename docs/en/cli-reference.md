@@ -222,6 +222,8 @@ kip status
 
 A component with no ready replicas (or no available replicas for a Deployment) is marked `…` and listed as starting when its pods appear to be starting up. Assigned nodes must be Ready. Pending pods can qualify before scheduling or container status is reported. Finished and deleting pods are ignored. If startup persists, check pod events, init containers, and readiness probes. `✗` means the health check found neither a healthy component nor evidence of startup; possible causes include missing pods, crash loops, image pull failures, scheduling failures, nodes that are not Ready, and lookup errors.
 
+The Backups section reports the health of the newest finished backup of each active schedule, using the same checks as [`kip doctor`](#kip-doctor).
+
 It also audits the DNS resolvers your cluster forwards external queries to. Those live in a file on the server, so `kip status` makes a best-effort SSH connection as the cluster's SSH user (reusing the key from install, then your SSH agent or `~/.ssh/id_ed25519`) to read it. Three things are checked: the file is still a safe set (IPv4 entries only, at most three), the entries still match the resolvers the cluster was configured with (`dns_resolvers` in `~/.kip/config.yaml`, or the default public set), and each resolver actually accepts connections from the server. Each problem gets its own warning, and drift or an unsafe hand-edit is fixed with `kip cluster dns repair`. If the server can't be reached over SSH, the section reports that the check could not run, and the rest of the status still prints.
 
 On a cluster with workers, the host checks (DNS resolvers, pending restarts, read-only volume mounts, attempts to switch UFW off after a failed firewall rollback, and operator access) cover the server and every recorded worker. Results identify each node by its recorded name. kip finds workers in node records read through the Kubernetes API. If those records are missing, unreadable or invalid, it uses the local copy and warns when the read or validation fails. It runs all of a worker's checks as one SSH command to reduce connections against the worker's firewall rate limit. Each worker's resolvers are probed from that worker. `kip cluster dns repair` restores the resolver file on the server and every worker. Before reporting a worker's results, kip confirms that the address still answers with the worker's recorded machine ID. A worker that cannot be reached, or that answers as another machine, is listed as not checked and the rest of the status still prints. Operator access checks require an SSH connection to the server to read the cluster's access record. On a single-node cluster, results retain their layout without node-name prefixes.
@@ -240,6 +242,7 @@ The checks are grouped by where a problem could occur:
 
 - **Host:** the server answers over SSH, k3s is running, and how long ago the server booted.
 - **Kubernetes:** the API server answers, it accepts your login, the nodes are Ready, and Traefik, CoreDNS, cert-manager, Dex and the Console API are running.
+- **Backups:** the newest finished backup of each active schedule. A failed one fails the check. A partially failed one warns and points to `kip backup describe`. A schedule that has not run for more than two days for daily or faster schedules, or two weeks for weekly schedules, also warns. Staleness is not judged for other cadences, such as a monthly schedule. `kip status` prints the same result.
 - **Gateway hop** (kipper.run clusters only): the hop certificate is in place, Traefik's own copy of it matches, the default TLSStore points Traefik at it, port 443 actually serves it, the gateway heartbeat renews the name, and the cluster registers the address kip has on record.
 - **kipper.run gateway** (kipper.run clusters only): the gateway is up and routes the cluster's name to it.
 
@@ -1185,6 +1188,7 @@ kip backup create weekly --project blog                       # backup one proje
 kip backup create --project blog --environment prod --ttl 720h  # 30-day retention
 kip backup create everything --include-system                       # also back up system namespaces
 kip backup list
+kip backup describe velero-daily-apps-20260413030000                # how a backup ended, its volume backups, errors and warnings
 kip backup restore weekly-20260413
 kip backup restore weekly-20260413 --namespace blog-prod      # restore one namespace
 kip backup schedules                                                # list scheduled backups

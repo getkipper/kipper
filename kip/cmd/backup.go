@@ -245,13 +245,7 @@ func runBackupList(cmd *cobra.Command, args []string) error {
 			status = s
 		}
 
-		namespaces := "all"
-		if ns, ok, _ := unstructured.NestedStringSlice(b.Object, "spec", "includedNamespaces"); ok && len(ns) > 0 {
-			namespaces = strings.Join(ns, ", ")
-		} else if ex, ok, _ := unstructured.NestedStringSlice(b.Object, "spec", "excludedNamespaces"); ok && len(ex) > 0 {
-			// Distinguish namespace exclusions from an unrestricted backup.
-			namespaces = "all except system"
-		}
+		namespaces := backupNamespaces(b)
 
 		created := b.GetCreationTimestamp().Format("2006-01-02 15:04")
 

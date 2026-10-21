@@ -204,6 +204,14 @@ This command cannot cancel restic volume restores or restores that use CSI data 
 
 ### Partially failed backups
 
+`kip doctor` and `kip status` warn when the newest finished backup of a schedule partially failed, and fail when it failed. `kip backup describe <name>` shows why:
+
+```bash
+kip backup describe velero-daily-apps-20260318030000
+```
+
+It prints the backup's status, error and warning counts when either is non-zero, available start, completion and expiry times, and item counts when Velero reports a total. It also shows each recorded file-system volume backup, including Velero's message for failed volumes, and the error and warning messages Velero recorded. Velero stores those messages with the backup, so kip asks Velero for a short-lived download link and fetches them from your machine. This works with AWS S3 or another external store reachable from your machine. In-cluster MinIO is reachable only within the cluster. If kip cannot fetch the messages, it reports the problem and prints the remaining details.
+
 `kip backup restore` requires `--allow-partial` to restore a backup marked `PartiallyFailed`, because restored data or resources may be incomplete. Choose a `Completed` backup when possible. If you proceed with `--allow-partial`, kip warns about missing data and lists volumes with failed or canceled backups when those details are available.
 
 ### CPU and memory after a restore

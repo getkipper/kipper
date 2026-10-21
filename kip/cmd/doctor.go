@@ -39,10 +39,10 @@ var doctorLoginTimeout = 15 * time.Second
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Diagnose a cluster that installed but does not work",
-	Long: `Checks the server, Kubernetes and, for a kipper.run cluster, the hop between the
-kipper.run gateway and the cluster. It reads the cluster over SSH first, so it
-still works when the Kubernetes API rejects your login. If a check fails, it
-prints a link to report what it found.`,
+	Long: `Checks the server, Kubernetes, the scheduled backups and, for a kipper.run
+cluster, the hop between the kipper.run gateway and the cluster. It reads the
+cluster over SSH first, so it still works when the Kubernetes API rejects your
+login. If a check fails, it prints a link to report what it found.`,
 	RunE:         runDoctor,
 	SilenceUsage: true,
 }
@@ -136,7 +136,7 @@ func unreadSnapshot(cause error) doctor.Snapshot {
 	err := cause
 	missing := map[doctor.Part]error{}
 	for _, p := range []doctor.Part{doctor.PartNodes, doctor.PartWorkloads, doctor.PartHopCert, doctor.PartTraefikCopy,
-		doctor.PartTLSStores, doctor.PartClusterHost, doctor.PartProfile, doctor.PartHeartbeat} {
+		doctor.PartTLSStores, doctor.PartClusterHost, doctor.PartProfile, doctor.PartHeartbeat, doctor.PartBackups} {
 		missing[p] = err
 	}
 	return doctor.Snapshot{Missing: missing}
@@ -152,7 +152,7 @@ func collectDoctorResults(ctx context.Context, cluster *config.Cluster, runner d
 	kube = append(kube, doctor.CheckNodes(snap))
 	kube = append(kube, doctor.CheckWorkloads(snap)...)
 
-	groups := []doctorGroup{{"Host", hostResults}, {"Kubernetes", kube}}
+	groups := []doctorGroup{{"Host", hostResults}, {"Kubernetes", kube}, {"Backups", []doctor.Result{doctor.CheckBackups(snap, time.Now())}}}
 	if !strings.HasSuffix(cluster.Domain, ".kipper.run") {
 		return groups
 	}
