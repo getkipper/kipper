@@ -110,11 +110,13 @@ func init() {
 }
 
 // accessNode is one recorded node an access verb reaches. node is
-// lease-fenced. base is the plain connection used for baseline checks and rollback.
+// lease-fenced. base is the plain connection used for baseline checks and
+// rollback. tunnel is set when that connection goes through the device tunnel.
 type accessNode struct {
-	rec  installer.NodeRecord
-	node installer.FirewallRunner
-	base installer.FirewallRunner
+	rec    installer.NodeRecord
+	node   installer.FirewallRunner
+	base   installer.FirewallRunner
+	tunnel bool
 }
 
 // accessCluster is everything an access verb needs. The function fields
@@ -134,14 +136,17 @@ type accessCluster struct {
 	// device is this workstation's device for the cluster, or nil. With
 	// useTunnel its path is checked beside the direct one, and with noDirect
 	// instead of it. verifyTunnel checks a pending device after the change.
-	device        *localDevice
-	cluster       *config.Cluster
-	useTunnel     bool
-	noDirect      bool
-	verifyTunnel  bool
-	tunnel        func(accessNode) (installer.AddressObserver, error)
-	direct        func(host string) installer.AddressObserver
-	reopen        func() (*accessCluster, []installer.NodeRecord, error)
+	device       *localDevice
+	cluster      *config.Cluster
+	useTunnel    bool
+	noDirect     bool
+	verifyTunnel bool
+	tunnel       func(accessNode) (installer.AddressObserver, error)
+	direct       func(host string) installer.AddressObserver
+	reopen       func() (*accessCluster, []installer.NodeRecord, error)
+	// throughTunnel replaces the session with one whose connections use the
+	// tunnel, before a change that closes the direct path.
+	throughTunnel func() (*accessCluster, error)
 	tunnels       map[string]installer.AddressObserver
 	lastBaselines map[string]accessBaseline
 
@@ -401,6 +406,9 @@ func (c *accessCluster) change(action string, edit accessEdit, acceptOlder bool)
 	if err := c.lockoutGuard(admin, baselines, c.nodes, next); err != nil {
 		return err
 	}
+	if err := c.sessionGuard(admin, baselines); err != nil {
+		return err
+	}
 	if err := c.apiGuard(admin, baselines[serverRec.MachineID], apiOn, next); err != nil {
 		return err
 	}
@@ -570,6 +578,21 @@ func (c *accessCluster) lockoutGuard(admin []netip.Prefix, baselines map[string]
 				return fmt.Errorf("the new list does not admit %s, the IPv%s address %s sees for this workstation, so kip would lock you out. Add it with 'kip cluster access allow %s' or use --here", addr, f, n.rec.Name, addr)
 			}
 		}
+	}
+	return nil
+}
+
+// sessionGuard protects the command's direct connections when a change removes
+// access for any address family observed in the baseline. The connection's
+// address family is unknown, so each observed family must remain allowed.
+// It runs after lockoutGuard, which verifies the tunnel as an alternative.
+func (c *accessCluster) sessionGuard(admin []netip.Prefix, baselines map[string]accessBaseline) error {
+	for _, n := range c.nodes {
+		b, ok := baselines[n.rec.MachineID]
+		if !ok || n.tunnel || len(b.admitted(admin)) == len(b.families()) {
+			continue
+		}
+		return fmt.Errorf("kip connected to %s directly when this command started. The change could close that connection, so kip changed nothing. Run the command again to connect through the tunnel", n.rec.Name)
 	}
 	return nil
 }
@@ -1046,7 +1069,7 @@ func openAccessSession(cmd *cobra.Command, verb string, forReset bool) (*accessS
 	}
 	keyFlag, _ := cmd.Flags().GetString("ssh-key")
 	s := &accessSession{cluster: cluster}
-	serverConn, err := dialNodeSSH(cluster.Host, keyFlag, cluster)
+	serverConn, serverTunnel, err := dialNode(cluster.Host, keyFlag, cluster)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to the server: %w", err)
 	}
@@ -1084,10 +1107,10 @@ func openAccessSession(cmd *cobra.Command, verb string, forReset bool) (*accessS
 			continue
 		}
 		if r.Role == installer.NodeRoleServer {
-			c.nodes = append(c.nodes, accessNode{rec: r, node: server, base: serverConn})
+			c.nodes = append(c.nodes, accessNode{rec: r, node: server, base: serverConn, tunnel: serverTunnel})
 			continue
 		}
-		conn, err := dialNodeSSH(r.Host, keyFlag, cluster)
+		conn, tunnel, err := dialNode(r.Host, keyFlag, cluster)
 		if err == nil {
 			s.conns = append(s.conns, conn)
 			var id string
@@ -1103,7 +1126,7 @@ func openAccessSession(cmd *cobra.Command, verb string, forReset bool) (*accessS
 			s.close()
 			return nil, fmt.Errorf("%s is unreachable (%v). If it is gone, run 'kip node remove %s --force'. If it refuses this workstation, add your address from the provider console first (see 'kip cluster access show')", r.Name, firstErrLine(err), r.Name)
 		}
-		c.nodes = append(c.nodes, accessNode{rec: r, node: lease.Host(conn), base: conn})
+		c.nodes = append(c.nodes, accessNode{rec: r, node: lease.Host(conn), base: conn, tunnel: tunnel})
 	}
 	c.useAPI(cluster)
 	s.c = c
