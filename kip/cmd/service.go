@@ -1128,6 +1128,14 @@ func runServiceCredentials(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %-24s %-34s %s\n", "-", p.Name, "unowned binding secret")
 	}
 	fmt.Println()
+	for _, s := range audit.Services {
+		switch s.Rotation {
+		case service.RotationUnfinished:
+			fmt.Printf("  !  A password rotation of %s is unfinished. If no other run is rotating it, run kip service rotate-password %s to finish it.\n\n", s.Service, s.Service)
+		case service.RotationUnusable:
+			fmt.Printf("  !  %s holds an invalid password, which blocks password rotation for %s. --repair removes the record.\n\n", secretname.ServicePasswordRotation(s.Service), s.Service)
+		}
+	}
 
 	if !audit.NeedsRepair() {
 		fmt.Printf("  Every service owns its credentials.\n\n")

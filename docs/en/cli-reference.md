@@ -832,10 +832,13 @@ kip service import mydb --file dump.sql      # load a database dump
 kip service export mydb --file nightly.dump  # dump a database to a local file
 kip service restore-dump mydb --to mydb-new  # restore mydb's consistent dump from a backup into an empty service
 kip service credentials                      # check every service owns its credentials
+kip service rotate-password mydb             # new password in the engine, the Secret and every bound app
 kip service delete mydb --delete-data        # delete the service and its volume
 ```
 
 `kip service share` accepts `--project` and `--environment` to target a service outside the active project, `--expires` (up to 720h) for the link lifetime, and `--label` for a note in the listing. Use `--list` to see a service's links, `--revoke <id>` to kill one, and `--revoke-all` plus `--rotate-key` to contain a leak.
+
+`kip service rotate-password` takes `--yes` to skip the confirmation, plus `--project` and `--environment`. Without `--project` or `--environment`, it finds the service by name across the cluster. See [Rotating a service password](/en/services#rotating-a-service-password).
 
 `kip service restore-dump` takes `--to` (required, an existing Postgres service without tables), `--backup` (default: the latest completed backup that covers the namespace), `--project` and `--environment`. See [Restore a Postgres dump into a new service](/en/backups#restore-a-postgres-dump-into-a-new-service).
 

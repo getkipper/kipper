@@ -47,7 +47,8 @@ type CredentialReport struct {
 	State   CredentialState
 	// Owner names the controller holding the Secret, when one does and it is
 	// not this Service.
-	Owner string
+	Owner    string
+	Rotation RotationRecord
 }
 
 // Healthy reports whether this service's credentials can be injected.
@@ -74,7 +75,7 @@ func (a CredentialAudit) NeedsRepair() bool {
 		return true
 	}
 	for _, s := range a.Services {
-		if s.State == CredentialUnowned || s.State == CredentialAbandoned {
+		if s.State == CredentialUnowned || s.State == CredentialAbandoned || s.Rotation == RotationUnusable {
 			return true
 		}
 	}
@@ -82,7 +83,7 @@ func (a CredentialAudit) NeedsRepair() bool {
 }
 
 // AuditCredentials reports the ownership of every service's credentials in a
-// namespace, and any per-binding projection left without an owner.
+// namespace, their rotation records, and any per-binding projection left without an owner.
 //
 // Ownership is not bookkeeping here. A binding's credentials are admitted into a
 // workload only when the Secret carries a controller reference to the Service CR
@@ -129,6 +130,9 @@ func (m *Manager) AuditCredentials(ctx context.Context, namespace string) (Crede
 				}
 				report.Owner = owner.Kind + "/" + owner.Name
 			}
+		}
+		if report.Rotation, err = ReadRotationRecord(ctx, m.Client, namespace, name); err != nil {
+			return audit, fmt.Errorf("checking for an unfinished rotation of %s: %w", name, err)
 		}
 		audit.Services = append(audit.Services, report)
 	}
@@ -200,9 +204,24 @@ func withoutController(refs []metav1.OwnerReference) []metav1.OwnerReference {
 // RepairCredentials assigns unowned or abandoned Secrets to their services
 // on the operator's authority, rechecking ownership and service liveness.
 // Unowned projections are deleted so controllers rebuild them from shared
-// credentials instead of retaining their existing values.
+// credentials instead of retaining their existing values. Unusable rotation
+// records are deleted after rechecking their passwords. The result lists completed
+// repairs, including those completed before an error.
 func (m *Manager) RepairCredentials(ctx context.Context, namespace string, audit CredentialAudit) ([]string, error) {
 	var done []string
+
+	for _, report := range audit.Services {
+		if report.Rotation != RotationUnusable {
+			continue
+		}
+		removed, err := RemoveUnusableRotationRecord(ctx, m.Client, namespace, report.Service)
+		if err != nil {
+			return done, err
+		}
+		if removed {
+			done = append(done, fmt.Sprintf("%s removed. It held a password kip will not use, so no rotation could resume from it", secretname.ServicePasswordRotation(report.Service)))
+		}
+	}
 
 	for _, report := range audit.Services {
 		if report.State != CredentialUnowned && report.State != CredentialAbandoned {
