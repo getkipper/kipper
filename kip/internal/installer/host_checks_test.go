@@ -123,6 +123,9 @@ func TestHostCheckBatchCoversEveryWorkerCheck(t *testing.T) {
 		if _, err := ReadAccessGuardState(replay); err != nil && strings.Contains(err.Error(), "not in the batch") {
 			t.Errorf("access guard: %v", err)
 		}
+		if _, err := ReadOpsState(replay); err != nil {
+			t.Errorf("operator interface: %v", err)
+		}
 		body, err := ReadResolvConf(replay)
 		if err != nil {
 			t.Fatalf("resolv.conf: %v", err)
