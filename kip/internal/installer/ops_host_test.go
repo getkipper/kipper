@@ -42,6 +42,7 @@ case "$1 $2" in
   "link show") [ -e ROOT/link ] ;;
   "link add") touch ROOT/link ;;
   "link del") [ ! -e ROOT/link-del-fails ] && rm -f ROOT/link ;;
+  "route replace") [ ! -e ROOT/route-fails ] ;;
 esac`
 
 const fakeWg = `case "$1" in
@@ -238,6 +239,25 @@ func TestOpsStateNoticesATableChangedAfterTheLoad(t *testing.T) {
 	assert.NotEqual(t, st.TableSum, st.LoadedSum)
 }
 
+func TestOpsStateReadsWhatTheBootUnitNeeds(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	s.write("enabled-"+opsUnitName, "")
+	out, err := s.Run(opsStateCommand(s.root))
+	require.NoError(t, err, out)
+	st := parseOpsState(out)
+	assert.True(t, st.Enabled)
+	assert.Empty(t, st.Missing)
+
+	require.NoError(t, os.Remove(filepath.Join(s.root, "enabled-"+opsUnitName)))
+	require.NoError(t, os.Remove(filepath.Join(s.root, opsDir, "peers.conf")))
+	out, err = s.Run(opsStateCommand(s.root))
+	require.NoError(t, err, out)
+	st = parseOpsState(out)
+	assert.False(t, st.Enabled)
+	assert.Equal(t, []string{"peers.conf"}, st.Missing)
+}
+
 func TestOpsLoadWithoutTheTableNeverBringsUpTheInterface(t *testing.T) {
 	s := newOpsScene(t)
 	s.prepared(sampleDevices())
@@ -246,6 +266,14 @@ func TestOpsLoadWithoutTheTableNeverBringsUpTheInterface(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, s.calls(), "ip link add")
 	assert.NotContains(t, s.calls(), "wg syncconf")
+}
+
+func TestOpsLoadFailsWhenTheDeviceRouteCannotBeSet(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	s.write("route-fails", "")
+	_, err := s.script("load")
+	require.Error(t, err, "the boot unit reports a node that cannot answer its devices")
 }
 
 func TestOpsLoadNeverHandsAnIncompleteConfigToWireGuard(t *testing.T) {
@@ -487,14 +515,40 @@ func TestApplyOpsNodeOpensTheTunnelPortInUFW(t *testing.T) {
 	assert.Less(t, strings.Index(s.calls(), allow), strings.Index(s.calls(), "wg syncconf"), "the port opens before the interface comes up")
 }
 
-func TestApplyOpsNodeLeavesAnInactiveUFWAlone(t *testing.T) {
+func TestApplyOpsNodeSavesTheTunnelPortInAnInactiveUFW(t *testing.T) {
 	s := newOpsScene(t)
 	s.prepared(sampleDevices())
 	writeUFWStub(t, s.bin, `echo "ufw $*" >> `+filepath.Join(s.root, "calls.log")+`; [ "$1" = status ] && echo "Status: inactive"; exit 0`)
 	peers, err := RenderOpsPeers(9, 443, sampleDevices())
 	require.NoError(t, err)
 	require.NoError(t, applyOpsNode(s, sampleOpsIntent(), peers, s.root))
-	assert.NotContains(t, s.calls(), "ufw allow")
+	assert.Contains(t, s.calls(), "ufw allow 443/udp comment kipper-ops", "enabling UFW later keeps the port")
+	assert.NotContains(t, s.calls(), "ufw enable")
+}
+
+func TestOpsUFWRulesFollowThePeersFile(t *testing.T) {
+	s := newOpsScene(t)
+	rules, err := opsUFWRules(opsRootRunner{s})
+	require.NoError(t, err)
+	assert.Empty(t, rules, "a host without an operator interface gets no rule")
+
+	peers, err := RenderOpsPeers(9, 51820, sampleDevices())
+	require.NoError(t, err)
+	s.write(opsDir+"/peers.conf", peers)
+	rules, err = opsUFWRules(opsRootRunner{s})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ufw allow 51820/udp comment kipper-ops"}, rules)
+}
+
+// opsRootRunner runs commands with host paths redirected into the scene.
+type opsRootRunner struct{ s *opsScene }
+
+func (r opsRootRunner) Run(command string) (string, error) {
+	return r.s.Run(strings.ReplaceAll(command, opsDir, r.s.root+opsDir))
+}
+
+func (r opsRootRunner) RunStdin(command string, stdin io.Reader) (string, error) {
+	return r.s.RunStdin(strings.ReplaceAll(command, opsDir, r.s.root+opsDir), stdin)
 }
 
 func writeUFWStub(t *testing.T, bin, body string) {

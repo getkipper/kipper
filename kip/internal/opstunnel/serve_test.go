@@ -188,3 +188,68 @@ func TestServeAnswersADeviceChangeBeforeStopping(t *testing.T) {
 	_, err = open.Read(make([]byte, 1))
 	assert.Error(t, err, "the stream of the old device was closed")
 }
+
+func TestADialThatMeetsAnIdleExitStartsTheProcessAgain(t *testing.T) {
+	gone := shortSocket(t)
+	l, err := net.Listen("unix", gone)
+	require.NoError(t, err)
+	go func() {
+		c, err := l.Accept()
+		if err == nil {
+			_ = c.Close()
+		}
+		_ = l.Close()
+	}()
+	fresh, _ := serve(t, &echoDialer{}, time.Minute)
+	sockets := []string{gone, fresh}
+	ensured := 0
+	ensure := func() (string, error) {
+		ensured++
+		return sockets[ensured-1], nil
+	}
+
+	c, err := dialRetrying(ensure, func(socket string) (net.Conn, error) {
+		return DialVia(context.Background(), socket, "node-1", 22)
+	})
+
+	require.NoError(t, err)
+	_ = c.Close()
+	assert.Equal(t, 2, ensured)
+}
+
+func TestADialRefusedByTheNodeIsNotRetried(t *testing.T) {
+	socket, _ := serve(t, &echoDialer{}, time.Minute)
+	ensured := 0
+	_, err := dialRetrying(func() (string, error) {
+		ensured++
+		return socket, nil
+	}, func(socket string) (net.Conn, error) {
+		return DialVia(context.Background(), socket, "node-1", 1)
+	})
+	require.Error(t, err)
+	assert.Equal(t, 1, ensured)
+}
+
+func TestADialThatTimesOutIsNotRetried(t *testing.T) {
+	socket := shortSocket(t)
+	l, err := net.Listen("unix", socket)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		c, err := l.Accept()
+		if err == nil {
+			t.Cleanup(func() { _ = c.Close() })
+		}
+	}()
+	ensured := 0
+	_, err = dialRetrying(func() (string, error) {
+		ensured++
+		return socket, nil
+	}, func(socket string) (net.Conn, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		return DialVia(ctx, socket, "node-1", 22)
+	})
+	require.Error(t, err)
+	assert.Equal(t, 1, ensured, "a slow node is not dialed twice")
+}

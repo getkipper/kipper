@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -167,8 +168,7 @@ const opsFindAwk = `BEGIN { RS = ""; FS = "\n" }
 // opsScript is ops.sh. load replaces the kipper_ops table before bringing up
 // the interface with the composed config. revoke-device lets a
 // provider console operator persist a key revocation on this node.
-// remove takes the interface down before the table. Tests use root to
-// redirect host paths into a temporary directory.
+// Tests use root to redirect host paths into a temporary directory.
 func opsScript(root string) string {
 	d := root + opsDir
 	return `export LC_ALL=C LANGUAGE=C
@@ -359,8 +359,8 @@ func opsNodeKey(client CommandRunner, out io.Writer, root string) (string, error
 }
 
 // ApplyOpsNode writes the node's ops table, interface settings and peers,
-// enables the boot unit, opens the tunnel's UDP port when UFW is active, and
-// loads them: first the table, then the interface.
+// enables the boot unit and saves a rule allowing the tunnel's UDP port when
+// UFW is installed, even if inactive. It loads the table before the interface.
 // nft checks the table before anything is written. OpsNodeKey must have run
 // on the node first. Validation or remote command failures return an error.
 // Failures after the nft check may leave partially applied changes.
@@ -387,7 +387,8 @@ func applyOpsNode(client CommandRunner, in OpsNodeIntent, peers, root string) er
 	b.WriteString(writeIfChanged(root+opsUnitPath, opsUnit(), "0644", "systemctl daemon-reload || exit 1"))
 	fmt.Fprintf(&b, "%ssync %s/ops.nft %s/iface %s/peers.conf %s || exit 1\n", accessTimeout, d, d, d, d)
 	fmt.Fprintf(&b, "systemctl enable %s >/dev/null 2>&1; systemctl is-enabled --quiet %s || { echo 'systemd did not enable %s' >&2; exit 1; }\n", opsUnitName, opsUnitName, opsUnitName)
-	fmt.Fprintf(&b, "if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then ufw allow %d/udp comment kipper-ops >/dev/null || exit 1; fi\n", in.Port)
+	// Saving the rule while UFW is inactive keeps the port open when it is enabled.
+	fmt.Fprintf(&b, "if command -v ufw >/dev/null 2>&1; then ufw allow %d/udp comment kipper-ops >/dev/null || exit 1; fi\n", in.Port)
 	fmt.Fprintf(&b, "command -v restorecon >/dev/null 2>&1 && restorecon -R %s %s; true) &&\n", d, root+opsUnitPath)
 	fmt.Fprintf(&b, "sh %s/ops.sh load", d)
 	if _, err := client.Run(b.String()); err != nil {
@@ -431,6 +432,31 @@ func scheduleOpsRemoval(client CommandRunner, root string) error {
 	return nil
 }
 
+// opsPortCommand returns a command that prints the first ListenPort in
+// peers.conf, or nothing if the file is unreadable or has no matching entry.
+func opsPortCommand(root string) string {
+	return fmt.Sprintf("sed -n 's/^ListenPort = \\([0-9][0-9]*\\)$/\\1/p' %s/peers.conf 2>/dev/null | head -n 1", root+opsDir)
+}
+
+// opsUFWRules returns a rule allowing the tunnel's UDP port from peers.conf
+// so UFW reloads preserve tunnel access. It returns nil if no port is found
+// and an error if the remote command fails or the port is not an integer.
+func opsUFWRules(client CommandRunner) ([]string, error) {
+	out, err := client.Run(opsPortCommand(""))
+	if err != nil {
+		return nil, fmt.Errorf("reading the operator tunnel's port: %w", err)
+	}
+	text := strings.TrimSpace(out)
+	if text == "" {
+		return nil, nil
+	}
+	port, err := strconv.Atoi(text)
+	if err != nil {
+		return nil, fmt.Errorf("the operator tunnel's port %q is not a number", text)
+	}
+	return []string{fmt.Sprintf("ufw allow %d/udp comment kipper-ops", port)}, nil
+}
+
 // opsRemoveCommand writes the removal script and runs it with run, passing
 // the tunnel port from peers.conf.
 func opsRemoveCommand(root, run string) string {
@@ -438,7 +464,7 @@ func opsRemoveCommand(root, run string) string {
 	script := root + "/run/kipper-ops-remove.sh"
 	var b strings.Builder
 	fmt.Fprintf(&b, "[ -e %s ] || [ -e %s ] || exit 0\n", d, root+opsUnitPath)
-	fmt.Fprintf(&b, "p=$(sed -n 's/^ListenPort = \\([0-9][0-9]*\\)$/\\1/p' %s/peers.conf 2>/dev/null | head -n 1)\n", d)
+	fmt.Fprintf(&b, "p=$(%s)\n", opsPortCommand(root))
 	fmt.Fprintf(&b, "cat > %s <<'KIPPER_OPS_REMOVE' || exit 1\n%sKIPPER_OPS_REMOVE\n", script, opsRemoveScript(root))
 	fmt.Fprintf(&b, "%s %s \"$p\"", run, script)
 	return b.String()

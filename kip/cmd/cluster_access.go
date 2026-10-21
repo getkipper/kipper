@@ -677,7 +677,7 @@ func (c *accessCluster) allowEdit(args []string, here bool, note string) accessE
 		}
 		if len(add) == 0 {
 			if here && c.device != nil {
-				return rec, nil, fmt.Errorf("kip reached the server only through device %s, so it cannot see this workstation's direct address. Name the prefix, or run with --via direct from the network to add", c.device.name)
+				return rec, nil, fmt.Errorf("kip reached the server only through device %s, so it cannot see this workstation's direct address. Name the prefix to admit, for example 'kip cluster access allow 203.0.113.5/32'", c.device.name)
 			}
 			return rec, nil, errors.New("name the prefixes to admit, or pass --here")
 		}
@@ -1037,6 +1037,10 @@ func openAccessSession(cmd *cobra.Command, verb string, forReset bool) (*accessS
 	if err != nil {
 		return nil, err
 	}
+	// A lost device key moves the session to the direct path before it connects.
+	if _, err := loadLocalDevice(cluster); err != nil {
+		return nil, err
+	}
 	if cluster.Host == "" {
 		return nil, fmt.Errorf("cluster %s has no host recorded, so kip cannot reach its nodes", cluster.Name)
 	}
@@ -1067,6 +1071,13 @@ func openAccessSession(cmd *cobra.Command, verb string, forReset bool) (*accessS
 	if err := c.useDevice(cluster, keyFlag); err != nil {
 		s.close()
 		return nil, err
+	}
+	// Repin trusts a changed key, so the old pin must not stop it.
+	if verb != "device repin" {
+		if err := c.syncManifest(); err != nil {
+			s.close()
+			return nil, err
+		}
 	}
 	for _, r := range records {
 		if r.State == installer.NodeStateWiping && !forReset {
@@ -1403,6 +1414,10 @@ func runClusterAccessShow(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	// A lost device key moves show to the direct path before it connects.
+	if _, err := loadLocalDevice(cluster); err != nil {
+		return err
+	}
 	if cluster.Host == "" {
 		return fmt.Errorf("cluster %s has no host recorded, so kip cannot reach its nodes", cluster.Name)
 	}
@@ -1436,6 +1451,9 @@ func runClusterAccessShow(cmd *cobra.Command, _ []string) error {
 	c.useTunnel = c.device != nil && c.device.state == config.OpsActive && mode != transport.Direct
 	if mode == transport.Tunnel {
 		c.apiFamilies = nil
+	}
+	if err := c.syncManifest(); err != nil {
+		say(c.out, "  ⚠  %v\n", err)
 	}
 	var nodes []showNode
 	for _, r := range records {

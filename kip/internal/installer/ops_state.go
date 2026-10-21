@@ -16,6 +16,8 @@ import (
 // UFWRules preserves the order printed by 'ufw status' when UFW is active.
 type OpsHostState struct {
 	Dir       bool
+	Enabled   bool
+	Missing   []string
 	Table     bool
 	Up        bool
 	PublicKey string
@@ -47,6 +49,8 @@ func opsStateCommand(root string) string {
 	d := root + opsDir
 	return `d=` + d + `
 [ -d $d ] && echo dir=1
+systemctl is-enabled --quiet ` + opsUnitName + ` 2>/dev/null && echo enabled=1
+for f in ops.nft iface peers.conf kipops.key ops.sh; do [ -s $d/$f ] || echo "missing=$f"; done
 if listed=$(nft list table ` + opsTable + ` 2>/dev/null); then
   echo table=1
   echo "tablesum=$(printf '%s\n' "$listed" | sha256sum | cut -c1-64)"
@@ -91,6 +95,10 @@ func parseOpsState(out string) OpsHostState {
 		switch k {
 		case "dir":
 			st.Dir = true
+		case "enabled":
+			st.Enabled = true
+		case "missing":
+			st.Missing = append(st.Missing, v)
 		case "table":
 			st.Table = true
 		case "up":
@@ -155,6 +163,14 @@ func OpsDrift(st OpsHostState, rec AccessRecord, machineID string) []string {
 		return []string{"has no operator address in the record. Run 'kip cluster access apply'"}
 	}
 	var drift []string
+	if st.Dir {
+		if !st.Enabled {
+			drift = append(drift, "kipper-ops.service is not enabled, so the operator interface would not come back after a reboot. Run 'kip cluster access apply'")
+		}
+		for _, f := range st.Missing {
+			drift = append(drift, fmt.Sprintf("%s/%s, which the interface loads at boot, is missing or empty. Run 'kip cluster access apply'", opsDir, f))
+		}
+	}
 	if !st.Table {
 		drift = append(drift, "the kipper_ops table is not loaded")
 	} else if chains := opsChainDrift(st.Chains); len(chains) > 0 {

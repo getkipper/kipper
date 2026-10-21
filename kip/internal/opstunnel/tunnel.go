@@ -58,6 +58,7 @@ type Tunnel struct {
 	address netip.Addr
 	mu      sync.Mutex
 	nodes   []Node
+	applied string
 }
 
 // Up starts and configures a userspace WireGuard tunnel with 25-second peer
@@ -88,12 +89,13 @@ func Up(m Manifest, logf func(string, ...any)) (*Tunnel, error) {
 		dev.Close()
 		return nil, fmt.Errorf("starting the tunnel: %w", err)
 	}
-	return &Tunnel{dev: dev, net: tnet, address: m.Address, nodes: append([]Node(nil), m.Nodes...)}, nil
+	return &Tunnel{dev: dev, net: tnet, address: m.Address, nodes: append([]Node(nil), m.Nodes...), applied: cfg}, nil
 }
 
-// Reload replaces the tunnel's private key and peers from the manifest. It
-// returns configuration errors and rejects address changes, which require a
-// new tunnel.
+// Reload updates the tunnel's private key, peers and node manifest. It reuses
+// an unchanged WireGuard configuration to preserve established peer sessions.
+// It returns configuration errors and rejects address changes, which require
+// a new tunnel.
 func (t *Tunnel) Reload(m Manifest) error {
 	if m.Address != t.address {
 		return fmt.Errorf("the device address changed from %s to %s", t.address, m.Address)
@@ -104,8 +106,11 @@ func (t *Tunnel) Reload(m Manifest) error {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if err := t.dev.IpcSet(cfg); err != nil {
-		return fmt.Errorf("configuring the tunnel: %w", err)
+	if cfg != t.applied {
+		if err := t.dev.IpcSet(cfg); err != nil {
+			return fmt.Errorf("configuring the tunnel: %w", err)
+		}
+		t.applied = cfg
 	}
 	t.nodes = append([]Node(nil), m.Nodes...)
 	return nil

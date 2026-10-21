@@ -247,8 +247,12 @@ func loadUFW(client CommandRunner, sshPorts []string, rateLimitSSH bool, mesh Fi
 
 	// A saved rule can survive a failed reload. Reload and check the live SSH
 	// rules below even if retrying a rule command succeeds.
+	ops, err := opsUFWRules(client)
+	if err != nil {
+		return err
+	}
 	var ruleErr error
-	for _, rule := range append(ufwRules(sshPorts, rateLimitSSH, mesh.Role), ufwPeerRules(mesh)...) {
+	for _, rule := range append(append(ufwRules(sshPorts, rateLimitSSH, mesh.Role), ufwPeerRules(mesh)...), ops...) {
 		if err := runUFW(client, rule); err != nil {
 			ruleErr = fmt.Errorf("applying %q: %w", rule, err)
 			break

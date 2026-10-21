@@ -5,14 +5,17 @@ import (
 	"errors"
 	"io"
 	"net/netip"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
+	"github.com/getkipper/kipper/kip/internal/transport"
 )
 
 var testNodeKey = wordKey("pubcpubcpubcpubcpubcpubcpubcpubc")
@@ -101,7 +104,7 @@ func newDeviceFixture(t *testing.T, state string, observed map[string]string) *d
 		return &d, nil, nil
 	}
 	f.c.opsState = func(installer.CommandRunner) (installer.OpsHostState, error) {
-		return installer.OpsHostState{Dir: true, Table: true, Up: true, PublicKey: testNodeKey, Port: 443, Address: "10.99.0.1/32",
+		return installer.OpsHostState{Dir: true, Enabled: true, Table: true, Up: true, PublicKey: testNodeKey, Port: 443, Address: "10.99.0.1/32",
 			MTU: 1380, Routes: []string{"10.99.0.128/25"}, Chains: testOpsChains, TableSum: "abc", LoadedSum: "abc",
 			Peers: map[string]string{f.public: "10.99.0.129/32"}}, nil
 	}
@@ -438,6 +441,25 @@ func TestEnrollmentRefusesARangeThatOverlapsANodeNetwork(t *testing.T) {
 	}
 }
 
+func TestEnrollmentRefusesWhenThePodNetworkCannotBeRead(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsPending, map[string]string{"4": "198.51.100.7"})
+	f.server.store(t, installer.AccessRecord{Version: 1, Generation: 3, Sources: []installer.AccessSource{{Prefix: "198.51.100.7/32"}}})
+	f.committed(f.server, 3)
+	f.c.pod = func() (netip.Prefix, error) { return netip.Prefix{}, errors.New("reading the k3s config failed") }
+	prepared := false
+	f.c.opsKey = func(installer.CommandRunner) (string, error) {
+		prepared = true
+		return testNodeKey, nil
+	}
+
+	_, err := f.c.enroll(laptopRequest())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reading the k3s config failed")
+	assert.False(t, prepared, "an unchecked range touches no node")
+	assert.Empty(t, f.server.writes)
+}
+
 func TestEnrollmentMovesPastADeviceTheRecordNoLongerLists(t *testing.T) {
 	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
 	f.server.store(t, installer.AccessRecord{Version: 1, Generation: 3, Sources: []installer.AccessSource{{Prefix: "198.51.100.7/32"}}})
@@ -456,6 +478,81 @@ func TestEnrollmentMovesPastADeviceTheRecordNoLongerLists(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, config.OpsActive, cfg.GetCluster("prod").Ops.State)
 	assert.Equal(t, "desktop", cfg.GetCluster("prod").Ops.Device)
+}
+
+func TestEnrollmentAfterAResetForgetsTheOldNodeKeys(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	f.server.store(t, installer.AccessRecord{Version: 1, Generation: 3, Sources: []installer.AccessSource{{Prefix: "198.51.100.7/32"}}})
+	f.committed(f.server, 3)
+	old := []config.OpsNode{{MachineID: f.c.nodes[0].rec.MachineID, Name: "server", PublicKey: wordKey("a key from before the reset.....")}}
+	require.NoError(t, updateLocalOps(f.cluster, func(o *config.Ops) *config.Ops {
+		o.Nodes = old
+		return o
+	}))
+
+	_, err := f.c.enroll(laptopRequest())
+
+	require.NoError(t, err, "the nodes' new keys come from this enrollment, so the old pins are dropped")
+	require.NotEmpty(t, f.cluster.Ops.Nodes)
+	assert.Equal(t, testNodeKey, f.cluster.Ops.Nodes[0].PublicKey)
+}
+
+func TestAllowHereThroughTheTunnelAsksForThePrefix(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{})
+	f.deviceRecord(t, "198.51.100.7/32")
+
+	err := f.c.change("allow", f.c.allowEdit(nil, true, ""), false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Name the prefix to admit")
+	assert.NotContains(t, err.Error(), "--via direct", "a workstation that only reaches the cluster through its device cannot connect directly")
+}
+
+func TestALostDeviceKeyLeavesTheDeviceStale(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	path, err := config.OpsKeyPath("prod")
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(path))
+
+	device, err := loadLocalDevice(f.cluster)
+
+	require.NoError(t, err, "a lost key must not close every access command, device remove included")
+	assert.Nil(t, device)
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, config.OpsStale, cfg.GetCluster("prod").Ops.State)
+	assert.Equal(t, transport.Direct, transport.Mode(cfg.GetCluster("prod")))
+}
+
+func TestAccessCommandsNoticeALostKeyBeforeConnecting(t *testing.T) {
+	for name, run := range map[string]func(*cobra.Command) error{
+		"session": func(cmd *cobra.Command) error {
+			_, err := openAccessSession(cmd, "apply", false)
+			return err
+		},
+		"show": func(cmd *cobra.Command) error { return runClusterAccessShow(cmd, nil) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeDeviceKey(t)
+			t.Setenv("KIP_CLUSTER", "")
+			cluster := config.Cluster{Name: "prod", Ops: &config.Ops{Device: "laptop", State: config.OpsActive, Address: "10.99.0.129", Via: transport.Tunnel}}
+			require.NoError(t, config.Save(&config.Config{CurrentCluster: "prod", Clusters: []config.Cluster{cluster}}))
+			path, err := config.OpsKeyPath("prod")
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(path, []byte("not a key\n"), 0o600))
+			cmd := &cobra.Command{}
+			cmd.Flags().String("ssh-key", "", "")
+			cmd.Flags().Bool("json", false, "")
+
+			err = run(cmd)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "no host recorded", "the key is checked before the first connection")
+			cfg, err := config.Load()
+			require.NoError(t, err)
+			assert.Equal(t, config.OpsStale, cfg.GetCluster("prod").Ops.State)
+		})
+	}
 }
 
 func TestEnrollmentRefusesASecondDeviceForThisWorkstation(t *testing.T) {
@@ -484,20 +581,191 @@ func TestAccessReportNoticesAStaleDevice(t *testing.T) {
 	assert.Equal(t, config.OpsStale, cfg.GetCluster("prod").Ops.State)
 }
 
-func TestRemovingADeviceTheRecordNoLongerListsForgetsItsKey(t *testing.T) {
+func TestRemovingADeviceTheRecordNoLongerListsLoadsTheRecordEverywhere(t *testing.T) {
 	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
 	f.server.store(t, installer.AccessRecord{Version: 1, Generation: 3, Sources: []installer.AccessSource{{Prefix: "198.51.100.7/32"}}})
 	f.committed(f.server, 3)
+	worker := f.addWorker()
+	f.committed(worker, 3)
+	f.c.useTunnel = false
 
 	require.NoError(t, f.c.removeDevice("laptop", f.c.device))
 
-	assert.Empty(t, f.server.writes)
+	assert.Len(t, f.applied, 2, "a removal that stopped after the record write is finished on every node")
+	assert.Contains(t, f.out.String(), "no longer lists device laptop")
 	cfg, err := config.Load()
 	require.NoError(t, err)
 	assert.Nil(t, cfg.GetCluster("prod").Ops)
 	path, err := config.OpsKeyPath("prod")
 	require.NoError(t, err)
 	assert.NoFileExists(t, path)
+}
+
+func TestRemovingADeviceWithoutARecordForgetsOnlyTheKey(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	f.c.useTunnel = false
+
+	require.NoError(t, f.c.removeDevice("laptop", f.c.device))
+
+	assert.Empty(t, f.server.writes)
+	assert.Empty(t, f.applied)
+	path, err := config.OpsKeyPath("prod")
+	require.NoError(t, err)
+	assert.NoFileExists(t, path)
+}
+
+func TestRemovingAnotherDeviceAgainFinishesOnlyARecordedRemoval(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	rec := f.deviceRecord(t, "198.51.100.7/32")
+	rec.History = append(rec.History, installer.AccessChange{Action: "device-removed", Device: "desktop", Generation: 3})
+	f.server.store(t, rec)
+
+	err := f.c.removeDevice("tablet", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no device called tablet")
+	assert.Empty(t, f.applied)
+
+	require.NoError(t, f.c.removeDevice("desktop", nil))
+	assert.NotEmpty(t, f.applied)
+}
+
+func TestSyncManifestAddsANodeAnotherWorkstationJoined(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	rec := f.deviceRecord(t)
+	require.NoError(t, updateLocalOps(f.cluster, func(o *config.Ops) *config.Ops {
+		o.Nodes = []config.OpsNode{{MachineID: accessServerID, Name: "server", Host: "192.0.2.10", PublicKey: testNodeKey, SSHPorts: []int{2222}, Server: true}}
+		return o
+	}))
+	f.addWorker()
+	rec.Ops.Nodes, rec.Ops.NextNode = append(rec.Ops.Nodes, installer.AccessOpsNode{MachineID: accessWorkerID, Address: "10.99.0.2", PublicKey: testWorkerKey}), 3
+	f.server.store(t, rec)
+
+	require.NoError(t, f.c.syncManifest())
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	nodes := cfg.GetCluster("prod").Ops.Nodes
+	require.Len(t, nodes, 2)
+	assert.Equal(t, []int{2222}, nodes[0].SSHPorts, "a known node keeps its ports")
+	assert.Equal(t, "worker-1", nodes[1].Name)
+	assert.Equal(t, testWorkerKey, nodes[1].PublicKey)
+	assert.Equal(t, []int{22}, nodes[1].SSHPorts)
+
+	rec.Ops.Nodes[0].PublicKey = wordKey("changedchangedchangedchangedchan")
+	f.server.store(t, rec)
+	err = f.c.syncManifest()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "device repin server")
+}
+
+func TestSyncManifestSkipsTheOldPinsOfADeviceTheRecordDropped(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	rec := f.deviceRecord(t, "198.51.100.7/32")
+	require.NoError(t, updateLocalOps(f.cluster, func(o *config.Ops) *config.Ops {
+		o.Nodes = []config.OpsNode{{MachineID: accessServerID, Name: "server", Host: "192.0.2.10", PublicKey: wordKey("a key from before the reset....."), Server: true}}
+		return o
+	}))
+	rec.Devices = []installer.AccessDevice{{Name: "desktop", PublicKey: wordKey("desktopdesktopdesktopdesktopdesk"), Address: "10.99.0.130", State: installer.DeviceActive}}
+	rec.Ops.NextDevice = 131
+	f.server.store(t, rec)
+
+	require.NoError(t, f.c.syncManifest(), "another workstation's new enrollment must not lock this one out of 'device add'")
+
+	assert.Nil(t, f.c.device)
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, config.OpsStale, cfg.GetCluster("prod").Ops.State)
+}
+
+func TestSyncManifestOverTheDirectPathWarnsAboutAChangedKey(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	rec := f.deviceRecord(t, "198.51.100.7/32")
+	old := []config.OpsNode{{MachineID: accessServerID, Name: "server", Host: "192.0.2.10", PublicKey: wordKey("a key from before the reinstall."), Server: true}}
+	require.NoError(t, updateLocalOps(f.cluster, func(o *config.Ops) *config.Ops {
+		o.Nodes = old
+		return o
+	}))
+	f.server.store(t, rec)
+	f.c.useTunnel = false
+
+	require.NoError(t, f.c.syncManifest(), "a direct session can still remove the device or reset")
+
+	assert.Contains(t, f.out.String(), "device repin server")
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, old[0].PublicKey, cfg.GetCluster("prod").Ops.Nodes[0].PublicKey, "the pin is not replaced")
+}
+
+func TestDirectRemovalOfAnotherDeviceKeepsAChangedPin(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	rec := f.deviceRecord(t, "198.51.100.7/32")
+	rec.Devices = append(rec.Devices, installer.AccessDevice{Name: "desktop", PublicKey: wordKey("desktopdesktopdesktopdesktopdesk"), Address: "10.99.0.130", State: installer.DeviceActive})
+	rec.Ops.NextDevice = 131
+	f.server.store(t, rec)
+	old := wordKey("a key from before the reinstall.")
+	require.NoError(t, updateLocalOps(f.cluster, func(o *config.Ops) *config.Ops {
+		o.Nodes = []config.OpsNode{{MachineID: accessServerID, Name: "server", Host: "192.0.2.10", PublicKey: old, Server: true}}
+		return o
+	}))
+	f.c.useTunnel = false
+
+	require.NoError(t, f.c.removeDevice("desktop", f.c.device), "a stolen device can be removed over the direct path")
+
+	_, ok := f.server.stored(t).Device("desktop")
+	assert.False(t, ok)
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, old, cfg.GetCluster("prod").Ops.Nodes[0].PublicKey, "the changed key is not trusted")
+}
+
+func TestRefreshManifestIgnoresPinsOnceTheDeviceLeavesTheRecord(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	rec := f.deviceRecord(t, "198.51.100.7/32")
+	require.NoError(t, updateLocalOps(f.cluster, func(o *config.Ops) *config.Ops {
+		o.Nodes = []config.OpsNode{{MachineID: accessServerID, Name: "server", Host: "192.0.2.10", PublicKey: wordKey("a key from before the reinstall."), Server: true}}
+		return o
+	}))
+	rec.Devices = nil
+
+	assert.NoError(t, f.c.refreshManifest(rec, nil), "removing this workstation's own device needs no tunnel")
+}
+
+func TestSyncManifestNeedsARecordedServer(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	f.deviceRecord(t)
+	require.NoError(t, updateLocalOps(f.cluster, func(o *config.Ops) *config.Ops {
+		o.Nodes = []config.OpsNode{{MachineID: accessServerID, Name: "server", Host: "192.0.2.10", PublicKey: testNodeKey, Server: true}}
+		return o
+	}))
+	f.c.records = []installer.NodeRecord{{Name: "server", Host: "192.0.2.10", Role: installer.NodeRoleServer}}
+
+	require.NoError(t, f.c.syncManifest())
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Len(t, cfg.GetCluster("prod").Ops.Nodes, 1, "the manifest keeps its server")
+}
+
+func TestRepinRecordsTheKeyReadFromTheNode(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	f.deviceRecord(t, "198.51.100.7/32")
+	key := wordKey("reinstalledreinstalledreinstalle")
+	require.NoError(t, updateLocalOps(f.cluster, func(o *config.Ops) *config.Ops {
+		o.Nodes = []config.OpsNode{{MachineID: accessServerID, Name: "server", Host: "192.0.2.10", PublicKey: key, Server: true}}
+		return o
+	}))
+
+	require.NoError(t, f.c.recordNodeKey(accessServerID, "server", key))
+
+	rec := f.server.stored(t)
+	on, ok := rec.Ops.Node(accessServerID)
+	require.True(t, ok)
+	assert.Equal(t, key, on.PublicKey)
+	assert.Equal(t, "repin", rec.History[len(rec.History)-1].Action)
+	writes := len(f.server.writes)
+
+	require.NoError(t, f.c.recordNodeKey(accessServerID, "server", key))
+	assert.Len(t, f.server.writes, writes, "a key the record already holds changes nothing")
 }
 
 func TestManifestKeepsTheSSHPortsOfNodesTheChangeDidNotRead(t *testing.T) {
