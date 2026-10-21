@@ -27,6 +27,12 @@ func TestSSHConfigReachesEachNodeThroughTheTunnel(t *testing.T) {
 	assert.Contains(t, out, "Host prod-worker-1\n  HostName 192.0.2.11\n  User ubuntu\n  Port 22\n")
 	assert.Contains(t, out, "--node' '"+accessWorkerID+"' '--device' 'laptop' %p\n")
 	assert.Contains(t, out, "ProxyCommand 'kip' '--cluster' 'prod'", "kip comes from PATH, so an upgrade keeps it working")
+
+	cluster.Nodes = []config.NodeRecord{{Name: "worker-1", Host: "192.0.2.11", Role: "worker", SSHUser: "ec2-user"}}
+	out, err = sshConfigBlocks(cluster, "kip")
+	require.NoError(t, err)
+	assert.Contains(t, out, "Host prod-worker-1\n  HostName 192.0.2.11\n  User ec2-user\n", "a node keeps its own login")
+	assert.Contains(t, out, "Host prod-server\n  HostName 192.0.2.10\n  User ubuntu\n")
 }
 
 func testKubeconfig() *clientcmdapi.Config {

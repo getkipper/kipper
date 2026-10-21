@@ -24,7 +24,7 @@ func checkNodesAndStorage(cluster *config.Cluster, sshKey string) error {
 		return fmt.Errorf("connecting to %s: %w", cluster.Host, err)
 	}
 	defer func() { _ = provider.Close() }()
-	if _, err := recordNodes(provider.Client(), cluster.Name, cluster.Host); err != nil {
+	if _, err := recordNodes(provider.Client(), cluster); err != nil {
 		return err
 	}
 	pinForUpgrade(os.Stdout, provider.Client())
@@ -53,19 +53,21 @@ func pinForUpgrade(out io.Writer, client installer.CommandRunner) {
 
 // recordNodes ensures every node is recorded, creating the server record if
 // needed, then copies the records into the local cluster config.
-func recordNodes(client installer.CommandRunner, clusterName, host string) ([]installer.NodeRecord, error) {
-	records, err := installer.RequireRecordedNodes(client, host)
+func recordNodes(client installer.CommandRunner, cluster *config.Cluster) ([]installer.NodeRecord, error) {
+	records, err := installer.RequireRecordedNodes(client, cluster.Host)
 	if err != nil {
 		return nil, err
 	}
-	mirrorNodes(clusterName, records)
+	mirrorNodes(cluster, records)
 	return records, nil
 }
 
-// mirrorNodes treats local copy failures as warnings because the cluster
-// keeps the authoritative records.
-func mirrorNodes(clusterName string, records []installer.NodeRecord) {
-	if err := config.MirrorNodes(clusterName, records); err != nil {
+// mirrorNodes updates cluster's records for later connections and saves them
+// to the local config. Save failures are warnings because the cluster keeps
+// the authoritative records.
+func mirrorNodes(cluster *config.Cluster, records []installer.NodeRecord) {
+	cluster.Nodes = append([]installer.NodeRecord(nil), records...)
+	if err := config.MirrorNodes(cluster.Name, records); err != nil {
 		fmt.Printf("  ⚠  could not update the local copy of the node records: %v\n", err)
 	}
 }

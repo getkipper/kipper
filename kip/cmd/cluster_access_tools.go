@@ -110,7 +110,7 @@ func sshConfigBlocks(cluster *config.Cluster, exe string) (string, error) {
 		if len(n.SSHPorts) > 0 {
 			port = n.SSHPorts[0]
 		}
-		fmt.Fprintf(&b, "Host %s-%s\n  HostName %s\n  User %s\n  Port %d\n", cluster.Name, n.Name, strings.Trim(n.Host, "[]"), sshUser(cluster), port)
+		fmt.Fprintf(&b, "Host %s-%s\n  HostName %s\n  User %s\n  Port %d\n", cluster.Name, n.Name, strings.Trim(n.Host, "[]"), nodeSSHUser(cluster, n.Host), port)
 		if cluster.SSHKey != "" {
 			fmt.Fprintf(&b, "  IdentityFile %s\n", cluster.SSHKey)
 		}

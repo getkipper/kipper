@@ -97,6 +97,31 @@ func TestNodeSSHWithoutADeviceHasNoProxyCommand(t *testing.T) {
 	}
 }
 
+func TestNodeSSHLogsInAsTheNodesOwnUser(t *testing.T) {
+	c := &config.Cluster{Name: "plain", Host: "198.51.100.7", SSHUser: "rocky", Nodes: []config.NodeRecord{
+		{Name: "server", Host: "198.51.100.7", Role: "server"},
+		{Name: "worker", Host: "198.51.100.8", Role: "worker", SSHUser: "ec2-user"},
+	}}
+	server, err := nodeSSH("198.51.100.7", "", c)
+	require.NoError(t, err)
+	assert.Equal(t, "rocky", server.User)
+
+	worker, err := nodeSSH("198.51.100.8", "", c)
+	require.NoError(t, err)
+	assert.Equal(t, "ec2-user", worker.User)
+
+	retargeted, err := retargetSSH(server, c, "198.51.100.8")
+	require.NoError(t, err)
+	assert.Equal(t, "ec2-user", retargeted.User)
+	back, err := retargetSSH(retargeted, c, "198.51.100.7")
+	require.NoError(t, err)
+	assert.Equal(t, "rocky", back.User)
+
+	provider, err := clusterProvider(c, "198.51.100.8", "", "")
+	require.NoError(t, err)
+	assert.Equal(t, "ec2-user", provider.User)
+}
+
 func TestViaStoresTheDefault(t *testing.T) {
 	writeDeviceKey(t)
 	t.Setenv("KIP_CLUSTER", "")

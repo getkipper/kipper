@@ -57,7 +57,7 @@ func runClusterDNSRepair(_ *cobra.Command, _ []string) error {
 		return err
 	}
 	defer leased.close()
-	records, err := recordNodes(leased.server, cluster.Name, cluster.Host)
+	records, err := recordNodes(leased.server, cluster)
 	if err != nil {
 		return err
 	}

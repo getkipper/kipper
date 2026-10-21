@@ -221,7 +221,7 @@ kip cluster access forward                          # 127.0.0.1:16443 to the API
 kip cluster access kubeconfig                       # a <context>-tunnel context for kubectl
 ```
 
-`ssh-config` prints one `Host <cluster>-<node>` block per node. Its `ProxyCommand` calls `kip` through your `PATH`, so print it again after adding or removing a node. `kubeconfig` adds a context whose server is `https://127.0.0.1:16443`, with the same CA, credentials and TLS server name, so kubectl still checks the API's certificate. It preserves an existing `<context>-tunnel` entry unless it matches the generated entry apart from the local port, which can be updated. While `forward` runs, any local user of your workstation can reach the API through that port. The API still asks for credentials.
+`ssh-config` prints one `Host <cluster>-<node>` block per node, with the node's own SSH user when it has one. Its `ProxyCommand` calls `kip` through your `PATH`, so print it again after adding or removing a node. `kubeconfig` adds a context whose server is `https://127.0.0.1:16443`, with the same CA, credentials and TLS server name, so kubectl still checks the API's certificate. It preserves an existing `<context>-tunnel` entry unless it matches the generated entry apart from the local port, which can be updated. While `forward` runs, any local user of your workstation can reach the API through that port. The API still asks for credentials.
 
 **A lost or stolen device**
 

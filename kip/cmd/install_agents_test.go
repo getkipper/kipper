@@ -40,7 +40,7 @@ func (recordsOnlyServer) ObservedAddress(string) (string, error) { return "", ni
 
 func TestUpgradeAgentsAfterInstallSkipsASingleNodeCluster(t *testing.T) {
 	server := recordsOnlyServer{t: t, records: `{"0123456789abcdef0123456789abcdef":"{\"name\":\"server-1\",\"host\":\"203.0.113.10\",\"machineID\":\"0123456789abcdef0123456789abcdef\",\"role\":\"server\",\"state\":\"ready\"}"}`}
-	dial := func(string) (installer.FirewallRunner, func(), error) {
+	dial := func(string, string) (installer.FirewallRunner, func(), error) {
 		t.Fatal("a single-node cluster has no worker to connect to")
 		return nil, nil, nil
 	}
@@ -49,8 +49,16 @@ func TestUpgradeAgentsAfterInstallSkipsASingleNodeCluster(t *testing.T) {
 
 func TestUpgradeAgentsAfterInstallReportsUnreadableRecords(t *testing.T) {
 	server := recordsOnlyServer{t: t, err: errors.New("connection reset")}
-	dial := func(string) (installer.FirewallRunner, func(), error) { return nil, nil, nil }
+	dial := func(string, string) (installer.FirewallRunner, func(), error) { return nil, nil, nil }
 	err := upgradeAgentsAfterInstall(io.Discard, server, dial)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "connection reset")
+}
+
+func TestAgentSSHLogsInAsTheWorkersOwnUser(t *testing.T) {
+	base := ssh.Config{Host: "203.0.113.10", User: "rocky", KeyPath: "/k", Options: []string{"BatchMode=yes"}}
+
+	cfg := agentSSH(base, "203.0.113.11", "ec2-user")
+	assert.Equal(t, ssh.Config{Host: "203.0.113.11", User: "ec2-user", KeyPath: "/k", Options: []string{"BatchMode=yes"}}, cfg)
+	assert.Equal(t, "rocky", agentSSH(base, "203.0.113.12", "").User, "a worker without its own login uses the install's")
 }

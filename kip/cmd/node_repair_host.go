@@ -68,6 +68,11 @@ func runNodeRepairHost(cmd *cobra.Command, _ []string) error {
 	}
 
 	if nodeHost != "" {
+		recorded, err := withRecordedNodes(master, cluster)
+		if err != nil {
+			fmt.Printf("  ⚠  Could not read the cluster's node records. kip selects the SSH user for %s from locally saved settings: %v\n", nodeHost, err)
+		}
+		cluster = recorded
 		fmt.Printf("\n  Connecting to %s...\n", nodeHost)
 		nodeConn, err := dialNodeSSH(nodeHost, sshKey, cluster)
 		if err != nil {
@@ -81,7 +86,7 @@ func runNodeRepairHost(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	records, err := recordNodes(master, cluster.Name, cluster.Host)
+	records, err := recordNodes(master, cluster)
 	if err != nil {
 		return err
 	}
@@ -179,7 +184,7 @@ func nodeSSHVia(host, flagValue string, cluster *config.Cluster, mode string) (s
 	explicit, fallback := resolveSSHKey(flagValue, cluster)
 	cfg := ssh.Config{
 		Host:            host,
-		User:            sshUser(cluster),
+		User:            nodeSSHUser(cluster, host),
 		KeyPath:         explicit,
 		FallbackKeyPath: fallback,
 	}
@@ -191,14 +196,15 @@ func nodeSSHVia(host, flagValue string, cluster *config.Cluster, mode string) (s
 	return cfg, nil
 }
 
-// retargetSSH returns cfg for the cluster node at host instead, with the
-// transport options chosen for that node rather than the ones cfg carried.
+// retargetSSH returns a copy of cfg for host with that node's login and
+// transport options. It replaces the proxy and port options and keeps the rest.
 func retargetSSH(cfg ssh.Config, cluster *config.Cluster, host string) (ssh.Config, error) {
 	opts, err := transport.SSHOptions(cluster, host, "")
 	if err != nil {
 		return ssh.Config{}, err
 	}
 	cfg.Host = host
+	cfg.User = nodeSSHUser(cluster, host)
 	kept := make([]string, 0, len(cfg.Options)+len(opts))
 	for _, o := range cfg.Options {
 		if !strings.HasPrefix(o, "ProxyCommand=") && !strings.HasPrefix(o, "Port=") {
@@ -217,7 +223,7 @@ func clusterProvider(cluster *config.Cluster, host, explicitKey, fallbackKey str
 	if err != nil {
 		return nil, err
 	}
-	return &infra.BareMetalProvider{Host: host, User: sshUser(cluster), SSHKey: explicitKey, FallbackSSHKey: fallbackKey, Options: opts}, nil
+	return &infra.BareMetalProvider{Host: host, User: nodeSSHUser(cluster, host), SSHKey: explicitKey, FallbackSSHKey: fallbackKey, Options: opts}, nil
 }
 
 // dialNodeSSH connects to the cluster node at host, through this

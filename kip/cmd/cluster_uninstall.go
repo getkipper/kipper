@@ -193,7 +193,7 @@ func connectForUninstall(flagKey string) func(*config.Cluster) (uninstallDeps, f
 			Wipe:        func() error { return wipeServer(provider.Client(), cluster) },
 			CheckServer: func() error { return checkServerIdentity(provider.Client(), cluster) },
 			WipeWorker: func(node config.NodeRecord) error {
-				client, err := dialNodeSSH(node.Host, flagKey, cluster)
+				client, err := dialNodeSSH(node.Host, flagKey, withNodes(cluster, []config.NodeRecord{node}))
 				if err != nil {
 					return err
 				}

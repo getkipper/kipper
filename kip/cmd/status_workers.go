@@ -118,7 +118,7 @@ func inspectWorker(rec installer.NodeRecord, capture func(installer.NodeRecord) 
 // captureWorkerChecks batches host checks into one remote command to reduce
 // SSH connections and avoid exhausting the worker's firewall rate limit.
 func captureWorkerChecks(cfg ssh.Config, cluster *config.Cluster, rec installer.NodeRecord) (installer.CommandRunner, error) {
-	cfg, err := retargetSSH(cfg, cluster, rec.Host)
+	cfg, err := retargetSSH(cfg, withNodes(cluster, []installer.NodeRecord{rec}), rec.Host)
 	if err != nil {
 		return nil, err
 	}
