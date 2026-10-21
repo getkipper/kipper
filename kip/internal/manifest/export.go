@@ -3,6 +3,8 @@ package manifest
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/getkipper/kipper/controller/pkg/provenance"
 
@@ -16,7 +18,11 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
-// Export reads live CRs from a namespace and produces a Manifest.
+// Export reads Kipper-managed resources from namespace and produces a Manifest
+// for project and environment. Project metadata is included when readable.
+// Secret values are omitted. Notes identify omitted secret keys, unreadable
+// secrets, held resource values and link targets that could not be identified.
+// Resource listing and link namespace lookup failures return a nil manifest and an error.
 func Export(ctx context.Context, dynClient dynamic.Interface, project, environment, namespace string) (*Manifest, error) {
 	m := &Manifest{
 		Project:     project,
@@ -116,6 +122,7 @@ func exportApps(ctx context.Context, dynClient dynamic.Interface, namespace stri
 		app.Autoscale = exportAutoscale(spec)
 		app.Health = exportHealth(spec)
 		app.Stopped = exportStopped(spec)
+		noteSecrets(ctx, dynClient, namespace, secretname.KindApp, name, m)
 
 		m.Apps[name] = app
 	}
@@ -514,6 +521,40 @@ func exportJobs(ctx context.Context, dynClient dynamic.Interface, namespace stri
 	return nil
 }
 
+var secretsGVR = schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
+
+// noteSecrets records sorted user secret keys omitted from the manifest, excluding
+// rollback values. Missing or empty Secrets need no note. Other read failures
+// produce a note because the omitted keys cannot be listed.
+func noteSecrets(ctx context.Context, dynClient dynamic.Interface, namespace string, kind secretname.Kind, name string, m *Manifest) {
+	secret, err := dynClient.Resource(secretsGVR).Namespace(namespace).Get(ctx, secretname.Secrets(kind, name), metav1.GetOptions{})
+	if k8serrors.IsNotFound(err) {
+		return
+	}
+	if err != nil {
+		m.Notes = append(m.Notes, fmt.Sprintf("%s %q: kip could not read its secrets, so the list of omitted secret keys may be incomplete: %v", kind, name, err))
+		return
+	}
+	data, _ := secret.Object["data"].(map[string]interface{})
+	var keys []string
+	for k := range data {
+		// This suffix stores the previous value for secret rollback.
+		if !strings.HasSuffix(k, ".__previous") {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return
+	}
+	sort.Strings(keys)
+	noun, pronoun := "secrets", "them"
+	if len(keys) == 1 {
+		noun, pronoun = "secret", "it"
+	}
+	m.Notes = append(m.Notes, fmt.Sprintf("%s %q: the export omits the values of %s %s. Set %s again with kip %s secret set.",
+		kind, name, noun, strings.Join(keys, ", "), pronoun, kind))
+}
+
 func exportFunctions(ctx context.Context, dynClient dynamic.Interface, namespace string, m *Manifest) error {
 	list, err := dynClient.Resource(FunctionGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: "app.kubernetes.io/managed-by=kipper",
@@ -558,6 +599,7 @@ func exportFunctions(ctx context.Context, dynClient dynamic.Interface, namespace
 		}
 		fn.Resources = exportResources(spec)
 		fn.ServiceBindings = exportBindings(spec)
+		noteSecrets(ctx, dynClient, namespace, secretname.KindFunction, item.GetName(), m)
 		fn.Volumes = exportVolumeMounts(spec)
 		if triggers := extractSlice(spec, "triggers"); len(triggers) > 0 {
 			for _, tr := range triggers {
