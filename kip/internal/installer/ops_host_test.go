@@ -494,6 +494,21 @@ func TestAccessHeaderCountsThePeersGeneration(t *testing.T) {
 	assert.Error(t, StaleAccessRecord(11, []AccessNodeHeader{h}), "so restoring an older record that still lists the device is refused")
 }
 
+func TestALeftoverOperatorInterfaceIsNotCalledARestriction(t *testing.T) {
+	s := newAccessScene(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(s.root, opsDir), 0o700))
+	s.write(opsDir+"/peers.conf", "# kipper-ops generation 12\n[Interface]\nListenPort = 443\n")
+	st, err := parseAccessState(mustShell(t, s, accessStateCommand(s.root)))
+	require.NoError(t, err)
+
+	err = OrphanedAccessTable([]AccessNodeHeader{st.Header("server")})
+
+	require.Error(t, err, "reset still has an interface to remove")
+	assert.NotContains(t, err.Error(), "restricts SSH")
+	assert.Contains(t, err.Error(), "operator interface")
+	assert.Contains(t, err.Error(), "kip cluster access reset")
+}
+
 func TestOpsNodeKeyRefusesANodeRunningFirewalld(t *testing.T) {
 	s := newOpsScene(t)
 	s.write("active-firewalld", "")

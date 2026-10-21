@@ -32,7 +32,9 @@ type Source struct {
 // stops for any reason but idleness, it closes its open streams. It releases
 // the lock only after its tunnel is down, so two processes never run the
 // same device at once. It returns ErrRunning if the lock is held, or any
-// startup or listener error. src callbacks and logf must be non-nil.
+// startup or listener error. After acquiring the lock, it attempts to truncate
+// p.Log if set and continues if truncation fails. The src callbacks and logf
+// must be non-nil.
 func Run(ctx context.Context, p Paths, src Source, idle time.Duration, logf func(string, ...any)) error {
 	release, err := lockfile.TryExclusive(p.Lock)
 	if errors.Is(err, lockfile.ErrHeld) {
@@ -42,6 +44,12 @@ func Run(ctx context.Context, p Paths, src Source, idle time.Duration, logf func
 		return err
 	}
 	defer release()
+	// Competing processes share the log, so clearing it requires the lock.
+	// Startup can proceed with old log output if truncation fails.
+	if p.Log != "" {
+		_ = os.Truncate(p.Log, 0)
+	}
+	logf("The tunnel is starting on %s. It exits after %s with no open connections.", p.Socket, idle)
 	stamp := src.Stamp()
 	m, err := src.Load()
 	if err != nil {
@@ -139,10 +147,10 @@ func (d *reloadingDialer) reload() error {
 }
 
 // StartDetached starts exe with args as a background process that outlives
-// its parent, with stdout and stderr in logPath. It truncates the log and
-// returns errors from opening it, starting the process or releasing its handle.
+// its parent, with stdout and stderr appended to logPath. It returns errors from
+// opening the log, starting the process or releasing its handle.
 func StartDetached(exe string, args []string, logPath string) error {
-	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec // logPath is under kip's own runtime directory
+	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // logPath is under kip's own runtime directory
 	if err != nil {
 		return fmt.Errorf("opening the tunnel log: %w", err)
 	}

@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"os"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -122,4 +125,53 @@ func TestRunStopsSoonAfterItsDeviceIsRemoved(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the tunnel process kept running with a removed device")
 	}
+}
+
+func TestOnlyTheProcessThatRunsStartsTheLogAfresh(t *testing.T) {
+	node, workstation := newKeyPair(t), newKeyPair(t)
+	m := Manifest{PrivateKey: b64(workstation.private), Address: deviceAddr, Nodes: []Node{{
+		MachineID: "m-1", Name: "node-1", Endpoint: "127.0.0.1:9", PublicKey: b64(node.public), Address: nodeAddr, SSHPorts: []int{22},
+	}}}
+	src := &fakeSource{m: m}
+	p := testPaths(t)
+	p.Log = p.Socket + ".log"
+	require.NoError(t, os.WriteFile(p.Log, []byte("an earlier process\n"), 0o600))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	})
+	go func() { done <- Run(ctx, p, src.source(), time.Minute, func(string, ...any) {}) }()
+	require.Eventually(t, func() bool { return Reachable(p.Socket) }, 5*time.Second, 20*time.Millisecond)
+	log, err := os.ReadFile(p.Log)
+	require.NoError(t, err)
+	assert.NotContains(t, string(log), "an earlier process")
+
+	require.NoError(t, os.WriteFile(p.Log, []byte("the running process\n"), 0o600))
+	assert.ErrorIs(t, Run(ctx, p, src.source(), time.Minute, func(string, ...any) {}), ErrRunning)
+	log, err = os.ReadFile(p.Log)
+	require.NoError(t, err)
+	assert.Contains(t, string(log), "the running process", "a process that loses the race leaves the log alone")
+}
+
+func TestStartDetachedAppendsToTheLog(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /bin/sh")
+	}
+	log := shortSocket(t) + ".log"
+	require.NoError(t, os.WriteFile(log, []byte("the running process\n"), 0o600))
+
+	require.NoError(t, StartDetached("/bin/sh", []string{"-c", "echo a second starter"}, log))
+
+	require.Eventually(t, func() bool {
+		b, _ := os.ReadFile(log)
+		return strings.Contains(string(b), "a second starter")
+	}, 5*time.Second, 20*time.Millisecond)
+	b, err := os.ReadFile(log)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), "the running process")
 }

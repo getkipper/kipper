@@ -629,6 +629,8 @@ func (s AccessHostState) Sources() int {
 
 // Header returns the highest valid generation from table.nft, operators.nft
 // and peers.conf for stale-record and orphaned-table checks.
+// It sets OpsOnly when only peers.conf makes the header present, with no
+// committed table or valid positive generation in operators.nft.
 func (s AccessHostState) Header(name string) AccessNodeHeader {
 	h := AccessNodeHeader{Name: name, Present: s.HasTable(), Sources: s.Sources()}
 	if g, ok := s.Generation(); ok {
@@ -638,6 +640,7 @@ func (s AccessHostState) Header(name string) AccessNodeHeader {
 		h.Generation, h.Present = g, true
 	}
 	if s.PeersGeneration > h.Generation {
+		h.OpsOnly = !h.Present
 		h.Generation, h.Present = s.PeersGeneration, true
 	}
 	return h
