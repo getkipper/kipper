@@ -121,6 +121,8 @@ func TestReadNodeRecordsRefusesUnsafeValues(t *testing.T) {
 		"state":        func(r *NodeRecord) { r.State = "" },
 		"mode":         func(r *NodeRecord) { r.Mode = "mesh" },
 		"name":         func(r *NodeRecord) { r.Name = "Worker_1" },
+		"ssh user":     func(r *NodeRecord) { r.SSHUser = "rocky\n  ProxyCommand x" },
+		"ssh option":   func(r *NodeRecord) { r.SSHUser = "-oProxyCommand=x" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := good
@@ -395,5 +397,16 @@ func TestRefuseUnrecordedNodesStopsAReRunDuringARemoval(t *testing.T) {
 	}}
 	if _, err := refuseUnrecordedNodes(runner, serverMachine); err == nil || !strings.Contains(err.Error(), "worker-1 is being removed") {
 		t.Fatalf("err = %v, want a refusal while worker-1 is being removed", err)
+	}
+}
+
+func TestReadNodeRecordsKeepsANodesOwnSSHUser(t *testing.T) {
+	r := NodeRecord{Name: "worker-1", Host: "203.0.113.11", MachineID: workerMachine, Role: NodeRoleWorker, State: NodeStateReady, SSHUser: "ec2-user"}
+	records, err := ReadNodeRecords(&routedRunner{routes: []route{{contains: "kipper-nodes", out: recordsJSON(t, r)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].SSHUser != "ec2-user" {
+		t.Fatalf("records = %+v, want the worker's own user", records)
 	}
 }

@@ -47,6 +47,15 @@ func ValidNodeHost(host string) bool {
 	return hostnamePattern.MatchString(host)
 }
 
+var sshUserPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}$`)
+
+// ValidSSHUser reports whether user can be recorded as a node's SSH login.
+// It accepts 1 to 32 ASCII letters, digits, underscores, dots or hyphens,
+// starting with a letter, digit or underscore.
+func ValidSSHUser(user string) bool {
+	return sshUserPattern.MatchString(user)
+}
+
 var errInvalidNodeRecords = errors.New("the node records are invalid")
 
 func validateNodeRecord(r NodeRecord) error {
@@ -82,6 +91,9 @@ func validateNodeRecord(r NodeRecord) error {
 	}
 	if r.Interface != "" && !interfaceNamePattern.MatchString(r.Interface) {
 		return fmt.Errorf("node record %s has invalid interface name %q", r.Name, r.Interface)
+	}
+	if r.SSHUser != "" && !ValidSSHUser(r.SSHUser) {
+		return fmt.Errorf("node record %s has invalid SSH user %q", r.Name, r.SSHUser)
 	}
 	return nil
 }

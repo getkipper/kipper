@@ -1081,7 +1081,7 @@ func openAccessSession(cmd *cobra.Command, verb string, forReset bool) (*accessS
 	}
 	s.lease = lease
 	server := lease.Server(serverConn)
-	records, err := recordNodes(server, cluster.Name, cluster.Host)
+	records, err := recordNodes(server, cluster)
 	if err != nil {
 		s.close()
 		return nil, err
@@ -1460,6 +1460,7 @@ func runClusterAccessShow(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	cluster = withNodes(cluster, records)
 	if _, ok := installer.ServerRecord(records); !ok {
 		records = append(records, installer.NodeRecord{Name: "server", Host: cluster.Host, Role: installer.NodeRoleServer})
 	}

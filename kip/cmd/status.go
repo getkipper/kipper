@@ -241,6 +241,42 @@ func sshUser(cluster *config.Cluster) string {
 	return "root"
 }
 
+// nodeSSHUser returns the first matching node's SSH user, falling back to the
+// cluster's user and then root. Host matching ignores case and IPv6 brackets.
+func nodeSSHUser(cluster *config.Cluster, host string) string {
+	if cluster != nil {
+		for _, n := range cluster.Nodes {
+			if !strings.EqualFold(strings.Trim(n.Host, "[]"), strings.Trim(host, "[]")) {
+				continue
+			}
+			if n.SSHUser != "" {
+				return n.SSHUser
+			}
+			break
+		}
+	}
+	return sshUser(cluster)
+}
+
+// withRecordedNodes returns a copy of cluster with records read through server
+// so connections use the recorded logins. A read failure returns the original
+// cluster and the error.
+func withRecordedNodes(server installer.CommandRunner, cluster *config.Cluster) (*config.Cluster, error) {
+	records, err := installer.ReadNodeRecords(server)
+	if err != nil {
+		return cluster, err
+	}
+	return withNodes(cluster, records), nil
+}
+
+// withNodes returns a copy of cluster with a copy of records so subsequent
+// connections use their recorded logins.
+func withNodes(cluster *config.Cluster, records []config.NodeRecord) *config.Cluster {
+	c := *cluster
+	c.Nodes = append([]config.NodeRecord(nil), records...)
+	return &c
+}
+
 // hostSSHConfig is nodeSSH for the server, with interactive prompts disabled.
 func hostSSHConfig(cluster *config.Cluster, keyFlag string) (ssh.Config, error) {
 	cfg, err := nodeSSH(cluster.Host, keyFlag, cluster)

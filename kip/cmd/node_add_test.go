@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
 )
 
@@ -306,4 +307,89 @@ func TestNodeAddNamesTheSSHLimitOnATimeout(t *testing.T) {
 	other := errors.New("ssh: connect to host 192.0.2.11 port 22: Connection refused")
 	assert.Equal(t, other, explainSSHTimeout(other))
 	assert.NoError(t, explainSSHTimeout(nil))
+}
+
+func TestNodeAddLogsInAsTheChosenUser(t *testing.T) {
+	cluster := &config.Cluster{SSHUser: "rocky", Nodes: []config.NodeRecord{{Host: "203.0.113.12", SSHUser: "ubuntu"}}}
+
+	login, err := nodeAddLogin(cluster, "203.0.113.11", "ec2-user")
+	require.NoError(t, err)
+	assert.Equal(t, "ec2-user", login)
+
+	login, err = nodeAddLogin(cluster, "203.0.113.11", "")
+	require.NoError(t, err)
+	assert.Equal(t, "rocky", login, "without the flag a new node uses the cluster's login")
+
+	login, err = nodeAddLogin(cluster, "203.0.113.12", "")
+	require.NoError(t, err)
+	assert.Equal(t, "ubuntu", login, "a node joining again keeps its recorded login")
+
+	for _, bad := range []string{"rocky\n  ProxyCommand x", "-oProxyCommand=x", "a b"} {
+		_, err := nodeAddLogin(cluster, "203.0.113.11", bad)
+		assert.Error(t, err, bad)
+	}
+}
+
+func TestNodeAddRecordsOnlyAChosenLogin(t *testing.T) {
+	recorded := &installer.NodeRecord{Host: "203.0.113.11", SSHUser: "ec2-user"}
+
+	assert.Equal(t, "ec2-user", recordedLogin(nil, "ec2-user"), "--ssh-user is recorded with the node")
+	assert.Equal(t, "rocky", recordedLogin(nil, "rocky"), "--ssh-user is recorded even when it matches this workstation's login")
+	assert.Empty(t, recordedLogin(nil, ""), "a new node without the flag follows the cluster's login")
+	assert.Equal(t, "ec2-user", recordedLogin(recorded, ""), "joining again without the flag keeps the recorded login, whatever this workstation logs in as")
+	assert.Equal(t, "ubuntu", recordedLogin(recorded, "ubuntu"), "--ssh-user replaces the recorded login")
+}
+
+func TestMirrorNodesTellsThisRunEachNodesLogin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	cluster := &config.Cluster{Name: "prod", SSHUser: "rocky"}
+	require.NoError(t, config.Save(&config.Config{CurrentCluster: "prod", Clusters: []config.Cluster{*cluster}}))
+
+	mirrorNodes(cluster, []installer.NodeRecord{{Name: "worker-1", Host: "203.0.113.11", SSHUser: "ec2-user"}})
+
+	assert.Equal(t, "ec2-user", nodeSSHUser(cluster, "203.0.113.11"), "a node saved during this run is reached as its own user")
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "ec2-user", cfg.GetCluster("prod").Nodes[0].SSHUser)
+}
+
+func TestWithRecordedNodesUsesTheClustersRecordedLogins(t *testing.T) {
+	stale := &config.Cluster{Name: "prod", SSHUser: "rocky"}
+	server := recordsOnlyServer{t: t, records: `{"0123456789abcdef0123456789abcdef":"{\"name\":\"worker-1\",\"host\":\"203.0.113.11\",\"machineID\":\"0123456789abcdef0123456789abcdef\",\"role\":\"worker\",\"state\":\"ready\",\"sshUser\":\"ec2-user\"}"}`}
+
+	fresh, err := withRecordedNodes(server, stale)
+	require.NoError(t, err)
+
+	assert.Equal(t, "ec2-user", nodeSSHUser(fresh, "203.0.113.11"), "a node added from another workstation keeps its login")
+	assert.Empty(t, stale.Nodes, "the loaded cluster stays as it was")
+
+	unreadable, err := withRecordedNodes(recordsOnlyServer{t: t, err: errors.New("connection reset")}, stale)
+	require.ErrorContains(t, err, "connection reset", "the caller decides whether to go on without the records")
+	assert.Equal(t, "rocky", nodeSSHUser(unreadable, "203.0.113.11"), "unreadable records leave this machine's copy")
+}
+
+func TestNodeAddStopsWhenTheRecordsNameAnotherLogin(t *testing.T) {
+	node := config.NodeRecord{Host: "worker-1.example.com", SSHUser: "ec2-user"}
+	recorded := &config.Cluster{SSHUser: "rocky", Nodes: []config.NodeRecord{node}}
+
+	err := confirmJoinLogin(recorded, &node, "worker-1.example.com", "", "rocky")
+	require.Error(t, err, "a login picked while the records were unreadable must not overwrite the recorded one")
+	assert.Contains(t, err.Error(), `"ec2-user"`)
+	assert.Contains(t, err.Error(), "kip node add worker-1.example.com --ssh-user ec2-user")
+
+	assert.Error(t, confirmJoinLogin(recorded, &node, "203.0.113.11", "", "rocky"), "the same machine reached by another address keeps its recorded login")
+	assert.NoError(t, confirmJoinLogin(recorded, &node, "203.0.113.11", "", "ec2-user"))
+	assert.NoError(t, confirmJoinLogin(recorded, &node, "worker-1.example.com", "rocky", "rocky"), "--ssh-user replaces the recorded login")
+
+	followsCluster := config.NodeRecord{Host: "203.0.113.12"}
+	assert.NoError(t, confirmJoinLogin(recorded, &followsCluster, "203.0.113.12", "", "rocky"), "a node without its own user follows the cluster")
+	assert.Error(t, confirmJoinLogin(recorded, &followsCluster, "203.0.113.12", "", "ec2-user"))
+	assert.NoError(t, confirmJoinLogin(recorded, nil, "203.0.113.13", "", "rocky"), "a new node follows the cluster")
+}
+
+func TestNodeSSHUserMatchesHostNamesInAnyCase(t *testing.T) {
+	c := &config.Cluster{SSHUser: "rocky", Nodes: []config.NodeRecord{{Host: "Worker-1.example.com", SSHUser: "ec2-user"}}}
+	assert.Equal(t, "ec2-user", nodeSSHUser(c, "worker-1.example.com"))
 }

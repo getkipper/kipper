@@ -67,6 +67,7 @@ const nodeAddNotice = `
 func init() {
 	nodeAddCmd.Flags().String("host", "", "IP address or hostname of the node to add (same as the argument)")
 	nodeAddCmd.Flags().String("ssh-key", "", "path to SSH private key")
+	nodeAddCmd.Flags().String("ssh-user", "", "SSH user for a node that needs a different login from the cluster's. kip uses passwordless sudo for users other than root. The default is the node's recorded user, falling back to the cluster's user.")
 	nodeAddCmd.Flags().String("private-network", "", "private network the nodes share, in CIDR form; needed when it carries the default route")
 	nodeAddCmd.Flags().Bool("public", false, "use the nodes' public addresses even when they share a private network")
 	nodeAddCmd.Flags().Bool("yes", false, "apply or recover server network changes without prompting")
@@ -301,6 +302,7 @@ func addNode(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	sshKey, _ := cmd.Flags().GetString("ssh-key")
+	userFlag, _ := cmd.Flags().GetString("ssh-user")
 	privateNetwork, _ := cmd.Flags().GetString("private-network")
 	forcePublic, _ := cmd.Flags().GetBool("public")
 	autoYes, _ := cmd.Flags().GetBool("yes")
@@ -333,6 +335,17 @@ func addNode(cmd *cobra.Command, args []string) error {
 	}
 	defer lease.Release()
 	server := lease.Server(serverConn)
+	// The cluster's records include nodes added from other workstations.
+	// An interrupted network change can leave the API down and records unreadable,
+	// so the login is checked against them again after recovery.
+	cluster, err = withRecordedNodes(server, cluster)
+	if err != nil {
+		fmt.Printf("  ⚠  Could not read the cluster's node records. kip selects the SSH user for %s from --ssh-user or locally saved settings: %v\n", workerHost, err)
+	}
+	workerLogin, err := nodeAddLogin(cluster, workerHost, userFlag)
+	if err != nil {
+		return err
+	}
 	fmt.Printf("  Connecting to %s...\n", workerHost)
 	// A host missing from the device's node list needs a direct connection
 	// to prepare its operator interface, even with --via tunnel.
@@ -347,6 +360,7 @@ func addNode(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("connecting to %s: %w", workerHost, err)
 	}
+	workerCfg.User = workerLogin
 	workerConn, err := ssh.Dial(workerCfg)
 	if err != nil {
 		return fmt.Errorf("connecting to %s: %w", workerHost, err)
@@ -398,7 +412,7 @@ func addNode(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	mirrorNodes(cluster.Name, records)
+	mirrorNodes(cluster, records)
 	if err := removalBlocksJoin(records, identity.MachineID); err != nil {
 		return err
 	}
@@ -417,6 +431,9 @@ func addNode(cmd *cobra.Command, args []string) error {
 		} else if records[i].Role == installer.NodeRoleWorker {
 			firstWorker = false
 		}
+	}
+	if err := confirmJoinLogin(cluster, existing, workerHost, userFlag, workerLogin); err != nil {
+		return err
 	}
 	if existing != nil {
 		if err := keepRemovingNode(worker, *existing); err != nil {
@@ -508,18 +525,18 @@ func addNode(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("moving the server's network: %w", err)
 	}
 	serverRec.Mode, serverRec.PeerAddress, serverRec.Interface = plan.Mode, peerAddress(plan.Mode, plan.Server), plan.Server.Interface
-	if err := saveNodeRecord(server, cluster.Name, serverRec); err != nil {
+	if err := saveNodeRecord(server, cluster, serverRec); err != nil {
 		return err
 	}
 
 	rec := installer.NodeRecord{Host: workerHost, MachineID: identity.MachineID, Role: installer.NodeRoleWorker, State: installer.NodeStateJoining,
-		Mode: plan.Mode, PeerAddress: peerAddress(plan.Mode, plan.Joiner), Interface: plan.Joiner.Interface}
+		Mode: plan.Mode, PeerAddress: peerAddress(plan.Mode, plan.Joiner), Interface: plan.Joiner.Interface, SSHUser: recordedLogin(existing, userFlag)}
 	if existing != nil {
 		rec.Name = existing.Name
 	} else if rec.Name, err = installer.ProposedNodeName(worker); err != nil {
 		return err
 	}
-	if err := saveNodeRecord(server, cluster.Name, rec); err != nil {
+	if err := saveNodeRecord(server, cluster, rec); err != nil {
 		return err
 	}
 	if records, err = installer.ReadNodeRecords(server); err != nil {
@@ -531,7 +548,7 @@ func addNode(cmd *cobra.Command, args []string) error {
 	if access.tunnelled(identity.MachineID) {
 		// The joiner's access table can close the direct path. Use the tunnel
 		// so commands still connect after SSH's idle multiplexing timeout.
-		if workerConn, worker, err = rejoinThroughTunnel(workerConn, lease, workerHost, sshKey, cluster, identity.MachineID); err != nil {
+		if workerConn, worker, err = rejoinThroughTunnel(workerConn, lease, workerHost, workerLogin, sshKey, cluster, identity.MachineID); err != nil {
 			return nodeAddRetry(err, workerHost)
 		}
 	}
@@ -614,7 +631,7 @@ func addNode(cmd *cobra.Command, args []string) error {
 	}
 	if nodeName != rec.Name {
 		rec.Name = nodeName
-		if err := saveNodeRecord(server, cluster.Name, rec); err != nil {
+		if err := saveNodeRecord(server, cluster, rec); err != nil {
 			return nodeAddRetry(err, workerHost)
 		}
 	}
@@ -660,14 +677,14 @@ func addNode(cmd *cobra.Command, args []string) error {
 	}
 
 	rec.State = installer.NodeStateReady
-	if err := saveNodeRecord(server, cluster.Name, rec); err != nil {
+	if err := saveNodeRecord(server, cluster, rec); err != nil {
 		return nodeAddRetry(err, workerHost)
 	}
 	if err := installer.UncordonWorker(server, nodeName); err != nil {
 		// Back to the state a retry expects: cordoned and joining.
 		rec.State = installer.NodeStateJoining
 		_, cordonErr := server.Run("kubectl cordon " + nodeName + " >/dev/null")
-		saveErr := saveNodeRecord(server, cluster.Name, rec)
+		saveErr := saveNodeRecord(server, cluster, rec)
 		if cordonErr != nil || saveErr != nil {
 			return fmt.Errorf("%w; putting %s back to cordoned and joining also failed (%v), so cordon it with 'kubectl cordon %s' and run 'kip node add %s' again", err, nodeName, errors.Join(cordonErr, saveErr), nodeName, workerHost)
 		}
@@ -763,15 +780,16 @@ func prepareJoinHost(server, worker installer.CommandRunner, machineID, workerHo
 	return plan, serverDropIn, serverFlannel, nil
 }
 
-// rejoinThroughTunnel reconnects to host through this workstation's device
-// tunnel and verifies its machine ID against id before closing old. The joiner
-// must already be in the device's node list. On error, old stays open and is
-// returned with its lease-bound runner.
-func rejoinThroughTunnel(old *ssh.Client, lease *installer.NodeLease, host, sshKey string, cluster *config.Cluster, id string) (*ssh.Client, installer.FirewallRunner, error) {
+// rejoinThroughTunnel reconnects to host as login through this workstation's
+// device tunnel and verifies its machine ID against id before closing old.
+// The joiner must already be in the device's node list. On error, old stays
+// open and is returned with its lease-bound runner.
+func rejoinThroughTunnel(old *ssh.Client, lease *installer.NodeLease, host, login, sshKey string, cluster *config.Cluster, id string) (*ssh.Client, installer.FirewallRunner, error) {
 	cfg, err := nodeSSHVia(host, sshKey, cluster, transport.Tunnel)
 	if err != nil {
 		return old, lease.Host(old), err
 	}
+	cfg.User = login
 	conn, err := ssh.Dial(cfg)
 	if err != nil {
 		return old, lease.Host(old), fmt.Errorf("connecting to %s through the tunnel: %w", host, err)
@@ -789,12 +807,57 @@ func rejoinThroughTunnel(old *ssh.Client, lease *installer.NodeLease, host, sshK
 	return conn, runner, nil
 }
 
+// nodeAddLogin validates and returns an explicit user. If user is empty, it
+// uses the host's recorded user, then the cluster's user, then root.
+func nodeAddLogin(cluster *config.Cluster, host, user string) (string, error) {
+	if user == "" {
+		return nodeSSHUser(cluster, host), nil
+	}
+	if !installer.ValidSSHUser(user) {
+		return "", fmt.Errorf("--ssh-user %q is not a valid login name", user)
+	}
+	return user, nil
+}
+
+// confirmJoinLogin checks login against the explicit user or the joining
+// machine's recorded user, falling back to the cluster's user. This catches
+// mismatches after connecting with unreadable records or a different host
+// address. existing identifies a previously recorded machine.
+func confirmJoinLogin(cluster *config.Cluster, existing *installer.NodeRecord, host, user, login string) error {
+	want, err := nodeAddLogin(cluster, host, user)
+	if err != nil {
+		return err
+	}
+	if user == "" && existing != nil {
+		want = existing.SSHUser
+		if want == "" {
+			want = sshUser(cluster)
+		}
+	}
+	if want != login {
+		return fmt.Errorf("the cluster records SSH user %q for %s, but kip connected as %q. Run 'kip node add %s --ssh-user %s' to join with the recorded user, or pass another --ssh-user to change it", want, host, login, host, want)
+	}
+	return nil
+}
+
+// recordedLogin returns the explicit user or the node's existing SSH user.
+// For a new node, an empty result makes it follow the cluster's login.
+func recordedLogin(existing *installer.NodeRecord, user string) string {
+	if user != "" {
+		return user
+	}
+	if existing != nil {
+		return existing.SSHUser
+	}
+	return ""
+}
+
 func nodeAddRetry(err error, host string) error {
 	return fmt.Errorf("%w. The join is incomplete. Fix the cause, then run 'kip node add %s' again with the same options to resume", err, host)
 }
 
 // saveNodeRecord saves the cluster record and refreshes the local cache when possible.
-func saveNodeRecord(server installer.CommandRunner, clusterName string, rec installer.NodeRecord) error {
+func saveNodeRecord(server installer.CommandRunner, cluster *config.Cluster, rec installer.NodeRecord) error {
 	if err := installer.SaveNodeRecord(server, rec); err != nil {
 		return err
 	}
@@ -803,7 +866,7 @@ func saveNodeRecord(server installer.CommandRunner, clusterName string, rec inst
 		fmt.Printf("  ⚠  could not update the local copy of the node records: %v\n", err)
 		return nil
 	}
-	mirrorNodes(clusterName, records)
+	mirrorNodes(cluster, records)
 	return nil
 }
 

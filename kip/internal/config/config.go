@@ -94,6 +94,7 @@ type NodeRecord struct {
 	PeerAddress string `mapstructure:"peer_address" yaml:"peer_address,omitempty" json:"peerAddress,omitempty"`
 	Interface   string `mapstructure:"interface"    yaml:"interface,omitempty"    json:"interface,omitempty"`
 	State       string `mapstructure:"state"        yaml:"state"                  json:"state"`
+	SSHUser     string `mapstructure:"ssh_user"     yaml:"ssh_user,omitempty"     json:"sshUser,omitempty"`
 }
 
 // BackupStorageRef records the BSL mode and metadata for a cluster, so

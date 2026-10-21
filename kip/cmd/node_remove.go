@@ -102,6 +102,7 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	cluster = withNodes(cluster, records)
 	if err := serverIsTheCluster(serverID, cluster.MachineID, records); err != nil {
 		return fmt.Errorf("%s: %w. Check the cluster's host. Nothing was changed", cluster.Host, err)
 	}
@@ -191,6 +192,7 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 	if records, err = installer.ReadNodeRecords(master); err != nil {
 		return err
 	}
+	cluster = withNodes(cluster, records)
 	if current, found := findByMachineID(records, worker.MachineID); !found || current.State != worker.State || current.Host != worker.Host {
 		return fmt.Errorf("%s changed while kip was waiting for confirmation. Run the command again", worker.Name)
 	}
@@ -247,7 +249,7 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 			}
 			return updateRemainingPeers(os.Stdout, accessNode{node: master, base: server}, remaining, worker, dialHost, access)
 		},
-		SaveRecords: func(remaining []installer.NodeRecord) { mirrorNodes(cluster.Name, remaining) },
+		SaveRecords: func(remaining []installer.NodeRecord) { mirrorNodes(cluster, remaining) },
 	}
 	return r.run()
 }
