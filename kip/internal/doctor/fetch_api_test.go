@@ -31,6 +31,8 @@ func apiClients(t *testing.T) (*k8sfake.Clientset, *dynamicfake.FakeDynamicClien
 		{Group: "traefik.io", Version: "v1alpha1", Resource: "tlsstores"}:         "TLSStoreList",
 		{Group: "kipper.run", Version: "v1alpha1", Resource: "clusteridentities"}: "ClusterIdentityList",
 		{Group: "kipper.run", Version: "v1alpha1", Resource: "platformconfigs"}:   "PlatformConfigList",
+		veleroBackupGVR:   "BackupList",
+		veleroScheduleGVR: "ScheduleList",
 	},
 		unstructuredObject("traefik.io/v1alpha1", "TLSStore", "kipper-system", "default",
 			map[string]any{"defaultCertificate": map[string]any{"secretName": "kipper-hop-cert"}}), //nolint:gosec // a Kubernetes field name, not a credential
