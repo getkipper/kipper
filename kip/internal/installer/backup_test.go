@@ -187,6 +187,16 @@ func TestVeleroAWSPluginMatchesTheChartsVelero(t *testing.T) {
 	assert.True(t, strings.HasPrefix(image, series), "plugin %s is incompatible with chart %s", image, veleroChartVersion)
 }
 
+// TestVeleroRunsAReleaseThatFinishesCanceledVolumeBackups guards against the
+// timeout and restore metadata loss caused by canceled volume backups in
+// Velero 1.18.0 to 1.18.2.
+func TestVeleroRunsAReleaseThatFinishesCanceledVolumeBackups(t *testing.T) {
+	image, _ := veleroValues(t, false)["image"].(map[string]any)
+
+	assert.Equal(t, "velero/velero", image["repository"])
+	assert.Equal(t, "v1.18.4", image["tag"])
+}
+
 func TestVeleroManifestLeavesFsBackupUnprivilegedWithoutSELinux(t *testing.T) {
 	values := veleroValues(t, false)
 

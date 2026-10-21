@@ -10,6 +10,9 @@ spec:
   targetNamespace: velero
   createNamespace: true
   valuesContent: |-
+    image:
+      repository: velero/velero
+      tag: v1.18.4
     initContainers:
       - name: velero-plugin-for-aws
         image: velero/velero-plugin-for-aws:v1.14.4

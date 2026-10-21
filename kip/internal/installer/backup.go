@@ -22,6 +22,12 @@ import (
 
 const veleroChartVersion = "12.0.0"
 
+// veleroImageTag overrides the chart's Velero 1.18.0 with the latest 1.18 patch.
+// Releases 1.18.0 to 1.18.2 wait for canceled pod volume backups until the
+// default four-hour timeout, then discard the metadata needed to restore volume
+// data. Version 1.18.3 fixed this, and 1.18.4 includes the fix.
+const veleroImageTag = "v1.18.4"
+
 // veleroAWSPluginImage must be compatible with the chart's Velero release.
 // Plugin v1.14.x supports Velero 1.18.x, which chart 12.0.0 installs.
 const veleroAWSPluginImage = "velero/velero-plugin-for-aws:v1.14.4"
@@ -581,6 +587,9 @@ spec:
   targetNamespace: velero
   createNamespace: true
   valuesContent: |-
+    image:
+      repository: velero/velero
+      tag: %s
     initContainers:
       - name: velero-plugin-for-aws
         image: %s
@@ -635,7 +644,7 @@ spec:
             - cert-manager
             - kipper-system
 %s
-%s`, veleroChartVersion, veleroAWSPluginImage, bslBlock, nodeAgentArgs, excludedBlock, scopeBlock, scopeBlock, selinuxValues)
+%s`, veleroChartVersion, veleroImageTag, veleroAWSPluginImage, bslBlock, nodeAgentArgs, excludedBlock, scopeBlock, scopeBlock, selinuxValues)
 }
 
 // installVeleroCredentials creates the velero namespace and the
