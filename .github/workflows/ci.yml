@@ -19,7 +19,7 @@ on:
 # current for standard-library security fixes, and check golangci-lint
 # compatibility when upgrading the minor version.
 env:
-  GO_VERSION: '1.26.9'
+  GO_VERSION: '1.26.10'
 
 # One run per ref: a superseded run is cancelled rather than run to completion.
 concurrency:
