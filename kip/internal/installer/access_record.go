@@ -179,14 +179,16 @@ func DeleteAccessRecord(client CommandRunner) error {
 	return nil
 }
 
-// AccessNodeHeader is the generation of the committed access files on one
-// node. Present also covers an operators.nft with a newer valid header. Sources counts
-// the operator prefixes in its committed operators.nft.
+// AccessNodeHeader describes one node's saved access files. Generation is the
+// highest valid generation in table.nft, operators.nft or peers.conf. Present
+// also covers a committed table without a valid header. Sources counts the
+// operator prefixes in the committed operators.nft.
 type AccessNodeHeader struct {
 	Name       string
 	Generation int
 	Present    bool
 	Sources    int
+	OpsOnly    bool
 }
 
 // NextAccessGeneration is one above both the record and every node's
@@ -213,10 +215,14 @@ func StaleAccessRecord(record int, nodes []AccessNodeHeader) error {
 	return nil
 }
 
-// OrphanedAccessTable refuses when the record is gone but a node still
-// holds a committed table.
+// OrphanedAccessTable returns an error for the first present node header,
+// identifying a leftover access table or operator interface, or nil if none
+// is present. Call it after confirming that the access record is missing.
 func OrphanedAccessTable(nodes []AccessNodeHeader) error {
 	for _, n := range nodes {
+		if n.Present && n.OpsOnly {
+			return fmt.Errorf("the operator access record is gone but %s still has an operator interface. Run 'kip cluster access reset' to remove it", n.Name)
+		}
 		if n.Present {
 			return fmt.Errorf("the operator access record is gone but %s still restricts SSH and 6443 to %s. Run 'kip cluster access reset' to open them, or restore the cluster settings backup", n.Name, plural(n.Sources, "one source", fmt.Sprintf("%d sources", n.Sources)))
 		}

@@ -190,7 +190,6 @@ func runClusterAccessConnect(cmd *cobra.Command, _ []string) error {
 	logf := func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, format+"\n", args...)
 	}
-	logf("Starting the tunnel for cluster %s on %s. It exits after %s with no open connections.", cluster.Name, p.Socket, opstunnel.IdleExit)
 	err = opstunnel.Run(ctx, p, tunnelSource(cluster.Name), opstunnel.IdleExit, logf)
 	if errors.Is(err, opstunnel.ErrRunning) {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "The tunnel for cluster %s is already running.\n", cluster.Name)
