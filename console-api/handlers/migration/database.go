@@ -357,23 +357,34 @@ func (h *Handler) ReceiveDBImportHandler(w http.ResponseWriter, r *http.Request)
 	respondJSON(w, http.StatusOK, map[string]interface{}{"status": "imported"})
 }
 
-// buildDumpCommand covers the service types whose dump restores symmetric
-// through a single stream. Postgres is handled by migratePostgres, which
-// moves database by database.
+// mysqlClient prefixes a mysql or mysqldump invocation with the root password
+// in its environment, which keeps it out of the process's arguments.
+const mysqlClient = `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" `
+
+// mongoTool passes the root password to a MongoDB tool through a temporary config
+// file with mode 0600, keeping it out of the tool's arguments. The script removes
+// the file after the tool exits and preserves its exit status.
+func mongoTool(invocation string) string {
+	return fmt.Sprintf(
+		`c="$(mktemp)"; chmod 600 "$c"; printf 'password: %%s\n' "$MONGO_INITDB_ROOT_PASSWORD" >"$c"; %s --config="$c" -u "$MONGO_INITDB_ROOT_USERNAME" --authenticationDatabase admin; rc=$?; rm -f "$c"; exit $rc`,
+		invocation)
+}
+
+// buildDumpCommand returns a command and container for services whose dumps can
+// be restored from a single stream. Unsupported types return nil and an empty
+// container name. migratePostgres handles Postgres one database at a time.
 func buildDumpCommand(svcType, serviceName string) ([]string, string) {
 	switch svcType {
 	case "mysql":
 		// Routines and events are off by default in mysqldump and would
-		// silently stay behind; triggers is explicit for the same reason.
-		return []string{"sh", "-c", "mysqldump -u root -p\"$MYSQL_ROOT_PASSWORD\" --all-databases --single-transaction --routines --events --triggers"}, serviceName
+		// silently stay behind. Triggers are explicit to ensure they are included too.
+		return []string{"sh", "-c", mysqlClient + "mysqldump -u root --all-databases --single-transaction --routines --events --triggers"}, serviceName
 	case "mongodb":
 		// The catalog sets MONGO_INITDB_ROOT_USERNAME and _PASSWORD, and the
 		// official image starts mongod with --auth when both are present, so an
 		// unauthenticated dump is refused. The localhost exception does not
-		// apply once a root user exists. Both variables are already in the pod's
-		// environment, so the credentials never appear in the command line.
-		return []string{"sh", "-c", "mongodump --archive --quiet " +
-			`-u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin`}, serviceName
+		// apply once a root user exists.
+		return []string{"sh", "-c", mongoTool("mongodump --archive --quiet")}, serviceName
 	case "redis":
 		// SAVE blocks until the RDB is on disk, so the copied file is the
 		// current dataset. BGSAVE returns before the write finishes, and a
@@ -389,10 +400,9 @@ func buildDumpCommand(svcType, serviceName string) ([]string, string) {
 func buildImportCommand(svcType, serviceName string) ([]string, string) {
 	switch svcType {
 	case "mysql":
-		return []string{"sh", "-c", "mysql -u root -p\"$MYSQL_ROOT_PASSWORD\""}, serviceName
+		return []string{"sh", "-c", mysqlClient + "mysql -u root"}, serviceName
 	case "mongodb":
-		return []string{"sh", "-c", "mongorestore --archive --quiet " +
-			`-u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin`}, serviceName
+		return []string{"sh", "-c", mongoTool("mongorestore --archive --quiet")}, serviceName
 	case "redis":
 		// DEBUG RELOAD without NOSAVE first saves the (empty) in-memory
 		// dataset over the file it is about to load, silently discarding the

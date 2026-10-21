@@ -16,7 +16,7 @@ import (
 // Create provisions a PostgreSQL or MySQL database or a RabbitMQ vhost through
 // pod exec, using the service's shared credentials. Existing namespaces are reused,
 // and MySQL and RabbitMQ permissions are reapplied. For MongoDB, it only validates
-// the name; the database is created on first write.
+// the name, and the database is created on first write.
 func Create(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, serviceName, namespace, svcType, value string, creds *corev1.Secret) error {
 	if svcType == "mongodb" {
 		if !ValidName(value) {
@@ -70,8 +70,11 @@ func Create(ctx context.Context, client kubernetes.Interface, restConfig *rest.C
 }
 
 // Cmd builds a provisioning command for PostgreSQL, MySQL, or RabbitMQ. Values
-// are passed as shell positional arguments; name validation also protects the
-// SQL literals and identifiers that use them.
+// are passed as shell positional arguments. Name validation also protects the
+// SQL literals and identifiers that use them. creds must be non-nil and contain
+// a valid USERNAME. Invalid names, usernames and unsupported service types return
+// an error. PostgreSQL uses creds' NAME or defaults to app. MySQL reads the root
+// password from the pod's MYSQL_ROOT_PASSWORD environment variable.
 func Cmd(svcType, value string, creds *corev1.Secret) ([]string, error) {
 	if !ValidName(value) {
 		return nil, fmt.Errorf("invalid namespace name %q", value)
@@ -95,11 +98,13 @@ func Cmd(svcType, value string, creds *corev1.Secret) ([]string, error) {
 		}, nil
 	case "mysql":
 		// Use root to create the database and grant the service user access.
+		// mysql reads the root password from MYSQL_PWD, which keeps it out
+		// of the process's arguments.
 		return []string{
 			"sh", "-c",
 			// Backticks inside double quotes are command substitution to the
 			// shell, so the MySQL identifier quotes are escaped.
-			`mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "CREATE DATABASE IF NOT EXISTS \` + "`" + `$1\` + "`" + `; GRANT ALL PRIVILEGES ON \` + "`" + `$1\` + "`" + `.* TO \` + "`" + `$2\` + "`" + `@'%'"`,
+			`MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -e "CREATE DATABASE IF NOT EXISTS \` + "`" + `$1\` + "`" + `; GRANT ALL PRIVILEGES ON \` + "`" + `$1\` + "`" + `.* TO \` + "`" + `$2\` + "`" + `@'%'"`,
 			"--", value, username,
 		}, nil
 	case "rabbitmq":
