@@ -342,7 +342,7 @@ This outputs the manifest to stdout. Save it to a file:
 kip export --project blog --environment test -o kipper.yaml
 ```
 
-The export includes all apps, services, volumes, jobs, functions, project metadata (display name, environments list), resource profiles, autoscale config, service bindings, links, routes, and declared health checks. Secret values are excluded. To edit a live project, export it, update the manifest, and apply the file. Review export messages on stderr and run `kip diff -f kipper.yaml` before applying to check for changes, including omitted values.
+The export includes all apps, services, volumes, jobs, functions, project metadata (display name, environments list), resource profiles, autoscale config, service bindings, links, routes, and declared health checks. Secret values are excluded. The export lists each app's and function's secret keys on stderr so you know which ones to set again. To edit a live project, export it, update the manifest, and apply the file. Review export messages on stderr and run `kip diff -f kipper.yaml` before applying to check for changes, including omitted values.
 
 For Apps, `kip export` includes explicit CPU and memory settings and omits values written by the old auto-sizer. Applying the file preserves those automatic values and their ownership. Held values are included with a message on stderr. Applying the file confirms every declared resource value as a user setting, including held values. See [Your own CPU and memory values](/en/resource-management#your-own-values).
 
@@ -363,7 +363,7 @@ kip apply -f test.yaml
 kip apply -f acc.yaml
 kip apply -f prod.yaml
 
-# Recreate secrets (not included in the export)
+# Recreate the secrets kip export listed on stderr
 kip app secret set backend DATABASE_URL --project blog --environment test
 ```
 
