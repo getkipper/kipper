@@ -173,7 +173,7 @@ The controller rebuilds that Secret from the service's shared credentials on eve
 
 Neither Secret is read by your pods directly. The controller folds them into the workload's [published environment](/en/secrets#how-it-works-internally) along with everything else, which is what lets a connection string you composed from `${DB_PASSWORD}` stay in step with the password itself.
 
-**Rotating a service password restarts the workloads bound to it.** Kipper publishes the updated environment and rolls the workloads so they load the new credentials. Check rollout status after rotation.
+**Rotating a service password restarts the workloads bound to it.** Kipper publishes the updated environment and rolls the workloads so they load the new credentials. [`kip service rotate-password`](#rotating-a-service-password) does the rotation and waits for those rollouts.
 
 **MailHog** (test SMTP server), prefix `MAIL_`:
 
@@ -440,6 +440,24 @@ project when two of them run a service under the same name:
 ```bash
 kip service restart db --project shop --environment prod
 ```
+
+## Rotating a service password
+
+```bash
+kip service rotate-password db
+```
+
+This gives a Postgres, MySQL, MongoDB, RabbitMQ or MinIO service a new random password. kip changes the password inside the engine, stores it in the service's credentials Secret, and recreates the service's pod so every session opened with the old password ends. It then waits for the apps and functions bound to the service to roll out the new password and reports each completed update. Cron functions use the new password on their next scheduled run. Pass `--yes` to skip the confirmation, and `--project` and `--environment` when two projects run a service under the same name.
+
+The old password stops working as soon as the engine has the new one, so bound apps may fail to connect to the service until they restart. A few things keep the old password because kip cannot reach them: runs of jobs and cron functions that had already started, values pasted by hand into an environment variable or an external client, and backups or dumps taken before the rotation. Restoring one of those backups brings the old password back.
+
+MinIO reads its root secret key only when it starts, so for MinIO the pod restart is the moment the new key takes effect.
+
+kip changes a RabbitMQ password through the management plugin, which Kipper's default RabbitMQ image includes. The service image must include the management plugin for this command to work.
+
+kip refuses to start while a backup of the project is running, because that backup could save the volume under one password and the credentials under the other. Run the command again once the backup has finished. A backup that starts during the few seconds of the change itself can still catch that mix, so take a fresh backup after a rotation if you rely on backups for this service.
+
+If the rotation is interrupted before the password is stored, for example by Ctrl-C or a lost connection, run the same command again to resume it. kip keeps the new password in a `<service>-password-rotation` Secret until it is committed to the credentials Secret. The next run resumes any rotation whose record remains. After the password is stored, follow the restart or status-check instructions in the output. `kip service credentials` reports any remaining rotation record.
 
 ## Checking that a service owns its credentials
 

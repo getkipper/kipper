@@ -81,6 +81,13 @@ func ServiceCredentials(service string) string {
 	return service + "-credentials"
 }
 
+// ServicePasswordRotation names the Secret holding a service's pending password.
+// The -password-rotation suffix keeps it distinct from shared credentials, which
+// are identified by the -credentials suffix.
+func ServicePasswordRotation(service string) string {
+	return service + "-password-rotation"
+}
+
 // GitCredential is the Secret holding the token an App clones its source with,
 // named by a digest of the token and the host it is for.
 //

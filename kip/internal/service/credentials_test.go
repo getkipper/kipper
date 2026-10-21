@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -118,6 +119,61 @@ func TestAuditCredentials_ClassifiesByOwnerUID(t *testing.T) {
 // An unowned per-binding Secret is a credential nothing maintains: the
 // workload's controller refuses to write through an object it does not own, so
 // the values sit there while the workload that needs them fails to reconcile.
+func TestAuditCredentials_ReportsAnUnfinishedRotation(t *testing.T) {
+	m := managerWith([]runtime.Object{
+		credentialsSecret("db-credentials", ownedBy("Service", "db", "uid-db")),
+		withData(credentialsSecret("db-password-rotation", ownedBy("Service", "db", "uid-db")), "0123456789abcdef0123456789abcdef"),
+		credentialsSecret("cache-credentials", ownedBy("Service", "cache", "uid-cache")),
+	}, serviceCR("db", "uid-db"), serviceCR("cache", "uid-cache"))
+
+	audit, err := m.AuditCredentials(context.Background(), "shop-prod")
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	for _, r := range audit.Services {
+		want := RotationNone
+		if r.Service == "db" {
+			want = RotationUnfinished
+		}
+		if r.Rotation != want {
+			t.Errorf("%s: Rotation = %q, want %q", r.Service, r.Rotation, want)
+		}
+	}
+	if audit.NeedsRepair() {
+		t.Error("--repair cannot finish a rotation, so it is not counted as repair work")
+	}
+}
+
+func TestRepairRemovesARotationRecordKipWillNotUse(t *testing.T) {
+	m := managerWith([]runtime.Object{
+		credentialsSecret("db-credentials", ownedBy("Service", "db", "uid-db")),
+		withData(credentialsSecret("db-password-rotation", nil), "x' OR '1"),
+	}, serviceCR("db", "uid-db"))
+
+	audit, err := m.AuditCredentials(context.Background(), "shop-prod")
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	if audit.Services[0].Rotation != RotationUnusable || !audit.NeedsRepair() {
+		t.Fatalf("audit = %+v, want an unusable record that needs repair", audit.Services[0])
+	}
+	done, err := m.RepairCredentials(context.Background(), "shop-prod", audit)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if len(done) != 1 || !strings.Contains(done[0], "db-password-rotation removed") {
+		t.Errorf("done = %q", done)
+	}
+	if state, _ := ReadRotationRecord(context.Background(), m.Client, "shop-prod", "db"); state != RotationNone {
+		t.Errorf("record still there: %q", state)
+	}
+}
+
+func withData(s *corev1.Secret, password string) *corev1.Secret {
+	s.Data = map[string][]byte{"PASSWORD": []byte(password)}
+	return s
+}
+
 func TestAuditCredentials_FindsUnownedProjections(t *testing.T) {
 	m := managerWith([]runtime.Object{
 		withBindingLabel(credentialsSecret("db-app-api-credentials", nil)),
