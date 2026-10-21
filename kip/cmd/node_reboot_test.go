@@ -369,18 +369,22 @@ func TestWaitForBackupPhase(t *testing.T) {
 }
 
 func TestRebootBoundsEverySSHCommand(t *testing.T) {
-	cfg := rebootSSHConfig(&config.Cluster{Host: "203.0.113.10"}, "/keys/override")
+	cfg, err := rebootSSHConfig(&config.Cluster{Host: "203.0.113.10"}, "/keys/override")
+	require.NoError(t, err)
 	assert.Equal(t, 30*time.Second, cfg.CommandTimeout, "a server still starting can accept a session and never answer it")
 	assert.Equal(t, "/keys/override", cfg.KeyPath)
 }
 
 func TestHostSSHConfigHonoursTheKeyFlag(t *testing.T) {
 	cluster := &config.Cluster{Host: "203.0.113.10", SSHKey: "/keys/configured"}
-	cfg := hostSSHConfig(cluster, "/keys/override")
+	cfg, err := hostSSHConfig(cluster, "/keys/override")
+	require.NoError(t, err)
 	assert.Equal(t, "/keys/override", cfg.KeyPath)
 	assert.Equal(t, "root", cfg.User)
 	assert.Contains(t, cfg.Options, "BatchMode=yes")
-	assert.Equal(t, "/keys/configured", hostSSHConfig(cluster, "").KeyPath)
+	cfg, err = hostSSHConfig(cluster, "")
+	require.NoError(t, err)
+	assert.Equal(t, "/keys/configured", cfg.KeyPath)
 }
 
 func TestNodeRebootChecksHealthAgainstTheNewBoot(t *testing.T) {

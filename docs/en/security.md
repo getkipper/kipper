@@ -156,7 +156,7 @@ cat /etc/kipper/access/table.nft /etc/kipper/access/operators.nft
 
 The record lives in the `kipper-access` ConfigMap in `kipper-system`. It holds the prefixes, who added each one and from which address, and the last 100 changes. Those addresses identify your own staff, so treat the record as personal data your organization controls.
 
-Each change is loaded on every node, workers first and the server last, and checked there before it is kept: a new SSH connection over each address family must arrive from a listed address, and on the server the API must answer too. A failed check restores the previous list on that node at once. If kip stops in the middle of a change, the node restores its previous list about 180 seconds after kip's last step. After restoring its previous list, a node still allows the addresses on that list, so `kip status` and `kip cluster access show` warn that its generation is older than the record. Run `kip cluster access apply` to bring the node up to date. kip refuses a change when the API does not answer from your workstation beforehand, since it could not check it afterwards. It also refuses a change that would not admit the address your nodes see for your workstation, refuses to revoke the last entry (`reset` opens the ports instead), and stops before changing anything when a node cannot be reached. Revoking an address refuses its new connections. Sessions it already has stay open until they end.
+Each change is loaded on every node, workers first and the server last, and checked there before it is kept: a new SSH connection over each address family must arrive from a listed address, and on the server the API must answer too. A failed check restores the previous list on that node at once. If kip stops in the middle of a change, the node restores its previous list about 180 seconds after kip's last step. After restoring its previous list, a node still allows the addresses on that list, so `kip status` and `kip cluster access show` warn that its generation is older than the record. Run `kip cluster access apply` to bring the node up to date. kip refuses a change when the API does not answer from your workstation beforehand, since it could not check it afterwards. It also refuses a change that would not admit the address your nodes see for your workstation, refuses to revoke the last entry unless an [operator device](#operator-devices) is active (`reset` opens the ports instead), and stops before changing anything when a node cannot be reached. Revoking an address refuses its new connections. Sessions it already has stay open until they end.
 
 These checks open several new SSH connections to each node, up to six for a dual-stack `kip node add`. UFW's [SSH rate limit](/en/installation#ssh-rate-limiting) allows six connections in thirty seconds from one source address. A quick retry or a second operator sharing that address can reach the limit, causing the check to fail and the change to be rolled back. Wait thirty seconds and run the command again. `kip cluster harden --no-ssh-rate-limit` turns the limit off on every recorded node whose UFW firewall kip configures. Like the rest of `kip cluster harden`, it stops at the first node it cannot reach. Run the command again to finish checking and configuring the remaining nodes.
 
@@ -188,6 +188,53 @@ Enabling the distribution's own `nftables.service` conflicts with the list. Its 
 
    `nft delete table inet kipper_access` removes the whole list from that node until the next change or reboot.
 3. When the service failed at boot (case 4 above), the node is reachable on the host firewall's rules. `systemctl status kipper-access` names the cause and `kip cluster access apply` restores the list.
+
+### Operator devices {#operator-devices}
+
+A listed address works as long as you work from that network. An operator device lets you connect from different networks: your workstation gets a WireGuard key, every node gets a small WireGuard interface, and kip reaches SSH and the API through that tunnel from wherever you are. Add this workstation as a device with:
+
+```bash
+kip cluster access device add laptop               # set up the tunnel and register this workstation
+kip cluster access device add laptop --device-only # and then drop its address from the list
+kip cluster access device list
+kip cluster access device remove laptop
+kip cluster access via auto|tunnel|direct          # how this workstation reaches the nodes
+```
+
+The tunnel runs inside kip with its own network stack, so it leaves your workstation's interfaces, routes and DNS alone and needs no administrator rights. kip starts it when a command needs it, and it stops after 15 minutes without connections. The nodes listen on UDP 443 by default (`--port` on the first device changes it) and hand out addresses from `10.99.0.0/24` (`--range`). kip refuses a range that overlaps the pod or Service network, a node's address or any route on a node.
+
+The first `device add` installs `wireguard-tools` on every node, creates a key on each node that never leaves it, opens the UDP port in UFW, and loads the interface. When the cluster has no access list yet, it lists your workstation's address first so you keep a way in. The device is recorded as pending until kip has checked that a new SSH connection to every node through the tunnel arrives from the device's address, and that the API answers through it on the server. Only then is it active. Nodes running firewalld are refused for now.
+
+With an active device the access list may be empty. SSH and the API then take new connections from outside the cluster only through registered devices, and from an unlisted network the tunnel is the only way in. Connections that are already open, loopback and the cluster's own nodes, including one that is joining, are still admitted, as with any access list. `--device-only` empties the list after the device is active, and only when the list holds nothing but this workstation's own address. In a terminal, `device add` asks. A change is still checked before it is kept: kip refuses one that would leave neither the tunnel nor a listed address working for both SSH and the API.
+
+With `via auto`, the default, kip uses the tunnel and falls back to the direct path when the tunnel does not come up within 10 seconds, for example on a network that blocks UDP. `--via` sets the path for one command. The interface on each node accepts SSH, the API, ping and ICMP errors from the device range, which includes a pending device while kip checks it. It drops everything else, forwards nothing and reaches no other host or pod.
+
+**Other tools**
+
+```bash
+kip cluster access ssh-config >> ~/.ssh/config     # Host blocks for ssh and scp through the tunnel
+kip cluster access forward                          # 127.0.0.1:16443 to the API, until Ctrl+C
+kip cluster access kubeconfig                       # a <context>-tunnel context for kubectl
+```
+
+`ssh-config` prints one `Host <cluster>-<node>` block per node. Its `ProxyCommand` calls `kip` through your `PATH`, so print it again after adding or removing a node. `kubeconfig` adds a context whose server is `https://127.0.0.1:16443`, with the same CA, credentials and TLS server name, so kubectl still checks the API's certificate. It preserves an existing `<context>-tunnel` entry unless it matches the generated entry apart from the local port, which can be updated. While `forward` runs, any local user of your workstation can reach the API through that port. The API still asks for credentials.
+
+**A lost or stolen device**
+
+Remove it from another device or a listed address with `kip cluster access device remove <name>`. When no other way in is left, revoke the device from the provider's console on every node, then allow a recovery address:
+
+```bash
+sh /etc/kipper/ops/ops.sh revoke-device laptop     # on every node, from the console
+nft add element inet kipper_access admin4 { 198.51.100.9 }
+```
+
+From that address, `kip cluster access allow --here --via direct` records it, and `kip cluster access device remove laptop --via direct` removes the device for good. kip refuses every other change, and `kip node add`, while a node has revoked a device the record still lists, because a new node would otherwise admit it again.
+
+**Reboot, reset and uninstall**
+
+`kipper-ops.service` loads the interface at boot. `kip status` and `kip cluster access show` compare each node's interface, port, address and loaded devices with the record, and its `kipper_ops` table with the one kip loaded. `kip cluster access reset` opens SSH and the API, then checks that every node answers a direct SSH connection and that the API answers directly. Only then does it remove the interfaces and the record over a new direct session and forget this workstation's device. When a node or the API does not answer directly, the tunnel stays and a rerun finishes the reset. `kip cluster uninstall` removes the interface, its table, the UFW rule and `/etc/kipper/ops/` from every host it wipes.
+
+`kip node add` gives the new node its interface. On a cluster whose list is empty, the new node is reached directly while it joins, so list your workstation's address for the duration of the join.
 
 ### Security headers
 

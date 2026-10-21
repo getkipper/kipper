@@ -183,6 +183,8 @@ compose() {
 }
 load() {
   ` + accessTimeout + `nft -f $d/ops.nft || return 1
+  listed=$(nft list table ` + opsTable + `) || return 1
+  printf '%s\n' "$listed" | sha256sum | cut -c1-64 > $d/table.sum.kip-new && mv -f $d/table.sum.kip-new $d/table.sum || return 1
   . $d/iface || return 1
   ip link show ` + opsInterface + ` >/dev/null 2>&1 || ip link add ` + opsInterface + ` type wireguard || return 1
   cfg=$(compose) || { echo 'kip could not compose the operator interface config, so its peers are unchanged' >&2; return 1; }
@@ -222,20 +224,8 @@ revoke-device)
   fi
   echo "revoked $key on this node. Run this on every node, then 'kip cluster access device remove' from a workstation"
   ;;
-remove)
-  flock 9 || exit 1
-  systemctl disable ` + opsUnitName + ` >/dev/null 2>&1
-  if ip link show ` + opsInterface + ` >/dev/null 2>&1; then ip link del ` + opsInterface + ` || exit 1; fi
-  if ! out=$(` + accessTimeout + `nft list table ` + opsTable + ` 2>&1 >/dev/null); then
-    case "$out" in *"No such file or directory"*) ;; *) printf '%s\n' "$out" >&2; exit 1 ;; esac
-  else
-    ` + accessTimeout + `nft delete table ` + opsTable + ` || exit 1
-  fi
-  rm -f ` + root + opsUnitPath + ` && systemctl daemon-reload || exit 1
-  rm -rf $d
-  ;;
 *)
-  echo 'usage: ops.sh load|key|revoke-device <device>|remove' >&2; exit 2
+  echo 'usage: ops.sh load|key|revoke-device <device>' >&2; exit 2
   ;;
 esac
 `
@@ -271,6 +261,8 @@ func opsPrepareCommand(root string) string {
 	b.WriteString("(umask 077\n")
 	fmt.Fprintf(&b, "mkdir -p %s && mkdir -p -m 0700 %s && chmod 0700 %s || exit 1\n", root+"/etc/kipper", d, d)
 	fmt.Fprintf(&b, "exec 9>>%s && flock 9 || exit 1\n", root+accessLock)
+	// Kipper's firewalld zones do not open the tunnel's UDP port yet.
+	b.WriteString("systemctl is-active --quiet firewalld && { echo 'firewalld runs on this node, and kip cannot open the operator tunnel port in it yet, so operator devices are not supported on this node' >&2; exit 1; }\n")
 	b.WriteString("modprobe wireguard >/dev/null 2>&1\n")
 	fmt.Fprintf(&b, "[ -d %s/sys/module/wireguard ] || { echo 'this kernel has no WireGuard module, so the node cannot take part in operator devices' >&2; exit 1; }\n", root)
 	b.WriteString(writeIfChanged(d+"/ops.sh", opsScript(root), "", ""))
@@ -278,9 +270,63 @@ func opsPrepareCommand(root string) string {
 	return b.String()
 }
 
-// OpsNodeKey installs wireguard-tools when missing, checks kernel WireGuard
-// support and creates the node's private key if absent or empty. It returns the
-// public key or an error from preparation, key generation or key validation.
+// OpsNodeRoutes returns the IPv4 destinations of the node's routes in every
+// table, leaving out default routes and the operator interface's own, so an
+// operator range can be checked against the networks the node reaches.
+func OpsNodeRoutes(client CommandRunner) ([]netip.Prefix, error) {
+	out, err := client.Run("ip -4 route show table all")
+	if err != nil {
+		return nil, fmt.Errorf("reading the node's routes: %w", err)
+	}
+	return parseOpsRoutes(out), nil
+}
+
+// routeTypes are the route type keywords ip prints before a destination.
+var routeTypes = map[string]bool{
+	"unicast": true, "local": true, "broadcast": true, "multicast": true, "anycast": true,
+	"unreachable": true, "blackhole": true, "prohibit": true, "throw": true, "nat": true,
+}
+
+func parseOpsRoutes(out string) []netip.Prefix {
+	var nets []netip.Prefix
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		// Indented lines are the nexthops of the route above.
+		if len(f) == 0 || line[0] == ' ' || line[0] == '\t' {
+			continue
+		}
+		if routeTypes[f[0]] {
+			f = f[1:]
+		}
+		if len(f) == 0 || f[0] == "default" || opsRoute(f) {
+			continue
+		}
+		p, err := netip.ParsePrefix(f[0])
+		if err != nil {
+			a, aerr := netip.ParseAddr(f[0])
+			if aerr != nil {
+				continue
+			}
+			p = netip.PrefixFrom(a, a.BitLen())
+		}
+		nets = append(nets, p)
+	}
+	return nets
+}
+
+func opsRoute(fields []string) bool {
+	for i := 0; i+1 < len(fields); i++ {
+		if fields[i] == "dev" && fields[i+1] == opsInterface {
+			return true
+		}
+	}
+	return false
+}
+
+// OpsNodeKey installs wireguard-tools when missing, rejects nodes running
+// firewalld and checks kernel WireGuard support. It creates the node's private
+// key if absent or empty and returns the public key. Preparation, key generation
+// and key validation failures return an error.
 // The private key stays on the node. Installation output is written to out.
 func OpsNodeKey(client CommandRunner, out io.Writer) (string, error) {
 	return opsNodeKey(client, out, "")
@@ -313,7 +359,8 @@ func opsNodeKey(client CommandRunner, out io.Writer, root string) (string, error
 }
 
 // ApplyOpsNode writes the node's ops table, interface settings and peers,
-// enables the boot unit and loads them: first the table, then the interface.
+// enables the boot unit, opens the tunnel's UDP port when UFW is active, and
+// loads them: first the table, then the interface.
 // nft checks the table before anything is written. OpsNodeKey must have run
 // on the node first. Validation or remote command failures return an error.
 // Failures after the nft check may leave partially applied changes.
@@ -340,6 +387,7 @@ func applyOpsNode(client CommandRunner, in OpsNodeIntent, peers, root string) er
 	b.WriteString(writeIfChanged(root+opsUnitPath, opsUnit(), "0644", "systemctl daemon-reload || exit 1"))
 	fmt.Fprintf(&b, "%ssync %s/ops.nft %s/iface %s/peers.conf %s || exit 1\n", accessTimeout, d, d, d, d)
 	fmt.Fprintf(&b, "systemctl enable %s >/dev/null 2>&1; systemctl is-enabled --quiet %s || { echo 'systemd did not enable %s' >&2; exit 1; }\n", opsUnitName, opsUnitName, opsUnitName)
+	fmt.Fprintf(&b, "if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then ufw allow %d/udp comment kipper-ops >/dev/null || exit 1; fi\n", in.Port)
 	fmt.Fprintf(&b, "command -v restorecon >/dev/null 2>&1 && restorecon -R %s %s; true) &&\n", d, root+opsUnitPath)
 	fmt.Fprintf(&b, "sh %s/ops.sh load", d)
 	if _, err := client.Run(b.String()); err != nil {
@@ -348,18 +396,90 @@ func applyOpsNode(client CommandRunner, in OpsNodeIntent, peers, root string) er
 	return nil
 }
 
-// RemoveOpsNode takes the operator interface down, then removes the
-// kipper_ops table, the boot unit and /etc/kipper/ops. It does nothing when
-// ops.sh is absent and returns an error if the remote removal command fails.
+// RemoveOpsNode disables the boot unit, then removes the operator interface,
+// its table, boot unit file, UFW rule and directory, in that order. Interface
+// removal must succeed before the table is removed, so a failed removal leaves
+// its guard in place. Interface and table inspection failures are treated as
+// absence, and UFW removal failures are ignored. Other failures return an error,
+// and removal can be retried.
+// The connection must bypass the tunnel because removing the interface closes it.
+// A node with neither the operator directory nor the boot unit file is left alone.
 func RemoveOpsNode(client CommandRunner) error {
 	return removeOpsNode(client, "")
 }
 
 func removeOpsNode(client CommandRunner, root string) error {
-	d := root + opsDir
-	cmd := fmt.Sprintf("if [ -e %[1]s/ops.sh ]; then sh %[1]s/ops.sh remove; else exit 0; fi", d)
-	if _, err := client.Run(cmd); err != nil {
+	if _, err := client.Run(opsRemoveCommand(root, "sh")); err != nil {
 		return fmt.Errorf("removing the operator interface: %w", err)
 	}
 	return nil
+}
+
+// ScheduleOpsRemoval attempts to disable the operator interface's boot unit
+// immediately and schedules removal in a transient unit about ten seconds later.
+// This lets removal continue after it closes the tunnel carrying the session.
+// Uninstall uses it on hosts it wipes. It returns script creation or scheduling
+// errors, but the later removal runs independently and can still fail.
+func ScheduleOpsRemoval(client CommandRunner) error {
+	return scheduleOpsRemoval(client, "")
+}
+
+func scheduleOpsRemoval(client CommandRunner, root string) error {
+	if _, err := client.Run(opsRemoveCommand(root, "systemctl disable "+opsUnitName+" >/dev/null 2>&1; systemd-run --quiet --collect --on-active=10 /bin/sh")); err != nil {
+		return fmt.Errorf("scheduling the removal of the operator interface: %w", err)
+	}
+	return nil
+}
+
+// opsRemoveCommand writes the removal script and runs it with run, passing
+// the tunnel port from peers.conf.
+func opsRemoveCommand(root, run string) string {
+	d := root + opsDir
+	script := root + "/run/kipper-ops-remove.sh"
+	var b strings.Builder
+	fmt.Fprintf(&b, "[ -e %s ] || [ -e %s ] || exit 0\n", d, root+opsUnitPath)
+	fmt.Fprintf(&b, "p=$(sed -n 's/^ListenPort = \\([0-9][0-9]*\\)$/\\1/p' %s/peers.conf 2>/dev/null | head -n 1)\n", d)
+	fmt.Fprintf(&b, "cat > %s <<'KIPPER_OPS_REMOVE' || exit 1\n%sKIPPER_OPS_REMOVE\n", script, opsRemoveScript(root))
+	fmt.Fprintf(&b, "%s %s \"$p\"", run, script)
+	return b.String()
+}
+
+// opsRemoveScript removes the operator interface under the access lock.
+// Its argument is the tunnel port whose UFW rule should also be removed,
+// or empty to skip that rule. Interface and table inspection failures are
+// treated as absence, and UFW removal failures are ignored. Other failures
+// stop cleanup. The script deletes itself on exit.
+func opsRemoveScript(root string) string {
+	return `export LC_ALL=C LANGUAGE=C
+trap 'rm -f "$0"' EXIT
+exec 9>>` + root + accessLock + ` && flock 9 || exit 1
+if [ -e ` + root + opsUnitPath + ` ]; then systemctl disable ` + opsUnitName + ` >/dev/null 2>&1 || exit 1; fi
+if ip link show ` + opsInterface + ` >/dev/null 2>&1; then ip link del ` + opsInterface + ` || exit 1; fi
+if nft list table ` + opsTable + ` >/dev/null 2>&1; then nft delete table ` + opsTable + ` || exit 1; fi
+rm -f ` + root + opsUnitPath + ` && systemctl daemon-reload || exit 1
+if [ -n "$1" ] && command -v ufw >/dev/null 2>&1; then ufw delete allow "$1/udp" >/dev/null 2>&1; fi
+rm -rf ` + root + opsDir + `
+`
+}
+
+// ReadOpsRevokedKeys returns the device keys revoked on the node from its
+// console with 'ops.sh revoke-device', in file order. Missing or unreadable
+// lists produce an empty result, and invalid keys are skipped. Remote command
+// failures return an error.
+func ReadOpsRevokedKeys(client CommandRunner) ([]string, error) {
+	return readOpsRevokedKeys(client, "")
+}
+
+func readOpsRevokedKeys(client CommandRunner, root string) ([]string, error) {
+	out, err := client.Run(fmt.Sprintf("cat %s/revoked-keys 2>/dev/null; true", root+opsDir))
+	if err != nil {
+		return nil, fmt.Errorf("reading the node's revoked device keys: %w", err)
+	}
+	var keys []string
+	for _, line := range strings.Split(out, "\n") {
+		if k := strings.TrimSpace(line); ValidWireGuardKey(k) == nil {
+			keys = append(keys, k)
+		}
+	}
+	return keys, nil
 }

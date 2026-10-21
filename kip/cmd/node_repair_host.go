@@ -2,12 +2,15 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/getkipper/kipper/kip/internal/config"
+	"github.com/getkipper/kipper/kip/internal/infra"
 	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/ssh"
+	"github.com/getkipper/kipper/kip/internal/transport"
 )
 
 var nodeRepairHostCmd = &cobra.Command{
@@ -66,7 +69,7 @@ func runNodeRepairHost(cmd *cobra.Command, _ []string) error {
 
 	if nodeHost != "" {
 		fmt.Printf("\n  Connecting to %s...\n", nodeHost)
-		nodeConn, err := ssh.Dial(nodeSSH(nodeHost, sshKey, cluster))
+		nodeConn, err := dialNodeSSH(nodeHost, sshKey, cluster)
 		if err != nil {
 			return fmt.Errorf("connecting to %s: %w", nodeHost, err)
 		}
@@ -163,13 +166,66 @@ func repairHostNotNeeded(master installer.CommandRunner) (bool, error) {
 	return false, nil
 }
 
-// nodeSSH uses the shared SSH key precedence: flag, environment, then cluster config.
-func nodeSSH(host, flagValue string, cluster *config.Cluster) ssh.Config {
+// nodeSSH uses the shared SSH key precedence: flag, environment, then cluster
+// config. It adds a ProxyCommand when the selected transport uses this
+// workstation's device tunnel. Tunnel mode returns an error if host is absent
+// from the device's node list or the ProxyCommand cannot be constructed.
+func nodeSSH(host, flagValue string, cluster *config.Cluster) (ssh.Config, error) {
+	return nodeSSHVia(host, flagValue, cluster, transport.Mode(cluster))
+}
+
+// nodeSSHVia is nodeSSH with the transport mode forced.
+func nodeSSHVia(host, flagValue string, cluster *config.Cluster, mode string) (ssh.Config, error) {
 	explicit, fallback := resolveSSHKey(flagValue, cluster)
-	return ssh.Config{
+	cfg := ssh.Config{
 		Host:            host,
 		User:            sshUser(cluster),
 		KeyPath:         explicit,
 		FallbackKeyPath: fallback,
 	}
+	opts, err := transport.SSHOptionsVia(cluster, host, "", mode)
+	if err != nil {
+		return ssh.Config{}, err
+	}
+	cfg.Options = append(cfg.Options, opts...)
+	return cfg, nil
+}
+
+// retargetSSH returns cfg for the cluster node at host instead, with the
+// transport options chosen for that node rather than the ones cfg carried.
+func retargetSSH(cfg ssh.Config, cluster *config.Cluster, host string) (ssh.Config, error) {
+	opts, err := transport.SSHOptions(cluster, host, "")
+	if err != nil {
+		return ssh.Config{}, err
+	}
+	cfg.Host = host
+	kept := make([]string, 0, len(cfg.Options)+len(opts))
+	for _, o := range cfg.Options {
+		if !strings.HasPrefix(o, "ProxyCommand=") && !strings.HasPrefix(o, "Port=") {
+			kept = append(kept, o)
+		}
+	}
+	kept = append(kept, opts...)
+	cfg.Options = kept
+	return cfg, nil
+}
+
+// clusterProvider returns the provider for the cluster node at host, reached
+// through this workstation's device tunnel when the command uses it.
+func clusterProvider(cluster *config.Cluster, host, explicitKey, fallbackKey string) (*infra.BareMetalProvider, error) {
+	opts, err := transport.SSHOptions(cluster, host, "")
+	if err != nil {
+		return nil, err
+	}
+	return &infra.BareMetalProvider{Host: host, User: sshUser(cluster), SSHKey: explicitKey, FallbackSSHKey: fallbackKey, Options: opts}, nil
+}
+
+// dialNodeSSH connects to the cluster node at host, through this
+// workstation's device tunnel when the command uses it.
+func dialNodeSSH(host, flagValue string, cluster *config.Cluster) (*ssh.Client, error) {
+	cfg, err := nodeSSH(host, flagValue, cluster)
+	if err != nil {
+		return nil, err
+	}
+	return ssh.Dial(cfg)
 }

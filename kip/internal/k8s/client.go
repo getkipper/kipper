@@ -11,7 +11,6 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/config"
@@ -43,12 +42,12 @@ func (c *Client) RESTConfig() *rest.Config {
 
 // NewFromCluster creates a Kubernetes client from a kip cluster config entry.
 func NewFromCluster(cluster *config.Cluster) (*Client, error) {
-	cfg, err := clientcmd.BuildConfigFromFlags("", cluster.Kubeconfig)
+	cfg, err := RESTConfig(cluster)
 	if err != nil {
-		return nil, fmt.Errorf("loading kubeconfig %s: %w", cluster.Kubeconfig, err)
+		return nil, err
 	}
-	// No global timeout — long-running operations like log streaming need
-	// unbounded connections. Individual operations use context timeouts.
+	// Keep the global timeout unset because log streaming needs unbounded
+	// connections. Individual operations use context timeouts.
 
 	clientset, err := kubernetes.NewForConfig(cfg)
 	if err != nil {

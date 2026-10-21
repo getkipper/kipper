@@ -35,7 +35,8 @@ func clearKipperStateCommand(root string) string {
 // kip manages stays running or stopped with SSH allowed. Failures to remove
 // firewall rules produce warnings and cleanup continues. The operator access
 // table is removed after k3s is gone, because a reused host must not boot with
-// the list of a cluster that no longer exists. OS hardening remains configured.
+// the list of a cluster that no longer exists. Operator-interface removal is
+// scheduled for about ten seconds later. OS hardening remains configured.
 // State in /etc/kipper is cleared except for firewall ownership records,
 // fail-open records and lock files. A firewall reservation or an active or
 // activating rollback unit preserves all of that state and prints a notice.
@@ -92,6 +93,9 @@ done`
 	}
 
 	if err := RemoveAccessGuard(client); err != nil {
+		return err
+	}
+	if err := ScheduleOpsRemoval(client); err != nil {
 		return err
 	}
 

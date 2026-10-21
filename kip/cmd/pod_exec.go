@@ -10,6 +10,8 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+
+	"github.com/getkipper/kipper/kip/internal/k8s"
 )
 
 // podExecFunc runs a command in a container, streaming stdin, stdout and stderr.
@@ -32,7 +34,7 @@ func podExec(clientset kubernetes.Interface, restConfig *rest.Config, namespace,
 				Stderr:    true,
 			}, scheme.ParameterCodec)
 
-		executor, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
+		executor, err := k8s.NewSPDYExecutor(restConfig, "POST", req.URL())
 		if err != nil {
 			return fmt.Errorf("creating executor: %w", err)
 		}

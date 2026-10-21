@@ -14,7 +14,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/kip/internal/k8s"
@@ -257,9 +256,9 @@ func resolveTransferTarget(ctx context.Context, name, namespace string, database
 	}
 	container := workloadContainerName(pod, name)
 
-	restConfig, err := clientcmd.BuildConfigFromFlags("", cluster.Kubeconfig)
+	restConfig, err := k8s.RESTConfig(cluster)
 	if err != nil {
-		return nil, fmt.Errorf("loading kubeconfig: %w", err)
+		return nil, err
 	}
 
 	return &transferTarget{

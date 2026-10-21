@@ -252,9 +252,13 @@ func runNodeReboot(cmd *cobra.Command, args []string) error {
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	ignoreVolumes, _ := cmd.Flags().GetBool("ignore-degraded-volumes")
 
+	sshCfg, err := rebootSSHConfig(cluster, keyFlag)
+	if err != nil {
+		return err
+	}
 	r := &nodeReboot{
 		Out:     os.Stdout,
-		SSH:     rebootSSHConfig(cluster, keyFlag),
+		SSH:     sshCfg,
 		Impact:  "Its apps will be unavailable during the reboot.",
 		Confirm: confirmReboot,
 		Backup: func() (string, error) {
@@ -311,7 +315,7 @@ func runNodeReboot(cmd *cobra.Command, args []string) error {
 	}
 	drainTimeout, _ := cmd.Flags().GetDuration("drain-timeout")
 	// Allow the worker drain to reach its own timeout before SSH times out.
-	masterSSH := rebootSSHConfig(cluster, keyFlag)
+	masterSSH := sshCfg
 	masterSSH.CommandTimeout = max(drainTimeout, 0) + 2*time.Minute
 	master, err := ssh.Dial(masterSSH)
 	if err != nil {
@@ -347,7 +351,9 @@ func runNodeReboot(cmd *cobra.Command, args []string) error {
 	if drainTimeout < time.Second {
 		return fmt.Errorf("--drain-timeout must be at least 1s, got %s", drainTimeout)
 	}
-	r.SSH.Host = rec.Host
+	if r.SSH, err = retargetSSH(r.SSH, cluster, rec.Host); err != nil {
+		return err
+	}
 	id, err := onHost(r.SSH, func(c *ssh.Client) (string, error) { return installer.ReadMachineID(c) })
 	if err != nil {
 		return fmt.Errorf("reaching %s over SSH before the reboot: %w", rec.Host, err)
@@ -689,10 +695,10 @@ func reportWorkerAfterReboot(out io.Writer, cfg ssh.Config, node string, server 
 
 // rebootSSHConfig limits command duration because a booting server can accept
 // SSH connections before it can complete commands.
-func rebootSSHConfig(cluster *config.Cluster, keyFlag string) ssh.Config {
-	cfg := hostSSHConfig(cluster, keyFlag)
+func rebootSSHConfig(cluster *config.Cluster, keyFlag string) (ssh.Config, error) {
+	cfg, err := hostSSHConfig(cluster, keyFlag)
 	cfg.CommandTimeout = 30 * time.Second
-	return cfg
+	return cfg, err
 }
 
 // onlyOnce attempts cleanup once, including when cleanup fails.

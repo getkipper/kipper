@@ -20,7 +20,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 	utilexec "k8s.io/client-go/util/exec"
 
 	"github.com/getkipper/kipper/kip/internal/k8s"
@@ -152,9 +151,9 @@ func runServiceRestoreDump(cmd *cobra.Command, args []string) error {
 		return errBackupsNotConfigured
 	}
 
-	kubeconfig, err := clientcmd.BuildConfigFromFlags("", cluster.Kubeconfig)
+	kubeconfig, err := k8s.RESTConfig(cluster)
 	if err != nil {
-		return fmt.Errorf("loading kubeconfig: %w", err)
+		return err
 	}
 	execClient, err := kubernetes.NewForConfig(k8s.WithoutPodSecurityWarnings(kubeconfig))
 	if err != nil {

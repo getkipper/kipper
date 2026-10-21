@@ -65,13 +65,7 @@ func dialCutoverStager(cluster *config.Cluster, fromDomain, toDomain string) (*c
 	if cluster.Host == "" {
 		return nil, fmt.Errorf("no host recorded for cluster %s; a domain change needs SSH access to stage the API server's trust", cluster.Name)
 	}
-	explicit, fallback := resolveSSHKey("", cluster)
-	client, err := ssh.Dial(ssh.Config{
-		Host:            cluster.Host,
-		User:            sshUser(cluster),
-		KeyPath:         explicit,
-		FallbackKeyPath: fallback,
-	})
+	client, err := dialNodeSSH(cluster.Host, "", cluster)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to %s over SSH: %w", cluster.Host, err)
 	}
@@ -706,13 +700,7 @@ func writeLocalDomainConfig() error {
 func refuseDomainChangeDuringCAReplacement(ctx context.Context, cluster *config.Cluster, k8sClient *k8s.Client) error {
 	var client *ssh.Client
 	if cluster.Host != "" {
-		explicit, fallback := resolveSSHKey("", cluster)
-		if dialled, err := ssh.Dial(ssh.Config{
-			Host:            cluster.Host,
-			User:            sshUser(cluster),
-			KeyPath:         explicit,
-			FallbackKeyPath: fallback,
-		}); err == nil {
+		if dialled, err := dialNodeSSH(cluster.Host, "", cluster); err == nil {
 			client = dialled
 			defer func() { _ = client.Close() }()
 		}

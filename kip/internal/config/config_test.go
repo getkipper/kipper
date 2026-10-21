@@ -347,3 +347,30 @@ func TestGetClusterByHostMatchesEitherSpelling(t *testing.T) {
 		t.Errorf("an empty alias must match nothing, got %v", got)
 	}
 }
+
+func TestOpsRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	ops := &Ops{
+		Device: "laptop", State: OpsActive, Address: "10.99.0.129", Via: "tunnel", APIHost: "198.51.100.1",
+		Nodes: []OpsNode{{
+			MachineID: "m-1", Name: "server", Host: "198.51.100.1", Endpoint: "198.51.100.1:443", PublicKey: "AAAA",
+			Address: "10.99.0.1", SSHPorts: []int{22, 2222}, Server: true,
+		}},
+	}
+	require.NoError(t, SaveTo(&Config{Clusters: []Cluster{{Name: "prod", Ops: ops}, {Name: "plain"}}}, path))
+	loaded, err := LoadFrom(path)
+	require.NoError(t, err)
+	assert.Equal(t, ops, loaded.Clusters[0].Ops)
+	assert.Nil(t, loaded.Clusters[1].Ops, "a cluster without a device has no ops state")
+}
+
+func TestOpsKeyPathRefusesNamesThatLeaveTheDirectory(t *testing.T) {
+	p, err := OpsKeyPath("prod")
+	require.NoError(t, err)
+	assert.Equal(t, "prod-ops.key", filepath.Base(p))
+	assert.Equal(t, "clusters", filepath.Base(filepath.Dir(p)))
+	for _, name := range []string{"", ".", "..", "a/b", `a\b`} {
+		_, err := OpsKeyPath(name)
+		assert.Error(t, err, name)
+	}
+}

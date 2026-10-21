@@ -13,9 +13,7 @@ import (
 
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/domain"
-	"github.com/getkipper/kipper/kip/internal/infra"
 	"github.com/getkipper/kipper/kip/internal/installer"
-	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 var clusterUninstallCmd = &cobra.Command{
@@ -181,11 +179,9 @@ func gatewayOnlyDeps(_ *config.Cluster) uninstallDeps {
 func connectForUninstall(flagKey string) func(*config.Cluster) (uninstallDeps, func(), error) {
 	return func(cluster *config.Cluster) (uninstallDeps, func(), error) {
 		explicit, fallback := resolveSSHKey(flagKey, cluster)
-		provider := &infra.BareMetalProvider{
-			Host:           cluster.Host,
-			User:           sshUser(cluster),
-			SSHKey:         explicit,
-			FallbackSSHKey: fallback,
+		provider, err := clusterProvider(cluster, cluster.Host, explicit, fallback)
+		if err != nil {
+			return uninstallDeps{}, nil, err
 		}
 		if err := provider.Connect(); err != nil {
 			return uninstallDeps{}, func() {}, fmt.Errorf("connecting to %s: %w", cluster.Host, err)
@@ -195,7 +191,7 @@ func connectForUninstall(flagKey string) func(*config.Cluster) (uninstallDeps, f
 			Wipe:        func() error { return wipeServer(provider.Client(), cluster) },
 			CheckServer: func() error { return checkServerIdentity(provider.Client(), cluster) },
 			WipeWorker: func(node config.NodeRecord) error {
-				client, err := ssh.Dial(nodeSSH(node.Host, flagKey, cluster))
+				client, err := dialNodeSSH(node.Host, flagKey, cluster)
 				if err != nil {
 					return err
 				}
@@ -435,6 +431,7 @@ func removeLocalClusterEntry(name, ownedToken string) error {
 			}
 			found = true
 			_ = os.Remove(c.Kubeconfig)
+			removeDeviceKey(c.Name)
 		}
 		if !found {
 			return config.ErrNoChange

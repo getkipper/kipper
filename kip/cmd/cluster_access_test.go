@@ -92,14 +92,15 @@ func (h *accessHost) store(t *testing.T, rec installer.AccessRecord) {
 // accessFixture is a one-node cluster whose host state and apply calls are
 // recorded in memory.
 type accessFixture struct {
-	out     *bytes.Buffer
-	server  *accessHost
-	c       *accessCluster
-	headers map[installer.FirewallRunner]string
-	applied []installer.AccessApply
-	result  map[string]error
-	refused map[string]error
-	removed []installer.FirewallRunner
+	out        *bytes.Buffer
+	server     *accessHost
+	c          *accessCluster
+	headers    map[installer.FirewallRunner]string
+	applied    []installer.AccessApply
+	result     map[string]error
+	refused    map[string]error
+	removed    []installer.FirewallRunner
+	opsRemoved []installer.FirewallRunner
 }
 
 func newAccessFixture(t *testing.T, observed map[string]string) *accessFixture {
@@ -119,6 +120,7 @@ func newAccessFixture(t *testing.T, observed map[string]string) *accessFixture {
 		apiFamilies: []string{"4", "6"},
 		now:         func() time.Time { return time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC) },
 		pod:         func() (netip.Prefix, error) { return netip.MustParsePrefix("10.42.0.0/16"), nil },
+		opsState:    func(installer.CommandRunner) (installer.OpsHostState, error) { return installer.OpsHostState{}, nil },
 		ports: func(installer.CommandRunner) ([]int, error) {
 			return []int{22}, nil
 		},
@@ -140,7 +142,17 @@ func newAccessFixture(t *testing.T, observed map[string]string) *accessFixture {
 			return installer.AccessCommitted, nil
 		},
 		remove: func(r installer.CommandRunner) error {
+			if _, closed := r.(closedRunner); closed {
+				return errors.New("session closed")
+			}
 			f.removed = append(f.removed, r.(installer.FirewallRunner))
+			return nil
+		},
+		removeOps: func(r installer.CommandRunner) error {
+			if _, closed := r.(closedRunner); closed {
+				return errors.New("session closed")
+			}
+			f.opsRemoved = append(f.opsRemoved, r.(installer.FirewallRunner))
 			return nil
 		},
 	}

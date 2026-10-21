@@ -6,7 +6,6 @@ import (
 	"os"
 
 	"github.com/getkipper/kipper/kip/internal/config"
-	"github.com/getkipper/kipper/kip/internal/infra"
 	"github.com/getkipper/kipper/kip/internal/installer"
 )
 
@@ -17,7 +16,10 @@ func checkNodesAndStorage(cluster *config.Cluster, sshKey string) error {
 		return nil
 	}
 	explicitKey, fallbackKey := resolveSSHKey(sshKey, cluster)
-	provider := &infra.BareMetalProvider{Host: cluster.Host, User: sshUser(cluster), SSHKey: explicitKey, FallbackSSHKey: fallbackKey}
+	provider, err := clusterProvider(cluster, cluster.Host, explicitKey, fallbackKey)
+	if err != nil {
+		return err
+	}
 	if err := provider.Connect(); err != nil {
 		return fmt.Errorf("connecting to %s: %w", cluster.Host, err)
 	}

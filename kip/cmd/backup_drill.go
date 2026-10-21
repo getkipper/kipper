@@ -25,7 +25,6 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/getkipper/kipper/controller/pkg/backupscope"
 	"github.com/getkipper/kipper/kip/internal/installer"
@@ -140,9 +139,9 @@ func runBackupDrill(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	kubeconfig, err := clientcmd.BuildConfigFromFlags("", cluster.Kubeconfig)
+	kubeconfig, err := k8s.RESTConfig(cluster)
 	if err != nil {
-		return fmt.Errorf("loading kubeconfig: %w", err)
+		return err
 	}
 	execClient, err := kubernetes.NewForConfig(k8s.WithoutPodSecurityWarnings(kubeconfig))
 	if err != nil {

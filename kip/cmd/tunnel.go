@@ -11,9 +11,10 @@ import (
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
+
+	"github.com/getkipper/kipper/kip/internal/k8s"
 )
 
 var tunnelCmd = &cobra.Command{
@@ -87,13 +88,12 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build the port-forward
-	kubeconfigPath := cluster.Kubeconfig
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	config, err := k8s.RESTConfig(cluster)
 	if err != nil {
-		return fmt.Errorf("loading kubeconfig: %w", err)
+		return err
 	}
 
-	transport, upgrader, err := spdy.RoundTripperFor(config)
+	transport, upgrader, err := k8s.SPDYRoundTripperFor(config)
 	if err != nil {
 		return fmt.Errorf("creating transport: %w", err)
 	}

@@ -79,7 +79,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			if cluster.Host == "" {
 				return nil, fmt.Errorf("no host recorded for this cluster")
 			}
-			host, err := ssh.Dial(hostSSHConfig(cluster, ""))
+			cfg, err := hostSSHConfig(cluster, "")
+			if err != nil {
+				return nil, err
+			}
+			host, err := ssh.Dial(cfg)
 			if err != nil {
 				return nil, fmt.Errorf("could not reach the host over SSH: %w", err)
 			}
@@ -220,7 +224,12 @@ func checkHost(cluster *config.Cluster, nodes []k8s.NodeInfo, records []installe
 	if cluster.Host == "" {
 		return
 	}
-	checkHostWith(os.Stdout, hostSSHConfig(cluster, ""), cluster, nodes, records)
+	cfg, err := hostSSHConfig(cluster, "")
+	if err != nil {
+		fmt.Printf("\n  Host checks skipped: %v\n", err)
+		return
+	}
+	checkHostWith(os.Stdout, cfg, cluster, nodes, records)
 }
 
 // sshUser returns the cluster's saved login user, defaulting to root when the
@@ -232,16 +241,14 @@ func sshUser(cluster *config.Cluster) string {
 	return "root"
 }
 
-// hostSSHConfig applies the shared SSH key precedence and disables interactive prompts.
-func hostSSHConfig(cluster *config.Cluster, keyFlag string) ssh.Config {
-	explicit, fallback := resolveSSHKey(keyFlag, cluster)
-	return ssh.Config{
-		Host:            cluster.Host,
-		User:            sshUser(cluster),
-		KeyPath:         explicit,
-		FallbackKeyPath: fallback,
-		Options:         []string{"BatchMode=yes"},
+// hostSSHConfig is nodeSSH for the server, with interactive prompts disabled.
+func hostSSHConfig(cluster *config.Cluster, keyFlag string) (ssh.Config, error) {
+	cfg, err := nodeSSH(cluster.Host, keyFlag, cluster)
+	if err != nil {
+		return ssh.Config{}, err
 	}
+	cfg.Options = append([]string{"BatchMode=yes"}, cfg.Options...)
+	return cfg, nil
 }
 
 // checkHostWith runs the host checks on the server over sshConfig and on every
@@ -254,7 +261,7 @@ func checkHostWith(out io.Writer, sshConfig ssh.Config, cluster *config.Cluster,
 		server = client
 	}
 	workers := inspectWorkers(records, func(rec installer.NodeRecord) (installer.CommandRunner, error) {
-		return captureWorkerChecks(sshConfig, rec)
+		return captureWorkerChecks(sshConfig, cluster, rec)
 	})
 	reportHostChecks(out, cluster, nodes, serverTarget(cluster, server, err, records), workers)
 }

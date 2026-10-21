@@ -23,6 +23,7 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/getkipper/kipper/kip/internal/auth"
+	"github.com/getkipper/kipper/kip/internal/config"
 )
 
 func TestResetOverSSH(t *testing.T) {
@@ -69,11 +70,11 @@ func TestHasLocalSession(t *testing.T) {
 }
 
 func TestClientsetFromKubeconfig(t *testing.T) {
-	_, err := clientsetFromKubeconfig(realAdminKubeconfig(t), "203.0.113.10")
+	_, err := clientsetFromKubeconfig(realAdminKubeconfig(t), &config.Cluster{Host: "203.0.113.10"})
 	assert.NoError(t, err)
 
 	// Use a sensitive-looking kind to check that parse errors conceal input.
-	_, err = clientsetFromKubeconfig("apiVersion: v1\nkind: c2VjcmV0LWtleQ==\n", "203.0.113.10")
+	_, err = clientsetFromKubeconfig("apiVersion: v1\nkind: c2VjcmV0LWtleQ==\n", &config.Cluster{Host: "203.0.113.10"})
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "c2VjcmV0LWtleQ==", "parse errors must omit kubeconfig contents")
 }

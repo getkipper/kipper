@@ -88,7 +88,7 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--timeout must be at least 1s, got %s", timeout)
 	}
 
-	server, err := ssh.Dial(nodeSSH(cluster.Host, sshKey, cluster))
+	server, err := dialNodeSSH(cluster.Host, sshKey, cluster)
 	if err != nil {
 		return fmt.Errorf("connecting to the server: %w", err)
 	}
@@ -117,7 +117,7 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	dialWorker := func() (installer.CommandRunner, func(), error) {
-		c, err := ssh.Dial(nodeSSH(worker.Host, sshKey, cluster))
+		c, err := dialNodeSSH(worker.Host, sshKey, cluster)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -127,7 +127,10 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 	case force:
 		// Bound the probe so password prompts and unreachable hosts cannot stall forced removal.
 		probe := func() (installer.CommandRunner, func(), error) {
-			cfg := nodeSSH(worker.Host, sshKey, cluster)
+			cfg, err := nodeSSH(worker.Host, sshKey, cluster)
+			if err != nil {
+				return nil, nil, err
+			}
 			cfg.Options = append(cfg.Options, "BatchMode=yes")
 			cfg.CommandTimeout = 30 * time.Second
 			c, err := ssh.Dial(cfg)
@@ -196,7 +199,7 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	dialHost := func(host string) (installer.FirewallRunner, installer.FirewallRunner, func(), error) {
-		c, err := ssh.Dial(nodeSSH(host, sshKey, cluster))
+		c, err := dialNodeSSH(host, sshKey, cluster)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -236,7 +239,11 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 		},
 		UpdatePeers: func(remaining []installer.NodeRecord) ([]string, error) {
 			access := func(nodes []accessNode) (*nodeAccess, []string, error) {
-				return prepareNodeAccess(newNodeAccessCluster(os.Stdout, master, cluster), nodes, nil, "node remove "+worker.Name, false)
+				nc, err := newNodeAccessCluster(os.Stdout, master, cluster, sshKey)
+				if err != nil {
+					return nil, nil, err
+				}
+				return prepareNodeAccess(nc, nodes, nil, "node remove "+worker.Name, false)
 			}
 			return updateRemainingPeers(os.Stdout, accessNode{node: master, base: server}, remaining, worker, dialHost, access)
 		},

@@ -83,13 +83,7 @@ func dialClusterHost(cmd *cobra.Command) (*ssh.Client, *config.Cluster, error) {
 		return nil, nil, fmt.Errorf("no host recorded for cluster %s; this command needs SSH access to the server", cluster.Name)
 	}
 	flagKey, _ := cmd.Flags().GetString("ssh-key")
-	explicit, fallback := resolveSSHKey(flagKey, cluster)
-	client, err := ssh.Dial(ssh.Config{
-		Host:            cluster.Host,
-		User:            sshUser(cluster),
-		KeyPath:         explicit,
-		FallbackKeyPath: fallback,
-	})
+	client, err := dialNodeSSH(cluster.Host, flagKey, cluster)
 	if err != nil {
 		return nil, nil, fmt.Errorf("connecting to %s over SSH: %w", cluster.Host, err)
 	}

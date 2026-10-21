@@ -32,6 +32,9 @@ github.io
 githubusercontent.com
 gitlab.com
 golang.org
+# WireGuard's Go implementation and the gVisor network stack it runs on
+golang.zx2c4.com
+gvisor.dev
 google.com
 googleapis.com
 k8s.io

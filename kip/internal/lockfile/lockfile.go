@@ -4,6 +4,7 @@
 package lockfile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,20 @@ import (
 // calling it still releases the lock, since the operating system drops it when
 // the descriptor closes.
 func Exclusive(path string) (func(), error) {
+	return take(path, lock)
+}
+
+// ErrHeld indicates that another caller holds the requested lock.
+var ErrHeld = errors.New("the lock is held")
+
+// TryExclusive takes an exclusive advisory lock on path, creating it and its
+// parent directory if needed. It returns ErrHeld immediately if the lock is held.
+// On success, the caller must call the returned release function, as with Exclusive.
+func TryExclusive(path string) (func(), error) {
+	return take(path, tryLock)
+}
+
+func take(path string, lockFn func(*os.File) error) (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("creating directory for %s: %w", path, err)
 	}
@@ -23,8 +38,11 @@ func Exclusive(path string) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
-	if err := lock(f); err != nil {
+	if err := lockFn(f); err != nil {
 		_ = f.Close()
+		if errors.Is(err, ErrHeld) {
+			return nil, ErrHeld
+		}
 		return nil, fmt.Errorf("locking %s: %w", path, err)
 	}
 	return func() {

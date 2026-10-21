@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
 )
 
@@ -234,9 +236,16 @@ type heldHost struct {
 	accessHost
 	gen       int
 	operators string
+	ops       string
 }
 
-func (h *heldHost) Run(string) (string, error) {
+func (h *heldHost) Run(command string) (string, error) {
+	switch {
+	case strings.Contains(command, "kipper_ops"):
+		return h.ops, nil
+	case strings.Contains(command, "machine-id"):
+		return accessServerID + "\n", nil
+	}
 	header := "# kipper-access generation " + strconv.Itoa(h.gen) + "\n"
 	return header + "table inet kipper_access {}\n----kip-access----\n" +
 		header + "add element inet kipper_access admin4 { " + h.operators + " }\n----kip-access----\n" +
@@ -357,4 +366,95 @@ type newerHost struct{ accessHost }
 func (h *newerHost) Run(command string) (string, error) {
 	g := "# kipper-access generation 9\nadd element inet kipper_access admin4 { 198.51.100.0/24 }\n"
 	return g + "----kip-access----\n" + g + "----kip-access----\nlive\n", nil
+}
+
+// testWorkerKey is a second node's WireGuard public key.
+var testWorkerKey = wordKey("workerworkerworkerworkerworker12")
+
+func TestNodeAccessGivesAJoinerItsOperatorInterface(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	f.deviceRecord(t, "198.51.100.7/32")
+	f.c.opsKey = func(installer.CommandRunner) (string, error) { return testWorkerKey, nil }
+	a, _, err := prepareNodeAccess(f.c, f.c.nodes, nil, "node add 192.0.2.11", true)
+	require.NoError(t, err)
+	f.addWorker()
+	records := f.c.records
+	f.c.records = records[:1]
+
+	require.NoError(t, a.load(f.c.nodes[0], records, ""))
+	require.NoError(t, a.load(f.c.nodes[1], records, ""))
+
+	on, ok := f.server.stored(t).Ops.Node(accessWorkerID)
+	require.True(t, ok, "the joiner's operator address is recorded")
+	assert.Equal(t, "10.99.0.2", on.Address)
+	assert.Equal(t, testWorkerKey, on.PublicKey)
+	require.Len(t, f.opsCalls, 2)
+	assert.Equal(t, netip.MustParseAddr("10.99.0.2"), f.opsCalls[1].Address)
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	var names []string
+	for _, n := range cfg.GetCluster("prod").Ops.Nodes {
+		names = append(names, n.Name)
+	}
+	assert.Equal(t, []string{"server", "worker-1"}, names, "the tunnel learns the new node")
+}
+
+func TestNodeAccessRefusesAJoinerWithARouteIntoTheOperatorRange(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	f.deviceRecord(t, "198.51.100.7/32")
+	a, _, err := prepareNodeAccess(f.c, f.c.nodes, nil, "node add 192.0.2.11", true)
+	require.NoError(t, err)
+	f.addWorker()
+	f.routes = []netip.Prefix{netip.MustParsePrefix("10.99.0.128/25")}
+
+	require.NoError(t, a.load(f.c.nodes[0], f.c.records, ""))
+	err = a.load(f.c.nodes[1], f.c.records, "")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "10.99.0.128/25")
+	_, ok := f.server.stored(t).Ops.Node(accessWorkerID)
+	assert.False(t, ok)
+	assert.Len(t, f.opsCalls, 1, "the joiner's interface is never loaded")
+}
+
+func TestNodeAccessDropsTheRemovedNodesOperatorAddress(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	rec := f.deviceRecord(t, "198.51.100.7/32")
+	rec.Ops.Nodes = append(rec.Ops.Nodes, installer.AccessOpsNode{MachineID: accessWorkerID, Address: "10.99.0.2", PublicKey: testWorkerKey})
+	rec.Ops.NextNode = 3
+	f.server.store(t, rec)
+	a, _, err := prepareNodeAccess(f.c, f.c.nodes, nil, "node remove worker-9", false)
+	require.NoError(t, err)
+
+	require.NoError(t, a.load(f.c.nodes[0], f.c.records, accessWorkerID))
+
+	_, ok := f.server.stored(t).Ops.Node(accessWorkerID)
+	assert.False(t, ok)
+}
+
+func TestReportAccessGuardCountsRegisteredDevices(t *testing.T) {
+	server := &accessHost{}
+	server.store(t, installer.AccessRecord{
+		Version: 2, Generation: 4,
+		Sources: []installer.AccessSource{{Prefix: "198.51.100.0/24"}},
+		Ops: &installer.AccessOps{Range: installer.DefaultOpsRange, Port: 443, NextNode: 2, NextDevice: 130,
+			Nodes: []installer.AccessOpsNode{{MachineID: accessServerID, Address: "10.99.0.1", PublicKey: testNodeKey}}},
+		Devices: []installer.AccessDevice{{Name: "laptop", PublicKey: testWorkerKey, Address: "10.99.0.129", State: installer.DeviceActive}},
+	})
+	var out bytes.Buffer
+
+	host := &heldHost{gen: 4, operators: "198.51.100.0/24",
+		ops: "dir=1\ntable=1\n" + strings.Repeat("rule=input\n", 6) + "hook=input input\n" + strings.Repeat("rule=forward\n", 2) + "hook=forward forward\nrule=raw\nhook=raw prerouting\n" +
+			"up=1\nmtu=1380\nroute=10.99.0.128/25\nkey=" + testNodeKey + "\nport=443\naddress=10.99.0.1/32\npeer=" + testWorkerKey + "\t10.99.0.129/32\n"}
+
+	reportAccessGuard(&out, server, host)
+
+	assert.Contains(t, out.String(), "✔  restricted to one source and one device (generation 4)")
+	assert.NotContains(t, out.String(), "the list has one entry", "a registered device is a second way in")
+	assert.NotContains(t, out.String(), "operator interface")
+
+	out.Reset()
+	host.ops = "dir=1\n"
+	reportAccessGuard(&out, server, host)
+	assert.Contains(t, out.String(), "⚠  the operator interface kipops is down. Run 'kip cluster access show'")
 }

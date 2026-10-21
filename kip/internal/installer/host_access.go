@@ -261,13 +261,24 @@ func accessRefused(out string, err error) error {
 	return err
 }
 
+// AddressObserver opens one new SSH connection over family ("4" or "6") and
+// returns the client address the host saw.
+type AddressObserver interface {
+	ObservedAddress(family string) (string, error)
+}
+
 // AccessApply configures an access change on one node. Node must use the node
 // lease so a lost lease stops mutations. Base bypasses the lease for rollback.
-// Families and ReadyzOn contain "4" or "6". Readyz must be set when ReadyzOn
-// is non-empty. A nil Out uses os.Stdout.
+// Families and ReadyzOn contain "4" or "6", and ReadyzOn also "t" for the API
+// through the device tunnel. Readyz must be set when ReadyzOn is non-empty.
+// Direct checks Families and defaults to Node. A non-nil Tunnel is checked
+// too, and must arrive from Device. A nil Out uses os.Stdout.
 type AccessApply struct {
 	Node     FirewallRunner
 	Base     FirewallRunner
+	Direct   AddressObserver
+	Tunnel   AddressObserver
+	Device   netip.Addr
 	Label    string
 	Intent   AccessIntent
 	Families []string
@@ -342,17 +353,33 @@ func (r accessRun) loadAndVerify(a AccessApply) error {
 		}
 		return fmt.Errorf("loading the new access table failed: %w", err)
 	}
+	direct := a.Direct
+	if direct == nil {
+		direct = a.Node
+	}
 	for _, family := range a.Families {
 		if err := accessRefused(a.Node.Run(r.locked("true"))); err != nil {
 			return err
 		}
-		observed, err := a.Node.ObservedAddress(family)
+		observed, err := direct.ObservedAddress(family)
 		if err != nil {
 			return fmt.Errorf("new IPv%s SSH connections failed with the new access table. The access table admits this workstation's address. Something else refuses the connection (an operator firewall or the provider's firewall), or your network uses more than one outgoing address. List the whole range with 'kip cluster access allow' first: %w", family, err)
 		}
 		addr, err := netip.ParseAddr(observed)
 		if err != nil || !admits(a.Intent.Admin, addr) {
 			return fmt.Errorf("the host saw this workstation as %s over IPv%s, which the new access table does not admit", observed, family)
+		}
+	}
+	if a.Tunnel != nil {
+		if err := accessRefused(a.Node.Run(r.locked("true"))); err != nil {
+			return err
+		}
+		observed, err := a.Tunnel.ObservedAddress("4")
+		if err != nil {
+			return fmt.Errorf("new SSH connections through the device tunnel failed with the new access table: %w", err)
+		}
+		if addr, perr := netip.ParseAddr(observed); perr != nil || addr != a.Device {
+			return fmt.Errorf("a connection through the device tunnel arrived from %s, not from the device address %s", observed, a.Device)
 		}
 	}
 	for _, family := range a.ReadyzOn {
@@ -440,6 +467,17 @@ func AccessPodNetwork(server CommandRunner) (netip.Prefix, error) {
 		return netip.Prefix{}, fmt.Errorf("%w (the access list supports IPv4 cluster networks. Operator prefixes may be IPv6)", err)
 	}
 	return nets["pod"], nil
+}
+
+// AccessServiceNetwork resolves the IPv4 Service network from the server's
+// k3s configuration and defaults. It returns an error if reading or validating
+// the cluster's pod and Service networks fails.
+func AccessServiceNetwork(server CommandRunner) (netip.Prefix, error) {
+	nets, err := clusterNetworks(server)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	return nets["Service"], nil
 }
 
 // AccessIntentFor builds one node's intent from the operator prefixes, the
