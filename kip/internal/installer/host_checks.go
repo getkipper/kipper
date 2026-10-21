@@ -42,6 +42,7 @@ var hostCheckCommands = []string{
 	k3sResolvConfCommand,
 	liveDNSProbeCommand,
 	accessStateCommand(""),
+	opsStateCommand(""),
 }
 
 // CaptureHostChecks runs every host check command on client as one remote
