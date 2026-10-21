@@ -37,14 +37,27 @@ func publishEnvGeneration(ctx context.Context, c client.Client, scheme *runtime.
 	for k, v := range env {
 		data[k] = []byte(v)
 	}
+	if err := publishImmutableSecret(ctx, c, scheme, owner, name, data, labels); err != nil {
+		return "", err
+	}
+	return name, nil
+}
 
+// publishImmutableSecret creates or reuses an immutable, opaque Secret with
+// the supplied name and data in the owner's namespace. The caller must derive
+// the name from the content so matching Secrets can be reused without rewriting.
+// An existing Secret must have matching data and be controlled by owner, or
+// have no owner references and matching identity labels so it can be adopted.
+// Validation and API errors are returned to the caller.
+func publishImmutableSecret(ctx context.Context, c client.Client, scheme *runtime.Scheme,
+	owner client.Object, name string, data map[string][]byte, labels map[string]string) error {
 	var existing corev1.Secret
 	err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: owner.GetNamespace()}, &existing)
 	if err == nil {
-		return name, acceptEnvGeneration(ctx, c, scheme, &existing, owner, data, labels)
+		return acceptEnvGeneration(ctx, c, scheme, &existing, owner, data, labels)
 	}
 	if !errors.IsNotFound(err) {
-		return "", err
+		return err
 	}
 
 	immutable := true
@@ -59,20 +72,20 @@ func publishEnvGeneration(ctx context.Context, c client.Client, scheme *runtime.
 		Data:      data,
 	}
 	if err := controllerutil.SetControllerReference(owner, desired, scheme); err != nil {
-		return "", fmt.Errorf("setting owner reference: %w", err)
+		return fmt.Errorf("setting owner reference: %w", err)
 	}
 	if err := c.Create(ctx, desired); err != nil {
 		if !errors.IsAlreadyExists(err) {
-			return "", err
+			return err
 		}
 		// Another writer got there between the read and the create. Whatever it
 		// wrote has to satisfy the same invariants before a pod is pointed at it.
 		if err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: owner.GetNamespace()}, &existing); err != nil {
-			return "", err
+			return err
 		}
-		return name, acceptEnvGeneration(ctx, c, scheme, &existing, owner, data, labels)
+		return acceptEnvGeneration(ctx, c, scheme, &existing, owner, data, labels)
 	}
-	return name, nil
+	return nil
 }
 
 // acceptEnvGeneration validates an existing generation and adopts it if it has

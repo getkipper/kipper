@@ -59,6 +59,21 @@ func Binding(service string, kind Kind, workload string) string {
 	return service + "-" + string(kind) + "-" + workload + "-credentials"
 }
 
+// PollSource returns the Secret name for one version of a Function poller's
+// connection URL using the supplied content digest. It appends digest unchanged
+// to PollSourcePrefix(function). The URL can contain the service password, so
+// callers store it in a Secret to keep it out of the pod template, which anyone
+// allowed to read Deployments can see.
+func PollSource(function, digest string) string {
+	return PollSourcePrefix(function) + digest
+}
+
+// PollSourcePrefix returns "function-<function>-poll-source-", the prefix shared
+// by all versions of a Function's poller source Secret.
+func PollSourcePrefix(function string) string {
+	return string(KindFunction) + "-" + function + "-poll-source-"
+}
+
 // ServiceCredentials is the Secret holding a service's shared credentials. It
 // belongs to the Service CR rather than to any workload, so no kind applies:
 // every binding without its own logical namespace reads this one directly.

@@ -294,9 +294,8 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_
 		return ctrl.Result{}, fmt.Errorf("service bindings refused: %s", strings.Join(refusedBindings, "; "))
 	}
 
-	// Materialise Spec.Env into a Secret named function-<fn>-env. The container's
-	// EnvFrom references this Secret with Optional=true, so a missing
-	// Secret leaves the env vars unset rather than failing the deploy.
+	// Publish the complete environment as an immutable Secret before updating
+	// children so their required references resolve to a fixed generation.
 	generation, err := r.reconcileEnvSecret(ctx, &fn, envSources)
 	if recErr := recordPublication(ctx, r.Client, &fn, &fn.Status.Conditions,
 		&fn.Status.PublishedEnv, fn.Generation, generation, err); recErr != nil {
@@ -355,6 +354,11 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_
 	if databaseRetry := bindingDatabaseRequeue(databaseFailures); databaseRetry > 0 && (retryIn == 0 || databaseRetry < retryIn) {
 		retryIn = databaseRetry
 	}
+	if hasHTTPTrigger(&fn) {
+		if historyRetry := r.dropPollPasswordHistory(ctx, &fn); historyRetry > 0 && (retryIn == 0 || historyRetry < retryIn) {
+			retryIn = historyRetry
+		}
+	}
 	return ctrl.Result{RequeueAfter: retryIn}, nil
 }
 
@@ -365,9 +369,8 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_
 // Any child that fails stops the pass, so the caller records why on the status
 // rather than only in the log.
 func (r *FunctionReconciler) reconcileChildren(ctx context.Context, fn *kipperv1.Function, bindingHash string, envSources []envSource, generation string, rendered renderedBindings) error {
-	// HTTP path: Deployment + Service + KEDA HTTPScaledObject + Ingress.
-	// Cron-only functions skip all of this — they have no need for a
-	// long-lived Pod, an HTTP service, or external routing.
+	// HTTP and event triggers need a long-lived pod and Service. Cron-only
+	// functions run as Jobs, so remove any previous serving Deployment.
 	if hasHTTPTrigger(fn) {
 		if err := r.reconcileDeployment(ctx, fn, bindingHash, envSources, generation, rendered); err != nil {
 			return fmt.Errorf("reconciling deployment: %w", err)
@@ -375,6 +378,8 @@ func (r *FunctionReconciler) reconcileChildren(ctx context.Context, fn *kipperv1
 		if err := r.reconcileService(ctx, fn); err != nil {
 			return fmt.Errorf("reconciling service: %w", err)
 		}
+	} else if err := r.removeServingDeployment(ctx, fn); err != nil {
+		return fmt.Errorf("removing the serving deployment: %w", err)
 	}
 
 	// The route and the scaler are one unit. The Ingress points the host at the
@@ -943,10 +948,21 @@ func boundCredentialSnapshot(fn *kipperv1.Function, sourceName, serviceType stri
 	return nil, nil
 }
 
-// buildPollSidecar produces the kipper-poll container that bridges
-// event sources into HTTP invocations of the function. The trigger's
-// Config map carries trigger-specific knobs (query, list, bucket, etc.)
-// from the CR and gets translated into env vars the poller understands.
+const (
+	pollSourceKey = "KIPPER_SOURCE_URL"
+	// pollHistoryRetry is how soon to look again while a ReplicaSet holding a
+	// poller password is still draining or could not be deleted.
+	pollHistoryRetry = time.Minute
+)
+
+// buildPollSidecar builds the kipper-poll container that invokes the function
+// over HTTP when events arrive. It translates the CR's trigger configuration,
+// including query, list and bucket settings, into the poller's environment.
+//
+// The source URL can contain a service password, so this publishes it as an
+// immutable Secret named by a digest of its data. The container references that
+// Secret. A changed URL changes the template's Secret name and triggers a rollout.
+// If the template update fails, it continues to reference the previous version.
 func (r *FunctionReconciler) buildPollSidecar(ctx context.Context, fn *kipperv1.Function, trigger *kipperv1.FunctionTrigger, fnPort int32, rendered renderedBindings) (corev1.Container, error) {
 	source := trigger.Config["source"]
 	conn, err := r.loadServiceConn(ctx, fn, fn.Namespace, source, rendered)
@@ -964,10 +980,21 @@ func (r *FunctionReconciler) buildPollSidecar(ctx context.Context, fn *kipperv1.
 		}
 	}
 
+	pollSource := secretname.PollSource(fn.Name, envDigest(map[string]string{pollSourceKey: sourceURL}))
+	if err := publishImmutableSecret(ctx, r.Client, r.Scheme, fn, pollSource,
+		map[string][]byte{pollSourceKey: []byte(sourceURL)}, functionLabels(fn)); err != nil {
+		return corev1.Container{}, fmt.Errorf("publishing the event poller's source: %w", err)
+	}
+
 	env := []corev1.EnvVar{
 		{Name: "KIPPER_TRIGGER", Value: trigger.Type},
 		{Name: "KIPPER_TARGET_URL", Value: fmt.Sprintf("http://localhost:%d/event", fnPort)},
-		{Name: "KIPPER_SOURCE_URL", Value: sourceURL},
+		{Name: "KIPPER_SOURCE_URL", ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: pollSource},
+				Key:                  pollSourceKey,
+			},
+		}},
 	}
 
 	switch trigger.Type {
@@ -1003,6 +1030,113 @@ func (r *FunctionReconciler) buildPollSidecar(ctx context.Context, fn *kipperv1.
 			},
 		},
 	}, nil
+}
+
+// removeServingDeployment deletes the Function's Deployment with background
+// garbage collection if the Function controls it. A missing or foreign Deployment
+// is left alone. The caller must check that a long-lived pod is no longer needed.
+// Cron-only Functions run as Jobs, so an earlier event trigger's Deployment would
+// otherwise retain its poller, source Secret and any password stored directly in
+// its template before source URLs moved to Secrets.
+func (r *FunctionReconciler) removeServingDeployment(ctx context.Context, fn *kipperv1.Function) error {
+	var dep appsv1.Deployment
+	err := r.Get(ctx, types.NamespacedName{Namespace: fn.Namespace, Name: fn.Name}, &dep)
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !metav1.IsControlledBy(&dep, fn) {
+		return nil
+	}
+	err = r.Delete(ctx, &dep, client.Preconditions{UID: &dep.UID}, client.PropagationPolicy(metav1.DeletePropagationBackground))
+	if err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+// dropPollPasswordHistory deletes scaled-down ReplicaSets controlled by the
+// Function's Deployment when their templates contain a literal poller source URL.
+// The Function must control the Deployment.
+// The URL can contain the service password, which project viewers can read in
+// ReplicaSets. Cleanup waits for all owned pods, including terminating pods,
+// to disappear. Errors are logged and scheduled for retry so reconciliation
+// can continue.
+//
+// It returns the retry delay while cleanup is pending, or zero when no cleanup
+// remains or the Function has no controlled Deployment.
+// The controller watches neither pods nor ReplicaSets, so the timer ensures
+// cleanup resumes after the last pod disappears.
+func (r *FunctionReconciler) dropPollPasswordHistory(ctx context.Context, fn *kipperv1.Function) time.Duration {
+	logger := log.FromContext(ctx).WithValues("function", fn.Name)
+	reader := r.hostReader()
+
+	var dep appsv1.Deployment
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: fn.Namespace, Name: fn.Name}, &dep); err != nil {
+		if !errors.IsNotFound(err) {
+			logger.Error(err, "Failed to read the Deployment to clear poller passwords from its history")
+			return pollHistoryRetry
+		}
+		return 0
+	}
+	if !metav1.IsControlledBy(&dep, fn) {
+		return 0
+	}
+	mine := client.MatchingLabels{"app": fn.Name}
+	var sets appsv1.ReplicaSetList
+	if err := reader.List(ctx, &sets, client.InNamespace(fn.Namespace), mine); err != nil {
+		logger.Error(err, "Failed to list ReplicaSets to clear poller passwords from history")
+		return pollHistoryRetry
+	}
+	// Status.Replicas excludes terminating pods, so check pod ownership too
+	// before deleting a ReplicaSet whose pods may still be shutting down.
+	var pods corev1.PodList
+	if err := reader.List(ctx, &pods, client.InNamespace(fn.Namespace), mine); err != nil {
+		logger.Error(err, "Failed to list pods to clear poller passwords from history")
+		return pollHistoryRetry
+	}
+	hasPods := map[types.UID]bool{}
+	for i := range pods.Items {
+		if owner := metav1.GetControllerOf(&pods.Items[i]); owner != nil {
+			hasPods[owner.UID] = true
+		}
+	}
+	var retry time.Duration
+	for i := range sets.Items {
+		rs := &sets.Items[i]
+		if !metav1.IsControlledBy(rs, &dep) || !literalPollSource(rs.Spec.Template.Spec) {
+			continue
+		}
+		scaledDown := rs.Spec.Replicas != nil && *rs.Spec.Replicas == 0 && rs.Status.Replicas == 0 && !hasPods[rs.UID]
+		if !scaledDown {
+			retry = pollHistoryRetry
+			continue
+		}
+		err := r.Delete(ctx, rs, client.Preconditions{UID: &rs.UID, ResourceVersion: &rs.ResourceVersion})
+		if err != nil && !errors.IsNotFound(err) {
+			logger.Error(err, "Failed to delete a ReplicaSet that holds a poller password", "replicaset", rs.Name)
+			retry = pollHistoryRetry
+		}
+	}
+	return retry
+}
+
+// literalPollSource reports whether a kipper-poll container has a non-empty
+// literal source URL in its environment.
+func literalPollSource(spec corev1.PodSpec) bool {
+	for _, c := range spec.Containers {
+		if c.Name != "kipper-poll" {
+			continue
+		}
+		for _, e := range c.Env {
+			if e.Name == pollSourceKey && e.Value != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // reconcileEventScaledObject creates the KEDA ScaledObject that scales
