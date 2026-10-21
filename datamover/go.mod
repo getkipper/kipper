@@ -3,7 +3,7 @@ module github.com/getkipper/kipper/datamover
 go 1.26.0
 
 require (
-	github.com/klauspost/compress v1.18.2
+	github.com/klauspost/compress v1.18.7
 	github.com/minio/minio-go/v7 v7.0.99
 	github.com/spf13/cobra v1.10.2
 )
