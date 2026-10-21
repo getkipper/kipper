@@ -67,9 +67,12 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 
 	var runner doctor.Runner
 	sshResult := doctor.Result{ID: "ssh", Label: "SSH", Status: doctor.Pass, Message: "reachable over SSH"}
-	sshConfig := hostSSHConfig(cluster, keyFlag)
+	sshConfig, dialErr := hostSSHConfig(cluster, keyFlag)
 	sshConfig.CommandTimeout = doctorSSHCommandTimeout
-	client, dialErr := ssh.Dial(sshConfig)
+	var client *ssh.Client
+	if dialErr == nil {
+		client, dialErr = ssh.Dial(sshConfig)
+	}
 	if dialErr != nil {
 		sshResult = doctor.Result{ID: "ssh", Label: "SSH", Status: doctor.Warn,
 			Message: "could not reach the server over SSH, so the cluster is read through the Kubernetes API instead", Detail: dialErr.Error()}

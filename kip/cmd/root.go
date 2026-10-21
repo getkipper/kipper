@@ -6,6 +6,8 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/getkipper/kipper/kip/internal/transport"
 )
 
 var rootCmd = &cobra.Command{
@@ -14,7 +16,20 @@ var rootCmd = &cobra.Command{
 	Long: `Kipper gives small teams a production-ready Kubernetes cluster on any
 Linux root server, with a web console, automatic SSL, and one-command
 app deployments, without requiring Kubernetes expertise.`,
-	PersistentPreRunE: silenceUsageAfterValidation,
+	PersistentPreRunE: preRun,
+}
+
+// preRun validates and applies the transport override, then suppresses usage
+// once required flags and flag groups have passed validation.
+func preRun(cmd *cobra.Command, args []string) error {
+	via, _ := cmd.Flags().GetString("via")
+	if via != "" {
+		if err := transport.ValidMode(via); err != nil {
+			return err
+		}
+	}
+	transport.Override = via
+	return silenceUsageAfterValidation(cmd, args)
 }
 
 // silenceUsageAfterValidation preserves the existing usage setting for unknown
@@ -35,6 +50,7 @@ func silenceUsageAfterValidation(cmd *cobra.Command, _ []string) error {
 
 func init() {
 	rootCmd.PersistentFlags().String("cluster", "", "cluster name (overrides current_cluster; also settable via KIP_CLUSTER env var)")
+	rootCmd.PersistentFlags().String("via", "", "reach the nodes through this workstation's device tunnel or directly for this command: tunnel, direct or auto")
 }
 
 // SetVersion sets the CLI version string displayed by --version.

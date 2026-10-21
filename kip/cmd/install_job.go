@@ -173,8 +173,11 @@ func recordPushedEntry(cfg *config.Config, pushed config.Cluster) {
 	for _, c := range cfg.Clusters {
 		if c.Name == pushed.Name || !strings.EqualFold(c.Host, pushed.Host) {
 			kept = append(kept, c)
-		} else if cfg.CurrentCluster == c.Name {
-			cfg.CurrentCluster = pushed.Name
+		} else {
+			removeDeviceKey(c.Name)
+			if cfg.CurrentCluster == c.Name {
+				cfg.CurrentCluster = pushed.Name
+			}
 		}
 	}
 	cfg.Clusters = kept

@@ -37,6 +37,50 @@ type Cluster struct {
 	DNSResolvers       []string          `mapstructure:"dns_resolvers"       yaml:"dns_resolvers,omitempty"`
 	TrustedProxies     []string          `mapstructure:"trusted_proxies"     yaml:"trusted_proxies,omitempty"`
 	Nodes              []NodeRecord      `mapstructure:"nodes" yaml:"nodes,omitempty"`
+	Ops                *Ops              `mapstructure:"ops" yaml:"ops,omitempty"`
+}
+
+const (
+	OpsPending = "pending"
+	OpsActive  = "active"
+	OpsStale   = "stale"
+)
+
+// Ops stores this workstation's operator device and reachable cluster nodes.
+// The private key is stored separately at OpsKeyPath.
+type Ops struct {
+	Device  string    `mapstructure:"device"   yaml:"device"`
+	State   string    `mapstructure:"state"    yaml:"state"`
+	Address string    `mapstructure:"address"  yaml:"address"`
+	Via     string    `mapstructure:"via"      yaml:"via,omitempty"`
+	APIHost string    `mapstructure:"api_host" yaml:"api_host,omitempty"`
+	Nodes   []OpsNode `mapstructure:"nodes"    yaml:"nodes,omitempty"`
+}
+
+// OpsNode records a node's WireGuard endpoint, operator address and public key.
+// The public key is pinned like an SSH host key.
+type OpsNode struct {
+	MachineID string `mapstructure:"machine_id" yaml:"machine_id"`
+	Name      string `mapstructure:"name"       yaml:"name"`
+	Host      string `mapstructure:"host"       yaml:"host"`
+	Endpoint  string `mapstructure:"endpoint"   yaml:"endpoint"`
+	PublicKey string `mapstructure:"public_key" yaml:"public_key"`
+	Address   string `mapstructure:"address"    yaml:"address"`
+	SSHPorts  []int  `mapstructure:"ssh_ports"  yaml:"ssh_ports"`
+	Server    bool   `mapstructure:"server"     yaml:"server,omitempty"`
+}
+
+// OpsKeyPath returns ~/.kip/clusters/<cluster>-ops.key. It rejects empty names,
+// ".", ".." and names containing path separators, and propagates home directory errors.
+func OpsKeyPath(cluster string) (string, error) {
+	if cluster == "" || cluster == "." || cluster == ".." || strings.ContainsAny(cluster, `/\`) {
+		return "", fmt.Errorf("cluster name %q cannot name a key file", cluster)
+	}
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "clusters", cluster+"-ops.key"), nil
 }
 
 // NodeRecord is kip's record of one cluster node, kept in the kipper-nodes

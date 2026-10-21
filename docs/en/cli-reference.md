@@ -89,9 +89,18 @@ kip cluster access revoke 198.51.100.7/32     # remove prefixes
 kip cluster access apply                      # load the recorded list on every node again
 kip cluster access apply --accept-older-record # restore an older record's list after reviewing it
 kip cluster access reset --yes                # remove the list and open SSH and the API
+kip cluster access device add laptop          # reach SSH and the API through a WireGuard tunnel
+kip cluster access device add laptop --device-only # then accept only registered devices
+kip cluster access device list
+kip cluster access device remove laptop
+kip cluster access device repin <node>        # trust a reinstalled node's new WireGuard key
+kip cluster access via auto|tunnel|direct     # how this workstation reaches the nodes
+kip cluster access ssh-config                 # OpenSSH Host blocks through the tunnel
+kip cluster access forward [--port 16443]     # a local port to the API through the tunnel
+kip cluster access kubeconfig [--port 16443]  # a kubeconfig context for that port
 ```
 
-Every verb takes `--ssh-key`. A bare address is a `/32` or `/128`. `0.0.0.0/0` and `::/0` are refused, because `reset` is the way to open the ports. `--here` adds an IPv4 address as a `/32` and an IPv6 address as the `/64` around it. Each change is loaded on the workers first and the server last. A node keeps the change only after a new SSH connection works from a listed address. The server also checks that the API still answers. kip refuses a list that would not admit your workstation, revoking the last entry, any change while a node is unreachable or a worker's removal is unfinished, and any change while the API does not answer from your workstation.
+`show`, `allow`, `revoke`, `apply`, `reset` and the `device` subcommands take `--ssh-key`. Every command that reaches the nodes accepts `--via`, though commands specifically for the tunnel always use it. A bare address is a `/32` or `/128`. `0.0.0.0/0` and `::/0` are refused, because `reset` is the way to open the ports. `--here` adds an IPv4 address as a `/32` and an IPv6 address as the `/64` around it. Each change is loaded on the workers first and the server last. A node keeps the change only after a new SSH connection works from a listed address. The server also checks that the API still answers. kip refuses a list that would not admit your workstation, revoking the last entry while no [operator device](/en/security#operator-devices) is active, any change while a node is unreachable or a worker's removal is unfinished, and any change while the API does not answer from your workstation.
 
 `show` exits 1 unless every node enforces the record. It reports nodes it cannot reach as not verified, a live table that differs from the saved files, a node that booted closed, a failed `kipper-access` service, an enabled `nftables.service`, and a saved table the installed `nft` would reject at the next boot. When an access list is present, a failed SSH or API check for an address family with no prefix in the list appears as a note and leaves the exit status unchanged, because your network may have no route for that family. `reset` removes the list from every reachable node, including a worker whose removal has not finished, and deletes the record only when every node has been reset. Run it again once an unreachable node is back. Run it from your workstation, because on the cluster's own host kip cannot see the address you connect from.
 

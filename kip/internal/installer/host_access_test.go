@@ -1141,3 +1141,68 @@ func TestReadAccessLiveParsesTheListing(t *testing.T) {
 	assert.Equal(t, int64(12), live.Chain.Dropped)
 	assert.Contains(t, live.CommittedCheck, "syntax error")
 }
+
+// observeFunc is an AddressObserver for one path to the node.
+type observeFunc func(family string) (string, error)
+
+func (f observeFunc) ObservedAddress(family string) (string, error) { return f(family) }
+
+func (s *accessScene) applyWithTunnel(gen int, families []string, tunnel observeFunc, admin ...string) (string, error) {
+	in := s.intent(gen, admin...)
+	in.Devices = true
+	return ApplyAccessGuard(AccessApply{
+		Node: s, Base: s, Label: "server", Intent: in, Families: families,
+		Tunnel: observeFunc(func(f string) (string, error) { s.ran = append(s.ran, "tunnel IPv"+f); return tunnel(f) }),
+		Device: netip.MustParseAddr("10.99.0.129"),
+		Out:    io.Discard, root: s.root,
+	})
+}
+
+func TestApplyAccessGuardChecksTheDeviceTunnel(t *testing.T) {
+	t.Parallel()
+	s := newAccessScene(t)
+	s.commit("203.0.113.0/24")
+	outcome, err := s.applyWithTunnel(8, []string{"4"}, func(string) (string, error) { return "10.99.0.129", nil }, "198.51.100.0/24")
+	require.NoError(t, err)
+	assert.Equal(t, AccessCommitted, outcome)
+	assert.Contains(t, s.ran, "observe IPv4", "the direct path is checked too")
+	assert.Contains(t, s.ran, "tunnel IPv4")
+}
+
+func TestApplyAccessGuardWithOnlyTheTunnelLeftCommits(t *testing.T) {
+	t.Parallel()
+	s := newAccessScene(t)
+	s.commit("203.0.113.0/24")
+	outcome, err := s.applyWithTunnel(8, nil, func(string) (string, error) { return "10.99.0.129", nil })
+	require.NoError(t, err)
+	assert.Equal(t, AccessCommitted, outcome)
+	assert.NotContains(t, s.ran, "observe IPv4")
+}
+
+func TestApplyAccessGuardRollsBackWhenTheTunnelFails(t *testing.T) {
+	t.Parallel()
+	for name, tunnel := range map[string]observeFunc{
+		"no connection":   func(string) (string, error) { return "", errors.New("handshake did not complete") },
+		"another address": func(string) (string, error) { return "198.51.100.7", nil },
+	} {
+		s := newAccessScene(t)
+		s.commit("203.0.113.0/24")
+		outcome, err := s.applyWithTunnel(8, []string{"4"}, tunnel, "198.51.100.0/24")
+		require.Error(t, err, name)
+		assert.Equal(t, AccessRestored, outcome, name)
+		assert.Contains(t, err.Error(), "device tunnel", name)
+		assert.Equal(t, "7", s.kernelGeneration(), name)
+	}
+}
+
+func TestReadOpsRevokedKeys(t *testing.T) {
+	t.Parallel()
+	s := newAccessScene(t)
+	keys, err := readOpsRevokedKeys(s, s.root)
+	require.NoError(t, err)
+	assert.Empty(t, keys, "no file is no revoked key")
+	s.write(opsDir+"/revoked-keys", "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\n\n  \nnot a key\n")
+	keys, err = readOpsRevokedKeys(s, s.root)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}, keys)
+}

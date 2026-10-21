@@ -32,7 +32,7 @@ if [ -n "$file" ]; then
   exit 0
 fi
 case "$1 $2" in
-  "list table") [ -e ROOT/ops-kernel ] || { echo "Error: No such file or directory" >&2; exit 1; } ;;
+  "list table") cat ROOT/ops-kernel 2>/dev/null || { echo "Error: No such file or directory" >&2; exit 1; } ;;
   "delete table") rm -f ROOT/ops-kernel ;;
 esac
 exit 0`
@@ -41,7 +41,7 @@ const fakeIP = `echo "ip $*" >> ROOT/calls.log
 case "$1 $2" in
   "link show") [ -e ROOT/link ] ;;
   "link add") touch ROOT/link ;;
-  "link del") rm -f ROOT/link ;;
+  "link del") [ ! -e ROOT/link-del-fails ] && rm -f ROOT/link ;;
 esac`
 
 const fakeWg = `case "$1" in
@@ -54,7 +54,7 @@ esac`
 func newOpsScene(t *testing.T) *opsScene {
 	t.Helper()
 	root, bin := t.TempDir(), t.TempDir()
-	for _, d := range []string{"/etc/kipper/ops", "/etc/systemd/system", "/sys/module/wireguard"} {
+	for _, d := range []string{"/etc/kipper/ops", "/etc/systemd/system", "/sys/module/wireguard", "/run"} {
 		require.NoError(t, os.MkdirAll(filepath.Join(root, d), 0o750))
 	}
 	stubs := map[string]string{
@@ -64,8 +64,12 @@ func newOpsScene(t *testing.T) *opsScene {
 		"systemctl": fakeSystemctl,
 		"flock":     fakeFlock,
 		"modprobe":  `exit 0`,
+		"sha256sum": `echo "$(cksum | cut -d' ' -f1)-fingerprint  -"`,
 		"timeout":   `shift 3; exec "$@"`,
 		"sync":      `echo "sync $*" >> ROOT/calls.log; [ ! -e ROOT/sync-fails ]`,
+		"systemd-run": `echo "systemd-run $*" >> ROOT/calls.log
+while [ $# -gt 0 ]; do case "$1" in --*) shift ;; *) break ;; esac; done
+exec "$@"`,
 	}
 	for name, body := range stubs {
 		body = strings.ReplaceAll(strings.ReplaceAll(body, "ROOT", root), "LOG", filepath.Join(root, "calls.log"))
@@ -214,6 +218,26 @@ func TestOpsLoadLoadsTheTableBeforeTheInterfaceAndInsertsTheKey(t *testing.T) {
 	assert.NotContains(t, calls, "c2VjcmV0", "the private key never appears in a command line")
 }
 
+func TestOpsStateNoticesATableChangedAfterTheLoad(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	out, err := s.script("load")
+	require.NoError(t, err, out)
+
+	out, err = s.Run(opsStateCommand(s.root))
+	require.NoError(t, err, out)
+	st := parseOpsState(out)
+	require.NotEmpty(t, st.TableSum)
+	assert.Equal(t, st.TableSum, st.LoadedSum)
+
+	kernel := strings.Replace(s.file("ops-kernel"), `iifname "kipops" drop`, `iifname "kipops" return`, 1)
+	s.write("ops-kernel", kernel)
+	out, err = s.Run(opsStateCommand(s.root))
+	require.NoError(t, err, out)
+	st = parseOpsState(out)
+	assert.NotEqual(t, st.TableSum, st.LoadedSum)
+}
+
 func TestOpsLoadWithoutTheTableNeverBringsUpTheInterface(t *testing.T) {
 	s := newOpsScene(t)
 	s.prepared(sampleDevices())
@@ -309,12 +333,19 @@ func TestOpsRemoveTakesTheInterfaceDownBeforeTheTable(t *testing.T) {
 	s.prepared(sampleDevices())
 	_, err := s.script("load")
 	require.NoError(t, err)
+	writeUFWStub(t, s.bin, `echo "ufw $*" >> `+filepath.Join(s.root, "calls.log"))
 	require.NoError(t, removeOpsNode(s, s.root))
 	calls := s.calls()
+	assert.NotContains(t, calls, "systemd-run", "reset waits for the removal")
 	assert.Less(t, strings.Index(calls, "ip link del kipops"), strings.Index(calls, "nft delete table inet kipper_ops"), calls)
+	assert.Contains(t, calls, "ufw delete allow 443/udp")
 	assert.False(t, s.exists(opsDir), "the ops directory is gone")
 	assert.False(t, s.exists("ops-kernel"))
+	assert.False(t, s.exists("run/kipper-ops-remove.sh"), "the script removes itself")
+
+	s.write("calls.log", "")
 	require.NoError(t, removeOpsNode(s, s.root), "a node without ops state is left alone")
+	assert.NotContains(t, s.calls(), "systemd-run")
 }
 
 func TestOpsNodeKeyAndApplyBringUpTheInterface(t *testing.T) {
@@ -433,4 +464,91 @@ func TestAccessHeaderCountsThePeersGeneration(t *testing.T) {
 	h := st.Header("server")
 	assert.Equal(t, 12, h.Generation, "a device removal newer than the tables counts")
 	assert.Error(t, StaleAccessRecord(11, []AccessNodeHeader{h}), "so restoring an older record that still lists the device is refused")
+}
+
+func TestOpsNodeKeyRefusesANodeRunningFirewalld(t *testing.T) {
+	s := newOpsScene(t)
+	s.write("active-firewalld", "")
+	_, err := opsNodeKey(s, io.Discard, s.root)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "firewalld")
+	assert.NotContains(t, s.calls(), "wg genkey", "nothing is set up on a node the tunnel cannot reach")
+}
+
+func TestApplyOpsNodeOpensTheTunnelPortInUFW(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	writeUFWStub(t, s.bin, `echo "ufw $*" >> `+filepath.Join(s.root, "calls.log")+`; [ "$1" = status ] && echo "Status: active"; exit 0`)
+	peers, err := RenderOpsPeers(9, 443, sampleDevices())
+	require.NoError(t, err)
+	require.NoError(t, applyOpsNode(s, sampleOpsIntent(), peers, s.root))
+	allow := "ufw allow 443/udp comment kipper-ops"
+	require.Contains(t, s.calls(), allow)
+	assert.Less(t, strings.Index(s.calls(), allow), strings.Index(s.calls(), "wg syncconf"), "the port opens before the interface comes up")
+}
+
+func TestApplyOpsNodeLeavesAnInactiveUFWAlone(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	writeUFWStub(t, s.bin, `echo "ufw $*" >> `+filepath.Join(s.root, "calls.log")+`; [ "$1" = status ] && echo "Status: inactive"; exit 0`)
+	peers, err := RenderOpsPeers(9, 443, sampleDevices())
+	require.NoError(t, err)
+	require.NoError(t, applyOpsNode(s, sampleOpsIntent(), peers, s.root))
+	assert.NotContains(t, s.calls(), "ufw allow")
+}
+
+func writeUFWStub(t *testing.T, bin, body string) {
+	t.Helper()
+	//nolint:gosec // the stand-in has to be executable
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "ufw"), []byte("#!/bin/sh\n"+body+"\n"), 0o755))
+}
+
+func TestOpsNodeRoutesListsEveryTableExceptDefaultsAndTheTunnel(t *testing.T) {
+	out := `default via 172.31.0.1 dev ens5 proto dhcp src 172.31.5.10 metric 100
+10.42.0.0/24 dev cni0 proto kernel scope link src 10.42.0.1
+10.99.0.128/25 dev kipops scope link
+172.31.0.0/20 dev ens5 proto kernel scope link src 172.31.5.10 metric 100
+10.0.0.0/8 table 200 proto static
+	nexthop via 10.0.0.1 dev eth1 weight 1
+local 172.31.5.10 dev ens5 table local proto kernel scope host src 172.31.5.10
+broadcast 172.31.15.255 dev ens5 table local proto kernel scope link src 172.31.5.10
+unreachable 192.0.2.0/24
+`
+	got := parseOpsRoutes(out)
+
+	var s []string
+	for _, p := range got {
+		s = append(s, p.String())
+	}
+	assert.Equal(t, []string{"10.42.0.0/24", "172.31.0.0/20", "10.0.0.0/8", "172.31.5.10/32", "172.31.15.255/32", "192.0.2.0/24"}, s)
+}
+
+func TestOpsRemoveKeepsTheTableWhileTheInterfaceStays(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	_, err := s.script("load")
+	require.NoError(t, err)
+	s.write("link-del-fails", "")
+
+	require.Error(t, removeOpsNode(s, s.root))
+
+	assert.True(t, s.exists("ops-kernel"), "the isolation table stays while the interface is up")
+	assert.True(t, s.exists(opsDir+"/peers.conf"), "a rerun still has what it needs")
+}
+
+func TestScheduledOpsRemovalDisablesTheBootUnitAtOnce(t *testing.T) {
+	s := newOpsScene(t)
+	s.prepared(sampleDevices())
+	_, err := s.script("load")
+	require.NoError(t, err)
+	writeUFWStub(t, s.bin, `echo "ufw $*" >> `+filepath.Join(s.root, "calls.log"))
+
+	require.NoError(t, scheduleOpsRemoval(s, s.root))
+
+	calls := s.calls()
+	assert.Contains(t, calls, "systemd-run --quiet --collect --on-active=10", "the removal waits until the session returns")
+	require.Contains(t, calls, "systemctl disable "+opsUnitName)
+	assert.Less(t, strings.Index(calls, "systemctl disable "+opsUnitName), strings.Index(calls, "systemd-run"), "a reboot before the timer fires cannot load the interface again")
+	assert.False(t, s.exists(opsDir), "the stub runs the timer at once")
+	assert.Contains(t, calls, "ufw delete allow 443/udp")
 }

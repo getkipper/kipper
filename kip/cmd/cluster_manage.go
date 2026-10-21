@@ -826,6 +826,7 @@ func runClusterRemove(_ *cobra.Command, args []string) error {
 			if c.Name == name {
 				found = true
 				_ = os.Remove(c.Kubeconfig)
+				removeDeviceKey(c.Name)
 				continue
 			}
 			remaining = append(remaining, c)

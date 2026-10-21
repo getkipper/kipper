@@ -20,11 +20,15 @@ import (
 // exists, ssh tries it; otherwise ssh falls through to its normal
 // lookup (ssh-agent, ~/.ssh/config, default identity files). The
 // fallback path never sets IdentitiesOnly.
+//
+// Options are extra ssh options, such as the ProxyCommand that carries the
+// connection through an operator device tunnel.
 type BareMetalProvider struct {
 	Host           string
 	User           string
 	SSHKey         string
 	FallbackSSHKey string
+	Options        []string
 	client         *ssh.Client
 }
 
@@ -35,6 +39,7 @@ func (p *BareMetalProvider) Connect() error {
 		User:            p.User,
 		KeyPath:         p.SSHKey,
 		FallbackKeyPath: p.FallbackSSHKey,
+		Options:         p.Options,
 	})
 	if err != nil {
 		return err

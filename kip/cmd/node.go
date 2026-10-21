@@ -319,7 +319,7 @@ func addNode(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\n  Connecting to the server (%s)...\n", cluster.Host)
-	serverConn, err := ssh.Dial(nodeSSH(cluster.Host, sshKey, cluster))
+	serverConn, err := dialNodeSSH(cluster.Host, sshKey, cluster)
 	if err != nil {
 		return fmt.Errorf("connecting to the server: %w", err)
 	}
@@ -333,7 +333,7 @@ func addNode(cmd *cobra.Command, args []string) error {
 	defer lease.Release()
 	server := lease.Server(serverConn)
 	fmt.Printf("  Connecting to %s...\n", workerHost)
-	workerConn, err := ssh.Dial(nodeSSH(workerHost, sshKey, cluster))
+	workerConn, err := dialNodeSSH(workerHost, sshKey, cluster)
 	if err != nil {
 		return fmt.Errorf("connecting to %s: %w", workerHost, err)
 	}
@@ -424,7 +424,7 @@ func addNode(cmd *cobra.Command, args []string) error {
 		if r.Role != installer.NodeRoleWorker || r.MachineID == identity.MachineID {
 			continue
 		}
-		c, err := ssh.Dial(nodeSSH(r.Host, sshKey, cluster))
+		c, err := dialNodeSSH(r.Host, sshKey, cluster)
 		if err != nil {
 			return fmt.Errorf("connecting to node %s (%s), whose firewall must admit the new node: %w", r.Name, r.Host, err)
 		}
@@ -445,7 +445,11 @@ func addNode(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%s: %w", workerHost, err)
 	}
 	joinerHeader := []installer.AccessNodeHeader{joinerState.Header(workerHost)}
-	access, _, err := prepareNodeAccess(newNodeAccessCluster(os.Stdout, server, cluster), touched, joinerHeader, "node add "+workerHost, true)
+	nc, err := newNodeAccessCluster(os.Stdout, server, cluster, sshKey)
+	if err != nil {
+		return err
+	}
+	access, _, err := prepareNodeAccess(nc, touched, joinerHeader, "node add "+workerHost, true)
 	if err != nil {
 		return err
 	}

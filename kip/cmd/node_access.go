@@ -29,12 +29,15 @@ type nodeAccess struct {
 	written    bool
 }
 
-// newNodeAccessCluster connects the access verbs' defaults to a node
-// command's server.
-func newNodeAccessCluster(out io.Writer, server installer.FirewallRunner, cluster *config.Cluster) *accessCluster {
+// newNodeAccessCluster connects the access verbs' defaults and this
+// workstation's device to a node command's server.
+func newNodeAccessCluster(out io.Writer, server installer.FirewallRunner, cluster *config.Cluster, keyFlag string) (*accessCluster, error) {
 	c := &accessCluster{out: out, server: server, families: hostFamilies}
 	c.useAPI(cluster)
-	return c
+	if err := c.useDevice(cluster, keyFlag); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 // prepareNodeAccess reads the access record and the committed tables of
@@ -78,6 +81,13 @@ func prepareNodeAccess(c *accessCluster, nodes []accessNode, inspect []installer
 	if requireTables && broken != nil {
 		return nil, nil, broken
 	}
+	// A joining node has no revocation list of its own yet, so it would admit
+	// a device the other nodes revoked from the console.
+	if requireTables {
+		if err := c.refuseRevokedDevices(nodes, rec, action); err != nil {
+			return nil, nil, err
+		}
+	}
 	var notes []string
 	for _, n := range missing {
 		if requireTables && n.rec.State == installer.NodeStateJoining {
@@ -102,12 +112,12 @@ func prepareNodeAccess(c *accessCluster, nodes []accessNode, inspect []installer
 		}
 		a.baselines[n.rec.MachineID] = b
 	}
-	if err := c.lockoutGuard(a.admin, a.baselines, nodes); err != nil {
+	if err := c.lockoutGuard(a.admin, a.baselines, nodes, rec); err != nil {
 		return nil, nil, fmt.Errorf("%w. This workstation's address is not in the operator access list. Run 'kip cluster access allow --here' first", err)
 	}
 	for _, n := range nodes {
 		if n.rec.Role == installer.NodeRoleServer && !a.skip[n.rec.MachineID] {
-			if a.apiOn, err = c.apiBaseline(a.baselines[n.rec.MachineID].families()); err != nil {
+			if a.apiOn, err = c.apiBaseline(a.baselines[n.rec.MachineID]); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -133,7 +143,7 @@ func (a *nodeAccess) load(n accessNode, records []installer.NodeRecord, exclude 
 		if b, err = a.c.baseline(n); err != nil {
 			return err
 		}
-		if err := a.c.lockoutGuard(a.admin, map[string]accessBaseline{n.rec.MachineID: b}, []accessNode{n}); err != nil {
+		if err := a.c.lockoutGuard(a.admin, map[string]accessBaseline{n.rec.MachineID: b}, []accessNode{n}, a.record); err != nil {
 			return fmt.Errorf("%w. This workstation's address is not in the operator access list. Run 'kip cluster access allow --here' first", err)
 		}
 		a.baselines[n.rec.MachineID] = b
@@ -146,16 +156,32 @@ func (a *nodeAccess) load(n accessNode, records []installer.NodeRecord, exclude 
 	if err != nil {
 		return fmt.Errorf("%s: %w", n.rec.Name, err)
 	}
+	in.Devices = len(a.record.Devices) > 0
 	if !a.written {
 		a.next = a.record
+		if a.record.Ops != nil {
+			ops := *a.record.Ops
+			ops.Nodes = append([]installer.AccessOpsNode(nil), a.record.Ops.Nodes...)
+			a.next.Ops = &ops
+		}
 		a.next.Generation = a.generation
 		a.next.History = append(a.next.History, installer.AccessChange{At: a.c.now().UTC().Format(time.RFC3339), By: a.c.actor(b), Action: a.action, Generation: a.generation, Nodes: map[string]string{}})
+	}
+	opsChanged, err := a.updateOps(n, exclude)
+	if err != nil {
+		return err
+	}
+	if !a.written || opsChanged {
 		if err := installer.WriteAccessRecord(a.c.server, a.next); err != nil {
 			return err
 		}
 		a.written = true
 	}
-	outcome, err := a.c.applyOn(n, b, in, a.apiOn)
+	a.c.records = records
+	if err := a.c.refreshManifest(a.next, map[string][]int{n.rec.MachineID: ports}); err != nil {
+		return err
+	}
+	outcome, err := a.c.applyOn(n, b, in, a.apiOn, a.next, ports)
 	if err != nil {
 		outcome = accessOutcome(n.rec.Name, outcome, err)
 	}
@@ -170,6 +196,33 @@ func (a *nodeAccess) load(n accessNode, records []installer.NodeRecord, exclude 
 		return err
 	}
 	return nil
+}
+
+// updateOps drops the removed node exclude from the operator state and gives
+// n an operator address and key when the cluster has devices and n has
+// none. It reports whether the record changed.
+func (a *nodeAccess) updateOps(n accessNode, exclude string) (bool, error) {
+	ops := a.next.Ops
+	if ops == nil {
+		return false, nil
+	}
+	changed := false
+	if _, ok := ops.Node(exclude); exclude != "" && ok {
+		var kept []installer.AccessOpsNode
+		for _, on := range ops.Nodes {
+			if on.MachineID != exclude {
+				kept = append(kept, on)
+			}
+		}
+		ops.Nodes, changed = kept, true
+	}
+	if _, ok := ops.Node(n.rec.MachineID); ok {
+		return changed, nil
+	}
+	if err := a.c.addOpsNode(ops, n); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // checkRemovalTargetAccess refuses to remove a worker whose committed
@@ -237,9 +290,44 @@ func reportHostAccessGuard(out io.Writer, prefix string, rec installer.AccessRec
 		}
 	default:
 		g, _ := st.Generation()
-		say(out, "    ✔  %srestricted to %s (generation %d)\n", prefix, plural(st.Sources(), "one source", fmt.Sprintf("%d sources", st.Sources())), g)
-		if len(rec.Sources) == 1 {
+		what := plural(st.Sources(), "one source", fmt.Sprintf("%d sources", st.Sources()))
+		if d := rec.ActiveDevices(); d > 0 {
+			devices := plural(d, "one device", fmt.Sprintf("%d devices", d))
+			if st.Sources() == 0 {
+				what = devices
+			} else {
+				what += " and " + devices
+			}
+		}
+		say(out, "    ✔  %srestricted to %s (generation %d)\n", prefix, what, g)
+		if len(rec.Sources) == 1 && rec.ActiveDevices() == 0 {
 			say(out, "    ⚠  %sthe list has one entry. Add a stable second prefix so a changed address cannot lock you out\n", prefix)
 		}
+	}
+	if stErr == nil && recErr == nil {
+		reportOpsInterface(out, prefix, rec, host)
+	}
+}
+
+// reportOpsInterface warns about each difference between host's operator
+// interface and rec, or a leftover interface without devices.
+func reportOpsInterface(out io.Writer, prefix string, rec installer.AccessRecord, host installer.CommandRunner) {
+	ops, err := installer.ReadOpsState(host)
+	if err != nil {
+		say(out, "    ⚠  %soperator interface not checked (%v)\n", prefix, err)
+		return
+	}
+	id := ""
+	if rec.Ops != nil {
+		if id, err = installer.ReadMachineID(host); err != nil {
+			say(out, "    ⚠  %soperator interface not checked (%v)\n", prefix, err)
+			return
+		}
+	}
+	for _, d := range installer.OpsDrift(ops, rec, id) {
+		if !strings.Contains(d, "Run '") {
+			d += ". Run 'kip cluster access show'"
+		}
+		say(out, "    ⚠  %s%s\n", prefix, d)
 	}
 }

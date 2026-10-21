@@ -117,6 +117,13 @@ func Dial(cfg Config) (*Client, error) {
 // even when sudo's secure_path omits that directory.
 const sudoPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+// Unshared returns an unconnected client for cfg. Each command opens a fresh
+// connection, allowing ObservedAddress to verify access without reusing an
+// existing session.
+func Unshared(cfg Config) *Client {
+	return &Client{cfg: cfg}
+}
+
 func (c *Client) viaSudo() bool {
 	return c.cfg.User != "" && c.cfg.User != "root"
 }

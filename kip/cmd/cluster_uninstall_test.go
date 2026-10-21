@@ -47,6 +47,10 @@ func TestRemoveLocalClusterEntry_DropsClusterAndDeletesKubeconfig(t *testing.T) 
 	if err := os.WriteFile(kubeconfig, []byte("kubeconfig data"), 0o600); err != nil {
 		t.Fatalf("write kubeconfig: %v", err)
 	}
+	deviceKey := filepath.Join(clusters, "storefront-ops.key")
+	if err := os.WriteFile(deviceKey, []byte("key"), 0o600); err != nil {
+		t.Fatalf("write device key: %v", err)
+	}
 	cfg := &config.Config{
 		CurrentCluster: "storefront",
 		Clusters: []config.Cluster{
@@ -71,6 +75,7 @@ func TestRemoveLocalClusterEntry_DropsClusterAndDeletesKubeconfig(t *testing.T) 
 	assert.Equal(t, "other", got.CurrentCluster, "current should fall back to remaining cluster")
 	_, statErr := os.Stat(kubeconfig)
 	assert.True(t, os.IsNotExist(statErr), "kubeconfig file should have been deleted")
+	assert.NoFileExists(t, deviceKey, "the device key goes with the cluster")
 }
 
 func TestRemoveLocalClusterEntry_CurrentBecomesEmptyWhenLastClusterRemoved(t *testing.T) {

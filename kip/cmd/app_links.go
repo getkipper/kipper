@@ -13,7 +13,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/getkipper/kipper/controller/pkg/applink"
@@ -271,7 +270,7 @@ func execInPod(ctx context.Context, k8sClient *k8s.Client, ns, pod, container st
 	if err != nil {
 		return "", err.Error()
 	}
-	restCfg, err := clientcmd.BuildConfigFromFlags("", cluster.Kubeconfig)
+	restCfg, err := k8s.RESTConfig(cluster)
 	if err != nil {
 		return "", err.Error()
 	}
@@ -281,7 +280,7 @@ func execInPod(ctx context.Context, k8sClient *k8s.Client, ns, pod, container st
 			Container: container, Command: argv, Stdout: true, Stderr: true,
 		}, scheme.ParameterCodec)
 
-	executor, err := remotecommand.NewSPDYExecutor(restCfg, "POST", req.URL())
+	executor, err := k8s.NewSPDYExecutor(restCfg, "POST", req.URL())
 	if err != nil {
 		return "", err.Error()
 	}

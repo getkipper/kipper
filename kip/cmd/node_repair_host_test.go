@@ -12,6 +12,7 @@ import (
 
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/installer"
+	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 // The repair command is the one an operator runs against a node added by an
@@ -23,7 +24,7 @@ func TestRepairHostResolvesTheSSHKeyLikeEverythingElse(t *testing.T) {
 	t.Setenv("KIP_SSH_KEY", "")
 	cluster := &config.Cluster{Host: "203.0.113.10", SSHKey: "/keys/cluster-key"}
 
-	cfg := nodeSSH("203.0.113.11", "", cluster)
+	cfg := mustNodeSSH(t, "", cluster)
 	assert.Equal(t, "/keys/cluster-key", cfg.KeyPath,
 		"the cluster's own key is what installed it and what should repair it")
 
@@ -38,13 +39,13 @@ func TestRepairHostPrefersTheFlag(t *testing.T) {
 	t.Setenv("KIP_SSH_KEY", "/keys/from-env")
 	cluster := &config.Cluster{SSHKey: "/keys/cluster-key"}
 
-	assert.Equal(t, "/keys/named", nodeSSH("203.0.113.11", "/keys/named", cluster).KeyPath)
-	assert.Equal(t, "/keys/from-env", nodeSSH("203.0.113.11", "", cluster).KeyPath,
+	assert.Equal(t, "/keys/named", mustNodeSSH(t, "/keys/named", cluster).KeyPath)
+	assert.Equal(t, "/keys/from-env", mustNodeSSH(t, "", cluster).KeyPath,
 		"the environment beats the cluster config, as it does everywhere else")
 }
 
 func TestRepairHostConnectsAsRoot(t *testing.T) {
-	assert.Equal(t, "root", nodeSSH("203.0.113.11", "", nil).User,
+	assert.Equal(t, "root", mustNodeSSH(t, "", nil).User,
 		"writing host configuration needs root, as kip node add does")
 }
 
@@ -125,4 +126,11 @@ func TestRepairHostOnEveryNodeRecordsTheCheckedMachineID(t *testing.T) {
 	assert.Contains(t, log, "server records 'worker-a'",
 		"a worker whose identity was checked is recorded, even if a later read of it would fail")
 	assert.Contains(t, log, "server records 'worker-b'")
+}
+
+func mustNodeSSH(t *testing.T, flagValue string, cluster *config.Cluster) ssh.Config {
+	t.Helper()
+	cfg, err := nodeSSH("203.0.113.11", flagValue, cluster)
+	require.NoError(t, err)
+	return cfg
 }

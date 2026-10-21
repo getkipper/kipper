@@ -98,7 +98,7 @@ type leasedCluster struct {
 // leaseCluster connects to the cluster's server and takes the node lifecycle
 // lease. Competing runs see purpose in the refusal message. Call close when finished.
 func leaseCluster(cluster *config.Cluster, sshKey, purpose string) (*leasedCluster, error) {
-	conn, err := ssh.Dial(nodeSSH(cluster.Host, sshKey, cluster))
+	conn, err := dialNodeSSH(cluster.Host, sshKey, cluster)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to %s: %w", cluster.Host, err)
 	}
@@ -119,7 +119,7 @@ func (c *leasedCluster) close() {
 // run under the lease.
 func (c *leasedCluster) dialer(cluster *config.Cluster, sshKey string) nodeDialer {
 	return func(rec installer.NodeRecord) (installer.FirewallRunner, func(), error) {
-		conn, err := ssh.Dial(nodeSSH(rec.Host, sshKey, cluster))
+		conn, err := dialNodeSSH(rec.Host, sshKey, cluster)
 		if err != nil {
 			return nil, nil, err
 		}

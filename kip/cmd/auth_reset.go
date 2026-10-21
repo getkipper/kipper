@@ -14,8 +14,8 @@ import (
 
 	"github.com/getkipper/kipper/kip/internal/auth"
 	"github.com/getkipper/kipper/kip/internal/config"
-	"github.com/getkipper/kipper/kip/internal/infra"
 	"github.com/getkipper/kipper/kip/internal/installer"
+	"github.com/getkipper/kipper/kip/internal/transport"
 )
 
 func resetOverSSH(sshKeyGiven, needsSession, hasSession bool) bool {
@@ -56,7 +56,10 @@ func hasLocalSession(store *auth.Store, domain string) bool {
 // returns a client built from it. The kubeconfig stays in memory.
 func adminClientsetOverSSH(cluster *config.Cluster, sshKeyFlag string) (kubernetes.Interface, error) {
 	explicit, fallback := resolveSSHKey(sshKeyFlag, cluster)
-	provider := &infra.BareMetalProvider{Host: cluster.Host, User: sshUser(cluster), SSHKey: explicit, FallbackSSHKey: fallback}
+	provider, err := clusterProvider(cluster, cluster.Host, explicit, fallback)
+	if err != nil {
+		return nil, err
+	}
 	if err := provider.Connect(); err != nil {
 		return nil, fmt.Errorf("connecting to %s: %w", cluster.Host, err)
 	}
@@ -65,14 +68,18 @@ func adminClientsetOverSSH(cluster *config.Cluster, sshKeyFlag string) (kubernet
 	if err != nil {
 		return nil, err
 	}
-	return clientsetFromKubeconfig(kubeconfig, cluster.Host)
+	return clientsetFromKubeconfig(kubeconfig, cluster)
 }
 
-// clientsetFromKubeconfig builds a client in memory for the cluster at host.
+// clientsetFromKubeconfig builds a client in memory for the cluster's host,
+// through this workstation's device tunnel when the command uses it.
 // Generic errors keep the server's admin credentials out of error messages.
-func clientsetFromKubeconfig(kubeconfig, host string) (kubernetes.Interface, error) {
-	restConfig, err := adminRESTConfig(kubeconfig, host)
+func clientsetFromKubeconfig(kubeconfig string, cluster *config.Cluster) (kubernetes.Interface, error) {
+	restConfig, err := adminRESTConfig(kubeconfig, cluster.Host)
 	if err != nil {
+		return nil, err
+	}
+	if err := transport.ConfigureREST(cluster, restConfig); err != nil {
 		return nil, err
 	}
 	clientset, err := kubernetes.NewForConfig(restConfig)

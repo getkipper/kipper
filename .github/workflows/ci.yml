@@ -51,6 +51,21 @@ jobs:
             GOOS="${target%/*}" GOARCH="${target#*/}" go build -o /dev/null . || exit 1
           done
 
+  # Exercise Windows socket, lock and owner-only DACL behavior.
+  test-kip-windows:
+    name: Test kip tunnel on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            kip/go.sum
+            controller/go.mod
+      - run: go test ./internal/opstunnel/... ./internal/lockfile/...
+        working-directory: kip
+
   test-console-api:
     name: Test console-api
     runs-on: ubuntu-latest

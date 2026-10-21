@@ -9,8 +9,9 @@ import (
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
+
+	"github.com/getkipper/kipper/kip/internal/k8s"
 )
 
 // ttySizeQueue feeds remote terminal-size updates to the exec stream.
@@ -109,10 +110,9 @@ func runExec(cmd *cobra.Command, args []string) error {
 	podName := target.pod.Name
 	containerName := workloadContainerName(target.pod, name)
 
-	kubeconfigPath := cluster.Kubeconfig
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	config, err := k8s.RESTConfig(cluster)
 	if err != nil {
-		return fmt.Errorf("loading kubeconfig: %w", err)
+		return err
 	}
 
 	stdinFd := int(os.Stdin.Fd())
@@ -125,7 +125,7 @@ func runExec(cmd *cobra.Command, args []string) error {
 		SubResource("exec").
 		VersionedParams(&options, scheme.ParameterCodec)
 
-	executor, err := remotecommand.NewSPDYExecutor(config, "POST", req.URL())
+	executor, err := k8s.NewSPDYExecutor(config, "POST", req.URL())
 	if err != nil {
 		return fmt.Errorf("creating executor: %w", err)
 	}
