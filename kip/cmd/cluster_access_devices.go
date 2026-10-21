@@ -317,6 +317,30 @@ func (c *accessCluster) syncManifest() error {
 	return c.refreshManifest(rec, nil)
 }
 
+// refreshDeviceNodes refreshes an active device's node list from the server's
+// access record so commands can reach nodes added from another workstation
+// through the tunnel in the same run. Call it before connecting to other nodes.
+// Missing or invalid local keys and devices absent from the record mark the
+// device stale. Errors produce warnings so the calling command can continue.
+func refreshDeviceNodes(out io.Writer, cluster *config.Cluster, server installer.FirewallRunner, records []installer.NodeRecord) {
+	if cluster == nil || cluster.Ops == nil || cluster.Ops.State != config.OpsActive {
+		return
+	}
+	device, err := loadLocalDevice(cluster)
+	if err != nil {
+		say(out, "  ⚠  %v\n", err)
+		return
+	}
+	if device == nil {
+		return
+	}
+	c := &accessCluster{out: out, server: server, records: records, cluster: cluster, device: device}
+	c.useTunnel = transport.Mode(cluster) != transport.Direct
+	if err := c.syncManifest(); err != nil {
+		say(out, "  ⚠  could not refresh this workstation's node list: %v\n", err)
+	}
+}
+
 // checkStaleDevice marks the local device stale when a successfully read
 // record no longer lists its key, after a reset or a removal run elsewhere.
 // kip then stops using it in this session. Saving the stale state also prevents

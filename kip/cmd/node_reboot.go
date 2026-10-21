@@ -337,6 +337,7 @@ func runNodeReboot(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("reading the node records: %w. To reboot the server without looking up node records, run 'kip node reboot' with no argument", err)
 	}
+	refreshDeviceNodes(os.Stdout, cluster, master, records)
 	rec, err := findNodeRecord(records, args[0])
 	if err != nil {
 		return err

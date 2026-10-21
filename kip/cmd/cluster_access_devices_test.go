@@ -730,6 +730,42 @@ func TestRefreshManifestIgnoresPinsOnceTheDeviceLeavesTheRecord(t *testing.T) {
 	assert.NoError(t, f.c.refreshManifest(rec, nil), "removing this workstation's own device needs no tunnel")
 }
 
+func TestRefreshDeviceNodesGivesOtherCommandsANodeAddedElsewhere(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+	rec := f.deviceRecord(t)
+	require.NoError(t, updateLocalOps(f.cluster, func(o *config.Ops) *config.Ops {
+		o.Nodes = []config.OpsNode{{MachineID: accessServerID, Name: "server", Host: "192.0.2.10", PublicKey: testNodeKey, SSHPorts: []int{22}, Server: true}}
+		return o
+	}))
+	f.addWorker()
+	rec.Ops.Nodes, rec.Ops.NextNode = append(rec.Ops.Nodes, installer.AccessOpsNode{MachineID: accessWorkerID, Address: "10.99.0.2", PublicKey: testWorkerKey}), 3
+	f.server.store(t, rec)
+
+	refreshDeviceNodes(io.Discard, f.cluster, f.server, f.c.records)
+
+	require.Len(t, f.cluster.Ops.Nodes, 2, "the caller's own cluster sees the new node in this run")
+	assert.Equal(t, "worker-1", f.cluster.Ops.Nodes[1].Name)
+}
+
+// silentRunner fails the test on any command. Other methods panic.
+type silentRunner struct {
+	installer.FirewallRunner
+	t *testing.T
+}
+
+func (r silentRunner) Run(command string) (string, error) {
+	r.t.Errorf("unexpected command: %s", command)
+	return "", errors.New("unexpected")
+}
+
+func (r silentRunner) RunStdin(command string, _ io.Reader) (string, error) { return r.Run(command) }
+
+func TestRefreshDeviceNodesWithoutADeviceRunsNothing(t *testing.T) {
+	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
+
+	refreshDeviceNodes(io.Discard, &config.Cluster{Name: "prod"}, silentRunner{t: t}, f.c.records)
+}
+
 func TestSyncManifestNeedsARecordedServer(t *testing.T) {
 	f := newDeviceFixture(t, config.OpsActive, map[string]string{"4": "198.51.100.7"})
 	f.deviceRecord(t)

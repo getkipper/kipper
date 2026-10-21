@@ -259,6 +259,7 @@ func checkHostWith(out io.Writer, sshConfig ssh.Config, cluster *config.Cluster,
 	if err == nil {
 		defer func() { _ = client.Close() }()
 		server = client
+		refreshDeviceNodes(out, cluster, client, records)
 	}
 	workers := inspectWorkers(records, func(rec installer.NodeRecord) (installer.CommandRunner, error) {
 		return captureWorkerChecks(sshConfig, cluster, rec)
