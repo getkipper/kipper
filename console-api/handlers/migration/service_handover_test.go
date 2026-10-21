@@ -572,11 +572,10 @@ func TestMigrateServices_RefusesIncompleteCredentials(t *testing.T) {
 	}
 }
 
-// The catalog starts mongod with MONGO_INITDB_ROOT_USERNAME and _PASSWORD set,
-// and the official image turns on --auth when both are present, so a dump with
-// no credentials is refused and the mongodb migration cannot work at all. The
-// values are read from the pod's own environment, so they never appear in the
-// command line.
+// TestMongoCommandsAuthenticate checks that migration uses the root credentials
+// configured by the catalog, which enable authentication in the official image.
+// Both tools receive the password through a private config file to keep it out
+// of their arguments.
 func TestMongoCommandsAuthenticate(t *testing.T) {
 	dump, _ := buildDumpCommand("mongodb", "orders")
 	restore, _ := buildImportCommand("mongodb", "orders")
@@ -591,12 +590,16 @@ func TestMongoCommandsAuthenticate(t *testing.T) {
 		script := tc.cmd[len(tc.cmd)-1]
 		for _, want := range []string{
 			`-u "$MONGO_INITDB_ROOT_USERNAME"`,
-			`-p "$MONGO_INITDB_ROOT_PASSWORD"`,
+			`printf 'password: %s\n' "$MONGO_INITDB_ROOT_PASSWORD" >"$c"`,
+			`--config="$c"`,
 			"--authenticationDatabase admin",
 		} {
 			if !strings.Contains(script, want) {
 				t.Errorf("mongo %s command must pass %s, got: %s", tc.what, want, script)
 			}
+		}
+		if strings.Contains(script, " -p ") {
+			t.Errorf("mongo %s command must keep the password out of the arguments, got: %s", tc.what, script)
 		}
 	}
 }
@@ -623,5 +626,17 @@ func TestRabbitMQImportReadsAFileRatherThanStdin(t *testing.T) {
 	dumpCmd, _ := buildDumpCommand("rabbitmq", "queue")
 	if !strings.Contains(dumpCmd[len(dumpCmd)-1], "export_definitions -") {
 		t.Fatalf("export_definitions writes to stdout with a dash and stays as it is, got: %s", dumpCmd)
+	}
+}
+
+func TestMySQLCommandsKeepThePasswordOutOfTheArguments(t *testing.T) {
+	dump, _ := buildDumpCommand("mysql", "db")
+	restore, _ := buildImportCommand("mysql", "db")
+
+	for _, cmd := range [][]string{dump, restore} {
+		script := cmd[len(cmd)-1]
+		if strings.Contains(script, "-p") || !strings.HasPrefix(script, `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql`) {
+			t.Errorf("the root password must reach mysql through MYSQL_PWD, got: %s", script)
+		}
 	}
 }

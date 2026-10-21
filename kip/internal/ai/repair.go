@@ -30,29 +30,24 @@ var veleroBackupRepositoryGVR = schema.GroupVersionResource{
 	Resource: "backuprepositories",
 }
 
-// RepairPlan summarises orphan states `kip ai backup repair` will fix.
+// RepairPlan summarises orphan states that kip ai backup repair will fix.
+// OrphanInCluster contains Kipper-owned Backup CRs missing from MinIO.
+// These CRs are deleted directly because DeleteBackupRequest would keep trying
+// to free missing repository data. OrphanInStorage contains backup directories
+// without a matching Backup CR, often left by kubectl delete backup bypassing
+// Velero's deletion pipeline and leaving Kopia data behind.
+// BrokenRepos contains NotReady BackupRepository CRs at least brokenRepoMinAge old.
+// Replacing them lets Velero reinitialise the repository on the next backup.
+// When MinIOReachable is false, cluster findings remain usable, but the orphan
+// lists are incomplete.
 type RepairPlan struct {
-	// OrphanInCluster names Backup CRs Kipper owns that have no
-	// matching Kopia repo data in MinIO. Recovery: delete the CR
-	// (DeleteBackupRequest would loop trying to free non-existent
-	// repo data).
 	OrphanInCluster []string
-	// OrphanInStorage names backup directories present in the MinIO
-	// bucket without a matching Backup CR. Usually the result of
-	// `kubectl delete backup` (which bypasses Velero's deletion
-	// pipeline, so Kopia data is never freed).
 	OrphanInStorage []string
-	// BrokenRepos names BackupRepository CRs whose phase is anything
-	// other than Ready. Replacing the CR forces Velero to re-init the
-	// Kopia repo on the next backup.
-	BrokenRepos []string
-	// MinIOReachable is false when listing the bucket failed. The
-	// caller can still act on cluster-side findings, but
-	// OrphanInCluster and OrphanInStorage will be incomplete.
-	MinIOReachable bool
+	BrokenRepos     []string
+	MinIOReachable  bool
 }
 
-// IsClean returns true when there is nothing for repair to do.
+// IsClean reports whether the plan has no repair actions, even if MinIO was unreachable.
 func (p *RepairPlan) IsClean() bool {
 	return len(p.OrphanInCluster) == 0 && len(p.OrphanInStorage) == 0 && len(p.BrokenRepos) == 0
 }
@@ -65,11 +60,10 @@ const minioListerImage = "ghcr.io/getkipper/mc:RELEASE.2025-08-13T08-35-41Z"
 // path in kip/internal/installer/backup.go.
 const minioBackupBucket = "velero"
 
-// minioServiceURL points at the in-cluster MinIO Service. The Pod
-// running mc lives in the velero namespace, so a short DNS name
-// (minio:9000) suffices but using the FQDN protects against future
-// namespace moves.
-const minioServiceURL = "http://minio.velero.svc:9000"
+// minioServiceHost includes the velero namespace so mc can resolve the Service
+// even if its Pod moves to another namespace. minio:9000 also resolves from the
+// current Pod namespace, velero.
+const minioServiceHost = "minio.velero.svc:9000"
 
 // MinIO credential Secret coordinates, matching the install path in
 // kip/internal/installer/backup.go. The root password is generated per
@@ -106,6 +100,9 @@ type minioListEntry struct {
 // cluster-config backups. The cluster-side orphan list is
 // Kipper-scoped because the only AI-bundle CRs we know how to
 // recognise are the ones Kipper labels.
+//
+// Cluster listing failures return a nil plan and an error. A MinIO listing failure
+// returns a partial plan and an error. All finding lists are sorted by name.
 func (i *Installer) DetectOrphans(ctx context.Context) (*RepairPlan, error) {
 	plan := &RepairPlan{}
 
@@ -150,6 +147,8 @@ func (i *Installer) DetectOrphans(ctx context.Context) (*RepairPlan, error) {
 // ApplyRepair executes the cleanup actions in the plan against the
 // cluster. The caller is expected to have prompted the operator for
 // confirmation already.
+// It stops on the first error, leaving completed actions in place. A nil out
+// discards progress messages. plan must be non-nil.
 func (i *Installer) ApplyRepair(ctx context.Context, plan *RepairPlan, out io.Writer) error {
 	if out == nil {
 		out = io.Discard
@@ -216,8 +215,8 @@ func (i *Installer) listAllBackupNames(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
-// brokenRepoMinAge is the minimum time a BackupRepository CR must
-// have spent in a non-Ready phase before repair flags it. New repos
+// brokenRepoMinAge is the minimum age of a BackupRepository CR before repair
+// flags its NotReady phase. New repos
 // transit New → Ready (or New → NotReady) during normal init, which
 // can take a minute on a slow cluster. Without this floor, repair
 // would delete a still-initialising repo and interrupt the first
@@ -263,13 +262,7 @@ func (i *Installer) listBrokenBackupRepositories(ctx context.Context) ([]string,
 // entry names under velero/backups. Command or Pod failures propagate so callers
 // can distinguish inaccessible storage from an empty listing.
 func (i *Installer) listMinIOBackupDirs(ctx context.Context) ([]string, error) {
-	pod, err := i.runMinIOLister(ctx, []string{
-		"sh", "-c",
-		fmt.Sprintf(
-			"set -e\nmc alias set kipper %s \"$MINIO_ROOT_USER\" \"$MINIO_ROOT_PASSWORD\" >/dev/null\nmc ls --json kipper/%s/backups/\n",
-			minioServiceURL, minioBackupBucket,
-		),
-	})
+	pod, err := i.runMinIOLister(ctx, []string{"sh", "-c", listMinIOBackupsScript()})
 	if err != nil {
 		return nil, err
 	}
@@ -288,23 +281,33 @@ func (i *Installer) removeMinIOBackupDirs(ctx context.Context, names []string) e
 	if len(names) == 0 {
 		return nil
 	}
-	var script strings.Builder
-	fmt.Fprintf(&script, "set -eu\nmc alias set kipper %s \"$MINIO_ROOT_USER\" \"$MINIO_ROOT_PASSWORD\" >/dev/null\n",
-		minioServiceURL)
-	for _, name := range names {
-		// Pre-validated by the caller to be top-level entries we
-		// listed ourselves; still strip slashes defensively before
-		// embedding into the shell script.
-		safe := strings.ReplaceAll(name, "/", "")
-		fmt.Fprintf(&script, "mc rm --recursive --force kipper/%s/backups/%s >/dev/null\n",
-			minioBackupBucket, safe)
-	}
-	pod, err := i.runMinIOLister(ctx, []string{"sh", "-c", script.String()})
+	pod, err := i.runMinIOLister(ctx, []string{"sh", "-c", removeMinIOBackupsScript(names)})
 	if err != nil {
 		return err
 	}
 	defer i.deletePodBestEffort(context.Background(), pod.GetName())
 	return nil
+}
+
+// minioHostLine passes the lister Pod's credentials to mc through MC_HOST_kipper,
+// keeping the password out of mc's arguments.
+const minioHostLine = `export MC_HOST_kipper="http://$MINIO_ROOT_USER:$MINIO_ROOT_PASSWORD@` + minioServiceHost + "\"\n"
+
+func listMinIOBackupsScript() string {
+	return "set -e\n" + minioHostLine + fmt.Sprintf("mc ls --json kipper/%s/backups/\n", minioBackupBucket)
+}
+
+func removeMinIOBackupsScript(names []string) string {
+	var script strings.Builder
+	script.WriteString("set -eu\n" + minioHostLine)
+	for _, name := range names {
+		// Names come from the backup listing. Strip slashes defensively before
+		// embedding them in shell paths.
+		safe := strings.ReplaceAll(name, "/", "")
+		fmt.Fprintf(&script, "mc rm --recursive --force kipper/%s/backups/%s >/dev/null\n",
+			minioBackupBucket, safe)
+	}
+	return script.String()
 }
 
 // runMinIOLister creates a one-shot Pod in the velero namespace and

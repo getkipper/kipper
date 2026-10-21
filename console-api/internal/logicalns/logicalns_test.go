@@ -77,6 +77,9 @@ func TestCmd_MySQLCreatesAsRootAndGrantsTheServiceUser(t *testing.T) {
 	if !strings.Contains(script, "-uroot") {
 		t.Errorf("the database must be created as root, got %q", script)
 	}
+	if strings.Contains(script, "-p") || !strings.Contains(script, `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql`) {
+		t.Errorf("the root password must reach mysql through MYSQL_PWD, not its arguments, got %q", script)
+	}
 	if !strings.Contains(script, "GRANT ALL PRIVILEGES ON \\`$1\\`.* TO \\`$2\\`@'%'") {
 		t.Errorf("the service user must be granted the new database, got %q", script)
 	}
