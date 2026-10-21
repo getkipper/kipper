@@ -768,3 +768,24 @@ func TestTheConfigWriteKeepsTheConfigOutOfCommandsAndErrors(t *testing.T) {
 	assert.NotContains(t, err.Error(), token)
 	assert.NotContains(t, err.Error(), "staged", "the failed write's command stays out of the error")
 }
+
+var errExitStatus = errors.New("exit status 1")
+
+type sshStyleFailure struct{}
+
+func (sshStyleFailure) Run(command string) (string, error) {
+	return "", fmt.Errorf("running %q on 203.0.113.10: %w: Job for k3s.service failed", command, errExitStatus)
+}
+
+func (s sshStyleFailure) RunStdin(command string, _ io.Reader) (string, error) { return s.Run(command) }
+
+func TestAFencedFailureNamesTheCommandRatherThanTheLockWrapper(t *testing.T) {
+	runner := fencedRunner{base: sshStyleFailure{}, token: "0123456789abcdef0123456789abcdef"}
+
+	_, err := runner.Run("systemctl restart k3s")
+
+	require.Error(t, err)
+	assert.Equal(t, `running "systemctl restart k3s" on 203.0.113.10: exit status 1: Job for k3s.service failed`, err.Error())
+	assert.NotContains(t, err.Error(), runner.token)
+	assert.ErrorIs(t, err, errExitStatus, "the runner's cause stays reachable")
+}
