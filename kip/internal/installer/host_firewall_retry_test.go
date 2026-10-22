@@ -42,7 +42,9 @@ type ufwHost struct {
 	// Empty sshListening defaults to a listening socket on port 22.
 	sshListening string
 	opsPort      string
-	onRun        func(cmd string)
+	// Empty defaults stands for Ubuntu's stock /etc/default/ufw.
+	defaults string
+	onRun    func(cmd string)
 }
 
 func (h *ufwHost) SurvivesSSHRateLimit() bool { return true }
@@ -98,6 +100,11 @@ func (h *ufwHost) Run(cmd string) (string, error) {
 	cmd = strings.ReplaceAll(cmd, ufwTimeout, "")
 	cmd = strings.ReplaceAll(cmd, "iptables -w 5 ", "iptables ")
 	switch {
+	case cmd == "cat /etc/default/ufw":
+		if h.defaults != "" {
+			return h.defaults, nil
+		}
+		return "IPV6=yes\nDEFAULT_INPUT_POLICY=\"DROP\"\nDEFAULT_OUTPUT_POLICY=\"ACCEPT\"\nDEFAULT_FORWARD_POLICY=\"DROP\"\n", nil
 	case strings.Contains(cmd, "systemd-run"):
 		return "", nil
 	case strings.Contains(cmd, "systemctl stop "+ufwRollbackUnit):
@@ -146,6 +153,9 @@ func (h *ufwHost) Run(cmd string) (string, error) {
 		out := "-N ufw-user-input\n"
 		if h.live["ufw allow 22/tcp"] {
 			out += "-A ufw-user-input -p tcp -m tcp --dport 22 -j ACCEPT\n"
+		}
+		if h.live["ufw limit 22/tcp"] {
+			out += "-A ufw-user-input -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ufw-user-limit\n"
 		}
 		for _, rule := range slices.Sorted(maps.Keys(h.live)) {
 			if f := strings.Fields(rule); len(f) >= 10 && f[2] == "from" && f[6] == "port" && f[8] == "proto" {

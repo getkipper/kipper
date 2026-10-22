@@ -97,6 +97,10 @@ func TestForeignUFWRules(t *testing.T) {
 	assert.Equal(t, []string{"ufw allow 2222/tcp comment 'web'"}, foreignUFWRules("ufw allow 2222/tcp comment 'web'\n", want, []string{"22"}),
 		"a commented rule for a port sshd does not use goes")
 
+	assert.Equal(t, []string{"ufw allow 22", "ufw limit 2222 comment 'ssh'"},
+		foreignUFWRules("ufw allow 22\nufw allow 22/tcp\nufw limit 2222 comment 'ssh'\n", want, []string{"22", "2222"}),
+		"an SSH rule without a protocol also matches TCP ahead of kip's limit rule, so it goes")
+
 	worker := foreignUFWRules("ufw allow 22/tcp\nufw allow 80/tcp\n", ufwRules([]string{"22"}, true, RoleWorker), []string{"22"})
 	assert.Equal(t, []string{"ufw allow 80/tcp"}, worker, "a worker serves no public ingress")
 }
@@ -166,6 +170,44 @@ func TestPreviewUFWAdoption(t *testing.T) {
 	assert.Contains(t, refused.Reason, "nothing listens")
 }
 
+func TestPreviewUFWAdoptionNamesDefaultPolicyChanges(t *testing.T) {
+	stock := unrecordedUFWHost(legacyUFWRules...)
+	preview, err := PreviewUFWAdoption(stock, FirewallMesh{})
+	require.NoError(t, err)
+	require.True(t, preview.Possible, preview.Reason)
+	assert.Equal(t, []string{"routed traffic: deny becomes allow"}, preview.PolicyChanges,
+		"Ubuntu's stock defaults differ from kip's only in forwarding")
+	assert.Contains(t, preview.Question("203.0.113.10"), "default for routed traffic: deny becomes allow")
+
+	filtered := unrecordedUFWHost(legacyUFWRules...)
+	filtered.defaults = "DEFAULT_INPUT_POLICY=\"ACCEPT\"\nDEFAULT_OUTPUT_POLICY=\"REJECT\"\nDEFAULT_FORWARD_POLICY=\"ACCEPT\"\n"
+	preview, err = PreviewUFWAdoption(filtered, FirewallMesh{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"incoming traffic: allow becomes deny", "outgoing traffic: reject becomes allow"}, preview.PolicyChanges)
+	assert.Contains(t, preview.Question("203.0.113.10"), "default for outgoing traffic: reject becomes allow")
+
+	ours := unrecordedUFWHost(legacyUFWRules...)
+	ours.defaults = "DEFAULT_INPUT_POLICY=DROP\nDEFAULT_OUTPUT_POLICY=ACCEPT\nDEFAULT_FORWARD_POLICY=ACCEPT\n"
+	preview, err = PreviewUFWAdoption(ours, FirewallMesh{})
+	require.NoError(t, err)
+	assert.Empty(t, preview.PolicyChanges)
+	assert.NotContains(t, preview.Question("203.0.113.10"), "default for")
+}
+
+func TestUFWAdoptionConsentCoversTheDefaultPolicies(t *testing.T) {
+	noUFWRetryDelay(t)
+	h := unrecordedUFWHost(legacyUFWRules...)
+	h.defaults = "DEFAULT_INPUT_POLICY=\"DROP\"\nDEFAULT_OUTPUT_POLICY=\"ACCEPT\"\nDEFAULT_FORWARD_POLICY=\"DROP\"\n"
+	preview, err := PreviewUFWAdoption(h, FirewallMesh{})
+	require.NoError(t, err)
+	h.defaults = "DEFAULT_INPUT_POLICY=\"DROP\"\nDEFAULT_OUTPUT_POLICY=\"DROP\"\nDEFAULT_FORWARD_POLICY=\"DROP\"\n"
+
+	err = configureFirewall(h, debianHost, false, FirewallConsent{Adopt: true, Fingerprint: preview.Fingerprint}, FirewallMesh{})
+
+	assert.ErrorContains(t, err, "changed after you agreed")
+	assert.False(t, h.claimWritten)
+}
+
 func TestConfigureUFWAdoptsAnUnrecordedFirewall(t *testing.T) {
 	noUFWRetryDelay(t)
 
@@ -214,6 +256,26 @@ func TestConfigureUFWAdoptsAnUnrecordedFirewall(t *testing.T) {
 			assert.False(t, h.saved[rule], rule)
 		}
 		assert.True(t, h.saved["ufw allow 22/tcp"])
+	})
+
+	t.Run("rate limits SSH that a rule without a protocol allowed", func(t *testing.T) {
+		h := unrecordedUFWHost("ufw allow 22", "ufw allow 80/tcp")
+
+		require.NoError(t, configureFirewall(h, debianHost, true, FirewallConsent{Adopt: true}, FirewallMesh{}))
+
+		assert.True(t, h.saved["ufw limit 22/tcp"])
+		assert.False(t, h.saved["ufw allow 22"], "an earlier allow rule for the port would skip the limit")
+		limited, deleted := -1, -1
+		for i, cmd := range h.ran {
+			if limited < 0 && strings.Contains(cmd, "ufw limit 22/tcp") {
+				limited = i
+			}
+			if deleted < 0 && strings.Contains(cmd, "ufw delete allow 22") {
+				deleted = i
+			}
+		}
+		require.GreaterOrEqual(t, deleted, 0)
+		assert.Less(t, limited, deleted, "SSH stays open: the limit rule goes in before the old allow rule comes out")
 	})
 
 	t.Run("deletes route rules with ufw route delete", func(t *testing.T) {
