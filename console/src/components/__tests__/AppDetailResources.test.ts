@@ -224,6 +224,25 @@ describe('AppDetail resources tab', () => {
     expect(cpuGauge.props('limit')).toBe(0)
   })
 
+  it('keeps what the user types while the tab reloads', async () => {
+    const wrapper = await openResources()
+    const vm = wrapper.vm as unknown as { activeTab: string, memoryLimit: string, cpuRequest: string }
+    vm.activeTab = 'logs'
+    await flushPromises()
+
+    let answer: (r: Awaited<ReturnType<typeof appsApi.fetchResources>>) => void = () => {}
+    const current = await vi.mocked(appsApi.fetchResources).getMockImplementation()!('shop', 'web')
+    vi.mocked(appsApi.fetchResources).mockImplementationOnce(() => new Promise(resolve => { answer = resolve }))
+    vm.activeTab = 'resources'
+    await flushPromises()
+    vm.memoryLimit = '3Gi'
+    answer({ ...current, cpu_request: '250m' })
+    await flushPromises()
+
+    expect(vm.memoryLimit).toBe('3Gi')
+    expect(vm.cpuRequest).toBe('250m')
+  })
+
   describe('after a resize', () => {
     // fixed answers for an app whose spec fixes memory at size, running with
     // live, pending while the two differ.
