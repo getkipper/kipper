@@ -305,20 +305,7 @@ func latestBackupFor(backups []unstructured.Unstructured, namespace string) (*un
 func backupCovers(b *unstructured.Unstructured, namespace string) bool {
 	included, _, _ := unstructured.NestedStringSlice(b.Object, "spec", "includedNamespaces")
 	excluded, _, _ := unstructured.NestedStringSlice(b.Object, "spec", "excludedNamespaces")
-	for _, ns := range excluded {
-		if ns == namespace {
-			return false
-		}
-	}
-	if len(included) == 0 {
-		return true
-	}
-	for _, ns := range included {
-		if ns == namespace || ns == "*" {
-			return true
-		}
-	}
-	return false
+	return backupscope.Covers(included, excluded, namespace)
 }
 
 func completionTime(b *unstructured.Unstructured) string {

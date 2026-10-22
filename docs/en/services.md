@@ -457,7 +457,9 @@ MinIO reads its root secret key only when it starts, so for MinIO the pod restar
 
 kip changes a RabbitMQ password through the management plugin, which Kipper's default RabbitMQ image includes. The service image must include the management plugin for this command to work.
 
-kip refuses to start while a backup of the project is running, because that backup could save the volume under one password and the credentials under the other. Run the command again once the backup has finished. A backup that starts during the few seconds of the change itself can still catch that mix, so take a fresh backup after a rotation if you rely on backups for this service.
+A cluster admin must run this command because it checks the cluster's backups and pauses resource tuning on the service. Project roles lack both permissions.
+
+kip refuses to start while an unfinished backup may include the project, because that backup could save the volume under one password and the credentials under the other. Rotation can proceed if kip can confirm that the backup excludes the project's namespace. Run the command again once the backup has finished. A backup that starts during the few seconds of the change itself can still catch that mix, so take a fresh backup after a rotation if you rely on backups for this service.
 
 If the rotation is interrupted before the password is stored, for example by Ctrl-C or a lost connection, run the same command again to resume it. kip keeps the new password in a `<service>-password-rotation` Secret until it is committed to the credentials Secret. The next run resumes any rotation whose record remains. After the password is stored, follow the restart or status-check instructions in the output. `kip service credentials` reports any remaining rotation record.
 

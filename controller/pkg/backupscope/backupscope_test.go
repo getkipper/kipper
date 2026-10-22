@@ -93,3 +93,44 @@ func TestListsAreFreshOnEveryCall(t *testing.T) {
 	b[0] = "changed"
 	assert.NotEqual(t, "changed", BackedUpClusterResources()[0])
 }
+
+func TestCoversFollowsVeleroNamespacePatterns(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		included, excluded []string
+		covers, mayCover   bool
+	}{
+		{"no lists", nil, nil, true, true},
+		{"star", []string{"*"}, nil, true, true},
+		{"name", []string{"shop"}, nil, true, true},
+		{"other name", []string{"blog"}, nil, false, false},
+		{"prefix glob", []string{"sh*"}, nil, true, true},
+		{"single character", []string{"sho?"}, nil, true, true},
+		{"bracket range is uncertain", []string{"[r-t]hop"}, nil, false, true},
+		{"negated set is uncertain", []string{"[!d]*"}, nil, false, true},
+		{"alternatives are uncertain", []string{"{shop,blog}"}, nil, false, true},
+		{"uncertain exclusion", []string{"*"}, []string{"[!s]*"}, false, true},
+		{"glob for others", []string{"blog-*"}, nil, false, false},
+		{"excluded name", nil, []string{"shop"}, false, false},
+		{"excluded star", nil, []string{"*"}, false, false},
+		{"excluded glob wins", []string{"*"}, []string{"sh*"}, false, false},
+		{"excluded glob for others", []string{"*"}, []string{"blog-*"}, true, true},
+		{"unparsed inclusion", []string{"[shop"}, nil, false, true},
+		{"unparsed exclusion", nil, []string{"[shop"}, false, true},
+		{"escape", []string{`sh\op`}, nil, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.covers, Covers(tc.included, tc.excluded, "shop"), "Covers")
+			assert.Equal(t, tc.mayCover, MayCover(tc.included, tc.excluded, "shop"), "MayCover")
+		})
+	}
+}
+
+func TestUnfinishedCountsEveryPhaseThatIsNotAnEnd(t *testing.T) {
+	for _, phase := range []string{"", "New", "InProgress", "WaitingForPluginOperations", "Finalizing", "Queued", "ReadyToStart"} {
+		assert.True(t, Unfinished(phase), phase)
+	}
+	for _, phase := range []string{"Completed", "PartiallyFailed", "Failed", "FailedValidation", "Deleting"} {
+		assert.False(t, Unfinished(phase), phase)
+	}
+}
