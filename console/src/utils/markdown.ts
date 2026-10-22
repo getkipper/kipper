@@ -74,7 +74,7 @@ renderer.code = (token: Tokens.Code) => {
 }
 
 renderer.codespan = (token: Tokens.Codespan) => {
-  return `<code class="rounded-sm bg-slate-800 px-1.5 py-0.5 font-mono text-xs text-kipper-300">${token.text}</code>`
+  return `<code class="rounded-sm bg-slate-800 px-1.5 py-0.5 font-mono text-xs text-kipper-300">${escapeHTML(token.text)}</code>`
 }
 
 renderer.table = (token: Tokens.Table) => {
@@ -105,10 +105,29 @@ renderer.blockquote = (token: Tokens.Blockquote) => {
 
 renderer.hr = () => '<hr class="my-4 border-slate-700" />'
 
+/**
+ * Displays raw HTML as text because model output can quote cluster data.
+ * Rendering that HTML could create a fake code block whose Copy button copies hidden text.
+ */
+renderer.html = (token: Tokens.HTML | Tokens.Tag) => escapeHTML(token.text)
+
 marked.use({ renderer })
+marked.use({
+  renderer: {
+    text(token: Tokens.Text | Tokens.Escape) {
+      // Marked leaves text inside raw HTML elements such as <code> unescaped.
+      // Escape it here because browsers accept tags its grammar misses, such as <img/src=x>.
+      if ('escaped' in token && token.escaped && !('tokens' in token && token.tokens)) {
+        return escapeHTML(token.text)
+      }
+      return false
+    },
+  },
+})
 
 /**
  * Returns sanitized HTML with Markdown formatting, syntax highlighting and code copy buttons.
+ * Displays raw HTML as text.
  * Sanitization protects against untrusted cluster data in AI responses.
  */
 export function renderMarkdown(text: string): string {
