@@ -139,15 +139,11 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 	// because conditions are set in memory throughout and compared once at the end.
 	statusAtEntry := app.Status.DeepCopy()
 
-	// Every failure below leaves the workload part-reconciled, so it belongs on
-	// the object rather than only in a log line. The API server folds repeats of
-	// the same reason and message into one event with a count, so a failure that
-	// recurs on every pass does not flood the namespace.
-	defer func() {
-		if retErr != nil && r.Recorder != nil {
-			r.Recorder.Event(&app, corev1.EventTypeWarning, "ReconcileFailed", retErr.Error())
-		}
-	}()
+	// A failed pass can leave the workload partially reconciled, so record the
+	// failure on the object for visibility. Conflicts are handled by retries.
+	// The event recorder counts repeated events with the same reason and message
+	// while cached, limiting duplicate events when a failure recurs.
+	defer func() { recordReconcileFailure(r.Recorder, &app, retErr) }()
 
 	if !app.DeletionTimestamp.IsZero() {
 		logger.Info("cleaning up app resources", "app", app.Name)
@@ -2551,6 +2547,16 @@ func (r *AppReconciler) enqueueAppsForGitCredential(_ context.Context, obj clien
 	return []reconcile.Request{{
 		NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: app},
 	}}
+}
+
+// recordReconcileFailure records a ReconcileFailed warning event when err and
+// recorder are non-nil. It skips API conflicts because the controller retries
+// reconciliation against the updated object.
+func recordReconcileFailure(recorder record.EventRecorder, obj runtime.Object, err error) {
+	if err == nil || recorder == nil || errors.IsConflict(err) {
+		return
+	}
+	recorder.Event(obj, corev1.EventTypeWarning, "ReconcileFailed", err.Error())
 }
 
 // SetupWithManager registers the App reconciler with the controller manager.

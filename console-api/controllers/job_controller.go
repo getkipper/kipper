@@ -66,14 +66,11 @@ func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 	}
 	statusAtEntry := job.Status.DeepCopy()
 
-	// Every failure below leaves the job part-reconciled, so it belongs on the
-	// object rather than only in a log line. The API server folds repeats of the
-	// same reason and message into one event with a count.
-	defer func() {
-		if retErr != nil && r.Recorder != nil {
-			r.Recorder.Event(&job, corev1.EventTypeWarning, "ReconcileFailed", retErr.Error())
-		}
-	}()
+	// A failed pass can leave the job partially reconciled, so record the
+	// failure on the object for visibility. Conflicts are handled by retries.
+	// The event recorder counts repeated events with the same reason and message
+	// while cached, limiting duplicate events when a failure recurs.
+	defer func() { recordReconcileFailure(r.Recorder, &job, retErr) }()
 
 	if !job.DeletionTimestamp.IsZero() {
 		logger.Info("cleaning up job resources", "job", job.Name)
