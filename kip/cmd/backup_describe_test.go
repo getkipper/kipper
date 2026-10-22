@@ -196,6 +196,64 @@ func TestDescribeBackupReportsAnUnreachableDownload(t *testing.T) {
 	assert.True(t, strings.Contains(out.String(), "kip could not read the error and warning messages") && strings.Contains(out.String(), "403"), out.String())
 }
 
+func TestDescribeBackupKeepsThePresignedLinkOutOfATransportError(t *testing.T) {
+	noDownloadWait(t)
+	srv := httptest.NewServer(http.NotFoundHandler())
+	link := srv.URL + "/backups/results.json.gz?X-Amz-Credential=sentinel-credential&X-Amz-Signature=sentinel-signature"
+	srv.Close()
+	dyn := describeClient(link, describedBackup("PartiallyFailed", 1, 0))
+	var out bytes.Buffer
+
+	require.NoError(t, describeBackup(context.Background(), dyn, "velero-daily-apps-20261021030000", &out, &http.Client{Timeout: 5 * time.Second}))
+
+	text := out.String()
+	assert.Contains(t, text, "kip could not read the error and warning messages: downloading from the backup storage at "+strings.TrimPrefix(srv.URL, "http://"))
+	assert.Contains(t, text, "connect", "the underlying failure reason stays")
+	assert.NotContains(t, text, "sentinel")
+	assert.NotContains(t, text, "results.json.gz")
+}
+
+// The client quotes a malformed redirect target in full, so a storage proxy
+// that carries the signature into Location must not get it printed.
+func TestDescribeBackupKeepsASignedRedirectOutOfTheError(t *testing.T) {
+	noDownloadWait(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "https://storage.example:bad/results?X-Amz-Credential=sentinel-credential&X-Amz-Signature=sentinel-signature")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+	dyn := describeClient(srv.URL+"/results?X-Amz-Signature=outer", describedBackup("PartiallyFailed", 1, 0))
+	var out bytes.Buffer
+
+	require.NoError(t, describeBackup(context.Background(), dyn, "velero-daily-apps-20261021030000", &out, srv.Client()))
+
+	text := out.String()
+	assert.Contains(t, text, "kip could not read the error and warning messages: downloading from the backup storage")
+	assert.Contains(t, text, "Location", "the reason stays readable")
+	assert.NotContains(t, text, "sentinel")
+	assert.NotContains(t, text, "outer")
+}
+
+func TestDescribeBackupRefusesOversizedMessages(t *testing.T) {
+	noDownloadWait(t)
+	saved := maxBackupResultsSize
+	maxBackupResultsSize = 1 << 20
+	t.Cleanup(func() { maxBackupResultsSize = saved })
+	body := gzipJSON(t, map[string]any{
+		"errors":   map[string]any{"velero": []string{strings.Repeat("x", 2<<20)}},
+		"warnings": map[string]any{},
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }))
+	defer srv.Close()
+	dyn := describeClient(srv.URL, describedBackup("PartiallyFailed", 1, 0))
+	var out bytes.Buffer
+
+	require.NoError(t, describeBackup(context.Background(), dyn, "velero-daily-apps-20261021030000", &out, srv.Client()))
+
+	assert.Contains(t, out.String(), "kip could not read the error and warning messages: the messages are larger than 1 MiB")
+	assert.NotContains(t, out.String(), strings.Repeat("x", 100))
+}
+
 func noDownloadWait(t *testing.T) {
 	t.Helper()
 	saved := downloadPollInterval

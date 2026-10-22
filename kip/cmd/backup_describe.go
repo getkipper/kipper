@@ -6,10 +6,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -112,6 +115,10 @@ var downloadPollInterval = 500 * time.Millisecond
 // Velero's link, including API calls that stall.
 var downloadWait = 30 * time.Second
 
+// maxBackupResultsSize limits decompressed message bytes to bound memory use
+// when reading a corrupt or unexpected object.
+var maxBackupResultsSize int64 = 32 << 20
+
 // downloadCleanupWait bounds the removal of kip's DownloadRequest.
 const downloadCleanupWait = 10 * time.Second
 
@@ -143,13 +150,13 @@ func fetchBackupResults(ctx context.Context, dyn dynamic.Interface, backup strin
 		_ = requests.Delete(cleanupCtx, name, metav1.DeleteOptions{})
 	}()
 
-	url, err := waitForDownloadURL(waitCtx, requests, name)
+	link, err := waitForDownloadURL(waitCtx, requests, name)
 	if err != nil {
 		return backupResults{}, err
 	}
-	resp, err := httpClient.Get(url) //nolint:gosec // the URL is Velero's presigned link to the backup storage
+	resp, err := httpClient.Get(link) //nolint:gosec // the URL is Velero's presigned link to the backup storage
 	if err != nil {
-		return backupResults{}, fmt.Errorf("downloading from the backup storage: %w", err)
+		return backupResults{}, downloadError(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
@@ -159,12 +166,44 @@ func fetchBackupResults(ctx context.Context, dyn dynamic.Interface, backup strin
 	if err != nil {
 		return backupResults{}, fmt.Errorf("reading the messages: %w", err)
 	}
+	limited := &io.LimitedReader{R: zr, N: maxBackupResultsSize + 1}
 	var results backupResults
-	if err := json.NewDecoder(zr).Decode(&results); err != nil {
+	err = json.NewDecoder(limited).Decode(&results)
+	if limited.N <= 0 {
+		return backupResults{}, fmt.Errorf("the messages are larger than %d MiB, exceeding kip's read limit", maxBackupResultsSize>>20)
+	}
+	if err != nil {
 		return backupResults{}, fmt.Errorf("reading the messages: %w", err)
 	}
 	return results, nil
 }
+
+// downloadError describes a failed download without the presigned link, whose
+// query string grants read access to the messages until it expires. It keeps
+// the storage host when the URL can be parsed, and the transport's reason.
+func downloadError(err error) error {
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		return fmt.Errorf("downloading from the backup storage: %w", withoutQueries{err})
+	}
+	if u, parseErr := url.Parse(urlErr.URL); parseErr == nil && u.Host != "" {
+		return fmt.Errorf("downloading from the backup storage at %s: %w", u.Host, withoutQueries{urlErr.Err})
+	}
+	return fmt.Errorf("downloading from the backup storage: %w", withoutQueries{urlErr.Err})
+}
+
+// urlQuery matches from a question mark to the next whitespace or double quote
+// to redact URL queries in error messages.
+var urlQuery = regexp.MustCompile(`\?[^\s"]*`)
+
+// withoutQueries prints an error with every URL query string removed, because
+// the HTTP client quotes a malformed redirect target in full and that target
+// can carry the signature too.
+type withoutQueries struct{ err error }
+
+func (e withoutQueries) Error() string { return urlQuery.ReplaceAllString(e.err.Error(), "") }
+
+func (e withoutQueries) Unwrap() error { return e.err }
 
 // waitForDownloadURL polls until the DownloadRequest is processed with a
 // non-empty URL. API errors and context cancellation return an error.
