@@ -1,14 +1,17 @@
 package doctor
 
 import (
+	"bytes"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/getkipper/kipper/controller/pkg/hopca"
 	"github.com/getkipper/kipper/controller/pkg/spki"
 )
 
@@ -122,9 +125,12 @@ func CheckHopCertificate(snap Snapshot) (Result, []string) {
 // CheckTraefikCopy compares the SPKI fingerprint in Traefik's copy with keys[0],
 // the live key returned by CheckHopCertificate. Only the live key may match,
 // because Traefik loads this copy at startup before its Kubernetes provider
-// syncs and must not serve a staged candidate. A read failure or empty keys
+// syncs and must not serve a staged candidate. A copy read failure or empty keys
 // skips the check. An absent copy warns, and an unreadable certificate or
-// different key fails. A match passes without checking the private key or rollout.
+// different key fails. A matching key still warns if the supplied Deployment
+// lacks the copy's mount on the Traefik container at hopca.TraefikMountPath,
+// or if a readable hop certificate differs from the copy. Otherwise it passes.
+// The private key and rollout are not checked.
 func CheckTraefikCopy(snap Snapshot, keys []string) Result {
 	const id, label = "traefik-copy", "Traefik's copy"
 	if err, ok := snap.Missing[PartTraefikCopy]; ok {
@@ -145,7 +151,38 @@ func CheckTraefikCopy(snap Snapshot, keys []string) Result {
 		return Result{ID: id, Label: label, Status: Fail,
 			Message: "Traefik's copy holds a different key from the hop certificate. Traefik may already serve this key and will load it on its next restart. The gateway refuses this key"}
 	}
+	if dep := snap.Workloads[hopca.TraefikNamespace+"/"+hopca.TraefikDeploymentName]; dep != nil && !mountsTraefikCopy(dep) {
+		return Result{ID: id, Label: label, Status: Warn,
+			Message: "Traefik does not mount its copy of the hop certificate, so after a restart it waits for its Kubernetes provider to load the certificate. Run a full kip upgrade"}
+	}
+	if hop, err := parseCertificate(snap.HopCert); err == nil && !bytes.Equal(hop.Raw, cert.Raw) {
+		return Result{ID: id, Label: label, Status: Warn,
+			Message: "Traefik's copy has the same public key as the hop certificate but a different certificate. console-api synchronizes the copy on each gateway heartbeat. If this persists, check the gateway heartbeat"}
+	}
 	return Result{ID: id, Label: label, Status: Pass, Message: "Traefik's copy matches the hop certificate's public key"}
+}
+
+// traefikContainer is the container name the Traefik chart gives its proxy.
+const traefikContainer = "traefik"
+
+func mountsTraefikCopy(dep *appsv1.Deployment) bool {
+	pod := dep.Spec.Template.Spec
+	for _, v := range pod.Volumes {
+		if v.Secret == nil || v.Secret.SecretName != hopca.TraefikCopyName {
+			continue
+		}
+		for _, c := range pod.Containers {
+			if c.Name != traefikContainer {
+				continue
+			}
+			for _, m := range c.VolumeMounts {
+				if m.Name == v.Name && m.MountPath == hopca.TraefikMountPath {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func parseCertificate(pemText string) (*x509.Certificate, error) {

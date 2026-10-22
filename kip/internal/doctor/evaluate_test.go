@@ -18,6 +18,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/getkipper/kipper/controller/pkg/hopca"
 	"github.com/getkipper/kipper/controller/pkg/spki"
 )
 
@@ -323,4 +324,74 @@ func TestCheckTraefikCopy_ComparesWithTheLiveKeyOnly(t *testing.T) {
 
 	r := CheckTraefikCopy(Snapshot{TraefikCopyCert: candidatePEM}, []string{spki.Fingerprint(live), spki.Fingerprint(candidate)})
 	assert.Equal(t, Fail, r.Status, "the copy must never serve a rotation candidate")
+}
+
+func testCertsSharingAKey(t *testing.T) (first, second string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	sign := func(serial int64) string {
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: "kipper hop"},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		require.NoError(t, err)
+		return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	}
+	return sign(1), sign(2)
+}
+
+func traefikWithCopy(declared, mounted bool) *appsv1.Deployment {
+	dep := deployment(hopca.TraefikNamespace, hopca.TraefikDeploymentName, 1)
+	container := corev1.Container{Name: "traefik"}
+	if declared {
+		dep.Spec.Template.Spec.Volumes = []corev1.Volume{{
+			Name:         "kipper-hop",
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: hopca.TraefikCopyName}},
+		}}
+	}
+	if mounted {
+		container.VolumeMounts = []corev1.VolumeMount{{Name: "kipper-hop", MountPath: hopca.TraefikMountPath, ReadOnly: true}}
+	}
+	dep.Spec.Template.Spec.Containers = []corev1.Container{container}
+	return dep
+}
+
+func TestCheckTraefikCopy_WarnsWhenTheCopyLagsBehindARenewedCertificate(t *testing.T) {
+	renewed, lagging := testCertsSharingAKey(t)
+	hop, err := parseCertificate(renewed)
+	require.NoError(t, err)
+	keys := []string{spki.Fingerprint(hop)}
+
+	r := CheckTraefikCopy(Snapshot{HopCert: renewed, TraefikCopyCert: lagging}, keys)
+	assert.Equal(t, Warn, r.Status)
+	assert.Contains(t, r.Message, "different certificate")
+
+	assert.Equal(t, Pass, CheckTraefikCopy(Snapshot{HopCert: renewed, TraefikCopyCert: renewed}, keys).Status)
+}
+
+func TestCheckTraefikCopy_WarnsWhenTraefikDoesNotMountTheCopy(t *testing.T) {
+	live, livePEM := testCert(t, "kipper hop")
+	keys := []string{spki.Fingerprint(live)}
+	key := hopca.TraefikNamespace + "/" + hopca.TraefikDeploymentName
+
+	check := func(dep *appsv1.Deployment) Result {
+		return CheckTraefikCopy(Snapshot{HopCert: livePEM, TraefikCopyCert: livePEM,
+			Workloads: map[string]*appsv1.Deployment{key: dep}}, keys)
+	}
+
+	absent := check(traefikWithCopy(false, false))
+	assert.Equal(t, Warn, absent.Status)
+	assert.Contains(t, absent.Message, "does not mount")
+	assert.Contains(t, absent.Message, "kip upgrade")
+
+	assert.Equal(t, Warn, check(traefikWithCopy(true, false)).Status, "a declared volume no container mounts is not a mount")
+	assert.Equal(t, Pass, check(traefikWithCopy(true, true)).Status)
+
+	sidecar := traefikWithCopy(true, false)
+	sidecar.Spec.Template.Spec.Containers = append(sidecar.Spec.Template.Spec.Containers, corev1.Container{
+		Name: "sidecar", VolumeMounts: []corev1.VolumeMount{{Name: "kipper-hop", MountPath: hopca.TraefikMountPath}},
+	})
+	assert.Equal(t, Warn, check(sidecar).Status, "another container's mount does not reach Traefik")
 }
