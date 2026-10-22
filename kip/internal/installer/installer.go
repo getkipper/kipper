@@ -475,7 +475,7 @@ func Run(opts Options) (*Result, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := checkClusterK3sSkew(client, records); err != nil {
+		if err := checkClusterK3sSkew(client, records, "kip install"); err != nil {
 			return nil, err
 		}
 		// Recheck previewed peers against the validated records before applying rules.

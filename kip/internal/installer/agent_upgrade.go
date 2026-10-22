@@ -63,8 +63,9 @@ func HasWorkers(records []NodeRecord) bool {
 }
 
 // checkClusterK3sSkew checks recorded workers against the planned server version.
-// It reads versions only when the cluster has workers.
-func checkClusterK3sSkew(client CommandRunner, records []NodeRecord) error {
+// It reads versions only when the cluster has workers. rerun names the command
+// to run again after fixing the worker.
+func checkClusterK3sSkew(client CommandRunner, records []NodeRecord, rerun string) error {
 	if !HasWorkers(records) {
 		return nil
 	}
@@ -76,7 +77,7 @@ func checkClusterK3sSkew(client CommandRunner, records []NodeRecord) error {
 	if err != nil {
 		return err
 	}
-	return checkK3sSkew(installed, records, versions)
+	return checkK3sSkew(installed, records, versions, rerun)
 }
 
 // checkK3sSkew compares recorded workers with k3sVersion if decideK3sInstall
@@ -84,7 +85,7 @@ func checkClusterK3sSkew(client CommandRunner, records []NodeRecord) error {
 // because kip never downgrades an agent. It also rejects a new gap of more
 // than kubeletMinorSkew minor versions or a different major version. An existing
 // gap is left to the subsequent agent upgrade. Records without a Node are skipped.
-func checkK3sSkew(installed string, records []NodeRecord, versions map[string]nodeVersion) error {
+func checkK3sSkew(installed string, records []NodeRecord, versions map[string]nodeVersion, rerun string) error {
 	run, _, err := decideK3sInstall(installed, k3sVersion)
 	if err != nil {
 		return err
@@ -120,11 +121,11 @@ func checkK3sSkew(installed string, records []NodeRecord, versions map[string]no
 			return err
 		}
 		if newer {
-			return fmt.Errorf("worker %s runs k3s %s, newer than the %s the server will run after this install. kip never downgrades a worker, so nothing was changed. Use a kip release that installs %s or later", r.Name, node.version, planned, node.version)
+			return fmt.Errorf("worker %s runs k3s %s, newer than the %s the server will run. kip never downgrades a worker, so nothing was changed. Use a kip release that installs %s or later", r.Name, node.version, planned, node.version)
 		}
 		tooFar := func(server [4]int) bool { return server[0] != av[0] || server[1]-av[1] > kubeletMinorSkew }
 		if tooFar(pv) && (installed == "" || !tooFar(iv)) {
-			return fmt.Errorf("worker %s runs k3s %s, and upgrading the server to %s would leave it more than three minor versions behind, which Kubernetes does not support. Nothing was changed. Bring the worker to the server's version first with 'kip node add %s', then run kip install again", r.Name, node.version, planned, r.Host)
+			return fmt.Errorf("worker %s runs k3s %s, and upgrading the server to %s would leave it more than three minor versions behind, which Kubernetes does not support. Nothing was changed. Bring the worker to the server's version first with 'kip node add %s', then run %s again", r.Name, node.version, planned, r.Host, rerun)
 		}
 	}
 	return nil
@@ -168,11 +169,12 @@ INSTALL_K3S_VERSION=%[4]s INSTALL_K3S_EXEC=agent INSTALL_K3S_FORCE_RESTART=true 
 // onWorker must connect to the host, call use synchronously and release the
 // connection. The caller must hold the node lifecycle lease and pass runners
 // that check lease ownership for both the server and worker commands.
-func UpgradeAgents(out io.Writer, master CommandRunner, onWorker func(host string, use func(CommandRunner) error) error) error {
-	return upgradeAgents(out, master, onWorker, defaultJoinTimeouts.ready, defaultJoinTimeouts.interval)
+// The rerun command appears in recovery instructions.
+func UpgradeAgents(out io.Writer, master CommandRunner, onWorker func(host string, use func(CommandRunner) error) error, rerun string) error {
+	return upgradeAgents(out, master, onWorker, rerun, defaultJoinTimeouts.ready, defaultJoinTimeouts.interval)
 }
 
-func upgradeAgents(out io.Writer, master CommandRunner, onWorker func(host string, use func(CommandRunner) error) error, timeout, interval time.Duration) error {
+func upgradeAgents(out io.Writer, master CommandRunner, onWorker func(host string, use func(CommandRunner) error) error, rerun string, timeout, interval time.Duration) error {
 	records, err := ReadNodeRecords(master)
 	if err != nil {
 		return err
@@ -207,7 +209,7 @@ func upgradeAgents(out io.Writer, master CommandRunner, onWorker func(host strin
 		}
 		current, ok := now[w.Name]
 		if !ok {
-			return fmt.Errorf("worker %s has no node in the cluster. Rejoin it with 'kip node add %s', then run kip install again", w.Name, w.Host)
+			return fmt.Errorf("worker %s has no node in the cluster. Rejoin it with 'kip node add %s', then run %s again", w.Name, w.Host, rerun)
 		}
 		if current.version == target && current.ready {
 			_, _ = fmt.Fprintf(out, "  ✔  Worker %s already runs k3s %s\n", w.Name, target)
@@ -225,7 +227,7 @@ func upgradeAgents(out io.Writer, master CommandRunner, onWorker func(host strin
 				return err
 			})
 			if err != nil {
-				return fmt.Errorf("upgrading k3s on worker %s: %w. Run kip install again to resume", w.Name, hostFailure(hostOut, err))
+				return fmt.Errorf("upgrading k3s on worker %s: %w. Run %s again to resume", w.Name, hostFailure(hostOut, err), rerun)
 			}
 		}
 		upgraded := func() (bool, error) {
@@ -240,7 +242,7 @@ func upgradeAgents(out io.Writer, master CommandRunner, onWorker func(host strin
 			return true, nil
 		}
 		if err := pollUntil(timeout, interval, upgraded); err != nil {
-			return fmt.Errorf("worker %s did not report Ready on k3s %s within %s (%v). Run kip install again to resume", w.Name, target, timeout, err)
+			return fmt.Errorf("worker %s did not report Ready on k3s %s within %s (%v). Run %s again to resume", w.Name, target, timeout, err, rerun)
 		}
 		_, _ = fmt.Fprintf(out, "  ✔  Worker %s runs k3s %s\n", w.Name, target)
 	}

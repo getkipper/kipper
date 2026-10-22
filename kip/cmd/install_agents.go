@@ -18,8 +18,9 @@ type agentServer interface {
 // the same node lifecycle lease as kip node add and remove. It takes the lease
 // only when a worker is recorded. dial receives each worker's host and recorded
 // SSH user, with an empty user selecting the default login. It returns the
-// connection and cleanup function.
-func upgradeAgentsAfterInstall(out io.Writer, server agentServer, dial func(host, user string) (installer.FirewallRunner, func(), error)) error {
+// connection and cleanup function. The command identifies the lease holder
+// and appears in recovery instructions.
+func upgradeAgentsAfterInstall(out io.Writer, server agentServer, dial func(host, user string) (installer.FirewallRunner, func(), error), command string) error {
 	records, err := installer.ReadNodeRecords(server)
 	if err != nil {
 		return err
@@ -32,7 +33,7 @@ func upgradeAgentsAfterInstall(out io.Writer, server agentServer, dial func(host
 		return nil
 	}
 	say(out, "\n  Bringing the workers to the server's k3s version...\n")
-	lease, err := installer.TakeNodeLease(server, "kip install")
+	lease, err := installer.TakeNodeLease(server, command)
 	if err != nil {
 		return err
 	}
@@ -45,7 +46,7 @@ func upgradeAgentsAfterInstall(out io.Writer, server agentServer, dial func(host
 		defer done()
 		return use(lease.Host(c))
 	}
-	return installer.UpgradeAgents(out, lease.Server(server), onWorker)
+	return installer.UpgradeAgents(out, lease.Server(server), onWorker, command)
 }
 
 // sshDialer returns a dial function that uses base's keys and options.
@@ -79,5 +80,5 @@ func upgradeAgentsDirect(host, user, keyPath, fallbackKeyPath string) error {
 		return err
 	}
 	defer func() { _ = server.Close() }()
-	return upgradeAgentsAfterInstall(os.Stdout, server, sshDialer(cfg))
+	return upgradeAgentsAfterInstall(os.Stdout, server, sshDialer(cfg), "kip install")
 }

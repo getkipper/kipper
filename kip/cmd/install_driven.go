@@ -196,7 +196,7 @@ func runDrivenInstall(cmd *cobra.Command, credentialsFile string) error {
 	}
 	// Worker upgrades use this machine's SSH credentials after the server job finishes.
 	workerSSH := ssh.Config{User: user, KeyPath: keyPath, Options: []string{"BatchMode=yes"}}
-	if err := upgradeAgentsAfterInstall(os.Stdout, client, sshDialer(workerSSH)); err != nil {
+	if err := upgradeAgentsAfterInstall(os.Stdout, client, sshDialer(workerSSH), "kip install"); err != nil {
 		return err
 	}
 	if noLogin {
