@@ -21,6 +21,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/controller/pkg/mongotool"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
@@ -361,15 +362,6 @@ func (h *Handler) ReceiveDBImportHandler(w http.ResponseWriter, r *http.Request)
 // in its environment, which keeps it out of the process's arguments.
 const mysqlClient = `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" `
 
-// mongoTool passes the root password to a MongoDB tool through a temporary config
-// file with mode 0600, keeping it out of the tool's arguments. The script removes
-// the file after the tool exits and preserves its exit status.
-func mongoTool(invocation string) string {
-	return fmt.Sprintf(
-		`c="$(mktemp)"; chmod 600 "$c"; printf 'password: %%s\n' "$MONGO_INITDB_ROOT_PASSWORD" >"$c"; %s --config="$c" -u "$MONGO_INITDB_ROOT_USERNAME" --authenticationDatabase admin; rc=$?; rm -f "$c"; exit $rc`,
-		invocation)
-}
-
 // buildDumpCommand returns a command and container for services whose dumps can
 // be restored from a single stream. Unsupported types return nil and an empty
 // container name. migratePostgres handles Postgres one database at a time.
@@ -384,7 +376,7 @@ func buildDumpCommand(svcType, serviceName string) ([]string, string) {
 		// official image starts mongod with --auth when both are present, so an
 		// unauthenticated dump is refused. The localhost exception does not
 		// apply once a root user exists.
-		return []string{"sh", "-c", mongoTool("mongodump --archive --quiet")}, serviceName
+		return []string{"sh", "-c", mongotool.Script("mongodump --archive --quiet")}, serviceName
 	case "redis":
 		// SAVE blocks until the RDB is on disk, so the copied file is the
 		// current dataset. BGSAVE returns before the write finishes, and a
@@ -402,7 +394,7 @@ func buildImportCommand(svcType, serviceName string) ([]string, string) {
 	case "mysql":
 		return []string{"sh", "-c", mysqlClient + "mysql -u root"}, serviceName
 	case "mongodb":
-		return []string{"sh", "-c", mongoTool("mongorestore --archive --quiet")}, serviceName
+		return []string{"sh", "-c", mongotool.Script("mongorestore --archive --quiet")}, serviceName
 	case "redis":
 		// DEBUG RELOAD without NOSAVE first saves the (empty) in-memory
 		// dataset over the file it is about to load, silently discarding the
