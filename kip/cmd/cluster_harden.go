@@ -17,8 +17,10 @@ var clusterHardenCmd = &cobra.Command{
 	Long: `Audit every recorded node for surplus services and an existing firewall,
 then apply Kipper's hardening defaults. Safe to repeat.
 
-Mirrors the hardening that 'kip install' and 'kip node add' apply, so
-existing clusters can use current defaults without reinstalling.
+Applies the service and firewall hardening of 'kip install' and 'kip node
+add', so existing clusters can use current defaults without reinstalling.
+It also turns off SSH password login on every node unless
+--allow-ssh-passwords is set. 'kip node add' leaves SSH password login unchanged.
 The server goes first, then each worker one at a time. A worker gets the
 worker firewall: SSH open to all sources and cluster ports open to other
 nodes, with no public access to ports 80, 443 or 6443. kip stops at the first
@@ -53,12 +55,7 @@ func runClusterHarden(cmd *cobra.Command, _ []string) error {
 	allowSSHPasswords, _ := cmd.Flags().GetBool("allow-ssh-passwords")
 	harden, _ := cmd.Flags().GetBool("harden")
 	isTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
-	opts := hardenOptions{
-		harden:       harden,
-		rateLimitSSH: !noSSHRateLimit,
-		keyOnlySSH:   harden && !allowSSHPasswords,
-		askToAdopt:   adoptionQuestion(isTTY),
-	}
+	opts := newHardenOptions(harden, noSSHRateLimit, allowSSHPasswords, adoptionQuestion(isTTY))
 	opts.firewall, _ = cmd.Flags().GetBool("firewall")
 	opts.adoptFirewall, _ = cmd.Flags().GetBool("adopt-firewall")
 
@@ -103,6 +100,15 @@ type hardenOptions struct {
 	harden, firewall, adoptFirewall bool
 	rateLimitSSH, keyOnlySSH        bool
 	askToAdopt                      func(question string) bool
+}
+
+func newHardenOptions(harden, noSSHRateLimit, allowSSHPasswords bool, askToAdopt func(question string) bool) hardenOptions {
+	return hardenOptions{
+		harden:       harden,
+		rateLimitSSH: !noSSHRateLimit,
+		keyOnlySSH:   !allowSSHPasswords,
+		askToAdopt:   askToAdopt,
+	}
 }
 
 // hardenNode audits one host, then disables surplus services, configures its
