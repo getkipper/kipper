@@ -108,6 +108,8 @@ kip cluster access kubeconfig [--port 16443]  # a kubeconfig context for that po
 
 Triggers a rolling restart of a platform or cluster component, for when it has stale configuration or needs to pick up changes.
 
+If the Kubernetes API request fails or the API rejects your login, kip restarts the component over SSH by running `kubectl` on the server with the cluster's SSH key. Login can fail when Traefik serves its fallback certificate after a restart. Other API errors, such as a permission denial, are reported without retrying over SSH.
+
 ```bash
 kip platform restart dex           # restart identity provider
 kip platform restart console       # restart web console
