@@ -118,7 +118,7 @@ For clusters installed before host hardening was the default, apply the same def
 ```bash
 kip cluster harden                    # uses the current cluster
 kip cluster harden --cluster storefront  # specific cluster
-kip cluster harden --firewall=false   # only disable surplus services
+kip cluster harden --firewall=false   # disable surplus services and turn off SSH password login
 ```
 
 The command is idempotent. It hardens every recorded node: the server first, then each worker one at a time, each with the firewall for its role. A worker allows SSH from all sources and cluster ports from other nodes, with no public access to ports 80, 443 or 6443. kip stops at the first node it cannot reach or harden, names it, and starts again from the server on a rerun. It runs the same audit as `kip install`, then disables installed `rpcbind` units and stops Cockpit when its socket listens on all interfaces. It configures UFW, or firewalld on Rocky Linux, AlmaLinux and CentOS Stream, under the same ownership rules as `kip install`, and accepts `--adopt-firewall` too. After loading firewalld, Kipper restarts k3s if it is running to restore its network rules. The restart can briefly interrupt pod networking.
