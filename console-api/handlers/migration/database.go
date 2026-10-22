@@ -471,7 +471,6 @@ func (h *Handler) estimateDatabaseSize(ctx context.Context, namespace, serviceNa
 }
 
 func buildManualMigrationSteps(svcType, serviceName, namespace string) []string {
-	// Extract project from namespace for --project flag
 	project := namespace
 
 	switch svcType {
@@ -485,25 +484,26 @@ func buildManualMigrationSteps(svcType, serviceName, namespace string) []string 
 			fmt.Sprintf("kip exec %s --project %s -- psql -U kipper -d app -v ON_ERROR_STOP=1 < /tmp/%s-app.sql", serviceName, project, serviceName),
 		}
 	case "mysql":
+		// Single quotes defer password expansion to the shell inside the pod.
 		return []string{
 			"# Export from source cluster:",
-			fmt.Sprintf("kip exec %s --project %s -- mysqldump -u root --all-databases --single-transaction > %s-dump.sql", serviceName, project, serviceName),
+			fmt.Sprintf(`kip exec %s --project %s -- sh -c '%smysqldump -u root --all-databases --single-transaction' > %s-dump.sql`, serviceName, project, mysqlClient, serviceName),
 			"# Copy to target server:",
 			fmt.Sprintf("scp %s-dump.sql root@<target-server>:/tmp/", serviceName),
 			"# Import on target cluster:",
-			fmt.Sprintf("kip exec %s --project %s -- mysql -u root < /tmp/%s-dump.sql", serviceName, project, serviceName),
+			fmt.Sprintf(`kip exec %s --project %s -- sh -c '%smysql -u root' < /tmp/%s-dump.sql`, serviceName, project, mysqlClient, serviceName),
 		}
 	case "mongodb":
-		// The credentials are read inside the pod, so the command runs under
-		// sh -c in single quotes: unquoted, the operator's own shell would
-		// expand the variables to nothing before kip ever saw them.
+		// Single quotes let the pod's shell read its credentials. Otherwise,
+		// the operator's shell would expand the variables before kip sees them.
+		// These scripts contain no single quotes, so the outer quoting is safe.
 		return []string{
 			"# Export from source cluster:",
-			fmt.Sprintf(`kip exec %s --project %s -- sh -c 'mongodump --archive -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin' > %s-dump.archive`, serviceName, project, serviceName),
+			fmt.Sprintf(`kip exec %s --project %s -- sh -c '%s' > %s-dump.archive`, serviceName, project, mongotool.Script("mongodump --archive"), serviceName),
 			"# Copy to target server:",
 			fmt.Sprintf("scp %s-dump.archive root@<target-server>:/tmp/", serviceName),
 			"# Import on target cluster:",
-			fmt.Sprintf(`kip exec %s --project %s -- sh -c 'mongorestore --archive -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin' < /tmp/%s-dump.archive`, serviceName, project, serviceName),
+			fmt.Sprintf(`kip exec %s --project %s -- sh -c '%s' < /tmp/%s-dump.archive`, serviceName, project, mongotool.Script("mongorestore --archive"), serviceName),
 		}
 	default:
 		return []string{
