@@ -217,7 +217,8 @@ func (r *PlatformConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, stderrors.Join(errs...)
 	}
 	if waiting {
-		// Poll so the chart can be recreated after deletion; HelmChart events are not watched.
+		// Poll in case the HelmChart watch misses the deletion event needed
+		// to recreate the chart.
 		return ctrl.Result{RequeueAfter: helmChartDeletePoll}, nil
 	}
 	return ctrl.Result{}, nil
@@ -628,15 +629,24 @@ func memoryOverrideMap(overrides map[string]kipperv1.ComponentOverride) map[stri
 }
 
 func (r *PlatformConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// GenerationChangedPredicate suppresses reconcile triggers when only the
-	// status subresource (which we write ourselves) changes. Without it, every
-	// Status().Update would enqueue another reconcile and we'd loop forever
-	// against the singleton PlatformConfig CR on every cluster.
+	// Filter out status-only PlatformConfig updates to avoid reconciling
+	// again after writing our own status.
+	helmChart := &unstructured.Unstructured{}
+	helmChart.SetGroupVersionKind(helmChartGVK)
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kipperv1.PlatformConfig{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&networkingv1.NetworkPolicy{}, handler.EnqueueRequestsFromMapFunc(mapGrafanaPolicy)).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(mapIngressControllerConfig)).
+		// kip upgrade can overwrite memory sizing with installer defaults.
+		// Watch chart spec changes to restore the configured sizing. Our own
+		// chart update triggers another pass, which skips unchanged values.
+		Watches(helmChart, handler.EnqueueRequestsFromMapFunc(mapSizedHelmChart), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(r)
+}
+
+func mapSizedHelmChart(_ context.Context, o client.Object) []reconcile.Request {
+	_, sized := platform.ComponentsByChart()[o.GetName()]
+	return platformConfigRequest(o.GetNamespace() == helmChartNamespace && sized)
 }
 
 func platformConfigRequest(match bool) []reconcile.Request {

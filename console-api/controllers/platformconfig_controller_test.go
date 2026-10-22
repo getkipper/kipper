@@ -1071,3 +1071,23 @@ func TestPlatformConfigReconciler_RecordsLonghornOnALegacyCluster(t *testing.T) 
 		})
 	}
 }
+
+// TestMapSizedHelmChart checks which charts trigger reconciliation so memory
+// sizing can be restored when kip upgrade overwrites it with installer defaults.
+func TestMapSizedHelmChart(t *testing.T) {
+	chart := func(namespace, name string) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(helmChartGVK)
+		u.SetNamespace(namespace)
+		u.SetName(name)
+		return u
+	}
+
+	for _, name := range []string{"traefik", "keda", "velero"} {
+		reqs := mapSizedHelmChart(context.Background(), chart(helmChartNamespace, name))
+		require.Len(t, reqs, 1, name)
+		assert.Equal(t, PlatformConfigName, reqs[0].Name)
+	}
+	assert.Empty(t, mapSizedHelmChart(context.Background(), chart(helmChartNamespace, "coredns")), "a chart the reconciler does not size")
+	assert.Empty(t, mapSizedHelmChart(context.Background(), chart("default", "traefik")), "a same-named chart outside kube-system")
+}
