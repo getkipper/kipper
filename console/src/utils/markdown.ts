@@ -29,13 +29,17 @@ marked.setOptions({
   gfm: true,
 })
 
-let codeBlockIndex = 0
-const codeBlockContents: string[] = []
-
-// Preserve inline formatting without the paragraph wrapper.
+/** Preserves inline formatting while omitting the paragraph wrapper. */
 function parseInline(tokens: Token[]): string {
   return marked.parser([{ type: 'paragraph', raw: '', text: '', tokens }] as TokensList)
     .replace(/^<p>/, '').replace(/<\/p>\n?$/, '')
+}
+
+function escapeHTML(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
 }
 
 const renderer = new marked.Renderer()
@@ -51,25 +55,19 @@ renderer.heading = (token: Tokens.Heading) => {
 }
 
 renderer.code = (token: Tokens.Code) => {
-  const idx = codeBlockIndex++
-  codeBlockContents.push(token.text)
-
   let highlighted: string
   if (token.lang && hljs.getLanguage(token.lang)) {
     highlighted = hljs.highlight(token.text, { language: token.lang }).value
   } else {
-    highlighted = token.text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
+    highlighted = escapeHTML(token.text)
   }
 
-  const langLabel = token.lang || ''
+  const langLabel = escapeHTML(token.lang || '')
 
-  return `<div class="group/code relative my-2">` +
+  return `<div data-code-block class="group/code relative my-2">` +
     `<div class="flex items-center justify-between rounded-t-lg bg-slate-800 px-3 py-1.5">` +
     `<span class="text-[10px] font-medium text-slate-500">${langLabel}</span>` +
-    `<button data-copy-code="${idx}" class="text-[10px] text-slate-500 hover:text-slate-300 transition-colors">Copy</button>` +
+    `<button data-copy-code class="text-[10px] text-slate-500 hover:text-slate-300 transition-colors">Copy</button>` +
     `</div>` +
     `<pre class="rounded-b-lg bg-slate-950 p-3 font-mono text-xs leading-relaxed overflow-x-auto"><code class="hljs">${highlighted}</code></pre>` +
     `</div>`
@@ -109,21 +107,28 @@ renderer.hr = () => '<hr class="my-4 border-slate-700" />'
 
 marked.use({ renderer })
 
-/** Sanitizes rendered Markdown before display; AI responses can contain untrusted cluster data. */
+/**
+ * Returns sanitized HTML with Markdown formatting, syntax highlighting and code copy buttons.
+ * Sanitization protects against untrusted cluster data in AI responses.
+ */
 export function renderMarkdown(text: string): string {
-  codeBlockIndex = 0
-  codeBlockContents.length = 0
   return DOMPurify.sanitize(marked.parse(text) as string)
 }
 
+/**
+ * Copies code from the clicked button's block in the rendered DOM so each message copies its own code.
+ * Ignores clicks outside copy buttons and buttons with no matching code element.
+ * Requires an element event target and the Clipboard API.
+ * Shows “Copied!” for two seconds without waiting for the clipboard write to complete.
+ * Clipboard errors are not handled.
+ */
 export function handleCodeCopyClick(e: MouseEvent): void {
   const target = e.target as HTMLElement
   const btn = target.closest('[data-copy-code]') as HTMLElement
   if (!btn) return
 
-  const idx = parseInt(btn.dataset.copyCode || '0', 10)
-  const code = codeBlockContents[idx]
-  if (code !== undefined) {
+  const code = btn.closest('[data-code-block]')?.querySelector(':scope > pre > code')?.textContent
+  if (code != null) {
     navigator.clipboard.writeText(code)
     btn.textContent = 'Copied!'
     setTimeout(() => { btn.textContent = 'Copy' }, 2000)
