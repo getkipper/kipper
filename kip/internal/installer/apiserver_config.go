@@ -221,13 +221,13 @@ func (f fencedRunner) fence(command string) string {
 func (f fencedRunner) Run(command string) (string, error) {
 	fenced := f.fence(command)
 	out, err := f.base.Run(fenced)
-	return out, fencedError(fenced, command, err)
+	return out, fencedError(fenced, command, f.token, err)
 }
 
 func (f fencedRunner) RunStdin(command string, stdin io.Reader) (string, error) {
 	fenced := f.fence(command)
 	out, err := f.base.RunStdin(fenced, stdin)
-	return out, fencedError(fenced, command, err)
+	return out, fencedError(fenced, command, f.token, err)
 }
 
 // commandError names the requested command without the lock wrapper and its owner
@@ -241,7 +241,10 @@ type commandError struct {
 func (e commandError) Error() string { return e.message }
 func (e commandError) Unwrap() error { return e.err }
 
-func fencedError(fenced, command string, err error) error {
+// fencedError replaces quoted and unquoted lock wrappers with the requested
+// command and redacts any remaining owner token, including in echoed stderr.
+// It preserves the underlying cause for error inspection and returns nil for nil.
+func fencedError(fenced, command, token string, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -249,7 +252,12 @@ func fencedError(fenced, command string, err error) error {
 	if cause == nil {
 		cause = err
 	}
-	return commandError{message: strings.Replace(err.Error(), strconv.Quote(fenced), strconv.Quote(command), 1), err: cause}
+	message := strings.Replace(err.Error(), strconv.Quote(fenced), strconv.Quote(command), 1)
+	message = strings.ReplaceAll(message, fenced, command)
+	if token != "" {
+		message = strings.ReplaceAll(message, token, "<lock token>")
+	}
+	return commandError{message: message, err: cause}
 }
 
 // pendingWriteIsUnchanged reports whether the config matches the pending checksum.
