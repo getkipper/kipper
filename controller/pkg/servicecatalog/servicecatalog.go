@@ -87,6 +87,8 @@ func DefaultResources(serviceType string) (cpu, memory string) {
 		return "500m", "1Gi"
 	case "opensearch":
 		return "100m", "2Gi"
+	case "rabbitmq":
+		return "100m", "512Mi"
 	default:
 		return "100m", "128Mi"
 	}

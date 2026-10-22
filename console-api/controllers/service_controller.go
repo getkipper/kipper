@@ -1452,7 +1452,7 @@ func serviceCatalog(svcType string) serviceCatalogEntry {
 		}
 	case "rabbitmq":
 		return serviceCatalogEntry{
-			image: "rabbitmq", defaultVersion: "3-management-alpine", port: 5672, resourceProfile: "standard",
+			image: "rabbitmq", defaultVersion: "3-management-alpine", port: 5672, resourceProfile: "memory-heavy",
 			dataPath: "/var/lib/rabbitmq", defaultStorage: "1Gi",
 			envVars: func(name string) []corev1.EnvVar {
 				return []corev1.EnvVar{

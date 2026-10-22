@@ -62,9 +62,11 @@ flowchart TD
 | `--environment` | — | Target environment (e.g. test, acc, prod) |
 | `--storage` | `1Gi` | Storage size |
 | `--cpu` | Request `500m` (postgres/mysql/mongodb), `100m` (others). OpenSearch has a `1000m` limit. | Sets the CPU request and limit to the same value. |
-| `--memory` | `1Gi` (postgres/mysql/mongodb), `2Gi` (opensearch), `128Mi` (others) | Sets the memory request and limit to the same value. |
+| `--memory` | `1Gi` (postgres/mysql/mongodb), `2Gi` (opensearch), `512Mi` (rabbitmq), `128Mi` (others) | Sets the memory request and limit to the same value. |
 | `--tls` | `required` (postgres) | Postgres only. `required` refuses connections without TLS, `on` serves TLS and still accepts plaintext, `off` creates the service without TLS. See [Encrypted Postgres connections](#postgres-tls). |
 | `--consistent-backups` | `true` (postgres) | Postgres only. Adds a `pg_dump` of every database to each backup. See [Consistent database dumps](/en/backups#consistent-database-dumps). |
+
+RabbitMQ services created with the default settings in earlier Kipper releases started with `128Mi`, which the broker can exceed during startup. Upgrading Kipper preserves their existing memory allocation. Increase it with `kip service update <name> --memory 512Mi`.
 
 Before creating a service, `kip service add` checks that one eligible node has enough CPU and memory after existing pod requests are deducted. If capacity is insufficient, it reports the largest remaining CPU and memory capacities and their nodes. Reduce requests with `--cpu` and `--memory`, or add capacity. If no nodes qualify, it directs you to `kip status`. The check is skipped if nodes or pods cannot be read.
 

@@ -70,11 +70,10 @@ func statefulSetContainer(t *testing.T, r *ServiceReconciler) corev1.Container {
 	return sts.Spec.Template.Spec.Containers[0]
 }
 
-// A service that pins no resources still gets a full set of requests and
-// limits from its type's profile, so every service pod is quota-eligible and
-// bounded. The StatefulSet also carries the profile label so the resource
-// controller's floor and nil-defaults stay in lockstep. Memory values track
-// profileResources(): database=1Gi, standard=128Mi, jvm=2Gi.
+// TestReconcileStatefulSet_DefaultsResourcesPerProfile checks that profile defaults
+// supply requests and limits so service pods meet quota requirements and have
+// resource bounds. The StatefulSet's profile label keeps resource tuning aligned
+// with those defaults. Expected memory values match profileResources().
 func TestReconcileStatefulSet_DefaultsResourcesPerProfile(t *testing.T) {
 	cases := []struct {
 		svcType      string
@@ -86,7 +85,7 @@ func TestReconcileStatefulSet_DefaultsResourcesPerProfile(t *testing.T) {
 		{"mongodb", "database", "1Gi"},
 		{"redis", "standard", "128Mi"},
 		{"minio", "standard", "128Mi"},
-		{"rabbitmq", "standard", "128Mi"},
+		{"rabbitmq", "memory-heavy", "512Mi"},
 		{"mailhog", "standard", "128Mi"},
 		{"opensearch", "jvm", "2Gi"},
 	}
