@@ -3,13 +3,15 @@ package service
 import (
 	"fmt"
 	"regexp"
+
+	"github.com/getkipper/kipper/controller/pkg/mongotool"
 )
 
 // Import and export run the engine's own dump/restore tools inside the
 // service pod, streaming the dump file over the exec connection. Credentials
 // stay out of the child processes' argv: postgres authenticates over the
 // pod-local socket, mysql reads MYSQL_PWD from the environment, and the
-// mongodb tools read the password from a private, short-lived config file —
+// mongodb tools read the password from a private, short-lived config file,
 // their documented mechanism for sensitive options.
 
 // TransferSupported reports whether a service type has import/export tooling
@@ -45,15 +47,6 @@ func pipeline(producer, consumer string) string {
 		producer, consumer)
 }
 
-// mongoTool wraps a mongodb tool invocation so the root password reaches it
-// through a mode-600 config file instead of the child argv, where any
-// in-pod process listing could read it for the duration of the transfer.
-func mongoTool(invocation string) string {
-	return fmt.Sprintf(
-		`c="$(mktemp)"; chmod 600 "$c"; printf 'password: %%s\n' "$MONGO_INITDB_ROOT_PASSWORD" >"$c"; %s --config="$c" -u "$MONGO_INITDB_ROOT_USERNAME" --authenticationDatabase admin; rc=$?; rm -f "$c"; exit $rc`,
-		invocation)
-}
-
 // mysqlClient prefixes a mysql/mysqldump invocation with the password in the
 // child's environment (argv stays clean).
 const mysqlClient = `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" `
@@ -62,16 +55,15 @@ const mysqlClient = `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" `
 type DumpFormat int
 
 const (
-	// DumpPlain is anything without a recognised magic header — for
-	// postgres and mysql that means a plain SQL script.
 	DumpPlain DumpFormat = iota
-	// DumpGzip is a gzip-compressed stream (SQL script or mongodump archive).
 	DumpGzip
-	// DumpPGCustom is postgres' custom archive format (pg_dump -F c).
 	DumpPGCustom
 )
 
-// SniffDumpFormat classifies an import file by its leading bytes.
+// SniffDumpFormat recognizes gzip streams (SQL scripts or mongodump archives)
+// and Postgres custom archives (pg_dump -F c) by their leading bytes. It returns
+// DumpPlain for an unrecognized or incomplete header, including empty input.
+// For Postgres and MySQL, DumpPlain is treated as a plain SQL script.
 func SniffDumpFormat(head []byte) DumpFormat {
 	if len(head) >= 2 && head[0] == 0x1f && head[1] == 0x8b {
 		return DumpGzip
@@ -84,21 +76,26 @@ func SniffDumpFormat(head []byte) DumpFormat {
 
 // ImportOptions configures BuildImportCommand.
 type ImportOptions struct {
-	// Database is the target database. Required for postgres and mysql;
-	// for mongodb it maps the dump's databases only when SourceDatabase
-	// is also set.
-	Database string
-	// SourceDatabase is the database name inside a mongodb archive, used
-	// with Database to rename on restore (mongorestore --nsFrom/--nsTo).
+	Database       string
 	SourceDatabase string
-	// Drop replaces existing objects instead of failing on them.
-	Drop bool
-	// Format is the sniffed dump format.
-	Format DumpFormat
+	Drop           bool
+	Format         DumpFormat
 }
 
-// BuildImportCommand returns the command to run inside the service pod, with
-// the dump streamed to its stdin.
+// BuildImportCommand returns a command to run inside the service pod with the
+// dump streamed to stdin. Format selects how the dump is read.
+//
+// Postgres and MySQL require Database. MongoDB restores the archive's original
+// database names when both names are empty. To rename a MongoDB database, both
+// SourceDatabase and Database are required for mongorestore --nsFrom and --nsTo.
+// SourceDatabase is supported only for MongoDB. Database names must contain
+// only ASCII letters, digits, underscores and hyphens.
+//
+// Drop drops MongoDB collections before restoring them, cleans objects before
+// restoring a Postgres custom archive, or recreates the MySQL target database.
+// Plain and gzipped Postgres SQL scripts must manage their own DROP statements.
+// Unsupported service types, invalid names and incompatible options or formats
+// return an error and a nil command.
 func BuildImportCommand(svcType string, opts ImportOptions) ([]string, error) {
 	switch svcType {
 	case "mongodb":
@@ -134,7 +131,7 @@ func buildMongoImport(opts ImportOptions) ([]string, error) {
 		}
 		invocation += fmt.Sprintf(" --nsFrom=%q --nsTo=%q", opts.SourceDatabase+".*", opts.Database+".*")
 	}
-	return []string{"sh", "-c", mongoTool(invocation)}, nil
+	return []string{"sh", "-c", mongotool.Script(invocation)}, nil
 }
 
 func buildPostgresImport(opts ImportOptions) ([]string, error) {
@@ -155,7 +152,7 @@ func buildPostgresImport(opts ImportOptions) ([]string, error) {
 		return []string{"sh", "-c", script}, nil
 	}
 	if opts.Drop {
-		return nil, fmt.Errorf("--drop needs a custom-format dump (pg_dump -F c); a plain SQL script manages its own DROP statements")
+		return nil, fmt.Errorf("--drop needs a custom-format dump (pg_dump -F c). A plain SQL script manages its own DROP statements")
 	}
 	load := fmt.Sprintf(`psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d %q`, opts.Database)
 	if opts.Format == DumpGzip {
@@ -198,6 +195,10 @@ func backtick(name string) string {
 // BuildExportCommand returns the command whose stdout is the dump stream.
 // mongodb produces a gzipped archive, postgres a custom-format dump
 // (pg_restore input), and mysql a gzipped SQL script.
+// An empty database exports all MongoDB databases. Postgres and MySQL require
+// a database. Names must contain only ASCII letters, digits, underscores and
+// hyphens. Invalid names, missing required databases and unsupported service
+// types return an error and a nil command.
 func BuildExportCommand(svcType, database string) ([]string, error) {
 	if database != "" {
 		if err := validDatabaseName(database); err != nil {
@@ -210,7 +211,7 @@ func BuildExportCommand(svcType, database string) ([]string, error) {
 		if database != "" {
 			invocation += fmt.Sprintf(" --db=%q", database)
 		}
-		return []string{"sh", "-c", mongoTool(invocation)}, nil
+		return []string{"sh", "-c", mongotool.Script(invocation)}, nil
 	case "postgres":
 		if database == "" {
 			return nil, fmt.Errorf("postgres export needs --database")
@@ -226,7 +227,8 @@ func BuildExportCommand(svcType, database string) ([]string, error) {
 	return nil, fmt.Errorf("service type %q does not support export (supported: mongodb, postgres, mysql)", svcType)
 }
 
-// ExportExtension is the file extension matching BuildExportCommand's output.
+// ExportExtension returns the file extension, including the leading dot, for
+// BuildExportCommand's output, or an empty string for an unsupported service type.
 func ExportExtension(svcType string) string {
 	switch svcType {
 	case "mongodb":

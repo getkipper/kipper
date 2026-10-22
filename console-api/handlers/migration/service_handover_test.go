@@ -22,6 +22,7 @@ import (
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/controller/pkg/mongotool"
 )
 
 // receivedResource is one /resource payload as the target saw it.
@@ -574,8 +575,7 @@ func TestMigrateServices_RefusesIncompleteCredentials(t *testing.T) {
 
 // TestMongoCommandsAuthenticate checks that migration uses the root credentials
 // configured by the catalog, which enable authentication in the official image.
-// Both tools receive the password through a private config file to keep it out
-// of their arguments.
+// mongotool covers how the password reaches the tools.
 func TestMongoCommandsAuthenticate(t *testing.T) {
 	dump, _ := buildDumpCommand("mongodb", "orders")
 	restore, _ := buildImportCommand("mongodb", "orders")
@@ -583,23 +583,16 @@ func TestMongoCommandsAuthenticate(t *testing.T) {
 	for _, tc := range []struct {
 		what string
 		cmd  []string
-	}{{"dump", dump}, {"restore", restore}} {
+		want string
+	}{
+		{"dump", dump, mongotool.Script("mongodump --archive --quiet")},
+		{"restore", restore, mongotool.Script("mongorestore --archive --quiet")},
+	} {
 		if len(tc.cmd) == 0 {
 			t.Fatalf("%s command is missing", tc.what)
 		}
-		script := tc.cmd[len(tc.cmd)-1]
-		for _, want := range []string{
-			`-u "$MONGO_INITDB_ROOT_USERNAME"`,
-			`printf 'password: %s\n' "$MONGO_INITDB_ROOT_PASSWORD" >"$c"`,
-			`--config="$c"`,
-			"--authenticationDatabase admin",
-		} {
-			if !strings.Contains(script, want) {
-				t.Errorf("mongo %s command must pass %s, got: %s", tc.what, want, script)
-			}
-		}
-		if strings.Contains(script, " -p ") {
-			t.Errorf("mongo %s command must keep the password out of the arguments, got: %s", tc.what, script)
+		if script := tc.cmd[len(tc.cmd)-1]; script != tc.want {
+			t.Errorf("mongo %s command must run through mongotool, got: %s", tc.what, script)
 		}
 	}
 }
