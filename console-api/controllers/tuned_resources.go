@@ -123,7 +123,7 @@ func recommendationFor(ctx context.Context, reader client.Reader, w tunedWorkloa
 	case err == nil && !resourcebounds.TuningBelongsTo(&rt, w.UID):
 		return nil
 	case err == nil:
-		rec := w.Tracked.Recommendation(rt.Status)
+		rec := resourcebounds.WithChangedRequests(w.Tracked.Recommendation(rt.Status), w.Spec, rt.Status.RecommendedUnder)
 		return &rec
 	case errors.IsNotFound(err), meta.IsNoMatchError(err), errors.IsForbidden(err):
 		// No record yet, the CRD is not installed, or console-api may not

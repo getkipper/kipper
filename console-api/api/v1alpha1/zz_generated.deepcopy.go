@@ -1732,6 +1732,11 @@ func (in *ResourceTuningSpec) DeepCopy() *ResourceTuningSpec {
 func (in *ResourceTuningStatus) DeepCopyInto(out *ResourceTuningStatus) {
 	*out = *in
 	out.Recommendation = in.Recommendation
+	if in.RecommendedUnder != nil {
+		in, out := &in.RecommendedUnder, &out.RecommendedUnder
+		*out = new(TunedResources)
+		**out = **in
+	}
 	if in.RecommendedAt != nil {
 		in, out := &in.RecommendedAt, &out.RecommendedAt
 		*out = (*in).DeepCopy()

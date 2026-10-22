@@ -128,6 +128,21 @@ spec:
                 description: RecommendedAt is when the recommendation last changed.
                 format: date-time
                 type: string
+              recommendedUnder:
+                description: |-
+                  RecommendedUnder is the user's CPU and memory requests the
+                  recommendation was made under. A changed bounded request starts the
+                  resource at the new request. Records written before it existed have none.
+                properties:
+                  cpuLimit:
+                    type: string
+                  cpuRequest:
+                    type: string
+                  memoryLimit:
+                    type: string
+                  memoryRequest:
+                    type: string
+                type: object
             type: object
         type: object
     served: true
