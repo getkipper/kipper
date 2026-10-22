@@ -127,21 +127,50 @@ func (m *Manager) List(ctx context.Context, namespace string) ([]Status, error) 
 	return result, nil
 }
 
-// History returns recent job executions for a scheduled job by listing
-// native Jobs labeled with the parent app name.
+// History returns retained runs matching the app label name in namespace,
+// including scheduled runs and one-off runs started by kip job run --name or
+// the console. One-off Job CRs take precedence over native Jobs of the same
+// name and preserve outcomes after native Jobs expire. Scheduled history is
+// limited to retained native Jobs.
+//
+// Last is the time since resource creation, truncated to seconds. Results
+// contain one-off CRs first, followed by native Jobs, in each API's list order.
+// An empty result means no matching runs remain. Both clients are required,
+// and a failed lookup returns an error without partial results.
 func (m *Manager) History(ctx context.Context, namespace, name string) ([]Status, error) {
-	if m.Client == nil {
-		return nil, fmt.Errorf("job manager is not configured with a clientset")
+	if m.Client == nil || m.Dynamic == nil {
+		return nil, fmt.Errorf("job manager is not configured with a clientset and a dynamic client")
 	}
-	jobs, err := m.Client.BatchV1().Jobs(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("app=%s,%s=%s", name, kipperLabel, kipperValue),
-	})
+	selector := metav1.ListOptions{LabelSelector: fmt.Sprintf("app=%s,%s=%s", name, kipperLabel, kipperValue)}
+
+	// One-off CRs retain the requested app label, while their native Jobs use
+	// the run name. Query CRs to include generated run names. The native Job
+	// selector finds a one-off run only when its name matches the requested name.
+	runs, err := m.Dynamic.Resource(manifest.JobGVR).Namespace(namespace).List(ctx, selector)
+	if err != nil {
+		return nil, fmt.Errorf("listing job runs: %w", err)
+	}
+	result := make([]Status, 0, len(runs.Items))
+	oneOff := map[string]bool{}
+	for i := range runs.Items {
+		run := &runs.Items[i]
+		if schedule, _, _ := unstructured.NestedString(run.Object, "spec", "schedule"); schedule != "" {
+			continue
+		}
+		status := jobStatusFromCR(run)
+		status.Last = time.Since(run.GetCreationTimestamp().Time).Truncate(time.Second).String() + " ago"
+		result = append(result, status)
+		oneOff[run.GetName()] = true
+	}
+
+	jobs, err := m.Client.BatchV1().Jobs(namespace).List(ctx, selector)
 	if err != nil {
 		return nil, fmt.Errorf("listing job history: %w", err)
 	}
-
-	result := make([]Status, 0, len(jobs.Items))
 	for _, j := range jobs.Items {
+		if oneOff[j.Name] {
+			continue
+		}
 		result = append(result, Status{
 			Name:   j.Name,
 			Type:   "job",
