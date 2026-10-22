@@ -78,10 +78,10 @@ func ServeHopCertificate(client CommandRunner) error {
 }
 
 // RestartTraefikOntoCopy requests a restart when the pod template's copy version
-// differs from the Secret's resourceVersion, then waits up to 300 seconds for
-// the rollout, because file-provider reloads of the mounted copy are unreliable.
-// Every call waits, including retries after a timeout. Read,
-// patch and rollout errors are returned to the caller.
+// differs from the Secret's resourceVersion because file-provider reloads of
+// the mounted copy are unreliable. After successful reads and any required patch,
+// it waits up to 300 seconds for the rollout, including on retries after a timeout.
+// It returns read, patch and rollout errors to the caller.
 //
 // Call it after applying the Traefik HelmChart. helm-controller applies chart
 // changes asynchronously, so the wait can cover pods from the previous chart.
