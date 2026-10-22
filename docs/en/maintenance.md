@@ -295,12 +295,13 @@ A finished rollout can still leave a newer console-api pod terminating. The func
 until every console-api pod belongs to the current revision, printing the pods it is waiting for, and then
 removes the copy. It prints the current revision's image for reference and leaves the copy unchanged if
 any read before deletion fails. At the end, it displays any recreated copy so you can check that deletion
-persisted. Run it while no other console-api rollout is in progress, and rerun it if it stops partway:
+persisted. Each rollout wait has a five-minute timeout. The wait for pods from earlier revisions to
+exit has no timeout. Run it while no other console-api rollout is in progress, and rerun it if it stops partway:
 
 ```bash
 remove_traefik_copy() (
   local rev hash pods
-  kubectl -n kipper-system rollout status deployment console-api || return 1
+  kubectl -n kipper-system rollout status deployment console-api --timeout=300s || return 1
   if ! rev=$(kubectl -n kipper-system get deployment console-api \
       -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}') || [ -z "$rev" ]; then
     echo "STOP: could not read console-api's revision. The copy is unchanged."; return 1
@@ -326,7 +327,7 @@ remove_traefik_copy() (
   done
   kubectl -n traefik delete secret kipper-hop-cert --ignore-not-found &&
   kubectl -n traefik rollout restart deployment traefik &&
-  kubectl -n traefik rollout status deployment traefik &&
+  kubectl -n traefik rollout status deployment traefik --timeout=300s &&
   kubectl -n traefik get secret kipper-hop-cert --ignore-not-found
 )
 remove_traefik_copy
