@@ -117,6 +117,19 @@ kip platform restart console-api   # restart console API
 kip platform restart traefik       # restart ingress controller
 ```
 
+### kip platform versions {#kip-platform-versions}
+
+Shows the cluster's component versions. The header shows the kip version recorded on Kipper's App CRD, the console-api build, each node's Kubernetes version, and your local kip version. The Kubernetes version is shown once when all nodes agree. Source builds preserve an existing CRD release stamp, so it can refer to an earlier CRD write. At startup, console-api records the commit it was built from because its image uses the moving `latest` tag. A rollback to a console-api build that predates this recording leaves the newer commit in place unless the record is cleared.
+
+Below the header, kip lists every Deployment, StatefulSet and DaemonSet in Kipper's system namespaces with its ready count and pod template images. Init container images are marked `(init)`. Velero uses init containers to load its storage plugin.
+
+A workload marked `updating` may still have pods from an earlier pod template, so some of them may run the previous image. READY counts pods that pass their readiness checks.
+
+```bash
+kip platform versions
+kip platform versions --cluster staging
+```
+
 ### kip cluster env {#kip-cluster-env}
 
 Sets environment variables on a cluster component and restarts it to pick up the changes.
@@ -1278,6 +1291,7 @@ Manage system component sizing, including the observability stack (Prometheus, G
 
 ```bash
 kip platform status                          # active profile + per-component state
+kip platform versions                        # Kipper, Kubernetes and component image versions
 kip platform resize prometheus --memory 2Gi  # set a manual memory override
 kip platform disable loki                    # turn a component off
 kip platform enable loki                     # turn it back on
