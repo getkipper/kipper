@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -12,9 +14,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
+	"github.com/getkipper/kipper/kip/internal/ssh"
 )
 
 const (
@@ -94,11 +99,7 @@ var platformResizeMemory string
 // the rollout annotation. It covers the cluster components (console,
 // console-api, dex, traefik) and the platform monitoring components, so one
 // command restarts any of them.
-var restartTargets = map[string]struct {
-	Namespace string
-	Kind      string
-	Name      string
-}{
+var restartTargets = map[string]restartTarget{
 	"console":     {"kipper-system", "Deployment", "console"},
 	"console-api": {"kipper-system", "Deployment", "console-api"},
 	"dex":         {"dex", "Deployment", "dex"},
@@ -424,60 +425,92 @@ func runPlatformRestart(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("unknown component %q (valid: %s)", component, valid)
 	}
 
-	_, k8sClient, err := loadCurrentCluster()
+	cluster, k8sClient, err := loadCurrentCluster()
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cs := k8sClient.Clientset()
-	stamp := time.Now().Format(time.RFC3339)
-
-	switch target.Kind {
-	case "Deployment":
-		d, err := cs.AppsV1().Deployments(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
+	dial := func() (restartHost, error) {
+		cfg, err := hostSSHConfig(cluster, "")
 		if err != nil {
-			return fmt.Errorf("getting deployment %s/%s: %w", target.Namespace, target.Name, err)
+			return nil, err
 		}
-		if d.Spec.Template.Annotations == nil {
-			d.Spec.Template.Annotations = map[string]string{}
-		}
-		d.Spec.Template.Annotations["kipper.run/restartedAt"] = stamp
-		_, err = cs.AppsV1().Deployments(target.Namespace).Update(ctx, d, metav1.UpdateOptions{})
+		client, err := ssh.Dial(cfg)
 		if err != nil {
-			return fmt.Errorf("restarting %s: %w", component, err)
+			return nil, err
 		}
-	case "StatefulSet":
-		s, err := cs.AppsV1().StatefulSets(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("getting statefulset %s/%s: %w", target.Namespace, target.Name, err)
-		}
-		if s.Spec.Template.Annotations == nil {
-			s.Spec.Template.Annotations = map[string]string{}
-		}
-		s.Spec.Template.Annotations["kipper.run/restartedAt"] = stamp
-		_, err = cs.AppsV1().StatefulSets(target.Namespace).Update(ctx, s, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("restarting %s: %w", component, err)
-		}
-	case "DaemonSet":
-		d, err := cs.AppsV1().DaemonSets(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("getting daemonset %s/%s: %w", target.Namespace, target.Name, err)
-		}
-		if d.Spec.Template.Annotations == nil {
-			d.Spec.Template.Annotations = map[string]string{}
-		}
-		d.Spec.Template.Annotations["kipper.run/restartedAt"] = stamp
-		_, err = cs.AppsV1().DaemonSets(target.Namespace).Update(ctx, d, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("restarting %s: %w", component, err)
-		}
+		return client, nil
 	}
-
+	overSSH, err := restartComponent(ctx, k8sClient.Clientset(), dial, target, time.Now().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("restarting %s: %w", component, err)
+	}
+	if overSSH {
+		fmt.Printf("\n  ✔  Restarting %s over SSH because the Kubernetes API request failed or your login was rejected.\n\n", component)
+		return nil
+	}
 	fmt.Printf("\n  ✔  Restarting %s\n\n", component)
 	return nil
+}
+
+type restartTarget struct {
+	Namespace string
+	Kind      string
+	Name      string
+}
+
+type restartHost interface {
+	Run(command string) (string, error)
+	Close() error
+}
+
+// restartComponent annotates target's pod template to trigger a rolling restart.
+// On an Unauthorized response or a wrapped *url.Error, it retries the same patch
+// with kubectl on the server over SSH. Login can fail while Traefik serves its
+// fallback certificate. Other errors, including Forbidden and NotFound, are
+// returned without trying SSH. overSSH is true only when the SSH patch succeeds.
+func restartComponent(ctx context.Context, cs kubernetes.Interface, dial func() (restartHost, error), target restartTarget, stamp string) (overSSH bool, err error) {
+	patch := []byte(fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"kipper.run/restartedAt":%q}}}}}`, stamp))
+	apiErr := patchPodTemplate(ctx, cs, target, patch)
+	if apiErr == nil {
+		return false, nil
+	}
+	// A *url.Error indicates a request failure before a response or a failed
+	// redirect, neither of which carries an API authorization decision.
+	// Preserve other errors because a body truncated after the status line
+	// may contain a refusal that SSH must not bypass.
+	var noResponse *url.Error
+	if !apierrors.IsUnauthorized(apiErr) && !errors.As(apiErr, &noResponse) {
+		return false, apiErr
+	}
+	host, err := dial()
+	if err != nil {
+		return false, fmt.Errorf("the Kubernetes API failed (%w), and SSH to the server failed: %v", apiErr, err)
+	}
+	defer func() { _ = host.Close() }()
+	command := fmt.Sprintf("kubectl -n %s patch %s %s --type merge -p '%s' --request-timeout=20s",
+		target.Namespace, strings.ToLower(target.Kind), target.Name, patch)
+	if _, err := host.Run(command); err != nil {
+		return false, fmt.Errorf("the Kubernetes API failed (%w), and kubectl on the server failed: %v", apiErr, err)
+	}
+	return true, nil
+}
+
+func patchPodTemplate(ctx context.Context, cs kubernetes.Interface, target restartTarget, patch []byte) error {
+	var err error
+	switch target.Kind {
+	case "Deployment":
+		_, err = cs.AppsV1().Deployments(target.Namespace).Patch(ctx, target.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+	case "StatefulSet":
+		_, err = cs.AppsV1().StatefulSets(target.Namespace).Patch(ctx, target.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+	case "DaemonSet":
+		_, err = cs.AppsV1().DaemonSets(target.Namespace).Patch(ctx, target.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+	default:
+		err = fmt.Errorf("unsupported workload kind %q", target.Kind)
+	}
+	return err
 }
 
 func validateComponent(name string) error {
