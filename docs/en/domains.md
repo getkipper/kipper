@@ -94,7 +94,7 @@ If the gateway can't get a response from your cluster, it returns a short error 
 | 502 | This site isn't ready yet | The cluster presented a certificate the gateway doesn't accept. This usually clears within a few minutes of a restart, once Traefik has loaded the cluster's certificate. |
 | 502 | Something went wrong reaching this site | Anything else, such as the cluster closing the connection before it answered. |
 
-Start with `kip status` in each case. The page also links to a GitHub issue form, prefilled with the error status, kind, time, and a fixed explanation and reproduction step. The link keeps the site's address and the visitor's address private. With proof enforcement enabled, a name that has not proven control, or whose proof has lapsed, still returns 404 without this error page, so the gateway never confirms that an unproven name is registered.
+Start with `kip doctor` in each case. It reads cluster diagnostics over SSH, so it can still diagnose problems when the Kubernetes API rejects your login, which can happen while Traefik serves a fallback certificate. The page also links to a GitHub issue form, prefilled with the error status, kind, time, and a fixed explanation and reproduction step. The link keeps the site's address and the visitor's address private. With proof enforcement enabled, a name that has not proven control, or whose proof has lapsed, still returns 404 without this error page, so the gateway never confirms that an unproven name is registered.
 
 ### What the gateway records
 

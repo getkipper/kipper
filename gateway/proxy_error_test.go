@@ -97,7 +97,7 @@ func TestProxyErrorPage_ExplainsAnUnexpectedCertificate(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Errorf("Content-Type = %q", ct)
 	}
-	for _, want := range []string{"certificate", "restart", "kip status"} {
+	for _, want := range []string{"certificate", "restart", "kip doctor"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks %q:\n%s", want, body)
 		}
@@ -229,7 +229,7 @@ func TestProxyErrorPage_IssueLinkGuidesTheOwnerWithoutNamingTheSite(t *testing.T
 		t.Errorf("repro = %q", repro)
 	}
 	what := q.Get("what-happened")
-	for _, want := range []string{failureUnexpectedCertificate.detail, "kip status", "Logs or output", "only if you're comfortable"} {
+	for _, want := range []string{failureUnexpectedCertificate.detail, "kip doctor", "Logs or output", "only if you're comfortable"} {
 		if !strings.Contains(what, want) {
 			t.Errorf("what-happened lacks %q:\n%s", want, what)
 		}
@@ -274,11 +274,11 @@ func TestProxyErrorPage_LoadsNothingFromElsewhere(t *testing.T) {
 	}
 }
 
-func TestProxyErrorPage_ShowsKipStatusAsACommand(t *testing.T) {
+func TestProxyErrorPage_ShowsKipDoctorAsACommand(t *testing.T) {
 	body := bodyOf(t, get(pinnedProxy(t), browserAccept))
 
-	if !strings.Contains(body, "<code>kip status</code>") {
-		t.Errorf("kip status is not marked up as a command:\n%s", body)
+	if !strings.Contains(body, "<code>kip doctor</code>") {
+		t.Errorf("kip doctor is not marked up as a command:\n%s", body)
 	}
 }
 
@@ -287,5 +287,13 @@ func TestProxyErrorPage_AnimatesOnceSoMotionEndsWithinFiveSeconds(t *testing.T) 
 
 	if strings.Contains(body, " 3 both") || !strings.Contains(body, "travel 2.8s cubic-bezier(.45, 0, .3, 1) .5s 1 both") {
 		t.Error("the signal animation must run once")
+	}
+}
+
+func TestProxyErrorPage_SendsEveryOwnerToKipDoctor(t *testing.T) {
+	for _, f := range []proxyFailure{failureUnexpectedCertificate, failureNotAnswering, failureNotReachable, failureUpstream} {
+		if !strings.Contains(f.owner, "kip doctor") || strings.Contains(f.owner, "kip status") {
+			t.Errorf("%s: owner advice = %q, want it to name kip doctor", f.kind, f.owner)
+		}
 	}
 }
