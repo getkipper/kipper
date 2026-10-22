@@ -789,3 +789,26 @@ func TestAFencedFailureNamesTheCommandRatherThanTheLockWrapper(t *testing.T) {
 	assert.NotContains(t, err.Error(), runner.token)
 	assert.ErrorIs(t, err, errExitStatus, "the runner's cause stays reachable")
 }
+
+// echoingFailure fails like a runner that formats the command unquoted and
+// appends a shell error echoing part of it.
+type echoingFailure struct{ token string }
+
+func (e echoingFailure) Run(command string) (string, error) {
+	return "", fmt.Errorf("running %s: %w: sh: 2: [: %s: unexpected operator", command, errExitStatus, e.token)
+}
+
+func (e echoingFailure) RunStdin(command string, _ io.Reader) (string, error) { return e.Run(command) }
+
+func TestAFencedFailureNeverCarriesTheLockToken(t *testing.T) {
+	token := "0123456789abcdef0123456789abcdef"
+	runner := fencedRunner{base: echoingFailure{token: token}, token: token}
+
+	_, err := runner.Run("systemctl restart k3s")
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), token)
+	assert.Contains(t, err.Error(), "systemctl restart k3s")
+	assert.Contains(t, err.Error(), "unexpected operator", "the shell's reason stays")
+	assert.ErrorIs(t, err, errExitStatus)
+}
