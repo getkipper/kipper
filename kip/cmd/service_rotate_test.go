@@ -649,5 +649,48 @@ func TestABackupCheckThatIsForbiddenNamesTheMissingAccess(t *testing.T) {
 
 	require.Error(t, err, "a guard the user cannot evaluate must not be skipped")
 	assert.Contains(t, err.Error(), "Ask a cluster admin")
+	assert.Contains(t, err.Error(), "pauses resource tuning", "the refusal names both things a project role cannot do")
 	assert.Empty(t, c.execs)
+}
+
+func TestTheBackupCheckComesBeforeThePodLookup(t *testing.T) {
+	c := newRotationCluster("postgres", postgresData())
+	require.NoError(t, c.cs.CoreV1().Pods("shop").Delete(context.Background(), "db-0", metav1.DeleteOptions{}))
+	c.dyn.PrependReactor("list", "backups", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "velero.io", Resource: "backups"}, "", errors.New("no access"))
+	})
+
+	err := c.rotation().run(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Ask a cluster admin", "a project owner learns first that the command needs an admin")
+}
+
+func TestABackupThatExcludesTheNamespaceDoesNotStopTheRotation(t *testing.T) {
+	c := newRotationCluster("postgres", postgresData())
+	c.add(t, veleroBackupGVR, "velero", &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "velero.io/v1", "kind": "Backup",
+		"metadata": map[string]any{"name": "platform", "namespace": "velero"},
+		"spec":     map[string]any{"excludedNamespaces": []any{"shop"}},
+		"status":   map[string]any{"phase": "InProgress"},
+	}})
+
+	require.NoError(t, c.rotation().run(context.Background()))
+	assert.NotEmpty(t, c.execs, "the rotation went ahead")
+}
+
+func TestAPendingBackupMatchingTheNamespaceByPatternStopsTheRotation(t *testing.T) {
+	c := newRotationCluster("postgres", postgresData())
+	c.add(t, veleroBackupGVR, "velero", &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "velero.io/v1", "kind": "Backup",
+		"metadata": map[string]any{"name": "shops", "namespace": "velero"},
+		"spec":     map[string]any{"includedNamespaces": []any{"sh*"}},
+	}})
+
+	err := c.rotation().run(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "shops")
+	assert.Empty(t, c.execs)
+	assert.False(t, c.hasRecord())
 }

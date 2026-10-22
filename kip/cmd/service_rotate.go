@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -29,6 +28,7 @@ import (
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 
+	"github.com/getkipper/kipper/controller/pkg/backupscope"
 	"github.com/getkipper/kipper/controller/pkg/rollout"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/kip/internal/ai"
@@ -190,6 +190,9 @@ func (r *passwordRotation) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := r.refuseDuringBackup(ctx); err != nil {
+		return err
+	}
 	var pod, container string
 	changesEngine := engineStep != nil || svcType == "rabbitmq"
 	if changesEngine {
@@ -199,9 +202,6 @@ func (r *passwordRotation) run(ctx context.Context) error {
 	}
 	bound, err := r.boundWorkloads(ctx)
 	if err != nil {
-		return err
-	}
-	if err := r.refuseDuringBackup(ctx); err != nil {
 		return err
 	}
 
@@ -429,7 +429,7 @@ func (r *passwordRotation) servicePods(ctx context.Context) ([]corev1.Pod, error
 	return owned, nil
 }
 
-// refuseDuringBackup refuses while a Velero backup that covers the namespace is
+// refuseDuringBackup refuses while a Velero backup that may cover the namespace is
 // unfinished, because it could save the volume with one password and the
 // credentials with the other. A cluster without Velero has nothing to wait for.
 func (r *passwordRotation) refuseDuringBackup(ctx context.Context) error {
@@ -438,7 +438,7 @@ func (r *passwordRotation) refuseDuringBackup(ctx context.Context) error {
 		return nil
 	}
 	if apierrors.IsForbidden(err) {
-		return fmt.Errorf("kip cannot check for running backups, because you do not have permission to list Velero backups. Ask a cluster admin to run the rotation")
+		return fmt.Errorf("kip service rotate-password requires a cluster admin because it checks the cluster's backups and pauses resource tuning on the service. Project roles lack both permissions. Ask a cluster admin to run the rotation")
 	}
 	if err != nil {
 		return fmt.Errorf("checking for running backups: %w", err)
@@ -446,12 +446,9 @@ func (r *passwordRotation) refuseDuringBackup(ctx context.Context) error {
 	var running []string
 	for _, b := range list.Items {
 		phase, _, _ := unstructured.NestedString(b.Object, "status", "phase")
-		switch phase {
-		case "Completed", "PartiallyFailed", "Failed", "FailedValidation", "Deleting":
-			continue
-		}
 		included, _, _ := unstructured.NestedStringSlice(b.Object, "spec", "includedNamespaces")
-		if len(included) == 0 || slices.Contains(included, "*") || slices.Contains(included, r.namespace) {
+		excluded, _, _ := unstructured.NestedStringSlice(b.Object, "spec", "excludedNamespaces")
+		if backupscope.Unfinished(phase) && backupscope.MayCover(included, excluded, r.namespace) {
 			running = append(running, b.GetName())
 		}
 	}

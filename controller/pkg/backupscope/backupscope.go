@@ -3,6 +3,11 @@
 // the same objects.
 package backupscope
 
+import (
+	"path"
+	"strings"
+)
+
 // DrillNamespace is where kip backup drill restores a namespace's services.
 const DrillNamespace = "kipper-restore-drill"
 
@@ -92,4 +97,66 @@ func toAnySlice(items []string) []interface{} {
 		out[i] = item
 	}
 	return out
+}
+
+// Covers reports whether a Backup's spec.includedNamespaces and
+// spec.excludedNamespaces definitely select namespace. Exclusions take precedence,
+// and an empty inclusion list includes every namespace. Patterns support literal
+// names and the * and ? wildcards. Patterns containing brackets, braces,
+// backslashes or !, and malformed patterns, are treated as uncertain.
+// An uncertain inclusion is ignored. Any uncertain exclusion makes Covers return
+// false because coverage cannot be confirmed.
+func Covers(included, excluded []string, namespace string) bool {
+	return coverage(included, excluded, namespace, false)
+}
+
+// MayCover reports whether a Backup's namespace selection could include namespace,
+// so guards can block operations when coverage is uncertain. It uses the same
+// patterns, exclusion precedence and empty-list behavior as Covers, but treats
+// uncertain inclusions as matches and ignores uncertain exclusions.
+func MayCover(included, excluded []string, namespace string) bool {
+	return coverage(included, excluded, namespace, true)
+}
+
+func coverage(included, excluded []string, namespace string, mayCover bool) bool {
+	for _, pattern := range excluded {
+		matched, certain := matchNamespace(pattern, namespace)
+		if (certain && matched) || (!certain && !mayCover) {
+			return false
+		}
+	}
+	if len(included) == 0 {
+		return true
+	}
+	for _, pattern := range included {
+		matched, certain := matchNamespace(pattern, namespace)
+		if (certain && matched) || (!certain && mayCover) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchNamespace evaluates the subset of Velero's gobwas/glob patterns that
+// path.Match handles equivalently for namespace names, which contain no slash.
+// Bracket sets and {a,b} alternatives differ between the matchers, so these
+// constructs and escapes are conservatively reported as uncertain.
+func matchNamespace(pattern, namespace string) (matched, certain bool) {
+	if strings.ContainsAny(pattern, `[]{}\!`) {
+		return false, false
+	}
+	matched, err := path.Match(pattern, namespace)
+	return matched, err == nil
+}
+
+// Unfinished reports whether a Backup in phase may still write data. Completed,
+// PartiallyFailed, Failed, FailedValidation and Deleting return false. All other
+// phases return true, including unknown phases and an empty phase before Velero
+// picks up the Backup.
+func Unfinished(phase string) bool {
+	switch phase {
+	case "Completed", "PartiallyFailed", "Failed", "FailedValidation", "Deleting":
+		return false
+	}
+	return true
 }
