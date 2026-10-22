@@ -640,3 +640,149 @@ func TestAnIdleJVMAppLowersItsCPURequestButKeepsTheLimitMinimum(t *testing.T) {
 		t.Fatalf("CPU recommendation = %s/%s, want 250m/500m", rec.CPURequest, rec.CPULimit)
 	}
 }
+
+func cpuRecord(rec kipperv1.TunedResources, under *kipperv1.TunedResources) *kipperv1.ResourceTuning {
+	controller := true
+	return &kipperv1.ResourceTuning{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "service-" + workloadName, Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: kipperv1.GroupVersion.String(), Kind: "Service", Name: workloadName,
+				UID: types.UID("uid-" + workloadName), Controller: &controller,
+			}},
+		},
+		Spec:   kipperv1.ResourceTuningSpec{Kind: "Service", Name: workloadName},
+		Status: kipperv1.ResourceTuningStatus{Recommendation: rec, RecommendedUnder: under},
+	}
+}
+
+// A fixed 2 CPUs changed to bounds of 100m..2 on a single replica: the old
+// size must not keep itself in place.
+func TestAChangedCPURequestRestartsTheRecommendationAtIt(t *testing.T) {
+	crClient := tuningCRClient(
+		serviceWithResources(kipperv1.ServiceResources{CPURequest: "100m", CPULimit: "2"}),
+		cpuRecord(kipperv1.TunedResources{CPURequest: "2", CPULimit: "2"}, &kipperv1.TunedResources{CPURequest: "2"}),
+	)
+	deploy := ownedDeployment("Service", cpuMemoryContainer("2", "2", "512Mi"))
+	one := int32(1)
+	deploy.Spec.Replicas = &one
+	rc := NewResourceController(fake.NewClientset(deploy), crClient)
+
+	rc.processDeployment(context.Background(), deploy.DeepCopy(), busy(50, "100Mi"), nil)
+
+	status := tuningOf(t, crClient, "Service").Status
+	if status.Recommendation.CPURequest != "100m" || status.Recommendation.CPULimit != "2" {
+		t.Fatalf("cpu recommendation = %s/%s, want 100m/2", status.Recommendation.CPURequest, status.Recommendation.CPULimit)
+	}
+	if status.RecommendedUnder == nil || status.RecommendedUnder.CPURequest != "2" {
+		t.Fatalf("recommendedUnder = %+v, want the old request 2 until the workload runs 100m", status.RecommendedUnder)
+	}
+}
+
+func TestATunedCPURequestSurvivesWhileTheUserRequestStaysTheSame(t *testing.T) {
+	crClient := tuningCRClient(
+		serviceWithResources(kipperv1.ServiceResources{CPURequest: "100m", CPULimit: "2"}),
+		cpuRecord(kipperv1.TunedResources{CPURequest: "150m", CPULimit: "2"}, &kipperv1.TunedResources{CPURequest: "100m"}),
+	)
+	deploy := ownedDeployment("Service", cpuMemoryContainer("150m", "2", "256Mi"))
+	rc := NewResourceController(fake.NewClientset(deploy), crClient)
+
+	rc.processDeployment(context.Background(), deploy.DeepCopy(), busy(80, "100Mi"), nil)
+
+	if got := tuningOf(t, crClient, "Service").Status.Recommendation.CPURequest; got != "150m" {
+		t.Fatalf("cpu recommendation = %s, want the tuned 150m", got)
+	}
+}
+
+// An older record gains the current user requests even when its recommendation
+// stays unchanged.
+func TestAnOlderRecordLearnsTheRequestsItWasMadeUnder(t *testing.T) {
+	crClient := tuningCRClient(
+		serviceWithResources(kipperv1.ServiceResources{CPURequest: "100m", CPULimit: "2"}),
+		cpuRecord(kipperv1.TunedResources{CPURequest: "150m", CPULimit: "2", MemoryRequest: "512Mi", MemoryLimit: "512Mi"}, nil),
+	)
+	deploy := ownedDeployment("Service", cpuMemoryContainer("150m", "2", "512Mi"))
+	rc := NewResourceController(fake.NewClientset(deploy), crClient)
+
+	rc.processDeployment(context.Background(), deploy.DeepCopy(), busy(80, "100Mi"), nil)
+
+	status := tuningOf(t, crClient, "Service").Status
+	if status.RecommendedUnder == nil || status.RecommendedUnder.CPURequest != "100m" {
+		t.Fatalf("recommendedUnder = %+v, want the cpu request 100m", status.RecommendedUnder)
+	}
+	if status.Recommendation.CPURequest != "150m" {
+		t.Fatalf("cpu recommendation = %s, want the tuned 150m kept", status.Recommendation.CPURequest)
+	}
+}
+
+func TestANewRequestEqualToTheTunedValueIsRecorded(t *testing.T) {
+	crClient := tuningCRClient(
+		serviceWithResources(kipperv1.ServiceResources{CPURequest: "150m", CPULimit: "2"}),
+		cpuRecord(kipperv1.TunedResources{CPURequest: "150m", CPULimit: "2", MemoryRequest: "512Mi", MemoryLimit: "512Mi"}, &kipperv1.TunedResources{CPURequest: "100m"}),
+	)
+	deploy := ownedDeployment("Service", cpuMemoryContainer("150m", "2", "512Mi"))
+	rc := NewResourceController(fake.NewClientset(deploy), crClient)
+
+	rc.processDeployment(context.Background(), deploy.DeepCopy(), busy(80, "100Mi"), nil)
+
+	if under := tuningOf(t, crClient, "Service").Status.RecommendedUnder; under == nil || under.CPURequest != "150m" {
+		t.Fatalf("recommendedUnder = %+v, want the cpu request 150m", under)
+	}
+}
+
+// A busy workload proposes an increase based on its old size. The user's new
+// request still takes precedence.
+func TestAChangedCPURequestOutranksAProposalFromTheOldSize(t *testing.T) {
+	crClient := tuningCRClient(
+		serviceWithResources(kipperv1.ServiceResources{CPURequest: "100m", CPULimit: "2"}),
+		cpuRecord(kipperv1.TunedResources{CPURequest: "2", CPULimit: "2"}, &kipperv1.TunedResources{CPURequest: "2"}),
+	)
+	deploy := ownedDeployment("Service", cpuMemoryContainer("2", "2", "512Mi"))
+	rc := NewResourceController(fake.NewClientset(deploy), crClient)
+
+	rc.processDeployment(context.Background(), deploy.DeepCopy(), busy(1990, "100Mi"), nil)
+
+	status := tuningOf(t, crClient, "Service").Status
+	if status.Recommendation.CPURequest != "100m" {
+		t.Fatalf("cpu recommendation = %s, want the user's new request 100m", status.Recommendation.CPURequest)
+	}
+	if status.RecommendedUnder == nil || status.RecommendedUnder.CPURequest != "2" {
+		t.Fatalf("recommendedUnder = %+v, want 2 kept while the edit is pending", status.RecommendedUnder)
+	}
+}
+
+func TestTuningResumesOnceTheWorkloadRunsTheChangedRequest(t *testing.T) {
+	crClient := tuningCRClient(
+		serviceWithResources(kipperv1.ServiceResources{CPURequest: "100m", CPULimit: "2"}),
+		cpuRecord(kipperv1.TunedResources{CPURequest: "2", CPULimit: "2"}, &kipperv1.TunedResources{CPURequest: "2"}),
+	)
+	deploy := ownedDeployment("Service", cpuMemoryContainer("100m", "2", "512Mi"))
+	rc := NewResourceController(fake.NewClientset(deploy), crClient)
+
+	rc.processDeployment(context.Background(), deploy.DeepCopy(), busy(30, "100Mi"), nil)
+
+	status := tuningOf(t, crClient, "Service").Status
+	if status.Recommendation.CPURequest != "100m" {
+		t.Fatalf("cpu recommendation = %s, want 100m", status.Recommendation.CPURequest)
+	}
+	if status.RecommendedUnder == nil || status.RecommendedUnder.CPURequest != "100m" {
+		t.Fatalf("recommendedUnder = %+v, want 100m once the workload runs it", status.RecommendedUnder)
+	}
+}
+
+// A record from before requests were recorded cannot tell an old fixed size
+// from tuning, so it keeps its value.
+func TestAnOlderRecordAtTheCeilingKeepsItsValue(t *testing.T) {
+	crClient := tuningCRClient(
+		serviceWithResources(kipperv1.ServiceResources{CPURequest: "100m", CPULimit: "2"}),
+		cpuRecord(kipperv1.TunedResources{CPURequest: "2", CPULimit: "2", MemoryRequest: "512Mi", MemoryLimit: "512Mi"}, nil),
+	)
+	deploy := ownedDeployment("Service", cpuMemoryContainer("2", "2", "512Mi"))
+	rc := NewResourceController(fake.NewClientset(deploy), crClient)
+
+	rc.processDeployment(context.Background(), deploy.DeepCopy(), busy(1000, "100Mi"), nil)
+
+	if got := tuningOf(t, crClient, "Service").Status.Recommendation.CPURequest; got != "2" {
+		t.Fatalf("cpu recommendation = %s, want 2 kept", got)
+	}
+}

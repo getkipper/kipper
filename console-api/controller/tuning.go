@@ -227,11 +227,20 @@ func (rc *ResourceController) tuneWorkload(
 	if oomCap == 0 {
 		oomCap = defaultOOMCapBytes
 	}
-	pendingCPU, pendingMem := pendingPairs(sizing.Tracked.Recommendation(rt.Status))
+	pendingCPU, pendingMem := pendingPairs(resourcebounds.WithChangedRequests(sizing.Tracked.Recommendation(rt.Status), spec, rt.Status.RecommendedUnder))
 	cpuEff, cpuChanged := effective(spec.CPURequest, spec.CPULimit, corev1.ResourceCPU, live, work, pendingCPU, cooldown,
 		resourcebounds.AutoRange{Floor: resource.MustParse(profile.cpu), LimitFloor: resource.MustParse(profile.cpuLimit())})
 	memEff, memChanged := effective(spec.MemoryRequest, spec.MemoryLimit, corev1.ResourceMemory, live, work, pendingMem, cooldown,
 		resourcebounds.AutoRange{Floor: resource.MustParse(profile.memory), Ceiling: *resource.NewQuantity(oomCap, resource.BinarySI)})
+	// Apply the user's changed request before proposals based on the old size
+	// until the workload adopts the new request.
+	cpuHeld, memHeld := resourcebounds.PendingRequests(spec, rt.Status.RecommendedUnder, &live.Resources)
+	if cpuHeld {
+		cpuEff, cpuChanged = resourcebounds.Pair{Request: spec.CPURequest.Value, Limit: spec.CPULimit.Value}, false
+	}
+	if memHeld {
+		memEff, memChanged = resourcebounds.Pair{Request: spec.MemoryRequest.Value, Limit: spec.MemoryLimit.Value}, false
+	}
 
 	target := live.DeepCopy()
 	setPair(target, corev1.ResourceCPU, cpuEff)
@@ -257,6 +266,7 @@ func (rc *ResourceController) tuneWorkload(
 			next.MemoryCause = ""
 		}
 		rt.Status.Recommendation = sizing.Tracked.Recommendation(next)
+		rt.Status.RecommendedUnder = resourcebounds.NextRecommendedUnder(spec, rt.Status.RecommendedUnder, &live.Resources)
 		rt.Status.MemoryCause = next.MemoryCause
 	}
 	if oomMark != nil && !quotaBlocked {
@@ -478,6 +488,9 @@ func pairsEqual(a, b resourcebounds.Pair) bool {
 
 func statusEqual(a, b *kipperv1.ResourceTuningStatus) bool {
 	if a.Recommendation != b.Recommendation || a.MemoryCause != b.MemoryCause {
+		return false
+	}
+	if (a.RecommendedUnder == nil) != (b.RecommendedUnder == nil) || (a.RecommendedUnder != nil && *a.RecommendedUnder != *b.RecommendedUnder) {
 		return false
 	}
 	if !timesEqual(a.DecreaseBlockedUntil, b.DecreaseBlockedUntil) {

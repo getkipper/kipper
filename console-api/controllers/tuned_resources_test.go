@@ -263,3 +263,77 @@ func TestTunedResourcesReadTheRolloutOnlyForARecommendation(t *testing.T) {
 		},
 	})
 }
+
+func cpuPair(req, lim string) *corev1.ResourceRequirements {
+	return &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(req)},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(lim)},
+	}
+}
+
+func TestTunedResourcesStartAtAChangedRequest(t *testing.T) {
+	record := &kipperv1.ResourceTuning{
+		ObjectMeta: metav1.ObjectMeta{Name: resourcebounds.TuningName("Service", "db"), Namespace: "default", OwnerReferences: controlledBy("Service", "db", "uid-db")},
+		Spec:       kipperv1.ResourceTuningSpec{Kind: "Service", Name: "db"},
+		Status: kipperv1.ResourceTuningStatus{
+			Recommendation:   kipperv1.TunedResources{CPURequest: "2", CPULimit: "2"},
+			RecommendedUnder: &kipperv1.TunedResources{CPURequest: "2"},
+		},
+	}
+	spec, err := resourcebounds.OwnedSpec("100m", "2", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := cpuPair("100m", "2")
+
+	applyTunedResources(context.Background(), tunedClient(t, record), tunedWorkload{Namespace: "default", Kind: "Service", Name: "db", UID: "uid-db", Spec: spec, Desired: desired, Live: cpuPair("2", "2"), Replicas: 1})
+
+	r, l := desired.Requests[corev1.ResourceCPU], desired.Limits[corev1.ResourceCPU]
+	if r.Cmp(resource.MustParse("100m")) != 0 || l.Cmp(resource.MustParse("2")) != 0 {
+		t.Fatalf("cpu = %s/%s, want 100m/2", r.String(), l.String())
+	}
+}
+
+func cpuRecordFor(rec kipperv1.TunedResources, under *kipperv1.TunedResources) *kipperv1.ResourceTuning {
+	return &kipperv1.ResourceTuning{
+		ObjectMeta: metav1.ObjectMeta{Name: resourcebounds.TuningName("Service", "db"), Namespace: "default", OwnerReferences: controlledBy("Service", "db", "uid-db")},
+		Spec:       kipperv1.ResourceTuningSpec{Kind: "Service", Name: "db"},
+		Status:     kipperv1.ResourceTuningStatus{Recommendation: rec, RecommendedUnder: under},
+	}
+}
+
+func assertCPUPair(t *testing.T, got *corev1.ResourceRequirements, req, lim string) {
+	t.Helper()
+	r, l := got.Requests[corev1.ResourceCPU], got.Limits[corev1.ResourceCPU]
+	if r.Cmp(resource.MustParse(req)) != 0 || l.Cmp(resource.MustParse(lim)) != 0 {
+		t.Fatalf("cpu = %s/%s, want %s/%s", r.String(), l.String(), req, lim)
+	}
+}
+
+// The auto-sizer omits CPU recommendations when the HPA tracks CPU, so the
+// user's changed request must apply even with an empty recommendation.
+func TestTunedResourcesApplyAChangedRequestTheHPATracks(t *testing.T) {
+	spec, err := resourcebounds.OwnedSpec("100m", "2", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := cpuPair("100m", "2")
+	c := tunedClient(t, cpuRecordFor(kipperv1.TunedResources{}, &kipperv1.TunedResources{CPURequest: "2"}))
+
+	applyTunedResources(context.Background(), c, tunedWorkload{Namespace: "default", Kind: "Service", Name: "db", UID: "uid-db", Spec: spec, Desired: desired, Live: cpuPair("2", "2"), Replicas: 1, Tracked: resourcebounds.Tracked{CPU: true}})
+
+	assertCPUPair(t, desired, "100m", "2")
+}
+
+func TestTunedResourcesKeepAnOlderRecordsValue(t *testing.T) {
+	spec, err := resourcebounds.OwnedSpec("100m", "4", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := cpuPair("100m", "4")
+	c := tunedClient(t, cpuRecordFor(kipperv1.TunedResources{CPURequest: "2", CPULimit: "4"}, nil))
+
+	applyTunedResources(context.Background(), c, tunedWorkload{Namespace: "default", Kind: "Service", Name: "db", UID: "uid-db", Spec: spec, Desired: desired, Live: cpuPair("2", "4"), Replicas: 1})
+
+	assertCPUPair(t, desired, "2", "4")
+}

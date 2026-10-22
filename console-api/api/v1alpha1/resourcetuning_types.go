@@ -51,6 +51,12 @@ type ResourceTuningStatus struct {
 	// +optional
 	Recommendation TunedResources `json:"recommendation,omitempty"`
 
+	// RecommendedUnder is the user's CPU and memory requests the
+	// recommendation was made under. A changed bounded request starts the
+	// resource at the new request. Records written before it existed have none.
+	// +optional
+	RecommendedUnder *TunedResources `json:"recommendedUnder,omitempty"`
+
 	// RecommendedAt is when the recommendation last changed.
 	// +optional
 	RecommendedAt *metav1.Time `json:"recommendedAt,omitempty"`

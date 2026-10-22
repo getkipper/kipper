@@ -66,7 +66,9 @@ The saturation override raises the CPU limit only when CPU is sized automaticall
 
 ### Single-replica apps
 
-For single-replica apps, automatic sizing only increases resources. A resource change starts a replacement pod and waits for it to become ready before stopping the old one. With a [health check](/en/deploying-apps#health-checks-and-rollouts), the replacement must pass it first. The cluster needs capacity for the extra pod; if none is available, lower the request or add capacity to unblock the rollout.
+For single-replica apps, automatic sizing only increases resources. A resource change starts a replacement pod and waits for it to become ready before stopping the old one. With a [health check](/en/deploying-apps#health-checks-and-rollouts), the replacement must pass it first. The cluster needs capacity for the extra pod. If none is available, lower the request or add capacity to unblock the rollout.
+
+Even after you lower the request, the rollout can remain blocked on a full node because the old pod keeps its CPU and memory until the replacement is ready. In that case, run `kip app scale <app> 0` followed by `kip app scale <app> 1` to free the old pod's resources, at the cost of a short outage.
 
 The Scale tab in the web console shows a message explaining this when an app has one replica and auto mode is active.
 
@@ -200,7 +202,7 @@ Profiles provide starting values. If an app needs specific resources, set a fixe
 
 CPU and memory are independent: you can set a CPU range and leave memory automatic. Your bounds take precedence over profile minimums and the [OOM cap](#oom-memory-cap).
 
-For example, a memory request of `512Mi` and limit of `2Gi` lets Kipper reserve between 512 Mi and 2 Gi while the container can use up to 2 Gi. The request falls only when the usual scale-down conditions are met; a single-replica app keeps its allocation. A proposal that clamps to the current allocation produces no resize alert or resource-log entry. Alerts describe recommended changes; the reconciler applies them afterwards.
+For example, a memory request of `512Mi` and limit of `2Gi` lets Kipper reserve between 512 Mi and 2 Gi while the container can use up to 2 Gi. Automatic sizing lowers the request only when the usual scale-down conditions are met. A single-replica app keeps its allocation. When you change the request itself, the workload moves to the new request once any rollout in progress finishes and the project quota allows it. Kipper resumes tuning from the new request. A proposal that clamps to the current allocation produces no resize alert or resource-log entry. Alerts describe recommended changes. The reconciler applies them afterwards.
 
 **From the CLI:**
 
