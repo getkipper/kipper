@@ -130,6 +130,7 @@ func init() {
 	platformProfileCmd.AddCommand(platformProfileSetCmd)
 
 	platformCmd.AddCommand(platformStatusCmd)
+	platformCmd.AddCommand(platformVersionsCmd)
 	platformCmd.AddCommand(platformResizeCmd)
 	platformCmd.AddCommand(platformEnableCmd)
 	platformCmd.AddCommand(platformDisableCmd)

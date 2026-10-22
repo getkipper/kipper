@@ -244,6 +244,8 @@ because the Kubernetes skew policy forbids skipping minors. For a server further
 behind, kip keeps the installed version and warns that the intermediate minor
 upgrades are needed first. Every re-run restarts k3s so that it loads the configuration kip wrote.
 
+To check component versions after an upgrade, run [`kip platform versions`](/en/cli-reference#kip-platform-versions). It shows the kip version recorded on the App CRD, the console-api build recorded at startup, each node's Kubernetes version, and the pod template images of every Deployment, StatefulSet and DaemonSet in Kipper's system namespaces.
+
 ### k3s upgrades {#k3s-upgrades}
 
 On a cluster with workers, rerunning `kip install` checks every recorded
