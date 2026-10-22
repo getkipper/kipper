@@ -44,7 +44,7 @@ func TestDefaultResourcesMatchTheReconcilerPresets(t *testing.T) {
 		{"mysql", "500m", "1Gi"},
 		{"mongodb", "500m", "1Gi"},
 		{"redis", "100m", "128Mi"},
-		{"rabbitmq", "100m", "128Mi"},
+		{"rabbitmq", "100m", "512Mi"},
 		{"minio", "100m", "128Mi"},
 		{"mailhog", "100m", "128Mi"},
 		{"opensearch", "100m", "2Gi"},
