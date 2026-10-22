@@ -179,6 +179,9 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		if err := upgradeClusterK3s(cluster, sshKey); err != nil {
 			return err
 		}
+		if err := waitForAPIAuthentication(ctx, clientset, k3sAuthenticationWait, 2*time.Second); err != nil {
+			return err
+		}
 	}
 
 	// Update CRD schemas via K8s API. Later steps (the system-component

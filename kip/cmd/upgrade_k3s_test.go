@@ -5,15 +5,22 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	authnv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/getkipper/kipper/kip/internal/installer"
 )
@@ -195,4 +202,49 @@ func TestCheckK3sUpgradeAdoptsAnUnrecordedServer(t *testing.T) {
 
 	require.NoError(t, checkK3sUpgrade(context.Background(), cs, &out))
 	assert.Contains(t, out.String(), "moves the server from v1.35.4+k3s1")
+}
+
+func selfReviewsAnswering(errs ...error) (*fake.Clientset, *int) {
+	cs := fake.NewClientset()
+	calls := 0
+	cs.PrependReactor("create", "selfsubjectreviews", func(k8stesting.Action) (bool, runtime.Object, error) {
+		calls++
+		if calls <= len(errs) {
+			return true, nil, errs[calls-1]
+		}
+		return true, &authnv1.SelfSubjectReview{}, nil
+	})
+	return cs, &calls
+}
+
+func TestWaitForAPIAuthenticationRetriesUntilTheCredentialsAreAccepted(t *testing.T) {
+	unauthorized := apierrors.NewUnauthorized("oidc: authenticator not initialized")
+	cs, calls := selfReviewsAnswering(unauthorized, unauthorized)
+
+	require.NoError(t, waitForAPIAuthentication(context.Background(), cs, time.Second, time.Millisecond))
+
+	assert.Equal(t, 3, *calls)
+}
+
+func TestWaitForAPIAuthenticationNamesTheRerunWhenTheCredentialsStayRejected(t *testing.T) {
+	unauthorized := apierrors.NewUnauthorized("oidc: authenticator not initialized")
+	errs := make([]error, 1000)
+	for i := range errs {
+		errs[i] = unauthorized
+	}
+	cs, _ := selfReviewsAnswering(errs...)
+
+	err := waitForAPIAuthentication(context.Background(), cs, 20*time.Millisecond, time.Millisecond)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), k3sUpgradeCommand)
+}
+
+func TestWaitForAPIAuthenticationStopsAtAnErrorThatIsNotARejection(t *testing.T) {
+	cs, calls := selfReviewsAnswering(apierrors.NewForbidden(schema.GroupResource{Resource: "selfsubjectreviews"}, "", errors.New("denied")))
+
+	err := waitForAPIAuthentication(context.Background(), cs, time.Second, time.Millisecond)
+
+	require.Error(t, err)
+	assert.Equal(t, 1, *calls)
 }
