@@ -14,13 +14,14 @@ import (
 
 // UFWAdoption describes the proposed takeover of an active, unclaimed UFW.
 type UFWAdoption struct {
-	Possible    bool
-	Reason      string
-	Removed     []string
-	Opened      []string
-	Pods        []string
-	Peers       []string
-	Fingerprint string
+	Possible      bool
+	Reason        string
+	Removed       []string
+	Opened        []string
+	Pods          []string
+	Peers         []string
+	PolicyChanges []string
+	Fingerprint   string
 }
 
 // PreviewUFWAdoption checks takeover eligibility and describes the changes
@@ -42,6 +43,10 @@ func PreviewUFWAdoption(client CommandRunner, mesh FirewallMesh) (UFWAdoption, e
 	if err != nil {
 		return UFWAdoption{}, err
 	}
+	defaults, err := readUFWDefaults(client)
+	if err != nil {
+		return UFWAdoption{}, err
+	}
 	refusal, err := ufwTakeoverRefusal(client, added, ports, mesh, ops)
 	if err != nil {
 		return UFWAdoption{}, err
@@ -51,9 +56,10 @@ func PreviewUFWAdoption(client CommandRunner, mesh FirewallMesh) (UFWAdoption, e
 	}
 	want := ufwWantedRules(ports, mesh, ops)
 	preview := UFWAdoption{
-		Possible:    true,
-		Peers:       openedToPeers(mesh),
-		Fingerprint: ufwFingerprint(added, ports, mesh, ops),
+		Possible:      true,
+		Peers:         openedToPeers(mesh),
+		PolicyChanges: defaults.changes(),
+		Fingerprint:   ufwFingerprint(added, ports, mesh, ops, defaults),
 	}
 	for _, r := range foreignUFWRules(added, want, ports) {
 		preview.Removed = append(preview.Removed, strings.TrimPrefix(r, "ufw "))
@@ -83,6 +89,9 @@ func (a UFWAdoption) Question(host string) string {
 	fmt.Fprintf(&b, "     opened to pods: %s\n", strings.Join(a.Pods, ", "))
 	for _, p := range a.Peers {
 		fmt.Fprintf(&b, "     opened to cluster node %s\n", p)
+	}
+	for _, c := range a.PolicyChanges {
+		fmt.Fprintf(&b, "     default for %s\n", c)
 	}
 	b.WriteString("  Incoming traffic is denied by default. If new SSH connections fail afterwards, Kipper\n")
 	b.WriteString("  attempts to restore the previous firewall. A fallback timer also attempts restoration\n")
@@ -132,7 +141,11 @@ func checkUFWAdoption(client FirewallRunner, consent FirewallConsent, mesh Firew
 	if err != nil {
 		return nil, err
 	}
-	if consent.Fingerprint != "" && ufwFingerprint(added, sshPorts, mesh, ops) != consent.Fingerprint {
+	defaults, err := readUFWDefaults(client)
+	if err != nil {
+		return nil, err
+	}
+	if consent.Fingerprint != "" && ufwFingerprint(added, sshPorts, mesh, ops, defaults) != consent.Fingerprint {
 		return nil, fmt.Errorf("the running UFW changed after you agreed to its takeover, so kip left it alone. Run the command again to review the changes")
 	}
 	refusal, err := ufwTakeoverRefusal(client, added, sshPorts, mesh, ops)
@@ -202,14 +215,78 @@ func ufwRuleDeletable(rule string) bool {
 }
 
 // ufwFingerprint binds consent to the saved rules, the configured SSH ports,
-// the host's role and peers, and the tunnel's rules.
-func ufwFingerprint(added string, ports []string, mesh FirewallMesh, ops []string) string {
+// the host's role and peers, the tunnel's rules and the default policies.
+func ufwFingerprint(added string, ports []string, mesh FirewallMesh, ops []string, defaults ufwDefaults) string {
 	h := sha256.New()
-	for _, part := range []string{added, strings.Join(ports, " "), meshFingerprint(mesh), strings.Join(ops, "\n")} {
+	for _, part := range []string{added, strings.Join(ports, " "), meshFingerprint(mesh), strings.Join(ops, "\n"), defaults.String()} {
 		h.Write([]byte(part))
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// ufwDefaults holds saved policies as allow, deny or reject, preserving unknown
+// values verbatim. A setting missing from the file is empty.
+type ufwDefaults struct {
+	incoming, outgoing, routed string
+}
+
+// kipUFWDefaults are the policies kip sets: ufwRules denies incoming and
+// allows outgoing traffic, and loadUFW accepts forwarding for pod traffic.
+var kipUFWDefaults = ufwDefaults{incoming: "deny", outgoing: "allow", routed: "allow"}
+
+// readUFWDefaults reads the default policies from /etc/default/ufw.
+func readUFWDefaults(client CommandRunner) (ufwDefaults, error) {
+	out, err := client.Run("cat /etc/default/ufw")
+	if err != nil {
+		return ufwDefaults{}, fmt.Errorf("reading ufw's default policies: %w", err)
+	}
+	words := map[string]string{"ACCEPT": "allow", "DROP": "deny", "REJECT": "reject"}
+	var d ufwDefaults
+	for _, line := range strings.Split(out, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		value = strings.Trim(value, `"'`)
+		if w, known := words[value]; known {
+			value = w
+		}
+		switch key {
+		case "DEFAULT_INPUT_POLICY":
+			d.incoming = value
+		case "DEFAULT_OUTPUT_POLICY":
+			d.outgoing = value
+		case "DEFAULT_FORWARD_POLICY":
+			d.routed = value
+		}
+	}
+	return d, nil
+}
+
+// changes describes each default policy that kip's takeover changes, such as
+// "outgoing traffic: deny becomes allow".
+func (d ufwDefaults) changes() []string {
+	var out []string
+	for _, p := range []struct{ traffic, now, kip string }{
+		{"incoming", d.incoming, kipUFWDefaults.incoming},
+		{"outgoing", d.outgoing, kipUFWDefaults.outgoing},
+		{"routed", d.routed, kipUFWDefaults.routed},
+	} {
+		if p.now == p.kip {
+			continue
+		}
+		now := p.now
+		if now == "" {
+			now = "unset"
+		}
+		out = append(out, fmt.Sprintf("%s traffic: %s becomes %s", p.traffic, now, p.kip))
+	}
+	return out
+}
+
+func (d ufwDefaults) String() string {
+	return d.incoming + " " + d.outgoing + " " + d.routed
 }
 
 // ufwWantedRules lists every rule kip keeps on a host it manages.
@@ -217,8 +294,8 @@ func ufwWantedRules(sshPorts []string, mesh FirewallMesh, ops []string) []string
 	return append(append(ufwRules(sshPorts, true, mesh.Role), ufwPeerRules(mesh)...), ops...)
 }
 
-// foreignUFWRules returns the saved rules, as `ufw show added` prints them,
-// that are neither in want nor an allow or limit rule for one of sshPorts.
+// foreignUFWRules returns saved rules in the format printed by ufw show added,
+// excluding wanted rules and TCP allow or limit rules for configured SSH ports.
 // Quoting is ignored because ufw prints comments quoted.
 func foreignUFWRules(added string, want, sshPorts []string) []string {
 	keep := map[string]bool{}
@@ -241,15 +318,18 @@ func ufwRuleKey(rule string) string {
 	return strings.ReplaceAll(rule, "'", "")
 }
 
-// isSSHRule reports whether rule allows or rate-limits one of sshPorts from
-// everywhere, with an optional /tcp suffix and comment. These rules are kept
-// so kip can update their SSH action in place.
+// isSSHRule reports whether rule allows or rate-limits TCP traffic to one of
+// sshPorts from everywhere, with an optional comment. These rules are kept so
+// kip can update their SSH action in place. UFW treats a rule without /tcp as
+// a separate rule, so takeover removes it to prevent it matching SSH traffic
+// before kip's rule.
 func isSSHRule(rule string, sshPorts []string) bool {
 	f := strings.Fields(rule)
 	if len(f) < 3 || (f[1] != "allow" && f[1] != "limit") || (len(f) > 3 && f[3] != "comment") {
 		return false
 	}
-	return slices.Contains(sshPorts, strings.TrimSuffix(f[2], "/tcp"))
+	port, ok := strings.CutSuffix(f[2], "/tcp")
+	return ok && slices.Contains(sshPorts, port)
 }
 
 // ufwDeleteCommand turns a rule printed by `ufw show added` into the command

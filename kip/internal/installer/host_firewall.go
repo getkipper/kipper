@@ -214,7 +214,7 @@ func configureFirewallWith(client FirewallRunner, rateLimitSSH bool, consent Fir
 
 // configureFirewall loads kip's UFW rules with rollback protection. Consent
 // allows takeover of an eligible, unclaimed UFW, preserving kip's rules and
-// allow or limit rules for configured SSH ports while removing other saved rules.
+// TCP allow or limit rules for configured SSH ports while removing other saved rules.
 func configureFirewall(client FirewallRunner, host HostOS, rateLimitSSH bool, consent FirewallConsent, mesh FirewallMesh) error {
 	// Refresh package lists so UFW can be installed on a fresh host.
 	install := host.InstallPackagesCommand(true, "ufw")
@@ -255,7 +255,7 @@ func configureFirewall(client FirewallRunner, host HostOS, rateLimitSSH bool, co
 }
 
 // loadUFW saves and loads kip's rules. Takeover also removes foreign saved
-// rules, preserving allow and limit rules for configured SSH ports. The caller
+// rules, preserving TCP allow and limit rules for configured SSH ports. The caller
 // must arm rollback and provide a runner that guards commands with its lock.
 func loadUFW(client CommandRunner, sshPorts []string, rateLimitSSH bool, mesh FirewallMesh, takeover *ufwTakeover) error {
 	// Allow forwarding for kube-proxy NAT and Flannel pod traffic.
@@ -307,7 +307,7 @@ func loadUFW(client CommandRunner, sshPorts []string, rateLimitSSH bool, mesh Fi
 
 // removeStaleRules deletes obsolete peer rules and, on workers, saved server
 // port rules, except those for configured SSH ports. Takeover also removes
-// foreign rules, preserving allow and limit rules for configured SSH ports.
+// foreign rules, preserving TCP allow and limit rules for configured SSH ports.
 // It deletes nothing if a foreign rule was absent from the checked listing or
 // cannot be safely deleted. It stops at the first command error.
 func removeStaleRules(client CommandRunner, mesh FirewallMesh, sshPorts []string, takeover *ufwTakeover, ops []string) error {
