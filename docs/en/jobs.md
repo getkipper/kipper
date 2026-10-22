@@ -54,7 +54,7 @@ kip job list --project blog --environment test
 kip job history nightly-cleanup --project blog --environment prod
 ```
 
-Shows all past executions with timestamps and status (completed/failed/running).
+Shows retained runs for that job name, each with its own run name, time since resource creation and status (pending, running, completed or failed). This includes scheduled runs and one-off runs started with `kip job run --name` or from the console. One-off outcomes remain available after Kubernetes cleans up the execution Job. Scheduled runs appear while their Kubernetes Jobs are retained.
 
 ## Deleting a scheduled job
 
