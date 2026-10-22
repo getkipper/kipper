@@ -276,6 +276,11 @@ release keeps running, and one whose binary was replaced by an interrupted attem
 restarted. The workers then follow as described below, and a failed step names the
 command to run again.
 
+Before applying the CRDs and console, kip waits up to two minutes for the API to
+accept kip's credentials again. An API server that authenticates operators through
+Dex can reject their tokens for a few seconds after a restart while it reconnects
+to Dex and initializes authentication.
+
 On a cluster with workers, `kip upgrade --k3s` and rerunning `kip install` check
 every recorded worker's reported k3s version before upgrading k3s. Each command
 stops if a worker runs a newer version than the server will run. Use a

@@ -7,7 +7,9 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
+	authnv1 "k8s.io/api/authentication/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -56,6 +58,35 @@ func upgradeClusterK3s(cluster *config.Cluster, sshKey string) error {
 	}
 	fmt.Println()
 	return nil
+}
+
+// k3sAuthenticationWait allows time for OIDC authentication to recover after a
+// restart. The authenticator retries every ten seconds and needs Traefik to reach Dex.
+const k3sAuthenticationWait = 2 * time.Minute
+
+// waitForAPIAuthentication uses SelfSubjectReview to check that the API accepts
+// cs's credentials. OIDC authentication may still be initializing after the node
+// reports Ready. It retries Unauthorized responses at interval until timeout or
+// context cancellation, and returns other errors immediately. Every error names
+// the command to run again.
+func waitForAPIAuthentication(ctx context.Context, cs kubernetes.Interface, timeout, interval time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		_, err := cs.AuthenticationV1().SelfSubjectReviews().Create(ctx, &authnv1.SelfSubjectReview{}, metav1.CreateOptions{})
+		if err == nil {
+			return nil
+		}
+		rejected := fmt.Errorf("the Kubernetes API did not accept kip's credentials after k3s restarted (%w). Run %s again once 'kip auth verify' passes", err, k3sUpgradeCommand)
+		if !apierrors.IsUnauthorized(err) {
+			return rejected
+		}
+		select {
+		case <-ctx.Done():
+			return rejected
+		case <-time.After(interval):
+		}
+	}
 }
 
 // preflightK3s checks the upgrade plan over SSH using the existing node records,
