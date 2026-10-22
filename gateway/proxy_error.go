@@ -34,7 +34,7 @@ var (
 		kind:    "unexpected certificate",
 		heading: "This site isn't ready yet",
 		detail:  "The server behind this address answered with a certificate the kipper.run gateway doesn't recognize. That often happens for a few minutes while a cluster starts up after a restart.",
-		owner:   "Wait a few minutes after a restart. If this page still appears, run kip status and check that Traefik and console-api are running.",
+		owner:   "Wait a few minutes after a restart. If this page still appears, run kip doctor. It reads cluster diagnostics over SSH and checks Traefik, console-api and the connection between the gateway and your cluster.",
 	}
 	failureNotAnswering = proxyFailure{
 		status:  http.StatusGatewayTimeout,
@@ -42,7 +42,7 @@ var (
 		kind:    "cluster not answering",
 		heading: "This site isn't answering",
 		detail:  "The server behind this address didn't respond in time. It may be turned off, restarting, or behind a firewall that drops the connection.",
-		owner:   "Check that the server is running and that ports 80 and 443 are open to the internet, then run kip status.",
+		owner:   "Check that the server is running and that ports 80 and 443 are open to the internet, then run kip doctor.",
 	}
 	failureNotReachable = proxyFailure{
 		status:  http.StatusBadGateway,
@@ -50,7 +50,7 @@ var (
 		kind:    "cluster not reachable",
 		heading: "This site can't be reached right now",
 		detail:  "The server behind this address refused the connection or couldn't be reached. It may be restarting or turned off.",
-		owner:   "Check that the server is running and that Traefik is listening on port 443, then run kip status.",
+		owner:   "Check that the server is running and that Traefik is listening on port 443, then run kip doctor.",
 	}
 	failureUpstream = proxyFailure{
 		status:  http.StatusBadGateway,
@@ -58,7 +58,7 @@ var (
 		kind:    "upstream error",
 		heading: "Something went wrong reaching this site",
 		detail:  "The kipper.run gateway couldn't complete the request to the server behind this address.",
-		owner:   "Run kip status to check the cluster.",
+		owner:   "Run kip doctor to check the cluster.",
 	}
 )
 
@@ -124,7 +124,7 @@ func proxyFailureIssueLink(f *proxyFailure, now time.Time) string {
 		"template": {"bug_report.yml"},
 		"title":    {"kipper.run gateway: " + f.kind},
 		"what-happened": {fmt.Sprintf("The kipper.run gateway answered %d (%s) at %s.\n\n%s\n\n"+
-			"If this is your cluster, run `kip status` and paste its output into Logs or output. "+
+			"If this is your cluster, run `kip doctor` and paste its output into Logs or output. "+
 			"Add the site's address only if you're comfortable making it public.",
 			f.status, f.kind, now.Format("2006-01-02T15:04Z"), f.detail)},
 		"repro": {"Opened a site on a kipper.run address and got the gateway's error page."},
@@ -132,10 +132,10 @@ func proxyFailureIssueLink(f *proxyFailure, now time.Time) string {
 	return "https://github.com/getkipper/kipper/issues/new?" + q.Encode()
 }
 
-// withCommands escapes text and formats each occurrence of kip status as HTML code.
+// withCommands escapes text and formats each occurrence of kip doctor as HTML code.
 func withCommands(text string) template.HTML {
 	escaped := template.HTMLEscapeString(text)
-	return template.HTML(strings.ReplaceAll(escaped, "kip status", "<code>kip status</code>")) //nolint:gosec // The text is escaped above, and only fixed markup is added.
+	return template.HTML(strings.ReplaceAll(escaped, "kip doctor", "<code>kip doctor</code>")) //nolint:gosec // The text is escaped above, and only fixed markup is added.
 }
 
 var proxyFailurePage = template.Must(template.New("proxy-failure").Parse(`{{define "mark"}}<path fill="#BDE4FF" d="M106.36 445.6l106.58 0 87.72 -107.26 62.99 -76.32 -88.13 -106.77 -62.59 75.83 87.72 107.26 -105.76 0 -88.54 107.26z"/><path fill="#0EA5E9" d="M106.36 231.07l-106.36 0 88.54 107.26 -88.54 107.26 106.36 0 88.54 -107.26 -88.54 -107.26z"/><path fill="#0EA5E9" d="M296.34 0l-74.66 90.45 141.97 171.56 -62.99 76.32 62.99 76.32 -141.97 171.57 74.66 90.45c93.65,-112.68 187.1,-225.35 280.37,-338.34 -93.27,-112.98 -186.72,-225.66 -280.37,-338.34z"/><circle fill="#fff" cx="440.9" cy="343.39" r="34.88"/><path fill="#fff" d="M106.36 231.08l106.58 0 87.72 107.26 -105.76 0 -88.54 -107.26zm194.3 107.26l-87.72 107.26 62.59 75.82 88.13 -106.77 -62.99 -76.32z"/><path fill="#7DC3F5" d="M286.59 534.83l-1.29 0 0 -1.56 1.29 1.56zm0 -392.99l-1.29 0 0 1.56 1.29 -1.56zm-180.99 89.23l107.33 0 62.59 -75.83 -107.33 0 -47.4 57.43 -15.19 18.4zm0 214.52l107.33 0 62.59 75.82 -107.33 0 -47.4 -57.43 -15.19 -18.39z"/>{{end}}<!doctype html>
