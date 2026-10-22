@@ -1992,10 +1992,13 @@ async function loadSettings() {
 // Only the latest resource read may update the panel.
 let resourcesReadSeq = 0
 
-// loadResources reports whether its response was accepted. wanted rejects
-// responses for an obsolete save. When saved is supplied, only replaceable
-// fields that still match their saved values are updated; the baseline always
-// advances. Ordinary loads replace all inputs.
+/**
+ * Refreshes resources while preserving edits and returns whether the response was accepted.
+ * The wanted callback rejects responses for an obsolete save. With saved fields,
+ * only replaceable inputs that still match their saved values are updated.
+ * Otherwise, only inputs that still match the baseline are updated.
+ * Every accepted response advances the baseline. Failed or stale reads return false.
+ */
 async function loadResources(wanted: () => boolean = () => true, saved?: SavedFields): Promise<boolean> {
   if (!wanted()) return false
   const identity = resourcesIdentity()
@@ -2015,7 +2018,10 @@ async function loadResources(wanted: () => boolean = () => true, saved?: SavedFi
     const fields = { memoryRequest, memoryLimit, cpuRequest, cpuLimit }
     let typed = false
     for (const key of Object.keys(fields) as (keyof ResourceValues)[]) {
-      if (saved && (!saved.replaceable[key] || fields[key].value !== saved.values[key])) typed = true
+      const edited = saved
+        ? !saved.replaceable[key] || fields[key].value !== saved.values[key]
+        : fields[key].value !== loadedResources.value[key]
+      if (edited) typed = true
       else {
         fields[key].value = read[key]
         const record = saved ?? latestSaved
