@@ -15,7 +15,7 @@ kip job run --name db-migrate --image myapp:latest --command "npm run migrate" -
 
 ```
   Running job "db-migrate"...
-  ✔  Job started
+  ✔  Job db-migrate-20261022-061500 started
   Run 'kip job history db-migrate' to check the result
 ```
 
@@ -45,7 +45,7 @@ kip job list --project blog --environment test
 ```
   NAME                 TYPE       SCHEDULE             LAST RUN        STATUS
   nightly-cleanup      cronjob    0 3 * * *            8h ago          scheduled
-  db-migrate           job                             2m ago          completed
+  db-migrate-20261022-061500 job                             2m ago          completed
 ```
 
 ## Viewing history
