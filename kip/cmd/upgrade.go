@@ -75,10 +75,19 @@ fixes are written once the new console-api is serving alone.
 --check runs these data checks on their own, changes nothing and needs
 no SSH key. It exits non-zero when something needs a decision.
 
+--k3s also upgrades k3s to the release pinned by this kip version, before the CRDs
+and console: the server first, then each ready worker. It stops
+before upgrading k3s when the server is more than one Kubernetes
+minor behind the pin, a node runs a newer release, or a worker would
+cross the limit of three minor versions behind. Restarting k3s pauses the
+Kubernetes API while running pods keep serving. With --check it
+reports the planned upgrade.
+
 Examples:
   kip upgrade --check
   kip upgrade
   kip upgrade --skip-system
+  kip upgrade --k3s
   kip upgrade --yes
   kip upgrade --seed-credential-grants
   kip upgrade --repair-autoscaling`,
@@ -94,6 +103,7 @@ func init() {
 	upgradeCmd.Flags().Bool("check", false, "run the upgrade's data checks and report what it would fix, without changing anything; exits non-zero when something needs a decision")
 	upgradeCmd.Flags().Bool("repair-autoscaling", false, "apply the autoscaling fixes the upgrade lists, without asking")
 	upgradeCmd.Flags().Bool("skip-autoscaling-check", false, "upgrade although some apps' autoscaling settings need a decision, leaving those apps as they are")
+	upgradeCmd.Flags().Bool("k3s", false, "also upgrade k3s to the release pinned by this kip version: the server first, then each ready worker. Stops before upgrading k3s when the server is more than one Kubernetes minor behind the pin, a node runs a newer release, or a worker would cross the limit of three minor versions behind. Restarting k3s pauses the Kubernetes API while running pods keep serving. The k3s step preserves the other settings created by kip install")
 	upgradeCmd.Flags().String("ssh-key", "", "path to SSH private key for the host; needed by every upgrade, including --skip-system, because the cluster's trust material is reconciled over SSH (overrides cluster.ssh_key in config and KIP_SSH_KEY env)")
 	rootCmd.AddCommand(upgradeCmd)
 }
@@ -107,6 +117,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	repairAutoscalingFlag, _ := cmd.Flags().GetBool("repair-autoscaling")
 	skipAutoscalingCheck, _ := cmd.Flags().GetBool("skip-autoscaling-check")
 	imageTag, _ := cmd.Flags().GetString("image-tag")
+	upgradeK3s, _ := cmd.Flags().GetBool("k3s")
 	if err := checkImageTagFlags(imageTag, skipSystem); err != nil {
 		return err
 	}
@@ -120,7 +131,13 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	clientset := k8sClient.Clientset()
 
 	if checkOnly {
-		return runUpgradeChecks(ctx, clientset, k8sClient.Dynamic(), os.Stdout, cliVersion())
+		checkErr := runUpgradeChecks(ctx, clientset, k8sClient.Dynamic(), os.Stdout, cliVersion())
+		if upgradeK3s {
+			if err := checkK3sUpgrade(ctx, clientset, os.Stdout); err != nil && checkErr == nil {
+				checkErr = err
+			}
+		}
+		return checkErr
 	}
 
 	fmt.Printf("\n  Upgrading Kipper on %s...\n\n", cluster.Domain)
@@ -129,6 +146,11 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	// below needs the API, so the change is settled over SSH first.
 	if err := recoverNetworkChange(cluster, sshKey, autoYes); err != nil {
 		return err
+	}
+	if upgradeK3s {
+		if err := preflightK3s(cluster, sshKey); err != nil {
+			return err
+		}
 	}
 	if err := checkNodesAndStorage(cluster, sshKey); err != nil {
 		return err
@@ -150,6 +172,13 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		return confirmInteractiveNonFatal("  Remove these routes so Kipper's own routes work? [y/N] ")
 	}); err != nil {
 		return err
+	}
+
+	// The control plane moves before the CRDs and console are applied to it.
+	if upgradeK3s {
+		if err := upgradeClusterK3s(cluster, sshKey); err != nil {
+			return err
+		}
 	}
 
 	// Update CRD schemas via K8s API. Later steps (the system-component

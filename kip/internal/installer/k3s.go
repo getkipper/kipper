@@ -779,12 +779,7 @@ func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPre
 		// The script's change detection covers its binary, service and environment
 		// files. Force a restart to load the config written by this run or an
 		// interrupted earlier run, even if those files are unchanged.
-		force := ""
-		if k3sPreexisting {
-			force = "INSTALL_K3S_FORCE_RESTART=true "
-		}
-		installCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | %sINSTALL_K3S_VERSION='%s' INSTALL_K3S_EXEC='server' sh -", force, k3sVersion)
-		if _, err := client.Run(installCmd); err != nil {
+		if _, err := client.Run(serverInstallCommand(k3sPreexisting)); err != nil {
 			return fmt.Errorf("running k3s installer: %w", err)
 		}
 	} else {

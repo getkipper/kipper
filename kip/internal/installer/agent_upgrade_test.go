@@ -53,7 +53,7 @@ func TestCheckK3sSkew(t *testing.T) {
 				"server-1": {version: tt.installed, ready: true},
 				"worker-1": {version: tt.agent, ready: true},
 			}
-			err := checkK3sSkew(tt.installed, skewRecords(worker), versions)
+			err := checkK3sSkew(tt.installed, skewRecords(worker), versions, "kip install")
 			if tt.wantErr == nil {
 				assert.NoError(t, err)
 				return
@@ -77,17 +77,17 @@ func TestCheckK3sSkewChecksEveryRecordedAgent(t *testing.T) {
 		"worker-1": {version: "v1.35.6+k3s1", ready: true},
 		"worker-2": {version: "v1.32.0+k3s1"},
 	}
-	err := checkK3sSkew("v1.35.6+k3s1", records, versions)
+	err := checkK3sSkew("v1.35.6+k3s1", records, versions, "kip install")
 	require.Error(t, err, "a joining agent's kubelet still talks to the API server")
 	assert.Contains(t, err.Error(), "worker-2")
 
 	delete(versions, "worker-2")
-	assert.NoError(t, checkK3sSkew("v1.35.6+k3s1", records, versions), "a record without a Node runs no kubelet")
+	assert.NoError(t, checkK3sSkew("v1.35.6+k3s1", records, versions, "kip install"), "a record without a Node runs no kubelet")
 }
 
 func TestCheckK3sSkewRefusesAnUnreadableAgentVersion(t *testing.T) {
 	versions := map[string]nodeVersion{"worker-1": {version: "v1.36"}}
-	err := checkK3sSkew(k3sVersion, skewRecords(workerRecord("worker-1", "203.0.113.11", NodeStateReady)), versions)
+	err := checkK3sSkew(k3sVersion, skewRecords(workerRecord("worker-1", "203.0.113.11", NodeStateReady)), versions, "kip install")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "worker-1")
 }
@@ -108,7 +108,7 @@ func TestParseNodeVersions(t *testing.T) {
 
 func TestCheckClusterK3sSkewSkipsAClusterWithoutWorkers(t *testing.T) {
 	r := &routedRunner{}
-	require.NoError(t, checkClusterK3sSkew(r, skewRecords()))
+	require.NoError(t, checkClusterK3sSkew(r, skewRecords(), "kip install"))
 	assert.Empty(t, r.commands, "a single-node cluster needs no version reads")
 }
 
@@ -117,7 +117,7 @@ func TestCheckClusterK3sSkewReadsTheServerAndNodes(t *testing.T) {
 		{contains: "k3s --version", out: "k3s version v1.35.6+k3s1 (abc)\n"},
 		{contains: "kubeletVersion", out: "server-1\tv1.35.6+k3s1\tTrue\nworker-1\tv1.32.1+k3s1\tTrue\n"},
 	}}
-	err := checkClusterK3sSkew(r, skewRecords(workerRecord("worker-1", "203.0.113.11", NodeStateReady)))
+	err := checkClusterK3sSkew(r, skewRecords(workerRecord("worker-1", "203.0.113.11", NodeStateReady)), "kip install")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "worker-1")
 }
@@ -205,7 +205,7 @@ func TestUpgradeAgentsBringsEachWorkerToTheServersVersion(t *testing.T) {
 		workerRecord("worker-3", "203.0.113.13", NodeStateReady),
 	)
 	var out bytes.Buffer
-	require.NoError(t, upgradeAgents(&out, c, c.onWorker, time.Second, time.Millisecond))
+	require.NoError(t, upgradeAgents(&out, c, c.onWorker, "kip install", time.Second, time.Millisecond))
 
 	for _, host := range []string{"203.0.113.11", "203.0.113.13"} {
 		require.Len(t, c.ran[host], 1, "one command per agent")
@@ -228,7 +228,7 @@ func TestUpgradeAgentsStopsAtTheFirstFailure(t *testing.T) {
 		workerRecord("worker-2", "203.0.113.12", NodeStateReady),
 	)
 	c.failOn = "203.0.113.11"
-	err := upgradeAgents(io.Discard, c, c.onWorker, time.Second, time.Millisecond)
+	err := upgradeAgents(io.Discard, c, c.onWorker, "kip install", time.Second, time.Millisecond)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "worker-1")
 	assert.Contains(t, err.Error(), "kip install again")
@@ -242,7 +242,7 @@ func TestUpgradeAgentsWaitsForTheNewVersion(t *testing.T) {
 		workerRecord("worker-2", "203.0.113.12", NodeStateReady),
 	)
 	c.stuck = "203.0.113.11"
-	err := upgradeAgents(io.Discard, c, c.onWorker, 20*time.Millisecond, time.Millisecond)
+	err := upgradeAgents(io.Discard, c, c.onWorker, "kip install", 20*time.Millisecond, time.Millisecond)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "worker-1")
 	assert.Contains(t, err.Error(), "v1.36.2+k3s1")
@@ -256,7 +256,7 @@ func TestUpgradeAgentsLeavesWorkersInTransitionAlone(t *testing.T) {
 		workerRecord("worker-2", "203.0.113.12", NodeStateRemoving),
 	)
 	var out bytes.Buffer
-	require.NoError(t, upgradeAgents(&out, c, c.onWorker, time.Second, time.Millisecond))
+	require.NoError(t, upgradeAgents(&out, c, c.onWorker, "kip install", time.Second, time.Millisecond))
 	assert.Empty(t, c.ran)
 	assert.Contains(t, out.String(), "worker-1")
 	assert.Contains(t, out.String(), "joining")
@@ -267,7 +267,7 @@ func TestUpgradeAgentsRefusesANewerAgent(t *testing.T) {
 		map[string]string{"worker-1": "v1.36.3+k3s1"},
 		workerRecord("worker-1", "203.0.113.11", NodeStateReady),
 	)
-	err := upgradeAgents(io.Discard, c, c.onWorker, time.Second, time.Millisecond)
+	err := upgradeAgents(io.Discard, c, c.onWorker, "kip install", time.Second, time.Millisecond)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "newer")
 	assert.Empty(t, c.ran)
@@ -275,7 +275,7 @@ func TestUpgradeAgentsRefusesANewerAgent(t *testing.T) {
 
 func TestUpgradeAgentsRefusesAMissingNode(t *testing.T) {
 	c := newAgentCluster(nil, workerRecord("worker-1", "203.0.113.11", NodeStateReady))
-	err := upgradeAgents(io.Discard, c, c.onWorker, time.Second, time.Millisecond)
+	err := upgradeAgents(io.Discard, c, c.onWorker, "kip install", time.Second, time.Millisecond)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "worker-1")
 	assert.Empty(t, c.ran)
@@ -283,7 +283,7 @@ func TestUpgradeAgentsRefusesAMissingNode(t *testing.T) {
 
 func TestUpgradeAgentsWithoutWorkersReadsNoVersions(t *testing.T) {
 	c := newAgentCluster(nil)
-	require.NoError(t, upgradeAgents(io.Discard, c, c.onWorker, time.Second, time.Millisecond))
+	require.NoError(t, upgradeAgents(io.Discard, c, c.onWorker, "kip install", time.Second, time.Millisecond))
 	assert.Zero(t, c.reads)
 }
 
@@ -299,7 +299,7 @@ func TestUpgradeAgentsWaitsForAWorkerAlreadyOnTheVersionToBeReady(t *testing.T) 
 		workerRecord("worker-2", "203.0.113.12", NodeStateReady),
 	)
 	c.versions["worker-1"] = nodeVersion{version: "v1.36.2+k3s1"}
-	err := upgradeAgents(io.Discard, c, c.onWorker, 20*time.Millisecond, time.Millisecond)
+	err := upgradeAgents(io.Discard, c, c.onWorker, "kip install", 20*time.Millisecond, time.Millisecond)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "worker-1")
 	assert.Empty(t, c.ran, "no worker restarts while another is not Ready")
@@ -308,7 +308,7 @@ func TestUpgradeAgentsWaitsForAWorkerAlreadyOnTheVersionToBeReady(t *testing.T) 
 func TestUpgradeAgentsReportsTheHostsLastLine(t *testing.T) {
 	c := newAgentCluster(map[string]string{"worker-1": "v1.35.6+k3s1"}, workerRecord("worker-1", "203.0.113.11", NodeStateReady))
 	c.failOn = "203.0.113.11"
-	err := upgradeAgents(io.Discard, c, c.onWorker, time.Second, time.Millisecond)
+	err := upgradeAgents(io.Discard, c, c.onWorker, "kip install", time.Second, time.Millisecond)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Could not resolve host")
 	assert.NotContains(t, err.Error(), "INSTALL_K3S_VERSION", "the script itself stays out of the error")
@@ -368,7 +368,7 @@ func TestUpgradeAgentsRereadsReadinessForEachWorker(t *testing.T) {
 			c.versions["worker-2"] = nodeVersion{version: "v1.36.2+k3s1"}
 		}
 	}
-	err := upgradeAgents(io.Discard, c, c.onWorker, 20*time.Millisecond, time.Millisecond)
+	err := upgradeAgents(io.Discard, c, c.onWorker, "kip install", 20*time.Millisecond, time.Millisecond)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "worker-2")
 	assert.Empty(t, c.ran["203.0.113.13"], "worker-3 waits while worker-2 is not Ready")
@@ -385,6 +385,6 @@ func TestHostFailure(t *testing.T) {
 func TestUpgradeAgentsKeepsALostLease(t *testing.T) {
 	c := newAgentCluster(map[string]string{"worker-1": "v1.35.6+k3s1"}, workerRecord("worker-1", "203.0.113.11", NodeStateReady))
 	onWorker := func(string, func(CommandRunner) error) error { return ErrNodeLeaseLost }
-	err := upgradeAgents(io.Discard, c, onWorker, time.Second, time.Millisecond)
+	err := upgradeAgents(io.Discard, c, onWorker, "kip install", time.Second, time.Millisecond)
 	assert.ErrorIs(t, err, ErrNodeLeaseLost)
 }

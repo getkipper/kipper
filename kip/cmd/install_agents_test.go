@@ -44,13 +44,13 @@ func TestUpgradeAgentsAfterInstallSkipsASingleNodeCluster(t *testing.T) {
 		t.Fatal("a single-node cluster has no worker to connect to")
 		return nil, nil, nil
 	}
-	require.NoError(t, upgradeAgentsAfterInstall(io.Discard, server, dial))
+	require.NoError(t, upgradeAgentsAfterInstall(io.Discard, server, dial, "kip install"))
 }
 
 func TestUpgradeAgentsAfterInstallReportsUnreadableRecords(t *testing.T) {
 	server := recordsOnlyServer{t: t, err: errors.New("connection reset")}
 	dial := func(string, string) (installer.FirewallRunner, func(), error) { return nil, nil, nil }
-	err := upgradeAgentsAfterInstall(io.Discard, server, dial)
+	err := upgradeAgentsAfterInstall(io.Discard, server, dial, "kip install")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "connection reset")
 }

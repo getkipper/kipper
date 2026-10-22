@@ -231,6 +231,25 @@ func UnrecordedNodes(client CommandRunner, records []NodeRecord) ([]string, erro
 	return unrecordedIn(out, records)
 }
 
+// NodeIdentity is a Node's name and machine ID.
+type NodeIdentity struct {
+	Name      string
+	MachineID string
+}
+
+// UnrecordedIdentities returns alphabetically sorted names of Nodes with no
+// recorded machine ID, including Nodes with an empty machine ID. It returns nil
+// when all Nodes are recorded. Duplicate non-empty machine IDs, invalid Node
+// names and names that differ from their records return an error. Joining
+// records and records with no name match by machine ID alone.
+func UnrecordedIdentities(nodes []NodeIdentity, records []NodeRecord) ([]string, error) {
+	var b strings.Builder
+	for _, n := range nodes {
+		fmt.Fprintf(&b, "%s|%s\n", n.Name, n.MachineID)
+	}
+	return unrecordedIn(b.String(), records)
+}
+
 func listNodeIdentities(client CommandRunner) (string, error) {
 	out, err := client.Run(`kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}|{.status.nodeInfo.machineID}{"\n"}{end}' 2>/dev/null`)
 	if err != nil {

@@ -54,6 +54,7 @@ A cluster already carrying these arguments keeps them, and the arguments themsel
 kip upgrade --check            # report what the upgrade would fix, change nothing
 kip upgrade                    # default, prompts before system components
 kip upgrade --skip-system      # only steps 1 and 2 (Kipper console layer)
+kip upgrade --k3s              # also upgrade k3s to the release pinned by this kip version
 kip upgrade --yes              # all three steps, no component prompt (for automation)
 kip upgrade --yes --repair-autoscaling  # also apply autoscaling fixes without asking
 ```
@@ -64,6 +65,7 @@ kip upgrade --yes --repair-autoscaling  # also apply autoscaling fixes without a
 |---|---|---|
 | `--skip-system` | `false` | Skip the cluster components (Traefik, Longhorn, KEDA, Velero, Zot, monitoring). CRDs, console, and the cluster's own trust material are still updated, and Traefik is restarted when its copy of the hop certificate changes. Use this in production to avoid touching component versions. |
 | `--yes` | `false` | Confirm cluster-component upgrades and removal of app routes that collide with installed platform routes. Required for these steps in non-interactive contexts (CI, scripts). Autoscaling fixes are confirmed separately, so a run without a terminal also needs `--repair-autoscaling` when there are fixes to apply |
+| `--k3s` | `false` | Also upgrade k3s to the release pinned by this kip version, before the CRDs and console: the server first, then each ready worker. Stops before upgrading k3s when the server is more than one Kubernetes minor behind the pin, a node runs a newer release, or a worker would cross the limit of three minor versions behind. With `--check`, reports the planned upgrade. See [k3s upgrades](#k3s-upgrades) |
 | `--check` | `false` | Run the upgrade's data checks and report what it would fix, without changing anything. Needs no SSH key. Exits non-zero when something needs a decision. See [Checking before an upgrade](#checking-before-an-upgrade) |
 | `--repair-autoscaling` | `false` | Apply the autoscaling fixes the upgrade lists without asking. Required in non-interactive contexts when there are fixes to apply |
 | `--skip-autoscaling-check` | `false` | Upgrade although some apps' autoscaling settings need a decision, leaving those apps as they are |
@@ -237,20 +239,46 @@ re-runs the rest of the install. Use it for the specific tasks named in these
 docs, not as a way to catch up a cluster.
 :::
 
-**k3s** deserves its own note: re-running `kip install` moves the server onto the
-k3s release this kip version pins, which briefly restarts the control plane. That
-path refuses downgrades and upgrades at most one Kubernetes minor per run,
-because the Kubernetes skew policy forbids skipping minors. For a server further
-behind, kip keeps the installed version and warns that the intermediate minor
-upgrades are needed first. Every re-run restarts k3s so that it loads the configuration kip wrote.
+**k3s** deserves its own note: `kip upgrade --k3s` moves a cluster onto the k3s
+release this kip version pins without re-running the install. See
+[k3s upgrades](#k3s-upgrades). Re-running `kip install` also moves the server onto
+that release, and it restarts k3s on every run so that it loads the configuration
+kip wrote. For a server more than one Kubernetes minor behind, the install keeps
+the installed version and warns that the intermediate minor upgrades are needed
+first.
 
 To check component versions after an upgrade, run [`kip platform versions`](/en/cli-reference#kip-platform-versions). It shows the kip version recorded on the App CRD, the console-api build recorded at startup, each node's Kubernetes version, and the pod template images of every Deployment, StatefulSet and DaemonSet in Kipper's system namespaces.
 
 ### k3s upgrades {#k3s-upgrades}
 
-On a cluster with workers, rerunning `kip install` checks every recorded
-worker's reported k3s version before the install steps start. It stops before
-upgrading k3s if a worker runs a newer version than the server will run. Use a
+`kip upgrade --k3s` upgrades the cluster to the k3s release pinned by this kip
+version, then continues with the rest of the upgrade. The k3s step preserves the
+other settings created by `kip install`, including console users, the admin
+password and the k3s configuration.
+
+```bash
+kip upgrade --check --k3s   # report the planned move
+kip upgrade --k3s           # move the server, then each ready worker
+```
+
+After recovering any interrupted network change and before upgrading k3s, kip
+checks the server's version and the reported versions of recorded workers. It
+stops when the server is more than one Kubernetes minor behind the pin, because Kubernetes
+upgrades the control plane one minor at a time, and when the server or a worker runs
+a newer release, because kip prevents k3s downgrades. It also stops while a worker is still
+joining. Workers follow the skew rules below.
+
+The server moves first. kip runs the k3s install script for the pinned release and
+restarts k3s, then waits up to five minutes for the server's node to report Ready on
+that release. Restarting k3s pauses the Kubernetes API, usually for under a minute,
+while running pods keep serving. A server whose node already reports the pinned
+release keeps running, and one whose binary was replaced by an interrupted attempt is
+restarted. The workers then follow as described below, and a failed step names the
+command to run again.
+
+On a cluster with workers, `kip upgrade --k3s` and rerunning `kip install` check
+every recorded worker's reported k3s version before upgrading k3s. Each command
+stops if a worker runs a newer version than the server will run. Use a
 kip release that installs at least that worker's version.
 
 It also stops if the server upgrade would leave a worker more than three
@@ -261,7 +289,7 @@ for kubelets at version 1.25 or later. Bring such a worker to the server's curre
 version first with `kip node add <host>`. Workers already beyond that limit are
 handled by the worker upgrade that follows.
 
-Once the server install finishes, kip upgrades workers recorded as `ready` to
+Once the server is on its new version, kip upgrades workers recorded as `ready` to
 the server's k3s version, one at a time in name order. Before upgrading each
 worker, it checks that the host is the recorded machine and that its installed
 k3s matches either the version its Node reports or the target version from an
@@ -269,7 +297,7 @@ earlier attempt. It then reruns the k3s install script with the worker's saved
 join settings. `k3s-agent` restarts while existing pods keep running, without a
 drain. kip waits up to five minutes for each worker to report Ready on the target
 version, including workers already on that version, and stops at the first
-upgrade failure or readiness timeout. Rerunning `kip install` resumes the
+upgrade failure or readiness timeout. Running the same command again resumes the
 upgrades and skips workers already reporting Ready on the server's version.
 Workers recorded as joining, being removed or being wiped are left unchanged.
 kip holds the same lock as `kip node add` and `kip node remove` while upgrading
