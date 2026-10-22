@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/job"
 )
 
@@ -95,7 +96,16 @@ func resolveJobNamespace(cmd *cobra.Command) string {
 		}
 		return project
 	}
+	return jobNamespace(cmd, cluster)
+}
+
+// jobNamespace resolves the job namespace using the project selected by --project,
+// then the active project, then "default", matching kip app deploy.
+func jobNamespace(cmd *cobra.Command, cluster *config.Cluster) string {
 	project, environment := resolveProjectAndEnvironment(cmd, cluster)
+	if project == "" {
+		project = "default"
+	}
 	return cluster.ResolveNamespace(project, environment)
 }
 
