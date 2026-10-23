@@ -50,6 +50,7 @@ func healthyRunner() *routedRunner {
 		on(`{.data.candidate\.crt}`, "", nil).
 		on("tlsstores", tlsStoresJSON, nil).
 		on("clusteridentities", "203.0.113.10", nil).
+		on("{.spec.storage}", "longhorn", nil).
 		on("platformconfigs", "small", nil).
 		on("logs deploy/console-api", "2026-10-06T00:07:40Z serving on :8080\n2026-10-06T00:07:48Z gateway heartbeat: renewed lab.kipper.run (hop pin active)\n", nil)
 }
@@ -70,6 +71,7 @@ func TestFetchOverSSH_ReadsEveryPart(t *testing.T) {
 	assert.Equal(t, []TLSStore{{Namespace: "kipper-system", Name: "default", DefaultCert: "kipper-hop-cert"}}, snap.TLSStores)
 	assert.Equal(t, "203.0.113.10", snap.ClusterHost)
 	assert.Equal(t, "small", snap.Profile)
+	assert.Equal(t, "longhorn", snap.Storage)
 	assert.Equal(t, []string{"2026-10-06T00:07:48Z gateway heartbeat: renewed lab.kipper.run (hop pin active)"}, snap.Heartbeat)
 }
 

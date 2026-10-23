@@ -8,7 +8,7 @@ description: Commands for managing Kipper clusters, workloads, users, and config
 Use this reference to look up commands and flags. For workflows, start with the guides in the sidebar. Run `kip <command> --help` for the options available in your installed version.
 
 - [Installation reference](/en/installation) covers `kip install`, server requirements, and initial setup.
-- [Upgrades & Maintenance](/en/maintenance) covers `kip upgrade`, its flags, `kip upgrade --check` and upgrade recovery.
+- [Upgrades & Maintenance](/en/maintenance) covers `kip upgrade`, its flags, `kip upgrade --check`, `kip upgrade --longhorn` and upgrade recovery.
 
 ## kip cluster {#kip-cluster}
 
@@ -256,7 +256,7 @@ Diagnoses a cluster that installed but does not work and provides a way to repor
 The checks are grouped by where a problem could occur:
 
 - **Host:** the server answers over SSH, k3s is running, and how long ago the server booted.
-- **Kubernetes:** the API server answers, it accepts your login, the nodes are Ready, and Traefik, CoreDNS, cert-manager, Dex and the Console API are running.
+- **Kubernetes:** the API server answers, it accepts your login, the nodes are Ready, and Traefik, CoreDNS, cert-manager, Dex and the Console API are running. On a Longhorn cluster it warns about each node at the Rocky Linux or AlmaLinux 9.7 level or later, where Longhorn's volumes may stop attaching (see [Longhorn upgrades](/en/maintenance#longhorn-upgrades)).
 - **Backups:** the newest finished backup of each active schedule. A failed one fails the check. A partially failed one warns and points to `kip backup describe`. A schedule that has not run for more than two days for daily or faster schedules, or two weeks for weekly schedules, also warns. Staleness is not judged for other cadences, such as a monthly schedule. `kip status` prints the same result.
 - **Gateway hop** (kipper.run clusters only): the hop certificate is in place, Traefik mounts a copy with the same certificate, the default TLSStore points Traefik at it, port 443 actually serves it, the gateway heartbeat renews the name, and the cluster registers the address kip has on record.
 - **kipper.run gateway** (kipper.run clusters only): the gateway is up and routes the cluster's name to it.
@@ -291,7 +291,7 @@ A cluster starts with one server. `kip node add` joins workers that add CPU and 
 kip node add <host> [--ssh-key <path>] [--ssh-user <user>] [--private-network <cidr> | --public] [--firewall | --firewall=false] [--no-ssh-rate-limit] [--yes]
 ```
 
-The command prepares the host (kernel modules, kubelet hardening, Longhorn's storage packages, host hardening and the firewall) and joins it as a k3s worker on the server's k3s version.
+The command prepares the host (kernel modules, kubelet hardening, Longhorn's storage packages, host hardening and the firewall) and joins it as a k3s worker on the server's k3s version. It refuses a host at the Rocky Linux or AlmaLinux 9.7 level or later, where Longhorn's volumes stop attaching (Longhorn issue 13606, see [Longhorn upgrades](/en/maintenance#longhorn-upgrades)).
 
 - **SSH user:** kip logs in to the new node as the cluster's SSH user. Pass `--ssh-user` when the node's image uses a different login, such as `ec2-user` on an AlmaLinux worker joining a Rocky Linux server. kip saves that user in the node's record and uses it for later connections and the node's block in `kip cluster access ssh-config`. The node keeps that user when it joins again without the flag. A user other than root needs passwordless sudo.
 - **Networking:** kip uses a shared private network when available, or public addresses otherwise. The first join sets the cluster network mode. Applying new network settings restarts k3s on the server. `--yes` confirms network changes and recovery without prompting. Use `--private-network` to select a private network that carries the default route, as can happen for cloud VMs in the same VPC, or `--public` to use public addresses. On the first join, if no other private route qualifies and you pass neither `--private-network` nor `--public`, kip checks this network for private connectivity and network overlap. If it passes, kip stops before the host joins and shows the `--private-network` value to use. When the hosts share a private route but the server cannot reach the new host's SSH port on it, or the new host cannot reach the API on port 6443, kip stops and names the failed connection. Open the port, or pass `--public` to join over public addresses instead. The server must already use WireGuard for its pod network. Run `kip upgrade` first if needed.

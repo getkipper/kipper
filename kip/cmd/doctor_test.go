@@ -9,6 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/getkipper/kipper/kip/internal/auth"
 	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/doctor"
@@ -220,4 +224,33 @@ func TestAnUnreadClusterLeavesBackupsUnchecked(t *testing.T) {
 	if r.Status != doctor.Skip || !strings.Contains(r.Detail, "no SSH connection and no API client") || strings.Contains(r.Message, "not set up") {
 		t.Errorf("an unread cluster should name why backups were not checked, got %v: %s", r.Status, r.Message)
 	}
+}
+
+func TestCheckLonghornHostsWarnsAboutHeldNodes(t *testing.T) {
+	snap := doctor.Snapshot{Storage: installer.StorageLonghorn, Missing: map[doctor.Part]error{}, Nodes: []corev1.Node{
+		*longhornNode("server-1", "Ubuntu 24.04.3 LTS", "6.8.0-85-generic"),
+		*longhornNode("worker-1", "Rocky Linux 9.7 (Blue Onyx)", "5.14.0-611.5.1.el9_7.x86_64"),
+	}}
+	r, ok := checkLonghornHosts(snap)
+	require.True(t, ok)
+	assert.Equal(t, doctor.Warn, r.Status)
+	assert.Contains(t, r.Message, "1 node runs at the RHEL 9.7 package level")
+	assert.Contains(t, r.Detail, "node worker-1")
+
+	snap.Nodes = snap.Nodes[:1]
+	r, _ = checkLonghornHosts(snap)
+	assert.Equal(t, doctor.Pass, r.Status)
+
+	snap.Storage = ""
+	_, ok = checkLonghornHosts(snap)
+	assert.True(t, ok, "an empty storage mode is a legacy Longhorn cluster")
+
+	snap.Storage = installer.StorageLocal
+	_, ok = checkLonghornHosts(snap)
+	assert.False(t, ok, "a local-storage cluster has no Longhorn hosts")
+
+	snap.Missing[doctor.PartStorage] = errors.New("timeout")
+	r, ok = checkLonghornHosts(snap)
+	assert.True(t, ok)
+	assert.Equal(t, doctor.Skip, r.Status)
 }

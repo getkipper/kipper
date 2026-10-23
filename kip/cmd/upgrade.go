@@ -46,8 +46,9 @@ var upgradeCmd = &cobra.Command{
 	Short: "Upgrade Kipper components on the current cluster",
 	Long: `Updates CRD schemas, restarts console and console-api with the latest
 images, and reconciles cluster system components (KEDA, Longhorn, Traefik,
-Loki, Prometheus, Grafana, Velero, Zot) to the versions pinned in this
-kip build.
+Loki, Prometheus, Grafana, Velero, Zot). Components use the versions pinned
+in this kip build. Longhorn keeps its installed release unless --longhorn
+is set, or resumes applying a recorded upgrade target.
 
 By default, system component upgrades require explicit confirmation
 because a chart upgrade can fail mid-rollout and disrupt running
@@ -57,7 +58,7 @@ workloads. Pass --yes to skip the prompt (e.g. for automation), or
 On a cluster old enough to hold shared git credentials with no
 allow-list, the upgrade prints which apps reference each one and asks
 before granting them. Pass --seed-credential-grants to skip that
-prompt (e.g. for automation); a scripted upgrade without it completes
+prompt (e.g. for automation). A scripted upgrade without it completes
 and prints the flag rather than granting on inference.
 
 The cluster's own certificate authority and the trust anchor the API
@@ -67,7 +68,7 @@ rather than a component version.
 
 Before it changes anything, the upgrade checks the apps' autoscaling
 settings against the rules of this kip build. It lists what it would
-fix and asks; --repair-autoscaling answers yes. A run with no terminal
+fix and asks for confirmation. --repair-autoscaling answers yes. A run with no terminal
 and fixes to apply stops unless that flag is given, and so does any app
 that needs a decision unless --skip-autoscaling-check is given. The
 fixes are written once the new console-api is serving alone.
@@ -83,11 +84,23 @@ cross the limit of three minor versions behind. Restarting k3s pauses the
 Kubernetes API while running pods keep serving. With --check it
 reports the planned upgrade.
 
+A plain upgrade re-applies the Longhorn release the cluster already
+runs. --longhorn moves Longhorn to the release this kip installs, one
+minor at a time and to each minor's latest patch. It needs backups on
+external storage. Before each step it checks that every volume is
+stable and no replica is rebuilding, takes a Velero backup and waits for
+it to complete, and saves Longhorn's volumes, replicas, engines and
+settings under ~/.kip/longhorn-upgrades. Each step then waits for
+Longhorn and every volume to settle. A step that does not finish is
+resumed by running the same command again. --check lists the planned
+steps on every Longhorn cluster.
+
 Examples:
   kip upgrade --check
   kip upgrade
   kip upgrade --skip-system
   kip upgrade --k3s
+  kip upgrade --longhorn
   kip upgrade --yes
   kip upgrade --seed-credential-grants
   kip upgrade --repair-autoscaling`,
@@ -104,6 +117,7 @@ func init() {
 	upgradeCmd.Flags().Bool("repair-autoscaling", false, "apply the autoscaling fixes the upgrade lists, without asking")
 	upgradeCmd.Flags().Bool("skip-autoscaling-check", false, "upgrade although some apps' autoscaling settings need a decision, leaving those apps as they are")
 	upgradeCmd.Flags().Bool("k3s", false, "also upgrade k3s to the release pinned by this kip version: the server first, then each ready worker. Stops before upgrading k3s when the server is more than one Kubernetes minor behind the pin, a node runs a newer release, or a worker would cross the limit of three minor versions behind. Restarting k3s pauses the Kubernetes API while running pods keep serving. The k3s step preserves the other settings created by kip install")
+	upgradeCmd.Flags().Bool("longhorn", false, "also upgrade Longhorn to the release pinned by this kip version, one minor at a time. Needs external backup storage. Before each step it checks every volume, takes a Velero backup and saves Longhorn's objects under ~/.kip/longhorn-upgrades, then waits for every volume to settle. Running it again resumes a step that did not finish")
 	upgradeCmd.Flags().String("ssh-key", "", "path to SSH private key for the host; needed by every upgrade, including --skip-system, because the cluster's trust material is reconciled over SSH (overrides cluster.ssh_key in config and KIP_SSH_KEY env)")
 	rootCmd.AddCommand(upgradeCmd)
 }
@@ -118,7 +132,11 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	skipAutoscalingCheck, _ := cmd.Flags().GetBool("skip-autoscaling-check")
 	imageTag, _ := cmd.Flags().GetString("image-tag")
 	upgradeK3s, _ := cmd.Flags().GetBool("k3s")
+	upgradeLonghorn, _ := cmd.Flags().GetBool("longhorn")
 	if err := checkImageTagFlags(imageTag, skipSystem); err != nil {
+		return err
+	}
+	if err := checkLonghornFlags(upgradeLonghorn, skipSystem); err != nil {
 		return err
 	}
 
@@ -137,6 +155,9 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 				checkErr = err
 			}
 		}
+		if err := checkLonghornUpgrade(ctx, clientset, k8sClient.Dynamic(), os.Stdout, cluster, upgradeK3s, upgradeLonghorn); err != nil && checkErr == nil && upgradeLonghorn {
+			checkErr = err
+		}
 		return checkErr
 	}
 
@@ -151,6 +172,10 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		if err := preflightK3s(cluster, sshKey); err != nil {
 			return err
 		}
+	}
+	longhornReport, err := preflightLonghorn(ctx, clientset, k8sClient.Dynamic(), os.Stdout, cluster, upgradeK3s, upgradeLonghorn)
+	if err != nil {
+		return err
 	}
 	if err := checkNodesAndStorage(cluster, sshKey); err != nil {
 		return err
@@ -442,7 +467,13 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	return runSystemUpgrade(cluster, explicitKey, fallbackKey, cluster.Domain, cluster.DNSResolvers, cluster.TrustedProxies, state, autoYes)
+	longhorn := longhornStep{Report: longhornReport}
+	if upgradeLonghorn {
+		if longhorn.Upgrade, err = newLonghornUpgrade(cluster, k8sClient); err != nil {
+			return err
+		}
+	}
+	return runSystemUpgrade(cluster, explicitKey, fallbackKey, cluster.Domain, cluster.DNSResolvers, cluster.TrustedProxies, state, autoYes, longhorn)
 }
 
 // ensureTrustMaterial brings the host's copy of the cluster's certificate
@@ -1172,10 +1203,12 @@ func veleroWritesElsewhere(ctx context.Context, dyn dynamic.Interface) (bool, er
 }
 
 // runSystemUpgrade re-applies cluster system components (Traefik, Longhorn,
-// KEDA, etc.) at the versions pinned in this kip build. Prompts for
-// confirmation unless autoYes is set or stdin is not a terminal.
-func runSystemUpgrade(cluster *config.Cluster, explicitKey, fallbackKey, domain string, dnsResolvers, trustedProxies []string, state installer.PlatformState, autoYes bool) error {
-	components := installer.SystemComponents(domain, dnsResolvers, trustedProxies, state)
+// KEDA, etc.) at the versions pinned in this kip build. The longhorn argument decides
+// whether Longhorn is re-applied at its installed release or upgraded. Prompts
+// for confirmation unless autoYes is set. Without autoYes, non-terminal
+// input returns an error.
+func runSystemUpgrade(cluster *config.Cluster, explicitKey, fallbackKey, domain string, dnsResolvers, trustedProxies []string, state installer.PlatformState, autoYes bool, longhorn longhornStep) error {
+	components := longhorn.apply(installer.SystemComponents(domain, dnsResolvers, trustedProxies, state))
 	host := cluster.Host
 
 	provider, err := clusterProvider(cluster, host, explicitKey, fallbackKey)
@@ -1201,8 +1234,9 @@ func runSystemUpgrade(cluster *config.Cluster, explicitKey, fallbackKey, domain 
 	for _, c := range components {
 		fmt.Printf("    - %s\n", c.Name)
 	}
-	fmt.Printf("\n  Each component is re-applied at the version pinned in this kip build.\n")
-	fmt.Printf("  Helm-controller upgrades charts in place; a failed chart can disrupt running workloads.\n\n")
+	fmt.Printf("\n  Components use the versions pinned in this kip build, except Longhorn, which keeps its installed release or resumes a recorded upgrade target. Use --longhorn to upgrade it.\n")
+	fmt.Printf("  Helm-controller upgrades charts in place. A failed chart can disrupt running workloads.\n\n")
+	longhorn.preview(os.Stdout)
 	if network.Needed() {
 		fmt.Printf("%s\n", network.Describe())
 	}

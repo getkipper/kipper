@@ -73,6 +73,12 @@ func FetchViaAPI(ctx context.Context, cs kubernetes.Interface, dyn dynamic.Inter
 		snap.Profile = profile
 	}
 
+	if storage, err := nestedField(ctx, dyn, platformConfigGVR, "platform", "spec", "storage"); err != nil {
+		snap.Missing[PartStorage] = err
+	} else {
+		snap.Storage = storage
+	}
+
 	if lines, err := heartbeatLines(ctx, cs); err != nil {
 		snap.Missing[PartHeartbeat] = err
 	} else {

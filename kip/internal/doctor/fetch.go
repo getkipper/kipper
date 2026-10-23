@@ -27,6 +27,7 @@ const (
 	PartTLSStores   Part = "TLS stores"
 	PartClusterHost Part = "cluster identity"
 	PartProfile     Part = "platform profile"
+	PartStorage     Part = "storage mode"
 	PartHeartbeat   Part = "gateway heartbeat log"
 	PartTraefikCopy Part = "Traefik's copy of the hop certificate"
 )
@@ -68,6 +69,7 @@ type Snapshot struct {
 	TLSStores       []TLSStore
 	ClusterHost     string
 	Profile         string
+	Storage         string
 	Heartbeat       []string
 	Backups         BackupState
 	Missing         map[Part]error
@@ -156,6 +158,12 @@ func FetchOverSSH(r Runner) Snapshot {
 		snap.Missing[PartProfile] = commandError(err)
 	} else {
 		snap.Profile = withoutWarnings(out)
+	}
+
+	if out, err := r.Run("kubectl get platformconfigs.kipper.run platform --ignore-not-found -o jsonpath='{.spec.storage}' " + requestTimeout); err != nil {
+		snap.Missing[PartStorage] = commandError(err)
+	} else {
+		snap.Storage = withoutWarnings(out)
 	}
 
 	// Filter locally so a failed kubectl command remains distinguishable from an empty log.

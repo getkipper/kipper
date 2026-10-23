@@ -7,22 +7,52 @@ import (
 	"strings"
 )
 
-const longhornVersion = "v1.7.3"
-
 const longhornSettingsFuncName = "add_kipper_longhorn_settings"
 
-// longhornSettingsFunc copies the manifest from $1 to $2 with upgrade checks
-// and usage metrics disabled. Drains wait for eviction of a volume's last
-// healthy replica. Requiring exactly one settings header catches format changes
-// before installation.
-const longhornSettingsFunc = longhornSettingsFuncName + `() {
+// longhornSettingsFunc copies the manifest from $1 to $2 with kip's Longhorn
+// settings: upgrade checks and usage metrics off, drains waiting for eviction of
+// a volume's last healthy replica, fast replica rebuild off (Longhorn issue
+// 14096), and the storage defaults Kipper relies on written out so a Longhorn
+// upgrade cannot change them. Requiring exactly one settings header catches
+// format changes before installation.
+var longhornSettingsFunc = longhornSettingsFuncName + `() {
   header='  default-setting.yaml: |-'
   [ "$(grep -cxF "$header" "$1")" = 1 ] || { echo "expected exactly one default-setting block in the Longhorn manifest" >&2; return 1; }
-  awk -v header="$header" '{ print } $0 == header { print "    upgrade-checker: false"; print "    allow-collecting-longhorn-usage-metrics: false"; print "    node-drain-policy: block-for-eviction-if-contains-last-replica" }' "$1" > "$2"
+  awk -v header="$header" '{ print } $0 == header { ` + longhornSettingsAwk + ` }' "$1" > "$2"
 }`
+
+// longhornSettings are written into the manifest's default settings, which
+// longhorn-manager copies onto the Setting objects whenever they change.
+// Longhorn v1.7.3 to v1.9.2 drop the whole block when one key is unknown or
+// invalid, so every key must exist on the oldest release of longhornPath.
+var longhornSettings = []string{
+	"upgrade-checker: false",
+	"allow-collecting-longhorn-usage-metrics: false",
+	"node-drain-policy: block-for-eviction-if-contains-last-replica",
+	"fast-replica-rebuild-enabled: false",
+	"default-data-locality: disabled",
+	"replica-auto-balance: disabled",
+	"rwx-volume-fast-failover: false",
+	"node-down-pod-deletion-policy: do-nothing",
+	"allow-volume-creation-with-degraded-availability: true",
+}
+
+var longhornSettingsAwk = func() string {
+	var prints []string
+	for _, s := range longhornSettings {
+		prints = append(prints, `print "    `+s+`"`)
+	}
+	return strings.Join(prints, "; ")
+}()
 
 // InstallLonghorn installs Longhorn for distributed persistent storage.
 // It detects the OS so kip upgrade can run without gathering system info.
+// New clusters receive the pinned release. Existing clusters keep their
+// detected release or resume applying a recorded upgrade target once a version
+// marker shows that the step started. It also
+// installs host dependencies, applies Kipper settings and storage classes,
+// and waits for the driver deployer. Read, apply and readiness failures return
+// an error and may leave completed changes in place.
 func InstallLonghorn(client CommandRunner) error {
 	return InstallLonghornThen(client, nil)
 }
@@ -86,21 +116,19 @@ func installLonghorn(client CommandRunner, host HostOS, afterPackages func() err
 	if err := installStorageDependencies(client, host, afterPackages); err != nil {
 		return err
 	}
-
-	url := fmt.Sprintf(
-		"https://raw.githubusercontent.com/longhorn/longhorn/%s/deploy/longhorn.yaml",
-		longhornVersion,
-	)
-
-	applyCmd := fmt.Sprintf(`set -e
-%s
-dir=$(mktemp -d)
-trap 'rm -rf "$dir"' EXIT
-curl -fsSL %s -o "$dir/stock.yaml"
-%s "$dir/stock.yaml" "$dir/longhorn.yaml"
-kubectl apply -f "$dir/longhorn.yaml"`, longhornSettingsFunc, url, longhornSettingsFuncName)
-	if _, err := client.Run(applyCmd); err != nil {
-		return fmt.Errorf("applying longhorn manifest: %w", err)
+	markers, err := ReadLonghornMarkers(client)
+	if err != nil {
+		return err
+	}
+	version, _, err := LonghornVersionToApply(markers)
+	if err != nil {
+		return err
+	}
+	if markers.Record != nil {
+		fmt.Printf("  ⚠  A Longhorn upgrade from %s to %s is unfinished. kip applies %s again. Run 'kip upgrade --longhorn' to finish it\n", markers.Record.From, markers.Record.To, version)
+	}
+	if err := applyLonghornManifest(client, version); err != nil {
+		return err
 	}
 
 	waitCmd := "kubectl -n longhorn-system rollout status deployment/longhorn-driver-deployer --timeout=180s"
@@ -116,6 +144,22 @@ kubectl apply -f "$dir/longhorn.yaml"`, longhornSettingsFunc, url, longhornSetti
 		return err
 	}
 
+	return nil
+}
+
+// applyLonghornManifest applies the given release's manifest with kip's settings.
+func applyLonghornManifest(client CommandRunner, version string) error {
+	url := fmt.Sprintf("https://raw.githubusercontent.com/longhorn/longhorn/%s/deploy/longhorn.yaml", version)
+	applyCmd := fmt.Sprintf(`set -e
+%s
+dir=$(mktemp -d)
+trap 'rm -rf "$dir"' EXIT
+curl -fsSL %s -o "$dir/stock.yaml"
+%s "$dir/stock.yaml" "$dir/longhorn.yaml"
+kubectl apply -f "$dir/longhorn.yaml"`, longhornSettingsFunc, url, longhornSettingsFuncName)
+	if _, err := client.Run(applyCmd); err != nil {
+		return fmt.Errorf("applying the Longhorn %s manifest: %w", version, err)
+	}
 	return nil
 }
 

@@ -12,7 +12,7 @@ The first server stays the cluster's only control plane and ingress node, and Ki
 ## Before you start
 
 - **The server's pod network runs WireGuard.** Clusters installed before multi-node support use VXLAN until a full `kip upgrade` switches them to WireGuard. If the upgrade warns that it kept VXLAN because the server cannot load WireGuard, fix that first. See [Upgrades & Maintenance](/en/maintenance).
-- **Each new host runs a supported OS** with an IPv4 address and the `wireguard` kernel module, like the server. See [preflight checks](/en/installation#preflight-checks).
+- **Each new host runs a supported OS** with an IPv4 address and the `wireguard` kernel module, like the server. See [preflight checks](/en/installation#preflight-checks). Workers hold Longhorn volumes, so kip refuses Rocky Linux or AlmaLinux 9.7 or a later 9.x until a Kipper release adopts a fixed Longhorn (see [Longhorn upgrades](/en/maintenance#longhorn-upgrades)).
 - **Your SSH key logs in to every node the way it logs in to the server:** the new host and every worker already in the cluster. Each join needs this access to update their firewall rules. Pass `--ssh-key` to choose the key.
 - **Every existing worker is recorded.** kip refuses to add a new node while the cluster has an unrecorded worker. Run `kip node add <host>` for that worker first to adopt it.
 - **The provider's firewall allows the traffic between the nodes.** See [Firewalls](#firewalls) below.

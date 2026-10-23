@@ -738,9 +738,18 @@ func confirmReboot(prompt string) (bool, error) {
 // backupBeforeReboot uses the defaults from 'kip backup create' and waits for completion.
 func backupBeforeReboot(ctx context.Context, cluster *config.Cluster, client *k8s.Client, interval time.Duration) (string, error) {
 	name := "before-reboot-" + time.Now().UTC().Format("20060102-150405")
+	if err := takeBackup(ctx, cluster, client, name, "168h", interval); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+// takeBackup creates a Velero backup in the scope of 'kip backup create',
+// kept for ttl, and waits until it completes, fails or ctx ends.
+func takeBackup(ctx context.Context, cluster *config.Cluster, client *k8s.Client, name, ttl string, interval time.Duration) error {
 	backups := client.Dynamic().Resource(backupGVR).Namespace("velero")
-	if _, err := backups.Create(ctx, buildBackupCR(name, "", "", "168h", false, cluster), metav1.CreateOptions{}); err != nil {
-		return "", fmt.Errorf("creating backup %s: %w", name, err)
+	if _, err := backups.Create(ctx, buildBackupCR(name, "", "", ttl, false, cluster), metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("creating backup %s: %w", name, err)
 	}
 	phase := func(ctx context.Context) (string, error) {
 		current, err := backups.Get(ctx, name, metav1.GetOptions{})
@@ -750,10 +759,7 @@ func backupBeforeReboot(ctx context.Context, cluster *config.Cluster, client *k8
 		p, _, _ := unstructured.NestedString(current.Object, "status", "phase")
 		return p, nil
 	}
-	if err := waitForBackupPhase(ctx, name, phase, interval); err != nil {
-		return "", err
-	}
-	return name, nil
+	return waitForBackupPhase(ctx, name, phase, interval)
 }
 
 // waitForBackupPhase retries read errors until ctx ends or Velero reports a
