@@ -100,8 +100,17 @@ spec:
               period: 24h
       storage:
         type: filesystem
+      # The compactor enforces retention_period. Its working directory keeps
+      # deletion markers on the persistent volume so they survive pod restarts.
+      compactor:
+        working_directory: /var/loki/compactor
+        retention_enabled: true
+        delete_request_store: filesystem
       limits_config:
         retention_period: 72h
+        # Retention also enables the deletion API by default. Disable it
+        # because Loki runs without authentication.
+        deletion_mode: disabled
     singleBinary:
       replicas: 1
       nodeSelector:

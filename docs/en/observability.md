@@ -271,6 +271,10 @@ kube-state-metrics requests 32 Mi and is allowed 192 Mi. The gap is deliberate: 
 - **Metrics (Prometheus):** 3 days
 - **Logs (Loki):** 3 days
 
+Loki's compactor checks for expired logs every 15 minutes and drops them from the index. Their files are removed from disk in the background after a further 2 hours. Loki's API for deleting individual log lines is turned off.
+
+Older Kipper releases set the 3-day retention period but never enabled log deletion. Clusters installed with those releases begin deleting expired logs after their next full `kip upgrade`. Upgrades with `--skip-system` keep the old Loki settings. If Loki's volume is completely full at that point, free space on it or increase its capacity first. The compactor needs working space before it can enforce retention.
+
 For longer retention, update the Helm values via the k3s HelmChart resource in `kube-system`.
 
 ## Architecture
