@@ -185,6 +185,28 @@ func TestKubePrometheusStackHelmChart_GrafanaSendsNothingUpstream(t *testing.T) 
 	assert.Equal(t, true, valueAt(t, values, "grafana", "grafana.ini", "security", "disable_gravatar"))
 }
 
+// Loki's compactor enforces retention_period. Loki 3.x requires a delete
+// request store to start with retention enabled.
+func TestLokiHelmChart_CompactorAppliesRetention(t *testing.T) {
+	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage))
+
+	assert.Equal(t, "72h", valueAt(t, values, "loki", "limits_config", "retention_period"))
+	assert.Equal(t, true, valueAt(t, values, "loki", "compactor", "retention_enabled"))
+	assert.Equal(t, "filesystem", valueAt(t, values, "loki", "compactor", "delete_request_store"))
+	// Retention marker files must survive pod restarts, so keep them on the
+	// persistent volume mounted at /var/loki.
+	assert.Equal(t, "/var/loki/compactor", valueAt(t, values, "loki", "compactor", "working_directory"))
+}
+
+// Retention enables the deletion API by default. It must stay disabled
+// because Loki runs without authentication.
+func TestLokiHelmChart_KeepsTheDeletionAPIOff(t *testing.T) {
+	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage))
+
+	assert.Equal(t, false, valueAt(t, values, "loki", "auth_enabled"))
+	assert.Equal(t, "disabled", valueAt(t, values, "loki", "limits_config", "deletion_mode"))
+}
+
 // The canary and its dependent Helm test use top-level chart values.
 func TestLokiHelmChart_DeploysNoCanary(t *testing.T) {
 	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage))
