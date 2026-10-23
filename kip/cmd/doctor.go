@@ -136,7 +136,7 @@ func unreadSnapshot(cause error) doctor.Snapshot {
 	err := cause
 	missing := map[doctor.Part]error{}
 	for _, p := range []doctor.Part{doctor.PartNodes, doctor.PartWorkloads, doctor.PartHopCert, doctor.PartTraefikCopy,
-		doctor.PartTLSStores, doctor.PartClusterHost, doctor.PartProfile, doctor.PartHeartbeat, doctor.PartBackups} {
+		doctor.PartTLSStores, doctor.PartClusterHost, doctor.PartProfile, doctor.PartStorage, doctor.PartHeartbeat, doctor.PartBackups} {
 		missing[p] = err
 	}
 	return doctor.Snapshot{Missing: missing}
@@ -150,6 +150,9 @@ func collectDoctorResults(ctx context.Context, cluster *config.Cluster, runner d
 
 	kube := kubernetesAPIChecks(ctx, cluster)
 	kube = append(kube, doctor.CheckNodes(snap))
+	if r, ok := checkLonghornHosts(snap); ok {
+		kube = append(kube, r)
+	}
 	kube = append(kube, doctor.CheckWorkloads(snap)...)
 
 	groups := []doctorGroup{{"Host", hostResults}, {"Kubernetes", kube}, {"Backups", []doctor.Result{doctor.CheckBackups(snap, time.Now())}}}
@@ -172,6 +175,32 @@ func collectDoctorResults(ctx context.Context, cluster *config.Cluster, runner d
 		}},
 	)
 	return groups
+}
+
+// checkLonghornHosts warns about nodes of a Longhorn cluster at the RHEL 9.7
+// package level or later, where Longhorn's volumes may stop attaching
+// (Longhorn issue 13606). It reports false on a cluster with local storage.
+func checkLonghornHosts(snap doctor.Snapshot) (doctor.Result, bool) {
+	const id, label = "longhorn-hosts", "Longhorn hosts"
+	notChecked := func(part doctor.Part, err error) doctor.Result {
+		return doctor.Result{ID: id, Label: label, Status: doctor.Skip, Message: fmt.Sprintf("not checked (could not read the %s)", part), Detail: err.Error()}
+	}
+	if err, ok := snap.Missing[doctor.PartStorage]; ok {
+		return notChecked(doctor.PartStorage, err), true
+	}
+	if snap.Storage != "" && snap.Storage != installer.StorageLonghorn {
+		return doctor.Result{}, false
+	}
+	if err, ok := snap.Missing[doctor.PartNodes]; ok {
+		return notChecked(doctor.PartNodes, err), true
+	}
+	held := installer.RHEL97LevelProblems(nodeFactsOf(snap.Nodes))
+	if len(held) == 0 {
+		return doctor.Result{ID: id, Label: label, Status: doctor.Pass, Message: "no node runs the RHEL 9.7 package level that Longhorn issue 13606 affects"}, true
+	}
+	return doctor.Result{ID: id, Label: label, Status: doctor.Warn,
+		Message: fmt.Sprintf("%d %s at the RHEL 9.7 package level or later, where Longhorn's volumes may stop attaching (Longhorn issue 13606). Hold the point release on Longhorn nodes", len(held), plural(len(held), "node runs", "nodes run")),
+		Detail:  strings.Join(held, "\n")}, true
 }
 
 // kubernetesAPIChecks checks that the API server answers and accepts the

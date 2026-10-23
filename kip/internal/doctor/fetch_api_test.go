@@ -38,7 +38,7 @@ func apiClients(t *testing.T) (*k8sfake.Clientset, *dynamicfake.FakeDynamicClien
 			map[string]any{"defaultCertificate": map[string]any{"secretName": "kipper-hop-cert"}}), //nolint:gosec // a Kubernetes field name, not a credential
 		unstructuredObject("kipper.run/v1alpha1", "ClusterIdentity", "", "cluster",
 			map[string]any{"gateway": map[string]any{"clusterHost": "203.0.113.10"}}),
-		unstructuredObject("kipper.run/v1alpha1", "PlatformConfig", "", "platform", map[string]any{"profile": "small"}),
+		unstructuredObject("kipper.run/v1alpha1", "PlatformConfig", "", "platform", map[string]any{"profile": "small", "storage": "longhorn"}),
 	)
 	return cs, dyn
 }
@@ -54,6 +54,7 @@ func TestFetchViaAPI_ReadsTheSameParts(t *testing.T) {
 	assert.Equal(t, []TLSStore{{Namespace: "kipper-system", Name: "default", DefaultCert: "kipper-hop-cert"}}, snap.TLSStores)
 	assert.Equal(t, "203.0.113.10", snap.ClusterHost)
 	assert.Equal(t, "small", snap.Profile)
+	assert.Equal(t, "longhorn", snap.Storage)
 }
 
 func TestFetchViaAPI_NeverReadsASecret(t *testing.T) {

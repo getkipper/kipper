@@ -143,7 +143,7 @@ func TestNodeLeaseRefusesASecondRunAndNamesTheFirst(t *testing.T) {
 
 	_, err := takeNodeLease(c.server, c.dir, c.stateDir, "kip node add 192.0.2.10")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "another kip node or cluster access command is running on this cluster (kip node remove worker-1)")
+	assert.Contains(t, err.Error(), "another kip command that changes nodes, cluster access or Longhorn is running on this cluster (kip node remove worker-1)")
 }
 
 func TestNodeLeaseIsFreeAgainAfterRelease(t *testing.T) {

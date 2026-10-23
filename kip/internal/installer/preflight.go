@@ -85,6 +85,7 @@ type SystemInfo struct {
 	Host              HostOS
 	OS                string
 	OSVersion         string
+	Kernel            string
 	RAMMB             int
 	DiskMB            int
 	DiskSizeMB        int
@@ -122,6 +123,13 @@ func runPreflightChecks(sys SystemInfo, state PlatformState, inClusterBackup, ex
 	}
 	if err := checkRAM(sys); err != nil {
 		return nil, err
+	}
+	if (role == RoleWorker || platform.StorageMode(state.Storage) == StorageLonghorn) && RHEL97LevelHost(sys.OS, sys.OSVersion, sys.Kernel) {
+		if role == RoleServer && existingCluster {
+			result.Warnings = append(result.Warnings, longhornRHEL97Hold+". This existing cluster keeps running, but its v1 volumes on this host may stop attaching. Hold the host's point release until a fixed Longhorn is adopted.")
+		} else {
+			return nil, fmt.Errorf("%s %s cannot hold Longhorn volumes. %s. Use another supported OS, such as Ubuntu, Debian or Rocky Linux 10, or a 9.6 release held at that point release", osDisplayName[strings.ToLower(sys.OS)], sys.OSVersion, longhornRHEL97Hold)
+		}
 	}
 	if role == RoleServer && state.Storage == StorageLocal {
 		warning, err := checkLocalDisk(sys)

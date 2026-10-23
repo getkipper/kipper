@@ -52,12 +52,12 @@ var (
 
 var leasePurposeUnsafe = regexp.MustCompile(`[^A-Za-z0-9 .:_/-]`)
 
-// NodeLease is this run's hold on the cluster's node lifecycle lease. One
-// kip node add or remove holds it at a time. Commands sent through Run or
-// RunStdin on its Server and Host wrappers check ownership and hold a lock
-// that the next owner waits for. Hosts remember each server's newest
-// generation and refuse older ones. Lease ownership ends on reboot, while
-// generation counters persist across reboots.
+// NodeLease is this run's hold on the cluster's node lifecycle lease. One kip
+// command that changes nodes, cluster access or Longhorn holds it at a time.
+// Commands sent through Run or RunStdin on its Server and Host wrappers check
+// ownership and hold a lock that the next owner waits for. Hosts remember
+// each server's newest generation and refuse older ones. Lease ownership ends
+// on reboot, while generation counters persist across reboots.
 type NodeLease struct {
 	server   LeaseServer
 	dir      string
@@ -99,12 +99,12 @@ func takeNodeLease(server LeaseServer, dir, stateDir, purpose string) (*NodeLeas
 		case strings.HasPrefix(line, leaseHeld):
 			who := strings.TrimSpace(strings.TrimPrefix(line, leaseHeld))
 			if stopped, ok := strings.CutPrefix(who, leaseFinish); ok {
-				return nil, fmt.Errorf("an earlier kip node command (%s) was stopped and is waiting up to %d seconds for its last step on the server to finish. Run this command again after that", stopped, leaseWaitSecs)
+				return nil, fmt.Errorf("an earlier kip command (%s) was stopped and is waiting up to %d seconds for its last step on the server to finish. Run this command again after that", stopped, leaseWaitSecs)
 			}
 			if who == "" {
-				who = "an earlier kip node command"
+				who = "an earlier kip command"
 			}
-			return nil, fmt.Errorf("another kip node or cluster access command is running on this cluster (%s). Wait for it to finish, or stop it, then run this command again", who)
+			return nil, fmt.Errorf("another kip command that changes nodes, cluster access or Longhorn is running on this cluster (%s). Wait for it to finish, or stop it, then run this command again", who)
 		case strings.HasPrefix(line, leaseBusy):
 			return nil, fmt.Errorf("a command from an interrupted kip node run is still running on the server after %d seconds%s. Run this command again once it has finished", leaseWaitSecs, stillRunning(string(rest)))
 		}

@@ -13,7 +13,7 @@ Upgrades the cluster to the versions pinned in this kip build. Before making cha
 
 1. **Kipper CRDs** are updated (so newer console features that need new CRD fields work).
 2. **Console and console-api** are restarted to pull the latest images. console-api also gets the pod security settings this kip build ships (non-root, no privilege escalation, dropped capabilities, a read-only root filesystem), so a cluster installed a while ago ends up with the same posture as a fresh install. Anything you added to the Deployment by hand, such as an extra volume, is kept. Each component is then waited for: kip only moves on once the new pods are actually running, and stops with the reason if one of them cannot start. That matters because a rollout keeps the previous pod serving while the new one fails, so without the wait a broken upgrade looks exactly like a working one.
-3. **Cluster system components** (Traefik, Longhorn, KEDA, Loki, Prometheus, Grafana, Velero, Zot, security middleware) are reconciled. Each chart is re-applied at the version pinned in kip, and helm-controller upgrades it in place. The Zot step restarts k3s only when the server's registry CA certificate or `registries.yaml` changes, or when an earlier attempt leaves a pending marker. The marker ensures that a retry loads any changes left by an interrupted run. It is cleared after any required restart and node readiness check succeed.
+3. **Cluster system components** (Traefik, Longhorn, KEDA, Loki, Prometheus, Grafana, Velero, Zot, security middleware) are reconciled. Each chart is re-applied at the version pinned in kip, and helm-controller upgrades it in place. Longhorn is the exception: a plain upgrade re-applies the Longhorn release the cluster already runs, with the settings this kip pins, and `--longhorn` moves it to a newer release. See [Longhorn upgrades](#longhorn-upgrades). The Zot step restarts k3s only when the server's registry CA certificate or `registries.yaml` changes, or when an earlier attempt leaves a pending marker. The marker ensures that a retry loads any changes left by an interrupted run. It is cleared after any required restart and node readiness check succeed.
 
 On a cluster that uses a `*.kipper.run` name, the upgrade also records that name and the address the cluster registers with on the ClusterIdentity, which is where the console reads them from when it renews the registration. It keeps the address already recorded rather than replacing it, and tells you when the cluster answers somewhere else: a server that has genuinely moved needs a fresh registration, because the gateway ties a name to one address. A cluster that has never registered is left alone and told so, since only you know whether it should hold a kipper.run name.
 
@@ -55,6 +55,7 @@ kip upgrade --check            # report what the upgrade would fix, change nothi
 kip upgrade                    # default, prompts before system components
 kip upgrade --skip-system      # only steps 1 and 2 (Kipper console layer)
 kip upgrade --k3s              # also upgrade k3s to the release pinned by this kip version
+kip upgrade --longhorn         # also move Longhorn to the release pinned by this kip version
 kip upgrade --yes              # all three steps, no component prompt (for automation)
 kip upgrade --yes --repair-autoscaling  # also apply autoscaling fixes without asking
 ```
@@ -66,6 +67,7 @@ kip upgrade --yes --repair-autoscaling  # also apply autoscaling fixes without a
 | `--skip-system` | `false` | Skip the cluster components (Traefik, Longhorn, KEDA, Velero, Zot, monitoring). CRDs, console, and the cluster's own trust material are still updated, and Traefik is restarted when its copy of the hop certificate changes. Use this in production to avoid touching component versions. |
 | `--yes` | `false` | Confirm cluster-component upgrades and removal of app routes that collide with installed platform routes. Required for these steps in non-interactive contexts (CI, scripts). Autoscaling fixes are confirmed separately, so a run without a terminal also needs `--repair-autoscaling` when there are fixes to apply |
 | `--k3s` | `false` | Also upgrade k3s to the release pinned by this kip version, before the CRDs and console: the server first, then each ready worker. Stops before upgrading k3s when the server is more than one Kubernetes minor behind the pin, a node runs a newer release, or a worker would cross the limit of three minor versions behind. With `--check`, reports the planned upgrade. See [k3s upgrades](#k3s-upgrades) |
+| `--longhorn` | `false` | Also upgrade Longhorn to the release pinned by this kip version, one minor at a time. Needs external backup storage. Before each step it checks every volume, takes a Velero backup and saves Longhorn's objects, then waits for every volume to settle. Running it again resumes a step that did not finish. Cannot be combined with `--skip-system`. See [Longhorn upgrades](#longhorn-upgrades) |
 | `--check` | `false` | Run the upgrade's data checks and report what it would fix, without changing anything. Needs no SSH key. Exits non-zero when something needs a decision. See [Checking before an upgrade](#checking-before-an-upgrade) |
 | `--repair-autoscaling` | `false` | Apply the autoscaling fixes the upgrade lists without asking. Required in non-interactive contexts when there are fixes to apply |
 | `--skip-autoscaling-check` | `false` | Upgrade although some apps' autoscaling settings need a decision, leaving those apps as they are |
@@ -172,7 +174,9 @@ Check this table before upgrading to see which components are included and which
 | Project operator roles (viewer, deployer, owner) | Yes | — |
 | Shared git credential allow-lists, where never set | Once, on consent (prompt, or `--seed-credential-grants`), from the apps that reference them | `kip credentials allow` |
 | App autoscaling settings the new rules refuse | On consent (prompt, or `--repair-autoscaling`), after the console-api rollout | `kip app autoscale`, `kip app scale` |
-| Traefik, Longhorn, KEDA, Velero, Zot | Yes | — |
+| Traefik, KEDA, Velero, Zot | Yes | — |
+| Longhorn settings, at the installed release | Yes | — |
+| **Longhorn release** | **With `--longhorn`** | See [Longhorn upgrades](#longhorn-upgrades) |
 | Loki, Prometheus, Grafana | Yes, when enabled | — |
 | Security-header middleware, build isolation | Yes | — |
 | cert-manager DNS resolvers | Yes | — |
@@ -311,6 +315,129 @@ workers, so it stops if another command holds that lock.
 By default on Windows, and with `--via-server`, the install runs as a job on the
 server. The machine running the CLI upgrades the workers after the job finishes.
 `kip install --local` upgrades the server only.
+
+### Longhorn upgrades {#longhorn-upgrades}
+
+Longhorn holds the data of every service and app volume on a Longhorn cluster,
+so kip moves it only when you ask, with `--longhorn`. A plain `kip upgrade`
+re-applies the release the cluster already runs.
+
+```bash
+kip upgrade --check            # lists the planned Longhorn steps
+kip upgrade --longhorn         # runs them
+```
+
+Longhorn upgrades one minor version at a time and cannot be downgraded. kip
+moves it to the latest patch of each minor in turn: from 1.7.3, the release
+earlier kip versions installed, that is 1.8.2, 1.9.2, 1.10.2 and then 1.11.3.
+Longhorn 1.11 needs Kubernetes 1.34 or later on every node, so run
+`kip upgrade --k3s` first on an older cluster, or pass both flags.
+
+`--longhorn` needs backups on external storage. Backups in in-cluster MinIO live
+on the Longhorn storage the upgrade changes, so kip refuses to start on such a
+cluster, and on one with backups turned off. kip also resolves the backup
+endpoint and refuses one that leads back into the cluster: a node's address, a
+Service's address or endpoint, an address in the pod or service range, or a
+loopback or link-local address. kip resolves the endpoint's name from your
+machine, so a cluster DNS override pointing the same name back into the cluster
+is outside this check's scope. Configure external storage first by running
+`kip install` again with `--backup-storage-bucket` and its related
+flags. Read [Re-running install](/en/installation#re-running-install) before you
+do, because a re-run also resets users created in the console.
+
+Keep these off the cluster before the first step, because recovery from a failed
+step may require restoring onto a fresh cluster:
+
+- the backup repository key, from `kip backup repository-key export --to <file>`.
+- the SSE-C key, if backups are encrypted with one, from `kip backup sse-key export --to <file>`.
+- the credentials of the backup bucket.
+- a restore you have verified, with [`kip backup drill <namespace>`](/en/backups) for
+  each namespace with data. `kip backup drill` does not run on the `nano` profile,
+  so on nano restore a backup onto a separate recovery cluster instead.
+
+The confirmation lists all four requirements. `--yes` skips the prompt, so
+scripts must ensure all four are met.
+
+Each step then runs the same way:
+
+1. kip checks that Longhorn and every volume have settled: the manager, instance
+   managers and CSI components have finished rolling out, the manager reports
+   the current release, no volume is faulted or stuck attaching, and no replica
+   is rebuilding. A node marked out of service, as a fenced node is, runs no
+   instance manager, so the step waits until you bring the node back with
+   `kip node add` or remove it with `kip node remove --force`. It also checks that every node
+   meets the next release's Kubernetes floor, that every engine in use meets its
+   minimum engine version, and, before the step to 1.10, that no Longhorn CRD
+   still stores `v1beta1` objects. Longhorn 1.10 removes `v1beta1`, so that one
+   requires the migration described in the Longhorn v1.10.0 release notes.
+2. kip rechecks the backup location and verifies that a regular container in a
+   running pod mounts every app volume in the backup scope, because file
+   backups require these mounts. A volume used only by a stopped app blocks
+   the step. Start the app with `kip app start` or remove the volume.
+   kip then takes a Velero backup in the scope of
+   `kip backup create`, kept for 30 days, and waits for it to complete. A backup
+   that fails stops the step. kip then checks the cluster again.
+3. kip saves Longhorn's volumes, replicas, engines and settings as YAML under
+   `~/.kip/longhorn-upgrades/<cluster>/`, readable only by you.
+4. kip records the step on the cluster and applies the next release's manifest.
+5. kip waits for every component to run the new release, lets Longhorn move each
+   volume onto the new engine, and waits for every volume to settle again.
+   From Longhorn 1.10 on, kip then removes the engine images of older releases
+   that nothing uses any more. Longhorn deploys each on every node until it is
+   deleted, and 1.10 is the first release that refuses to delete one in use.
+
+Only one run changes Longhorn at a time. While applying Longhorn, every
+`kip upgrade` holds the same lock as the `kip node` commands. If another command
+holds the lock, the upgrade stops and names that command. `kip upgrade --longhorn`
+holds the lock throughout the Longhorn upgrade, which can take hours. The
+`kip node` commands refuse to run until the lock is released. To remove or
+fence a worker that fails during a step, stop the upgrade with Ctrl-C first. The
+lock is released about a minute later, or up to six minutes later if a command
+started by the upgrade is still running on the server. Stopping the upgrade is
+safe because the next `kip upgrade --longhorn` resumes the step.
+
+Each wait lasts up to 45 minutes, so a full run from 1.7.3 can take a few hours
+on a busy cluster. A step that does not finish in time stops with what is still
+pending, with longhorn-manager's last log lines when a reported problem
+mentions the manager and its logs are available. Running `kip upgrade --longhorn`
+again resumes a started version change with its existing backup, after checking
+that no volume is faulted or uses the v2 data engine and that the new release's
+engine, Kubernetes, CRD and host requirements still hold. If neither the manager
+DaemonSet nor the running release shows a recorded step's target, the step
+starts again with every check and a new backup. An unfinished engine catch-up
+also restarts with a new backup. A plain `kip upgrade` in between re-applies the release an unfinished
+step was moving to, or the release the cluster runs when that step never
+applied, and says so.
+
+A shared volume in Longhorn's default class wants three copies, so on a cluster
+with fewer than three nodes it stays degraded while it is attached. Longhorn
+cannot move such a volume's engine while it is in use, so kip lets it keep its
+older engine as long as each node holds a working copy and the new release
+still supports that engine, and names it at the end. Longhorn moves it once the
+cluster has a node for every copy: add nodes with `kip node add`, then run
+`kip upgrade --longhorn` again. If a later release no longer supports the engine,
+that step stops before starting and names the volume.
+
+kip pins these Longhorn settings on every Longhorn cluster, on install and on
+every upgrade: update checks and usage reporting off, `fast-replica-rebuild-enabled`
+off (Longhorn issue 14096), a node drain that waits while Longhorn moves a
+volume's last copy off the node, data locality and replica auto-balance off, RWX
+fast failover off, pods on a node that goes down left in place, and volume
+creation with degraded availability allowed. The last five are Longhorn's
+current defaults, explicitly set so that upgrades
+through four consecutive releases preserve them. Longhorn's own production
+guidance turns degraded creation off. Kipper keeps it on so that a single-node cluster can create volumes
+that want more copies than it has nodes. kip never sets a Longhorn backup target,
+because backups go through Velero.
+
+**Rocky Linux and AlmaLinux 9.7.** On Rocky Linux 9.7, Longhorn's volumes stop
+attaching (Longhorn issue 13606), and no Longhorn release carries a fix yet. kip
+holds every host at that level or later: Rocky Linux or AlmaLinux 9.7 or a later
+9.x, and any EL9 kernel from 5.14.0-611, which also covers CentOS Stream 9. A new
+Longhorn cluster and `kip node add` refuse such a host, `kip upgrade` warns about
+each such node, `--longhorn` refuses to start, and `kip doctor` warns. Keep
+Longhorn nodes on 9.6 or earlier, or use version 10, until a Kipper release
+adopts a fixed Longhorn.
 
 ### Downgrading console-api {#downgrading-console-api}
 

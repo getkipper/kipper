@@ -27,6 +27,14 @@ func gatherSystemInfo(client CommandRunner, role HostRole) (SystemInfo, error) {
 	info.Host = host
 	info.OS = host.ID
 	info.OSVersion = host.VersionID
+	// Longhorn's RHEL 9.7-level hold reads the kernel of EL9 hosts.
+	if host.Family == FamilyRHEL && strings.HasPrefix(host.VersionID, "9") {
+		kernel, err := client.Run("uname -r")
+		if err != nil {
+			return info, fmt.Errorf("reading the kernel version: %w", err)
+		}
+		info.Kernel = kubectlLine(kernel)
+	}
 
 	ram, err := gatherRAM(client)
 	if err != nil {
