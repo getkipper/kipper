@@ -396,6 +396,10 @@ func newRouter(reg *registry.Registry, proxy *Proxy, baseDomain, statusToken str
 	// bucket and its own entry in a cluster's logs.
 	r.Use(chimw.ClientIPFromHeader(clientIPHeader))
 
+	// Run before the proxy so www redirects even if a registration predating
+	// the reservation still holds the label.
+	r.Use(siteRedirect(baseDomain))
+
 	// Proxy middleware — intercepts requests to registered subdomains
 	// and reverse-proxies them. All other requests fall through to the API.
 	r.Use(proxy.Middleware)
@@ -420,6 +424,28 @@ func newRouter(reg *registry.Registry, proxy *Proxy, baseDomain, statusToken str
 	r.Post("/proof", handleProof(reg, baseDomain, observeClusterKey))
 
 	return r
+}
+
+// projectSite is the destination for website redirects.
+const projectSite = "https://getkipper.com/"
+
+// siteRedirect redirects GET and HEAD requests at the bare domain's root and
+// all methods and paths on www to projectSite with HTTP 301. Other requests
+// continue to the next handler. Keeping API paths available preserves cluster
+// heartbeats because Go's HTTP client follows a 301 for POST as GET without a body.
+func siteRedirect(baseDomain string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			host := normaliseHost(r.Host)
+			apexRoot := host == baseDomain && r.URL.Path == "/" &&
+				(r.Method == http.MethodGet || r.Method == http.MethodHead)
+			if apexRoot || host == "www."+baseDomain {
+				http.Redirect(w, r, projectSite, http.StatusMovedPermanently)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // maxRequestBody caps the API request bodies. The largest legitimate payload

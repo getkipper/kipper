@@ -869,3 +869,79 @@ func TestMain(m *testing.M) {
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }
+
+// TestApexRootAndWWWRedirectToTheProjectSite checks website redirects and preserves
+// API routing on the bare domain. Redirecting heartbeat POST requests with a 301
+// would break them because Go's HTTP client follows the redirect as GET without a body.
+func TestApexRootAndWWWRedirectToTheProjectSite(t *testing.T) {
+	reg := registry.New()
+	// Use loopback for a fast proxy failure. This assumes port 443 refuses
+	// connections, producing a 502 response.
+	if _, _, err := reg.Register("203-0-113-12", "127.0.0.1", ""); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	// A previously proven registration predating the www reservation survives
+	// startup pruning, so the redirect must take precedence over its proxy route.
+	if _, _, err := reg.Register("www", "127.0.0.1", ""); err != nil {
+		t.Fatalf("register www: %v", err)
+	}
+	proxy := &Proxy{Registry: reg, BaseDomain: "kipper.run"}
+	router := newRouter(reg, proxy, "kipper.run", "s3cret")
+
+	call := func(method, host, path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, "http://"+host+path, strings.NewReader("{}"))
+		r.Host = host
+		r.Header.Set(clientIPHeader, "203.0.113.99")
+		r.Header.Set("Authorization", "Bearer s3cret")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, r)
+		return w
+	}
+
+	redirects := []struct{ method, host, path string }{
+		{http.MethodGet, "kipper.run", "/"},
+		{http.MethodHead, "kipper.run", "/"},
+		{http.MethodGet, "KIPPER.run:443", "/"},
+		{http.MethodGet, "www.kipper.run", "/"},
+		{http.MethodGet, "www.kipper.run", "/pricing?ref=x"},
+		{http.MethodPost, "www.kipper.run", "/register"},
+	}
+	for _, tc := range redirects {
+		w := call(tc.method, tc.host, tc.path)
+		if w.Code != http.StatusMovedPermanently || w.Header().Get("Location") != "https://getkipper.com/" {
+			t.Errorf("%s %s%s: got %d Location %q, want 301 to https://getkipper.com/",
+				tc.method, tc.host, tc.path, w.Code, w.Header().Get("Location"))
+		}
+	}
+
+	// JSON responses distinguish these API handlers from chi's plain-text 404,
+	// so a missing route cannot satisfy the API checks.
+	untouched := []struct {
+		method, host, path string
+		want               int
+		handler            bool
+	}{
+		{http.MethodGet, "kipper.run", "/health", http.StatusOK, true},
+		{http.MethodGet, "kipper.run", "/status", http.StatusOK, true},
+		{http.MethodPost, "kipper.run", "/register", http.StatusBadRequest, true},
+		{http.MethodDelete, "kipper.run", "/register", http.StatusNotFound, true},
+		{http.MethodPost, "kipper.run", "/ping", http.StatusNotFound, true},
+		{http.MethodPost, "kipper.run", "/proof", http.StatusNotFound, true},
+		{http.MethodPost, "kipper.run", "/", http.StatusNotFound, false},
+		{http.MethodGet, "kipper.run", "/favicon.ico", http.StatusNotFound, false},
+		{http.MethodGet, "unregistered.kipper.run", "/", http.StatusNotFound, false},
+		{http.MethodGet, "203-0-113-12.kipper.run", "/", http.StatusBadGateway, false},
+		{http.MethodGet, "console--203-0-113-12.kipper.run", "/", http.StatusBadGateway, false},
+	}
+	for _, tc := range untouched {
+		w := call(tc.method, tc.host, tc.path)
+		if w.Code != tc.want || w.Header().Get("Location") != "" {
+			t.Errorf("%s %s%s: got %d Location %q, want %d with no redirect",
+				tc.method, tc.host, tc.path, w.Code, w.Header().Get("Location"), tc.want)
+		}
+		if isJSON := w.Header().Get("Content-Type") == "application/json"; isJSON != tc.handler {
+			t.Errorf("%s %s%s: Content-Type %q, want handler answer %v",
+				tc.method, tc.host, tc.path, w.Header().Get("Content-Type"), tc.handler)
+		}
+	}
+}
