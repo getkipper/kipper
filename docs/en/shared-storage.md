@@ -127,7 +127,9 @@ The `--delete-data` flag is required to prevent accidental data loss.
 
 ### Backups
 
-Backups copy a volume's files through a running pod that mounts it. Kipper runs a small holder pod named `volume-holder-<name>` for each shared volume so backups include its files even when no app mounts it, for example while every app using it is stopped. The holder mounts the volume read-only and sleeps. It runs as a non-root user without a service account token or open ports, and it requests 1m CPU and 8Mi memory, with limits of 10m CPU and 16Mi memory that count towards the project's quota. Deleting the volume deletes its holder.
+Backups copy a volume's files through a running pod that mounts it. Kipper runs a small holder pod named `volume-holder-<name>` for each shared volume so backups include its files even when no app mounts it, for example while every app using it is stopped. The holder mounts the volume read-only and sleeps. It runs as a non-root user without a service account token or open ports, and it requests 1m CPU and 8Mi memory, with limits of 10m CPU and 16Mi memory that count towards the project's quota. Deleting the volume deletes its holder. Holders run only while the cluster has backups configured, so a cluster installed without backups has none.
+
+A project's shared storage, the `shared-uploads` volume in each of its environments, gets a holder named `shared-uploads-holder`, owned by the project. It stays as long as the volume does, including after shared storage is turned off for the project, because the volume keeps its files. When a holder cannot run and no running app mounts the volume, `kip backup list` names `shared-uploads` among the volumes whose files the next backup would omit.
 
 A restore brings the holder back along with the volume, and Velero writes the volume's files through it before the holder starts. Kipper adopts the restored holder once the volume itself is restored. Until then, the holder has no owner, so `kip node reboot` and `kip node remove` refuse to drain its node and identify the `volume-holder-<name>` pod in the error.
 

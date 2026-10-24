@@ -933,6 +933,7 @@ kip service share mailhog --expires 72h      # shareable link to a service web U
 kip service import mydb --file dump.sql      # load a database dump
 kip service export mydb --file nightly.dump  # dump a database to a local file
 kip service restore-dump mydb --to mydb-new  # restore mydb's consistent dump from a backup into an empty service
+kip service recreate-dump mydb               # replace a faulted dump volume, data volume left unchanged
 kip service credentials                      # check every service owns its credentials
 kip service rotate-password mydb             # new password in the engine, the Secret and every bound app
 kip service delete mydb --delete-data        # delete the service and its volume
@@ -946,6 +947,8 @@ kip service start mydb                       # start a service kip node fence le
 `kip service rotate-password` takes `--yes` to skip the confirmation, plus `--project` and `--environment`. Without `--project` or `--environment`, it finds the service by name across the cluster. See [Rotating a service password](/en/services#rotating-a-service-password).
 
 `kip service restore-dump` takes `--to` (required, an existing Postgres service without tables), `--backup` (default: the latest completed backup that covers the namespace), `--project` and `--environment`. See [Restore a Postgres dump into a new service](/en/backups#restore-a-postgres-dump-into-a-new-service).
+
+`kip service info` prints a warning line while a Postgres service's dump volume is faulted, with the command that replaces it. `kip service recreate-dump` refuses unless Longhorn reports the dump volume as faulted and the dump volume, StatefulSet and any existing pod belong to the service. It also refuses while a backup of the namespace or a restore into it is still running, or if it cannot read their status. It repeats all these checks after confirmation, even when `--yes` skips the prompt. It then deletes the dump volume, restarts the pod and waits up to three minutes for the controller's new dump volume. A pod on a node that is down stays terminating, and kip names [`kip node fence`](#kip-node-fence) as the next step. It takes `--yes` to skip the confirmation, plus `--project` and `--environment`, and without them it finds the service by name across the cluster. See [Consistent database dumps](/en/backups#consistent-database-dumps).
 
 See [Stateful Services](/en/services) for full documentation.
 
@@ -1092,7 +1095,7 @@ Before creating the volume, `kip volume create` checks whether the server has ca
 
 Mounts are recorded on the volume and applied to the app automatically, so they survive image updates and redeployments. `kip volume unmount` removes the mount again; the volume and its data stay available for other apps. Deleting a volume needs `--delete-data` because it permanently destroys the data.
 
-Each shared volume has a holder pod, `volume-holder-<name>`, that keeps it mounted so backups include its files even when no app mounts it. `kip volume list` prints a warning line for a volume whose holder cannot run. See [Shared volume backups](/en/shared-storage#backups).
+While backups are configured, each shared volume has a holder pod, `volume-holder-<name>`, that keeps it mounted so backups include its files even when no app mounts it. A project's shared storage has one too, `shared-uploads-holder`. `kip volume list` prints a warning line for a volume whose holder cannot run. See [Shared volume backups](/en/shared-storage#backups).
 
 See [Storage](/en/storage) for full documentation.
 
@@ -1310,12 +1313,14 @@ kip backup restore weekly-20260413 --namespace blog-prod      # restore one name
 kip backup schedules                                                # list scheduled backups
 kip backup storage resize --size 30Gi                               # grow the in-cluster MinIO volume
 kip backup repository-key export --to ~/example-backups.key         # save the key that encrypts the backups
-kip backup drill blog-prod                                          # restore blog-prod's services into an isolated namespace and count their rows
+kip backup drill blog-prod                                          # restore blog-prod's services and shared volumes into an isolated namespace and count their rows
 kip backup sse-key export --to ~/example-backups-sse.key            # save the SSE-C key, on clusters installed with --backup-storage-sse-c
 kip backup mirror add uploads --source s3://... --target s3://... ...  # copy an S3 bucket daily into a locked bucket
 kip backup mirror status uploads                                    # last run, preflight result and copy totals
 kip backup mirror remove uploads                                    # stop the mirror. Both buckets stay as they are
 ```
+
+`kip backup drill` estimates the Longhorn or local storage it needs, counting each restored volume once per estimated copy on this cluster. It warns about restored volumes with fewer copies than configured.
 
 The `nano` profile blocks `kip backup drill` because running a second copy of a namespace's services exceeds a small server's memory capacity. Use `kip service restore-dump` to check one Postgres service's backup. See [Test a restore with a drill](/en/backups#test-a-restore-with-a-drill).
 

@@ -94,7 +94,7 @@ func testMapper(withLonghorn bool) meta.RESTMapper {
 		mapper.Add(gvk, meta.RESTScopeNamespace)
 	}
 	for _, gvk := range []schema.GroupVersionKind{
-		{Version: "v1", Kind: "Node"}, {Group: "kipper.run", Version: "v1alpha1", Kind: "PlatformConfig"},
+		{Version: "v1", Kind: "Node"}, {Version: "v1", Kind: "PersistentVolume"}, {Group: "kipper.run", Version: "v1alpha1", Kind: "PlatformConfig"},
 		{Group: "kipper.run", Version: "v1alpha1", Kind: "Project"},
 	} {
 		mapper.Add(gvk, meta.RESTScopeRoot)

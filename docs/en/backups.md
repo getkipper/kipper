@@ -93,6 +93,14 @@ kip service add postgres --name mydb --consistent-backups=false   # Create a ser
 
 For a Postgres service declared in `kipper.yaml`, set `consistentBackups: true` to enable consistent dumps. Omitting this field from the service's manifest entry disables consistent dumps when the manifest is applied. If the field is currently set, `kip apply` lists it as a field to be cleared and requires `--force` to proceed. Each database uses a consistent snapshot. Databases are dumped sequentially, so their snapshots represent different points in time. Each service stores its current set of dumps on its own dump volume and removes the previous set before starting a new one.
 
+The dump volume always keeps one copy, regardless of how many copies the service has, because the next backup writes its contents again. If the disk holding that copy fails, Longhorn reports the dump volume as faulted. Consistent dumps then fail, and the database pod cannot start again until the dump volume is replaced. A running pod continues running until it restarts. Kipper checks every minute and leaves deletion of the dump volume to the user. `kip service info` shows a warning with the command that replaces it:
+
+```bash
+kip service recreate-dump mydb
+```
+
+kip checks that Longhorn reports the dump volume as faulted, that the dump volume, StatefulSet and any existing pod belong to the service, and that no backup of the namespace or restore into it is still running, because restarting the pod would interrupt that work. It refuses if it cannot read the backup and restore status. It asks for confirmation, then repeats all these checks before deleting the dump volume and restarting the database pod. `--yes` skips only the confirmation prompt. The controller creates a new, empty dump volume. The data volume is left unchanged. If the data volume is faulted too, kip says so, because the pod still cannot start afterwards. See [When a node dies](/en/maintenance#when-a-node-dies).
+
 ## Restoring from a backup
 
 ### Restore to the same namespace
@@ -121,11 +129,15 @@ A drill tests whether services from the latest completed backup can be restored 
 kip backup drill blog-prod
 ```
 
-It restores the database and other service pods of `blog-prod`, with their volumes and credentials, into `kipper-restore-drill` from the latest completed backup that covers `blog-prod`. App pods, Deployments, Jobs, CronJobs and Ingresses are excluded to avoid starting applications that could connect to the live database or claim live hostnames. Before restoring anything, kip creates a NetworkPolicy that allows traffic between drill pods and outgoing queries to the cluster's DNS. Enforcement requires a NetworkPolicy controller. k3s runs one unless started with `--disable-network-policy`. Kubernetes still allows traffic between a pod and its node.
+It restores the database and other service pods of `blog-prod`, with their volumes and credentials, into `kipper-restore-drill` from the latest completed backup that covers `blog-prod`. The files of the namespace's shared volumes and project shared storage are restored through their holder pods. App pods, Deployments, Jobs, CronJobs and Ingresses are excluded to avoid starting applications that could connect to the live database or claim live hostnames. Before restoring anything, kip creates a NetworkPolicy that allows traffic between drill pods and outgoing queries to the cluster's DNS. Enforcement requires a NetworkPolicy controller. k3s runs one unless started with `--disable-network-policy`. Kubernetes still allows traffic between a pod and its node.
 
-kip then checks that every PVC-backed volume of the restored services has a completed volume restore, waits for each service to become ready, and counts rows in its user tables with `count(*)`. For Postgres, it checks all connectable, non-template databases and includes the database and schema in each table name. For MySQL, it checks tables outside the system schemas and includes the database in each table name. Direct counts remain useful after crash recovery resets Postgres statistics during startup of a restored volume. Other service types are reported as restored without a row check.
+Before the restore starts, kip estimates the storage the drill needs, on Longhorn or on local disks. It multiplies each selected volume's current size by its storage class's copy count, capped by the eligible nodes on this cluster and with a minimum of one copy, then adds the results. A local volume counts once. A backup taken before volumes were added, removed or resized restores different sizes, so the estimate is a guide.
+
+kip then checks that every PVC-backed volume of the restored services and holder pods has a completed volume restore, reports each shared volume as `files restored`, waits for each service to become ready, and counts rows in its user tables with `count(*)`. For Postgres, it checks all connectable, non-template databases and includes the database and schema in each table name. For MySQL, it checks tables outside the system schemas and includes the database in each table name. Direct counts remain useful after crash recovery resets Postgres statistics during startup of a restored volume. Other service types are reported as restored without a row check.
 
 When a restored Postgres service carries a consistent dump, kip also tests the logical restore. It checks that the manifest marks the dump as complete and that each dump matches its recorded SHA-256 checksum. It then restores each database's dump into a scratch database inside the drill namespace and compares the exact per-table row counts with the counts recorded from the dump's snapshot. A dump that is incomplete, altered or restores with different counts fails the drill. Restoring the dumps requires free space on the restored data volume for a second copy of each database.
+
+The drill's volumes keep their storage class, so a volume with two copies asks for two in the drill too. When Longhorn cannot place every copy, kip warns that the volume has fewer copies than configured. That is harmless for the drill's scratch copy.
 
 The drill's copy of each service needs enough resources on a node. If kip observes a restored pod staying unschedulable for two minutes, for example because the node has no CPU or memory available, kip stops waiting, reports the scheduler's reason and leaves the restore running. Resolve the scheduling error or end the restore with `kip backup restore --cancel <restore>` (see [Cancel a stuck restore](#cancel-a-stuck-restore)). Then remove the namespace with `kip backup drill <namespace> --clean`. `kip service restore-dump` behaves the same way.
 
@@ -171,6 +183,10 @@ kip backup restore pre-migration --cluster-resources
 ```
 
 `--cluster-resources` restores projects and their resource adjustments. By default, Velero skips existing objects, preserving live project settings. This flag cannot be combined with `--namespace-mapping`. The platform configuration and cluster identity are always excluded from restores because each cluster creates its own during installation.
+
+### Copies after a restore
+
+A restored volume keeps the storage class it was backed up with, and so the number of copies that class keeps. On a cluster with fewer nodes that can hold copies, Longhorn reports the volume degraded until enough nodes are available, and `kip status` lists it under copies that need attention. The volume's files are complete either way.
 
 ### Restore progress and credentials
 
@@ -382,7 +398,7 @@ Practise a restore regularly into a scratch bucket, then compare it with `rclone
 | PostgreSQL data | Yes | PVC data via Kopia file-system backup |
 | Redis data | Yes | PVC data via Kopia file-system backup |
 | Longhorn volumes | Yes | Full file-system backup of volume contents |
-| Shared volumes | Yes | File-system backup through the volume's holder pod, whether or not an app mounts the volume |
+| Shared volumes and project shared storage | Yes | File-system backup through a holder pod, whether or not an app mounts the volume |
 | Projects and resource adjustments | Yes | Restored only with `--cluster-resources` |
 | Platform configuration and cluster identity | Yes | Included in backups and always excluded from restores |
 | Resource tuning records | No | The auto-sizer rebuilds them from the running workloads |
@@ -436,6 +452,6 @@ kip backup create --ttl 720h  # 30 days
 ## Limitations
 
 - **In-cluster mode**: backups are stored inside the cluster, so a host loss or `kip cluster uninstall` takes the backups with it. Configure [external backup storage](#external-s3-compatible-storage) for clusters that hold data you care about.
-- Kipper's backups copy files from volumes mounted by regular containers in running pods. Without such a mount, a backup saves the volume's Kubernetes objects but none of its files. This includes volumes used only by an app stopped with `kip app stop`. [Shared volumes](/en/shared-storage#backups) are the exception, because each one has a holder pod that keeps it mounted. When backups exist and it can read the cluster's pods and volumes, `kip backup list` names volumes in user-workload namespaces whose files a backup would omit with the current mounts. It skips volumes explicitly labelled for exclusion from backups. Start the app before the backup runs, or remove a volume you no longer need.
+- Kipper's backups copy files from volumes mounted by regular containers in running pods. Without such a mount, a backup saves the volume's Kubernetes objects but none of its files. This includes volumes used only by an app stopped with `kip app stop`. [Shared volumes and project shared storage](/en/shared-storage#backups) are the exception, because each has a holder pod that keeps it mounted while backups are configured. When backups exist and it can read the cluster's pods and volumes, `kip backup list` names volumes in user-workload namespaces whose files a backup would omit with the current mounts. It skips volumes explicitly labelled for exclusion from backups. Start the app before the backup runs, or remove a volume you no longer need.
 - Database volumes are copied while the database runs. Postgres services with [consistent backups](#consistent-database-dumps) also include a `pg_dump` per database. MySQL and MongoDB include only the volume copy, so use their native tools alongside Velero when you need a logical dump.
 - Backup storage mode is chosen at install time, and there is no command that migrates a running cluster from one mode to another. **Do not uninstall in order to switch.** In in-cluster mode the backups live on the cluster, so `kip cluster uninstall` removes them along with everything else, and a backup taken just beforehand is gone before you can restore it. Re-running `kip install` with `--backup-storage-bucket` does repoint Velero at external storage, but it leaves your existing backups behind and re-runs the rest of the install, so it is a deliberate change rather than a migration. The route that keeps your data is to install a second cluster with external storage and move workloads onto it. See [One-shot decision](/en/installation#one-shot-decision).

@@ -559,6 +559,7 @@ type Snapshot struct {
 	TLSServing     bool
 	TLSWaiting     string
 	Copies         Copies
+	DumpFault      string
 }
 
 // Blocked reports whether the reconciler has refused this service anything.
@@ -585,8 +586,9 @@ func (m *Manager) Read(ctx context.Context, namespace, name string) (Snapshot, e
 	}
 	tls, _, _ := unstructured.NestedString(cr.Object, "spec", "tls")
 	_, waiting := blockage(cr.Object, servicecatalog.ConditionTLSReady)
+	_, dumpFault := blockage(cr.Object, servicecatalog.ConditionDumpVolumeReady)
 	return Snapshot{Type: svcType, BlockedReason: reason, BlockedMessage: message,
-		TLS: tls, TLSServing: ServesTLS(cr), TLSWaiting: waiting, Copies: CopiesOf(cr.Object)}, nil
+		TLS: tls, TLSServing: ServesTLS(cr), TLSWaiting: waiting, Copies: CopiesOf(cr.Object), DumpFault: dumpFault}, nil
 }
 
 // credentialsBlockage reads the reason and remedy off a service that the

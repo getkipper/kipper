@@ -75,7 +75,8 @@ func TestDrillRestoreSpecRestoresOnlyServicesIntoTheDrillNamespace(t *testing.T)
 	assert.Equal(t, []interface{}{
 		map[string]interface{}{"matchExpressions": []interface{}{map[string]interface{}{"key": "kipper.run/service-type", "operator": "Exists"}}},
 		map[string]interface{}{"matchExpressions": []interface{}{map[string]interface{}{"key": "kipper.run/tls-for", "operator": "Exists"}}},
-	}, spec["orLabelSelectors"], "Restore only service pods, their credentials and their TLS objects. Exclude app pods.")
+		map[string]interface{}{"matchLabels": map[string]interface{}{"kipper.run/resource-type": "volume-holder"}},
+	}, spec["orLabelSelectors"], "Restore only service pods, their credentials, their TLS objects and the shared volumes' holders. Exclude app pods.")
 	assert.NotContains(t, spec, "labelSelector", "Velero accepts either labelSelector or orLabelSelectors, but rejects requests containing both.")
 	assert.NotContains(t, spec, "includeClusterResources", "the PV behind each restored PVC still gets provisioned")
 	assert.Contains(t, spec["excludedResources"], "projects.kipper.run")
@@ -483,4 +484,44 @@ func TestAnInterruptedDrillSaysSoInsteadOfContextCanceled(t *testing.T) {
 	other := errors.New("restore drill-shop-1 ended with phase Failed")
 	assert.Equal(t, other, reportInterrupt(other))
 	assert.NoError(t, reportInterrupt(nil))
+}
+
+// holderPods returns the labels of a shared Volume's holder and of a
+// project's shared storage holder, keyed by description.
+func holderPods() map[string]map[string]string {
+	return map[string]map[string]string{
+		"volume holder":  {"app.kubernetes.io/managed-by": "kipper", "kipper.run/resource-type": "volume-holder", "kipper.run/volume-name": "uploads"},
+		"project holder": {"app.kubernetes.io/managed-by": "kipper", "kipper.run/resource-type": "volume-holder", "kipper.run/project": "shop"},
+	}
+}
+
+func TestADrillRestoresSharedVolumesThroughTheirHolders(t *testing.T) {
+	spec := drillRestoreSpec("daily-2", "shop-prod", "")
+	for holder, holderLabels := range holderPods() {
+		assert.True(t, restoreSelects(t, spec, holderLabels), "the drill restores the %s, and with it the shared claim it mounts", holder)
+	}
+	assert.False(t, restoreSelects(t, spec, map[string]string{"app.kubernetes.io/managed-by": "kipper", "app": "web"}),
+		"app pods stay out")
+}
+
+func TestADumpRestoreLeavesSharedVolumesOut(t *testing.T) {
+	spec := drillRestoreSpec("daily-2", "shop-prod", "orders")
+	for holder, holderLabels := range holderPods() {
+		assert.False(t, restoreSelects(t, spec, holderLabels), "a dump restore of one service leaves the %s out", holder)
+	}
+}
+
+func TestADrillReportsAHolderAsARestoredSharedVolume(t *testing.T) {
+	holder := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "volume-holder-uploads", Labels: holderPods()["volume holder"]},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "shared-uploads"}}}}},
+	}
+	claim, ok := drillHolderClaim(&holder)
+	assert.True(t, ok)
+	assert.Equal(t, "shared-uploads", claim)
+
+	service := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "db-0", Labels: map[string]string{"kipper.run/service-type": "postgres"}}}
+	_, ok = drillHolderClaim(&service)
+	assert.False(t, ok, "a service pod gets its row check")
 }
