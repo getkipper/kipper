@@ -168,7 +168,7 @@ func valueAt(t *testing.T, values map[string]interface{}, path ...string) interf
 }
 
 func TestLokiHelmChart_SendsNoUsageReports(t *testing.T) {
-	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage))
+	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage, nil))
 
 	assert.Equal(t, false, valueAt(t, values, "loki", "analytics", "reporting_enabled"))
 }
@@ -188,7 +188,7 @@ func TestKubePrometheusStackHelmChart_GrafanaSendsNothingUpstream(t *testing.T) 
 // Loki's compactor enforces retention_period. Loki 3.x requires a delete
 // request store to start with retention enabled.
 func TestLokiHelmChart_CompactorAppliesRetention(t *testing.T) {
-	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage))
+	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage, nil))
 
 	assert.Equal(t, "72h", valueAt(t, values, "loki", "limits_config", "retention_period"))
 	assert.Equal(t, true, valueAt(t, values, "loki", "compactor", "retention_enabled"))
@@ -201,7 +201,7 @@ func TestLokiHelmChart_CompactorAppliesRetention(t *testing.T) {
 // Retention enables the deletion API by default. It must stay disabled
 // because Loki runs without authentication.
 func TestLokiHelmChart_KeepsTheDeletionAPIOff(t *testing.T) {
-	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage))
+	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage, nil))
 
 	assert.Equal(t, false, valueAt(t, values, "loki", "auth_enabled"))
 	assert.Equal(t, "disabled", valueAt(t, values, "loki", "limits_config", "deletion_mode"))
@@ -209,7 +209,7 @@ func TestLokiHelmChart_KeepsTheDeletionAPIOff(t *testing.T) {
 
 // The canary and its dependent Helm test use top-level chart values.
 func TestLokiHelmChart_DeploysNoCanary(t *testing.T) {
-	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage))
+	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage, nil))
 
 	assert.Equal(t, false, valueAt(t, values, "lokiCanary", "enabled"))
 	assert.Equal(t, false, valueAt(t, values, "test", "enabled"))
@@ -317,8 +317,43 @@ func TestLokiStorageSize(t *testing.T) {
 }
 
 func TestLokiHelmChart_RequestsTheGivenStorage(t *testing.T) {
-	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), "10Gi"))
+	values := seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), "10Gi", nil))
 	assert.Equal(t, "10Gi", valueAt(t, values, "singleBinary", "persistence", "size"))
-	values = seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage))
+	values = seededValues(t, LokiHelmChart(ResourcesForProfile(ProfileMedium), LokiDefaultStorage, nil))
 	assert.Equal(t, "5Gi", valueAt(t, values, "singleBinary", "persistence", "size"))
+}
+
+func TestLokiStorageClass(t *testing.T) {
+	longhornSingle := LonghornSingleClass
+	empty := ""
+	assert.Nil(t, LokiStorageClass(true, nil, LocalPathClass, string(StorageLonghorn)),
+		"a template without a class keeps rendering none, since the template is immutable")
+	assert.Equal(t, &empty, LokiStorageClass(true, &empty, "", string(StorageLonghorn)),
+		"an explicit empty template class stays explicit")
+	assert.Equal(t, &longhornSingle, LokiStorageClass(true, &longhornSingle, LocalPathClass, string(StorageLocal)),
+		"the template wins over the claim and the mode")
+	got := LokiStorageClass(false, nil, LocalPathClass, string(StorageLonghorn))
+	require.NotNil(t, got)
+	assert.Equal(t, LocalPathClass, *got, "a surviving claim keeps its class after the StatefulSet is gone")
+	got = LokiStorageClass(false, nil, "", string(StorageLonghorn))
+	require.NotNil(t, got)
+	assert.Equal(t, LonghornSingleClass, *got, "a fresh Longhorn install gets one copy")
+	got = LokiStorageClass(false, nil, "", string(StorageLocal))
+	require.NotNil(t, got)
+	assert.Equal(t, LocalPathClass, *got, "a fresh local install stays on local-path")
+}
+
+func TestLokiHelmChart_RendersTheGivenClass(t *testing.T) {
+	res := ResourcesForProfile(ProfileMedium)
+	persistence := func(class *string) map[string]interface{} {
+		values := seededValues(t, LokiHelmChart(res, LokiDefaultStorage, class))
+		p, ok := valueAt(t, values, "singleBinary", "persistence").(map[string]interface{})
+		require.True(t, ok)
+		return p
+	}
+	assert.NotContains(t, persistence(nil), "storageClass", "no class leaves the cluster default in charge")
+	class := LocalPathClass
+	assert.Equal(t, LocalPathClass, persistence(&class)["storageClass"])
+	empty := ""
+	assert.Equal(t, "-", persistence(&empty)["storageClass"], "the chart renders \"-\" as an empty storageClassName")
 }

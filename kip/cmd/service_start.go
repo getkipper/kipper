@@ -48,6 +48,7 @@ func init() {
 // the node lifecycle lease.
 type serviceStarter interface {
 	FenceStop(ns, name string) (*installer.FenceStopMark, error)
+	MoveMark(ns, name string) (string, error)
 	Records() ([]installer.NodeRecord, error)
 	Replicas() ([]stranded.Replica, error)
 	LonghornVolumes() ([]string, error)
@@ -98,6 +99,13 @@ func runServiceStart(cmd *cobra.Command, args []string) error {
 }
 
 func (s fenceStoppedStart) run(ns, name string) error {
+	move, err := s.Server.MoveMark(ns, name)
+	if err != nil {
+		return err
+	}
+	if move != "" {
+		return fmt.Errorf("service %s in %s is moving its volume to Longhorn. 'kip service storage longhorn %s' finishes the move, or undoes it with --rollback, and either one starts the service again", name, ns, name)
+	}
 	mark, err := s.Server.FenceStop(ns, name)
 	if err != nil {
 		return err
@@ -238,6 +246,14 @@ type startServer struct{ fenceServer }
 
 func (s startServer) FenceStop(ns, name string) (*installer.FenceStopMark, error) {
 	return installer.ReadFenceStop(s.master, ns, name)
+}
+
+func (s startServer) MoveMark(ns, name string) (string, error) {
+	sts, err := installer.KubectlMoveCluster{Server: s.master}.ReadStatefulSet(ns, name)
+	if err != nil || sts == nil {
+		return "", err
+	}
+	return sts.Mark, nil
 }
 
 func (s startServer) Replicas() ([]stranded.Replica, error) { return installer.ReadReplicas(s.master) }

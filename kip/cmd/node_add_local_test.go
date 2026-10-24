@@ -12,7 +12,7 @@ func TestNodeAddRefusesALocalStorageCluster(t *testing.T) {
 	err := refuseNodeAddOnLocalStorage(installer.StorageLocal)
 	assert.ErrorContains(t, err, "local storage")
 	assert.ErrorContains(t, err, "Longhorn")
-	assert.ErrorContains(t, err, "Cluster Migration")
+	assert.ErrorContains(t, err, "kip cluster storage longhorn")
 	assert.NoError(t, refuseNodeAddOnLocalStorage(installer.StorageLonghorn))
 }
 

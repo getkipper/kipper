@@ -1,0 +1,42 @@
+# Only admins may add, change or remove a Service's storage-move mark during
+# an update, or delete a marked Service, so others cannot interrupt a move.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kipper-storage-move-services
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["kipper.run"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["services"]
+  variables:
+    - name: oldMark
+      expression: >-
+        oldObject != null && has(oldObject.metadata.annotations) &&
+        'kipper.run/storage-move' in oldObject.metadata.annotations
+        ? oldObject.metadata.annotations['kipper.run/storage-move'] : ''
+    - name: newMark
+      expression: >-
+        object != null && has(object.metadata.annotations) &&
+        'kipper.run/storage-move' in object.metadata.annotations
+        ? object.metadata.annotations['kipper.run/storage-move'] : ''
+  validations:
+    - expression: >-
+        variables.oldMark == variables.newMark ||
+        authorizer.group('kipper.run').resource('platformconfigs').name('platform').check('update').allowed()
+      message: "This service's volume is moving to Longhorn. Only an admin can end the move, with 'kip service storage longhorn'."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kipper-storage-move-services
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  policyName: kipper-storage-move-services
+  validationActions: ["Deny"]

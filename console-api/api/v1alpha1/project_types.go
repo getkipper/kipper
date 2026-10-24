@@ -163,6 +163,11 @@ type ProjectSharedStorage struct {
 	Copies *int32 `json:"copies,omitempty"`
 }
 
+// ConditionWaitingForStorageMove reports a project namespace that is kept
+// because a service storage move in it has not finished or rolled back. The
+// project deletes it, or finishes its own deletion, once the move ends.
+const ConditionWaitingForStorageMove = "WaitingForStorageMove"
+
 // ProjectStatus defines the observed state of the project.
 type ProjectStatus struct {
 	// Phase represents the current lifecycle phase.

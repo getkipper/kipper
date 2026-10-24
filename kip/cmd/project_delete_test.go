@@ -10,11 +10,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/manifest"
 )
 
@@ -134,4 +137,132 @@ func TestDeletingAProjectBindsBothDeletesToTheObjectsItRead(t *testing.T) {
 		"the namespace delete carried no precondition, so a namespace recreated under that name between the check and the delete is destroyed on its predecessor's authorisation")
 	require.NotNil(t, namespaceDelete.DeleteOptions.Preconditions.UID)
 	assert.Equal(t, types.UID("the-namespace"), *namespaceDelete.DeleteOptions.Preconditions.UID)
+}
+
+func moveFixture(t *testing.T, namespaces []runtime.Object, services ...*unstructured.Unstructured) (*k8sfake.Clientset, *dynamicfake.FakeDynamicClient) {
+	t.Helper()
+	objects := make([]runtime.Object, 0, len(services))
+	for _, svc := range services {
+		objects = append(objects, svc)
+	}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{manifest.ProjectGVR: "ProjectList", manifest.ServiceGVR: "ServiceList"},
+		objects...)
+	return k8sfake.NewClientset(namespaces...), dyn
+}
+
+func markedService(namespace string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kipper.run/v1alpha1",
+		"kind":       "Service",
+		"metadata": map[string]any{"name": "pg", "namespace": namespace,
+			"annotations": map[string]any{platform.StorageMoveAnnotation: "kipper-storage-move-1"}},
+	}}
+}
+
+// The namespace delete that follows a project delete cannot finish while a
+// volume in it is moving: admission keeps the marked Service, so the namespace
+// stays Terminating with the move half done.
+func TestAProjectWithAMovingNamespaceIsNotDeleted(t *testing.T) {
+	ns := labelledNamespace("shop-prod", "the-namespace")
+	ns.Labels = map[string]string{platform.StorageMoveNamespaceLabel: "true"}
+	project := projectClaiming(claimOf("shop-prod", "the-namespace"))
+	clientset, dyn := moveFixture(t, []runtime.Object{&ns})
+
+	err := refuseDuringStorageMove(context.Background(), clientset, dyn, project)
+
+	require.Error(t, err, "a project was deleted while a volume in its namespace was moving to Longhorn")
+	assert.Contains(t, err.Error(), "shop-prod")
+}
+
+// The namespace label and the Service's mark are written at different steps,
+// so either one alone identifies a move.
+func TestAMarkedServiceAloneBlocksTheProjectDelete(t *testing.T) {
+	ns := labelledNamespace("shop-prod", "the-namespace")
+	project := projectClaiming(claimOf("shop-prod", "the-namespace"))
+	clientset, dyn := moveFixture(t, []runtime.Object{&ns}, markedService("shop-prod"))
+
+	err := refuseDuringStorageMove(context.Background(), clientset, dyn, project)
+
+	require.Error(t, err, "a project was deleted while one of its services carried a storage move mark")
+	assert.Contains(t, err.Error(), "shop-prod")
+}
+
+// The refusal names the moving service with the flags that reach it, so the
+// command it prints runs as it stands.
+func TestTheProjectDeleteRefusalNamesTheMovingService(t *testing.T) {
+	ns := labelledNamespace("shop-staging", "the-namespace")
+	ns.Labels = map[string]string{platform.StorageMoveNamespaceLabel: "true", labels.Project: "shop", labels.Environment: "staging"}
+	project := projectClaiming(claimOf("shop-staging", "the-namespace"))
+	clientset, dyn := moveFixture(t, []runtime.Object{&ns}, markedService("shop-staging"))
+
+	err := refuseDuringStorageMove(context.Background(), clientset, dyn, project)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Finish the move with 'kip service storage longhorn pg --project shop --environment staging', or undo it with --rollback, then delete the project")
+
+	err = refuseEnvRemovalDuringStorageMove(context.Background(), clientset, dyn, project, "shop-staging")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Finish the move with 'kip service storage longhorn pg --project shop --environment staging', or undo it with --rollback, then remove the environment")
+}
+
+// A namespace that names no project is reached with --project and its own
+// name, which kip accepts, so the printed command still finds the service.
+func TestTheProjectDeleteRefusalReachesANamespaceWithoutAProjectLabel(t *testing.T) {
+	ns := labelledNamespace("shop-staging", "the-namespace")
+	ns.Labels = map[string]string{platform.StorageMoveNamespaceLabel: "true"}
+	project := projectClaiming(claimOf("shop-staging", "the-namespace"))
+	clientset, dyn := moveFixture(t, []runtime.Object{&ns}, markedService("shop-staging"))
+
+	err := refuseDuringStorageMove(context.Background(), clientset, dyn, project)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Finish the move with 'kip service storage longhorn pg --project shop-staging', or undo it with --rollback")
+}
+
+func TestAMoveInAnotherProjectDoesNotBlockTheDelete(t *testing.T) {
+	mine := labelledNamespace("shop-prod", "the-namespace")
+	theirs := labelledNamespace("grocer-prod", "their-namespace")
+	theirs.Labels = map[string]string{platform.StorageMoveNamespaceLabel: "true"}
+	project := projectClaiming(claimOf("shop-prod", "the-namespace"))
+	clientset, dyn := moveFixture(t, []runtime.Object{&mine, &theirs}, markedService("grocer-prod"))
+
+	assert.NoError(t, refuseDuringStorageMove(context.Background(), clientset, dyn, project),
+		"a move in a namespace this project does not hold blocked its delete")
+}
+
+// Removing an environment deletes its namespace through the project
+// reconciler, so it has the same problem as deleting the project.
+func TestAnEnvironmentWithAMoveIsNotRemoved(t *testing.T) {
+	prod := labelledNamespace("shop-prod", "the-namespace")
+	project := projectClaiming(claimOf("shop-prod", "the-namespace"))
+	clientset, dyn := moveFixture(t, []runtime.Object{&prod}, markedService("shop-prod"))
+
+	err := refuseEnvRemovalDuringStorageMove(context.Background(), clientset, dyn, project, "shop-prod")
+
+	require.Error(t, err, "an environment was removed while a volume in its namespace was moving to Longhorn")
+	assert.Contains(t, err.Error(), "shop-prod")
+}
+
+func TestAnEnvironmentWithoutAMoveCanBeRemoved(t *testing.T) {
+	prod := labelledNamespace("shop-prod", "the-namespace")
+	test := labelledNamespace("shop-test", "the-other-namespace")
+	test.Labels = map[string]string{platform.StorageMoveNamespaceLabel: "true"}
+	project := projectClaiming(claimOf("shop-prod", "the-namespace"), claimOf("shop-test", "the-other-namespace"))
+	clientset, dyn := moveFixture(t, []runtime.Object{&prod, &test}, markedService("shop-test"))
+
+	assert.NoError(t, refuseEnvRemovalDuringStorageMove(context.Background(), clientset, dyn, project, "shop-prod"),
+		"a move in another environment blocked removing this one")
+	assert.NoError(t, refuseEnvRemovalDuringStorageMove(context.Background(), clientset, dyn, project, "shop-gone"),
+		"an environment whose namespace is already gone could not be removed")
+}
+
+// The reconciler deletes only namespaces the project holds. A declaration whose
+// namespace another project holds is removed without touching it.
+func TestAMoveInANamespaceTheProjectDoesNotHoldDoesNotBlockTheRemoval(t *testing.T) {
+	prod := labelledNamespace("shop-prod", "their-namespace")
+	prod.Labels = map[string]string{platform.StorageMoveNamespaceLabel: "true"}
+	project := projectClaiming()
+	clientset, dyn := moveFixture(t, []runtime.Object{&prod})
+
+	assert.NoError(t, refuseEnvRemovalDuringStorageMove(context.Background(), clientset, dyn, project, "shop-prod"),
+		"a move in a namespace this project does not hold blocked removing its environment")
 }

@@ -11,7 +11,7 @@ func TestLocalStorageNotes(t *testing.T) {
 	notes := strings.Join(localStorageNotes(BackupNone), "\n")
 	assert.Contains(t, notes, "one node")
 	assert.Contains(t, notes, "--backup-storage-bucket", "a cluster without backups learns how to get them")
-	assert.Contains(t, notes, "Cluster Migration", "and how to grow beyond one node")
+	assert.Contains(t, notes, "kip cluster storage longhorn", "and how to grow beyond one node")
 	assert.NotContains(t, strings.ToLower(notes), "disposable")
 	assert.NotContains(t, strings.ToLower(notes), "throwaway")
 

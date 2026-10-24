@@ -147,6 +147,10 @@ func resolveStorage(requested, profile string, existing, unreadable bool, record
 			return "", fmt.Errorf("this host already runs k3s, but its storage configuration could not be read. " +
 				"Run kip install again when the cluster is reachable to verify its storage mode")
 		}
+		if mode == StorageLocal && requested == StorageLonghorn {
+			return "", fmt.Errorf("this cluster runs local storage. " +
+				"Switch it to Longhorn in place with 'kip cluster storage longhorn', then move each service with 'kip service storage longhorn <name>'")
+		}
 		if requested != "" && requested != mode {
 			return "", fmt.Errorf("this cluster runs %s storage, which it keeps for its lifetime. "+
 				"To use %s storage, install a new cluster with --storage %s and move your projects to it. See Cluster Migration in the Kipper docs",

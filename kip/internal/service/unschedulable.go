@@ -9,9 +9,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// unschedulableReason is the scheduler's message on a pod it cannot place,
+// UnschedulableReason returns the scheduler's message on a pod it cannot place,
 // empty for a pod that is scheduled or has nothing recorded yet.
-func unschedulableReason(pod *corev1.Pod) string {
+func UnschedulableReason(pod *corev1.Pod) string {
 	if pod.Spec.NodeName != "" {
 		return ""
 	}
@@ -39,19 +39,20 @@ func UnschedulableServices(ctx context.Context, client kubernetes.Interface, nam
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		name := pod.Labels["app"]
-		reason := unschedulableReason(pod)
+		reason := UnschedulableReason(pod)
 		if name == "" || reason == "" {
 			continue
 		}
 		if byName == nil {
 			byName = map[string]string{}
 		}
-		byName[name] = unschedulableMessage(name, reason)
+		byName[name] = UnschedulableMessage(name, reason)
 	}
 	return byName
 }
 
-// unschedulableMessage includes resource advice for capacity-related failures.
-func unschedulableMessage(service, reason string) string {
+// UnschedulableMessage formats the scheduler's reason with advice to reduce
+// CPU or memory requests or add capacity. The advice is included for every reason.
+func UnschedulableMessage(service, reason string) string {
 	return fmt.Sprintf("the pod cannot be scheduled: %s For insufficient CPU or memory, reduce requests with 'kip service update %s --cpu <cpu> --memory <memory>' or add cluster capacity.", reason, service)
 }

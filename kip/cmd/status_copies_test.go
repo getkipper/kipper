@@ -94,3 +94,13 @@ func TestStatusListsConversionsApartFromProblems(t *testing.T) {
 	assert.Contains(t, got, "…  shop/queue (service)")
 	assert.Contains(t, got, "Storage copies needing attention:\n    ✗  shop/files (volume)\n       The server has no room")
 }
+
+// 'kip status' reports an unfinished move in its own section, so the copies
+// sections leave a moving service out.
+func TestStatusLeavesAMovingServiceToTheMoveSection(t *testing.T) {
+	var out bytes.Buffer
+	reportStorageCopies(context.Background(), &out, copiesStatusClient(
+		copiesStatusObject("Service", "shop", "db", 1, "False", "Moving", "The volume is moving to Longhorn and the service is stopped."),
+	))
+	assert.Empty(t, out.String())
+}

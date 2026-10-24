@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/controller/pkg/stranded"
 )
 
@@ -29,5 +30,26 @@ func TestRestoreLeavesAServiceTheFenceStoppedAlone(t *testing.T) {
 	}
 	if *got.Spec.Replicas != 0 {
 		t.Fatalf("a fence-stopped service was scaled to %d. Migration cleanup must honor its stop annotation", *got.Spec.Replicas)
+	}
+}
+
+func TestRestoreLeavesAServiceUnderAStorageMoveAlone(t *testing.T) {
+	zero := int32(0)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "shop", Annotations: map[string]string{
+			platform.StorageMoveAnnotation: "kipper-storage-move-uid"}},
+		Spec: appsv1.StatefulSetSpec{Replicas: &zero},
+	}
+	client := fake.NewSimpleClientset(sts)
+	h := &Handler{Client: client}
+	if err := h.restoreStatefulSet(context.Background(), "shop", "db", 1); err != nil {
+		t.Fatalf("restoring: %v", err)
+	}
+	got, err := client.AppsV1().StatefulSets("shop").Get(context.Background(), "db", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *got.Spec.Replicas != 0 {
+		t.Fatalf("a service under a storage move was scaled to %d. Only the move restarts it", *got.Spec.Replicas)
 	}
 }

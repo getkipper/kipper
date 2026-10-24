@@ -733,6 +733,80 @@ func fenceStopped() *appsv1.StatefulSet {
 	return sts
 }
 
+func moveMarked() *appsv1.StatefulSet {
+	sts := dbStatefulSet(0)
+	sts.Annotations = map[string]string{platform.StorageMoveAnnotation: "kipper-storage-move-u", platform.StorageMoveReplicasAnnotation: "1"}
+	return sts
+}
+
+// movedClaim is pvc as a storage move creates it, carrying the move's mark.
+func movedClaim(pvc *corev1.PersistentVolumeClaim) *corev1.PersistentVolumeClaim {
+	if pvc.Annotations == nil {
+		pvc.Annotations = map[string]string{}
+	}
+	pvc.Annotations[platform.StorageMoveAnnotation] = "kipper-storage-move-u"
+	return pvc
+}
+
+type countedWrites struct {
+	crclient.Client
+	writes int
+}
+
+func (w *countedWrites) Create(ctx context.Context, obj crclient.Object, opts ...crclient.CreateOption) error {
+	w.writes++
+	return w.Client.Create(ctx, obj, opts...)
+}
+
+func (w *countedWrites) Update(ctx context.Context, obj crclient.Object, opts ...crclient.UpdateOption) error {
+	w.writes++
+	return w.Client.Update(ctx, obj, opts...)
+}
+
+func (w *countedWrites) Patch(ctx context.Context, obj crclient.Object, patch crclient.Patch, opts ...crclient.PatchOption) error {
+	w.writes++
+	return w.Client.Patch(ctx, obj, patch, opts...)
+}
+
+func (w *countedWrites) Delete(ctx context.Context, obj crclient.Object, opts ...crclient.DeleteOption) error {
+	w.writes++
+	return w.Client.Delete(ctx, obj, opts...)
+}
+
+// A storage move restores replicas and removes its StatefulSet marker in one
+// write. A reconcile that read the service before it was marked may reach the
+// move's new claim. While the StatefulSet marker remains, that reconcile must
+// write nothing, including stops, volume patches, leases, tickets and scaling.
+func TestACopyChangeWaitsForAStorageMove(t *testing.T) {
+	cases := map[string]struct {
+		claim  *corev1.PersistentVolumeClaim
+		volume *unstructured.Unstructured
+		wanted *int32
+	}{
+		"a reduction with no stop yet":      {dbDataClaim(), lhVolumeObj("pvc-1", 2, platform.ReplicaStorageTag), ptr.To(int32(1))},
+		"a reduction with a stop recorded":  {stoppedClaim(), lhVolumeObj("pvc-1", 2, platform.ReplicaStorageTag), ptr.To(int32(1))},
+		"a recorded stop set back":          {stoppedClaim(), lhVolumeObj("pvc-1", 2, platform.ReplicaStorageTag), ptr.To(int32(2))},
+		"a recorded stop unset":             {stoppedClaim(), lhVolumeObj("pvc-1", 2, platform.ReplicaStorageTag), nil},
+		"an unheld volume below its copies": {stoppedClaim(), lhVolumeObj("pvc-1", 1, platform.ReplicaStorageTag), ptr.To(int32(1))},
+		"settled copies with no stop":       {dbDataClaim(), lhVolumeObj("pvc-1", 2, platform.ReplicaStorageTag), ptr.To(int32(2))},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			claim := movedClaim(tc.claim)
+			// The count guard would reject the unheld volume that the move must
+			// leave unchanged, so this test uses the plain fake client.
+			c := crfake.NewClientBuilder().WithScheme(testScheme()).WithRESTMapper(testMapper(true)).
+				WithObjects(convWorld(append(twoCopies("worker-1"), tc.volume, lhAttachmentObj(""), claim, moveMarked())...)...).Build()
+			w := &countedWrites{Client: c}
+			sc := storageConverter{Reader: c, Writer: w, Now: func() time.Time { return convNow }, StatefulSet: "db",
+				Commands: serviceStorageCommands("db")}
+			_, err := sc.convert(context.Background(), claim.DeepCopy(), tc.wanted)
+			require.ErrorIs(t, err, errStorageMoveHolds)
+			assert.Zero(t, w.writes, "nothing is written during a move")
+		})
+	}
+}
+
 // A stop of a service kip node fence left at zero records one replica, as the
 // fence does, so a 'kip service start' during the change is not undone by it.
 func TestAStopOfAFenceStoppedServiceRecordsOneReplica(t *testing.T) {

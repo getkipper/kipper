@@ -234,3 +234,20 @@ func TestTheProjectCopiesCommandIsKip(t *testing.T) {
 	assert.Equal(t, "kip project update shop --copies 2", projectCopiesCommand("shop", 2))
 	assert.Equal(t, "kip project update shop --copies", projectStorageCommands("shop").Copies)
 }
+
+// A cluster that grew onto Longhorn keeps a service's data on local storage
+// until 'kip service storage longhorn' moves it, so two copies wait for that.
+func TestTwoCopiesOfAServiceStillOnLocalStorageWaitForTheMove(t *testing.T) {
+	svc := copiesService(2, false)
+	r := copiesReconciler(append(twoReplicaNodes(), svc, boundClaim("ns", platform.LocalPathClass, "pvc-1"))...)
+	ctx := context.Background()
+	require.NoError(t, r.reconcileStatefulSet(ctx, svc))
+	require.NoError(t, r.updateStatus(ctx, svc))
+	var got kipperv1.Service
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "db"}, &got))
+	c := apimeta.FindStatusCondition(got.Status.Conditions, kipperv1.ConditionStorageCopies)
+	require.NotNil(t, c)
+	assert.Equal(t, metav1.ConditionFalse, c.Status)
+	assert.Equal(t, kipperv1.StorageCopiesLocalStorage, c.Reason)
+	assert.Contains(t, c.Message, "'kip service storage longhorn db'")
+}

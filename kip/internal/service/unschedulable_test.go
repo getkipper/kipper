@@ -63,3 +63,8 @@ func TestPlacementCarriesTheSchedulerReason(t *testing.T) {
 	assert.Empty(t, p.PodNode)
 	assert.Equal(t, "0/1 nodes are available: 1 Insufficient cpu.", p.Unscheduled)
 }
+
+func TestUnschedulableReasonReadsTheSchedulersMessage(t *testing.T) {
+	assert.Equal(t, "0/1 nodes are available: 1 Insufficient cpu.", UnschedulableReason(unschedulablePod("default", "cache", "0/1 nodes are available: 1 Insufficient cpu.")))
+	assert.Empty(t, UnschedulableReason(unschedulablePod("default", "cache", "")))
+}

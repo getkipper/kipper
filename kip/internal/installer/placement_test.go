@@ -169,7 +169,7 @@ func TestPlatformManifestsPinToTheServer(t *testing.T) {
 		manifest string
 		want     int
 	}{
-		"loki (single binary, gateway)": {platform.LokiHelmChart(res, platform.LokiDefaultStorage), 2},
+		"loki (single binary, gateway)": {platform.LokiHelmChart(res, platform.LokiDefaultStorage, nil), 2},
 		"kube-prometheus-stack (operator, webhook job, prometheus, grafana, kube-state-metrics)": {platform.KubePrometheusStackHelmChart(res), 5},
 		"keda (all components, then interceptor, scaler, operator)":                              {strings.Join(keda.commands, "\n"), 4},
 		"velero server":   {veleroManifest(nil, false), 1},
@@ -194,7 +194,7 @@ func (r *stdinRecorder) RunStdin(_ string, in io.Reader) (string, error) {
 }
 
 func TestLokiGatewayCanRollOutOnOneServer(t *testing.T) {
-	values := platform.LokiHelmChart(platform.EffectiveResources(ProfileMedium, nil), platform.LokiDefaultStorage)
+	values := platform.LokiHelmChart(platform.EffectiveResources(ProfileMedium, nil), platform.LokiDefaultStorage, nil)
 	assert.Contains(t, values, "    gateway:\n      # ", "the strategy belongs to the gateway block")
 	assert.Contains(t, values, "      deploymentStrategy:\n        type: RollingUpdate\n        rollingUpdate:\n          maxSurge: 0\n          maxUnavailable: 1\n",
 		"a surge pod can never schedule next to the old one, and the rollout stalls")

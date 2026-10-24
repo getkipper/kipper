@@ -361,6 +361,28 @@ func TestStorageCopiesPolicies(t *testing.T) {
 		if err := owner.Update(ctx, svc); err != nil {
 			t.Fatalf("a blocked conversion can be set back: %v", err)
 		}
+		setReason(StorageCopiesMoving)
+		if err := owner.Get(ctx, crclient.ObjectKey{Namespace: "default", Name: "converting"}, svc); err != nil {
+			t.Fatal(err)
+		}
+		svc.Spec.Copies = ptr.To[int32](1)
+		if err := owner.Update(ctx, svc); err == nil || !strings.Contains(err.Error(), "until the move ends") {
+			t.Fatalf("want the move refusal, got %v", err)
+		}
+
+		// The move marks the service before the controller reports Moving.
+		setReason(StorageCopiesBlocked)
+		if err := admin.Get(ctx, crclient.ObjectKey{Namespace: "default", Name: "converting"}, svc); err != nil {
+			t.Fatal(err)
+		}
+		svc.Annotations = map[string]string{"kipper.run/storage-move": "kipper-storage-move-u"}
+		if err := admin.Update(ctx, svc); err != nil {
+			t.Fatal(err)
+		}
+		svc.Spec.Copies = ptr.To[int32](1)
+		if err := owner.Update(ctx, svc); err == nil || !strings.Contains(err.Error(), "until the move ends") {
+			t.Fatalf("want the move refusal for a marked service, got %v", err)
+		}
 	})
 
 	t.Run("a project's shared storage copies do not change while an environment converts", func(t *testing.T) {

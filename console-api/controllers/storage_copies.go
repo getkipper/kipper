@@ -369,6 +369,21 @@ type storageGateError struct {
 
 func (e *storageGateError) Error() string { return e.message }
 
+// storageMoveGate holds the StatefulSet and dump claim back while
+// 'kip service storage longhorn' moves the service's volume. The move stops
+// the workload and swaps the claim itself, so any write here could recreate a
+// claim it just released or start a pod on a half-copied volume.
+func storageMoveGate(svc *kipperv1.Service) error {
+	if svc.Annotations[platform.StorageMoveAnnotation] == "" {
+		return nil
+	}
+	return &storageGateError{
+		reason: kipperv1.StorageCopiesMoving,
+		message: fmt.Sprintf("The volume is moving to Longhorn and the service is stopped. "+
+			"An admin can finish the move with 'kip service storage longhorn %s' or undo it with --rollback.", svc.Name),
+	}
+}
+
 // dataClaimName is the claim the StatefulSet's "data" template creates for
 // its only pod.
 func dataClaimName(service string) string { return "data-" + service + "-0" }
@@ -435,8 +450,26 @@ func (r *ServiceReconciler) reportStorageCopies(ctx context.Context, svc *kipper
 		return reportConversionOnly(ctx, &svc.Status.Conditions, converted, svc.Generation, err)
 	}
 	svc.Status.Storage = storageStatus(&pvc, live)
-	setCopiesCondition(&svc.Status.Conditions, orConverted(converted, copiesCondition(svc.Spec.Copies, live, "kip service update "+svc.Name+" --copies 1|2")), svc.Generation)
+	cond := orConverted(converted, copiesCondition(svc.Spec.Copies, live, "kip service update "+svc.Name+" --copies 1|2"))
+	if local := localCopiesCondition(svc, &pvc); local != nil {
+		cond = *local
+	}
+	setCopiesCondition(&svc.Status.Conditions, cond, svc.Generation)
 	return nil
+}
+
+// localCopiesCondition reports when svc requests multiple copies of a local
+// data claim, or returns nil otherwise. Switching the cluster to Longhorn
+// leaves existing claims on local storage with one copy until
+// 'kip service storage longhorn' moves them and enables conversion.
+func localCopiesCondition(svc *kipperv1.Service, pvc *corev1.PersistentVolumeClaim) *metav1.Condition {
+	if svc.Spec.Copies == nil || *svc.Spec.Copies <= 1 || pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != platform.LocalPathClass {
+		return nil
+	}
+	return &metav1.Condition{
+		Type: kipperv1.ConditionStorageCopies, Status: metav1.ConditionFalse, Reason: kipperv1.StorageCopiesLocalStorage,
+		Message: fmt.Sprintf("The data is on local storage, which keeps one copy. Move it to Longhorn with 'kip service storage longhorn %s'. Kipper then converts it to %d copies.", svc.Name, *svc.Spec.Copies),
+	}
 }
 
 // ownsDataClaim reports whether pvc is svc's data claim: the StatefulSet named

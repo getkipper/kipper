@@ -49,6 +49,7 @@ func reportStorageCopies(ctx context.Context, out io.Writer, dyn dynamic.Interfa
 		for _, obj := range list.Items {
 			e := copiesEntry{namespace: obj.GetNamespace(), name: obj.GetName(), kind: kind.name, copies: service.CopiesOf(obj.Object)}
 			switch {
+			case e.copies.Reason == "Moving":
 			case e.copies.Reason == "NotSet":
 				unset = append(unset, e)
 			case e.copies.Converting():

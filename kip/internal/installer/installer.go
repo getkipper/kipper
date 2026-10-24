@@ -55,6 +55,7 @@ type Options struct {
 	ChangeNetwork        bool
 	ConfirmNetworkChange func(question string) bool
 	CredentialsFile      string
+	SkipMemoryFloor      bool
 }
 
 // Result contains installation outputs, including those available after a failure.
@@ -388,6 +389,14 @@ func Run(opts Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	floorWarning, err := installMemoryFloor(storageMode, existingCluster, sysInfo.RAMMB, opts.SkipMemoryFloor)
+	if err != nil {
+		return nil, err
+	}
+	memoryFloorOverridden := floorWarning != ""
+	if memoryFloorOverridden {
+		preflight.Warnings = append(preflight.Warnings, sentence(floorWarning))
+	}
 	fmt.Printf("  ✔  OS: %s %s\n", sysInfo.OS, sysInfo.OSVersion)
 	fmt.Printf("  ✔  RAM: %dMB available\n", sysInfo.RAMMB)
 	fmt.Printf("  ✔  CPUs: %d\n", sysInfo.CPUs)
@@ -683,6 +692,11 @@ func Run(opts Options) (*Result, error) {
 			if err := InstallPlatformConfig(client, platformProfile, storageMode, backupMode); err != nil {
 				return err
 			}
+			if memoryFloorOverridden {
+				if err := RecordMemoryFloorOverride(client, sysInfo.RAMMB); err != nil {
+					return err
+				}
+			}
 			state, err := ReadPlatformStateViaSSH(client)
 			if err != nil {
 				return err
@@ -779,7 +793,7 @@ func Run(opts Options) (*Result, error) {
 				fmt.Printf("       (disabled in PlatformConfig; skipping)\n")
 				return nil
 			}
-			return InstallLokiWithResources(client, effectivePlatform.EffectiveResources())
+			return InstallLokiWithResources(client, effectivePlatform.EffectiveResources(), storageMode)
 		}},
 		{"Issuing the node metrics certificate", func() error {
 			return InstallNodeExporterTLS(client)

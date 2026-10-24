@@ -207,7 +207,7 @@ func TestPruningStopsWhenTheProjectWasReplacedUnderItsName(t *testing.T) {
 		WithObjects(live, successor).WithStatusSubresource(successor).Build()
 
 	r := &ProjectReconciler{Client: cached, APIReader: apiServer, Scheme: scheme}
-	_, err := r.deleteProjectNamespaces(context.Background(), gone, false)
+	_, _, err := r.deleteProjectNamespaces(context.Background(), gone, false)
 	require.ErrorIs(t, err, errProjectReplaced,
 		"a pass that has proven its project replaced carried on to the revoke sweep and the status write, both of which act on the dead project's spec")
 

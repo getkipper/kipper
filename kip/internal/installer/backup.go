@@ -87,7 +87,8 @@ type Uploader interface {
 
 // InstallBackup configures Velero to use cfg's external S3-compatible bucket.
 // A nil cfg deploys in-cluster MinIO, whose backups depend on cluster storage.
-// MinIO uses local-path when storageMode is local and longhorn-single otherwise.
+// A new MinIO volume uses local-path when storageMode is local and
+// longhorn-single otherwise. An existing one keeps its class.
 // A non-nil repositoryKey supplies a missing key and must match any existing
 // key after trimming whitespace. With nil, an existing key is kept and a new
 // key is generated only after confirming the bucket has no backups.
@@ -174,7 +175,8 @@ func minioStorageRequest(out string) (string, error) {
 	return size, nil
 }
 
-// installInClusterMinIO deploys MinIO and creates the Velero bucket.
+// installInClusterMinIO deploys MinIO and creates the Velero bucket. class is
+// used for a new volume. An existing volume keeps its class.
 // Backups use cluster storage. Use external S3 storage to survive cluster loss.
 func installInClusterMinIO(client CommandRunner, password, class string) error {
 	// Preserve existing capacity because Kubernetes rejects PVC shrink requests.
@@ -183,6 +185,10 @@ func installInClusterMinIO(client CommandRunner, password, class string) error {
 		return fmt.Errorf("reading the backup volume size: %w", err)
 	}
 	storage, err := minioStorageRequest(existing)
+	if err != nil {
+		return err
+	}
+	class, err = liveClaimClass(client, "velero", "minio-storage", class)
 	if err != nil {
 		return err
 	}

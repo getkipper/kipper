@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -80,6 +81,27 @@ func (s storageConverter) now() time.Time {
 	return time.Now()
 }
 
+// waitForMove returns errStorageMoveHolds when pvc and its StatefulSet both
+// carry a storage move marker. The move marks the StatefulSet before creating
+// the claim, so reading the StatefulSet after the claim detects an active move.
+// Claims without a move marker need no StatefulSet read.
+func (s storageConverter) waitForMove(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
+	if s.StatefulSet == "" || pvc.Annotations[platform.StorageMoveAnnotation] == "" {
+		return nil
+	}
+	var sts appsv1.StatefulSet
+	err := s.Reader.Get(ctx, types.NamespacedName{Namespace: pvc.Namespace, Name: s.StatefulSet}, &sts)
+	switch {
+	case errors.IsNotFound(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("reading the StatefulSet %s: %w", s.StatefulSet, err)
+	case sts.Annotations[platform.StorageMoveAnnotation] != "":
+		return errStorageMoveHolds
+	}
+	return nil
+}
+
 // convert takes one step towards wanted copies on pvc's Longhorn volume.
 // The caller must establish that its object owns pvc. Unbound claims, dump
 // claims, local storage and platform namespaces are skipped. Otherwise,
@@ -110,6 +132,9 @@ func (s storageConverter) convert(ctx context.Context, pvc *corev1.PersistentVol
 			return nil, nil
 		}
 		return nil, fmt.Errorf("reading claim %s: %w", pvc.Name, err)
+	}
+	if err := s.waitForMove(ctx, pvc); err != nil {
+		return nil, err
 	}
 	v, c, err := s.read(ctx, pvc)
 	if err != nil {

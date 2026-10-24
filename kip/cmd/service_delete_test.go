@@ -22,6 +22,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/getkipper/kipper/controller/pkg/datavolume"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/kip/internal/deployer"
 	"github.com/getkipper/kipper/kip/internal/manifest"
@@ -459,4 +460,28 @@ func TestServiceDelete_DoesNotPromiseNothingWentOnAConflict(t *testing.T) {
 	assert.NotContains(t, err.Error(), "nothing was deleted",
 		"a delete that may well have happened elsewhere was reported as nothing having happened")
 	assert.Contains(t, err.Error(), "did not delete it")
+}
+
+// A move keeps the claims fenced and holds the old volume on Retain. Deleting
+// the service halfway leaves that fence and record with nothing that can
+// finish or undo them, so the delete waits for the move.
+func TestServiceDelete_RefusesAServiceWhoseVolumeIsMoving(t *testing.T) {
+	for _, deleteData := range []bool{false, true} {
+		t.Run(fmt.Sprintf("delete-data=%v", deleteData), func(t *testing.T) {
+			mgr, dyn := deleteFixture(t)
+			marked := serviceToDelete()
+			marked.SetAnnotations(map[string]string{platform.StorageMoveAnnotation: "kipper-storage-move-the-service-being-deleted"})
+			_, err := dyn.Resource(manifest.ServiceGVR).Namespace("shop-prod").Update(context.Background(), marked, metav1.UpdateOptions{})
+			require.NoError(t, err)
+
+			var out bytes.Buffer
+			err = deleteService(context.Background(), &out, mgr, dyn, "shop-prod", "db", deleteData)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "'kip service storage longhorn db'")
+			assert.Contains(t, err.Error(), "--rollback")
+			_, getErr := dyn.Resource(manifest.ServiceGVR).Namespace("shop-prod").Get(context.Background(), "db", metav1.GetOptions{})
+			assert.NoError(t, getErr, "the service is kept")
+			assert.True(t, claimIsThere(t, mgr), "the volume is kept")
+		})
+	}
 }

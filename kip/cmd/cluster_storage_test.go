@@ -29,8 +29,9 @@ func storageDyn(objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		platformConfigGVR: "PlatformConfigList",
 		nodeGVR:           "NodeList",
-		admissionPolicyGVRs["ValidatingAdmissionPolicy"]:        "ValidatingAdmissionPolicyList",
-		admissionPolicyGVRs["ValidatingAdmissionPolicyBinding"]: "ValidatingAdmissionPolicyBindingList",
+		{Group: "longhorn.io", Version: "v1beta2", Resource: "nodes"}: "NodeList",
+		admissionPolicyGVRs["ValidatingAdmissionPolicy"]:              "ValidatingAdmissionPolicyList",
+		admissionPolicyGVRs["ValidatingAdmissionPolicyBinding"]:       "ValidatingAdmissionPolicyBindingList",
 	}, objects...)
 }
 
@@ -49,7 +50,10 @@ func offeredInPolicy(t *testing.T, dyn *dynamicfake.FakeDynamicClient) string {
 }
 
 func TestSettingTheCopiesOfferRecordsItAndRendersThePolicy(t *testing.T) {
-	dyn := storageDyn(storagePlatformConfig(platform.StorageLonghorn))
+	objects := []runtime.Object{storagePlatformConfig(platform.StorageLonghorn)}
+	objects = append(objects, replicaNode("server-1")...)
+	objects = append(objects, replicaNode("worker-1")...)
+	dyn := storageDyn(objects...)
 	var out bytes.Buffer
 	require.NoError(t, setCopiesOffer(context.Background(), &out, dyn, 2))
 
@@ -59,6 +63,7 @@ func TestSettingTheCopiesOfferRecordsItAndRendersThePolicy(t *testing.T) {
 	assert.EqualValues(t, 2, maxCopies)
 	assert.Equal(t, "2", offeredInPolicy(t, dyn))
 	assert.Contains(t, out.String(), "offers two copies")
+	assert.NotContains(t, out.String(), "New volumes with two copies need", "two nodes can hold copies")
 
 	require.NoError(t, setCopiesOffer(context.Background(), &out, dyn, 1))
 	assert.Equal(t, "1", offeredInPolicy(t, dyn))
@@ -82,6 +87,34 @@ func TestPolicyRenderingListsOnlyTheServerNodes(t *testing.T) {
 	variables, _, _ := unstructured.NestedSlice(policy.Object, "spec", "variables")
 	require.NotEmpty(t, variables)
 	assert.Equal(t, "['server-1']", variables[0].(map[string]interface{})["expression"])
+}
+
+func TestTheCopiesOfferOnOneNodeSaysNewVolumesNeedASecondNode(t *testing.T) {
+	dyn := storageDyn(append([]runtime.Object{storagePlatformConfig(platform.StorageLonghorn)}, replicaNode("server-1")...)...)
+	var out bytes.Buffer
+	require.NoError(t, setCopiesOffer(context.Background(), &out, dyn, 2))
+	assert.Contains(t, out.String(), "offers two copies")
+	assert.Contains(t, out.String(), "New volumes with two copies need two ready nodes that can hold copies, and the cluster has 1. An admin adds a worker with 'kip node add', or lets an existing worker hold copies with 'kip node storage <node> --copies'.")
+}
+
+// replicaNode returns matching Kubernetes and Longhorn nodes eligible to hold copies.
+func replicaNode(name string) []runtime.Object {
+	ready := []interface{}{map[string]interface{}{"type": "Ready", "status": "True"}}
+	return []runtime.Object{
+		&unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "v1", "kind": "Node", "metadata": map[string]interface{}{"name": name},
+			"status": map[string]interface{}{"conditions": ready},
+		}},
+		&unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "longhorn.io/v1beta2", "kind": "Node",
+			"metadata": map[string]interface{}{"name": name, "namespace": "longhorn-system"},
+			"spec":     map[string]interface{}{"allowScheduling": true, "tags": []interface{}{platform.ReplicaStorageTag}},
+			"status": map[string]interface{}{"conditions": []interface{}{
+				map[string]interface{}{"type": "Ready", "status": "True"},
+				map[string]interface{}{"type": "Schedulable", "status": "True"},
+			}},
+		}},
+	}
 }
 
 func TestTheCopiesOfferIsRefusedOnLocalStorage(t *testing.T) {

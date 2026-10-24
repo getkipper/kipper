@@ -47,7 +47,7 @@ func (m *Manager) Placement(ctx context.Context, namespace, name string) (Placem
 	switch {
 	case err == nil:
 		p.PodNode = pod.Spec.NodeName
-		p.Unscheduled = unschedulableReason(pod)
+		p.Unscheduled = UnschedulableReason(pod)
 	case !errors.IsNotFound(err):
 		return p, fmt.Errorf("reading the pod of %s: %w", name, err)
 	}

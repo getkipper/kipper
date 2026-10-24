@@ -158,11 +158,11 @@ func (r *PlatformConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			patchErrs = append(patchErrs, fmt.Errorf("traefik servicemonitor: %w", err))
 		}
 	}
-	if lokiStorage, err := r.lokiStorageSize(ctx); err != nil {
-		patchErrs = append(patchErrs, fmt.Errorf("loki volume size: %w", err))
+	if lokiStorage, lokiClass, err := r.lokiStorage(ctx, pc.Spec.Storage); err != nil {
+		patchErrs = append(patchErrs, fmt.Errorf("loki volume: %w", err))
 	} else if err := r.reconcileComponentEnabled(ctx, "loki",
 		lokiEnabled,
-		platform.LokiHelmChart(res, lokiStorage),
+		platform.LokiHelmChart(res, lokiStorage, lokiClass),
 		pathsByChart["loki"]); err != nil {
 		patchErrs = append(patchErrs, fmt.Errorf("loki enable/disable: %w", err))
 	}
@@ -294,29 +294,37 @@ func (r *PlatformConfigReconciler) recordLegacyStorage(ctx context.Context, pc *
 	return nil
 }
 
-// lokiStorageSize preserves the existing template or claim size when recreating
-// Loki. Missing objects use the fallback in platform.LokiStorageSize.
-func (r *PlatformConfigReconciler) lokiStorageSize(ctx context.Context) (string, error) {
-	var templateSize, claimSize string
+// lokiStorage preserves the existing template or claim size and storage class
+// when recreating Loki. Missing objects use the fallbacks in
+// platform.LokiStorageSize and platform.LokiStorageClass.
+func (r *PlatformConfigReconciler) lokiStorage(ctx context.Context, storageMode string) (string, *string, error) {
+	var templateSize, claimSize, claimClass string
+	var templateClass *string
 	sts := &appsv1.StatefulSet{}
 	err := r.Get(ctx, types.NamespacedName{Name: "loki", Namespace: platform.MonitoringNamespace}, sts)
+	templateFound := err == nil
 	switch {
-	case err == nil:
+	case templateFound:
 		if len(sts.Spec.VolumeClaimTemplates) > 0 {
 			templateSize = storageRequest(sts.Spec.VolumeClaimTemplates[0].Spec.Resources.Requests)
+			templateClass = sts.Spec.VolumeClaimTemplates[0].Spec.StorageClassName
 		}
 	case !errors.IsNotFound(err):
-		return "", fmt.Errorf("reading the loki statefulset: %w", err)
+		return "", nil, fmt.Errorf("reading the loki statefulset: %w", err)
 	}
 	claim := &corev1.PersistentVolumeClaim{}
 	err = r.Get(ctx, types.NamespacedName{Name: "storage-loki-0", Namespace: platform.MonitoringNamespace}, claim)
 	switch {
 	case err == nil:
 		claimSize = storageRequest(claim.Spec.Resources.Requests)
+		if claim.Spec.StorageClassName != nil {
+			claimClass = *claim.Spec.StorageClassName
+		}
 	case !errors.IsNotFound(err):
-		return "", fmt.Errorf("reading the loki claim: %w", err)
+		return "", nil, fmt.Errorf("reading the loki claim: %w", err)
 	}
-	return platform.LokiStorageSize(templateSize, claimSize), nil
+	return platform.LokiStorageSize(templateSize, claimSize),
+		platform.LokiStorageClass(templateFound, templateClass, claimClass, storageMode), nil
 }
 
 // storageRequest returns the storage request, or "" when it is absent or zero.
