@@ -1000,7 +1000,7 @@ func PrepareWorkerFrom(workerClient CommandRunner, m JoinMaterial, networkDropIn
 		return WorkerJoin{}, err
 	}
 	// The agent needs the server's registry mirror, credentials and CA at startup.
-	if err := writeZotNodeFiles(workerClient, m.RegistryCA, m.ZotIP, m.PullPassword); err != nil {
+	if _, err := writeZotNodeFiles(workerClient, m.RegistryCA, m.ZotIP, m.PullPassword); err != nil {
 		return WorkerJoin{}, err
 	}
 	if _, err := workerClient.RunStdin(writeDropInScript(k3sNetworkConfigPath), strings.NewReader(networkDropIn)); err != nil {
