@@ -448,6 +448,10 @@ func siteRedirect(baseDomain string) func(http.Handler) http.Handler {
 	}
 }
 
+// heartbeatWindow allows two daily heartbeat intervals before monitoring treats
+// a registration as inactive.
+const heartbeatWindow = 48 * time.Hour
+
 // maxRequestBody caps the API request bodies. The largest legitimate payload
 // is a subdomain, an IP, a token, and a fingerprint — well under 4KB.
 const maxRequestBody = 4 << 10
@@ -478,7 +482,8 @@ func bearerToken(header string) (string, bool) {
 
 // handleStatus reports the posture the cutover audit and monitoring need: how
 // many registrations proxy without an enforced pin, how many are not routable,
-// how long the oldest of each has been that way, and whether enforcement is on.
+// the age of the oldest registration in each group, proof freshness, and whether
+// enforcement is on.
 // A poller can tell a normal seconds-long convergence from a cluster stuck in
 // grace for days.
 //
@@ -499,6 +504,10 @@ func handleStatus(reg *registry.Registry, token string) http.HandlerFunc {
 
 		unpinned, oldest := reg.UnpinnedSummary()
 		unproven, unprovenOldest := reg.UnprovenSummary()
+		var lastProofAge any
+		if age, ok := reg.NewestProofAge(); ok {
+			lastProofAge = int64(age.Seconds())
+		}
 		respondJSON(w, http.StatusOK, map[string]any{
 			"status":                  "ok",
 			"registrations":           reg.Count(),
@@ -509,7 +518,12 @@ func handleStatus(reg *registry.Registry, token string) http.HandlerFunc {
 			// proven or lease-expired), and the oldest one's age.
 			"unproven":                unproven,
 			"unproven_oldest_seconds": int64(unprovenOldest.Seconds()),
-			"proof_before_route":      reg.EnforceProof,
+			// Excluding registrations silent for heartbeatWindow avoids alerts for
+			// deleted clusters. Unproven still counts their invalid proofs until
+			// the registrations expire.
+			"proof_overdue":          reg.ProofOverdue(heartbeatWindow),
+			"last_proof_age_seconds": lastProofAge,
+			"proof_before_route":     reg.EnforceProof,
 		})
 	}
 }

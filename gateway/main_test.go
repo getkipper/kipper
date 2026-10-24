@@ -83,10 +83,20 @@ func TestStatusEndpointNeedsItsToken(t *testing.T) {
 		t.Fatalf("with the token: got %d, want 200", code)
 	}
 	for _, field := range []string{"registrations", "unpinned", "unpinned_oldest_seconds",
-		"unproven", "unproven_oldest_seconds", "proof_before_route"} {
+		"unproven", "unproven_oldest_seconds", "proof_overdue", "last_proof_age_seconds",
+		"proof_before_route"} {
 		if _, ok := resp[field]; !ok {
 			t.Errorf("status response missing %q, which monitoring reads: %v", field, resp)
 		}
+	}
+	// A fresh registration needs proof, so monitoring counts it as overdue
+	// even with proof enforcement disabled.
+	if resp["proof_overdue"] != float64(1) {
+		t.Errorf("proof_overdue: got %v, want 1", resp["proof_overdue"])
+	}
+	// No registration has proven, so there is no age to report.
+	if resp["last_proof_age_seconds"] != nil {
+		t.Errorf("last_proof_age_seconds: got %v, want null with no proofs", resp["last_proof_age_seconds"])
 	}
 }
 
@@ -943,5 +953,32 @@ func TestApexRootAndWWWRedirectToTheProjectSite(t *testing.T) {
 			t.Errorf("%s %s%s: Content-Type %q, want handler answer %v",
 				tc.method, tc.host, tc.path, w.Header().Get("Content-Type"), tc.handler)
 		}
+	}
+}
+
+func TestStatusReportsTheNewestProofAge(t *testing.T) {
+	reg := registry.New()
+	entry, _, err := reg.Register("myapp", "203.0.113.1", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	nonce, _, _ := reg.IssueChallenge("myapp", entry.Token)
+	if !reg.RecordProof("myapp", entry.Token, nonce, "spki", "kipper-hop-proof-v1") {
+		t.Fatal("record proof")
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/status", nil)
+	r.Header.Set("Authorization", "Bearer s3cret")
+	w := httptest.NewRecorder()
+	handleStatus(reg, "s3cret").ServeHTTP(w, r)
+
+	var resp map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	age, ok := resp["last_proof_age_seconds"].(float64)
+	if !ok || age < 0 || age > 5 {
+		t.Errorf("last_proof_age_seconds: got %v, want a few seconds for a proof just made", resp["last_proof_age_seconds"])
+	}
+	if resp["proof_overdue"] != float64(0) {
+		t.Errorf("proof_overdue: got %v, want 0 for a cluster that just proved", resp["proof_overdue"])
 	}
 }

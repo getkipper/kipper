@@ -31,9 +31,19 @@ curl -sf -H "Authorization: Bearer $KIPPER_STATUS_TOKEN" https://gateway.example
   "unpinned_oldest_seconds": 0,
   "unproven": 1,
   "unproven_oldest_seconds": 240,
+  "proof_overdue": 1,
+  "last_proof_age_seconds": 3600,
   "proof_before_route": true
 }
 ```
+
+`unproven` counts unexpired registrations that fail the proof requirements for routing, including
+clusters deleted without releasing their names. A deleted cluster stops renewing, and its proof lease
+expires seven days after its last proof. It then counts as `unproven` until its 30-day inactivity window
+ends. With proof enforcement enabled, a registration that has never proved is released two hours after
+creation instead. `proof_overdue` counts registrations that were created or renewed in the last 48 hours
+and either fail the proof requirements or have no proof from that period. `last_proof_age_seconds` is the
+age in seconds of the newest proof among unexpired registrations, or `null` when none has a recorded proof.
 
 ## What to alert on
 
@@ -46,13 +56,28 @@ registered still routes traffic there. That is the transition mode, and it shoul
 state. Alert on the value being false at all, not on it changing, or a restart that loses the setting
 goes unnoticed.
 
-**`unproven` above zero for more than 15 minutes — investigate.**
-A cluster acquires its proof on its first heartbeat, so a few minutes is normal after a fresh
-registration or a cluster restart. Longer means the cluster is not completing the proof exchange: it
-cannot reach the gateway, its hop certificate changed without a re-assertion, or its heartbeat is failing
-for its own reasons. Under enforcement the affected cluster is not routing, so this is a live outage for
-whoever it serves. `unproven_oldest_seconds` tells you whether it is one stuck registration or a
-churning set.
+**`proof_overdue` above zero for more than 15 minutes. Investigate.**
+A cluster normally acquires its proof on its first heartbeat, so a few minutes is normal after a fresh
+registration or a cluster restart. A longer delay means the cluster is failing to complete the proof
+exchange. It may be unable to reach the gateway, its hop certificate may have changed without a new pin
+assertion, or its heartbeat may be failing for another reason. With proof enforcement enabled, a cluster
+that fails the proof requirements has a live outage for whoever it serves. A cluster whose proofs
+stopped also counts while its seven-day lease is still valid, giving days of warning before routing
+stops. Alerting on `unproven` instead would keep firing for deleted clusters after their leases expire.
+
+A single cluster whose requests stop reaching the gateway drops out of this count 48 hours after its
+last renewal, because the gateway cannot distinguish it from a deleted cluster. Its console-api log
+records each failed attempt in a `gateway heartbeat:` line. When every cluster is affected,
+`last_proof_age_seconds` below detects the lack of new proofs while a recorded proof remains available.
+
+**`last_proof_age_seconds` above 30 hours. Investigate.**
+Healthy clusters prove on their daily heartbeat, so the newest proof should be no more than about a day
+old. An older proof means the gateway has stopped recording proofs across the fleet. This points to the
+gateway or the path to it rather than an individual cluster, for example a gateway update that broke
+registration or proof, or Caddy no longer forwarding API requests. Every lease expires within seven days
+of the fleet's last proof. With proof enforcement enabled, each cluster stops routing when its own lease
+expires. When the last live cluster is deleted without releasing its name, the age keeps increasing
+until that registration's 30-day inactivity window ends, so silence the alert for an unused gateway.
 
 **`unpinned` above zero for more than 15 minutes — investigate.**
 The hop to that cluster proxies without an enforced certificate pin. It is the designed fail-open state
@@ -224,3 +249,7 @@ Then confirm it is up:
 curl -sf https://gateway.example.com/health
 curl -sf -H "Authorization: Bearer $KIPPER_STATUS_TOKEN" https://gateway.example.com/status
 ```
+
+Clusters keep their daily heartbeat schedule across a gateway update, so the first proof against the
+updated gateway can take up to a day. A `proof recorded for <sub>` entry in the gateway log confirms that
+it recorded a proof, which resets `last_proof_age_seconds`.
