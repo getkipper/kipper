@@ -363,9 +363,12 @@ func addPausedReplicas(master CommandRunner, view *FenceView) error {
 	return nil
 }
 
-// claimOwner matches claim to a StatefulSet in ns using the claim template's
-// <template>-<set>-<ordinal> naming convention. It returns false for no match.
-func claimOwner(sets []appsv1.StatefulSet, ns, claim string) (string, bool) {
+// ClaimOwner returns the name of the first StatefulSet in ns whose claim
+// template matches claim using the <template>-<set>-<ordinal> naming convention.
+// The ordinal must contain one or more decimal digits and may exceed the set's
+// current replica count, so claims of stopped services still match. Matching
+// uses names only, without checking ownership metadata. No match returns "", false.
+func ClaimOwner(sets []appsv1.StatefulSet, ns, claim string) (string, bool) {
 	for _, set := range sets {
 		if set.Namespace != ns {
 			continue
@@ -419,7 +422,7 @@ func buildFenceView(node string, found []stranded.Service, pods []corev1.Pod, se
 			// A migration mover mounts its service's claim while the service
 			// is paused, and the migration starts the service again when the
 			// mover ends.
-			if set, ok := claimOwner(sets, s.Namespace, s.Claim); ok {
+			if set, ok := ClaimOwner(sets, s.Namespace, s.Claim); ok {
 				svc := get(s.Namespace, set)
 				svc.Volumes = appendUnique(svc.Volumes, s.Volume)
 			}

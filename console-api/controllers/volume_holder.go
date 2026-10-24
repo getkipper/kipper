@@ -3,7 +3,9 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -12,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8slabels "k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -50,12 +53,16 @@ const (
 	holderRetryInterval = time.Minute
 
 	// holderStartGrace limits how long a holder may start or terminate before
-	// the Volume reports a problem. A restore has its own deadline.
+	// the owning resource reports a problem. A restore has its own deadline.
 	holderStartGrace = 10 * time.Minute
 
 	// holderRestoreDeadline is the maximum pod age before a holder with an
 	// unfinished restore is replaced.
 	holderRestoreDeadline = 24 * time.Hour
+
+	// holderStoppedForCopyChange is the BackupHolderReady reason while a copy
+	// change keeps the holder stopped.
+	holderStoppedForCopyChange = "StoppedForCopyChange"
 )
 
 // volumeHolderCommand sleeps until the pod is stopped and exits at once on
@@ -74,9 +81,31 @@ func volumeHolderLabels(volume string) map[string]string {
 	}
 }
 
+// holderTarget names a holder pod, the shared claim it keeps mounted and the
+// Kipper object that controls the pod. claimOwned checks that the claim is
+// the one Kipper created for owner and returns a reason when it is not.
+type holderTarget struct {
+	owner      client.Object
+	kind       string
+	namespace  string
+	pod        string
+	claim      string
+	labels     map[string]string
+	claimOwned func(*corev1.PersistentVolumeClaim) (bool, string)
+}
+
+func volumeHolderTarget(vol *kipperv1.Volume) holderTarget {
+	return holderTarget{
+		owner: vol, kind: "Volume", namespace: vol.Namespace,
+		pod: volumeHolderName(vol.Name), claim: sharedClaimName(vol.Name), labels: volumeHolderLabels(vol.Name),
+		claimOwned: func(pvc *corev1.PersistentVolumeClaim) (bool, string) { return claimProvenance(pvc, vol) },
+	}
+}
+
 // PodCacheNamespaces scopes the controller manager's Pod cache to every pod in
-// the monitoring namespace, which the OOM watcher reads, and to volume holders
-// in every other namespace. Controllers must use an API reader for other pods.
+// the monitoring namespace, which the OOM watcher reads, and to shared-volume
+// and project shared-storage holders in every other namespace. Controllers
+// must use an API reader for other pods.
 func PodCacheNamespaces() map[string]cache.Config {
 	holders := k8slabels.SelectorFromSet(k8slabels.Set{
 		kipperLabel:         kipperValue,
@@ -89,16 +118,21 @@ func PodCacheNamespaces() map[string]cache.Config {
 }
 
 // buildVolumeHolder returns the holder pod for vol, without an owner reference.
+func buildVolumeHolder(vol *kipperv1.Volume) *corev1.Pod {
+	return buildHolder(volumeHolderTarget(vol))
+}
+
+// buildHolder returns the holder pod for t, without an owner reference.
 //
 // The holder container mounts the claim read-only. The volume source stays
 // writable so Velero's restore container can write to the same volume. Omitting
 // fsGroup avoids recursive changes to file ownership on the volume.
-func buildVolumeHolder(vol *kipperv1.Volume) *corev1.Pod {
+func buildHolder(t holderTarget) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      volumeHolderName(vol.Name),
-			Namespace: vol.Namespace,
-			Labels:    volumeHolderLabels(vol.Name),
+			Name:      t.pod,
+			Namespace: t.namespace,
+			Labels:    maps.Clone(t.labels),
 		},
 		Spec: corev1.PodSpec{
 			AutomountServiceAccountToken:  ptr.To(false),
@@ -134,7 +168,7 @@ func buildVolumeHolder(vol *kipperv1.Volume) *corev1.Pod {
 			Volumes: []corev1.Volume{{
 				Name: volumeHolderMountName,
 				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: sharedClaimName(vol.Name)},
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: t.claim},
 				},
 			}},
 		},
@@ -180,70 +214,115 @@ func claimUnsupported(pvc *corev1.PersistentVolumeClaim) string {
 }
 
 // holderProvenance checks ownership of pod and returns a reason on failure.
-// An ownerless pod requires Kipper's holder labels for vol and a reference to
-// vol's claim. The pod's name alone is insufficient evidence of ownership.
-func holderProvenance(pod *corev1.Pod, vol *kipperv1.Volume) (bool, string) {
+// An ownerless pod requires every holder label of t and a reference to t's
+// claim. The pod's name alone is insufficient evidence of ownership.
+func holderProvenance(pod *corev1.Pod, t holderTarget) (bool, string) {
 	if ref := metav1.GetControllerOf(pod); ref != nil {
-		return controllerRefNames(ref, vol, "Volume")
+		return controllerRefNames(ref, t.owner, t.kind)
 	}
-	l := pod.Labels
-	if l[kipperLabel] != kipperValue || l[labels.ResourceType] != labels.ResourceTypeVolumeHolder || l[labels.VolumeName] != vol.Name {
-		return false, "was not created by Kipper as this volume's holder"
+	for k, v := range t.labels {
+		if pod.Labels[k] != v {
+			return false, fmt.Sprintf("was not created by Kipper as this %s's holder", strings.ToLower(t.kind))
+		}
 	}
-	claim := sharedClaimName(vol.Name)
 	for _, v := range pod.Spec.Volumes {
-		if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == claim {
+		if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == t.claim {
 			return true, ""
 		}
 	}
-	return false, fmt.Sprintf("does not mount the claim %s", claim)
+	return false, fmt.Sprintf("does not mount the claim %s", t.claim)
+}
+
+// holderReport is where one holder pass records the BackupHolderReady
+// condition. event, when set, receives the reason and message of a changed
+// condition that needs attention. save, when set, persists the condition
+// before a holder is deleted for replacement.
+type holderReport struct {
+	conditions *[]metav1.Condition
+	generation int64
+	event      func(reason, message string)
+	save       func(context.Context) error
+}
+
+// holderOps maintains holder pods with the controller's client and scheme.
+// reader reads pods outside the controller's pod cache.
+type holderOps struct {
+	client client.Client
+	reader client.Reader
+	scheme *runtime.Scheme
+}
+
+func (r *VolumeReconciler) holders() holderOps {
+	return holderOps{client: r.Client, reader: r.apiReader(), scheme: r.Scheme}
 }
 
 // reconcileHolder maintains vol's holder and sets its BackupHolderReady
 // condition for the caller to persist. It returns a retry delay, or zero to
 // wait for a watched event, and any API error that prevents reconciliation.
+func (r *VolumeReconciler) reconcileHolder(ctx context.Context, vol *kipperv1.Volume, pvc *corev1.PersistentVolumeClaim) (time.Duration, error) {
+	st := holderReport{
+		conditions: &vol.Status.Conditions,
+		generation: vol.Generation,
+		save: func(ctx context.Context) error {
+			if err := r.Status().Update(ctx, vol); err != nil {
+				return fmt.Errorf("saving volume status: %w", err)
+			}
+			return nil
+		},
+	}
+	if r.Recorder != nil {
+		st.event = func(reason, message string) {
+			r.Recorder.Event(vol, corev1.EventTypeWarning, "BackupHolder"+reason, message)
+		}
+	}
+	return r.holders().reconcile(ctx, volumeHolderTarget(vol), pvc, st)
+}
+
+// reconcile maintains t's holder for pvc and records its state in st. It
+// returns a retry delay, or zero to wait for a watched event, and any API
+// error that prevents reconciliation.
 //
 // Pending holders are preserved until the restore deadline so Velero's init
 // container can finish restoring their data. Replacing one interrupts the
 // restore. Velero restores pods before custom resources, so a restored holder
-// can precede its Volume. An ownerless holder is adopted once its labels and
+// can precede its owner. An ownerless holder is adopted once its labels and
 // claim establish ownership.
-func (r *VolumeReconciler) reconcileHolder(ctx context.Context, vol *kipperv1.Volume, pvc *corev1.PersistentVolumeClaim) (time.Duration, error) {
-	if ok, why := claimProvenance(pvc, vol); !ok {
-		r.setHolderCondition(vol, "ForeignClaim", fmt.Sprintf(
+func (h holderOps) reconcile(ctx context.Context, t holderTarget, pvc *corev1.PersistentVolumeClaim, st holderReport) (time.Duration, error) {
+	if ok, why := t.claimOwned(pvc); !ok {
+		st.setFalse("ForeignClaim", fmt.Sprintf(
 			"The claim %s %s, so no backup holder runs for it and its files are backed up only while an app mounts it.", pvc.Name, why))
 		return 0, nil
 	}
 	if why := claimUnsupported(pvc); why != "" {
-		r.setHolderCondition(vol, "UnsupportedClaim", fmt.Sprintf(
+		st.setFalse("UnsupportedClaim", fmt.Sprintf(
 			"The claim %s %s, so no backup holder runs for it and its files are only backed up while an app mounts it.", pvc.Name, why))
 		return 0, nil
 	}
 
-	key := types.NamespacedName{Namespace: vol.Namespace, Name: volumeHolderName(vol.Name)}
+	key := types.NamespacedName{Namespace: t.namespace, Name: t.pod}
 	var pod corev1.Pod
-	err := r.Get(ctx, key, &pod)
+	err := h.client.Get(ctx, key, &pod)
 	if pvc.Annotations[platform.CopyChangeStopAnnotation] != "" {
-		return 0, r.stopHolderForCopyChange(ctx, vol, &pod, err)
+		return 0, h.stopForCopyChange(ctx, t, &pod, err, st)
 	}
 	if errors.IsNotFound(err) {
-		desired := buildVolumeHolder(vol)
-		if err := controllerutil.SetControllerReference(vol, desired, r.Scheme); err != nil {
+		desired := buildHolder(t)
+		if err := controllerutil.SetControllerReference(t.owner, desired, h.scheme); err != nil {
 			return 0, err
 		}
-		err = r.Create(ctx, desired)
+		err = h.client.Create(ctx, desired)
 		switch {
 		case err == nil:
-			r.setHolderCondition(vol, "Starting", "The backup holder was created and is starting.")
+			st.setFalse("Starting", "The backup holder was created and is starting.")
 			return 0, nil
 		case errors.IsAlreadyExists(err):
 			// Outside monitoring, the cache holds only labelled holders.
 			// Read directly to check for a name collision with an uncached pod.
-			if err := r.apiReader().Get(ctx, key, &pod); err != nil {
+			if err := h.reader.Get(ctx, key, &pod); err != nil {
 				return 0, err
 			}
 		case errors.IsForbidden(err) || errors.IsInvalid(err):
-			r.setHolderCondition(vol, "CreateRejected", fmt.Sprintf(
+			st.setFalse("CreateRejected", fmt.Sprintf(
 				"The cluster refused the backup holder, so the volume's files are backed up only while an app mounts it: %v", err))
 			return holderRetryInterval, nil
 		default:
@@ -253,23 +332,23 @@ func (r *VolumeReconciler) reconcileHolder(ctx context.Context, vol *kipperv1.Vo
 		return 0, err
 	}
 
-	if ok, why := holderProvenance(&pod, vol); !ok {
-		r.setHolderCondition(vol, "NameTaken", fmt.Sprintf(
+	if ok, why := holderProvenance(&pod, t); !ok {
+		st.setFalse("NameTaken", fmt.Sprintf(
 			"The pod %s %s. Remove or rename that pod so the volume's backup holder can run.", pod.Name, why))
 		return holderRetryInterval, nil
 	}
 	if metav1.GetControllerOf(&pod) == nil {
-		if err := controllerutil.SetControllerReference(vol, &pod, r.Scheme); err != nil {
+		if err := controllerutil.SetControllerReference(t.owner, &pod, h.scheme); err != nil {
 			return 0, err
 		}
-		if err := r.Update(ctx, &pod); err != nil {
+		if err := h.client.Update(ctx, &pod); err != nil {
 			return 0, fmt.Errorf("adopting backup holder: %w", err)
 		}
 	}
 
 	ended := pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded
 	if (ended || pod.DeletionTimestamp != nil) && restoreUnfinished(&pod) {
-		r.setHolderCondition(vol, "RestoreInterrupted",
+		st.setFalse("RestoreInterrupted",
 			"The restored backup holder stopped before its restore finished, so the volume's files may be incomplete. kip backup restore reports the restore failure. Restore again if it failed.")
 	}
 
@@ -280,73 +359,89 @@ func (r *VolumeReconciler) reconcileHolder(ctx context.Context, vol *kipperv1.Vo
 		// meanwhile.
 		pending := time.Since(pod.DeletionTimestamp.Time)
 		if pending >= holderStartGrace {
-			r.setHolderCondition(vol, "StuckTerminating", fmt.Sprintf(
+			st.setFalse("StuckTerminating", fmt.Sprintf(
 				"The backup holder has been terminating for more than %s, usually because its node is unreachable. It is replaced once the node is back or removed with kip node remove.", holderStartGrace))
 			return 0, nil
 		}
 		if !restoreUnfinished(&pod) {
-			r.setHolderCondition(vol, "Starting", "The backup holder is being replaced.")
+			st.setFalse("Starting", "The backup holder is being replaced.")
 		}
 		return holderStartGrace - pending, nil
 	case ended:
 		// A terminal pod cannot restart or support backups or restores.
 		// Deletion triggers reconciliation to create its replacement.
-		if err := r.replaceHolder(ctx, vol, &pod); err != nil {
+		if err := h.replace(ctx, &pod, st); err != nil {
 			return 0, fmt.Errorf("removing ended backup holder: %w", err)
 		}
-		r.setHolderCondition(vol, "Starting", "The backup holder ended and is being replaced.")
+		st.setFalse("Starting", "The backup holder ended and is being replaced.")
 		return 0, nil
 	case podReady(&pod):
-		r.setHolderReady(vol)
+		st.setReady()
 		return 0, nil
 	case restoreUnfinished(&pod) && holderAge(&pod) >= holderRestoreDeadline:
 		// Velero's restore container waits for a done file that a failed
 		// volume restore never writes, so the pod would stay in its init
 		// container and keep the volume out of later backups.
-		r.setHolderCondition(vol, "RestoreStuck", fmt.Sprintf(
+		st.setFalse("RestoreStuck", fmt.Sprintf(
 			"The volume restore is still unfinished %s after the backup holder was created. The backup holder is being replaced so backups include the volume again. Restore again if the files are incomplete.", holderRestoreDeadline))
-		if err := r.replaceHolder(ctx, vol, &pod); err != nil {
+		if err := h.replace(ctx, &pod, st); err != nil {
 			return 0, fmt.Errorf("removing stuck backup holder: %w", err)
 		}
 		return 0, nil
 	}
-	return r.reportHolderNotReady(vol, &pod), nil
+	return reportHolderNotReady(&pod, st), nil
 }
 
-// stopHolderForCopyChange removes vol's holder pod, read with getErr, while
-// a copy change waits for the volume to detach. A pod Kipper cannot prove is
-// the holder is left alone, and so is a holder still restoring the volume's
-// files, which the copy change then waits for.
-func (r *VolumeReconciler) stopHolderForCopyChange(ctx context.Context, vol *kipperv1.Volume, pod *corev1.Pod, getErr error) error {
+// stopForCopyChange removes t's holder pod, read with getErr, while a copy
+// change waits for the volume to detach. A pod Kipper cannot prove is the
+// holder is left alone, and so is a holder still restoring the volume's files,
+// which the copy change then waits for.
+func (h holderOps) stopForCopyChange(ctx context.Context, t holderTarget, pod *corev1.Pod, getErr error, st holderReport) error {
 	switch {
 	case errors.IsNotFound(getErr):
 	case getErr != nil:
 		return getErr
 	case restoreUnfinished(pod):
-		r.setHolderCondition(vol, "Restoring", "The backup holder is restoring the volume's files. The copy change waits until the restore is done.")
+		st.setFalse("Restoring", "The backup holder is restoring the volume's files. The copy change waits until the restore is done.")
 		return nil
 	default:
-		if ok, _ := holderProvenance(pod, vol); ok && pod.DeletionTimestamp == nil {
+		if ok, _ := holderProvenance(pod, t); ok && pod.DeletionTimestamp == nil {
 			uid := pod.UID
-			if err := r.Delete(ctx, pod, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
+			if err := h.client.Delete(ctx, pod, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
 				return fmt.Errorf("stopping backup holder: %w", err)
 			}
 		}
 	}
-	r.setHolderCondition(vol, holderStoppedForCopyChange,
+	st.setFalse(holderStoppedForCopyChange,
 		"The backup holder is stopped while the volume's copies change, so the volume's files are backed up only while an app mounts it. It starts again once the change is done.")
 	return nil
 }
 
-// replaceHolder saves vol's status before deleting pod to trigger replacement.
-// Saving first preserves restore warnings before their evidence is deleted.
-// If saving fails, the pod remains for the next reconciliation.
-func (r *VolumeReconciler) replaceHolder(ctx context.Context, vol *kipperv1.Volume, pod *corev1.Pod) error {
-	if err := r.Status().Update(ctx, vol); err != nil {
-		return fmt.Errorf("saving volume status: %w", err)
+// remove deletes t's holder after verifying ownership. A missing, foreign or
+// already deleting pod needs no action.
+func (h holderOps) remove(ctx context.Context, t holderTarget) error {
+	var pod corev1.Pod
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: t.namespace, Name: t.pod}, &pod); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if ok, _ := holderProvenance(&pod, t); !ok || pod.DeletionTimestamp != nil {
+		return nil
 	}
 	uid := pod.UID
-	if err := r.Delete(ctx, pod, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
+	return client.IgnoreNotFound(h.client.Delete(ctx, &pod, client.Preconditions{UID: &uid}))
+}
+
+// replace calls st.save, when provided, before deleting pod to trigger
+// replacement. Saving first preserves restore warnings before their evidence
+// is deleted. If saving fails, the pod remains for the next reconciliation.
+func (h holderOps) replace(ctx context.Context, pod *corev1.Pod, st holderReport) error {
+	if st.save != nil {
+		if err := st.save(ctx); err != nil {
+			return err
+		}
+	}
+	uid := pod.UID
+	if err := h.client.Delete(ctx, pod, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
 		return err
 	}
 	return nil
@@ -354,29 +449,29 @@ func (r *VolumeReconciler) replaceHolder(ctx context.Context, vol *kipperv1.Volu
 
 // reportHolderNotReady records why a holder that has not ended is not ready
 // and returns when to look again if no pod event will arrive first.
-func (r *VolumeReconciler) reportHolderNotReady(vol *kipperv1.Volume, pod *corev1.Pod) time.Duration {
+func reportHolderNotReady(pod *corev1.Pod, st holderReport) time.Duration {
 	for _, c := range pod.Status.Conditions {
 		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse && c.Reason == corev1.PodReasonUnschedulable {
-			r.setHolderCondition(vol, "Unschedulable", "The backup holder cannot be scheduled: "+c.Message)
+			st.setFalse("Unschedulable", "The backup holder cannot be scheduled: "+c.Message)
 			return 0
 		}
 	}
 	if name, waiting := failingContainer(pod); waiting != nil {
-		r.setHolderCondition(vol, "ContainerFailing", fmt.Sprintf(
+		st.setFalse("ContainerFailing", fmt.Sprintf(
 			"The backup holder's container %s is failing: %s %s", name, waiting.Reason, waiting.Message))
 		return 0
 	}
 	age := holderAge(pod)
 	if restoreUnfinished(pod) {
-		r.setHolderCondition(vol, "Restoring", "The backup holder is waiting for a restore to write the volume's files.")
+		st.setFalse("Restoring", "The backup holder is waiting for a restore to write the volume's files.")
 		return holderRestoreDeadline - age
 	}
 	if age >= holderStartGrace {
-		r.setHolderCondition(vol, "NotStarting", fmt.Sprintf(
+		st.setFalse("NotStarting", fmt.Sprintf(
 			"The backup holder has not started within %s. Its pod is %s.", holderStartGrace, pod.Status.Phase))
 		return 0
 	}
-	r.setHolderCondition(vol, "Starting", "The backup holder is starting.")
+	st.setFalse("Starting", "The backup holder is starting.")
 	return holderStartGrace - age
 }
 
@@ -425,41 +520,42 @@ func (r *VolumeReconciler) apiReader() client.Reader {
 	return r.Client
 }
 
-func (r *VolumeReconciler) setHolderReady(vol *kipperv1.Volume) {
-	apimeta.SetStatusCondition(&vol.Status.Conditions, metav1.Condition{
+func (st holderReport) setReady() {
+	apimeta.SetStatusCondition(st.conditions, metav1.Condition{
 		Type:               conditionBackupHolderReady,
 		Status:             metav1.ConditionTrue,
 		Reason:             "Running",
 		Message:            "The backup holder is running, so backups copy the volume's files.",
-		ObservedGeneration: vol.Generation,
+		ObservedGeneration: st.generation,
 	})
 }
 
-// setHolderCondition sets BackupHolderReady to false, preserving RestoreStuck
-// and RestoreInterrupted warnings when the new reason is Starting. When the
-// condition changes and a recorder is available, reasons other than Starting
-// or Restoring also emit a warning event to draw the operator's attention.
-// holderStoppedForCopyChange is the BackupHolderReady reason while a copy
-// change keeps the holder stopped.
-const holderStoppedForCopyChange = "StoppedForCopyChange"
-
-func (r *VolumeReconciler) setHolderCondition(vol *kipperv1.Volume, reason, message string) {
+// setFalse sets BackupHolderReady to false, preserving RestoreStuck and
+// RestoreInterrupted warnings when the new reason is Starting. When the
+// condition changes, reasons other than Starting or Restoring also go to
+// st.event, when provided, to draw the operator's attention.
+func (st holderReport) setFalse(reason, message string) {
 	if reason == "Starting" {
-		if c := apimeta.FindStatusCondition(vol.Status.Conditions, conditionBackupHolderReady); c != nil &&
-			(c.Reason == "RestoreStuck" || c.Reason == "RestoreInterrupted") {
+		if c := apimeta.FindStatusCondition(*st.conditions, conditionBackupHolderReady); c != nil && restoreWarning(c.Reason) {
 			return
 		}
 	}
-	changed := apimeta.SetStatusCondition(&vol.Status.Conditions, metav1.Condition{
+	changed := apimeta.SetStatusCondition(st.conditions, metav1.Condition{
 		Type:               conditionBackupHolderReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             reason,
 		Message:            message,
-		ObservedGeneration: vol.Generation,
+		ObservedGeneration: st.generation,
 	})
-	if changed && r.Recorder != nil && reason != "Starting" && reason != "Restoring" {
-		r.Recorder.Event(vol, corev1.EventTypeWarning, "BackupHolder"+reason, message)
+	if changed && st.event != nil && reason != "Starting" && reason != "Restoring" {
+		st.event(reason, message)
 	}
+}
+
+// restoreWarning reports whether reason warns that a restore through the
+// holder may have left the volume's files incomplete.
+func restoreWarning(reason string) bool {
+	return reason == "RestoreStuck" || reason == "RestoreInterrupted"
 }
 
 func hasInitContainer(pod *corev1.Pod, name string) bool {

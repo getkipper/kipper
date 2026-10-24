@@ -531,6 +531,9 @@ func writeServiceInfo(ctx context.Context, out io.Writer, mgr *service.Manager, 
 	writeCopies(out, snapshot.Copies, "  Copies:   ")
 	placement, err := mgr.Placement(ctx, namespace, name)
 	writePlacement(out, placement, err)
+	if snapshot.DumpFault != "" {
+		say(out, "\n  ⚠  %s\n", snapshot.DumpFault)
+	}
 	writeSecretsHint(out, masked)
 	say(out, "\n")
 

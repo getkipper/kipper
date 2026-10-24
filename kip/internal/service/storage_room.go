@@ -436,13 +436,18 @@ func (m *Manager) classNodeSelector(ctx context.Context, class string) ([]string
 	if sc.Provisioner != longhornProvisioner {
 		return nil, false, nil
 	}
+	return classTags(sc.Parameters), true, nil
+}
+
+// classTags returns the Longhorn node tags in a class's nodeSelector parameter.
+func classTags(parameters map[string]string) []string {
 	var tags []string
-	for _, tag := range strings.Split(sc.Parameters["nodeSelector"], ",") {
+	for _, tag := range strings.Split(parameters["nodeSelector"], ",") {
 		if tag = strings.TrimSpace(tag); tag != "" {
 			tags = append(tags, tag)
 		}
 	}
-	return tags, true, nil
+	return tags
 }
 
 func (m *Manager) longhornState(ctx context.Context) ([]unstructured.Unstructured, longhorncap.Settings, error) {

@@ -28,11 +28,10 @@ const (
 	firstSightWindow = 3 * checkInterval
 )
 
-// autoscalingEpisode is an autoscaling warning that is due unless the store
-// already holds it from before a restart.
-type autoscalingEpisode struct {
+// alertEpisode pairs a due warning with its start time for deduplication
+// against alerts stored before a controller restart.
+type alertEpisode struct {
 	batch alertBatch
-	// since is when the episode began. A stored alert from then on covers it.
 	since time.Time
 }
 
@@ -43,7 +42,12 @@ type autoscalingEpisode struct {
 func (rc *ResourceController) checkAutoscaling(ctx context.Context) []alertBatch {
 	now := time.Now()
 	nowStr := now.UTC().Format(time.RFC3339)
-	due := append(rc.atMaximumEpisodes(ctx, now, nowStr), rc.notReadyEpisodes(ctx, nowStr)...)
+	return rc.unstoredEpisodes(ctx, append(rc.atMaximumEpisodes(ctx, now, nowStr), rc.notReadyEpisodes(ctx, nowStr)...))
+}
+
+// unstoredEpisodes returns due batches that still need to be stored and
+// commits the state changes for episodes already covered by stored alerts.
+func (rc *ResourceController) unstoredEpisodes(ctx context.Context, due []alertEpisode) []alertBatch {
 	if len(due) == 0 {
 		return nil
 	}
@@ -64,7 +68,7 @@ func (rc *ResourceController) checkAutoscaling(ctx context.Context) []alertBatch
 	return batches
 }
 
-func (rc *ResourceController) atMaximumEpisodes(ctx context.Context, now time.Time, nowStr string) []autoscalingEpisode {
+func (rc *ResourceController) atMaximumEpisodes(ctx context.Context, now time.Time, nowStr string) []alertEpisode {
 	hpas, err := rc.client.AutoscalingV2().HorizontalPodAutoscalers("").List(ctx, metav1.ListOptions{
 		LabelSelector: labels.KipperManagedSelector,
 	})
@@ -75,7 +79,7 @@ func (rc *ResourceController) atMaximumEpisodes(ctx context.Context, now time.Ti
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	present := make(map[string]bool, len(hpas.Items))
-	var due []autoscalingEpisode
+	var due []alertEpisode
 	for i := range hpas.Items {
 		hpa := &hpas.Items[i]
 		key := hpaKey(hpa)
@@ -106,7 +110,7 @@ func (rc *ResourceController) atMaximumEpisodes(ctx context.Context, now time.Ti
 		if last := hpa.Status.LastScaleTime; last != nil && last.After(since) {
 			since = last.Time
 		}
-		due = append(due, autoscalingEpisode{since: since, batch: alertBatch{
+		due = append(due, alertEpisode{since: since, batch: alertBatch{
 			entry: ResourceLogEntry{
 				Time:      nowStr,
 				App:       hpa.Name,
@@ -166,7 +170,7 @@ func hpaKey(hpa *autoscalingv2.HorizontalPodAutoscaler) string {
 	return hpa.Namespace + "/" + hpa.Name + "/" + string(hpa.UID)
 }
 
-func (rc *ResourceController) notReadyEpisodes(ctx context.Context, nowStr string) []autoscalingEpisode {
+func (rc *ResourceController) notReadyEpisodes(ctx context.Context, nowStr string) []alertEpisode {
 	if rc.crClient == nil {
 		return nil
 	}
@@ -178,7 +182,7 @@ func (rc *ResourceController) notReadyEpisodes(ctx context.Context, nowStr strin
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	present := make(map[string]bool, len(apps.Items))
-	var due []autoscalingEpisode
+	var due []alertEpisode
 	for i := range apps.Items {
 		app := &apps.Items[i]
 		// The UID makes a replacement under the same name a new episode.
@@ -193,7 +197,7 @@ func (rc *ResourceController) notReadyEpisodes(ctx context.Context, nowStr strin
 			continue
 		}
 		reason := c.Reason
-		due = append(due, autoscalingEpisode{since: c.LastTransitionTime.Time, batch: alertBatch{
+		due = append(due, alertEpisode{since: c.LastTransitionTime.Time, batch: alertBatch{
 			entry: ResourceLogEntry{
 				Time:      nowStr,
 				App:       app.Name,

@@ -424,7 +424,8 @@ func (r *ServiceReconciler) reportStorageCopies(ctx context.Context, svc *kipper
 	commands := serviceStorageCommands(svc.Name)
 	if r.ownsDataClaim(ctx, svc, &pvc) {
 		var err error
-		sc := storageConverter{Reader: r.longhornReader(), Writer: r.Client, Commands: commands, StatefulSet: svc.Name}
+		sc := storageConverter{Reader: r.longhornReader(), Writer: r.Client, Commands: commands, StatefulSet: svc.Name,
+			StopRefusal: func(ctx context.Context) (string, error) { return r.dumpVolumeRefusal(ctx, svc) }}
 		if converted, err = sc.convertOrBlock(ctx, &pvc, svc.Spec.Copies); err != nil {
 			return err
 		}

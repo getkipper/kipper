@@ -209,6 +209,15 @@ func (s storageConverter) stop(ctx context.Context, pvc *corev1.PersistentVolume
 	if len(users) > 0 {
 		return s.blockedBeforeStop(inUse(users), hold), nil
 	}
+	if s.StopRefusal != nil {
+		why, err := s.StopRefusal(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if why != "" {
+			return s.blockedBeforeStop(why, hold), nil
+		}
+	}
 	rec := platform.CopyChangeStop{At: s.now().UTC().Format(time.RFC3339)}
 	if s.StatefulSet != "" {
 		sts, err := s.statefulSet(ctx, pvc.Namespace)

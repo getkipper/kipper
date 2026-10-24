@@ -78,11 +78,22 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, fmt.Errorf("reconciling pvc: %w", err)
 	}
 
+	backups, err := clusterBackupsConfigured(ctx, r.Client)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	var retry time.Duration
-	if pvc != nil {
+	switch {
+	case pvc == nil:
+	case backups:
 		if retry, err = r.reconcileHolder(ctx, &vol, pvc); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconciling backup holder: %w", err)
 		}
+	default:
+		if err := r.holders().remove(ctx, volumeHolderTarget(&vol)); err != nil {
+			return ctrl.Result{}, fmt.Errorf("removing backup holder: %w", err)
+		}
+		apimeta.RemoveStatusCondition(&vol.Status.Conditions, conditionBackupHolderReady)
 	}
 
 	if err := r.syncAppVolumes(ctx, &vol); err != nil {

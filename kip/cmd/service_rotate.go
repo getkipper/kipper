@@ -433,30 +433,41 @@ func (r *passwordRotation) servicePods(ctx context.Context) ([]corev1.Pod, error
 // unfinished, because it could save the volume with one password and the
 // credentials with the other. A cluster without Velero has nothing to wait for.
 func (r *passwordRotation) refuseDuringBackup(ctx context.Context) error {
-	list, err := r.dynamic.Resource(veleroBackupGVR).Namespace(ai.VeleroNamespace).List(ctx, metav1.ListOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
+	running, err := unfinishedBackups(ctx, r.dynamic, r.namespace)
 	if apierrors.IsForbidden(err) {
 		return fmt.Errorf("kip service rotate-password requires a cluster admin because it checks the cluster's backups and pauses resource tuning on the service. Project roles lack both permissions. Ask a cluster admin to run the rotation")
 	}
 	if err != nil {
 		return fmt.Errorf("checking for running backups: %w", err)
 	}
+	if len(running) > 0 {
+		return fmt.Errorf("backup %s is still running and covers %s. Rotate once it has finished, so the backup holds a single password", strings.Join(running, ", "), r.namespace)
+	}
+	return nil
+}
+
+// unfinishedBackups returns sorted names of unfinished Velero backups that may
+// cover namespace. A cluster without Velero returns nil. Other read errors are
+// returned unchanged.
+func unfinishedBackups(ctx context.Context, dyn dynamic.Interface, namespace string) ([]string, error) {
+	list, err := dyn.Resource(veleroBackupGVR).Namespace(ai.VeleroNamespace).List(ctx, metav1.ListOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	var running []string
 	for _, b := range list.Items {
 		phase, _, _ := unstructured.NestedString(b.Object, "status", "phase")
 		included, _, _ := unstructured.NestedStringSlice(b.Object, "spec", "includedNamespaces")
 		excluded, _, _ := unstructured.NestedStringSlice(b.Object, "spec", "excludedNamespaces")
-		if backupscope.Unfinished(phase) && backupscope.MayCover(included, excluded, r.namespace) {
+		if backupscope.Unfinished(phase) && backupscope.MayCover(included, excluded, namespace) {
 			running = append(running, b.GetName())
 		}
 	}
-	if len(running) > 0 {
-		sort.Strings(running)
-		return fmt.Errorf("backup %s is still running and covers %s. Rotate once it has finished, so the backup holds a single password", strings.Join(running, ", "), r.namespace)
-	}
-	return nil
+	sort.Strings(running)
+	return running, nil
 }
 
 // boundWorkloads lists the Apps and Functions whose credentials come from the

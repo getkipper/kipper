@@ -27,8 +27,10 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/getkipper/kipper/controller/pkg/backupscope"
+	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/k8s"
+	"github.com/getkipper/kipper/kip/internal/service"
 	"github.com/getkipper/kipper/kip/internal/velerolabel"
 )
 
@@ -45,13 +47,17 @@ var backupDrillCmd = &cobra.Command{
 	Short: "Restore a namespace's services from the latest backup into an isolated namespace and count their rows",
 	Long: `Restores the database and other service pods of one namespace, with their
 volumes and credentials, from its latest completed backup into the namespace
-kipper-restore-drill. App pods, Ingresses and jobs are excluded to avoid running
+kipper-restore-drill. The files of shared volumes and project shared storage
+are restored through their holder pods. App pods, Ingresses and jobs are excluded to avoid running
 applications against live services or claiming live hostnames. A NetworkPolicy
 allows traffic between the restored pods and outgoing cluster DNS queries.
 It requires a NetworkPolicy controller and allows the node traffic exempted by
 Kubernetes. For Postgres and MySQL, the drill counts rows in user tables across
 databases with count(*). The drill namespace is deleted afterwards unless
 --keep is set or the restore is still running or its state cannot be checked.
+Before restoring, kip estimates the Longhorn or local storage the drill needs,
+counting each volume once per estimated copy on this cluster. Afterwards, it
+warns about restored volumes with fewer copies than configured.
 The nano profile blocks drills because small servers lack the memory for a
 second copy of the services. To check one Postgres service's backup, use
 kip service restore-dump.`,
@@ -122,6 +128,8 @@ func runBackupDrill(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("\n  Drilling %s from backup %s (completed %s)\n", source, backup.GetName(), completionTime(backup))
+	mgr := &service.Manager{Client: clientset, Dynamic: dyn}
+	reportDrillDisk(ctx, mgr, source)
 
 	if err := createDrillNamespace(ctx, clientset); err != nil {
 		return err
@@ -138,6 +146,7 @@ func runBackupDrill(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	reportDegradedDrillVolumes(ctx, mgr)
 
 	kubeconfig, err := k8s.RESTConfig(cluster)
 	if err != nil {
@@ -318,10 +327,11 @@ func labelExists(key string) map[string]interface{} {
 }
 
 // drillRestoreSpec selects service-labelled pods, Secrets and ConfigMaps from
-// source for the drill namespace. A non-empty service limits the selection to
-// that service. Velero adds the selected pods' PVCs and PVs as dependencies,
-// limiting volumes to the selected services. Including PVs lets Velero clear
-// each PVC's old binding so a fresh volume can receive the restored files.
+// source for the drill namespace, and the holder pods of its shared volumes.
+// A non-empty service limits the selection to that service. Velero adds the
+// selected pods' PVCs and PVs as dependencies, limiting volumes to the
+// selected services and shared volumes. Including PVs lets Velero clear each
+// PVC's old binding so a fresh volume can receive the restored files.
 func drillRestoreSpec(backupName, source, service string) map[string]interface{} {
 	// TLS services also need certificate Secrets and pg_hba ConfigMaps
 	// labelled with their service name under tls-for. Include these
@@ -329,6 +339,7 @@ func drillRestoreSpec(backupName, source, service string) map[string]interface{}
 	selectors := []interface{}{
 		labelExists("kipper.run/service-type"),
 		labelExists("kipper.run/tls-for"),
+		map[string]interface{}{"matchLabels": map[string]interface{}{kipperlabels.ResourceType: kipperlabels.ResourceTypeVolumeHolder}},
 	}
 	if service != "" {
 		ownPods := labelExists("kipper.run/service-type")
@@ -663,7 +674,27 @@ func requireVolumesRestored(ctx context.Context, dyn dynamic.Interface, restoreN
 	return nil
 }
 
+// drillHolderClaim returns the first PVC referenced by a pod labelled as a
+// holder. It returns false when the label or a PVC reference is missing.
+func drillHolderClaim(pod *corev1.Pod) (string, bool) {
+	if pod.Labels[kipperlabels.ResourceType] != kipperlabels.ResourceTypeVolumeHolder {
+		return "", false
+	}
+	for _, v := range pod.Spec.Volumes {
+		if v.PersistentVolumeClaim != nil {
+			return v.PersistentVolumeClaim.ClaimName, true
+		}
+	}
+	return "", false
+}
+
 func reportServiceRows(ctx context.Context, clientset kubernetes.Interface, restConfig *rest.Config, pod *corev1.Pod) error {
+	// requireVolumesRestored has already checked the holder's volume restore,
+	// and a shared volume has no rows to count.
+	if claim, ok := drillHolderClaim(pod); ok {
+		fmt.Printf("  ✔  shared volume %s: files restored\n", claim)
+		return nil
+	}
 	serviceType := pod.Labels["kipper.run/service-type"]
 	if err := waitForPodRunning(ctx, clientset, pod.Name, 5*time.Minute); err != nil {
 		return err
