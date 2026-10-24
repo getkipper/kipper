@@ -324,6 +324,21 @@ type storageGateError struct {
 
 func (e *storageGateError) Error() string { return e.message }
 
+// storageMoveGate holds the StatefulSet and dump claim back while
+// 'kip service storage longhorn' moves the service's volume. The move stops
+// the workload and swaps the claim itself, so any write here could recreate a
+// claim it just released or start a pod on a half-copied volume.
+func storageMoveGate(svc *kipperv1.Service) error {
+	if svc.Annotations[platform.StorageMoveAnnotation] == "" {
+		return nil
+	}
+	return &storageGateError{
+		reason: kipperv1.StorageCopiesConverting,
+		message: fmt.Sprintf("The volume is moving to Longhorn and the service is stopped. "+
+			"An admin finishes the move with 'kip service storage longhorn %s', or undoes it with --rollback.", svc.Name),
+	}
+}
+
 // dataClaimName is the claim the StatefulSet's "data" template creates for
 // its only pod.
 func dataClaimName(service string) string { return "data-" + service + "-0" }

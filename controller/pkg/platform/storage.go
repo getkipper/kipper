@@ -47,7 +47,7 @@ func SupportsSharedVolumes(mode string) bool {
 // SharedVolumesUnsupported is the shared-volume error message used by the CLI,
 // API, console and admission policy.
 const SharedVolumesUnsupported = "This cluster uses local storage. Shared volumes (ReadWriteMany) require Longhorn. " +
-	"See Cluster Migration in the Kipper docs to move to a cluster with Longhorn storage."
+	"An admin can switch the cluster to Longhorn with 'kip cluster storage longhorn'."
 
 const ComponentLonghorn = "longhorn"
 

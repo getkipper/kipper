@@ -29,6 +29,7 @@ import (
 	"github.com/getkipper/kipper/console-api/controllers"
 	"github.com/getkipper/kipper/console-api/middleware"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 // asUser returns req with an authenticated user and global role in context,
@@ -906,6 +907,103 @@ func TestProjectsHandler_Delete(t *testing.T) {
 
 		if rec.Code != http.StatusNoContent {
 			t.Errorf("expected status 204, got %d; body: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("refuses while a volume in the project is moving to Longhorn", func(t *testing.T) {
+		staging := newKipperNamespace("myapp-staging", "myapp", "staging", "0")
+		prod := newKipperNamespace("myapp-production", "myapp", "production", "1")
+		prod.Labels[platform.StorageMoveNamespaceLabel] = "true"
+		projectCR := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "myapp"}}
+		client := fake.NewClientset(staging, prod)
+		crClient := crClientOwning(t, client, projectCR)
+		handler := &Projects{Client: client, CRClient: crClient}
+
+		r := chi.NewRouter()
+		r.Delete("/api/v1/projects/{name}", handler.Delete)
+
+		req := httptest.NewRequest("DELETE", "/api/v1/projects/myapp", nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("expected status 409, got %d; body: %s", rec.Code, rec.Body.String())
+		}
+		for _, want := range []string{"myapp-production", "kip service storage longhorn", "--rollback"} {
+			if !strings.Contains(rec.Body.String(), want) {
+				t.Errorf("body %q does not mention %q", rec.Body.String(), want)
+			}
+		}
+		var kept kipperv1.Project
+		if err := crClient.Get(context.Background(), crclient.ObjectKey{Name: "myapp"}, &kept); err != nil {
+			t.Errorf("the project was deleted: %v", err)
+		}
+		if _, err := client.CoreV1().Namespaces().Get(context.Background(), "myapp-production", metav1.GetOptions{}); err != nil {
+			t.Errorf("the namespace was deleted: %v", err)
+		}
+	})
+
+	t.Run("refuses while a held namespace that lost its project label is moving a volume", func(t *testing.T) {
+		prod := newKipperNamespace("myapp-production", "myapp", "production", "1")
+		delete(prod.Labels, "kipper.run/project")
+		prod.Labels[platform.StorageMoveNamespaceLabel] = "true"
+		projectCR := &kipperv1.Project{
+			ObjectMeta: metav1.ObjectMeta{Name: "myapp"},
+			Status: kipperv1.ProjectStatus{NamespaceClaims: []kipperv1.NamespaceClaim{
+				{Name: "myapp-production", UID: prod.UID},
+			}},
+		}
+		client := fake.NewClientset(prod)
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, projectCR)}
+
+		r := chi.NewRouter()
+		r.Delete("/api/v1/projects/{name}", handler.Delete)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/v1/projects/myapp", nil))
+
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("expected status 409, got %d; body: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("refuses while a held namespace that lost its move label has a marked Service", func(t *testing.T) {
+		prod := newKipperNamespace("myapp-production", "myapp", "production", "1")
+		svc := &kipperv1.Service{ObjectMeta: metav1.ObjectMeta{
+			Name: "db", Namespace: "myapp-production",
+			Annotations: map[string]string{platform.StorageMoveAnnotation: "kipper-storage-move-u"},
+		}}
+		projectCR := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "myapp"}}
+		client := fake.NewClientset(prod)
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, projectCR, svc)}
+
+		r := chi.NewRouter()
+		r.Delete("/api/v1/projects/{name}", handler.Delete)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/v1/projects/myapp", nil))
+
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("expected status 409, got %d; body: %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "myapp-production") {
+			t.Errorf("body %q does not name the namespace", rec.Body.String())
+		}
+	})
+
+	t.Run("a move in another project's namespace does not block the delete", func(t *testing.T) {
+		staging := newKipperNamespace("myapp-staging", "myapp", "staging", "0")
+		other := newKipperNamespace("shop-prod", "shop", "prod", "0")
+		other.Labels[platform.StorageMoveNamespaceLabel] = "true"
+		projectCR := &kipperv1.Project{ObjectMeta: metav1.ObjectMeta{Name: "myapp"}}
+		client := fake.NewClientset(staging, other)
+		handler := &Projects{Client: client, CRClient: crClientOwning(t, client, projectCR)}
+
+		r := chi.NewRouter()
+		r.Delete("/api/v1/projects/{name}", handler.Delete)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/v1/projects/myapp", nil))
+
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("expected status 204, got %d; body: %s", rec.Code, rec.Body.String())
 		}
 	})
 

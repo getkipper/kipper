@@ -517,6 +517,9 @@ func (r *ServiceReconciler) repairCredentials(ctx context.Context, secret *corev
 }
 
 func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kipperv1.Service) error {
+	if err := storageMoveGate(svc); err != nil {
+		return err
+	}
 	catalog := serviceCatalog(svc.Spec.Type)
 	labels := serviceLabels(svc)
 

@@ -93,3 +93,22 @@ func formatLonghornVolumeDiagnosis(out string) string {
 	return fmt.Sprintf(" (Longhorn volume %s (%s) is not scheduled: %s. Check the reported condition and available disk space)",
 		name, robustness, message)
 }
+
+var claimClassPayload = regexp.MustCompile(`claim-class\[([^\]]*)\]`)
+
+// liveClaimClass returns the storage class of an existing claim, or fallback
+// when the claim is missing or names no class. Claim classes are immutable, so
+// re-applied manifests render the live class rather than the cluster's
+// current storage mode. A failed lookup returns an error.
+func liveClaimClass(client CommandRunner, namespace, claim, fallback string) (string, error) {
+	out, err := client.Run(fmt.Sprintf(`kubectl -n %s get pvc %s --ignore-not-found -o jsonpath='{"claim-class["}{.spec.storageClassName}{"]"}'`,
+		namespace, claim))
+	if err != nil {
+		return "", fmt.Errorf("reading the storage class of %s/%s: %w", namespace, claim, err)
+	}
+	matches := claimClassPayload.FindAllStringSubmatch(out, -1)
+	if len(matches) == 0 || matches[len(matches)-1][1] == "" {
+		return fallback, nil
+	}
+	return matches[len(matches)-1][1], nil
+}

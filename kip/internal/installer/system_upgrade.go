@@ -45,7 +45,7 @@ func SystemComponents(domain string, dnsResolvers, trustedProxies []string, stat
 	if state.LokiEnabled() {
 		res := state.EffectiveResources()
 		components = append(components,
-			SystemComponent{Name: "loki", Apply: func(c CommandRunner) error { return InstallLokiWithResources(c, res) }},
+			SystemComponent{Name: "loki", Apply: func(c CommandRunner) error { return InstallLokiWithResources(c, res, state.Storage) }},
 		)
 	}
 	if state.PrometheusEnabled() {

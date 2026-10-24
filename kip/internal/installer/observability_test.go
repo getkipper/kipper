@@ -63,14 +63,15 @@ func TestLokiStorageRequest(t *testing.T) {
 
 func TestInstallLokiRendersThePreservedSize(t *testing.T) {
 	host := &routedRunner{routes: []route{
+		{contains: lokiStatefulSetQuery, out: lokiStatefulSetJSON(`"storageClassName":"local-path",`)},
 		{contains: "get statefulset loki", out: "loki-template[10Gi]"},
 		{contains: "get pvc storage-loki-0", out: "loki-claim[20Gi]"},
 	}}
-	require.NoError(t, InstallLokiWithResources(host, platform.ResourcesForProfile(ProfileSmall)))
+	require.NoError(t, InstallLokiWithResources(host, platform.ResourcesForProfile(ProfileSmall), StorageLocal))
 	assert.Contains(t, strings.Join(host.commands, "\n"), "size: 10Gi\n", "an upgrade keeps the StatefulSet's immutable claim template")
 
 	fresh := &routedRunner{}
-	require.NoError(t, InstallLokiWithResources(fresh, platform.ResourcesForProfile(ProfileSmall)))
+	require.NoError(t, InstallLokiWithResources(fresh, platform.ResourcesForProfile(ProfileSmall), StorageLocal))
 	assert.Contains(t, strings.Join(fresh.commands, "\n"), "size: 5Gi\n")
 }
 
@@ -82,10 +83,63 @@ func TestInstallLokiStopsWhenEitherSizeLookupFails(t *testing.T) {
 			{contains: "get statefulset loki", out: "loki-template[10Gi]"},
 			{contains: "get pvc storage-loki-0", out: "loki-claim[20Gi]"},
 		}}
-		err := InstallLokiWithResources(host, platform.ResourcesForProfile(ProfileSmall))
+		err := InstallLokiWithResources(host, platform.ResourcesForProfile(ProfileSmall), StorageLocal)
 		assert.ErrorContains(t, err, "log volume size", failing)
 		for _, c := range host.commands {
 			assert.NotContains(t, c, "kind: HelmChart", "nothing is applied when the current size is unknown")
 		}
+	}
+}
+
+func lokiStatefulSetJSON(classField string) string {
+	return `Warning: noise
+{"kind":"StatefulSet","spec":{"volumeClaimTemplates":[{"metadata":{"name":"storage"},"spec":{` + classField +
+		`"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":"10Gi"}}}}]}}`
+}
+
+// Claim templates are immutable, so a growth to Longhorn must leave the Loki
+// StatefulSet's class exactly as it is, while a new volume follows the mode.
+func TestInstallLokiKeepsTheLiveStorageClass(t *testing.T) {
+	applied := func(host *routedRunner) string {
+		t.Helper()
+		require.NoError(t, InstallLokiWithResources(host, platform.ResourcesForProfile(ProfileSmall), StorageLonghorn))
+		for _, c := range host.commands {
+			if strings.Contains(c, "name: loki\n") {
+				return c
+			}
+		}
+		t.Fatal("no Loki HelmChart was applied")
+		return ""
+	}
+	existing := func(classField string) *routedRunner {
+		return &routedRunner{routes: []route{
+			{contains: lokiStatefulSetQuery, out: lokiStatefulSetJSON(classField)},
+			{contains: "get statefulset loki", out: "loki-template[10Gi]"},
+			{contains: "get pvc storage-loki-0", out: "loki-claim[10Gi]claim-class[local-path]"},
+		}}
+	}
+
+	assert.NotContains(t, applied(existing("")), "storageClass:", "a template without a class keeps rendering none")
+	assert.Contains(t, applied(existing(`"storageClassName":"local-path",`)), `storageClass: "local-path"`)
+	assert.Contains(t, applied(existing(`"storageClassName":"",`)), `storageClass: "-"`)
+
+	claimOnly := &routedRunner{routes: []route{
+		{contains: "get pvc storage-loki-0", out: "loki-claim[10Gi]claim-class[local-path]"},
+	}}
+	assert.Contains(t, applied(claimOnly), `storageClass: "local-path"`, "a surviving claim keeps its class")
+
+	assert.Contains(t, applied(&routedRunner{}), `storageClass: "longhorn-single"`, "a new log volume takes one Longhorn copy")
+}
+
+func TestInstallLokiStopsWhenTheTemplateCannotBeRead(t *testing.T) {
+	host := &routedRunner{routes: []route{
+		{contains: lokiStatefulSetQuery, out: "Connection closed"},
+		{contains: "get statefulset loki", out: "loki-template[10Gi]"},
+		{contains: "get pvc storage-loki-0", out: "loki-claim[10Gi]"},
+	}}
+	err := InstallLokiWithResources(host, platform.ResourcesForProfile(ProfileSmall), StorageLonghorn)
+	require.Error(t, err)
+	for _, c := range host.commands {
+		assert.NotContains(t, c, "kind: HelmChart", "nothing is applied when the template's class is unknown")
 	}
 }

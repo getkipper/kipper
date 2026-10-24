@@ -808,6 +808,73 @@ func TestPlatformConfigReconciler_RecreatesLokiAtTheSizeStillOnTheCluster(t *tes
 	}
 }
 
+// Claim templates are immutable, so growing onto Longhorn keeps the Loki
+// StatefulSet's class exactly, while a new log volume follows the mode.
+func TestPlatformConfigReconciler_KeepsTheLiveLokiStorageClass(t *testing.T) {
+	yes, no := true, false
+	localPath, empty := platform.LocalPathClass, ""
+	pc := &kipperv1.PlatformConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: PlatformConfigName},
+		Spec: kipperv1.PlatformConfigSpec{
+			Profile: platform.ProfileMedium,
+			Storage: string(platform.StorageLonghorn),
+			Components: []kipperv1.ComponentOverride{
+				{Name: componentLoki, Enabled: &yes},
+				{Name: componentPrometheus, Enabled: &no},
+			},
+		},
+	}
+	claim := func(class *string) *corev1.PersistentVolumeClaim {
+		return &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "storage-loki-0", Namespace: platform.MonitoringNamespace},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				StorageClassName: class,
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")},
+				},
+			},
+		}
+	}
+	statefulSet := func(class *string) *appsv1.StatefulSet {
+		return &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "loki", Namespace: platform.MonitoringNamespace},
+			Spec:       appsv1.StatefulSetSpec{VolumeClaimTemplates: []corev1.PersistentVolumeClaim{*claim(class)}},
+		}
+	}
+
+	for name, tc := range map[string]struct {
+		objects []client.Object
+		want    string
+		absent  bool
+	}{
+		"template without a class":        {objects: []client.Object{statefulSet(nil), claim(&localPath)}, absent: true},
+		"template naming local-path":      {objects: []client.Object{statefulSet(&localPath), claim(&localPath)}, want: `storageClass: "local-path"`},
+		"template with an empty class":    {objects: []client.Object{statefulSet(&empty)}, want: `storageClass: "-"`},
+		"only the claim left":             {objects: []client.Object{claim(&localPath)}, want: `storageClass: "local-path"`},
+		"fresh volume on a Longhorn mode": {want: `storageClass: "longhorn-single"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			scheme := testScheme()
+			fakeClient := crfake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(append([]client.Object{pc.DeepCopy()}, tc.objects...)...).
+				WithStatusSubresource(&kipperv1.PlatformConfig{}).Build()
+			r := &PlatformConfigReconciler{Client: fakeClient, Scheme: scheme}
+			_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: PlatformConfigName}})
+			require.NoError(t, err)
+
+			loki := &unstructured.Unstructured{}
+			loki.SetGroupVersionKind(helmChartGVK)
+			require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "loki", Namespace: helmChartNamespace}, loki))
+			values, _, _ := unstructured.NestedString(loki.Object, "spec", "valuesContent")
+			if tc.absent {
+				assert.NotContains(t, values, "storageClass:")
+				return
+			}
+			assert.Contains(t, values, tc.want)
+		})
+	}
+}
+
 func TestPlatformConfigReconciler_IgnoresUnknownCRName(t *testing.T) {
 	scheme := testScheme()
 

@@ -18,6 +18,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/controller/pkg/stranded"
 )
 
@@ -334,13 +335,17 @@ func (h *Handler) restoreStatefulSet(ctx context.Context, namespace, name string
 // scaleStatefulSet sets a StatefulSet's replica count and, when scaling to
 // zero, waits for its pods to terminate so their PVCs can be mounted elsewhere.
 // It skips scale-up requests for a StatefulSet with a fence stop annotation,
-// leaving the restart to kip's service start, fence or rejoin checks.
+// leaving the restart to kip's service start, fence or rejoin checks. It also
+// skips scale-up during a storage move, which manages the restart itself.
 func (h *Handler) scaleStatefulSet(ctx context.Context, namespace, name string, replicas int32) error {
 	sts, err := h.Client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
 	if _, fenced := sts.Annotations[stranded.FenceStopAnnotation]; fenced && replicas > 0 {
+		return nil
+	}
+	if sts.Annotations[platform.StorageMoveAnnotation] != "" && replicas > 0 {
 		return nil
 	}
 	if sts.Spec.Replicas != nil && *sts.Spec.Replicas == replicas {

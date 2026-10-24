@@ -19,6 +19,7 @@ import (
 	"github.com/getkipper/kipper/console-api/controllers"
 	"github.com/getkipper/kipper/console-api/serviceui"
 	"github.com/getkipper/kipper/controller/pkg/datavolume"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 )
 
@@ -184,6 +185,15 @@ func (s *Services) Delete(w http.ResponseWriter, r *http.Request) {
 	if !svc.DeletionTimestamp.IsZero() {
 		respondError(w, http.StatusConflict, fmt.Sprintf(
 			"service %q is already being deleted; kip service list says what is holding it up", name))
+		return
+	}
+
+	// console-api has admin admission privileges, so this check protects moving
+	// services from console users. The version checks on the data-deletion mark
+	// and delete below also catch a storage move marked after this read.
+	if svc.Annotations[platform.StorageMoveAnnotation] != "" {
+		respondError(w, http.StatusConflict, fmt.Sprintf(
+			"service %q is moving its volume to Longhorn. An admin finishes the move with 'kip service storage longhorn %s', or undoes it with --rollback, before it can be deleted", name, name))
 		return
 	}
 
