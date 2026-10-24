@@ -282,7 +282,7 @@ func refuseNodeAddOnLocalStorage(mode string) error {
 		return nil
 	}
 	return fmt.Errorf("this cluster uses local storage and supports a single node. " +
-		"To add nodes, install a Longhorn cluster with --storage longhorn and migrate your projects. See Cluster Migration in the Kipper docs")
+		"Switch it to Longhorn with 'kip cluster storage longhorn', then add nodes")
 }
 
 func runNodeAdd(cmd *cobra.Command, args []string) error {

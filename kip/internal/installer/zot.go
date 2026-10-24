@@ -490,7 +490,8 @@ func formatZotDiagnosis(logs string) string {
 // InstallZot deploys the Zot OCI registry with authentication and TLS, then
 // configures k3s to use the pull account. Builds use a separate push account.
 // Repeated installs reuse existing credentials and preserve expanded volumes.
-// The volume uses local-path when storageMode is local and longhorn-single otherwise.
+// A new volume uses local-path when storageMode is local and longhorn-single
+// otherwise. An existing volume keeps its class.
 // k3s restarts only when the server's registry files change or a pending marker
 // remains from an earlier attempt. After a restart, installation waits up to
 // five minutes for all nodes to report Ready, then clears the marker.
@@ -506,7 +507,11 @@ func InstallZot(client CommandRunner, storageMode string) error {
 	if err != nil {
 		return err
 	}
-	applyBase := fmt.Sprintf("cat << 'KIPEOF' | kubectl apply -f -\n%sKIPEOF", renderZotBaseManifest(storage, platform.SingleWriterClass(storageMode)))
+	class, err := liveClaimClass(client, zotNamespace, "zot-data", platform.SingleWriterClass(storageMode))
+	if err != nil {
+		return err
+	}
+	applyBase := fmt.Sprintf("cat << 'KIPEOF' | kubectl apply -f -\n%sKIPEOF", renderZotBaseManifest(storage, class))
 	if _, err := client.Run(applyBase); err != nil {
 		return fmt.Errorf("applying zot manifests: %w", err)
 	}

@@ -16,6 +16,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 // Both clusters must derive the same per-transfer token from the session
@@ -196,6 +198,41 @@ func TestCreateTransferStopsServiceStatefulSet(t *testing.T) {
 	}
 	if pod.Labels["kipper.run/transfer-service"] != "files" {
 		t.Fatal("import pod must record the paused service for teardown")
+	}
+}
+
+// A storage move owns the service's data claim, so a competing transfer is
+// refused before anything is created or scaled.
+func TestCreateTransferRefusesAServiceUnderAStorageMove(t *testing.T) {
+	zero := int32(0)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "files", Namespace: "shop-prod", Annotations: map[string]string{
+			platform.StorageMoveAnnotation: "kipper-storage-move-uid"}},
+		Spec: appsv1.StatefulSetSpec{Replicas: &zero},
+	}
+	h := &Handler{
+		Client:         fake.NewSimpleClientset(projectNamespace("shop-prod", "shop"), sts),
+		Sessions:       NewSessionStore(),
+		DatamoverImage: "img",
+		CRClient:       migrationOwners(t),
+	}
+	session := transferSession(t, h)
+
+	rec := postTransfer(t, h, session, map[string]interface{}{
+		"transferID": "sess-shop-prod-svc-files",
+		"namespace":  "shop-prod",
+		"kind":       "servicePVC",
+		"target":     map[string]string{"service": "files"},
+	})
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "kip service storage longhorn files") {
+		t.Fatalf("status = %d, want 409 naming the move: %s", rec.Code, rec.Body.String())
+	}
+	secrets, err := h.Client.CoreV1().Secrets("shop-prod").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Fatal("nothing is created for a refused transfer")
 	}
 }
 

@@ -300,6 +300,28 @@ kip cluster storage --max-copies 2
 
 The offer is recorded in the PlatformConfig and enforced by the `kipper-storage-copies-offer` admission policy, which kip renders on install, upgrade and every `--max-copies` change. Admins are not bound by it. If the command stops between the two writes, run it again. See [Two copies of a service's data](/en/worker-nodes#two-copies-of-a-services-data).
 
+On a Longhorn cluster, the output also lists unfinished moves to Longhorn, service volumes still on local storage, and the local copies kept after a move, the same as `kip status`.
+
+### kip cluster storage longhorn {#kip-cluster-storage-longhorn}
+
+Switches a local-storage cluster to Longhorn in place. Nothing stops while it runs.
+
+```bash
+kip cluster storage longhorn [--ssh-key <path>]
+```
+
+The command needs at least 6000 MiB of RAM on the server, a platform upgraded with the same kip version, more than 25% of the filesystem holding `/var/lib/longhorn` free, and an OS that can hold Longhorn volumes. It prepares the host, installs Longhorn and records Longhorn as the storage mode, then lists the service volumes still on local storage with the command that moves each one. The platform's own volumes stay on local storage. Run it again to continue after an interruption. See [Grow in place](/en/nano#grow-in-place).
+
+### kip cluster storage prune {#kip-cluster-storage-prune}
+
+Deletes the local copies that [`kip service storage longhorn`](#kip-service-storage-longhorn) kept after a move.
+
+```bash
+kip cluster storage prune [--yes] [--ssh-key <path>]
+```
+
+It lists each kept copy with its service, size and age, asks once, and deletes only copies whose service still has its data on the Longhorn volume the move verified, or whose service was deleted. It checks again right before deleting each copy. Copies of unfinished moves, and of services that lost or replaced their data volume, are kept. `--yes` skips the question.
+
 ## kip node add {#kip-node-add}
 
 A cluster starts with one server. `kip node add` joins workers that add CPU and memory for apps, functions, jobs and services. The server remains the only control plane and ingress node, so the cluster still depends on it for availability.
@@ -951,7 +973,25 @@ See [Stateful Services](/en/services) for full documentation.
 
 ### kip service start {#kip-service-start}
 
-Starts a service that [`kip node fence`](#kip-node-fence) stopped. The service starts at once when every one of its volumes has a current copy on a node that is not fenced. A rejoined worker's copies count too. When its copies may be older than the data on the fenced worker, kip shows each copy with its timestamps and asks whether to start on them, or accepts `--accept-stale-data` as confirmation. Writes made since those copies were current are lost. A service whose only copy is on the fenced worker starts after the worker rejoins. Once its volumes no longer exist, for example after the worker was removed, kip says how to restore it from a backup taken before the fence and, on a terminal, offers to clear the fence's stop mark. The service stays stopped either way. The command takes `--project`, `--environment` and `--ssh-key`, and without `--project` or `--environment` it finds the service by name across the cluster. It holds the node lifecycle lease, so it never runs alongside a fence or a rejoin.
+Starts a service that [`kip node fence`](#kip-node-fence) stopped. The service starts at once when every one of its volumes has a current copy on a node that is not fenced. A rejoined worker's copies count too. When its copies may be older than the data on the fenced worker, kip shows each copy with its timestamps and asks whether to start on them, or accepts `--accept-stale-data` as confirmation. Writes made since those copies were current are lost. A service whose only copy is on the fenced worker starts after the worker rejoins. Once its volumes no longer exist, for example after the worker was removed, kip says how to restore it from a backup taken before the fence and, on a terminal, offers to clear the fence's stop mark. The service stays stopped either way. The command takes `--project`, `--environment` and `--ssh-key`, and without `--project` or `--environment` it finds the service by name across the cluster. It holds the node lifecycle lease, so it never runs alongside a fence or a rejoin. It refuses a service whose move to Longhorn is unfinished and names the command that finishes it.
+
+### kip service storage longhorn {#kip-service-storage-longhorn}
+
+Moves a service's data volume from local storage onto a single-copy Longhorn volume, on a cluster that [`kip cluster storage longhorn`](#kip-cluster-storage-longhorn) switched to Longhorn.
+
+```bash
+kip service storage longhorn <name> [--project <project>] [--environment <env>] [--no-backup] [--rollback] [--yes] [--ssh-key <path>]
+```
+
+The service is stopped for the whole copy. kip keeps every other pod off the volume, copies the data into a new Longhorn volume at least as large as the declared size and the data, compares every file, and starts the service on the new volume. The copy pod may use up to 1 GiB of memory. A file or directory name containing a line break stops the copy before anything is copied, because the comparison cannot represent it. A database dump volume is recreated empty on Longhorn. The old local directory is kept until [`kip cluster storage prune`](#kip-cluster-storage-prune).
+
+- **Backups:** on a cluster with backups, a completed backup covering the service's project is required, and no backup, restore or migration transfer may be running. On a cluster without backups, `--no-backup` moves the service anyway.
+- **Room:** the Longhorn volume must fit on the server. kip checks this before stopping the service, and again once the service has stopped if it wrote more data in between.
+- **Interruptions:** run the command again and it continues from the step it reached, after checking again that the service is stopped and other pods are kept off its volume. A verified copy is kept unless another pod mounted the new volume or its protection was lifted in the meantime. In either case, kip copies the data again. Until the move commits, just before the service starts on Longhorn, `--rollback` undoes it and starts the service on its local volume. After the commit the move can only be finished. If the move record is missing, `--rollback` rebuilds it from the remaining volumes.
+- **Deleting:** `kip service delete` and project deletion are blocked while the move is unfinished.
+- **Confirmation:** the command asks before it stops the service. `--yes` skips the question, and without a terminal it is required.
+
+Without `--project` or `--environment`, it finds the service by name across the cluster. It holds the node lifecycle lease.
 
 ## kip project {#kip-project}
 

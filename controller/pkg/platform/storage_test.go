@@ -31,6 +31,7 @@ func TestSharedVolumesNeedLonghorn(t *testing.T) {
 	assert.True(t, SupportsSharedVolumes(""))
 	assert.Contains(t, SharedVolumesUnsupported, "local storage")
 	assert.Contains(t, SharedVolumesUnsupported, "Longhorn")
+	assert.Contains(t, SharedVolumesUnsupported, "kip cluster storage longhorn")
 }
 
 func TestInstalledFollowsProfileOverridesAndStorage(t *testing.T) {

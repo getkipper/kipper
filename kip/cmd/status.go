@@ -96,6 +96,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	} else {
 		reportStorageRestartCoverage(nodes)
 		reportServerStorageRoom(ctx, os.Stdout, &service.Manager{Client: client.Clientset(), Dynamic: client.Dynamic()})
+		reportLocalVolumes(ctx, os.Stdout, client.Clientset(), client.Dynamic())
 	}
 	reportAlertDelivery(ctx, client)
 	state, err := doctor.ReadBackupsViaAPI(ctx, client.Dynamic())

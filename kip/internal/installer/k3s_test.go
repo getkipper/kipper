@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/yaml"
 )
 
 func TestDefaultDNSResolvers(t *testing.T) {
@@ -135,6 +137,21 @@ func TestK3sConfigPointsCoreDNSAtCuratedResolvConf(t *testing.T) {
 	assert.Contains(t, rendered, "resolv-conf: "+k3sResolvConfPath)
 	assert.True(t, strings.Contains(rendered, "disable:\n  - traefik"),
 		"traefik must still be disabled")
+}
+
+// Growing a local-storage cluster onto Longhorn leaves every platform volume
+// and the retained service copies on local-path, so k3s must keep running its
+// provisioner on every cluster.
+func TestK3sConfigKeepsTheLocalPathProvisioner(t *testing.T) {
+	for _, backend := range []string{wireguardBackend, "vxlan"} {
+		rendered := renderK3sConfig("myserver.example.com", backend, "")
+		var config struct {
+			Disable []string `json:"disable"`
+		}
+		require.NoError(t, yaml.Unmarshal([]byte(rendered), &config))
+		assert.NotContains(t, config.Disable, "local-storage")
+		assert.NotContains(t, rendered, "local-storage")
+	}
 }
 
 func TestK3sConfigEnablesProtectKernelDefaults(t *testing.T) {

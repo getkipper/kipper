@@ -1,0 +1,68 @@
+# During a service storage move, pod creation is allowed to mount claims in
+# the namespace's kipper.run/storage-move-claims annotation only when an admin
+# creates a pod named with the kipper-move-copy- prefix. Only admins can create
+# or change these copy pods, exec into them, attach to them or add debug
+# containers. This lets kip trust their names together with its own checks.
+# The selector limits this policy to labelled namespaces. Project roles cannot
+# write namespaces, so they cannot remove this protection.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kipper-storage-move-pods
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kipper.run/storage-move: "true"
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CONNECT"]
+        resources: ["pods/exec", "pods/attach"]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["pods/ephemeralcontainers"]
+  variables:
+    - name: podObject
+      expression: "!has(request.subResource) || request.subResource == ''"
+    - name: moving
+      expression: >-
+        namespaceObject != null && has(namespaceObject.metadata.annotations) &&
+        'kipper.run/storage-move-claims' in namespaceObject.metadata.annotations
+        ? namespaceObject.metadata.annotations['kipper.run/storage-move-claims'].split(',')
+        : []
+    - name: mounted
+      expression: >-
+        variables.podObject && request.operation == 'CREATE' && has(object.spec.volumes)
+        ? object.spec.volumes.filter(v, has(v.persistentVolumeClaim)).map(v, v.persistentVolumeClaim.claimName)
+        : []
+    - name: copyNamed
+      expression: >-
+        variables.podObject
+        ? has(object.metadata.name) && object.metadata.name.startsWith('kipper-move-copy-')
+        : request.name.startsWith('kipper-move-copy-')
+    - name: admin
+      expression: "authorizer.group('kipper.run').resource('platformconfigs').name('platform').check('update').allowed()"
+  validations:
+    - expression: "!variables.copyNamed || variables.admin"
+      message: "Pods named kipper-move-copy- belong to 'kip service storage longhorn' while it moves a volume in this namespace. Only an admin can create, change or open them."
+    - expression: "!variables.mounted.exists(c, c in variables.moving) || (variables.copyNamed && variables.admin)"
+      message: "This volume is moving to Longhorn. Pods can mount it again once 'kip service storage longhorn' finishes or rolls back the move."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kipper-storage-move-pods
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  policyName: kipper-storage-move-pods
+  validationActions: ["Deny"]

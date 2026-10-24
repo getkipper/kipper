@@ -30,7 +30,8 @@ const (
 	StorageCopiesPending = "Pending"
 	// StorageCopiesUnknown: fewer healthy copies than wanted, and the nodes of
 	// some copies could not be read.
-	StorageCopiesUnknown = "Unknown"
+	StorageCopiesUnknown    = "Unknown"
+	StorageCopiesConverting = "Converting"
 )
 
 // StorageCopiesStatus reports a claim's configured replica count and healthy

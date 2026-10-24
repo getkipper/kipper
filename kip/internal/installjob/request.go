@@ -43,6 +43,7 @@ type Request struct {
 	TrustedProxies      []string        `json:"trusted_proxies,omitempty"`
 	Profile             string          `json:"profile,omitempty"`
 	Storage             string          `json:"storage,omitempty"`
+	SkipMemoryFloor     bool            `json:"skip_memory_floor,omitempty"`
 	Backup              *Backup         `json:"backup,omitempty"`
 	Entry               *config.Cluster `json:"entry,omitempty"`
 	BackupRepositoryKey string          `json:"backup_repository_key,omitempty"`
@@ -108,6 +109,7 @@ func (r Request) Options() installer.Options {
 		TrustedProxies:   r.TrustedProxies,
 		Profile:          r.Profile,
 		Storage:          r.Storage,
+		SkipMemoryFloor:  r.SkipMemoryFloor,
 	}
 	if r.BackupRepositoryKey != "" {
 		opts.BackupRepositoryKey = []byte(r.BackupRepositoryKey)

@@ -236,7 +236,7 @@ func TestResolveStorage(t *testing.T) {
 		"a legacy nano cluster stays on longhorn":          {"", ProfileNano, "", true, false, StorageLonghorn, ""},
 		"repeating the recorded mode is fine":              {StorageLonghorn, ProfileSmall, StorageLonghorn, true, false, StorageLonghorn, ""},
 		"switching a legacy cluster to local is refused":   {StorageLocal, ProfileNano, "", true, false, "", "runs longhorn storage"},
-		"switching a local cluster to longhorn is refused": {StorageLonghorn, ProfileNano, StorageLocal, true, false, "", "Cluster Migration"},
+		"switching a local cluster to longhorn is refused": {StorageLonghorn, ProfileNano, StorageLocal, true, false, "", "kip cluster storage longhorn"},
 		"an unreadable cluster stays on longhorn":          {"", ProfileNano, "", true, true, StorageLonghorn, ""},
 		"local on an unreadable cluster is refused":        {StorageLocal, ProfileNano, "", true, true, "", "could not be read"},
 	} {

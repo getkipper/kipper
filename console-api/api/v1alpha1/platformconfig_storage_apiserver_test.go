@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,15 +70,26 @@ func TestPlatformConfigStorageSchema(t *testing.T) {
 		}
 	})
 
-	t.Run("a recorded mode never changes or disappears", func(t *testing.T) {
+	t.Run("local storage can grow onto longhorn", func(t *testing.T) {
+		pc := create(t, "grown-local", "local")
+		if err := update(pc, "longhorn"); err != nil {
+			t.Fatalf("growing local storage onto longhorn: %v", err)
+		}
+	})
+
+	t.Run("longhorn never goes back to local", func(t *testing.T) {
+		pc := create(t, "longhorn-back", "longhorn")
+		err := update(pc, "local")
+		if err == nil {
+			t.Fatal("a longhorn cluster was switched to local storage")
+		}
+		if !strings.Contains(err.Error(), "kip cluster storage longhorn") {
+			t.Fatalf("the refusal does not name the growth command: %v", err)
+		}
+	})
+
+	t.Run("a recorded mode never disappears", func(t *testing.T) {
 		local := create(t, "recorded-local", "local")
-		if err := update(local, "longhorn"); err == nil {
-			t.Fatal("local storage was switched to longhorn")
-		}
-		local = &PlatformConfig{}
-		if err := c.Get(ctx, crclient.ObjectKey{Name: "recorded-local"}, local); err != nil {
-			t.Fatal(err)
-		}
 		if err := update(local, ""); err == nil {
 			t.Fatal("the recorded mode was removed, which would read as longhorn")
 		}

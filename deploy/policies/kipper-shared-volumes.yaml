@@ -27,7 +27,7 @@ spec:
       expression: "has(params.spec) && has(params.spec.storage) && params.spec.storage == 'local'"
   validations:
     - expression: "!variables.local || (request.resource.resource != 'volumes' && (!has(object.spec) || !has(object.spec.volumes) || size(object.spec.volumes) == 0))"
-      message: "This cluster uses local storage. Shared volumes (ReadWriteMany) require Longhorn. See Cluster Migration in the Kipper docs to move to a cluster with Longhorn storage."
+      message: "This cluster uses local storage. Shared volumes (ReadWriteMany) require Longhorn. An admin can switch the cluster to Longhorn with 'kip cluster storage longhorn'."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
