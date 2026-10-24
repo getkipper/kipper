@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,7 +49,8 @@ func longhornVolume(name, namespace, claim string, replicas int64) *unstructured
 
 func longhornReplica(name, volume, node, healthyAt, failedAt string) *unstructured.Unstructured {
 	u := longhornObject("Replica", name, map[string]interface{}{
-		"spec": map[string]interface{}{"nodeID": node, "healthyAt": healthyAt, "failedAt": failedAt, "volumeName": volume},
+		"spec":   map[string]interface{}{"nodeID": node, "healthyAt": healthyAt, "failedAt": failedAt, "volumeName": volume},
+		"status": map[string]interface{}{"currentState": "running"},
 	})
 	u.SetLabels(map[string]string{"longhornvolume": volume})
 	return u
@@ -70,7 +72,8 @@ func kubeNode(name string, ready corev1.ConditionStatus, taints ...corev1.Taint)
 	return &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec:       corev1.NodeSpec{Taints: taints},
-		Status:     corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: ready}}},
+		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: ready,
+			LastTransitionTime: metav1.NewTime(convNow.Add(-time.Hour))}}},
 	}
 }
 
@@ -89,18 +92,18 @@ func testMapper(withLonghorn bool) meta.RESTMapper {
 		{Version: "v1", Kind: "PersistentVolumeClaim"}, {Version: "v1", Kind: "Pod"}, {Version: "v1", Kind: "Secret"},
 		{Version: "v1", Kind: "ConfigMap"}, {Version: "v1", Kind: "Service"}, {Group: "apps", Version: "v1", Kind: "StatefulSet"},
 		{Group: "kipper.run", Version: "v1alpha1", Kind: "Service"}, {Group: "kipper.run", Version: "v1alpha1", Kind: "Volume"},
-		{Group: "kipper.run", Version: "v1alpha1", Kind: "App"},
+		{Group: "kipper.run", Version: "v1alpha1", Kind: "App"}, {Group: "coordination.k8s.io", Version: "v1", Kind: "Lease"},
 	} {
 		mapper.Add(gvk, meta.RESTScopeNamespace)
 	}
 	for _, gvk := range []schema.GroupVersionKind{
-		{Version: "v1", Kind: "Node"}, {Group: "kipper.run", Version: "v1alpha1", Kind: "PlatformConfig"},
+		{Version: "v1", Kind: "Node"}, {Version: "v1", Kind: "Namespace"}, {Group: "kipper.run", Version: "v1alpha1", Kind: "PlatformConfig"},
 		{Group: "kipper.run", Version: "v1alpha1", Kind: "Project"},
 	} {
 		mapper.Add(gvk, meta.RESTScopeRoot)
 	}
 	if withLonghorn {
-		for _, kind := range []string{"Node", "Volume", "Replica"} {
+		for _, kind := range []string{"Node", "Volume", "Replica", "Engine", "Setting", "VolumeAttachment"} {
 			mapper.Add(schema.GroupVersionKind{Group: "longhorn.io", Version: "v1beta2", Kind: kind}, meta.RESTScopeNamespace)
 		}
 	}
@@ -224,6 +227,68 @@ func TestASalvagedReplicaIsNotACurrentCopy(t *testing.T) {
 	assert.Equal(t, liveCopies{Copies: 2, Healthy: 1, Nodes: []string{"server-1"}}, *live)
 }
 
+// Longhorn moves only lastHealthyAt when a salvaged copy serves writes again,
+// so a copy that served writes after recovering counts as healthy whether
+// attached or detached. Conversion also checks for copies that may hold newer writes.
+func TestASalvagedCopyThatServedAgainIsHealthy(t *testing.T) {
+	for _, state := range []string{"attached", "detached"} {
+		t.Run(state, func(t *testing.T) {
+			volume := longhornVolume("pvc-1", "shop", "data-db-0", 1)
+			_ = unstructured.SetNestedField(volume.Object, state, "status", "state")
+			keeper := salvaged(longhornReplica("r1", "pvc-1", "server-1", "2026-10-25T09:22:11Z", ""), "2026-10-25T09:54:36Z")
+			_ = unstructured.SetNestedField(keeper.Object, "2026-10-25T09:54:46Z", "spec", "lastHealthyAt")
+			c := longhornClient(volume, keeper, kubeNode("server-1", corev1.ConditionTrue))
+
+			live, err := readLiveCopies(context.Background(), c, boundClaim("shop", "longhorn-single", "pvc-1"))
+
+			require.NoError(t, err)
+			require.NotNil(t, live)
+			assert.Equal(t, liveCopies{Copies: 1, Healthy: 1, Nodes: []string{"server-1"}}, *live)
+		})
+	}
+}
+
+// A detached volume that no pod has mounted yet holds no data, so its copies
+// are complete, and its copies condition settles.
+func TestACopyOfAVolumeNeverAttachedIsHealthy(t *testing.T) {
+	c := longhornClient(
+		detached(longhornVolume("pvc-1", "shop", "data-db-0", 1)),
+		longhornReplica("r1", "pvc-1", "server-1", "", ""),
+		kubeNode("server-1", corev1.ConditionTrue),
+	)
+
+	live, err := readLiveCopies(context.Background(), c, boundClaim("shop", "longhorn-single", "pvc-1"))
+
+	require.NoError(t, err)
+	require.NotNil(t, live)
+	assert.Equal(t, liveCopies{Copies: 1, Healthy: 1, Nodes: []string{"server-1"}}, *live)
+	assert.Equal(t, metav1.ConditionTrue, copiesCondition(ptr.To(int32(1)), live, "kip volume update db --copies 1").Status)
+}
+
+// Only a volume created empty counts its unmarked copies. A replica Longhorn
+// reuses for a rebuild keeps its failure history, and a volume restored from a
+// backup has no data in its copies until the restore completes.
+func TestAnUnmarkedCopyOfAVolumeThatHadOrAwaitsDataIsNotHealthy(t *testing.T) {
+	reused := longhornReplica("r1", "pvc-1", "server-1", "", "")
+	_ = unstructured.SetNestedField(reused.Object, "2026-10-24T02:00:00Z", "spec", "lastFailedAt")
+	_ = unstructured.SetNestedField(reused.Object, "2026-10-24T01:00:00Z", "spec", "lastHealthyAt")
+	restoring := detached(longhornVolume("pvc-1", "shop", "data-db-0", 1))
+	_ = unstructured.SetNestedField(restoring.Object, "s3://backups@example/?backup=backup-1&volume=pvc-0", "spec", "fromBackup")
+	_ = unstructured.SetNestedField(restoring.Object, true, "status", "restoreRequired")
+	for name, objs := range map[string][]crclient.Object{
+		"reused for a rebuild": {detached(longhornVolume("pvc-1", "shop", "data-db-0", 1)), reused},
+		"restore pending":      {restoring, longhornReplica("r1", "pvc-1", "server-1", "", "")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := longhornClient(append(objs, kubeNode("server-1", corev1.ConditionTrue))...)
+			live, err := readLiveCopies(context.Background(), c, boundClaim("shop", "longhorn-single", "pvc-1"))
+			require.NoError(t, err)
+			require.NotNil(t, live)
+			assert.Equal(t, liveCopies{Copies: 1}, *live)
+		})
+	}
+}
+
 func TestTwoReplicasOnOneNodeAreOneCopy(t *testing.T) {
 	c := longhornClient(
 		longhornVolume("pvc-1", "shop", "data-db-0", 2),
@@ -289,11 +354,11 @@ func TestLiveCopiesOfALocalPathClaimIsOneCopy(t *testing.T) {
 	assert.Equal(t, liveCopies{Copies: 1, Healthy: 1}, *live)
 }
 
-func TestUnsetCopiesAboveWhatKipperSetsOfferNoCommand(t *testing.T) {
+func TestUnsetCopiesAboveWhatKipperSetsAreKeptUntilCopiesAreSet(t *testing.T) {
 	c := copiesCondition(nil, &liveCopies{Copies: 3, Healthy: 3}, "kip volume update files --copies 1|2")
 	assert.Equal(t, kipperv1.StorageCopiesNotSet, c.Reason)
 	assert.Contains(t, c.Message, "Longhorn keeps 3 copies (3 healthy), more than Kipper sets")
-	assert.NotContains(t, c.Message, "kip volume update", "no value the command takes would match the volume")
+	assert.Contains(t, c.Message, "'kip volume update files --copies 1|2' converts it", "setting copies converts a three-copy volume")
 }
 
 func TestCopiesCondition(t *testing.T) {
@@ -306,13 +371,13 @@ func TestCopiesCondition(t *testing.T) {
 		reason string
 		says   string
 	}{
-		"unset reports the live copies":    {nil, &liveCopies{Copies: 2, Healthy: 1}, metav1.ConditionUnknown, kipperv1.StorageCopiesNotSet, "Longhorn keeps 2 copies (1 healthy). Set them with 'kip service update db"},
-		"unset and not provisioned":        {nil, nil, metav1.ConditionUnknown, kipperv1.StorageCopiesNotSet, "kip service update db --copies"},
-		"not provisioned yet":              {two, nil, metav1.ConditionUnknown, kipperv1.StorageCopiesPending, "not provisioned"},
-		"healthy":                          {two, &liveCopies{Copies: 2, Healthy: 2}, metav1.ConditionTrue, kipperv1.StorageCopiesHealthy, "2 of 2"},
-		"degraded":                         {two, &liveCopies{Copies: 2, Healthy: 1}, metav1.ConditionFalse, kipperv1.StorageCopiesDegraded, "1 of 2"},
-		"a changed value is not converted": {two, &liveCopies{Copies: 1, Healthy: 1}, metav1.ConditionFalse, kipperv1.StorageCopiesConversionPending, "keeps 1"},
-		"one copy":                         {one, &liveCopies{Copies: 1, Healthy: 1}, metav1.ConditionTrue, kipperv1.StorageCopiesHealthy, "1 of 1"},
+		"unset reports the live copies":     {nil, &liveCopies{Copies: 2, Healthy: 1}, metav1.ConditionUnknown, kipperv1.StorageCopiesNotSet, "Longhorn keeps 2 copies (1 healthy). Set them with 'kip service update db"},
+		"unset and not provisioned":         {nil, nil, metav1.ConditionUnknown, kipperv1.StorageCopiesNotSet, "kip service update db --copies"},
+		"not provisioned yet":               {two, nil, metav1.ConditionUnknown, kipperv1.StorageCopiesPending, "not provisioned"},
+		"healthy":                           {two, &liveCopies{Copies: 2, Healthy: 2}, metav1.ConditionTrue, kipperv1.StorageCopiesHealthy, "2 of 2"},
+		"degraded":                          {two, &liveCopies{Copies: 2, Healthy: 1}, metav1.ConditionFalse, kipperv1.StorageCopiesDegraded, "1 of 2"},
+		"a changed value not converted yet": {two, &liveCopies{Copies: 1, Healthy: 1}, metav1.ConditionFalse, kipperv1.StorageCopiesConversionPending, "and the volume has 1"},
+		"one copy":                          {one, &liveCopies{Copies: 1, Healthy: 1}, metav1.ConditionTrue, kipperv1.StorageCopiesHealthy, "1 of 1"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := copiesCondition(tc.wanted, tc.live, "kip service update db --copies 1|2")
@@ -322,4 +387,20 @@ func TestCopiesCondition(t *testing.T) {
 			assert.Contains(t, c.Message, tc.says)
 		})
 	}
+}
+
+func TestUnsetCopiesNameOneCopyInTheSingular(t *testing.T) {
+	c := copiesCondition(nil, &liveCopies{Copies: 1, Healthy: 1}, "kip service update db --copies 1|2")
+	assert.Contains(t, c.Message, "Longhorn keeps 1 copy (1 healthy).")
+	c = copiesCondition(nil, &liveCopies{Copies: 2, Healthy: 1}, "kip service update db --copies 1|2")
+	assert.Contains(t, c.Message, "Longhorn keeps 2 copies (1 healthy).")
+}
+
+// Extra healthy copies, such as a server copy kept after cancellation, count
+// as healthy and appear in the status message.
+func TestMoreHealthyCopiesThanSetAreHealthy(t *testing.T) {
+	cond := copiesCondition(ptr.To(int32(2)), &liveCopies{Copies: 2, Healthy: 3}, "kip service update db --copies 1|2")
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, kipperv1.StorageCopiesHealthy, cond.Reason)
+	assert.Equal(t, "3 copies are healthy, more than the 2 set.", cond.Message)
 }

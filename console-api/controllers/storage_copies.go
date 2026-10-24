@@ -17,8 +17,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
@@ -26,10 +28,13 @@ import (
 // registered for a kind a local-path cluster does not serve.
 const longhornNamespace = "longhorn-system"
 
-// Storage status is refreshed on a timer because nothing watches Longhorn.
+// Storage status is refreshed on a timer because nothing watches Longhorn. A
+// running or pending conversion is read every 10 seconds, so the steps of a
+// stopped service follow each other quickly.
 const (
-	storageRefreshUnsettled = time.Minute
-	storageRefreshSettled   = 5 * time.Minute
+	storageRefreshConverting = 10 * time.Second
+	storageRefreshUnsettled  = time.Minute
+	storageRefreshSettled    = 5 * time.Minute
 )
 
 var (
@@ -103,14 +108,28 @@ func CopiesCapacity(ctx context.Context, reader client.Reader) (offered int32, n
 }
 
 func longhornConditionTrue(obj unstructured.Unstructured, kind string) bool {
+	return longhornCondition(obj, kind).ok
+}
+
+// lhCondition represents a Longhorn condition. A missing condition has the
+// zero value. ok is true only when the condition status is True.
+type lhCondition struct {
+	ok         bool
+	reason     string
+	transition string
+}
+
+func longhornCondition(obj unstructured.Unstructured, kind string) lhCondition {
 	conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	for _, c := range conditions {
 		m, _ := c.(map[string]interface{})
 		if m["type"] == kind {
-			return m["status"] == "True"
+			reason, _ := m["reason"].(string)
+			transition, _ := m["lastTransitionTime"].(string)
+			return lhCondition{ok: m["status"] == "True", reason: reason, transition: transition}
 		}
 	}
-	return false
+	return lhCondition{}
 }
 
 // holderState is what readLiveCopies knows about a replica holder's node.
@@ -139,8 +158,8 @@ func readHolder(ctx context.Context, reader client.Reader, name string) holderSt
 }
 
 // readLiveCopies reads the replica count configured on pvc's Longhorn volume
-// and counts distinct Ready, unfenced nodes holding a current replica, as
-// defined by platform.ReplicaCurrent. Missing nodes are unavailable. Other node
+// and counts distinct Ready, unfenced nodes holding a healthy copy, as
+// defined by platform.HealthyCopies. Missing nodes are unavailable. Other node
 // read failures count as Unknown. Healthy holders are sorted by name.
 // The volume name comes from the claim.
 // It returns nil for an unbound claim, missing Longhorn resources, a mismatched
@@ -182,13 +201,16 @@ func readLiveCopies(ctx context.Context, reader client.Reader, pvc *corev1.Persi
 		return nil, fmt.Errorf("listing replicas of Longhorn volume %s: %w", name, err)
 	}
 	live := &liveCopies{Copies: int32(wanted)}
+	markers := make([]platform.CopyMarkers, len(replicas.Items))
+	for i := range replicas.Items {
+		r := replicaFrom(&replicas.Items[i])
+		markers[i] = platform.CopyMarkers{HealthyAt: r.HealthyAt, FailedAt: r.FailedAt, LastFailedAt: r.LastFailedAt, LastHealthyAt: r.LastHealthyAt}
+	}
+	healthy := platform.HealthyCopies(platform.CopyVolumeOf(volume.Object), markers)
 	holders := map[string]holderState{}
-	for _, r := range replicas.Items {
-		healthyAt, _, _ := unstructured.NestedString(r.Object, "spec", "healthyAt")
-		failedAt, _, _ := unstructured.NestedString(r.Object, "spec", "failedAt")
-		lastFailedAt, _, _ := unstructured.NestedString(r.Object, "spec", "lastFailedAt")
+	for i, r := range replicas.Items {
 		node, _, _ := unstructured.NestedString(r.Object, "spec", "nodeID")
-		if node == "" || !platform.ReplicaCurrent(healthyAt, failedAt, lastFailedAt) {
+		if node == "" || !healthy[i] {
 			continue
 		}
 		if _, seen := holders[node]; seen {
@@ -219,22 +241,25 @@ func copiesCondition(wanted *int32, live *liveCopies, setCommand string) metav1.
 		c.Message = fmt.Sprintf("Copies are not set, so Kipper leaves this volume as it is. Set them with '%s'.", setCommand)
 	case wanted == nil && live.Copies > platform.MaxCopies:
 		c.Status, c.Reason = metav1.ConditionUnknown, kipperv1.StorageCopiesNotSet
-		c.Message = fmt.Sprintf("Copies are not set, so Kipper leaves this volume unchanged. Longhorn keeps %d copies (%d healthy), more than Kipper sets. Copies stay unset until changing the count is available.", live.Copies, live.Healthy)
+		c.Message = fmt.Sprintf("Copies are not set, so Kipper leaves this volume as it is: Longhorn keeps %d %s (%d healthy), more than Kipper sets. Setting copies with '%s' converts it to that count.", live.Copies, pluralCopies(live.Copies), live.Healthy, setCommand)
 	case wanted == nil:
 		c.Status, c.Reason = metav1.ConditionUnknown, kipperv1.StorageCopiesNotSet
-		c.Message = fmt.Sprintf("Copies are not set, so Kipper leaves this volume as it is: Longhorn keeps %d copies (%d healthy). Set them with '%s'.", live.Copies, live.Healthy, setCommand)
+		c.Message = fmt.Sprintf("Copies are not set, so Kipper leaves this volume as it is: Longhorn keeps %d %s (%d healthy). Set them with '%s'.", live.Copies, pluralCopies(live.Copies), live.Healthy, setCommand)
 	case live == nil:
 		c.Status, c.Reason = metav1.ConditionUnknown, kipperv1.StorageCopiesPending
 		c.Message = "The volume is not provisioned yet."
 	case live.Copies != *wanted:
 		c.Status, c.Reason = metav1.ConditionFalse, kipperv1.StorageCopiesConversionPending
-		c.Message = fmt.Sprintf("The copy count is set to %d, but the volume has %d. Changing the copies of an existing volume is not available yet, so it keeps %d.", *wanted, live.Copies, live.Copies)
+		c.Message = fmt.Sprintf("The copy count is set to %d, and the volume has %d. Kipper converts it once the volume can be read.", *wanted, live.Copies)
 	case live.Healthy < *wanted && live.Unknown > 0:
 		c.Status, c.Reason = metav1.ConditionUnknown, kipperv1.StorageCopiesUnknown
 		c.Message = fmt.Sprintf("%d of %d copies are healthy, and Kipper could not read node information for %d %s.", live.Healthy, *wanted, live.Unknown, pluralCopies(live.Unknown))
 	case live.Healthy < *wanted:
 		c.Status, c.Reason = metav1.ConditionFalse, kipperv1.StorageCopiesDegraded
 		c.Message = fmt.Sprintf("%d of %d copies are healthy. Longhorn rebuilds a missing copy when a node that can hold it is available.", live.Healthy, *wanted)
+	case live.Healthy > *wanted:
+		c.Status, c.Reason = metav1.ConditionTrue, kipperv1.StorageCopiesHealthy
+		c.Message = fmt.Sprintf("%d copies are healthy, more than the %d set.", live.Healthy, *wanted)
 	default:
 		c.Status, c.Reason = metav1.ConditionTrue, kipperv1.StorageCopiesHealthy
 		c.Message = fmt.Sprintf("%d of %d copies are healthy.", live.Healthy, *wanted)
@@ -256,12 +281,32 @@ func storageStatus(pvc *corev1.PersistentVolumeClaim, live *liveCopies) *kipperv
 }
 
 // storageRefresh polls healthy and unset storage less often to reduce API
-// reads. The requested count stays unset until someone sets it.
+// reads and a running or pending conversion more often because it takes one
+// step per reconcile. A conversion blocked by pods that use the volume, or
+// blocked while it keeps a service stopped, is polled just as often because
+// these controllers do not watch the pods or Longhorn. Message markers identify
+// these blocks.
 func storageRefresh(c *metav1.Condition) time.Duration {
-	if c != nil && (c.Status == metav1.ConditionTrue || c.Reason == kipperv1.StorageCopiesNotSet) {
+	switch {
+	case c != nil && (c.Status == metav1.ConditionTrue || c.Reason == kipperv1.StorageCopiesNotSet):
 		return storageRefreshSettled
+	case c != nil && c.Reason == kipperv1.StorageCopiesBlocked && (strings.Contains(c.Message, inUseMarker) || strings.Contains(c.Message, stoppedMarker)):
+		return storageRefreshConverting
+	case c != nil && (c.Reason == kipperv1.StorageCopiesConverting || c.Reason == kipperv1.StorageCopiesConversionPending):
+		return storageRefreshConverting
 	}
 	return storageRefreshUnsettled
+}
+
+// storageRequeue is how soon the storage status of an object with conditions
+// is read again. A shared volume whose backup holder is stopped for a copy
+// change is read every 10 seconds.
+func storageRequeue(conditions []metav1.Condition) time.Duration {
+	holder := apimeta.FindStatusCondition(conditions, conditionBackupHolderReady)
+	if holder != nil && holder.Reason == holderStoppedForCopyChange {
+		return storageRefreshConverting
+	}
+	return storageRefresh(apimeta.FindStatusCondition(conditions, kipperv1.ConditionStorageCopies))
 }
 
 // projectRequeue is how soon a project is reconciled again: the egress
@@ -375,13 +420,65 @@ func (r *ServiceReconciler) reportStorageCopies(ctx context.Context, svc *kipper
 		}
 		return err
 	}
+	var converted *metav1.Condition
+	commands := serviceStorageCommands(svc.Name)
+	if r.ownsDataClaim(ctx, svc, &pvc) {
+		var err error
+		sc := storageConverter{Reader: r.longhornReader(), Writer: r.Client, Commands: commands, StatefulSet: svc.Name}
+		if converted, err = sc.convertOrBlock(ctx, &pvc, svc.Spec.Copies); err != nil {
+			return err
+		}
+	}
 	live, err := readLiveCopies(ctx, r.longhornReader(), &pvc)
 	if err != nil {
-		return err
+		return reportConversionOnly(ctx, &svc.Status.Conditions, converted, svc.Generation, err)
 	}
 	svc.Status.Storage = storageStatus(&pvc, live)
-	setCopiesCondition(&svc.Status.Conditions, copiesCondition(svc.Spec.Copies, live, "kip service update "+svc.Name+" --copies 1|2"), svc.Generation)
+	setCopiesCondition(&svc.Status.Conditions, orConverted(converted, copiesCondition(svc.Spec.Copies, live, "kip service update "+svc.Name+" --copies 1|2")), svc.Generation)
 	return nil
+}
+
+// ownsDataClaim reports whether pvc is svc's data claim: the StatefulSet named
+// after svc is controlled by svc, and the claim is controlled by that
+// StatefulSet or has no controller and carries an app label matching svc's
+// name. Only owned claims are converted. Other claims are only reported.
+func (r *ServiceReconciler) ownsDataClaim(ctx context.Context, svc *kipperv1.Service, pvc *corev1.PersistentVolumeClaim) bool {
+	var sts appsv1.StatefulSet
+	if err := r.Get(ctx, types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}, &sts); err != nil {
+		return false
+	}
+	ref := metav1.GetControllerOf(&sts)
+	if ref == nil {
+		return false
+	}
+	if owned, _ := controllerRefNames(ref, svc, "Service"); !owned {
+		return false
+	}
+	if claimRef := metav1.GetControllerOf(pvc); claimRef != nil {
+		return claimRef.Kind == "StatefulSet" && claimRef.Name == sts.Name && claimRef.UID == sts.UID
+	}
+	return pvc.Labels["app"] == svc.Name
+}
+
+// reportConversionOnly records converted, logs readErr and returns nil so a
+// Blocked condition can be saved even when live reads fail. The caller retains
+// the previous storage status. If converted is nil, it returns readErr.
+func reportConversionOnly(ctx context.Context, conditions *[]metav1.Condition, converted *metav1.Condition, generation int64, readErr error) error {
+	if converted == nil {
+		return readErr
+	}
+	log.FromContext(ctx).Error(readErr, "Could not read the live storage copies.")
+	setCopiesCondition(conditions, *converted, generation)
+	return nil
+}
+
+// orConverted returns the conversion condition when present, otherwise the
+// live copies condition.
+func orConverted(converted *metav1.Condition, live metav1.Condition) metav1.Condition {
+	if converted != nil {
+		return *converted
+	}
+	return live
 }
 
 // reportStorageGate records why the service's data claim is held back.
@@ -404,19 +501,70 @@ func (r *VolumeReconciler) longhornReader() client.Reader {
 // reportStorageCopies sets the volume's storage status and StorageCopies
 // condition from its shared claim.
 func (r *VolumeReconciler) reportStorageCopies(ctx context.Context, vol *kipperv1.Volume, pvc *corev1.PersistentVolumeClaim) error {
+	var converted *metav1.Condition
+	commands := volumeStorageCommands(vol.Name)
+	if owned, _ := claimProvenance(pvc, vol); owned {
+		var err error
+		sc := storageConverter{Reader: r.longhornReader(), Writer: r.Client, Commands: commands, Holder: volumeHolderName(vol.Name)}
+		if converted, err = convertShared(ctx, sc, pvc, vol.Spec.Copies); err != nil {
+			return err
+		}
+	}
 	live, err := readLiveCopies(ctx, r.longhornReader(), pvc)
 	if err != nil {
-		return err
+		return reportConversionOnly(ctx, &vol.Status.Conditions, converted, vol.Generation, err)
 	}
 	vol.Status.Storage = storageStatus(pvc, live)
-	setCopiesCondition(&vol.Status.Conditions, sharedCopiesCondition(vol.Spec.Copies, live, "kip volume update "+vol.Name+" --copies 1|2"), vol.Generation)
+	setCommand := fmt.Sprintf("kip volume update %s --copies %d", vol.Name, sharedCopiesHint(live))
+	setCopiesCondition(&vol.Status.Conditions, orConverted(converted, sharedCopiesCondition(vol.Spec.Copies, live, setCommand)), vol.Generation)
 	return nil
 }
 
-// sharedCopiesCondition is copiesCondition for a shared claim, which cannot
-// have two copies while RWXCopiesQualified is false.
+// volumeStorageCommands returns the copy-count command for the named shared volume.
+func volumeStorageCommands(name string) storageCommands {
+	return storageCommands{Copies: "kip volume update " + name + " --copies"}
+}
+
+// serviceStorageCommands returns the copy-count command for the named service.
+func serviceStorageCommands(name string) storageCommands {
+	return storageCommands{Copies: "kip service update " + name + " --copies"}
+}
+
+// convertShared starts no conversion when two copies are requested and
+// RWXCopiesQualified is false. A stop recorded on pvc, read past the cache, is
+// then undone, as restore describes, so what the hold changed on the volume is
+// put back before it is let go. Other requests use the normal conversion.
+func convertShared(ctx context.Context, sc storageConverter, pvc *corev1.PersistentVolumeClaim, wanted *int32) (*metav1.Condition, error) {
+	if platform.WantsTwoCopies(wanted) && !platform.RWXCopiesQualified {
+		if err := sc.Reader.Get(ctx, types.NamespacedName{Namespace: pvc.Namespace, Name: pvc.Name}, pvc); err != nil {
+			if errors.IsNotFound(err) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("reading claim %s: %w", pvc.Name, err)
+		}
+		// With the copies unset, a conversion only undoes the stop.
+		return sc.convertOrBlock(ctx, pvc, nil)
+	}
+	return sc.convertOrBlock(ctx, pvc, wanted)
+}
+
+// sharedCopiesCondition reports a shared claim's copy health. While
+// RWXCopiesQualified is false, a request for two copies preserves an existing
+// count of at least two and reports health against the two copies set, naming
+// a higher count Longhorn still asks for. Fewer or unknown copies produce an
+// RWXNotQualified condition.
 func sharedCopiesCondition(wanted *int32, live *liveCopies, setCommand string) metav1.Condition {
 	if platform.WantsTwoCopies(wanted) && !platform.RWXCopiesQualified {
+		if live != nil && live.Copies >= 2 {
+			judged := *live
+			judged.Copies = *wanted
+			c := copiesCondition(wanted, &judged, setCommand)
+			c.Message = "Shared volumes take no new copies in this Kipper release, so Kipper keeps this volume's copies. " + c.Message
+			if live.Copies > *wanted {
+				c.Message += fmt.Sprintf(" Longhorn still asks for %d copies, and Kipper lowers that only while it holds the volume for a change, such as the next one to one copy.", live.Copies)
+			}
+			return c
+		}
 		kept := "its current copies"
 		if live != nil {
 			kept = fmt.Sprintf("%d %s", live.Copies, pluralCopies(live.Copies))
@@ -429,11 +577,35 @@ func sharedCopiesCondition(wanted *int32, live *liveCopies, setCommand string) m
 	return copiesCondition(wanted, live, setCommand)
 }
 
+// sharedCopiesHint returns the live count capped at this release's shared-volume
+// limit, or 1 when the live count is unknown or below 1.
+func sharedCopiesHint(live *liveCopies) int32 {
+	most := int32(1)
+	if platform.RWXCopiesQualified {
+		most = platform.MaxCopies
+	}
+	if live == nil || live.Copies < 1 {
+		return 1
+	}
+	return min(live.Copies, most)
+}
+
 func pluralCopies(n int32) string {
 	if n == 1 {
 		return "copy"
 	}
 	return "copies"
+}
+
+// projectSharedClaim reports whether pvc, read from a namespace the project
+// reconciler resolved as the project's, is the project's shared storage
+// claim: nothing controls it and Kipper labelled it a shared volume, without
+// the volume-name label a Volume's claim carries.
+func projectSharedClaim(pvc *corev1.PersistentVolumeClaim) bool {
+	l := pvc.Labels
+	_, volumeClaim := l[kipperlabels.VolumeName]
+	return metav1.GetControllerOf(pvc) == nil && !volumeClaim && l[kipperLabel] == kipperValue &&
+		l[kipperlabels.ResourceType] == kipperlabels.ResourceTypeSharedVolume
 }
 
 func (r *ProjectReconciler) longhornReader() client.Reader {
@@ -444,10 +616,14 @@ func (r *ProjectReconciler) longhornReader() client.Reader {
 }
 
 // projectCopiesCommand is how an admin records copies on a project's shared
-// storage. No kip command sets them yet.
+// storage.
 func projectCopiesCommand(project string, copies int32) string {
-	// Messages wrap the command in single quotes, so the patch uses double ones.
-	return fmt.Sprintf(`kubectl patch project %s --type merge -p "{\"spec\":{\"sharedStorage\":{\"copies\":%d}}}"`, project, copies)
+	return fmt.Sprintf("kip project update %s --copies %d", project, copies)
+}
+
+// projectStorageCommands returns the copy-count command for a project's shared storage.
+func projectStorageCommands(project string) storageCommands {
+	return storageCommands{Copies: "kip project update " + project + " --copies"}
 }
 
 // envCopies is one environment's shared storage StorageCopies condition.
@@ -457,14 +633,24 @@ type envCopies struct {
 }
 
 // projectCopiesCondition combines a non-empty list of environment conditions.
-// It keeps the first condition with the least healthy status and joins every
-// environment's message in input order.
+// It joins every environment's message in input order and selects the first
+// running conversion so admission can refuse another copy count change, then
+// the first blocked or pending one, so kip can set it back. Otherwise, it
+// selects the first condition with the least healthy status.
 func projectCopiesCondition(envs []envCopies) metav1.Condition {
-	rank := map[metav1.ConditionStatus]int{metav1.ConditionFalse: 0, metav1.ConditionUnknown: 1, metav1.ConditionTrue: 2}
+	rank := func(c metav1.Condition) int {
+		switch c.Reason {
+		case kipperv1.StorageCopiesConverting:
+			return 0
+		case kipperv1.StorageCopiesBlocked, kipperv1.StorageCopiesConversionPending:
+			return 1
+		}
+		return map[metav1.ConditionStatus]int{metav1.ConditionFalse: 2, metav1.ConditionUnknown: 3, metav1.ConditionTrue: 4}[c.Status]
+	}
 	worst := envs[0].cond
 	var messages []string
 	for _, e := range envs {
-		if rank[e.cond.Status] < rank[worst.Status] {
+		if rank(e.cond) < rank(worst) {
 			worst = e.cond
 		}
 		messages = append(messages, e.env+": "+e.cond.Message)

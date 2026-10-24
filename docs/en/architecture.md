@@ -213,6 +213,10 @@ flowchart TD
 
 This pattern applies to all Kipper resource types. The CLI and console API create CRs, and reconcilers handle the native Kubernetes resources. This enables GitOps. You can apply CRs directly with `kubectl apply` or sync them via ArgoCD/Flux.
 
+The reconcilers run in one console-api pod at a time, the one holding the `kipper-console-api-controllers` Lease in `kipper-system`. Every console-api pod serves the API. During a console-api rollout, the old pod finishes the reconciles it has started, then releases the Lease for the new pod. Reconciling pauses during this handover, which normally takes a few seconds. The old pod then allows API requests already in progress to finish for up to 15 seconds. The pod's 60-second termination grace period limits both phases together. A pod that loses the Lease without shutting down restarts to stand for election again.
+
+The leader tolerates brief API server outages, such as the k3s restart during `kip upgrade`, provided it renews the Lease within 40 seconds of its last successful renewal request. Missing this deadline restarts console-api, so that pod's API is unavailable until it returns. If a pod stops without releasing the Lease, for example when it is killed after exhausting its grace period, the next pod waits for the 60-second Lease to expire before taking over. A console-api container that crashes and restarts in the same pod can reacquire its Lease without waiting for expiry, provided no other pod has taken over. The route-name check that admits new app and service UI routes also runs in the leader. While a console-api pod running a different image is still live, as during an upgrade, it waits for that pod to stop, because an earlier release may publish routes without holding the Lease. A new route can therefore stay pending for a few seconds longer than other changes. Pods running the leader's image publish routes only while they hold the Lease, so the new leader can admit routes while those pods remain live.
+
 ## Infrastructure provider interface
 
 Kipper is designed to support multiple infrastructure providers through the `InfraProvider` interface:

@@ -741,3 +741,41 @@ func TestVolumeHolderRestoreWarningIsSavedBeforeThePodGoes(t *testing.T) {
 		})
 	}
 }
+
+// A copy change needs the volume detached, so a claim carrying a copy-change
+// stop has no holder: a running one is removed and none is created. A holder
+// still restoring the volume's files is left to finish.
+func TestVolumeHolderStopsForACopyChange(t *testing.T) {
+	vol := sharedVolume()
+	stopped := func() *corev1.PersistentVolumeClaim {
+		pvc := sharedClaim(vol)
+		pvc.Annotations = map[string]string{platform.CopyChangeStopAnnotation: `{"at":"2026-10-24T11:59:00Z"}`}
+		return pvc
+	}
+	running := buildVolumeHolder(vol)
+	running.OwnerReferences = []metav1.OwnerReference{volumeControllerRef(vol)}
+	running.Status.Phase = corev1.PodRunning
+
+	for name, objs := range map[string][]crclient.Object{
+		"running holder": {vol, stopped(), running},
+		"no holder":      {vol, stopped()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHolderHarness(t, interceptor.Funcs{}, objs...)
+			h.reconcile(t)
+
+			_, ok := h.holder(t)
+			assert.False(t, ok)
+			cond := h.holderCondition(t)
+			require.NotNil(t, cond)
+			assert.Equal(t, "StoppedForCopyChange", cond.Reason)
+		})
+	}
+
+	restoring := restoredHolder()
+	restoring.OwnerReferences = []metav1.OwnerReference{volumeControllerRef(vol)}
+	h := newHolderHarness(t, interceptor.Funcs{}, vol, stopped(), restoring)
+	h.reconcile(t)
+	_, ok := h.holder(t)
+	assert.True(t, ok, "a restore is never interrupted for a copy change")
+}

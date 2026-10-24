@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
@@ -22,12 +23,23 @@ var admissionPolicies embed.FS
 // kipper-storage-copies-offer policy carries.
 const offeredCopiesLine = "    - name: offered\n      expression: \"1\"\n"
 
+// serverNodesLine is the empty server node list the shipped
+// kipper-longhorn-server-replicas policy carries.
+const serverNodesLine = "    - name: serverNodes\n      expression: \"[]\"\n"
+
 // AdmissionPolicyManifests returns embedded policy YAML in filename order,
-// with the copies offer set to offered. It returns an error if offered is
-// outside 1 to 2, a file cannot be read or the offer placeholder is missing.
-func AdmissionPolicyManifests(offered int32) ([][]byte, error) {
+// with the copies offer set to offered and the server node list set to
+// serverNodes. It returns an error if offered is outside 1 to 2, a server node
+// name is not a DNS-1123 subdomain, a file cannot be read or a placeholder is
+// missing. No server nodes render an empty list, which denies every replica
+// delete by console-api.
+func AdmissionPolicyManifests(offered int32, serverNodes []string) ([][]byte, error) {
 	if offered < 1 || offered > platform.MaxCopies {
 		return nil, fmt.Errorf("the copies offer must be 1 or 2, not %d", offered)
+	}
+	servers, err := celStringList(serverNodes)
+	if err != nil {
+		return nil, err
 	}
 	entries, err := admissionPolicies.ReadDir("policies")
 	if err != nil {
@@ -45,23 +57,47 @@ func AdmissionPolicyManifests(offered int32) ([][]byte, error) {
 			}
 			data = bytes.Replace(data, []byte(offeredCopiesLine), []byte(fmt.Sprintf("    - name: offered\n      expression: \"%d\"\n", offered)), 1)
 		}
+		if e.Name() == "kipper-longhorn-server-replicas.yaml" {
+			if !bytes.Contains(data, []byte(serverNodesLine)) {
+				return nil, fmt.Errorf("admission policy %s carries no server node list to render", e.Name())
+			}
+			data = bytes.Replace(data, []byte(serverNodesLine), []byte(fmt.Sprintf("    - name: serverNodes\n      expression: %q\n", servers)), 1)
+		}
 		manifests = append(manifests, data)
 	}
 	return manifests, nil
 }
 
+// celStringList renders node names as a CEL list literal. Each name must be a
+// DNS-1123 subdomain, so no name can end the string it is quoted in.
+func celStringList(names []string) (string, error) {
+	quoted := make([]string, 0, len(names))
+	for _, n := range names {
+		if errs := validation.IsDNS1123Subdomain(n); len(errs) > 0 {
+			return "", fmt.Errorf("server node name %q cannot be rendered into an admission policy: %s", n, strings.Join(errs, "; "))
+		}
+		quoted = append(quoted, "'"+n+"'")
+	}
+	return "[" + strings.Join(quoted, ", ") + "]", nil
+}
+
 // InstallAdmissionPolicies applies embedded policies in filename order using kubectl,
-// preserving the copies offer recorded in PlatformConfig. It defaults to one
-// when the object, field or resource kind is absent.
+// preserving the copies offer recorded in PlatformConfig and listing the
+// nodes labeled ServerNodeLabel as servers. The offer defaults to one when the
+// object, field or resource kind is absent.
 // Call it after InstallCRDs because the policies use Kipper resources as parameters.
-// Offer reads and manifest rendering must succeed before any policy is applied.
-// An apply error stops installation, leaving earlier policies applied.
+// Offer and node reads and manifest rendering must succeed before any policy is
+// applied. An apply error stops installation, leaving earlier policies applied.
 func InstallAdmissionPolicies(client CommandRunner) error {
 	offered, err := recordedCopiesOffer(client)
 	if err != nil {
 		return err
 	}
-	manifests, err := AdmissionPolicyManifests(offered)
+	servers, err := ServerNodeNames(client)
+	if err != nil {
+		return err
+	}
+	manifests, err := AdmissionPolicyManifests(offered, servers)
 	if err != nil {
 		return err
 	}
@@ -103,4 +139,20 @@ func recordedCopiesOffer(client CommandRunner) (int32, error) {
 		return 0, fmt.Errorf("reading the recorded copies offer: unexpected value %q", value)
 	}
 	return platform.OfferedCopies(ptr.To(int32(n))), nil
+}
+
+// ServerNodeNames lists the nodes labeled ServerNodeLabel, in kubectl's order.
+// A cluster with none returns an empty list.
+func ServerNodeNames(client CommandRunner) ([]string, error) {
+	out, err := client.Run("kubectl get nodes -l " + ServerNodeLabel + " --request-timeout=30s -o name")
+	if err != nil {
+		return nil, fmt.Errorf("listing the server nodes: %w: %s", err, strings.TrimSpace(out))
+	}
+	var names []string
+	for _, line := range strings.Split(out, "\n") {
+		if name, ok := strings.CutPrefix(strings.TrimSpace(line), "node/"); ok && name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, nil
 }

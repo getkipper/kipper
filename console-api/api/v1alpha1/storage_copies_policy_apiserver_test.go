@@ -217,6 +217,36 @@ func TestStorageCopiesPolicies(t *testing.T) {
 		}
 	})
 
+	t.Run("the copies a volume reports offer an owner nothing", func(t *testing.T) {
+		if err := owner.Create(ctx, &Volume{ObjectMeta: metav1.ObjectMeta{Name: "moving", Namespace: "default"}, Spec: VolumeSpec{Size: "1Gi", Copies: ptr.To[int32](1)}}); err != nil {
+			t.Fatal(err)
+		}
+		// Building a server copy for a one-copy volume reports two copies
+		// until the worker copy is removed.
+		vol := &Volume{}
+		if err := admin.Get(ctx, crclient.ObjectKey{Namespace: "default", Name: "moving"}, vol); err != nil {
+			t.Fatal(err)
+		}
+		vol.Status.Storage = &StorageCopiesStatus{Copies: 2}
+		if err := admin.Status().Update(ctx, vol); err != nil {
+			t.Fatal(err)
+		}
+		setTwo := func(c crclient.Client) error {
+			vol := &Volume{}
+			if err := c.Get(ctx, crclient.ObjectKey{Namespace: "default", Name: "moving"}, vol); err != nil {
+				t.Fatal(err)
+			}
+			vol.Spec.Copies = ptr.To[int32](2)
+			return c.Update(ctx, vol)
+		}
+		if err := setTwo(owner); err == nil || !strings.Contains(err.Error(), "--max-copies 2") {
+			t.Fatalf("an owner kept a second copy the cluster does not offer, got %v", err)
+		}
+		if err := setTwo(admin); err != nil {
+			t.Fatalf("an admin setting the copies back: %v", err)
+		}
+	})
+
 	t.Run("a deployer can still update a copies-2 object it could not create today", func(t *testing.T) {
 		svc := &Service{}
 		if err := deployer.Get(ctx, crclient.ObjectKey{Namespace: "default", Name: "restored"}, svc); err != nil {
@@ -285,6 +315,72 @@ func TestStorageCopiesPolicies(t *testing.T) {
 		project.Spec.SharedStorage.Copies = ptr.To[int32](2)
 		if err := projectOwner.Update(ctx, project); err == nil || !strings.Contains(err.Error(), "--max-copies 2") {
 			t.Fatalf("an owner is still bound by the offer, got %v", err)
+		}
+	})
+
+	t.Run("no one changes copies while a conversion runs", func(t *testing.T) {
+		if err := admin.Create(ctx, copiesService("converting", ptr.To[int32](1))); err != nil {
+			t.Fatal(err)
+		}
+		setReason := func(reason string) {
+			t.Helper()
+			svc := &Service{}
+			if err := admin.Get(ctx, crclient.ObjectKey{Namespace: "default", Name: "converting"}, svc); err != nil {
+				t.Fatal(err)
+			}
+			svc.Status.Conditions = []metav1.Condition{{
+				Type: ConditionStorageCopies, Status: metav1.ConditionFalse, Reason: reason,
+				Message: "Longhorn is building a copy of the volume (1 of 2 copies healthy).", LastTransitionTime: metav1.Now(),
+			}}
+			if err := admin.Status().Update(ctx, svc); err != nil {
+				t.Fatal(err)
+			}
+		}
+		setReason(StorageCopiesConverting)
+		svc := &Service{}
+		for _, writer := range []crclient.Client{owner, admin} {
+			if err := writer.Get(ctx, crclient.ObjectKey{Namespace: "default", Name: "converting"}, svc); err != nil {
+				t.Fatal(err)
+			}
+			svc.Spec.Copies = nil
+			err := writer.Update(ctx, svc)
+			if err == nil || !strings.Contains(err.Error(), "while a conversion runs. Longhorn is building a copy") {
+				t.Fatalf("want the running-conversion refusal with its message, got %v", err)
+			}
+		}
+		svc.Spec.Copies = ptr.To[int32](1)
+		svc.Spec.Storage = "2Gi"
+		if err := owner.Update(ctx, svc); err != nil {
+			t.Fatalf("an update that keeps copies during a conversion: %v", err)
+		}
+		setReason(StorageCopiesBlocked)
+		if err := owner.Get(ctx, crclient.ObjectKey{Namespace: "default", Name: "converting"}, svc); err != nil {
+			t.Fatal(err)
+		}
+		svc.Spec.Copies = nil
+		if err := owner.Update(ctx, svc); err != nil {
+			t.Fatalf("a blocked conversion can be set back: %v", err)
+		}
+	})
+
+	t.Run("a project's shared storage copies do not change while an environment converts", func(t *testing.T) {
+		project := &Project{}
+		if err := admin.Get(ctx, crclient.ObjectKey{Name: "shop"}, project); err != nil {
+			t.Fatal(err)
+		}
+		project.Status.Conditions = []metav1.Condition{{
+			Type: ConditionStorageCopies, Status: metav1.ConditionFalse, Reason: StorageCopiesConverting,
+			Message: "test: Building a copy on the server. prod: The volume is not attached.", LastTransitionTime: metav1.Now(),
+		}}
+		if err := admin.Status().Update(ctx, project); err != nil {
+			t.Fatal(err)
+		}
+		if err := admin.Get(ctx, crclient.ObjectKey{Name: "shop"}, project); err != nil {
+			t.Fatal(err)
+		}
+		project.Spec.SharedStorage.Copies = nil
+		if err := admin.Update(ctx, project); err == nil || !strings.Contains(err.Error(), "while a conversion runs. test: Building a copy") {
+			t.Fatalf("want the running-conversion refusal for a project, got %v", err)
 		}
 	})
 

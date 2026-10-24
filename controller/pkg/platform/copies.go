@@ -8,6 +8,10 @@ const LonghornReplicatedClass = "longhorn-replicated"
 // Kipper tags the server during storage setup and workers after the disk check.
 const ReplicaStorageTag = "kipper-replica"
 
+// ServerStorageTag marks the server's Longhorn node. Single-copy volumes are
+// pinned to it, and a copies conversion keeps a server copy.
+const ServerStorageTag = "kipper-server"
+
 // MaxCopies is the most copies any object may ask for.
 const MaxCopies = 2
 

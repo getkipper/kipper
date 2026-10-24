@@ -186,9 +186,21 @@ rules:
   - apiGroups: ["monitoring.coreos.com"]
     resources: ["servicemonitors"]
     verbs: ["get", "list", "watch", "create", "update"]
-  # Storage copies status reads Longhorn's objects on a timer, without a watch.
+  # Storage copies status and conversion read Longhorn's objects on a timer,
+  # without a watch. A conversion patches the volume's replica count, node
+  # selector and locality, switches the revision counter on for the volume,
+  # its engines and replicas, and attaches the volume on the server through
+  # its attachment record. Longhorn removes the extra replicas itself.
+  # The rules are cluster-wide because local-path clusters have no
+  # longhorn-system namespace to hold a Role.
   - apiGroups: ["longhorn.io"]
-    resources: ["volumes", "replicas", "engines", "nodes", "settings"]
+    resources: ["volumes", "engines", "replicas"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["longhorn.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["longhorn.io"]
+    resources: ["nodes", "settings"]
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -210,8 +222,8 @@ metadata:
   name: console-api
   namespace: kipper-system
 rules:
-  # Leader leases coordinate resource sizing, route-name cleanup, and legacy
-  # database-state migration across console-api replicas.
+  # Leader leases coordinate the controllers, resource sizing, route-name
+  # cleanup, and legacy database-state migration across console-api replicas.
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "create", "update"]
@@ -249,6 +261,9 @@ spec:
       nodeSelector:
         node-role.kubernetes.io/control-plane: "true"
       serviceAccountName: console-api
+      # Allows controller reconciles to drain before Lease release, followed
+      # by up to 15 seconds for in-flight HTTP requests within this grace period.
+      terminationGracePeriodSeconds: 60
       # console-api holds a cluster-powerful ServiceAccount, so its own pod is
       # locked down: non-root, no privilege escalation, all capabilities
       # dropped, the default seccomp profile, and a read-only root filesystem.
@@ -278,6 +293,10 @@ spec:
             - name: tmp
               mountPath: /tmp
           env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
             - name: DEX_ISSUER
               value: "https://%s/dex"
             - name: DEX_CLIENT_SECRET
@@ -435,12 +454,12 @@ func ingressBackendPath(path, service string, port int) string {
 `, path, service, port)
 }
 
-// DesiredConsoleAPIDeployment returns the console-api Deployment exactly as a
-// fresh install renders it, parsed from that same manifest so an upgrade cannot
-// drift from an install. The host-derived values are irrelevant here: callers
-// use it for the parts of the pod spec the installer owns — the security context
-// and the writable /tmp mount — while the serving reconciler owns the env family
-// and image pinning is `kip upgrade`'s own concern.
+// DesiredConsoleAPIDeployment parses the console-api Deployment from the install
+// manifest so upgrades share the installer's pod settings. It uses placeholder
+// hosts because callers need the security contexts, writable /tmp mount,
+// termination grace period and environment defaults. The serving reconciler
+// manages serving environment variables, and kip upgrade manages image pinning.
+// It returns an error if no console-api Deployment can be decoded.
 func DesiredConsoleAPIDeployment() (*appsv1.Deployment, error) {
 	manifest := renderConsoleManifest("dex", "console", "console-api", "example.com", "", "")
 	for _, doc := range strings.Split(manifest, "\n---\n") {

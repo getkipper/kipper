@@ -40,7 +40,8 @@ func copiesService(copies int32, consistentBackups bool) *kipperv1.Service {
 func copiesReconciler(objs ...crclient.Object) *ServiceReconciler {
 	c := crfake.NewClientBuilder().WithScheme(testScheme()).WithRESTMapper(testMapper(true)).WithObjects(objs...).
 		WithStatusSubresource(&kipperv1.Service{}).Build()
-	return &ServiceReconciler{Client: c, APIReader: c, Scheme: testScheme()}
+	r := &ServiceReconciler{Client: c, APIReader: c, Scheme: testScheme()}
+	return r
 }
 
 func claimClasses(t *testing.T, r *ServiceReconciler) (data, dump string) {
@@ -211,8 +212,25 @@ func TestUnsetCopiesAreRefreshedLikeSettledOnes(t *testing.T) {
 	assert.Equal(t, storageRefreshUnsettled, storageRefresh(unknown))
 }
 
-func TestTheProjectCopiesCommandRunsAsPrinted(t *testing.T) {
-	cmd := projectCopiesCommand("shop", 2)
-	assert.NotContains(t, cmd, "'", "the condition message wraps the command in single quotes")
-	assert.Contains(t, cmd, `-p "{\"spec\":{\"sharedStorage\":{\"copies\":2}}}"`, "the command records the copies the storage has")
+// A blocked conversion uses the running interval while waiting for pods to
+// release the volume or keeping a workload stopped because these controllers
+// do not watch the pods or Longhorn. Other blocks use the slower interval.
+func TestABlockedConversionIsReadAgainSoonOnlyWhileItWaitsOrStops(t *testing.T) {
+	blocked := func(message string) []metav1.Condition {
+		return []metav1.Condition{{Type: kipperv1.ConditionStorageCopies, Status: metav1.ConditionFalse, Reason: kipperv1.StorageCopiesBlocked, Message: message}}
+	}
+	sc := storageConverter{StatefulSet: "db"}
+	assert.Equal(t, storageRefreshConverting, storageRequeue(blocked("db keeps running. "+inUse([]string{"debug"}))))
+	assert.Equal(t, storageRefreshConverting, storageRequeue(blocked("prod: "+inUse([]string{"web-1"}))))
+	assert.Equal(t, storageRefreshConverting, storageRequeue(blocked(sc.stoppedFor()+copyNodeDown("worker-1"))))
+	assert.Equal(t, storageRefreshUnsettled, storageRequeue(blocked(copyNodeDown("worker-1"))))
+
+	holderStopped := append(blocked(copyNodeDown("worker-1")),
+		metav1.Condition{Type: conditionBackupHolderReady, Status: metav1.ConditionFalse, Reason: "StoppedForCopyChange"})
+	assert.Equal(t, storageRefreshConverting, storageRequeue(holderStopped), "a shared volume's stop shows on its holder")
+}
+
+func TestTheProjectCopiesCommandIsKip(t *testing.T) {
+	assert.Equal(t, "kip project update shop --copies 2", projectCopiesCommand("shop", 2))
+	assert.Equal(t, "kip project update shop --copies", projectStorageCommands("shop").Copies)
 }

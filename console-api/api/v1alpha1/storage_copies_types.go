@@ -13,9 +13,17 @@ const (
 	StorageCopiesDegraded = "Degraded"
 	// StorageCopiesNotSet: copies is unset, so Kipper only reports the live copies.
 	StorageCopiesNotSet = "NotSet"
-	// StorageCopiesConversionPending: copies differs from the existing claim's
-	// live count, and nothing converts an existing claim yet.
+	// StorageCopiesConversionPending: the claim's volume needs a conversion step
+	// that has to wait before it can start or continue, for example while
+	// another volume's conversion holds the cluster's one build slot.
 	StorageCopiesConversionPending = "ConversionPending"
+	// StorageCopiesConverting: Kipper is converting the claim's volume towards
+	// the wanted copies, one step at a time. The copies cannot change meanwhile.
+	StorageCopiesConverting = "Converting"
+	// StorageCopiesBlocked: the conversion cannot go on, for example for lack of
+	// room, a copy Kipper cannot confirm as current, or a step that keeps
+	// failing. Every copy is kept, and setting the copies back stops the change.
+	StorageCopiesBlocked = "Blocked"
 	// StorageCopiesNotEnoughReplicaNodes: copies 2 was asked for at creation with
 	// fewer than two usable storage nodes, so no claim was created.
 	StorageCopiesNotEnoughReplicaNodes = "NotEnoughReplicaNodes"
@@ -34,8 +42,10 @@ const (
 )
 
 // StorageCopiesStatus reports a claim's configured replica count and healthy
-// replicas. Nodes contains healthy replica holders sorted by name. Local-path
-// claims are reported as one healthy copy without a node list.
+// replicas. Healthy copies are complete copies on Ready, unfenced nodes, as
+// determined by platform.HealthyCopies.
+// Nodes contains healthy replica holders sorted by name. Local-path claims
+// are reported as one healthy copy without a node list.
 type StorageCopiesStatus struct {
 	// Class is the claim's storage class.
 	// +optional
@@ -46,8 +56,10 @@ type StorageCopiesStatus struct {
 	// +optional
 	Copies int32 `json:"copies,omitempty"`
 
-	// HealthyCopies is the number of Ready, unfenced nodes holding a current
-	// copy. Local storage always reports 1.
+	// HealthyCopies is the number of Ready, unfenced nodes holding a complete
+	// copy: one rebuilt or serving again since its last failure, or one of a
+	// volume created empty that was never attached. Local storage always
+	// reports 1.
 	// +optional
 	HealthyCopies int32 `json:"healthyCopies,omitempty"`
 

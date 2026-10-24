@@ -43,3 +43,49 @@ func TestNodeAvailable(t *testing.T) {
 	other := corev1.Taint{Key: "example.com/maintenance", Effect: corev1.TaintEffectNoSchedule}
 	assert.True(t, NodeAvailable(readyNode(corev1.ConditionTrue, other)))
 }
+
+func TestHealthyCopies(t *testing.T) {
+	healthy := CopyMarkers{HealthyAt: "2026-10-24T01:00:00Z", LastHealthyAt: "2026-10-24T01:00:00Z"}
+	salvaged := CopyMarkers{HealthyAt: "2026-10-24T01:00:00Z", LastFailedAt: "2026-10-24T02:00:00Z", LastHealthyAt: "2026-10-24T02:00:10Z"}
+	for name, tc := range map[string]struct {
+		state    string
+		seeded   bool
+		replicas []CopyMarkers
+		want     []bool
+	}{
+		"healthy and never failed":                    {"attached", false, []CopyMarkers{healthy}, []bool{true}},
+		"healthy on a detached volume":                {"detached", false, []CopyMarkers{healthy}, []bool{true}},
+		"rebuilt after its last failure":              {"attached", false, []CopyMarkers{{HealthyAt: "2026-10-24T03:00:00Z", LastFailedAt: "2026-10-24T02:00:00Z"}}, []bool{true}},
+		"salvaged and serving again":                  {"attached", false, []CopyMarkers{salvaged}, []bool{true}},
+		"salvaged, served, then detached":             {"detached", false, []CopyMarkers{salvaged}, []bool{true}},
+		"salvaged and not serving since":              {"attached", false, []CopyMarkers{{HealthyAt: "2026-10-24T01:00:00Z", LastFailedAt: "2026-10-24T02:00:00Z", LastHealthyAt: "2026-10-24T01:30:00Z"}}, []bool{false}},
+		"served in the same second it failed":         {"attached", false, []CopyMarkers{{HealthyAt: "2026-10-24T01:00:00Z", LastFailedAt: "2026-10-24T02:00:00Z", LastHealthyAt: "2026-10-24T02:00:00Z"}}, []bool{false}},
+		"failed now":                                  {"attached", false, []CopyMarkers{{HealthyAt: "2026-10-24T01:00:00Z", FailedAt: "2026-10-24T02:00:00Z", LastFailedAt: "2026-10-24T02:00:00Z"}}, []bool{false}},
+		"being built next to a healthy copy":          {"attached", false, []CopyMarkers{healthy, {}}, []bool{true, false}},
+		"never attached":                              {"detached", false, []CopyMarkers{{}, {}}, []bool{true, true}},
+		"never attached, one copy failed":             {"detached", false, []CopyMarkers{{}, {FailedAt: "2026-10-24T02:00:00Z"}}, []bool{false, false}},
+		"attaching for the first time":                {"attaching", false, []CopyMarkers{{}}, []bool{false}},
+		"reused after a failure on a detached volume": {"detached", false, []CopyMarkers{{LastFailedAt: "2026-10-24T02:00:00Z", LastHealthyAt: "2026-10-24T01:00:00Z"}}, []bool{false}},
+		"never attached, waiting for its data":        {"detached", true, []CopyMarkers{{}}, []bool{false}},
+		"unparsable healthyAt":                        {"attached", false, []CopyMarkers{{HealthyAt: "yesterday"}}, []bool{false}},
+		"unparsable lastHealthyAt":                    {"attached", false, []CopyMarkers{{HealthyAt: "2026-10-24T01:00:00Z", LastFailedAt: "2026-10-24T02:00:00Z", LastHealthyAt: "later"}}, []bool{false}},
+	} {
+		assert.Equal(t, tc.want, HealthyCopies(CopyVolume{State: tc.state, Seeded: tc.seeded}, tc.replicas), name)
+	}
+}
+
+func TestCopyVolumeOf(t *testing.T) {
+	volume := func(spec, status map[string]interface{}) map[string]interface{} {
+		return map[string]interface{}{"spec": spec, "status": status}
+	}
+	assert.Equal(t, CopyVolume{State: "detached"}, CopyVolumeOf(volume(map[string]interface{}{"fromBackup": "", "dataSource": ""}, map[string]interface{}{"state": "detached"})))
+	for name, v := range map[string]map[string]interface{}{
+		"from a backup":       volume(map[string]interface{}{"fromBackup": "s3://backups@example/?backup=b-1&volume=v-1"}, nil),
+		"from a data source":  volume(map[string]interface{}{"dataSource": "vol://pvc-source"}, nil),
+		"on a backing image":  volume(map[string]interface{}{"backingImage": "base-image"}, nil),
+		"restore required":    volume(nil, map[string]interface{}{"restoreRequired": true}),
+		"cloned from another": volume(nil, map[string]interface{}{"cloneStatus": map[string]interface{}{"sourceVolume": "pvc-source"}}),
+	} {
+		assert.True(t, CopyVolumeOf(v).Seeded, name)
+	}
+}

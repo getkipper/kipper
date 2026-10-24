@@ -79,8 +79,15 @@ func writePlacement(out io.Writer, p service.Placement, err error) {
 		return
 	}
 	data := "no healthy copy found"
+	if len(p.UnavailableNodes) > 0 {
+		data = "no copy on an available node"
+	}
 	if len(p.DataNodes) > 0 {
 		data = fmt.Sprintf("%s (%d %s)", strings.Join(p.DataNodes, ", "), len(p.DataNodes), plural(len(p.DataNodes), "copy", "copies"))
+	}
+	if len(p.UnavailableNodes) > 0 {
+		n := len(p.UnavailableNodes)
+		data += fmt.Sprintf(". %s on %s, which %s not Ready or %s fenced", plural(n, "A copy is", "Copies are"), strings.Join(p.UnavailableNodes, ", "), plural(n, "is", "are"), plural(n, "is", "are"))
 	}
 	if len(p.UncheckedNodes) > 0 {
 		n := len(p.UncheckedNodes)

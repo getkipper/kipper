@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"slices"
@@ -91,6 +92,10 @@ func datamoverImage() string {
 }
 
 func main() {
+	// SIGTERM stops the controller manager, which hands the controller Lease
+	// over once its reconciles finish. HTTP requests then get time to finish.
+	ctx := ctrl.SetupSignalHandler()
+
 	// API-key and plan mutations log a JSON audit event so Loki can parse the
 	// actor, action, and object.
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -161,7 +166,11 @@ func main() {
 	// client once the informers are warm and buildRouter is what publishes the
 	// resolver. Started before it, the two race and the loser is the swap,
 	// which then never happens and says nothing.
-	go startControllerManager(restConfig, crClient, clientset, podName)
+	managerDone := make(chan struct{})
+	go func() {
+		defer close(managerDone)
+		startControllerManager(ctx, restConfig, crClient, clientset, podName)
+	}()
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -178,10 +187,41 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	log.Printf("console-api listening on :%s", port) //nolint:gosec // port from env var, not user input
-	if err := srv.ListenAndServe(); err != nil {
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
 		log.Fatalf("server failed: %v", err)
 	}
+	log.Printf("console-api listening on :%s", port) //nolint:gosec // port from env var, not user input
+	if err := serveUntilStopped(ctx, srv, ln, managerDone, httpShutdownWait); err != nil {
+		log.Fatalf("server failed: %v", err)
+	}
+}
+
+// httpShutdownWait limits HTTP draining after the controller manager stops.
+// It shares the Deployment's termination grace period with controller draining.
+const httpShutdownWait = 15 * time.Second
+
+// serveUntilStopped serves srv on ln until ctx ends and managerDone is closed,
+// then lets in-flight requests finish for up to wait. Hijacked connections,
+// such as WebSocket streams, are cut when the process exits. It returns the
+// error that stopped serving early, or nil after a shutdown.
+func serveUntilStopped(ctx context.Context, srv *http.Server, ln net.Listener, managerDone <-chan struct{}, wait time.Duration) error {
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(ln) }()
+	select {
+	case err := <-served:
+		return err
+	case <-ctx.Done():
+	}
+	// Keep serving requests while the manager drains its reconciles, then
+	// drain HTTP requests within the remaining pod termination grace period.
+	<-managerDone
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("stopped with requests still in flight after %s: %v", wait, err)
+	}
+	return nil
 }
 
 // buildRouter assembles the whole HTTP surface. It takes kubernetes.Interface
@@ -1023,7 +1063,7 @@ func bindingDatabaseProvisioner(clientset kubernetes.Interface, cfg *rest.Config
 	}
 }
 
-func startControllerManager(cfg *rest.Config, direct crclient.Client, clientset kubernetes.Interface, podName string) {
+func startControllerManager(ctx context.Context, cfg *rest.Config, direct crclient.Client, clientset kubernetes.Interface, podName string) {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(kipperv1.AddToScheme(scheme))
@@ -1036,20 +1076,12 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client, clientset 
 	// its generation is bootstrapped.
 	routeNameGate := controllers.NewRouteNameGate()
 
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:                 scheme,
-		HealthProbeBindAddress: "0", // disable — console-api has its own health endpoint
-		Metrics:                metricsOptions(),
-		Cache: cache.Options{
-			// Scope Pod watches to monitoring for the Prometheus and Loki OOM
-			// watcher, and to volume holders elsewhere for the Volume controller.
-			// This avoids caching every Pod across the cluster and reduces
-			// API-server load.
-			ByObject: map[crclient.Object]cache.ByObject{
-				&corev1.Pod{}: {Namespaces: controllers.PodCacheNamespaces()},
-			},
-		},
-	})
+	lock, err := controllerLease(cfg, controllerLeaseIdentity(podName, os.Getenv("POD_UID")), controllerLeaseTiming)
+	if err != nil {
+		log.Printf("controller manager failed to start: %v (CRD reconcilers disabled)", err)
+		return
+	}
+	mgr, err := ctrl.NewManager(cfg, controllerManagerOptions(scheme, lock))
 	if err != nil {
 		log.Printf("controller manager failed to start: %v (CRD reconcilers disabled)", err)
 		return
@@ -1071,6 +1103,7 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client, clientset 
 			ConsoleAuthCheckURL: serviceUIAuthCheckURL(),
 			ShareGrants:         shareGrantStoreFor(cfg),
 			RouteNames:          routeNameGate,
+			Recorder:            mgr.GetEventRecorderFor("service-controller"), //nolint:staticcheck // ServiceReconciler requires record.EventRecorder.
 		}).SetupWithManager},
 		{"Function", (&controllers.FunctionReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Domain: domain, Recorder: mgr.GetEventRecorderFor("function-controller"), Provision: bindingDatabaseProvisioner(clientset, cfg)}).SetupWithManager}, //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
 		{"Job", (&controllers.JobReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Recorder: mgr.GetEventRecorderFor("job-controller")}).SetupWithManager},                                                                                       //nolint:staticcheck // consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
@@ -1128,7 +1161,7 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client, clientset 
 	// no owning Kipper CR and surface them as warnings so the operator
 	// can investigate drift between the cluster and the CRs.
 	go func() {
-		if !mgr.GetCache().WaitForCacheSync(context.Background()) {
+		if !mgr.GetCache().WaitForCacheSync(ctx) {
 			log.Printf("orphan warner: cache sync failed, skipping")
 			return
 		}
@@ -1146,18 +1179,26 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client, clientset 
 		}
 
 		controllers.RunOrphanWarner(
-			context.Background(),
+			ctx,
 			mgr.GetClient(),
 			mgr.GetEventRecorderFor("orphan-warner"), //nolint:staticcheck // RunOrphanWarner consumes record.EventRecorder; migration to GetEventRecorder/events.EventRecorder is a separate change
 		)
 	}()
 
-	// One elected pod maintains route-name claims and attribution intervals.
-	go (&controllers.RouteNameSweeper{Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Clientset: clientset, PodName: podName, Gate: routeNameGate}).Run(context.Background())
+	if err := addRouteNameSweeper(mgr, podName, routeNameGate); err != nil {
+		log.Printf("failed to set up the route-name sweeper: %v (new routes stay pending)", err)
+	}
 
 	log.Printf("CRD controller manager starting")
 	handlers.SetControllerManagerStarted(true)
-	if err := mgr.Start(context.Background()); err != nil {
+	lost, err := runControllerManager(ctx, mgr, lock)
+	if lost {
+		// Leadership may have ended while leader-only work is still running.
+		// Exit to stop that work. The pod must restart to rejoin the election
+		// because a manager can only be started once.
+		log.Fatalf("controller manager stopped after leading: %v", err)
+	}
+	if err != nil {
 		log.Printf("controller manager exited: %v", err)
 	}
 	handlers.SetControllerManagerStarted(false)
@@ -1172,6 +1213,76 @@ func startControllerManager(cfg *rest.Config, direct crclient.Client, clientset 
 		log.Printf("project access resolving live again: the controller cache has stopped")
 	}
 }
+
+// addRouteNameSweeper registers the sweeper under the controller Lease so it
+// opens the gate used by the reconcilers publishing routes. On shutdown, the
+// gate closes as the reconcilers drain. The next leader handles routes still
+// waiting for admission.
+func addRouteNameSweeper(mgr ctrl.Manager, podName string, gate *controllers.RouteNameGate) error {
+	return mgr.Add(&controllers.RouteNameSweeper{Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), PodName: podName, Gate: gate})
+}
+
+// elected reports whether mgr has won the controller Lease.
+func elected(mgr ctrl.Manager) bool {
+	select {
+	case <-mgr.Elected():
+		return true
+	default:
+		return false
+	}
+}
+
+// controllerManagerOptions configures the CRD controller manager to hold lock.
+// Reconcilers run only in the console-api pod holding the controller Lease,
+// while the cache, metrics and console-api's own HTTP server run in every pod.
+// On shutdown the manager waits for in-flight reconciles without a time limit.
+// If the Lease stays current, runControllerManager releases it after they
+// finish so the next pod can take over. HTTP draining may then keep the process
+// alive until httpShutdownWait expires. The pod termination grace period
+// bounds both phases.
+//
+// The renew deadline allows brief API server outages, such as a k3s restart,
+// provided renewal succeeds before the deadline. A missed deadline ends the
+// leadership term, and the process exits without releasing the Lease.
+// Another pod may take over only once it expires. The client-go release on
+// that path could outlast the Lease, so automatic release is disabled.
+func controllerManagerOptions(scheme *runtime.Scheme, lock *heldLease) ctrl.Options {
+	waitForReconciles := time.Duration(-1)
+	leaseDuration, renewDeadline, retryPeriod := lock.timing.LeaseDuration, lock.timing.RenewDeadline, lock.timing.RetryPeriod
+	return ctrl.Options{
+		Scheme:                              scheme,
+		HealthProbeBindAddress:              "0", // console-api serves its own health endpoint.
+		Metrics:                             metricsOptions(),
+		LeaderElection:                      true,
+		LeaderElectionID:                    controllerLeaseName,
+		LeaderElectionNamespace:             controllerLeaseNamespace,
+		LeaderElectionResourceLockInterface: lock,
+		LeaseDuration:                       &leaseDuration,
+		RenewDeadline:                       &renewDeadline,
+		RetryPeriod:                         &retryPeriod,
+		GracefulShutdownTimeout:             &waitForReconciles,
+		Cache: cache.Options{
+			// Scope Pod watches to monitoring for the Prometheus and Loki OOM
+			// watcher, and to volume holders elsewhere for the Volume controller.
+			// This avoids caching every Pod across the cluster and reduces
+			// API-server load.
+			ByObject: map[crclient.Object]cache.ByObject{
+				&corev1.Pod{}: {Namespaces: controllers.PodCacheNamespaces()},
+			},
+		},
+	}
+}
+
+// The controller Lease elects the console-api pod that runs the reconcilers.
+const (
+	controllerLeaseName      = "kipper-console-api-controllers"
+	controllerLeaseNamespace = "kipper-system"
+)
+
+// controllerLeaseTiming allows 40 seconds from the last successful renewal
+// request before the shutdown check ends leadership. The 60-second Lease
+// duration leaves time to exit before another pod can take over.
+var controllerLeaseTiming = leader.Timing{LeaseDuration: 60 * time.Second, RenewDeadline: 40 * time.Second, RetryPeriod: 2 * time.Second}
 
 // metricsPort is where controller-runtime serves its own metrics, including
 // controller_runtime_reconcile_errors_total. It is a second port rather than a

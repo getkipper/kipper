@@ -94,7 +94,7 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	// Nothing watches Longhorn, so the copies in the status are read again on a timer.
-	retry = earliest(retry, storageRefresh(apimeta.FindStatusCondition(vol.Status.Conditions, kipperv1.ConditionStorageCopies)))
+	retry = earliest(retry, storageRequeue(vol.Status.Conditions))
 	return ctrl.Result{RequeueAfter: retry}, nil
 }
 

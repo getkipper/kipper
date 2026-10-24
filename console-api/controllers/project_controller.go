@@ -248,6 +248,14 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				return ctrl.Result{}, fmt.Errorf("reconciling shared storage in %s: %w", pl.ns, err)
 			}
 			sharedCopies = append(sharedCopies, envCopies{env: pl.env.Name, cond: copies})
+		} else {
+			released, err := r.followRetainedSharedClaim(ctx, &project, pl.ns)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("releasing the shared storage in %s from a copy change: %w", pl.ns, err)
+			}
+			if released != nil {
+				sharedCopies = append(sharedCopies, envCopies{env: pl.env.Name, cond: *released})
+			}
 		}
 
 		namespaces = append(namespaces, pl.ns)
@@ -770,7 +778,8 @@ func (r *ProjectReconciler) reconcileNamespace(ctx context.Context, project *kip
 
 // reconcileSharedStorage creates the environment's shared claim when it is
 // missing, under the copies creation gate, and returns the claim's
-// StorageCopies condition. An existing claim is never changed.
+// StorageCopies condition. Conversion may update an existing claim's
+// annotations while preserving its spec.
 func (r *ProjectReconciler) reconcileSharedStorage(ctx context.Context, project *kipperv1.Project, ns, mode string) (metav1.Condition, error) {
 	pvcName := "shared-uploads"
 	copies := project.Spec.SharedStorage.Copies
@@ -825,15 +834,40 @@ func (r *ProjectReconciler) reconcileSharedStorage(ctx context.Context, project 
 	if err != nil {
 		return metav1.Condition{}, err
 	}
+	var converted *metav1.Condition
+	if projectSharedClaim(&existing) {
+		sc := storageConverter{Reader: r.longhornReader(), Writer: r.Client, Commands: projectStorageCommands(project.Name)}
+		if converted, err = convertShared(ctx, sc, &existing, copies); err != nil {
+			return metav1.Condition{}, err
+		}
+	}
 	live, err := readLiveCopies(ctx, r.longhornReader(), &existing)
 	if err != nil {
-		return metav1.Condition{}, err
+		if converted == nil {
+			return metav1.Condition{}, err
+		}
+		log.FromContext(ctx).Error(err, "Could not read the live storage copies.", "namespace", ns)
+		return *converted, nil
 	}
-	command := projectCopiesCommand(project.Name, 1)
-	if live != nil {
-		command = projectCopiesCommand(project.Name, live.Copies)
+	command := projectCopiesCommand(project.Name, sharedCopiesHint(live))
+	return orConverted(converted, sharedCopiesCondition(copies, live, command)), nil
+}
+
+// followRetainedSharedClaim releases a retained shared claim from a copy-change
+// stop when shared storage reconciliation is disabled or unsupported. It keeps
+// the claim and only completes or undoes the existing change. It returns the
+// pass's StorageCopies condition, or nil when there is nothing to report.
+func (r *ProjectReconciler) followRetainedSharedClaim(ctx context.Context, project *kipperv1.Project, ns string) (*metav1.Condition, error) {
+	var existing corev1.PersistentVolumeClaim
+	err := r.Get(ctx, types.NamespacedName{Name: "shared-uploads", Namespace: ns}, &existing)
+	if errors.IsNotFound(err) {
+		return nil, nil
 	}
-	return sharedCopiesCondition(copies, live, command), nil
+	if err != nil || !projectSharedClaim(&existing) || existing.Annotations[platform.CopyChangeStopAnnotation] == "" {
+		return nil, err
+	}
+	sc := storageConverter{Reader: r.longhornReader(), Writer: r.Client, Commands: projectStorageCommands(project.Name)}
+	return sc.convertOrBlock(ctx, &existing, nil)
 }
 
 // ResolveNamespace returns the namespace an environment of a project runs in.

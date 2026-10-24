@@ -442,6 +442,9 @@ func (r nodeRemoval) finish() error {
 	if err := installer.DeleteNodeObjects(r.Master, w.Name); err != nil {
 		return err
 	}
+	if err := installer.InstallAdmissionPolicies(r.Master); err != nil {
+		return fmt.Errorf("updating the admission policies after removing %s: %w. Run the command again to finish", w.Name, err)
+	}
 
 	// Commands outside the node lease, such as an install re-run, can change
 	// the records during the waits, so the peer rules come from a fresh read.

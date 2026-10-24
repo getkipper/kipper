@@ -107,3 +107,25 @@ func TestUpdateStorageRefusalWritesNoOtherChange(t *testing.T) {
 	_, found, _ := unstructured.NestedMap(svc.Object, "spec", "resources")
 	assert.False(t, found, "the memory change given with a refused storage change is not written")
 }
+
+func TestAResourceUpdateLeavesTheCopiesAlone(t *testing.T) {
+	for _, declared := range []interface{}{nil, int64(2)} {
+		cr := storageServiceCR()
+		if declared != nil {
+			require.NoError(t, unstructured.SetNestedField(cr.Object, declared, "spec", "copies"))
+		}
+		m := managerWith([]runtime.Object{dbStatefulSet(), storageClaim("longhorn-single")}, cr)
+		_, err := m.Update(context.Background(), "default", "db", Options{MemoryLimit: "1Gi"})
+		require.NoError(t, err)
+		svc, err := m.Dynamic.Resource(manifest.ServiceGVR).Namespace("default").Get(context.Background(), "db", metav1.GetOptions{})
+		require.NoError(t, err)
+		copies, found, _ := unstructured.NestedFieldNoCopy(svc.Object, "spec", "copies")
+		if declared == nil {
+			assert.False(t, found, "a memory change never adds copies")
+		} else {
+			assert.Equal(t, declared, copies, "a memory change keeps the declared copies")
+		}
+		memory, _, _ := unstructured.NestedString(svc.Object, "spec", "resources", "memoryLimit")
+		assert.Equal(t, "1Gi", memory)
+	}
+}

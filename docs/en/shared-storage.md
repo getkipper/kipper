@@ -64,7 +64,7 @@ On Linux 7.0 and later, the NFS client requests directory delegations, which Lon
 kip volume create uploads --size 10Gi --project blog --environment prod
 ```
 
-A new shared volume keeps one copy of its data on the server, like a service created with the default copy count. Volumes created by earlier Kipper releases keep the copies they have. `kip volume create` refuses creation when the server's Longhorn disks have insufficient capacity for the volume and names the disk's node and its remaining room.
+A new shared volume keeps one copy of its data on the server, like a service created with the default copy count. Volumes created by earlier Kipper releases keep the copies they have until `kip volume update <name> --copies 1` converts them to one copy on the server. The reduction waits until no app mounts the volume, and Kipper stops the volume's backup holder until the extra copies are gone. While that reduction is blocked or pending, for example because an app still mounts the volume, `kip volume update <name> --copies 2` stops it, and the volume keeps the copies it has. Its status counts them against the requested two copies, and Kipper lowers Longhorn's copy count only while it holds the volume for a reduction to one. Setting it back while Kipper builds the server's copy keeps that copy once Longhorn has placed it on the server, so Longhorn finishes it and the volume keeps every copy it had plus that one, for example two copies when it had one. A server copy Longhorn has not placed yet is dropped from the count. On a cluster that offers one copy, that needs an admin (see [Changing the copies of a running service](/en/worker-nodes#changing-the-copies-of-a-running-service)). `kip volume create` refuses creation when the server's Longhorn disks have insufficient capacity for the volume and names the disk's node and its remaining room.
 
 ```
   ✔  Shared volume "uploads" created (10Gi)
@@ -124,6 +124,10 @@ kip volume delete uploads --delete-data --project blog --environment prod
 ```
 
 The `--delete-data` flag is required to prevent accidental data loss.
+
+### Copies of project shared storage
+
+A project can also have shared storage of its own, a `shared-uploads` volume in each environment. Its copies are set for the whole project with `kip project update <project> --copies 1 [--wait]`, which needs cluster admin rights. Shared storage keeps one copy in this release. The project's status names the environment in each message. See [Changing the copies of a running service](/en/worker-nodes#changing-the-copies-of-a-running-service) for how a reduction runs.
 
 ### Backups
 
