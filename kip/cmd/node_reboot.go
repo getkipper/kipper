@@ -345,6 +345,9 @@ func runNodeReboot(cmd *cobra.Command, args []string) error {
 	if err := removalBlocksReboot(rec); err != nil {
 		return err
 	}
+	if err := fenceBlocksReboot(rec); err != nil {
+		return err
+	}
 	if rec.Role == installer.NodeRoleServer {
 		return rebootServer()
 	}
@@ -815,7 +818,8 @@ func readyAfterBoot(nodes []k8s.NodeInfo, health []k8s.ComponentStatus, bootID s
 	}
 	var notReady []string
 	for _, n := range nodes {
-		if n.Status != "Ready" {
+		// A fenced node stays down until it rejoins, so it is not waited for.
+		if n.Status != "Ready" && n.Status != k8s.NodeOutOfService {
 			notReady = append(notReady, "node "+n.Name+" "+n.Status)
 		}
 	}

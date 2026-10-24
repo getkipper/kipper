@@ -1421,13 +1421,13 @@ func TestCheckNodeReady(t *testing.T) {
 	rc := NewResourceController(fake.NewClientset(), nil)
 	nodes := []corev1.Node{notReady}
 
-	batches := rc.checkNodeReady(nodes)
+	batches := rc.checkNodeReady(context.Background(), nodes)
 	entries, marks := entriesOf(batches), marksOf(batches)
 	if len(entries) != 1 || entries[0].Action != "node NotReady" || entries[0].Severity != "critical" {
 		t.Fatalf("expected 1 critical node NotReady entry, got %+v", entries)
 	}
 	rc.commitMarks(marks)
-	if again := entriesOf(rc.checkNodeReady(nodes)); len(again) != 0 {
+	if again := entriesOf(rc.checkNodeReady(context.Background(), nodes)); len(again) != 0 {
 		t.Fatalf("expected cooldown to suppress repeat, got %+v", again)
 	}
 }

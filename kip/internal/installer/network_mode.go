@@ -36,6 +36,8 @@ type NetworkModeOptions struct {
 	ServerExternalIP string
 	JoinerExternalIP string
 	SSHPort          string
+	RecordedServerIP string
+	RecordedJoinerIP string
 }
 
 // excludedInterface filters loopback and common pod and container interfaces.
@@ -140,9 +142,12 @@ func tcpReachable(from CommandRunner, addr netip.Addr, port string) bool {
 // PlanNodeNetwork selects addresses and a mode consistent with opts.ClusterMode.
 // Private mode requires local RFC 1918 addresses, SSH access to the joiner,
 // and API access to the server. Automatic selection excludes default-route
-// interfaces. An explicit private network allows them. With no cluster mode set,
-// automatic selection falls back to public mode only when no private route
-// qualifies for the TCP checks. Before falling back, it checks for a shared
+// interfaces. An explicit private network allows them. In a private-mode cluster,
+// if automatic selection finds no path and PrivateNetwork is empty, it tries
+// RecordedServerIP and RecordedJoinerIP with the same routing, connectivity and
+// network overlap checks, allowing default-route interfaces.
+// With no cluster mode set, automatic selection falls back to public mode only
+// when no private route qualifies for the TCP checks. Before falling back, it checks for a shared
 // default-route network and returns an error asking for an explicit network
 // choice if that network passes the private path checks.
 // Public mode requires external IPv4 addresses and API access to the server.
@@ -172,6 +177,15 @@ func PlanNodeNetwork(server, joiner CommandRunner, opts NetworkModeOptions) (Net
 		plan, found, unreachable, err := privatePath(server, joiner, private, opts)
 		if err != nil {
 			return NetworkPlan{}, err
+		}
+		if !found && !private.IsValid() && opts.ClusterMode == NetworkModePrivate {
+			var again string
+			if plan, found, again, err = recordedPath(server, joiner, opts); err != nil {
+				return NetworkPlan{}, err
+			}
+			if unreachable == "" {
+				unreachable = again
+			}
 		}
 		if found {
 			return plan, nil
@@ -207,22 +221,46 @@ func sharedDefaultNetwork(server, joiner CommandRunner, opts NetworkModeOptions)
 	if err != nil {
 		return netip.Prefix{}, false
 	}
-	a, b := serverDefault.src, joinerDefault.src
+	p, ok := sharedPrivatePrefix(serverDefault.src, joinerDefault.src)
+	if !ok {
+		return netip.Prefix{}, false
+	}
+	if _, found, _, err := privatePath(server, joiner, p, opts); err == nil && found {
+		return p, true
+	}
+	return netip.Prefix{}, false
+}
+
+// sharedPrivatePrefix returns the smallest /24, /16 or /8 network containing
+// both private IPv4 addresses, or false if none qualifies.
+func sharedPrivatePrefix(a, b netip.Addr) (netip.Prefix, bool) {
 	if !a.Is4() || !b.Is4() || !a.IsPrivate() || !b.IsPrivate() {
 		return netip.Prefix{}, false
 	}
 	for _, bits := range []int{24, 16, 8} {
-		p := netip.PrefixFrom(a, bits).Masked()
-		if !p.Contains(b) {
-			continue
-		}
-		if _, found, _, err := privatePath(server, joiner, p, opts); err == nil && found {
+		if p := netip.PrefixFrom(a, bits).Masked(); p.Contains(b) {
 			return p, true
 		}
-		return netip.Prefix{}, false
 	}
 	return netip.Prefix{}, false
 }
+
+// recordedPath checks the path between opts.RecordedServerIP and
+// opts.RecordedJoinerIP, allowing default-route interfaces as an explicit
+// private network does. It uses privatePath's checks and return conventions.
+func recordedPath(server, joiner CommandRunner, opts NetworkModeOptions) (NetworkPlan, bool, string, error) {
+	// Invalid addresses skip the fallback because sharedPrivatePrefix rejects them.
+	s, _ := netip.ParseAddr(opts.RecordedServerIP)
+	j, _ := netip.ParseAddr(opts.RecordedJoinerIP)
+	prefix, ok := sharedPrivatePrefix(s, j)
+	if !ok {
+		return NetworkPlan{}, false, "", nil
+	}
+	return privatePathBetween(server, joiner, prefix, &recordedPeers{server: s, joiner: j}, opts)
+}
+
+// recordedPeers limits a private path search to one pair of addresses.
+type recordedPeers struct{ server, joiner netip.Addr }
 
 func failedLeg(unreachable string) string {
 	if unreachable == "" {
@@ -241,6 +279,12 @@ func inNetwork(p netip.Prefix) string {
 // privatePath returns the first qualifying private path. If none passes the TCP
 // checks, the third result describes the first failed connection, when present.
 func privatePath(server, joiner CommandRunner, private netip.Prefix, opts NetworkModeOptions) (NetworkPlan, bool, string, error) {
+	return privatePathBetween(server, joiner, private, nil, opts)
+}
+
+// privatePathBetween applies privatePath's checks and return conventions,
+// restricting the search to the recorded pair of addresses when only is set.
+func privatePathBetween(server, joiner CommandRunner, private netip.Prefix, only *recordedPeers, opts NetworkModeOptions) (NetworkPlan, bool, string, error) {
 	unreachable := ""
 	joinerAddrs, err := hostAddresses(joiner)
 	if err != nil {
@@ -287,11 +331,11 @@ func privatePath(server, joiner CommandRunner, private netip.Prefix, opts Networ
 
 	for _, ja := range joinerAddrs {
 		addr := ja.prefix.Addr()
-		if !addr.IsPrivate() || (private.IsValid() && !private.Contains(addr)) {
+		if !addr.IsPrivate() || (private.IsValid() && !private.Contains(addr)) || (only != nil && addr != only.joiner) {
 			continue
 		}
 		toJoiner, ok := routeTo(server, addr)
-		if !ok || !usable(toJoiner.src, toJoiner.iface, serverDefault.iface, serverAddrs) {
+		if !ok || !usable(toJoiner.src, toJoiner.iface, serverDefault.iface, serverAddrs) || (only != nil && toJoiner.src != only.server) {
 			continue
 		}
 		toServer, ok := routeTo(joiner, toJoiner.src)

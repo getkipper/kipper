@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/getkipper/kipper/controller/pkg/stranded"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -76,6 +78,10 @@ type NodeInfo struct {
 	Annotations map[string]string
 	BootID      string
 }
+
+// NodeOutOfService is the status of a node with the out-of-service taint.
+// It takes precedence over the kubelet's Ready condition.
+const NodeOutOfService = "OutOfService"
 
 // Summary returns Status with ",SchedulingDisabled" appended for a cordoned
 // node, matching kubectl's status format.
@@ -214,13 +220,8 @@ func (c *Client) ClusterHealth(ctx context.Context) ([]ComponentStatus, error) {
 				continue
 			}
 			healthy := false
-			for _, node := range nodes.Items {
-				for _, cond := range node.Status.Conditions {
-					if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
-						healthy = true
-						break
-					}
-				}
+			for i := range nodes.Items {
+				healthy = healthy || stranded.Ready(&nodes.Items[i])
 			}
 			msg := fmt.Sprintf("%d node(s)", len(nodes.Items))
 			statuses = append(statuses, ComponentStatus{
@@ -284,18 +285,17 @@ func (c *Client) ClusterHealth(ctx context.Context) ([]ComponentStatus, error) {
 	return statuses, nil
 }
 
-// readyNodeNames returns nodes reporting Ready; lookup failures leave the set empty.
+// readyNodeNames returns nodes reporting Ready without an out-of-service
+// taint. Lookup failures leave the set empty.
 func (c *Client) readyNodeNames(ctx context.Context) map[string]bool {
 	ready := map[string]bool{}
 	nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return ready
 	}
-	for _, n := range nodes.Items {
-		for _, cond := range n.Status.Conditions {
-			if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
-				ready[n.Name] = true
-			}
+	for i := range nodes.Items {
+		if stranded.Ready(&nodes.Items[i]) {
+			ready[nodes.Items[i].Name] = true
 		}
 	}
 	return ready
@@ -317,11 +317,11 @@ func (c *Client) selectedPodsStarting(ctx context.Context, readyNodes map[string
 
 func nodeToInfo(node corev1.Node) NodeInfo {
 	status := "NotReady"
-	for _, cond := range node.Status.Conditions {
-		if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
-			status = "Ready"
-			break
-		}
+	switch {
+	case stranded.OutOfService(&node):
+		status = NodeOutOfService
+	case stranded.Ready(&node):
+		status = "Ready"
 	}
 
 	role := "worker"

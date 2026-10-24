@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/getkipper/kipper/controller/pkg/stranded"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -81,13 +83,7 @@ func (c *Cluster) GetNodes(w http.ResponseWriter, r *http.Request) {
 }
 
 func toNodeStatus(node corev1.Node) nodeStatus {
-	status := "NotReady"
-	for _, cond := range node.Status.Conditions {
-		if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
-			status = "Ready"
-			break
-		}
-	}
+	status := nodeStatusText(node)
 
 	role := "worker"
 	if _, ok := node.Labels["node-role.kubernetes.io/master"]; ok {
@@ -115,4 +111,16 @@ func toNodeStatus(node corev1.Node) nodeStatus {
 		Version: node.Status.NodeInfo.KubeletVersion,
 		IP:      ip,
 	}
+}
+
+// nodeStatusText returns Ready, NotReady or OutOfService. The out-of-service
+// taint takes precedence over the node's Ready condition.
+func nodeStatusText(node corev1.Node) string {
+	switch {
+	case stranded.OutOfService(&node):
+		return "OutOfService"
+	case stranded.Ready(&node):
+		return "Ready"
+	}
+	return "NotReady"
 }

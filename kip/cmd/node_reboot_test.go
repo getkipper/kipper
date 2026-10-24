@@ -440,6 +440,11 @@ func TestReadyAfterBoot(t *testing.T) {
 
 	ok, _ = readyAfterBoot([]k8s.NodeInfo{{Name: "n1", Status: "Ready", BootID: "new-boot"}}, healthy, "new-boot")
 	assert.True(t, ok)
+
+	ok, why = readyAfterBoot([]k8s.NodeInfo{{Name: "n1", Status: "Ready", BootID: "new-boot"}, {Name: "worker-1", Status: k8s.NodeOutOfService}}, healthy, "new-boot")
+	assert.True(t, ok, "a fenced worker stays down until it rejoins, so a server reboot does not wait for it: %s", why)
+	ok, _ = readyAfterBoot([]k8s.NodeInfo{{Name: "n1", Status: "Ready", BootID: "new-boot"}, {Name: "worker-1", Status: "NotReady"}}, healthy, "new-boot")
+	assert.False(t, ok)
 }
 
 func TestRebootCommandUsesAUnitNameOfItsOwn(t *testing.T) {

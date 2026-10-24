@@ -110,6 +110,9 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := fenceAllowsRemoval(worker, force); err != nil {
+		return err
+	}
 	if err := removalMayStart(records, worker.MachineID); err != nil {
 		return err
 	}
@@ -140,8 +143,12 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 			}
 			return c, func() { _ = c.Close() }, nil
 		}
-		if err := refuseForceForLiveHost(worker, probe); err != nil {
-			return err
+		// A fenced host may answer over SSH while k3s is stopped. The fence
+		// is checked under the lease below.
+		if worker.Fence == nil {
+			if err := refuseForceForLiveHost(worker, probe); err != nil {
+				return err
+			}
 		}
 	case !installer.RemovalStarted(worker.State):
 		// Verify the host before changing its record, because removal needs
@@ -198,6 +205,28 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 	}
 	if err := removalMayStart(records, worker.MachineID); err != nil {
 		return err
+	}
+	if force && worker.Fence != nil {
+		view, err := installer.ReadFenceView(master, worker.Name)
+		if err != nil {
+			return err
+		}
+		probe := func() (rejoinHost, func(), error) {
+			cfg, err := nodeSSH(worker.Host, sshKey, cluster)
+			if err != nil {
+				return nil, nil, err
+			}
+			cfg.Options = append(cfg.Options, "BatchMode=yes")
+			cfg.CommandTimeout = 30 * time.Second
+			c, err := ssh.Dial(cfg)
+			if err != nil {
+				return nil, nil, err
+			}
+			return rejoinWorker{fenceWorker{c: lease.Host(c)}}, func() { _ = c.Close() }, nil
+		}
+		if err := checkFencedRemoval(os.Stdout, worker, view, records, probe); err != nil {
+			return err
+		}
 	}
 
 	dialHost := func(host string) (installer.FirewallRunner, installer.FirewallRunner, func(), error) {
@@ -762,4 +791,65 @@ func peerAddressOf(node installer.NodeRecord) string {
 		return node.PeerAddress
 	}
 	return node.Host
+}
+
+// fenceAllowsRemoval refuses to remove a worker whose fence is unfinished,
+// and a fenced worker without --force, which would try to drain it.
+func fenceAllowsRemoval(rec installer.NodeRecord, force bool) error {
+	switch {
+	case rec.State == installer.NodeStateFencing:
+		return fmt.Errorf("the fence of %s has not finished. Finish it with 'kip node fence %s' first", rec.Name, rec.Name)
+	case rec.Fence != nil && !force:
+		return fmt.Errorf("%s is fenced. Rejoin it with 'kip node add %s', or remove it for good with 'kip node remove %s --force'", rec.Name, rec.Host, rec.Name)
+	}
+	return nil
+}
+
+// checkFencedRemoval allows the forced removal of a fenced worker only while
+// the fence still holds a host that answers over SSH, and only once every
+// service the fence stopped with older copies elsewhere has been decided on.
+// Services whose only copy is on the worker are listed, and the data-loss
+// check of the removal still applies to them.
+func checkFencedRemoval(out io.Writer, rec installer.NodeRecord, view installer.FenceView, records []installer.NodeRecord, dial func() (rejoinHost, func(), error)) error {
+	if host, done, err := dial(); err == nil {
+		defer done()
+		id, err := host.MachineID()
+		if err != nil {
+			return fmt.Errorf("%s answers over SSH, but kip could not read its machine ID to tell whether the fence still holds it: %w. Run the command again", rec.Host, err)
+		}
+		if id == rec.MachineID {
+			held := host.VerifyInterlock()
+			if held == nil {
+				held = host.Quiescent()
+			}
+			if held != nil {
+				return fmt.Errorf("%s answers as %s, and the fence no longer holds it stopped (%v). Run 'kip node fence %s' again, or finish its rejoin with 'kip node add %s'", rec.Host, rec.Name, held, rec.Name, rec.Host)
+			}
+			say(out, "  ℹ  %s answers over SSH, and the fence still holds k3s stopped on it\n", rec.Host)
+		}
+	}
+	replicas := installer.AvailableReplicas(view.Replicas, records, "")
+	var waiting []string
+	var onlyCopy []installer.FenceService
+	for _, svc := range view.Services {
+		if svc.Stop == nil {
+			continue
+		}
+		fresh := installer.JudgeFreshness(rec.Name, svc.Volumes, replicas)
+		switch {
+		case fresh.Current:
+		case fresh.Reason == installer.FenceStopStale:
+			waiting = append(waiting, svc.StatefulSet+" ("+svc.Namespace+")")
+		default:
+			onlyCopy = append(onlyCopy, svc)
+		}
+	}
+	if len(waiting) > 0 {
+		return fmt.Errorf("%s %s stopped, and %s other copies may be older than %s data on %s. Removing the worker loses that data, so decide first: start %s on the older copies with 'kip service start <name> --accept-stale-data', or rejoin the worker with 'kip node add %s'",
+			strings.Join(waiting, ", "), plural(len(waiting), "is", "are"), plural(len(waiting), "its", "their"), plural(len(waiting), "its", "their"), rec.Name, plural(len(waiting), "it", "them"), rec.Host)
+	}
+	for _, svc := range onlyCopy {
+		say(out, "  ⚠  %s stays stopped: the only copy of its data is on %s. After the removal, %s\n", svc.Label(), rec.Name, restoreAdvice(svc.Namespace, svc.StatefulSet))
+	}
+	return nil
 }

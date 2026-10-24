@@ -47,7 +47,17 @@ a pod on the server, Longhorn storage, host registry authentication,
 containerd's registry mirror configuration and direct registry access, and
 kubelet access. Run the command again with the same options to resume an
 interrupted join. Running it again for a recorded worker also rejoins one
-whose agent certificates are missing or expired.`,
+whose agent certificates are missing or expired.
+
+For a worker fenced with 'kip node fence', kip rejoins it in a guarded order.
+It makes sure k3s is stopped and cannot start, reboots the host unless it
+has booted since the fence, then lifts the fence, runs the checks above and
+starts the services the fence stopped. A service whose copies are not known
+to be current starts only after you accept the older data, interactively
+or with --accept-stale-data. In private mode, if a fenced worker responds at
+an address different from the one its node publishes, kip records the new
+address. After the rejoin, kip runs the add process again so the node publishes
+the new address. In public mode, kip refuses to rejoin it at the new address.`,
 	Args:         cobra.MaximumNArgs(1),
 	SilenceUsage: true,
 	RunE:         runNodeAdd,
@@ -68,10 +78,11 @@ func init() {
 	nodeAddCmd.Flags().String("host", "", "IP address or hostname of the node to add (same as the argument)")
 	nodeAddCmd.Flags().String("ssh-key", "", "path to SSH private key")
 	nodeAddCmd.Flags().String("ssh-user", "", "SSH user for a node that needs a different login from the cluster's. kip uses passwordless sudo for users other than root. The default is the node's recorded user, falling back to the cluster's user.")
-	nodeAddCmd.Flags().String("private-network", "", "private network the nodes share, in CIDR form; needed when it carries the default route")
+	nodeAddCmd.Flags().String("private-network", "", "private network the nodes share, in CIDR form; needed when it carries the default route, unless the worker is already recorded in a private-mode cluster")
 	nodeAddCmd.Flags().Bool("public", false, "use the nodes' public addresses even when they share a private network")
 	nodeAddCmd.Flags().Bool("yes", false, "apply or recover server network changes without prompting")
 	nodeAddCmd.Flags().Bool("no-ssh-rate-limit", false, "Allow SSH without UFW rate limiting on the joining node, replacing any existing limit. By default, keep its managed rule or inherit the server's setting for a new firewall.")
+	nodeAddCmd.Flags().Bool("accept-stale-data", false, "when rejoining a fenced worker, start its stopped services even when no copy of their data is known to be current")
 	nodeAddCmd.Flags().Bool("firewall", true, "set up a host firewall on the new node (default: follow the server's kip-managed firewall setting); use --firewall=false to skip setup")
 
 	nodeCmd.AddCommand(nodeAddCmd)
@@ -367,6 +378,12 @@ func addNode(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = workerConn.Close() }()
 	worker := lease.Host(workerConn)
+	var rejoinConns []*ssh.Client
+	defer func() {
+		for _, c := range rejoinConns {
+			_ = c.Close()
+		}
+	}()
 
 	// Capture the host identity before setup so registration can be verified.
 	identity, err := installer.ReadHostIdentity(worker)
@@ -435,7 +452,74 @@ func addNode(cmd *cobra.Command, args []string) error {
 	if err := confirmJoinLogin(cluster, existing, workerHost, userFlag, workerLogin); err != nil {
 		return err
 	}
+	if err := replacedFencedHost(records, workerHost, identity.MachineID); err != nil {
+		return err
+	}
 	if existing != nil {
+		if err := fenceBlocksJoin(*existing); err != nil {
+			return err
+		}
+		if existing.State == installer.NodeStateFenced {
+			published, err := installer.NodeExternalIP(server, existing.Name)
+			if err != nil {
+				return err
+			}
+			moved, err := rejoinMoves(*existing, workerIP, published)
+			if err != nil {
+				return err
+			}
+			if moved {
+				fmt.Printf("  ℹ  %s responds at %s. Its node currently publishes %s. kip records the new address and runs the add process again after the rejoin so the node publishes the new address\n", existing.Name, workerHost, published)
+			}
+			if moved && existing.Host != workerHost {
+				// Save the new address so fence and rejoin retries can reach the host.
+				existing.Host = workerHost
+				if err := saveNodeRecord(server, cluster, *existing); err != nil {
+					return err
+				}
+			}
+			reconnect := func() (installer.CommandRunner, error) {
+				cfg := workerCfg
+				cfg.Options = append(append([]string(nil), cfg.Options...), "BatchMode=yes")
+				c, err := ssh.Dial(cfg)
+				if err != nil {
+					return nil, err
+				}
+				rejoinConns = append(rejoinConns, c)
+				return lease.Host(c), nil
+			}
+			acceptStale, _ := cmd.Flags().GetBool("accept-stale-data")
+			if err := rejoinFenced(server, worker, reconnect, cluster, *existing, serverRec.Name, acceptStale); err != nil {
+				return nodeAddRetry(err, workerHost)
+			}
+			if !moved {
+				return nil
+			}
+			// The rejoin may have rebooted the host, which ends this connection.
+			c, err := ssh.Dial(workerCfg)
+			if err != nil {
+				return nodeAddRetry(fmt.Errorf("connecting to %s after the rejoin: %w", workerHost, err), workerHost)
+			}
+			rejoinConns = append(rejoinConns, workerConn)
+			workerConn, worker = c, lease.Host(c)
+			// Refresh the boot ID so registration can verify the boot after the rejoin.
+			current, err := installer.ReadHostIdentity(worker)
+			if err != nil {
+				return nodeAddRetry(fmt.Errorf("reading the host identity of %s after the rejoin: %w", workerHost, err), workerHost)
+			}
+			if current.MachineID != identity.MachineID {
+				return fmt.Errorf("%s answered with machine ID %s after the rejoin, not %s. Check the address, then run 'kip node add %s' again", workerHost, current.MachineID, identity.MachineID, workerHost)
+			}
+			identity = current
+			if records, err = installer.ReadNodeRecords(server); err != nil {
+				return err
+			}
+			for i := range records {
+				if records[i].MachineID == identity.MachineID {
+					existing = &records[i]
+				}
+			}
+		}
 		if err := keepRemovingNode(worker, *existing); err != nil {
 			return err
 		}
@@ -513,9 +597,11 @@ func addNode(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	recordedServer, recordedJoiner := recordedPeers(serverRec, existing)
 	plan, serverDropIn, serverFlannel, err := prepareJoinHost(server, worker, identity.MachineID, workerHost, installer.NetworkModeOptions{
 		PrivateNetwork: privateNetwork, Public: forcePublic, ClusterMode: serverRec.Mode,
 		ServerExternalIP: serverIP, JoinerExternalIP: workerIP,
+		RecordedServerIP: recordedServer, RecordedJoinerIP: recordedJoiner,
 	}, autoYes)
 	if err != nil {
 		return err
@@ -603,6 +689,13 @@ func addNode(cmd *cobra.Command, args []string) error {
 	}
 	if err := installer.WriteFlannelConf(worker, workerFlannel); err != nil {
 		return nodeAddRetry(fmt.Errorf("on %s: %w", workerHost, err), workerHost)
+	}
+	if clearsLeftoverInterlock(existing) {
+		if cleared, err := installer.ClearLeftoverInterlock(worker); err != nil {
+			return nodeAddRetry(err, workerHost)
+		} else if cleared {
+			fmt.Printf("  ℹ  Removed a fence interlock left on %s from an earlier cluster membership\n", workerHost)
+		}
 	}
 	join, err := installer.PrepareWorker(server, worker, workerDropIn)
 	if err != nil {

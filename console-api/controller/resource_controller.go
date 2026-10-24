@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/getkipper/kipper/controller/pkg/stranded"
+
 	"github.com/getkipper/kipper/console-api/handlers"
 	"github.com/getkipper/kipper/controller/pkg/rollout"
 
@@ -116,7 +118,10 @@ type ResourceController struct {
 	// readPreviousLog fetches the log of the container that died, so a crash
 	// loop can be told apart from a volume that went read-only underneath one.
 	// It is a field so a test can supply a log without an API server.
-	readPreviousLog  func(ctx context.Context, namespace, pod, container string) string
+	readPreviousLog func(ctx context.Context, namespace, pod, container string) string
+	// listReplicas reads Longhorn's replicas, so the node alert can say where
+	// a current copy of a stranded service's data is.
+	listReplicas     func(ctx context.Context) ([]stranded.Replica, error)
 	history          map[workloadKey][]usageObservation
 	historySize      map[workloadKey]string  // the resources history was sampled at
 	skippedLogged    map[string]bool         // namespace/name of ownerless workloads already logged
@@ -180,6 +185,7 @@ func NewResourceController(client kubernetes.Interface, crClient crclient.Client
 		skippedLogged:    make(map[string]bool),
 	}
 	rc.readPreviousLog = rc.readPreviousContainerLog
+	rc.listReplicas = rc.longhornReplicas
 	return rc
 }
 
@@ -223,7 +229,7 @@ func (rc *ResourceController) tick(ctx context.Context) {
 	rc.forgetStoppedApps(ctx, deployments)
 
 	batches := rc.checkPodProblems(ctx)
-	batches = append(batches, rc.checkNodeReady(nodes)...)
+	batches = append(batches, rc.checkNodeReady(ctx, nodes)...)
 	batches = append(batches, rc.checkFailedJobs(ctx)...)
 	if deployErr == nil {
 		batches = append(batches, rc.checkStuckRollouts(deployments, rc.explainStuckRollout(ctx))...)
@@ -1972,38 +1978,36 @@ func (rc *ResourceController) checkPodProblems(ctx context.Context) []alertBatch
 	return batches
 }
 
-// checkNodeReady alerts when a node's Ready condition is not True. Each node
-// is alerted at most once per cooldown so a node that stays down does not
-// storm; the marker resets on recovery so the next outage alerts again.
-func (rc *ResourceController) checkNodeReady(nodes []corev1.Node) []alertBatch {
-	rc.mu.Lock()
-	defer rc.mu.Unlock()
-
+// checkNodeReady prepares alerts for nodes that are not Ready or are fenced.
+// Committed cooldown marks limit repeat alerts, and recovery resets the mark
+// so the next outage alerts again. Service details are read after the cooldown
+// check, outside the lock.
+func (rc *ResourceController) checkNodeReady(ctx context.Context, nodes []corev1.Node) []alertBatch {
 	now := time.Now()
-	var batches []alertBatch
+	var due []*corev1.Node
+	rc.mu.Lock()
 	for i := range nodes {
 		node := &nodes[i]
-		ready := false
-		for _, c := range node.Status.Conditions {
-			if c.Type == corev1.NodeReady {
-				ready = c.Status == corev1.ConditionTrue
-				break
-			}
-		}
-		if ready {
+		if stranded.Ready(node) {
 			delete(rc.nodeReadyAlerted, node.Name)
 			continue
 		}
 		if last, seen := rc.nodeReadyAlerted[node.Name]; seen && now.Sub(last) < nodeAlertCooldown {
 			continue
 		}
+		due = append(due, node)
+	}
+	rc.mu.Unlock()
+
+	var batches []alertBatch
+	for _, node := range due {
 		batches = append(batches, alertBatch{
 			entry: ResourceLogEntry{
 				Time:      now.UTC().Format(time.RFC3339),
 				App:       "cluster",
 				Namespace: "system",
 				Action:    "node NotReady",
-				Reason:    fmt.Sprintf("node %q is not Ready: workloads on it may be disrupted", node.Name),
+				Reason:    rc.nodeDownReason(ctx, node),
 				Severity:  "critical",
 			},
 			marks: []pendingMark{{dst: rc.nodeReadyAlerted, key: node.Name, at: now}},

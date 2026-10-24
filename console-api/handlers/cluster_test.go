@@ -136,3 +136,14 @@ func TestToNodeStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestToNodeStatusShowsAFencedNodeOutOfService(t *testing.T) {
+	node := corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
+		Spec:       corev1.NodeSpec{Taints: []corev1.Taint{{Key: "node.kubernetes.io/out-of-service", Value: "nodeshutdown", Effect: corev1.TaintEffectNoExecute}}},
+		Status:     corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}},
+	}
+	if got := toNodeStatus(node).Status; got != "OutOfService" {
+		t.Fatalf("a fenced node reporting Ready has status %q, want OutOfService", got)
+	}
+}
