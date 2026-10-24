@@ -80,6 +80,7 @@ func rbacDynamic(objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
 		{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRole"},
 		{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRoleBinding"},
 		{Group: "", Version: "v1", Kind: "ServiceAccount"},
+		{Group: "", Version: "v1", Kind: "Node"},
 		{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"},
 		{Group: "admissionregistration.k8s.io", Version: "v1", Kind: "ValidatingAdmissionPolicy"},
 		{Group: "admissionregistration.k8s.io", Version: "v1", Kind: "ValidatingAdmissionPolicyBinding"},

@@ -89,7 +89,7 @@ func testMapper(withLonghorn bool) meta.RESTMapper {
 		{Version: "v1", Kind: "PersistentVolumeClaim"}, {Version: "v1", Kind: "Pod"}, {Version: "v1", Kind: "Secret"},
 		{Version: "v1", Kind: "ConfigMap"}, {Version: "v1", Kind: "Service"}, {Group: "apps", Version: "v1", Kind: "StatefulSet"},
 		{Group: "kipper.run", Version: "v1alpha1", Kind: "Service"}, {Group: "kipper.run", Version: "v1alpha1", Kind: "Volume"},
-		{Group: "kipper.run", Version: "v1alpha1", Kind: "App"},
+		{Group: "kipper.run", Version: "v1alpha1", Kind: "App"}, {Group: "coordination.k8s.io", Version: "v1", Kind: "Lease"},
 	} {
 		mapper.Add(gvk, meta.RESTScopeNamespace)
 	}
@@ -100,7 +100,7 @@ func testMapper(withLonghorn bool) meta.RESTMapper {
 		mapper.Add(gvk, meta.RESTScopeRoot)
 	}
 	if withLonghorn {
-		for _, kind := range []string{"Node", "Volume", "Replica"} {
+		for _, kind := range []string{"Node", "Volume", "Replica", "Engine", "Setting"} {
 			mapper.Add(schema.GroupVersionKind{Group: "longhorn.io", Version: "v1beta2", Kind: kind}, meta.RESTScopeNamespace)
 		}
 	}
@@ -289,11 +289,11 @@ func TestLiveCopiesOfALocalPathClaimIsOneCopy(t *testing.T) {
 	assert.Equal(t, liveCopies{Copies: 1, Healthy: 1}, *live)
 }
 
-func TestUnsetCopiesAboveWhatKipperSetsOfferNoCommand(t *testing.T) {
+func TestUnsetCopiesAboveWhatKipperSetsAreKeptUntilCopiesAreSet(t *testing.T) {
 	c := copiesCondition(nil, &liveCopies{Copies: 3, Healthy: 3}, "kip volume update files --copies 1|2")
 	assert.Equal(t, kipperv1.StorageCopiesNotSet, c.Reason)
 	assert.Contains(t, c.Message, "Longhorn keeps 3 copies (3 healthy), more than Kipper sets")
-	assert.NotContains(t, c.Message, "kip volume update", "no value the command takes would match the volume")
+	assert.Contains(t, c.Message, "'kip volume update files --copies 1|2' converts it", "setting copies converts a three-copy volume")
 }
 
 func TestCopiesCondition(t *testing.T) {
@@ -306,13 +306,13 @@ func TestCopiesCondition(t *testing.T) {
 		reason string
 		says   string
 	}{
-		"unset reports the live copies":    {nil, &liveCopies{Copies: 2, Healthy: 1}, metav1.ConditionUnknown, kipperv1.StorageCopiesNotSet, "Longhorn keeps 2 copies (1 healthy). Set them with 'kip service update db"},
-		"unset and not provisioned":        {nil, nil, metav1.ConditionUnknown, kipperv1.StorageCopiesNotSet, "kip service update db --copies"},
-		"not provisioned yet":              {two, nil, metav1.ConditionUnknown, kipperv1.StorageCopiesPending, "not provisioned"},
-		"healthy":                          {two, &liveCopies{Copies: 2, Healthy: 2}, metav1.ConditionTrue, kipperv1.StorageCopiesHealthy, "2 of 2"},
-		"degraded":                         {two, &liveCopies{Copies: 2, Healthy: 1}, metav1.ConditionFalse, kipperv1.StorageCopiesDegraded, "1 of 2"},
-		"a changed value is not converted": {two, &liveCopies{Copies: 1, Healthy: 1}, metav1.ConditionFalse, kipperv1.StorageCopiesConversionPending, "keeps 1"},
-		"one copy":                         {one, &liveCopies{Copies: 1, Healthy: 1}, metav1.ConditionTrue, kipperv1.StorageCopiesHealthy, "1 of 1"},
+		"unset reports the live copies":     {nil, &liveCopies{Copies: 2, Healthy: 1}, metav1.ConditionUnknown, kipperv1.StorageCopiesNotSet, "Longhorn keeps 2 copies (1 healthy). Set them with 'kip service update db"},
+		"unset and not provisioned":         {nil, nil, metav1.ConditionUnknown, kipperv1.StorageCopiesNotSet, "kip service update db --copies"},
+		"not provisioned yet":               {two, nil, metav1.ConditionUnknown, kipperv1.StorageCopiesPending, "not provisioned"},
+		"healthy":                           {two, &liveCopies{Copies: 2, Healthy: 2}, metav1.ConditionTrue, kipperv1.StorageCopiesHealthy, "2 of 2"},
+		"degraded":                          {two, &liveCopies{Copies: 2, Healthy: 1}, metav1.ConditionFalse, kipperv1.StorageCopiesDegraded, "1 of 2"},
+		"a changed value not converted yet": {two, &liveCopies{Copies: 1, Healthy: 1}, metav1.ConditionFalse, kipperv1.StorageCopiesConversionPending, "and the volume has 1"},
+		"one copy":                          {one, &liveCopies{Copies: 1, Healthy: 1}, metav1.ConditionTrue, kipperv1.StorageCopiesHealthy, "1 of 1"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := copiesCondition(tc.wanted, tc.live, "kip service update db --copies 1|2")
@@ -322,4 +322,11 @@ func TestCopiesCondition(t *testing.T) {
 			assert.Contains(t, c.Message, tc.says)
 		})
 	}
+}
+
+func TestUnsetCopiesNameOneCopyInTheSingular(t *testing.T) {
+	c := copiesCondition(nil, &liveCopies{Copies: 1, Healthy: 1}, "kip service update db --copies 1|2")
+	assert.Contains(t, c.Message, "Longhorn keeps 1 copy (1 healthy).")
+	c = copiesCondition(nil, &liveCopies{Copies: 2, Healthy: 1}, "kip service update db --copies 1|2")
+	assert.Contains(t, c.Message, "Longhorn keeps 2 copies (1 healthy).")
 }

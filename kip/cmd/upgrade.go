@@ -1590,9 +1590,15 @@ func upgradeRBACSteps() []rbacStep {
 
 // applyAdmissionPolicies creates or updates the admission policies kip install
 // applies, so existing clusters get them on upgrade. The copies offer is
-// rendered from the PlatformConfig, so an upgrade keeps the admin's offer.
+// rendered from the PlatformConfig, so an upgrade keeps the admin's offer, and
+// the server node list from the nodes labeled installer.ServerNodeLabel. A
+// failed node read applies nothing.
 func applyAdmissionPolicies(ctx context.Context, dynClient dynamic.Interface) error {
-	manifests, err := installer.AdmissionPolicyManifests(recordedCopiesOffer(ctx, dynClient))
+	servers, err := serverNodeNames(ctx, dynClient)
+	if err != nil {
+		return err
+	}
+	manifests, err := installer.AdmissionPolicyManifests(recordedCopiesOffer(ctx, dynClient), servers)
 	if err != nil {
 		return err
 	}
@@ -1602,6 +1608,21 @@ func applyAdmissionPolicies(ctx context.Context, dynClient dynamic.Interface) er
 		}
 	}
 	return nil
+}
+
+var nodeGVR = schema.GroupVersionResource{Version: "v1", Resource: "nodes"}
+
+// serverNodeNames lists the nodes labeled installer.ServerNodeLabel.
+func serverNodeNames(ctx context.Context, dynClient dynamic.Interface) ([]string, error) {
+	list, err := dynClient.Resource(nodeGVR).List(ctx, metav1.ListOptions{LabelSelector: installer.ServerNodeLabel})
+	if err != nil {
+		return nil, fmt.Errorf("listing the server nodes: %w", err)
+	}
+	names := make([]string, 0, len(list.Items))
+	for _, n := range list.Items {
+		names = append(names, n.GetName())
+	}
+	return names, nil
 }
 
 // applyConsoleRBAC creates or updates the console-api ServiceAccount,

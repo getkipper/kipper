@@ -506,11 +506,16 @@ func (s longhornSnapshot) degradedByDesign(v lhVolume) bool {
 
 // volumeProblems lists volumes that are not healthy and stable: faulted,
 // v2, in transition, attached with unknown health, rebuilding, degraded other
-// than by design, or with an engine upgrade in progress. A detached volume's
-// unknown robustness is normal.
+// than by design, with an engine upgrade in progress, or with more replicas
+// without a failure marker than the requested count. These extra replicas can
+// stall a live engine upgrade in Longhorn 1.7.3. A detached volume's unknown
+// robustness is normal.
 func (s longhornSnapshot) volumeProblems() []string {
 	problems := s.carryProblems()
 	for _, v := range s.Volumes {
+		if n := s.unfailedReplicas(v.Name); n > v.Replicas {
+			problems = append(problems, fmt.Sprintf("%s has %d replicas for a count of %d. An unfinished copy count change can leave extra replicas. Run 'kip status' to see why the change stopped", v.label(), n, v.Replicas))
+		}
 		switch {
 		case v.DataEngine == "v2" || v.Robustness == "faulted":
 			continue
@@ -590,6 +595,16 @@ func (s longhornSnapshot) engineEvidenceProblem(v lhVolume) string {
 		return fmt.Sprintf("%s is healthy, but only %d of its %d replicas are running and read-write", v.label(), usable, v.Replicas)
 	}
 	return ""
+}
+
+func (s longhornSnapshot) unfailedReplicas(volume string) int {
+	n := 0
+	for _, r := range s.Replicas {
+		if r.Volume == volume && r.FailedAt == "" {
+			n++
+		}
+	}
+	return n
 }
 
 func orUnknown(s string) string {

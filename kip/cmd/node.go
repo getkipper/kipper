@@ -771,6 +771,11 @@ func addNode(cmd *cobra.Command, args []string) error {
 	if err := installer.InstallBuildIsolation(server); err != nil {
 		return nodeAddRetry(fmt.Errorf("updating build isolation for %s: %w", nodeName, err), workerHost)
 	}
+	// The server-replica policy lists the server nodes, so it is rendered again
+	// whenever the node set changes.
+	if err := installer.InstallAdmissionPolicies(server); err != nil {
+		return nodeAddRetry(fmt.Errorf("updating the admission policies: %w", err), workerHost)
+	}
 
 	rec.State = installer.NodeStateReady
 	if err := saveNodeRecord(server, cluster, rec); err != nil {

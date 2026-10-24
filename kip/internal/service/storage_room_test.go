@@ -850,3 +850,83 @@ func TestStorageRoomLetsPendingSharedVolumesUseOtherNodes(t *testing.T) {
 
 	require.NoError(t, err)
 }
+
+// copiesCluster is a server and one worker that both hold copies, with the
+// server's disk figures from a live cluster: 80.3 GB, 24.1 GB reserved and
+// 49.4 GB scheduled leave 6.8 GB for new replicas.
+func copiesCluster(t *testing.T, objects ...runtime.Object) *Manager {
+	t.Helper()
+	clientset := fake.NewSimpleClientset( //nolint:staticcheck
+		storageClass("longhorn-single", "driver.longhorn.io", map[string]string{"numberOfReplicas": "1", "nodeSelector": "kipper-server"}),
+		storageClass("longhorn-replicated", "driver.longhorn.io", map[string]string{"numberOfReplicas": "2", "nodeSelector": "kipper-replica"}),
+	)
+	for _, o := range objects {
+		require.NoError(t, clientset.Tracker().Add(o))
+	}
+	return storageManager(clientset, append(defaultSettings(),
+		longhornNodeObject(healthyNode("server-1", []string{"kipper-server", "kipper-replica"}, roomyDisk("default-disk", 80_300_000_000, 24_100_000_000, 49_400_000_000))),
+		longhornNodeObject(healthyNode("worker-1", []string{"kipper-replica"}, roomyDisk("default-disk", gi(500), gi(150), 0))),
+	)...)
+}
+
+func twoCopyPostgres(t *testing.T, storage string) []NewVolume {
+	t.Helper()
+	volumes, err := ServiceVolumes("default", "px", "postgres", storage, true)
+	require.NoError(t, err)
+	volumes[0].Copies = 2
+	return volumes
+}
+
+// With two nodes, a volume with two copies keeps one on the server, next to
+// the single-copy dump pinned there: 4Gi each make 8Gi, more than the 6.8 GB
+// the server has left.
+func TestStorageRoomRefusesTwoCopiesWhenTheServerCannotHoldItsCopyAndTheDump(t *testing.T) {
+	mgr := copiesCluster(t)
+
+	warning, err := mgr.CheckStorageRoom(context.Background(), twoCopyPostgres(t, "4Gi"), "--storage")
+
+	require.Error(t, err)
+	assert.Empty(t, warning)
+	for _, want := range []string{"server-1", "6.3Gi", "8Gi", "data 4Gi", "dump 4Gi", "--storage"} {
+		assert.Contains(t, err.Error(), want)
+	}
+	assert.NotContains(t, err.Error(), "worker-1")
+
+	warning, err = mgr.CheckStorageRoom(context.Background(), twoCopyPostgres(t, "3Gi"), "--storage")
+	require.NoError(t, err, "3Gi each make 6Gi, which fits in 6.8 GB")
+	assert.Empty(t, warning)
+}
+
+// A volume with two copies whose claim exists but that Longhorn has not
+// scheduled yet still puts a copy on the server.
+func TestStorageRoomCountsTheServerCopyOfAPendingTwoCopyVolume(t *testing.T) {
+	mgr := copiesCluster(t, claim("data-other-0", "longhorn-replicated", "4Gi", ""))
+
+	_, err := mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "uploads", Shared: true, Bytes: gi(4), Namespace: "shop", Claim: "shared-uploads"}}, "--size")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "data-other-0")
+}
+
+// Three nodes hold copies, so no single node must take a copy of either volume,
+// but the two copies of each need 2 × (6 + 6) = 24Gi and the nodes have 21Gi.
+func TestStorageRoomCountsEveryCopyAgainstTheNodesThatHoldCopies(t *testing.T) {
+	maximum, reserved := gi(40), gi(4)
+	mgr := storageManager(fake.NewSimpleClientset( //nolint:staticcheck
+		storageClass("longhorn-single", "driver.longhorn.io", map[string]string{"numberOfReplicas": "1", "nodeSelector": "kipper-server"}),
+		storageClass("longhorn-replicated", "driver.longhorn.io", map[string]string{"numberOfReplicas": "2", "nodeSelector": "kipper-replica"}),
+	), append(defaultSettings(),
+		longhornNodeObject(healthyNode("server-1", []string{"kipper-server", "kipper-replica"}, roomyDisk("default-disk", maximum, reserved, maximum-reserved-gi(7)))),
+		longhornNodeObject(healthyNode("worker-1", []string{"kipper-replica"}, roomyDisk("default-disk", maximum, reserved, maximum-reserved-gi(7)))),
+		longhornNodeObject(healthyNode("worker-2", []string{"kipper-replica"}, roomyDisk("default-disk", maximum, reserved, maximum-reserved-gi(7)))),
+	)...)
+	volumes := []NewVolume{{Name: "a", Bytes: gi(6), Copies: 2}, {Name: "b", Bytes: gi(6), Copies: 2}}
+
+	_, err := mgr.CheckStorageRoom(context.Background(), volumes, "--storage")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "24Gi")
+
+	_, err = mgr.CheckStorageRoom(context.Background(), volumes[:1], "--storage")
+	require.NoError(t, err)
+}

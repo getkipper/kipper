@@ -825,15 +825,25 @@ func (r *ProjectReconciler) reconcileSharedStorage(ctx context.Context, project 
 	if err != nil {
 		return metav1.Condition{}, err
 	}
+	var converted *metav1.Condition
+	if projectSharedClaim(&existing) {
+		if converted, err = convertShared(ctx, storageConverter{Reader: r.longhornReader(), Writer: r.Client}, &existing, copies); err != nil {
+			return metav1.Condition{}, err
+		}
+	}
 	live, err := readLiveCopies(ctx, r.longhornReader(), &existing)
 	if err != nil {
-		return metav1.Condition{}, err
+		if converted == nil {
+			return metav1.Condition{}, err
+		}
+		log.FromContext(ctx).Error(err, "Could not read the live storage copies.", "namespace", ns)
+		return *converted, nil
 	}
 	command := projectCopiesCommand(project.Name, 1)
 	if live != nil {
 		command = projectCopiesCommand(project.Name, live.Copies)
 	}
-	return sharedCopiesCondition(copies, live, command), nil
+	return orConverted(converted, sharedCopiesCondition(copies, live, command)), nil
 }
 
 // ResolveNamespace returns the namespace an environment of a project runs in.

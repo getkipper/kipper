@@ -46,22 +46,17 @@ func copiesService(spec, live *int64) *unstructured.Unstructured {
 	return obj
 }
 
-func TestApplyRefusesToChangeTheCopiesOfAnExistingObject(t *testing.T) {
-	err := refuseCopiesChange("Service", map[string]interface{}{"copies": int64(2)}, copiesService(ptr.To[int64](1), ptr.To[int64](1)))
-	assert.ErrorContains(t, err, "live conversion")
-	assert.NoError(t, refuseCopiesChange("Service", map[string]interface{}{"copies": int64(1)}, copiesService(ptr.To[int64](1), ptr.To[int64](1))))
+func TestApplyChangesCopiesExceptDuringAConversion(t *testing.T) {
+	assert.NoError(t, refuseCopiesChange("Service", map[string]interface{}{"copies": int64(2)}, copiesService(ptr.To[int64](1), ptr.To[int64](1))))
+	assert.NoError(t, refuseCopiesChange("Service", map[string]interface{}{"copies": int64(2)}, copiesService(nil, ptr.To[int64](1))),
+		"an unmanaged object is converted to the copies the manifest sets")
 	assert.NoError(t, refuseCopiesChange("Service", map[string]interface{}{"type": "redis"}, copiesService(nil, ptr.To[int64](3))),
 		"a manifest without copies leaves an unmanaged object unmanaged")
-}
 
-func TestApplyRecordsUnsetCopiesOnlyWhenTheyMatchTheVolume(t *testing.T) {
-	assert.NoError(t, refuseCopiesChange("Service", map[string]interface{}{"copies": int64(1)}, copiesService(nil, ptr.To[int64](1))))
-
-	err := refuseCopiesChange("Service", map[string]interface{}{"copies": int64(2)}, copiesService(nil, ptr.To[int64](1)))
-	assert.ErrorContains(t, err, "live conversion", "a different count on an unmanaged object is a conversion too")
-
-	err = refuseCopiesChange("Volume", map[string]interface{}{"copies": int64(1)}, copiesService(nil, nil))
-	assert.ErrorContains(t, err, "not known yet")
+	converting := withCopiesCondition(copiesService(ptr.To[int64](2), ptr.To[int64](1)), "False", "Converting", "Longhorn is building a copy of the volume (1 of 2 copies healthy).")
+	err := refuseCopiesChange("Service", map[string]interface{}{"copies": int64(1)}, converting)
+	assert.ErrorContains(t, err, "being converted")
+	assert.NoError(t, refuseCopiesChange("Service", map[string]interface{}{"copies": int64(2)}, converting), "the same copies are no change")
 }
 
 func copiesWrites(dyn *dynamicfake.FakeDynamicClient) []string {
@@ -155,7 +150,7 @@ func TestApplyCannotAskAdmissionInANamespaceThatDoesNotExistYet(t *testing.T) {
 		"admission still refuses the real create")
 }
 
-func TestApplyRefusesAChangedCountOnAnUnmanagedServiceBeforeWritingAnything(t *testing.T) {
+func TestApplyRefusesTwoCopiesOnAnExistingServiceTheClusterCannotHoldBeforeWritingAnything(t *testing.T) {
 	dyn := copiesApplyDyn()
 	seedCopiesService(t, dyn, nil, ptr.To[int64](1))
 	dyn.ClearActions()
@@ -165,7 +160,7 @@ func TestApplyRefusesAChangedCountOnAnUnmanagedServiceBeforeWritingAnything(t *t
 	})
 	_, _, err := applyPlans(context.Background(), dyn, k8sfake.NewSimpleClientset(), []applyPlan{plan}, false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "live conversion")
+	assert.Contains(t, err.Error(), "offers one copy")
 	assert.Empty(t, copiesWrites(dyn))
 	live := getCopiesService(t, dyn)
 	_, set, _ := unstructured.NestedInt64(live.Object, "spec", "copies")

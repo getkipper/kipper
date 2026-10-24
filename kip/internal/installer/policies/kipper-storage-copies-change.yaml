@@ -2,7 +2,8 @@
 # storage, including setting or removing them, needs the custom RBAC verb
 # set-copies on that object. Project owners, console-api and cluster admins
 # hold it. Deployers can create within the offer, but changing copies requires
-# this additional permission.
+# this additional permission. No one changes copies while the object reports a
+# running conversion (StorageCopies reason Converting).
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -28,6 +29,11 @@ spec:
         request.resource.resource == 'projects'
         ? (has(object.spec.sharedStorage) && has(object.spec.sharedStorage.copies) ? object.spec.sharedStorage.copies : 0)
         : (has(object.spec.copies) ? object.spec.copies : 0)
+    - name: conversions
+      expression: >-
+        has(oldObject.status) && has(oldObject.status.conditions)
+        ? oldObject.status.conditions.filter(c, c.type == 'StorageCopies' && c.reason == 'Converting')
+        : []
   validations:
     # Projects are cluster-scoped, so their requests carry no namespace.
     - expression: >-
@@ -36,6 +42,9 @@ spec:
         ? authorizer.group('kipper.run').resource('projects').name(request.name).check('set-copies').allowed()
         : authorizer.group('kipper.run').resource(request.resource.resource).namespace(request.namespace).name(request.name).check('set-copies').allowed())
       message: "Changing the copies of an existing volume needs the project owner role."
+    - expression: "variables.oldCopies == variables.newCopies || size(variables.conversions) == 0"
+      messageExpression: >-
+        "The copies cannot change while a conversion runs. " + variables.conversions[0].message
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

@@ -32,12 +32,12 @@ func (e copiesEntry) label(detail string) string {
 }
 
 // reportStorageCopies lists the services, volumes and project shared storage
-// whose copies are unset, and those whose StorageCopies condition is False
-// (degraded, held back at creation, or set to a count the volume does not
-// have) or whose copies Kipper could not check. A kind that cannot be listed
-// is skipped.
+// whose copies are unset, those being converted, and those whose
+// StorageCopies condition is otherwise False (degraded, held back at
+// creation, or a conversion that cannot go on) or whose copies Kipper could
+// not check. A kind that cannot be listed is skipped.
 func reportStorageCopies(ctx context.Context, out io.Writer, dyn dynamic.Interface) {
-	var unset, attention []copiesEntry
+	var unset, converting, attention []copiesEntry
 	for _, kind := range []struct {
 		gvr  schema.GroupVersionResource
 		name string
@@ -51,6 +51,8 @@ func reportStorageCopies(ctx context.Context, out io.Writer, dyn dynamic.Interfa
 			switch {
 			case e.copies.Reason == "NotSet":
 				unset = append(unset, e)
+			case e.copies.Converting():
+				converting = append(converting, e)
 			case e.copies.Status == "False", e.copies.Reason == "Unknown":
 				attention = append(attention, e)
 			}
@@ -60,6 +62,7 @@ func reportStorageCopies(ctx context.Context, out io.Writer, dyn dynamic.Interfa
 		sort.Slice(entries, func(i, j int) bool { return entries[i].label("") < entries[j].label("") })
 	}
 	byLabel(unset)
+	byLabel(converting)
 	byLabel(attention)
 
 	if len(unset) > 0 {
@@ -76,7 +79,14 @@ func reportStorageCopies(ctx context.Context, out io.Writer, dyn dynamic.Interfa
 				say(out, "    ·  %s\n", e.label(""))
 			}
 		}
-		say(out, "       Set a service or volume to the copies it has with 'kip service update <name> --copies <n>' or 'kip volume update <name> --copies <n>'.\n\n")
+		say(out, "       Set copies on a service or volume with 'kip service update <name> --copies <n>' or 'kip volume update <name> --copies <n>'. Kipper converts the volume when it has a different number.\n\n")
+	}
+	if len(converting) > 0 {
+		say(out, "  Storage copies being converted:\n")
+		for _, e := range converting {
+			say(out, "    …  %s\n       %s\n", e.label(""), e.copies.Message)
+		}
+		say(out, "\n")
 	}
 	if len(attention) > 0 {
 		say(out, "  Storage copies needing attention:\n")

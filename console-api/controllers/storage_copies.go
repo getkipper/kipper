@@ -17,8 +17,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
 	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
@@ -28,8 +30,9 @@ const longhornNamespace = "longhorn-system"
 
 // Storage status is refreshed on a timer because nothing watches Longhorn.
 const (
-	storageRefreshUnsettled = time.Minute
-	storageRefreshSettled   = 5 * time.Minute
+	storageRefreshConverting = 15 * time.Second
+	storageRefreshUnsettled  = time.Minute
+	storageRefreshSettled    = 5 * time.Minute
 )
 
 var (
@@ -219,16 +222,16 @@ func copiesCondition(wanted *int32, live *liveCopies, setCommand string) metav1.
 		c.Message = fmt.Sprintf("Copies are not set, so Kipper leaves this volume as it is. Set them with '%s'.", setCommand)
 	case wanted == nil && live.Copies > platform.MaxCopies:
 		c.Status, c.Reason = metav1.ConditionUnknown, kipperv1.StorageCopiesNotSet
-		c.Message = fmt.Sprintf("Copies are not set, so Kipper leaves this volume unchanged. Longhorn keeps %d copies (%d healthy), more than Kipper sets. Copies stay unset until changing the count is available.", live.Copies, live.Healthy)
+		c.Message = fmt.Sprintf("Copies are not set, so Kipper leaves this volume as it is: Longhorn keeps %d %s (%d healthy), more than Kipper sets. Setting copies with '%s' converts it to that count.", live.Copies, pluralCopies(live.Copies), live.Healthy, setCommand)
 	case wanted == nil:
 		c.Status, c.Reason = metav1.ConditionUnknown, kipperv1.StorageCopiesNotSet
-		c.Message = fmt.Sprintf("Copies are not set, so Kipper leaves this volume as it is: Longhorn keeps %d copies (%d healthy). Set them with '%s'.", live.Copies, live.Healthy, setCommand)
+		c.Message = fmt.Sprintf("Copies are not set, so Kipper leaves this volume as it is: Longhorn keeps %d %s (%d healthy). Set them with '%s'.", live.Copies, pluralCopies(live.Copies), live.Healthy, setCommand)
 	case live == nil:
 		c.Status, c.Reason = metav1.ConditionUnknown, kipperv1.StorageCopiesPending
 		c.Message = "The volume is not provisioned yet."
 	case live.Copies != *wanted:
 		c.Status, c.Reason = metav1.ConditionFalse, kipperv1.StorageCopiesConversionPending
-		c.Message = fmt.Sprintf("The copy count is set to %d, but the volume has %d. Changing the copies of an existing volume is not available yet, so it keeps %d.", *wanted, live.Copies, live.Copies)
+		c.Message = fmt.Sprintf("The copy count is set to %d, and the volume has %d. Kipper converts it once the volume can be read.", *wanted, live.Copies)
 	case live.Healthy < *wanted && live.Unknown > 0:
 		c.Status, c.Reason = metav1.ConditionUnknown, kipperv1.StorageCopiesUnknown
 		c.Message = fmt.Sprintf("%d of %d copies are healthy, and Kipper could not read node information for %d %s.", live.Healthy, *wanted, live.Unknown, pluralCopies(live.Unknown))
@@ -256,10 +259,14 @@ func storageStatus(pvc *corev1.PersistentVolumeClaim, live *liveCopies) *kipperv
 }
 
 // storageRefresh polls healthy and unset storage less often to reduce API
-// reads. The requested count stays unset until someone sets it.
+// reads and a running conversion more often because it takes one step per
+// reconcile.
 func storageRefresh(c *metav1.Condition) time.Duration {
-	if c != nil && (c.Status == metav1.ConditionTrue || c.Reason == kipperv1.StorageCopiesNotSet) {
+	switch {
+	case c != nil && (c.Status == metav1.ConditionTrue || c.Reason == kipperv1.StorageCopiesNotSet):
 		return storageRefreshSettled
+	case c != nil && c.Reason == kipperv1.StorageCopiesConverting:
+		return storageRefreshConverting
 	}
 	return storageRefreshUnsettled
 }
@@ -375,13 +382,63 @@ func (r *ServiceReconciler) reportStorageCopies(ctx context.Context, svc *kipper
 		}
 		return err
 	}
+	var converted *metav1.Condition
+	if r.ownsDataClaim(ctx, svc, &pvc) {
+		var err error
+		if converted, err = (storageConverter{Reader: r.longhornReader(), Writer: r.Client}).convertOrBlock(ctx, &pvc, svc.Spec.Copies); err != nil {
+			return err
+		}
+	}
 	live, err := readLiveCopies(ctx, r.longhornReader(), &pvc)
 	if err != nil {
-		return err
+		return reportConversionOnly(ctx, &svc.Status.Conditions, converted, svc.Generation, err)
 	}
 	svc.Status.Storage = storageStatus(&pvc, live)
-	setCopiesCondition(&svc.Status.Conditions, copiesCondition(svc.Spec.Copies, live, "kip service update "+svc.Name+" --copies 1|2"), svc.Generation)
+	setCopiesCondition(&svc.Status.Conditions, orConverted(converted, copiesCondition(svc.Spec.Copies, live, "kip service update "+svc.Name+" --copies 1|2")), svc.Generation)
 	return nil
+}
+
+// ownsDataClaim reports whether pvc is svc's data claim: the StatefulSet named
+// after svc is controlled by svc, and the claim is controlled by that
+// StatefulSet or has no controller and carries an app label matching svc's
+// name. Only owned claims are converted. Other claims are only reported.
+func (r *ServiceReconciler) ownsDataClaim(ctx context.Context, svc *kipperv1.Service, pvc *corev1.PersistentVolumeClaim) bool {
+	var sts appsv1.StatefulSet
+	if err := r.Get(ctx, types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}, &sts); err != nil {
+		return false
+	}
+	ref := metav1.GetControllerOf(&sts)
+	if ref == nil {
+		return false
+	}
+	if owned, _ := controllerRefNames(ref, svc, "Service"); !owned {
+		return false
+	}
+	if claimRef := metav1.GetControllerOf(pvc); claimRef != nil {
+		return claimRef.Kind == "StatefulSet" && claimRef.Name == sts.Name && claimRef.UID == sts.UID
+	}
+	return pvc.Labels["app"] == svc.Name
+}
+
+// reportConversionOnly records converted, logs readErr and returns nil so a
+// Blocked condition can be saved even when live reads fail. The caller retains
+// the previous storage status. If converted is nil, it returns readErr.
+func reportConversionOnly(ctx context.Context, conditions *[]metav1.Condition, converted *metav1.Condition, generation int64, readErr error) error {
+	if converted == nil {
+		return readErr
+	}
+	log.FromContext(ctx).Error(readErr, "Could not read the live storage copies.")
+	setCopiesCondition(conditions, *converted, generation)
+	return nil
+}
+
+// orConverted returns the conversion condition when present, otherwise the
+// live copies condition.
+func orConverted(converted *metav1.Condition, live metav1.Condition) metav1.Condition {
+	if converted != nil {
+		return *converted
+	}
+	return live
 }
 
 // reportStorageGate records why the service's data claim is held back.
@@ -404,13 +461,29 @@ func (r *VolumeReconciler) longhornReader() client.Reader {
 // reportStorageCopies sets the volume's storage status and StorageCopies
 // condition from its shared claim.
 func (r *VolumeReconciler) reportStorageCopies(ctx context.Context, vol *kipperv1.Volume, pvc *corev1.PersistentVolumeClaim) error {
+	var converted *metav1.Condition
+	if owned, _ := claimProvenance(pvc, vol); owned {
+		var err error
+		if converted, err = convertShared(ctx, storageConverter{Reader: r.longhornReader(), Writer: r.Client}, pvc, vol.Spec.Copies); err != nil {
+			return err
+		}
+	}
 	live, err := readLiveCopies(ctx, r.longhornReader(), pvc)
 	if err != nil {
-		return err
+		return reportConversionOnly(ctx, &vol.Status.Conditions, converted, vol.Generation, err)
 	}
 	vol.Status.Storage = storageStatus(pvc, live)
-	setCopiesCondition(&vol.Status.Conditions, sharedCopiesCondition(vol.Spec.Copies, live, "kip volume update "+vol.Name+" --copies 1|2"), vol.Generation)
+	setCopiesCondition(&vol.Status.Conditions, orConverted(converted, sharedCopiesCondition(vol.Spec.Copies, live, "kip volume update "+vol.Name+" --copies 1|2")), vol.Generation)
 	return nil
+}
+
+// convertShared returns nil without converting when two copies are requested
+// and RWXCopiesQualified is false. Other requests use the normal conversion.
+func convertShared(ctx context.Context, sc storageConverter, pvc *corev1.PersistentVolumeClaim, wanted *int32) (*metav1.Condition, error) {
+	if platform.WantsTwoCopies(wanted) && !platform.RWXCopiesQualified {
+		return nil, nil
+	}
+	return sc.convertOrBlock(ctx, pvc, wanted)
 }
 
 // sharedCopiesCondition is copiesCondition for a shared claim, which cannot
@@ -436,6 +509,17 @@ func pluralCopies(n int32) string {
 	return "copies"
 }
 
+// projectSharedClaim reports whether pvc, read from a namespace the project
+// reconciler resolved as the project's, is the project's shared storage
+// claim: nothing controls it and Kipper labelled it a shared volume, without
+// the volume-name label a Volume's claim carries.
+func projectSharedClaim(pvc *corev1.PersistentVolumeClaim) bool {
+	l := pvc.Labels
+	_, volumeClaim := l[kipperlabels.VolumeName]
+	return metav1.GetControllerOf(pvc) == nil && !volumeClaim && l[kipperLabel] == kipperValue &&
+		l[kipperlabels.ResourceType] == kipperlabels.ResourceTypeSharedVolume
+}
+
 func (r *ProjectReconciler) longhornReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
@@ -457,14 +541,16 @@ type envCopies struct {
 }
 
 // projectCopiesCondition combines a non-empty list of environment conditions.
-// It keeps the first condition with the least healthy status and joins every
-// environment's message in input order.
+// It joins every environment's message in input order and selects the first
+// running conversion so admission can refuse another copy count change.
+// Otherwise, it selects the first condition with the least healthy status.
 func projectCopiesCondition(envs []envCopies) metav1.Condition {
 	rank := map[metav1.ConditionStatus]int{metav1.ConditionFalse: 0, metav1.ConditionUnknown: 1, metav1.ConditionTrue: 2}
 	worst := envs[0].cond
 	var messages []string
 	for _, e := range envs {
-		if rank[e.cond.Status] < rank[worst.Status] {
+		converting := e.cond.Reason == kipperv1.StorageCopiesConverting
+		if worst.Reason != kipperv1.StorageCopiesConverting && (converting || rank[e.cond.Status] < rank[worst.Status]) {
 			worst = e.cond
 		}
 		messages = append(messages, e.env+": "+e.cond.Message)

@@ -68,7 +68,7 @@ func (p placementRunner) Run(cmd string) (string, error) {
 	case strings.Contains(cmd, "get pv "):
 		return "longhorn-single\tpvc-db\n", nil
 	case strings.Contains(cmd, "get volumes.longhorn.io"):
-		return "pvc-db\t" + p.selector + "\tshop\tdata-db-0\n", nil
+		return "pvc-db\t" + p.selector + "\tshop\tdata-db-0\t1\t5\n", nil
 	case strings.Contains(cmd, "replicas.longhorn.io"):
 		return p.replicas, nil
 	}
