@@ -116,6 +116,8 @@ func TestVolumeProblems(t *testing.T) {
 		"replica stopped":    {func(s *longhornSnapshot) { s.Replicas[1].State = "stopped" }, "only 1 of its 2 replicas"},
 		"replica failed":     {func(s *longhornSnapshot) { s.Replicas[1].FailedAt = "t" }, "only 1 of its 2 replicas"},
 		"engine not running": {func(s *longhornSnapshot) { s.Engines[0].State = "starting" }, "its engine is starting"},
+		"more replicas than its count": {func(s *longhornSnapshot) { s.Volumes[0].Replicas = 1 },
+			"shop/data-db-0 has 2 replicas for a count of 1"},
 		"two engines": {func(s *longhornSnapshot) {
 			s.Engines = append(s.Engines, lhEngine{Volume: "pvc-db", State: "running", Modes: map[string]string{"pvc-db-r-1": "RW", "pvc-db-r-2": "RW"}})
 		}, "has 2 engines"},

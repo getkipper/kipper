@@ -47,9 +47,9 @@ func withLiveCopies(kind string, spec, live map[string]interface{}) map[string]i
 	return withField(spec, "copies", current)
 }
 
-// refuseCopiesChange refuses a manifest whose copies the existing object
-// cannot take without live conversion. A manifest without copies changes
-// nothing.
+// refuseCopiesChange refuses a manifest that changes the copies of an
+// existing object while they are being converted. A manifest without copies
+// changes nothing.
 func refuseCopiesChange(kind string, spec map[string]interface{}, existing *unstructured.Unstructured) error {
 	if !carriesCopies(kind) {
 		return nil
@@ -62,15 +62,17 @@ func refuseCopiesChange(kind string, spec map[string]interface{}, existing *unst
 	if !ok {
 		return fmt.Errorf("copies must be a whole number, got %v", wanted)
 	}
-	_, err := checkCopiesAdoption(existing, want)
+	_, err := checkCopiesChange(existing, want, nil, kind == "Volume")
 	return err
 }
 
 // refuseCopiesInPlans checks every copies setting in the manifests before
 // apply writes anything: a new object's copies against what the cluster
-// offers and can place, an existing object's against the copies it has.
+// offers and can place, an existing object's change against a running
+// conversion and, for two copies, against what the cluster can place.
 // Admission and the controllers still refuse what changes after this check.
 func refuseCopiesInPlans(ctx context.Context, out io.Writer, dyn dynamic.Interface, plans []applyPlan) error {
+	var cluster *copiesCluster
 	for _, p := range plans {
 		for _, res := range p.resources {
 			kind, name := res.Object.GetKind(), res.Object.GetName()
@@ -96,8 +98,16 @@ func refuseCopiesInPlans(ctx context.Context, out io.Writer, dyn dynamic.Interfa
 			case err != nil:
 				return fmt.Errorf("reading %s/%s: %w", kind, name, err)
 			default:
-				if _, err := checkCopiesAdoption(live, copies); err != nil {
+				if copies == 2 && cluster == nil {
+					c := readCopiesCluster(ctx, dyn)
+					cluster = &c
+				}
+				unchanged, err := checkCopiesChange(live, copies, cluster, res.GVR == manifest.VolumeGVR)
+				if err != nil {
 					return fmt.Errorf("%s/%s: %w", kind, name, err)
+				}
+				if !unchanged && cluster != nil {
+					warnAboutCopies(out, int32(copies), *cluster) //nolint:gosec // G115: Validate bounds copies to 1 or 2.
 				}
 			}
 		}

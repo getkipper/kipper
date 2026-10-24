@@ -56,13 +56,13 @@ var volumeDeleteCmd = &cobra.Command{
 
 var volumeUpdateCmd = &cobra.Command{
 	Use:   "update [name] --copies 1|2",
-	Short: "Set the copies of a shared volume whose copies are unset",
-	Long: `Set the copies of a shared volume created before Kipper managed copies.
-The value must match the number of copies the volume has now. Changing that
-number on an existing volume is not available yet.
+	Short: "Change the copies of a shared volume",
+	Long: `Change the copies of a shared volume. Kipper converts the live volume one
+step at a time and keeps the copy on the server. This Kipper release converts
+shared volumes to one copy and rejects requests for two copies.
 
 Examples:
-  kip volume update uploads --copies 1`,
+  kip volume update uploads --copies 1 --wait`,
 	Args: cobra.ExactArgs(1),
 	RunE: runVolumeUpdate,
 }
@@ -96,7 +96,8 @@ func init() {
 
 	volumeUpdateCmd.Flags().String("project", "", "project name")
 	volumeUpdateCmd.Flags().String("environment", "", "target environment")
-	volumeUpdateCmd.Flags().Int32("copies", 1, "copies the volume has now: 1 or 2")
+	volumeUpdateCmd.Flags().Int32("copies", 1, copiesUpdateHelp)
+	volumeUpdateCmd.Flags().Bool("wait", false, "wait until the conversion is done and every copy is healthy")
 	_ = volumeUpdateCmd.MarkFlagRequired("copies")
 
 	volumeMountCmd.Flags().String("path", "/data", "mount path inside the container")
@@ -203,12 +204,15 @@ func runVolumeUpdate(cmd *cobra.Command, args []string) error {
 	if ns == "" {
 		return fmt.Errorf("no project context. Set one with `kip project use <name>` or pass --project")
 	}
-	changed, err := adoptCopies(context.Background(), k8sClient.Dynamic(), manifest.VolumeGVR, ns, name, copies)
+	wait, _ := cmd.Flags().GetBool("wait")
+	fmt.Println()
+	err = setCopies(context.Background(), os.Stdout, k8sClient.Dynamic(), copiesChange{
+		gvr: manifest.VolumeGVR, namespace: ns, name: name, want: copies, shared: true, wait: wait,
+		infoCommand: "kip volume list",
+	})
 	if err != nil {
 		return err
 	}
-	fmt.Println()
-	sayCopiesAdopted(os.Stdout, changed, copies)
 	fmt.Println()
 	return nil
 }

@@ -186,9 +186,20 @@ rules:
   - apiGroups: ["monitoring.coreos.com"]
     resources: ["servicemonitors"]
     verbs: ["get", "list", "watch", "create", "update"]
-  # Storage copies status reads Longhorn's objects on a timer, without a watch.
+  # Storage copies status and conversion read Longhorn's objects on a timer,
+  # without a watch. A conversion patches the volume's replica count, node
+  # selector and locality, and deletes one surplus replica at a time. The
+  # kipper-longhorn-server-replicas policy denies deleting a server's replica.
+  # The rules are cluster-wide because local-path clusters have no
+  # longhorn-system namespace to hold a Role.
   - apiGroups: ["longhorn.io"]
-    resources: ["volumes", "replicas", "engines", "nodes", "settings"]
+    resources: ["volumes"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["longhorn.io"]
+    resources: ["replicas"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: ["longhorn.io"]
+    resources: ["engines", "nodes", "settings"]
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

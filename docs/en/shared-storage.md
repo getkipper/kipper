@@ -64,7 +64,7 @@ On Linux 7.0 and later, the NFS client requests directory delegations, which Lon
 kip volume create uploads --size 10Gi --project blog --environment prod
 ```
 
-A new shared volume keeps one copy of its data on the server, like a service created with the default copy count. Volumes created by earlier Kipper releases keep the copies they have. `kip volume create` refuses creation when the server's Longhorn disks have insufficient capacity for the volume and names the disk's node and its remaining room.
+A new shared volume keeps one copy of its data on the server, like a service created with the default copy count. Volumes created by earlier Kipper releases keep the copies they have until `kip volume update <name> --copies 1` converts them to one copy on the server (see [Changing the copies of a running service](/en/worker-nodes#changing-the-copies-of-a-running-service)). `kip volume create` refuses creation when the server's Longhorn disks have insufficient capacity for the volume and names the disk's node and its remaining room.
 
 ```
   ✔  Shared volume "uploads" created (10Gi)

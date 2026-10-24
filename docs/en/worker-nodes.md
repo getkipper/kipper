@@ -97,11 +97,12 @@ Some platforms, such as Harvester, taint a node out of service on a timer. Kippe
 
 ## Two copies of a service's data
 
-A service can keep two copies of its data, each on a different node, so the data survives the loss of either node's disk. Two copies are opt-in and chosen when the service is created:
+A service can keep two copies of its data, each on a different node, so the data survives the loss of either node's disk. Two copies are opt-in, chosen when the service is created or later on a running service:
 
 ```bash
 kip cluster storage --max-copies 2           # an admin offers two copies, once
 kip service add postgres --name db --copies 2
+kip service update cache --copies 2 --wait   # convert a running service
 ```
 
 The server is always eligible to hold copies. A worker becomes eligible after its disk passes the check that `kip node add` runs at the end of each join unless `--no-copies` is set. [`kip node storage <worker> --copies`](/en/cli-reference#kip-node-storage) repeats the check. The check measures how long the disk takes to sync small writes, because a replica on a slow disk stalls every write to the volume. Local SSD and NVMe disks pass. Network block storage mounted at `/var/lib/longhorn` is usually refused. `--ignore-slow-disk` can accept it and records the override, except when a sync stall reaches half of Longhorn's replica timeout. `kip node list` shows which nodes can hold copies.
@@ -109,9 +110,21 @@ The server is always eligible to hold copies. A worker becomes eligible after it
 `kip service add --copies 2` requires two ready nodes that can hold copies. If a service reaches the controller before two eligible nodes are ready, creation of its data volume waits, and `kip service info` explains why. A restore from a backup goes ahead with the nodes that are back, and Longhorn adds the second copy when a node can take it.
 
 - **Shared volumes** keep one copy in this release.
-- **Existing services and volumes** have their copies unset, and Kipper leaves their storage exactly as it is. `kip status` lists them with the copies Longhorn keeps, and `kip service info` shows the command that records them. Shared volumes and project shared storage created by an earlier Kipper release retain Longhorn's three-copy setting. Kipper supports setting one or two copies, so these volumes remain unset. Changing the number of copies of an existing service is not available yet.
+- **Existing services and volumes** have their copies unset, and Kipper leaves their storage exactly as it is. `kip status` lists them with the copies Longhorn keeps, and `kip service info` shows the command that sets them. Shared volumes and project shared storage created by an earlier Kipper release keep Longhorn's three copies until copies are set. Setting them converts the volume to that number.
 - **Who decides:** an admin sets the offer, a deployer chooses one or two copies when creating a service, and changing copies on an existing object needs the project owner role.
 - **Backups** stay necessary: two copies protect against a lost node, and only backups outside the cluster protect against a lost cluster.
+
+### Changing the copies of a running service
+
+`kip service update <name> --copies 1|2` and `kip volume update <name> --copies 1` change the copies of a volume that is in use, with no restart. The console-api controller converts the volume one step per pass and reports each step in `kip service info`, `kip volume list` and `kip status`. `--wait` follows the conversion until every copy is healthy.
+
+- **One to two:** Longhorn copies the volume to a second node that can hold copies. The controller first checks that two such nodes have room for the volume. Kipper starts one build at a time across the cluster, and the others wait their turn until that build finishes or exceeds its time budget. Longhorn may continue an earlier build after its budget expires.
+- **Two to one:** the copy on the server stays. The controller turns off data locality and auto-balance, lowers the copy count, then removes the other copy. It never deletes a copy on the server, and it removes a worker's copy only after checking again that the server's copy is healthy. It refuses to remove anything while the server's copy is unhealthy or not in the running engine, while a copy is being evicted, or while the volume is detached. A volume with no copy on the server gets one first, so a reduction never leaves a volume without a server copy.
+- **Three to two** (a volume from an earlier release): a server copy is built first when there is none, and the extra copies are removed one at a time.
+- **While Longhorn builds a copy**, the copies cannot change again. The build has a time budget of 30 minutes plus one minute per GiB. Past it, the conversion reports `Blocked` and Longhorn keeps trying. Setting the copies back stops it.
+- **Detached volumes:** Longhorn 1.9 and later build the new copy of a detached volume by attaching it for the build. On Longhorn 1.7 and 1.8 a detached volume waits until an app attaches it. Removing a copy always waits for the volume to be attached.
+- **When conversion is blocked**, the service shows `Blocked` with the reason, for example too little room on the server, and keeps every copy. A failed step, such as a write the API server refuses, reports `Blocked` with the error. Conflicts, timeouts and throttled requests are retried. A copy that Longhorn recovered after a failure without rebuilding it also blocks the change, because Kipper cannot tell whether that copy is current. The command exits non-zero. The conversion resumes on its own once the reason clears, and setting the copies back stops it.
+- **Longhorn upgrades:** `kip upgrade --longhorn` refuses an upgrade step while a volume has more replicas without a failure marker than its requested copy count. An unfinished reduction can leave these extra replicas behind.
 
 Kipper departs from Longhorn's defaults here:
 

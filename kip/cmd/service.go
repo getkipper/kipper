@@ -91,11 +91,14 @@ var serviceUpdateCmd = &cobra.Command{
 
 Storage expansion is live (no restart needed).
 Memory, CPU, and version changes restart the service pod.
+Changing --copies converts the live volume without a restart: Longhorn builds
+the new copy first, and a reduction keeps the copy on the server.
 
 Examples:
   kip service update mydb --storage 20Gi
   kip service update mydb --memory 2Gi --cpu 2
-  kip service update mydb --version 17`,
+  kip service update mydb --version 17
+  kip service update mydb --copies 2 --wait`,
 	Args: cobra.ExactArgs(1),
 	RunE: runServiceUpdate,
 }
@@ -159,7 +162,8 @@ func init() {
 	serviceUpdateCmd.Flags().String("version", "", "new image version")
 	serviceUpdateCmd.Flags().String("tls", "", "Postgres only: required, on or off. The database restarts once to switch")
 	serviceUpdateCmd.Flags().Bool("consistent-backups", false, "Postgres only. Add a pg_dump of every database to each backup. Use --consistent-backups=false to disable. Changing this setting restarts the database once.")
-	serviceUpdateCmd.Flags().Int32("copies", 1, "set the copies of a service whose copies are unset to the number its volume has now. Changing the number of copies is not available yet")
+	serviceUpdateCmd.Flags().Int32("copies", 1, copiesUpdateHelp)
+	serviceUpdateCmd.Flags().Bool("wait", false, "with --copies, wait until every copy is built and healthy")
 	serviceUpdateCmd.Flags().Bool("force", false, "with --tls required, switch even while clients are connected without TLS")
 
 	serviceRestartCmd.Flags().String("project", "default", "project namespace")
@@ -604,11 +608,14 @@ func runServiceUpdate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n  Updating service %s...\n", name)
 
 	if copiesSet {
-		changed, err := adoptCopies(ctx, k8sClient.Dynamic(), manifest.ServiceGVR, namespace, name, copies)
+		wait, _ := cmd.Flags().GetBool("wait")
+		err := setCopies(ctx, os.Stdout, k8sClient.Dynamic(), copiesChange{
+			gvr: manifest.ServiceGVR, namespace: namespace, name: name, want: copies, wait: wait,
+			infoCommand: "kip service info " + name,
+		})
 		if err != nil {
 			return err
 		}
-		sayCopiesAdopted(os.Stdout, changed, copies)
 		if storage == "" && memory == "" && cpu == "" && version == "" && tls == "" && !dumpSet {
 			fmt.Println()
 			return nil

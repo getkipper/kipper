@@ -79,3 +79,16 @@ func TestStatusPrintsNothingAboutCopiesWhenAllIsWell(t *testing.T) {
 	))
 	assert.Empty(t, out.String())
 }
+
+func TestStatusListsConversionsApartFromProblems(t *testing.T) {
+	var out bytes.Buffer
+	reportStorageCopies(context.Background(), &out, copiesStatusClient(
+		copiesStatusObject("Service", "shop", "db", 1, "False", "Converting", "Longhorn is building a copy of the volume (1 of 2 copies healthy)."),
+		copiesStatusObject("Service", "shop", "queue", 1, "False", "ConversionPending", "Another volume's copies are being converted."),
+		copiesStatusObject("Volume", "shop", "files", 2, "False", "Blocked", "The server has no room for a copy of this volume (5.0 GiB)."),
+	))
+	got := out.String()
+	assert.Contains(t, got, "Storage copies being converted:\n    …  shop/db (service)\n       Longhorn is building a copy")
+	assert.Contains(t, got, "…  shop/queue (service)")
+	assert.Contains(t, got, "Storage copies needing attention:\n    ✗  shop/files (volume)\n       The server has no room")
+}

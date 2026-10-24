@@ -3,7 +3,9 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"io"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -12,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 
 	"github.com/getkipper/kipper/kip/internal/service"
@@ -114,50 +117,144 @@ func copiesObject(spec, live *int64) *unstructured.Unstructured {
 	return obj
 }
 
-func adopt(t *testing.T, obj *unstructured.Unstructured, want int32) (bool, *unstructured.Unstructured, error) {
+func withCopiesCondition(obj *unstructured.Unstructured, status, reason, message string) *unstructured.Unstructured {
+	_ = unstructured.SetNestedSlice(obj.Object, []interface{}{map[string]interface{}{
+		"type": "StorageCopies", "status": status, "reason": reason, "message": message, "observedGeneration": int64(0),
+	}}, "status", "conditions")
+	return obj
+}
+
+func quickCopiesPolling(t *testing.T) {
 	t.Helper()
-	dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), obj)
-	changed, err := adoptCopies(context.Background(), dyn, manifest.ServiceGVR, "shop", "db", want)
+	poll, limit, waitPoll, waitLimit := copiesVerdictPoll, copiesVerdictLimit, copiesWaitPoll, copiesWaitLimit
+	copiesVerdictPoll, copiesVerdictLimit, copiesWaitPoll, copiesWaitLimit = time.Millisecond, 50*time.Millisecond, time.Millisecond, time.Second
+	t.Cleanup(func() {
+		copiesVerdictPoll, copiesVerdictLimit, copiesWaitPoll, copiesWaitLimit = poll, limit, waitPoll, waitLimit
+	})
+}
+
+func setServiceCopies(t *testing.T, dyn *dynamicfake.FakeDynamicClient, want int32, wait bool) (string, *unstructured.Unstructured, error) {
+	t.Helper()
+	quickCopiesPolling(t)
+	var out bytes.Buffer
+	err := setCopies(context.Background(), &out, dyn, copiesChange{
+		gvr: manifest.ServiceGVR, namespace: "shop", name: "db", want: want, wait: wait, infoCommand: "kip service info db",
+	})
 	got, getErr := dyn.Resource(manifest.ServiceGVR).Namespace("shop").Get(context.Background(), "db", metav1.GetOptions{})
 	require.NoError(t, getErr)
-	return changed, got, err
+	return out.String(), got, err
 }
 
-func TestAdoptCopiesWritesTheLiveCountOnAnUnmanagedObject(t *testing.T) {
-	changed, got, err := adopt(t, copiesObject(nil, ptr.To[int64](3)), 3)
-	require.Error(t, err, "3 is outside the range kip writes")
-	assert.False(t, changed)
-	_, written, _ := unstructured.NestedInt64(got.Object, "spec", "copies")
-	assert.False(t, written)
+func copiesDyn(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
+	dyn := copiesApplyDyn()
+	for _, obj := range objs {
+		u := obj.(*unstructured.Unstructured)
+		_, _ = dyn.Resource(manifest.ServiceGVR).Namespace("shop").Create(context.Background(), u, metav1.CreateOptions{})
+	}
+	return dyn
+}
 
-	changed, got, err = adopt(t, copiesObject(nil, ptr.To[int64](1)), 1)
+// convertingAfterPatch serves obj until a patch arrives and then the patched
+// object with a Converting condition carrying message.
+func convertingAfterPatch(dyn *dynamicfake.FakeDynamicClient, message string) {
+	patched := false
+	dyn.PrependReactor("patch", "services", func(k8stesting.Action) (bool, runtime.Object, error) {
+		patched = true
+		return false, nil, nil
+	})
+	dyn.PrependReactor("get", "services", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if !patched {
+			return false, nil, nil
+		}
+		obj, err := dyn.Tracker().Get(manifest.ServiceGVR, a.GetNamespace(), a.(k8stesting.GetAction).GetName())
+		if err != nil {
+			return true, nil, err
+		}
+		return true, withCopiesCondition(obj.(*unstructured.Unstructured).DeepCopy(), "False", "Converting", message), nil
+	})
+}
+
+func TestSettingCopiesWritesThemAndPrintsTheConversion(t *testing.T) {
+	obj := withCopiesCondition(copiesObject(ptr.To[int64](2), ptr.To[int64](2)), "True", "Healthy", "2 of 2 copies are healthy.")
+	dyn := copiesDyn(obj)
+	convertingAfterPatch(dyn, "Lowering the copy count to 1.")
+	out, got, err := setServiceCopies(t, dyn, 1, false)
 	require.NoError(t, err)
-	assert.True(t, changed)
 	copies, _, _ := unstructured.NestedInt64(got.Object, "spec", "copies")
 	assert.EqualValues(t, 1, copies)
+	assert.Contains(t, out, "Copies set to 1")
+	assert.Contains(t, out, "Lowering the copy count to 1.")
+	assert.Contains(t, out, "'kip service info db' shows the progress")
 }
 
-func TestAdoptCopiesRefusesAValueThatNeedsConversion(t *testing.T) {
-	changed, got, err := adopt(t, copiesObject(nil, ptr.To[int64](1)), 2)
+func TestABlockedConversionFailsTheCommand(t *testing.T) {
+	obj := withCopiesCondition(copiesObject(ptr.To[int64](2), ptr.To[int64](2)), "False", "Blocked", "The server has no room for a copy of this volume (10.0 GiB).")
+	_, _, err := setServiceCopies(t, copiesDyn(obj), 1, false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "live conversion")
-	assert.False(t, changed)
-	_, found, _ := unstructured.NestedInt64(got.Object, "spec", "copies")
-	assert.False(t, found, "nothing is written")
-
-	_, _, err = adopt(t, copiesObject(ptr.To[int64](1), ptr.To[int64](1)), 2)
-	assert.ErrorContains(t, err, "live conversion")
+	assert.Contains(t, err.Error(), "cannot change now: The server has no room")
 }
 
-func TestAdoptCopiesWaitsForTheLiveCount(t *testing.T) {
-	_, _, err := adopt(t, copiesObject(nil, nil), 1)
-	assert.ErrorContains(t, err, "not known yet")
+func TestCopiesDoNotChangeWhileAConversionRuns(t *testing.T) {
+	obj := withCopiesCondition(copiesObject(ptr.To[int64](2), ptr.To[int64](1)), "False", "Converting", "Longhorn is building a copy of the volume (1 of 2 copies healthy).")
+	dyn := copiesDyn(obj)
+	dyn.ClearActions()
+	_, got, err := setServiceCopies(t, dyn, 1, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "being converted, and can change again once that ends: Longhorn is building")
+	copies, _, _ := unstructured.NestedInt64(got.Object, "spec", "copies")
+	assert.EqualValues(t, 2, copies, "nothing is written")
+	for _, a := range dyn.Actions() {
+		assert.NotEqual(t, "patch", a.GetVerb())
+	}
 }
 
-func TestAdoptCopiesThatAreAlreadySetChangesNothing(t *testing.T) {
-	changed, _, err := adopt(t, copiesObject(ptr.To[int64](2), ptr.To[int64](2)), 2)
+func TestTwoCopiesRunTheCreationChecksUnlessTheVolumeHasThem(t *testing.T) {
+	obj := copiesObject(ptr.To[int64](1), ptr.To[int64](1))
+	_, got, err := setServiceCopies(t, copiesDyn(obj), 2, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "offers one copy")
+	copies, _, _ := unstructured.NestedInt64(got.Object, "spec", "copies")
+	assert.EqualValues(t, 1, copies)
+
+	adopted := withCopiesCondition(copiesObject(nil, ptr.To[int64](2)), "True", "Healthy", "2 of 2 copies are healthy.")
+	out, _, err := setServiceCopies(t, copiesDyn(adopted), 2, false)
+	require.NoError(t, err, "a volume that has two copies already needs no new node")
+	assert.Contains(t, out, "2 of 2 copies are healthy.")
+}
+
+func TestWaitFollowsTheConversionUntilEveryCopyIsHealthy(t *testing.T) {
+	obj := copiesObject(ptr.To[int64](2), ptr.To[int64](2))
+	dyn := copiesDyn(obj)
+	gets := 0
+	dyn.PrependReactor("get", "services", func(k8stesting.Action) (bool, runtime.Object, error) {
+		gets++
+		live := copiesObject(ptr.To[int64](1), ptr.To[int64](2))
+		switch {
+		case gets < 3:
+			return true, withCopiesCondition(live, "False", "Converting", "Lowering the copy count to 1."), nil
+		case gets < 5:
+			return true, withCopiesCondition(live, "False", "Converting", "Removing an extra copy (1 left, 1 wanted)."), nil
+		}
+		return true, withCopiesCondition(copiesObject(ptr.To[int64](1), ptr.To[int64](1)), "True", "Healthy", "1 of 1 copies are healthy."), nil
+	})
+	out, _, err := setServiceCopies(t, dyn, 1, true)
 	require.NoError(t, err)
-	assert.False(t, changed)
+	assert.Contains(t, out, "Lowering the copy count to 1.")
+	assert.Contains(t, out, "Removing an extra copy")
+	assert.Contains(t, out, "✔  1 of 1 copies are healthy.")
+	assert.NotContains(t, out, "--wait waits")
+}
+
+func TestSettingTheCopiesTheObjectHasWritesNothing(t *testing.T) {
+	obj := withCopiesCondition(copiesObject(ptr.To[int64](2), ptr.To[int64](2)), "True", "Healthy", "2 of 2 copies are healthy.")
+	dyn := copiesDyn(obj)
+	dyn.ClearActions()
+	out, _, err := setServiceCopies(t, dyn, 2, false)
+	require.NoError(t, err)
+	assert.Contains(t, out, "Copies are already 2")
+	for _, a := range dyn.Actions() {
+		assert.NotEqual(t, "patch", a.GetVerb())
+	}
 }
 
 func TestServiceInfoShowsTheCopiesAndWhatHoldsThemBack(t *testing.T) {
@@ -178,4 +275,83 @@ func TestServiceInfoShowsTheCopiesAndWhatHoldsThemBack(t *testing.T) {
 	require.NoError(t, writeServiceInfo(context.Background(), &out, &service.Manager{Client: client, Dynamic: dyn}, "default", "db", false))
 	assert.Contains(t, out.String(), "Copies:   2, not created yet")
 	assert.Contains(t, out.String(), "the cluster has 1.")
+}
+
+// A verdict the controller wrote before the change is never printed as the
+// change's verdict.
+func TestAVerdictOnAnOlderGenerationIsNotTheAnswer(t *testing.T) {
+	obj := withCopiesCondition(copiesObject(ptr.To[int64](2), ptr.To[int64](2)), "True", "Healthy", "2 of 2 copies are healthy.")
+	obj.SetGeneration(1)
+	_ = unstructured.SetNestedField(obj.Object, []interface{}{map[string]interface{}{
+		"type": "StorageCopies", "status": "True", "reason": "Healthy", "message": "2 of 2 copies are healthy.", "observedGeneration": int64(1),
+	}}, "status", "conditions")
+	dyn := copiesDyn(obj)
+	dyn.PrependReactor("patch", "services", func(k8stesting.Action) (bool, runtime.Object, error) {
+		written := withCopiesCondition(copiesObject(ptr.To[int64](1), ptr.To[int64](2)), "True", "Healthy", "2 of 2 copies are healthy.")
+		written.SetGeneration(2)
+		return true, written, dyn.Tracker().Update(manifest.ServiceGVR, written, "shop")
+	})
+	out, _, err := setServiceCopies(t, dyn, 1, false)
+	require.NoError(t, err)
+	assert.NotContains(t, out, "2 of 2 copies are healthy.")
+	assert.Contains(t, out, "Kipper converts the copies in the background")
+}
+
+// Another client set the copies back before the controller answered, so the
+// healthy verdict describes a count this command did not ask for.
+func TestWaitFailsWhenTheCopiesWereChangedByAnotherClient(t *testing.T) {
+	obj := withCopiesCondition(copiesObject(ptr.To[int64](2), ptr.To[int64](2)), "True", "Healthy", "2 of 2 copies are healthy.")
+	dyn := copiesDyn(obj)
+	dyn.PrependReactor("get", "services", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, withCopiesCondition(copiesObject(ptr.To[int64](2), ptr.To[int64](2)), "True", "Healthy", "2 of 2 copies are healthy."), nil
+	})
+	out, _, err := setServiceCopies(t, dyn, 1, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the copies of db were changed to 2 while waiting")
+	assert.NotContains(t, out, "✔  2 of 2 copies are healthy.")
+}
+
+func TestWaitFailsWhenTheObjectWasCreatedAgain(t *testing.T) {
+	obj := withCopiesCondition(copiesObject(ptr.To[int64](2), ptr.To[int64](2)), "True", "Healthy", "2 of 2 copies are healthy.")
+	obj.SetUID("uid-1")
+	dyn := copiesDyn(obj)
+	dyn.PrependReactor("get", "services", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		stored, err := dyn.Tracker().Get(manifest.ServiceGVR, a.GetNamespace(), a.(k8stesting.GetAction).GetName())
+		if err != nil {
+			return true, nil, err
+		}
+		if copies, _, _ := unstructured.NestedInt64(stored.(*unstructured.Unstructured).Object, "spec", "copies"); copies == 2 {
+			return true, stored, nil
+		}
+		again := withCopiesCondition(copiesObject(ptr.To[int64](1), ptr.To[int64](1)), "True", "Healthy", "1 of 1 copies are healthy.")
+		again.SetUID("uid-2")
+		return true, again, nil
+	})
+	_, _, err := setServiceCopies(t, dyn, 1, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "db was deleted and created again while waiting")
+}
+
+func setSharedCopies(t *testing.T, dyn *dynamicfake.FakeDynamicClient, want int32) error {
+	t.Helper()
+	quickCopiesPolling(t)
+	return setCopies(context.Background(), io.Discard, dyn, copiesChange{
+		gvr: manifest.ServiceGVR, namespace: "shop", name: "db", want: want, shared: true, wait: true, infoCommand: "kip volume list",
+	})
+}
+
+// The controller never reports a shared volume with two copies as healthy
+// while RWX copies are not qualified, so waiting for health would time out.
+func TestTwoCopiesOfASharedVolumeAreRefusedEvenWhenItHasThem(t *testing.T) {
+	if platform.RWXCopiesQualified {
+		t.Skip("shared volumes may have two copies")
+	}
+	err := setSharedCopies(t, copiesDyn(copiesObject(ptr.To[int64](1), ptr.To[int64](2))), 2)
+	assert.ErrorContains(t, err, "shared volumes cannot have two copies")
+
+	already := withCopiesCondition(copiesObject(ptr.To[int64](2), ptr.To[int64](2)), "False", "RWXNotQualified", "Shared volumes keep one copy in this release.")
+	start := time.Now()
+	err = setSharedCopies(t, copiesDyn(already), 2)
+	assert.ErrorContains(t, err, "Shared volumes keep one copy in this release.")
+	assert.Less(t, time.Since(start), copiesWaitLimit, "the wait ends at once")
 }

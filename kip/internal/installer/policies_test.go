@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -46,12 +47,12 @@ func TestInstallAdmissionPoliciesAppliesEachPolicy(t *testing.T) {
 
 func TestAdmissionPoliciesRenderTheCopiesOffer(t *testing.T) {
 	for _, offered := range []int32{1, 2} {
-		manifests, err := AdmissionPolicyManifests(offered)
+		manifests, err := AdmissionPolicyManifests(offered, nil)
 		require.NoError(t, err)
 		all := string(bytes.Join(manifests, nil))
 		assert.Contains(t, all, fmt.Sprintf("    - name: offered\n      expression: \"%d\"\n", offered))
 	}
-	_, err := AdmissionPolicyManifests(3)
+	_, err := AdmissionPolicyManifests(3, nil)
 	assert.Error(t, err, "only 1 or 2 is ever rendered into the policy")
 }
 
@@ -117,4 +118,74 @@ func TestInstallAdmissionPoliciesOffersOneBeforeThePlatformConfigKindIsServed(t 
 	require.NoError(t, InstallAdmissionPolicies(host))
 	assert.Contains(t, strings.Join(host.commands, "\n"), "    - name: offered\n      expression: \"1\"\n",
 		"a kind that is not served yet holds no recorded offer")
+}
+
+const shippedServerNodes = "    - name: serverNodes\n      expression: \"[]\"\n"
+
+func TestAdmissionPoliciesRenderTheServerNodes(t *testing.T) {
+	manifests, err := AdmissionPolicyManifests(1, []string{"server-1", "cp.example.com"})
+	require.NoError(t, err)
+	all := string(bytes.Join(manifests, nil))
+	assert.Contains(t, all, "    - name: serverNodes\n      expression: \"['server-1', 'cp.example.com']\"\n")
+	assert.NotContains(t, all, shippedServerNodes)
+}
+
+func TestAdmissionPoliciesRenderNoServerNodesAsAnEmptyList(t *testing.T) {
+	manifests, err := AdmissionPolicyManifests(1, nil)
+	require.NoError(t, err)
+	assert.Contains(t, string(bytes.Join(manifests, nil)), shippedServerNodes,
+		"an empty list denies every replica delete by console-api")
+}
+
+func TestAdmissionPoliciesRefuseANodeNameThatIsNoDNSName(t *testing.T) {
+	for _, name := range []string{"server'1", "Server-1", "", "a b", "x]"} {
+		_, err := AdmissionPolicyManifests(1, []string{name})
+		assert.Error(t, err, "%q never reaches the CEL expression", name)
+	}
+}
+
+func TestInstallAdmissionPoliciesRendersTheServerNodes(t *testing.T) {
+	host := &hostScript{reply: func(command string) (string, error) {
+		if strings.Contains(command, "get nodes -l "+ServerNodeLabel) {
+			return "node/server-1\n", nil
+		}
+		return "", nil
+	}}
+	require.NoError(t, InstallAdmissionPolicies(host))
+	assert.Contains(t, strings.Join(host.commands, "\n"), "expression: \"['server-1']\"")
+}
+
+func TestInstallAdmissionPoliciesStopsWhenTheServerNodesCannotBeRead(t *testing.T) {
+	host := &hostScript{reply: func(command string) (string, error) {
+		if strings.Contains(command, "get nodes -l "+ServerNodeLabel) {
+			return "Unable to connect to the server", errors.New("exit status 1")
+		}
+		return "", nil
+	}}
+	err := InstallAdmissionPolicies(host)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server nodes")
+	assert.NotContains(t, strings.Join(host.commands, "\n"), "kubectl apply", "nothing is applied with a guessed list")
+}
+
+// The policy matches console-api by username, which must be the ServiceAccount
+// console-api's Deployment runs as. A mismatch would never match and so never
+// protect anything.
+func TestServerReplicaPolicyMatchesConsoleAPIsServiceAccount(t *testing.T) {
+	deployment := consoleManifest(t)
+	account := regexp.MustCompile(`(?m)^\s+serviceAccountName: (\S+)$`).FindStringSubmatch(deployment)
+	namespace := regexp.MustCompile(`(?m)^  namespace: (\S+)$`).FindStringSubmatch(deployment)
+	require.Len(t, account, 2, "console-api's Deployment names its ServiceAccount")
+	require.Len(t, namespace, 2, "console-api's Deployment names its namespace")
+	policy, err := admissionPolicies.ReadFile("policies/kipper-longhorn-server-replicas.yaml")
+	require.NoError(t, err)
+	assert.Contains(t, string(policy), fmt.Sprintf("request.userInfo.username == 'system:serviceaccount:%s:%s'", namespace[1], account[1]))
+}
+
+func consoleManifest(t *testing.T) string {
+	t.Helper()
+	manifest := renderConsoleManifest("dex.example.com", "console.example.com", "api.example.com", "example.com", "kipper.example.com", "example.com")
+	start := strings.Index(manifest, "kind: Deployment\nmetadata:\n  name: console-api\n")
+	require.GreaterOrEqual(t, start, 0, "the console manifest carries console-api's Deployment")
+	return manifest[start:]
 }

@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"github.com/getkipper/kipper/controller/pkg/longhorncap"
 	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
@@ -46,7 +47,7 @@ func (m *Manager) ReplicaNodes(ctx context.Context) (int, error) {
 		tags, _, _ := unstructured.NestedStringSlice(n.Object, "spec", "tags")
 		conditions, _, _ := unstructured.NestedSlice(n.Object, "status", "conditions")
 		if allow && slices.Contains(tags, platform.ReplicaStorageTag) &&
-			conditionTrue(conditions, "Ready") && conditionTrue(conditions, "Schedulable") && usable[n.GetName()] {
+			longhorncap.ConditionTrue(conditions, "Ready") && longhorncap.ConditionTrue(conditions, "Schedulable") && usable[n.GetName()] {
 			count++
 		}
 	}
@@ -87,8 +88,10 @@ func CopiesOf(obj map[string]interface{}) Copies {
 
 // Summary returns the requested copy count, "not set" for unmanaged storage,
 // or an empty string when no copy information is present. A requested count
-// without a known live count includes "not created yet". Data location is
-// reported separately by the placement view.
+// without a known live count includes "not created yet". With a known live
+// count, a running or pending conversion includes "converting", and a blocked
+// conversion includes "blocked". Data location is reported separately by the
+// placement view.
 func (c Copies) Summary() string {
 	switch {
 	case c.Wanted == nil && !c.LiveKnown && c.Status == "":
@@ -97,8 +100,17 @@ func (c Copies) Summary() string {
 		return "not set"
 	case !c.LiveKnown:
 		return fmt.Sprintf("%d, not created yet", *c.Wanted)
+	case c.Converting():
+		return fmt.Sprintf("%d, converting", *c.Wanted)
+	case c.Reason == "Blocked":
+		return fmt.Sprintf("%d, blocked", *c.Wanted)
 	}
 	return strconv.FormatInt(*c.Wanted, 10)
+}
+
+// Converting reports whether the copy count change is running or pending.
+func (c Copies) Converting() bool {
+	return c.Reason == "Converting" || c.Reason == "ConversionPending"
 }
 
 // Problem returns the controller's message unless the condition is True.
