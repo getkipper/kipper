@@ -53,3 +53,22 @@ func TestAVolumeOnlyAnInitContainerMountsIsNamed(t *testing.T) {
 		}}
 	assert.Equal(t, []string{"shop/seed-data"}, volumesOutsideBackups([]corev1.PersistentVolumeClaim{claim("shop", "seed-data", nil)}, []corev1.Pod{pod}))
 }
+
+func TestARunningHolderPutsItsSharedVolumeIntoTheBackup(t *testing.T) {
+	readOnly := func(pod corev1.Pod) corev1.Pod {
+		pod.Spec.Containers[0].VolumeMounts[0].ReadOnly = true
+		return pod
+	}
+	pvcs := []corev1.PersistentVolumeClaim{
+		claim("shop", "shared-uploads", nil),
+		claim("shop", "shared-media", nil),
+		claim("blog", "shared-uploads", nil),
+	}
+	pods := []corev1.Pod{
+		readOnly(podMounting("shop", corev1.PodRunning, "shared-uploads")),
+		readOnly(podMounting("shop", corev1.PodRunning, "shared-media")),
+		readOnly(podMounting("blog", corev1.PodPending, "shared-uploads")),
+	}
+	assert.Equal(t, []string{"blog/shared-uploads"}, volumesOutsideBackups(pvcs, pods),
+		"a holder's read-only mount counts once it runs, and a holder that has not started yet does not")
+}
