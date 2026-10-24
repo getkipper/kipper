@@ -153,6 +153,7 @@ type ResourceController struct {
 	atMaxAlerted     map[string]time.Time    // namespace/name/uid of an HPA → when its current at-maximum episode was alerted
 	belowMaxAt       map[string]time.Time    // namespace/name/uid of an HPA → last time it ran below its maximum
 	notReadyAlerted  map[string]string       // namespace/name/uid of an App → AutoscalingReady reason already alerted
+	dumpFaultAlerted map[string]time.Time    // Maps Service namespace/name/UID to the reported DumpVolumeReady=False transition time.
 	mu               sync.Mutex
 	leader           leader.Worker
 	oomCapBytes      int64
@@ -178,6 +179,7 @@ func NewResourceController(client kubernetes.Interface, crClient crclient.Client
 		atMaxAlerted:     make(map[string]time.Time),
 		belowMaxAt:       make(map[string]time.Time),
 		notReadyAlerted:  make(map[string]string),
+		dumpFaultAlerted: make(map[string]time.Time),
 		client:           client,
 		crClient:         crClient,
 		history:          make(map[workloadKey][]usageObservation),
@@ -235,6 +237,7 @@ func (rc *ResourceController) tick(ctx context.Context) {
 		batches = append(batches, rc.checkStuckRollouts(deployments, rc.explainStuckRollout(ctx))...)
 	}
 	batches = append(batches, rc.checkAutoscaling(ctx)...)
+	batches = append(batches, rc.checkDumpVolumes(ctx)...)
 
 	if len(batches) > 0 {
 		// Bound this tick to the store's per-write cap, dropping the oldest.

@@ -16,6 +16,7 @@ var mayMentionTheLabel = map[string]string{
 	"controllers/project_quota.go":      "writes the label onto quota objects",
 	"controllers/project_rbac.go":       "writes the label onto member bindings, and reads it as one of the revoke pass's anchors",
 	"handlers/projects.go":              "writes the label onto namespaces it creates, and gathers candidates by it; every decision resolves through nsowner",
+	"controllers/project_holder.go":     "writes the label onto shared storage holders, maps holder and shared storage claim events to a Project, and requires it on the shared storage claim; the namespace comes from the Project's environments and owner references decide",
 
 	// Selectors: these gather candidates by label, and whatever they hand the
 	// candidates to decides.

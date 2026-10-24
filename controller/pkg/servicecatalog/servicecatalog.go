@@ -47,6 +47,12 @@ const ConditionNameFree = "NameFree"
 // its pods are ready, or false with the reason issuance or rollout is pending.
 const ConditionTLSReady = "TLSReady"
 
+// ConditionDumpVolumeReady is false, with reason Faulted, while the dump volume
+// of a Postgres service with consistent backups is faulted. The database pod
+// cannot start then, and the message names the command that recreates the dump
+// volume. The condition is absent otherwise.
+const ConditionDumpVolumeReady = "DumpVolumeReady"
+
 // HasAuth reports which service types Kipper configures with credentials.
 // Only those types should receive generated passwords; the remaining configured
 // services and unknown types use unauthenticated defaults.

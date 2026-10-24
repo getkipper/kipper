@@ -47,6 +47,8 @@ var (
 // which stops while the conversion needs the volume detached, and is empty for claims
 // whose users Kipper does not stop. Holder names Kipper's backup holder pod for
 // the claim, which stops while the claim carries a copy-change stop.
+// An optional StopRefusal callback runs before recording a new stop. A non-empty
+// message blocks the change, an empty message allows it and an error aborts it.
 type storageConverter struct {
 	Reader      client.Reader
 	Writer      client.Client
@@ -54,6 +56,7 @@ type storageConverter struct {
 	Commands    storageCommands
 	StatefulSet string
 	Holder      string
+	StopRefusal func(context.Context) (string, error)
 }
 
 // storageCommands are the commands a conversion's messages name for the

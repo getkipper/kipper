@@ -50,6 +50,10 @@ When total memory usage across all pods exceeds 80% of the node's allocatable me
 
 When a node is not Ready, or is fenced, the controller raises a critical alert on its next check and repeats it at most once every 30 minutes while the node stays down. When the node hosts Kipper services with a single-node Longhorn volume, the alert names each service, the nodes that hold a current copy of its data, and the command `kip node fence <node>` to run once you know the node is down for good. The copy locations are left out when Longhorn's replicas cannot be read. The alert for a fenced node names `kip node add` to rejoin it and `kip node remove <node> --force` to remove it. See [When a node dies](/en/worker-nodes#when-a-node-dies).
 
+### Faulted dump volumes
+
+When Longhorn reports the dump volume of a Postgres service with [consistent backups](/en/backups#consistent-database-dumps) as faulted, the controller raises a **dump volume faulted** warning with the command that replaces the dump volume. Consistent dumps fail while the dump volume is faulted, and the database pod cannot start again until the dump volume is replaced. The warning fires once per fault and can fire for a new fault after the dump volume has recovered or been replaced. After a console-api restart, the controller uses the 50 stored alerts to avoid repeating warnings for faults already reported.
+
 ### Autoscaling
 
 For an app with [autoscaling](/en/deploying-apps#autoscaling), two situations raise a warning:

@@ -26,3 +26,17 @@ func clusterStorageMode(ctx context.Context, c client.Reader) (string, error) {
 	}
 	return platform.StorageMode(pc.Spec.Storage), nil
 }
+
+// clusterBackupsConfigured reports whether the platform records a backup
+// mode that enables Velero. A missing PlatformConfig counts as configured
+// for compatibility with older clusters.
+func clusterBackupsConfigured(ctx context.Context, c client.Reader) (bool, error) {
+	var pc kipperv1.PlatformConfig
+	if err := c.Get(ctx, types.NamespacedName{Name: PlatformConfigName}, &pc); err != nil {
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("reading the backup mode: %w", err)
+	}
+	return platform.BackupsConfigured(pc.Spec.Backup), nil
+}

@@ -85,15 +85,7 @@ func (m *Manager) Placement(ctx context.Context, namespace, name string) (Placem
 	if err != nil {
 		return p, fmt.Errorf("reading the replicas of %s: %w", name, err)
 	}
-	markers := make([]platform.CopyMarkers, len(replicas.Items))
-	for i, r := range replicas.Items {
-		str := func(field string) string {
-			v, _, _ := unstructured.NestedString(r.Object, "spec", field)
-			return v
-		}
-		markers[i] = platform.CopyMarkers{HealthyAt: str("healthyAt"), FailedAt: str("failedAt"), LastFailedAt: str("lastFailedAt"), LastHealthyAt: str("lastHealthyAt")}
-	}
-	healthy := platform.HealthyCopies(copyVolume, markers)
+	healthy := platform.HealthyCopies(copyVolume, copyMarkers(replicas.Items))
 	seen := map[string]bool{}
 	for i, r := range replicas.Items {
 		node, _, _ := unstructured.NestedString(r.Object, "spec", "nodeID")

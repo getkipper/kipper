@@ -520,6 +520,122 @@ kubectl -n <chart-target-ns> delete secret -l owner=helm,name=<chart>
 kubectl -n kube-system annotate helmchart <chart> kip.kipper/reapply="$(date +%s)" --overwrite
 ```
 
+## When a node dies {#when-a-node-dies}
+
+What happens depends on which node is lost and whether its disk survives.
+
+**A worker.** Services that ran on it stay down until the worker returns or you fence it with `kip node fence <worker>`. [When a node dies](/en/worker-nodes#when-a-node-dies) in the worker guide walks through the fence, the copies check and bringing the worker back. Use the fence, never `kubectl delete pod --force`, because the fence makes sure the old host can no longer write to its volumes.
+
+**The server.** The server runs the Kubernetes control plane and holds every single-copy volume, so the cluster stops while it is down. Workers keep their data. When the host comes back with its disk, the cluster resumes on its own.
+
+**The server's disk.** Losing the server's disk loses the cluster's state, every single-copy volume and in-cluster backups. Install a new cluster and restore from a backup in [external storage](/en/backups#external-s3-compatible-storage). A service with [two copies](/en/worker-nodes#two-copies-of-a-services-data) also has a copy on a worker, and that copy can hold newer data than the last backup. Longhorn can export it from the worker's disk, as described below.
+
+**A Postgres dump volume.** The dump volume of a service with [consistent backups](/en/backups#consistent-database-dumps) always has one copy. If Longhorn reports it faulted, consistent dumps fail and the database pod cannot start again until the dump volume is replaced. `kip service info` shows a warning with the command that replaces it. `kip service recreate-dump <name>` deletes only the dump volume and restarts the pod. Kipper never deletes it on its own.
+
+### Export a volume from a worker's copy {#export-from-replica}
+
+Longhorn keeps the full data of a volume in each copy, so one copy on a surviving worker is enough to read it, even with the server gone. This follows Longhorn's [export from a single replica](https://longhorn.io/docs/1.11.3/advanced-resources/data-recovery/export-from-replica/), with extra steps that keep the worker's copy unchanged. It may be the only copy left, and starting the Longhorn engine on a directory writes to it, so run the engine only on a separate working copy.
+
+**1. Assess the copy before changing it.** On the worker, find the copy under `/var/lib/longhorn/replicas/`. Each directory is named after the volume, which is the PV name, plus an eight-character suffix. `kip service info <name>` showed the volume's nodes before the loss, but omitted its PV name. With the server gone, the cluster can no longer provide that name. Use the `Size` field of `volume.meta`, which gives the service's storage size in bytes, and the head image's modification time to help identify the directory. Confirm which service the volume belongs to by inspecting its files after mounting it in step 5. A Postgres volume holds a `pgdata` directory. Read the evidence now, because starting the engine rewrites `volume.meta` and the head image's modification time:
+
+```bash
+ls /var/lib/longhorn/replicas/
+cat <replica directory>/volume.meta
+ls -l --time-style=full-iso <replica directory>/
+```
+
+None of these signs proves the copy is current, so treat a copy you are unsure about as possibly stale and compare it with your newest backup:
+
+- `"Rebuilding": true` in `volume.meta` means the copy was still being rebuilt and is incomplete. Do not use it.
+- The modification time of the `volume-head-*.img` file is the last write this copy received. A time well before the server was lost means the copy had stopped receiving writes.
+- What Kipper reported before the loss: `kip service info` and `kip status` showing all copies healthy mean the copy was current at that point.
+
+Note the volume's size in bytes from the `Size` field of `volume.meta`.
+
+**2. Stop everything that holds the copy open.** `lsof +D <replica directory>` usually lists a `longhorn` process for the replica still running in the worker's instance manager. The cluster is gone with the server's disk, so stop k3s and every container on the worker with `/usr/local/bin/k3s-killall.sh`, then run `lsof +D <replica directory>` again. Continue only when it prints nothing. k3s on the worker cannot start again without its server, so the steps below run the engine with Docker instead.
+
+**3. Make an untouched copy.** Copy the whole directory to another disk. If the worker has only one disk, use another directory on it. If it has no room, copy to another host. Keep that copy unchanged. The image files are sparse, so preserve that format when copying them. Each copy then takes about as much space as the data on the volume:
+
+```bash
+mkdir -p /mnt/spare
+cp -a --sparse=always <replica directory> /mnt/spare/
+# Use this alternative if the worker has no room.
+rsync -aS <replica directory> recovery-host:/srv/replicas/
+```
+
+Make a second copy of that one to work on. Every step below uses the working copy only. If something goes wrong, make a new working copy from the untouched one:
+
+```bash
+mkdir -p /mnt/work
+cp -a --sparse=always /mnt/spare/<replica directory name> /mnt/work/
+```
+
+**4. Start the engine on the working copy.** It needs a Linux host with `open-iscsi`, like any Longhorn node, and the engine image of the Longhorn release that wrote the copy, which is v1.11.3 for this kip. The surviving worker already has `open-iscsi`. Its k3s cannot run containers without the server, so install Docker there and start the engine with it. Docker pulls the engine image from Docker Hub, about 170 MB. `<volume name>` is the replica directory's name without its eight-character suffix, and `<size in bytes>` is the `Size` from step 1:
+
+```bash
+apt-get install -y docker.io
+docker run -d --name longhorn-recovery --privileged \
+  -v /dev:/host/dev -v /proc:/host/proc -v <working copy directory>:/volume \
+  longhornio/longhorn-engine:v1.11.3 launch-simple-longhorn <volume name> <size in bytes>
+timeout 120 sh -c 'until [ -b /dev/longhorn/<volume name> ]; do sleep 1; done'
+```
+
+The block device takes about ten seconds to appear. If the wait times out, `docker logs longhorn-recovery` shows why the engine did not start.
+
+On a working k3s node, such as a node in the new cluster, a static pod can run the engine instead of Docker. Write it to `/var/lib/rancher/k3s/agent/pod-manifests/longhorn-recovery.yaml`. `launch-simple-longhorn` expects the host's `/dev` and `/proc` at `/host/dev` and `/host/proc`:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: longhorn-recovery
+  namespace: longhorn-system
+spec:
+  hostPID: true
+  restartPolicy: Never
+  containers:
+    - name: engine
+      image: longhornio/longhorn-engine:v1.11.3
+      securityContext:
+        privileged: true
+      command: ["launch-simple-longhorn"]
+      args: ["<volume name>", "<size in bytes>"]
+      volumeMounts:
+        - { name: dev, mountPath: /host/dev }
+        - { name: proc, mountPath: /host/proc }
+        - { name: data, mountPath: /volume }
+  volumes:
+    - { name: dev, hostPath: { path: /dev } }
+    - { name: proc, hostPath: { path: /proc } }
+    - { name: data, hostPath: { path: <working copy directory> } }
+```
+
+**5. Mount it read-only and copy the data off.** The volume appears as `/dev/longhorn/<volume name>`. Kipper formats volumes as ext4, and a plain `mount -o ro` still replays an unclean journal, which writes to the device. For a first look, `noload` skips the replay:
+
+```bash
+mkdir -p /mnt/recovery
+mount -o ro,noload /dev/longhorn/<volume name> /mnt/recovery
+```
+
+Skipping the replay can leave the last writes before the loss missing or inconsistent. Reading a file written shortly before the loss can fail with `Structure needs cleaning`. Before copying data off, always replay the journal, including for a database. Run `umount /mnt/recovery`, then stop the engine with `docker rm -f longhorn-recovery` or by removing the static pod manifest. Make a fresh working copy as in step 3 and start the engine on it as in step 4. Mount it with `mount -o ro /dev/longhorn/<volume name> /mnt/recovery`, omitting `noload`. The journal then replays on that working copy only. Copy the files you need.
+
+For a Postgres service, the data directory is `pgdata` at the top of the volume, owned by the image's `postgres` user. That user's ID is 70 in Kipper's default Alpine image and 999 in the Debian image used below. When started as root, the official image adjusts ownership of the working data copy to its own `postgres` user. Kipper passes the TLS and access settings on the command line, leaving the data directory's configuration files usable by the official image during recovery. Start the same major version on a copy, wait for it to finish crash recovery, and take a dump. The user is `kipper` and Kipper's database is `app`. `psql -l` lists any other databases the service holds. Each one needs its own dump:
+
+```bash
+mkdir /mnt/pg-copy
+cp -a /mnt/recovery/pgdata/. /mnt/pg-copy/
+docker run -d --name pg-recovery -e PGDATA=/data -v /mnt/pg-copy:/data postgres:16
+timeout 600 sh -c "until docker logs pg-recovery 2>&1 | grep -q 'ready to accept connections'; do sleep 1; done"
+docker exec pg-recovery psql -U kipper -l
+docker exec pg-recovery pg_dump -U kipper -Fc app > /mnt/app.dump
+```
+
+If the wait times out, check `docker logs pg-recovery` for startup errors, such as a major version mismatch.
+
+During crash recovery, Postgres uses its write-ahead log to restore committed transactions present in this copy. Load the dump into a service on the new cluster with `kip service import <name> --file app.dump`.
+
+**6. Unmount, then stop the engine.** If you started Postgres, run `docker rm -f pg-recovery`. Then run `umount /mnt/recovery`. Finally, stop the engine with `docker rm -f longhorn-recovery` or by removing the static pod manifest. Stopping the engine while the filesystem is mounted leaves the mount pointing at a device that no longer exists.
+
 ## Host maintenance and recovery
 
 - [DNS repair](/en/cli-reference#kip-cluster-dns-repair) restores the configured host resolvers.

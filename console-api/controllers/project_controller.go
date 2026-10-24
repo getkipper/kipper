@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -156,6 +157,12 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		storageMode = mode
 	}
 	var sharedCopies []envCopies
+	var holders []envHolder
+	var holderRetry time.Duration
+	backups, err := clusterBackupsConfigured(ctx, r.Client)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	type envPlan struct {
 		env    kipperv1.ProjectEnvironment
 		ns     string
@@ -257,6 +264,14 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				sharedCopies = append(sharedCopies, envCopies{env: pl.env.Name, cond: *released})
 			}
 		}
+		holder, retry, err := r.reconcileProjectHolder(ctx, &project, pl.env.Name, pl.ns, backups)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconciling the backup holder in %s: %w", pl.ns, err)
+		}
+		if holder != nil {
+			holders = append(holders, *holder)
+		}
+		holderRetry = earliest(holderRetry, retry)
 
 		namespaces = append(namespaces, pl.ns)
 	}
@@ -303,6 +318,7 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	} else {
 		apimeta.RemoveStatusCondition(&project.Status.Conditions, kipperv1.ConditionStorageCopies)
 	}
+	r.setProjectHolderCondition(&project, holders)
 	project.Status.Phase = "Active"
 	// What the project declares according to the API server, not what the pass
 	// started from. Both records are pruned by that set, and a claim written
@@ -328,7 +344,7 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// if a Node add/remove event was missed (a map-func List error can't be
 	// retried), bounding how long a new node's IP stays reachable to this period
 	// rather than the manager's multi-hour informer resync.
-	return ctrl.Result{RequeueAfter: projectRequeue(project.Status.Conditions)}, nil
+	return ctrl.Result{RequeueAfter: earliest(projectRequeue(project.Status.Conditions), holderRetry)}, nil
 }
 
 // confirmIncarnation reports whether the project this pass began from is still
@@ -781,7 +797,7 @@ func (r *ProjectReconciler) reconcileNamespace(ctx context.Context, project *kip
 // StorageCopies condition. Conversion may update an existing claim's
 // annotations while preserving its spec.
 func (r *ProjectReconciler) reconcileSharedStorage(ctx context.Context, project *kipperv1.Project, ns, mode string) (metav1.Condition, error) {
-	pvcName := "shared-uploads"
+	pvcName := sharedUploadsClaim
 	copies := project.Spec.SharedStorage.Copies
 	storageClass := platform.ClaimClassForCopies(mode, copies)
 
@@ -836,7 +852,7 @@ func (r *ProjectReconciler) reconcileSharedStorage(ctx context.Context, project 
 	}
 	var converted *metav1.Condition
 	if projectSharedClaim(&existing) {
-		sc := storageConverter{Reader: r.longhornReader(), Writer: r.Client, Commands: projectStorageCommands(project.Name)}
+		sc := r.sharedConverter(project)
 		if converted, err = convertShared(ctx, sc, &existing, copies); err != nil {
 			return metav1.Condition{}, err
 		}
@@ -853,6 +869,13 @@ func (r *ProjectReconciler) reconcileSharedStorage(ctx context.Context, project 
 	return orConverted(converted, sharedCopiesCondition(copies, live, command)), nil
 }
 
+// sharedConverter configures copy changes for project's shared storage.
+// It identifies Kipper's backup holder so holder reconciliation can stop it
+// for the change.
+func (r *ProjectReconciler) sharedConverter(project *kipperv1.Project) storageConverter {
+	return storageConverter{Reader: r.longhornReader(), Writer: r.Client, Commands: projectStorageCommands(project.Name), Holder: projectHolderName}
+}
+
 // followRetainedSharedClaim releases a retained shared claim from a copy-change
 // stop when shared storage reconciliation is disabled or unsupported. It keeps
 // the claim and only completes or undoes the existing change. It returns the
@@ -866,7 +889,7 @@ func (r *ProjectReconciler) followRetainedSharedClaim(ctx context.Context, proje
 	if err != nil || !projectSharedClaim(&existing) || existing.Annotations[platform.CopyChangeStopAnnotation] == "" {
 		return nil, err
 	}
-	sc := storageConverter{Reader: r.longhornReader(), Writer: r.Client, Commands: projectStorageCommands(project.Name)}
+	sc := r.sharedConverter(project)
 	return sc.convertOrBlock(ctx, &existing, nil)
 }
 
@@ -929,6 +952,9 @@ func (r *ProjectReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			})).
 		// A node added or removed changes every project's egress except-list.
 		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.enqueueProjectsForNode)).
+		// The manager's pod cache holds every holder, as PodCacheNamespaces configures.
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(projectForHolder)).
+		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(projectForSharedClaim)).
 		Complete(r)
 }
 

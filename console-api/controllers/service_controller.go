@@ -165,6 +165,10 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.updateStatus(ctx, &svc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
+	dumpRetry, err := r.reportDumpVolume(ctx, &svc)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reporting the dump volume: %w", err)
+	}
 	lookAgain, err := r.replaceUnschedulablePod(ctx, &svc)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("replacing the waiting pod: %w", err)
@@ -173,6 +177,7 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	after := serviceRouteNameRetry(&svc)
 	// Nothing watches Longhorn, so the copies in the status are read again on a timer.
 	after = earliest(after, storageRequeue(svc.Status.Conditions))
+	after = earliest(after, dumpRetry)
 	// This controller does not watch pods, so deletion conflicts need a retry.
 	if lookAgain && (after == 0 || after > pendingPodRetry) {
 		after = pendingPodRetry
