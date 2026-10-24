@@ -7,5 +7,5 @@ func localStorageNotes(backup string) []string {
 	if backup == BackupNone {
 		notes = append(notes, "Backups need external S3-compatible storage. Add it with --backup-storage-bucket and its related flags.")
 	}
-	return append(notes, "To add nodes later, move to a cluster with --storage longhorn using Cluster Migration in the console.")
+	return append(notes, "To add nodes later, switch to Longhorn with 'kip cluster storage longhorn'.")
 }

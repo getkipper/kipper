@@ -130,8 +130,8 @@ spec:
                     type: boolean
                 type: object
               storage:
-                description: Storage defaults to Longhorn when omitted and is immutable
-                  once set.
+                description: Omitted storage means Longhorn. A recorded mode can only
+                  change from local to longhorn.
                 enum:
                 - local
                 - longhorn
@@ -287,10 +287,12 @@ spec:
             type: object
         type: object
         x-kubernetes-validations:
-        - message: spec.storage cannot change on an existing cluster. Migrate to a
-            new cluster to change storage modes.
+        - message: spec.storage can change only from local to longhorn, which 'kip
+            cluster storage longhorn' does. Any other change needs a new cluster and
+            Cluster Migration.
           rule: '(has(oldSelf.spec) && has(oldSelf.spec.storage)) ? (has(self.spec)
-            && has(self.spec.storage) && self.spec.storage == oldSelf.spec.storage)
+            && has(self.spec.storage) && (self.spec.storage == oldSelf.spec.storage
+            || (oldSelf.spec.storage == ''local'' && self.spec.storage == ''longhorn'')))
             : (!has(self.spec) || !has(self.spec.storage) || self.spec.storage ==
             ''longhorn'')'
     served: true

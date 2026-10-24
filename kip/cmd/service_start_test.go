@@ -14,6 +14,7 @@ import (
 )
 
 type fakeStarter struct {
+	moveMark string
 	mark     *installer.FenceStopMark
 	records  []installer.NodeRecord
 	replicas []stranded.Replica
@@ -24,6 +25,7 @@ type fakeStarter struct {
 }
 
 func (f *fakeStarter) FenceStop(string, string) (*installer.FenceStopMark, error) { return f.mark, nil }
+func (f *fakeStarter) MoveMark(string, string) (string, error)                    { return f.moveMark, nil }
 func (f *fakeStarter) Records() ([]installer.NodeRecord, error)                   { return f.records, nil }
 func (f *fakeStarter) Replicas() ([]stranded.Replica, error)                      { return f.replicas, nil }
 func (f *fakeStarter) LonghornVolumes() ([]string, error)                         { return f.volumes, nil }
@@ -172,4 +174,13 @@ func TestServiceStartNamesTheRejoinOnlyWhileTheWorkerIsRecorded(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "kip node add", "the worker was removed")
 	assert.Contains(t, err.Error(), "kip service delete db --delete-data")
+}
+
+func TestServiceStartRefusesAServiceUnderAStorageMove(t *testing.T) {
+	s := starterFor(installer.NodeStateReady)
+	s.moveMark = "kipper-storage-move-uid"
+	err := fenceStoppedStart{Out: &bytes.Buffer{}, Server: s, AcceptStale: true}.run("shop", "db")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kip service storage longhorn db")
+	assert.Empty(t, s.started)
 }

@@ -22,6 +22,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/manifest"
 	"github.com/getkipper/kipper/kip/internal/service"
 )
@@ -456,4 +457,40 @@ func TestRecreateDumpChecksForVolumeRestoresAgainAfterTheConfirmation(t *testing
 	for _, a := range client.Actions() {
 		assert.NotEqual(t, "delete", a.GetVerb())
 	}
+}
+
+// TestRecreateDumpRefusesDuringAStorageMove verifies that recreation leaves
+// claims under the move's control until it ends, when the controller can
+// create a new dump claim.
+func TestRecreateDumpRefusesDuringAStorageMove(t *testing.T) {
+	f := healthyRecreateFixture()
+	f.cr.SetAnnotations(map[string]string{platform.StorageMoveAnnotation: "move-uid"})
+	d, client := f.build()
+	_, err := d.check(context.Background(), recreateNS, "db")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is moving its volume to Longhorn")
+	_, getErr := client.CoreV1().PersistentVolumeClaims(recreateNS).Get(context.Background(), "db-dump", metav1.GetOptions{})
+	assert.NoError(t, getErr, "the dump claim is left alone")
+}
+
+// TestRecreateDumpNamesAMoveThatStartedAfterTheCheck verifies that the timeout
+// explains why the controller delays the new dump volume until the move ends.
+func TestRecreateDumpNamesAMoveThatStartedAfterTheCheck(t *testing.T) {
+	d, client := healthyRecreateFixture().build()
+	target, err := d.check(context.Background(), recreateNS, "db")
+	require.NoError(t, err)
+	client.PrependReactor("delete", "persistentvolumeclaims", func(k8stesting.Action) (bool, runtime.Object, error) {
+		cr, err := d.dyn.Resource(manifest.ServiceGVR).Namespace(recreateNS).Get(context.Background(), "db", metav1.GetOptions{})
+		require.NoError(t, err)
+		cr.SetAnnotations(map[string]string{platform.StorageMoveAnnotation: "move-uid"})
+		_, err = d.dyn.Resource(manifest.ServiceGVR).Namespace(recreateNS).Update(context.Background(), cr, metav1.UpdateOptions{})
+		require.NoError(t, err)
+		return false, nil, nil
+	})
+
+	var out bytes.Buffer
+	err = d.recreate(context.Background(), &out, recreateNS, "db", target)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the controller has not created a new db-dump yet")
+	assert.Contains(t, err.Error(), "db started moving its volume to Longhorn, and the controller creates the new dump volume once the move ends")
 }

@@ -99,7 +99,7 @@ The dump volume always keeps one copy, regardless of how many copies the service
 kip service recreate-dump mydb
 ```
 
-kip checks that Longhorn reports the dump volume as faulted, that the dump volume, StatefulSet and any existing pod belong to the service, and that no backup of the namespace or restore into it is still running, because restarting the pod would interrupt that work. It refuses if it cannot read the backup and restore status. It asks for confirmation, then repeats all these checks before deleting the dump volume and restarting the database pod. `--yes` skips only the confirmation prompt. The controller creates a new, empty dump volume. The data volume is left unchanged. If the data volume is faulted too, kip says so, because the pod still cannot start afterwards. See [When a node dies](/en/maintenance#when-a-node-dies).
+kip checks that Longhorn reports the dump volume as faulted and that the dump volume, StatefulSet and any existing pod belong to the service. It also checks that the service is not moving to Longhorn and that no backup of the namespace or restore into it is still running, because restarting the pod would interrupt that work. It refuses if it cannot read the backup and restore status. It asks for confirmation, then repeats all these checks before deleting the dump volume and restarting the database pod. `--yes` skips only the confirmation prompt. The controller creates a new, empty dump volume. The data volume is left unchanged. If the data volume is faulted too, kip says so, because the pod still cannot start afterwards. See [When a node dies](/en/maintenance#when-a-node-dies).
 
 ## Restoring from a backup
 

@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
@@ -17,6 +18,9 @@ const (
 		`-o jsonpath='{"loki-template["}{.spec.volumeClaimTemplates[0].spec.resources.requests.storage}{"]"}' 2>/dev/null`
 	lokiClaimQuery = `kubectl -n monitoring get pvc storage-loki-0 --ignore-not-found ` +
 		`-o jsonpath='{"loki-claim["}{.spec.resources.requests.storage}{"]"}' 2>/dev/null`
+	// Read only after lokiTemplateQuery found the StatefulSet, so an empty
+	// answer is an error rather than a missing object.
+	lokiStatefulSetQuery = `kubectl -n monitoring get statefulset loki -o json`
 )
 
 var (
@@ -51,36 +55,59 @@ func markedSize(payload *regexp.Regexp, out string) (string, error) {
 	return m[1], nil
 }
 
-// lokiStorage reads the existing volume size and returns lookup or parsing errors.
-func lokiStorage(client CommandRunner) (string, error) {
+// lokiStorage reads the existing volume size and storage class, picking them
+// with platform.LokiStorageSize and platform.LokiStorageClass. Lookup and
+// parsing failures return errors.
+func lokiStorage(client CommandRunner, storageMode string) (string, *string, error) {
 	templateOut, err := client.Run(lokiTemplateQuery)
 	if err != nil {
-		return "", fmt.Errorf("reading the log volume size: %w", err)
+		return "", nil, fmt.Errorf("reading the log volume size: %w", err)
 	}
 	claimOut, err := client.Run(lokiClaimQuery)
 	if err != nil {
-		return "", fmt.Errorf("reading the log volume size: %w", err)
+		return "", nil, fmt.Errorf("reading the log volume size: %w", err)
 	}
-	return lokiStorageRequest(templateOut, claimOut)
+	size, err := lokiStorageRequest(templateOut, claimOut)
+	if err != nil {
+		return "", nil, err
+	}
+	if lokiTemplatePayload.MatchString(templateOut) {
+		var sts appsv1.StatefulSet
+		if err := kubectlJSON(client, "the log StatefulSet", lokiStatefulSetQuery, &sts); err != nil {
+			return "", nil, err
+		}
+		var templateClass *string
+		if len(sts.Spec.VolumeClaimTemplates) > 0 {
+			templateClass = sts.Spec.VolumeClaimTemplates[0].Spec.StorageClassName
+		}
+		return size, platform.LokiStorageClass(true, templateClass, "", storageMode), nil
+	}
+	claimClass, err := liveClaimClass(client, platform.MonitoringNamespace, "storage-loki-0", "")
+	if err != nil {
+		return "", nil, err
+	}
+	return size, platform.LokiStorageClass(false, nil, claimClass, storageMode), nil
 }
 
 // InstallLoki applies Loki with memory resources from the profile and adds Promtail.
 // It preserves existing Loki storage through InstallLokiWithResources.
-func InstallLoki(client CommandRunner, profile string) error {
-	return InstallLokiWithResources(client, platform.ResourcesForProfile(profile))
+func InstallLoki(client CommandRunner, profile, storageMode string) error {
+	return InstallLokiWithResources(client, platform.ResourcesForProfile(profile), storageMode)
 }
 
 // InstallLokiWithResources applies Loki with the supplied memory resources and
-// adds Promtail. It preserves the existing Loki template or claim size. Lookup,
-// size parsing and apply failures return errors. It also attempts to raise
-// the host inotify limit and returns without waiting for the charts to be ready.
-func InstallLokiWithResources(client CommandRunner, res platform.Resources) error {
+// adds Promtail. It preserves the existing Loki template or claim size and
+// storage class, and gives a new log volume the single-copy class of
+// storageMode. Lookup, parsing and apply failures return errors. It also
+// attempts to raise the host inotify limit and returns without waiting for the
+// charts to be ready.
+func InstallLokiWithResources(client CommandRunner, res platform.Resources, storageMode string) error {
 	// Preserve the immutable claim template when updating an existing StatefulSet.
-	storage, err := lokiStorage(client)
+	storage, class, err := lokiStorage(client, storageMode)
 	if err != nil {
 		return err
 	}
-	manifest := platform.LokiHelmChart(res, storage)
+	manifest := platform.LokiHelmChart(res, storage, class)
 
 	applyCmd := fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", manifest)
 	if _, err := client.Run(applyCmd); err != nil {

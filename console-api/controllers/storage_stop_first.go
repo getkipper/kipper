@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	goerrors "errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -224,6 +225,9 @@ func (s storageConverter) stop(ctx context.Context, pvc *corev1.PersistentVolume
 		if err != nil {
 			return nil, err
 		}
+		if sts.Annotations[platform.StorageMoveAnnotation] != "" {
+			return nil, errStorageMoveHolds
+		}
 		replicas := int32(1)
 		if sts.Spec.Replicas != nil {
 			replicas = max(*sts.Spec.Replicas, 1)
@@ -253,6 +257,12 @@ func podList(pods []string) string {
 	return "pods " + strings.Join(pods, ", ")
 }
 
+// errStorageMoveHolds prevents a copy change from scaling a StatefulSet owned
+// by a storage move, which restores replicas and removes its marker atomically.
+// This protects a reconcile that read the service before the move marked it.
+// Later reconciles wait at the service's move gate while that marker remains.
+var errStorageMoveHolds = goerrors.New("a storage move holds the StatefulSet, so the copy change waits for the move")
+
 // keepStopped scales the StatefulSet to zero unless it is there already, so
 // a scale-up by anything else is undone while the stop lasts.
 func (s storageConverter) keepStopped(ctx context.Context, namespace string) error {
@@ -262,6 +272,9 @@ func (s storageConverter) keepStopped(ctx context.Context, namespace string) err
 	sts, err := s.statefulSet(ctx, namespace)
 	if err != nil {
 		return err
+	}
+	if sts.Annotations[platform.StorageMoveAnnotation] != "" {
+		return errStorageMoveHolds
 	}
 	if sts.Spec.Replicas != nil && *sts.Spec.Replicas == 0 {
 		return nil
@@ -517,6 +530,22 @@ func (s storageConverter) patchAttachment(ctx context.Context, v *lhVolume, tick
 // kip's checks start it.
 func (s storageConverter) restore(ctx context.Context, pvc *corev1.PersistentVolumeClaim, v *lhVolume) (patched bool, err error) {
 	stop := s.records(pvc).Stop
+	// Reading before any writes lets the move marker block restoration.
+	// The resourceVersion guards scaling if a move marks the StatefulSet later.
+	var sts *appsv1.StatefulSet
+	if stop != nil && s.StatefulSet != "" {
+		var read appsv1.StatefulSet
+		err := s.Reader.Get(ctx, types.NamespacedName{Namespace: pvc.Namespace, Name: s.StatefulSet}, &read)
+		switch {
+		case errors.IsNotFound(err):
+		case err != nil:
+			return false, fmt.Errorf("reading the StatefulSet %s: %w", s.StatefulSet, err)
+		case read.Annotations[platform.StorageMoveAnnotation] != "":
+			return false, errStorageMoveHolds
+		default:
+			sts = &read
+		}
+	}
 	ticket := v != nil && v.Attachment != nil && v.Attachment.TicketNode != ""
 	if v != nil && (ticket || stop != nil) {
 		if patched, err = s.endHeldBuild(ctx, v); err != nil {
@@ -531,20 +560,15 @@ func (s storageConverter) restore(ctx context.Context, pvc *corev1.PersistentVol
 	if stop == nil {
 		return patched, nil
 	}
-	if s.StatefulSet != "" {
+	if sts != nil {
 		replicas := int32(1)
 		if stop.Replicas != nil {
 			replicas = *stop.Replicas
 		}
-		var sts appsv1.StatefulSet
-		err := s.Reader.Get(ctx, types.NamespacedName{Namespace: pvc.Namespace, Name: s.StatefulSet}, &sts)
 		switch {
-		case errors.IsNotFound(err):
-		case err != nil:
-			return patched, fmt.Errorf("reading the StatefulSet %s: %w", s.StatefulSet, err)
 		case sts.Annotations[stranded.FenceStopAnnotation] != "":
 		case sts.Spec.Replicas == nil || *sts.Spec.Replicas != replicas:
-			if err := s.scale(ctx, &sts, replicas); err != nil {
+			if err := s.scale(ctx, sts, replicas); err != nil {
 				return patched, err
 			}
 		}

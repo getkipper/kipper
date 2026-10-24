@@ -22,6 +22,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/getkipper/kipper/controller/pkg/backupscope"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/kip/internal/ai"
 	"github.com/getkipper/kipper/kip/internal/manifest"
 	"github.com/getkipper/kipper/kip/internal/service"
@@ -39,8 +40,9 @@ next backup writes a new one. The data volume is left unchanged.
 
 kip checks that Longhorn reports the dump volume as faulted and that the dump
 volume, StatefulSet and any existing pod belong to the service. It refuses
-while a backup of the namespace or a restore into it is still running, or if
-it cannot read their status. It repeats these checks after confirmation, even
+while the service is moving its volume to Longhorn, while a backup of the
+namespace or a restore into it is still running, or if it cannot read the
+backup and restore status. It repeats these checks after confirmation, even
 when --yes skips the prompt. It waits up to three minutes for the new dump
 volume. A pod on a node that is down stays terminating, and then
 'kip node fence' is the next step.`,
@@ -120,8 +122,9 @@ type dumpTarget struct {
 // check verifies that a Postgres service with consistent backups owns a
 // faulted dump claim and its StatefulSet. An existing pod must belong to that
 // StatefulSet and reference the dump claim. It returns the first validation or
-// read error without changing resources, including errors checking for unfinished
-// backups or restores in the namespace. Data-volume read errors are ignored.
+// read error without changing resources. Active storage moves and unfinished
+// backups or restores in the namespace prevent recreation. Data-volume read
+// errors are ignored.
 func (d *dumpRecreate) check(ctx context.Context, namespace, name string) (*dumpTarget, error) {
 	cr, err := d.dyn.Resource(manifest.ServiceGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
@@ -134,6 +137,10 @@ func (d *dumpRecreate) check(ctx context.Context, namespace, name string) (*dump
 	consistent, _, _ := unstructured.NestedBool(cr.Object, "spec", "consistentBackups")
 	if svcType != "postgres" || !consistent {
 		return nil, fmt.Errorf("only a Postgres service with consistent backups has a dump volume, and %s is not one", name)
+	}
+	if cr.GetAnnotations()[platform.StorageMoveAnnotation] != "" {
+		return nil, fmt.Errorf("service %s is moving its volume to Longhorn. The move controls its volume claims until it ends. "+
+			"An admin can finish the move with 'kip service storage longhorn %s' or undo it with --rollback. Then recreate the dump volume", name, name)
 	}
 	if err := refuseDuringVeleroWork(ctx, d.dyn, namespace); err != nil {
 		return nil, err
@@ -343,7 +350,7 @@ func (d *dumpRecreate) recreate(ctx context.Context, out io.Writer, namespace, n
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return d.leftover(ctx, t, err == nil)
+			return d.leftover(ctx, namespace, name, t, err == nil)
 		}
 		select {
 		case <-ctx.Done():
@@ -354,12 +361,17 @@ func (d *dumpRecreate) recreate(ctx context.Context, out io.Writer, namespace, n
 }
 
 // leftover explains why no new claim appeared in time.
-func (d *dumpRecreate) leftover(ctx context.Context, t *dumpTarget, oldClaim bool) error {
+func (d *dumpRecreate) leftover(ctx context.Context, namespace, name string, t *dumpTarget, oldClaim bool) error {
 	var left []string
 	if oldClaim {
 		left = append(left, t.claim.Name+" is still being deleted")
 	} else {
 		left = append(left, "the controller has not created a new "+t.claim.Name+" yet")
+		// A move started after validation can delay the replacement dump claim.
+		cr, err := d.dyn.Resource(manifest.ServiceGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err == nil && cr.GetAnnotations()[platform.StorageMoveAnnotation] != "" {
+			left = append(left, name+" started moving its volume to Longhorn, and the controller creates the new dump volume once the move ends")
+		}
 	}
 	if t.pod != nil {
 		pod, err := d.client.CoreV1().Pods(t.pod.Namespace).Get(ctx, t.pod.Name, metav1.GetOptions{})

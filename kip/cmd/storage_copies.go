@@ -62,6 +62,8 @@ func maxCopiesOf(pc *unstructured.Unstructured) *int32 {
 	return &n
 }
 
+const addCopyNodeHint = "An admin adds a worker with 'kip node add', or lets an existing worker hold copies with 'kip node storage <node> --copies'"
+
 // copiesFlagHelp describes --copies on the commands that create storage.
 const copiesFlagHelp = "copies of the data, each on a different node: 1 or 2. Choosing 2 at creation avoids the cost of converting a live volume later"
 
@@ -106,7 +108,7 @@ func refuseCopiesOnCreate(copies int32, shared bool, c copiesCluster) error {
 		return errSharedCopies
 	}
 	if c.replicaNodes != unknownReplicaNodes && c.replicaNodes < 2 {
-		return fmt.Errorf("two copies need two ready nodes that can hold copies, and the cluster has %d. An admin adds one with 'kip node storage <node> --copies'", c.replicaNodes)
+		return fmt.Errorf("two copies need two ready nodes that can hold copies, and the cluster has %d. %s", c.replicaNodes, addCopyNodeHint)
 	}
 	return nil
 }
@@ -246,12 +248,13 @@ func (ch copiesChange) stopNotice(obj *unstructured.Unstructured) string {
 	return "Longhorn removes the extra copy only while Kipper holds the volume with nothing writing to it, so the change waits until no app mounts the volume. 'kip app stop <app>' stops an app that does."
 }
 
-// checkCopiesChange returns unchanged when want matches the copies at field. A change
-// is refused while the object's copies are being converted, and a change to
-// two copies is refused for shared volumes until RWX copies are qualified,
-// unless it stops a blocked or pending reduction to one. console-api then
-// decides what the volume keeps, since the reported live count is Longhorn's,
-// which the held reduction lowers before it removes a copy.
+// checkCopiesChange returns unchanged when want matches the copies at field.
+// Changes must wait for an active conversion or move to Longhorn to finish.
+// Two copies require a service's data to be on Longhorn. Until RWX copies are
+// qualified, shared volumes accept two only to stop a blocked or pending
+// reduction to one. console-api then decides which copies to keep because the
+// reported live count is Longhorn's requested count, which a held reduction
+// lowers before removing a copy.
 // Other changes to two copies run the cluster checks unless the live volume
 // already has two copies or more, or cluster is nil.
 func checkCopiesChange(obj *unstructured.Unstructured, field []string, want int64, cluster *copiesCluster, shared bool) (unchanged bool, err error) {
@@ -260,8 +263,17 @@ func checkCopiesChange(obj *unstructured.Unstructured, field []string, want int6
 		return true, nil
 	}
 	c := copiesCondition(obj)
-	if c.reason == "Converting" {
+	switch c.reason {
+	case "Converting":
 		return false, fmt.Errorf("the copies of %s are being converted, and can change again once that ends: %s", obj.GetName(), c.message)
+	case "Moving":
+		return false, fmt.Errorf("the copies of %s can change once the move ends: %s", obj.GetName(), c.message)
+	}
+	if obj.GetAnnotations()[platform.StorageMoveAnnotation] != "" {
+		return false, fmt.Errorf("the copies of %s can change once the move ends", obj.GetName())
+	}
+	if class, _, _ := unstructured.NestedString(obj.Object, "status", "storage", "class"); want == 2 && !shared && class == platform.LocalPathClass {
+		return false, fmt.Errorf("the data of %s is on local storage, which keeps one copy. Move it to Longhorn with 'kip service storage longhorn %s' first", obj.GetName(), obj.GetName())
 	}
 	live, known, _ := unstructured.NestedInt64(obj.Object, "status", "storage", "copies")
 	if want == 2 && shared && !platform.RWXCopiesQualified {

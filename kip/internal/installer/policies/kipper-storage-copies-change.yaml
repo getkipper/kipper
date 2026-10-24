@@ -3,7 +3,8 @@
 # set-copies on that object. Project owners, console-api and cluster admins
 # hold it. Deployers can create within the offer, but changing copies requires
 # this additional permission. No one changes copies while the object reports a
-# running conversion (StorageCopies reason Converting).
+# running conversion or move (StorageCopies reason Converting or Moving), or
+# while a move has marked a service and the controller has not reported it yet.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -32,8 +33,12 @@ spec:
     - name: conversions
       expression: >-
         has(oldObject.status) && has(oldObject.status.conditions)
-        ? oldObject.status.conditions.filter(c, c.type == 'StorageCopies' && c.reason == 'Converting')
+        ? oldObject.status.conditions.filter(c, c.type == 'StorageCopies' && (c.reason == 'Converting' || c.reason == 'Moving'))
         : []
+    - name: moving
+      expression: >-
+        has(oldObject.metadata.annotations) && 'kipper.run/storage-move' in oldObject.metadata.annotations &&
+        oldObject.metadata.annotations['kipper.run/storage-move'] != ''
   validations:
     # Projects are cluster-scoped, so their requests carry no namespace.
     - expression: >-
@@ -42,9 +47,13 @@ spec:
         ? authorizer.group('kipper.run').resource('projects').name(request.name).check('set-copies').allowed()
         : authorizer.group('kipper.run').resource(request.resource.resource).namespace(request.namespace).name(request.name).check('set-copies').allowed())
       message: "Changing the copies of an existing volume needs the project owner role."
-    - expression: "variables.oldCopies == variables.newCopies || size(variables.conversions) == 0"
+    - expression: "variables.oldCopies == variables.newCopies || (size(variables.conversions) == 0 && !variables.moving)"
       messageExpression: >-
-        "The copies cannot change while a conversion runs. " + variables.conversions[0].message
+        size(variables.conversions) == 0
+        ? "The copies cannot change until the move ends."
+        : (variables.conversions[0].reason == 'Moving'
+        ? "The copies cannot change until the move ends. "
+        : "The copies cannot change while a conversion runs. ") + variables.conversions[0].message
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

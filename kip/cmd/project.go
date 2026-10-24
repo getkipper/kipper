@@ -17,8 +17,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/controller/pkg/projectenv"
 	"github.com/getkipper/kipper/kip/internal/config"
+	"github.com/getkipper/kipper/kip/internal/installer"
 	"github.com/getkipper/kipper/kip/internal/manifest"
 )
 
@@ -294,9 +296,17 @@ func runProjectDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("checking project: %w", getErr)
 	}
 
+	if err := refuseDuringStorageMove(ctx, k8sClient.Clientset(), dynClient, project); err != nil {
+		return err
+	}
+
 	if !confirmPrompt(fmt.Sprintf("Delete project %q and ALL its environments, apps, services, and data?", name)) {
 		fmt.Println("  Canceled.")
 		return nil
+	}
+	// A move can start while the prompt waits for an answer.
+	if err := refuseDuringStorageMove(ctx, k8sClient.Clientset(), dynClient, project); err != nil {
+		return err
 	}
 
 	fmt.Printf("\n  Deleting project %q...\n", name)
@@ -330,6 +340,94 @@ func runProjectDelete(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	return nil
+}
+
+// refuseDuringStorageMove returns an error if a namespace held by the project
+// has a storage move label or a Service with a move annotation, or a lookup fails.
+// Admission protects marked Services from deletion by the namespace controller,
+// which would leave the namespace Terminating with an unfinished move.
+func refuseDuringStorageMove(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, project *unstructured.Unstructured) error {
+	namespaces, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("listing namespaces to check for storage moves: %w", err)
+	}
+	others, err := dyn.Resource(manifest.ProjectGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("reading projects to check for storage moves: %w", err)
+	}
+	services, err := dyn.Resource(manifest.ServiceGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("listing services to check for storage moves: %w", err)
+	}
+	if moving, names := movingNamespace(heldByProject(project, others.Items, namespaces.Items), services.Items); moving != nil {
+		return fmt.Errorf("project %q has a volume moving to Longhorn in %s. %s, then delete the project", project.GetName(), moving.Name, finishMoves(moving, names))
+	}
+	return nil
+}
+
+// refuseEnvRemovalDuringStorageMove returns an error if the project holds the
+// namespace and it has a storage move label or a Service with a move annotation,
+// or a lookup fails. This prevents namespace deletion from stalling on a marked
+// Service. Missing namespaces and namespaces held by other projects are safe
+// to remove from the environment list because the reconciler leaves them alone.
+func refuseEnvRemovalDuringStorageMove(ctx context.Context, clientset kubernetes.Interface, dyn dynamic.Interface, project *unstructured.Unstructured, namespace string) error {
+	ns, err := clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading namespace %s to check for storage moves: %w", namespace, err)
+	}
+	others, err := dyn.Resource(manifest.ProjectGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("reading projects to check for storage moves: %w", err)
+	}
+	services, err := dyn.Resource(manifest.ServiceGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("listing services to check for storage moves: %w", err)
+	}
+	if moving, names := movingNamespace(heldByProject(project, others.Items, []corev1.Namespace{*ns}), services.Items); moving != nil {
+		return fmt.Errorf("namespace %s has a volume moving to Longhorn. %s, then remove the environment", namespace, finishMoves(moving, names))
+	}
+	return nil
+}
+
+// movingNamespace returns the first namespace in the supplied order with a
+// volume moving to Longhorn, and the sorted names of its Services that carry a
+// move annotation, or nil if no namespace has a move. Either the namespace's
+// move label or a Service's move annotation suffices, so a lost marker still
+// allows detection.
+func movingNamespace(namespaces []corev1.Namespace, services []unstructured.Unstructured) (*corev1.Namespace, []string) {
+	for i, ns := range namespaces {
+		var names []string
+		for _, svc := range services {
+			if svc.GetNamespace() == ns.Name && svc.GetAnnotations()[platform.StorageMoveAnnotation] != "" {
+				names = append(names, svc.GetName())
+			}
+		}
+		if len(names) > 0 || ns.Labels[platform.StorageMoveNamespaceLabel] == "true" {
+			slices.Sort(names)
+			return &namespaces[i], names
+		}
+	}
+	return nil, nil
+}
+
+// finishMoves returns instructions to finish or roll back the named services'
+// moves, with flags selecting ns. An empty services slice uses a placeholder.
+func finishMoves(ns *corev1.Namespace, services []string) string {
+	flags := installer.ServiceFlags(ns.Name, ns.Labels)
+	if len(services) == 0 {
+		return "Finish the move with 'kip service storage longhorn <service>" + flags + "', or undo it with --rollback"
+	}
+	commands := make([]string, 0, len(services))
+	for _, svc := range services {
+		commands = append(commands, "'kip service storage longhorn "+svc+flags+"'")
+	}
+	if len(commands) == 1 {
+		return "Finish the move with " + commands[0] + ", or undo it with --rollback"
+	}
+	return "Finish the moves with " + strings.Join(commands, " and ") + ", or undo them with --rollback"
 }
 
 // deleteProjectCR deletes the project bound to the object that was read.
@@ -624,6 +722,9 @@ func runProjectRemoveEnv(cmd *cobra.Command, args []string) error {
 
 	// Surface what's about to be destroyed so the user knows the blast radius.
 	clientset := k8sClient.Clientset()
+	if err := refuseEnvRemovalDuringStorageMove(ctx, clientset, dynClient, project, ns); err != nil {
+		return err
+	}
 	apps, _ := dynClient.Resource(manifest.AppGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
 	appCount := 0
 	if apps != nil {
@@ -641,6 +742,10 @@ func runProjectRemoveEnv(cmd *cobra.Command, args []string) error {
 	if !confirmTypePrompt("This action cannot be undone.", envName) {
 		fmt.Println("\n  Canceled.")
 		return nil
+	}
+	// A move can start while the prompt waits for an answer.
+	if err := refuseEnvRemovalDuringStorageMove(ctx, clientset, dynClient, project, ns); err != nil {
+		return err
 	}
 
 	if err := writeProjectEnvironments(ctx, dynClient, project, remaining); err != nil {

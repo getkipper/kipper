@@ -52,6 +52,7 @@ func init() {
 	installCmd.Flags().Bool("adopt-firewall", false, "take over a running firewall without prompting when it has no Kipper ownership marker: UFW on Ubuntu and Debian, firewalld on Rocky, AlmaLinux or CentOS Stream. Replaces UFW rules or the firewalld public zone, removing services such as Cockpit, and allows SSH and TCP ports 80, 443 and 6443. Requires SSH or --via-server and is unavailable with --local")
 	installCmd.Flags().String("request", "", requestFlagUsage)
 	_ = installCmd.Flags().MarkHidden("request")
+	addSkipMemoryFloorFlag(installCmd)
 	installCmd.Flags().Bool("via-server", false, "run the install as a persistent server job and stream its log (default on Windows)")
 	installCmd.Flags().String("server-kip", "", "with --via-server: upload a local Linux kip binary, useful for unreleased builds")
 	installCmd.Flags().Bool("cancel", false, "with --via-server: stop the running install or discard its uncollected result")
@@ -224,6 +225,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		BackupRepositoryKey:  repositoryKey,
 		Profile:              profile,
 		Storage:              storage,
+		SkipMemoryFloor:      skipMemoryFloor(cmd),
 		DNSResolvers:         dnsResolvers,
 		TrustedProxies:       trustedProxies,
 		KubeconfigMode:       kubeconfigMode,

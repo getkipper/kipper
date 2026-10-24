@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -30,6 +31,7 @@ import (
 	"github.com/getkipper/kipper/console-api/middleware"
 	"github.com/getkipper/kipper/controller/pkg/capability"
 	kipperlabels "github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 // projectMemberRole returns email's role in the project, or "" if not a member.
@@ -613,11 +615,11 @@ func (p *Projects) Create(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Update mutates the project's editable spec fields. Today that means the
-// environment list (add, remove, reorder) and the display name. Removing an
-// environment cascades to its namespace and everything inside it via the
-// project reconciler — callers are responsible for confirming destructive
-// edits with the user before sending them.
+// Update changes the environment list (add, remove, reorder) and display name.
+// Removing an environment causes the project reconciler to delete its owned
+// namespace and everything inside it. Callers must confirm destructive edits
+// with the user before sending them. An unfinished storage move in a namespace
+// being removed blocks the update.
 // PUT /api/v1/projects/{name}
 func (p *Projects) Update(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
@@ -670,6 +672,33 @@ func (p *Projects) Update(w http.ResponseWriter, r *http.Request) {
 	// current count so a reduction on an over-limit project still goes through.
 	if err := checkEnvironmentLimit(&project, len(envs), len(project.Spec.Environments)); err != nil {
 		respondError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
+	// Removing an environment triggers deletion of its namespace if the project
+	// owns it. An unfinished storage move can leave that namespace Terminating.
+	// Compare resolved namespaces because "" and "default" both use the project
+	// name as their namespace.
+	kept := map[string]bool{}
+	for _, env := range req.Environments {
+		kept[controllers.ResolveNamespace(name, env)] = true
+	}
+	removed := map[string]bool{}
+	for _, env := range controllers.ProjectEnvironments(&project) {
+		if ns := controllers.ResolveNamespace(name, env.Name); !kept[ns] {
+			removed[ns] = true
+		}
+	}
+	moving, err := p.movingNamespace(ctx, func(ns string, uid types.UID) bool {
+		return removed[ns] && nsowner.EverHeld(project.Status, ns, uid)
+	})
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to update project")
+		return
+	}
+	if moving != "" {
+		respondError(w, http.StatusConflict, fmt.Sprintf(
+			"environment namespace %s has a volume moving to Longhorn. An admin must finish the move with 'kip service storage longhorn <service>' or undo it with --rollback before the environment can be removed", moving))
 		return
 	}
 
@@ -1230,7 +1259,46 @@ func validateEnvironmentNames(projectName string, envs []string) error {
 	return nil
 }
 
-// Delete deletes a Kipper-managed namespace.
+// movingNamespace returns a namespace accepted by inScope with an unfinished
+// storage move, or "" if none is found. Either the namespace's move label or a
+// Service's move annotation suffices, so a lost marker still allows detection.
+// It returns an error if a required namespace or Service lookup fails.
+func (p *Projects) movingNamespace(ctx context.Context, inScope func(name string, uid types.UID) bool) (string, error) {
+	labelled, err := p.Client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
+		LabelSelector: platform.StorageMoveNamespaceLabel + "=true",
+	})
+	if err != nil {
+		return "", err
+	}
+	for _, ns := range labelled.Items {
+		if inScope(ns.Name, ns.UID) {
+			return ns.Name, nil
+		}
+	}
+	var services kipperv1.ServiceList
+	if err := p.CRClient.List(ctx, &services); err != nil {
+		return "", err
+	}
+	for _, svc := range services.Items {
+		if svc.Annotations[platform.StorageMoveAnnotation] == "" {
+			continue
+		}
+		ns, err := p.Client.CoreV1().Namespaces().Get(ctx, svc.Namespace, metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if inScope(ns.Name, ns.UID) {
+			return ns.Name, nil
+		}
+	}
+	return "", nil
+}
+
+// Delete deletes a project and cleans up namespaces it previously held.
+// An unfinished storage move blocks deletion.
 // DELETE /api/v1/projects/{name}
 func (p *Projects) Delete(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
@@ -1250,6 +1318,23 @@ func (p *Projects) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	held := project.Status
+
+	// Admission protects marked Services from deletion by the namespace
+	// controller, which leaves the namespace Terminating with an unfinished move.
+	// Use the project's ownership records, as cleanup does, so namespaces with
+	// missing project labels are still checked.
+	moving, err := p.movingNamespace(ctx, func(ns string, uid types.UID) bool {
+		return nsowner.EverHeld(held, ns, uid)
+	})
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to delete project")
+		return
+	}
+	if moving != "" {
+		respondError(w, http.StatusConflict, fmt.Sprintf(
+			"project %q has a volume moving to Longhorn in %s. An admin must finish the move with 'kip service storage longhorn <service>' or undo it with --rollback before deleting the project", name, moving))
+		return
+	}
 
 	// Bound to the object that was read. Between the read and here the project
 	// can finish deleting and be created again under the same name with

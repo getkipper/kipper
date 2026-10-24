@@ -80,6 +80,7 @@ func TestTwoCopiesNeedTwoReplicaNodes(t *testing.T) {
 	err := refuseCopiesOnCreate(2, false, offeringTwo(1))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "has 1")
+	assert.Contains(t, err.Error(), "'kip node add'", "a one-node cluster has no worker to enable")
 	assert.Contains(t, err.Error(), "kip node storage <node> --copies")
 
 	assert.NoError(t, refuseCopiesOnCreate(2, false, offeringTwo(2)))
@@ -454,4 +455,31 @@ func TestACopiesChangeSaysWhatItStops(t *testing.T) {
 		setBack := copiesChange{gvr: manifest.VolumeGVR, name: "uploads", want: 2, shared: true}
 		assert.Empty(t, setBack.stopNotice(copiesObject(ptr.To[int64](1), ptr.To[int64](3))), "a shared set-back from three copies removes nothing")
 	}
+}
+
+func TestCopiesDoNotChangeWhileTheVolumeMoves(t *testing.T) {
+	obj := withCopiesCondition(copiesObject(ptr.To[int64](1), ptr.To[int64](1)), "False", "Moving", "The volume is moving to Longhorn and the service is stopped.")
+	_, _, err := setServiceCopies(t, copiesDyn(obj), 2, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "can change once the move ends: The volume is moving to Longhorn")
+
+	marked := copiesObject(ptr.To[int64](2), ptr.To[int64](1))
+	marked.SetAnnotations(map[string]string{platform.StorageMoveAnnotation: "kipper-storage-move-u"})
+	_, got, err := setServiceCopies(t, copiesDyn(marked), 1, false)
+	require.Error(t, err, "the move marks the service before the controller reports Moving")
+	assert.Contains(t, err.Error(), "the copies of db can change once the move ends")
+	copies, _, _ := unstructured.NestedInt64(got.Object, "spec", "copies")
+	assert.EqualValues(t, 2, copies, "nothing is written")
+}
+
+// A service that has not moved off local storage after the cluster grew onto
+// Longhorn keeps one copy until it moves.
+func TestTwoCopiesWaitForTheMoveOffLocalStorage(t *testing.T) {
+	obj := copiesObject(ptr.To[int64](1), ptr.To[int64](1))
+	_ = unstructured.SetNestedField(obj.Object, "local-path", "status", "storage", "class")
+	_, got, err := setServiceCopies(t, copiesDyn(obj), 2, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "local storage, which keeps one copy. Move it to Longhorn with 'kip service storage longhorn db' first")
+	copies, _, _ := unstructured.NestedInt64(got.Object, "spec", "copies")
+	assert.EqualValues(t, 1, copies, "nothing is written")
 }

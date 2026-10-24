@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 const (
@@ -111,6 +114,11 @@ func (h *Handler) CreateTransferHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := h.createImportResources(ctx, sessionID, &req, token); err != nil {
+		var moving *storageMoveError
+		if stderrors.As(err, &moving) {
+			respondError(w, http.StatusConflict, moving.Error())
+			return
+		}
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("creating import resources: %v", err))
 		return
 	}
@@ -288,6 +296,14 @@ func (h *Handler) findTransferNamespace(ctx context.Context, sessionID, transfer
 func importPodName(transferID string) string     { return "dt-" + transferID + "-import" }
 func importServiceName(transferID string) string { return "dt-" + transferID }
 
+// storageMoveError refuses a transfer into a service whose volume is moving
+// to Longhorn. It explains why admission would deny the receiver pod.
+type storageMoveError struct{ service string }
+
+func (e *storageMoveError) Error() string {
+	return fmt.Sprintf("service %s is moving its volume to Longhorn. Finish or roll back the move with 'kip service storage longhorn %s' and transfer again", e.service, e.service)
+}
+
 func (h *Handler) createImportResources(ctx context.Context, sessionID string, req *transferRequest, token string) error {
 	labels := map[string]string{
 		"app.kubernetes.io/managed-by": "kipper",
@@ -307,6 +323,9 @@ func (h *Handler) createImportResources(ctx context.Context, sessionID string, r
 		sts, err := h.Client.AppsV1().StatefulSets(req.Namespace).Get(ctx, req.Target.Service, metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("reading target service %s: %w", req.Target.Service, err)
+		}
+		if sts.Annotations[platform.StorageMoveAnnotation] != "" {
+			return &storageMoveError{service: req.Target.Service}
 		}
 		replicas := int32(1)
 		if sts.Spec.Replicas != nil && *sts.Spec.Replicas > 0 {

@@ -94,7 +94,7 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	if !project.DeletionTimestamp.IsZero() {
 		logger.Info("cleaning up project resources", "project", project.Name)
-		pruned, err := r.deleteProjectNamespaces(ctx, &project, false)
+		pruned, waiting, err := r.deleteProjectNamespaces(ctx, &project, false)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("deleting project namespaces: %w", err)
 		}
@@ -103,8 +103,22 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// to remove and the update below would only report that.
 			return ctrl.Result{}, nil
 		}
-		controllerutil.RemoveFinalizer(&project, projectFinalizer)
-		return ctrl.Result{}, r.Update(ctx, &project)
+		changed, err := r.setStorageMoveCondition(ctx, pruned, waiting)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if changed {
+			if err := r.Status().Update(ctx, pruned); err != nil {
+				return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
+			}
+		}
+		// The finalizer stays while a namespace waits on a storage move,
+		// because nothing else would delete that namespace once the move ends.
+		if len(waiting) > 0 {
+			return ctrl.Result{RequeueAfter: storageMoveWaitInterval}, nil
+		}
+		controllerutil.RemoveFinalizer(pruned, projectFinalizer)
+		return ctrl.Result{}, r.Update(ctx, pruned)
 	}
 
 	if !controllerutil.ContainsFinalizer(&project, projectFinalizer) {
@@ -281,7 +295,7 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// edit land in between, and the two answers then disagreed: the delete kept
 	// a namespace the record prune dropped, which strands it for good, because
 	// cleanup reaches a labelled namespace only while the records still name it.
-	pruned, err := r.deleteProjectNamespaces(ctx, &project, true)
+	pruned, waiting, err := r.deleteProjectNamespaces(ctx, &project, true)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("pruning removed environments: %w", err)
 	}
@@ -319,6 +333,9 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		apimeta.RemoveStatusCondition(&project.Status.Conditions, kipperv1.ConditionStorageCopies)
 	}
 	r.setProjectHolderCondition(&project, holders)
+	if _, err := r.setStorageMoveCondition(ctx, &project, waiting); err != nil {
+		return ctrl.Result{}, err
+	}
 	project.Status.Phase = "Active"
 	// What the project declares according to the API server, not what the pass
 	// started from. Both records are pruned by that set, and a claim written
@@ -344,7 +361,11 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// if a Node add/remove event was missed (a map-func List error can't be
 	// retried), bounding how long a new node's IP stays reachable to this period
 	// rather than the manager's multi-hour informer resync.
-	return ctrl.Result{RequeueAfter: earliest(projectRequeue(project.Status.Conditions), holderRetry)}, nil
+	requeue := earliest(projectRequeue(project.Status.Conditions), holderRetry)
+	if len(waiting) > 0 {
+		requeue = earliest(requeue, storageMoveWaitInterval)
+	}
+	return ctrl.Result{RequeueAfter: requeue}, nil
 }
 
 // confirmIncarnation reports whether the project this pass began from is still
@@ -384,8 +405,9 @@ func declaredEnvNames(project *kipperv1.Project) []string {
 
 // keepLiveNamespaces merges this pass's holdings with the legacy ownership
 // record used for adoption and cleanup. Keep recorded names while requested
-// and present, during termination, or when a read fails. This preserves evidence
-// across skipped reconciles while pruning names the project has released.
+// and present, during termination, while a storage move holds the namespace,
+// or when a read fails. This preserves evidence across skipped reconciles
+// while pruning names the project has released.
 func (r *ProjectReconciler) keepLiveNamespaces(ctx context.Context, recorded, held, envNames []string, project string) []string {
 	wanted := make(map[string]struct{}, len(envNames))
 	for _, env := range envNames {
@@ -405,7 +427,7 @@ func (r *ProjectReconciler) keepLiveNamespaces(ctx context.Context, recorded, he
 			out = append(out, name)
 			continue
 		}
-		if _, want := wanted[name]; !want && ns.DeletionTimestamp.IsZero() {
+		if _, want := wanted[name]; !want && ns.DeletionTimestamp.IsZero() && !holdsStorageMove(ns.Labels) {
 			continue
 		}
 		out = append(out, name)
@@ -414,7 +436,8 @@ func (r *ProjectReconciler) keepLiveNamespaces(ctx context.Context, recorded, he
 }
 
 // keepLiveClaims merges new claims with recorded claims, retaining skipped
-// entries while their namespace is requested, terminating, or unreadable.
+// entries while their namespace is requested, terminating, held by a storage
+// move, or unreadable.
 // It prunes missing namespaces and released environments. Existing claims keep
 // their recorded UID; successful acquisition supplies a replacement UID.
 func (r *ProjectReconciler) keepLiveClaims(ctx context.Context, project *kipperv1.Project, claimed []kipperv1.NamespaceClaim, envNames []string) []kipperv1.NamespaceClaim {
@@ -443,7 +466,7 @@ func (r *ProjectReconciler) keepLiveClaims(ctx context.Context, project *kipperv
 		// Retain a mismatched UID as evidence that a recreated namespace is a
 		// different object. Dropping it would let the legacy name record authorize
 		// unlabelled cleanup. Successful adoption republishes the new UID.
-		if _, want := wanted[claim.Name]; !want && ns.DeletionTimestamp.IsZero() {
+		if _, want := wanted[claim.Name]; !want && ns.DeletionTimestamp.IsZero() && !holdsStorageMove(ns.Labels) {
 			continue
 		}
 		out = append(out, claim)
@@ -598,8 +621,10 @@ func recordedNames(status kipperv1.ProjectStatus) []string {
 // deleteProjectNamespaces deletes owned namespaces using UID preconditions.
 // With keepDeclared, it preserves environments in the freshly read Project,
 // including those above its tier limit. Returning that same snapshot keeps
-// subsequent status updates consistent; nil means the Project has gone.
-func (r *ProjectReconciler) deleteProjectNamespaces(ctx context.Context, project *kipperv1.Project, keepDeclared bool) (*kipperv1.Project, error) {
+// subsequent status updates consistent. Nil means the Project has gone.
+// Namespaces holding an unfinished storage move are skipped and returned as
+// waiting, because admission refuses to delete them until the move ends.
+func (r *ProjectReconciler) deleteProjectNamespaces(ctx context.Context, project *kipperv1.Project, keepDeclared bool) (*kipperv1.Project, []string, error) {
 	// Re-read the project from the API server before deleting anything.
 	//
 	// Every input to this decision has to be current, not just the rival claims
@@ -615,9 +640,9 @@ func (r *ProjectReconciler) deleteProjectNamespaces(ctx context.Context, project
 	var current kipperv1.Project
 	if err := r.APIReader.Get(ctx, types.NamespacedName{Name: project.Name}, &current); err != nil {
 		if errors.IsNotFound(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, fmt.Errorf("re-reading project %s before deleting its namespaces: %w", project.Name, err)
+		return nil, nil, fmt.Errorf("re-reading project %s before deleting its namespaces: %w", project.Name, err)
 	}
 	// And it has to be the same object. A name outlives what carried it, so a
 	// project deleted and recreated under this one's name is a different
@@ -630,7 +655,7 @@ func (r *ProjectReconciler) deleteProjectNamespaces(ctx context.Context, project
 	// And it ends the pass. On the pruning call the revoke sweep and the status
 	// write still follow, and both act on the dead project's spec.
 	if current.UID != project.UID {
-		return nil, errProjectReplaced
+		return nil, nil, errProjectReplaced
 	}
 	project = &current
 
@@ -648,11 +673,16 @@ func (r *ProjectReconciler) deleteProjectNamespaces(ctx context.Context, project
 
 	namespaces, err := r.ownedNamespaces(ctx, project)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
+	var waiting []string
 	for _, ns := range namespaces {
 		if _, ok := keep[ns.Name]; ok {
+			continue
+		}
+		if holdsStorageMove(ns.Labels) {
+			waiting = append(waiting, ns.Name)
 			continue
 		}
 		// Bound to the object the records were checked against. A namespace can
@@ -664,8 +694,13 @@ func (r *ProjectReconciler) deleteProjectNamespaces(ctx context.Context, project
 		// authorised object has already gone.
 		uid := ns.UID
 		err := r.Delete(ctx, &ns, client.Preconditions{UID: &uid})
+		if refusedForStorageMove(err) {
+			// The cached namespace predates its move label.
+			waiting = append(waiting, ns.Name)
+			continue
+		}
 		if err != nil && !errors.IsNotFound(err) && !errors.IsConflict(err) {
-			return nil, fmt.Errorf("deleting namespace %s: %w", ns.Name, err)
+			return nil, nil, fmt.Errorf("deleting namespace %s: %w", ns.Name, err)
 		}
 		// A namespace's route host claims are cluster-scoped ConfigMaps in
 		// kipper-system with no owner reference back to it, so they are not
@@ -677,7 +712,7 @@ func (r *ProjectReconciler) deleteProjectNamespaces(ctx context.Context, project
 		// gone, so an abandoned host is taken over by the next project that wants
 		// it once the old one is fully deleted.
 	}
-	return project, nil
+	return project, waiting, nil
 }
 
 // reconcileNamespace creates or updates the namespace for one environment.

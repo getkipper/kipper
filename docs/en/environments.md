@@ -104,6 +104,8 @@ Removing an environment deletes the matching namespace and **everything inside i
 
 A project must keep at least one environment. If you want to remove the last one, delete the project itself instead.
 
+While a service in the environment has an unfinished storage move, nobody, including admins using kubectl, can delete its namespace until `kip service storage longhorn <service>` finishes the move or `--rollback` undoes it. An environment removed through kubectl or GitOps in the meantime waits with the project condition `WaitingForStorageMove`, and the controller deletes its namespace once the move ends.
+
 ## Copying an environment
 
 When you create a new environment from the console, the **Copy from** dropdown lets you seed it with everything from an existing environment in one step. This is the fast path for "I have a working test env, give me a prod env that looks the same."
@@ -292,5 +294,7 @@ kip project delete blog
 ```
 
 This prompts for confirmation and deletes all environments, apps, services, and data. It cannot be undone.
+
+A namespace holding an unfinished storage move can't be deleted by anyone until the move finishes or is rolled back with `kip service storage longhorn <service> --rollback`. A project deleted through kubectl or GitOps in the meantime waits with the condition `WaitingForStorageMove` and the controller finishes deleting it once the move ends.
 
 From the web console, click the delete button on a project card in the **Projects** screen. You'll need to type the project name to confirm.

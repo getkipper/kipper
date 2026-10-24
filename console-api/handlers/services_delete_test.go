@@ -26,6 +26,7 @@ import (
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/controllers"
 	"github.com/getkipper/kipper/controller/pkg/datavolume"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 func testCRScheme() *runtime.Scheme {
@@ -541,4 +542,29 @@ func TestServicesDelete_AnswersAConflictTheSameWayWhicheverCallMeetsIt(t *testin
 			assert.NotContains(t, rec.Body.String(), "nothing was deleted")
 		})
 	}
+}
+
+func TestServicesDelete_RefusesAServiceWhoseVolumeIsMoving(t *testing.T) {
+	svc := &kipperv1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "mydb",
+			Namespace:   "default",
+			Labels:      map[string]string{kipperLabel: kipperValue, "app": "mydb"},
+			Annotations: map[string]string{platform.StorageMoveAnnotation: "kipper-storage-move-abc"},
+		},
+		Spec: kipperv1.ServiceSpec{Type: "postgres", Storage: "5Gi"},
+	}
+	crClient := crfake.NewClientBuilder().WithScheme(testCRScheme()).WithObjects(svc).Build()
+	handler := &Services{Client: fake.NewClientset(), CRClient: crClient} //nolint:staticcheck
+
+	r := chi.NewRouter()
+	r.Delete("/services/{name}", handler.Delete)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("DELETE", "/services/mydb?namespace=default&confirm=true", nil))
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "kip service storage longhorn mydb")
+	kept := &kipperv1.Service{}
+	require.NoError(t, crClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "mydb"}, kept))
+	assert.Empty(t, kept.Annotations[datavolume.DeleteAnnotation], "the data is not marked for deletion")
 }

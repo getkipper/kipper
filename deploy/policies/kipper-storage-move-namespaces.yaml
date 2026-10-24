@@ -1,0 +1,39 @@
+# Nobody, admins included, may delete a namespace while a service storage move
+# runs in it, because the move can no longer finish or roll back once its
+# claims are gone. kip removes the label when the move ends. On DELETE the
+# binding's selector reads the namespace being deleted, and the expression
+# allows any namespace whose labels do not mark a move.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kipper-storage-move-namespaces
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["namespaces"]
+  validations:
+    - expression: >-
+        oldObject == null || !has(oldObject.metadata.labels) ||
+        !('kipper.run/storage-move' in oldObject.metadata.labels) ||
+        oldObject.metadata.labels['kipper.run/storage-move'] != 'true'
+      message: "This namespace holds a volume moving to Longhorn. Finish the move with 'kip service storage longhorn <service>' or undo it with --rollback, then delete the namespace."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kipper-storage-move-namespaces
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  policyName: kipper-storage-move-namespaces
+  validationActions: ["Deny"]
+  matchResources:
+    objectSelector:
+      matchLabels:
+        kipper.run/storage-move: "true"

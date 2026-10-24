@@ -28,7 +28,7 @@ type PlatformConfigSpec struct {
 	// +optional
 	Telemetry *TelemetrySpec `json:"telemetry,omitempty"`
 
-	// Storage defaults to Longhorn when omitted and is immutable once set.
+	// Omitted storage means Longhorn. A recorded mode can only change from local to longhorn.
 	// +optional
 	// +kubebuilder:validation:Enum=local;longhorn
 	Storage string `json:"storage,omitempty"`
@@ -166,7 +166,7 @@ type ComponentStatus struct {
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:printcolumn:name="Profile",type=string,JSONPath=`.spec.profile`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// +kubebuilder:validation:XValidation:rule="(has(oldSelf.spec) && has(oldSelf.spec.storage)) ? (has(self.spec) && has(self.spec.storage) && self.spec.storage == oldSelf.spec.storage) : (!has(self.spec) || !has(self.spec.storage) || self.spec.storage == 'longhorn')",message="spec.storage cannot change on an existing cluster. Migrate to a new cluster to change storage modes."
+// +kubebuilder:validation:XValidation:rule="(has(oldSelf.spec) && has(oldSelf.spec.storage)) ? (has(self.spec) && has(self.spec.storage) && (self.spec.storage == oldSelf.spec.storage || (oldSelf.spec.storage == 'local' && self.spec.storage == 'longhorn'))) : (!has(self.spec) || !has(self.spec.storage) || self.spec.storage == 'longhorn')",message="spec.storage can change only from local to longhorn, which 'kip cluster storage longhorn' does. Any other change needs a new cluster and Cluster Migration."
 
 // PlatformConfig is the Schema for the platform configuration API. It controls
 // system component sizing and per-component enable/disable for Kipper's

@@ -39,6 +39,10 @@ const (
 	// StorageCopiesUnknown: fewer healthy copies than wanted, and the nodes of
 	// some copies could not be read.
 	StorageCopiesUnknown = "Unknown"
+	// StorageCopiesMoving: 'kip service storage longhorn' is moving the
+	// service's volume from local storage onto Longhorn. The service stays
+	// stopped and its copies cannot change until the move ends.
+	StorageCopiesMoving = "Moving"
 )
 
 // StorageCopiesStatus reports a claim's configured replica count and healthy

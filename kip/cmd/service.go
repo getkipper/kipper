@@ -20,6 +20,7 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	"github.com/getkipper/kipper/controller/pkg/datavolume"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/controller/pkg/secretname"
 	"github.com/getkipper/kipper/controller/pkg/servicecatalog"
 	"github.com/getkipper/kipper/kip/internal/auth"
@@ -771,6 +772,11 @@ func deleteService(ctx context.Context, out io.Writer, mgr *service.Manager, dyn
 		// somebody's new service, not this one, so the CR is never touched and
 		// only what an earlier delete left behind is cleared.
 		return deleteLeftovers(ctx, out, mgr, dyn, namespace, name, deleteData)
+	}
+	// The delete below is pinned to this read, so a move marked after it
+	// makes the delete fail instead of stranding the move's fence and record.
+	if cr.GetAnnotations()[platform.StorageMoveAnnotation] != "" {
+		return fmt.Errorf("service %q is moving its volume to Longhorn. Finish the move with 'kip service storage longhorn %s', or undo it with 'kip service storage longhorn %s --rollback', then delete it", name, name, name)
 	}
 
 	var volumes service.DataVolumes

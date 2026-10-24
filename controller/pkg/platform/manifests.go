@@ -66,10 +66,30 @@ func LokiStorageSize(templateSize, claimSize string) string {
 	}
 }
 
-// LokiHelmChart renders a Loki HelmChart with the supplied memory resources
-// and storage quantity. Use ResourcesForProfile or EffectiveResources for res
-// and LokiStorageSize for storage. Values are interpolated without validation.
-func LokiHelmChart(res Resources, storage string) string {
+// LokiStorageClass returns the storage class the Loki chart renders. An
+// existing StatefulSet keeps its template's class exactly, because claim
+// templates are immutable: nil means the template names no class. Without a
+// StatefulSet a surviving claim's class is kept, and otherwise the mode's
+// single-copy class is used. An empty claimClass falls back to the mode's class.
+func LokiStorageClass(templateFound bool, templateClass *string, claimClass, mode string) *string {
+	switch {
+	case templateFound:
+		return templateClass
+	case claimClass != "":
+		return &claimClass
+	default:
+		class := SingleWriterClass(mode)
+		return &class
+	}
+}
+
+// LokiHelmChart renders a Loki HelmChart with the supplied memory resources,
+// storage quantity and storage class. Use ResourcesForProfile or
+// EffectiveResources for res, LokiStorageSize for storage and LokiStorageClass
+// for class. A nil class omits the storageClass value. A pointer to an empty
+// string renders the chart's "-", an explicitly empty storageClassName.
+// Values are interpolated without validation.
+func LokiHelmChart(res Resources, storage string, class *string) string {
 	return fmt.Sprintf(`apiVersion: helm.cattle.io/v1
 kind: HelmChart
 metadata:
@@ -123,7 +143,7 @@ spec:
           memory: %s
       persistence:
         enabled: true
-        size: %s
+        size: %s%s
     minio:
       enabled: false
     gateway:
@@ -156,7 +176,19 @@ spec:
     # The chart's Helm test requires the canary.
     test:
       enabled: false
-`, HelmChartNamespace, LokiChartVersion, res.LokiMemoryRequest, res.LokiMemoryLimit, storage)
+`, HelmChartNamespace, LokiChartVersion, res.LokiMemoryRequest, res.LokiMemoryLimit, storage, lokiClassValue(class))
+}
+
+// lokiClassValue renders the storageClass line under singleBinary.persistence.
+func lokiClassValue(class *string) string {
+	switch {
+	case class == nil:
+		return ""
+	case *class == "":
+		return "\n        storageClass: \"-\""
+	default:
+		return fmt.Sprintf("\n        storageClass: %q", *class)
+	}
 }
 
 // PromtailHelmChart renders the promtail HelmChart that ships container logs

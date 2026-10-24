@@ -58,6 +58,16 @@ func TestNodeHeadroomSubtractsWhatRunningPodsRequest(t *testing.T) {
 	assert.Equal(t, gi(2.5), nodes[0].MemoryBytes)
 }
 
+func TestHeadroomKeepsTheNodesAllocatableCPU(t *testing.T) {
+	nodes := Headroom(
+		[]corev1.Node{*node("server", "2", "4Gi", false)},
+		[]corev1.Pod{*requestingPod("platform", "server", "1500m", "1Gi", corev1.PodRunning)},
+	)
+	require.Len(t, nodes, 1)
+	assert.Equal(t, int64(2000), nodes[0].AllocatableCPUMilli)
+	assert.Equal(t, int64(500), nodes[0].CPUMilli)
+}
+
 func TestNodeHeadroomSkipsNodesThatCannotTakePods(t *testing.T) {
 	cordoned := node("worker", "8", "16Gi", true)
 	notReady := node("down", "8", "16Gi", false)

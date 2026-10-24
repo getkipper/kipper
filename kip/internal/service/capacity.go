@@ -14,10 +14,12 @@ import (
 
 // NodeHeadroom holds allocatable CPU in millicores and memory in bytes, minus
 // requests from assigned, unfinished pods. Values may be negative.
+// AllocatableCPUMilli is the node's allocatable CPU before any request.
 type NodeHeadroom struct {
-	Node        string
-	CPUMilli    int64
-	MemoryBytes int64
+	Node                string
+	AllocatableCPUMilli int64
+	CPUMilli            int64
+	MemoryBytes         int64
 }
 
 // NodeHeadroom returns remaining CPU and memory for Ready, uncordoned nodes
@@ -33,22 +35,36 @@ func (m *Manager) NodeHeadroom(ctx context.Context) ([]NodeHeadroom, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listing pods: %w", err)
 	}
+	var eligible []corev1.Node
+	for _, n := range nodes.Items {
+		if !n.Spec.Unschedulable && nodeReady(&n) && !hasBlockingTaint(&n) {
+			eligible = append(eligible, n)
+		}
+	}
+	return Headroom(eligible, pods.Items), nil
+}
+
+// Headroom subtracts assigned, unfinished pods' requests from each node's
+// allocatable CPU and memory, using platform.PodRequests. It includes all
+// supplied nodes in input order, including unready and cordoned nodes. CPU is
+// in millicores and memory in bytes, and either remainder may be negative. An
+// empty node slice produces a nil result.
+func Headroom(nodes []corev1.Node, pods []corev1.Pod) []NodeHeadroom {
 	var out []NodeHeadroom
 	index := map[string]int{}
-	for i := range nodes.Items {
-		n := &nodes.Items[i]
-		if n.Spec.Unschedulable || !nodeReady(n) || hasBlockingTaint(n) {
-			continue
-		}
+	for i := range nodes {
+		n := &nodes[i]
 		index[n.Name] = len(out)
+		cpu := n.Status.Allocatable.Cpu().MilliValue()
 		out = append(out, NodeHeadroom{
-			Node:        n.Name,
-			CPUMilli:    n.Status.Allocatable.Cpu().MilliValue(),
-			MemoryBytes: n.Status.Allocatable.Memory().Value(),
+			Node:                n.Name,
+			AllocatableCPUMilli: cpu,
+			CPUMilli:            cpu,
+			MemoryBytes:         n.Status.Allocatable.Memory().Value(),
 		})
 	}
-	for i := range pods.Items {
-		pod := &pods.Items[i]
+	for i := range pods {
+		pod := &pods[i]
 		at, ok := index[pod.Spec.NodeName]
 		if !ok || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 			continue
@@ -57,7 +73,7 @@ func (m *Manager) NodeHeadroom(ctx context.Context) ([]NodeHeadroom, error) {
 		out[at].CPUMilli -= cpu
 		out[at].MemoryBytes -= memory
 	}
-	return out, nil
+	return out
 }
 
 func nodeReady(n *corev1.Node) bool {

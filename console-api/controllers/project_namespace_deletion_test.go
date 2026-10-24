@@ -315,9 +315,9 @@ func TestANamespaceNoOtherProjectClaimsIsStillCollected(t *testing.T) {
 	assert.True(t, errors.IsNotFound(err), "the project's own namespace outlived it")
 }
 
-// pruneRan drops the live project the prune decided from, for the tests that
-// care about which namespaces survived rather than which spec decided it.
-func pruneRan(_ *kipperv1.Project, err error) error {
+// pruneRan discards the project snapshot and waiting namespaces for tests
+// concerned only with which namespaces survived pruning.
+func pruneRan(_ *kipperv1.Project, _ []string, err error) error {
 	return err
 }
 
