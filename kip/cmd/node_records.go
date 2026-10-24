@@ -49,6 +49,7 @@ func pinForUpgrade(out io.Writer, client installer.CommandRunner) {
 		return
 	}
 	reportSingleCopyPlacement(out, placement)
+	reportCopiesForUpgrade(out, client)
 }
 
 // recordNodes ensures every node is recorded, creating the server record if

@@ -117,7 +117,9 @@ func (f *fakeLonghorn) Run(cmd string) (string, error) {
 	case strings.Contains(cmd, "get nodes -l"):
 		return "node/server-1\n", nil
 	case strings.Contains(cmd, "get nodes.longhorn.io"):
-		return `["kipper-server"]`, nil
+		return `["kipper-server","kipper-replica"]`, nil
+	case strings.Contains(cmd, "get storageclass longhorn-replicated"):
+		return replicatedClass, nil
 	case strings.Contains(cmd, "get storageclass"):
 		return pinnedClass, nil
 	}

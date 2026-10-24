@@ -54,6 +54,19 @@ var volumeDeleteCmd = &cobra.Command{
 	RunE:  runVolumeDelete,
 }
 
+var volumeUpdateCmd = &cobra.Command{
+	Use:   "update [name] --copies 1|2",
+	Short: "Set the copies of a shared volume whose copies are unset",
+	Long: `Set the copies of a shared volume created before Kipper managed copies.
+The value must match the number of copies the volume has now. Changing that
+number on an existing volume is not available yet.
+
+Examples:
+  kip volume update uploads --copies 1`,
+	Args: cobra.ExactArgs(1),
+	RunE: runVolumeUpdate,
+}
+
 var volumeMountCmd = &cobra.Command{
 	Use:   "mount [volume-name] [app-name] --path /data",
 	Short: "Mount a shared volume into an app",
@@ -72,6 +85,7 @@ func init() {
 	volumeCreateCmd.Flags().String("size", "5Gi", "volume size")
 	volumeCreateCmd.Flags().String("project", "", "project name")
 	volumeCreateCmd.Flags().String("environment", "", "target environment")
+	volumeCreateCmd.Flags().Int32("copies", 1, copiesFlagHelp)
 
 	volumeListCmd.Flags().String("project", "", "project name")
 	volumeListCmd.Flags().String("environment", "", "target environment")
@@ -79,6 +93,11 @@ func init() {
 	volumeDeleteCmd.Flags().String("project", "", "project name")
 	volumeDeleteCmd.Flags().String("environment", "", "target environment")
 	volumeDeleteCmd.Flags().Bool("delete-data", false, "confirm permanent data deletion")
+
+	volumeUpdateCmd.Flags().String("project", "", "project name")
+	volumeUpdateCmd.Flags().String("environment", "", "target environment")
+	volumeUpdateCmd.Flags().Int32("copies", 1, "copies the volume has now: 1 or 2")
+	_ = volumeUpdateCmd.MarkFlagRequired("copies")
 
 	volumeMountCmd.Flags().String("path", "/data", "mount path inside the container")
 	volumeMountCmd.Flags().String("project", "", "project name")
@@ -90,6 +109,7 @@ func init() {
 	volumeCmd.AddCommand(volumeCreateCmd)
 	volumeCmd.AddCommand(volumeListCmd)
 	volumeCmd.AddCommand(volumeDeleteCmd)
+	volumeCmd.AddCommand(volumeUpdateCmd)
 	volumeCmd.AddCommand(volumeMountCmd)
 	volumeCmd.AddCommand(volumeUnmountCmd)
 	rootCmd.AddCommand(volumeCmd)
@@ -98,9 +118,13 @@ func init() {
 func runVolumeCreate(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	size, _ := cmd.Flags().GetString("size")
+	copies, _ := cmd.Flags().GetInt32("copies")
 	quantity, err := resource.ParseQuantity(size)
 	if err != nil {
 		return fmt.Errorf("invalid --size %q: %w", size, err)
+	}
+	if err := refuseCopiesOutOfRange(copies); err != nil {
+		return err
 	}
 
 	cluster, k8sClient, err := loadCurrentCluster()
@@ -123,6 +147,9 @@ func runVolumeCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("checking volume %q: %w", name, err)
 	}
 	mgr := &service.Manager{Client: k8sClient.Clientset(), Dynamic: k8sClient.Dynamic()}
+	if _, err := checkCopiesOnCreate(ctx, os.Stdout, k8sClient.Dynamic(), copies, true); err != nil {
+		return err
+	}
 	if err := refuseWithoutStorageRoom(ctx, os.Stdout, mgr, []service.NewVolume{service.SharedVolume(ns, name, quantity.Value())}, "--size"); err != nil {
 		return err
 	}
@@ -141,7 +168,7 @@ func runVolumeCreate(cmd *cobra.Command, args []string) error {
 				"kipper.run/volume-name":       name,
 			},
 		},
-		"spec": map[string]interface{}{"size": size},
+		"spec": map[string]interface{}{"size": size, "copies": int64(copies)},
 	}}
 
 	_, err = k8sClient.Dynamic().Resource(manifest.VolumeGVR).Namespace(ns).Create(ctx, vol, metav1.CreateOptions{})
@@ -158,6 +185,31 @@ func runVolumeCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Mount into an app:\n")
 	fmt.Printf("    kip volume mount %s <app-name> --path /data/uploads\n\n", name)
 
+	return nil
+}
+
+func runVolumeUpdate(cmd *cobra.Command, args []string) error {
+	name := args[0]
+	copies, _ := cmd.Flags().GetInt32("copies")
+	if err := refuseCopiesOutOfRange(copies); err != nil {
+		return err
+	}
+	cluster, k8sClient, err := loadCurrentCluster()
+	if err != nil {
+		return err
+	}
+	project, environment := resolveProjectAndEnvironment(cmd, cluster)
+	ns := cluster.ResolveNamespace(project, environment)
+	if ns == "" {
+		return fmt.Errorf("no project context. Set one with `kip project use <name>` or pass --project")
+	}
+	changed, err := adoptCopies(context.Background(), k8sClient.Dynamic(), manifest.VolumeGVR, ns, name, copies)
+	if err != nil {
+		return err
+	}
+	fmt.Println()
+	sayCopiesAdopted(os.Stdout, changed, copies)
+	fmt.Println()
 	return nil
 }
 
@@ -181,16 +233,26 @@ func runVolumeList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("\n  %-25s %-10s %-12s %s\n", "NAME", "SIZE", "STATUS", "ACCESS")
+	fmt.Printf("\n  %-25s %-10s %-12s %-14s %s\n", "NAME", "SIZE", "STATUS", "COPIES", "ACCESS")
 	var warnings []string
 	for _, cr := range crList.Items {
 		size, _, _ := unstructured.NestedString(cr.Object, "spec", "size")
 		if actual, _, _ := unstructured.NestedString(cr.Object, "status", "actualSize"); actual != "" {
 			size = actual
 		}
-		fmt.Printf("  %-25s %-10s %-12s %s\n", cr.GetName(), size, volumeListStatus(&cr), "ReadWriteMany")
+		copies := service.CopiesOf(cr.Object)
+		summary := copies.Summary()
+		if summary == "" {
+			summary = "-"
+		}
+		fmt.Printf("  %-25s %-10s %-12s %-14s %s\n", cr.GetName(), size, volumeListStatus(&cr), summary, "ReadWriteMany")
 		if w := volumeBackupWarning(&cr); w != "" {
 			warnings = append(warnings, fmt.Sprintf("%s: %s", cr.GetName(), w))
+		}
+		// An unset value is the normal state of an older volume, so only a
+		// refusal or a degraded volume earns a line here.
+		if p := copies.Problem(); p != "" && copies.Status == "False" {
+			warnings = append(warnings, fmt.Sprintf("%s: %s", cr.GetName(), p))
 		}
 	}
 	for _, w := range warnings {

@@ -38,6 +38,13 @@ type PlatformConfigSpec struct {
 	// +kubebuilder:validation:Enum=none;in-cluster;external
 	Backup string `json:"backup,omitempty"`
 
+	// MaxCopies is the most data copies the admin offers to services, volumes
+	// and project storage. Unset means 1: copies 2 is not offered.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=2
+	// +optional
+	MaxCopies *int32 `json:"maxCopies,omitempty"`
+
 	// RouteGuard configures the refusals applied to every app route.
 	// +optional
 	RouteGuard *RouteGuardSpec `json:"routeGuard,omitempty"`

@@ -12,6 +12,7 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/capacity"
 	"github.com/getkipper/kipper/controller/pkg/healthcheck"
 	"github.com/getkipper/kipper/controller/pkg/internalpath"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 // redirectFromHostPattern is the shape a route.redirectFrom entry must have:
@@ -199,11 +200,17 @@ func Validate(m *Manifest) error {
 		if svc.TLS != "" && svc.TLS != "required" && svc.TLS != "on" && svc.TLS != "off" {
 			return fmt.Errorf("service %q: tls must be required, on or off, not %q", name, svc.TLS)
 		}
+		if !validCopies(svc.Copies) {
+			return fmt.Errorf("service %q: copies must be 1 or 2, not %d", name, *svc.Copies)
+		}
 	}
 
 	for name, vol := range m.Volumes {
 		if vol.Size == "" {
 			return fmt.Errorf("volume %q: size is required", name)
+		}
+		if !validCopies(vol.Copies) {
+			return fmt.Errorf("volume %q: copies must be 1 or 2, not %d", name, *vol.Copies)
 		}
 	}
 
@@ -220,6 +227,11 @@ func Validate(m *Manifest) error {
 const maxLinks = 64
 
 var linkTargetName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+// validCopies accepts an omitted copies value, 1 or 2.
+func validCopies(copies *int32) bool {
+	return copies == nil || (*copies >= 1 && *copies <= platform.MaxCopies)
+}
 
 func validateLinks(links []LinkSpec) error {
 	if len(links) > maxLinks {

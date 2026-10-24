@@ -13,6 +13,7 @@ import (
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 // claimsOf returns the claims a pod spec mounts.
@@ -59,7 +60,7 @@ func TestDeploymentsAndJobsMountOnlySharedClaims(t *testing.T) {
 
 	vol := &kipperv1.Volume{ObjectMeta: metav1.ObjectMeta{Name: "uploads", Namespace: "ns", UID: "uid-vol"}, Spec: kipperv1.VolumeSpec{Size: "1Gi"}}
 	vc := crfake.NewClientBuilder().WithScheme(testScheme()).WithObjects(vol).Build()
-	claim, err := (&VolumeReconciler{Client: vc, Scheme: testScheme()}).reconcilePVC(context.Background(), vol)
+	claim, err := (&VolumeReconciler{Client: vc, Scheme: testScheme()}).reconcilePVC(context.Background(), vol, platform.StorageLonghorn)
 	require.NoError(t, err)
 	assert.Equal(t, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, claim.Spec.AccessModes, "the shared claim apps and functions mount is ReadWriteMany")
 }

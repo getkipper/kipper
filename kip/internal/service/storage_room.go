@@ -28,8 +28,9 @@ var (
 
 const longhornProvisioner = "driver.longhorn.io"
 
-// NewVolume describes a proposed volume for a storage check. Shared volumes use
-// the ReadWriteMany class, and others use the cluster's single-writer class.
+// NewVolume describes a proposed volume for a storage check. On Longhorn,
+// counts of at least two use the replicated class. Other values use the
+// single-copy class, including shared volumes. Local storage uses local-path.
 // CheckStorageRoom skips volumes whose Claim already exists in Namespace.
 type NewVolume struct {
 	Name      string
@@ -37,6 +38,15 @@ type NewVolume struct {
 	Bytes     int64
 	Namespace string
 	Claim     string
+	Copies    int32
+}
+
+// class is the StorageClass a new claim for v gets in storage mode.
+func (v NewVolume) class(mode string) string {
+	if v.Copies == 0 {
+		return platform.ClaimClassForCopies(mode, nil)
+	}
+	return platform.ClaimClassForCopies(mode, &v.Copies)
 }
 
 // DefaultStorage is the Service CRD's default for spec.storage, which the API
@@ -110,9 +120,10 @@ type longhornSettings struct {
 	minimalAvailable int64
 }
 
-// CheckStorageRoom checks capacity for one replica of each proposed volume
-// without changing cluster state. It returns an error for a definite shortage,
-// using sizeOption as the size flag or field in the error's hint. A Kubernetes
+// CheckStorageRoom checks capacity without changing cluster state. It checks
+// room for each replicated volume on two distinct nodes, then estimates combined
+// demand using one replica per proposed volume. It returns an error for a definite
+// shortage, using sizeOption as the size flag or field in the error's hint. A Kubernetes
 // Forbidden error skips the check with an empty warning and nil error. Other read
 // failures, no eligible disks, or an inconclusive placement return a warning and
 // nil error.
@@ -137,10 +148,10 @@ func (m *Manager) CheckStorageRoom(ctx context.Context, volumes []NewVolume, siz
 	var disks []longhornDisk
 	var read bool
 	var wanted []placement
-	for _, class := range []string{platform.SingleWriterClass(mode), platform.LonghornSharedClass} {
+	for _, class := range []string{platform.SingleWriterClass(mode), platform.LonghornReplicatedClass} {
 		var inClass []NewVolume
 		for _, v := range volumes {
-			if v.Shared == (class == platform.LonghornSharedClass) {
+			if v.class(mode) == class {
 				inClass = append(inClass, v)
 			}
 		}
@@ -310,9 +321,11 @@ func (m *Manager) unscheduledClaims(ctx context.Context, mode string, nodes []un
 		if err != nil {
 			continue
 		}
+		copies, _, _ := unstructured.NestedInt64(svc.Object, "spec", "copies")
+		volumes[0].Copies = int32(copies) //nolint:gosec // G115: the CRD bounds copies to 1 or 2.
 		for _, v := range volumes {
 			if !existing[v.Namespace+"/"+v.Claim] {
-				if err := hold(v, platform.SingleWriterClass(mode)); err != nil {
+				if err := hold(v, v.class(mode)); err != nil {
 					return nil, err
 				}
 			}
@@ -329,7 +342,7 @@ func (m *Manager) unscheduledClaims(ctx context.Context, mode string, nodes []un
 			continue
 		}
 		if v := SharedVolume(vol.GetNamespace(), vol.GetName(), q.Value()); !existing[v.Namespace+"/"+v.Claim] {
-			if err := hold(v, platform.LonghornSharedClass); err != nil {
+			if err := hold(v, v.class(mode)); err != nil {
 				return nil, err
 			}
 		}
@@ -527,9 +540,10 @@ type placement struct {
 }
 
 // place refuses when a shortage is certain for any new volume: it is larger
-// than any of its disks has room for, or the new and pending volumes need more
-// than their disks have together. Otherwise it puts every volume, largest
-// first, on its eligible disk with the most room left, so volumes of both
+// than any eligible disk has room for, a replicated volume lacks room on a
+// second node, or the new and pending volumes need more than their disks have
+// together. Otherwise it puts every volume, largest first, on its eligible disk
+// with the most room left, so volumes of both
 // classes draw on the same disks. Longhorn makes its own placement choices, so
 // failure to place a volume here produces only a warning.
 func place(disks []longhornDisk, wanted, pending []placement, sizeOption string) (string, error) {
@@ -564,7 +578,7 @@ func place(disks []longhornDisk, wanted, pending []placement, sizeOption string)
 }
 
 func certainlyShort(disks []longhornDisk, wanted []placement, p placement) bool {
-	if disks[roomiest(disks, p.disks)].room < p.volume.Bytes {
+	if disks[roomiest(disks, p.disks)].room < p.volume.Bytes || secondCopyShort(disks, p) {
 		return true
 	}
 	var sameClass []placement
@@ -578,6 +592,33 @@ func certainlyShort(disks []longhornDisk, wanted []placement, p placement) bool 
 	}
 	need, free := total(wanted, disks, allDisks(wanted))
 	return need > free
+}
+
+// secondCopyDisk returns the index of the roomiest eligible disk on a different
+// node from the roomiest disk. It returns false if all eligible disks share one
+// node. indexes must be non-empty. Ties follow roomiest.
+func secondCopyDisk(disks []longhornDisk, indexes []int) (int, bool) {
+	first := disks[roomiest(disks, indexes)].node
+	var others []int
+	for _, i := range indexes {
+		if disks[i].node != first {
+			others = append(others, i)
+		}
+	}
+	if len(others) == 0 {
+		return 0, false
+	}
+	return roomiest(disks, others), true
+}
+
+// secondCopyShort reports whether a replicated volume lacks room for a copy
+// outside the roomiest node, including when no other node has an eligible disk.
+func secondCopyShort(disks []longhornDisk, p placement) bool {
+	if p.class != platform.LonghornReplicatedClass {
+		return false
+	}
+	i, ok := secondCopyDisk(disks, p.disks)
+	return !ok || disks[i].room < p.volume.Bytes
 }
 
 // total returns the requested bytes and the listed disks' original capacity.
@@ -630,8 +671,17 @@ func shortage(disks []longhornDisk, wanted, pending []placement, p placement, si
 		needs += fmt.Sprintf(" in addition to %s for volumes awaiting Longhorn scheduling (%s)", FormatSize(held), describe(sharing))
 	}
 	hint := fmt.Sprintf("Free space with kip service delete <name> --delete-data or kip volume delete <name> --delete-data, grow the server's disk, or request less storage with %s.", sizeOption)
-	if p.class == platform.LonghornSharedClass {
-		return fmt.Errorf("not enough storage on any node: Longhorn can schedule at most %s more, on %s, and this needs %s. %s",
+	if disks[roomiest(disks, p.disks)].room >= p.volume.Bytes && secondCopyShort(disks, p) {
+		second, ok := secondCopyDisk(disks, p.disks)
+		if !ok {
+			return fmt.Errorf("no room for the second copy of %s: it needs %s on another node, and no other node that can hold copies has a disk that Longhorn can schedule on now. 'kip cluster storage' shows the nodes that can hold copies",
+				p.volume.Name, FormatSize(p.volume.Bytes))
+		}
+		return fmt.Errorf("not enough storage for the second copy of %s: it needs %s on another node that can hold copies, and Longhorn can schedule at most %s more on %s. %s",
+			p.volume.Name, FormatSize(p.volume.Bytes), FormatSize(disks[second].room), disks[second].node, hint)
+	}
+	if p.class == platform.LonghornReplicatedClass {
+		return fmt.Errorf("not enough storage on the nodes that can hold copies: Longhorn can schedule at most %s more, on %s, and this needs %s. %s",
 			FormatSize(best.room), best.node, needs, hint)
 	}
 	return fmt.Errorf("not enough storage on the server: Longhorn can schedule %s more on %s, and this needs %s. %s",

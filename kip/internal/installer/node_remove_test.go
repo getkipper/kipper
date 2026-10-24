@@ -70,11 +70,39 @@ func TestNodeRegisteredIgnoresKubectlWarnings(t *testing.T) {
 }
 
 func TestVolumesOnlyOnCountsFailedReplicasHere(t *testing.T) {
-	replicas := "pvc-a\tworker-1\t2026-10-18T00:00:00Z\t2026-10-18T00:05:00Z\n" +
-		"pvc-b\tworker-1\t2026-10-18T00:00:00Z\t\n" +
-		"pvc-b\tserver-1\t2026-10-18T00:00:00Z\t\n" +
-		"pvc-c\tserver-1\t2026-10-18T00:00:00Z\t\n"
-	assert.Equal(t, []string{"pvc-a"}, volumesOnlyOn(replicas, "worker-1"))
+	replicas := "pvc-a\tworker-1\t2026-10-18T00:00:00Z\t2026-10-18T00:05:00Z\t2026-10-18T00:05:00Z\n" +
+		"pvc-b\tworker-1\t2026-10-18T00:00:00Z\t\t\n" +
+		"pvc-b\tserver-1\t2026-10-18T00:00:00Z\t\t\n" +
+		"pvc-c\tserver-1\t2026-10-18T00:00:00Z\t\t\n"
+	h := &drainHost{replies: map[string]string{"replicas.longhorn.io": replicas, "get nodes --": "server-1\tTrue\t\nworker-1\tFalse\t\n"}}
+	only, err := VolumesOnlyOn(h, "worker-1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"pvc-a"}, only, "any replica on the worker counts, even on a node that is down")
+}
+
+func TestVolumesOnlyOnNeedsACurrentCopyOnAnAvailableNode(t *testing.T) {
+	here := "pvc-b\tworker-1\t2026-10-18T00:00:00Z\t\t\n"
+	healthy := "pvc-b\tserver-1\t2026-10-18T00:00:00Z\t\t\n"
+	for name, tc := range map[string]struct {
+		replicas, nodes string
+		only            []string
+	}{
+		"a ready copy elsewhere":    {here + healthy, "server-1\tTrue\t\n", nil},
+		"a fenced holder":           {here + healthy, "server-1\tTrue\tnode.kubernetes.io/out-of-service\n", []string{"pvc-b"}},
+		"a NotReady holder":         {here + healthy, "server-1\tUnknown\t\n", []string{"pvc-b"}},
+		"a missing holder":          {here + healthy, "worker-1\tTrue\t\n", []string{"pvc-b"}},
+		"a salvaged copy":           {here + "pvc-b\tserver-1\t2026-10-18T00:00:00Z\t\t2026-10-18T00:03:00Z\n", "server-1\tTrue\t\n", []string{"pvc-b"}},
+		"a copy on the worker only": {here, "server-1\tTrue\t\n", []string{"pvc-b"}},
+	} {
+		h := &drainHost{replies: map[string]string{"replicas.longhorn.io": tc.replicas, "get nodes --": tc.nodes}}
+		only, err := VolumesOnlyOn(h, "worker-1")
+		require.NoError(t, err, name)
+		assert.Equal(t, tc.only, only, name)
+	}
+
+	h := &drainHost{replies: map[string]string{"replicas.longhorn.io": here + healthy}, failures: map[string]string{"get nodes --": "forbidden"}}
+	_, err := VolumesOnlyOn(h, "worker-1")
+	assert.Error(t, err, "an unreadable holder is no proof of a copy elsewhere")
 }
 
 func TestJoinInProgressExemptsTheNodeItself(t *testing.T) {

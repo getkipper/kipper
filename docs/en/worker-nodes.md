@@ -95,12 +95,37 @@ No kip command and no part of the console force-deletes a pod without a recorded
 
 Some platforms, such as Harvester, taint a node out of service on a timer. Kipper waits for you instead, because a timer cannot tell a dead host from one that is only cut off.
 
+## Two copies of a service's data
+
+A service can keep two copies of its data, each on a different node, so the data survives the loss of either node's disk. Two copies are opt-in and chosen when the service is created:
+
+```bash
+kip cluster storage --max-copies 2           # an admin offers two copies, once
+kip service add postgres --name db --copies 2
+```
+
+The server is always eligible to hold copies. A worker becomes eligible after its disk passes the check that `kip node add` runs at the end of each join unless `--no-copies` is set. [`kip node storage <worker> --copies`](/en/cli-reference#kip-node-storage) repeats the check. The check measures how long the disk takes to sync small writes, because a replica on a slow disk stalls every write to the volume. Local SSD and NVMe disks pass. Network block storage mounted at `/var/lib/longhorn` is usually refused. `--ignore-slow-disk` can accept it and records the override, except when a sync stall reaches half of Longhorn's replica timeout. `kip node list` shows which nodes can hold copies.
+
+`kip service add --copies 2` requires two ready nodes that can hold copies. If a service reaches the controller before two eligible nodes are ready, creation of its data volume waits, and `kip service info` explains why. A restore from a backup goes ahead with the nodes that are back, and Longhorn adds the second copy when a node can take it.
+
+- **Shared volumes** keep one copy in this release.
+- **Existing services and volumes** have their copies unset, and Kipper leaves their storage exactly as it is. `kip status` lists them with the copies Longhorn keeps, and `kip service info` shows the command that records them. Shared volumes and project shared storage created by an earlier Kipper release retain Longhorn's three-copy setting. Kipper supports setting one or two copies, so these volumes remain unset. Changing the number of copies of an existing service is not available yet.
+- **Who decides:** an admin sets the offer, a deployer chooses one or two copies when creating a service, and changing copies on an existing object needs the project owner role.
+- **Backups** stay necessary: two copies protect against a lost node, and only backups outside the cluster protect against a lost cluster.
+
+Kipper departs from Longhorn's defaults here:
+
+- One copy by default, at most two.
+- Data locality is off, so a copy stays on its node when the pod moves.
+- Replica auto-balance is off, so Longhorn leaves healthy copies in place instead of moving them to balance storage across nodes.
+- A volume can be created with one copy missing, so a restore never waits for a node.
+
 ## Looking after workers
 
 - **Reboots:** [`kip node reboot <worker>`](/en/cli-reference#kip-node-reboot) takes a backup, drains the worker, reboots it and waits for previously ready workloads to become ready again. The CLI reference lists when it cancels and what a drain removes.
 - **Certificates:** a worker's agent certificates last a year and are renewed whenever its agent starts while they are still valid, so reboot each worker at least once a year. A worker whose certificates have expired or are missing shows `NotReady`. Run `kip node add <host>` again with the original options to rejoin it.
 - **Removing a worker:** [`kip node remove <worker>`](/en/cli-reference#kip-node-remove) moves volume copies off the worker, then drains and wipes it and removes it from the cluster. It also removes the worker's address from the other nodes' kip-managed firewalls. On a node with an operator-managed firewall, kip lists the worker's address and ports so that you can remove any rules that still allow it access. `--force` deregisters a worker whose host is powered off or gone for good. For a worker that stopped reporting, fence it first, as [When a node dies](#when-a-node-dies) describes.
-- **Listing nodes:** `kip node list` shows every node with its role, status and address. When a worker is recorded, it also shows each node's network mode and SSH address.
+- **Listing nodes:** `kip node list` shows every node with its role, status and address. When a worker is recorded, it also shows each node's network mode, whether it can hold copies of volumes, and its SSH address.
 - **Health:** `kip status` runs its host checks on the server and every recorded worker, and names a worker it could not reach. `kip app info` and `kip function info` name the nodes a workload's pods run on, and `kip service info` shows the node a service runs on and where its data is.
 
 - **k3s upgrades:** rerunning `kip install` upgrades k3s on the server, then brings each worker recorded as `ready` to the same version, one at a time and without a drain. See [k3s upgrades](/en/maintenance#k3s-upgrades).

@@ -139,7 +139,7 @@ func kipperClasses() *fake.Clientset {
 
 func storageManager(clientset *fake.Clientset, objects ...runtime.Object) *Manager {
 	return &Manager{Client: clientset, Dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{longhornNodeGVR: "NodeList", manifest.ServiceGVR: "ServiceList", manifest.VolumeGVR: "VolumeList"}, objects...)}
+		map[schema.GroupVersionResource]string{longhornNodeGVR: "NodeList", kubeNodeGVR: "NodeList", manifest.ServiceGVR: "ServiceList", manifest.VolumeGVR: "VolumeList"}, objects...)}
 }
 
 func defaultSettings() []runtime.Object {
@@ -214,28 +214,78 @@ func TestStorageRoomPlacesSingleCopiesOnTheServerOnly(t *testing.T) {
 	assert.NotContains(t, err.Error(), "worker-1")
 }
 
-func TestStorageRoomLetsASharedVolumeUseAnyNode(t *testing.T) {
+// New shared volumes keep one copy on the server, like every other volume
+// whose copies are unset or 1.
+func TestStorageRoomPlacesASharedVolumeOnTheServer(t *testing.T) {
 	mgr := longhornCluster(
-		healthyNode("server-1", []string{"kipper-server"}, roomyDisk("default-disk", liveMaximum, liveReserved, liveScheduled)),
+		healthyNode("server-1", []string{"kipper-server"}, roomyDisk("default-disk", gi(40), gi(12), gi(27))),
 		healthyNode("worker-1", nil, roomyDisk("default-disk", gi(500), gi(150), 0)),
 	)
 
 	_, err := mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "uploads", Shared: true, Bytes: gi(5)}}, "--size")
 
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server-1", "a roomy worker does not take a single copy")
+	assert.Contains(t, err.Error(), "--size")
 }
 
-func TestStorageRoomRefusesASharedVolumeNoNodeCanHold(t *testing.T) {
-	mgr := longhornCluster(
-		healthyNode("server-1", []string{"kipper-server"}, roomyDisk("default-disk", gi(40), gi(12), gi(27))),
-		healthyNode("worker-1", nil, roomyDisk("default-disk", gi(40), gi(12), gi(26))),
-	)
+// A volume with two copies needs room on a node that can hold copies.
+func TestStorageRoomPlacesTwoCopiesOnReplicaNodes(t *testing.T) {
+	mgr := storageManager(fake.NewSimpleClientset( //nolint:staticcheck
+		storageClass("longhorn-single", "driver.longhorn.io", map[string]string{"numberOfReplicas": "1", "nodeSelector": "kipper-server"}),
+		storageClass("longhorn-replicated", "driver.longhorn.io", map[string]string{"numberOfReplicas": "2", "nodeSelector": "kipper-replica"}),
+	), append(defaultSettings(),
+		longhornNodeObject(healthyNode("server-1", []string{"kipper-server", "kipper-replica"}, roomyDisk("default-disk", gi(40), gi(12), gi(27)))),
+		longhornNodeObject(healthyNode("worker-1", []string{"kipper-replica"}, roomyDisk("default-disk", gi(40), gi(12), gi(26)))),
+		longhornNodeObject(healthyNode("worker-2", nil, roomyDisk("default-disk", gi(500), gi(150), 0))),
+	)...)
 
-	_, err := mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "uploads", Shared: true, Bytes: gi(5)}}, "--size")
+	_, err := mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "data", Bytes: gi(5), Copies: 2}}, "--storage")
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "worker-1", "names the node with the most room")
-	assert.Contains(t, err.Error(), "--size")
+	assert.Contains(t, err.Error(), "nodes that can hold copies")
+	assert.Contains(t, err.Error(), "worker-1", "names the replica node with the most room")
+}
+
+// Each of the two copies needs room on its own node.
+func TestStorageRoomNeedsRoomForTheSecondCopyOnAnotherNode(t *testing.T) {
+	mgr := storageManager(fake.NewSimpleClientset( //nolint:staticcheck
+		storageClass("longhorn-single", "driver.longhorn.io", map[string]string{"numberOfReplicas": "1", "nodeSelector": "kipper-server"}),
+		storageClass("longhorn-replicated", "driver.longhorn.io", map[string]string{"numberOfReplicas": "2", "nodeSelector": "kipper-replica"}),
+	), append(defaultSettings(),
+		longhornNodeObject(healthyNode("server-1", []string{"kipper-server", "kipper-replica"}, roomyDisk("default-disk", gi(200), gi(12), 0))),
+		longhornNodeObject(healthyNode("worker-1", []string{"kipper-replica"}, roomyDisk("default-disk", gi(40), gi(12), gi(20)))),
+	)...)
+
+	_, err := mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "data", Bytes: gi(20), Copies: 2}}, "--storage")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "second copy")
+	assert.Contains(t, err.Error(), "worker-1")
+	assert.Contains(t, err.Error(), "--storage")
+
+	_, err = mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "data", Bytes: gi(5), Copies: 2}}, "--storage")
+	require.NoError(t, err, "both nodes have room for a 5Gi copy")
+}
+
+// A second node that can hold copies but has no disk that takes one leaves the
+// second copy nowhere to go.
+func TestStorageRoomNeedsADiskForTheSecondCopy(t *testing.T) {
+	closed := roomyDisk("default-disk", gi(40), gi(12), 0)
+	closed.allowScheduling = false
+	mgr := storageManager(fake.NewSimpleClientset( //nolint:staticcheck
+		storageClass("longhorn-single", "driver.longhorn.io", map[string]string{"numberOfReplicas": "1", "nodeSelector": "kipper-server"}),
+		storageClass("longhorn-replicated", "driver.longhorn.io", map[string]string{"numberOfReplicas": "2", "nodeSelector": "kipper-replica"}),
+	), append(defaultSettings(),
+		longhornNodeObject(healthyNode("server-1", []string{"kipper-server", "kipper-replica"}, roomyDisk("default-disk", gi(200), gi(12), 0))),
+		longhornNodeObject(healthyNode("worker-1", []string{"kipper-replica"}, closed)),
+	)...)
+
+	_, err := mgr.CheckStorageRoom(context.Background(), []NewVolume{{Name: "data", Bytes: gi(5), Copies: 2}}, "--storage")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "second copy")
+	assert.Contains(t, err.Error(), "no other node that can hold copies has a disk")
 }
 
 // A disk at or under the minimal-available share takes nothing, however little
@@ -465,7 +515,7 @@ func TestDumpVolumeIsWhatTurningOnConsistentBackupsCreates(t *testing.T) {
 
 // Both classes draw on the same disks, so a single-copy volume and a shared one
 // on a single-node cluster share the server's room.
-func TestStorageRoomCountsBothClassesAgainstTheSameDisks(t *testing.T) {
+func TestStorageRoomCountsSharedAndServiceVolumesAgainstTheServer(t *testing.T) {
 	maximum, reserved := gi(20), gi(4)
 	server := roomyDisk("default-disk", maximum, reserved, maximum-reserved-gi(6))
 	mgr := longhornCluster(healthyNode("server-1", []string{"kipper-server"}, server))
@@ -478,9 +528,8 @@ func TestStorageRoomCountsBothClassesAgainstTheSameDisks(t *testing.T) {
 		healthyNode("server-1", []string{"kipper-server"}, server),
 		healthyNode("worker-1", nil, roomyDisk("default-disk", gi(20), gi(4), 0)),
 	)
-	warning, err := withWorker.CheckStorageRoom(context.Background(), volumes, "--storage")
-	require.NoError(t, err, "the worker takes the shared volume")
-	assert.Empty(t, warning)
+	_, err = withWorker.CheckStorageRoom(context.Background(), volumes, "--storage")
+	require.Error(t, err, "a new shared volume keeps its one copy on the server too")
 }
 
 // 6Gi and 10Gi fit on disks with 10Gi and 6Gi left in either order.

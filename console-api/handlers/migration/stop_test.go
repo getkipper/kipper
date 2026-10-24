@@ -171,6 +171,17 @@ func TestCreateApp_KeepsTheStop(t *testing.T) {
 
 func planWithTarget(t *testing.T, keepsStops *bool, apps ...crclient.Object) *planResponse {
 	t.Helper()
+	extra := map[string]interface{}{}
+	if keepsStops != nil {
+		extra["keeps_stops"] = *keepsStops
+	}
+	return planWithCapacity(t, extra, apps...)
+}
+
+// planWithCapacity builds a plan against a target with fixed resource headroom.
+// The extra fields extend or override its capacity response.
+func planWithCapacity(t *testing.T, extra map[string]interface{}, objs ...crclient.Object) *planResponse {
+	t.Helper()
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/capacity"):
@@ -180,8 +191,8 @@ func planWithTarget(t *testing.T, keepsStops *bool, apps ...crclient.Object) *pl
 				"requested_cpu_millis":      0, "requested_memory_bytes": 0, "requested_storage_bytes": 0,
 				"target_version": "dev",
 			}
-			if keepsStops != nil {
-				body["keeps_stops"] = *keepsStops
+			for k, v := range extra {
+				body[k] = v
 			}
 			_ = json.NewEncoder(w).Encode(body)
 		case strings.HasSuffix(r.URL.Path, "/projects"):
@@ -191,7 +202,7 @@ func planWithTarget(t *testing.T, keepsStops *bool, apps ...crclient.Object) *pl
 		}
 	}))
 	t.Cleanup(target.Close)
-	objs := append([]crclient.Object{ownerOf("shop-prod")}, apps...)
+	objs = append([]crclient.Object{ownerOf("shop-prod")}, objs...)
 	h := &Handler{
 		Client:   fakeClientWithProject(t),
 		CRClient: crfake.NewClientBuilder().WithScheme(migrationScheme()).WithObjects(objs...).Build(),

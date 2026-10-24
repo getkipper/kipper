@@ -11,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
@@ -441,6 +442,7 @@ func exportServices(ctx context.Context, dynClient dynamic.Interface, namespace 
 		if v, ok := spec["consistentBackups"].(bool); ok {
 			svc.ConsistentBackups = v
 		}
+		svc.Copies = copiesOf(spec)
 		// Export every tuned request/limit value as-is — collapsing the
 		// pairs would lose burstable shapes and let a later apply revert
 		// the tuning.
@@ -486,6 +488,7 @@ func exportVolumes(ctx context.Context, dynClient dynamic.Interface, namespace s
 		if v, ok := spec["size"].(string); ok {
 			vol.Size = v
 		}
+		vol.Copies = copiesOf(spec)
 		if mounts := extractSlice(spec, "mounts"); len(mounts) > 0 {
 			for _, mt := range mounts {
 				if mm, ok := mt.(map[string]interface{}); ok {
@@ -800,4 +803,14 @@ func exportJob(spec map[string]interface{}) JobSpec {
 		job.BackoffLimit = int32Ptr(v)
 	}
 	return job
+}
+
+// copiesOf reads spec.copies, or nil when it is unset.
+func copiesOf(spec map[string]interface{}) *int32 {
+	v, found, _ := unstructured.NestedInt64(spec, "copies")
+	if !found {
+		return nil
+	}
+	n := int32(v) //nolint:gosec // G115: the CRD bounds copies to 1 or 2.
+	return &n
 }

@@ -172,6 +172,11 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  wipes Kipper's data from it.\n\n")
 	}
 	reportNodeVolumes(os.Stdout, worker.Name, volumes)
+	degraded, err := installer.CopiesWithoutRebuildRoom(server, worker.Name, volumes)
+	if err != nil {
+		return err
+	}
+	reportCopiesLeftDegraded(os.Stdout, worker.Name, degraded)
 	if !yes {
 		if !term.IsTerminal(int(os.Stdin.Fd())) {
 			return fmt.Errorf("stdin is not a terminal. Pass --yes to remove %s without confirmation", worker.Name)
@@ -281,6 +286,19 @@ func runNodeRemove(cmd *cobra.Command, args []string) error {
 		SaveRecords: func(remaining []installer.NodeRecord) { mirrorNodes(cluster, remaining) },
 	}
 	return r.run()
+}
+
+// reportCopiesLeftDegraded names volumes that retain a copy elsewhere and
+// must wait for an eligible node before rebuilding the copy on the removed node.
+func reportCopiesLeftDegraded(out io.Writer, node string, volumes []string) {
+	if len(volumes) == 0 {
+		return
+	}
+	say(out, "\n  ⚠  These volumes keep a healthy copy on another node. Currently, no other node can take the copy on %s.\n", node)
+	say(out, "     They stay degraded until a node that can hold the replacement copy is ready, for example one enabled with 'kip node storage <node> --copies':\n")
+	for _, v := range volumes {
+		say(out, "       %s\n", v)
+	}
 }
 
 // run keeps the removal record until removal and peer firewall updates

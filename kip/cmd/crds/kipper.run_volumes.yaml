@@ -52,6 +52,15 @@ spec:
           spec:
             description: VolumeSpec defines the desired state of a shared volume.
             properties:
+              copies:
+                description: |-
+                  Copies is the requested number of copies of the volume, each on a different
+                  storage node. It applies when the claim is created, and an existing claim
+                  keeps its count. Unset means unmanaged: Kipper reports the live copies.
+                format: int32
+                maximum: 2
+                minimum: 1
+                type: integer
               mounts:
                 description: Mounts lists apps and their mount paths for this volume.
                 items:
@@ -152,6 +161,32 @@ spec:
                 - Bound
                 - Released
                 type: string
+              storage:
+                description: Storage reports the configured and healthy copies of
+                  the volume.
+                properties:
+                  class:
+                    description: Class is the claim's storage class.
+                    type: string
+                  copies:
+                    description: |-
+                      Copies is the replica count configured on the Longhorn volume, or 1 for
+                      local storage.
+                    format: int32
+                    type: integer
+                  healthyCopies:
+                    description: |-
+                      HealthyCopies is the number of Ready, unfenced nodes holding a current
+                      copy. Local storage always reports 1.
+                    format: int32
+                    type: integer
+                  nodes:
+                    description: Nodes lists those nodes, sorted by name. It is empty
+                      for local storage.
+                    items:
+                      type: string
+                    type: array
+                type: object
             type: object
         type: object
     served: true

@@ -96,6 +96,37 @@ func LastCopiesWithoutRoom(master CommandRunner, node string, last []NodeVolume)
 	if len(last) == 0 {
 		return nil, nil
 	}
+	return withoutRoom(master, node, last, nil)
+}
+
+// CopiesWithoutRebuildRoom returns volumes whose copy on node has no rebuild
+// destination after node is removed. It checks volumes supplied by VolumesOnNode
+// with a current copy on node and at least one available copy elsewhere.
+// Destinations already holding a current copy are excluded using CurrentReplicaNodes.
+// LastCopiesWithoutRoom checks last copies.
+// If no volumes qualify, it returns nil without running commands. Replica read
+// errors are returned. Results, other errors and capacity checks follow
+// LastCopiesWithoutRoom.
+func CopiesWithoutRebuildRoom(master CommandRunner, node string, volumes []NodeVolume) ([]string, error) {
+	var shared []NodeVolume
+	for _, v := range volumes {
+		if v.Here > 0 && v.Elsewhere > 0 {
+			shared = append(shared, v)
+		}
+	}
+	if len(shared) == 0 {
+		return nil, nil
+	}
+	holders, err := CurrentReplicaNodes(master)
+	if err != nil {
+		return nil, err
+	}
+	return withoutRoom(master, node, shared, holders)
+}
+
+// withoutRoom returns volumes with no eligible destination outside node.
+// holders maps each volume to existing copy holders, which are also excluded.
+func withoutRoom(master CommandRunner, node string, check []NodeVolume, holders map[string]map[string]bool) ([]string, error) {
 	out, err := master.Run(`kubectl -n longhorn-system get nodes.longhorn.io --request-timeout=30s -o json`)
 	if err != nil {
 		return nil, fmt.Errorf("listing Longhorn nodes: %w", err)
@@ -127,7 +158,7 @@ func LastCopiesWithoutRoom(master CommandRunner, node string, last []NodeVolume)
 	sort.Slice(nodes.Items, func(i, j int) bool { return nodes.Items[i].Metadata.Name < nodes.Items[j].Metadata.Name })
 
 	var blocked []string
-	for _, v := range last {
+	for _, v := range check {
 		vol, ok := byName[v.Name]
 		if !ok {
 			continue
@@ -136,6 +167,10 @@ func LastCopiesWithoutRoom(master CommandRunner, node string, last []NodeVolume)
 		fits := false
 		for _, n := range nodes.Items {
 			if n.Metadata.Name == node {
+				continue
+			}
+			if holders[v.Name][n.Metadata.Name] {
+				reasons = append(reasons, n.Metadata.Name+": already holds a copy")
 				continue
 			}
 			reason := nodeRefuses(n, vol, settings)

@@ -43,7 +43,7 @@ func TestDebianPackageCommands(t *testing.T) {
 	h := HostOS{ID: "debian", VersionID: "13", Family: FamilyDebian}
 
 	assert.Equal(t, "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ufw", h.InstallPackagesCommand(false, "ufw"))
-	assert.Equal(t, "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq open-iscsi nfs-common",
+	assert.Equal(t, "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq open-iscsi nfs-common fio",
 		h.InstallPackagesCommand(true, h.StoragePackages()...))
 }
 
@@ -190,7 +190,7 @@ func TestStoragePackagesAreInstalledOnlyWhenOneIsMissing(t *testing.T) {
 	missing := &packageHost{}
 	var out bytes.Buffer
 	require.NoError(t, installStoragePackages(missing, rocky, &out))
-	assert.Contains(t, out.String(), "Installing iscsi-initiator-utils nfs-utils")
+	assert.Contains(t, out.String(), "Installing iscsi-initiator-utils nfs-utils fio")
 	assert.Contains(t, strings.Join(missing.cmds, "\n"), "dnf install")
 
 	present := &packageHost{present: true}

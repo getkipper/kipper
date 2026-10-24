@@ -135,6 +135,10 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if stderrors.Is(err, errAwaitingCertificate) {
 			return ctrl.Result{RequeueAfter: tlsIssuanceRetry}, nil
 		}
+		var gate *storageGateError
+		if stderrors.As(err, &gate) {
+			return ctrl.Result{RequeueAfter: storageRefreshUnsettled}, r.reportStorageGate(ctx, &svc, gate)
+		}
 		r.reportNameTaken(ctx, &svc, err)
 		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
 	}
@@ -165,6 +169,8 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	after := serviceRouteNameRetry(&svc)
+	// Nothing watches Longhorn, so the copies in the status are read again on a timer.
+	after = earliest(after, storageRefresh(meta.FindStatusCondition(svc.Status.Conditions, kipperv1.ConditionStorageCopies)))
 	// This controller does not watch pods, so deletion conflicts need a retry.
 	if lookAgain && (after == 0 || after > pendingPodRetry) {
 		after = pendingPodRetry
@@ -582,7 +588,12 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 	if err != nil {
 		return err
 	}
-	storageClass := platform.SingleWriterClass(mode)
+	storageClass := platform.ClaimClassForCopies(mode, svc.Spec.Copies)
+	// The dump is transient, so it keeps one copy whatever the data has.
+	dumpClass := platform.SingleWriterClass(mode)
+	if err := r.gateNewDataClaim(ctx, svc, mode); err != nil {
+		return err
+	}
 
 	// Init container removes lost+found created by ext4 formatting on Longhorn volumes.
 	// MySQL refuses to initialise if the data directory contains any files.
@@ -651,7 +662,7 @@ func (r *ServiceReconciler) reconcileStatefulSet(ctx context.Context, svc *kippe
 		if err != nil {
 			return fmt.Errorf("reading the storage size %q: %w", storage, err)
 		}
-		if err := r.ensureDumpClaim(ctx, svc, storageClass, size); err != nil {
+		if err := r.ensureDumpClaim(ctx, svc, dumpClass, size); err != nil {
 			return fmt.Errorf("reconciling the dump volume: %w", err)
 		}
 		applyConsistentBackups(&desired.Spec.Template, svc.Name, size)
@@ -1324,6 +1335,9 @@ func (r *ServiceReconciler) updateStatus(ctx context.Context, svc *kipperv1.Serv
 		svc.Status.Phase = "Running"
 	} else {
 		svc.Status.Phase = "Pending"
+	}
+	if err := r.reportStorageCopies(ctx, svc); err != nil {
+		return err
 	}
 
 	return r.writeStatusIfChanged(ctx, svc, before)

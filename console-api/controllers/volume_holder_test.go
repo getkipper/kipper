@@ -245,7 +245,7 @@ func TestVolumeHolderRefusesAnUnexpectedClaim(t *testing.T) {
 			p.Spec.VolumeMode = ptr.To(corev1.PersistentVolumeBlock)
 		},
 		"other class": func(p *corev1.PersistentVolumeClaim) {
-			p.Spec.StorageClassName = ptr.To("longhorn-single")
+			p.Spec.StorageClassName = ptr.To("local-path")
 		},
 		"no class": func(p *corev1.PersistentVolumeClaim) {
 			p.Spec.StorageClassName = nil

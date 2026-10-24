@@ -7,13 +7,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
+
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 // LonghornEvictionDrainPolicy makes drains wait for Longhorn to copy a volume's
 // last healthy replica to another node.
 const LonghornEvictionDrainPolicy = "block-for-eviction-if-contains-last-replica"
 
-// NodeVolume is a Longhorn volume with at least one healthy replica on a node.
+// NodeVolume is a Longhorn volume with a current replica on a node.
 type NodeVolume struct {
 	Name      string
 	Claim     string
@@ -21,7 +25,8 @@ type NodeVolume struct {
 	Elsewhere int
 }
 
-// LastCopy reports whether the node holds every healthy replica of the volume.
+// LastCopy reports whether this node holds a current copy and no other
+// available node holds one.
 func (v NodeVolume) LastCopy() bool { return v.Here > 0 && v.Elsewhere == 0 }
 
 // Label names the volume by its claim when it has one.
@@ -44,61 +49,138 @@ func RequireEvictionDrainPolicy(master CommandRunner) error {
 	return nil
 }
 
-// VolumesOnNode lists the Longhorn volumes with a healthy replica on node,
-// with how many healthy replicas each has there and on other nodes.
+// VolumesOnNode lists Longhorn volumes with a current replica on node, sorted
+// by Label. It returns nil if none match. Here is 1 for each volume, regardless
+// of node availability. Elsewhere counts distinct available nodes holding a
+// current replica. [platform.ReplicaCurrent] and [platform.NodeAvailable] define
+// these checks. A failed replica, volume or node inventory query returns an error.
 func VolumesOnNode(master CommandRunner, node string) ([]NodeVolume, error) {
-	replicas, err := master.Run(replicaQuery)
+	replicas, err := readReplicas(master)
 	if err != nil {
-		return nil, fmt.Errorf("listing Longhorn replicas: %w", err)
+		return nil, err
+	}
+	available, err := availableNodes(master)
+	if err != nil {
+		return nil, err
 	}
 	volumes, err := master.Run(`kubectl -n longhorn-system get volumes.longhorn.io --request-timeout=30s -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.kubernetesStatus.namespace}{"\t"}{.status.kubernetesStatus.pvcName}{"\n"}{end}'`)
 	if err != nil {
 		return nil, fmt.Errorf("listing Longhorn volumes: %w", err)
 	}
-	return volumesOnNode(replicas, volumes, node), nil
+	return volumesOnNode(replicas, available, volumes, node), nil
 }
 
-// HealthyReplicaNodes maps each Longhorn volume to the nodes with healthy replicas.
+// HealthyReplicaNodes maps Longhorn volumes to sets of available nodes holding
+// current replicas, using [platform.NodeAvailable] and [platform.ReplicaCurrent].
+// Volumes without a qualifying replica are omitted. A failed replica or node
+// inventory query returns an error.
 func HealthyReplicaNodes(master CommandRunner) (map[string]map[string]bool, error) {
+	replicas, err := readReplicas(master)
+	if err != nil {
+		return nil, err
+	}
+	available, err := availableNodes(master)
+	if err != nil {
+		return nil, err
+	}
+	return replicaHolders(replicas, available), nil
+}
+
+// CurrentReplicaNodes maps Longhorn volumes to sets of nodes holding current
+// replicas, as defined by [platform.ReplicaCurrent]. It includes unavailable
+// nodes to locate current data independently of whether it can be served.
+// Volumes without a qualifying replica are omitted. A failed replica inventory
+// query returns an error.
+func CurrentReplicaNodes(master CommandRunner) (map[string]map[string]bool, error) {
+	replicas, err := readReplicas(master)
+	if err != nil {
+		return nil, err
+	}
+	return replicaHolders(replicas, nil), nil
+}
+
+// replicaHolders maps volumes to the nodes holding a current replica. With
+// available set, only available nodes are kept.
+func replicaHolders(replicas []longhornReplica, available map[string]bool) map[string]map[string]bool {
+	nodes := map[string]map[string]bool{}
+	for _, r := range replicas {
+		if r.node == "" || !r.current || (available != nil && !available[r.node]) {
+			continue
+		}
+		if nodes[r.volume] == nil {
+			nodes[r.volume] = map[string]bool{}
+		}
+		nodes[r.volume][r.node] = true
+	}
+	return nodes
+}
+
+const replicaQuery = `kubectl -n longhorn-system get replicas.longhorn.io --request-timeout=30s -o jsonpath='{range .items[*]}{.spec.volumeName}{"\t"}{.spec.nodeID}{"\t"}{.spec.healthyAt}{"\t"}{.spec.failedAt}{"\t"}{.spec.lastFailedAt}{"\n"}{end}'`
+
+// longhornReplica is one line of replicaQuery's output.
+type longhornReplica struct {
+	volume, node string
+	current      bool
+}
+
+func readReplicas(master CommandRunner) ([]longhornReplica, error) {
 	out, err := master.Run(replicaQuery)
 	if err != nil {
 		return nil, fmt.Errorf("listing Longhorn replicas: %w", err)
 	}
-	nodes := map[string]map[string]bool{}
+	var replicas []longhornReplica
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) != 4 || f[0] == "" || f[1] == "" || f[2] == "" || f[3] != "" {
+		if len(f) != 5 || f[0] == "" {
 			continue
 		}
-		if nodes[f[0]] == nil {
-			nodes[f[0]] = map[string]bool{}
-		}
-		nodes[f[0]][f[1]] = true
+		replicas = append(replicas, longhornReplica{volume: f[0], node: f[1], current: platform.ReplicaCurrent(f[2], f[3], f[4])})
 	}
-	return nodes, nil
+	return replicas, nil
 }
 
-const replicaQuery = `kubectl -n longhorn-system get replicas.longhorn.io --request-timeout=30s -o jsonpath='{range .items[*]}{.spec.volumeName}{"\t"}{.spec.nodeID}{"\t"}{.spec.healthyAt}{"\t"}{.spec.failedAt}{"\n"}{end}'`
+const nodeAvailabilityQuery = `kubectl get nodes --request-timeout=30s -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="Ready")].status}{"\t"}{.spec.taints[*].key}{"\n"}{end}'`
 
-func volumesOnNode(replicas, volumes, node string) []NodeVolume {
-	byName := map[string]*NodeVolume{}
-	for _, line := range strings.Split(replicas, "\n") {
+// availableNodes checks Kubernetes nodes with [platform.NodeAvailable].
+// A node missing from the result is treated as unavailable.
+func availableNodes(master CommandRunner) (map[string]bool, error) {
+	out, err := master.Run(nodeAvailabilityQuery)
+	if err != nil {
+		return nil, fmt.Errorf("listing nodes: %w", err)
+	}
+	available := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) != 4 || f[0] == "" {
+		if len(f) != 3 || f[0] == "" {
 			continue
 		}
-		// Count replicas with healthyAt set and failedAt empty.
-		if f[2] == "" || f[3] != "" {
+		node := &corev1.Node{Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionStatus(f[1])}}}}
+		for _, key := range strings.Fields(f[2]) {
+			node.Spec.Taints = append(node.Spec.Taints, corev1.Taint{Key: key})
+		}
+		available[f[0]] = platform.NodeAvailable(node)
+	}
+	return available, nil
+}
+
+func volumesOnNode(replicas []longhornReplica, available map[string]bool, volumes, node string) []NodeVolume {
+	byName := map[string]*NodeVolume{}
+	elsewhere := map[string]map[string]bool{}
+	for _, r := range replicas {
+		if r.node == "" || !r.current {
 			continue
 		}
-		v := byName[f[0]]
+		v := byName[r.volume]
 		if v == nil {
-			v = &NodeVolume{Name: f[0]}
-			byName[f[0]] = v
+			v = &NodeVolume{Name: r.volume}
+			byName[r.volume] = v
+			elsewhere[r.volume] = map[string]bool{}
 		}
-		if f[1] == node {
-			v.Here++
-		} else {
+		switch {
+		case r.node == node:
+			v.Here = 1
+		case available[r.node] && !elsewhere[r.volume][r.node]:
+			elsewhere[r.volume][r.node] = true
 			v.Elsewhere++
 		}
 	}

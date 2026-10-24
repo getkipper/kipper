@@ -146,13 +146,16 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	limit := project.EffectiveEnvLimit()
 	wantsShared := project.Spec.SharedStorage != nil && project.Spec.SharedStorage.Enabled
 	sharedSupported := true
+	var storageMode string
 	if wantsShared {
 		mode, err := clusterStorageMode(ctx, r.Client)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		sharedSupported = platform.SupportsSharedVolumes(mode)
+		storageMode = mode
 	}
+	var sharedCopies []envCopies
 	type envPlan struct {
 		env    kipperv1.ProjectEnvironment
 		ns     string
@@ -240,9 +243,11 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 
 		if wantsShared && sharedSupported {
-			if err := r.reconcileSharedStorage(ctx, &project, pl.ns); err != nil {
+			copies, err := r.reconcileSharedStorage(ctx, &project, pl.ns, storageMode)
+			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("reconciling shared storage in %s: %w", pl.ns, err)
 			}
+			sharedCopies = append(sharedCopies, envCopies{env: pl.env.Name, cond: copies})
 		}
 
 		namespaces = append(namespaces, pl.ns)
@@ -285,6 +290,11 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	r.setNamespaceConflictCondition(&project, namespaceConflicts)
 	setSharedStorageCondition(&project, wantsShared && !sharedSupported)
+	if len(sharedCopies) > 0 {
+		setCopiesCondition(&project.Status.Conditions, projectCopiesCondition(sharedCopies), project.Generation)
+	} else {
+		apimeta.RemoveStatusCondition(&project.Status.Conditions, kipperv1.ConditionStorageCopies)
+	}
 	project.Status.Phase = "Active"
 	// What the project declares according to the API server, not what the pass
 	// started from. Both records are pruned by that set, and a claim written
@@ -310,7 +320,7 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// if a Node add/remove event was missed (a map-func List error can't be
 	// retried), bounding how long a new node's IP stays reachable to this period
 	// rather than the manager's multi-hour informer resync.
-	return ctrl.Result{RequeueAfter: egressRefreshInterval}, nil
+	return ctrl.Result{RequeueAfter: projectRequeue(project.Status.Conditions)}, nil
 }
 
 // confirmIncarnation reports whether the project this pass began from is still
@@ -758,9 +768,13 @@ func (r *ProjectReconciler) reconcileNamespace(ctx context.Context, project *kip
 	return existing.UID, nil
 }
 
-func (r *ProjectReconciler) reconcileSharedStorage(ctx context.Context, project *kipperv1.Project, ns string) error {
+// reconcileSharedStorage creates the environment's shared claim when it is
+// missing, under the copies creation gate, and returns the claim's
+// StorageCopies condition. An existing claim is never changed.
+func (r *ProjectReconciler) reconcileSharedStorage(ctx context.Context, project *kipperv1.Project, ns, mode string) (metav1.Condition, error) {
 	pvcName := "shared-uploads"
-	storageClass := platform.LonghornSharedClass
+	copies := project.Spec.SharedStorage.Copies
+	storageClass := platform.ClaimClassForCopies(mode, copies)
 
 	size := "5Gi"
 	if project.Spec.SharedStorage != nil && project.Spec.SharedStorage.Size != "" {
@@ -791,9 +805,35 @@ func (r *ProjectReconciler) reconcileSharedStorage(ctx context.Context, project 
 	var existing corev1.PersistentVolumeClaim
 	err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: ns}, &existing)
 	if errors.IsNotFound(err) {
-		return r.Create(ctx, desired)
+		restored := project.Labels[veleroRestoreNameLabel] != ""
+		reason, message, err := creationGate(ctx, r.longhornReader(), mode, copies, true, restored)
+		if err != nil {
+			return metav1.Condition{}, err
+		}
+		if reason != "" {
+			if !restored || reason != kipperv1.StorageCopiesRWXNotQualified {
+				return metav1.Condition{Type: kipperv1.ConditionStorageCopies, Status: metav1.ConditionFalse, Reason: reason, Message: message}, nil
+			}
+			single := platform.SingleWriterClass(mode)
+			desired.Spec.StorageClassName = &single
+		}
+		if err := r.Create(ctx, desired); err != nil {
+			return metav1.Condition{}, err
+		}
+		return sharedCopiesCondition(copies, nil, projectCopiesCommand(project.Name, 1)), nil
 	}
-	return err
+	if err != nil {
+		return metav1.Condition{}, err
+	}
+	live, err := readLiveCopies(ctx, r.longhornReader(), &existing)
+	if err != nil {
+		return metav1.Condition{}, err
+	}
+	command := projectCopiesCommand(project.Name, 1)
+	if live != nil {
+		command = projectCopiesCommand(project.Name, live.Copies)
+	}
+	return sharedCopiesCondition(copies, live, command), nil
 }
 
 // ResolveNamespace returns the namespace an environment of a project runs in.

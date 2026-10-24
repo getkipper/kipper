@@ -22,6 +22,7 @@ import (
 	"github.com/getkipper/kipper/console-api/domain"
 	"github.com/getkipper/kipper/console-api/middleware"
 	"github.com/getkipper/kipper/controller/pkg/capacity"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 // The plan screen is the mandatory report every migration starts from: what
@@ -78,6 +79,7 @@ type planResponse struct {
 	MoveBaseDomain   bool          `json:"move_base_domain,omitempty"`
 
 	arriveStopped []string
+	twoCopies     []string
 }
 
 // notMigratedList is the static "what does NOT move" block, mirrored from
@@ -398,6 +400,9 @@ func (h *Handler) buildPlan(ctx context.Context, claims *middleware.Claims, toke
 		}
 	}
 
+	if msg := copiesShortfall(resp.twoCopies, target); targetAnswered && msg != "" {
+		resp.Blockers = append(resp.Blockers, msg)
+	}
 	if targetAnswered && !target.KeepsStops && len(resp.arriveStopped) > 0 {
 		resp.Blockers = append(resp.Blockers, fmt.Sprintf(
 			"%s would arrive stopped, but the target's Kipper cannot keep a stop and would start them. Upgrade the target cluster first.",
@@ -544,6 +549,9 @@ func (h *Handler) planProject(ctx context.Context, project string, token *Token,
 		for i := range svcList.Items {
 			svc := &svcList.Items[i]
 			behind[svc.Name] = h.planService(ctx, svc, ns, resp)
+			if platform.WantsTwoCopies(svc.Spec.Copies) {
+				resp.twoCopies = append(resp.twoCopies, ns+"/"+svc.Name)
+			}
 		}
 		for _, app := range bound {
 			for _, b := range app.Spec.ServiceBindings {
@@ -759,6 +767,17 @@ func (h *Handler) planVolumes(ctx context.Context, ns string, resp *planResponse
 	}
 	for i := range volumes {
 		vol := &volumes[i]
+		switch {
+		case !platform.WantsTwoCopies(vol.Spec.Copies):
+		case platform.RWXCopiesQualified:
+			resp.twoCopies = append(resp.twoCopies, ns+"/"+vol.Name)
+		default:
+			// Migration creates a new claim, so it must meet the shared-volume
+			// creation requirements. Restores can fall back to a single-copy claim.
+			resp.Blockers = append(resp.Blockers, fmt.Sprintf(
+				"Volume %s/%s keeps two copies. This Kipper release cannot create a shared volume with two copies, so the target would refuse it. Leave its project out of this migration.",
+				ns, vol.Name))
+		}
 		mounts := volumeMountSummary(vol)
 		detail := fmt.Sprintf("%s claimed: chunked transfer, resumes on failure", vol.Spec.Size)
 		if mounts != "" {

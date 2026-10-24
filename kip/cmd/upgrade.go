@@ -1589,9 +1589,10 @@ func upgradeRBACSteps() []rbacStep {
 }
 
 // applyAdmissionPolicies creates or updates the admission policies kip install
-// applies, so existing clusters get them on upgrade.
+// applies, so existing clusters get them on upgrade. The copies offer is
+// rendered from the PlatformConfig, so an upgrade keeps the admin's offer.
 func applyAdmissionPolicies(ctx context.Context, dynClient dynamic.Interface) error {
-	manifests, err := installer.AdmissionPolicyManifests()
+	manifests, err := installer.AdmissionPolicyManifests(recordedCopiesOffer(ctx, dynClient))
 	if err != nil {
 		return err
 	}

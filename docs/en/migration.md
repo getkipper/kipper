@@ -51,7 +51,7 @@ Migration is a console feature with visual progress. The flow:
 | Job CRs | Created on target |
 | Custom domain routes | Applied after user verifies apps work |
 
-Before anything moves, the source checks the target has enough free CPU, memory, and disk for the selected projects and refuses the migration with a clear message if the box is too small. The disk check compares the projects' volume claims against the target's storage headroom, so treat it as a sanity check rather than a guarantee. Both clusters must also run the same major Kipper version.
+Before anything moves, the source checks the target has enough free CPU, memory, and disk for the selected projects and refuses the migration with a clear message if the box is too small. The disk check compares the projects' volume claims against the target's storage headroom, so treat it as a sanity check rather than a guarantee. Services that keep [two copies](/en/worker-nodes#two-copies-of-a-services-data) need a target that offers two copies and has two nodes that can hold them. A shared volume with two copies cannot migrate in this release. Both clusters must also run the same major Kipper version.
 
 ### Resources to recreate separately {#what-is-not-migrated}
 
@@ -170,7 +170,7 @@ On the **source cluster's** console, go to **Migration** and click **Migrate to 
 The plan shows everything before anything moves:
 
 - The consent line: which projects, databases, and secrets go to which cluster at which endpoint
-- **Blockers** (red) that stop the start: target unreachable, version mismatch, not enough capacity, unconfirmed overwrites, an app with invalid autoscaling settings, or a 2FA factor that is missing or still inside its 7-day wait
+- **Blockers** (red) that prevent migration from starting: target unreachable, version mismatch, not enough capacity, resources requiring two copies that the target cannot create, unconfirmed overwrites, an app with invalid autoscaling settings, or a 2FA factor that is missing or still inside its 7-day wait
 - **Warnings** (amber): autoscaled apps that keep serving through a freeze, missing notification channels
 - Capacity numbers: CPU, memory, and disk the projects need against what the target has free
 - **Data that will be skipped**: databases over the 500MB cap stay behind with manual steps. Volumes and service storage always move, chunked and verified, with no size cap

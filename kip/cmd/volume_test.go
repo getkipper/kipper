@@ -2,7 +2,10 @@ package cmd
 
 import (
 	"context"
+	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -218,4 +221,16 @@ func TestUnmountVolumeNotMounted(t *testing.T) {
 	err := unmountVolume(context.Background(), dyn, "blog-test", "uploads", "webapp")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `volume "uploads" is not mounted`)
+}
+
+func TestVolumeCreateRefusesCopiesOutsideOneAndTwoBeforeReadingTheCluster(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.Flags().String("size", "1Gi", "")
+	cmd.Flags().Int32("copies", 1, "")
+	_ = cmd.Flags().Set("copies", "0")
+
+	err := runVolumeCreate(cmd, []string{"uploads"})
+	if err == nil || !strings.Contains(err.Error(), "--copies must be 1 or 2") {
+		t.Fatalf("want the copies range refusal, got %v", err)
+	}
 }

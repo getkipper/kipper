@@ -37,13 +37,14 @@ func (h *drainHost) RunStdin(cmd string, _ io.Reader) (string, error) { return h
 
 func TestVolumesOnNodeCountsHealthyReplicasHereAndElsewhere(t *testing.T) {
 	h := &drainHost{replies: map[string]string{
-		"replicas.longhorn.io": "pvc-db\tworker-1\t2026-10-16T01:00:00Z\t\n" +
-			"pvc-loki\tworker-1\t2026-10-16T01:00:00Z\t\n" +
-			"pvc-loki\tserver\t2026-10-16T01:00:00Z\t\n" +
-			"pvc-loki\tworker-2\t2026-10-16T01:00:00Z\t2026-10-16T02:00:00Z\n" +
-			"pvc-zot\tserver\t2026-10-16T01:00:00Z\t\n" +
-			"pvc-new\tworker-1\t\t\n",
+		"replicas.longhorn.io": "pvc-db\tworker-1\t2026-10-16T01:00:00Z\t\t\n" +
+			"pvc-loki\tworker-1\t2026-10-16T01:00:00Z\t\t\n" +
+			"pvc-loki\tserver\t2026-10-16T01:00:00Z\t\t\n" +
+			"pvc-loki\tworker-2\t2026-10-16T01:00:00Z\t2026-10-16T02:00:00Z\t2026-10-16T02:00:00Z\n" +
+			"pvc-zot\tserver\t2026-10-16T01:00:00Z\t\t\n" +
+			"pvc-new\tworker-1\t\t\t\n",
 		"volumes.longhorn.io": "pvc-db\tshop\tdata-db-0\npvc-loki\tmonitoring\tstorage-loki-0\npvc-zot\tkipper-system\tzot-data\n",
+		"get nodes --":        readyNodes,
 	}}
 
 	got, err := VolumesOnNode(h, "worker-1")
@@ -54,6 +55,49 @@ func TestVolumesOnNodeCountsHealthyReplicasHereAndElsewhere(t *testing.T) {
 	}, got, "only volumes with healthy replicas on the requested node are included")
 	assert.False(t, got[0].LastCopy())
 	assert.True(t, got[1].LastCopy())
+}
+
+func holderNodes(lines ...string) string {
+	return strings.Join(lines, "\n") + "\n"
+}
+
+const readyNodes = "server\tTrue\t\nworker-1\tTrue\t\nworker-2\tTrue\t"
+
+func TestVolumesOnNodeCountsOnlyCurrentCopiesOnAvailableNodesElsewhere(t *testing.T) {
+	healthy := "2026-10-16T01:00:00Z"
+	for name, tc := range map[string]struct {
+		replicas, nodes string
+		elsewhere       int
+	}{
+		"a ready holder": {"pvc-db\tserver\t" + healthy + "\t\t\n", holderNodes("server\tTrue\t", "worker-1\tTrue\t"), 1},
+		"a fenced holder": {"pvc-db\tserver\t" + healthy + "\t\t\n",
+			holderNodes("server\tTrue\tnode.kubernetes.io/out-of-service", "worker-1\tTrue\t"), 0},
+		"a NotReady holder":  {"pvc-db\tserver\t" + healthy + "\t\t\n", holderNodes("server\tFalse\t", "worker-1\tTrue\t"), 0},
+		"a missing holder":   {"pvc-db\tserver\t" + healthy + "\t\t\n", holderNodes("worker-1\tTrue\t"), 0},
+		"a salvaged replica": {"pvc-db\tserver\t" + healthy + "\t\t2026-10-16T02:00:00Z\n", holderNodes("server\tTrue\t", "worker-1\tTrue\t"), 0},
+		"two replicas on one holder": {"pvc-db\tserver\t" + healthy + "\t\t\npvc-db\tserver\t" + healthy + "\t\t\n",
+			holderNodes("server\tTrue\t", "worker-1\tTrue\t"), 1},
+	} {
+		h := &drainHost{replies: map[string]string{
+			"replicas.longhorn.io": "pvc-db\tworker-1\t" + healthy + "\t\t\n" + tc.replicas,
+			"volumes.longhorn.io":  "pvc-db\tshop\tdata-db-0\n",
+			"get nodes --":         tc.nodes,
+		}}
+		got, err := VolumesOnNode(h, "worker-1")
+		require.NoError(t, err, name)
+		require.Len(t, got, 1, name)
+		assert.Equal(t, tc.elsewhere, got[0].Elsewhere, name)
+		assert.Equal(t, tc.elsewhere == 0, got[0].LastCopy(), name)
+	}
+}
+
+func TestVolumesOnNodeStopsWhenTheNodesCannotBeRead(t *testing.T) {
+	h := &drainHost{
+		replies:  map[string]string{"replicas.longhorn.io": "pvc-db\tworker-1\t2026-10-16T01:00:00Z\t\t\n"},
+		failures: map[string]string{"get nodes --": "forbidden"},
+	}
+	_, err := VolumesOnNode(h, "worker-1")
+	require.Error(t, err, "an unreadable holder is never counted as a copy elsewhere")
 }
 
 func TestVolumesOnNodeReportsUnreadableReplicas(t *testing.T) {

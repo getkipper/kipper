@@ -75,6 +75,8 @@ func newVolumesInPlans(ctx context.Context, mgr *service.Manager, plans []applyP
 			if err != nil {
 				return nil, fmt.Errorf("service %s: %w", name, err)
 			}
+			copies, _, _ := unstructured.NestedInt64(res.Object.Object, "spec", "copies")
+			created[0].Copies = int32(copies) //nolint:gosec // G115: Validate bounds copies to 1 or 2.
 			volumes = append(volumes, named(name, created)...)
 		}
 	}

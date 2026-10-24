@@ -127,14 +127,14 @@ func packageInstallNotice(pkgs []string) string {
 	return fmt.Sprintf("  ·  Installing %s from the server's package mirrors. This may take a few minutes.\n", strings.Join(pkgs, " "))
 }
 
-// StoragePackages returns Longhorn's iSCSI and NFS client packages, or nil for
-// unsupported families.
+// StoragePackages returns Longhorn's iSCSI and NFS client packages and fio for
+// the storage-copies disk gate, or nil for unsupported families.
 func (h HostOS) StoragePackages() []string {
 	switch h.Family {
 	case FamilyDebian:
-		return []string{"open-iscsi", "nfs-common"}
+		return []string{"open-iscsi", "nfs-common", "fio"}
 	case FamilyRHEL:
-		return []string{"iscsi-initiator-utils", "nfs-utils"}
+		return []string{"iscsi-initiator-utils", "nfs-utils", "fio"}
 	}
 	return nil
 }

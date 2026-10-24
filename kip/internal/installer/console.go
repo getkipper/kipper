@@ -123,6 +123,10 @@ rules:
   - apiGroups: ["kipper.run"]
     resources: ["platformconfigs"]
     verbs: ["get", "list", "watch", "update", "patch"]
+  # The custom verb the kipper-storage-copies-change admission policy checks.
+  - apiGroups: ["kipper.run"]
+    resources: ["services", "volumes", "projects"]
+    verbs: ["set-copies"]
   # The serving-identity reconciler watches the cluster-scoped ClusterIdentity
   # singleton and writes its status; the Ingress, ConfigMap, Secret and
   # Deployment rules above already grant the objects it drives at cutover
@@ -182,6 +186,10 @@ rules:
   - apiGroups: ["monitoring.coreos.com"]
     resources: ["servicemonitors"]
     verbs: ["get", "list", "watch", "create", "update"]
+  # Storage copies status reads Longhorn's objects on a timer, without a watch.
+  - apiGroups: ["longhorn.io"]
+    resources: ["volumes", "replicas", "engines", "nodes", "settings"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

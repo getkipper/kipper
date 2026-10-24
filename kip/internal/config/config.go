@@ -86,16 +86,17 @@ func OpsKeyPath(cluster string) (string, error) {
 // NodeRecord is kip's record of one cluster node, kept in the kipper-nodes
 // ConfigMap and copied into the local cluster config.
 type NodeRecord struct {
-	Name        string     `mapstructure:"name"         yaml:"name"                   json:"name"`
-	Host        string     `mapstructure:"host"         yaml:"host"                   json:"host"`
-	MachineID   string     `mapstructure:"machine_id"   yaml:"machine_id"             json:"machineID"`
-	Role        string     `mapstructure:"role"         yaml:"role"                   json:"role"`
-	Mode        string     `mapstructure:"mode"         yaml:"mode,omitempty"         json:"mode,omitempty"`
-	PeerAddress string     `mapstructure:"peer_address" yaml:"peer_address,omitempty" json:"peerAddress,omitempty"`
-	Interface   string     `mapstructure:"interface"    yaml:"interface,omitempty"    json:"interface,omitempty"`
-	State       string     `mapstructure:"state"        yaml:"state"                  json:"state"`
-	SSHUser     string     `mapstructure:"ssh_user"     yaml:"ssh_user,omitempty"     json:"sshUser,omitempty"`
-	Fence       *NodeFence `mapstructure:"fence" yaml:"fence,omitempty" json:"fence,omitempty"`
+	Name        string       `mapstructure:"name"         yaml:"name"                   json:"name"`
+	Host        string       `mapstructure:"host"         yaml:"host"                   json:"host"`
+	MachineID   string       `mapstructure:"machine_id"   yaml:"machine_id"             json:"machineID"`
+	Role        string       `mapstructure:"role"         yaml:"role"                   json:"role"`
+	Mode        string       `mapstructure:"mode"         yaml:"mode,omitempty"         json:"mode,omitempty"`
+	PeerAddress string       `mapstructure:"peer_address" yaml:"peer_address,omitempty" json:"peerAddress,omitempty"`
+	Interface   string       `mapstructure:"interface"    yaml:"interface,omitempty"    json:"interface,omitempty"`
+	State       string       `mapstructure:"state"        yaml:"state"                  json:"state"`
+	SSHUser     string       `mapstructure:"ssh_user"     yaml:"ssh_user,omitempty"     json:"sshUser,omitempty"`
+	Fence       *NodeFence   `mapstructure:"fence" yaml:"fence,omitempty" json:"fence,omitempty"`
+	Storage     *NodeStorage `mapstructure:"storage" yaml:"storage,omitempty" json:"storage,omitempty"`
 }
 
 // NodeFence records a fence and the checkpoints needed to resume fencing or
@@ -135,6 +136,21 @@ type ReplicaStamp struct {
 	HealthyAt    string `mapstructure:"healthy_at"     yaml:"healthy_at,omitempty"     json:"healthyAt,omitempty"`
 	FailedAt     string `mapstructure:"failed_at"      yaml:"failed_at,omitempty"      json:"failedAt,omitempty"`
 	LastFailedAt string `mapstructure:"last_failed_at" yaml:"last_failed_at,omitempty" json:"lastFailedAt,omitempty"`
+}
+
+// NodeStorage records the disk check that decides whether a node may hold
+// copies of volumes, with the raw figures in milliseconds. UnderlayRTTP99Ms
+// and TunnelRTTP99Ms are nil when the round trip to the server could not be
+// measured, directly or over the pod network.
+type NodeStorage struct {
+	Copies           bool     `mapstructure:"copies"              yaml:"copies"                        json:"copies"`
+	P99Ms            float64  `mapstructure:"p99_ms"              yaml:"p99_ms"                        json:"p99Ms"`
+	MaxMs            float64  `mapstructure:"max_ms"              yaml:"max_ms"                        json:"maxMs"`
+	CapHit           bool     `mapstructure:"cap_hit"             yaml:"cap_hit,omitempty"             json:"capHit,omitempty"`
+	UnderlayRTTP99Ms *float64 `mapstructure:"underlay_rtt_p99_ms" yaml:"underlay_rtt_p99_ms,omitempty" json:"underlayRttP99Ms,omitempty"`
+	TunnelRTTP99Ms   *float64 `mapstructure:"tunnel_rtt_p99_ms" yaml:"tunnel_rtt_p99_ms,omitempty" json:"tunnelRttP99Ms,omitempty"`
+	Overridden       bool     `mapstructure:"overridden"          yaml:"overridden,omitempty"          json:"overridden,omitempty"`
+	CheckedAt        string   `mapstructure:"checked_at"          yaml:"checked_at"                    json:"checkedAt"`
 }
 
 // BackupStorageRef records the BSL mode and metadata for a cluster, so

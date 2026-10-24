@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 // ServerStorageTag selects the server's Longhorn node for replica scheduling.
@@ -29,6 +31,41 @@ parameters:
   nodeSelector: "%s"
 `, singleCopyClass, ServerStorageTag)
 
+// replicatedClassParameters are the parameters of the class for volumes with
+// two copies. Locality and auto-balance are off so Longhorn never builds or
+// deletes a copy because a pod moved.
+var replicatedClassParameters = map[string]string{
+	"numberOfReplicas":    "2",
+	"dataLocality":        "disabled",
+	"nodeSelector":        platform.ReplicaStorageTag,
+	"replicaAutoBalance":  "disabled",
+	"staleReplicaTimeout": "30",
+	"fsType":              "ext4",
+	"dataEngine":          "v1",
+}
+
+var replicatedClassManifest = func() string {
+	keys := make([]string, 0, len(replicatedClassParameters))
+	for k := range replicatedClassParameters {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	var params strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&params, "  %s: %q\n", k, replicatedClassParameters[k])
+	}
+	return fmt.Sprintf(`apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: %s
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+%s`, platform.LonghornReplicatedClass, params.String())
+}()
+
 // serverStorageWait allows a fresh install time for node registration, disk
 // synchronization and manifest retries.
 var serverStorageWait = joinTimeouts{ready: 5 * time.Minute, interval: 5 * time.Second}
@@ -37,7 +74,8 @@ var serverStorageWait = joinTimeouts{ready: 5 * time.Minute, interval: 5 * time.
 // delay upgrades less than fresh installations.
 var pinWait = joinTimeouts{ready: 30 * time.Second, interval: 5 * time.Second}
 
-// OffServerCopy identifies a healthy replica of a single-copy volume on a worker.
+// OffServerCopy identifies a current replica of a single-copy volume on a worker,
+// including workers that are unavailable.
 type OffServerCopy struct {
 	Volume string
 	Node   string
@@ -45,7 +83,7 @@ type OffServerCopy struct {
 }
 
 // SingleCopyPlacement reports volume selector changes, patch failures with reasons,
-// and healthy replicas still on workers. Volumes use namespace/claim labels
+// and current replicas still on workers. Volumes use namespace/claim labels
 // when available, otherwise Longhorn volume names.
 type SingleCopyPlacement struct {
 	Pinned    []string
@@ -55,7 +93,7 @@ type SingleCopyPlacement struct {
 
 // PinSingleCopiesToServer configures server-only scheduling for the single-copy
 // StorageClass and its existing volumes. Existing replicas can remain on workers.
-// The result lists updated volumes, patch failures with reasons, and healthy
+// The result lists updated volumes, patch failures with reasons, and current
 // replicas still on workers. Individual patch failures allow the run to continue.
 // Single-node clusters update only the server tag and StorageClass and return an
 // empty result. Other errors stop the run and may leave partial changes applied.
@@ -80,7 +118,7 @@ func pinSingleCopies(client CommandRunner, joining bool) (SingleCopyPlacement, e
 	if err != nil {
 		return SingleCopyPlacement{}, err
 	}
-	if err := ensureSingleCopyClass(client, pinWait); err != nil {
+	if err := ensureStorageClasses(client, pinWait); err != nil {
 		return SingleCopyPlacement{}, err
 	}
 	// A single-node cluster needs volume selectors before a worker joins
@@ -191,64 +229,67 @@ func tagServerStorage(client CommandRunner, wait joinTimeouts) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var tags []string
-	err = pollUntil(wait.ready, wait.interval, func() (bool, error) {
-		out, err := client.Run(fmt.Sprintf("kubectl -n longhorn-system get nodes.longhorn.io %s --request-timeout=30s -o jsonpath='{.spec.tags}'", server))
-		if err != nil {
-			return false, err
-		}
-		tags, err = parseJSONList(out)
-		return err == nil, err
-	})
-	if err != nil {
-		return "", fmt.Errorf("reading the Longhorn tags of %s: %w", server, err)
-	}
-	if slices.Contains(tags, ServerStorageTag) {
-		return server, nil
-	}
-	patch := fmt.Sprintf(`{"spec":{"tags":%s}}`, jsonList(append(tags, ServerStorageTag)))
-	// Longhorn's webhook refuses node changes while a new node's disks sync.
-	err = pollUntil(wait.ready, wait.interval, func() (bool, error) {
-		_, err := client.Run(fmt.Sprintf("kubectl -n longhorn-system patch nodes.longhorn.io %s --request-timeout=30s --type merge -p '%s' >/dev/null", server, patch))
-		return err == nil, err
-	})
-	if err != nil {
-		return "", fmt.Errorf("tagging the server's Longhorn node %s: %w", server, err)
+	if err := setLonghornNodeTags(client, server, []string{ServerStorageTag, platform.ReplicaStorageTag}, nil, wait); err != nil {
+		return "", err
 	}
 	return server, nil
 }
 
-// ensureSingleCopyClass recreates the class to change its immutable parameters.
-// Existing volumes survive replacement. If creation fails, it attempts to
-// restore the previous class so new claims can bind.
-func ensureSingleCopyClass(client CommandRunner, wait joinTimeouts) error {
-	out, err := client.Run(fmt.Sprintf("kubectl get storageclass %s --ignore-not-found --request-timeout=30s -o json", singleCopyClass))
+// ensureStorageClasses creates or recreates the single-copy and replicated
+// classes, as ensureClass describes.
+func ensureStorageClasses(client CommandRunner, wait joinTimeouts) error {
+	if err := ensureClass(client, singleCopyClass, singleCopyClassManifest, singleCopyClassCurrent, wait); err != nil {
+		return err
+	}
+	return ensureClass(client, platform.LonghornReplicatedClass, replicatedClassManifest, replicatedClassCurrent, wait)
+}
+
+// singleCopyClassCurrent checks the parameters that make the class one copy
+// on the server.
+func singleCopyClassCurrent(params map[string]interface{}) bool {
+	return params["nodeSelector"] == ServerStorageTag && params["numberOfReplicas"] == "1"
+}
+
+func replicatedClassCurrent(params map[string]interface{}) bool {
+	for k, v := range replicatedClassParameters {
+		if params[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// ensureClass recreates the class to change its immutable parameters when
+// current rejects them. Existing volumes survive replacement. If creation
+// fails, it attempts to restore the previous class so new claims can bind.
+func ensureClass(client CommandRunner, name, manifest string, current func(map[string]interface{}) bool, wait joinTimeouts) error {
+	out, err := client.Run(fmt.Sprintf("kubectl get storageclass %s --ignore-not-found --request-timeout=30s -o json", name))
 	if err != nil {
-		return fmt.Errorf("reading the %s StorageClass: %w", singleCopyClass, err)
+		return fmt.Errorf("reading the %s StorageClass: %w", name, err)
 	}
 	var previous string
 	if strings.TrimSpace(out) != "" {
-		pinned, restore, err := readSingleCopyClass(out)
+		ok, restore, err := readClass(out, current)
 		if err != nil {
-			return fmt.Errorf("reading the %s StorageClass: %w", singleCopyClass, err)
+			return fmt.Errorf("reading the %s StorageClass: %w", name, err)
 		}
-		if pinned {
+		if ok {
 			return nil
 		}
-		if _, err := client.Run(fmt.Sprintf("kubectl delete storageclass %s --request-timeout=30s >/dev/null", singleCopyClass)); err != nil {
-			return fmt.Errorf("replacing the %s StorageClass: %w", singleCopyClass, err)
+		if _, err := client.Run(fmt.Sprintf("kubectl delete storageclass %s --request-timeout=30s >/dev/null", name)); err != nil {
+			return fmt.Errorf("replacing the %s StorageClass: %w", name, err)
 		}
 		previous = restore
 	}
 	// Retry creation here because new claims need the class to bind.
-	err = applyManifest(client, singleCopyClassManifest, wait)
+	err = applyManifest(client, manifest, wait)
 	if err == nil {
 		return nil
 	}
 	if previous != "" && applyManifest(client, previous, wait) == nil {
-		return fmt.Errorf("replacing the %s StorageClass: %w. The previous class was restored, so new volumes are not pinned to the server; run 'kip upgrade' again once the cause is fixed", singleCopyClass, err)
+		return fmt.Errorf("replacing the %s StorageClass: %w. The previous class was restored, so new volumes still use its old parameters. Run 'kip upgrade' again once the cause is fixed", name, err)
 	}
-	return fmt.Errorf("creating the %s StorageClass: %w. Until it exists, new databases, registry and backup volumes stay Pending; run 'kip upgrade' again to create it", singleCopyClass, err)
+	return fmt.Errorf("creating the %s StorageClass: %w. Until it exists, new volumes using it stay Pending. Run 'kip upgrade' again to create it", name, err)
 }
 
 func applyManifest(client CommandRunner, manifest string, wait joinTimeouts) error {
@@ -259,15 +300,15 @@ func applyManifest(client CommandRunner, manifest string, wait joinTimeouts) err
 	})
 }
 
-// readSingleCopyClass checks the server selector and prepares an unpinned
-// class for restoration by removing server-assigned metadata.
-func readSingleCopyClass(raw string) (bool, string, error) {
+// readClass checks the class's parameters with current and prepares a class
+// it rejects for restoration by removing server-assigned metadata.
+func readClass(raw string, current func(map[string]interface{}) bool) (bool, string, error) {
 	var class map[string]interface{}
 	if err := json.Unmarshal([]byte(raw), &class); err != nil {
 		return false, "", err
 	}
 	params, _ := class["parameters"].(map[string]interface{})
-	if params["nodeSelector"] == ServerStorageTag {
+	if current(params) {
 		return true, "", nil
 	}
 	if meta, ok := class["metadata"].(map[string]interface{}); ok {
@@ -335,7 +376,7 @@ func offServerCopies(client CommandRunner, volumes []singleCopyVolume, server st
 	if len(volumes) == 0 {
 		return nil, nil
 	}
-	holders, err := HealthyReplicaNodes(client)
+	holders, err := CurrentReplicaNodes(client)
 	if err != nil {
 		return nil, err
 	}

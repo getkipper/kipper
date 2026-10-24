@@ -141,7 +141,7 @@ func installLonghorn(client CommandRunner, host HostOS, afterPackages func() err
 	if _, err := tagServerStorage(client, serverStorageWait); err != nil {
 		return err
 	}
-	if err := ensureSingleCopyClass(client, serverStorageWait); err != nil {
+	if err := ensureStorageClasses(client, serverStorageWait); err != nil {
 		return err
 	}
 

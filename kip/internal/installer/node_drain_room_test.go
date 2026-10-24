@@ -10,11 +10,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// longhornState answers the reads LastCopiesWithoutRoom makes.
+// longhornState answers the reads LastCopiesWithoutRoom and
+// CopiesWithoutRebuildRoom make.
 type longhornState struct {
 	nodes    string
 	volumes  string
 	settings string
+	replicas string
 }
 
 func (s longhornState) Run(cmd string) (string, error) {
@@ -25,6 +27,8 @@ func (s longhornState) Run(cmd string) (string, error) {
 		return s.volumes, nil
 	case strings.Contains(cmd, "settings.longhorn.io"):
 		return s.settings, nil
+	case strings.Contains(cmd, "replicas.longhorn.io"):
+		return s.replicas, nil
 	}
 	return "", fmt.Errorf("unexpected command %q", cmd)
 }
@@ -171,4 +175,50 @@ func TestLastCopiesWithoutRoomSkipsANodeBeingDeleted(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, blocked, 1)
 	assert.Contains(t, blocked[0], "server: is being deleted")
+}
+
+const replicatedVolume = `{"items":[{"metadata":{"name":"pvc-db"},"spec":{"size":"5368709120","nodeSelector":["kipper-replica"],"diskSelector":[]},"status":{"actualSize":1073741824}}]}`
+
+var dbSecondCopy = []NodeVolume{{Name: "pvc-db", Claim: "shop/data-db-0", Here: 1, Elsewhere: 1}}
+
+func TestCopiesWithoutRebuildRoomNamesACopyNoOtherNodeCanTake(t *testing.T) {
+	s := longhornState{
+		nodes: longhornList(
+			longhornNodeJSON("server", `"kipper-server","kipper-replica"`, "True", 30*gi, 0),
+			longhornNodeJSON("worker-1", `"kipper-replica"`, "True", 30*gi, 0),
+			longhornNodeJSON("worker-2", "", "True", 30*gi, 0)),
+		volumes:  replicatedVolume,
+		replicas: "pvc-db\tserver\t2026-10-24T01:00:00Z\t\t\npvc-db\tworker-1\t2026-10-24T01:00:00Z\t\t\n",
+	}
+
+	blocked, err := CopiesWithoutRebuildRoom(s, "worker-1", dbSecondCopy)
+
+	require.NoError(t, err)
+	require.Len(t, blocked, 1)
+	assert.Contains(t, blocked[0], "shop/data-db-0")
+	assert.Contains(t, blocked[0], "server: already holds a copy")
+	assert.Contains(t, blocked[0], "worker-2: lacks the node tag kipper-replica")
+}
+
+func TestCopiesWithoutRebuildRoomAcceptsAThirdNodeThatCanHoldCopies(t *testing.T) {
+	s := longhornState{
+		nodes: longhornList(
+			longhornNodeJSON("server", `"kipper-server","kipper-replica"`, "True", 30*gi, 0),
+			longhornNodeJSON("worker-1", `"kipper-replica"`, "True", 30*gi, 0),
+			longhornNodeJSON("worker-2", `"kipper-replica"`, "True", 30*gi, 0)),
+		volumes:  replicatedVolume,
+		replicas: "pvc-db\tserver\t2026-10-24T01:00:00Z\t\t\npvc-db\tworker-1\t2026-10-24T01:00:00Z\t\t\n",
+	}
+
+	blocked, err := CopiesWithoutRebuildRoom(s, "worker-1", dbSecondCopy)
+
+	require.NoError(t, err)
+	assert.Empty(t, blocked)
+}
+
+func TestCopiesWithoutRebuildRoomLeavesLastCopiesToTheDrainCheck(t *testing.T) {
+	blocked, err := CopiesWithoutRebuildRoom(longhornState{}, "worker-1", dbLastCopy)
+
+	require.NoError(t, err, "a last copy is LastCopiesWithoutRoom's, and no command runs")
+	assert.Empty(t, blocked)
 }

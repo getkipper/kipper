@@ -34,7 +34,7 @@ func TestParseOSReleaseRHELFamily(t *testing.T) {
 }
 
 func TestRHELPackageCommands(t *testing.T) {
-	assert.Contains(t, rhel10Host.InstallPackagesCommand(true, rhel10Host.StoragePackages()...), "dnf install -y -q --setopt=exit_on_lock=True --refresh iscsi-initiator-utils nfs-utils 2>")
+	assert.Contains(t, rhel10Host.InstallPackagesCommand(true, rhel10Host.StoragePackages()...), "dnf install -y -q --setopt=exit_on_lock=True --refresh iscsi-initiator-utils nfs-utils fio 2>")
 	assert.Contains(t, rhel10Host.InstallPackagesCommand(false, "firewalld"), "dnf install -y -q --setopt=exit_on_lock=True firewalld 2>")
 	assert.Equal(t, []string{"iscsid"}, rhel10Host.StorageServices())
 	assert.Empty(t, debianHost.StorageServices(), "open-iscsi starts iscsid itself on Debian")
@@ -153,8 +153,8 @@ func TestK3sSELinuxConfigOnlyOnRHEL(t *testing.T) {
 func TestLonghornEnablesIscsidOnRHEL(t *testing.T) {
 	r := pinHost(nil)
 	require.NoError(t, installLonghorn(r, rhel10Host, nil))
-	assert.Contains(t, r.commands[0], "rpm -q --quiet iscsi-initiator-utils nfs-utils")
-	assert.Contains(t, r.commands[1], "dnf install -y -q --setopt=exit_on_lock=True --refresh iscsi-initiator-utils nfs-utils")
+	assert.Contains(t, r.commands[0], "rpm -q --quiet iscsi-initiator-utils nfs-utils fio")
+	assert.Contains(t, r.commands[1], "dnf install -y -q --setopt=exit_on_lock=True --refresh iscsi-initiator-utils nfs-utils fio")
 	assert.Equal(t, "systemctl enable --now iscsid", r.commands[2])
 }
 
