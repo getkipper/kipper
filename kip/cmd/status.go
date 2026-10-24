@@ -59,6 +59,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			nodeMark(node), node.Name, node.Role, node.Summary(), node.Version)
 	}
 	fmt.Println()
+	reportStranded(ctx, os.Stdout, client.Clientset(), client.Dynamic(), cluster.Nodes)
 
 	// Component health
 	health, err := client.ClusterHealth(ctx)

@@ -277,6 +277,7 @@ func TestLonghornRefusesAStepWhoseBackupWouldOmitAVolume(t *testing.T) {
 	problems := strings.Join(c.report(t, true, false).Problems, "\n")
 	assert.Contains(t, problems, "shop/uploads")
 	assert.Contains(t, problems, "kip app start")
+	assert.Contains(t, problems, "kip service start", "a service the fence stopped leaves its volume unmounted too")
 
 	cs, dyn := c.clients()
 	taken := 0

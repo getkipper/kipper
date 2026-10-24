@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/getkipper/kipper/kip/internal/config"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -260,6 +262,16 @@ func TestUpgradeAgentsLeavesWorkersInTransitionAlone(t *testing.T) {
 	assert.Empty(t, c.ran)
 	assert.Contains(t, out.String(), "worker-1")
 	assert.Contains(t, out.String(), "joining")
+}
+
+func TestUpgradeAgentsLeavesAFencedWorkerStopped(t *testing.T) {
+	fenced := workerRecord("worker-1", "203.0.113.11", NodeStateFenced)
+	fenced.Fence = &config.NodeFence{Method: FenceMethodKillall, StartedAt: "2026-10-24T08:00:00Z", BootID: BootIDUnknown}
+	c := newAgentCluster(map[string]string{"worker-1": "v1.35.6+k3s1"}, fenced)
+	var out bytes.Buffer
+	require.NoError(t, upgradeAgents(&out, c, c.onWorker, "kip install", time.Second, time.Millisecond))
+	assert.Empty(t, c.ran, "an agent upgrade restarts k3s, which the fence keeps stopped")
+	assert.Contains(t, out.String(), "fenced")
 }
 
 func TestUpgradeAgentsRefusesANewerAgent(t *testing.T) {

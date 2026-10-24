@@ -55,6 +55,12 @@ func UninstallHost(client CommandRunner) error {
 		}
 	}
 
+	// The uninstall scripts leave the unit's .d directory behind, so a fenced
+	// worker's agent interlock needs separate removal.
+	if _, err := client.Run(fmt.Sprintf("rm -f %s && { rmdir %s 2>/dev/null || true; } && { systemctl daemon-reload 2>/dev/null || true; }", FenceDropInPath(), FenceDropInPath()[:strings.LastIndex(FenceDropInPath(), "/")])); err != nil {
+		return fmt.Errorf("removing %s: %w", FenceDropInPath(), err)
+	}
+
 	if acted, err := removeKipperFirewall(client); err != nil {
 		fmt.Printf("  ⚠  kip's firewall rules may still be on this host: %v\n", err)
 	} else if acted {

@@ -373,7 +373,9 @@ Each step then runs the same way:
 2. kip rechecks the backup location and verifies that a regular container in a
    running pod mounts every app volume in the backup scope, because file
    backups require these mounts. A volume used only by a stopped app blocks
-   the step. Start the app with `kip app start` or remove the volume.
+   the step, and so does the volume of a service `kip node fence` stopped.
+   Start the app with `kip app start`, start the service with
+   `kip service start`, or remove the volume.
    kip then takes a Velero backup in the scope of
    `kip backup create`, kept for 30 days, and waits for it to complete. A backup
    that fails stops the step. kip then checks the cluster again.

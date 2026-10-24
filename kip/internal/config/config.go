@@ -86,15 +86,55 @@ func OpsKeyPath(cluster string) (string, error) {
 // NodeRecord is kip's record of one cluster node, kept in the kipper-nodes
 // ConfigMap and copied into the local cluster config.
 type NodeRecord struct {
-	Name        string `mapstructure:"name"         yaml:"name"                   json:"name"`
-	Host        string `mapstructure:"host"         yaml:"host"                   json:"host"`
-	MachineID   string `mapstructure:"machine_id"   yaml:"machine_id"             json:"machineID"`
-	Role        string `mapstructure:"role"         yaml:"role"                   json:"role"`
-	Mode        string `mapstructure:"mode"         yaml:"mode,omitempty"         json:"mode,omitempty"`
-	PeerAddress string `mapstructure:"peer_address" yaml:"peer_address,omitempty" json:"peerAddress,omitempty"`
-	Interface   string `mapstructure:"interface"    yaml:"interface,omitempty"    json:"interface,omitempty"`
-	State       string `mapstructure:"state"        yaml:"state"                  json:"state"`
-	SSHUser     string `mapstructure:"ssh_user"     yaml:"ssh_user,omitempty"     json:"sshUser,omitempty"`
+	Name        string     `mapstructure:"name"         yaml:"name"                   json:"name"`
+	Host        string     `mapstructure:"host"         yaml:"host"                   json:"host"`
+	MachineID   string     `mapstructure:"machine_id"   yaml:"machine_id"             json:"machineID"`
+	Role        string     `mapstructure:"role"         yaml:"role"                   json:"role"`
+	Mode        string     `mapstructure:"mode"         yaml:"mode,omitempty"         json:"mode,omitempty"`
+	PeerAddress string     `mapstructure:"peer_address" yaml:"peer_address,omitempty" json:"peerAddress,omitempty"`
+	Interface   string     `mapstructure:"interface"    yaml:"interface,omitempty"    json:"interface,omitempty"`
+	State       string     `mapstructure:"state"        yaml:"state"                  json:"state"`
+	SSHUser     string     `mapstructure:"ssh_user"     yaml:"ssh_user,omitempty"     json:"sshUser,omitempty"`
+	Fence       *NodeFence `mapstructure:"fence" yaml:"fence,omitempty" json:"fence,omitempty"`
+}
+
+// NodeFence records a fence and the checkpoints needed to resume fencing or
+// rejoining safely. Times are RFC 3339 in UTC. The original boot ID is retained
+// throughout the fence, or is "unknown" if unavailable. The reboot checkpoint
+// identifies the boot before a rejoin's reboot so retries recognise its
+// completion. Methods include killall and powered-off and allow future
+// mechanisms such as provider-poweroff.
+type NodeFence struct {
+	Method           string      `mapstructure:"method"     yaml:"method"               json:"method"`
+	Operator         string      `mapstructure:"operator"   yaml:"operator,omitempty"   json:"operator,omitempty"`
+	StartedAt        string      `mapstructure:"started_at" yaml:"started_at"           json:"startedAt"`
+	FencedAt         string      `mapstructure:"fenced_at"  yaml:"fenced_at,omitempty"  json:"fencedAt,omitempty"`
+	BootID           string      `mapstructure:"boot_id"     yaml:"boot_id"               json:"bootID"`
+	VerifiedAt       string      `mapstructure:"verified_at" yaml:"verified_at,omitempty" json:"verifiedAt,omitempty"`
+	RebootCheckpoint string      `mapstructure:"reboot_checkpoint" yaml:"reboot_checkpoint,omitempty" json:"rebootCheckpoint,omitempty"`
+	Stopped          []FenceStop `mapstructure:"stopped"           yaml:"stopped,omitempty"           json:"stopped,omitempty"`
+}
+
+// FenceStop records a service stopped because no current copy of its data was
+// available elsewhere. The reason is stale if other copies exist, or only-copy
+// if none exists. Consent applies only while replica identities and timestamps
+// match. The StatefulSet's stop annotation holds the replica count to restore.
+type FenceStop struct {
+	Namespace   string         `mapstructure:"namespace"   yaml:"namespace"   json:"namespace"`
+	StatefulSet string         `mapstructure:"statefulset" yaml:"statefulset" json:"statefulSet"`
+	Reason      string         `mapstructure:"reason" yaml:"reason" json:"reason"`
+	Consent     []ReplicaStamp `mapstructure:"consent" yaml:"consent,omitempty" json:"consent,omitempty"`
+}
+
+// ReplicaStamp is a Longhorn replica's identity and freshness timestamps as
+// they were when the operator consented.
+type ReplicaStamp struct {
+	Volume       string `mapstructure:"volume"         yaml:"volume"                   json:"volume"`
+	Name         string `mapstructure:"name"           yaml:"name"                     json:"name"`
+	Node         string `mapstructure:"node"           yaml:"node"                     json:"node"`
+	HealthyAt    string `mapstructure:"healthy_at"     yaml:"healthy_at,omitempty"     json:"healthyAt,omitempty"`
+	FailedAt     string `mapstructure:"failed_at"      yaml:"failed_at,omitempty"      json:"failedAt,omitempty"`
+	LastFailedAt string `mapstructure:"last_failed_at" yaml:"last_failed_at,omitempty" json:"lastFailedAt,omitempty"`
 }
 
 // BackupStorageRef records the BSL mode and metadata for a cluster, so

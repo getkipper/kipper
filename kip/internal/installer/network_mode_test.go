@@ -439,3 +439,42 @@ func TestPlanNodeNetworkSaysAPrivateClusterNeedsAPrivatePath(t *testing.T) {
 	assert.Contains(t, err.Error(), "the cluster runs in private mode")
 	assert.Contains(t, err.Error(), "Attach the new host to the cluster's private network")
 }
+
+func TestPlanNodeNetworkReusesARecordedWorkersPrivatePathOnTheDefaultRoute(t *testing.T) {
+	lanServer := []route{{contains: "route show default", out: "default via 192.168.1.1 dev enp7s0 src 10.0.0.3\n"}}
+	lanJoiner := []route{{contains: "route show default", out: "default via 192.168.1.1 dev eth1 src 10.0.0.4\n"}}
+	opts := external
+	opts.ClusterMode = NetworkModePrivate
+
+	server, joiner := networkHosts(lanServer, lanJoiner)
+	_, err := PlanNodeNetwork(server, joiner, opts)
+	require.Error(t, err, "a new host on the default route still needs --private-network")
+
+	opts.RecordedServerIP, opts.RecordedJoinerIP = "10.0.0.3", "10.0.0.4"
+	server, joiner = networkHosts(lanServer, lanJoiner)
+	plan, err := PlanNodeNetwork(server, joiner, opts)
+	require.NoError(t, err)
+	assert.Equal(t, NodeNetwork{NodeIP: "10.0.0.4", ExternalIP: "203.0.113.11", Interface: "eth1"}, plan.Joiner, "a recorded worker rejoins over the path it joined over")
+	assert.Equal(t, "10.0.0.3", plan.Server.NodeIP)
+
+	opts.RecordedJoinerIP = "10.0.0.9"
+	server, joiner = networkHosts(lanServer, lanJoiner)
+	_, err = PlanNodeNetwork(server, joiner, opts)
+	require.Error(t, err, "only the recorded path is reused, never another address in its network")
+	assert.Contains(t, err.Error(), "no private path")
+
+	opts.RecordedServerIP, opts.RecordedJoinerIP = "10.0.0.9", "10.0.0.4"
+	server, joiner = networkHosts(lanServer, lanJoiner)
+	_, err = PlanNodeNetwork(server, joiner, opts)
+	require.Error(t, err, "the server side of the path must be the recorded one too")
+}
+
+func TestPlanNodeNetworkPrefersAutomaticSelectionForARecordedWorker(t *testing.T) {
+	server, joiner := networkHosts(nil, nil)
+	opts := external
+	opts.ClusterMode = NetworkModePrivate
+	opts.RecordedServerIP, opts.RecordedJoinerIP = "10.0.0.3", "10.0.0.9"
+	plan, err := PlanNodeNetwork(server, joiner, opts)
+	require.NoError(t, err)
+	assert.Equal(t, "10.0.0.4", plan.Joiner.NodeIP, "the recorded addresses are only a fallback")
+}

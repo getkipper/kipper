@@ -65,6 +65,10 @@ func TestLonghornSettingsFilter_SwitchesOffUpgradeChecksAndUsageMetrics(t *testi
 	assert.Equal(t, false, settings["allow-collecting-longhorn-usage-metrics"])
 	assert.Equal(t, "block-for-eviction-if-contains-last-replica", settings["node-drain-policy"],
 		"draining must wait for eviction of a volume's last healthy replica")
+	assert.Equal(t, "do-nothing", settings["node-down-pod-deletion-policy"],
+		"only kip node fence deletes the pods of a dead node")
+	assert.Equal(t, false, settings["rwx-volume-fast-failover"],
+		"fast RWX failover is disabled while normal share-manager failover remains available")
 	assert.Equal(t, "longhorn-critical", settings["priority-class"], "the stock settings stay")
 }
 

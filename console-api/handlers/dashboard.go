@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/getkipper/kipper/controller/pkg/stranded"
+
 	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -172,13 +174,8 @@ func checkK3s(label string, nodes []corev1.Node, nodeErr error) componentStatus 
 		return componentStatus{Name: label, Healthy: false, Message: nodeErr.Error()}
 	}
 	healthy := false
-	for _, node := range nodes {
-		for _, cond := range node.Status.Conditions {
-			if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
-				healthy = true
-				break
-			}
-		}
+	for i := range nodes {
+		healthy = healthy || stranded.Ready(&nodes[i])
 	}
 	return componentStatus{
 		Name:    label,
@@ -236,13 +233,7 @@ func (d *Dashboard) getNodes(ctx context.Context, nodes []corev1.Node) []dashboa
 
 	var result []dashboardNode
 	for _, node := range nodes {
-		status := "NotReady"
-		for _, cond := range node.Status.Conditions {
-			if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
-				status = "Ready"
-				break
-			}
-		}
+		status := nodeStatusText(node)
 
 		// Node resource usage requires metrics-server. When it is unavailable
 		// the node is absent from the map, so we report "n/a" and let the

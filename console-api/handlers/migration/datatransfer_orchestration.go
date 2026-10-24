@@ -18,6 +18,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
+	"github.com/getkipper/kipper/controller/pkg/stranded"
 )
 
 // dataTransferDeadline bounds one CR-driven transfer end to end. Transfers
@@ -188,10 +189,10 @@ func (h *Handler) runDataTransfer(ctx context.Context, session *Session, token *
 }
 
 // SweepAbandonedTransfers restores source-side state for DataTransfer CRs
-// whose owning migration session is no longer running — the durable
-// replacement for in-process defers lost to a console-api restart. It runs
-// at start and periodically: paused source services scale back up, and the
-// orphaned CR and its token secret are removed.
+// whose owning migration session is no longer running. This replaces in-process
+// defers lost to a console-api restart. It runs at start and periodically:
+// paused source services scale back up unless fenced, and the orphaned CR
+// and its token secret are removed.
 func (h *Handler) SweepAbandonedTransfers(ctx context.Context, interval time.Duration) {
 	h.sweepAbandonedTransfersOnce(ctx)
 	ticker := time.NewTicker(interval)
@@ -219,8 +220,8 @@ func (h *Handler) sweepAbandonedTransfersOnce(ctx context.Context) {
 		}
 		// Tear down the target receiver too when the session is still known,
 		// so its paused service restarts now rather than on the 24h lease.
-		// Without the session secret only the source can be recovered; the
-		// target then falls back to its own lease reaper.
+		// Without the session secret only the source can be recovered, so
+		// the target falls back to its own lease reaper.
 		if ok && session.TargetAPI != "" && session.Secret != "" {
 			token := &Token{Endpoint: session.TargetAPI, Secret: session.Secret}
 			dctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -310,10 +311,9 @@ func (h *Handler) cleanupDataTransfer(ctx context.Context, session *Session, tok
 	_ = h.Client.CoreV1().Secrets(dt.Namespace).Delete(ctx, "dt-"+dt.Name+"-token", metav1.DeleteOptions{})
 }
 
-// scaleStatefulSet sets a statefulset's replicas and, when scaling down,
-// waits for its pods to terminate so the PVC is safe to mount elsewhere.
-// statefulSetReplicas returns a statefulset's current desired replicas, or 1
-// when it is missing or unset, so a pause can be undone to the same size.
+// statefulSetReplicas returns the desired replica count so a pause can be
+// undone to the same size. It defaults to 1 if the read fails or the count
+// is unset or below 1.
 func (h *Handler) statefulSetReplicas(ctx context.Context, namespace, name string) int32 {
 	sts, err := h.Client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil || sts.Spec.Replicas == nil || *sts.Spec.Replicas < 1 {
@@ -322,8 +322,8 @@ func (h *Handler) statefulSetReplicas(ctx context.Context, namespace, name strin
 	return *sts.Spec.Replicas
 }
 
-// restoreStatefulSet scales a paused statefulset back to its recorded size,
-// treating a zero/unknown record as one replica.
+// restoreStatefulSet restores a paused StatefulSet's recorded replica count,
+// using 1 for counts below 1. A fence stop annotation prevents the restart.
 func (h *Handler) restoreStatefulSet(ctx context.Context, namespace, name string, replicas int32) error {
 	if replicas < 1 {
 		replicas = 1
@@ -331,10 +331,17 @@ func (h *Handler) restoreStatefulSet(ctx context.Context, namespace, name string
 	return h.scaleStatefulSet(ctx, namespace, name, replicas)
 }
 
+// scaleStatefulSet sets a StatefulSet's replica count and, when scaling to
+// zero, waits for its pods to terminate so their PVCs can be mounted elsewhere.
+// It skips scale-up requests for a StatefulSet with a fence stop annotation,
+// leaving the restart to kip's service start, fence or rejoin checks.
 func (h *Handler) scaleStatefulSet(ctx context.Context, namespace, name string, replicas int32) error {
 	sts, err := h.Client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return err
+	}
+	if _, fenced := sts.Annotations[stranded.FenceStopAnnotation]; fenced && replicas > 0 {
+		return nil
 	}
 	if sts.Spec.Replicas != nil && *sts.Spec.Replicas == replicas {
 		if replicas > 0 {

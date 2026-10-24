@@ -12,9 +12,10 @@ const longhornSettingsFuncName = "add_kipper_longhorn_settings"
 // longhornSettingsFunc copies the manifest from $1 to $2 with kip's Longhorn
 // settings: upgrade checks and usage metrics off, drains waiting for eviction of
 // a volume's last healthy replica, fast replica rebuild off (Longhorn issue
-// 14096), and the storage defaults Kipper relies on written out so a Longhorn
-// upgrade cannot change them. Requiring exactly one settings header catches
-// format changes before installation.
+// 14096), node-down pod deletion and fast RWX failover off to leave pod
+// recovery to the fence, and the storage defaults Kipper relies on written out
+// so a Longhorn upgrade cannot change them. Requiring exactly one settings
+// header catches format changes before installation.
 var longhornSettingsFunc = longhornSettingsFuncName + `() {
   header='  default-setting.yaml: |-'
   [ "$(grep -cxF "$header" "$1")" = 1 ] || { echo "expected exactly one default-setting block in the Longhorn manifest" >&2; return 1; }

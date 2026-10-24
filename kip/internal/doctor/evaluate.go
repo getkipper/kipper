@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/getkipper/kipper/controller/pkg/stranded"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 
@@ -60,14 +62,7 @@ func CheckNodes(snap Snapshot) Result {
 	return Result{ID: "nodes", Label: "Nodes", Status: Pass, Message: fmt.Sprintf("%d %s Ready", len(snap.Nodes), plural(len(snap.Nodes), "node", "nodes"))}
 }
 
-func nodeReady(n corev1.Node) bool {
-	for _, c := range n.Status.Conditions {
-		if c.Type == corev1.NodeReady {
-			return c.Status == corev1.ConditionTrue
-		}
-	}
-	return false
-}
+func nodeReady(n corev1.Node) bool { return stranded.Ready(&n) }
 
 // CheckWorkloads returns results in CoreWorkloads order. A missing workload,
 // zero desired replicas or fewer available replicas than requested fails the

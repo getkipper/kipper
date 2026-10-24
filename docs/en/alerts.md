@@ -46,6 +46,10 @@ When a rollout exceeds its Kubernetes progress deadline, the controller raises a
 
 When total memory usage across all pods exceeds 80% of the node's allocatable memory, the controller generates a warning alert listing the top consumers and any anomalies. At 90%+, the alert is marked critical. The alert includes which workloads are using the most memory and which ones have grown significantly in the last 10 minutes.
 
+### Nodes that are down
+
+When a node is not Ready, or is fenced, the controller raises a critical alert on its next check and repeats it at most once every 30 minutes while the node stays down. When the node hosts Kipper services with a single-node Longhorn volume, the alert names each service, the nodes that hold a current copy of its data, and the command `kip node fence <node>` to run once you know the node is down for good. The copy locations are left out when Longhorn's replicas cannot be read. The alert for a fenced node names `kip node add` to rejoin it and `kip node remove <node> --force` to remove it. See [When a node dies](/en/worker-nodes#when-a-node-dies).
+
 ### Autoscaling
 
 For an app with [autoscaling](/en/deploying-apps#autoscaling), two situations raise a warning:

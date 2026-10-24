@@ -60,6 +60,10 @@ func TestCheckNodes(t *testing.T) {
 	assert.Equal(t, Fail, failed.Status)
 	assert.Contains(t, failed.Message, "server-1 is not Ready")
 
+	fenced := node("worker-1", corev1.ConditionTrue)
+	fenced.Spec.Taints = []corev1.Taint{{Key: "node.kubernetes.io/out-of-service", Effect: corev1.TaintEffectNoExecute}}
+	assert.Equal(t, Fail, CheckNodes(Snapshot{Nodes: []corev1.Node{node("server-1", corev1.ConditionTrue), fenced}}).Status, "a fenced node is not Ready")
+
 	unread := CheckNodes(Snapshot{Missing: map[Part]error{PartNodes: errors.New("refused")}})
 	assert.Equal(t, Skip, unread.Status)
 	assert.Contains(t, unread.Message, "not checked")

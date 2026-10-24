@@ -203,7 +203,7 @@ func unbackedVolumesProblem(ctx context.Context, cs kubernetes.Interface) (strin
 	if len(outside) == 0 {
 		return "", nil
 	}
-	return fmt.Sprintf("Longhorn upgrades need a backup of every volume, and no regular container in a running pod mounts %s, so the backup would omit %s files. Start the app that uses %s with kip app start <app>, or remove a volume you no longer need, then run %s",
+	return fmt.Sprintf("Longhorn upgrades need a backup of every volume, and no regular container in a running pod mounts %s, so the backup would omit %s files. Start the app that uses %s with kip app start <app>, or a service kip node fence stopped with kip service start <name>, or remove a volume you no longer need, then run %s",
 		strings.Join(outside, ", "), plural(len(outside), "its", "their"), plural(len(outside), "it", "each"), installer.LonghornUpgradeCommand), nil
 }
 
