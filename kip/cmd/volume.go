@@ -55,14 +55,20 @@ var volumeDeleteCmd = &cobra.Command{
 }
 
 var volumeUpdateCmd = &cobra.Command{
-	Use:   "update [name] --copies 1|2",
-	Short: "Set the copies of a shared volume whose copies are unset",
-	Long: `Set the copies of a shared volume created before Kipper managed copies.
-The value must match the number of copies the volume has now. Changing that
-number on an existing volume is not available yet.
+	Use:   "update [name] --copies 1",
+	Short: "Change the copies of a shared volume",
+	Long: `Change the copies of a shared volume. Kipper converts the live volume one
+step at a time and keeps the copy on the server. A reduction waits until no app
+mounts the volume and stops the volume's backup holder until the extra copy is
+gone. This Kipper release converts shared volumes to one copy. A request for
+two copies is accepted only to stop a blocked or pending reduction to one, and
+the volume keeps its existing copies. On a cluster that offers one copy,
+stopping the reduction requires an admin. With --wait, the command exits
+non-zero and explains why the change is blocked. Run it again once the reason
+clears.
 
 Examples:
-  kip volume update uploads --copies 1`,
+  kip volume update uploads --copies 1 --wait`,
 	Args: cobra.ExactArgs(1),
 	RunE: runVolumeUpdate,
 }
@@ -85,7 +91,7 @@ func init() {
 	volumeCreateCmd.Flags().String("size", "5Gi", "volume size")
 	volumeCreateCmd.Flags().String("project", "", "project name")
 	volumeCreateCmd.Flags().String("environment", "", "target environment")
-	volumeCreateCmd.Flags().Int32("copies", 1, copiesFlagHelp)
+	volumeCreateCmd.Flags().Int32("copies", 1, sharedCopiesCreateHelp)
 
 	volumeListCmd.Flags().String("project", "", "project name")
 	volumeListCmd.Flags().String("environment", "", "target environment")
@@ -96,7 +102,8 @@ func init() {
 
 	volumeUpdateCmd.Flags().String("project", "", "project name")
 	volumeUpdateCmd.Flags().String("environment", "", "target environment")
-	volumeUpdateCmd.Flags().Int32("copies", 1, "copies the volume has now: 1 or 2")
+	volumeUpdateCmd.Flags().Int32("copies", 0, sharedCopiesHelp)
+	volumeUpdateCmd.Flags().Bool("wait", false, "wait until the conversion is done and every copy is healthy. The command exits non-zero when the change is blocked")
 	_ = volumeUpdateCmd.MarkFlagRequired("copies")
 
 	volumeMountCmd.Flags().String("path", "/data", "mount path inside the container")
@@ -203,12 +210,15 @@ func runVolumeUpdate(cmd *cobra.Command, args []string) error {
 	if ns == "" {
 		return fmt.Errorf("no project context. Set one with `kip project use <name>` or pass --project")
 	}
-	changed, err := adoptCopies(context.Background(), k8sClient.Dynamic(), manifest.VolumeGVR, ns, name, copies)
+	wait, _ := cmd.Flags().GetBool("wait")
+	fmt.Println()
+	err = setCopies(context.Background(), os.Stdout, k8sClient.Dynamic(), copiesChange{
+		gvr: manifest.VolumeGVR, namespace: ns, name: name, want: copies, shared: true, wait: wait,
+		infoCommand: "kip volume list",
+	})
 	if err != nil {
 		return err
 	}
-	fmt.Println()
-	sayCopiesAdopted(os.Stdout, changed, copies)
 	fmt.Println()
 	return nil
 }

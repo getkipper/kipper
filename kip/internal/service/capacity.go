@@ -8,6 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/controller/pkg/servicecatalog"
 )
 
@@ -52,47 +53,11 @@ func (m *Manager) NodeHeadroom(ctx context.Context) ([]NodeHeadroom, error) {
 		if !ok || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 			continue
 		}
-		cpu, memory := effectiveRequest(&pod.Spec)
+		cpu, memory := platform.PodRequests(&pod.Spec)
 		out[at].CPUMilli -= cpu
 		out[at].MemoryBytes -= memory
 	}
 	return out, nil
-}
-
-// effectiveRequest returns peak CPU and memory requests across init and running
-// containers, including restartable init containers that run alongside them.
-// Pod-level requests override each resource's aggregate before overhead is added.
-func effectiveRequest(spec *corev1.PodSpec) (cpuMilli, memoryBytes int64) {
-	var sidecarCPU, sidecarMemory, peakCPU, peakMemory int64
-	for _, c := range spec.InitContainers {
-		cpu, memory := c.Resources.Requests.Cpu().MilliValue(), c.Resources.Requests.Memory().Value()
-		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
-			sidecarCPU += cpu
-			sidecarMemory += memory
-			cpu, memory = sidecarCPU, sidecarMemory
-		} else {
-			cpu += sidecarCPU
-			memory += sidecarMemory
-		}
-		peakCPU, peakMemory = max(peakCPU, cpu), max(peakMemory, memory)
-	}
-	cpuMilli, memoryBytes = sidecarCPU, sidecarMemory
-	for _, c := range spec.Containers {
-		cpuMilli += c.Resources.Requests.Cpu().MilliValue()
-		memoryBytes += c.Resources.Requests.Memory().Value()
-	}
-	cpuMilli, memoryBytes = max(cpuMilli, peakCPU), max(memoryBytes, peakMemory)
-	if spec.Resources != nil {
-		if q, ok := spec.Resources.Requests[corev1.ResourceCPU]; ok {
-			cpuMilli = q.MilliValue()
-		}
-		if q, ok := spec.Resources.Requests[corev1.ResourceMemory]; ok {
-			memoryBytes = q.Value()
-		}
-	}
-	cpuMilli += spec.Overhead.Cpu().MilliValue()
-	memoryBytes += spec.Overhead.Memory().Value()
-	return cpuMilli, memoryBytes
 }
 
 func nodeReady(n *corev1.Node) bool {

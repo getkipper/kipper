@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -74,6 +75,7 @@ type ServiceReconciler struct {
 	// RouteNames says whether this process may publish a UI route that does
 	// not exist yet. Nil disables tenant route-name reservations.
 	RouteNames *RouteNameGate
+	Recorder   record.EventRecorder
 }
 
 func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -170,7 +172,7 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	after := serviceRouteNameRetry(&svc)
 	// Nothing watches Longhorn, so the copies in the status are read again on a timer.
-	after = earliest(after, storageRefresh(meta.FindStatusCondition(svc.Status.Conditions, kipperv1.ConditionStorageCopies)))
+	after = earliest(after, storageRequeue(svc.Status.Conditions))
 	// This controller does not watch pods, so deletion conflicts need a retry.
 	if lookAgain && (after == 0 || after > pendingPodRetry) {
 		after = pendingPodRetry

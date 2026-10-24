@@ -50,7 +50,7 @@ func TestStatusListsUnsetCopiesAndCopiesNeedingAttention(t *testing.T) {
 		copiesStatusObject("Service", "shop", "new", 0, "Unknown", "Pending", "The volume is not provisioned yet."),
 		copiesStatusObject("Volume", "shop", "files", 0, "Unknown", "NotSet", "Copies are not set"),
 		copiesStatusObject("Volume", "blog", "media", 0, "False", "RWXNotQualified", "Shared volumes cannot have two copies."),
-		copiesStatusObject("Project", "", "shop", 0, "Unknown", "NotSet", "Copies are not set. Set them with 'kubectl patch project shop'."),
+		copiesStatusObject("Project", "", "shop", 0, "Unknown", "NotSet", "Copies are not set. Set them with 'kip project update shop --copies 1'."),
 		copiesStatusObject("Service", "old", "legacy", 0, "", "", ""),
 	)
 
@@ -62,7 +62,9 @@ func TestStatusListsUnsetCopiesAndCopiesNeedingAttention(t *testing.T) {
 	assert.Contains(t, got, "shop/db (service, 3 copies)")
 	assert.Contains(t, got, "shop/files (volume)")
 	assert.Contains(t, got, "shared storage of project shop")
-	assert.Contains(t, got, "kubectl patch project shop", "a project names its own command, since kip has none for it")
+	assert.Contains(t, got, "'kip project update shop --copies 1'", "a project shows the controller's message with its command")
+	assert.Contains(t, got, "'kip project update <project> --copies <n>'")
+	assert.NotContains(t, got, "kubectl")
 	assert.Contains(t, got, "Storage copies needing attention:")
 	assert.Contains(t, got, "✗  shop/queue (service)\n       1 of 2 copies are healthy.")
 	assert.Contains(t, got, "✗  shop/search (service)\n       1 of 2 copies are healthy, and Kipper could not read", "a copy Kipper cannot vouch for is not reported as healthy")
@@ -78,4 +80,17 @@ func TestStatusPrintsNothingAboutCopiesWhenAllIsWell(t *testing.T) {
 		copiesStatusObject("Service", "shop", "cache", 2, "True", "Healthy", "2 of 2 copies are healthy."),
 	))
 	assert.Empty(t, out.String())
+}
+
+func TestStatusListsConversionsApartFromProblems(t *testing.T) {
+	var out bytes.Buffer
+	reportStorageCopies(context.Background(), &out, copiesStatusClient(
+		copiesStatusObject("Service", "shop", "db", 1, "False", "Converting", "Longhorn is building a copy of the volume (1 of 2 copies healthy)."),
+		copiesStatusObject("Service", "shop", "queue", 1, "False", "ConversionPending", "Another volume's copies are being converted."),
+		copiesStatusObject("Volume", "shop", "files", 2, "False", "Blocked", "The server has no room for a copy of this volume (5.0 GiB)."),
+	))
+	got := out.String()
+	assert.Contains(t, got, "Storage copies being converted:\n    …  shop/db (service)\n       Longhorn is building a copy")
+	assert.Contains(t, got, "…  shop/queue (service)")
+	assert.Contains(t, got, "Storage copies needing attention:\n    ✗  shop/files (volume)\n       The server has no room")
 }

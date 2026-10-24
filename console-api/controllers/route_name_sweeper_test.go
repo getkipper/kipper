@@ -76,23 +76,28 @@ func TestRouteNameGate_AdmitsOnlyWhileOpenAndClosingWaitsForAdmittedWrites(t *te
 	assert.False(t, ok)
 }
 
-func TestRouteNameSweeper_WaitsOnlyForLiveEarlierPods(t *testing.T) {
+// A pod of the same binary publishes routes only while it holds the
+// controller Lease, which this pod holds now, so the leader starts beside it
+// whatever its age. A pod of another binary may publish without the Lease, so
+// the leader waits until it stops.
+func TestRouteNameSweeper_WaitsOnlyForLivePodsOfAnotherBinary(t *testing.T) {
 	now := planNow
 	cases := map[string]struct {
 		other *corev1.Pod
 		want  bool
 	}{
-		"an earlier pod still running": {consoleAPIPod("console-api-old", "img-old", now.Add(-time.Hour), corev1.PodRunning), true},
-		"an earlier pod evicted":       {consoleAPIPod("console-api-old", "img-old", now.Add(-time.Hour), corev1.PodFailed), false},
-		"an earlier pod that finished": {consoleAPIPod("console-api-old", "img-old", now.Add(-time.Hour), corev1.PodSucceeded), false},
-		"a later pod":                  {consoleAPIPod("console-api-later", "img-new", now.Add(time.Minute), corev1.PodRunning), false},
+		"an earlier pod of the same binary":        {consoleAPIPod("console-api-old", "img-new", now.Add(-time.Hour), corev1.PodRunning), true},
+		"an earlier pod of another binary":         {consoleAPIPod("console-api-old", "img-old", now.Add(-time.Hour), corev1.PodRunning), false},
+		"an earlier pod of another binary evicted": {consoleAPIPod("console-api-old", "img-old", now.Add(-time.Hour), corev1.PodFailed), true},
+		"an earlier pod of another binary done":    {consoleAPIPod("console-api-old", "img-old", now.Add(-time.Hour), corev1.PodSucceeded), true},
+		"a later pod of the same binary":           {consoleAPIPod("console-api-later", "img-new", now.Add(time.Minute), corev1.PodRunning), true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			c := crfake.NewClientBuilder().WithScheme(testScheme()).
 				WithObjects(consoleAPIPod("console-api-new", "img-new", now, corev1.PodRunning), tc.other).Build()
 
-			got, err := newSweeper(c, now).earlierPodsLive(context.Background())
+			got, err := newSweeper(c, now).readyToStart(context.Background(), "img-new")
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 		})

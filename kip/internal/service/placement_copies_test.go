@@ -54,22 +54,24 @@ func longhornPlacementManager(nodes []runtime.Object, replicas ...runtime.Object
 func TestPlacementCountsCurrentCopiesOnAvailableNodesOnce(t *testing.T) {
 	fence := corev1.Taint{Key: "node.kubernetes.io/out-of-service", Effect: corev1.TaintEffectNoExecute}
 	for name, tc := range map[string]struct {
-		nodes []runtime.Object
-		extra []runtime.Object
-		want  []string
+		nodes       []runtime.Object
+		extra       []runtime.Object
+		want        []string
+		unavailable []string
 	}{
-		"two ready holders": {[]runtime.Object{placementNode("worker-1", corev1.ConditionTrue)}, nil, []string{"server-1", "worker-1"}},
-		"a fenced holder":   {[]runtime.Object{placementNode("worker-1", corev1.ConditionTrue, fence)}, nil, []string{"server-1"}},
-		"a NotReady holder": {[]runtime.Object{placementNode("worker-1", corev1.ConditionFalse)}, nil, []string{"server-1"}},
-		"a missing holder":  {nil, nil, []string{"server-1"}},
+		"two ready holders": {[]runtime.Object{placementNode("worker-1", corev1.ConditionTrue)}, nil, []string{"server-1", "worker-1"}, nil},
+		"a fenced holder":   {[]runtime.Object{placementNode("worker-1", corev1.ConditionTrue, fence)}, nil, []string{"server-1"}, []string{"worker-1"}},
+		"a NotReady holder": {[]runtime.Object{placementNode("worker-1", corev1.ConditionFalse)}, nil, []string{"server-1"}, []string{"worker-1"}},
+		"a missing holder":  {nil, nil, []string{"server-1"}, nil},
 		"a second replica on the same node": {[]runtime.Object{placementNode("worker-1", corev1.ConditionTrue)},
-			[]runtime.Object{placementReplica("r3", "server-1", "")}, []string{"server-1", "worker-1"}},
+			[]runtime.Object{placementReplica("r3", "server-1", "")}, []string{"server-1", "worker-1"}, nil},
 	} {
 		replicas := append([]runtime.Object{placementReplica("r1", "server-1", ""), placementReplica("r2", "worker-1", "")}, tc.extra...)
 		mgr := longhornPlacementManager(append([]runtime.Object{placementNode("server-1", corev1.ConditionTrue)}, tc.nodes...), replicas...)
 		p, err := mgr.Placement(context.Background(), "shop", "db")
 		require.NoError(t, err, name)
 		assert.Equal(t, tc.want, p.DataNodes, name)
+		assert.Equal(t, tc.unavailable, p.UnavailableNodes, name)
 		assert.Empty(t, p.UncheckedNodes, name)
 	}
 }
@@ -101,4 +103,51 @@ func TestPlacementNamesHoldersWhoseNodeCannotBeRead(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"server-1"}, p.DataNodes)
 	assert.Equal(t, []string{"worker-1"}, p.UncheckedNodes)
+}
+
+func placementVolume(state string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "longhorn.io/v1beta2", "kind": "Volume",
+		"metadata": map[string]interface{}{"name": "pvc-1", "namespace": "longhorn-system"},
+		"status":   map[string]interface{}{"state": state},
+	}}
+}
+
+// Data placement uses the same definition of a healthy copy as the service's
+// copies status: a copy that served writes again after a salvage holds the
+// data, and so does the copy of a volume no pod has mounted yet.
+func TestPlacementCountsTheCopiesTheStatusCounts(t *testing.T) {
+	served := placementReplica("r1", "server-1", "2026-10-24T02:00:00Z")
+	_ = unstructured.SetNestedField(served.Object, "2026-10-24T02:00:10Z", "spec", "lastHealthyAt")
+	unused := placementReplica("r1", "server-1", "")
+	_ = unstructured.SetNestedField(unused.Object, "", "spec", "healthyAt")
+	for name, objs := range map[string][]runtime.Object{
+		"salvaged and served again": {placementVolume("attached"), served},
+		"never attached":            {placementVolume("detached"), unused},
+	} {
+		mgr := longhornPlacementManager([]runtime.Object{placementNode("server-1", corev1.ConditionTrue)}, objs...)
+		p, err := mgr.Placement(context.Background(), "shop", "db")
+		require.NoError(t, err, name)
+		assert.Equal(t, []string{"server-1"}, p.DataNodes, name)
+	}
+}
+
+// A volume restored from a backup has no data in its unmarked copies until
+// the restore completes, and a reused replica keeps its failure history.
+func TestPlacementLeavesOutUnmarkedCopiesOfAVolumeThatHadOrAwaitsData(t *testing.T) {
+	restoring := placementVolume("detached")
+	_ = unstructured.SetNestedField(restoring.Object, "s3://backups@example/?backup=backup-1&volume=pvc-0", "spec", "fromBackup")
+	unused := placementReplica("r1", "server-1", "")
+	_ = unstructured.SetNestedField(unused.Object, "", "spec", "healthyAt")
+	reused := placementReplica("r1", "server-1", "2026-10-24T02:00:00Z")
+	_ = unstructured.SetNestedField(reused.Object, "", "spec", "healthyAt")
+	for name, objs := range map[string][]runtime.Object{
+		"restore pending":      {restoring, unused},
+		"reused for a rebuild": {placementVolume("detached"), reused},
+	} {
+		mgr := longhornPlacementManager([]runtime.Object{placementNode("server-1", corev1.ConditionTrue)}, objs...)
+		p, err := mgr.Placement(context.Background(), "shop", "db")
+		require.NoError(t, err, name)
+		assert.Empty(t, p.DataNodes, name)
+	}
 }

@@ -308,8 +308,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("reading %s: %w", comp.name, getErr)
 		}
 		var moved string
-		hardened := false
-		var imagesMoved []string
+		var consoleNotes []string
 		mutate := func(dep *appsv1.Deployment) error {
 			if dep.Spec.Template.Annotations == nil {
 				dep.Spec.Template.Annotations = make(map[string]string)
@@ -327,23 +326,15 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 				moved = m
 			}
 
-			// Deliver the pod-spec hardening the install manifest carries.
-			// Restarting a cluster-powerful component onto a new image while
-			// leaving it with the privileges of whenever the cluster was
-			// installed is the gap that let every existing cluster run the
-			// current console-api unhardened.
+			// Apply the install manifest's pod settings alongside the image update.
+			// Older installations otherwise retain their original privileges,
+			// leaving console-api unhardened despite running the current image.
 			if comp.name == consoleAPIName {
-				applied, hardenErr := applyConsoleAPIHardening(dep)
-				if hardenErr != nil {
-					return fmt.Errorf("rendering console-api pod spec: %w", hardenErr)
+				notes, specErr := applyConsoleAPIInstallSpec(dep, imageTag)
+				if specErr != nil {
+					return specErr
 				}
-				hardened = applied
-
-				repointed, imageErr := applyPlatformImageEnv(dep, imageTag)
-				if imageErr != nil {
-					return fmt.Errorf("rendering console-api platform images: %w", imageErr)
-				}
-				imagesMoved = repointed
+				consoleNotes = notes
 			}
 			return nil
 		}
@@ -355,11 +346,8 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("upgrading %s: %w", comp.name, err)
 		}
 
-		if hardened {
-			moved += " (pod hardening applied)"
-		}
-		for _, m := range imagesMoved {
-			moved += " (" + m + ")"
+		for _, note := range consoleNotes {
+			moved += " (" + note + ")"
 		}
 
 		// The API accepting a template is not the same as the cluster running it.
@@ -748,6 +736,83 @@ func applyPlatformImageEnv(deploy *appsv1.Deployment, imageTag string) ([]string
 		}
 	}
 	return moved, nil
+}
+
+// applyPodUIDEnv sets console-api's POD_UID from metadata.uid so its controller
+// Lease identity survives container restarts, including on older installations
+// that gain the variable on upgrade. Other variables are preserved. It reports
+// whether the deployment changed and returns false if console-api is absent.
+func applyPodUIDEnv(deploy *appsv1.Deployment) bool {
+	idx := consoleAPIContainerIndex(deploy.Spec.Template.Spec.Containers)
+	if idx < 0 {
+		return false
+	}
+	live := &deploy.Spec.Template.Spec.Containers[idx]
+	want := corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}}
+	changed, found := false, false
+	for i := range live.Env {
+		if live.Env[i].Name != want.Name {
+			continue
+		}
+		found = true
+		if live.Env[i].Value != "" || live.Env[i].ValueFrom == nil || live.Env[i].ValueFrom.FieldRef == nil ||
+			live.Env[i].ValueFrom.FieldRef.FieldPath != "metadata.uid" {
+			live.Env[i] = want
+			changed = true
+		}
+	}
+	if !found {
+		live.Env = append(live.Env, want)
+		changed = true
+	}
+	return changed
+}
+
+// applyConsoleAPIInstallSpec gives console-api the hardening, platform image
+// variables, pod UID variable and grace period from the install manifest.
+// A non-empty imageTag overrides the platform image tags. It returns notes
+// for hardening, image and grace-period changes. An error may leave dep
+// partially updated.
+func applyConsoleAPIInstallSpec(dep *appsv1.Deployment, imageTag string) ([]string, error) {
+	var notes []string
+	hardened, err := applyConsoleAPIHardening(dep)
+	if err != nil {
+		return nil, fmt.Errorf("rendering console-api pod spec: %w", err)
+	}
+	if hardened {
+		notes = append(notes, "pod hardening applied")
+	}
+	repointed, err := applyPlatformImageEnv(dep, imageTag)
+	if err != nil {
+		return nil, fmt.Errorf("rendering console-api platform images: %w", err)
+	}
+	notes = append(notes, repointed...)
+	applyPodUIDEnv(dep)
+	graced, err := applyConsoleAPIGracePeriod(dep)
+	if err != nil {
+		return nil, fmt.Errorf("rendering console-api grace period: %w", err)
+	}
+	if grace := dep.Spec.Template.Spec.TerminationGracePeriodSeconds; graced && grace != nil {
+		notes = append(notes, fmt.Sprintf("termination grace period set to %ds", *grace))
+	}
+	return notes, nil
+}
+
+// applyConsoleAPIGracePeriod sets console-api's termination grace period to the
+// install manifest's, which bounds the drain of its reconciles and HTTP requests
+// on shutdown. It reports whether the deployment changed.
+func applyConsoleAPIGracePeriod(deploy *appsv1.Deployment) (bool, error) {
+	desired, err := installer.DesiredConsoleAPIDeployment()
+	if err != nil {
+		return false, err
+	}
+	want := desired.Spec.Template.Spec.TerminationGracePeriodSeconds
+	live := &deploy.Spec.Template.Spec
+	if reflect.DeepEqual(live.TerminationGracePeriodSeconds, want) {
+		return false, nil
+	}
+	live.TerminationGracePeriodSeconds = want
+	return true, nil
 }
 
 // applyConsoleAPIHardening applies security contexts and writable mounts from the
@@ -1590,9 +1655,15 @@ func upgradeRBACSteps() []rbacStep {
 
 // applyAdmissionPolicies creates or updates the admission policies kip install
 // applies, so existing clusters get them on upgrade. The copies offer is
-// rendered from the PlatformConfig, so an upgrade keeps the admin's offer.
+// rendered from the PlatformConfig, so an upgrade keeps the admin's offer, and
+// the server node list from the nodes labeled installer.ServerNodeLabel. A
+// failed node read applies nothing.
 func applyAdmissionPolicies(ctx context.Context, dynClient dynamic.Interface) error {
-	manifests, err := installer.AdmissionPolicyManifests(recordedCopiesOffer(ctx, dynClient))
+	servers, err := serverNodeNames(ctx, dynClient)
+	if err != nil {
+		return err
+	}
+	manifests, err := installer.AdmissionPolicyManifests(recordedCopiesOffer(ctx, dynClient), servers)
 	if err != nil {
 		return err
 	}
@@ -1602,6 +1673,21 @@ func applyAdmissionPolicies(ctx context.Context, dynClient dynamic.Interface) er
 		}
 	}
 	return nil
+}
+
+var nodeGVR = schema.GroupVersionResource{Version: "v1", Resource: "nodes"}
+
+// serverNodeNames lists the nodes labeled installer.ServerNodeLabel.
+func serverNodeNames(ctx context.Context, dynClient dynamic.Interface) ([]string, error) {
+	list, err := dynClient.Resource(nodeGVR).List(ctx, metav1.ListOptions{LabelSelector: installer.ServerNodeLabel})
+	if err != nil {
+		return nil, fmt.Errorf("listing the server nodes: %w", err)
+	}
+	names := make([]string, 0, len(list.Items))
+	for _, n := range list.Items {
+		names = append(names, n.GetName())
+	}
+	return names, nil
 }
 
 // applyConsoleRBAC creates or updates the console-api ServiceAccount,

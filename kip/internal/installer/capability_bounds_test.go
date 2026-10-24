@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -191,15 +192,28 @@ func TestConsoleClusterRoleCanAdoptVolumeHolders(t *testing.T) {
 	}
 }
 
-// The copies status reads Longhorn's objects without a watch, and console-api
-// changes none of them.
-func TestConsoleClusterRoleReadsLonghornWithoutWatchOrWrites(t *testing.T) {
+// console-api reads Longhorn without a watch, and its only writes are the ones
+// a copies conversion needs: patching a volume, its replicas and engines to
+// switch the revision counter on, and patching its attachment for the hold on
+// the server. It deletes no replica.
+func TestConsoleClusterRoleHoldsOnlyTheLonghornVerbsConversionNeeds(t *testing.T) {
 	console := parseConsoleClusterRole(t)
-	for _, resource := range []string{"volumes", "replicas", "engines", "nodes", "settings"} {
-		for _, verb := range []string{"get", "list"} {
-			require.True(t, grants(console, "longhorn.io", resource, verb), "console-api needs %s on %s", verb, resource)
+	allowed := map[string][]string{
+		"volumes":           {"get", "list", "patch"},
+		"replicas":          {"get", "list", "patch"},
+		"engines":           {"get", "list", "patch"},
+		"volumeattachments": {"get", "patch"},
+		"nodes":             {"get", "list"},
+		"settings":          {"get", "list"},
+	}
+	for resource, verbs := range allowed {
+		for _, verb := range []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"} {
+			want := slices.Contains(verbs, verb)
+			require.Equal(t, want, grants(console, "longhorn.io", resource, verb), "console-api %s on %s: want %v", verb, resource, want)
 		}
-		for _, verb := range []string{"watch", "create", "update", "patch", "delete"} {
+	}
+	for _, resource := range []string{"engineimages", "instancemanagers", "sharemanagers", "*"} {
+		for _, verb := range []string{"create", "update", "patch", "delete"} {
 			require.False(t, grants(console, "longhorn.io", resource, verb), "console-api must not %s %s", verb, resource)
 		}
 	}

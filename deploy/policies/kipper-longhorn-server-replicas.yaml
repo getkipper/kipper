@@ -1,0 +1,39 @@
+# console-api deletes Longhorn replicas when it lowers a volume's copies, and
+# never one on a server. kip renders the server node names into the
+# serverNodes variable on install, upgrade, kip cluster storage, kip node add
+# and kip node remove. The policy reads no parameter, and an empty list denies
+# every replica delete by console-api. Other users, Longhorn's own manager
+# among them, are not matched.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kipper-longhorn-server-replicas
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["longhorn.io"]
+        apiVersions: ["*"]
+        operations: ["DELETE"]
+        resources: ["replicas"]
+  matchConditions:
+    - name: console-api
+      expression: "request.userInfo.username == 'system:serviceaccount:kipper-system:console-api'"
+  variables:
+    - name: serverNodes
+      expression: "[]"
+  validations:
+    - expression: "size(variables.serverNodes) > 0 && !(oldObject.spec.nodeID in variables.serverNodes)"
+      message: "console-api never deletes a Longhorn replica on a server node."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kipper-longhorn-server-replicas
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  policyName: kipper-longhorn-server-replicas
+  validationActions: ["Deny"]

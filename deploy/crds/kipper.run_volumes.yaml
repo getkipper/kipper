@@ -176,8 +176,10 @@ spec:
                     type: integer
                   healthyCopies:
                     description: |-
-                      HealthyCopies is the number of Ready, unfenced nodes holding a current
-                      copy. Local storage always reports 1.
+                      HealthyCopies is the number of Ready, unfenced nodes holding a complete
+                      copy: one rebuilt or serving again since its last failure, or one of a
+                      volume created empty that was never attached. Local storage always
+                      reports 1.
                     format: int32
                     type: integer
                   nodes:

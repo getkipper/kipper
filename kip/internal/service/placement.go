@@ -17,23 +17,30 @@ import (
 // LonghornReplicaGVR identifies Longhorn replica resources.
 var LonghornReplicaGVR = schema.GroupVersionResource{Group: "longhorn.io", Version: "v1beta2", Resource: "replicas"}
 
+var longhornVolumeGVR = schema.GroupVersionResource{Group: "longhorn.io", Version: "v1beta2", Resource: "volumes"}
+
 // Placement describes a service's pod location and data nodes.
 type Placement struct {
-	PodNode        string
-	Unscheduled    string
-	DataNodes      []string
-	UncheckedNodes []string
+	PodNode          string
+	Unscheduled      string
+	DataNodes        []string
+	UnavailableNodes []string
+	UncheckedNodes   []string
 }
 
 // Placement reads the service's pod location and scheduler failure message.
 // For Longhorn volumes, DataNodes lists distinct nodes holding healthy copies
-// in alphabetical order. A healthy copy passes [platform.ReplicaCurrent] and
-// [platform.NodeAvailable]. UncheckedNodes lists distinct nodes with current
-// replicas whose lookup failed, sorted alphabetically and excluding missing nodes.
+// in alphabetical order. A healthy copy passes [platform.HealthyCopies] and
+// [platform.NodeAvailable]. UnavailableNodes lists distinct nodes that hold a
+// healthy copy but are not Ready or are fenced, in alphabetical order.
+// UncheckedNodes lists distinct nodes with healthy copies whose lookup failed,
+// sorted alphabetically and excluding missing nodes.
 // For local-path volumes, DataNodes comes from node affinity without a health check.
 // Missing pods and missing or unbound claims leave the corresponding fields empty.
-// Other read failures return an error and may include a partial result with the
-// pod location.
+// A missing Longhorn volume leaves health checks to replica markers, so
+// unmarked replicas cannot qualify as copies of an empty volume. Node lookup
+// failures populate UncheckedNodes. Other read failures return an error and
+// may include a partial result with the pod location.
 func (m *Manager) Placement(ctx context.Context, namespace, name string) (Placement, error) {
 	var p Placement
 	pod, err := m.Client.CoreV1().Pods(namespace).Get(ctx, name+"-0", metav1.GetOptions{})
@@ -66,17 +73,31 @@ func (m *Manager) Placement(ctx context.Context, namespace, name string) (Placem
 	if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != "driver.longhorn.io" {
 		return p, fmt.Errorf("the data volume of %s is not a Longhorn volume", name)
 	}
+	var copyVolume platform.CopyVolume
+	volume, err := m.Dynamic.Resource(longhornVolumeGVR).Namespace("longhorn-system").Get(ctx, pv.Spec.CSI.VolumeHandle, metav1.GetOptions{})
+	switch {
+	case err == nil:
+		copyVolume = platform.CopyVolumeOf(volume.Object)
+	case !errors.IsNotFound(err):
+		return p, fmt.Errorf("reading the data volume of %s: %w", name, err)
+	}
 	replicas, err := m.Dynamic.Resource(LonghornReplicaGVR).Namespace("longhorn-system").List(ctx, metav1.ListOptions{LabelSelector: "longhornvolume=" + pv.Spec.CSI.VolumeHandle})
 	if err != nil {
 		return p, fmt.Errorf("reading the replicas of %s: %w", name, err)
 	}
+	markers := make([]platform.CopyMarkers, len(replicas.Items))
+	for i, r := range replicas.Items {
+		str := func(field string) string {
+			v, _, _ := unstructured.NestedString(r.Object, "spec", field)
+			return v
+		}
+		markers[i] = platform.CopyMarkers{HealthyAt: str("healthyAt"), FailedAt: str("failedAt"), LastFailedAt: str("lastFailedAt"), LastHealthyAt: str("lastHealthyAt")}
+	}
+	healthy := platform.HealthyCopies(copyVolume, markers)
 	seen := map[string]bool{}
-	for _, r := range replicas.Items {
+	for i, r := range replicas.Items {
 		node, _, _ := unstructured.NestedString(r.Object, "spec", "nodeID")
-		healthyAt, _, _ := unstructured.NestedString(r.Object, "spec", "healthyAt")
-		failedAt, _, _ := unstructured.NestedString(r.Object, "spec", "failedAt")
-		lastFailedAt, _, _ := unstructured.NestedString(r.Object, "spec", "lastFailedAt")
-		if node == "" || seen[node] || !platform.ReplicaCurrent(healthyAt, failedAt, lastFailedAt) {
+		if node == "" || seen[node] || !healthy[i] {
 			continue
 		}
 		seen[node] = true
@@ -85,12 +106,15 @@ func (m *Manager) Placement(ctx context.Context, namespace, name string) (Placem
 		case err == nil:
 			if platform.NodeAvailable(holder) {
 				p.DataNodes = append(p.DataNodes, node)
+			} else {
+				p.UnavailableNodes = append(p.UnavailableNodes, node)
 			}
 		case !errors.IsNotFound(err):
 			p.UncheckedNodes = append(p.UncheckedNodes, node)
 		}
 	}
 	sort.Strings(p.DataNodes)
+	sort.Strings(p.UnavailableNodes)
 	sort.Strings(p.UncheckedNodes)
 	return p, nil
 }

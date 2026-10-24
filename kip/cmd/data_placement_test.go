@@ -68,7 +68,7 @@ func (p placementRunner) Run(cmd string) (string, error) {
 	case strings.Contains(cmd, "get pv "):
 		return "longhorn-single\tpvc-db\n", nil
 	case strings.Contains(cmd, "get volumes.longhorn.io"):
-		return "pvc-db\t" + p.selector + "\tshop\tdata-db-0\n", nil
+		return "pvc-db\t" + p.selector + "\tshop\tdata-db-0\t1\t5\n", nil
 	case strings.Contains(cmd, "replicas.longhorn.io"):
 		return p.replicas, nil
 	}
@@ -234,6 +234,18 @@ func TestWritePlacementCountsCopiesAndNamesUncheckedHolders(t *testing.T) {
 	out.Reset()
 	writePlacement(&out, service.Placement{PodNode: "server-1", DataNodes: []string{"server-1", "worker-1"}}, nil)
 	assert.Contains(t, out.String(), "Data node: server-1, worker-1 (2 copies)\n")
+}
+
+// A copy on a node that is down still exists, so info names it rather than
+// counting only the copies on available nodes.
+func TestWritePlacementNamesCopiesOnUnavailableNodes(t *testing.T) {
+	var out bytes.Buffer
+	writePlacement(&out, service.Placement{PodNode: "server-1", DataNodes: []string{"server-1"}, UnavailableNodes: []string{"worker-1"}}, nil)
+	assert.Contains(t, out.String(), "Data node: server-1 (1 copy). A copy is on worker-1, which is not Ready or is fenced\n")
+
+	out.Reset()
+	writePlacement(&out, service.Placement{PodNode: "server-1", UnavailableNodes: []string{"worker-1", "worker-2"}}, nil)
+	assert.Contains(t, out.String(), "Data node: no copy on an available node. Copies are on worker-1, worker-2, which are not Ready or are fenced\n")
 }
 
 // localStorageHost answers the storage-mode read with local storage and records

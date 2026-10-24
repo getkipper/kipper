@@ -223,6 +223,9 @@ func (r *VolumeReconciler) reconcileHolder(ctx context.Context, vol *kipperv1.Vo
 	key := types.NamespacedName{Namespace: vol.Namespace, Name: volumeHolderName(vol.Name)}
 	var pod corev1.Pod
 	err := r.Get(ctx, key, &pod)
+	if pvc.Annotations[platform.CopyChangeStopAnnotation] != "" {
+		return 0, r.stopHolderForCopyChange(ctx, vol, &pod, err)
+	}
 	if errors.IsNotFound(err) {
 		desired := buildVolumeHolder(vol)
 		if err := controllerutil.SetControllerReference(vol, desired, r.Scheme); err != nil {
@@ -308,6 +311,31 @@ func (r *VolumeReconciler) reconcileHolder(ctx context.Context, vol *kipperv1.Vo
 		return 0, nil
 	}
 	return r.reportHolderNotReady(vol, &pod), nil
+}
+
+// stopHolderForCopyChange removes vol's holder pod, read with getErr, while
+// a copy change waits for the volume to detach. A pod Kipper cannot prove is
+// the holder is left alone, and so is a holder still restoring the volume's
+// files, which the copy change then waits for.
+func (r *VolumeReconciler) stopHolderForCopyChange(ctx context.Context, vol *kipperv1.Volume, pod *corev1.Pod, getErr error) error {
+	switch {
+	case errors.IsNotFound(getErr):
+	case getErr != nil:
+		return getErr
+	case restoreUnfinished(pod):
+		r.setHolderCondition(vol, "Restoring", "The backup holder is restoring the volume's files. The copy change waits until the restore is done.")
+		return nil
+	default:
+		if ok, _ := holderProvenance(pod, vol); ok && pod.DeletionTimestamp == nil {
+			uid := pod.UID
+			if err := r.Delete(ctx, pod, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
+				return fmt.Errorf("stopping backup holder: %w", err)
+			}
+		}
+	}
+	r.setHolderCondition(vol, holderStoppedForCopyChange,
+		"The backup holder is stopped while the volume's copies change, so the volume's files are backed up only while an app mounts it. It starts again once the change is done.")
+	return nil
 }
 
 // replaceHolder saves vol's status before deleting pod to trigger replacement.
@@ -411,6 +439,10 @@ func (r *VolumeReconciler) setHolderReady(vol *kipperv1.Volume) {
 // and RestoreInterrupted warnings when the new reason is Starting. When the
 // condition changes and a recorder is available, reasons other than Starting
 // or Restoring also emit a warning event to draw the operator's attention.
+// holderStoppedForCopyChange is the BackupHolderReady reason while a copy
+// change keeps the holder stopped.
+const holderStoppedForCopyChange = "StoppedForCopyChange"
+
 func (r *VolumeReconciler) setHolderCondition(vol *kipperv1.Volume, reason, message string) {
 	if reason == "Starting" {
 		if c := apimeta.FindStatusCondition(vol.Status.Conditions, conditionBackupHolderReady); c != nil &&

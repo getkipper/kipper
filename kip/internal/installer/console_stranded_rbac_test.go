@@ -18,8 +18,8 @@ func TestConsoleCanReadWhatTheStrandedAlertNeeds(t *testing.T) {
 		}
 	}
 	for _, verb := range []string{"watch", "create", "update", "patch", "delete"} {
-		if grants(console, "longhorn.io", "replicas", verb) || grants(console, "", "persistentvolumes", verb) {
-			t.Errorf("console-api may %s volumes or replicas, but only reads them", verb)
+		if grants(console, "", "persistentvolumes", verb) {
+			t.Errorf("console-api may %s persistent volumes, but only reads them", verb)
 		}
 	}
 }

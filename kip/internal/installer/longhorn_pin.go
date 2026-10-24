@@ -11,7 +11,7 @@ import (
 )
 
 // ServerStorageTag selects the server's Longhorn node for replica scheduling.
-const ServerStorageTag = "kipper-server"
+const ServerStorageTag = platform.ServerStorageTag
 
 const singleCopyClass = "longhorn-single"
 
@@ -144,14 +144,15 @@ func pinSingleCopies(client CommandRunner, joining bool) (SingleCopyPlacement, e
 		if v.pinned() {
 			continue
 		}
-		// Replace other selectors because they may exclude the server.
-		patch := fmt.Sprintf(`{"spec":{"nodeSelector":%s}}`, jsonList([]string{ServerStorageTag}))
-		if _, err := client.Run(fmt.Sprintf("kubectl -n longhorn-system patch volumes.longhorn.io %s --request-timeout=30s --type merge -p '%s' >/dev/null", v.name, patch)); err != nil {
+		pinned, err := pinVolume(client, v)
+		if err != nil {
 			placement.Unpinned = append(placement.Unpinned, fmt.Sprintf("%s: %v", v.label(), err))
 			continue
 		}
-		volumes[i].selector = []string{ServerStorageTag}
-		placement.Pinned = append(placement.Pinned, v.label())
+		if pinned {
+			volumes[i].selector = []string{ServerStorageTag}
+			placement.Pinned = append(placement.Pinned, v.label())
+		}
 	}
 	if placement.OffServer, err = offServerCopies(client, volumes, server); err != nil {
 		return placement, err
@@ -213,15 +214,9 @@ func SingleCopiesOffServer(client CommandRunner) ([]OffServerCopy, error) {
 }
 
 func serverNodeName(client CommandRunner) (string, error) {
-	out, err := client.Run("kubectl get nodes -l " + ServerNodeLabel + " --request-timeout=30s -o name")
+	names, err := ServerNodeNames(client)
 	if err != nil {
 		return "", fmt.Errorf("finding the server node: %w", err)
-	}
-	var names []string
-	for _, line := range strings.Split(out, "\n") {
-		if name, ok := strings.CutPrefix(strings.TrimSpace(line), "node/"); ok && name != "" {
-			names = append(names, name)
-		}
 	}
 	if len(names) != 1 {
 		return "", fmt.Errorf("expected one server node labeled %s, found %d", ServerNodeLabel, len(names))
@@ -326,8 +321,47 @@ func readClass(raw string, current func(map[string]interface{}) bool) (bool, str
 }
 
 type singleCopyVolume struct {
-	name, claim string
-	selector    []string
+	name, claim     string
+	selector        []string
+	resourceVersion string
+}
+
+// pinConflictRetries bounds the re-reads after a resourceVersion conflict.
+const pinConflictRetries = 3
+
+// pinVolume replaces v's node selector with the server tag because other tags
+// may exclude the server. It patches using the listed resourceVersion and
+// retries conflicts after re-reading, up to pinConflictRetries times. It returns
+// true when the pin succeeds or a re-read confirms the server-only selector.
+// It returns false with no error if a re-read has an unexpected field count or
+// a replica count other than one, preserving a concurrent conversion's selector.
+// Other read or patch failures and unreadable selectors return an error.
+func pinVolume(client CommandRunner, v singleCopyVolume) (bool, error) {
+	for attempt := 0; ; attempt++ {
+		patch := fmt.Sprintf(`{"metadata":{"resourceVersion":%q},"spec":{"nodeSelector":%s}}`, v.resourceVersion, jsonList([]string{ServerStorageTag}))
+		out, err := client.Run(fmt.Sprintf("kubectl -n longhorn-system patch volumes.longhorn.io %s --request-timeout=30s --type merge -p '%s' >/dev/null", v.name, patch))
+		if err == nil {
+			return true, nil
+		}
+		if !strings.Contains(out+err.Error(), "(Conflict)") || attempt == pinConflictRetries {
+			return false, err
+		}
+		current, err := client.Run(fmt.Sprintf(`kubectl -n longhorn-system get volumes.longhorn.io %s --request-timeout=30s -o jsonpath='{.spec.nodeSelector}{"\t"}{.spec.numberOfReplicas}{"\t"}{.metadata.resourceVersion}'`, v.name))
+		if err != nil {
+			return false, fmt.Errorf("re-reading the volume after a conflict: %w", err)
+		}
+		f := strings.Split(strings.TrimRight(current, "\r\n"), "\t")
+		if len(f) != 3 || f[1] != "1" {
+			return false, nil
+		}
+		if v.selector, err = parseJSONList(f[0]); err != nil {
+			return false, fmt.Errorf("volume %s has an unreadable node selector %q: %w", v.name, f[0], err)
+		}
+		if v.pinned() {
+			return true, nil
+		}
+		v.resourceVersion = f[2]
+	}
 }
 
 func (v singleCopyVolume) pinned() bool {
@@ -341,8 +375,9 @@ func (v singleCopyVolume) label() string {
 	return v.name
 }
 
-// singleCopyVolumes matches PV volume handles to Longhorn volumes
-// to identify single-copy storage.
+// singleCopyVolumes lists the Longhorn volumes of single-copy class claims
+// configured for one copy. Converted volumes retain their storage class, so
+// checking the configured count prevents pinning a two-copy volume to the server.
 func singleCopyVolumes(client CommandRunner) ([]singleCopyVolume, error) {
 	pvs, err := client.Run(`kubectl get pv --request-timeout=30s -o jsonpath='{range .items[*]}{.spec.storageClassName}{"\t"}{.spec.csi.volumeHandle}{"\n"}{end}'`)
 	if err != nil {
@@ -354,21 +389,21 @@ func singleCopyVolumes(client CommandRunner) ([]singleCopyVolume, error) {
 			single[handle] = true
 		}
 	}
-	out, err := client.Run(`kubectl -n longhorn-system get volumes.longhorn.io --request-timeout=30s -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.nodeSelector}{"\t"}{.status.kubernetesStatus.namespace}{"\t"}{.status.kubernetesStatus.pvcName}{"\n"}{end}'`)
+	out, err := client.Run(`kubectl -n longhorn-system get volumes.longhorn.io --request-timeout=30s -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.nodeSelector}{"\t"}{.status.kubernetesStatus.namespace}{"\t"}{.status.kubernetesStatus.pvcName}{"\t"}{.spec.numberOfReplicas}{"\t"}{.metadata.resourceVersion}{"\n"}{end}'`)
 	if err != nil {
 		return nil, fmt.Errorf("listing Longhorn volumes: %w", err)
 	}
 	var volumes []singleCopyVolume
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) != 4 || !single[f[0]] {
+		if len(f) != 6 || !single[f[0]] || f[4] != "1" {
 			continue
 		}
 		selector, err := parseJSONList(f[1])
 		if err != nil {
 			return nil, fmt.Errorf("volume %s has an unreadable node selector %q: %w", f[0], f[1], err)
 		}
-		v := singleCopyVolume{name: f[0], selector: selector}
+		v := singleCopyVolume{name: f[0], selector: selector, resourceVersion: f[5]}
 		if f[2] != "" && f[3] != "" {
 			v.claim = f[2] + "/" + f[3]
 		}

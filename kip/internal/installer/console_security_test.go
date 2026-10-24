@@ -161,3 +161,26 @@ func findManifestDoc(t *testing.T, manifest, kind, name, namespace string) map[s
 	t.Fatalf("%s %s/%s not found in manifest", kind, namespace, name)
 	return nil
 }
+
+// The grace period allows controller draining followed by up to 15 seconds
+// for HTTP requests. Kubernetes may kill the pod if either exceeds this budget.
+func TestConsoleAPIStopsWithinAStatedGracePeriod(t *testing.T) {
+	dep := consoleAPIDeployment(t)
+	assert.EqualValues(t, 60, dig(t, dep, "spec", "template", "spec", "terminationGracePeriodSeconds"))
+}
+
+// console-api uses its pod's UID in its controller Lease identity. Container
+// restarts retain the UID, while a recreated pod with the same name gets a new one.
+func TestConsoleAPIKnowsItsPodUID(t *testing.T) {
+	dep := consoleAPIDeployment(t)
+	containers := dig(t, dep, "spec", "template", "spec", "containers").([]interface{})
+	env := containers[0].(map[string]interface{})["env"].([]interface{})
+	for _, e := range env {
+		v := e.(map[string]interface{})
+		if v["name"] == "POD_UID" {
+			assert.Equal(t, "metadata.uid", dig(t, v, "valueFrom", "fieldRef", "fieldPath"))
+			return
+		}
+	}
+	t.Fatal("console-api has no POD_UID")
+}

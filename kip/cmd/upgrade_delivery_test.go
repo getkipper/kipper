@@ -3,8 +3,10 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -805,5 +807,86 @@ func TestUpgradeRepointUsesTheImageTag(t *testing.T) {
 		if want, ok := want[e.Name]; ok && e.Value != strings.TrimSuffix(want, ":"+sha)+":latest" {
 			t.Errorf("a plain upgrade must return %s to the released image, got %q", e.Name, e.Value)
 		}
+	}
+}
+
+// An upgrade gives an existing console-api its pod UID, which names it as the
+// holder of the controller Lease, and keeps every other variable.
+func TestUpgradeGivesConsoleAPIItsPodUID(t *testing.T) {
+	dep := liveConsoleAPI(corev1.EnvVar{Name: "CLUSTER_DOMAIN", Value: "example.com"}, corev1.EnvVar{Name: "POD_UID", Value: "stale"})
+	if !applyPodUIDEnv(dep) {
+		t.Fatal("adding the pod UID must be reported as a change")
+	}
+	env := dep.Spec.Template.Spec.Containers[0].Env
+	if len(env) != 2 || env[0].Name != "CLUSTER_DOMAIN" || env[0].Value != "example.com" {
+		t.Fatalf("other variables must stay as they are, got %+v", env)
+	}
+	if env[1].Name != "POD_UID" || env[1].Value != "" || env[1].ValueFrom == nil || env[1].ValueFrom.FieldRef == nil ||
+		env[1].ValueFrom.FieldRef.FieldPath != "metadata.uid" {
+		t.Fatalf("POD_UID must come from metadata.uid, got %+v", env[1])
+	}
+	if applyPodUIDEnv(dep) {
+		t.Fatal("a second upgrade changes nothing")
+	}
+}
+
+// An upgraded console-api gets the install manifest's termination grace period,
+// so its reconciles and HTTP requests have the same time to drain as on a fresh
+// install.
+func TestUpgradeGivesConsoleAPIItsTerminationGracePeriod(t *testing.T) {
+	desired, err := installer.DesiredConsoleAPIDeployment()
+	if err != nil {
+		t.Fatalf("render the shipped manifest: %v", err)
+	}
+	want := desired.Spec.Template.Spec.TerminationGracePeriodSeconds
+	if want == nil {
+		t.Fatal("the install manifest must set a termination grace period")
+	}
+
+	dep := liveConsoleAPI()
+	thirty := int64(30)
+	dep.Spec.Template.Spec.TerminationGracePeriodSeconds = &thirty
+	changed, err := applyConsoleAPIGracePeriod(dep)
+	if err != nil {
+		t.Fatalf("apply grace period: %v", err)
+	}
+	if !changed {
+		t.Fatal("a 30-second grace period must be reported as changed")
+	}
+	got := dep.Spec.Template.Spec.TerminationGracePeriodSeconds
+	if got == nil || *got != *want {
+		t.Fatalf("terminationGracePeriodSeconds = %v, want %d", got, *want)
+	}
+	if changed, _ := applyConsoleAPIGracePeriod(dep); changed {
+		t.Fatal("a second upgrade changes nothing")
+	}
+}
+
+// The upgrade output names a changed grace period, like the hardening and
+// image changes it delivers to console-api.
+func TestUpgradeNamesTheGracePeriodItSets(t *testing.T) {
+	desired, err := installer.DesiredConsoleAPIDeployment()
+	if err != nil {
+		t.Fatalf("render the shipped manifest: %v", err)
+	}
+	note := fmt.Sprintf("termination grace period set to %ds", *desired.Spec.Template.Spec.TerminationGracePeriodSeconds)
+
+	dep := liveConsoleAPI()
+	thirty := int64(30)
+	dep.Spec.Template.Spec.TerminationGracePeriodSeconds = &thirty
+	notes, err := applyConsoleAPIInstallSpec(dep, "")
+	if err != nil {
+		t.Fatalf("apply the install spec: %v", err)
+	}
+	if !slices.Contains(notes, note) {
+		t.Fatalf("notes = %q, want %q among them", notes, note)
+	}
+
+	notes, err = applyConsoleAPIInstallSpec(dep, "")
+	if err != nil {
+		t.Fatalf("apply the install spec again: %v", err)
+	}
+	if slices.Contains(notes, note) {
+		t.Fatalf("a second upgrade names the grace period again: %q", notes)
 	}
 }

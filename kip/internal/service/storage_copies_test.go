@@ -109,3 +109,14 @@ func TestCopiesSummaryOfAHeldBackVolume(t *testing.T) {
 func TestCopiesSummaryOnAClusterOlderThanCopies(t *testing.T) {
 	assert.Empty(t, CopiesOf(copiesCR(nil, nil, nil)).Summary())
 }
+
+func TestASummaryShowsARunningConversion(t *testing.T) {
+	two := int64(2)
+	for _, reason := range []string{"Converting", "ConversionPending"} {
+		c := Copies{Wanted: &two, Live: 1, LiveKnown: true, Status: "False", Reason: reason}
+		assert.Equal(t, "2, converting", c.Summary())
+	}
+	blocked := Copies{Wanted: &two, Live: 1, LiveKnown: true, Status: "False", Reason: "Blocked", Message: "No room."}
+	assert.Equal(t, "2, blocked", blocked.Summary(), "a blocked change has not reached the requested count")
+	assert.Equal(t, "No room.", blocked.Problem())
+}

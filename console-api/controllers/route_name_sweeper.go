@@ -14,11 +14,9 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
-	"github.com/getkipper/kipper/console-api/internal/leader"
 	"github.com/getkipper/kipper/controller/pkg/routename"
 )
 
@@ -26,7 +24,6 @@ const (
 	// routeNameMarkerName is the ConfigMap that records the enforcement
 	// generation, the binary it belongs to, and its heartbeat.
 	routeNameMarkerName = "route-name-claims"
-	routeNameLease      = "kipper-route-names"
 	// routeNameScanInterval is how often the sweeper scans routes and
 	// refreshes the heartbeat.
 	routeNameScanInterval = 30 * time.Second
@@ -130,10 +127,11 @@ func ownImageID(ctx context.Context, reader client.Reader, podName string) (stri
 	return podImageID(&pod), nil
 }
 
-// RouteNameGate admits new routes in this process only while it holds the
-// sweeper's Lease and its generation is bootstrapped. Closing it waits for
-// every admitted write to finish, which is how a bootstrap drains the writes
-// this process already allowed; other processes are drained by waiting for
+// RouteNameGate admits new routes in this process only while it runs the
+// sweeper and its generation is bootstrapped. Closing it waits for every
+// admitted write to finish so bootstrap can drain this process's writes.
+// Another process of this binary drains its own writes before it gives up
+// the controller Lease. The sweeper drains other binaries by waiting for
 // their pods to stop.
 type RouteNameGate struct {
 	mu     sync.RWMutex
@@ -145,8 +143,9 @@ func NewRouteNameGate() *RouteNameGate {
 	return &RouteNameGate{}
 }
 
-// Admit reports whether a route may be published now. Defer release after
-// admission so both successful and failed writes unblock the sweeper.
+// Admit reports whether a route may be published now. On admission, defer
+// release so both successful and failed writes unblock the sweeper. Calling
+// release more than once is safe. A closed gate returns nil and false.
 func (g *RouteNameGate) Admit() (release func(), ok bool) {
 	g.mu.RLock()
 	if !g.isOpen {
@@ -178,30 +177,39 @@ func (g *RouteNameGate) close() {
 }
 
 // RouteNamesReady reads the persisted bootstrap marker for API prechecks.
-// The reconciler's local gate still controls publication.
+// It returns false for a missing or unbootstrapped marker and returns read
+// errors to the caller. The reconciler's local gate still controls publication.
 func RouteNamesReady(ctx context.Context, reader client.Reader) (bool, error) {
 	m, found, err := readRouteNameMarker(ctx, reader)
 	return found && m.Bootstrapped, err
 }
 
 // RouteNameSweeper keeps the route name claims and their attribution
-// intervals, in one console-api pod at a time.
+// intervals. It runs as a leader-election runnable of the controller manager,
+// so it opens Gate in the one console-api pod whose reconcilers publish
+// routes.
 type RouteNameSweeper struct {
-	Client    client.Client
-	Reader    client.Reader
-	Clientset kubernetes.Interface
-	PodName   string
-	Gate      *RouteNameGate
-	Now       func() time.Time
+	Client  client.Client
+	Reader  client.Reader
+	PodName string
+	Gate    *RouteNameGate
+	Now     func() time.Time
 
-	worker     leader.Worker
 	retryDelay time.Duration
 }
 
-// Run holds the sweeper's Lease and runs a generation while it does. It
-// blocks until ctx is cancelled.
-func (s *RouteNameSweeper) Run(ctx context.Context) {
-	leader.Run(ctx, s.Clientset, routeClaimNamespace, routeNameLease, s.PodName, leader.DefaultTiming, &s.worker, s.lead)
+// Start waits for bootstrap, then scans route names until ctx is canceled.
+// It retries bootstrap failures and logs scan failures. Before returning nil,
+// it closes Gate and waits for admitted writes to finish.
+func (s *RouteNameSweeper) Start(ctx context.Context) error {
+	s.lead(ctx)
+	return nil
+}
+
+// NeedLeaderElection tells the manager to run the sweeper only while holding
+// the controller Lease.
+func (s *RouteNameSweeper) NeedLeaderElection() bool {
+	return true
 }
 
 func (s *RouteNameSweeper) now() time.Time {
@@ -211,9 +219,10 @@ func (s *RouteNameSweeper) now() time.Time {
 	return time.Now()
 }
 
-// lead runs one leadership term: it waits for this pod's image, for every
-// earlier console-api pod to stop and for no other binary to be live, starts a
-// generation, opens the gate, then scans. The gate closes when the term ends.
+// lead runs one leadership term: it waits for this pod's image and for no
+// other binary to be live, starts a generation, opens the gate, then scans.
+// The gate closes when the term ends, once the route writes it admitted have
+// finished.
 func (s *RouteNameSweeper) lead(ctx context.Context) {
 	s.Gate.close()
 	defer s.Gate.close()
@@ -278,10 +287,10 @@ func (s *RouteNameSweeper) waitReady(ctx context.Context) (string, error) {
 			if readyErr == nil && ready {
 				return image, nil
 			}
-			reason, err = "another console-api pod is still live", readyErr
+			reason, err = "a live console-api pod has a different or unknown image", readyErr
 		}
 		if time.Since(lastLog) > time.Minute {
-			log.Printf("route names: not checking route names yet: %s (%v)", reason, err)
+			log.Printf("route names: waiting to check route names: %s (%v)", reason, err)
 			lastLog = time.Now()
 		}
 		select {
@@ -292,14 +301,12 @@ func (s *RouteNameSweeper) waitReady(ctx context.Context) (string, error) {
 	}
 }
 
-// readyToStart reports whether no live console-api pod created before this one
-// remains, so every write it allowed has ended, and no live pod runs another
-// binary, which could publish routes this generation never checked.
+// readyToStart allows bootstrap once every live console-api pod runs image.
+// Unknown images also block it. Another binary may publish unchecked routes
+// without the controller Lease. Pods running this binary publish only while
+// holding the Lease and stop on leadership loss before takeover, so they can
+// coexist regardless of age.
 func (s *RouteNameSweeper) readyToStart(ctx context.Context, image string) (bool, error) {
-	earlier, err := s.earlierPodsLive(ctx)
-	if err != nil || earlier {
-		return false, err
-	}
 	_, foreign, err := s.foreignBinarySince(ctx, image)
 	return !foreign, err
 }
@@ -310,35 +317,6 @@ func (s *RouteNameSweeper) consoleAPIPods(ctx context.Context) ([]corev1.Pod, er
 		return nil, fmt.Errorf("listing console-api pods: %w", err)
 	}
 	return pods.Items, nil
-}
-
-// earlierPodsLive checks for older live console-api pods, breaking creation-time
-// ties by pod name.
-func (s *RouteNameSweeper) earlierPodsLive(ctx context.Context) (bool, error) {
-	pods, err := s.consoleAPIPods(ctx)
-	if err != nil {
-		return false, err
-	}
-	var own *corev1.Pod
-	for i := range pods {
-		if pods[i].Name == s.PodName {
-			own = &pods[i]
-		}
-	}
-	if own == nil {
-		return false, fmt.Errorf("console-api pod %s not found", s.PodName)
-	}
-	for i := range pods {
-		p := &pods[i]
-		if p.Name == s.PodName || !podLive(p) {
-			continue
-		}
-		created, mine := p.CreationTimestamp.Time, own.CreationTimestamp.Time
-		if created.Before(mine) || (created.Equal(mine) && p.Name < own.Name) {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 // foreignBinarySince returns the earliest creation time of a live console-api
@@ -431,12 +409,12 @@ func (s *RouteNameSweeper) scan(ctx context.Context, image string) error {
 		}
 	case !m.Heartbeat.IsZero() && listedAt.Sub(m.Heartbeat) > routeNameScanGap:
 		// Another binary may have run during the gap. Close intervals at the
-		// last heartbeat; a later successful scan can open new ones.
+		// last heartbeat. A later successful scan can open new ones.
 		snap.Suspended = true
 		snap.SuspendedAt = m.Heartbeat
 	}
 	if err := s.apply(ctx, snap, planRouteNames(snap)); errors.Is(err, errClaimWriteDropped) {
-		log.Printf("route names: %v; the heartbeat waits for the next scan", err)
+		log.Printf("route names: %v. The heartbeat waits for the next scan.", err)
 		return nil
 	} else if err != nil {
 		return err
@@ -519,7 +497,7 @@ func (s *routeNameSnapshot) addWorkload(namespace, name string) {
 }
 
 // apply persists the plan. A concurrent claim change defers writes or deletes
-// to the next pass; a dropped write also blocks the heartbeat update.
+// to the next pass. A dropped write also blocks the heartbeat update.
 func (s *RouteNameSweeper) apply(ctx context.Context, snap routeNameSnapshot, plan routeNamePlan) error {
 	dropped, droppedKey := false, ""
 	for _, c := range plan.Write {

@@ -344,7 +344,7 @@ With `--copies`, kip installs fio on the worker when it is missing and runs etcd
 
 Local SSD and NVMe disks pass with a wide margin. Network block storage, such as a cloud provider's attachable volume mounted at `/var/lib/longhorn`, is usually refused. kip records the figures, the time of the check and any override in the node's record, and tags the node `kipper-replica` in Longhorn when it passes. A check that cannot run leaves the node as it was. Running the command again repeats the check. When a repeated check refuses a worker that already takes copies, the worker keeps taking them, the refusal says so, and `--copies=false` stops new ones.
 
-`--copies=false` removes the tag, so Longhorn places no new copies on the worker. It is refused while the worker still holds copies, because moving them off a node is not available yet. The server is always eligible to hold copies, so this command accepts workers only.
+`--copies=false` removes the tag, so Longhorn places no new copies on the worker. It is refused while the worker still holds copies, because moving them off a node is not available yet. Reduce the services and volumes on it to one copy with `kip service update <name> --copies 1` first. The server is always eligible to hold copies, so this command accepts workers only.
 
 | Flag | Required | Description |
 |---|---|---|
@@ -926,6 +926,7 @@ Manage stateful services (databases, caches) with persistent storage.
 kip service add postgres --name mydb         # deploy PostgreSQL
 kip service add redis --name cache           # deploy Redis
 kip service add postgres --name mydb --copies 2 # keep two copies of the data on two nodes
+kip service update mydb --copies 2 --wait    # convert a running service to two copies
 kip service list                             # list all services
 kip service info mydb                        # show connection details, password masked
 kip service info mydb --show-secrets         # include the password
@@ -939,7 +940,7 @@ kip service delete mydb --delete-data        # delete the service and its volume
 kip service start mydb                       # start a service kip node fence left stopped
 ```
 
-`kip service add --copies 2` keeps two copies of the service's data, each on a different node that can hold copies. It is refused on local storage, on a cluster that offers one copy (see [`kip cluster storage`](#kip-cluster-storage)), and when fewer than two nodes can hold copies. The default is one copy. On a cluster with in-cluster backups, kip warns once that a second copy does not replace external backups. `kip service update <name> --copies N` sets the copies of a service created before Kipper managed them, when N equals the copies its volume has now. Changing the number of copies of an existing service is not available yet. See [Two copies of a service's data](/en/worker-nodes#two-copies-of-a-services-data).
+`kip service add --copies 2` keeps two copies of the service's data, each on a different node that can hold copies. It is refused on local storage, on a cluster that offers one copy (see [`kip cluster storage`](#kip-cluster-storage)), and when fewer than two nodes can hold copies. The default is one copy. On a cluster with in-cluster backups, kip warns once that a second copy does not replace external backups. `kip service update <name> --copies N [--wait]` changes the copies of an existing service, which needs the project owner role. Requesting two copies runs the same checks as creation, unless the volume has two copies or more already. kip saves the requested copy count. Lowering the copies stops the service: Kipper lowers the count only while the volume is attached on the server with nothing able to write to it, Longhorn removes the extra copy away from the server, and Kipper starts the service again once the copy is gone. A volume created without Longhorn's revision counter also stops the service once when its copies are raised, to switch the counter on, and the change says so while the service is stopped. Setting the copies back to `2` before Longhorn has removed the copy starts the service again at two copies. If Longhorn has placed the server copy for the change already, Kipper keeps it, and Longhorn removes one of the other copies first, so the volume ends at two. On a cluster that offers one copy, setting them back to `2` needs an admin. Without `--wait`, it waits up to 30 seconds to print the controller's first response. `--wait` follows the conversion until every copy is healthy, for up to three hours. While waiting, the command fails if another client changes the copy count or the object is deleted and created again. A blocked conversion exits non-zero with the reason. A wait for Kubernetes or Longhorn, such as for the volume to detach after the stop or for Longhorn to remove the extra copy, is reported as pending, and `--wait` keeps waiting through it until its limit. The copies cannot change again while Longhorn builds a copy. See [Changing the copies of a running service](/en/worker-nodes#changing-the-copies-of-a-running-service).
 
 `kip service share` accepts `--project` and `--environment` to target a service outside the active project, `--expires` (up to 720h) for the link lifetime, and `--label` for a note in the listing. Use `--list` to see a service's links, `--revoke <id>` to kill one, and `--revoke-all` plus `--rotate-key` to contain a leak.
 
@@ -964,9 +965,14 @@ kip project list
 kip project add-env blog prod
 kip project remove-env blog staging
 kip project delete blog
+kip project update blog --copies 1 --wait                      # set the copies of the project's shared storage
 ```
 
 `kip project remove-env` deletes the matching namespace and everything in it. You'll be asked to type the environment name to confirm. See [Projects & Environments](/en/environments#adding-and-removing-environments) for details.
+
+### kip project update {#kip-project-update}
+
+`kip project update <project> --copies 1 [--wait]` sets the copies of a project's shared storage, the `shared-uploads` volume of each environment, and follows the conversion like [`kip volume update`](#kip-volume). The project must have shared storage. Shared storage keeps one copy in this release, so `2` is refused, except to stop a reduction to one that is blocked or pending. The volumes then keep the copies they have. Changing a project's spec needs cluster admin rights.
 
 ### kip project members {#kip-project-members}
 
@@ -1065,18 +1071,18 @@ kip volume create uploads --size 5Gi --project blog --environment test
 kip volume mount uploads webapp --path /data --project blog --environment test
 kip volume unmount uploads webapp --project blog --environment test
 kip volume list --project blog
-kip volume update uploads --copies 1 --project blog --environment test
+kip volume update uploads --copies 1 --wait --project blog --environment test
 kip volume delete uploads --delete-data --project blog --environment test
 ```
 
-`kip volume list` shows each volume's copies: `1`, `not set` for a volume created before Kipper managed copies, or `-` on an older cluster. `kip volume update <name> --copies N` sets the copies of a volume whose copies are unset, when N equals the copies it has now.
+`kip volume list` shows each volume's copies: `1`, `not set` for a volume created before Kipper managed copies, or `-` on an older cluster. `kip volume update <name> --copies 1 [--wait]` converts a volume to one copy on the server, for example a volume from an earlier release that has three. The conversion waits until no app mounts the volume, stops the volume's backup holder and attaches the volume on the server, where Longhorn removes the extra copies once Kipper lowers the count. While an app still mounts it, the conversion reports `Blocked`, names the pods and gives `kip volume update <name> --copies 2`, which stops the change. Shared volumes keep one copy in this release. A request for `2` is accepted only to stop a blocked or pending reduction to one. The volume then keeps the copies it has, and if Kipper has already lowered Longhorn's requested count while holding the volume, it raises that count back to the number of copies present. The status and `--wait` count the copies present against the requested two copies. A Longhorn count of three from an earlier release stays at three, because Kipper lowers a count only while it holds the volume for a reduction to one. Canceling the reduction while Kipper builds the server's copy keeps that copy once Longhorn has placed it on the server, so the volume keeps every copy it had plus the server's, for example two copies when it had one. A server copy Longhorn has not placed yet is dropped from the count. On a cluster that offers one copy, only an admin can stop it.
 
 ### kip volume create flags {#kip-volume-create-flags}
 
 | Flag | Required | Default | Description |
 |---|---|---|---|
 | `--size` | No | `5Gi` | Volume size |
-| `--copies` | No | `1` | Copies of the data. Shared volumes keep one copy in this release, so `2` is refused |
+| `--copies` | No | `1` | Copies of the data. Shared volumes keep one copy in this release, so `2` is refused at creation. `kip volume update --copies 2` is accepted only to stop a blocked or pending reduction |
 | `--project` | No | `default` | Project name |
 | `--environment` | No | — | Target environment |
 
