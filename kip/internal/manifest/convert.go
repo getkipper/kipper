@@ -342,6 +342,9 @@ func convertService(name, namespace string, svc SvcSpec) Resource {
 	if svc.ConsistentBackups {
 		spec["consistentBackups"] = true
 	}
+	if svc.Copies != nil {
+		spec["copies"] = int64(*svc.Copies)
+	}
 	if svc.Resources != nil {
 		resources := map[string]interface{}{}
 		for key, value := range map[string]string{
@@ -381,6 +384,9 @@ func convertService(name, namespace string, svc SvcSpec) Resource {
 func convertVolume(name, namespace string, vol VolSpec) Resource {
 	spec := map[string]interface{}{
 		"size": vol.Size,
+	}
+	if vol.Copies != nil {
+		spec["copies"] = int64(*vol.Copies)
 	}
 
 	if len(vol.Mounts) > 0 {

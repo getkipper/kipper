@@ -173,6 +173,9 @@ func applyPlans(ctx context.Context, dyn dynamic.Interface, clientset kubernetes
 		}
 		fmt.Printf("  --force given, clearing them.\n")
 	}
+	if err := refuseCopiesInPlans(ctx, os.Stdout, dyn, plans); err != nil {
+		return 0, 0, err
+	}
 	mgr := &service.Manager{Client: clientset, Dynamic: dyn}
 	volumes, err := newVolumesInPlans(ctx, mgr, plans)
 	if err != nil {
@@ -356,6 +359,7 @@ func scanChangesWith(ctx context.Context, dyn dynamic.Interface, namespace strin
 		// so previews and field-removal checks agree with the applied spec.
 		effective := withLiveStopRecord(effectiveSpecForDiff(name, newSpec), liveSpec)
 		effective = withLiveServiceTLS(res.Object.GetKind(), effective, liveSpec)
+		effective = withLiveCopies(res.Object.GetKind(), effective, liveSpec)
 		if res.Object.GetKind() == "App" {
 			effective = withResolvedReplicas(effective, liveSpec)
 			effective = withLiveAutomaticResources(effective, liveSpec, live.GetManagedFields())
@@ -376,7 +380,7 @@ func objectForCreate(name string, object *unstructured.Unstructured) *unstructur
 	if !isSpec {
 		return object
 	}
-	resolved := withNewServiceTLS(object.GetKind(), spec)
+	resolved := withNewCopies(object.GetKind(), withNewServiceTLS(object.GetKind(), spec))
 	if object.GetKind() == "App" {
 		resolved = withResolvedReplicas(spec, nil)
 	}
@@ -691,6 +695,10 @@ func applyResource(ctx context.Context, dyn dynamic.Interface, namespace string,
 		liveSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
 		newSpec = withLiveStopRecord(newSpec, liveSpec)
 		newSpec = withLiveServiceTLS(res.Object.GetKind(), newSpec, liveSpec)
+		newSpec = withLiveCopies(res.Object.GetKind(), newSpec, liveSpec)
+		if err := refuseCopiesChange(res.Object.GetKind(), newSpec, existing); err != nil {
+			return err
+		}
 		if res.Object.GetKind() == "App" {
 			newSpec = withResolvedReplicas(newSpec, liveSpec)
 			newSpec = withLiveAutomaticResources(newSpec, liveSpec, existing.GetManagedFields())

@@ -10,6 +10,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 // LonghornReplicaGVR identifies Longhorn replica resources.
@@ -17,16 +19,21 @@ var LonghornReplicaGVR = schema.GroupVersionResource{Group: "longhorn.io", Versi
 
 // Placement describes a service's pod location and data nodes.
 type Placement struct {
-	PodNode     string
-	Unscheduled string
-	DataNodes   []string
+	PodNode        string
+	Unscheduled    string
+	DataNodes      []string
+	UncheckedNodes []string
 }
 
-// Placement reads the service's pod location, scheduler failure message and
-// healthy replica nodes in alphabetical order. A local-path volume's node comes
-// from its node affinity.
-// Missing pods and unbound claims leave the corresponding fields empty.
-// Errors may return a partial result with the pod location.
+// Placement reads the service's pod location and scheduler failure message.
+// For Longhorn volumes, DataNodes lists distinct nodes holding healthy copies
+// in alphabetical order. A healthy copy passes [platform.ReplicaCurrent] and
+// [platform.NodeAvailable]. UncheckedNodes lists distinct nodes with current
+// replicas whose lookup failed, sorted alphabetically and excluding missing nodes.
+// For local-path volumes, DataNodes comes from node affinity without a health check.
+// Missing pods and missing or unbound claims leave the corresponding fields empty.
+// Other read failures return an error and may include a partial result with the
+// pod location.
 func (m *Manager) Placement(ctx context.Context, namespace, name string) (Placement, error) {
 	var p Placement
 	pod, err := m.Client.CoreV1().Pods(namespace).Get(ctx, name+"-0", metav1.GetOptions{})
@@ -63,15 +70,28 @@ func (m *Manager) Placement(ctx context.Context, namespace, name string) (Placem
 	if err != nil {
 		return p, fmt.Errorf("reading the replicas of %s: %w", name, err)
 	}
+	seen := map[string]bool{}
 	for _, r := range replicas.Items {
 		node, _, _ := unstructured.NestedString(r.Object, "spec", "nodeID")
 		healthyAt, _, _ := unstructured.NestedString(r.Object, "spec", "healthyAt")
 		failedAt, _, _ := unstructured.NestedString(r.Object, "spec", "failedAt")
-		if node != "" && healthyAt != "" && failedAt == "" {
-			p.DataNodes = append(p.DataNodes, node)
+		lastFailedAt, _, _ := unstructured.NestedString(r.Object, "spec", "lastFailedAt")
+		if node == "" || seen[node] || !platform.ReplicaCurrent(healthyAt, failedAt, lastFailedAt) {
+			continue
+		}
+		seen[node] = true
+		holder, err := m.Client.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+		switch {
+		case err == nil:
+			if platform.NodeAvailable(holder) {
+				p.DataNodes = append(p.DataNodes, node)
+			}
+		case !errors.IsNotFound(err):
+			p.UncheckedNodes = append(p.UncheckedNodes, node)
 		}
 	}
 	sort.Strings(p.DataNodes)
+	sort.Strings(p.UncheckedNodes)
 	return p, nil
 }
 

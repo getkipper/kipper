@@ -38,9 +38,8 @@ type removalHost struct {
 	longhornDeleteErrs int
 	recordDeleted      bool
 	workerState        string
-	// strandedReplica lists a failed worker replica of pvc-2, which then has
-	// no healthy copy anywhere.
-	strandedReplica bool
+	strandedReplica    bool
+	serverDown         bool
 }
 
 // records renders the node records as the ConfigMap's data, without the
@@ -97,16 +96,22 @@ func (h *removalHost) Run(cmd string) (string, error) {
 		return "customresourcedefinition.apiextensions.k8s.io/nodes.longhorn.io\n", nil
 	case strings.Contains(cmd, "get nodes.longhorn.io"):
 		return "node.longhorn.io/worker-1\n", nil
+	case strings.Contains(cmd, "spec.taints"):
+		server := "server-1\tTrue\t"
+		if h.serverDown {
+			server = "server-1\tFalse\t"
+		}
+		return server + "\nworker-1\tTrue\t\n", nil
 	case strings.Contains(cmd, "get replicas.longhorn.io"):
-		out := "pvc-1\tworker-1\t2026-10-18T00:00:00Z\t\n"
+		out := "pvc-1\tworker-1\t2026-10-18T00:00:00Z\t\t\n"
 		if h.strandedReplica {
-			out += "pvc-2\tworker-1\t2026-10-18T00:00:00Z\t2026-10-18T00:05:00Z\n"
+			out += "pvc-2\tworker-1\t2026-10-18T00:00:00Z\t2026-10-18T00:05:00Z\t\n"
 		}
 		if h.lastCopyPolls > 0 {
 			h.lastCopyPolls--
 			return out, nil
 		}
-		return out + "pvc-1\tserver-1\t2026-10-18T00:01:00Z\t\n", nil
+		return out + "pvc-1\tserver-1\t2026-10-18T00:01:00Z\t\t\n", nil
 	case strings.Contains(cmd, "get volumes.longhorn.io"):
 		return "pvc-1\tshop\tdata-db-0\n", nil
 	}
@@ -595,6 +600,30 @@ func TestForcedRemovalRefusesWhileTheWorkerHoldsTheOnlyData(t *testing.T) {
 	assert.Greater(t, h.index("kubectl delete node"), 0)
 }
 
+func TestForcedRemovalCountsNoCopyOnAnUnavailableNode(t *testing.T) {
+	h := &removalHost{serverDown: true}
+	var events []string
+	r := forcedRemoval(h, &events)
+
+	err := r.run()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pvc-1", "the server's copy is on a node that is not ready")
+	assert.Contains(t, err.Error(), "--accept-data-loss")
+	assert.Equal(t, -1, h.index("kubectl delete node"))
+}
+
+func TestAResumedWipeCountsNoCopyOnAnUnavailableNode(t *testing.T) {
+	h := &removalHost{workerState: installer.NodeStateWiping, serverDown: true}
+	var events []string
+	r := newRemoval(h, &events)
+	r.Worker.State = installer.NodeStateWiping
+
+	err := r.run()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pvc-1")
+	assert.Empty(t, events, "the host is not wiped while its copy may be the only current one")
+}
+
 func TestForceIsRefusedForAHostThatStillAnswers(t *testing.T) {
 	worker := removalRecords()[1]
 	alive := func() (installer.CommandRunner, func(), error) {
@@ -613,4 +642,17 @@ func TestForceIsRefusedForAHostThatStillAnswers(t *testing.T) {
 
 func TestNodeRemoveIsListedInHelp(t *testing.T) {
 	assert.False(t, nodeRemoveCmd.Hidden)
+}
+
+func TestNodeRemoveNamesCopiesThatStayDegraded(t *testing.T) {
+	var out bytes.Buffer
+	reportCopiesLeftDegraded(&out, "worker-1", []string{"shop/data-db-0 (server: already holds a copy)"})
+	got := out.String()
+	assert.Contains(t, got, "no other node can take the copy on worker-1")
+	assert.Contains(t, got, "shop/data-db-0 (server: already holds a copy)")
+	assert.Contains(t, got, "kip node storage <node> --copies")
+
+	out.Reset()
+	reportCopiesLeftDegraded(&out, "worker-1", nil)
+	assert.Empty(t, out.String())
 }

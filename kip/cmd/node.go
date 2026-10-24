@@ -83,6 +83,7 @@ func init() {
 	nodeAddCmd.Flags().Bool("yes", false, "apply or recover server network changes without prompting")
 	nodeAddCmd.Flags().Bool("no-ssh-rate-limit", false, "Allow SSH without UFW rate limiting on the joining node, replacing any existing limit. By default, keep its managed rule or inherit the server's setting for a new firewall.")
 	nodeAddCmd.Flags().Bool("accept-stale-data", false, "when rejoining a fenced worker, start its stopped services even when no copy of their data is known to be current")
+	nodeAddCmd.Flags().Bool("no-copies", false, "skip the disk check that lets the node hold copies of volumes. Run 'kip node storage <node> --copies' later")
 	nodeAddCmd.Flags().Bool("firewall", true, "set up a host firewall on the new node (default: follow the server's kip-managed firewall setting); use --firewall=false to skip setup")
 
 	nodeCmd.AddCommand(nodeAddCmd)
@@ -318,6 +319,7 @@ func addNode(cmd *cobra.Command, args []string) error {
 	forcePublic, _ := cmd.Flags().GetBool("public")
 	autoYes, _ := cmd.Flags().GetBool("yes")
 	noRateLimit, _ := cmd.Flags().GetBool("no-ssh-rate-limit")
+	noCopies, _ := cmd.Flags().GetBool("no-copies")
 
 	cluster, _, err := loadCurrentCluster()
 	if err != nil {
@@ -616,7 +618,8 @@ func addNode(cmd *cobra.Command, args []string) error {
 	}
 
 	rec := installer.NodeRecord{Host: workerHost, MachineID: identity.MachineID, Role: installer.NodeRoleWorker, State: installer.NodeStateJoining,
-		Mode: plan.Mode, PeerAddress: peerAddress(plan.Mode, plan.Joiner), Interface: plan.Joiner.Interface, SSHUser: recordedLogin(existing, userFlag)}
+		Mode: plan.Mode, PeerAddress: peerAddress(plan.Mode, plan.Joiner), Interface: plan.Joiner.Interface, SSHUser: recordedLogin(existing, userFlag),
+		Storage: joinedNodeStorage(existing)}
 	if existing != nil {
 		rec.Name = existing.Name
 	} else if rec.Name, err = installer.ProposedNodeName(worker); err != nil {
@@ -786,6 +789,12 @@ func addNode(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\n  ✔  %s joined as worker %s (%s mode, %s)\n", workerHost, nodeName, plan.Mode, plan.Joiner.NodeIP)
 	fmt.Printf("     Apps, functions, jobs and services can now run on it. The platform stays on the server.\n\n")
+	if !noCopies {
+		checkJoinedNodeForCopies(os.Stdout, server, worker, serverRec, rec, func(s config.NodeStorage) error {
+			rec.Storage = &s
+			return saveNodeRecord(server, cluster, rec)
+		})
+	}
 	fmt.Print(joinDataSummary)
 	if len(placement.OffServer) > 0 {
 		fmt.Printf("\n  ⚠  %s\n", offServerJoinWarning)
@@ -945,6 +954,15 @@ func recordedLogin(existing *installer.NodeRecord, user string) string {
 	return ""
 }
 
+// joinedNodeStorage returns the copies check recorded for a node that joins
+// again, or nil for a new node.
+func joinedNodeStorage(existing *installer.NodeRecord) *config.NodeStorage {
+	if existing == nil {
+		return nil
+	}
+	return existing.Storage
+}
+
 func nodeAddRetry(err error, host string) error {
 	return fmt.Errorf("%w. The join is incomplete. Fix the cause, then run 'kip node add %s' again with the same options to resume", err, host)
 }
@@ -1002,16 +1020,17 @@ func writeNodeList(out io.Writer, nodes []k8s.NodeInfo, records []installer.Node
 		return
 	}
 
-	say(out, "\n  %-20s %-8s %-25s %-14s %-16s %-9s %s\n", "NAME", "ROLE", "STATUS", "VERSION", "IP", "MODE", "ADDRESS")
+	say(out, "\n  %-20s %-8s %-25s %-14s %-16s %-9s %-9s %s\n", "NAME", "ROLE", "STATUS", "VERSION", "IP", "MODE", "COPIES", "ADDRESS")
 	for _, node := range nodes {
-		mode, address := "-", "-"
+		mode, copies, address := "-", "-", "-"
 		if r, ok := byName[node.Name]; ok {
 			address = r.Host
 			if r.Mode != "" {
 				mode = r.Mode
 			}
+			copies = nodeCopiesColumn(r)
 		}
-		say(out, "  %-20s %-8s %-25s %-14s %-16s %-9s %s\n", node.Name, node.Role, node.Summary(), node.Version, node.IP, mode, address)
+		say(out, "  %-20s %-8s %-25s %-14s %-16s %-9s %-9s %s\n", node.Name, node.Role, node.Summary(), node.Version, node.IP, mode, copies, address)
 	}
 	say(out, "\n")
 }

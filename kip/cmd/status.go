@@ -102,6 +102,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	writeBackupHealth(os.Stdout, state, err, time.Now())
 	reportCrashLoopingServices(ctx, client)
 	reportPlaintextPostgres(ctx, client)
+	reportStorageCopies(ctx, os.Stdout, client.Dynamic())
 
 	records, recordsErr := nodeRecordsFromAPI(ctx, client.Clientset(), cluster)
 	reportRecordFallback(os.Stdout, recordsErr)

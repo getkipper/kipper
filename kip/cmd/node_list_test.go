@@ -36,6 +36,8 @@ func TestNodeListShowsModeAndAddressForRecordedNodes(t *testing.T) {
 	var out bytes.Buffer
 	records := statusRecords()
 	records[1].Mode = installer.NetworkModePrivate
+	records[1].Storage = &config.NodeStorage{Copies: true}
+	records[2].Storage = &config.NodeStorage{Copies: false}
 	nodes := []k8s.NodeInfo{
 		{Name: "server-1", Role: "master", Status: "Ready", Version: "v1.33.1+k3s1", IP: "10.0.0.2"},
 		{Name: "worker-1", Role: "worker", Status: "Ready", Version: "v1.33.1+k3s1", IP: "10.0.0.3"},
@@ -45,9 +47,15 @@ func TestNodeListShowsModeAndAddressForRecordedNodes(t *testing.T) {
 	writeNodeList(&out, nodes, records)
 
 	got := out.String()
-	assert.Contains(t, got, "MODE      ADDRESS\n")
-	assert.Contains(t, got, "  worker-1             worker   Ready                     v1.33.1+k3s1   10.0.0.3         private   203.0.113.11\n")
-	assert.Contains(t, got, "  stray                worker   NotReady                  v1.33.1+k3s1   10.0.0.9         -         -\n")
+	assert.Contains(t, got, "MODE      COPIES    ADDRESS\n")
+	assert.Contains(t, got, "  server-1             master   Ready                     v1.33.1+k3s1   10.0.0.2         -         yes       203.0.113.10\n")
+	assert.Contains(t, got, "  worker-1             worker   Ready                     v1.33.1+k3s1   10.0.0.3         private   yes       203.0.113.11\n")
+	assert.Contains(t, got, "  stray                worker   NotReady                  v1.33.1+k3s1   10.0.0.9         -         -         -\n")
+
+	nodes = append(nodes, k8s.NodeInfo{Name: "worker-2", Role: "worker", Status: "Ready", Version: "v1.33.1+k3s1", IP: "10.0.0.4"})
+	out.Reset()
+	writeNodeList(&out, nodes, records)
+	assert.Contains(t, out.String(), "  worker-2             worker   Ready                     v1.33.1+k3s1   10.0.0.4         -         no        203.0.113.12\n")
 }
 
 // The records are read through the API, so any operator machine sees the

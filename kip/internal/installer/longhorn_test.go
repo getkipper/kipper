@@ -79,17 +79,17 @@ func TestLonghornSettingsFilter_RefusesAManifestItCannotPlaceTheSettingsIn(t *te
 }
 
 func TestInstallLonghorn_AppliesTheFilteredManifest(t *testing.T) {
-	r := pinHost(map[string]string{"get storageclass": "", "get nodes.longhorn.io": ""})
+	r := pinHost(map[string]string{"get storageclass longhorn-single": "", "get storageclass longhorn-replicated": "", "get nodes.longhorn.io": ""})
 	require.NoError(t, installLonghorn(r, HostOS{ID: "debian", Family: FamilyDebian}, nil))
 
 	all := strings.Join(r.commands, "\n")
-	install := slices.Index(r.commands, "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq open-iscsi nfs-common")
+	install := slices.Index(r.commands, "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq open-iscsi nfs-common fio")
 	require.Positive(t, install, "storage packages are installed")
 	assert.Contains(t, r.commands[install-1], "open-iscsi", "storage package installation follows the package check")
 	assert.Contains(t, all, longhornSettingsFuncName+` "$dir/stock.yaml" "$dir/longhorn.yaml"`)
 	assert.Contains(t, all, `kubectl apply -f "$dir/longhorn.yaml"`)
 	assert.NotContains(t, all, "kubectl apply -f https://", "the stock manifest must not be applied unfiltered")
-	assert.Contains(t, all, `{"spec":{"tags":["kipper-server"]}}`, "a fresh install tags the server")
+	assert.Contains(t, all, `{"spec":{"tags":["kipper-server","kipper-replica"]}}`, "a fresh install tags the server")
 	assert.Contains(t, all, `nodeSelector: "kipper-server"`, "and pins the single-copy class to it")
 	assert.Less(t, strings.Index(all, "patch nodes.longhorn.io"), strings.Index(all, `nodeSelector: "kipper-server"`),
 		"the tag exists before any volume can select it")
@@ -135,7 +135,8 @@ func TestSystemComponents_VeleroNeedsARunnerThatUploads(t *testing.T) {
 // already runs: applying the target would skip minors, which Longhorn refuses.
 func TestInstallLonghornReappliesTheInstalledReleaseOnAnExistingCluster(t *testing.T) {
 	r := pinHost(map[string]string{
-		"get storageclass":                      "",
+		"get storageclass longhorn-single":      "",
+		"get storageclass longhorn-replicated":  "",
 		"get nodes.longhorn.io":                 "",
 		"daemonset longhorn-manager":            "longhornio/longhorn-manager:v1.7.3",
 		"current-longhorn-version":              "v1.7.3",
@@ -149,7 +150,7 @@ func TestInstallLonghornReappliesTheInstalledReleaseOnAnExistingCluster(t *testi
 }
 
 func TestInstallLonghornGivesAFreshHostTheTarget(t *testing.T) {
-	r := pinHost(map[string]string{"get storageclass": "", "get nodes.longhorn.io": ""})
+	r := pinHost(map[string]string{"get storageclass longhorn-single": "", "get storageclass longhorn-replicated": "", "get nodes.longhorn.io": ""})
 	require.NoError(t, installLonghorn(r, HostOS{ID: "debian", Family: FamilyDebian}, nil))
 
 	assert.Contains(t, strings.Join(r.commands, "\n"), "longhorn/longhorn/"+longhornVersion+"/deploy/longhorn.yaml")
@@ -157,7 +158,8 @@ func TestInstallLonghornGivesAFreshHostTheTarget(t *testing.T) {
 
 func TestInstallLonghornFinishesAnUnfinishedHopInsteadOfGoingBack(t *testing.T) {
 	r := pinHost(map[string]string{
-		"get storageclass":                      "",
+		"get storageclass longhorn-single":      "",
+		"get storageclass longhorn-replicated":  "",
 		"get nodes.longhorn.io":                 "",
 		"configmap " + LonghornHopRecordName:    "v1.8.2\tv1.9.2\t\tb\te",
 		"daemonset longhorn-manager":            "longhornio/longhorn-manager:v1.9.2",

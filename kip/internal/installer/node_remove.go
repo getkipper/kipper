@@ -111,40 +111,38 @@ func otherInState(records []NodeRecord, machineID, state string) (NodeRecord, bo
 }
 
 // VolumesOnlyOn lists the Longhorn volumes that have a replica on node, in any
-// state, and no healthy replica on another node. It returns sorted names or nil
-// if none match. A healthy replica has healthyAt set and failedAt empty. Once
-// Longhorn marks a deleted node's replicas failed, the host may still hold the
-// volumes' only data, so failed replicas also matter here.
+// state, and no current replica on another available node (see VolumesOnNode).
+// It returns sorted names or nil if none match. Once Longhorn marks a deleted
+// node's replicas failed, the host may still hold the volumes' only data, so
+// failed replicas on node also count. A failed replica or node inventory query
+// returns an error.
 func VolumesOnlyOn(master CommandRunner, node string) ([]string, error) {
-	out, err := master.Run(replicaQuery)
+	replicas, err := readReplicas(master)
 	if err != nil {
-		return nil, fmt.Errorf("listing Longhorn replicas: %w", err)
+		return nil, err
 	}
-	return volumesOnlyOn(out, node), nil
-}
-
-func volumesOnlyOn(replicas, node string) []string {
+	available, err := availableNodes(master)
+	if err != nil {
+		return nil, err
+	}
 	here := map[string]bool{}
-	healthyElsewhere := map[string]bool{}
-	for _, line := range strings.Split(replicas, "\n") {
-		f := strings.Split(line, "\t")
-		if len(f) != 4 || f[0] == "" {
-			continue
-		}
-		if f[1] == node {
-			here[f[0]] = true
-		} else if f[2] != "" && f[3] == "" {
-			healthyElsewhere[f[0]] = true
+	copyElsewhere := map[string]bool{}
+	for _, r := range replicas {
+		switch {
+		case r.node == node:
+			here[r.volume] = true
+		case r.current && available[r.node]:
+			copyElsewhere[r.volume] = true
 		}
 	}
 	var only []string
 	for v := range here {
-		if !healthyElsewhere[v] {
+		if !copyElsewhere[v] {
 			only = append(only, v)
 		}
 	}
 	sort.Strings(only)
-	return only
+	return only, nil
 }
 
 // DeleteNodeRecord removes the record with machineID from the cluster's node

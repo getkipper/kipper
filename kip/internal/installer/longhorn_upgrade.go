@@ -154,7 +154,7 @@ func (u LonghornUpgrade) Apply(client CommandRunner) error {
 	if _, err := tagServerStorage(client, serverStorageWait); err != nil {
 		return err
 	}
-	return ensureSingleCopyClass(client, serverStorageWait)
+	return ensureStorageClasses(client, serverStorageWait)
 }
 
 // step moves Longhorn from one release to the next, or, with from equal to

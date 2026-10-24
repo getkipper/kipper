@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/ptr"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
@@ -129,7 +130,8 @@ func (v *Volumes) Create(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		Spec: kipperv1.VolumeSpec{
-			Size: req.Size,
+			Size:   req.Size,
+			Copies: ptr.To[int32](1),
 		},
 	}
 

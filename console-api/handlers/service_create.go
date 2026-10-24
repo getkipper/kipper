@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
@@ -126,6 +127,7 @@ func (s *Services) Create(w http.ResponseWriter, r *http.Request) {
 			Type:              req.Type,
 			TLS:               newServiceTLS(req.Type),
 			Storage:           storage,
+			Copies:            ptr.To[int32](1),
 			ConsistentBackups: newServiceConsistentBackups(req.Type),
 			Resources: kipperv1.ServiceResources{
 				CPURequest:    req.CPURequest,

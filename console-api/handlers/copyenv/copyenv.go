@@ -35,6 +35,7 @@ import (
 	"github.com/getkipper/kipper/console-api/internal/workloadname"
 	"github.com/getkipper/kipper/controller/pkg/applink"
 	"github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 	"github.com/getkipper/kipper/controller/pkg/workload"
 )
 
@@ -120,6 +121,9 @@ func (c *Copier) Run(ctx context.Context, opts Options) (Summary, error) {
 	}
 	if opts.Source == opts.Target {
 		return s, fmt.Errorf("source and target must differ")
+	}
+	if err := c.refuseCopiesNotOffered(ctx, opts.Source); err != nil {
+		return s, err
 	}
 
 	apps, appWarnings, err := c.copyApps(ctx, opts)
@@ -347,6 +351,48 @@ func defaultHostFor(appName, envName, clusterDomain string) string {
 		prefix = appName + "-" + envName
 	}
 	return domain.SubdomainFor(prefix, strings.TrimPrefix(clusterDomain, "."))
+}
+
+// refuseCopiesNotOffered refuses, before anything is copied, a source whose
+// services or volumes have two copies while the cluster offers one. The copy
+// keeps each object's copies, and console-api is not bound by the admission
+// policy that enforces the offer, so the offer is checked here.
+func (c *Copier) refuseCopiesNotOffered(ctx context.Context, source string) error {
+	var pc kipperv1.PlatformConfig
+	if err := c.CRClient.Get(ctx, crclient.ObjectKey{Name: "platform"}, &pc); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("reading the copies offer: %w", err)
+	}
+	if platform.OfferedCopies(pc.Spec.MaxCopies) >= platform.MaxCopies {
+		return nil
+	}
+	var services kipperv1.ServiceList
+	if err := c.CRClient.List(ctx, &services, crclient.InNamespace(source)); err != nil {
+		return err
+	}
+	var volumes kipperv1.VolumeList
+	if err := c.CRClient.List(ctx, &volumes, crclient.InNamespace(source)); err != nil {
+		return err
+	}
+	var two []string
+	for i := range services.Items {
+		if platform.WantsTwoCopies(services.Items[i].Spec.Copies) {
+			two = append(two, "service "+services.Items[i].Name)
+		}
+	}
+	for i := range volumes.Items {
+		if platform.WantsTwoCopies(volumes.Items[i].Spec.Copies) {
+			two = append(two, "volume "+volumes.Items[i].Name)
+		}
+	}
+	if len(two) == 0 {
+		return nil
+	}
+	verb := "have"
+	if len(two) == 1 {
+		verb = "has"
+	}
+	return fmt.Errorf("%s %s two copies, and this cluster offers one, so nothing was copied. An admin can offer two with 'kip cluster storage --max-copies 2'",
+		strings.Join(two, ", "), verb)
 }
 
 // copyServices deep-copies Service CRs. Status is dropped so the new

@@ -42,7 +42,8 @@ Supported types: %s
 
 Examples:
   kip service add postgres --name mydb
-  kip service add redis --name cache --storage 2Gi`, strings.Join(service.SupportedTypes(), ", ")),
+  kip service add redis --name cache --storage 2Gi
+  kip service add postgres --name mydb --copies 2`, strings.Join(service.SupportedTypes(), ", ")),
 	Args: cobra.ExactArgs(1),
 	RunE: runServiceAdd,
 }
@@ -140,6 +141,7 @@ func init() {
 	serviceAddCmd.Flags().String("version", "", "image version override (e.g. 16, 8.0, 7)")
 	serviceAddCmd.Flags().String("tls", "", "Postgres only: TLS with a certificate from the cluster's service CA: required (default), on (plaintext still accepted) or off")
 	serviceAddCmd.Flags().Bool("consistent-backups", true, "Postgres only. Add a pg_dump of every database to each backup. Use --consistent-backups=false to disable.")
+	serviceAddCmd.Flags().Int32("copies", 1, copiesFlagHelp)
 	_ = serviceAddCmd.MarkFlagRequired("name")
 
 	serviceListCmd.Flags().String("project", "default", "project namespace")
@@ -157,6 +159,7 @@ func init() {
 	serviceUpdateCmd.Flags().String("version", "", "new image version")
 	serviceUpdateCmd.Flags().String("tls", "", "Postgres only: required, on or off. The database restarts once to switch")
 	serviceUpdateCmd.Flags().Bool("consistent-backups", false, "Postgres only. Add a pg_dump of every database to each backup. Use --consistent-backups=false to disable. Changing this setting restarts the database once.")
+	serviceUpdateCmd.Flags().Int32("copies", 1, "set the copies of a service whose copies are unset to the number its volume has now. Changing the number of copies is not available yet")
 	serviceUpdateCmd.Flags().Bool("force", false, "with --tls required, switch even while clients are connected without TLS")
 
 	serviceRestartCmd.Flags().String("project", "default", "project namespace")
@@ -212,7 +215,11 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 	version, _ := cmd.Flags().GetString("version")
 	tlsFlag, _ := cmd.Flags().GetString("tls")
 	dumpFlag, _ := cmd.Flags().GetBool("consistent-backups")
+	copies, _ := cmd.Flags().GetInt32("copies")
 
+	if err := refuseCopiesOutOfRange(copies); err != nil {
+		return err
+	}
 	if !service.IsSupported(serviceType) {
 		return fmt.Errorf("unsupported service type %q (supported: %v)", serviceType, service.SupportedTypes())
 	}
@@ -267,13 +274,18 @@ func runServiceAdd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	volumes[0].Copies = copies
+	if _, err := checkCopiesOnCreate(ctx, os.Stdout, dynClient, copies, false); err != nil {
+		return err
+	}
 	if err := refuseWithoutStorageRoom(ctx, os.Stdout, mgr, volumes, "--storage"); err != nil {
 		return err
 	}
 
 	// Build Service CR
 	spec := map[string]interface{}{
-		"type": serviceType,
+		"type":   serviceType,
+		"copies": int64(copies),
 	}
 	if storage != "" {
 		spec["storage"] = storage
@@ -485,6 +497,7 @@ func writeServiceInfo(ctx context.Context, out io.Writer, mgr *service.Manager, 
 		say(out, "  Endpoint:   %s\n", conn.URL)
 		say(out, "  Access Key: %s\n", conn.Username)
 		say(out, "  Secret Key: %s\n", conn.Password)
+		writeCopies(out, snapshot.Copies, "  Copies:     ")
 		placement, err := mgr.Placement(ctx, namespace, name)
 		writePlacement(out, placement, err)
 		writeSecretsHint(out, masked)
@@ -504,6 +517,7 @@ func writeServiceInfo(ctx context.Context, out io.Writer, mgr *service.Manager, 
 	if snapshot.Type == "postgres" {
 		say(out, "  TLS:      %s\n", describeServiceTLS(snapshot))
 	}
+	writeCopies(out, snapshot.Copies, "  Copies:   ")
 	placement, err := mgr.Placement(ctx, namespace, name)
 	writePlacement(out, placement, err)
 	writeSecretsHint(out, masked)
@@ -561,9 +575,16 @@ func runServiceUpdate(cmd *cobra.Command, args []string) error {
 
 	dumpSet := cmd.Flags().Changed("consistent-backups")
 	dumpOn, _ := cmd.Flags().GetBool("consistent-backups")
+	copiesSet := cmd.Flags().Changed("copies")
+	copies, _ := cmd.Flags().GetInt32("copies")
 
-	if storage == "" && memory == "" && cpu == "" && version == "" && tls == "" && !dumpSet {
-		return fmt.Errorf("specify at least one of --storage, --memory, --cpu, --version, --tls, or --consistent-backups")
+	if storage == "" && memory == "" && cpu == "" && version == "" && tls == "" && !dumpSet && !copiesSet {
+		return fmt.Errorf("specify at least one of --storage, --memory, --cpu, --version, --tls, --consistent-backups or --copies")
+	}
+	if copiesSet {
+		if err := refuseCopiesOutOfRange(copies); err != nil {
+			return err
+		}
 	}
 	if tls != "" {
 		if err := validTLSMode(tls); err != nil {
@@ -581,6 +602,18 @@ func runServiceUpdate(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
 	fmt.Printf("\n  Updating service %s...\n", name)
+
+	if copiesSet {
+		changed, err := adoptCopies(ctx, k8sClient.Dynamic(), manifest.ServiceGVR, namespace, name, copies)
+		if err != nil {
+			return err
+		}
+		sayCopiesAdopted(os.Stdout, changed, copies)
+		if storage == "" && memory == "" && cpu == "" && version == "" && tls == "" && !dumpSet {
+			fmt.Println()
+			return nil
+		}
+	}
 
 	// Turning consistent backups on creates the dump volume, so it is checked
 	// before any change is written.

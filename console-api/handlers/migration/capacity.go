@@ -15,6 +15,7 @@ import (
 
 	kipperv1 "github.com/getkipper/kipper/console-api/api/v1alpha1"
 	"github.com/getkipper/kipper/console-api/controllers"
+	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
 // clusterCapacity sums a cluster's allocatable node resources, the resource
@@ -29,7 +30,9 @@ type clusterCapacity struct {
 	RequestedStorage   int64 `json:"requested_storage_bytes"`
 	// KeepsStops is true when this cluster's App schema keeps spec.stopped,
 	// so an app that arrives stopped stays stopped.
-	KeepsStops bool `json:"keeps_stops"`
+	KeepsStops    bool  `json:"keeps_stops"`
+	CopiesOffered int32 `json:"copies_offered"`
+	ReplicaNodes  int   `json:"replica_nodes"`
 }
 
 // FreeCPU returns the unrequested CPU headroom.
@@ -72,6 +75,11 @@ func (h *Handler) TargetCapacityHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	capacity.KeepsStops = h.keepsStops(ctx)
+	capacity.CopiesOffered, capacity.ReplicaNodes, err = controllers.CopiesCapacity(ctx, h.CRClient)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("computing capacity: %v", err))
+		return
+	}
 
 	// The version rides along so the source can run its major-version check
 	// at plan time; the accept handshake otherwise only reveals it on the
@@ -366,6 +374,9 @@ func (h *Handler) fetchTargetCapacity(token *Token, projects []string) (clusterC
 	}
 	// Treat an absent capability as unsupported for older targets.
 	target.KeepsStops, _ = resp["keeps_stops"].(bool)
+	offered, _ := resp["copies_offered"].(float64)
+	nodes, _ := resp["replica_nodes"].(float64)
+	target.CopiesOffered, target.ReplicaNodes = int32(offered), int(nodes)
 	version, _ := resp["target_version"].(string)
 	return target, version, nil
 }
@@ -386,6 +397,28 @@ func capacityShortfall(need migrationDemand, target clusterCapacity) string {
 		return fmt.Sprintf(
 			"target cluster has too little disk for this migration: the selected projects' volumes request %dMi, the target has %dMi of storage headroom; use a bigger disk or free up volumes",
 			need.Storage/(1024*1024), target.FreeStorage()/(1024*1024))
+	}
+	return ""
+}
+
+// copiesShortfall returns a blocker for objects requiring two copies when the
+// target lacks the offer or eligible nodes, or "" if there are no such objects
+// or both requirements are met. Checking before migration prevents claims
+// waiting for creation from causing a timeout.
+func copiesShortfall(objects []string, target clusterCapacity) string {
+	if len(objects) == 0 {
+		return ""
+	}
+	names := strings.Join(objects, ", ")
+	switch {
+	case target.CopiesOffered < platform.MaxCopies:
+		return fmt.Sprintf("The following resources keep two copies of their data: %s. The target offers one. An admin on the target can offer two with 'kip cluster storage --max-copies 2'. If the target runs a Kipper version from before copies were supported, upgrade it first.", names)
+	case target.ReplicaNodes < platform.MaxCopies:
+		nodes := "nodes"
+		if target.ReplicaNodes == 1 {
+			nodes = "node"
+		}
+		return fmt.Sprintf("The following resources keep two copies of their data: %s. The target has %d %s that can hold copies. An admin on the target can enable copies on a node with 'kip node storage <node> --copies'.", names, target.ReplicaNodes, nodes)
 	}
 	return ""
 }

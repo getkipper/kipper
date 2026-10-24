@@ -1,0 +1,48 @@
+# Changing the copies of an existing Service, Volume or Project's shared
+# storage, including setting or removing them, needs the custom RBAC verb
+# set-copies on that object. Project owners, console-api and cluster admins
+# hold it. Deployers can create within the offer, but changing copies requires
+# this additional permission.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kipper-storage-copies-change
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["kipper.run"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["services", "volumes", "projects"]
+  variables:
+    - name: oldCopies
+      expression: >-
+        request.resource.resource == 'projects'
+        ? (has(oldObject.spec.sharedStorage) && has(oldObject.spec.sharedStorage.copies) ? oldObject.spec.sharedStorage.copies : 0)
+        : (has(oldObject.spec.copies) ? oldObject.spec.copies : 0)
+    - name: newCopies
+      expression: >-
+        request.resource.resource == 'projects'
+        ? (has(object.spec.sharedStorage) && has(object.spec.sharedStorage.copies) ? object.spec.sharedStorage.copies : 0)
+        : (has(object.spec.copies) ? object.spec.copies : 0)
+  validations:
+    # Projects are cluster-scoped, so their requests carry no namespace.
+    - expression: >-
+        variables.oldCopies == variables.newCopies ||
+        (request.resource.resource == 'projects'
+        ? authorizer.group('kipper.run').resource('projects').name(request.name).check('set-copies').allowed()
+        : authorizer.group('kipper.run').resource(request.resource.resource).namespace(request.namespace).name(request.name).check('set-copies').allowed())
+      message: "Changing the copies of an existing volume needs the project owner role."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kipper-storage-copies-change
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  policyName: kipper-storage-copies-change
+  validationActions: ["Deny"]

@@ -47,6 +47,7 @@ func TestJoinSummarySaysWhereTheDataLives(t *testing.T) {
 	assert.Contains(t, text, "Kipper configures database, registry and in-cluster backup volumes to keep one copy on the server.")
 	assert.Contains(t, text, "With volume data on the server, worker loss preserves that data")
 	assert.Contains(t, text, "kip service info <name>")
+	assert.Contains(t, text, "Services created with two copies keep the second on a worker that passed the disk check")
 }
 
 func TestInClusterBackupsWarningAppliesOnlyToTheBundledMinIO(t *testing.T) {
@@ -78,7 +79,7 @@ func (p placementRunner) RunStdin(cmd string, _ io.Reader) (string, error) { ret
 
 func TestStatusReportsDataPlacementOnlyOnClustersWithWorkers(t *testing.T) {
 	two := []k8s.NodeInfo{{Name: "server-1"}, {Name: "worker-2"}}
-	offServer := placementRunner{replicas: "pvc-db\tworker-2\t2026-10-16T01:00:00Z\t\n", selector: `["kipper-server"]`}
+	offServer := placementRunner{replicas: "pvc-db\tworker-2\t2026-10-16T01:00:00Z\t\t\n", selector: `["kipper-server"]`}
 
 	var out bytes.Buffer
 	reportDataPlacement(&out, offServer, &config.Cluster{}, two)
@@ -86,7 +87,7 @@ func TestStatusReportsDataPlacementOnlyOnClustersWithWorkers(t *testing.T) {
 	assert.Contains(t, out.String(), "a lost server disk takes the backups with it")
 
 	out.Reset()
-	reportDataPlacement(&out, placementRunner{replicas: "pvc-db\tserver-1\t2026-10-16T01:00:00Z\t\n"}, &config.Cluster{BackupStorage: &config.BackupStorageRef{Mode: "external", Bucket: "b"}}, two)
+	reportDataPlacement(&out, placementRunner{replicas: "pvc-db\tserver-1\t2026-10-16T01:00:00Z\t\t\n"}, &config.Cluster{BackupStorage: &config.BackupStorageRef{Mode: "external", Bucket: "b"}}, two)
 	assert.Empty(t, out.String(), "data on the server with external backups needs no section")
 
 	out.Reset()
@@ -116,6 +117,7 @@ func TestServiceInfoShowsWhereTheServiceRunsAndWhereItsDataIs(t *testing.T) {
 			Data:       map[string][]byte{"HOST": []byte("db.default.svc.cluster.local"), "PORT": []byte("5432")},
 		},
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "db-0", Namespace: "default"}, Spec: corev1.PodSpec{NodeName: "worker-2"}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "server-1"}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}},
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data-db-0", Namespace: "default"}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "restored-db"}},
 		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "restored-db"}, Spec: corev1.PersistentVolumeSpec{
 			PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: "driver.longhorn.io", VolumeHandle: "pvc-db"}},
@@ -158,7 +160,7 @@ func TestServiceInfoShowsThePasswordOnlyWhenAsked(t *testing.T) {
 
 func TestStatusDoesNotPromiseAMoveForAnUnpinnedCopy(t *testing.T) {
 	var out bytes.Buffer
-	reportDataPlacement(&out, placementRunner{replicas: "pvc-db\tworker-2\t2026-10-16T01:00:00Z\t\n"}, &config.Cluster{}, []k8s.NodeInfo{{Name: "server-1"}, {Name: "worker-2"}})
+	reportDataPlacement(&out, placementRunner{replicas: "pvc-db\tworker-2\t2026-10-16T01:00:00Z\t\t\n"}, &config.Cluster{}, []k8s.NodeInfo{{Name: "server-1"}, {Name: "worker-2"}})
 	assert.Contains(t, out.String(), "Single-copy volumes not pinned to the server: shop/data-db-0 (on worker-2).")
 }
 
@@ -218,6 +220,20 @@ func TestWritePlacementSaysWhyAPodIsNotScheduled(t *testing.T) {
 	out.Reset()
 	writePlacement(&out, service.Placement{}, nil)
 	assert.Contains(t, out.String(), "Pod node:  not scheduled\n", "no reason yet, nothing invented")
+}
+
+func TestWritePlacementCountsCopiesAndNamesUncheckedHolders(t *testing.T) {
+	var out bytes.Buffer
+	writePlacement(&out, service.Placement{PodNode: "server-1", DataNodes: []string{"server-1"}, UncheckedNodes: []string{"worker-1"}}, nil)
+	assert.Contains(t, out.String(), "Data node: server-1 (1 copy). Could not read node worker-1, so its copy was not checked\n")
+
+	out.Reset()
+	writePlacement(&out, service.Placement{PodNode: "server-1", UncheckedNodes: []string{"worker-1"}}, nil)
+	assert.Contains(t, out.String(), "Data node: no healthy copy found. Could not read node worker-1, so its copy was not checked\n")
+
+	out.Reset()
+	writePlacement(&out, service.Placement{PodNode: "server-1", DataNodes: []string{"server-1", "worker-1"}}, nil)
+	assert.Contains(t, out.String(), "Data node: server-1, worker-1 (2 copies)\n")
 }
 
 // localStorageHost answers the storage-mode read with local storage and records

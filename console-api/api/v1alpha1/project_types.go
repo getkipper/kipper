@@ -153,6 +153,14 @@ type ProjectSharedStorage struct {
 	// +kubebuilder:default="5Gi"
 	// +optional
 	Size string `json:"size,omitempty"`
+
+	// Copies is the requested number of copies of each environment's shared
+	// volume, applied when the volume is created. Unset means unmanaged: Kipper
+	// reports the live copies.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=2
+	// +optional
+	Copies *int32 `json:"copies,omitempty"`
 }
 
 // ProjectStatus defines the observed state of the project.

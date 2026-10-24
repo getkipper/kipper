@@ -13,6 +13,14 @@ type VolumeSpec struct {
 	// Mounts lists apps and their mount paths for this volume.
 	// +optional
 	Mounts []VolumeMountTarget `json:"mounts,omitempty"`
+
+	// Copies is the requested number of copies of the volume, each on a different
+	// storage node. It applies when the claim is created, and an existing claim
+	// keeps its count. Unset means unmanaged: Kipper reports the live copies.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=2
+	// +optional
+	Copies *int32 `json:"copies,omitempty"`
 }
 
 // VolumeMountTarget defines which app mounts this volume and where.
@@ -38,6 +46,10 @@ type VolumeStatus struct {
 	// MountedApps lists the apps that currently have this volume mounted.
 	// +optional
 	MountedApps []string `json:"mountedApps,omitempty"`
+
+	// Storage reports the configured and healthy copies of the volume.
+	// +optional
+	Storage *StorageCopiesStatus `json:"storage,omitempty"`
 
 	// Conditions represent the latest available observations.
 	// +optional

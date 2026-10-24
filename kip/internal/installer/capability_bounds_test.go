@@ -190,3 +190,33 @@ func TestConsoleClusterRoleCanAdoptVolumeHolders(t *testing.T) {
 		require.True(t, grants(console, "", "pods", verb), "console-api needs %s on pods", verb)
 	}
 }
+
+// The copies status reads Longhorn's objects without a watch, and console-api
+// changes none of them.
+func TestConsoleClusterRoleReadsLonghornWithoutWatchOrWrites(t *testing.T) {
+	console := parseConsoleClusterRole(t)
+	for _, resource := range []string{"volumes", "replicas", "engines", "nodes", "settings"} {
+		for _, verb := range []string{"get", "list"} {
+			require.True(t, grants(console, "longhorn.io", resource, verb), "console-api needs %s on %s", verb, resource)
+		}
+		for _, verb := range []string{"watch", "create", "update", "patch", "delete"} {
+			require.False(t, grants(console, "longhorn.io", resource, verb), "console-api must not %s %s", verb, resource)
+		}
+	}
+}
+
+// Changing copies on an existing object is an owner's call (the
+// kipper-storage-copies-change policy checks set-copies). Console-api holds
+// the verb so it can bind the owner role and change copies itself.
+func TestOnlyOwnersAndConsoleAPICanSetCopies(t *testing.T) {
+	roles, _ := parseOperatorRBAC(t)
+	console := parseConsoleClusterRole(t)
+	for _, resource := range []string{"services", "volumes"} {
+		require.True(t, grants(roles["kipper:project-owner"], "kipper.run", resource, "set-copies"), "owners set copies on %s", resource)
+		require.False(t, grants(roles["kipper:project-deployer"], "kipper.run", resource, "set-copies"), "deployers do not set copies on %s", resource)
+		require.False(t, grants(roles["kipper:project-viewer"], "kipper.run", resource, "set-copies"))
+	}
+	for _, resource := range []string{"services", "volumes", "projects"} {
+		require.True(t, grants(console, "kipper.run", resource, "set-copies"), "console-api sets copies on %s", resource)
+	}
+}

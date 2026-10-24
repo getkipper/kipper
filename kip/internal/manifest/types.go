@@ -176,12 +176,14 @@ type SvcSpec struct {
 	Storage           string        `yaml:"storage,omitempty"`
 	TLS               string        `yaml:"tls,omitempty"`
 	ConsistentBackups bool          `yaml:"consistentBackups,omitempty"`
+	Copies            *int32        `yaml:"copies,omitempty"`
 	Resources         *ResourceSpec `yaml:"resources,omitempty"`
 }
 
 // VolSpec defines a shared volume in the manifest.
 type VolSpec struct {
 	Size   string      `yaml:"size"`
+	Copies *int32      `yaml:"copies,omitempty"`
 	Mounts []MountSpec `yaml:"mounts,omitempty"`
 }
 

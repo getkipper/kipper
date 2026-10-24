@@ -13,11 +13,28 @@ func TestServiceAddRefusesAMinIOReleaseKipperDoesNotBuild(t *testing.T) {
 	for _, f := range []string{"name", "project", "environment", "storage", "memory", "cpu", "version"} {
 		cmd.Flags().String(f, "", "")
 	}
+	cmd.Flags().Int32("copies", 1, "")
 	_ = cmd.Flags().Set("name", "storage")
 	_ = cmd.Flags().Set("version", "RELEASE.2024-06-13T22-53-53Z")
 
 	err := runServiceAdd(cmd, []string{"minio"})
 	if err == nil || !strings.Contains(err.Error(), "RELEASE.2025-09-07T16-13-09Z") {
 		t.Fatalf("want a refusal naming the release Kipper builds, got %v", err)
+	}
+}
+
+func TestServiceAddRefusesCopiesOutsideOneAndTwoBeforeReadingTheCluster(t *testing.T) {
+	cmd := &cobra.Command{}
+	for _, f := range []string{"name", "project", "environment", "storage", "memory", "cpu", "version", "tls"} {
+		cmd.Flags().String(f, "", "")
+	}
+	cmd.Flags().Bool("consistent-backups", true, "")
+	cmd.Flags().Int32("copies", 1, "")
+	_ = cmd.Flags().Set("name", "db")
+	_ = cmd.Flags().Set("copies", "3")
+
+	err := runServiceAdd(cmd, []string{"postgres"})
+	if err == nil || !strings.Contains(err.Error(), "--copies must be 1 or 2") {
+		t.Fatalf("want the copies range refusal, got %v", err)
 	}
 }

@@ -35,6 +35,14 @@ type ServiceSpec struct {
 
 	// +optional
 	ConsistentBackups bool `json:"consistentBackups,omitempty"`
+
+	// Copies is the requested number of copies of the data volume, each on a different
+	// storage node. It applies when the claim is created, and an existing claim
+	// keeps its count. Unset means unmanaged: Kipper reports the live copies.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=2
+	// +optional
+	Copies *int32 `json:"copies,omitempty"`
 }
 
 // ServiceResources configures CPU and memory for the service. Request
@@ -96,6 +104,10 @@ type ServiceStatus struct {
 	// CredentialsSecret is the name of the Secret containing connection details.
 	// +optional
 	CredentialsSecret string `json:"credentialsSecret,omitempty"`
+
+	// Storage reports the configured and healthy copies of the data volume.
+	// +optional
+	Storage *StorageCopiesStatus `json:"storage,omitempty"`
 
 	// Conditions represent the latest available observations.
 	// +optional

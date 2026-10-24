@@ -30,6 +30,8 @@ kip cluster domain --repair           # rewrite local config from the cluster
 kip cluster hosts                     # show the hostnames kip uses for a cluster
 kip cluster hosts --dex dex.example.com # correct one without contacting the cluster
 kip cluster dns repair                # restore the curated DNS resolvers on every node and restart CoreDNS
+kip cluster storage                   # storage mode, the copies offer and the nodes that can hold copies
+kip cluster storage --max-copies 2    # let deployers create services with two copies
 kip cluster access show               # the operator access list and a check of every node
 kip cluster access allow --here       # restrict SSH and the API to listed operator addresses
 kip platform restart <component>      # restart a platform or cluster component
@@ -247,6 +249,8 @@ On a cluster with workers, the host checks (DNS resolvers, pending restarts, rea
 
 On a cluster with Longhorn storage, a Storage section appears when the server's roomiest eligible disk has less than 5Gi available for scheduling new volumes. This is the default volume size for `kip volume create`.
 
+Two storage copies sections appear when they have something to list. The first names the services, volumes and project shared storage whose copies are unset, with the copy counts reported by Longhorn when available, and how to record them. The second names those whose copies need attention: fewer healthy copies than set, a volume held back at creation (for example, two copies asked for while fewer than two nodes can hold them), a set count the volume does not have yet, or copies Kipper could not check because it could not read the node holding them. A copy counts as healthy when its data is current and its node exists, is ready and is not fenced.
+
 ## kip doctor {#kip-doctor}
 
 ```bash
@@ -285,12 +289,23 @@ kip cluster dns repair
 
 The resolvers come from `dns_resolvers` in `~/.kip/config.yaml` (set via `--dns-resolver` at install time), or the default public set when none are configured.
 
+## kip cluster storage {#kip-cluster-storage}
+
+Shows the storage mode, the most copies of a volume the cluster offers and how many nodes can hold copies. With `--max-copies`, sets the offer. A cluster offers one copy until an admin runs `kip cluster storage --max-copies 2`, after which deployers may create services with `--copies 2`. Existing volumes keep their copies when the offer changes. Two copies need Longhorn storage, so the offer of two is refused on local storage.
+
+```bash
+kip cluster storage
+kip cluster storage --max-copies 2
+```
+
+The offer is recorded in the PlatformConfig and enforced by the `kipper-storage-copies-offer` admission policy, which kip renders on install, upgrade and every `--max-copies` change. Admins are not bound by it. If the command stops between the two writes, run it again. See [Two copies of a service's data](/en/worker-nodes#two-copies-of-a-services-data).
+
 ## kip node add {#kip-node-add}
 
 A cluster starts with one server. `kip node add` joins workers that add CPU and memory for apps, functions, jobs and services. The server remains the only control plane and ingress node, so the cluster still depends on it for availability.
 
 ```bash
-kip node add <host> [--ssh-key <path>] [--ssh-user <user>] [--private-network <cidr> | --public] [--firewall | --firewall=false] [--no-ssh-rate-limit] [--accept-stale-data] [--yes]
+kip node add <host> [--ssh-key <path>] [--ssh-user <user>] [--private-network <cidr> | --public] [--firewall | --firewall=false] [--no-ssh-rate-limit] [--no-copies] [--accept-stale-data] [--yes]
 ```
 
 The command prepares the host (kernel modules, kubelet hardening, Longhorn's storage packages, host hardening and the firewall) and joins it as a k3s worker on the server's k3s version. It refuses a host at the Rocky Linux or AlmaLinux 9.7 level or later, where Longhorn's volumes stop attaching (Longhorn issue 13606, see [Longhorn upgrades](/en/maintenance#longhorn-upgrades)).
@@ -305,8 +320,37 @@ The command prepares the host (kernel modules, kubelet hardening, Longhorn's sto
 - **Operator access list:** on a cluster with an [operator access list](#kip-cluster-access), the server and every existing worker must already enforce it, and your workstation's address must be on it. kip loads the list on the server and each existing worker before their peer firewall changes, and on the new worker right after it registers. While the node joins, the server admits the new host's addresses on 6443. An abandoned join leaves that entry until the next `kip cluster access apply` or reboot. `kip node remove` drops the removed node from the other nodes' lists and notes any node without one.
 - **Join credentials:** each join attempt uses a fresh k3s bootstrap token valid for one hour. The command attempts to delete it after registration or a join failure. If cleanup fails, the token expires on its own. Once joined, a worker authenticates with its own agent certificates. k3s issues them for one year and renews them at each agent start while they are still valid, so a worker that restarts its agent at least once a year (`kip node reboot <worker>` does this) keeps them current. A worker whose certificates have expired or gone missing cannot reconnect: it shows NotReady and `k3s-agent` logs `failed to retrieve configuration from server: not authorized`. Run `kip node add <host>` again for that worker with the original join options. It mints a fresh join token, repeats the join and keeps the node's name and the data on its disks; workloads are kept off the node while the join is checked. If the rerun fails, follow the cause it reports.
 - **Maintenance:** `kip upgrade` performs host operations on the server only. [`kip cluster uninstall`](#kip-cluster-uninstall) wipes the recorded workers before the server. `kip cluster harden`, `kip cluster dns repair` and `kip node repair-host` act on every recorded node: the server first, then each worker one at a time. Each stops at the first node it cannot reach or change, names that node and leaves the rest for a rerun. On a worker, `kip cluster harden` applies the worker firewall: SSH open to all sources, the cluster ports open to the other nodes, and no public 80, 443 or 6443. `kip node reboot <worker>` drains and reboots a worker, and `kip node remove <worker>` removes one. Rerunning `kip install` upgrades k3s on the server, then brings each worker recorded as `ready` to the server's version (see [k3s upgrades](/en/maintenance#k3s-upgrades)). `kip cluster ca`, `kip cluster domain`, `kip auth reset-password` and `kip install --local` act on the server only. When the first Rocky Linux, AlmaLinux or CentOS Stream node joins, `kip node add` turns on Velero's privileged file system backups, which SELinux hosts need, and waits for the backup agents to restart before it checks the worker.
+- **Copies:** once the worker has joined, kip runs the disk check of [`kip node storage`](#kip-node-storage) on it and, when the disk passes, lets it hold copies of services created with two copies. A refused or failed check allows the join to complete without enabling copies on the worker. The output names the command to run. `--no-copies` skips the check.
 - **Availability:** ingress stays on the control-plane node. Kipper configures each database, registry and in-cluster backup volume to keep one copy on the server. Workers add CPU and memory; high availability requires additional data copies and control-plane redundancy.
 - **Data placement:** `kip upgrade` and `kip node add` set server-only scheduling for these volumes and report copies still on workers. `kip status` also lists these copies. For a pinned volume, `kip node reboot <worker>` moves the copy to the server when the server has room for it. Otherwise the reboot names the volume and stops before cordoning the worker. If kip cannot read Longhorn's state, or capacity changes after that check, the drain blocks until `--drain-timeout`, then fails, and kip cancels the reboot. For volumes reported as not pinned, run `kip upgrade` to retry pinning; a reboot may otherwise move the copy to another worker. Permanent loss of a worker holding the only copy can lose that data. `kip service info <name>` shows where the service runs and where its data is stored.
+
+## kip node storage {#kip-node-storage}
+
+Checks a worker's disk and lets it hold copies of services created with two copies, or stops it taking new ones.
+
+```bash
+kip node storage worker-1 --copies
+kip node storage worker-1 --copies --ignore-slow-disk
+kip node storage worker-1 --copies=false
+```
+
+With `--copies`, kip installs fio on the worker when it is missing and runs etcd's fio recipe twice in `/var/lib/longhorn`: 22 MiB written in 2300-byte blocks with a `fdatasync` after each, capped at 60 seconds per run. It also times 200 TCP connections from the worker to the server's kubelet port, and 20 pings to the server over the pod network, the path Longhorn's copies travel. The ping results are reported and recorded for information. The worst measurements from the two fio runs determine the disk-check result:
+
+| Result | When | Effect |
+|---|---|---|
+| Refused, no override | the slowest sync takes at least half of Longhorn's `engine-replica-timeout` (4 s with the default of 8 s) | the worker gets no copies |
+| Refused | 1 in 100 syncs takes more than 20 ms, any sync takes more than 1 s, or fio cannot write 22 MiB within 60 s | `--ignore-slow-disk` accepts the disk and records the override |
+| Warning | 1 in 100 syncs takes more than 10 ms, or 1 in 100 connections to the server takes more than 2 ms | the worker gets copies |
+
+Local SSD and NVMe disks pass with a wide margin. Network block storage, such as a cloud provider's attachable volume mounted at `/var/lib/longhorn`, is usually refused. kip records the figures, the time of the check and any override in the node's record, and tags the node `kipper-replica` in Longhorn when it passes. A check that cannot run leaves the node as it was. Running the command again repeats the check. When a repeated check refuses a worker that already takes copies, the worker keeps taking them, the refusal says so, and `--copies=false` stops new ones.
+
+`--copies=false` removes the tag, so Longhorn places no new copies on the worker. It is refused while the worker still holds copies, because moving them off a node is not available yet. The server is always eligible to hold copies, so this command accepts workers only.
+
+| Flag | Required | Description |
+|---|---|---|
+| `--copies` | Yes | `--copies` to check the disk and allow copies, `--copies=false` to stop new copies |
+| `--ignore-slow-disk` | No | Accept a disk refused as slow. The override is recorded with the node |
+| `--ssh-key` | No | SSH private key. Overrides `KIP_SSH_KEY` and `cluster.ssh_key` |
 
 ## kip node remove {#kip-node-remove}
 
@@ -327,7 +371,9 @@ Without `--force`, kip starts a removal only while the worker's host answers wit
 
 When Longhorn cannot place a copy elsewhere, for example because the other nodes lack disk space, the command stops before draining and names the volumes. Evicted pods lose their emptyDir data.
 
-For a worker whose host is powered off or gone for good, `--force` deregisters it without changing anything on the host. It first checks whether the host still answers, without a password prompt and with short connection and command timeouts. If the connection or machine ID check fails, or the address now belongs to another machine, kip deletes the worker's node, requests deletion of its Longhorn node, removes its address from the kip-managed firewalls of the remaining nodes and drops its record. It refuses when the host still answers with the worker's machine ID, because forced removal could leave k3s running on that host. Remove it without `--force` instead. When a volume has a replica on the worker and no healthy copy elsewhere, its only data may be on the worker, so `--force` also needs `--accept-data-loss`. The host keeps its k3s credentials for the cluster, so wipe it with `/usr/local/bin/k3s-agent-uninstall.sh` or reinstall it before it comes back. Otherwise, its agent or a kip command already in transit to the host when an earlier run was interrupted can register the node again. To resume an interrupted forced removal, use `--force` again and include `--accept-data-loss` if it was needed. A rerun without `--force` takes the normal path and needs the host.
+Before asking for confirmation, kip also names volumes that retain a healthy copy elsewhere but have no eligible destination for the copy on the worker. For example, this happens with a volume that has two copies when only the server and this worker can hold copies. Those volumes stay degraded until a node that can hold the copy is ready.
+
+For a worker whose host is powered off or gone for good, `--force` deregisters it without changing anything on the host. It first checks whether the host still answers, without a password prompt and with short connection and command timeouts. If the connection or machine ID check fails, or the address now belongs to another machine, kip deletes the worker's node, requests deletion of its Longhorn node, removes its address from the kip-managed firewalls of the remaining nodes and drops its record. It refuses when the host still answers with the worker's machine ID, because forced removal could leave k3s running on that host. Remove it without `--force` instead. When a volume has a replica on the worker and no healthy copy elsewhere, its only data may be on the worker, so `--force` also needs `--accept-data-loss`. A copy elsewhere counts only when its data is current and its node is ready and not fenced. The same rule applies when checking whether a resumed removal may wipe the host. The host keeps its k3s credentials for the cluster, so wipe it with `/usr/local/bin/k3s-agent-uninstall.sh` or reinstall it before it comes back. Otherwise, its agent or a kip command already in transit to the host when an earlier run was interrupted can register the node again. To resume an interrupted forced removal, use `--force` again and include `--accept-data-loss` if it was needed. A rerun without `--force` takes the normal path and needs the host.
 
 A [fenced](#kip-node-fence) worker requires `--force` for removal. If its fence is unfinished, complete the fence before removing it. When the host of a fenced worker still answers over SSH, kip removes it only while the fence still holds it: the drop-in is in the loaded k3s agent unit, and no agent, container, Longhorn process or Longhorn mount is left. Otherwise kip refuses and tells you to fence the worker again or finish its rejoin. This check applies to a resumed removal as well. A service the fence stopped whose other copies may be older blocks the removal until you decide about it with `kip service start <name> --accept-stale-data` or rejoin the worker, because removing the worker loses the newer data on it. Services whose only copy is on the worker are listed with how to restore them afterwards from a backup taken before the fence, and `--accept-data-loss` covers them as above.
 
@@ -374,7 +420,7 @@ kip disables automatic node-down pod deletion and fast RWX failover with two Lon
 
 ## kip node list {#kip-node-list}
 
-Lists all nodes in the cluster with role, status, version, and IP. When a worker is recorded, the table also shows each node's network mode (`public` or `private`) and the address kip reaches it at over SSH. A node without a record shows `-` in both columns.
+Lists all nodes in the cluster with role, status, version, and IP. When a worker is recorded, the table also shows each node's network mode (`public` or `private`), whether it may hold copies of volumes, and the address kip reaches it at over SSH. The COPIES column shows `yes` for the server and for a worker that passed the [disk check](#kip-node-storage), `no` for one that was refused or stopped, and `-` for one never checked. A node without a record shows `-` in every recorded column.
 
 ```bash
 kip node list
@@ -879,6 +925,7 @@ Manage stateful services (databases, caches) with persistent storage.
 ```bash
 kip service add postgres --name mydb         # deploy PostgreSQL
 kip service add redis --name cache           # deploy Redis
+kip service add postgres --name mydb --copies 2 # keep two copies of the data on two nodes
 kip service list                             # list all services
 kip service info mydb                        # show connection details, password masked
 kip service info mydb --show-secrets         # include the password
@@ -891,6 +938,8 @@ kip service rotate-password mydb             # new password in the engine, the S
 kip service delete mydb --delete-data        # delete the service and its volume
 kip service start mydb                       # start a service kip node fence left stopped
 ```
+
+`kip service add --copies 2` keeps two copies of the service's data, each on a different node that can hold copies. It is refused on local storage, on a cluster that offers one copy (see [`kip cluster storage`](#kip-cluster-storage)), and when fewer than two nodes can hold copies. The default is one copy. On a cluster with in-cluster backups, kip warns once that a second copy does not replace external backups. `kip service update <name> --copies N` sets the copies of a service created before Kipper managed them, when N equals the copies its volume has now. Changing the number of copies of an existing service is not available yet. See [Two copies of a service's data](/en/worker-nodes#two-copies-of-a-services-data).
 
 `kip service share` accepts `--project` and `--environment` to target a service outside the active project, `--expires` (up to 720h) for the link lifetime, and `--label` for a note in the listing. Use `--list` to see a service's links, `--revoke <id>` to kill one, and `--revoke-all` plus `--rotate-key` to contain a leak.
 
@@ -1016,18 +1065,22 @@ kip volume create uploads --size 5Gi --project blog --environment test
 kip volume mount uploads webapp --path /data --project blog --environment test
 kip volume unmount uploads webapp --project blog --environment test
 kip volume list --project blog
+kip volume update uploads --copies 1 --project blog --environment test
 kip volume delete uploads --delete-data --project blog --environment test
 ```
+
+`kip volume list` shows each volume's copies: `1`, `not set` for a volume created before Kipper managed copies, or `-` on an older cluster. `kip volume update <name> --copies N` sets the copies of a volume whose copies are unset, when N equals the copies it has now.
 
 ### kip volume create flags {#kip-volume-create-flags}
 
 | Flag | Required | Default | Description |
 |---|---|---|---|
 | `--size` | No | `5Gi` | Volume size |
+| `--copies` | No | `1` | Copies of the data. Shared volumes keep one copy in this release, so `2` is refused |
 | `--project` | No | `default` | Project name |
 | `--environment` | No | — | Target environment |
 
-Before creating the volume, `kip volume create` checks whether at least one Longhorn node has capacity for a copy, using Longhorn's reserved space, over-provisioning and minimal-available settings. If capacity is insufficient, it refuses creation and reports the node with the most room and its remaining capacity. If Longhorn's state cannot be read, it prints a warning and proceeds with creation.
+Before creating the volume, `kip volume create` checks whether the server has capacity for the volume's copy, using Longhorn's reserved space, over-provisioning and minimal-available settings. If capacity is insufficient, it refuses creation and reports the node with the most room and its remaining capacity. If Longhorn's state cannot be read, it prints a warning and proceeds with creation.
 
 ### kip volume mount flags {#kip-volume-mount-flags}
 

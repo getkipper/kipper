@@ -16,8 +16,10 @@ const joinDataSummary = `     Kipper configures database, registry and in-cluste
      Workers add CPU and memory. With volume data on the server, worker loss
      preserves that data, but services on the worker may stay unavailable
      until it returns. Server loss stops the cluster. Permanent server disk
-     loss requires recovery from a surviving backup. 'kip service info <name>'
-     shows where each service runs and where its data is.
+     loss requires recovery from a surviving backup. Services created with two
+     copies keep the second on a worker that passed the disk check, so either
+     disk can be lost. 'kip service info <name>' shows where each service runs
+     and where its data is.
 `
 
 const offServerJoinWarning = "The volumes listed above still have data on workers. Permanent loss of a worker can lose that data."
@@ -76,9 +78,13 @@ func writePlacement(out io.Writer, p service.Placement, err error) {
 		say(out, "  Data node: not checked (%v)\n", err)
 		return
 	}
-	if len(p.DataNodes) == 0 {
-		say(out, "  Data node: no healthy copy found\n")
-		return
+	data := "no healthy copy found"
+	if len(p.DataNodes) > 0 {
+		data = fmt.Sprintf("%s (%d %s)", strings.Join(p.DataNodes, ", "), len(p.DataNodes), plural(len(p.DataNodes), "copy", "copies"))
 	}
-	say(out, "  Data node: %s (%d %s)\n", strings.Join(p.DataNodes, ", "), len(p.DataNodes), plural(len(p.DataNodes), "copy", "copies"))
+	if len(p.UncheckedNodes) > 0 {
+		n := len(p.UncheckedNodes)
+		data += fmt.Sprintf(". Could not read %s %s, so %s %s not checked", plural(n, "node", "nodes"), strings.Join(p.UncheckedNodes, ", "), plural(n, "its copy", "their copies"), plural(n, "was", "were"))
+	}
+	say(out, "  Data node: %s\n", data)
 }

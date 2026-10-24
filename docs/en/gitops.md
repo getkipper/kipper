@@ -53,6 +53,7 @@ services:
     type: postgres
     version: "16"
     storage: 5Gi
+    copies: 2
     resources:
       cpuRequest: 250m
       cpuLimit: 750m
@@ -214,6 +215,19 @@ stop, it preserves the original identity and timestamp.
 `kip export` includes the reason and migration flag, leaving the identity and timestamp
 in the cluster. Removing the block starts the app, so `kip apply` requires `--force`
 to apply that change.
+
+### Copies
+
+`copies` on a service or volume sets how many copies of its data Kipper keeps, each on
+a different node: `1` or `2`. A new service or volume without the field gets one copy.
+On an existing one, a manifest without the field keeps the copies it has. A manifest
+that changes them is refused before anything is written, because changing the copies
+of an existing volume is not available yet. For an object whose copies are unset, the
+manifest can record the copies its volume already has. A new object with two copies is
+checked against the cluster's offer and its nodes before anything is written. When
+your account cannot read the offer, kip checks it through the cluster's admission
+policies using a dry-run create, which works once the object's namespace exists.
+`kip export` writes the field for every object that has it. See [Two copies of a service's data](/en/worker-nodes#two-copies-of-a-services-data).
 
 ## Applying a manifest
 

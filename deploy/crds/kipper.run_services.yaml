@@ -60,6 +60,15 @@ spec:
                 type: array
               consistentBackups:
                 type: boolean
+              copies:
+                description: |-
+                  Copies is the requested number of copies of the data volume, each on a different
+                  storage node. It applies when the claim is created, and an existing claim
+                  keeps its count. Unset means unmanaged: Kipper reports the live copies.
+                format: int32
+                maximum: 2
+                minimum: 1
+                type: integer
               resources:
                 description: Resources configures CPU and memory for the service.
                 properties:
@@ -187,6 +196,32 @@ spec:
                 description: Port is the service port.
                 format: int32
                 type: integer
+              storage:
+                description: Storage reports the configured and healthy copies of
+                  the data volume.
+                properties:
+                  class:
+                    description: Class is the claim's storage class.
+                    type: string
+                  copies:
+                    description: |-
+                      Copies is the replica count configured on the Longhorn volume, or 1 for
+                      local storage.
+                    format: int32
+                    type: integer
+                  healthyCopies:
+                    description: |-
+                      HealthyCopies is the number of Ready, unfenced nodes holding a current
+                      copy. Local storage always reports 1.
+                    format: int32
+                    type: integer
+                  nodes:
+                    description: Nodes lists those nodes, sorted by name. It is empty
+                      for local storage.
+                    items:
+                      type: string
+                    type: array
+                type: object
             type: object
         type: object
     served: true

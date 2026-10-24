@@ -112,6 +112,11 @@ rules:
   - apiGroups: ["kipper.run"]
     resources: ["apikeys", "datatransfers"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # set-copies is checked by the kipper-storage-copies-change admission policy:
+  # changing the copies of an existing service or volume is an owner's call.
+  - apiGroups: ["kipper.run"]
+    resources: ["services", "volumes"]
+    verbs: ["set-copies"]
   - apiGroups: ["apps"]
     resources: ["deployments/scale", "statefulsets/scale"]
     verbs: ["update", "patch"]

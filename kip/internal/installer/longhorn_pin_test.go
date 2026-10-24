@@ -15,19 +15,21 @@ func init() {
 }
 
 const (
-	pinnedClass   = `{"kind":"StorageClass","metadata":{"name":"longhorn-single","uid":"abc","resourceVersion":"7"},"provisioner":"driver.longhorn.io","parameters":{"numberOfReplicas":"1","nodeSelector":"kipper-server"}}`
-	unpinnedClass = `{"kind":"StorageClass","metadata":{"name":"longhorn-single","uid":"abc","resourceVersion":"7"},"provisioner":"driver.longhorn.io","parameters":{"numberOfReplicas":"1"}}`
+	replicatedClass = `{"kind":"StorageClass","metadata":{"name":"longhorn-replicated"},"provisioner":"driver.longhorn.io","parameters":{"numberOfReplicas":"2","dataLocality":"disabled","nodeSelector":"kipper-replica","replicaAutoBalance":"disabled","staleReplicaTimeout":"30","fsType":"ext4","dataEngine":"v1"}}`
+	pinnedClass     = `{"kind":"StorageClass","metadata":{"name":"longhorn-single","uid":"abc","resourceVersion":"7"},"provisioner":"driver.longhorn.io","parameters":{"numberOfReplicas":"1","nodeSelector":"kipper-server"}}`
+	unpinnedClass   = `{"kind":"StorageClass","metadata":{"name":"longhorn-single","uid":"abc","resourceVersion":"7"},"provisioner":"driver.longhorn.io","parameters":{"numberOfReplicas":"1"}}`
 )
 
 func pinHost(replies map[string]string) *drainHost {
 	base := map[string]string{
-		"get nodes -l":            "node/server-1\n",
-		"get nodes --request":     "node/server-1\nnode/worker-1\n",
-		"get nodes.longhorn.io":   `["kipper-server"]`,
-		"get storageclass":        pinnedClass,
-		"get pv ":                 "",
-		"get volumes.longhorn.io": "",
-		"replicas.longhorn.io":    "",
+		"get nodes -l":                         "node/server-1\n",
+		"get nodes --request":                  "node/server-1\nnode/worker-1\n",
+		"get nodes.longhorn.io":                `["kipper-server","kipper-replica"]`,
+		"get storageclass longhorn-single":     pinnedClass,
+		"get storageclass longhorn-replicated": replicatedClass,
+		"get pv ":                              "",
+		"get volumes.longhorn.io":              "",
+		"replicas.longhorn.io":                 "",
 	}
 	for k, v := range replies {
 		base[k] = v
@@ -52,7 +54,7 @@ func TestServerStorageTagIsAddedAndKeepsTheNodesOtherTags(t *testing.T) {
 	patches := h.ranWith("patch nodes.longhorn.io")
 	require.Len(t, patches, 1)
 	assert.Contains(t, patches[0], "nodes.longhorn.io server-1 ")
-	assert.Contains(t, patches[0], `{"spec":{"tags":["ssd","kipper-server"]}}`)
+	assert.Contains(t, patches[0], `{"spec":{"tags":["ssd","kipper-server","kipper-replica"]}}`)
 
 	h = pinHost(nil)
 	_, err = PinSingleCopiesToServer(h)
@@ -67,7 +69,7 @@ func TestServerStorageTagNeedsExactlyOneServer(t *testing.T) {
 }
 
 func TestSingleCopyClassIsRecreatedWithTheServerSelector(t *testing.T) {
-	h := pinHost(map[string]string{"get storageclass": unpinnedClass})
+	h := pinHost(map[string]string{"get storageclass longhorn-single": unpinnedClass})
 	_, err := PinSingleCopiesToServer(h)
 	require.NoError(t, err)
 	require.Len(t, h.ranWith("delete storageclass longhorn-single"), 1, "StorageClass parameters cannot change in place")
@@ -77,7 +79,7 @@ func TestSingleCopyClassIsRecreatedWithTheServerSelector(t *testing.T) {
 	all := strings.Join(h.commands, "\n")
 	assert.Less(t, strings.Index(all, "delete storageclass"), strings.Index(all, `nodeSelector: "kipper-server"`))
 
-	h = pinHost(map[string]string{"get storageclass": ""})
+	h = pinHost(map[string]string{"get storageclass longhorn-single": ""})
 	_, err = PinSingleCopiesToServer(h)
 	require.NoError(t, err)
 	assert.Empty(t, h.ranWith("delete storageclass"))
@@ -88,6 +90,17 @@ func TestSingleCopyClassIsRecreatedWithTheServerSelector(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, h.ranWith("kubectl apply"), "a pinned class is left alone")
 	assert.Empty(t, h.ranWith("delete storageclass"))
+}
+
+func TestSingleCopyClassWithAnotherReplicaCountIsRecreated(t *testing.T) {
+	drifted := strings.Replace(pinnedClass, `"numberOfReplicas":"1"`, `"numberOfReplicas":"2"`, 1)
+	h := pinHost(map[string]string{"get storageclass longhorn-single": drifted})
+	_, err := PinSingleCopiesToServer(h)
+	require.NoError(t, err)
+	require.Len(t, h.ranWith("delete storageclass longhorn-single"), 1, "copies 1 must mean one replica")
+	created := h.ranWith(`nodeSelector: "kipper-server"`)
+	require.Len(t, created, 1)
+	assert.Contains(t, created[0], `numberOfReplicas: "1"`)
 }
 
 func TestExistingSingleCopyVolumesArePinnedToTheServer(t *testing.T) {
@@ -133,9 +146,9 @@ func TestSingleCopiesOffTheServerAreListedWithTheirNode(t *testing.T) {
 		"get volumes.longhorn.io": "pvc-db\t[\"kipper-server\"]\tshop\tdata-db-0\n" +
 			"pvc-loki\t\tmonitoring\tstorage-loki-0\n" +
 			"pvc-zot\t[\"kipper-server\"]\tkipper-system\tzot-data\n",
-		"replicas.longhorn.io": "pvc-db\tworker-2\t2026-10-16T01:00:00Z\t\n" +
-			"pvc-loki\tworker-1\t2026-10-16T01:00:00Z\t\n" +
-			"pvc-zot\tserver-1\t2026-10-16T01:00:00Z\t\n",
+		"replicas.longhorn.io": "pvc-db\tworker-2\t2026-10-16T01:00:00Z\t\t\n" +
+			"pvc-loki\tworker-1\t2026-10-16T01:00:00Z\t\t\n" +
+			"pvc-zot\tserver-1\t2026-10-16T01:00:00Z\t\t\n",
 	})
 	placement, err := PinSingleCopiesToServer(h)
 	require.NoError(t, err)
@@ -162,7 +175,7 @@ func TestARefusedPatchLeavesTheCopyListedAsNotPinned(t *testing.T) {
 	h := pinHost(map[string]string{
 		"get pv ":                 "longhorn-single\tpvc-db\n",
 		"get volumes.longhorn.io": "pvc-db\t\tshop\tdata-db-0\n",
-		"replicas.longhorn.io":    "pvc-db\tworker-2\t2026-10-16T01:00:00Z\t\n",
+		"replicas.longhorn.io":    "pvc-db\tworker-2\t2026-10-16T01:00:00Z\t\t\n",
 	})
 	h.failures = map[string]string{"patch volumes.longhorn.io": "denied"}
 	placement, err := PinSingleCopiesToServer(h)
@@ -171,7 +184,7 @@ func TestARefusedPatchLeavesTheCopyListedAsNotPinned(t *testing.T) {
 }
 
 func TestAReplacementThatKeepsFailingPutsThePreviousClassBack(t *testing.T) {
-	h := pinHost(map[string]string{"get storageclass": unpinnedClass})
+	h := pinHost(map[string]string{"get storageclass longhorn-single": unpinnedClass})
 	h.failures = map[string]string{`nodeSelector: "kipper-server"`: "denied by policy"}
 	_, err := PinSingleCopiesToServer(h)
 	require.Error(t, err)
@@ -183,16 +196,16 @@ func TestAReplacementThatKeepsFailingPutsThePreviousClassBack(t *testing.T) {
 }
 
 func TestAClassThatCannotBeCreatedAgainSaysHowToRecover(t *testing.T) {
-	h := pinHost(map[string]string{"get storageclass": unpinnedClass})
+	h := pinHost(map[string]string{"get storageclass longhorn-single": unpinnedClass})
 	h.failures = map[string]string{"kubectl apply": "the server is currently unable to handle the request"}
 	_, err := PinSingleCopiesToServer(h)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "run 'kip upgrade' again to create it")
+	assert.Contains(t, err.Error(), "Run 'kip upgrade' again to create it")
 	assert.NotEmpty(t, h.ranWith("delete storageclass"))
 }
 
 func TestASingleNodeClusterSkipsTheVolumeAndReplicaReads(t *testing.T) {
-	h := pinHost(map[string]string{"get nodes --request": "node/server-1\n", "get storageclass": unpinnedClass})
+	h := pinHost(map[string]string{"get nodes --request": "node/server-1\n", "get storageclass longhorn-single": unpinnedClass})
 	placement, err := PinSingleCopiesToServer(h)
 	require.NoError(t, err)
 	assert.NotEmpty(t, h.ranWith(`nodeSelector: "kipper-server"`), "the class is still pinned for the first worker")
@@ -216,10 +229,10 @@ func TestPinningForAnUpgradeGivesUpQuicklyOnALonghornProblem(t *testing.T) {
 
 func TestEveryPinRequestIsBoundedByARequestTimeout(t *testing.T) {
 	h := pinHost(map[string]string{
-		"get nodes.longhorn.io":   `[]`,
-		"get storageclass":        unpinnedClass,
-		"get pv ":                 "longhorn-single\tpvc-db\n",
-		"get volumes.longhorn.io": "pvc-db\t\tshop\tdata-db-0\n",
+		"get nodes.longhorn.io":            `[]`,
+		"get storageclass longhorn-single": unpinnedClass,
+		"get pv ":                          "longhorn-single\tpvc-db\n",
+		"get volumes.longhorn.io":          "pvc-db\t\tshop\tdata-db-0\n",
 	})
 	_, err := PinSingleCopiesToServer(h)
 	require.NoError(t, err)

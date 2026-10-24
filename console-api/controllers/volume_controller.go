@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -72,14 +73,16 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, r.reportSharedStorageUnsupported(ctx, &vol)
 	}
 
-	pvc, err := r.reconcilePVC(ctx, &vol)
+	pvc, err := r.reconcilePVC(ctx, &vol, mode)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling pvc: %w", err)
 	}
 
-	retry, err := r.reconcileHolder(ctx, &vol, pvc)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling backup holder: %w", err)
+	var retry time.Duration
+	if pvc != nil {
+		if retry, err = r.reconcileHolder(ctx, &vol, pvc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconciling backup holder: %w", err)
+		}
 	}
 
 	if err := r.syncAppVolumes(ctx, &vol); err != nil {
@@ -90,6 +93,8 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 
+	// Nothing watches Longhorn, so the copies in the status are read again on a timer.
+	retry = earliest(retry, storageRefresh(apimeta.FindStatusCondition(vol.Status.Conditions, kipperv1.ConditionStorageCopies)))
 	return ctrl.Result{RequeueAfter: retry}, nil
 }
 
@@ -175,9 +180,15 @@ func (r *VolumeReconciler) reportSharedStorageUnsupported(ctx context.Context, v
 // reconcilePVC returns vol's claim, creating it if missing. It adopts ownerless
 // claims, including restored claims, when Kipper's labels establish ownership.
 // Existing claims otherwise remain unchanged.
-func (r *VolumeReconciler) reconcilePVC(ctx context.Context, vol *kipperv1.Volume) (*corev1.PersistentVolumeClaim, error) {
+//
+// A new claim follows the copies creation gate: it returns nil without a claim
+// while the gate holds creation back, with the reason in the volume's
+// StorageCopies condition. A restored volume asking for two copies gets a
+// single-copy claim while shared copies are not qualified, so its data comes
+// back, and keeps its copies as intent.
+func (r *VolumeReconciler) reconcilePVC(ctx context.Context, vol *kipperv1.Volume, mode string) (*corev1.PersistentVolumeClaim, error) {
 	pvcName := sharedClaimName(vol.Name)
-	storageClass := platform.LonghornSharedClass
+	storageClass := platform.ClaimClassForCopies(mode, vol.Spec.Copies)
 
 	desired := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -207,6 +218,21 @@ func (r *VolumeReconciler) reconcilePVC(ctx context.Context, vol *kipperv1.Volum
 	var existing corev1.PersistentVolumeClaim
 	err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: vol.Namespace}, &existing)
 	if errors.IsNotFound(err) {
+		restored := vol.Labels[veleroRestoreNameLabel] != ""
+		reason, message, err := creationGate(ctx, r.longhornReader(), mode, vol.Spec.Copies, true, restored)
+		if err != nil {
+			return nil, err
+		}
+		if reason != "" {
+			if !restored || reason != kipperv1.StorageCopiesRWXNotQualified {
+				setCopiesCondition(&vol.Status.Conditions, metav1.Condition{
+					Type: kipperv1.ConditionStorageCopies, Status: metav1.ConditionFalse, Reason: reason, Message: message,
+				}, vol.Generation)
+				return nil, nil
+			}
+			single := platform.SingleWriterClass(mode)
+			desired.Spec.StorageClassName = &single
+		}
 		if err := r.Create(ctx, desired); err != nil {
 			return nil, err
 		}
@@ -238,6 +264,9 @@ func (r *VolumeReconciler) updateStatus(ctx context.Context, vol *kipperv1.Volum
 		return r.Status().Update(ctx, vol)
 	}
 	if err != nil {
+		return err
+	}
+	if err := r.reportStorageCopies(ctx, vol, &pvc); err != nil {
 		return err
 	}
 

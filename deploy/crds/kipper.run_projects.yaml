@@ -153,6 +153,15 @@ spec:
                 description: SharedStorage configures a shared PVC across apps in
                   each environment.
                 properties:
+                  copies:
+                    description: |-
+                      Copies is the requested number of copies of each environment's shared
+                      volume, applied when the volume is created. Unset means unmanaged: Kipper
+                      reports the live copies.
+                    format: int32
+                    maximum: 2
+                    minimum: 1
+                    type: integer
                   enabled:
                     description: Enabled turns shared storage on or off.
                     type: boolean

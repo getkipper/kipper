@@ -1,0 +1,48 @@
+# Two copies are offered only when the admin says so. kip renders the offer
+# from PlatformConfig.spec.maxCopies into the "offered" variable on install,
+# upgrade and kip cluster storage, so the policy reads no parameter and a
+# missing PlatformConfig offers one copy. Requesters who may update the
+# PlatformConfig, such as admins and Velero restores, are not bound by it.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kipper-storage-copies-offer
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["kipper.run"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["services", "volumes", "projects"]
+  variables:
+    - name: offered
+      expression: "1"
+    - name: newCopies
+      expression: >-
+        request.resource.resource == 'projects'
+        ? (has(object.spec.sharedStorage) && has(object.spec.sharedStorage.copies) ? object.spec.sharedStorage.copies : 0)
+        : (has(object.spec.copies) ? object.spec.copies : 0)
+    - name: oldCopies
+      expression: >-
+        request.operation != 'UPDATE' ? 0
+        : request.resource.resource == 'projects'
+        ? (has(oldObject.spec.sharedStorage) && has(oldObject.spec.sharedStorage.copies) ? oldObject.spec.sharedStorage.copies : 0)
+        : (has(oldObject.spec.copies) ? oldObject.spec.copies : 0)
+  validations:
+    - expression: >-
+        variables.offered >= 2 || variables.newCopies < 2 || variables.oldCopies >= 2 ||
+        authorizer.group('kipper.run').resource('platformconfigs').name('platform').check('update').allowed()
+      message: "This cluster offers one copy of each volume. An admin can offer two with 'kip cluster storage --max-copies 2'."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kipper-storage-copies-offer
+  labels:
+    app.kubernetes.io/managed-by: kipper
+spec:
+  policyName: kipper-storage-copies-offer
+  validationActions: ["Deny"]

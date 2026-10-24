@@ -393,3 +393,10 @@ func TestNodeSSHUserMatchesHostNamesInAnyCase(t *testing.T) {
 	c := &config.Cluster{SSHUser: "rocky", Nodes: []config.NodeRecord{{Host: "Worker-1.example.com", SSHUser: "ec2-user"}}}
 	assert.Equal(t, "ec2-user", nodeSSHUser(c, "worker-1.example.com"))
 }
+
+func TestARejoinKeepsTheNodesCopiesRecord(t *testing.T) {
+	checked := &config.NodeStorage{Copies: true, Overridden: true, CheckedAt: "2026-10-01T06:00:00Z"}
+	assert.Same(t, checked, joinedNodeStorage(&installer.NodeRecord{Name: "worker-1", Storage: checked}),
+		"a re-run of kip node add keeps the check the replica tag rests on")
+	assert.Nil(t, joinedNodeStorage(nil))
+}

@@ -45,7 +45,7 @@ func TestProjectReconciler_SharedStorageOnLonghorn(t *testing.T) {
 	c, project := reconcileSharedStorageProject(t)
 	var pvc corev1.PersistentVolumeClaim
 	require.NoError(t, c.Get(context.Background(), crclient.ObjectKey{Namespace: "demo-prod", Name: "shared-uploads"}, &pvc))
-	assert.Equal(t, platform.LonghornSharedClass, *pvc.Spec.StorageClassName)
+	assert.Equal(t, platform.LonghornSingleClass, *pvc.Spec.StorageClassName, "new shared storage without copies gets one copy")
 	assert.Nil(t, apimeta.FindStatusCondition(project.Status.Conditions, conditionSharedStorageUnsupported))
 }
 

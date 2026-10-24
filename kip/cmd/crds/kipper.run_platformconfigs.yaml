@@ -98,6 +98,14 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              maxCopies:
+                description: |-
+                  MaxCopies is the most data copies the admin offers to services, volumes
+                  and project storage. Unset means 1: copies 2 is not offered.
+                format: int32
+                maximum: 2
+                minimum: 1
+                type: integer
               profile:
                 description: |-
                   Profile selects a sizing profile for system components. The installer

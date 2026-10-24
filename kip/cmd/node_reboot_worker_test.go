@@ -16,19 +16,21 @@ import (
 
 // drainingServer stands in for kubectl on the server during a worker reboot.
 type drainingServer struct {
-	policy     string
-	cordoned   bool
-	drainErr   string
-	replicas   []string
-	afterDrain []string
-	commands   []string
-	drained    bool
-	health     string
-	degradeOn  string
-	healthErr  bool
-	replicaErr bool
-	nodes      string
-	longhorn   string
+	policy       string
+	cordoned     bool
+	drainErr     string
+	replicas     []string
+	afterDrain   []string
+	commands     []string
+	drained      bool
+	health       string
+	degradeOn    string
+	healthErr    bool
+	replicaErr   bool
+	nodes        string
+	longhorn     string
+	available    string
+	availableErr bool
 }
 
 func (s *drainingServer) Run(cmd string) (string, error) {
@@ -61,6 +63,14 @@ func (s *drainingServer) Run(cmd string) (string, error) {
 			return "connection refused", errors.New("exit status 1")
 		}
 		return s.health, nil
+	case strings.Contains(cmd, "spec.taints"):
+		if s.availableErr {
+			return "forbidden", errors.New("exit status 1")
+		}
+		if s.available != "" {
+			return s.available, nil
+		}
+		return "server\tTrue\t\nworker-1\tTrue\t\nworker-2\tTrue\t\n", nil
 	case strings.HasPrefix(cmd, "kubectl get nodes"):
 		if s.nodes == "" {
 			return "node/server\nnode/worker-1\nnode/worker-2\n", nil
@@ -100,10 +110,10 @@ func (s *drainingServer) ran(prefix string) bool {
 }
 
 const (
-	dbOnlyOnWorker   = "pvc-db\tworker-1\t2026-10-16T01:00:00Z\t"
-	dbMovedToServer  = "pvc-db\tserver\t2026-10-16T03:00:00Z\t"
-	lokiOnWorker     = "pvc-loki\tworker-1\t2026-10-16T01:00:00Z\t"
-	lokiOnServerToo  = "pvc-loki\tserver\t2026-10-16T01:00:00Z\t"
+	dbOnlyOnWorker   = "pvc-db\tworker-1\t2026-10-16T01:00:00Z\t\t"
+	dbMovedToServer  = "pvc-db\tserver\t2026-10-16T03:00:00Z\t\t"
+	lokiOnWorker     = "pvc-loki\tworker-1\t2026-10-16T01:00:00Z\t\t"
+	lokiOnServerToo  = "pvc-loki\tserver\t2026-10-16T01:00:00Z\t\t"
 	evictionPolicy   = installer.LonghornEvictionDrainPolicy
 	drainBudgetError = "error when evicting pods/\"instance-manager-abc\" -n \"longhorn-system\" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.\nerror: unable to drain node \"worker-1\" due to error: global timeout reached: 30m0s"
 )
@@ -346,7 +356,7 @@ func TestWorkerRebootOnlyWarnsAboutVolumesWithMoreReplicasThanNodes(t *testing.T
 
 func TestWorkerRebootRefusesAnOverReplicatedVolumeThatLostACopy(t *testing.T) {
 	s := &drainingServer{policy: evictionPolicy, health: lokiOnTwoNodes, nodes: "node/server\nnode/worker-1\n",
-		replicas: []string{lokiOnServerToo, "pvc-loki\tworker-1\t\t"}}
+		replicas: []string{lokiOnServerToo, "pvc-loki\tworker-1\t\t\t"}}
 	w, _ := newWorkerReboot(s)
 
 	err := w.preview()
@@ -475,10 +485,26 @@ func TestWorkerRebootChecksVolumeHealthAfterThePreCordonReads(t *testing.T) {
 
 func TestWorkerRebootRefusesAnOverReplicatedVolumeWhoseCopiesSitOnAGoneNode(t *testing.T) {
 	s := &drainingServer{policy: evictionPolicy, health: lokiOnTwoNodes, nodes: "node/server\nnode/worker-1\n",
-		replicas: []string{lokiOnServerToo, "pvc-loki\tworker-old\t2026-10-16T01:00:00Z\t"}}
+		replicas: []string{lokiOnServerToo, "pvc-loki\tworker-old\t2026-10-16T01:00:00Z\t\t"}}
 	w, _ := newWorkerReboot(s)
 
 	require.Error(t, w.preview(), "a copy on a node that left the cluster does not cover worker-1")
+}
+
+func TestVolumeGateCountsNoCopyOnAnUnavailableNode(t *testing.T) {
+	for name, s := range map[string]*drainingServer{
+		"a NotReady holder": {health: lokiOnTwoNodes, nodes: "node/server\nnode/worker-1\n",
+			replicas: []string{lokiOnWorker, lokiOnServerToo}, available: "server\tTrue\t\nworker-1\tFalse\t\n"},
+		"a fenced holder": {health: lokiOnTwoNodes, nodes: "node/server\nnode/worker-1\n",
+			replicas: []string{lokiOnWorker, lokiOnServerToo}, available: "server\tTrue\t\nworker-1\tTrue\tnode.kubernetes.io/out-of-service\n"},
+		"unreadable nodes": {health: lokiOnTwoNodes, nodes: "node/server\nnode/worker-1\n",
+			replicas: []string{lokiOnWorker, lokiOnServerToo}, availableErr: true},
+	} {
+		var out bytes.Buffer
+		err := volumeGate(&out, s, false)
+		require.Error(t, err, name)
+		assert.NotContains(t, out.String(), "Every node holds a healthy copy", name)
+	}
 }
 
 func TestVolumeGateRefusalTellsTheOperatorToWaitForLonghorn(t *testing.T) {

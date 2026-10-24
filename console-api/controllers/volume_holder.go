@@ -165,7 +165,7 @@ func claimProvenance(pvc *corev1.PersistentVolumeClaim, vol *kipperv1.Volume) (b
 }
 
 // claimUnsupported names what makes pvc unfit for a permanent holder, or
-// returns "" when it is a ReadWriteMany filesystem claim on the shared class.
+// returns "" when it is a ReadWriteMany filesystem claim on a Longhorn class.
 func claimUnsupported(pvc *corev1.PersistentVolumeClaim) string {
 	if !slices.Contains(pvc.Spec.AccessModes, corev1.ReadWriteMany) {
 		return "is not ReadWriteMany"
@@ -173,8 +173,8 @@ func claimUnsupported(pvc *corev1.PersistentVolumeClaim) string {
 	if pvc.Spec.VolumeMode != nil && *pvc.Spec.VolumeMode != corev1.PersistentVolumeFilesystem {
 		return "is a block volume"
 	}
-	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != platform.LonghornSharedClass {
-		return fmt.Sprintf("does not use the %q storage class", platform.LonghornSharedClass)
+	if pvc.Spec.StorageClassName == nil || !platform.IsLonghornClass(*pvc.Spec.StorageClassName) {
+		return "does not use a Longhorn storage class"
 	}
 	return ""
 }
