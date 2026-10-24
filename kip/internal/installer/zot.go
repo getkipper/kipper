@@ -25,8 +25,9 @@ const (
 	zotPullSecret     = "zot-pull-credentials" //nolint:gosec // Secret object name, not a credential
 	zotTLSSecret      = "zot-tls"
 
-	zotRegistryHost = "zot.kipper-system.svc.cluster.local:5000"
-	zotCAFilePath   = "/etc/rancher/k3s/zot-ca.crt"
+	zotRegistryHost   = "zot.kipper-system.svc.cluster.local:5000"
+	zotCAFilePath     = "/etc/rancher/k3s/zot-ca.crt"
+	zotRegistriesPath = "/etc/rancher/k3s/registries.yaml"
 )
 
 // zotBaseManifestTemplate creates storage and the Service before certificate
@@ -372,22 +373,67 @@ func ensureZotCredentials(client CommandRunner) (string, error) {
 }
 
 // writeZotNodeFiles writes the registry CA and pull configuration on one node
-// with mode 600. Passing file contents through stdin keeps the pull password
-// out of command arguments.
-func writeZotNodeFiles(client CommandRunner, caPEM, clusterIP, pullPassword string) error {
+// with mode 600 and reports whether either file's content changed. A file whose
+// content already matches is left in place. Passing file contents through stdin
+// keeps the pull password out of command arguments.
+func writeZotNodeFiles(client CommandRunner, caPEM, clusterIP, pullPassword string) (bool, error) {
 	if _, err := client.Run("mkdir -p /etc/rancher/k3s"); err != nil {
-		return fmt.Errorf("creating k3s config directory: %w", err)
+		return false, fmt.Errorf("creating k3s config directory: %w", err)
 	}
-	writeCA := fmt.Sprintf("cat > %s && chmod 600 %s", zotCAFilePath, zotCAFilePath)
-	if _, err := client.RunStdin(writeCA, strings.NewReader(caPEM)); err != nil {
-		return fmt.Errorf("writing zot CA: %w", err)
+	caChanged, err := replaceIfChanged(client, zotCAFilePath, caPEM)
+	if err != nil {
+		return false, fmt.Errorf("writing zot CA: %w", err)
 	}
-	const registriesPath = "/etc/rancher/k3s/registries.yaml"
-	writeRegistries := fmt.Sprintf("cat > %s && chmod 600 %s", registriesPath, registriesPath)
-	if _, err := client.RunStdin(writeRegistries, strings.NewReader(renderZotRegistriesConfig(clusterIP, pullPassword))); err != nil {
-		return fmt.Errorf("writing registries config: %w", err)
+	registriesChanged, err := replaceIfChanged(client, zotRegistriesPath, renderZotRegistriesConfig(clusterIP, pullPassword))
+	if err != nil {
+		return false, fmt.Errorf("writing registries config: %w", err)
 	}
-	return nil
+	return caChanged || registriesChanged, nil
+}
+
+// fileChangedMarker is printed by replaceIfChangedScript when it replaced the file.
+const fileChangedMarker = "KIP_FILE_CHANGED"
+
+// replaceIfChanged writes content to path and reports whether it differed from
+// what the file held. A missing file counts as changed. It sets mode 600 even
+// when the content matches. The returned boolean is meaningful only on success.
+func replaceIfChanged(client CommandRunner, path, content string) (bool, error) {
+	out, err := client.RunStdin(replaceIfChangedScript(path), strings.NewReader(content))
+	if err != nil {
+		return false, err
+	}
+	return hasOutputLine(out, fileChangedMarker), nil
+}
+
+// hasOutputLine reports whether marker appears as a whole line of out, which
+// may also carry SSH warnings or login script output. Leading and trailing
+// whitespace on each line is ignored.
+func hasOutputLine(out, marker string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == marker {
+			return true
+		}
+	}
+	return false
+}
+
+// replaceIfChangedScript stages stdin next to the target and renames it into
+// place only when it differs, preserving the modification time of unchanged
+// files and making replacements atomic. The target ends with mode 600.
+// The parent directory must exist, and path must be safe to use unquoted in sh.
+func replaceIfChangedScript(path string) string {
+	return strings.NewReplacer("TARGET", path, "MARKER", fileChangedMarker).Replace(`set -e
+staged=$(mktemp "$(dirname TARGET)"/.kipper-XXXXXX)
+trap 'rm -f "$staged"' EXIT
+cat > "$staged"
+if cmp -s "$staged" TARGET; then
+  chmod 600 TARGET
+  exit 0
+fi
+chmod 600 "$staged"
+mv "$staged" TARGET
+trap - EXIT
+echo MARKER`)
 }
 
 // verifyZotAuth requires /v2/ to return 401 for anonymous requests and 200
@@ -445,7 +491,10 @@ func formatZotDiagnosis(logs string) string {
 // configures k3s to use the pull account. Builds use a separate push account.
 // Repeated installs reuse existing credentials and preserve expanded volumes.
 // The volume uses local-path when storageMode is local and longhorn-single otherwise.
-// Installation restarts k3s and waits up to five minutes for node readiness.
+// k3s restarts only when the server's registry files change or a pending marker
+// remains from an earlier attempt. After a restart, installation waits up to
+// five minutes for all nodes to report Ready, then clears the marker.
+// It finishes by checking anonymous and authenticated registry access over TLS.
 func InstallZot(client CommandRunner, storageMode string) error {
 	// Preserve the existing volume size before applying the storage manifest.
 	// Stop on lookup errors to avoid requesting a smaller volume.
@@ -515,18 +564,45 @@ func InstallZot(client CommandRunner, storageMode string) error {
 	if caPEM == "" {
 		return fmt.Errorf("zot TLS secret is missing ca.crt")
 	}
-	if err := writeZotNodeFiles(client, caPEM, clusterIP, pullPassword); err != nil {
+	if err := configureServerRegistry(client, caPEM, clusterIP, pullPassword); err != nil {
 		return err
 	}
-
-	// Restart k3s to load the registry configuration.
-	if _, err := client.Run("systemctl restart k3s"); err != nil {
-		return fmt.Errorf("restarting k3s: %w", err)
-	}
-	// Allow time for the node to become ready after the restart.
-	if err := WaitForNodeReady(client, 5*time.Minute); err != nil {
-		return fmt.Errorf("waiting for k3s after restart: %w", err)
-	}
-
 	return verifyZotAuth(client, clusterIP, pullPassword)
+}
+
+// zotRestartPendingPath marks a registry update before files are written so
+// retries load any changes left by an interrupted run. It is cleared after any
+// required restart and readiness check succeed, including when files match.
+const zotRestartPendingPath = "/etc/rancher/k3s/.kipper-zot-restart-pending"
+
+// zotRestartPendingMarker is printed when zotRestartPendingPath already exists.
+const zotRestartPendingMarker = "KIP_ZOT_RESTART_PENDING"
+
+// configureServerRegistry writes the registry files on the server and restarts
+// k3s when either file changes or a pending marker remains from an earlier run.
+// After a restart it waits up to five minutes for all nodes to report Ready.
+// Once created, the marker remains on failure so the next attempt retries
+// the restart.
+func configureServerRegistry(client CommandRunner, caPEM, clusterIP, pullPassword string) error {
+	out, err := client.Run(fmt.Sprintf("mkdir -p /etc/rancher/k3s && if [ -e %[1]s ]; then echo %[2]s; fi; touch %[1]s", zotRestartPendingPath, zotRestartPendingMarker))
+	if err != nil {
+		return fmt.Errorf("marking the registry configuration as pending: %w", err)
+	}
+	pending := hasOutputLine(out, zotRestartPendingMarker)
+	changed, err := writeZotNodeFiles(client, caPEM, clusterIP, pullPassword)
+	if err != nil {
+		return err
+	}
+	if changed || pending {
+		if _, err := client.Run("systemctl restart k3s"); err != nil {
+			return fmt.Errorf("restarting k3s: %w", err)
+		}
+		if err := WaitForNodeReady(client, 5*time.Minute); err != nil {
+			return fmt.Errorf("waiting for k3s after restart: %w", err)
+		}
+	}
+	if _, err := client.Run("rm -f " + zotRestartPendingPath); err != nil {
+		return fmt.Errorf("clearing the pending registry configuration marker: %w", err)
+	}
+	return nil
 }
