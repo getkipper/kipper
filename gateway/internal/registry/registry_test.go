@@ -1363,3 +1363,88 @@ func TestNeverServedLabelStillReleasedWhileEnforcing(t *testing.T) {
 		t.Errorf("it must be released, removed %d", removed)
 	}
 }
+
+func proveForTest(t *testing.T, r *Registry, subdomain, ip string) {
+	t.Helper()
+	entry, _, _ := r.Register(subdomain, ip, "")
+	nonce, _, _ := r.IssueChallenge(subdomain, entry.Token)
+	if !r.RecordProof(subdomain, entry.Token, nonce, "spki", "kipper-hop-proof-v1") {
+		t.Fatalf("record proof for %s", subdomain)
+	}
+}
+
+func TestNewestProofAge(t *testing.T) {
+	r := New()
+	if _, ok := r.NewestProofAge(); ok {
+		t.Error("an empty registry has no proof to report an age for")
+	}
+
+	proveForTest(t, r, "older", "203.0.113.1")
+	proveForTest(t, r, "newer", "203.0.113.2")
+	proveForTest(t, r, "lapsed", "203.0.113.3")
+	now := time.Now()
+	r.entries["older"].ProvenAt = now.Add(-72 * time.Hour)
+	r.entries["newer"].ProvenAt = now.Add(-2 * time.Hour)
+	// An expired registration's newer proof must not mask the latest proof
+	// among unexpired registrations.
+	r.entries["lapsed"].ProvenAt = now.Add(-time.Minute)
+	r.entries["lapsed"].LastSeen = now.Add(-r.InactivityTTL - time.Hour)
+
+	age, ok := r.NewestProofAge()
+	if !ok {
+		t.Fatal("expected an age with proven registrations present")
+	}
+	if age < 2*time.Hour || age > 2*time.Hour+time.Minute {
+		t.Errorf("expected the newest live proof, about 2h old, got %v", age)
+	}
+}
+
+func TestProofOverdue(t *testing.T) {
+	r := New()
+	proveForTest(t, r, "routable", "203.0.113.1")
+	_, _, _ = r.Register("never-proven", "203.0.113.2", "")
+	proveForTest(t, r, "deleted-box", "203.0.113.3")
+	proveForTest(t, r, "lease-lapsed", "203.0.113.4")
+	proveForTest(t, r, "lease-running", "203.0.113.5")
+	proveForTest(t, r, "pin-moved", "203.0.113.6")
+	now := time.Now()
+	// A deleted cluster's expired lease should not trigger an overdue alert.
+	r.entries["deleted-box"].LastSeen = now.Add(-10 * 24 * time.Hour)
+	r.entries["deleted-box"].ProvenAt = now.Add(-10 * 24 * time.Hour)
+	r.entries["deleted-box"].ProofExpiry = now.Add(-3 * 24 * time.Hour)
+	// Recent renewal keeps an expired proof lease in the overdue count.
+	r.entries["lease-lapsed"].ProvenAt = now.Add(-8 * 24 * time.Hour)
+	r.entries["lease-lapsed"].ProofExpiry = now.Add(-24 * time.Hour)
+	// An overdue proof should trigger an alert while its lease still permits
+	// routing, giving four days to recover before the lease expires.
+	r.entries["lease-running"].ProvenAt = now.Add(-3 * 24 * time.Hour)
+	r.entries["lease-running"].ProofExpiry = now.Add(4 * 24 * time.Hour)
+	// A pin change requires a new proof even when the previous proof is recent.
+	r.entries["pin-moved"].CertFingerprint = strings.Repeat("ab", 32)
+
+	if got := r.ProofOverdue(48 * time.Hour); got != 4 {
+		t.Errorf("expected never-proven, lease-lapsed, lease-running and pin-moved, got %d", got)
+	}
+	if count, _ := r.UnprovenSummary(); count != 4 {
+		t.Errorf("UnprovenSummary counts the silent registration too but not the running lease: got %d, want 4", count)
+	}
+}
+
+// TestNewestProofAgeKeepsASilentRegistrationsProof checks that proof age keeps
+// increasing after renewals stop, so fleet-wide failures remain visible after
+// registrations leave the overdue count.
+func TestNewestProofAgeKeepsASilentRegistrationsProof(t *testing.T) {
+	r := New()
+	proveForTest(t, r, "gone-quiet", "203.0.113.1")
+	now := time.Now()
+	r.entries["gone-quiet"].LastSeen = now.Add(-72 * time.Hour)
+	r.entries["gone-quiet"].ProvenAt = now.Add(-72 * time.Hour)
+
+	age, ok := r.NewestProofAge()
+	if !ok || age < 72*time.Hour || age > 72*time.Hour+time.Minute {
+		t.Errorf("expected about 72h, got %v (ok=%v)", age, ok)
+	}
+	if got := r.ProofOverdue(48 * time.Hour); got != 0 {
+		t.Errorf("a registration silent for 72h is not overdue, got %d", got)
+	}
+}

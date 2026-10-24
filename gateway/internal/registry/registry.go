@@ -907,6 +907,53 @@ func (r *Registry) UnprovenSummary() (count int, oldest time.Duration) {
 	return count, oldest
 }
 
+// NewestProofAge returns the age of the most recent proof among unexpired
+// registrations, or zero and false if none has a recorded proof. It includes
+// proofs from registrations that have stopped renewing or whose leases expired,
+// so callers can detect when proofs have stopped across the fleet.
+func (r *Registry) NewestProofAge() (time.Duration, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var newest time.Time
+	for _, entry := range r.entries {
+		if r.isExpiredLocked(entry) {
+			continue
+		}
+		if entry.ProvenAt.After(newest) {
+			newest = entry.ProvenAt
+		}
+	}
+	if newest.IsZero() {
+		return 0, false
+	}
+	return time.Since(newest), true
+}
+
+// ProofOverdue counts unexpired registrations whose LastSeen is strictly after
+// now minus window and whose proof is invalid or was recorded at or before that
+// cutoff. It applies the proof requirements regardless of EnforceProof, including
+// registrations with a valid lease but an overdue proof. This detects proof
+// failures among recently active clusters while excluding deleted clusters once
+// their LastSeen falls outside window. UnprovenSummary counts invalid proofs
+// regardless of LastSeen until the registration expires.
+func (r *Registry) ProofOverdue(window time.Duration) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	cutoff := time.Now().Add(-window)
+	count := 0
+	for _, entry := range r.entries {
+		if r.isExpiredLocked(entry) || !entry.LastSeen.After(cutoff) {
+			continue
+		}
+		if !r.proofValidLocked(entry) || !entry.ProvenAt.After(cutoff) {
+			count++
+		}
+	}
+	return count
+}
+
 // generateNonce returns a 16-byte hex challenge nonce.
 func generateNonce() (string, error) {
 	b := make([]byte, 16)
