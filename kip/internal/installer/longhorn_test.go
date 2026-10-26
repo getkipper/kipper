@@ -91,6 +91,7 @@ func TestInstallLonghorn_AppliesTheFilteredManifest(t *testing.T) {
 	assert.NotContains(t, all, "kubectl apply -f https://", "the stock manifest must not be applied unfiltered")
 	assert.Contains(t, all, `{"spec":{"tags":["kipper-server","kipper-replica"]}}`, "a fresh install tags the server")
 	assert.Contains(t, all, `nodeSelector: "kipper-server"`, "and pins the single-copy class to it")
+	assert.Contains(t, all, `disableRevisionCounter: "false"`, "and creates the replicated class with the revision counter on")
 	assert.Less(t, strings.Index(all, "patch nodes.longhorn.io"), strings.Index(all, `nodeSelector: "kipper-server"`),
 		"the tag exists before any volume can select it")
 }

@@ -15,7 +15,7 @@ func init() {
 }
 
 const (
-	replicatedClass = `{"kind":"StorageClass","metadata":{"name":"longhorn-replicated"},"provisioner":"driver.longhorn.io","parameters":{"numberOfReplicas":"2","dataLocality":"disabled","nodeSelector":"kipper-replica","replicaAutoBalance":"disabled","staleReplicaTimeout":"30","fsType":"ext4","dataEngine":"v1"}}`
+	replicatedClass = `{"kind":"StorageClass","metadata":{"name":"longhorn-replicated"},"provisioner":"driver.longhorn.io","parameters":{"numberOfReplicas":"2","dataLocality":"disabled","nodeSelector":"kipper-replica","replicaAutoBalance":"disabled","staleReplicaTimeout":"30","fsType":"ext4","dataEngine":"v1","disableRevisionCounter":"false"}}`
 	pinnedClass     = `{"kind":"StorageClass","metadata":{"name":"longhorn-single","uid":"abc","resourceVersion":"7"},"provisioner":"driver.longhorn.io","parameters":{"numberOfReplicas":"1","nodeSelector":"kipper-server"}}`
 	unpinnedClass   = `{"kind":"StorageClass","metadata":{"name":"longhorn-single","uid":"abc","resourceVersion":"7"},"provisioner":"driver.longhorn.io","parameters":{"numberOfReplicas":"1"}}`
 )

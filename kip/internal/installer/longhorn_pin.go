@@ -32,16 +32,19 @@ parameters:
 `, singleCopyClass, ServerStorageTag)
 
 // replicatedClassParameters are the parameters of the class for volumes with
-// two copies. Locality and auto-balance are off so Longhorn never builds or
-// deletes a copy because a pod moved.
+// two copies. Locality and auto-balance are off so moving a pod leaves its copies
+// in place. The revision counter lets the engine reject copies that missed writes
+// at startup, except during a live engine upgrade. It must be enabled explicitly
+// because Longhorn's CSI driver disables it when the class omits the setting.
 var replicatedClassParameters = map[string]string{
-	"numberOfReplicas":    "2",
-	"dataLocality":        "disabled",
-	"nodeSelector":        platform.ReplicaStorageTag,
-	"replicaAutoBalance":  "disabled",
-	"staleReplicaTimeout": "30",
-	"fsType":              "ext4",
-	"dataEngine":          "v1",
+	"numberOfReplicas":       "2",
+	"dataLocality":           "disabled",
+	"nodeSelector":           platform.ReplicaStorageTag,
+	"replicaAutoBalance":     "disabled",
+	"staleReplicaTimeout":    "30",
+	"fsType":                 "ext4",
+	"dataEngine":             "v1",
+	"disableRevisionCounter": "false",
 }
 
 var replicatedClassManifest = func() string {
@@ -92,18 +95,20 @@ type SingleCopyPlacement struct {
 }
 
 // PinSingleCopiesToServer configures server-only scheduling for the single-copy
-// StorageClass and its existing volumes. Existing replicas can remain on workers.
+// StorageClass and its existing volumes. It also creates or updates the replicated
+// StorageClass for new two-copy volumes. Existing replicas can remain on workers.
 // The result lists updated volumes, patch failures with reasons, and current
 // replicas still on workers. Individual patch failures allow the run to continue.
-// Single-node clusters update only the server tag and StorageClass and return an
+// Single-node clusters update only the server tags and StorageClasses and return an
 // empty result. Other errors stop the run and may leave partial changes applied.
 func PinSingleCopiesToServer(client CommandRunner) (SingleCopyPlacement, error) {
 	return pinSingleCopies(client, false)
 }
 
 // PinSingleCopiesForJoin configures server-only scheduling before a worker joins,
-// including existing volumes in single-node clusters. It returns placement details
-// as described by PinSingleCopiesToServer and an error if any volume patch fails.
+// including existing volumes in single-node clusters. It also creates or updates
+// the replicated StorageClass for new two-copy volumes. It returns placement
+// details as described by PinSingleCopiesToServer and an error if any volume patch fails.
 // Errors may leave partial changes applied. Existing replicas can remain on workers.
 func PinSingleCopiesForJoin(client CommandRunner) (SingleCopyPlacement, error) {
 	placement, err := pinSingleCopies(client, true)

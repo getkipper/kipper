@@ -119,6 +119,7 @@ Kipper departs from Longhorn's defaults here:
 - Data locality is off, so a copy stays on its node when the pod moves.
 - Replica auto-balance is off, so Longhorn leaves healthy copies in place instead of moving them to balance storage across nodes.
 - A volume can be created with one copy missing, so a restore never waits for a node.
+- Once an install or upgrade has configured the `longhorn-replicated` class, new two-copy volumes have Longhorn's revision counter enabled. When a volume's engine starts, except during a live engine upgrade, it compares the counters of the copies it can reach. It marks any copy whose counter is behind as failed, excluding it from serving data so it can be rebuilt from a current copy. The counter costs some write throughput. Existing volumes keep their setting. Two-copy volumes created by Kipper v0.38.0 have the counter disabled. So do those created with the old class after an upgrade reported a storage warning and before the class was successfully recreated. Run `kip upgrade` again to retry configuring the class.
 
 ## Looking after workers
 

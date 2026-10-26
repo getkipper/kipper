@@ -65,7 +65,7 @@ flowchart TD
 | `--memory` | `1Gi` (postgres/mysql/mongodb), `2Gi` (opensearch), `512Mi` (rabbitmq), `128Mi` (others) | Sets the memory request and limit to the same value. |
 | `--tls` | `required` (postgres) | Postgres only. `required` refuses connections without TLS, `on` serves TLS and still accepts plaintext, `off` creates the service without TLS. See [Encrypted Postgres connections](#postgres-tls). |
 | `--consistent-backups` | `true` (postgres) | Postgres only. Adds a `pg_dump` of every database to each backup. See [Consistent database dumps](/en/backups#consistent-database-dumps). |
-| `--copies` | `1` | Copies of the data, each on a different node: `1` or `2`. Two copies need Longhorn, an admin's offer and two nodes that can hold copies. The Postgres dump volume always keeps one copy. See [Two copies of a service's data](/en/worker-nodes#two-copies-of-a-services-data). |
+| `--copies` | `1` | Copies of the data, each on a different node: `1` or `2`. Two copies need Longhorn, an admin's offer and two nodes that can hold copies. The Postgres dump volume always keeps one copy. Once an install or upgrade has configured the `longhorn-replicated` class, new two-copy volumes have Longhorn's revision counter enabled, which costs some write throughput. Existing volumes keep their setting, so two-copy volumes created by Kipper v0.38.0 have it disabled. See [Two copies of a service's data](/en/worker-nodes#two-copies-of-a-services-data). |
 
 RabbitMQ services created with the default settings in earlier Kipper releases started with `128Mi`, which the broker can exceed during startup. Upgrading Kipper preserves their existing memory allocation. Increase it with `kip service update <name> --memory 512Mi`.
 
