@@ -16,6 +16,15 @@
 </p>
 
 <p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/public/console-dashboard-dark.png">
+    <img src="docs/public/console-dashboard-light.png" width="800"
+         alt="The Kipper console after a one-command install: cluster health, every platform component ready, and apps, services, backups and users in the sidebar">
+  </picture>
+</p>
+<p align="center"><em>One install gives you a web console for k3s with cluster health, automatic HTTPS, storage and real-time logs.</em></p>
+
+<p align="center">
   <img src="docs/public/demo.gif" width="800" alt="A bare Ubuntu server becoming a Kubernetes cluster with an app serving over HTTPS, in two commands" />
 </p>
 
