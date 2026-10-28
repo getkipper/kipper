@@ -1,11 +1,16 @@
 name: Build and publish the docs image
 
-# Builds and publishes kipper-docs when a docs change lands on main, or on
-# demand. The other nine images live in build-images.yml, which ignores docs/**
-# so a wording fix does not rebuild the whole matrix.
+# Builds and publishes kipper-docs when docs change on main or on demand.
+# Pull requests targeting main that change docs/** run the same build for
+# validation only. The other ten images are built in build-images.yml, which
+# ignores docs/** to keep docs-only wording fixes out of the full build matrix.
 
 on:
   push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+  pull_request:
     branches: [main]
     paths:
       - 'docs/**'
@@ -20,7 +25,26 @@ env:
   ORG: getkipper
 
 jobs:
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build kipper-docs
+        uses: docker/build-push-action@v7
+        with:
+          context: docs
+          file: docs/Dockerfile
+          push: false
+          cache-from: type=gha,scope=kipper-docs
+
   build:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -36,8 +60,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # The Dockerfile runs the VitePress build, so a page that fails to render
-      # fails the job rather than publishing a broken site.
+      # The Dockerfile runs the VitePress build, so a page rendering failure
+      # stops the job before it can publish a broken site.
       - name: Build and push kipper-docs
         uses: docker/build-push-action@v7
         with:
