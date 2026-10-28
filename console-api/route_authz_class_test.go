@@ -432,6 +432,7 @@ var routeAuthz = map[string]authzDeclaration{
 	"PUT /api/v1/users/{email}/role":                                 {class: classGlobalRole},
 	"PUT /api/v1/users/{email}/monitoring":                           {class: classGlobalRole},
 	"DELETE /api/v1/users/{email}/monitoring":                        {class: classGlobalRole},
+	"QUERY /api/v1/migrate-target/{session}/transfer/{transfer}/*":   {class: classForeignCredential, reason: "the per-transfer token derived for this transfer, not a user identity"},
 	"TRACE /api/v1/migrate-target/{session}/transfer/{transfer}/*":   {class: classForeignCredential, reason: "the per-transfer token derived for this transfer, not a user identity"},
 }
 
