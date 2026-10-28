@@ -293,4 +293,5 @@ PUT /api/v1/settings/smtp	anon=401 outsider=403 viewer=403 deployer=403 owner=40
 PUT /api/v1/storage/{service}/public	anon=401 outsider=403 viewer=403 deployer=allow owner=allow admin=allow
 PUT /api/v1/users/{email}/monitoring	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=404
 PUT /api/v1/users/{email}/role	anon=401 outsider=403 viewer=403 deployer=403 owner=403 admin=allow
+QUERY /api/v1/migrate-target/{session}/transfer/{transfer}/*	anon=401 outsider=401 viewer=401 deployer=401 owner=401 admin=401
 TRACE /api/v1/migrate-target/{session}/transfer/{transfer}/*	anon=401 outsider=401 viewer=401 deployer=401 owner=401 admin=401
