@@ -14,12 +14,16 @@ const longhornSettingsFuncName = "add_kipper_longhorn_settings"
 // a volume's last healthy replica, fast replica rebuild off (Longhorn issue
 // 14096), node-down pod deletion and fast RWX failover off to leave pod
 // recovery to the fence, and the storage defaults Kipper relies on written out
-// so a Longhorn upgrade cannot change them. Requiring exactly one settings
-// header catches format changes before installation.
+// so they stay consistent across Longhorn upgrades. It also marks Longhorn's
+// stock class as non-default, leaving k3s's local-path as the default class.
+// Requiring exactly one settings header and one line containing the default
+// annotation catches format changes before installation.
 var longhornSettingsFunc = longhornSettingsFuncName + `() {
   header='  default-setting.yaml: |-'
+  annotation='storageclass.kubernetes.io/is-default-class: "true"'
   [ "$(grep -cxF "$header" "$1")" = 1 ] || { echo "expected exactly one default-setting block in the Longhorn manifest" >&2; return 1; }
-  awk -v header="$header" '{ print } $0 == header { ` + longhornSettingsAwk + ` }' "$1" > "$2"
+  [ "$(grep -cF "$annotation" "$1")" = 1 ] || { echo "expected exactly one default StorageClass annotation in the Longhorn manifest" >&2; return 1; }
+  awk -v header="$header" -v annotation="$annotation" 'index($0, annotation) { sub(/"true"/, "\"false\"") } { print } $0 == header { ` + longhornSettingsAwk + ` }' "$1" > "$2"
 }`
 
 // longhornSettings are written into the manifest's default settings, which
