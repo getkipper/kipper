@@ -125,12 +125,11 @@ func (i *Installer) ackWindow() time.Duration {
 
 func (i *Installer) timeout() time.Duration {
 	if i.PollTimeout == 0 {
-		// 30 minutes covers cold-start cases that 10 minutes did not:
-		// Longhorn PVC provisioning, MongoDB image pull (~270 MB),
-		// MongoDB init, LibreChat boot waiting for Mongo, plus the
-		// in-Job model probe (which itself has a 30-minute deadline).
-		// Each step short-circuits when state is already healthy, so
-		// the larger ceiling does not slow successful re-runs.
+		// Allow 30 minutes for cold starts that exceeded the previous 10-minute
+		// limit: PVC provisioning, the MongoDB image pull (~270 MB) and
+		// initialization, LibreChat waiting for MongoDB, and the model probe
+		// Job, which also has a 30-minute deadline. Each wait returns as soon
+		// as its readiness check succeeds, so healthy reruns finish promptly.
 		return 30 * time.Minute
 	}
 	return i.PollTimeout

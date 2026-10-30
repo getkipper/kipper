@@ -411,7 +411,7 @@ also restarts with a new backup. A plain `kip upgrade` in between re-applies the
 step was moving to, or the release the cluster runs when that step never
 applied, and says so.
 
-A shared volume in Longhorn's default class wants three copies, so on a cluster
+A shared volume in Longhorn's stock `longhorn` class wants three copies, so on a cluster
 with fewer than three nodes it stays degraded while it is attached. Longhorn
 cannot move such a volume's engine while it is in use, so kip lets it keep its
 older engine as long as each node holds a working copy and the new release
@@ -430,7 +430,11 @@ current defaults, explicitly set so that upgrades
 through four consecutive releases preserve them. Longhorn's own production
 guidance turns degraded creation off. Kipper keeps it on so that a single-node cluster can create volumes
 that want more copies than it has nodes. kip never sets a Longhorn backup target,
-because backups go through Velero.
+because backups go through Velero. The same step marks Longhorn's stock
+`longhorn` class as non-default, so k3s's `local-path` stays the cluster's only
+default class. Kipper specifies a class on claims it creates directly. The
+default applies to claims that omit the class: those created by the charts
+that `kip ai` installs, and Loki's on clusters installed by v0.38.0 or earlier.
 
 **Rocky Linux and AlmaLinux 9.7.** On Rocky Linux 9.7, Longhorn's volumes stop
 attaching (Longhorn issue 13606), and no Longhorn release carries a fix yet. kip

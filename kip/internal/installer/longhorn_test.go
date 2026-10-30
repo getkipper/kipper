@@ -33,6 +33,15 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: longhorn-storageclass
+data:
+  storageclass.yaml: |
+    kind: StorageClass
+    apiVersion: storage.k8s.io/v1
+    metadata:
+      name: longhorn
+      annotations:
+        storageclass.kubernetes.io/is-default-class: "true"
+    provisioner: driver.longhorn.io
 `
 
 func runSettingsFilter(t *testing.T, manifest string) (string, error) {
@@ -216,6 +225,38 @@ func longhornSettingsFromFilter(t *testing.T) map[string]interface{} {
 	var settings map[string]interface{}
 	require.NoError(t, yaml.Unmarshal([]byte(cm.Data["default-setting.yaml"]), &settings))
 	return settings
+}
+
+func TestLonghornSettingsFilter_TakesTheDefaultAwayFromLonghornsStockClass(t *testing.T) {
+	// A newer default class would send claims with no specified class to
+	// Longhorn's stock class with three copies instead of k3s's local-path.
+	filtered, err := runSettingsFilter(t, stockLonghornSettings)
+	require.NoError(t, err, filtered)
+
+	docs := strings.Split(filtered, "\n---\n")
+	var cm struct {
+		Data map[string]string `json:"data"`
+	}
+	require.NoError(t, yaml.Unmarshal([]byte(docs[len(docs)-1]), &cm))
+	var class struct {
+		Metadata struct {
+			Annotations map[string]string `json:"annotations"`
+		} `json:"metadata"`
+		Provisioner string `json:"provisioner"`
+	}
+	require.NoError(t, yaml.Unmarshal([]byte(cm.Data["storageclass.yaml"]), &class))
+	assert.Equal(t, "false", class.Metadata.Annotations["storageclass.kubernetes.io/is-default-class"])
+	assert.Equal(t, "driver.longhorn.io", class.Provisioner, "the rest of the class stays")
+}
+
+func TestLonghornSettingsFilter_RefusesAManifestWithoutOneDefaultClassLine(t *testing.T) {
+	without := strings.Replace(stockLonghornSettings, "        storageclass.kubernetes.io/is-default-class: \"true\"\n", "", 1)
+	_, err := runSettingsFilter(t, without)
+	assert.Error(t, err, "a manifest that moved the annotation would make its class a second default")
+
+	twice := strings.Replace(stockLonghornSettings, "        storageclass.kubernetes.io/is-default-class: \"true\"\n", "        storageclass.kubernetes.io/is-default-class: \"true\"\n        storageclass.kubernetes.io/is-default-class: \"true\"\n", 1)
+	_, err = runSettingsFilter(t, twice)
+	assert.Error(t, err)
 }
 
 // Fast rebuild with fast-check can rebuild a replica with missing data
