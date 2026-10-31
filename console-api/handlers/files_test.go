@@ -215,24 +215,21 @@ func uploadOf(t *testing.T, dir, filename string) *http.Request {
 	return req
 }
 
-// An image can carry a symlink from an ordinary path into a blocked one, and
-// stat, cat and tee all follow it. Listing, reading and downloading are open to
-// a project viewer while a shell needs deployer, so this is a viewer's route to
-// the ServiceAccount token — the reason the guard resolves the target rather
-// than trusting the spelling.
+// TestFiles_RefusesAPathResolvingIntoABlockedLocation checks the symlink guard.
+// An image can link an allowed path to a blocked one, and cat and tee follow
+// symlinks. A role can hold files.read without shell access, so file routes could
+// expose the ServiceAccount token. The guard therefore checks the resolved path.
 //
-// Every case sends a path the lexical check allows and has the pod resolve it
-// to the projected token, in the form a live workload returns. Deleting the
-// refuseBlockedTarget call from the handler under test fails its case.
+// Each case uses an allowed path that resolves to a projected token path in the
+// format Kubernetes uses. Removing the handler's refuseBlockedTarget call fails
+// that case.
 func TestFiles_RefusesAPathResolvingIntoABlockedLocation(t *testing.T) {
 	const resolved = "/run/secrets/kubernetes.io/serviceaccount/..2026_08_05_13_00_55.293925486/token"
 
 	tests := []struct {
 		name    string
 		request func(t *testing.T) *http.Request
-		// The command the handler would have run on the resolved target. It
-		// must not reach the pod once the guard has refused.
-		reads string
+		reads   string
 	}{
 		{
 			name: "list",

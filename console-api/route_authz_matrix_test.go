@@ -39,12 +39,12 @@ var updateMatrix = flag.Bool("update-authz-matrix", false, "rewrite testdata/rou
 
 const matrixGolden = "testdata/route_authz_matrix.txt"
 
-// The identities the matrix is probed with, in column order. Global role is
-// what the kipper-users ConfigMap says; project role is membership of the
-// fixture project.
+// matrixIdentities lists probe identities in column order. The global role
+// comes from the kipper-users ConfigMap, and the project role comes from
+// membership in the fixture project.
 var matrixIdentities = []struct {
 	column      string
-	email       string // empty sends no token at all
+	email       string
 	globalRole  string
 	projectRole kipperv1.ProjectMemberRole
 }{
@@ -54,6 +54,8 @@ var matrixIdentities = []struct {
 	{column: "deployer", email: "deployer@test.com", globalRole: "deployer", projectRole: kipperv1.ProjectRoleDeployer},
 	{column: "owner", email: "owner@test.com", globalRole: "deployer", projectRole: kipperv1.ProjectRoleOwner},
 	{column: "admin", email: "admin@test.com", globalRole: "admin"},
+	{column: "cluster-viewer", email: "cluster-viewer@test.com", globalRole: "viewer"},
+	{column: "cluster-viewer-owner", email: "cluster-viewer-owner@test.com", globalRole: "viewer", projectRole: kipperv1.ProjectRoleOwner},
 }
 
 // matrixParams fills path parameters with values the fixture knows about, so a
