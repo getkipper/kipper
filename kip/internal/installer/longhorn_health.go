@@ -183,6 +183,20 @@ func parseLonghornWorkloads(data []byte, snap *longhornSnapshot) error {
 	return nil
 }
 
+// v1SettingValue returns the v1 data engine's value of a Longhorn setting.
+// Longhorn 1.10 and later store data-engine-specific settings as a JSON object
+// such as {"v1":"8","v2":"8"}. For a JSON string map, it returns the trimmed
+// v1 value. A missing v1 key or JSON null yields an empty string. Other input,
+// including plain values and malformed JSON, is returned trimmed.
+func v1SettingValue(raw string) string {
+	raw = strings.TrimSpace(raw)
+	var perEngine map[string]string
+	if json.Unmarshal([]byte(raw), &perEngine) == nil {
+		return strings.TrimSpace(perEngine["v1"])
+	}
+	return raw
+}
+
 func parseLonghornSettings(data []byte, snap *longhornSnapshot) error {
 	var list struct {
 		Items []struct {
