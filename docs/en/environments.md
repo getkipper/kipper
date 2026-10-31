@@ -162,9 +162,9 @@ kip project list
 ```
 
 ```
-  PROJECT              ENVIRONMENTS
-  blog           test, acc, prod
-  other-project        default
+  PROJECT                   DISPLAY NAME              ENVIRONMENTS
+  blog                      Blog                      test, acc, prod
+  other-project             -                         default
 ```
 
 ## Setting an active project

@@ -75,7 +75,7 @@ If there are multiple statements separated by `;`, the cursor's position picks w
 ### Toolbar toggles
 
 - **Run as transaction** wraps the executed SQL in `BEGIN ... COMMIT`. Rollback support depends on the database and statement type; see [DDL safety](#ddl-safety).
-- **No auto-limit** disables the automatic `LIMIT 1000` that's added to bare `SELECT *`. Use it when you want all rows.
+- **No auto-limit** stops the console from appending `LIMIT 1000` to a query that starts with `SELECT` and contains no `LIMIT`. Queries starting with a comment or `WITH` run without an appended limit. The console still returns at most 1,000 rows and marks a longer result as truncated.
 
 ### Save snippet, Explain
 
@@ -166,7 +166,7 @@ Several rails to keep destructive changes deliberate:
 - **Run as transaction** groups supported statements in a transaction. MySQL DDL such as `ALTER TABLE` commits implicitly, so a failed batch can leave earlier changes applied. See [MySQL’s implicit-commit reference](https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html).
 - **DDL preview pane** in the Designer and Indexes editors so you see the SQL before pressing Apply.
 - **Auto-refresh**: when the SQL tab runs DDL (`CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `COMMENT ON`, `GRANT`, `REVOKE`), the schema sidebar, the open table's structure, and the autocomplete cache all reload automatically. Designer and Indexes tabs reflect reality on the next click.
-- **Audit log**: every query emits a stdout line on the console-api with `service`, `user`, `sql_hash` (SHA-256 prefix), `duration_ms`, and `status`. Loki picks it up. SQL values are never logged.
+- **Audit log**: every query executed from the SQL tab emits a stdout line on the console-api with `service`, `user`, `sql_hash` (SHA-256 prefix), `duration_ms`, and `status`. Loki picks it up. SQL values are never logged. Row edits in the data grid and changes applied from the Designer and Indexes tabs are not recorded in this audit log.
 
 ## Permissions
 
@@ -174,7 +174,7 @@ The database console runs SQL through the console-api using the service's existi
 
 - **Schema browsing, row reads, and query history** require `database.read` in the service’s project.
 - **Running SQL, editing rows or schema, and saving snippets** require `database.write`, held by project deployers and owners. Cluster admins also have access.
-- **Audit** of past queries is admin-visible via Loki.
+- **Audit logs** of past SQL tab queries are available to admins through Loki.
 
 ## Supported services
 

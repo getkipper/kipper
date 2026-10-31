@@ -337,8 +337,9 @@ type AppRoute struct {
 	RequireAPIKey bool `json:"requireApiKey,omitempty"`
 
 	// CSPAllowlist adds external domains to the Content Security Policy.
-	// These domains are added to style-src, font-src, script-src, and connect-src.
-	// Example: ["fonts.googleapis.com", "cdn.example.com"]
+	// These domains are added to script-src, style-src, and font-src.
+	// The connect-src directive already allows every HTTPS and WSS origin.
+	// For example, use ["fonts.googleapis.com", "cdn.example.com"].
 	// +optional
 	CSPAllowlist []string `json:"cspAllowlist,omitempty"`
 

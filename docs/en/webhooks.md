@@ -31,7 +31,7 @@ kip app webhook enable backend --project blog --environment test
 ```
   ✔  Webhook enabled for backend
 
-  Webhook URL:    https://console-api--203-0-113-12.kipper.run/api/v1/webhook/blog-test/backend
+  Webhook URL:    https://console--203-0-113-12.kipper.run/api/v1/webhook/blog-test/backend
   Secret token:   a3f8b2c4d5e6f7890123456789abcdef...
 
   GitLab CI snippet (.gitlab-ci.yml):
@@ -40,7 +40,7 @@ kip app webhook enable backend --project blog --environment test
       stage: deploy
       script:
         - |
-          curl -s -X POST https://console-api--<cluster>.kipper.run/api/v1/webhook/blog-test/backend \
+          curl -s -X POST https://console--<cluster>.kipper.run/api/v1/webhook/blog-test/backend \
             -H "X-Kipper-Token: $KIPPER_WEBHOOK_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"image": "'$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA'", "commit": "'$CI_COMMIT_SHORT_SHA'"}'
@@ -97,7 +97,7 @@ kip app git remove checkout --project shop --environment production
 
 The Git source card in the console has a Remove button that does the same thing.
 
-One caveat: if you wire your git provider's own webhook (GitHub/GitLab pointing directly at Kipper) **and** point your CI at the Kipper webhook URL, the same `git push` fires twice, once via the provider, once via CI. The newer build wins if they overlap, so they cannot race each other onto the app, but you'll see two builds in deploy history. Pick one trigger source.
+Trigger the webhook from CI with the request format below. A Git provider's push webhook (GitHub or GitLab pointing directly at Kipper) sends a provider-specific payload without the `commit` field required for Git-built apps. After authentication succeeds, Kipper rejects that payload with HTTP 400.
 
 ## Webhook request format
 
@@ -114,8 +114,8 @@ Content-Type: application/json
 
 | Field | Required | Description |
 |---|---|---|
-| `image` | For image-based apps | Full image reference including tag; omit for Git-built apps |
-| `commit` | No | Git commit SHA (shown in deploy history) |
+| `image` | For image-based apps | Full image reference including tag. Omit for Git-built apps |
+| `commit` | For Git-built apps | Git commit SHA to build. For image-based apps it is optional and shown in deploy history |
 
 ## Deploy history
 
@@ -168,7 +168,7 @@ kip app webhook disable backend --project blog --environment test
 ## Security
 
 - Each app has its own unique webhook token
-- Tokens are stored as Kubernetes Secrets (encrypted at rest)
+- Tokens are stored as Kubernetes Secrets in the app's namespace
 - The webhook endpoint verifies the token before making any changes
-- GitHub HMAC signature verification (`X-Hub-Signature-256`) is also supported
+- A request in Kipper's format can authenticate with a GitHub-style HMAC signature (`X-Hub-Signature-256`) if a nonempty `X-Kipper-Token` or `X-Gitlab-Token` header fails token verification. A signature alone returns HTTP 401
 - Webhook URLs are scoped to a specific namespace and app, so a token for one app cannot deploy another

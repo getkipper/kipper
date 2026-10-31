@@ -156,7 +156,7 @@ entered there is not checked in advance.
 
 Each file must have a `project` field. The `environment` field determines which namespace the resources are created in (`blog-test` in this example).
 
-The `environments` and `displayName` fields are optional. When present, `kip apply` creates the Project CR and any missing namespaces automatically, making the manifest self-contained for bootstrapping a new cluster.
+The `environments` and `displayName` fields are optional. `kip apply` creates or updates the Project CR even when these fields are omitted. It adds the target environment and creates its namespace if needed. Kipper's project controller creates namespaces for the other listed environments within the project's environment limit, so the manifest is self-contained for bootstrapping a new cluster.
 
 The Project itself is merged, not replaced. A Project also holds fields the manifest never carries, such as members, tier, quota and shared storage, which admins manage through the console or dedicated commands. Applying a manifest updates the Project's `displayName` and adds any new environments, and leaves those other fields untouched. Apply never removes an environment, because dropping one deletes its namespace and everything in it. That stays an explicit, confirmed action: `kip project remove-env <project> <env>` for one, or `kip project delete <project>` for the whole project.
 
@@ -168,7 +168,7 @@ automatic inference; see [Health checks and rollouts](/en/deploying-apps#health-
 | Field | What it does |
 |---|---|
 | `type` | `http`, `tcp` or `none`. Required when the block is present. `none` disables the app readiness check |
-| `path` | The path an `http` check requests. Starts with `/`, no spaces, up to 1024 characters. Supported only for `http` |
+| `path` | The path an `http` check requests. Required for `http` and rejected for other types. Must start with `/`, contain no spaces, tabs, or line breaks, and be at most 1024 characters long. |
 | `port` | The port to check. Defaults to the app port, and cannot be the instance proxy's port (app port + 10000) |
 | `startupTimeoutSeconds` | Time from pod creation to readiness before the pod is reported as stuck, including image pulls: 10-3600 seconds, default 300 |
 | `timeoutSeconds` | Timeout for each check: 1-60 seconds, default 2 |
@@ -238,6 +238,9 @@ policies using a dry-run create, which works once the object's namespace exists.
 ```bash
 kip apply -f kipper.yaml
 ```
+
+The output below assumes the linked `docuseal` app already exists in its own project and is readable with your credentials.
+If that app is missing or unreadable, `kip apply` rejects the new link before writing anything.
 
 ```
   ✔  Project blog created (environments: [test acc prod])
@@ -360,7 +363,7 @@ This outputs the manifest to stdout. Save it to a file:
 kip export --project blog --environment test -o kipper.yaml
 ```
 
-The export includes all apps, services, volumes, jobs, functions, project metadata (display name, environments list), resource profiles, autoscale config, service bindings, links, routes, and declared health checks. Secret values are excluded. The export lists each app's and function's secret keys on stderr so you know which ones to set again. To edit a live project, export it, update the manifest, and apply the file. Review export messages on stderr and run `kip diff -f kipper.yaml` before applying to check for changes, including omitted values.
+The export includes all Kipper-managed apps, services, volumes, jobs and functions (those labeled `app.kubernetes.io/managed-by: kipper`), project metadata (display name, environments list), resource profiles, autoscale config, service bindings, links, routes, and declared health checks. Secret values are excluded. The export lists each app's and function's secret keys on stderr so you know which ones to set again. To edit a live project, export it, update the manifest, and apply the file. Review export messages on stderr and run `kip diff -f kipper.yaml` before applying to check for changes, including omitted values.
 
 For Apps, `kip export` includes explicit CPU and memory settings and omits values written by the old auto-sizer. Applying the file preserves those automatic values and their ownership. Held values are included with a message on stderr. Applying the file confirms every declared resource value as a user setting, including held values. See [Your own CPU and memory values](/en/resource-management#your-own-values).
 
