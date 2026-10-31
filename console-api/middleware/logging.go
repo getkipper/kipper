@@ -6,16 +6,20 @@ import (
 	"time"
 )
 
-// Logging logs each request with method, path, status, and duration.
+// Logging logs each request with method, path, status, and duration, including
+// requests whose handlers panic. Panics propagate to the caller.
 func Logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		wrapped := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 
+		// Defer logging so a download aborted with http.ErrAbortHandler still gets
+		// a request log entry.
+		defer func() {
+			log.Printf("%s %s %d %s", //nolint:gosec // request method and path are safe to log
+				r.Method, r.URL.Path, wrapped.status, time.Since(start))
+		}()
 		next.ServeHTTP(wrapped, r)
-
-		log.Printf("%s %s %d %s", //nolint:gosec // request method and path are safe to log
-			r.Method, r.URL.Path, wrapped.status, time.Since(start))
 	})
 }
 

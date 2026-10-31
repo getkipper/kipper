@@ -1,8 +1,10 @@
 package middleware
 
 import (
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,5 +32,28 @@ func TestLoggingWriterAllowsReadDeadline(t *testing.T) {
 
 	if deadlineErr != nil {
 		t.Fatalf("SetReadDeadline must reach the connection through the logging middleware, got: %v", deadlineErr)
+	}
+}
+
+func TestAnAbortedRequestStillLeavesALogLine(t *testing.T) {
+	var out strings.Builder
+	prev := log.Writer()
+	log.SetOutput(&out)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	handler := Logging(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+
+	func() {
+		defer func() {
+			if p := recover(); p != http.ErrAbortHandler {
+				t.Errorf("the abort did not reach net/http: recovered %v", p)
+			}
+		}()
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/download", nil))
+	}()
+
+	if !strings.Contains(out.String(), "GET /download") {
+		t.Errorf("an aborted request left no log line:\n%s", out.String())
 	}
 }
