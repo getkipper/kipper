@@ -25,9 +25,9 @@ const dumpVolumeFaulted = "Faulted"
 // removes the condition otherwise and leaves claim deletion to the user.
 // For an owned claim with consistent backups enabled, it returns pendingPodRetry
 // during deletion so reconciliation can create a replacement promptly, or
-// storageRefreshUnsettled for a non-local claim. Polling detects faults while
-// the pod is running because the controller has no Longhorn watch. Otherwise,
-// it returns zero. Read and status update errors are returned to the caller.
+// storageRefreshUnsettled for a non-local claim when the Longhorn Volume watch
+// is not registered, so polling detects faults while the pod is running.
+// Otherwise, it returns zero. Read and status update errors are returned.
 func (r *ServiceReconciler) reportDumpVolume(ctx context.Context, svc *kipperv1.Service) (time.Duration, error) {
 	before := svc.Status.DeepCopy()
 	faulted, retry, err := r.dumpVolumeFaulted(ctx, svc)
@@ -68,6 +68,9 @@ func (r *ServiceReconciler) dumpVolumeFaulted(ctx context.Context, svc *kipperv1
 	robustness, err := longhornRobustness(ctx, r.longhornReader(), &pvc)
 	if err != nil {
 		return false, 0, err
+	}
+	if r.watchesLonghornVolumes {
+		return robustness == "faulted", 0, nil
 	}
 	return robustness == "faulted", storageRefreshUnsettled, nil
 }

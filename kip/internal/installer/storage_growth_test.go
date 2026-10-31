@@ -366,3 +366,19 @@ func TestLonghornCPURefusalCountsPendingPodsThatFit(t *testing.T) {
 	elsewhere.Spec.NodeSelector = map[string]string{"kipper.run/pool": "gpu"}
 	assert.NoError(t, longhornCPURefusal([]corev1.Node{server}, append(running, elsewhere), nil), "a pod that may not run on the node takes nothing there")
 }
+
+// console-api registers its Longhorn volume watch at startup, so storage growth
+// requests a restart after installation. If the request fails, polling continues
+// and the output gives the operator a manual restart command.
+func TestStorageGrowthRestartsConsoleAPIForItsLonghornWatch(t *testing.T) {
+	host := &routedRunner{}
+	var out strings.Builder
+	StorageGrowth{Server: host, Out: &out}.restartConsoleAPI()
+	assert.True(t, host.ran("kubectl -n kipper-system rollout restart deployment/console-api"))
+	assert.Empty(t, out.String())
+
+	failing := &routedRunner{routes: []route{{contains: "rollout restart", err: errors.New("connection reset")}}}
+	out.Reset()
+	StorageGrowth{Server: failing, Out: &out}.restartConsoleAPI()
+	assert.Contains(t, out.String(), "kip platform restart console-api")
+}
