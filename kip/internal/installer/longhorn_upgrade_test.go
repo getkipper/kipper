@@ -14,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/getkipper/kipper/controller/pkg/labels"
 )
 
 // fakeLonghorn simulates a Longhorn cluster that answers kip's kubectl calls:
@@ -34,6 +36,11 @@ type fakeLonghorn struct {
 	limits           []string
 	images           map[string]bool
 	deleted          []string
+	pods             []string
+	namespaces       []string
+	imCPUSetting     string
+	imCPUOverride    int64
+	imImage          string
 }
 
 type fakeVolume struct {
@@ -101,11 +108,19 @@ func (f *fakeLonghorn) Run(cmd string) (string, error) {
 	case cmd == longhornWorkloadQuery:
 		return f.workloads(), nil
 	case cmd == longhornSettingQuery:
-		return fmt.Sprintf(`{"items":[{"metadata":{"name":"current-longhorn-version"},"value":%q},{"metadata":{"name":"default-engine-image"},"value":"longhornio/longhorn-engine:%s"},{"metadata":{"name":"default-instance-manager-image"},"value":"longhornio/longhorn-instance-manager:%s"}]}`, f.running, f.running, f.running), nil
+		extra := ""
+		if f.imCPUSetting != "" {
+			extra = fmt.Sprintf(`,{"metadata":{"name":"guaranteed-instance-manager-cpu"},"value":%q}`, f.imCPUSetting)
+		}
+		return fmt.Sprintf(`{"items":[{"metadata":{"name":"current-longhorn-version"},"value":%q},{"metadata":{"name":"default-engine-image"},"value":"longhornio/longhorn-engine:%s"},{"metadata":{"name":"default-instance-manager-image"},"value":"longhornio/longhorn-instance-manager:%s"}%s]}`, f.running, f.running, f.running, extra), nil
 	case cmd == longhornObjectQuery:
 		return f.objects(), nil
 	case cmd == kubeNodeQuery:
 		return f.kubeNodes(), nil
+	case cmd == "kubectl get pods -A --request-timeout=30s -o json":
+		return `{"items":[` + strings.Join(f.pods, ",") + `]}`, nil
+	case cmd == "kubectl get namespaces --request-timeout=30s -o json":
+		return `{"items":[` + strings.Join(f.namespaces, ",") + `]}`, nil
 	case strings.Contains(cmd, "kubectl get crd --request-timeout=30s -o json"):
 		stored := `["v1beta2"]`
 		if f.v1beta1 {
@@ -180,10 +195,14 @@ func (f *fakeLonghorn) objects() string {
 	for e := range f.images {
 		items = append(items, fmt.Sprintf(`{"kind":"EngineImage","metadata":{"name":"ei-%s"},"spec":{"image":"longhornio/longhorn-engine:%s"},"status":{"state":"deployed","cliAPIVersion":10,"controllerAPIVersion":5,"refCount":%d}}`, e, e, refs[e]))
 	}
+	imImage := f.running
+	if f.imImage != "" {
+		imImage = f.imImage
+	}
 	items = append(items,
-		fmt.Sprintf(`{"kind":"InstanceManager","metadata":{"name":"im"},"spec":{"image":"longhornio/longhorn-instance-manager:%s","nodeID":"server-1","dataEngine":"v1"},"status":{"currentState":"running"}}`, f.running))
+		fmt.Sprintf(`{"kind":"InstanceManager","metadata":{"name":"im"},"spec":{"image":"longhornio/longhorn-instance-manager:%s","nodeID":"server-1","dataEngine":"v1"},"status":{"currentState":"running"}}`, imImage))
 	for _, n := range f.nodes {
-		items = append(items, fmt.Sprintf(`{"kind":"Node","metadata":{"name":%q}}`, n.Name))
+		items = append(items, fmt.Sprintf(`{"kind":"Node","metadata":{"name":%q},"spec":{"instanceManagerCPURequest":%d}}`, n.Name, f.imCPUOverride))
 	}
 	return `{"items":[` + strings.Join(items, ",") + `]}`
 }
@@ -197,11 +216,47 @@ func (f *fakeLonghorn) kubeNodes() string {
 				taints = append(taints, map[string]any{"key": outOfServiceTaint, "effect": "NoExecute"})
 			}
 			out = append(out, map[string]any{"metadata": map[string]any{"name": n.Name}, "spec": map[string]any{"taints": taints},
-				"status": map[string]any{"nodeInfo": map[string]any{"kubeletVersion": n.KubeletVersion, "osImage": n.OSImage, "kernelVersion": n.Kernel}}})
+				"status": map[string]any{"allocatable": map[string]any{"cpu": "2", "memory": "8Gi"},
+					"nodeInfo": map[string]any{"kubeletVersion": n.KubeletVersion, "osImage": n.OSImage, "kernelVersion": n.Kernel}}})
 		}
 		return out
 	}()})
 	return string(b)
+}
+
+// runningPod is a running pod on server-1 that requests cpu.
+func runningPod(namespace, name, cpu string, podLabels map[string]string) string {
+	l, _ := json.Marshal(podLabels)
+	return fmt.Sprintf(`{"metadata":{"namespace":%q,"name":%q,"labels":%s},"spec":{"nodeName":"server-1","containers":[{"name":%q,"resources":{"requests":{"cpu":%q}}}]},"status":{"phase":"Running"}}`, namespace, name, l, name, cpu)
+}
+
+// instanceManagerPod is a Longhorn instance manager on server-1.
+func instanceManagerPod(name, cpu string) string {
+	return runningPod("longhorn-system", name, cpu, map[string]string{"longhorn.io/component": "instance-manager"})
+}
+
+// newInstanceManagerPod returns JSON for an instance manager pod assigned to
+// server-1 with the given image and phase. status supplies containerStatuses
+// as JSON, with an empty string producing an empty array.
+func newInstanceManagerPod(image, phase, status string) string {
+	if status == "" {
+		status = "[]"
+	}
+	return fmt.Sprintf(`{"metadata":{"namespace":"longhorn-system","name":"instance-manager-new","labels":{"longhorn.io/component":"instance-manager"}},"spec":{"nodeName":"server-1","containers":[{"name":"instance-manager","image":%q,"resources":{"requests":{"cpu":"240m"}}}]},"status":{"phase":%q,"containerStatuses":%s}}`, image, phase, status)
+}
+
+// shopDBPod is the pod of service db in project shop's prod environment.
+func shopDBPod(cpu string) string {
+	return runningPod("shop-prod", "db", cpu, map[string]string{"app": "db", labels.ServiceType: "postgres"})
+}
+
+const shopProdNamespace = `{"metadata":{"name":"shop-prod","labels":{"kipper.run/project":"shop","kipper.run/environment":"prod"}}}`
+
+// fillServer leaves 160m of server-1's 2000m unrequested, with Longhorn's
+// instance manager holding its 240m. A hop needs another 240m.
+func (f *fakeLonghorn) fillServer() {
+	f.pods = []string{instanceManagerPod("instance-manager-a", "240m"), shopDBPod("1600m")}
+	f.namespaces = []string{shopProdNamespace}
 }
 
 func (f *fakeLonghorn) ran(fragment string) bool {
@@ -416,6 +471,180 @@ func TestLonghornUpgradeStopsWhenTheBackupFails(t *testing.T) {
 	assert.ErrorContains(t, err, "PartiallyFailed")
 	assert.Empty(t, f.applies)
 	assert.Nil(t, f.record)
+}
+
+// Longhorn starts another instance manager on each node during a hop. Its pod
+// is bound to the node, so insufficient CPU causes admission to fail and the
+// step to time out.
+func TestLonghornUpgradeRefusesAHopWithoutCPUForAnotherInstanceManager(t *testing.T) {
+	f := newFakeLonghorn("v1.10.2")
+	f.fillServer()
+	run := newUpgradeRun(t)
+
+	err := run.upgrade.Apply(f)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Longhorn v1.10.2 → v1.11.3 did not start")
+	assert.Contains(t, err.Error(), "server-1 has 160m CPU that no pod requests")
+	assert.Contains(t, err.Error(), "another instance manager there that requests 240m")
+	assert.Contains(t, err.Error(), "'kip service update db --cpu 1520m --project shop --environment prod'")
+	assert.Contains(t, err.Error(), "The node would refuse it")
+	assert.NotContains(t, err.Error(), "instance managers run there")
+	assert.Empty(t, f.applies)
+	assert.Empty(t, run.backups)
+}
+
+func TestLonghornUpgradeHopsWhenEachNodeHasCPUForAnotherInstanceManager(t *testing.T) {
+	f := newFakeLonghorn("v1.10.2")
+	f.pods = []string{instanceManagerPod("instance-manager-a", "240m"), shopDBPod("1500m")}
+	run := newUpgradeRun(t)
+
+	require.NoError(t, run.upgrade.Apply(f), run.out.String())
+	assert.Equal(t, []string{"v1.11.3"}, f.applies)
+}
+
+// Without a readable setting, the check estimates the new instance manager's
+// CPU request from the largest existing instance manager request.
+func TestLonghornUpgradeBudgetsWhatTheRunningInstanceManagerRequests(t *testing.T) {
+	f := newFakeLonghorn("v1.10.2")
+	f.pods = []string{instanceManagerPod("instance-manager-a", "500m"), shopDBPod("1200m")}
+	run := newUpgradeRun(t)
+
+	err := run.upgrade.Apply(f)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server-1 has 300m CPU that no pod requests")
+	assert.Contains(t, err.Error(), "requests 500m")
+	assert.Empty(t, f.applies)
+
+	f.pods = []string{instanceManagerPod("instance-manager-a", "0"), shopDBPod("2000m")}
+	require.NoError(t, run.upgrade.Apply(f), run.out.String())
+}
+
+// The current setting and node override determine the next manager's request,
+// which can differ from the existing manager's request.
+func TestLonghornUpgradeBudgetsTheSettingTheNewInstanceManagerGets(t *testing.T) {
+	for _, setting := range []string{"25", `{"v1":"25","v2":"12"}`} {
+		f := newFakeLonghorn("v1.10.2")
+		f.imCPUSetting = setting
+		f.pods = []string{instanceManagerPod("instance-manager-a", "240m"), shopDBPod("1400m")}
+		err := newUpgradeRun(t).upgrade.Apply(f)
+		require.Error(t, err, setting)
+		assert.Contains(t, err.Error(), "server-1 has 360m CPU that no pod requests", setting)
+		assert.Contains(t, err.Error(), "requests 500m", setting)
+	}
+
+	f := newFakeLonghorn("v1.10.2")
+	f.imCPUSetting = "12"
+	f.imCPUOverride = 300
+	f.pods = []string{instanceManagerPod("instance-manager-a", "240m"), shopDBPod("1500m")}
+	err := newUpgradeRun(t).upgrade.Apply(f)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requests 300m")
+
+	f.imCPUSetting = "5"
+	f.imCPUOverride = 0
+	f.pods = []string{instanceManagerPod("instance-manager-a", "240m"), shopDBPod("1600m")}
+	require.NoError(t, newUpgradeRun(t).upgrade.Apply(f), "a lowered setting needs only 100m")
+}
+
+// An older instance manager keeps engines until their volumes detach after an
+// earlier step. The refusal explains why its CPU request still counts.
+func TestLonghornUpgradeExplainsAnOlderInstanceManager(t *testing.T) {
+	f := newFakeLonghorn("v1.10.2")
+	f.pods = []string{instanceManagerPod("instance-manager-a", "240m"), instanceManagerPod("instance-manager-b", "240m"), shopDBPod("1400m")}
+	f.namespaces = []string{shopProdNamespace}
+	run := newUpgradeRun(t)
+
+	err := run.upgrade.Apply(f)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server-1 has 120m CPU that no pod requests")
+	assert.Contains(t, err.Error(), "2 instance managers run there")
+	assert.Contains(t, err.Error(), "an older one keeps the engines of volumes that stayed attached")
+	assert.Empty(t, f.applies)
+}
+
+// Engine catch-up uses existing instance managers. A resumed hop may already
+// have its new manager, so both paths skip the check for an additional manager.
+func TestLonghornUpgradeNeedsNoCPUForACatchUpOrAResumedHop(t *testing.T) {
+	catchUp := newFakeLonghorn(longhornVersion)
+	catchUp.volumes[1].engine = "v1.10.2"
+	catchUp.fillServer()
+	run := newUpgradeRun(t)
+	require.NoError(t, run.upgrade.Apply(catchUp), run.out.String())
+	assert.Equal(t, longhornVersion, catchUp.volumes[1].engine)
+
+	resumed := newFakeLonghorn("v1.10.2")
+	resumed.applied = "v1.11.3"
+	resumed.record = map[string]string{"from": "v1.10.2", "to": "v1.11.3", "backup": "before-longhorn-v1.11.3", "export": "/home/op/.kip/x"}
+	resumed.fillServer()
+	run = newUpgradeRun(t)
+	require.NoError(t, run.upgrade.Apply(resumed), run.out.String())
+	assert.Nil(t, resumed.record)
+}
+
+// A resumed hop skips the CPU check, so a node without CPU for the new
+// instance manager surfaces as a timeout, which names the shortage.
+func TestLonghornUpgradeTimeoutNamesAnInstanceManagerTheNodeHasNoCPUFor(t *testing.T) {
+	f := newFakeLonghorn("v1.10.2")
+	f.applied = "v1.11.3"
+	f.record = map[string]string{"from": "v1.10.2", "to": "v1.11.3", "backup": "before-longhorn-v1.11.3", "export": "/home/op/.kip/x"}
+	f.fillServer()
+	f.imImage = "v1.10.2"
+
+	err := newUpgradeRun(t).upgrade.Apply(f)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not settle")
+	assert.Contains(t, err.Error(), "node server-1 has no running instance manager")
+	assert.Contains(t, err.Error(), "server-1 has 160m CPU that no pod requests")
+	assert.Contains(t, err.Error(), "new instance manager there requests 240m")
+	assert.Contains(t, err.Error(), "'kip service update db --cpu 1520m --project shop --environment prod'")
+
+	// Excluding the pending manager's request estimates the CPU available
+	// for admission without counting that request twice.
+	f.fillServer()
+	f.pods = append(f.pods, newInstanceManagerPod("longhornio/longhorn-instance-manager:v1.11.3", "Pending", ""))
+	err = newUpgradeRun(t).upgrade.Apply(f)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server-1 has 160m CPU that no pod requests")
+	assert.Contains(t, err.Error(), "'kip service update db --cpu 1520m --project shop --environment prod'")
+
+	// The kubelet admitted the new manager, so CPU is not what holds it up.
+	f.pods[len(f.pods)-1] = newInstanceManagerPod("longhornio/longhorn-instance-manager:v1.11.3", "Running", "")
+	err = newUpgradeRun(t).upgrade.Apply(f)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not settle")
+	assert.NotContains(t, err.Error(), "CPU that no pod requests", "an admitted manager gets no CPU hint")
+
+	// Container statuses indicate admission even while an image pull is stalled.
+	f.pods[len(f.pods)-1] = newInstanceManagerPod("longhornio/longhorn-instance-manager:v1.11.3", "Pending",
+		`[{"name":"instance-manager","state":{"waiting":{"reason":"ImagePullBackOff"}}}]`)
+	err = newUpgradeRun(t).upgrade.Apply(f)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "CPU that no pod requests", "a manager admitted while its image pulls gets no CPU hint")
+
+	// A v2 manager reserves CPU independently of v1 admission, even with the
+	// same image.
+	f.pods[len(f.pods)-1] = strings.Replace(newInstanceManagerPod("longhornio/longhorn-instance-manager:v1.11.3", "Running", ""),
+		`"longhorn.io/component":"instance-manager"`, `"longhorn.io/component":"instance-manager","longhorn.io/data-engine":"v2"`, 1)
+	err = newUpgradeRun(t).upgrade.Apply(f)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server-1 has 0m CPU that no pod requests")
+
+	// A manager from another registry has a different image despite the shared
+	// suffix, so its CPU request still counts toward the shortage.
+	f.pods[len(f.pods)-1] = newInstanceManagerPod("registry.example/longhornio/longhorn-instance-manager:v1.11.3", "Running", "")
+	err = newUpgradeRun(t).upgrade.Apply(f)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server-1 has 0m CPU that no pod requests")
+
+	f.pods = []string{instanceManagerPod("instance-manager-a", "240m"), shopDBPod("1500m")}
+	err = newUpgradeRun(t).upgrade.Apply(f)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not settle")
+	assert.NotContains(t, err.Error(), "CPU that no pod requests", "a node with room gets no CPU hint")
 }
 
 func TestLonghornUpgradeRefusesThe110HopWhileACRDStillStoresV1beta1(t *testing.T) {

@@ -370,6 +370,21 @@ Each step then runs the same way:
    minimum engine version, and, before the step to 1.10, that no Longhorn CRD
    still stores `v1beta1` objects. Longhorn 1.10 removes `v1beta1`, so that one
    requires the migration described in the Longhorn v1.10.0 release notes.
+   During a step, Longhorn starts another instance manager on every node. It
+   requests the node's `instanceManagerCPURequest` when set to a positive value,
+   or the `guaranteed-instance-manager-cpu` share of the node's allocatable CPU
+   (12% by default). The old manager stays until no volume uses it. For an
+   attached volume, this means waiting until it detaches, so a node can run two
+   managers after the first step. kip refuses the step if a node has too little
+   unrequested CPU for the new manager. Otherwise, the node would refuse the
+   manager and the step would time out with volumes still on the old engine.
+   The error suggests which services' CPU requests to lower when possible, or
+   recommends adding CPU. It also explains when an older instance manager
+   still reserves CPU on the node. A resumed step skips this check. If it
+   times out waiting for an instance manager, kip checks CPU again and names
+   nodes with a shortage, with the same suggestion. This diagnostic requires
+   readable cluster data and skips nodes where the new manager's pod has
+   already been admitted.
 2. kip rechecks the backup location and verifies that a regular container in a
    running pod mounts every app volume in the backup scope, because file
    backups require these mounts. A volume used only by a stopped app blocks

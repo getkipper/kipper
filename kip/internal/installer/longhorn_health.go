@@ -17,6 +17,7 @@ type longhornSnapshot struct {
 	EngineImages     []lhEngineImage
 	InstanceManagers []lhInstanceManager
 	LonghornNodes    []string
+	IMCPUOverrides   map[string]int64
 	Nodes            []NodeFacts
 }
 
@@ -183,6 +184,20 @@ func parseLonghornWorkloads(data []byte, snap *longhornSnapshot) error {
 	return nil
 }
 
+// v1SettingValue returns the v1 data engine's value of a Longhorn setting.
+// Longhorn 1.10 and later store data-engine-specific settings as a JSON object
+// such as {"v1":"8","v2":"8"}. For a JSON string map, it returns the trimmed
+// v1 value. A missing v1 key or JSON null yields an empty string. Other input,
+// including plain values and malformed JSON, is returned trimmed.
+func v1SettingValue(raw string) string {
+	raw = strings.TrimSpace(raw)
+	var perEngine map[string]string
+	if json.Unmarshal([]byte(raw), &perEngine) == nil {
+		return strings.TrimSpace(perEngine["v1"])
+	}
+	return raw
+}
+
 func parseLonghornSettings(data []byte, snap *longhornSnapshot) error {
 	var list struct {
 		Items []struct {
@@ -305,7 +320,19 @@ func parseLonghornObjects(data []byte, snap *longhornSnapshot) error {
 			snap.InstanceManagers = append(snap.InstanceManagers, lhInstanceManager{Node: spec.NodeID, Image: spec.Image,
 				DataEngine: spec.DataEngine, State: status.CurrentState})
 		case "Node":
+			var spec struct {
+				InstanceManagerCPURequest int64 `json:"instanceManagerCPURequest"`
+			}
+			if err = unmarshalParts(it.Spec, &spec, nil, nil); err != nil {
+				break
+			}
 			snap.LonghornNodes = append(snap.LonghornNodes, it.Metadata.Name)
+			if spec.InstanceManagerCPURequest > 0 {
+				if snap.IMCPUOverrides == nil {
+					snap.IMCPUOverrides = map[string]int64{}
+				}
+				snap.IMCPUOverrides[it.Metadata.Name] = spec.InstanceManagerCPURequest
+			}
 		}
 		if err != nil {
 			return fmt.Errorf("%s %s: %w", it.Kind, it.Metadata.Name, err)
@@ -419,14 +446,8 @@ func (s longhornSnapshot) componentProblems(version string) []string {
 		problems = append(problems, "Longhorn lists no nodes")
 	}
 	for _, node := range s.LonghornNodes {
-		running := false
-		for _, m := range s.InstanceManagers {
-			if m.Node == node && m.Image == im && m.DataEngine != "v2" && m.State == "running" {
-				running = true
-			}
-		}
 		switch {
-		case running:
+		case s.instanceManagerRunning(node, im):
 		case s.outOfService(node):
 			problems = append(problems, outOfServiceProblem(node))
 		default:
@@ -434,6 +455,34 @@ func (s longhornSnapshot) componentProblems(version string) []string {
 		}
 	}
 	return problems
+}
+
+// instanceManagerRunning reports whether node has an instance manager on image
+// whose state is running and whose data engine is not v2.
+func (s longhornSnapshot) instanceManagerRunning(node, image string) bool {
+	for _, m := range s.InstanceManagers {
+		if m.Node == node && m.Image == image && m.DataEngine != "v2" && m.State == "running" {
+			return true
+		}
+	}
+	return false
+}
+
+// nodesWithoutInstanceManager returns the Longhorn nodes in service that run no
+// v1 instance manager on the default image. It returns nil while that image is
+// unset.
+func (s longhornSnapshot) nodesWithoutInstanceManager() []string {
+	im := s.Settings["default-instance-manager-image"]
+	if im == "" {
+		return nil
+	}
+	var nodes []string
+	for _, node := range s.LonghornNodes {
+		if !s.instanceManagerRunning(node, im) && !s.outOfService(node) {
+			nodes = append(nodes, node)
+		}
+	}
+	return nodes
 }
 
 // outOfServiceProblems identifies Longhorn nodes with the out-of-service taint
