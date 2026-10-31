@@ -20,20 +20,23 @@ import (
 )
 
 // Export reads Kipper-managed resources from namespace and produces a Manifest
-// for project and environment. Project metadata is included when readable.
+// for project and environment. projectCR is the Project resource name, including
+// the cluster's organization prefix when configured. Readable project metadata
+// is included, and metadata lookup failures are ignored.
+//
 // Secret values are omitted. Notes identify omitted secret keys, unreadable
 // secrets, held resource values and link targets that could not be identified.
 // Resource listing and link namespace lookup failures return a nil manifest and an error.
-func Export(ctx context.Context, dynClient dynamic.Interface, project, environment, namespace string) (*Manifest, error) {
+func Export(ctx context.Context, dynClient dynamic.Interface, project, projectCR, environment, namespace string) (*Manifest, error) {
 	m := &Manifest{
 		Project:     project,
 		Environment: environment,
 	}
 
 	// Try to read project metadata
-	projectCR, projErr := dynClient.Resource(ProjectGVR).Get(ctx, project, metav1.GetOptions{})
+	projectObj, projErr := dynClient.Resource(ProjectGVR).Get(ctx, projectCR, metav1.GetOptions{})
 	if projErr == nil {
-		spec := projectCR.Object["spec"].(map[string]interface{})
+		spec, _ := projectObj.Object["spec"].(map[string]interface{})
 		if dn, ok := spec["displayName"].(string); ok {
 			m.DisplayName = dn
 		}

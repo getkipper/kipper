@@ -60,7 +60,7 @@ func TestExportRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	dynClient := fakeClientWithManifest(t, original, "blog-test")
 
-	got, err := Export(ctx, dynClient, "blog", "test", "blog-test")
+	got, err := Export(ctx, dynClient, "blog", "blog", "test", "blog-test")
 	require.NoError(t, err)
 
 	assert.Equal(t, original.Apps["webapp"], got.Apps["webapp"], "webapp App must round-trip with every optional field intact")
@@ -84,7 +84,7 @@ func TestExportRoundTrip_AppKeepsImageWithoutGit(t *testing.T) {
 	}
 
 	dynClient := fakeClientWithManifest(t, original, "p-e")
-	got, err := Export(context.Background(), dynClient, "p", "e", "p-e")
+	got, err := Export(context.Background(), dynClient, "p", "p", "e", "p-e")
 	require.NoError(t, err)
 
 	img := got.Apps["img-only"]
@@ -275,4 +275,20 @@ func TestStopWithoutAReasonSurvivesYAML(t *testing.T) {
 	if back.Stopped == nil {
 		t.Fatalf("the stop was lost:\n%s", out)
 	}
+}
+
+func TestExportToleratesAProjectWithoutSpec(t *testing.T) {
+	dynClient := fakeClientWithManifest(t, &Manifest{Project: "other"}, "p-e")
+	bare := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "kipper.run/v1alpha1", "kind": "Project",
+		"metadata": map[string]interface{}{"name": "p"},
+	}}
+	_, err := dynClient.Resource(ProjectGVR).Create(context.Background(), bare, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	got, err := Export(context.Background(), dynClient, "p", "p", "e", "p-e")
+
+	require.NoError(t, err)
+	assert.Empty(t, got.DisplayName)
+	assert.Empty(t, got.Environments)
 }

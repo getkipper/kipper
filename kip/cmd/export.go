@@ -63,7 +63,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 
 func exportSingle(ctx context.Context, dynClient dynamic.Interface, cluster *config.Cluster, project, environment, output string) error {
 	namespace := cluster.ResolveNamespace(project, environment)
-	m, err := manifest.Export(ctx, dynClient, project, environment, namespace)
+	m, err := manifest.Export(ctx, dynClient, project, cluster.ResolveNamespace(project, ""), environment, namespace)
 	if err != nil {
 		return err
 	}
