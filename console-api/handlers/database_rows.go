@@ -189,7 +189,7 @@ func (d *Database) ListRows(w http.ResponseWriter, r *http.Request) {
 
 	// Best-effort total count for pagination.
 	var total int64
-	if err := db.QueryRowContext(queryCtx, cq, args...).Scan(&total); err == nil { //nolint:gosec // identifiers validated against introspected schema; values pass as placeholders
+	if err := db.QueryRowContext(queryCtx, cq, args...).Scan(&total); err == nil { //nolint:gosec // Column names are validated, identifiers are quoted, and values use placeholders.
 		result.Total = total
 	}
 
@@ -261,8 +261,13 @@ func (d *Database) InsertRow(w http.ResponseWriter, r *http.Request) {
 	switch info.driver {
 	case "pgx":
 		q := buildInsertReturning(info.driver, schema, table, cols, len(structure.Columns))
-		row := db.QueryRowContext(queryCtx, q, sortedVals...) //nolint:gosec // identifiers validated against introspected schema; values pass as placeholders
-		inserted, err := scanSingleRow(row, structure)
+		var inserted []interface{}
+		err := audited(r, svcName, []string{q}, func() error {
+			row := db.QueryRowContext(queryCtx, q, sortedVals...) //nolint:gosec // Column names are validated, identifiers are quoted, and values use placeholders.
+			var serr error
+			inserted, serr = scanSingleRow(row, structure)
+			return serr
+		})
 		if err != nil {
 			respondError(w, http.StatusBadRequest, fmt.Sprintf("insert: %v", err))
 			return
@@ -272,7 +277,12 @@ func (d *Database) InsertRow(w http.ResponseWriter, r *http.Request) {
 		})
 	case "mysql":
 		q := buildInsert(info.driver, schema, table, cols)
-		res, err := db.ExecContext(queryCtx, q, sortedVals...)
+		var res sql.Result
+		err := audited(r, svcName, []string{q}, func() error {
+			var eerr error
+			res, eerr = db.ExecContext(queryCtx, q, sortedVals...)
+			return eerr
+		})
 		if err != nil {
 			respondError(w, http.StatusBadRequest, fmt.Sprintf("insert: %v", err))
 			return
@@ -375,7 +385,12 @@ func (d *Database) UpdateRow(w http.ResponseWriter, r *http.Request) {
 
 	queryCtx, queryCancel := context.WithTimeout(ctx, defaultQueryTimeout)
 	defer queryCancel()
-	res, err := db.ExecContext(queryCtx, q, args...)
+	var res sql.Result
+	err = audited(r, svcName, []string{q}, func() error {
+		var eerr error
+		res, eerr = db.ExecContext(queryCtx, q, args...)
+		return eerr
+	})
 	if err != nil {
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("update: %v", err))
 		return
@@ -432,30 +447,46 @@ func (d *Database) DeleteRows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("begin: %v", err))
-		return
+	type rowDelete struct {
+		q    string
+		args []interface{}
 	}
-	var totalAffected int64
+	deletes := make([]rowDelete, 0, len(body.PKs))
+	statements := make([]string, 0, len(body.PKs))
 	for _, pk := range body.PKs {
 		if len(pk) != len(structure.PrimaryKey) {
-			_ = tx.Rollback()
 			respondError(w, http.StatusBadRequest, "every pk must include every primary key column")
 			return
 		}
-		pkCols := sortedKeys(pk)
-		q, args := buildDelete(info.driver, schema, table, pkCols, pk)
-		res, err := tx.ExecContext(ctx, q, args...)
-		if err != nil {
-			_ = tx.Rollback()
-			respondError(w, http.StatusBadRequest, fmt.Sprintf("delete: %v", err))
-			return
-		}
-		totalAffected += affectedOr(res, 0)
+		q, args := buildDelete(info.driver, schema, table, sortedKeys(pk), pk)
+		deletes = append(deletes, rowDelete{q: q, args: args})
+		statements = append(statements, q)
 	}
-	if err := tx.Commit(); err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("commit: %v", err))
+
+	var totalAffected int64
+	status := http.StatusBadRequest
+	err = audited(r, svcName, statements, func() error {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			status = http.StatusInternalServerError
+			return fmt.Errorf("begin: %w", err)
+		}
+		for _, del := range deletes {
+			res, err := tx.ExecContext(ctx, del.q, del.args...)
+			if err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("delete: %w", err)
+			}
+			totalAffected += affectedOr(res, 0)
+		}
+		if err := tx.Commit(); err != nil {
+			status = http.StatusInternalServerError
+			return fmt.Errorf("commit: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		respondError(w, status, err.Error())
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]interface{}{

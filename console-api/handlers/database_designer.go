@@ -1,9 +1,8 @@
-// Package handlers — database_designer.go provides the visual table
-// and index designer surface. The browser sends a typed list of
-// operations; the server generates dialect-correct DDL via the
-// builders here and either previews it or executes it in a single
-// transaction. CONCURRENT index ops on Postgres run outside the
-// transaction because Postgres forbids them inside one.
+// Package handlers provides the visual table and index designer endpoints.
+// The browser sends typed operations, and the builders generate dialect-specific
+// DDL for preview or execution in a single transaction. PostgreSQL concurrent
+// index operations run outside a transaction because PostgreSQL requires it.
+// MySQL DDL can commit implicitly, so a batch may be partially applied.
 package handlers
 
 import (
@@ -32,7 +31,7 @@ type columnSpec struct {
 
 type constraintSpec struct {
 	Name       string   `json:"name,omitempty"`
-	Type       string   `json:"type"` // "PRIMARY KEY" | "FOREIGN KEY" | "UNIQUE" | "CHECK"
+	Type       string   `json:"type"`
 	Columns    []string `json:"columns,omitempty"`
 	RefSchema  string   `json:"ref_schema,omitempty"`
 	RefTable   string   `json:"ref_table,omitempty"`
@@ -43,8 +42,8 @@ type constraintSpec struct {
 }
 
 // tableOp is one entry in a PATCH /db/tables/{schema}/{table} request.
-// Each op maps to one DDL statement; the server runs them in order
-// inside a transaction.
+// Each operation maps to one DDL statement, executed in request order
+// within a transaction. MySQL DDL can commit implicitly.
 type tableOp struct {
 	Op             string          `json:"op"`
 	Column         *columnSpec     `json:"column,omitempty"`
@@ -76,14 +75,14 @@ type indexRequest struct {
 	Name       string   `json:"name"`
 	Columns    []string `json:"columns"`
 	Unique     bool     `json:"unique"`
-	Method     string   `json:"method,omitempty"` // btree, gin, gist, hash
+	Method     string   `json:"method,omitempty"`
 	Where      string   `json:"where,omitempty"`
 	Concurrent bool     `json:"concurrent,omitempty"`
 }
 
 // previewRequest is the body for POST /db/ddl/preview. Exactly one of
-// the action fields should be populated; the server returns the SQL it
-// would execute without running anything.
+// the action fields should be populated. The server returns the generated
+// SQL for review before execution.
 type previewRequest struct {
 	CreateTable *createTableRequest `json:"create_table,omitempty"`
 	AlterTable  *struct {
@@ -133,7 +132,7 @@ func (d *Database) CreateTable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := execInTx(ctx, db, []string{ddl}); err != nil {
+	if err := audited(r, svcName, []string{ddl}, func() error { return execInTx(ctx, db, []string{ddl}) }); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -176,7 +175,7 @@ func (d *Database) AlterTable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := execInTx(ctx, db, ddl); err != nil {
+	if err := audited(r, svcName, ddl, func() error { return execInTx(ctx, db, ddl) }); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -218,22 +217,17 @@ func (d *Database) CreateIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Concurrent && info.driver == "pgx" {
-		// Concurrent ops cannot run in a transaction.
-		if _, err := db.ExecContext(ctx, ddl); err != nil {
-			respondError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	} else {
-		if err := execInTx(ctx, db, []string{ddl}); err != nil {
-			respondError(w, http.StatusBadRequest, err.Error())
-			return
-		}
+	if err := audited(r, svcName, []string{ddl}, func() error {
+		return execDDL(ctx, db, ddl, req.Concurrent && info.driver == "pgx")
+	}); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	respondJSON(w, http.StatusOK, map[string]interface{}{"ddl": []string{ddl}})
 }
 
-// DropIndex removes an index. CONCURRENTLY for Postgres opt-in.
+// DropIndex removes an index. On PostgreSQL, concurrent=true runs
+// DROP INDEX CONCURRENTLY outside a transaction.
 // DELETE /api/v1/services/{name}/db/indexes/{schema}/{indexName}
 func (d *Database) DropIndex(w http.ResponseWriter, r *http.Request) {
 	svcName, namespace, ok := requireService(w, r)
@@ -255,24 +249,18 @@ func (d *Database) DropIndex(w http.ResponseWriter, r *http.Request) {
 
 	ddl := buildDropIndex(info.driver, schemaName, indexName, concurrent)
 
-	if concurrent && info.driver == "pgx" {
-		if _, err := db.ExecContext(ctx, ddl); err != nil {
-			respondError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	} else {
-		if err := execInTx(ctx, db, []string{ddl}); err != nil {
-			respondError(w, http.StatusBadRequest, err.Error())
-			return
-		}
+	if err := audited(r, svcName, []string{ddl}, func() error {
+		return execDDL(ctx, db, ddl, concurrent && info.driver == "pgx")
+	}); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	respondJSON(w, http.StatusOK, map[string]interface{}{"ddl": []string{ddl}})
 }
 
-// PreviewDDL takes the same shape as the executing endpoints but never
-// touches the database. Used by the live DDL preview pane on the
-// designer so the user can read what's about to run before clicking
-// Apply.
+// PreviewDDL accepts the same operations as the execution endpoints and
+// connects to the database to determine its dialect. It returns generated
+// SQL without executing it so users can review the DDL before clicking Apply.
 // POST /api/v1/services/{name}/db/ddl/preview
 func (d *Database) PreviewDDL(w http.ResponseWriter, r *http.Request) {
 	svcName, namespace, ok := requireService(w, r)
@@ -325,9 +313,19 @@ func (d *Database) PreviewDDL(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// execInTx runs a list of statements inside one transaction. Any
-// failure rolls everything back. We prefer atomicity over partial
-// success so a failed alter never leaves the schema in a half state.
+// execDDL runs one DDL statement in a transaction unless outsideTx is true.
+// Use outsideTx for PostgreSQL concurrent index operations, which require it.
+func execDDL(ctx context.Context, db *sql.DB, ddl string, outsideTx bool) error {
+	if outsideTx {
+		_, err := db.ExecContext(ctx, ddl)
+		return err
+	}
+	return execInTx(ctx, db, []string{ddl})
+}
+
+// execInTx executes nonblank statements in order within one transaction and
+// attempts a rollback if a statement fails, keeping supported changes atomic.
+// MySQL DDL can commit implicitly, leaving earlier changes applied on failure.
 func execInTx(ctx context.Context, db *sql.DB, stmts []string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {

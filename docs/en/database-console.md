@@ -166,7 +166,7 @@ Several rails to keep destructive changes deliberate:
 - **Run as transaction** groups supported statements in a transaction. MySQL DDL such as `ALTER TABLE` commits implicitly, so a failed batch can leave earlier changes applied. See [MySQL’s implicit-commit reference](https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html).
 - **DDL preview pane** in the Designer and Indexes editors so you see the SQL before pressing Apply.
 - **Auto-refresh**: when the SQL tab runs DDL (`CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `COMMENT ON`, `GRANT`, `REVOKE`), the schema sidebar, the open table's structure, and the autocomplete cache all reload automatically. Designer and Indexes tabs reflect reality on the next click.
-- **Audit log**: every query emits a stdout line on the console-api with `service`, `user`, `sql_hash` (SHA-256 prefix), `duration_ms`, and `status`. Loki picks it up. SQL values are never logged.
+- **Audit log**: each SQL tab run, data-grid row edit, or Designer or Indexes request that reaches execution writes one line to the console-api log. Each line includes `service`, `user`, `sql_hash` (a SHA-256 prefix), `duration_ms`, and `status`. For requests with multiple statements, the hash covers the full batch, including statements skipped after a failure. Failed execution attempts are logged too. Loki collects these logs. Audit entries exclude SQL text and values.
 
 ## Permissions
 
@@ -174,7 +174,7 @@ The database console runs SQL through the console-api using the service's existi
 
 - **Schema browsing, row reads, and query history** require `database.read` in the service’s project.
 - **Running SQL, editing rows or schema, and saving snippets** require `database.write`, held by project deployers and owners. Cluster admins also have access.
-- **Audit** of past queries is admin-visible via Loki.
+- **Audit logs** of past queries and edits are available to admins through Loki.
 
 ## Supported services
 
