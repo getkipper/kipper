@@ -173,6 +173,7 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var sharedCopies []envCopies
 	var holders []envHolder
 	var holderRetry time.Duration
+	adoptSummaryWarning(&project)
 	backups, err := clusterBackupsConfigured(ctx, r.Client)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -333,6 +334,7 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		apimeta.RemoveStatusCondition(&project.Status.Conditions, kipperv1.ConditionStorageCopies)
 	}
 	r.setProjectHolderCondition(&project, holders)
+	setEnvironmentHolders(&project, holders)
 	if _, err := r.setStorageMoveCondition(ctx, &project, waiting); err != nil {
 		return ctrl.Result{}, err
 	}
