@@ -10,6 +10,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -124,6 +125,9 @@ type Files struct {
 	// any, and that invariant is about which pods were written to — which a
 	// test cannot see without standing in for the write itself.
 	writeInPod func(ctx context.Context, namespace, pod, container string, cmd []string, content string) error
+
+	// streamInPod lets tests observe download writes before the pod read finishes.
+	streamInPod func(ctx context.Context, namespace, pod, container string, command []string, stdout io.Writer) error
 }
 
 type fileEntry struct {
@@ -262,7 +266,10 @@ func (f *Files) Content(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(output)) //nolint:gosec // Content-Type is text/plain
 }
 
-// Download returns a file with Content-Disposition: attachment for downloading.
+// Download streams a file as an attachment using the request context, without
+// the 30-second timeout used for pod lookup and path validation. Read failures
+// return an error response before download headers are sent and abort the
+// response with http.ErrAbortHandler afterward.
 // GET /api/v1/projects/{name}/apps/{app}/files/download?path=/app/config.php
 func (f *Files) Download(w http.ResponseWriter, r *http.Request) {
 	namespace := chi.URLParam(r, "name")
@@ -295,18 +302,79 @@ func (f *Files) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	output, err := f.execInPod(ctx, namespace, podName, container, []string{"cat", filePath})
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to read file: %v", err))
-		return
+	// Use the request context so large downloads can outlast the lookup timeout.
+	// Leave Content-Length unset because the file can change while cat reads it.
+	// Aborting the response signals an incomplete download. If client-go reports
+	// a dropped API-server connection as clean EOF, however, the response completes
+	// normally because there is no error to trigger an abort.
+	readCtx, stopRead := context.WithCancel(r.Context())
+	defer stopRead()
+	body := &downloadWriter{w: w, stop: stopRead, headers: func() {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(filePath)))
+		w.WriteHeader(http.StatusOK)
+	}}
+	err = f.streamFromPod(readCtx, namespace, podName, container, []string{"cat", filePath}, body)
+	started, writeErr := body.finish()
+	if err == nil {
+		err = writeErr
 	}
+	switch {
+	case err == nil && !started:
+		body.headers()
+	case err == nil:
+	case !started:
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to read file: %v", err))
+	default:
+		// Headers are already sent, so abort to signal an incomplete download.
+		panic(http.ErrAbortHandler)
+	}
+}
 
-	filename := path.Base(filePath)
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
-	w.Header().Set("Content-Length", strconv.Itoa(len(output)))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(output)) //nolint:gosec // Content-Type is application/octet-stream with attachment disposition
+// downloadWriter delays download headers until the first nonempty write so
+// earlier read failures can return an error response. It records write errors
+// because client-go logs output-copy errors but returns the command's result.
+type downloadWriter struct {
+	mu      sync.Mutex
+	w       http.ResponseWriter
+	headers func()
+	stop    context.CancelFunc
+	started bool
+	done    bool
+	err     error
+}
+
+// Write sends download headers before the first nonempty write and cancels the
+// pod read on a response write error. Writes after finish return io.ErrClosedPipe.
+func (d *downloadWriter) Write(p []byte) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.done {
+		return 0, io.ErrClosedPipe
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if !d.started {
+		d.started = true
+		d.headers()
+	}
+	n, err := d.w.Write(p) //nolint:gosec // Content-Type is application/octet-stream with attachment disposition
+	if err != nil && d.err == nil {
+		d.err = err
+		d.stop()
+	}
+	return n, err
+}
+
+// finish blocks further writes because a canceled exec can still attempt them
+// after streaming returns. It reports whether download headers were sent and
+// returns the first response write error.
+func (d *downloadWriter) finish() (started bool, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.done = true
+	return d.started, d.err
 }
 
 // Save writes content to a file inside ALL running pods for this app.
@@ -524,6 +592,28 @@ func (f *Files) execInPod(ctx context.Context, namespace, pod, container string,
 	if f.runInPod != nil {
 		return f.runInPod(ctx, namespace, pod, container, command)
 	}
+	var stdout bytes.Buffer
+	if err := f.streamFromPod(ctx, namespace, pod, container, command, &stdout); err != nil {
+		return "", err
+	}
+	return stdout.String(), nil
+}
+
+// streamFromPod runs command in the container and streams its output to stdout.
+// On a stream error, nonempty trimmed stderr becomes the error message.
+// Test hooks replace execution when set, with streamInPod taking precedence.
+func (f *Files) streamFromPod(ctx context.Context, namespace, pod, container string, command []string, stdout io.Writer) error {
+	if f.streamInPod != nil {
+		return f.streamInPod(ctx, namespace, pod, container, command, stdout)
+	}
+	if f.runInPod != nil {
+		out, err := f.runInPod(ctx, namespace, pod, container, command)
+		if err != nil {
+			return err
+		}
+		_, err = io.WriteString(stdout, out)
+		return err
+	}
 
 	req := f.Client.CoreV1().RESTClient().Post().
 		Resource("pods").
@@ -539,22 +629,40 @@ func (f *Files) execInPod(ctx context.Context, namespace, pod, container string,
 
 	exec, err := remotecommand.NewSPDYExecutor(f.Config, "POST", req.URL())
 	if err != nil {
-		return "", fmt.Errorf("creating executor: %w", err)
+		return fmt.Errorf("creating executor: %w", err)
 	}
 
-	var stdout, stderr bytes.Buffer
+	var stderr lockedBuffer
 	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: &stdout,
+		Stdout: stdout,
 		Stderr: &stderr,
 	})
 	if err != nil {
-		if stderr.Len() > 0 {
-			return "", fmt.Errorf("%s", strings.TrimSpace(stderr.String()))
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return fmt.Errorf("%s", msg)
 		}
-		return "", err
+		return err
 	}
+	return nil
+}
 
-	return stdout.String(), nil
+// lockedBuffer synchronizes stderr reads and writes because client-go can keep
+// copying after streaming returns on cancellation or a v1 exec protocol error.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // parseLsOutput parses the output of `ls -la` into file entries.
