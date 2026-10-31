@@ -1,9 +1,13 @@
 package cmd
 
 import (
+	"errors"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/getkipper/kipper/kip/internal/config"
 )
 
 // "project/app" names another project; a bare name means the caller's own,
@@ -129,5 +133,99 @@ func TestAPublicLinkRecordsNoDependency(t *testing.T) {
 	}
 	if _, found, _ := unstructured.NestedSlice(app.Object, "spec", "links"); found {
 		t.Error("a public link left a dependency behind")
+	}
+}
+
+// TestAPublicLinkUsesTheDerivedHostWhenTheRouteHasNone verifies that --public
+// uses the same derived host as the reconciler and console link handler.
+// Environment lookup failures must return an error to prevent storing a guessed URL.
+func TestAPublicLinkUsesTheDerivedHostWhenTheRouteHasNone(t *testing.T) {
+	target := func(route map[string]any) *unstructured.Unstructured {
+		spec := map[string]any{"port": int64(8080)}
+		if route != nil {
+			spec["route"] = route
+		}
+		return &unstructured.Unstructured{Object: map[string]any{
+			"metadata": map[string]any{"name": "api"},
+			"spec":     spec,
+		}}
+	}
+	lookupFails := errors.New("namespaces is forbidden")
+
+	cases := []struct {
+		name, env, domain string
+		envErr            error
+		route             map[string]any
+		want              string
+		wantErr           bool
+	}{
+		{name: "explicit host", route: map[string]any{"host": "api.example.com", "path": "/v1"}, domain: "lab.kipper.run", want: "https://api.example.com/v1"},
+		{name: "explicit host ignores the environment and domain", env: "prod", route: map[string]any{"host": "api.example.com"}, want: "https://api.example.com"},
+		{name: "explicit host needs no environment lookup", envErr: lookupFails, route: map[string]any{"host": "api.example.com"}, want: "https://api.example.com"},
+		{name: "derived host", route: map[string]any{"path": "/"}, domain: "lab.kipper.run", want: "https://api--lab.kipper.run"},
+		{name: "derived host with a path", route: map[string]any{"path": "/v1"}, domain: "lab.kipper.run", want: "https://api--lab.kipper.run/v1"},
+		{name: "derived host in the default environment", env: "default", route: map[string]any{}, domain: "lab.kipper.run", want: "https://api--lab.kipper.run"},
+		{name: "derived host in an environment", env: "prod", route: map[string]any{}, domain: "example.com", want: "https://api-prod.example.com"},
+		{name: "derived host when the environment lookup fails", envErr: lookupFails, route: map[string]any{}, domain: "lab.kipper.run", wantErr: true},
+		{name: "no route", domain: "lab.kipper.run", wantErr: true},
+		{name: "no host and no cluster domain", route: map[string]any{}, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			environment := func() (string, error) { return tc.env, tc.envErr }
+			got, err := publicLinkURL(target(tc.route), environment, tc.domain)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("got %q, want an error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTheLinkTargetEnvironmentComesFromTheFlagsAndContext verifies that the
+// target's environment can be recovered from the namespace selection inputs.
+// Project membership grants no access to Namespace objects, so only targets
+// found by scanning require an environment label lookup.
+func TestTheLinkTargetEnvironmentComesFromTheFlagsAndContext(t *testing.T) {
+	cases := []struct {
+		name                       string
+		targetProject              string
+		flagProject, flagEnv       string
+		currentProject, currentEnv string
+		want                       string
+		known                      bool
+	}{
+		{name: "another project with an environment flag", targetProject: "docs", flagEnv: "prod", currentProject: "shop", currentEnv: "acc", want: "prod", known: true},
+		{name: "another project without the flag is its default environment", targetProject: "docs", currentProject: "shop", currentEnv: "acc", want: "", known: true},
+		{name: "own project from the context", currentProject: "shop", currentEnv: "prod", want: "prod", known: true},
+		{name: "own project from the flags", flagProject: "shop", flagEnv: "acc", currentProject: "other", currentEnv: "prod", want: "acc", known: true},
+		{name: "no project anywhere", known: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			cmd.Flags().String("project", "", "")
+			cmd.Flags().String("environment", "", "")
+			if tc.flagProject != "" {
+				_ = cmd.Flags().Set("project", tc.flagProject)
+			}
+			if tc.flagEnv != "" {
+				_ = cmd.Flags().Set("environment", tc.flagEnv)
+			}
+			cluster := &config.Cluster{CurrentProject: tc.currentProject, CurrentEnvironment: tc.currentEnv}
+
+			got, known := linkTargetEnvironment(cmd, cluster, tc.targetProject)
+			if got != tc.want || known != tc.known {
+				t.Errorf("got (%q, %v), want (%q, %v)", got, known, tc.want, tc.known)
+			}
+		})
 	}
 }
