@@ -409,13 +409,11 @@ var builtIn = map[Role][]Name{
 	RoleViewer: {
 		"database.read",
 		"env.read",
-		"files.read",
 		"kipper.read",
 		"members.read",
 		"pods.logs.read",
 		"project.read",
 		"storage.read",
-		"webhook.reveal",
 		"workloads.read",
 	},
 	RoleDeployer: {
