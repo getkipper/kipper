@@ -1149,7 +1149,7 @@ Before creating the volume, `kip volume create` checks whether the server has ca
 
 Mounts are recorded on the volume and applied to the app automatically, so they survive image updates and redeployments. `kip volume unmount` removes the mount again; the volume and its data stay available for other apps. Deleting a volume needs `--delete-data` because it permanently destroys the data.
 
-While backups are configured, each shared volume has a holder pod, `volume-holder-<name>`, that keeps it mounted so backups include its files even when no app mounts it. A project's shared storage has one too, `shared-uploads-holder`. `kip volume list` prints a warning line for a volume whose holder cannot run. See [Shared volume backups](/en/shared-storage#backups).
+While backups are configured, each shared volume has a holder pod, `volume-holder-<name>`, that keeps it mounted so backups include its files even when no app mounts it. A project's shared storage also has a holder named `shared-uploads-holder`. `kip volume list` prints a warning line for a volume whose holder cannot run, and `kip project list` prints one for each environment whose shared-storage holder cannot run. See [Shared volume backups](/en/shared-storage#backups).
 
 See [Storage](/en/storage) for full documentation.
 

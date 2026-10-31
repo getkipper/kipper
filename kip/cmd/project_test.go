@@ -343,3 +343,41 @@ func TestLoadProjectCR_LeavesADeclaredListAlone(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"prod"}, envs, "a project naming only prod has only prod")
 }
+
+// Each environment's shared storage holder warning reaches the project list,
+// so both environments' restore warnings are visible.
+func TestProjectBackupWarningsNameEachEnvironment(t *testing.T) {
+	env := func(name, reason, message string) interface{} {
+		return map[string]interface{}{"name": name, "conditions": []interface{}{map[string]interface{}{
+			"type": "BackupHolderReady", "status": "False", "reason": reason, "message": message,
+		}}}
+	}
+	project := &unstructured.Unstructured{Object: map[string]interface{}{
+		"metadata": map[string]interface{}{"name": "demo"},
+		"status": map[string]interface{}{"environments": []interface{}{
+			env("prod", "RestoreStuck", "the restore did not finish"),
+			env("staging", "Starting", "starting"),
+			env("dev", "RestoreInterrupted", "the restore was interrupted"),
+		}},
+	}}
+
+	assert.Equal(t, []string{
+		"demo/prod: the restore did not finish",
+		"demo/dev: the restore was interrupted",
+	}, projectBackupWarnings(project))
+	assert.Empty(t, projectBackupWarnings(&unstructured.Unstructured{Object: map[string]interface{}{}}))
+}
+
+// A console-api that predates status.environments reports only the project
+// summary, and its warning still reaches the project list.
+func TestProjectBackupWarningsFallBackToTheProjectSummary(t *testing.T) {
+	project := &unstructured.Unstructured{Object: map[string]interface{}{
+		"metadata": map[string]interface{}{"name": "demo"},
+		"status": map[string]interface{}{"conditions": []interface{}{map[string]interface{}{
+			"type": "BackupHolderReady", "status": "False", "reason": "RestoreStuck",
+			"message": "Environment prod: the restore did not finish",
+		}}},
+	}}
+
+	assert.Equal(t, []string{"demo/prod: the restore did not finish"}, projectBackupWarnings(project))
+}
