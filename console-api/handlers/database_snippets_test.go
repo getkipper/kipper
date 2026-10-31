@@ -3,6 +3,8 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -146,3 +148,34 @@ func TestHistoryDedupe_SameSQLBumpsToTop(t *testing.T) {
 // http.Request is referenced through net/http; keep a build-time
 // reference so future refactors don't drop the import accidentally.
 var _ = http.MethodGet
+
+// Row edits and Designer changes need the same audit coverage as SQL tab
+// queries, including failed writes.
+func TestAConsoleWriteLeavesAnAuditLineWhetherOrNotItSucceeds(t *testing.T) {
+	var out strings.Builder
+	prev := log.Writer()
+	log.SetOutput(&out)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+
+	if err := audited(r, "orders-db", []string{`DELETE FROM "public"."orders" WHERE "id" = $1`}, func() error { return nil }); err != nil {
+		t.Fatalf("a successful write returned %v", err)
+	}
+	refused := errors.New("permission denied for table orders")
+	if err := audited(r, "orders-db", []string{`DROP INDEX "public"."orders_by_day"`}, func() error { return refused }); !errors.Is(err, refused) {
+		t.Fatalf("a failed write returned %v, want the database's error", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d audit lines, want one per write:\n%s", len(lines), out.String())
+	}
+	for i, status := range []string{"status=ok", "status=error"} {
+		if !strings.Contains(lines[i], "db_audit service=orders-db") || !strings.Contains(lines[i], status) {
+			t.Errorf("audit line %d = %q, want the service and %s", i, lines[i], status)
+		}
+	}
+	if strings.Contains(out.String(), "orders_by_day") {
+		t.Errorf("the audit line carries the statement itself, which can hold row values:\n%s", out.String())
+	}
+}
