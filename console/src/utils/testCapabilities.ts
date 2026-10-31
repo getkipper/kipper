@@ -2,12 +2,12 @@ import type { Capability, ProjectRole } from '@/api/projects'
 
 /**
  * Built-in capability sets for Project test fixtures. Keep these aligned with
- * controller/pkg/capability; production UI uses the server-supplied lists.
+ * controller/pkg/capability. The production UI uses the server-supplied lists.
  */
 const byRole: Record<string, Capability[]> = {
   viewer: [
-    'database.read', 'env.read', 'files.read', 'kipper.read', 'members.read', 'pods.logs.read',
-    'project.read', 'storage.read', 'webhook.reveal', 'workloads.read',
+    'database.read', 'env.read', 'kipper.read', 'members.read', 'pods.logs.read',
+    'project.read', 'storage.read', 'workloads.read',
   ],
   deployer: [
     'apikeys.manage', 'database.read', 'database.write', 'env.read', 'env.reveal', 'env.write',

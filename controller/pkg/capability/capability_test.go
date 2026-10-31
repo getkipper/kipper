@@ -526,6 +526,36 @@ func TestAnOwnerHoldsEveryCapabilityInTheCatalogue(t *testing.T) {
 	}
 }
 
+func TestNothingAViewerHoldsGrantsMoreThanARead(t *testing.T) {
+	// Viewers must retain read-only access through indirect grants too.
+	// A deploy webhook token lets its holder deploy and change what runs in the project.
+	for _, held := range BuiltIn(RoleViewer) {
+		reached := map[Name]bool{held: true}
+		queue := []Name{held}
+		for len(queue) > 0 {
+			n := queue[0]
+			queue = queue[1:]
+			if !strings.HasSuffix(string(n), ".read") {
+				t.Errorf("a viewer holds %s, which grants %s and exceeds read-only access", held, n)
+			}
+			// The env.reveal restriction must also hold for capabilities that expose Secret values indirectly.
+			if n == "secrets.read" {
+				t.Errorf("a viewer holds %s, which grants secrets.read", held)
+			}
+			c, ok := Lookup(n)
+			if !ok {
+				t.Fatalf("%s is not in the catalog", n)
+			}
+			for _, imp := range c.Implications {
+				if !reached[imp.Grants] {
+					reached[imp.Grants] = true
+					queue = append(queue, imp.Grants)
+				}
+			}
+		}
+	}
+}
+
 // The three built-in sets nest, which is what the ladder they replace meant.
 // Losing that would take something from a role that has it today.
 func TestTheBuiltInRolesNest(t *testing.T) {

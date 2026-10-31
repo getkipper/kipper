@@ -10,7 +10,7 @@ The **cluster admin** runs the whole cluster. Admins see every project, create n
 
 Everyone else gets access one project at a time, with a role that decides what they can do there:
 
-- **Viewer** reads apps, logs, and settings.
+- **Viewer** reads apps, logs, settings, storage buckets, and database rows. Viewers cannot see an app's deploy webhook token because anyone with the token can deploy. They also cannot browse container files because this can expose Secrets mounted as files.
 - **Deployer** does the day-to-day work: deploy apps, edit environment variables and secrets, restart, roll back, open a terminal.
 - **Owner** is a deployer who also manages the project. Owners add and remove members, change roles, and edit the project itself.
 

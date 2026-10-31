@@ -637,14 +637,14 @@ func TestRemovingAMemberIsOwnerGatedAndExemptsAnAdmin(t *testing.T) {
 	}
 }
 
-// Browsing a pod's filesystem splits by what the operation does: listing,
-// reading and downloading are open to any project member, while writing into a
-// running container is deployer work. The split is in the route wrappers alone,
-// so no handler test can see it.
+// TestBrowsingAPodIsDeployerWork checks file access through the route wrappers,
+// where authorization is enforced. Handler tests alone cannot check this gate.
+// Reading also requires deployer access because mounted Secret files expose
+// values that viewers are restricted from seeing.
 //
-// A viewer reaching a read route lands on "no running pod", which is the gate
-// letting them through; the writes must not get that far.
-func TestBrowsingAPodIsReadableByAViewerAndWritableByADeployer(t *testing.T) {
+// With no running pods, an authorized request reaches the handler's missing-pod
+// response. Viewer requests must be rejected by the authorization gate first.
+func TestBrowsingAPodIsDeployerWork(t *testing.T) {
 	const (
 		viewer   = "viewer@test.com"
 		deployer = "deployer@test.com"
@@ -708,8 +708,11 @@ func TestBrowsingAPodIsReadableByAViewerAndWritableByADeployer(t *testing.T) {
 		base + "/content?path=/app/config.json",
 		base + "/download?path=/app/config.json",
 	} {
-		if code := call("GET", read, viewer); code == http.StatusForbidden {
-			t.Errorf("GET %s as a viewer = 403, want the gate to pass it through", read)
+		if code := call("GET", read, viewer); code != http.StatusForbidden {
+			t.Errorf("GET %s as a viewer = %d, want 403", read, code)
+		}
+		if code := call("GET", read, deployer); code == http.StatusForbidden {
+			t.Errorf("GET %s as a deployer = 403, want the gate to pass it through", read)
 		}
 	}
 
