@@ -4,11 +4,13 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -240,6 +242,44 @@ func TestReconcileIngress_RefusedRedirectFromDegradesRoute(t *testing.T) {
 	assert.Equal(t, "RedirectHostUnavailable", cond.Reason)
 	assert.Contains(t, cond.Message, "www.example.com")
 	assert.Contains(t, cond.Message, "promo.kipper.run")
+}
+
+// TestReconcileIngress_ARepeatedRefusalKeepsItsTransitionTime verifies that
+// observing the same refusal again leaves status unchanged. A new transition
+// time on each pass would change status and enqueue another pass.
+func TestReconcileIngress_ARepeatedRefusalKeepsItsTransitionTime(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme()
+
+	app := newTestApp()
+	app.Spec.Route = &kipperv1.AppRoute{Host: "example.com", RedirectFrom: []string{"www.example.com"}}
+	fakeClient := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(app, namespaceObj("other-project"), routeClaim("www.example.com", "other-project")).
+		WithStatusSubresource(app).
+		Build()
+	reconciler := &AppReconciler{Client: fakeClient, Scheme: scheme, Domain: "test.kipper.run"}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "my-app", Namespace: "project-test"}}
+	_, err := reconciler.Reconcile(ctx, req)
+	require.NoError(t, err)
+
+	var first kipperv1.App
+	require.NoError(t, fakeClient.Get(ctx, req.NamespacedName, &first))
+	firstSeen := metav1.NewTime(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
+	apimeta.FindStatusCondition(first.Status.Conditions, kipperv1.ConditionRouteReady).LastTransitionTime = firstSeen
+	require.NoError(t, fakeClient.Status().Update(ctx, &first))
+	require.NoError(t, fakeClient.Get(ctx, req.NamespacedName, &first))
+
+	_, err = reconciler.Reconcile(ctx, req)
+	require.NoError(t, err)
+
+	var second kipperv1.App
+	require.NoError(t, fakeClient.Get(ctx, req.NamespacedName, &second))
+	cond := apimeta.FindStatusCondition(second.Status.Conditions, kipperv1.ConditionRouteReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, "RedirectHostUnavailable", cond.Reason)
+	assert.True(t, firstSeen.Equal(&cond.LastTransitionTime), "the refusal first appeared at %s, got %s", firstSeen, cond.LastTransitionTime)
+	assert.True(t, equality.Semantic.DeepEqual(first.Status, second.Status), "an unchanged refusal leaves the status as it was")
 }
 
 func TestReconcileIngress_RedirectFromWithGatewayPrimaryHost(t *testing.T) {
