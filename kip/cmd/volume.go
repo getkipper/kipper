@@ -483,6 +483,13 @@ func volumeListStatus(cr *unstructured.Unstructured) string {
 // condition.
 func volumeBackupWarning(cr *unstructured.Unstructured) string {
 	conditions, _, _ := unstructured.NestedSlice(cr.Object, "status", "conditions")
+	return backupHolderWarning(conditions)
+}
+
+// backupHolderWarning returns the first false BackupHolderReady condition's
+// message. It returns an empty string for Starting or Restoring, a missing
+// message, or no false BackupHolderReady condition.
+func backupHolderWarning(conditions []interface{}) string {
 	for _, c := range conditions {
 		m, ok := c.(map[string]interface{})
 		if !ok || m["type"] != "BackupHolderReady" || m["status"] != "False" {

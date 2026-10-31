@@ -215,6 +215,27 @@ type ProjectStatus struct {
 	// spec that has since changed, and is stale rather than current.
 	// +optional
 	ProjectedMembersGeneration int64 `json:"projectedMembersGeneration,omitempty"`
+
+	// Environments reports each environment's own conditions. A project-level
+	// condition of the same type summarizes them.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	Environments []EnvironmentStatus `json:"environments,omitempty"`
+}
+
+// EnvironmentStatus is the observed state of one environment.
+type EnvironmentStatus struct {
+	// Name is the environment's name from spec.environments or the default
+	// environment name when none are declared.
+	Name string `json:"name"`
+
+	// Conditions are the environment's own observations, such as the
+	// BackupHolderReady condition of its shared storage's backup holder.
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
