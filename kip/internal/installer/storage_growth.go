@@ -122,6 +122,7 @@ func (g StorageGrowth) Run() error {
 		return fmt.Errorf("recording Longhorn as the storage mode: %w", err)
 	}
 	g.printf("  ✔  The cluster now uses Longhorn. New volumes get one Longhorn copy, and the platform's own volumes stay on local storage.\n")
+	g.restartConsoleAPI()
 	if len(volumes) > 0 {
 		g.printf("\n  These service volumes are still on local storage. Move each one when it suits you:\n")
 		for _, v := range volumes {
@@ -129,6 +130,15 @@ func (g StorageGrowth) Run() error {
 		}
 	}
 	return nil
+}
+
+// restartConsoleAPI requests a restart because console-api registers its Longhorn
+// volume watch only at startup. On failure, it prints a manual restart command.
+// Timed Longhorn reads continue until the restart.
+func (g StorageGrowth) restartConsoleAPI() {
+	if _, err := g.Server.Run("kubectl -n kipper-system rollout restart deployment/console-api"); err != nil {
+		g.printf("  ⚠  Could not restart console-api (%v). It continues checking Longhorn volume changes on a timer until it restarts. Run 'kip platform restart console-api' to restart it.\n", err)
+	}
 }
 
 func (g StorageGrowth) stampStorageRestarts() {
@@ -166,6 +176,14 @@ const longhornInstanceManagerCPUPercent = 12
 // checkLonghornCPU refuses a cluster where a node has no room for Longhorn's
 // instance manager.
 func checkLonghornCPU(server CommandRunner) error {
+	nodes, pods, namespaces, err := readCPUFacts(server)
+	if err != nil {
+		return err
+	}
+	return longhornCPURefusal(nodes, pods, namespaces)
+}
+
+func readCPUFacts(server CommandRunner) ([]corev1.Node, []corev1.Pod, []corev1.Namespace, error) {
 	var nodes corev1.NodeList
 	var pods corev1.PodList
 	var namespaces corev1.NamespaceList
@@ -173,24 +191,22 @@ func checkLonghornCPU(server CommandRunner) error {
 		what, command string
 		into          any
 	}{
-		{"the nodes", "kubectl get nodes -o json", &nodes},
-		{"the pods", "kubectl get pods -A -o json", &pods},
-		{"the namespaces", "kubectl get namespaces -o json", &namespaces},
+		{"the nodes", kubeNodeQuery, &nodes},
+		{"the pods", "kubectl get pods -A --request-timeout=30s -o json", &pods},
+		{"the namespaces", "kubectl get namespaces --request-timeout=30s -o json", &namespaces},
 	} {
 		if err := kubectlJSON(server, l.what, l.command, l.into); err != nil {
-			return fmt.Errorf("measuring CPU for Longhorn: %w", err)
+			return nil, nil, nil, fmt.Errorf("measuring CPU for Longhorn: %w", err)
 		}
 	}
-	return longhornCPURefusal(nodes.Items, pods.Items, namespaces.Items)
+	return nodes.Items, pods.Items, namespaces.Items, nil
 }
 
 // longhornCPURefusal returns an error for the first node whose unrequested CPU
-// is below what Longhorn's instance manager requests there, rounded as Longhorn
-// rounds it. Every node counts, including cordoned ones, and so does a pending
-// pod that may be placed on the node and fits in its room. Pods already in
-// longhorn-system are left out, so a rerun after a partial install counts them
-// as the reservation they are. The namespaces' labels give the flags that
-// reach each service.
+// is below the default instance manager request. Pods in longhorn-system are
+// excluded to avoid counting an existing reservation twice after a partial
+// install. Namespace labels identify each service's project and environment
+// for the suggested commands.
 func longhornCPURefusal(nodes []corev1.Node, pods []corev1.Pod, namespaces []corev1.Namespace) error {
 	others := make([]corev1.Pod, 0, len(pods))
 	for _, p := range pods {
@@ -198,21 +214,68 @@ func longhornCPURefusal(nodes []corev1.Node, pods []corev1.Pod, namespaces []cor
 			others = append(others, p)
 		}
 	}
-	for i := range nodes {
-		n := service.Headroom(nodes[i:i+1], others)[0]
-		pending, cpu, _ := pendingThatFit(others, &nodes[i], n, func(*corev1.Pod) bool { return false })
-		n.CPUMilli -= cpu
-		after := ""
-		if len(pending) > 0 {
-			after = " once the pending pods that could start there (" + strings.Join(pending, ", ") + ") take their share"
-		}
-		need := int64(math.Round(float64(n.AllocatableCPUMilli) * longhornInstanceManagerCPUPercent / 100))
-		if n.CPUMilli < need {
+	for _, r := range instanceManagerRooms(nodes, others) {
+		if r.free < r.need {
 			return fmt.Errorf("%s has %dm CPU that no pod requests%s, and Longhorn's storage engine requests %dm there (%d%% of the node's %dm). Services moved onto Longhorn could not start again. %s, then run this command again",
-				n.Node, max(n.CPUMilli, 0), after, need, longhornInstanceManagerCPUPercent, n.AllocatableCPUMilli, cpuRemedy(n.Node, need-n.CPUMilli, others, namespaces))
+				r.node, max(r.free, 0), r.after(), r.need, longhornInstanceManagerCPUPercent, r.allocatable, cpuRemedy(r.node, r.need-r.free, others, namespaces))
 		}
 	}
 	return nil
+}
+
+// instanceManagerRoom holds a node's unrequested CPU, default instance manager
+// request, and existing instance manager requests, all in millicores.
+type instanceManagerRoom struct {
+	node                    string
+	free, need, allocatable int64
+	pending                 []string
+	managers                []int64
+}
+
+// after returns a sentence fragment naming pending pods counted against the
+// available CPU, or an empty string when there are none.
+func (r instanceManagerRoom) after() string {
+	if len(r.pending) == 0 {
+		return ""
+	}
+	return " once the pending pods that could start there (" + strings.Join(r.pending, ", ") + ") take their share"
+}
+
+// instanceManagerRooms measures available CPU on every supplied node, including
+// cordoned nodes, and rounds the default instance manager request to millicores.
+// It subtracts assigned, unfinished pods and unscheduled pending pods that could
+// run on the node and individually fit its available CPU and memory. Pending
+// pods count even if they cannot all fit together.
+func instanceManagerRooms(nodes []corev1.Node, pods []corev1.Pod) []instanceManagerRoom {
+	rooms := make([]instanceManagerRoom, 0, len(nodes))
+	for i := range nodes {
+		n := service.Headroom(nodes[i:i+1], pods)[0]
+		pending, cpu, _ := pendingThatFit(pods, &nodes[i], n, func(*corev1.Pod) bool { return false })
+		rooms = append(rooms, instanceManagerRoom{
+			node:        n.Node,
+			free:        n.CPUMilli - cpu,
+			need:        int64(math.Round(float64(n.AllocatableCPUMilli) * longhornInstanceManagerCPUPercent / 100)),
+			allocatable: n.AllocatableCPUMilli,
+			pending:     pending,
+			managers:    instanceManagerRequests(n.Node, pods),
+		})
+	}
+	return rooms
+}
+
+// instanceManagerRequests returns CPU requests in millicores for unfinished
+// instance manager pods assigned to node, in input order.
+func instanceManagerRequests(node string, pods []corev1.Pod) []int64 {
+	var requests []int64
+	for i := range pods {
+		p := &pods[i]
+		if p.Spec.NodeName != node || p.Labels["longhorn.io/component"] != "instance-manager" || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		cpu, _ := platform.PodRequests(&p.Spec)
+		requests = append(requests, cpu)
+	}
+	return requests
 }
 
 // minSuggestedServiceCPUMilli is the lowest CPU cpuRemedy suggests for a service.

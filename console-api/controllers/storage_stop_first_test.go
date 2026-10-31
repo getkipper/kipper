@@ -807,6 +807,25 @@ func TestACopyChangeWaitsForAStorageMove(t *testing.T) {
 	}
 }
 
+// A copy change held by a storage move reports Moving with the move's
+// commands, the same condition the Service controller shows during the move.
+func TestACopyChangeHeldByAStorageMoveReportsMoving(t *testing.T) {
+	claim := movedClaim(dbDataClaim())
+	c := crfake.NewClientBuilder().WithScheme(testScheme()).WithRESTMapper(testMapper(true)).
+		WithObjects(convWorld(append(twoCopies("worker-1"), lhVolumeObj("pvc-1", 2, platform.ReplicaStorageTag), lhAttachmentObj(""), claim, moveMarked())...)...).Build()
+	w := &countedWrites{Client: c}
+	sc := storageConverter{Reader: c, Writer: w, Now: func() time.Time { return convNow }, StatefulSet: "db",
+		Commands: serviceStorageCommands("db")}
+
+	cond, err := sc.convertOrBlock(context.Background(), claim.DeepCopy(), ptr.To(int32(1)))
+
+	require.NoError(t, err)
+	require.NotNil(t, cond)
+	assert.Equal(t, kipperv1.StorageCopiesMoving, cond.Reason)
+	assert.Contains(t, cond.Message, "kip service storage longhorn db")
+	assert.Zero(t, w.writes)
+}
+
 // A stop of a service kip node fence left at zero records one replica, as the
 // fence does, so a 'kip service start' during the change is not undone by it.
 func TestAStopOfAFenceStoppedServiceRecordsOneReplica(t *testing.T) {

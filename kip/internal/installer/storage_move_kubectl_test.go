@@ -68,9 +68,10 @@ func TestKubectlMoveClusterStopsAndStartsWithTheSavedReplicas(t *testing.T) {
 	assert.Equal(t, int32(2), replicas, "a second stop keeps the first count")
 	assert.Empty(t, host.stdins, "nothing is patched twice")
 
-	replicas, err = KubectlMoveCluster{Server: host}.StartStatefulSet("shop", "db", -1)
+	replicas, started, err := KubectlMoveCluster{Server: host}.StartStatefulSet("shop", "db", -1)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), replicas)
+	assert.True(t, started)
 	require.Len(t, host.stdins, 1)
 	assert.Contains(t, host.stdins[0], `"kipper.run/storage-move":null`)
 	assert.Contains(t, host.stdins[0], `"replicas":2`)
@@ -86,18 +87,28 @@ func TestKubectlMoveClusterStartsTheCountTheMoveRecorded(t *testing.T) {
 	assert.Equal(t, int32(2), replicas, "a resumed stop keeps the recorded count")
 
 	host = &routedRunner{routes: []route{{contains: "get statefulset", out: edited}}}
-	replicas, err = KubectlMoveCluster{Server: host}.StartStatefulSet("shop", "db", 2)
+	replicas, started, err := KubectlMoveCluster{Server: host}.StartStatefulSet("shop", "db", 2)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), replicas)
+	assert.True(t, started)
 	require.Len(t, host.stdins, 1)
 	assert.Contains(t, host.stdins[0], `"replicas":2`)
 
 	unmarked := `{"metadata":{"name":"db","resourceVersion":"9"},"spec":{"replicas":1}}`
 	host = &routedRunner{routes: []route{{contains: "get statefulset", out: unmarked}}}
-	replicas, err = KubectlMoveCluster{Server: host}.StartStatefulSet("shop", "db", 2)
+	replicas, started, err = KubectlMoveCluster{Server: host}.StartStatefulSet("shop", "db", 2)
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), replicas, "an unmarked StatefulSet reports its own count")
+	assert.False(t, started, "another run has handed it back")
 	assert.Empty(t, host.stdins, "the move never scales a StatefulSet it has handed back")
+}
+
+func TestKubectlMoveClusterReportsAMissingStatefulSet(t *testing.T) {
+	host := &routedRunner{routes: []route{{contains: "get statefulset", out: `Error from server (NotFound): statefulsets.apps "db" not found`, err: errors.New("exit 1")}}}
+	_, err := KubectlMoveCluster{Server: host}.StopStatefulSet("shop", "db", "kipper-storage-move-u", 2)
+	require.ErrorIs(t, err, errStatefulSetGone)
+	_, _, err = KubectlMoveCluster{Server: host}.StartStatefulSet("shop", "db", 2)
+	require.ErrorIs(t, err, errStatefulSetGone)
 }
 
 // A resumed move stops the service again: a StatefulSet scaled up during a

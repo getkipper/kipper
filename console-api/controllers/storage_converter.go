@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	goerrors "errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -404,7 +405,8 @@ func claimWorkload(claim string) string {
 // run again, reading and planning afresh, up to conversionTries times.
 // Conflicts that persist, timeouts, throttling and a failed admission webhook
 // call report ConversionPending, the last with the API server's error. A
-// webhook that denies the request reports Blocked like other errors.
+// webhook that denies the request reports Blocked like other errors. A storage
+// move holding the StatefulSet reports Moving.
 // Other errors are logged and report Blocked, so users can reset the copy
 // count while the failure persists, which a Converting condition would
 // prevent in kip and admission policy.
@@ -415,6 +417,10 @@ func (s storageConverter) convertOrBlock(ctx context.Context, pvc *corev1.Persis
 	}
 	if err == nil {
 		return c, nil
+	}
+	if goerrors.Is(err, errStorageMoveHolds) {
+		return &metav1.Condition{Type: kipperv1.ConditionStorageCopies, Status: metav1.ConditionFalse, Reason: kipperv1.StorageCopiesMoving,
+			Message: storageMoveMessage(s.StatefulSet)}, nil
 	}
 	transient := errors.IsConflict(err) || errors.IsTimeout(err) || errors.IsServerTimeout(err) || errors.IsTooManyRequests(err)
 	if !transient {

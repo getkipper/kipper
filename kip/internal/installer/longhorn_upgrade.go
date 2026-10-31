@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 // LonghornUpgradeCommand is the command that moves Longhorn to the target.
@@ -203,7 +206,8 @@ func (u LonghornUpgrade) step(client CommandRunner, from, to string) error {
 
 // gate returns an error naming every reason the step must not start: the
 // cluster not ready or settled at from, the hop's own requirements, and a
-// host at the RHEL 9.7 level.
+// host at the RHEL 9.7 level. Version changes also require enough unrequested
+// CPU for another instance manager on every node.
 func (u LonghornUpgrade) gate(client CommandRunner, from, to string) error {
 	snap, err := readLonghornSnapshot(client)
 	if err != nil {
@@ -221,6 +225,11 @@ func (u LonghornUpgrade) gate(client CommandRunner, from, to string) error {
 			return err
 		}
 		problems = append(problems, more...)
+		nodes, pods, namespaces, err := readCPUFacts(client)
+		if err != nil {
+			return err
+		}
+		problems = append(problems, snap.hopCPUProblems(nodes, pods, namespaces)...)
 	}
 	problems = append(problems, snap.rhelHoldProblems()...)
 	if len(problems) == 0 {
@@ -231,6 +240,121 @@ func (u LonghornUpgrade) gate(client CommandRunner, from, to string) error {
 		step = fmt.Sprintf("the engine catch-up on Longhorn %s", from)
 	}
 	return fmt.Errorf("%s did not start, and nothing in Longhorn was changed:\n  - %s\nFix these, or wait for Longhorn to finish what it is doing, then run %s again", step, strings.Join(problems, "\n  - "), LonghornUpgradeCommand)
+}
+
+// hopCPUProblems reports nodes with insufficient unrequested CPU for another
+// instance manager. Longhorn binds its pod to the node, where insufficient CPU
+// prevents admission without evicting other pods, so the step times out. Unlike
+// the installation check, this counts existing managers as used CPU until their
+// engines and replicas stop. An attached volume's engine stays until it detaches.
+func (s longhornSnapshot) hopCPUProblems(nodes []corev1.Node, pods []corev1.Pod, namespaces []corev1.Namespace) []string {
+	var problems []string
+	for _, r := range instanceManagerRooms(nodes, pods) {
+		need := s.instanceManagerNeed(r)
+		if r.free >= need {
+			continue
+		}
+		problem := fmt.Sprintf("%s has %dm CPU that no pod requests%s, and during the upgrade Longhorn starts another instance manager there that requests %dm. The node would refuse it, so the step would time out with volumes still on the old engine.",
+			r.node, max(r.free, 0), r.after(), need)
+		if len(r.managers) > 1 {
+			problem += fmt.Sprintf(" %d instance managers run there because an older one keeps the engines of volumes that stayed attached through an earlier step. Those engines stay until the volumes detach. Longhorn removes the older manager once everything using those volumes, including backup holders, has stopped.", len(r.managers))
+		}
+		problems = append(problems, problem+" "+cpuRemedy(r.node, need-r.free, pods, namespaces))
+	}
+	return problems
+}
+
+// instanceManagerNeed returns the CPU request in millicores of the instance
+// manager Longhorn starts on r's node. Without a readable setting or override it
+// uses the largest request among unfinished instance manager pods on that node,
+// or the default percentage of allocatable CPU when there are none.
+func (s longhornSnapshot) instanceManagerNeed(r instanceManagerRoom) int64 {
+	if need, ok := s.nextInstanceManagerCPU(r.node, r.allocatable); ok {
+		return need
+	}
+	if len(r.managers) > 0 {
+		return slices.Max(r.managers)
+	}
+	return r.need
+}
+
+// instanceManagerCPUHint returns newline-prefixed CPU shortage hints for
+// in-service Longhorn nodes still waiting for the default instance manager.
+// It skips nodes with an admitted manager pod or enough CPU and returns an
+// empty string if reads fail or no hints apply.
+func instanceManagerCPUHint(client CommandRunner, snap longhornSnapshot) string {
+	missing := snap.nodesWithoutInstanceManager()
+	if len(missing) == 0 {
+		return ""
+	}
+	nodes, pods, namespaces, err := readCPUFacts(client)
+	if err != nil {
+		return ""
+	}
+	pods, admitted := withoutNewInstanceManagers(pods, snap.Settings["default-instance-manager-image"])
+	var hints []string
+	for _, r := range instanceManagerRooms(nodes, pods) {
+		need := snap.instanceManagerNeed(r)
+		if !slices.Contains(missing, r.node) || admitted[r.node] || r.free >= need {
+			continue
+		}
+		hints = append(hints, fmt.Sprintf("%s has %dm CPU that no pod requests%s, and Longhorn's new instance manager there requests %dm. The node refuses a pod bound to it without that CPU, which would keep the instance manager from starting. %s",
+			r.node, max(r.free, 0), r.after(), need, cpuRemedy(r.node, need-r.free, pods, namespaces)))
+	}
+	if len(hints) == 0 {
+		return ""
+	}
+	return "\n" + strings.Join(hints, "\n")
+}
+
+// withoutNewInstanceManagers filters out unfinished instance manager pods using
+// image whose data engine is not v2, so their requests do not inflate the CPU
+// shortage estimate. It also returns nodes considered to have an admitted pod
+// because the pod is Running or has container statuses.
+func withoutNewInstanceManagers(pods []corev1.Pod, image string) ([]corev1.Pod, map[string]bool) {
+	rest := make([]corev1.Pod, 0, len(pods))
+	admitted := map[string]bool{}
+	for i := range pods {
+		p := &pods[i]
+		finished := p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed
+		v1 := p.Labels["longhorn.io/data-engine"] != "v2"
+		if p.Labels["longhorn.io/component"] != "instance-manager" || !v1 || finished || !runsImage(p, image) {
+			rest = append(rest, *p)
+			continue
+		}
+		if p.Status.Phase == corev1.PodRunning || len(p.Status.ContainerStatuses) > 0 {
+			admitted[p.Spec.NodeName] = true
+		}
+	}
+	return rest, admitted
+}
+
+// runsImage reports whether a regular container in p specifies image exactly.
+// An empty image never matches.
+func runsImage(p *corev1.Pod, image string) bool {
+	for _, c := range p.Spec.Containers {
+		if image != "" && c.Image == image {
+			return true
+		}
+	}
+	return false
+}
+
+// nextInstanceManagerCPU returns a new v1 instance manager's CPU request in
+// millicores. A positive node override takes precedence over the rounded
+// guaranteed-instance-manager-cpu percentage of allocatable CPU. The setting
+// accepts a number or, starting with Longhorn 1.10, a per-data-engine object.
+// Without an override, the result is false if the setting is missing,
+// unreadable or negative.
+func (s longhornSnapshot) nextInstanceManagerCPU(node string, allocatable int64) (int64, bool) {
+	if override := s.IMCPUOverrides[node]; override > 0 {
+		return override, true
+	}
+	percent, err := strconv.ParseFloat(v1SettingValue(s.Settings["guaranteed-instance-manager-cpu"]), 64)
+	if err != nil || percent < 0 {
+		return 0, false
+	}
+	return int64(math.Round(float64(allocatable) * percent / 100)), true
 }
 
 // resumeGate checks volume, engine, Kubernetes, CRD, node and host requirements
@@ -352,7 +476,7 @@ func (u LonghornUpgrade) waitFor(client CommandRunner, version, what string, pro
 		}
 		if !u.now().Before(deadline) {
 			return snap, fmt.Errorf("%s did not settle within %s:\n  - %s%s\nRun %s again to keep waiting. It resumes where this run stopped",
-				what, u.StepTimeout, strings.Join(left, "\n  - "), managerLogTail(client, version, left), LonghornUpgradeCommand)
+				what, u.StepTimeout, strings.Join(left, "\n  - "), managerLogTail(client, version, left)+instanceManagerCPUHint(client, snap), LonghornUpgradeCommand)
 		}
 		time.Sleep(u.Interval)
 	}

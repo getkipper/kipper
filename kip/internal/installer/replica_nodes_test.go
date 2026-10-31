@@ -98,6 +98,15 @@ func TestEngineReplicaTimeoutReadsTheLiveSetting(t *testing.T) {
 	assert.Equal(t, DefaultEngineReplicaTimeout, EngineReplicaTimeout(h))
 }
 
+// Longhorn 1.10 and later keep a value per data engine. Kipper runs v1 volumes.
+func TestEngineReplicaTimeoutReadsTheV1ValueOfAPerEngineSetting(t *testing.T) {
+	h := &hostScript{reply: func(string) (string, error) { return `{"v1":" 20 ","v2":"8"}`, nil }}
+	assert.Equal(t, 20*time.Second, EngineReplicaTimeout(h))
+
+	h = &hostScript{reply: func(string) (string, error) { return `{"v2":"20"}`, nil }}
+	assert.Equal(t, DefaultEngineReplicaTimeout, EngineReplicaTimeout(h))
+}
+
 func TestEnsureStoragePackagesInstallsWhatIsMissing(t *testing.T) {
 	var out bytes.Buffer
 	h := &hostScript{reply: func(command string) (string, error) {
