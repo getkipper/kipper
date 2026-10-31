@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -103,10 +104,15 @@ func (r *ProjectReconciler) reconcileProjectHolder(ctx context.Context, project 
 		// An unrelated claim needs no shared storage warning when the feature is disabled.
 		return nil, 0, nil
 	}
+	// Starting from the environment's recorded condition keeps its restore
+	// warning while the replacement holder starts.
 	var conditions []metav1.Condition
+	if c := environmentHolder(project, env); c != nil {
+		conditions = []metav1.Condition{*c}
+	}
 	st := holderReport{conditions: &conditions, generation: project.Generation}
 	st.save = func(ctx context.Context) error {
-		if len(conditions) == 0 {
+		if len(conditions) == 0 || !restoreWarning(conditions[0].Reason) {
 			return nil
 		}
 		return r.saveHolderWarning(ctx, project, envHolder{env: env, cond: conditions[0]})
@@ -131,17 +137,79 @@ func (r *ProjectReconciler) saveHolderWarning(ctx context.Context, project *kipp
 		return errProjectReplaced
 	}
 	read := live.ResourceVersion
+	adoptSummaryWarning(&live)
 	r.holderReport(&live).setFalse(holder.cond.Reason, holder.message())
+	setEnvironmentHolder(&live, holder)
 	if err := r.Status().Update(ctx, &live); err != nil {
 		return fmt.Errorf("saving the backup holder warning: %w", err)
 	}
 	apimeta.SetStatusCondition(&project.Status.Conditions, *apimeta.FindStatusCondition(live.Status.Conditions, conditionBackupHolderReady))
+	setEnvironmentHolder(project, holder)
 	// If no intervening write changed the project, use the saved version so
 	// the final status write carrying this warning avoids a conflict.
 	if project.ResourceVersion == read {
 		project.ResourceVersion = live.ResourceVersion
 	}
 	return nil
+}
+
+// environmentHolder returns env's recorded BackupHolderReady condition, or nil
+// if the environment or condition is absent.
+func environmentHolder(project *kipperv1.Project, env string) *metav1.Condition {
+	for _, s := range project.Status.Environments {
+		if s.Name == env {
+			return apimeta.FindStatusCondition(s.Conditions, conditionBackupHolderReady)
+		}
+	}
+	return nil
+}
+
+// adoptSummaryWarning copies a legacy project restore warning to the named
+// environment if it has no BackupHolderReady condition. Older controllers
+// stored warnings only on the project, so this preserves the warning before
+// a new one replaces the project condition.
+func adoptSummaryWarning(project *kipperv1.Project) {
+	summary := apimeta.FindStatusCondition(project.Status.Conditions, conditionBackupHolderReady)
+	if summary == nil || !restoreWarning(summary.Reason) {
+		return
+	}
+	for _, env := range ProjectEnvironments(project) {
+		e := envHolder{env: env.Name}
+		if !e.reported(summary) || environmentHolder(project, env.Name) != nil {
+			continue
+		}
+		c := *summary
+		c.Message = strings.TrimPrefix(c.Message, e.message())
+		setEnvironmentHolder(project, envHolder{env: env.Name, cond: c})
+	}
+}
+
+// setEnvironmentHolder records holder's condition on its environment's status,
+// adding the environment when it has no status yet.
+func setEnvironmentHolder(project *kipperv1.Project, holder envHolder) {
+	for i := range project.Status.Environments {
+		if s := &project.Status.Environments[i]; s.Name == holder.env {
+			apimeta.SetStatusCondition(&s.Conditions, holder.cond)
+			return
+		}
+	}
+	project.Status.Environments = append(project.Status.Environments,
+		kipperv1.EnvironmentStatus{Name: holder.env, Conditions: []metav1.Condition{holder.cond}})
+}
+
+// setEnvironmentHolders records each environment's BackupHolderReady
+// condition. It removes that condition from environments absent from envs
+// and removes status entries left with no conditions.
+func setEnvironmentHolders(project *kipperv1.Project, envs []envHolder) {
+	for i := range project.Status.Environments {
+		apimeta.RemoveStatusCondition(&project.Status.Environments[i].Conditions, conditionBackupHolderReady)
+	}
+	for _, e := range envs {
+		setEnvironmentHolder(project, e)
+	}
+	project.Status.Environments = slices.DeleteFunc(project.Status.Environments, func(s kipperv1.EnvironmentStatus) bool {
+		return len(s.Conditions) == 0
+	})
 }
 
 func sharedStorageEnabled(project *kipperv1.Project) bool {

@@ -380,6 +380,182 @@ func TestProjectHolderReportsARestoreWarningOverAnotherEnvironment(t *testing.T)
 	assert.NotEqual(t, "RestoreStuck", h.condition(t).Reason, "the warning goes once staging's holder runs")
 }
 
+// envCondition returns env's BackupHolderReady condition from the project's
+// per-environment status.
+func (h *projectHolderHarness) envCondition(t *testing.T, env string) *metav1.Condition {
+	t.Helper()
+	var project kipperv1.Project
+	require.NoError(t, h.client.Get(context.Background(), crclient.ObjectKey{Name: "demo"}, &project))
+	for _, e := range project.Status.Environments {
+		if e.Name == env {
+			return apimeta.FindStatusCondition(e.Conditions, conditionBackupHolderReady)
+		}
+	}
+	return nil
+}
+
+// stuckProjectHolder is a holder in ns whose restore passed its deadline.
+func stuckProjectHolder(project *kipperv1.Project, ns string) *corev1.Pod {
+	stuck := buildHolder(projectHolderTarget(project, ns))
+	stuck.OwnerReferences = ownedProjectHolder(project).OwnerReferences
+	stuck.UID = types.UID("stuck-" + ns)
+	stuck.CreationTimestamp = metav1.NewTime(metav1.Now().Add(-holderRestoreDeadline - time.Minute))
+	stuck.Spec.InitContainers = []corev1.Container{{Name: veleroRestoreContainer}}
+	stuck.Status.Phase = corev1.PodPending
+	return stuck
+}
+
+// Each environment keeps its restore warning in status while its replacement
+// holder starts, so both warnings remain available beyond their events.
+func TestEachEnvironmentKeepsItsOwnRestoreWarning(t *testing.T) {
+	project := holderProject(&kipperv1.ProjectSharedStorage{Enabled: true, Size: "2Gi"})
+	project.Spec.Environments = []kipperv1.ProjectEnvironment{{Name: "prod"}, {Name: "staging"}}
+	staging := projectUploadsClaim()
+	staging.Namespace = "demo-staging"
+	h := newProjectHolderHarness(t, project, projectUploadsClaim(), staging,
+		stuckProjectHolder(project, projectHolderNamespace), stuckProjectHolder(project, "demo-staging"))
+
+	h.reconcile(t, 3)
+
+	for _, env := range []string{"prod", "staging"} {
+		cond := h.envCondition(t, env)
+		require.NotNil(t, cond, env)
+		assert.Equal(t, "RestoreStuck", cond.Reason, "%s keeps its warning while its replacement starts", env)
+	}
+	assert.Equal(t, "RestoreStuck", h.condition(t).Reason, "the project condition still summarizes them")
+
+	var replacement corev1.Pod
+	require.NoError(t, h.client.Get(context.Background(), types.NamespacedName{Namespace: "demo-staging", Name: projectHolderName}, &replacement))
+	replacement.Status.Phase = corev1.PodRunning
+	replacement.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	require.NoError(t, h.client.Status().Update(context.Background(), &replacement))
+	h.reconcile(t, 1)
+
+	assert.Equal(t, metav1.ConditionTrue, h.envCondition(t, "staging").Status, "staging's warning goes once its holder runs")
+	assert.Equal(t, "RestoreStuck", h.envCondition(t, "prod").Reason, "prod's warning stays")
+	assert.Contains(t, h.condition(t).Message, "Environment prod:")
+}
+
+// Replacing a holder that ended without a restore skips saving a warning
+// before deletion, so the recorded Running condition produces no warning event.
+func TestAnEndedHolderIsReplacedWithoutAWarning(t *testing.T) {
+	project := holderProject(&kipperv1.ProjectSharedStorage{Enabled: true, Size: "2Gi"})
+	running := metav1.Condition{Type: conditionBackupHolderReady, Status: metav1.ConditionTrue, Reason: "Running",
+		Message: "The backup holder is running, so backups copy the volume's files.", LastTransitionTime: metav1.Now()}
+	project.Status.Conditions = []metav1.Condition{running}
+	project.Status.Environments = []kipperv1.EnvironmentStatus{{Name: "prod", Conditions: []metav1.Condition{running}}}
+	ended := ownedProjectHolder(project)
+	ended.UID = "ended"
+	ended.Status.Phase = corev1.PodFailed
+	h := newProjectHolderHarness(t, project, projectUploadsClaim(), ended)
+
+	h.reconcile(t, 1)
+
+	assert.Equal(t, "Starting", h.envCondition(t, "prod").Reason)
+	assert.Equal(t, "Starting", h.condition(t).Reason)
+	for len(h.recorder.Events) > 0 {
+		assert.NotContains(t, <-h.recorder.Events, "BackupHolderRunning", "a running holder is no warning")
+	}
+}
+
+// A restore warning stored only on the project by an older controller carries
+// over to its environment's status.
+func TestASummaryRestoreWarningMovesToItsEnvironment(t *testing.T) {
+	project := holderProject(&kipperv1.ProjectSharedStorage{Enabled: true, Size: "2Gi"})
+	project.Status.Conditions = []metav1.Condition{{
+		Type: conditionBackupHolderReady, Status: metav1.ConditionFalse, Reason: "RestoreStuck",
+		Message: "Environment prod: the holder's restore did not finish", LastTransitionTime: metav1.Now(),
+	}}
+	h := newProjectHolderHarness(t, project, projectUploadsClaim())
+
+	h.reconcile(t, 1)
+
+	cond := h.envCondition(t, "prod")
+	require.NotNil(t, cond)
+	assert.Equal(t, "RestoreStuck", cond.Reason)
+	assert.Equal(t, "the holder's restore did not finish", cond.Message)
+}
+
+// A project without declared environments has the default one, and a legacy
+// warning for it moves there too.
+func TestASummaryRestoreWarningMovesToTheDefaultEnvironment(t *testing.T) {
+	project := holderProject(&kipperv1.ProjectSharedStorage{Enabled: true, Size: "2Gi"})
+	project.Spec.Environments = nil
+	project.Status.Conditions = []metav1.Condition{{
+		Type: conditionBackupHolderReady, Status: metav1.ConditionFalse, Reason: "RestoreStuck",
+		Message: "Environment " + DefaultEnvironmentName + ": the holder's restore did not finish", LastTransitionTime: metav1.Now(),
+	}}
+	h := newProjectHolderHarness(t, project, projectUploadsClaim())
+
+	h.reconcile(t, 1)
+
+	cond := h.envCondition(t, DefaultEnvironmentName)
+	require.NotNil(t, cond)
+	assert.Equal(t, "RestoreStuck", cond.Reason)
+}
+
+// A legacy summary warning for a later environment survives a new restore
+// warning in an earlier one, even when the pass's final status write fails
+// after the earlier warning was saved.
+func TestASummaryRestoreWarningSurvivesANewWarningInAnotherEnvironment(t *testing.T) {
+	project := holderProject(&kipperv1.ProjectSharedStorage{Enabled: true, Size: "2Gi"})
+	project.Spec.Environments = []kipperv1.ProjectEnvironment{{Name: "prod"}, {Name: "staging"}}
+	project.Status.Conditions = []metav1.Condition{{
+		Type: conditionBackupHolderReady, Status: metav1.ConditionFalse, Reason: "RestoreStuck",
+		Message: "Environment staging: the holder's restore did not finish", LastTransitionTime: metav1.Now(),
+	}}
+	staging := projectUploadsClaim()
+	staging.Namespace = "demo-staging"
+	// Fail subsequent project status writes to verify that saving prod's
+	// warning also preserves staging's warning in storage.
+	saved, failed := false, false
+	scheme := testScheme()
+	c := projectFakeBuilder().WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: stampUID,
+			SubResourceUpdate: func(ctx context.Context, c crclient.Client, sub string, obj crclient.Object, opts ...crclient.SubResourceUpdateOption) error {
+				p, ok := obj.(*kipperv1.Project)
+				if ok && saved {
+					failed = true
+					return apierrors.NewConflict(schema.GroupResource{Resource: "projects"}, obj.GetName(), errors.New("stale"))
+				}
+				if ok && environmentHolder(p, "prod") != nil && environmentHolder(p, "prod").Reason == "RestoreStuck" {
+					saved = true
+				}
+				return c.SubResource(sub).Update(ctx, obj, opts...)
+			},
+		}).
+		WithObjects(project, nodeWithIP("worker-1", "ExternalIP", "203.0.113.9"), projectUploadsClaim(), staging,
+			stuckProjectHolder(project, projectHolderNamespace)).
+		WithStatusSubresource(&kipperv1.Project{}).Build()
+	h := &projectHolderHarness{client: c, reconciler: &ProjectReconciler{Client: c, Scheme: scheme, APIReader: c, Recorder: record.NewFakeRecorder(20)}}
+
+	_, err := h.reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "demo"}})
+	require.Error(t, err)
+	require.True(t, failed, "the final status write fails after prod's warning was saved")
+
+	for _, env := range []string{"prod", "staging"} {
+		cond := h.envCondition(t, env)
+		require.NotNil(t, cond, env)
+		assert.Equal(t, "RestoreStuck", cond.Reason, env)
+	}
+}
+
+// An environment removed from the spec leaves the status when its only
+// condition is BackupHolderReady.
+func TestAnEnvironmentWithoutAHolderLeavesTheStatus(t *testing.T) {
+	project := holderProject(&kipperv1.ProjectSharedStorage{Enabled: true, Size: "2Gi"})
+	project.Status.Environments = []kipperv1.EnvironmentStatus{{Name: "gone", Conditions: []metav1.Condition{{
+		Type: conditionBackupHolderReady, Status: metav1.ConditionFalse, Reason: "RestoreStuck", Message: "old", LastTransitionTime: metav1.Now(),
+	}}}}
+	h := newProjectHolderHarness(t, project, projectUploadsClaim())
+
+	h.reconcile(t, 1)
+
+	assert.Nil(t, h.envCondition(t, "gone"))
+	require.NotNil(t, h.envCondition(t, "prod"))
+}
+
 // A recorded restore warning is kept while its environment's replacement
 // starts or warns again, without a second event, and gives way once that
 // environment reports anything else, such as a new restore.

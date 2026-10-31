@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -324,6 +325,15 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 	}
 
 	if err := r.reconcileChildren(ctx, &app, sources, generation, bindingHash); err != nil {
+		if errors.IsConflict(err) {
+			// Concurrent writes, such as HPA replica changes, leave rollout status
+			// unchanged. Gate status reflects how far reconciliation progressed,
+			// since only completed route reconciliation verifies the gate.
+			// Returning the error retries with the controller's backoff.
+			r.withdrawAPIKeyGate(&app, err)
+			r.writeStatusIfChanged(ctx, &app, statusAtEntry)
+			return ctrl.Result{}, err
+		}
 		// Record observations and cleanup results even when a child fails, so
 		// status reflects this pass rather than the last successful reconciliation.
 		r.sweepEnv(ctx, &app, generation, keepProjections)
@@ -1283,6 +1293,28 @@ func (r *AppReconciler) sweepWriterSecrets(ctx context.Context, app *kipperv1.Ap
 	return nil
 }
 
+// conditionIndex returns the index of the first condition of type t, or -1 if absent.
+func conditionIndex(conditions []metav1.Condition, t string) int {
+	return slices.IndexFunc(conditions, func(c metav1.Condition) bool { return c.Type == t })
+}
+
+// restoreCondition moves the condition matching previous.Type to index, capped
+// at the end of the slice, and preserves previous.LastTransitionTime if its
+// status is unchanged. It leaves the slice unchanged if the condition is absent.
+func restoreCondition(conditions *[]metav1.Condition, previous metav1.Condition, index int) {
+	list := *conditions
+	at := conditionIndex(list, previous.Type)
+	if at < 0 {
+		return
+	}
+	c := list[at]
+	if c.Status == previous.Status {
+		c.LastTransitionTime = previous.LastTransitionTime
+	}
+	list = slices.Delete(list, at, at+1)
+	*conditions = slices.Insert(list, min(index, len(list)), c)
+}
+
 // setRouteConflict marks the app's route as unavailable and logs why, so a
 // refused hostname surfaces on status instead of failing silently.
 func (r *AppReconciler) setRouteConflict(app *kipperv1.App, host, reason string) {
@@ -1386,6 +1418,12 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *kipperv1.App)
 	if !owned {
 		r.setRouteConflict(app, host, "already claimed by another project")
 		return r.deleteOwnedRouteIngresses(ctx, app)
+	}
+	// RouteReady is rebuilt below. Preserve its position and transition time
+	// when its status is unchanged so repeated refusals avoid status writes
+	// caused solely by reordering or a new timestamp.
+	if at := conditionIndex(app.Status.Conditions, kipperv1.ConditionRouteReady); at >= 0 {
+		defer restoreCondition(&app.Status.Conditions, app.Status.Conditions[at], at)
 	}
 	apimeta.RemoveStatusCondition(&app.Status.Conditions, kipperv1.ConditionRouteReady)
 

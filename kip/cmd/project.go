@@ -247,6 +247,7 @@ func runProjectList(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\n  %-25s %-25s %s\n", "PROJECT", "DISPLAY NAME", "ENVIRONMENTS")
+	var warnings []string
 	for _, p := range projectList.Items {
 		name := p.GetName()
 		displayName, _, _ := unstructured.NestedString(p.Object, "spec", "displayName")
@@ -265,10 +266,54 @@ func runProjectList(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Printf("  %-25s %-25s %s\n", name, displayName, strings.Join(envNames, ", "))
+		warnings = append(warnings, projectBackupWarnings(&p)...)
+	}
+	for _, w := range warnings {
+		fmt.Printf("\n  ⚠  %s", w)
+	}
+	if len(warnings) > 0 {
+		fmt.Println()
 	}
 	fmt.Println()
 
 	return nil
+}
+
+// projectBackupWarnings returns a "project/env: message" line for each
+// environment whose shared storage backup holder needs attention, using
+// backupHolderWarning to select messages. Lines follow status.environments order.
+// If status.environments is unavailable, it uses the project summary condition
+// for compatibility with older console-api versions. A summary message starting
+// with "Environment <env>: " yields the same format. Other summary messages yield
+// "project: message". It returns nil when no warning needs attention.
+func projectBackupWarnings(p *unstructured.Unstructured) []string {
+	envs, found, _ := unstructured.NestedSlice(p.Object, "status", "environments")
+	if !found {
+		conditions, _, _ := unstructured.NestedSlice(p.Object, "status", "conditions")
+		w := backupHolderWarning(conditions)
+		if w == "" {
+			return nil
+		}
+		if rest, ok := strings.CutPrefix(w, "Environment "); ok {
+			if env, msg, ok := strings.Cut(rest, ": "); ok {
+				return []string{fmt.Sprintf("%s/%s: %s", p.GetName(), env, msg)}
+			}
+		}
+		return []string{fmt.Sprintf("%s: %s", p.GetName(), w)}
+	}
+	var out []string
+	for _, e := range envs {
+		env, ok := e.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := env["name"].(string)
+		conditions, _ := env["conditions"].([]interface{})
+		if w := backupHolderWarning(conditions); w != "" {
+			out = append(out, fmt.Sprintf("%s/%s: %s", p.GetName(), name, w))
+		}
+	}
+	return out
 }
 
 func runProjectDelete(cmd *cobra.Command, args []string) error {
