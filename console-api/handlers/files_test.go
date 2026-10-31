@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -719,4 +720,154 @@ func TestFiles_SaveWritesNoPodWhenAnyReplicaRefusesTheTarget(t *testing.T) {
 				"no replica may be written to when another one's target is refused")
 		})
 	}
+}
+
+// downloadPod serves /app/big.bin using stream and delegates other pod commands
+// to podAnswers.
+func downloadPod(stream func(ctx context.Context, w io.Writer) error) *chi.Mux {
+	answers := &podAnswers{resolved: "/app/big.bin"}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "myapp-abc123", Namespace: "staging", Labels: map[string]string{"app": "myapp"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	return filesRouter(&Files{
+		Client:   fake.NewClientset(pod),
+		runInPod: answers.run,
+		streamInPod: func(ctx context.Context, _, _, _ string, command []string, w io.Writer) error {
+			if command[0] != "cat" {
+				out, err := answers.run(ctx, "", "", "", command)
+				if err != nil {
+					return err
+				}
+				_, err = io.WriteString(w, out)
+				return err
+			}
+			return stream(ctx, w)
+		},
+	})
+}
+
+// Streaming avoids buffering entire large files in memory and lets downloads
+// outlast the pod lookup deadline.
+func TestADownloadStreamsTheFileAsThePodSendsIt(t *testing.T) {
+	rec := httptest.NewRecorder()
+	router := downloadPod(func(ctx context.Context, w io.Writer) error {
+		if _, ok := ctx.Deadline(); ok {
+			t.Errorf("the file is read under a deadline, so a large download is cut off")
+		}
+		if _, err := io.WriteString(w, "first chunk,"); err != nil {
+			return err
+		}
+		if !strings.Contains(rec.Body.String(), "first chunk,") {
+			t.Errorf("the first chunk is held back until the whole file is read")
+		}
+		_, err := io.WriteString(w, "second chunk")
+		return err
+	})
+	router.ServeHTTP(rec, httptest.NewRequest("GET", "/projects/staging/apps/myapp/files/download?path=/app/big.bin", nil))
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "first chunk,second chunk", rec.Body.String())
+	assert.Equal(t, `attachment; filename="big.bin"`, rec.Header().Get("Content-Disposition"))
+	assert.Empty(t, rec.Header().Get("Content-Length"), "a length read before cat can disagree with what cat sends")
+}
+
+// unwritableResponse simulates a disconnected client.
+type unwritableResponse struct{ *httptest.ResponseRecorder }
+
+func (unwritableResponse) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+// client-go logs response write errors but returns the command's result, so a
+// successful read can still leave the client with an incomplete download.
+func TestADownloadThatCannotReachTheClientAbortsEvenWhenTheReadSucceeds(t *testing.T) {
+	router := downloadPod(func(ctx context.Context, w io.Writer) error {
+		_, _ = io.WriteString(w, "half")
+		if ctx.Err() == nil {
+			t.Errorf("the read keeps going after the client is gone")
+		}
+		return nil
+	})
+	assert.PanicsWithValue(t, http.ErrAbortHandler, func() {
+		router.ServeHTTP(unwritableResponse{httptest.NewRecorder()}, httptest.NewRequest("GET", "/projects/staging/apps/myapp/files/download?path=/app/big.bin", nil))
+	})
+}
+
+func TestAnEmptyWriteBeforeAFailureStillAnswersWithAnError(t *testing.T) {
+	rec := httptest.NewRecorder()
+	router := downloadPod(func(_ context.Context, w io.Writer) error {
+		_, _ = w.Write(nil)
+		return errors.New("cat: /app/big.bin: Permission denied")
+	})
+	router.ServeHTTP(rec, httptest.NewRequest("GET", "/projects/staging/apps/myapp/files/download?path=/app/big.bin", nil))
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Empty(t, rec.Header().Get("Content-Disposition"))
+}
+
+// Cancellation can return before the stream finishes copying, so writes can
+// arrive after the handler has finished the response.
+func TestAWriteAfterTheDownloadEndsNeverReachesTheResponse(t *testing.T) {
+	var late io.Writer
+	rec := httptest.NewRecorder()
+	router := downloadPod(func(_ context.Context, w io.Writer) error {
+		late = w
+		return context.Canceled
+	})
+	router.ServeHTTP(rec, httptest.NewRequest("GET", "/projects/staging/apps/myapp/files/download?path=/app/big.bin", nil))
+
+	_, err := io.WriteString(late, "late bytes")
+	assert.Error(t, err)
+	assert.NotContains(t, rec.Body.String(), "late bytes")
+}
+
+func TestADownloadThatFailsBeforeAnyByteAnswersWithAnError(t *testing.T) {
+	rec := httptest.NewRecorder()
+	router := downloadPod(func(context.Context, io.Writer) error {
+		return errors.New("cat: /app/big.bin: Permission denied")
+	})
+	router.ServeHTTP(rec, httptest.NewRequest("GET", "/projects/staging/apps/myapp/files/download?path=/app/big.bin", nil))
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "Permission denied")
+	assert.Empty(t, rec.Header().Get("Content-Disposition"), "an error must not arrive as a file")
+}
+
+// Once headers are sent, aborting signals an incomplete download because the
+// status can no longer change.
+func TestADownloadThatFailsPartWayAbortsTheConnection(t *testing.T) {
+	router := downloadPod(func(_ context.Context, w io.Writer) error {
+		_, _ = io.WriteString(w, "half")
+		return errors.New("container restarted")
+	})
+	assert.PanicsWithValue(t, http.ErrAbortHandler, func() {
+		router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/projects/staging/apps/myapp/files/download?path=/app/big.bin", nil))
+	})
+}
+
+func TestAnEmptyFileDownloadsAsAnEmptyFile(t *testing.T) {
+	rec := httptest.NewRecorder()
+	router := downloadPod(func(context.Context, io.Writer) error { return nil })
+	router.ServeHTTP(rec, httptest.NewRequest("GET", "/projects/staging/apps/myapp/files/download?path=/app/big.bin", nil))
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, `attachment; filename="big.bin"`, rec.Header().Get("Content-Disposition"))
+	assert.Empty(t, rec.Body.String())
+}
+
+// client-go can keep copying stderr after streaming returns, so reading stderr
+// must synchronize with ongoing writes.
+func TestStderrCanBeReadWhileItIsStillBeingWritten(t *testing.T) {
+	var stderr lockedBuffer
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 1000 {
+			_, _ = stderr.Write([]byte("cat: read error\n"))
+		}
+	}()
+	for range 1000 {
+		_ = stderr.String()
+	}
+	<-done
+	assert.Equal(t, 1000, strings.Count(stderr.String(), "read error"))
 }
