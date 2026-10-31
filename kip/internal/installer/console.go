@@ -187,14 +187,18 @@ rules:
     resources: ["servicemonitors"]
     verbs: ["get", "list", "watch", "create", "update"]
   # Storage copies status and conversion read Longhorn's objects on a timer,
-  # without a watch. A conversion patches the volume's replica count, node
-  # selector and locality, switches the revision counter on for the volume,
-  # its engines and replicas, and attaches the volume on the server through
-  # its attachment record. Longhorn removes the extra replicas itself.
+  # and Longhorn volumes are also watched. A conversion patches the volume's
+  # replica count, node selector and locality, switches the revision counter
+  # on for the volume, its engines and replicas, and attaches the volume on
+  # the server through its attachment record. Longhorn removes the extra
+  # replicas itself.
   # The rules are cluster-wide because local-path clusters have no
   # longhorn-system namespace to hold a Role.
   - apiGroups: ["longhorn.io"]
-    resources: ["volumes", "engines", "replicas"]
+    resources: ["volumes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["longhorn.io"]
+    resources: ["engines", "replicas"]
     verbs: ["get", "list", "patch"]
   - apiGroups: ["longhorn.io"]
     resources: ["volumeattachments"]

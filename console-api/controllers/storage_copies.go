@@ -24,13 +24,14 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/platform"
 )
 
-// Longhorn objects are read uncached and unstructured, so no informer is ever
-// registered for a kind a local-path cluster does not serve.
+// Longhorn reads use unstructured objects and the uncached API reader in
+// production. Only Volumes have an informer, registered when the kind and
+// permissions are available at startup.
 const longhornNamespace = "longhorn-system"
 
-// Storage status is refreshed on a timer because nothing watches Longhorn. A
-// running or pending conversion is read every 10 seconds, so the steps of a
-// stopped service follow each other quickly.
+// Storage status is refreshed on a timer because Longhorn's replicas and nodes
+// are not watched. A running or pending conversion is read every 10 seconds,
+// so the steps of a stopped service follow each other quickly.
 const (
 	storageRefreshConverting = 10 * time.Second
 	storageRefreshUnsettled  = time.Minute
@@ -284,8 +285,8 @@ func storageStatus(pvc *corev1.PersistentVolumeClaim, live *liveCopies) *kipperv
 // reads and a running or pending conversion more often because it takes one
 // step per reconcile. A conversion blocked by pods that use the volume, or
 // blocked while it keeps a service stopped, is polled just as often because
-// these controllers do not watch the pods or Longhorn. Message markers identify
-// these blocks.
+// pod watches do not cover every volume user, and Longhorn replicas are not
+// watched. Message markers identify these blocks.
 func storageRefresh(c *metav1.Condition) time.Duration {
 	switch {
 	case c != nil && (c.Status == metav1.ConditionTrue || c.Reason == kipperv1.StorageCopiesNotSet):
@@ -311,7 +312,7 @@ func storageRequeue(conditions []metav1.Condition) time.Duration {
 
 // projectRequeue is how soon a project is reconciled again: the egress
 // refresh interval, or sooner while it reports shared storage copies, since
-// nothing watches Longhorn's objects.
+// Longhorn's replicas and nodes are not watched.
 func projectRequeue(conditions []metav1.Condition) time.Duration {
 	c := apimeta.FindStatusCondition(conditions, kipperv1.ConditionStorageCopies)
 	if c == nil {

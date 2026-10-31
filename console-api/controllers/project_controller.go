@@ -974,7 +974,7 @@ func (r *ProjectReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := IndexMemberBindings(context.Background(), mgr.GetFieldIndexer()); err != nil {
 		return fmt.Errorf("indexing member bindings by project: %w", err)
 	}
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&kipperv1.Project{}).
 		// Member RoleBindings are authorization objects: drift must trigger
 		// repair, not wait for the next Project event.
@@ -989,8 +989,9 @@ func (r *ProjectReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.enqueueProjectsForNode)).
 		// The manager's pod cache holds every holder, as PodCacheNamespaces configures.
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(projectForHolder)).
-		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(projectForSharedClaim)).
-		Complete(r)
+		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(projectForSharedClaim))
+	b, _ = watchLonghornVolumes(mgr, b, projectForLonghornVolume(mgr.GetAPIReader()))
+	return b.Complete(r)
 }
 
 // namespaceConflictError says a namespace is already claimed by another project.

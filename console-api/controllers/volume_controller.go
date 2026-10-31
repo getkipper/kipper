@@ -104,7 +104,7 @@ func (r *VolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 
-	// Nothing watches Longhorn, so the copies in the status are read again on a timer.
+	// Polling keeps copy status current because Longhorn replicas and nodes are not watched.
 	retry = earliest(retry, storageRequeue(vol.Status.Conditions))
 	return ctrl.Result{RequeueAfter: retry}, nil
 }
@@ -304,14 +304,15 @@ func (r *VolumeReconciler) updateStatus(ctx context.Context, vol *kipperv1.Volum
 	return r.Status().Update(ctx, vol)
 }
 
-// SetupWithManager watches Volumes, their claims, and holder pods. Holders are
-// mapped by label so restored, ownerless holders also trigger reconciliation
-// of their Volume. The manager's Pod cache must include holder pods, as
-// configured by PodCacheNamespaces.
+// SetupWithManager watches Volumes, their claims, and holder pods. It also watches
+// Longhorn volumes when the kind and permissions are available at startup.
+// Holders are mapped by label so restored, ownerless holders also trigger
+// reconciliation of their Volume. The manager's Pod cache must include holder
+// pods, as configured by PodCacheNamespaces.
 func (r *VolumeReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b, _ := watchLonghornVolumes(mgr, ctrl.NewControllerManagedBy(mgr).
 		For(&kipperv1.Volume{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
-		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(volumeForHolder)).
-		Complete(r)
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(volumeForHolder)), volumeForLonghornVolume)
+	return b.Complete(r)
 }

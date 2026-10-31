@@ -122,6 +122,7 @@ func (g StorageGrowth) Run() error {
 		return fmt.Errorf("recording Longhorn as the storage mode: %w", err)
 	}
 	g.printf("  ✔  The cluster now uses Longhorn. New volumes get one Longhorn copy, and the platform's own volumes stay on local storage.\n")
+	g.restartConsoleAPI()
 	if len(volumes) > 0 {
 		g.printf("\n  These service volumes are still on local storage. Move each one when it suits you:\n")
 		for _, v := range volumes {
@@ -129,6 +130,15 @@ func (g StorageGrowth) Run() error {
 		}
 	}
 	return nil
+}
+
+// restartConsoleAPI requests a restart because console-api registers its Longhorn
+// volume watch only at startup. On failure, it prints a manual restart command.
+// Timed Longhorn reads continue until the restart.
+func (g StorageGrowth) restartConsoleAPI() {
+	if _, err := g.Server.Run("kubectl -n kipper-system rollout restart deployment/console-api"); err != nil {
+		g.printf("  ⚠  Could not restart console-api (%v). It continues checking Longhorn volume changes on a timer until it restarts. Run 'kip platform restart console-api' to restart it.\n", err)
+	}
 }
 
 func (g StorageGrowth) stampStorageRestarts() {

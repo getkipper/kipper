@@ -3,13 +3,10 @@ package controllers
 import (
 	"context"
 
-	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -166,36 +163,19 @@ func expertMode(ctx context.Context, c client.Reader) bool {
 
 // ownTuningRecords watches tuning records when the CRD and permissions are
 // available at startup. Starting an unsyncable watch would block the manager.
-// Without a watch, recommendations apply on the owner's next reconcile;
-// adding the watch requires a restart.
+// Without a watch, recommendations apply on the owner's next reconcile.
+// Adding the watch requires a restart.
 func ownTuningRecords(mgr ctrl.Manager, b *builder.Builder) *builder.Builder {
 	gk := kipperv1.GroupVersion.WithKind("ResourceTuning").GroupKind()
 	if _, err := mgr.GetRESTMapper().RESTMapping(gk, kipperv1.GroupVersion.Version); err != nil {
-		ctrl.Log.Info("ResourceTuning is not installed, resource recommendations apply on the next reconcile only", "reason", err.Error())
+		ctrl.Log.Info("ResourceTuning discovery failed. Resource recommendations apply on the next reconcile only.", "reason", err.Error())
 		return b
 	}
-	if !mayWatchTuningRecords(mgr) {
-		ctrl.Log.Info("console-api may not list and watch ResourceTuning, resource recommendations apply on the next reconcile only")
+	if !mayListAndWatch(mgr, kipperv1.GroupVersion.Group, "resourcetunings") {
+		ctrl.Log.Info("Could not confirm list and watch permissions for ResourceTuning. Resource recommendations apply on the next reconcile only.")
 		return b
 	}
 	return b.Owns(&kipperv1.ResourceTuning{})
-}
-
-func mayWatchTuningRecords(mgr ctrl.Manager) bool {
-	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
-	if err != nil {
-		return false
-	}
-	for _, verb := range []string{"list", "watch"} {
-		review := &authorizationv1.SelfSubjectAccessReview{Spec: authorizationv1.SelfSubjectAccessReviewSpec{
-			ResourceAttributes: &authorizationv1.ResourceAttributes{Group: kipperv1.GroupVersion.Group, Resource: "resourcetunings", Verb: verb},
-		}}
-		got, err := clientset.AuthorizationV1().SelfSubjectAccessReviews().Create(context.Background(), review, metav1.CreateOptions{})
-		if err != nil || !got.Status.Allowed {
-			return false
-		}
-	}
-	return true
 }
 
 // rolloutReplicas uses the higher of the desired and live replica counts

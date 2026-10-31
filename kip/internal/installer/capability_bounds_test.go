@@ -192,14 +192,14 @@ func TestConsoleClusterRoleCanAdoptVolumeHolders(t *testing.T) {
 	}
 }
 
-// console-api reads Longhorn without a watch, and its only writes are the ones
-// a copies conversion needs: patching a volume, its replicas and engines to
-// switch the revision counter on, and patching its attachment for the hold on
-// the server. It deletes no replica.
+// console-api watches Longhorn volumes and polls the other kinds. Copy conversion
+// needs patch access to volumes, replicas, and engines to enable revision counters,
+// and to attachment records to hold volumes on the server. Longhorn handles
+// replica deletion, so console-api needs no delete permission.
 func TestConsoleClusterRoleHoldsOnlyTheLonghornVerbsConversionNeeds(t *testing.T) {
 	console := parseConsoleClusterRole(t)
 	allowed := map[string][]string{
-		"volumes":           {"get", "list", "patch"},
+		"volumes":           {"get", "list", "watch", "patch"},
 		"replicas":          {"get", "list", "patch"},
 		"engines":           {"get", "list", "patch"},
 		"volumeattachments": {"get", "patch"},
