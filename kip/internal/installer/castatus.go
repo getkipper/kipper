@@ -7,91 +7,97 @@ import (
 	"github.com/getkipper/kipper/controller/pkg/hostnames"
 )
 
-// CAStatus answers the question an operator actually has: does everything
-// agree, and if not, what do I run? It is safe to ask at any time, including
-// while a rotation is part-way through and including when login is broken —
-// it reads over SSH and never depends on the OIDC path it reports on.
+// CAStatus reports certificate trust checks and the next recovery action.
+// ReadCAStatus collects it over SSH, so it remains available during rotations
+// and OIDC login failures.
 type CAStatus struct {
-	// Phase is where a rotation has got to; steady means none is in flight.
-	Phase CAPhase
-	// Resume names the step of the documented procedure to carry on from,
-	// empty when nothing is in flight.
-	Resume string
-	// Authority describes the authority currently signing.
-	Authority CertSummary
-	// Incoming and Outgoing are populated only during a rotation.
+	Phase              CAPhase
+	Resume             string
+	Authority          CertSummary
 	Incoming, Outgoing *CertSummary
-	// Leaf describes the certificate the cluster serves.
+	// Leaf describes the stored certificate, which Traefik may not yet serve.
 	Leaf CertSummary
-	// TrustedByAPIServer is the whole invariant: the anchor covers whatever
-	// signed the served certificate, AND the API server has loaded that anchor.
-	TrustedByAPIServer bool
-	// AnchorCovers and AnchorLoaded are the two halves, reported separately
-	// because they fail for different reasons and need different fixes. An
-	// anchor that covers but is not loaded means a sync was interrupted; one
-	// that does not cover means the wrong authority is anchored.
+	// TrustedByAPIServer requires both AnchorCovers and AnchorLoaded.
+	TrustedByAPIServer         bool
 	AnchorCovers, AnchorLoaded bool
-	// AnchorLoadedUnknown records that the API server could not be asked what
-	// it has loaded. Reported rather than folded into AnchorLoaded: "it has not
-	// taken this config" and "it did not answer" need different responses, and
-	// only one of them is repaired by a sync.
+	// AnchorLoadedUnknown distinguishes an unreadable metric from a confirmed mismatch.
 	AnchorLoadedUnknown bool
-	// ServedByActive is whether the wire shows a certificate the active
-	// authority signed. Nil when there is no gateway-fronted host to ask.
+	// AnchorUsed indicates that at least one configured issuer uses kipper.run.
+	AnchorUsed bool
+	// ServedByActive is nil when no gateway host or active authority is available to check.
 	ServedByActive *bool
-	// Hosts are the issuers the API server trusts.
-	Hosts []string
-	// Problems are malformed states that need attention before anything else.
-	Problems []string
+	Hosts          []string
+	Problems       []string
 }
 
 // CertSummary is the human-facing description of one certificate.
 type CertSummary struct {
-	Subject string
-	Expires time.Time
-	// Fingerprint distinguishes two authorities with the same subject, which
-	// is exactly the situation during a rotation.
+	Subject     string
+	Expires     time.Time
 	Fingerprint string
 }
 
-// Healthy reports whether the cluster needs no attention: no rotation in
-// flight, nothing malformed, and both sides of the trust relationship agree.
+// Healthy reports whether the cluster needs no attention: no rotation or
+// malformed state, confirmed anchor coverage and loading, and a passing live
+// certificate check when one is available.
 func (s CAStatus) Healthy() bool {
 	if s.Phase != CAPhaseSteady || len(s.Problems) > 0 || !s.TrustedByAPIServer {
 		return false
 	}
-	// A check that could not run is not a check that passed. Saying "nothing to
-	// do" on the strength of an unanswered question is how an operator stops
-	// looking at a cluster that still needs them.
+	// An unreadable metric leaves trust unconfirmed and still needs attention.
 	if s.AnchorLoadedUnknown {
 		return false
 	}
 	return s.ServedByActive == nil || *s.ServedByActive
 }
 
-// NextCommand is the command that moves this cluster toward a healthy state,
-// empty when there is nothing to run — either because nothing needs doing, or
-// because what is wrong is repaired by the documented procedure rather than by
-// a command. This is the field that makes the status worth printing: a
-// diagnosis nobody can act on is not a diagnosis.
+// NextCommand returns the command to repair a confirmed config mismatch when
+// the anchor covers the stored certificate and no malformed state is reported.
+// It returns an empty string when no command applies, including when recovery
+// requires the documented manual procedure.
 func (s CAStatus) NextCommand() string {
 	if len(s.Problems) > 0 {
 		return ""
 	}
-	// Sync re-renders the config from the anchor already on disk, so it repairs
-	// an anchor the API server never loaded. It cannot repair an anchor that
-	// names the wrong authority, because it adds nothing to that file, and it
-	// is not offered on the strength of a check that never ran.
+	// Sync uses the existing anchor, so it can repair a confirmed load mismatch
+	// only after the anchor itself is correct.
 	if s.AnchorCovers && !s.AnchorLoaded && !s.AnchorLoadedUnknown {
 		return "kip cluster auth sync"
 	}
 	return ""
 }
 
-// ReadCAStatus assembles the full picture, including one live check against
-// the wire. The wire check is what turns "the Secrets look right" into "the
-// cluster is actually serving what we think", which is the distinction three
-// abandoned designs failed on.
+// recordAnchorLoad records stored certificate coverage and checks whether the
+// API server loaded the config rendered from the anchor and issuer hosts.
+// The load check is skipped when no issuer is configured.
+// TrustedByAPIServer requires both checks to pass. Custom-domain issuers use
+// public certificates, so their rendered config is independent of the anchor.
+// loadUnconfirmed is true when a probe runs without confirming the load.
+// An unreadable metric sets AnchorLoadedUnknown. Other probe errors are returned.
+func (s *CAStatus) recordAnchorLoad(client CommandRunner, state CAState) (loadUnconfirmed bool, err error) {
+	s.AnchorCovers = state.anchorCoversLeaf()
+	s.AnchorUsed = firstGatewayHost(state.DexHosts) != ""
+	if len(state.DexHosts) == 0 {
+		return false, nil
+	}
+	// Check loading even when coverage fails, because loading an invalid anchor
+	// can break kipper.run logins when the gateway serves the stored certificate.
+	loaded, known, err := anchorIsActive(client, state)
+	if err != nil {
+		return false, err
+	}
+	s.AnchorLoaded = loaded
+	s.AnchorLoadedUnknown = !known
+	s.TrustedByAPIServer = loaded && s.AnchorCovers
+	return !loaded || !known, nil
+}
+
+// ReadCAStatus reads certificate state and, when the config names an issuer,
+// checks the API server's loaded config. When a gateway host and active
+// authority are available, it also verifies the served certificate against that
+// authority, since Secrets alone cannot confirm what the cluster serves. An
+// unreadable API server metric is reported through AnchorLoadedUnknown. Other
+// read or probe errors are returned.
 func ReadCAStatus(client CommandRunner) (CAStatus, error) {
 	state, err := ReadCAState(client)
 	if err != nil {
@@ -100,7 +106,6 @@ func ReadCAStatus(client CommandRunner) (CAStatus, error) {
 
 	status := CAStatus{
 		Phase:    state.Phase(),
-		Resume:   state.ResumePoint(),
 		Hosts:    state.DexHosts,
 		Problems: state.Anomalies(),
 	}
@@ -115,23 +120,11 @@ func ReadCAStatus(client CommandRunner) (CAStatus, error) {
 		status.Outgoing = &s
 	}
 
-	// The invariant has two halves, and reporting only the first is what made
-	// the abandoned designs unsafe. The anchor must cover whatever signed the
-	// served certificate — and the API server must have LOADED that anchor. A
-	// file on disk is an input to the API server, not evidence about it.
-	anchorCovers := state.LeafCert == "" || hopca.SignedByAny([]byte(state.LeafCert), []byte(state.Anchor))
-	if anchorCovers && len(state.DexHosts) > 0 {
-		loaded, known, aerr := anchorIsActive(client, state)
-		if aerr != nil {
-			return CAStatus{}, aerr
-		}
-		status.AnchorLoaded = loaded
-		status.AnchorLoadedUnknown = !known
-		status.TrustedByAPIServer = loaded
-	} else {
-		status.TrustedByAPIServer = false
+	loadUnconfirmed, err := status.recordAnchorLoad(client, state)
+	if err != nil {
+		return CAStatus{}, err
 	}
-	status.AnchorCovers = anchorCovers
+	status.Resume = resumeFor(state, loadUnconfirmed)
 
 	if host := firstGatewayHost(state.DexHosts); host != "" && state.Active != "" {
 		served, serr := ServedByAuthority(client, host, state.Active)
@@ -143,9 +136,9 @@ func ReadCAStatus(client CommandRunner) (CAStatus, error) {
 	return status, nil
 }
 
-// firstGatewayHost returns a host served the cluster's own hop certificate.
-// Custom domains carry WebPKI certificates and say nothing about the hop
-// authority, so they are not worth asking.
+// firstGatewayHost returns the first kipper.run host, or an empty string if none
+// exists. Custom domains use WebPKI certificates, so probing them cannot verify
+// the cluster's hop authority.
 func firstGatewayHost(hosts []string) string {
 	for _, h := range hosts {
 		if hostnames.IsKipperRun(h) {

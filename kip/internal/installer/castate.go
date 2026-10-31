@@ -49,15 +49,13 @@ const (
 	CAPhaseNarrowed CAPhase = "narrowed"
 )
 
-// ResumePoint names where in the documented procedure this cluster should carry
-// on, empty when nothing is in flight. The numbering matches the headings in
-// docs/en/certificate-authority.md, so an operator can go straight to the step
-// rather than working out which of them already happened.
+// ResumePoint returns the next step in docs/en/certificate-authority.md, or an
+// empty string when no replacement is in progress. It assumes the anchor on disk
+// is valid and loaded by the API server. resumeFor accounts for anchor checks.
 //
-// It reads the leaf as well as the phase because the phase alone cannot tell
-// the two halves of a promotion apart: moving the authority and re-signing the
-// certificate under it leave the same keys on the CA Secret, and only the
-// certificate's own signature says which of them has happened.
+// It checks the leaf's signature because promoting the authority and installing
+// the re-signed certificate leave the same keys in the CA Secret. The phase
+// alone cannot distinguish these steps.
 func (s CAState) ResumePoint() string {
 	switch s.Phase() {
 	case CAPhaseStaged:
@@ -74,6 +72,38 @@ func (s CAState) ResumePoint() string {
 	default:
 		return ""
 	}
+}
+
+// resumeFor adjusts ResumePoint for anchor checks in the expanded and promoted
+// phases so logins continue to work. Before promotion, the anchor must verify
+// the stored leaf. After promotion, it must contain the active authority before
+// the re-signed certificate is installed. Widening takes precedence over loading.
+// In either phase, loadUnconfirmed directs the operator to load the anchor
+// before continuing. Loading it again is safe.
+func resumeFor(s CAState, loadUnconfirmed bool) string {
+	if s.Phase() == CAPhasePromoted {
+		if !s.anchorHas(s.Active) {
+			return "step 1.4, widening the anchor"
+		}
+		if loadUnconfirmed {
+			return "step 1.5, loading the anchor into the API server"
+		}
+	}
+	if s.Phase() == CAPhaseExpanded {
+		if !s.anchorCoversLeaf() {
+			return "step 1.4, widening the anchor"
+		}
+		if loadUnconfirmed {
+			return "step 1.5, loading the anchor into the API server"
+		}
+	}
+	return s.ResumePoint()
+}
+
+// anchorCoversLeaf reports whether the leaf verifies against the anchor on disk.
+// A missing leaf returns true because there is no certificate to verify.
+func (s CAState) anchorCoversLeaf() bool {
+	return s.LeafCert == "" || hopca.SignedByAny([]byte(s.LeafCert), []byte(s.Anchor))
 }
 
 // CAState is the material a replacement moves through: the authority and its
