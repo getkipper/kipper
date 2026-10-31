@@ -328,7 +328,7 @@ Service-UI share links are the one deliberate exception: an admin can mint a sig
 
 ### Secrets management
 
-Application secrets are stored as Kubernetes Secrets, encrypted at rest by k3s. They are:
+Application secrets are stored as Kubernetes Secrets. k3s keeps them in its datastore on the server without encryption at rest, so anyone who can read the datastore on the server's disk can read the secrets. They are:
 
 - Never returned in API list responses (only revealed on explicit request)
 - Scoped to the project namespace (one project cannot access another's secrets)

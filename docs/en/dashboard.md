@@ -6,7 +6,7 @@ The dashboard is the first screen you see after logging into the Kipper web cons
 
 ### Component status
 
-The dashboard monitors 13 infrastructure components that make up a Kipper cluster:
+The dashboard monitors up to 13 infrastructure components that make up a Kipper cluster. The list reflects the cluster's profile, component overrides, and storage and backup settings:
 
 | Component     | What it does                                      |
 |---------------|---------------------------------------------------|
@@ -26,8 +26,8 @@ The dashboard monitors 13 infrastructure components that make up a Kipper cluste
 
 Each component shows a green or red indicator:
 
-- **Green** means the component has at least one healthy replica running.
-- **Red** means the component is not found or has zero available replicas.
+- **Green** means a Deployment has at least one available replica, a StatefulSet has all its desired replicas ready, or a DaemonSet has at least one ready pod. For k3s, at least one node must be Ready.
+- **Red** means the component could not be found or checked, or it does not meet its readiness condition.
 
 ### Node information
 
@@ -36,7 +36,7 @@ The nodes table shows every node in your cluster with:
 - **Status:** whether the node is Ready or NotReady.
 - **CPU usage:** current CPU consumption reported by metrics-server.
 - **Memory usage:** current memory consumption reported by metrics-server.
-- **Disk usage:** reported when available, otherwise shown as "n/a".
+- **Disk usage:** shown as "n/a" because disk usage is not collected.
 
 CPU and memory values require metrics-server to be installed (it is included in a standard Kipper installation). If metrics-server is unavailable, the values display as "n/a".
 
@@ -56,7 +56,7 @@ If the kill is on a pod in the `monitoring` namespace (Prometheus or Loki), the 
 
 Two cards show real-time memory and CPU utilization for the cluster:
 
-- **Utilization bar:** color-coded green (<70%), amber (70-85%), or red (>85%)
+- **Utilization bar:** color-coded green (<70%), amber (70% to below 90%), or red (90% and above)
 - **Sparkline chart:** a trend line showing the last hour of usage at a glance
 - **Totals:** current usage vs allocatable capacity
 
@@ -76,7 +76,7 @@ Anomalies are sorted to the top of the list, making it easy to spot a workload t
 
 ### Resource management mode
 
-The dashboard displays the current resource management mode (**Auto** or **Expert**) in the header area. In auto mode, the resource controller runs in the background and adjusts CPU/memory for your apps based on actual usage. A summary of recent auto-mode changes is shown on the dashboard when available. See [Resource Management](/en/resource-management) for details on how the controller works and how to switch between modes.
+The current resource management mode (**Auto** or **Expert**) and recent auto-mode changes are shown under **Settings**. In auto mode, the resource controller runs in the background and adjusts CPU/memory for your apps based on actual usage. See [Resource Management](/en/resource-management) for details on how the controller works and how to switch between modes.
 
 ## Auto-refresh
 

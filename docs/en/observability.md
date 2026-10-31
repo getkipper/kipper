@@ -141,29 +141,14 @@ A gated route answers `503` with `gate_unavailable` when no replica can prove it
 
 The console API runs the reconcilers that turn your Apps, Services, Functions and Jobs into running workloads. If one of them fails to start, the API itself keeps serving, so the console still loads while nothing new actually deploys. The `/health/controllers` endpoint makes that state visible instead of leaving it in the logs.
 
-It's unauthenticated, like `/health`, and reports each controller's registration plus whether the manager is running and its caches have synced:
+Like `/health`, it is unauthenticated. It returns a single health status that is true when the manager is running, its caches have synced, and every controller has registered successfully:
 
 ```bash
 curl http://console-api.kipper-system:8080/health/controllers
 ```
 
 ```json
-{
-  "healthy": true,
-  "managerStarted": true,
-  "cacheSynced": true,
-  "controllers": [
-    { "name": "App", "registered": true },
-    { "name": "Build", "registered": true },
-    { "name": "Function", "registered": true },
-    { "name": "Job", "registered": true },
-    { "name": "PlatformConfig", "registered": true },
-    { "name": "PodOOM", "registered": true },
-    { "name": "Project", "registered": true },
-    { "name": "Service", "registered": true },
-    { "name": "Volume", "registered": true }
-  ]
-}
+{ "healthy": true }
 ```
 
 When everything is up the endpoint returns `200`. When the manager is still starting, its caches haven't synced, or any controller failed to register, it returns `503` and `healthy` is `false`. A `503` indicates degraded controllers and potentially stalled deployments. The console API can still answer requests, allowing you to investigate.
@@ -321,7 +306,7 @@ Events:
 Prometheus scrapes the reconcilers directly, and two alerts ship with the cluster:
 
 - **KipperReconcileFailing** fires when a controller has recorded three or more errors within the last hour, and that has held for ten minutes. It counts errors in a rolling window rather than proving they were continuous, so a burst of three followed by quiet will still fire. The window is an hour rather than something tighter because a reconcile that keeps failing is retried on a backoff stretching to about seventeen minutes between attempts, and a five-minute view of that reads as quiet. The count covers every workload the controller manages, so three unrelated one-off errors in the same hour will fire it just as a single workload failing repeatedly will. That is a deliberate bias towards noticing: a workload stuck on every pass can sit there indefinitely, and a look at the logs costs less than missing one.
-- **KipperReconcileWedged** fires when a single reconcile has been running for over five minutes. That is a different fault: a failing pass returns and retries, while a wedged one never comes back, and nothing else on that controller's queue moves behind it. Look for a call with no timeout.
+- **KipperReconcileWedged** fires when a single reconcile has been running for over five minutes and that condition persists for ten minutes. That is a different fault: a failing pass returns and retries, while a wedged one never comes back, and nothing else on that controller's queue moves behind it. Look for a call with no timeout.
 
 Both name the controller, not the workload, because the metrics behind them are per-controller. Finding which workload is the next step rather than something the alert can tell you.
 
