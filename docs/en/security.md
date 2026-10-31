@@ -254,7 +254,7 @@ Every response from your applications includes security headers enforced at the 
 | `X-Frame-Options` | `SAMEORIGIN` | Prevents clickjacking |
 | `X-Content-Type-Options` | `nosniff` | Prevents MIME type sniffing |
 | `X-XSS-Protection` | `1; mode=block` | Blocks reflected XSS attacks |
-| `Content-Security-Policy` | Restricts script, style, image, and connection sources to `self` | Prevents XSS and data injection |
+| `Content-Security-Policy` | Allows scripts and stylesheets from `self` and the CSP allowlist, including inline scripts and styles and JavaScript `eval()`. Allows images and fonts from `self`, `data:`, and HTTPS, plus fonts from the CSP allowlist. Allows connections to `self`, HTTPS, and WSS. | Limits where a page can load scripts and stylesheets. |
 | `Referrer-Policy` | `strict-origin-when-cross-origin` | Controls referrer information leakage |
 | `Server` / `X-Powered-By` | Removed | Hides server technology from attackers |
 
@@ -291,11 +291,11 @@ The refusal is an ingress rule matching the path as written, so it closes the ac
 
 ### CSP allowlist
 
-The default Content Security Policy blocks external resources. If your app loads fonts, stylesheets, scripts, or connects to APIs on other domains, add them to the CSP allowlist.
+The default Content Security Policy blocks scripts and stylesheets from other domains. Images and fonts over HTTPS and requests to any HTTPS or WSS origin are already allowed. If your app loads scripts or stylesheets from another domain, add it to the CSP allowlist.
 
 **From the web console:** Open the app's Settings tab → enter comma-separated domains in the CSP allowlist field → Save.
 
-**Example:** To load Google Fonts, add `fonts.googleapis.com` to the allowlist. The domains are added to `style-src`, `font-src`, `script-src`, and `connect-src` directives.
+**Example:** To load Google Fonts, add `fonts.googleapis.com` to the allowlist. The domains are added to the `script-src`, `style-src`, and `font-src` directives.
 
 Functions have the same CSP settings. Open the function detail panel, then the Settings tab.
 
