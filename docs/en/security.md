@@ -13,7 +13,7 @@ Your team manages application security, dependencies, credentials, and access. S
 
 ### TLS at the ingress {#tls-everywhere}
 
-Public app routes use HTTPS. On custom domains, cert-manager obtains Let's Encrypt certificates for Traefik. Shared `*.kipper.run` routes terminate public TLS at the gateway. HTTP requests redirect to HTTPS at the ingress entrypoint. Inside the cluster, new Postgres services created through the CLI or console require TLS by default, with a certificate from the cluster's own service CA, once a full `kip upgrade` or `kip install` has created that CA. They refuse network connections without TLS unless the service is switched to mode `on` or `off`. See [Encrypted Postgres connections](/en/services#postgres-tls). Other service types use the protocol configured by the service.
+Public app routes use HTTPS. On custom domains, cert-manager obtains Let's Encrypt certificates for Traefik. Shared `*.kipper.run` routes terminate public TLS at the gateway. HTTP requests redirect to HTTPS at the ingress entrypoint. Inside the cluster, new Postgres services created through the CLI or console serve TLS by default with a certificate from the cluster's own service CA, once a full `kip upgrade` or `kip install` has created that CA. They also accept unencrypted connections, so the client chooses whether to use TLS. See [Encrypted Postgres connections](/en/services#postgres-tls). Other service types use the protocol configured by the service.
 
 `X-Forwarded-*` headers are honored only from trusted proxies: the kipper.run gateway (trusted automatically when your cluster uses a kipper.run domain) and any addresses you pass with `--trusted-proxy`. From anyone else they are dropped. On the kipper.run path the gateway drops any client-supplied `X-Forwarded-For` and sets it to the address it measured, so the source IP in your logs is trustworthy. If you put your own load balancer in front and trust it with `--trusted-proxy`, the logged source is only as trustworthy as that balancer: most append to the client-supplied chain rather than replacing it, so treat the leftmost address as a claim and cross-check the `forwarded_for` chain that kipper-authz logs. Source IP is used for logging only, never to decide whether a key is valid.
 
@@ -254,7 +254,7 @@ Every response from your applications includes security headers enforced at the 
 | `X-Frame-Options` | `SAMEORIGIN` | Prevents clickjacking |
 | `X-Content-Type-Options` | `nosniff` | Prevents MIME type sniffing |
 | `X-XSS-Protection` | `1; mode=block` | Blocks reflected XSS attacks |
-| `Content-Security-Policy` | Allows scripts and stylesheets from `self` and the CSP allowlist, including inline scripts and styles and JavaScript `eval()`. Allows images and fonts from `self`, `data:`, and HTTPS, plus fonts from the CSP allowlist. Allows connections to `self`, HTTPS, and WSS. | Limits where a page can load scripts and stylesheets. |
+| `Content-Security-Policy` | Restricts script, style, image, and connection sources to `self` | Prevents XSS and data injection |
 | `Referrer-Policy` | `strict-origin-when-cross-origin` | Controls referrer information leakage |
 | `Server` / `X-Powered-By` | Removed | Hides server technology from attackers |
 
@@ -291,11 +291,11 @@ The refusal is an ingress rule matching the path as written, so it closes the ac
 
 ### CSP allowlist
 
-The default Content Security Policy blocks scripts and stylesheets from other domains. Images and fonts over HTTPS and requests to any HTTPS or WSS origin are already allowed. If your app loads scripts or stylesheets from another domain, add it to the CSP allowlist.
+The default Content Security Policy blocks external resources. If your app loads fonts, stylesheets, scripts, or connects to APIs on other domains, add them to the CSP allowlist.
 
 **From the web console:** Open the app's Settings tab → enter comma-separated domains in the CSP allowlist field → Save.
 
-**Example:** To load Google Fonts, add `fonts.googleapis.com` to the allowlist. The domains are added to the `script-src`, `style-src`, and `font-src` directives.
+**Example:** To load Google Fonts, add `fonts.googleapis.com` to the allowlist. The domains are added to `style-src`, `font-src`, `script-src`, and `connect-src` directives.
 
 Functions have the same CSP settings. Open the function detail panel, then the Settings tab.
 
@@ -328,12 +328,35 @@ Service-UI share links are the one deliberate exception: an admin can mint a sig
 
 ### Secrets management
 
-Application secrets are stored as Kubernetes Secrets. k3s keeps them in its datastore on the server without encryption at rest, so anyone who can read the datastore on the server's disk can read the secrets. They are:
+Application secrets are stored as Kubernetes Secrets, which k3s encrypts at rest (see [Secrets at rest](#secrets-at-rest)). They are:
 
 - Never returned in API list responses (only revealed on explicit request)
 - Scoped to the project namespace (one project cannot access another's secrets)
 - Support previous version tracking and rollback
 - Injected into containers via `envFrom` (not visible in deployment YAML)
+
+### Secrets at rest {#secrets-at-rest}
+
+k3s encrypts Secrets with AES-CBC before it writes them to its datastore on the server. A cluster installed by this version of kip encrypts them from the start. An older cluster stores them unencrypted until you run `kip cluster encrypt-secrets`. Until then, `kip upgrade` and a rerun of `kip install` remind you to enable encryption. Rerunning the installation preserves the cluster's encryption setting.
+
+```bash
+kip cluster encrypt-secrets
+```
+
+The command follows the k3s procedure for an existing cluster. It creates the key, adds `secrets-encryption: true` to `/etc/rancher/k3s/config.yaml` and restarts k3s. It then rotates to a fresh key while k3s rewrites every Secret, and restarts k3s again. The API server is unavailable for a short time at each restart, while running pods keep serving.
+
+The command needs k3s v1.33.10, v1.34.6, v1.35.3 or later. On an older release one minor version behind the k3s that kip installs, run `kip upgrade --k3s` first.
+
+You can repeat an interrupted run. If k3s stopped during re-encryption, for example because it restarted during the key rotation, the command restarts k3s and starts the re-encryption again. If k3s still reports the re-encryption running, it waits up to ten minutes first. kip refuses to start it after `k3s secrets-encrypt disable`, because the re-encryption would then write every Secret unencrypted. If k3s takes longer than two minutes to come back, kip keeps the setting in place, because k3s may already have encrypted Secrets with it, and asks you to run the command again.
+
+On a cluster that encrypted from the start, the first run still rotates the key once. After that, the command changes nothing.
+
+Encryption protects a copy of the datastore taken on its own, such as `state.db` copied off the server. Its protection has these limits:
+
+- The key sits on the same disk, in `/var/lib/rancher/k3s/server/cred/encryption-config.json`. Anyone with root access to the server or a copy of the whole disk can read the key along with the data. Enable disk encryption at your provider to protect disk copies. Root access to the running server still exposes the key.
+- k3s encrypts Secrets only. ConfigMaps and other resources stay readable in the datastore.
+- Copies of Secrets written before encryption stay in the datastore file until k3s compacts its history and reuses the space. Backups taken before the run keep them too. Change any credential that must not survive such a copy.
+- Velero reads Secrets through the API, so backups hold them decrypted. See [the backup repository key](/en/installation#backup-repository-key) and [SSE-C](/en/installation#backup-sse-c) for how backups are encrypted.
 
 ### Revealing stored credentials
 
@@ -342,7 +365,7 @@ Git credentials and container-registry credentials stored under Settings are mas
 - **In the console:** click the eye icon next to a credential in Settings. You'll be asked to re-enter your password before the value is shown. It stays visible for 30 seconds, then re-masks.
 - **From the CLI:** run `kip credentials get <name>`. This reads the secret directly from the cluster, so it requires kubeconfig access to `kipper-system` (effectively cluster-admin).
 
-Only users with the `admin` role can use the console reveal flow for these stored credentials. The console logs successful reveals and password-verification failures. Some rejected requests, such as those with a missing password or an unknown credential name, have no audit entry. `kip credentials get` reads the Secret using your Kubernetes credentials, so only the API server's audit log records the read, if auditing is enabled.
+Only users with the `admin` role can use the console reveal flow for these stored credentials. Both paths log an audit line on success and on failed attempts.
 
 A token set per app (under the app's Git settings) is a separate case. It lives in a secret in the app's own namespace, not under Settings, so it does not appear in the lists above. Reveal it from the app's Git source panel with the same password re-entry, or from the CLI with `kip credentials get --app <app> --project <p> --environment <e>`. The app reveal is open to the `deployer` role, looser than the admin-only Settings reveal, because a deployer already manages the app's git source and can rotate that token. Scope app tokens per repository if you don't want a deployer recovering a credential that reaches other repos.
 

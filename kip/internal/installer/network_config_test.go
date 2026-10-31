@@ -14,17 +14,30 @@ import (
 
 // k3sInstallHost simulates a fresh or existing Ubuntu installation for InstallK3s.
 type k3sInstallHost struct {
-	installed bool
-	version   string
-	backend   string
-	addrs     string
-	route     string
-	external  string
-	configErr bool
-	commands  []string
+	installed     bool
+	version       string
+	backend       string
+	addrs         string
+	route         string
+	external      string
+	configErr     bool
+	encryptionKey bool
+	commands      []string
+	config        string
+	locked        []string
 }
 
 func (h *k3sInstallHost) Run(cmd string) (string, error) {
+	if strings.HasPrefix(cmd, "exec 9>"+apiServerLockPath+".guard") {
+		if strings.Contains(cmd, "mkdir "+apiServerLockPath) {
+			return lockAcquiredMarker + "\n", nil
+		}
+		if strings.Contains(cmd, "rm -rf "+apiServerLockPath) {
+			return "", nil
+		}
+		cmd = unfence(cmd)
+		h.locked = append(h.locked, cmd)
+	}
 	h.commands = append(h.commands, cmd)
 	switch cmd {
 	case "cat /etc/os-release":
@@ -51,6 +64,12 @@ func (h *k3sInstallHost) Run(cmd string) (string, error) {
 		}
 		return h.external, nil
 	}
+	if strings.HasPrefix(cmd, "test -f "+encryptionConfigPath) {
+		if h.encryptionKey {
+			return "yes\n", nil
+		}
+		return "no\n", nil
+	}
 	if strings.Contains(cmd, "backend-type") {
 		if h.backend == "" {
 			return "wireguard\n", nil
@@ -60,7 +79,16 @@ func (h *k3sInstallHost) Run(cmd string) (string, error) {
 	return "", nil
 }
 
-func (h *k3sInstallHost) RunStdin(cmd string, _ io.Reader) (string, error) { return h.Run(cmd) }
+func (h *k3sInstallHost) RunStdin(cmd string, in io.Reader) (string, error) {
+	if unfence(cmd) == replaceK3sConfigScript {
+		body, err := io.ReadAll(in)
+		if err != nil {
+			return "", err
+		}
+		h.config = string(body)
+	}
+	return h.Run(cmd)
+}
 
 func (h *k3sInstallHost) index(fragment string) int {
 	for i, c := range h.commands {
@@ -93,9 +121,8 @@ func TestWithoutOutputDropsTheRunnersOutput(t *testing.T) {
 
 func (h *k3sInstallHost) k3sConfig(t *testing.T) string {
 	t.Helper()
-	i := h.index("cat > /etc/rancher/k3s/config.yaml <<")
-	require.NotEqual(t, -1, i, "the k3s config was never written")
-	return h.commands[i]
+	require.NotEmpty(t, h.config, "the k3s config was never written")
+	return h.config
 }
 
 const (
@@ -216,7 +243,7 @@ func TestInstallK3sKeepsAnyExistingExternalAddressForm(t *testing.T) {
 // A config written by an interrupted run may match the next run's config while
 // k3s still uses older settings, so every re-run forces a restart.
 func TestInstallK3sRestartsK3sOnARerun(t *testing.T) {
-	unchanged := renderK3sConfig("203.0.113.10", wireguardBackend, "")
+	unchanged := renderK3sConfig("203.0.113.10", wireguardBackend, "", true)
 	for _, tc := range []struct {
 		name, existing     string
 		installed, restart bool
@@ -252,7 +279,7 @@ func TestInstallK3sStopsWhenTheExistingConfigIsUnreadable(t *testing.T) {
 	err := InstallK3s(h, "203.0.113.10", nil, true, false, StorageLonghorn)
 
 	require.Error(t, err)
-	assert.Equal(t, -1, h.index("cat > /etc/rancher/k3s/config.yaml <<"), "an unreadable config must not be overwritten")
+	assert.Empty(t, h.config, "an unreadable config must not be overwritten")
 }
 
 // With several IPv4 addresses, kip cannot tell which one SSH reached.

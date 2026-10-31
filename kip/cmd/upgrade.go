@@ -512,7 +512,22 @@ func ensureTrustMaterial(cluster *config.Cluster, explicitKey, fallbackKey strin
 	}
 	defer func() { _ = provider.Close() }()
 
-	return reconcileHostTrust(provider.Client(), cluster.DexHost())
+	if err := reconcileHostTrust(provider.Client(), cluster.DexHost()); err != nil {
+		return err
+	}
+	noteUnencryptedSecrets(provider.Client())
+	return nil
+}
+
+var secretsEncrypted = installer.SecretsEncrypted
+
+// noteUnencryptedSecrets recommends encryption when k3s reports it disabled.
+// The upgrade leaves encryption to the operator because it usually restarts
+// k3s twice and rewrites every Secret. Status errors are silently ignored.
+func noteUnencryptedSecrets(client installer.CommandRunner) {
+	if encrypted, err := secretsEncrypted(client); err == nil && !encrypted {
+		fmt.Printf("  ⚠  %s\n", installer.UnencryptedSecretsAdvice)
+	}
 }
 
 // reconcileHostTrust repairs host trust before restarting Traefik to load its

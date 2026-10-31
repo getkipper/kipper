@@ -168,7 +168,7 @@ kip app webhook disable backend --project blog --environment test
 ## Security
 
 - Each app has its own unique webhook token
-- Tokens are stored as Kubernetes Secrets in the app's namespace
+- Tokens are stored as Kubernetes Secrets in the app's namespace, which k3s encrypts at rest (see [Secrets at rest](/en/security#secrets-at-rest))
 - The webhook endpoint verifies the token before making any changes
 - A request in Kipper's format can authenticate with a GitHub-style HMAC signature (`X-Hub-Signature-256`) if a nonempty `X-Kipper-Token` or `X-Gitlab-Token` header fails token verification. A signature alone returns HTTP 401
 - Webhook URLs are scoped to a specific namespace and app, so a token for one app cannot deploy another

@@ -30,6 +30,7 @@ kip cluster domain --repair           # rewrite local config from the cluster
 kip cluster hosts                     # show the hostnames kip uses for a cluster
 kip cluster hosts --dex dex.example.com # correct one without contacting the cluster
 kip cluster dns repair                # restore the curated DNS resolvers on every node and restart CoreDNS
+kip cluster encrypt-secrets           # encrypt the cluster's Secrets at rest (restarts k3s)
 kip cluster storage                   # storage mode, the copies offer and the nodes that can hold copies
 kip cluster storage --max-copies 2    # let deployers create services with two copies
 kip cluster access show               # the operator access list and a check of every node
@@ -288,6 +289,14 @@ kip cluster dns repair
 ```
 
 The resolvers come from `dns_resolvers` in `~/.kip/config.yaml` (set via `--dns-resolver` at install time), or the default public set when none are configured.
+
+## kip cluster encrypt-secrets {#kip-cluster-encrypt-secrets}
+
+Turns on k3s secrets encryption on the server of an older cluster and rewrites every stored Secret with the new key. A cluster installed by this version of kip already encrypts its Secrets. Running the command there rotates the key once, and later runs change nothing. The API server is unavailable for a short time at each k3s restart. There are usually two restarts. Recovering interrupted re-encryption may require an additional restart. See [Secrets at rest](/en/security#secrets-at-rest) for the steps and for what encryption covers.
+
+```bash
+kip cluster encrypt-secrets
+```
 
 ## kip cluster storage {#kip-cluster-storage}
 

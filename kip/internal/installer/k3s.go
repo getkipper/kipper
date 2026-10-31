@@ -195,15 +195,21 @@ disable:
   - traefik
 flannel-backend: ` + wireguardBackend + `
 resolv-conf: ` + k3sResolvConfPath + `
+` + secretsEncryptionKey + `: true
 ` + k3sAPIServerArgs + `kubelet-arg:
   - "protect-kernel-defaults=true"
 `
 
 // renderK3sConfig renders the server config. addresses is either empty or
-// YAML settings for the node's external address and the API's advertised address.
-func renderK3sConfig(host, backend, addresses string) string {
-	return strings.Replace(fmt.Sprintf(k3sConfig, host),
-		"flannel-backend: "+wireguardBackend+"\n", "flannel-backend: "+backend+"\n", 1) + addresses
+// YAML settings for the node's external address and the API's advertised
+// address. encryptSecrets controls whether secrets-encryption: true is included.
+func renderK3sConfig(host, backend, addresses string, encryptSecrets bool) string {
+	config := strings.Replace(fmt.Sprintf(k3sConfig, host),
+		"flannel-backend: "+wireguardBackend+"\n", "flannel-backend: "+backend+"\n", 1)
+	if !encryptSecrets {
+		config = strings.Replace(config, secretsEncryptionKey+": true\n", "", 1)
+	}
+	return config + addresses
 }
 
 // addressSettings renders the given address settings as YAML, or "" when there
@@ -750,10 +756,8 @@ func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPre
 	if err != nil {
 		return err
 	}
-	configContent := renderK3sConfig(host, backend, addresses)
-	writeCmd := fmt.Sprintf("cat > /etc/rancher/k3s/config.yaml << 'KIPEOF'\n%sKIPEOF", configContent)
-	if _, err := client.Run(writeCmd); err != nil {
-		return fmt.Errorf("writing k3s config: %w", err)
+	if err := writeServerK3sConfig(client, host, backend, addresses, k3sPreexisting); err != nil {
+		return err
 	}
 
 	// The files the apiserver flags reference must exist before k3s starts.
@@ -815,6 +819,34 @@ func InstallK3s(client CommandRunner, host string, dnsResolvers []string, k3sPre
 		}
 	}
 
+	return nil
+}
+
+// writeServerK3sConfig writes the server config. A rerun keeps an existing
+// cluster's encryption as it is: adding the flag would encrypt only what k3s
+// writes from then on, while removing it from a cluster with a key would leave
+// its Secrets unreadable. The config lock keeps kip cluster encrypt-secrets
+// from adding the flag between the key check and the write.
+func writeServerK3sConfig(client CommandRunner, host, backend, addresses string, k3sPreexisting bool) error {
+	locked, release, err := lockAPIServerConfig(client)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	encrypt := true
+	if k3sPreexisting {
+		if encrypt, err = encryptionKeyExists(locked); err != nil {
+			return err
+		}
+		if !encrypt {
+			fmt.Printf("  ⚠  %s\n", UnencryptedSecretsAdvice)
+		}
+	}
+	config := renderK3sConfig(host, backend, addresses, encrypt)
+	if _, err := locked.RunStdin(replaceK3sConfigScript, strings.NewReader(config)); err != nil {
+		return fmt.Errorf("writing k3s config: %w", err)
+	}
 	return nil
 }
 

@@ -649,7 +649,7 @@ onMounted(async () => {
               </button>
             </div>
             <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              Stored encrypted in the cluster. Never sent to the browser.
+              Stored as a Secret in the cluster. Only a masked key is returned to the browser.
             </p>
           </div>
 

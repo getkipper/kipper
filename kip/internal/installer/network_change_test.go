@@ -337,7 +337,7 @@ func TestInstallK3sRefusesAVXLANServerWithoutConsent(t *testing.T) {
 	err := InstallK3s(h, "203.0.113.10", nil, true, false, StorageLonghorn)
 
 	require.ErrorIs(t, err, ErrNetworkChangeNotConfirmed)
-	assert.Equal(t, -1, h.index("cat > /etc/rancher/k3s/config.yaml"), "the template alone would switch flannel without removing the VXLAN link")
+	assert.Empty(t, h.config, "the template alone would switch flannel without removing the VXLAN link")
 }
 
 func TestK3sTemplateRunsWireGuard(t *testing.T) {
@@ -606,8 +606,12 @@ func (h *installNetHost) RunStdin(cmd string, in io.Reader) (string, error) {
 			return "MISSING:wireguard\n", nil
 		}
 		return "", nil
-	case strings.HasPrefix(cmd, "cat > "+k3sConfigPath+" << 'KIPEOF'"):
-		h.written = cmd
+	case unfence(cmd) == replaceK3sConfigScript:
+		body, err := io.ReadAll(in)
+		if err != nil {
+			return "", err
+		}
+		h.written = string(body)
 		return "", nil
 	}
 	return h.netHost.RunStdin(cmd, in)
