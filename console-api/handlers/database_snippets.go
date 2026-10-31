@@ -257,9 +257,9 @@ func (d *Database) recordHistory(ctx context.Context, svcName, namespace, user s
 	}
 }
 
-// auditLog emits a structured stdout line for every query so Loki can
-// pick it up. We never log values — only a SHA-256 hash of the SQL,
-// the duration, the user, and the error class.
+// auditLog writes a structured log line for collection by Loki with the service,
+// user, first eight bytes of the SQL SHA-256 hash, duration in milliseconds,
+// and success or error status. SQL text and values are excluded.
 func auditLog(r *http.Request, svcName, sqlText string, durationMs int64, errMsg string) {
 	user := userIdentifier(r)
 	hash := sha256.Sum256([]byte(sqlText))
@@ -270,6 +270,20 @@ func auditLog(r *http.Request, svcName, sqlText string, durationMs int64, errMsg
 	}
 	log.Printf("db_audit service=%s user=%s sql_hash=%s duration_ms=%d status=%s",
 		svcName, user, hashHex, durationMs, status)
+}
+
+// audited runs a console write and logs its duration and success or error status
+// in the same format as SQL tab queries. The SQL hash covers all supplied
+// statements, including any skipped after a failure. It returns run's error unchanged.
+func audited(r *http.Request, svcName string, statements []string, run func() error) error {
+	start := time.Now()
+	err := run()
+	errMsg := ""
+	if err != nil {
+		errMsg = err.Error()
+	}
+	auditLog(r, svcName, strings.Join(statements, ";\n"), time.Since(start).Milliseconds(), errMsg)
+	return err
 }
 
 // upsertSecretEntry sets a single key in a Secret, creating the
