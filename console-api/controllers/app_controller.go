@@ -324,6 +324,15 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl
 	}
 
 	if err := r.reconcileChildren(ctx, &app, sources, generation, bindingHash); err != nil {
+		if errors.IsConflict(err) {
+			// Concurrent writes, such as HPA replica changes, leave rollout status
+			// unchanged. Gate status reflects how far reconciliation progressed,
+			// since only completed route reconciliation verifies the gate.
+			// Returning the error retries with the controller's backoff.
+			r.withdrawAPIKeyGate(&app, err)
+			r.writeStatusIfChanged(ctx, &app, statusAtEntry)
+			return ctrl.Result{}, err
+		}
 		// Record observations and cleanup results even when a child fails, so
 		// status reflects this pass rather than the last successful reconciliation.
 		r.sweepEnv(ctx, &app, generation, keepProjections)
