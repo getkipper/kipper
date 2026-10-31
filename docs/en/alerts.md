@@ -24,7 +24,7 @@ expert mode makes no such changes.
 
 ### Resource adjustments
 
-The controller checks CPU and memory usage every 60 seconds. High usage must exceed 80% throughout the current observation window, which holds up to three checks; a fresh window needs one reading for an app or function, or two for a service. Decreases require usage below 20% for three consecutive checks. Resource-change alerts show the current and recommended values.
+The controller checks CPU and memory usage every 60 seconds. High usage must exceed 80% throughout the current observation window, which holds up to three checks. A fresh window needs one reading for an app or function, or two for a service. Decreases require usage below 20% for three consecutive checks and at least two replicas. Resource-change alerts show the current and recommended values.
 
 For a resource with user bounds, the controller adjusts only the request within that range. A proposal that resolves to the current allocation produces no resize alert, so an idle app at its floor stays quiet. See [Your own CPU and memory values](/en/resource-management#your-own-values).
 
@@ -44,7 +44,7 @@ When a rollout exceeds its Kubernetes progress deadline, the controller raises a
 
 ### Node resource pressure
 
-When total memory usage across all pods exceeds 80% of the node's allocatable memory, the controller generates a warning alert listing the top consumers and any anomalies. At 90%+, the alert is marked critical. The alert includes which workloads are using the most memory and which ones have grown significantly in the last 10 minutes.
+When total memory usage across all pods reaches 80% of the combined allocatable memory of all nodes, the controller generates a warning alert naming up to three workloads using the most memory. At 90% or higher, the alert is marked critical.
 
 ### Nodes that are down
 
@@ -139,13 +139,13 @@ The volume's data is untouched. The pod is recreated and its volume reattached.
 To confirm what is happening first:
 
 ```bash
-kip service list           # a crash-looping service is named, with its restart count
-kip status                 # reads /proc/mounts on the cluster host
+kip service list           # Shows crash-looping services and their restart counts.
+kip status
 ```
 
-`kip status` reads mounts over one SSH connection, to the cluster host, so on a
-multi-node cluster it names the nodes it could not check. The alert above has no
-such limit: it runs in the cluster and sees pods on every node.
+`kip status` reads mounts over SSH on the cluster host and every recorded
+worker and names any node it could not check. The alert above runs in the
+cluster and sees pods on every node.
 
 ### What causes the session to drop
 

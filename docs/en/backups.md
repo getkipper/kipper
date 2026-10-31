@@ -209,7 +209,7 @@ A restore that recreates the `kipper-access` ConfigMap in `kipper-system` can br
 Velero works on one restore at a time. A restore stuck in `InProgress`, for example while waiting for a volume restore that never finishes, holds up every restore and drill behind it. A drill lists the names of restores ahead of it in the queue. Cancel a restore by name:
 
 ```bash
-kip backup restore --cancel restore-blog-prod-20261019-090611
+kip backup restore --cancel restore-manual-20261019-090000-090611
 ```
 
 kip asks Velero's node agent to cancel the restore's unfinished volume restores, which usually lets the restore end as `PartiallyFailed`. If it is still `InProgress` after five minutes, kip restarts the Velero server, which marks `InProgress` restores `Failed` when it starts. A restart also fails backups and other restores that are `InProgress`. Unless you pass `--force`, kip blocks the restart and lists their names. A backup that starts after this check can still be affected by the restart.

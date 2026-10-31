@@ -13,7 +13,7 @@ A background controller monitors resource usage via metrics-server every 60 seco
 | Condition | Threshold | Action |
 |---|---|---|
 | High usage | Above 80% throughout the current observation window (up to 3 checks) | Increase by 50% |
-| Low usage | Below 20% for 3 consecutive checks | Halve (with minimums) |
+| Low usage | Below 20% for 3 consecutive checks, with at least 2 replicas | Halve (with minimums) |
 | OOM kill | Immediate | Double memory (capped, see [OOM memory cap](#oom-memory-cap)) |
 | Stuck pod | In `ContainerCreating` for 5+ minutes | Delete pod to trigger recreation |
 

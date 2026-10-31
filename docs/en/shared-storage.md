@@ -19,7 +19,7 @@ kip service add minio --name media --project blog --environment prod
   Connection details:
     Endpoint:   http://media.blog-prod.svc.cluster.local:9000
     Access Key: kipper
-    Secret Key: a1b2c3d4...
+    Secret Key: ********
 ```
 
 ### Why MinIO is recommended

@@ -12,8 +12,9 @@ It signs the certificate your cluster serves to the Kipper gateway, and your clu
 given the same authority as the thing it trusts when it verifies a login. Both sides have to agree. As
 long as they do, logins work and nothing needs your attention.
 
-It is valid for 30 years, and the certificate it signs expires with it. There is no renewal to
-remember and no scheduled rotation to run.
+It is valid for 30 years. The certificate it signs is valid for up to 10 years and expires no later than the
+authority itself. Kipper reissues the certificate when less than a year remains, so renewal
+is automatic and you do not need to schedule rotation.
 
 ## Checking it
 

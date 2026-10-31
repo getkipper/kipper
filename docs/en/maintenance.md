@@ -184,9 +184,10 @@ Check this table before upgrading to see which components are included and which
 | **Dex** (version and configuration) | **No** | See the warning below |
 | **Console deployment manifest** | **No** | Image moves on upgrade; the manifest does not |
 | **Initial admin ClusterRoleBinding** | **No, deliberately** | Managed as you add and remove admins |
-| **k3s** | **No** | Re-run `kip install` |
+| **k3s** | **No** | `kip upgrade --k3s` |
 | API server arguments and operator login | Yes, over SSH, even with `--skip-system` | — |
-| **Host firewall, kernel sysctls** | **No** | Fresh install only |
+| **Host firewall, service hardening** | **No** | `kip cluster harden` |
+| **Kernel sysctls** | **No** | Fresh install only |
 | Running apps | No rollout for these platform changes | New readiness and shutdown settings apply on the next pod rollout |
 
 The following components need additional explanation.

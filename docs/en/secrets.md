@@ -197,11 +197,11 @@ If a secret value is valid JSON, `kip app secret reveal` displays it as formatte
 $ kip app secret reveal backend DB_CONFIG
   DB_CONFIG=
   {
+    "database": "production",
     "host": "db.example.com",
-    "port": 5432,
-    "user": "api",
     "password": "secret",
-    "database": "production"
+    "port": 5432,
+    "user": "api"
   }
 ```
 
