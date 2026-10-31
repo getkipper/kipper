@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -310,6 +311,12 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_
 	}
 
 	if err := r.reconcileChildren(ctx, &fn, bindingHash, envSources, generation, rendered); err != nil {
+		if errors.IsConflict(err) {
+			// Concurrent writes, such as KEDA replica changes, leave the function's
+			// phase and adoption condition unchanged. Returning the error retries
+			// with the controller's backoff.
+			return ctrl.Result{}, err
+		}
 		// The pass stops here and everything after it is skipped, including the
 		// status write, so what stopped it has to go on the object. A function
 		// whose name another kind already owns is refused on every pass for
@@ -363,8 +370,8 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_
 // serving path for an HTTP trigger, the KEDA objects for an event trigger, and
 // the CronJob for a cron one, each cleaning up what an earlier spec left behind.
 //
-// Any child that fails stops the pass, so the caller records why on the status
-// rather than only in the log.
+// Any child error stops the pass. The caller retries conflicts and records
+// other failures in status so the reason is visible beyond the logs.
 func (r *FunctionReconciler) reconcileChildren(ctx context.Context, fn *kipperv1.Function, bindingHash string, envSources []envSource, generation string, rendered renderedBindings) error {
 	// HTTP and event triggers need a long-lived pod and Service. Cron-only
 	// functions run as Jobs, so remove any previous serving Deployment.
@@ -664,8 +671,22 @@ func (r *FunctionReconciler) reconcileDeployment(ctx context.Context, fn *kipper
 		return err
 	}
 
+	// KEDA can change replicas between the Deployment read and write, so retry
+	// conflicts locally as the App controller does. applyDeployment mutates
+	// desired based on the live object, so each attempt needs a fresh copy.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		return r.applyDeployment(ctx, fn, desired.DeepCopy(), generation)
+	})
+}
+
+// applyDeployment creates or updates the Function's Deployment, adjusting desired
+// for resource tuning within user bounds. It holds an environment change when
+// replicas or unfinished pods remain, the current environment is usable, and
+// keeping that environment preserves the live template. It skips the update when
+// the template, labels, and controller ownership already match.
+func (r *FunctionReconciler) applyDeployment(ctx context.Context, fn *kipperv1.Function, desired *appsv1.Deployment, generation string) error {
 	var existing appsv1.Deployment
-	err = r.Get(ctx, types.NamespacedName{Name: fn.Name, Namespace: fn.Namespace}, &existing)
+	err := r.Get(ctx, types.NamespacedName{Name: fn.Name, Namespace: fn.Namespace}, &existing)
 	if errors.IsNotFound(err) {
 		return r.Create(ctx, desired)
 	}
