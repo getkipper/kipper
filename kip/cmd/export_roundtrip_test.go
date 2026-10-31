@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 
+	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/manifest"
 )
 
@@ -84,7 +87,7 @@ func TestExportThenApplyChangesNothing(t *testing.T) {
 		"backoffLimit": int64(5),
 	}))
 
-	m, err := manifest.Export(ctx, dyn, "shop", "test", "shop-test")
+	m, err := manifest.Export(ctx, dyn, "shop", "shop", "test", "shop-test")
 	require.NoError(t, err)
 	assert.Empty(t, m.Notes)
 	resolve := func(project, environment string) string {
@@ -117,11 +120,35 @@ func TestApplyRefusesAnExportThatLeftALinkOut(t *testing.T) {
 	}), metav1.CreateOptions{})
 	require.NoError(t, err)
 
-	m, err := manifest.Export(ctx, dyn, "shop", "test", "shop-test")
+	m, err := manifest.Export(ctx, dyn, "shop", "shop", "test", "shop-test")
 	require.NoError(t, err)
 	require.Len(t, m.Notes, 1, "the export says it left the link out")
 
 	changes, err := scanChanges(ctx, dyn, "shop-test", manifest.Convert(m, "shop-test", nil))
 	require.NoError(t, err)
 	assert.NotEmpty(t, clearsOf(changes), "removing the left-out link needs --force")
+}
+
+// TestExportReadsTheOrgPrefixedProjectMetadata checks that export reads metadata
+// using the Project's organization-prefixed name, matching apply and --split.
+func TestExportReadsTheOrgPrefixedProjectMetadata(t *testing.T) {
+	ctx := context.Background()
+	dyn := roundTripDynamic()
+	_, err := dyn.Resource(manifest.ProjectGVR).Create(ctx, &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "kipper.run/v1alpha1", "kind": "Project",
+		"metadata": map[string]interface{}{"name": "acme-shop"},
+		"spec": map[string]interface{}{
+			"displayName":  "Shop",
+			"environments": []interface{}{map[string]interface{}{"name": "test"}},
+		},
+	}}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	output := filepath.Join(t.TempDir(), "shop.yaml")
+
+	require.NoError(t, exportSingle(ctx, dyn, &config.Cluster{Org: "acme"}, "shop", "test", output))
+
+	data, err := os.ReadFile(output)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "displayName: Shop")
+	assert.Contains(t, string(data), "- test")
 }
