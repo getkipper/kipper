@@ -74,8 +74,9 @@ type ServiceReconciler struct {
 	ShareGrants *share.GrantStore
 	// RouteNames says whether this process may publish a UI route that does
 	// not exist yet. Nil disables tenant route-name reservations.
-	RouteNames *RouteNameGate
-	Recorder   record.EventRecorder
+	RouteNames             *RouteNameGate
+	Recorder               record.EventRecorder
+	watchesLonghornVolumes bool
 }
 
 func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -175,7 +176,7 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	after := serviceRouteNameRetry(&svc)
-	// Nothing watches Longhorn, so the copies in the status are read again on a timer.
+	// Polling keeps copy status current because Longhorn replicas and nodes are not watched.
 	after = earliest(after, storageRequeue(svc.Status.Conditions))
 	after = earliest(after, dumpRetry)
 	// This controller does not watch pods, so deletion conflicts need a retry.
@@ -1382,14 +1383,15 @@ func (r *ServiceReconciler) retractCredentialsBlocked(ctx context.Context, svc *
 }
 
 func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ownTuningRecords(mgr, ctrl.NewControllerManagedBy(mgr).
+	b, watched := watchLonghornVolumes(mgr, ownTuningRecords(mgr, ctrl.NewControllerManagedBy(mgr).
 		For(&kipperv1.Service{})).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.ConfigMap{}).
-		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(serviceForTLSSecret)).
-		Complete(r)
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(serviceForTLSSecret)), serviceForLonghornVolume)
+	r.watchesLonghornVolumes = watched
+	return b.Complete(r)
 }
 
 // Service catalog

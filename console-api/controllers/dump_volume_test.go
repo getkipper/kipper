@@ -80,7 +80,7 @@ func TestAFaultedDumpVolumeIsReportedWithTheRecreateCommand(t *testing.T) {
 
 	retry, err := r.reportDumpVolume(context.Background(), svc)
 	require.NoError(t, err)
-	assert.Equal(t, storageRefreshUnsettled, retry, "nothing watches Longhorn, so a faulted dump is read again on a timer")
+	assert.Equal(t, storageRefreshUnsettled, retry, "the Longhorn watch is not registered, so a faulted dump is read again on a timer")
 
 	cond := dumpCondition(t, r)
 	require.NotNil(t, cond)
@@ -104,7 +104,7 @@ func TestADumpVolumeThatIsNotFaultedCarriesNoCondition(t *testing.T) {
 			r := copiesReconciler(svc, longhornPV(), dumpClaim(svc.UID), dumpLonghornVolume(robustness, "db-dump"))
 			retry, err := r.reportDumpVolume(context.Background(), svc)
 			require.NoError(t, err)
-			assert.Equal(t, storageRefreshUnsettled, retry, "nothing watches Longhorn, so a dump volume that faults while the pod runs is found on this timer")
+			assert.Equal(t, storageRefreshUnsettled, retry, "the Longhorn watch is not registered, so a dump volume that faults while the pod runs is found on this timer")
 			assert.Nil(t, dumpCondition(t, r), "a recovered or recreated dump volume clears the report")
 		})
 	}
