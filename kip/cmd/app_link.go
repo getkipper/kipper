@@ -12,6 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/getkipper/kipper/controller/pkg/applink"
+	"github.com/getkipper/kipper/controller/pkg/labels"
+	"github.com/getkipper/kipper/kip/internal/config"
 	"github.com/getkipper/kipper/kip/internal/k8s"
 )
 
@@ -106,6 +108,44 @@ func resolveLinkNamespace(cmd *cobra.Command, callerNS, targetProject string) (s
 	return cluster.ResolveNamespace(targetProject, environment), nil
 }
 
+// linkTargetEnvironment returns the environment used to build the target's
+// namespace, following resolveLinkNamespace for another project and
+// selectedNamespace for the caller's project. A false result means the namespace
+// was found by scanning, so the caller must read its environment label.
+func linkTargetEnvironment(cmd *cobra.Command, cluster *config.Cluster, targetProject string) (string, bool) {
+	if targetProject != "" {
+		environment, _ := cmd.Flags().GetString("environment")
+		return environment, true
+	}
+	project, environment := resolveProjectAndEnvironment(cmd, cluster)
+	return environment, project != ""
+}
+
+// publicLinkURL returns the target route's HTTPS URL for browser use.
+// It calls environment only when deriving a route's missing host from the app
+// name, environment, and nonempty clusterDomain.
+// It returns an error if the route is missing, the host cannot be derived, or
+// the environment lookup fails. A root path is omitted from the URL.
+func publicLinkURL(target *unstructured.Unstructured, environment func() (string, error), clusterDomain string) (string, error) {
+	route, found, _ := unstructured.NestedMap(target.Object, "spec", "route")
+	host, _ := route["host"].(string)
+	if found && host == "" && clusterDomain != "" {
+		env, err := environment()
+		if err != nil {
+			return "", fmt.Errorf("reading the environment of target app %q: %w", target.GetName(), err)
+		}
+		host = derivedRouteHost(target.GetName(), env, clusterDomain)
+	}
+	if host == "" {
+		return "", fmt.Errorf("target app %q has no public route. Create one first or remove --public", target.GetName())
+	}
+	routePath, _ := route["path"].(string)
+	if routePath == "/" {
+		routePath = ""
+	}
+	return "https://" + host + routePath, nil
+}
+
 func runAppLink(cmd *cobra.Command, args []string) error {
 	targetProject, target, err := parseLinkTarget(args[0])
 	if err != nil {
@@ -162,15 +202,24 @@ func runAppLink(cmd *cobra.Command, args []string) error {
 	envKey := applink.EnvKey(target)
 	var url string
 	if isPublic {
-		host, _, _ := unstructured.NestedString(targetObj.Object, "spec", "route", "host")
-		if host == "" {
-			return fmt.Errorf("target app %q has no public route. Create one first or remove --public", target)
+		cluster, err := loadCurrentClusterConfig()
+		if err != nil {
+			return err
 		}
-		routePath, _, _ := unstructured.NestedString(targetObj.Object, "spec", "route", "path")
-		if routePath == "/" {
-			routePath = ""
+		environment := func() (string, error) {
+			if env, known := linkTargetEnvironment(cmd, cluster, targetProject); known {
+				return env, nil
+			}
+			n, err := k8sClient.Clientset().CoreV1().Namespaces().Get(ctx, targetNS, metav1.GetOptions{})
+			if err != nil {
+				return "", err
+			}
+			return n.Labels[labels.Environment], nil
 		}
-		url = "https://" + host + routePath
+		url, err = publicLinkURL(targetObj, environment, cluster.Domain)
+		if err != nil {
+			return err
+		}
 	} else {
 		url = fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", target, targetNS, port)
 	}
