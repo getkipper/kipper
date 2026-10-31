@@ -301,7 +301,7 @@ func changeNetworkTo(client CommandRunner, t networkChangeTimeouts, dropIn *stri
 	if _, err := client.Run(resetFlannelCommand); err != nil {
 		return restoreAfter(client, t, ready, fmt.Errorf("removing the old flannel link: %w", err))
 	}
-	if _, err := client.RunStdin(replaceFileScript(k3sConfigPath), strings.NewReader(desired)); err != nil {
+	if _, err := client.RunStdin(replaceK3sConfigScript, strings.NewReader(desired)); err != nil {
 		return restoreAfter(client, t, ready, fmt.Errorf("writing %s: %v", k3sConfigPath, withoutOutput(err)))
 	}
 	if dropIn != nil && flannelConf != "" {
@@ -671,19 +671,21 @@ func withFlannelBackend(config, backend string) (string, error) {
 	return out, nil
 }
 
-// replaceFileScript writes stdin to path through a staged file in the same
-// directory, keeping a symlinked path's target and its mode and owner. The
-// content travels on stdin because a k3s config can hold credentials.
-func replaceFileScript(path string) string {
-	return strings.ReplaceAll(`set -e
+// replaceK3sConfigScript writes stdin to the k3s config through a staged file
+// in the same directory, keeping a symlinked path's target and its mode and
+// owner. A new file gets mode 0644. The content travels on stdin because a k3s
+// config can hold credentials.
+var replaceK3sConfigScript = strings.ReplaceAll(`set -e
+mkdir -p "$(dirname TARGET)"
 target=$(readlink -f TARGET)
-mode=$(stat -c %a "$target")
-owner=$(stat -c %u:%g "$target")
 staged=$(mktemp "$(dirname "$target")"/.kipper-XXXXXX)
 trap 'rm -f "$staged"' EXIT
 cat > "$staged"
-chmod "$mode" "$staged"
-chown "$owner" "$staged"
+if [ -e "$target" ]; then
+  chmod "$(stat -c %a "$target")" "$staged"
+  chown "$(stat -c %u:%g "$target")" "$staged"
+else
+  chmod 644 "$staged"
+fi
 mv "$staged" "$target"
-trap - EXIT`, "TARGET", path)
-}
+trap - EXIT`, "TARGET", k3sConfigPath)

@@ -432,8 +432,24 @@ func readK3sConfig(client CommandRunner) (string, error) {
 
 // writeK3sConfigScript stages and renames the config to avoid partial writes.
 // It preserves symlinks, mode, and ownership so managed paths and access
-// restrictions survive the replacement. The new content arrives on stdin.
+// restrictions survive the replacement. The new content arrives on stdin. It
+// marks the write pending, which lets a failed restart restore the backup.
 func writeK3sConfigScript() string {
+	return k3sConfigWriteScript(`sha256sum "$staged" | cut -d' ' -f1 > PENDING`)
+}
+
+// writeK3sConfigWithoutRollbackScript writes the config like
+// writeK3sConfigScript and removes the pending marker and backup before
+// replacement. This prevents automatic rollback and manual recovery from
+// that backup from removing settings needed to read encrypted Secrets.
+func writeK3sConfigWithoutRollbackScript() string {
+	return k3sConfigWriteScript(`rm -f PENDING BACKUP`)
+}
+
+// k3sConfigWriteScript stages a config from stdin, preserving symlinks, mode,
+// and ownership. It runs pendingStep to update rollback state immediately
+// before replacing the live config.
+func k3sConfigWriteScript(pendingStep string) string {
 	// Preserve the original backup while the live config matches a pending write.
 	// Otherwise, back up the live config before replacing it.
 	return strings.NewReplacer(
@@ -452,7 +468,7 @@ trap 'rm -f "$staged"' EXIT
 cat > "$staged"
 chmod "$mode" "$staged"
 chown "$owner" "$staged"
-sha256sum "$staged" | cut -d' ' -f1 > PENDING
+` + pendingStep + `
 mv "$staged" "$target"
 trap - EXIT`)
 }

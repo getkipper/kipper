@@ -144,7 +144,7 @@ func TestK3sConfigPointsCoreDNSAtCuratedResolvConf(t *testing.T) {
 // provisioner on every cluster.
 func TestK3sConfigKeepsTheLocalPathProvisioner(t *testing.T) {
 	for _, backend := range []string{wireguardBackend, "vxlan"} {
-		rendered := renderK3sConfig("myserver.example.com", backend, "")
+		rendered := renderK3sConfig("myserver.example.com", backend, "", true)
 		var config struct {
 			Disable []string `json:"disable"`
 		}
