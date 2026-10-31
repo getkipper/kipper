@@ -489,7 +489,7 @@ func (k KubectlMoveCluster) StopStatefulSet(namespace, name, mark string, save i
 		return 0, err
 	}
 	if sts == nil {
-		return 0, fmt.Errorf("the StatefulSet %s is gone", name)
+		return 0, fmt.Errorf("%w: %s", errStatefulSetGone, name)
 	}
 	current := int32(1)
 	if sts.Spec.Replicas != nil {
@@ -531,28 +531,28 @@ func savedReplicas(sts *appsv1.StatefulSet) (int32, error) {
 	return int32(n), nil
 }
 
-func (k KubectlMoveCluster) StartStatefulSet(namespace, name string, replicas int32) (int32, error) {
+func (k KubectlMoveCluster) StartStatefulSet(namespace, name string, replicas int32) (int32, bool, error) {
 	sts, err := k.readStatefulSet(namespace, name)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if sts == nil {
-		return 0, fmt.Errorf("the StatefulSet %s is gone", name)
+		return 0, false, fmt.Errorf("%w: %s", errStatefulSetGone, name)
 	}
 	// Checking the marker and guarding the patch with the same resourceVersion
 	// preserves the replica count if another run has already released the StatefulSet.
 	if sts.Annotations[platform.StorageMoveAnnotation] == "" {
 		if sts.Spec.Replicas == nil {
-			return 1, nil
+			return 1, false, nil
 		}
-		return *sts.Spec.Replicas, nil
+		return *sts.Spec.Replicas, false, nil
 	}
 	if replicas < 0 {
 		if replicas, err = savedReplicas(sts); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 	}
-	return replicas, patchStatefulSet(k.Server, namespace, name, map[string]any{
+	return replicas, true, patchStatefulSet(k.Server, namespace, name, map[string]any{
 		"metadata": map[string]any{"resourceVersion": sts.ResourceVersion, "annotations": map[string]any{
 			platform.StorageMoveAnnotation:         nil,
 			platform.StorageMoveReplicasAnnotation: nil,

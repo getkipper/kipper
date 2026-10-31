@@ -28,6 +28,7 @@ type fakeStatefulSet struct {
 	replicas, saved int32
 	mark            string
 	fence           bool
+	gone            bool
 }
 
 type fakePod struct {
@@ -44,6 +45,8 @@ type fakeMoveCluster struct {
 	deleteRecordErr  error
 	unmarkErr        error
 	startedWhileMark string
+	beforeStart      func()
+	deleteAtStop     bool
 	mode             string
 	server           string
 	paths            map[string]bool
@@ -267,6 +270,9 @@ func (f *fakeMoveCluster) SetServiceStorage(_, _, size string) error {
 }
 
 func (f *fakeMoveCluster) ReadStatefulSet(string, string) (*MoveStatefulSet, error) {
+	if f.sts.gone {
+		return nil, nil
+	}
 	replicas := f.sts.replicas
 	if f.sts.mark != "" {
 		replicas = f.sts.saved
@@ -285,7 +291,13 @@ func (f *fakeMoveCluster) RetainedVolume(serviceUID string) (*MovePV, error) {
 	return nil, nil
 }
 
-func (f *fakeMoveCluster) StopStatefulSet(_, _, mark string, save int32) (int32, error) {
+func (f *fakeMoveCluster) StopStatefulSet(_, name, mark string, save int32) (int32, error) {
+	if f.deleteAtStop {
+		f.sts.gone = true
+	}
+	if f.sts.gone {
+		return 0, fmt.Errorf("%w: %s", errStatefulSetGone, name)
+	}
 	if f.usedAfterStop > 0 {
 		f.used = f.usedAfterStop
 	}
@@ -303,9 +315,15 @@ func (f *fakeMoveCluster) StopStatefulSet(_, _, mark string, save int32) (int32,
 	return f.sts.saved, nil
 }
 
-func (f *fakeMoveCluster) StartStatefulSet(_, _ string, replicas int32) (int32, error) {
+func (f *fakeMoveCluster) StartStatefulSet(_, name string, replicas int32) (int32, bool, error) {
+	if f.beforeStart != nil {
+		f.beforeStart()
+	}
+	if f.sts.gone {
+		return 0, false, fmt.Errorf("%w: %s", errStatefulSetGone, name)
+	}
 	if f.sts.mark == "" {
-		return f.sts.replicas, nil
+		return f.sts.replicas, false, nil
 	}
 	if replicas < 0 {
 		replicas = f.sts.saved
@@ -313,7 +331,7 @@ func (f *fakeMoveCluster) StartStatefulSet(_, _ string, replicas int32) (int32, 
 	f.sts.replicas, f.sts.mark = replicas, ""
 	f.startedWhileMark = f.service.Mark
 	f.startPods()
-	return f.sts.replicas, nil
+	return f.sts.replicas, true, nil
 }
 
 func (f *fakeMoveCluster) ServiceReady(string, string) (bool, string, error) {
@@ -704,6 +722,16 @@ func newMove(f *fakeMoveCluster) (*StorageMove, *bytes.Buffer) {
 
 func requireMoved(t *testing.T, f *fakeMoveCluster) {
 	t.Helper()
+	requireDataMoved(t, f)
+	assert.Empty(t, f.sts.mark)
+	assert.Equal(t, int32(1), f.sts.replicas)
+	assert.Contains(t, f.pods, "db-0")
+}
+
+// requireDataMoved checks data migration and cleanup independently of the
+// StatefulSet and pod restart checks in requireMoved.
+func requireDataMoved(t *testing.T, f *fakeMoveCluster) {
+	t.Helper()
 	data := f.claims["data-db-0"]
 	require.NotNil(t, data)
 	assert.Equal(t, platform.LonghornSingleClass, data.Class)
@@ -717,8 +745,6 @@ func requireMoved(t *testing.T, f *fakeMoveCluster) {
 	assert.Equal(t, data.UID, old.Annotations[retainedDestinationAnnotation], "prune can tell the verified claim from a replacement")
 	assert.Equal(t, "the data", f.contents[moveOldPV])
 	assert.Empty(t, f.service.Mark)
-	assert.Empty(t, f.sts.mark)
-	assert.Equal(t, int32(1), f.sts.replicas)
 	assert.Empty(t, f.nsClaims, "the admission fence is lifted")
 	assert.Empty(t, f.records)
 	assert.NotContains(t, f.claims, "db-dump", "the controller recreates the dump on Longhorn")
@@ -727,10 +753,18 @@ func requireMoved(t *testing.T, f *fakeMoveCluster) {
 	assert.NotContains(t, f.pods, "kipper-move-copy-db")
 	assert.NotContains(t, f.pods, "kipper-move-verify-db", "helper pods are gone before the service starts")
 	assert.Empty(t, f.verifiedAttached, "every verification read the copy through a fresh mount")
-	assert.Contains(t, f.pods, "db-0")
 }
 
 func requireRolledBack(t *testing.T, f *fakeMoveCluster) {
+	t.Helper()
+	requireDataRolledBack(t, f)
+	assert.Empty(t, f.sts.mark)
+	assert.Equal(t, int32(1), f.sts.replicas)
+}
+
+// requireDataRolledBack checks data restoration and cleanup independently
+// of the StatefulSet restart checks in requireRolledBack.
+func requireDataRolledBack(t *testing.T, f *fakeMoveCluster) {
 	t.Helper()
 	data := f.claims["data-db-0"]
 	require.NotNil(t, data)
@@ -746,8 +780,6 @@ func requireRolledBack(t *testing.T, f *fakeMoveCluster) {
 	assert.Equal(t, "the data", f.contents[moveOldPV])
 	assert.Equal(t, "2Gi", f.service.Storage)
 	assert.Empty(t, f.service.Mark)
-	assert.Empty(t, f.sts.mark)
-	assert.Equal(t, int32(1), f.sts.replicas)
 	assert.Empty(t, f.nsClaims)
 	assert.Empty(t, f.records)
 	for name, pv := range f.pvs {
@@ -1050,6 +1082,105 @@ func TestStorageMoveKeepsAStoppedServiceStopped(t *testing.T) {
 	require.NoError(t, m.Run())
 	assert.Equal(t, int32(0), f.sts.replicas)
 	assert.Contains(t, out.String(), "stays stopped")
+}
+
+// Two runs can both reach the restart. When the other run has already handed
+// the StatefulSet back and a copy change has stopped it since, this run leaves
+// it to the copy change, which starts it again.
+func TestStorageMoveLeavesAServiceAnotherRunHandedBackToItsCopyChange(t *testing.T) {
+	f := newFakeMoveCluster()
+	f.beforeStart = func() { f.sts.mark, f.sts.replicas = "", 0 }
+	m, out := newMove(f)
+
+	require.NoError(t, m.Run())
+	assert.Zero(t, f.sts.replicas)
+	assert.NotContains(t, out.String(), "stays stopped")
+	assert.NotContains(t, out.String(), "kip service start")
+	assert.Empty(t, f.service.Mark)
+	assert.Empty(t, f.records)
+}
+
+// Releasing the Service lets the controller recreate a deleted StatefulSet
+// and allows the move to finish on a subsequent run.
+func TestStorageMoveFinishesAfterItsStatefulSetWasDeleted(t *testing.T) {
+	f := newFakeMoveCluster()
+	f.stopAfter = MoveCopied
+	m, out := newMove(f)
+	require.Error(t, m.Run())
+	f.sts.gone = true
+
+	require.NoError(t, m.Run())
+	requireDataMoved(t, f)
+	assert.Empty(t, f.service.Mark, "the controller can recreate the StatefulSet")
+	assert.Empty(t, f.records)
+	assert.Contains(t, out.String(), "The StatefulSet of db was deleted during the move, so the controller recreates it with one pod.")
+	assert.NotContains(t, out.String(), "will start again", "db was running before the move")
+}
+
+// TestStorageMoveSaysAStoppedServiceStartsWhenItsStatefulSetWasDeleted verifies
+// that users are told a previously stopped service will restart because the
+// controller recreates its StatefulSet with one pod regardless of the saved replica count.
+func TestStorageMoveSaysAStoppedServiceStartsWhenItsStatefulSetWasDeleted(t *testing.T) {
+	f := newFakeMoveCluster()
+	f.sts.replicas = 0
+	delete(f.pods, "db-0")
+	f.stopAfter = MoveCopied
+	m, out := newMove(f)
+	require.Error(t, m.Run())
+	f.sts.gone = true
+
+	require.NoError(t, m.Run())
+	requireDataMoved(t, f)
+	assert.Contains(t, out.String(), "db was stopped before the move and will start again when the controller recreates its StatefulSet.")
+	assert.NotContains(t, out.String(), "stays stopped")
+}
+
+func TestStorageMoveRollsBackAfterItsStatefulSetWasDeleted(t *testing.T) {
+	f := newFakeMoveCluster()
+	f.stopAfter = MoveCopied
+	m, out := newMove(f)
+	require.Error(t, m.Run())
+	f.sts.gone = true
+
+	require.NoError(t, m.Rollback())
+	requireDataRolledBack(t, f)
+	assert.Contains(t, out.String(), "the controller recreates it with one pod")
+}
+
+func TestStorageMoveRebuildsALostRecordAfterItsStatefulSetWasDeleted(t *testing.T) {
+	f := newFakeMoveCluster()
+	f.stopAfter = MoveCopied
+	m, _ := newMove(f)
+	require.Error(t, m.Run())
+	f.records = map[string]MoveRecord{}
+	f.sts.gone = true
+
+	require.NoError(t, m.Rollback())
+	data := f.claims["data-db-0"]
+	require.NotNil(t, data)
+	assert.Equal(t, moveOldPV, data.VolumeName, "the rebuilt record finds the local volume")
+	assert.Equal(t, "the data", f.contents[moveOldPV])
+	assert.Equal(t, "Delete", f.pvs[moveOldPV].Reclaim)
+	assert.Empty(t, f.service.Mark)
+	assert.Empty(t, f.records)
+}
+
+// If the StatefulSet is deleted before the first stop saves its replica
+// count, the move cannot resume. It suggests the rollback command, which
+// returns control of the service to the controller.
+func TestStorageMoveNamesTheRollbackWhenItsStatefulSetGoesBeforeTheStop(t *testing.T) {
+	f := newFakeMoveCluster()
+	f.deleteAtStop = true
+	m, out := newMove(f)
+
+	err := m.Run()
+	require.ErrorIs(t, err, errStatefulSetGone)
+	assert.Contains(t, err.Error(), "kip service storage longhorn db --rollback")
+
+	require.NoError(t, m.Rollback())
+	assert.Empty(t, f.service.Mark)
+	assert.Empty(t, f.records)
+	assert.Contains(t, out.String(), "the controller recreates it with one pod")
 }
 
 func TestMoveTargetSize(t *testing.T) {

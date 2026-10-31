@@ -377,11 +377,12 @@ func storageMoveGate(svc *kipperv1.Service) error {
 	if svc.Annotations[platform.StorageMoveAnnotation] == "" {
 		return nil
 	}
-	return &storageGateError{
-		reason: kipperv1.StorageCopiesMoving,
-		message: fmt.Sprintf("The volume is moving to Longhorn and the service is stopped. "+
-			"An admin can finish the move with 'kip service storage longhorn %s' or undo it with --rollback.", svc.Name),
-	}
+	return &storageGateError{reason: kipperv1.StorageCopiesMoving, message: storageMoveMessage(svc.Name)}
+}
+
+func storageMoveMessage(service string) string {
+	return fmt.Sprintf("The volume is moving to Longhorn and the service is stopped. "+
+		"An admin can finish the move with 'kip service storage longhorn %s' or undo it with --rollback.", service)
 }
 
 // dataClaimName is the claim the StatefulSet's "data" template creates for

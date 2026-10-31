@@ -283,15 +283,18 @@ type MoveCluster interface {
 	// StopStatefulSet scales to 0. An unmarked StatefulSet saves mark and save,
 	// using its current replica count if save is negative. A marked StatefulSet
 	// keeps its annotations. The returned count is save if non-negative,
-	// otherwise the saved count. A missing StatefulSet or an invalid saved
-	// count needed for the return value causes an error.
+	// otherwise the saved count. A missing StatefulSet causes an error wrapping
+	// errStatefulSetGone, and an invalid saved count needed for the return value
+	// causes an error.
 	StopStatefulSet(namespace, name, mark string, save int32) (int32, error)
 	// StartStatefulSet removes the mark and scales a marked StatefulSet to
-	// replicas, or to its saved count if replicas is negative. An unmarked
-	// StatefulSet stays unchanged. It returns the resulting count. A missing
-	// StatefulSet or an invalid saved count needed for restoration causes an
-	// error.
-	StartStatefulSet(namespace, name string, replicas int32) (int32, error)
+	// replicas, or to its saved count if replicas is negative. On success,
+	// count is the resulting replica count and started reports whether the
+	// StatefulSet was marked and patched, even when count is zero. An unmarked
+	// StatefulSet keeps its current count and returns started false. A missing
+	// StatefulSet causes an error wrapping errStatefulSetGone. An invalid saved
+	// count needed for restoration also causes an error.
+	StartStatefulSet(namespace, name string, replicas int32) (count int32, started bool, err error)
 	// ServiceReady reports whether the service's ordinal-zero pod is Running
 	// and Ready, with the scheduler's message while it cannot place the pod.
 	// An absent pod returns false with no error.
@@ -411,6 +414,8 @@ type StorageMove struct {
 // ErrMoveCanceled is returned when consent is refused.
 var ErrMoveCanceled = errors.New("the storage move was canceled")
 
+var errStatefulSetGone = errors.New("the StatefulSet is gone")
+
 // StorageMoveRecordName names the record of a move of the service with uid.
 func StorageMoveRecordName(uid string) string { return storageMoveRecordPrefix + uid }
 
@@ -466,8 +471,11 @@ func (m *StorageMove) printf(format string, args ...any) {
 // move, a non-nil CheckRoom checks data and dump capacity in bytes, and a
 // non-nil Consent asks permission. Refusal returns ErrMoveCanceled. Errors
 // leave completed checkpoints available for a later Run or Rollback.
-// Success restores the saved replica count, which may leave the service
-// stopped. A readiness timeout is reported to Out without returning an error.
+// Success restores a marked StatefulSet's saved replica count, which may
+// leave the service stopped. An unmarked StatefulSet keeps its current count.
+// The controller recreates a missing StatefulSet with one pod after the move
+// releases the service. A readiness timeout is reported to Out without returning
+// an error.
 func (m *StorageMove) Run() error {
 	svc, rec, err := m.load()
 	if err != nil {
@@ -490,8 +498,11 @@ func (m *StorageMove) Run() error {
 	return m.forward(rec)
 }
 
-// Rollback undoes an unfinished move and restores the saved replica count
-// on the local volume. It returns an error for a missing or committed move.
+// Rollback undoes an unfinished move onto the local volume and restores
+// the saved replica count if the StatefulSet is still marked. An unmarked
+// StatefulSet keeps its current count. The controller recreates a missing
+// StatefulSet with one pod after the move releases the service.
+// It returns an error for a missing or committed move.
 // For a marked service with a missing record, it reconstructs the record from
 // the remaining volumes. If no local volume can be recovered, it clears the
 // move and restarts the service on its current data claim. Failed rollbacks
@@ -531,8 +542,10 @@ func (m *StorageMove) rollbackWithoutRecord(svc *MoveService) error {
 	if err != nil {
 		return err
 	}
-	if sts == nil {
-		return fmt.Errorf("service %s has no StatefulSet, so kip cannot tell how many pods to restore", m.Service)
+	// The controller recreates a missing StatefulSet with one pod.
+	replicas := int32(1)
+	if sts != nil {
+		replicas = sts.Replicas
 	}
 	rec := &MoveRecord{
 		ServiceUID:      svc.UID,
@@ -540,7 +553,7 @@ func (m *StorageMove) rollbackWithoutRecord(svc *MoveService) error {
 		Service:         m.Service,
 		Direction:       MoveRollback,
 		Step:            MoveStopped,
-		Replicas:        sts.Replicas,
+		Replicas:        replicas,
 		ReplicasSaved:   true,
 		OriginalStorage: svc.Storage,
 		StartedAt:       m.now().UTC().Format(time.RFC3339),
@@ -974,6 +987,15 @@ func (rec *MoveRecord) stopped() bool {
 	return rec.ReplicasSaved
 }
 
+// restoreCount returns the recorded replica count, or -1 to use the count
+// saved on the StatefulSet.
+func (rec *MoveRecord) restoreCount() int32 {
+	if rec.ReplicasSaved {
+		return rec.Replicas
+	}
+	return -1
+}
+
 // stop fences the claims at admission, drains requests already admitted,
 // marks the service and stops its StatefulSet. A resumed move or rollback
 // runs it again, because the fence may have been lifted while kip was not
@@ -1026,10 +1048,17 @@ func (m *StorageMove) stop(rec *MoveRecord) error {
 		save = rec.Replicas
 	}
 	replicas, err := m.Cluster.StopStatefulSet(rec.Namespace, rec.Service, StorageMoveRecordName(rec.ServiceUID), save)
-	if err != nil {
+	switch {
+	case resumed && errors.Is(err, errStatefulSetGone):
+		// The saved count lets the move resume. The service marker prevents
+		// the controller from recreating the StatefulSet while existing pods drain.
+	case errors.Is(err, errStatefulSetGone):
+		return fmt.Errorf("stopping %s: %w. Run 'kip service storage longhorn %s --rollback' to end the move", rec.Service, err, rec.Service)
+	case err != nil:
 		return fmt.Errorf("stopping %s: %w", rec.Service, err)
+	default:
+		rec.Replicas, rec.ReplicasSaved = replicas, true
 	}
-	rec.Replicas, rec.ReplicasSaved = replicas, true
 	if err := m.waitFor("the pods of "+rec.Service+" to stop", 150, func() (bool, error) {
 		pods, err := m.foreignPods(rec, true)
 		if err != nil {
@@ -2190,24 +2219,16 @@ func (m *StorageMove) finish(rec *MoveRecord) error {
 // the StatefulSet. Restoration also removes the StatefulSet marker, so an
 // unmarked StatefulSet was either restored earlier or never stopped by the move.
 // It keeps its current replicas because a copy change may have stopped it since.
+// A StatefulSet deleted during the move is left to the controller, which
+// recreates it with one pod once the service is unmarked.
 func (m *StorageMove) restart(rec *MoveRecord) error {
 	if err := m.removeMoveClaims(rec.Namespace, rec.claims()); err != nil {
 		return err
 	}
-	sts, err := m.Cluster.ReadStatefulSet(rec.Namespace, rec.Service)
-	if err != nil {
-		return err
-	}
-	started := sts != nil && sts.Mark == ""
-	var replicas int32
-	if !started {
-		count := int32(-1)
-		if rec.ReplicasSaved {
-			count = rec.Replicas
-		}
-		if replicas, err = m.Cluster.StartStatefulSet(rec.Namespace, rec.Service, count); err != nil {
-			return fmt.Errorf("starting %s: %w", rec.Service, err)
-		}
+	replicas, started, err := m.Cluster.StartStatefulSet(rec.Namespace, rec.Service, rec.restoreCount())
+	gone := errors.Is(err, errStatefulSetGone)
+	if err != nil && !gone {
+		return fmt.Errorf("starting %s: %w", rec.Service, err)
 	}
 	if err := m.Cluster.MarkService(rec.Namespace, rec.Service, ""); err != nil {
 		return fmt.Errorf("unmarking %s: %w", rec.Service, err)
@@ -2215,7 +2236,14 @@ func (m *StorageMove) restart(rec *MoveRecord) error {
 	if err := m.Cluster.DeleteRecord(StorageMoveRecordName(rec.ServiceUID)); err != nil {
 		return fmt.Errorf("deleting the move record: %w", err)
 	}
-	if started {
+	if gone {
+		m.printf("The StatefulSet of %s was deleted during the move, so the controller recreates it with one pod.\n", rec.Service)
+		if rec.ReplicasSaved && rec.Replicas == 0 {
+			m.printf("%s was stopped before the move and will start again when the controller recreates its StatefulSet.\n", rec.Service)
+		}
+		return nil
+	}
+	if !started {
 		return nil
 	}
 	if replicas < 1 {
