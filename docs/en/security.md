@@ -254,7 +254,7 @@ Every response from your applications includes security headers enforced at the 
 | `X-Frame-Options` | `SAMEORIGIN` | Prevents clickjacking |
 | `X-Content-Type-Options` | `nosniff` | Prevents MIME type sniffing |
 | `X-XSS-Protection` | `1; mode=block` | Blocks reflected XSS attacks |
-| `Content-Security-Policy` | Restricts script, style, image, and connection sources to `self` | Prevents XSS and data injection |
+| `Content-Security-Policy` | Allows scripts and stylesheets from `self` and the CSP allowlist, including inline scripts and styles and JavaScript `eval()`. Allows images and fonts from `self`, `data:`, and HTTPS, plus fonts from the CSP allowlist. Allows connections to `self`, HTTPS, and WSS. | Limits where a page can load scripts and stylesheets. |
 | `Referrer-Policy` | `strict-origin-when-cross-origin` | Controls referrer information leakage |
 | `Server` / `X-Powered-By` | Removed | Hides server technology from attackers |
 
@@ -291,11 +291,11 @@ The refusal is an ingress rule matching the path as written, so it closes the ac
 
 ### CSP allowlist
 
-The default Content Security Policy blocks external resources. If your app loads fonts, stylesheets, scripts, or connects to APIs on other domains, add them to the CSP allowlist.
+The default Content Security Policy blocks scripts and stylesheets from other domains. Images and fonts over HTTPS and requests to any HTTPS or WSS origin are already allowed. If your app loads scripts or stylesheets from another domain, add it to the CSP allowlist.
 
 **From the web console:** Open the app's Settings tab → enter comma-separated domains in the CSP allowlist field → Save.
 
-**Example:** To load Google Fonts, add `fonts.googleapis.com` to the allowlist. The domains are added to `style-src`, `font-src`, `script-src`, and `connect-src` directives.
+**Example:** To load Google Fonts, add `fonts.googleapis.com` to the allowlist. The domains are added to the `script-src`, `style-src`, and `font-src` directives.
 
 Functions have the same CSP settings. Open the function detail panel, then the Settings tab.
 
@@ -328,7 +328,7 @@ Service-UI share links are the one deliberate exception: an admin can mint a sig
 
 ### Secrets management
 
-Application secrets are stored as Kubernetes Secrets, encrypted at rest by k3s. They are:
+Application secrets are stored as Kubernetes Secrets. k3s keeps them in its datastore on the server without encryption at rest, so anyone who can read the datastore on the server's disk can read the secrets. They are:
 
 - Never returned in API list responses (only revealed on explicit request)
 - Scoped to the project namespace (one project cannot access another's secrets)
@@ -342,7 +342,7 @@ Git credentials and container-registry credentials stored under Settings are mas
 - **In the console:** click the eye icon next to a credential in Settings. You'll be asked to re-enter your password before the value is shown. It stays visible for 30 seconds, then re-masks.
 - **From the CLI:** run `kip credentials get <name>`. This reads the secret directly from the cluster, so it requires kubeconfig access to `kipper-system` (effectively cluster-admin).
 
-Only users with the `admin` role can use the console reveal flow for these stored credentials. Both paths log an audit line on success and on failed attempts.
+Only users with the `admin` role can use the console reveal flow for these stored credentials. The console logs successful reveals and password-verification failures. Some rejected requests, such as those with a missing password or an unknown credential name, have no audit entry. `kip credentials get` reads the Secret using your Kubernetes credentials, so only the API server's audit log records the read, if auditing is enabled.
 
 A token set per app (under the app's Git settings) is a separate case. It lives in a secret in the app's own namespace, not under Settings, so it does not appear in the lists above. Reveal it from the app's Git source panel with the same password re-entry, or from the CLI with `kip credentials get --app <app> --project <p> --environment <e>`. The app reveal is open to the `deployer` role, looser than the admin-only Settings reveal, because a deployer already manages the app's git source and can rotate that token. Scope app tokens per repository if you don't want a deployer recovering a credential that reaches other repos.
 

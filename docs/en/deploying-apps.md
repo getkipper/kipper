@@ -70,7 +70,7 @@ kip app deploy \
 | Flag | Required | Default | Description |
 |---|---|---|---|
 | `--name` | Yes | — | Application name |
-| `--image` | Yes | — | Container image to deploy |
+| `--image` | Yes, unless `--git` is given | — | Container image to deploy |
 | `--port` | Yes | — | Port the application listens on |
 | `--replicas` | No | 1 | Number of pod replicas |
 | `--project` | No | `default` | Project namespace to deploy into |
@@ -423,7 +423,7 @@ Flags you leave out keep their stored values. Missing bounds default to a minimu
 
 Kipper checks replica changes against the app's bounds:
 
-- `kip app scale`, `kip app deploy --replicas`, the console's Desired field and `kip apply` refuse a count outside the bounds, and the message names them. The way to run no pods is [stopping the app](#stopping-and-starting-an-app), so a count of 0 is refused too.
+- `kip app scale`, `kip app deploy --replicas`, the console's Desired field and `kip apply` reject counts outside the bounds and include the minimum and maximum in the error message. When bounds are set, the minimum is at least 1, so a count of 0 is also rejected. To run no pods, [stop the app](#stopping-and-starting-an-app).
 - Changing the bounds with `kip app autoscale` or in the console moves the stored count into them in the same write. A minimum above the count raises it, and a maximum below it lowers it. The CLI prints the move. The console shows it before you save when no scaling policy is chosen, and in a notification after any save that moved the stored count. In `kipper.yaml` a declared `replicas` outside the new bounds is refused instead, so change both together.
 - Switching autoscaling off keeps the bounds. Remove them with `kip app autoscale backend --remove`, by clearing Minimum and Maximum in the console with no scaling policy, or by deleting the `autoscale` block from `kipper.yaml` and applying with `--force`. `--remove` refuses while autoscaling is on; `--off --remove` does both in one go.
 
@@ -533,7 +533,7 @@ kip app update backend --image ghcr.io/acme/api:v2.1.0 --project blog --environm
 ```
 
 ::: tip Rollback history
-Kipper keeps the 3 most recent versions of each deployment. Kubernetes can roll back to any of these if a new version fails to start. The previous 2 versions are retained automatically, and older ones are cleaned up to save resources.
+Kipper keeps the 3 previous versions of each deployment alongside the running one. Kubernetes can roll back to any of these previous versions if a new version fails to start. Older versions are cleaned up to save resources.
 :::
 
 ### Restart an app
@@ -738,6 +738,6 @@ You can match this ID to a specific pod in the live logs viewer. The live logs t
 Most apps should leave this on. You might turn it off if:
 
 - Your app already adds its own instance tracking header
-- You want to avoid the ~5MB memory overhead of the sidecar container per pod
+- You want to avoid the sidecar container's 16 MiB memory request per pod
 - Your security policy doesn't allow extra response headers
 

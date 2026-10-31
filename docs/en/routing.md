@@ -37,7 +37,7 @@ flowchart LR
     Browser -->|/api/dns| dns-api
 ```
 
-Services in the same route group share a single Ingress and TLS certificate. Traefik handles the path-based routing, so no separate API gateway is needed.
+Each service in a route group has its own Ingress on the shared hostname. Traefik routes requests to the matching service by path, so no separate API gateway is needed.
 
 Without `--route`, each app gets its own subdomain (the default behavior).
 
@@ -58,7 +58,7 @@ Domain: webapp-test--203-0-113-10.kipper.run
 /exchange-api  → exchange-service
 ```
 
-All apps share one TLS certificate. Traefik routes by path prefix and strips it before forwarding, so `domain-service` receives `/api/v1/...` not `/domains-api/api/v1/...`.
+On a `kipper.run` domain, the gateway's certificate covers every app in the group. On a custom domain, each app requests its own certificate for the shared hostname. Traefik routes by path prefix and strips it before forwarding, so a request to `/domains-api/api/v1/...` reaches `domain-service` as `/api/v1/...`.
 
 ### Editing and deleting {#editing-and-deleting}
 

@@ -31,7 +31,7 @@ A terminal session opens with a welcome banner showing the app name, namespace, 
   Type 'exit' to disconnect
 ```
 
-You are now inside a `/bin/sh` session in the container. Run any command you would normally run in a terminal.
+The session uses `/bin/bash` if it is available in the container, or `/bin/sh` otherwise. Run any command you would normally run in a terminal.
 
 ## What you can do
 
@@ -84,7 +84,7 @@ Type `exit` or close the side panel. The exec session is terminated automaticall
 
 ## Authentication
 
-Terminal sessions require a valid JWT. The console handles this automatically, so you do not need to pass tokens manually. Sessions are scoped to the same permissions as the logged-in user.
+Terminal sessions require a valid JWT. The console handles this automatically, so you do not need to pass tokens manually. Opening a session requires the `terminal.open` capability, which deployers and owners have. The console opens the shell with its own Kubernetes credentials. Inside the container, the session has the permissions of the container's user.
 
 ## CLI alternative
 
