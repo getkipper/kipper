@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -181,6 +182,9 @@ type claim struct {
 	Created bool
 }
 
+// takenNameRemedy gives both domain options when a gateway name is unavailable.
+const takenNameRemedy = "Install with --domain <name>.kipper.run to choose another kipper.run name, or with --domain <your-domain> to use a domain you control"
+
 // claimGatewayName registers or renews a gateway name using any stored token.
 // A renewal must return a challenge to confirm acceptance of that token.
 // Persist newly disclosed tokens before success; if saving fails, attempt to
@@ -191,6 +195,9 @@ func claimGatewayName(gw registrar, store tokenStore, subdomain, address, hostKe
 	known := store.tokenFor(hostKey)
 
 	reg, err := gw.Register(subdomain, address, known)
+	if errors.Is(err, domain.ErrNameTaken) {
+		return claim{}, fmt.Errorf("registering subdomain: %w. It may belong to another cluster, or to a server that had this address before. %s", err, takenNameRemedy)
+	}
 	if err != nil {
 		return claim{}, fmt.Errorf("registering subdomain: %w", err)
 	}
@@ -207,9 +214,8 @@ func claimGatewayName(gw registrar, store tokenStore, subdomain, address, hostKe
 		token = known
 	}
 	if token == "" {
-		return claim{}, fmt.Errorf("the subdomain %s is already registered, and the gateway did not accept a token for it from this machine "+
-			"(there may be none, or the one stored here may no longer be the one it holds), so it would never route to this cluster. "+
-			"Install with --domain <your-own-domain> to use a domain you control instead", reg.Domain)
+		return claim{}, fmt.Errorf("the subdomain %s is already registered, and the gateway did not accept a token for it from this machine. "+
+			"This machine may have no stored token, or its token may no longer match the gateway's token, so the gateway would never route this name to this cluster. %s", reg.Domain, takenNameRemedy)
 	}
 
 	if token == known && known != "" {
