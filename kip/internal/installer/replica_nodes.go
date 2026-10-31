@@ -111,14 +111,16 @@ func ReplicasOnNode(client CommandRunner, node string) (int, error) {
 	return count, nil
 }
 
-// EngineReplicaTimeout reads Longhorn's live engine-replica-timeout setting.
-// An unreadable or invalid setting gives DefaultEngineReplicaTimeout.
+// EngineReplicaTimeout reads Longhorn's live engine-replica-timeout setting
+// in seconds, selecting the v1 value when values are stored per data engine.
+// It returns DefaultEngineReplicaTimeout if the read fails or the selected
+// value is missing, is not an integer, or is nonpositive.
 func EngineReplicaTimeout(client CommandRunner) time.Duration {
 	out, err := client.Run("kubectl -n longhorn-system get settings.longhorn.io engine-replica-timeout --request-timeout=30s -o jsonpath='{.value}'")
 	if err != nil {
 		return DefaultEngineReplicaTimeout
 	}
-	seconds, err := strconv.Atoi(strings.TrimSpace(out))
+	seconds, err := strconv.Atoi(v1SettingValue(out))
 	if err != nil || seconds <= 0 {
 		return DefaultEngineReplicaTimeout
 	}
