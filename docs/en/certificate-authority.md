@@ -22,15 +22,15 @@ kip cluster ca status
 ```
 
 ```
-  Certificate authority — demo-cluster
+  Certificate authority: demo-cluster
 
     Authority        kipper-hop-ca (a3f2b81c), expires 27 Jul 2056 (29 years)
-    Served cert      kipper-hop, expires 27 Jul 2036 (9 years)
+    Stored cert      kipper-hop, expires 27 Jul 2036 (9 years)
     Login issuer     demo-cluster.kipper.run
 
     ✔ The anchor covers what signed this cluster's certificate
     ✔ The API server has loaded that anchor
-    ✔ The wire confirms the certificate in use
+    ✔ The wire serves a certificate that verifies against the current authority
 
   Everything agrees. Nothing to do.
 ```
@@ -315,7 +315,7 @@ kip cluster ca status
 ```
     ✔ The anchor covers what signed this cluster's certificate
     ✔ The API server has loaded that anchor
-    ✔ The wire confirms the certificate in use
+    ✔ The wire serves a certificate that verifies against the current authority
 
   A replacement is part-way through (expanded). This is a safe state to sit in:
   the cluster trusts one authority more than it strictly needs to, which
@@ -495,7 +495,7 @@ kip cluster ca status
 ```
     ✔ The anchor covers what signed this cluster's certificate
     ✔ The API server has loaded that anchor
-    ✔ The wire confirms the certificate in use
+    ✔ The wire serves a certificate that verifies against the current authority
 ```
 
 The third line is the gate. It opens a real connection on the node and checks the certificate that
@@ -562,15 +562,15 @@ kip cluster ca status
 ```
 
 ```
-  Certificate authority — demo-cluster
+  Certificate authority: demo-cluster
 
     Authority        kipper-hop-ca (7d41e0b9), expires 27 Jul 2056 (29 years)
-    Served cert      kipper-hop, expires 27 Jul 2036 (9 years)
+    Stored cert      kipper-hop, expires 27 Jul 2036 (9 years)
     Login issuer     demo-cluster.kipper.run
 
     ✔ The anchor covers what signed this cluster's certificate
     ✔ The API server has loaded that anchor
-    ✔ The wire confirms the certificate in use
+    ✔ The wire serves a certificate that verifies against the current authority
 
   Everything agrees. Nothing to do.
 ```
@@ -608,7 +608,11 @@ kip cluster ca status
 | --- | --- | --- |
 | part-way through (staged) | after 1.3, before the anchor was widened | resume at 1.4 |
 | part-way through (expanded), the API server has **not** loaded the anchor | after 1.4, before 1.5 | run 1.5 first, because going on from here is what breaks logins |
+| part-way through (expanded), the anchor does not cover the stored certificate | 1.4 left out the current authority | redo 1.4 with both authorities, then 1.5 |
+| part-way through (expanded), the API server's loaded config could not be checked | after 1.4 | check that the API server is running and rerun `kip cluster ca status`. Once the check succeeds, run 1.5. Reloading the anchor is safe. |
 | part-way through (expanded), the API server **has** loaded it | after gate 1 | resume at 2.2 (2.1 makes no cluster change, so redo it freely) |
+| part-way through (promoted), resume at 1.4 | the anchor does not hold the new authority | redo 1.4 with both authorities, then 1.5 |
+| part-way through (promoted), resume at 1.5 | the API server has not confirmed loading the anchor | check that the API server is running, run 1.5, then rerun `kip cluster ca status` |
 | part-way through (promoted), resume at 2.3 | after 2.2 | resume at 2.3 |
 | part-way through (promoted), resume at gate 2 | after 2.3 | confirm gate 2, then 3.1 |
 | part-way through (narrowed) | after 3.1 | confirm gate 3, then 3.2 |
@@ -634,10 +638,10 @@ kip cluster auth sync                               # from your own machine
 After 2.2 there is no abandoning: the new authority is signing. Carry on to the end, or use the
 recovery at the bottom of this page.
 
-The two `expanded` rows are the same phase and are told apart by the second tick in the status. They
-matter separately: the anchor holds both authorities but the API server is still running the config it
-had, so moving the signature before applying it hands the cluster a certificate the API server has
-never been told to trust.
+The `expanded` rows describe the same phase, distinguished by the two trust checks in the status.
+Both checks matter: even when the anchor holds both authorities, the API server may still use its
+previous config. Promoting the new authority before loading that config can lead to serving a
+certificate the API server cannot verify.
 
 The status names the step for you in each case, so you do not have to work out which row you are on.
 

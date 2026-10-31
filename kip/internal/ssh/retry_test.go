@@ -338,8 +338,7 @@ func TestRun_StopsACommandThatOverrunsItsTimeout(t *testing.T) {
 	require.NoError(t, os.WriteFile(stub, []byte(script), 0o755))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	c, err := Dial(Config{Host: "demo.example.com", User: "root", CommandTimeout: 2 * time.Second})
-	require.NoError(t, err)
+	c := dialThenBound(t, 2*time.Second)
 
 	started := time.Now()
 	_, runErr := c.Run("cat /proc/sys/kernel/random/boot_id")
@@ -354,6 +353,17 @@ func TestRun_StopsACommandThatOverrunsItsTimeout(t *testing.T) {
 	process, err := os.FindProcess(pid)
 	require.NoError(t, err)
 	assert.Error(t, process.Signal(syscall.Signal(0)), "the stalled ssh process is still running")
+}
+
+// dialThenBound gives Dial's probe a one-minute timeout to tolerate a busy
+// machine, then applies the timeout for the command under test.
+func dialThenBound(t *testing.T, timeout time.Duration) *Client {
+	t.Helper()
+	c, err := Dial(Config{Host: "demo.example.com", User: "root", CommandTimeout: time.Minute})
+	require.NoError(t, err)
+	require.Equal(t, time.Minute, c.cfg.CommandTimeout, "Dial dropped the configured command timeout")
+	c.cfg.CommandTimeout = timeout
+	return c
 }
 
 func alive(t *testing.T, pidFile string) bool {
@@ -384,8 +394,7 @@ func TestRun_TimeoutStopsHelpersThatHoldTheOutputOpen(t *testing.T) {
 	require.NoError(t, os.WriteFile(stub, []byte(script), 0o755))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	c, err := Dial(Config{Host: "demo.example.com", User: "root", CommandTimeout: 2 * time.Second})
-	require.NoError(t, err)
+	c := dialThenBound(t, 2*time.Second)
 
 	started := time.Now()
 	_, runErr := c.Run("cat /proc/sys/kernel/random/boot_id")

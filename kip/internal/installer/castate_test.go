@@ -2,6 +2,7 @@ package installer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/getkipper/kipper/controller/pkg/authncfg"
 	"github.com/getkipper/kipper/controller/pkg/hopca"
 	"github.com/getkipper/kipper/controller/pkg/hostnames"
 )
@@ -491,6 +493,165 @@ func TestResumePointsMatchTheDocumentedProcedure(t *testing.T) {
 			t.Errorf("the procedure's resume table does not mention the %q phase", phase)
 		}
 	}
+}
+
+// Even with both authorities in the anchor, the API server may still use its old
+// config. Promotion can then lead to serving a certificate it cannot verify, so
+// status directs the operator to load the anchor before promoting the authority.
+func TestAnExpandedAnchorTheAPIServerHasNotLoadedResumesAtLoadingIt(t *testing.T) {
+	page, err := os.ReadFile("../../../docs/en/certificate-authority.md")
+	if err != nil {
+		t.Fatalf("reading the published procedure: %v", err)
+	}
+	docs := string(page)
+
+	caA, caKeyA, leafA, leafKeyA := authorityFixture(t)
+	caB, caKeyB, _, _ := authorityFixture(t)
+	both := string(hopca.Bundle([]byte(caA), []byte(caB)))
+	expanded := CAState{Active: caA, ActiveKey: caKeyA, Pending: caB, PendingKey: caKeyB, LeafCert: leafA, LeafKey: leafKeyA, Anchor: both}
+	if expanded.Phase() != CAPhaseExpanded {
+		t.Fatalf("the fixture is %q, not expanded", expanded.Phase())
+	}
+
+	if resume := resumeFor(expanded, true); !strings.Contains(strings.ToLower(resume), "step 1.5") {
+		t.Errorf("an unconfirmed load resumes at %q, want step 1.5", resume)
+	}
+	if resume := resumeFor(expanded, false); !strings.Contains(strings.ToLower(resume), "step 2.2") {
+		t.Errorf("a confirmed load resumes at %q, want step 2.2", resume)
+	}
+
+	line, found := headingLine(docs, "### 1.5 ")
+	if !found || !strings.Contains(strings.ToLower(line), "load") {
+		t.Errorf("the procedure has no 1.5 heading about loading the anchor, so the status sends an operator nowhere")
+	}
+
+	// Keeping only the new authority in the anchor would break logins when
+	// loaded because the served certificate still requires the old authority.
+	overwritten := CAState{Active: caA, ActiveKey: caKeyA, Pending: caB, PendingKey: caKeyB, LeafCert: leafA, LeafKey: leafKeyA, Anchor: caB}
+	if overwritten.Phase() != CAPhaseExpanded {
+		t.Fatalf("the overwritten fixture is %q, not expanded", overwritten.Phase())
+	}
+	for _, unconfirmed := range []bool{true, false} {
+		if resume := resumeFor(overwritten, unconfirmed); !strings.Contains(strings.ToLower(resume), "step 1.4") {
+			t.Errorf("an anchor that does not cover the served certificate resumes at %q, want step 1.4 to widen it again", resume)
+		}
+	}
+
+	// After promotion the re-signed certificate needs the new authority in the
+	// anchor, so an anchor holding only the old one is widened first.
+	narrowedTooEarly := CAState{Active: caB, ActiveKey: caKeyB, Retained: caA, LeafCert: leafA, LeafKey: leafKeyA, Anchor: caA}
+	if narrowedTooEarly.Phase() != CAPhasePromoted {
+		t.Fatalf("the promoted fixture is %q, not promoted", narrowedTooEarly.Phase())
+	}
+	for _, unconfirmed := range []bool{true, false} {
+		if resume := resumeFor(narrowedTooEarly, unconfirmed); !strings.Contains(strings.ToLower(resume), "step 1.4") {
+			t.Errorf("a promoted anchor without the active authority resumes at %q, want step 1.4", resume)
+		}
+	}
+	promoted := CAState{Active: caB, ActiveKey: caKeyB, Retained: caA, LeafCert: leafA, LeafKey: leafKeyA, Anchor: both}
+	if resume := resumeFor(promoted, false); !strings.Contains(strings.ToLower(resume), "step 2.3") {
+		t.Errorf("a promoted anchor holding both authorities resumes at %q, want step 2.3", resume)
+	}
+	if resume := resumeFor(promoted, true); !strings.Contains(strings.ToLower(resume), "step 1.5") {
+		t.Errorf("a promoted anchor the API server has not confirmed loading resumes at %q, want step 1.5", resume)
+	}
+
+	staged := CAState{Active: caA, ActiveKey: caKeyA, Pending: caB, PendingKey: caKeyB, LeafCert: leafA, LeafKey: leafKeyA, Anchor: caA}
+	if got, want := resumeFor(staged, true), staged.ResumePoint(); got != want {
+		t.Errorf("a staged replacement resumes at %q, want %q: only the expanded and promoted phases depend on the load", got, want)
+	}
+}
+
+// TestAnAnchorThatMissesTheStoredCertificateIsStillCheckedForLoading verifies
+// that coverage failures still trigger a load check, because loading that
+// anchor can break logins when the gateway serves the stored certificate.
+func TestAnAnchorThatMissesTheStoredCertificateIsStillCheckedForLoading(t *testing.T) {
+	caA, caKeyA, leafA, leafKeyA := authorityFixture(t)
+	caB, caKeyB, _, _ := authorityFixture(t)
+	hosts := []string{"login--acme.kipper.run"}
+	overwritten := CAState{Active: caA, ActiveKey: caKeyA, Pending: caB, PendingKey: caKeyB, LeafCert: leafA, LeafKey: leafKeyA, Anchor: caB, DexHosts: hosts}
+	loadedMetric := `apiserver_authentication_config_controller_last_config_info{apiserver_id_hash="x",hash="` +
+		authncfg.Hash(authncfg.Render(overwritten.Anchor, hosts...)) + `"} 1`
+
+	var status CAStatus
+	unconfirmed, err := status.recordAnchorLoad(metricsHost(loadedMetric, nil), overwritten)
+	if err != nil {
+		t.Fatalf("recordAnchorLoad: %v", err)
+	}
+	if status.AnchorCovers || !status.AnchorLoaded || status.AnchorLoadedUnknown {
+		t.Errorf("got covers=%v loaded=%v unknown=%v, want an uncovered anchor reported as loaded", status.AnchorCovers, status.AnchorLoaded, status.AnchorLoadedUnknown)
+	}
+	if status.TrustedByAPIServer {
+		t.Errorf("an anchor that misses the stored certificate is reported as trusted")
+	}
+	if !status.AnchorUsed {
+		t.Errorf("a kipper.run issuer is not reported as using the anchor")
+	}
+	if unconfirmed {
+		t.Errorf("a confirmed load is reported as unconfirmed")
+	}
+
+	status = CAStatus{}
+	unconfirmed, err = status.recordAnchorLoad(metricsHost("", errors.New("connection refused")), overwritten)
+	if err != nil {
+		t.Fatalf("an unreadable metric is an error: %v", err)
+	}
+	if !status.AnchorLoadedUnknown || !unconfirmed {
+		t.Errorf("got unknown=%v unconfirmed=%v, want an unreadable metric reported as unknown and unconfirmed", status.AnchorLoadedUnknown, unconfirmed)
+	}
+
+	// Custom-domain issuers use public certificates, so their rendered config
+	// is independent of the anchor and loading it proves nothing about the anchor.
+	customOnly := overwritten
+	customOnly.DexHosts = []string{"login.example.com"}
+	status = CAStatus{}
+	if _, err := status.recordAnchorLoad(metricsHost("", nil), customOnly); err != nil {
+		t.Fatalf("recordAnchorLoad: %v", err)
+	}
+	if status.AnchorUsed {
+		t.Errorf("a custom-domain issuer is reported as using the anchor")
+	}
+	for _, hosts := range [][]string{{"login.example.com", "login--acme.kipper.run"}, {"login--acme.kipper.run", "login.example.com"}} {
+		mixed := overwritten
+		mixed.DexHosts = hosts
+		status = CAStatus{}
+		if _, err := status.recordAnchorLoad(metricsHost("", nil), mixed); err != nil {
+			t.Fatalf("recordAnchorLoad: %v", err)
+		}
+		if !status.AnchorUsed {
+			t.Errorf("issuers %v include a kipper.run login, which uses the anchor", hosts)
+		}
+	}
+
+	both := string(hopca.Bundle([]byte(caA), []byte(caB)))
+	expanded := overwritten
+	expanded.Anchor = both
+	status = CAStatus{}
+	unconfirmed, err = status.recordAnchorLoad(metricsHost("", nil), expanded)
+	if err != nil {
+		t.Fatalf("recordAnchorLoad: %v", err)
+	}
+	if !status.AnchorCovers || status.AnchorLoaded || status.TrustedByAPIServer || !unconfirmed {
+		t.Errorf("got covers=%v loaded=%v trusted=%v unconfirmed=%v, want a covering anchor the API server has not loaded", status.AnchorCovers, status.AnchorLoaded, status.TrustedByAPIServer, unconfirmed)
+	}
+
+	noIssuer := expanded
+	noIssuer.DexHosts = nil
+	status = CAStatus{}
+	host := metricsHost("", nil)
+	if unconfirmed, err := status.recordAnchorLoad(host, noIssuer); err != nil || unconfirmed {
+		t.Errorf("with no issuer got unconfirmed=%v err=%v, want nothing asked and nothing unconfirmed", unconfirmed, err)
+	}
+	if len(host.commands) != 0 {
+		t.Errorf("with no issuer the API server was asked anyway: %v", host.commands)
+	}
+}
+
+// metricsHost answers the API server metrics read with metrics, or fails it with err.
+func metricsHost(metrics string, err error) *hostScript {
+	return &hostScript{reply: func(string) (string, error) {
+		return metrics, err
+	}}
 }
 
 // An unanswered question is not a passed check. Reporting "nothing to do" on
