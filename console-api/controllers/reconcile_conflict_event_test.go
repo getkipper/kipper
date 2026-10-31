@@ -47,11 +47,11 @@ func TestReconcile_AConflictLeavesNoWarningEvent(t *testing.T) {
 
 	_, err := r.Reconcile(ctx, appRequest())
 	require.Error(t, err)
-	require.True(t, apierrors.IsConflict(err), "the test needs the pass to fail on the conflict: %v", err)
+	require.True(t, apierrors.IsConflict(err), "Reconciliation must return the conflict. Got %v.", err)
 
 	select {
 	case event := <-recorder.Events:
-		t.Fatalf("a conflict is retried and needs no event, got %q", event)
+		t.Fatalf("A conflict should be retried without emitting an event. Got %q.", event)
 	default:
 	}
 }
