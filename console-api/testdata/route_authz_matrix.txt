@@ -80,9 +80,9 @@ GET /api/v1/projects/{name}/apps/{app}/env/conflicts	anon=401 outsider=403 viewe
 GET /api/v1/projects/{name}/apps/{app}/env/injected	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=403 cluster-viewer-owner=allow
 GET /api/v1/projects/{name}/apps/{app}/env/preview	anon=401 outsider=403 viewer=403 deployer=404 owner=404 admin=404 cluster-viewer=403 cluster-viewer-owner=404
 GET /api/v1/projects/{name}/apps/{app}/env/status	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=403 cluster-viewer-owner=allow
-GET /api/v1/projects/{name}/apps/{app}/files	anon=401 outsider=403 viewer=404 deployer=404 owner=404 admin=404 cluster-viewer=403 cluster-viewer-owner=404
-GET /api/v1/projects/{name}/apps/{app}/files/content	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=403 cluster-viewer-owner=allow
-GET /api/v1/projects/{name}/apps/{app}/files/download	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=403 cluster-viewer-owner=allow
+GET /api/v1/projects/{name}/apps/{app}/files	anon=401 outsider=403 viewer=403 deployer=404 owner=404 admin=404 cluster-viewer=403 cluster-viewer-owner=404
+GET /api/v1/projects/{name}/apps/{app}/files/content	anon=401 outsider=403 viewer=403 deployer=allow owner=allow admin=allow cluster-viewer=403 cluster-viewer-owner=allow
+GET /api/v1/projects/{name}/apps/{app}/files/download	anon=401 outsider=403 viewer=403 deployer=allow owner=allow admin=allow cluster-viewer=403 cluster-viewer-owner=allow
 GET /api/v1/projects/{name}/apps/{app}/git	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=403 cluster-viewer-owner=allow
 GET /api/v1/projects/{name}/apps/{app}/health	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=403 cluster-viewer-owner=allow
 GET /api/v1/projects/{name}/apps/{app}/health-check	anon=401 outsider=403 viewer=404 deployer=404 owner=404 admin=404 cluster-viewer=403 cluster-viewer-owner=404
@@ -97,7 +97,7 @@ GET /api/v1/projects/{name}/apps/{app}/route/dns-status	anon=401 outsider=403 vi
 GET /api/v1/projects/{name}/apps/{app}/secrets	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=403 cluster-viewer-owner=allow
 GET /api/v1/projects/{name}/apps/{app}/secrets/{key}	anon=401 outsider=403 viewer=403 deployer=404 owner=404 admin=404 cluster-viewer=403 cluster-viewer-owner=404
 GET /api/v1/projects/{name}/apps/{app}/settings	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=403 cluster-viewer-owner=allow
-GET /api/v1/projects/{name}/apps/{app}/webhook	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=403 cluster-viewer-owner=allow
+GET /api/v1/projects/{name}/apps/{app}/webhook	anon=401 outsider=403 viewer=403 deployer=allow owner=allow admin=allow cluster-viewer=403 cluster-viewer-owner=allow
 GET /api/v1/projects/{name}/copy-preview	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=403 cluster-viewer-owner=allow
 GET /api/v1/projects/{name}/functions	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=403 cluster-viewer-owner=allow
 GET /api/v1/projects/{name}/functions/{fn}/bindings	anon=401 outsider=403 viewer=allow deployer=allow owner=allow admin=allow cluster-viewer=403 cluster-viewer-owner=allow

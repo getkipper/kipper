@@ -2,6 +2,8 @@
 
 Use the app detail panel's **Files** tab to browse, download, upload, and edit files in a running pod.
 
+Deployers, owners, and cluster admins see the tab. It is hidden from viewers because it can expose Secrets mounted as files.
+
 ## Opening the file browser
 
 1. Open the web console and navigate to your project
