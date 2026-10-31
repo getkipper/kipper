@@ -11,6 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -68,4 +69,29 @@ func TestAMovingServiceKeepsItsStoppedWorkloadAndReportsTheMove(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, c.Status)
 	assert.Equal(t, kipperv1.StorageCopiesMoving, c.Reason)
 	assert.Contains(t, c.Message, "--rollback")
+}
+
+// TestAMovingServiceWithoutAStatefulSetLeavesItsCopiesAlone verifies that the
+// Service's move annotation blocks copy changes until the move ends, even if
+// the StatefulSet is deleted while the data claim still carries its move annotation.
+func TestAMovingServiceWithoutAStatefulSetLeavesItsCopiesAlone(t *testing.T) {
+	svc := copiesService(1, false)
+	svc.Annotations = map[string]string{platform.StorageMoveAnnotation: "kipper-storage-move-u"}
+	svc.UID = "uid-db"
+	creds := serviceOwnedSecret("db-credentials", "db")
+	creds.Namespace = "ns"
+	creds.Data = map[string][]byte{"USERNAME": []byte("app"), "PASSWORD": []byte("pw"), "DATABASE": []byte("app")}
+	r := copiesReconciler(convWorld(svc, creds, movedClaim(dbDataClaim()), lhVolumeObj("pvc-1", 2, platform.ReplicaStorageTag))...)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "db"}})
+	require.NoError(t, err)
+
+	count, _, _ := unstructured.NestedInt64(getLonghorn(t, r.Client, "Volume", "pvc-1").Object, "spec", "numberOfReplicas")
+	assert.Equal(t, int64(2), count, "the copy count waits for the move")
+	assert.Nil(t, conversionLease(t, r.Client))
+	var got kipperv1.Service
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "db"}, &got))
+	c := apimeta.FindStatusCondition(got.Status.Conditions, kipperv1.ConditionStorageCopies)
+	require.NotNil(t, c)
+	assert.Equal(t, kipperv1.StorageCopiesMoving, c.Reason)
 }
