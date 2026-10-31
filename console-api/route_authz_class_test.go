@@ -92,22 +92,14 @@ func (s routeScope) String() string {
 	return "none"
 }
 
-// globalRank is which cluster-wide role a classGlobalRole route needs. It is a
-// different axis from project membership: a project owner holds no cluster
-// role, and a cluster deployer holds one in every project.
+// globalRank specifies the cluster role required by a classGlobalRole route,
+// independently of project membership. It defaults to admin. The deployer rank
+// admits cluster deployers and admins. The cluster-viewer fixture identities
+// verify that callers with a lower cluster role are denied.
 type globalRank int
 
 const (
-	// globalAdmin is the default, and the only rank the matrix can prove: the
-	// fixture's admin column holds it and no other column does.
 	globalAdmin globalRank = iota
-	// globalDeployer admits the cluster's deployers as well as its admins.
-	//
-	// The matrix cannot tell this apart from an ungated route, because every
-	// member column in the fixture holds the cluster deployer role, so all of
-	// them are admitted whether the wrapper is there or not. Declaring the rank
-	// is what records the gate; proving it needs a column with a lower cluster
-	// role, which is the fixture change release 2 should make.
 	globalDeployer
 )
 
@@ -524,8 +516,8 @@ func TestEachRouteBehavesLikeItsClass(t *testing.T) {
 				t.Errorf("%s is declared public and refuses an anonymous caller", route)
 			}
 		case classForeignCredential:
-			for _, column := range []string{"anon", "outsider", "viewer", "deployer", "owner", "admin"} {
-				if cells[column] != "401" {
+			for _, id := range matrixIdentities {
+				if column := id.column; cells[column] != "401" {
 					t.Errorf("%s is declared to need a credential that is not a user identity, but admits %s (%s)",
 						route, column, cells[column])
 				}
@@ -537,18 +529,29 @@ func TestEachRouteBehavesLikeItsClass(t *testing.T) {
 			if denied(cells["admin"]) {
 				t.Errorf("%s is gated on a cluster role and refuses an admin (%s)", route, cells["admin"])
 			}
-			// Only the admin rank is provable here. Every member column in the
-			// fixture holds the cluster deployer role, so a deployer-ranked
-			// gate admits all of them and looks exactly like no gate at all.
 			if d.globalRank == globalAdmin && !denied(cells["owner"]) {
 				t.Errorf("%s is declared admin-only and admits a project owner (%s)", route, cells["owner"])
+			}
+			if d.globalRank == globalDeployer && denied(cells["outsider"]) {
+				t.Errorf("%s is declared for cluster deployers and refuses one (%s)", route, cells["outsider"])
+			}
+			for _, column := range []string{"cluster-viewer", "cluster-viewer-owner"} {
+				if !denied(cells[column]) {
+					t.Errorf("%s is gated on a cluster role and admits a cluster viewer (%s=%s)", route, column, cells[column])
+				}
 			}
 		case classProjectCapability:
 			if cells["anon"] != "401" {
 				t.Errorf("%s is gated on project standing and admits an anonymous caller (%s)", route, cells["anon"])
 			}
-			if !denied(cells["outsider"]) {
-				t.Errorf("%s is gated on project standing and admits a non-member (%s)", route, cells["outsider"])
+			for _, column := range []string{"outsider", "cluster-viewer"} {
+				if !denied(cells[column]) {
+					t.Errorf("%s is gated on project standing and admits a non-member (%s=%s)", route, column, cells[column])
+				}
+			}
+			if denied(cells["cluster-viewer-owner"]) != denied(cells["owner"]) {
+				t.Errorf("%s is gated on project standing, yet a project owner gets %s with the cluster deployer role and %s with the cluster viewer role",
+					route, cells["owner"], cells["cluster-viewer-owner"])
 			}
 		case classAuthenticated, classHandlerInternal:
 			// The member columns are deliberately not asserted for a
@@ -570,6 +573,8 @@ func TestDeclaredCapabilitiesMatchTodaysAccess(t *testing.T) {
 		"viewer":   capability.RoleViewer,
 		"deployer": capability.RoleDeployer,
 		"owner":    capability.RoleOwner,
+		// Verify that cluster viewers retain their project role's capabilities.
+		"cluster-viewer-owner": capability.RoleOwner,
 	}
 
 	for route, d := range routeAuthz {
@@ -599,9 +604,10 @@ func TestDeclaredCapabilitiesMatchTodaysAccess(t *testing.T) {
 	}
 }
 
-// Handler-internal routes should answer all member probes identically when
-// the fixture stops before their gate. A discriminating response makes the gate
-// reachable and requires capability classification and cross-checking.
+// TestHandlerInternalRoutesAreActuallyUnreachedByTheProbe checks that all
+// authenticated non-admin probes receive the same response when the fixture
+// stops before the handler's gate. Different responses require reviewing the
+// gate and classifying it by project capability or cluster role as appropriate.
 func TestHandlerInternalRoutesAreActuallyUnreachedByTheProbe(t *testing.T) {
 	cells := matrixCells(t)
 	for route, d := range routeAuthz {
@@ -614,11 +620,11 @@ func TestHandlerInternalRoutesAreActuallyUnreachedByTheProbe(t *testing.T) {
 			continue
 		}
 		answers := map[string]bool{}
-		for _, column := range []string{"outsider", "viewer", "deployer", "owner"} {
+		for _, column := range []string{"outsider", "viewer", "deployer", "owner", "cluster-viewer", "cluster-viewer-owner"} {
 			answers[recorded[column]] = true
 		}
 		if len(answers) > 1 {
-			t.Errorf("%s is declared handler-internal but answers members differently (%v), so its gate is reachable: declare it as a project capability instead",
+			t.Errorf("%s is declared handler-internal but returns different responses to authenticated non-admin callers (%v). Review the gate and declare its project capability or cluster role as appropriate",
 				route, recorded)
 		}
 	}
@@ -627,12 +633,12 @@ func TestHandlerInternalRoutesAreActuallyUnreachedByTheProbe(t *testing.T) {
 // TestAuthenticatedRoutesDoNotDiscriminate holds classAuthenticated to what it
 // declares: a route that needs a token and nothing more.
 //
-// It is the mirror of the handler-internal check, and both exist because the
-// matrix cannot tell those two classes apart on its own. A route that does
-// discriminate between members is gated on project standing whatever it says,
-// and belongs in classProjectCapability where the capability cross-check
-// applies. Without this, the weakest class in the table is the easiest place
-// for a project route to hide.
+// Like the handler-internal check, this is needed because the matrix alone
+// cannot distinguish the two classes. Different responses to authenticated
+// non-admin callers require reviewing the route's project or cluster role gate.
+// Project capability gates belong in classProjectCapability so the capability
+// cross-check applies. This prevents project routes from escaping that check
+// through an authenticated-only declaration.
 func TestAuthenticatedRoutesDoNotDiscriminate(t *testing.T) {
 	cells := matrixCells(t)
 	for route, d := range routeAuthz {
@@ -645,11 +651,11 @@ func TestAuthenticatedRoutesDoNotDiscriminate(t *testing.T) {
 			continue
 		}
 		answers := map[string]bool{}
-		for _, column := range []string{"outsider", "viewer", "deployer", "owner"} {
+		for _, column := range []string{"outsider", "viewer", "deployer", "owner", "cluster-viewer", "cluster-viewer-owner"} {
 			answers[recorded[column]] = true
 		}
 		if len(answers) > 1 {
-			t.Errorf("%s is declared to need only a token but answers members differently (%v): it is gated on project standing and should say so",
+			t.Errorf("%s is declared to need only a token but returns different responses to authenticated non-admin callers (%v). Review and declare its project or cluster role gate",
 				route, recorded)
 		}
 	}
