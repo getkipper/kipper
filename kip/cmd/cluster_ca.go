@@ -35,7 +35,7 @@ is something you do if it leaks, not on a schedule.
 Start with 'kip cluster ca status'. It tells you whether anything needs doing.
 
 Replacing an authority is a documented procedure rather than a command. It
-spans two Secrets and two files on the host, and those cannot be changed as one
+spans three Secrets and two files on the host, and those cannot be changed as one
 transaction, so each phase ends at a gate an operator verifies before carrying
 on. The steps are at ` + caDocsURL + `.`,
 }
@@ -80,7 +80,7 @@ func dialClusterHost(cmd *cobra.Command) (*ssh.Client, *config.Cluster, error) {
 		return nil, nil, err
 	}
 	if cluster.Host == "" {
-		return nil, nil, fmt.Errorf("no host recorded for cluster %s; this command needs SSH access to the server", cluster.Name)
+		return nil, nil, fmt.Errorf("no host recorded for cluster %s. This command needs SSH access to the server", cluster.Name)
 	}
 	flagKey, _ := cmd.Flags().GetString("ssh-key")
 	client, err := dialNodeSSH(cluster.Host, flagKey, cluster)
@@ -126,10 +126,10 @@ func printCAStatus(clusterName string, s installer.CAStatus) {
 		fmt.Printf("    Incoming         %s (%s), signing nothing yet\n", s.Incoming.Subject, s.Incoming.Fingerprint)
 	}
 	if s.Outgoing != nil {
-		fmt.Printf("    Being replaced   %s (%s), still trusted\n", s.Outgoing.Subject, s.Outgoing.Fingerprint)
+		fmt.Printf("    Being replaced   %s (%s), still stored\n", s.Outgoing.Subject, s.Outgoing.Fingerprint)
 	}
 	if s.Leaf.Subject != "" {
-		fmt.Printf("    Served cert      %s, expires %s\n", s.Leaf.Subject, expiryOf(s.Leaf.Expires))
+		fmt.Printf("    Stored cert      %s, expires %s\n", s.Leaf.Subject, expiryOf(s.Leaf.Expires))
 	}
 	for _, h := range s.Hosts {
 		fmt.Printf("    Login issuer     %s\n", h)
@@ -137,14 +137,19 @@ func printCAStatus(clusterName string, s installer.CAStatus) {
 
 	fmt.Println()
 	fmt.Printf("    %s The anchor covers what signed this cluster's certificate\n", mark(s.AnchorCovers))
-	if s.AnchorLoadedUnknown {
+	switch {
+	case len(s.Hosts) == 0:
+		fmt.Printf("    –  No login issuer is configured, so the API server check was skipped\n")
+	case s.AnchorLoadedUnknown:
 		fmt.Printf("    ?  The API server could not be asked what it has loaded\n")
-	} else {
+	case !s.AnchorUsed:
+		fmt.Printf("    %s The API server has loaded its login config, which uses no anchor\n", mark(s.AnchorLoaded))
+	default:
 		fmt.Printf("    %s The API server has loaded that anchor\n", mark(s.AnchorLoaded))
 	}
 	// Report skipped live checks so operators can distinguish them from passes.
 	if s.ServedByActive != nil {
-		fmt.Printf("    %s The wire confirms the certificate in use\n", mark(*s.ServedByActive))
+		fmt.Printf("    %s The wire serves a certificate that verifies against the current authority\n", mark(*s.ServedByActive))
 	} else {
 		fmt.Printf("    –  The wire cannot be checked: no gateway-fronted issuer to ask\n")
 	}
@@ -170,9 +175,29 @@ func printCAStatus(clusterName string, s installer.CAStatus) {
 
 	// Show the resume point alongside any trust warning below.
 	if s.Phase != installer.CAPhaseSteady {
-		fmt.Printf("  A replacement is part-way through (%s). This is a safe state to sit in:\n", s.Phase)
-		fmt.Printf("  %s, which\n", caPhaseNote(s.Phase))
-		fmt.Printf("  affects nothing. Finish it before changing this cluster's domain.\n")
+		// Calling a phase safe requires confirmed trust and no failed live check.
+		// A live check may be skipped when no gateway-fronted issuer is configured.
+		trusted := s.TrustedByAPIServer && !s.AnchorLoadedUnknown
+		wireFails := s.ServedByActive != nil && !*s.ServedByActive
+		settled := trusted && !wireFails
+		switch {
+		case trusted && wireFails && s.Phase == installer.CAPhasePromoted:
+			fmt.Printf("  A replacement is part-way through (%s). Before step 2.3 the gateway serves\n", s.Phase)
+			fmt.Printf("  the outgoing authority's certificate. After the re-signed certificate is\n")
+			fmt.Printf("  installed, it keeps serving the old certificate until Traefik restarts.\n")
+			fmt.Printf("  The wire check cannot distinguish these cases from other verification failures.\n")
+		case settled && !s.AnchorUsed:
+			fmt.Printf("  A replacement is part-way through (%s). No login issuer uses the anchor,\n", s.Phase)
+			fmt.Printf("  so this is a safe state to sit in. Finish it before changing this cluster's\n")
+			fmt.Printf("  domain.\n")
+		case settled:
+			fmt.Printf("  A replacement is part-way through (%s). This is a safe state to sit in:\n", s.Phase)
+			fmt.Printf("  %s, which\n", caPhaseNote(s.Phase))
+			fmt.Printf("  affects nothing. Finish it before changing this cluster's domain.\n")
+		default:
+			fmt.Printf("  A replacement is part-way through (%s). Fix the issues below before\n", s.Phase)
+			fmt.Printf("  finishing it.\n")
+		}
 		fmt.Printf("  Resume at %s:\n", s.Resume)
 		fmt.Printf("  %s\n\n", caDocsURL)
 	}
@@ -180,30 +205,61 @@ func printCAStatus(clusterName string, s installer.CAStatus) {
 	switch {
 	case s.Healthy():
 		fmt.Printf("  Everything agrees. Nothing to do.\n")
-	case s.AnchorLoadedUnknown:
-		fmt.Printf("  The API server did not answer, so whether it has loaded this anchor is\n")
-		fmt.Printf("  unknown. Logins may be fine. Check the API server is running, then ask\n")
-		fmt.Printf("  again before changing anything.\n")
+	case !s.AnchorCovers && !s.AnchorUsed:
+		fmt.Printf("  The anchor on disk does not cover the certificate stored for this cluster.\n")
+		fmt.Printf("  The login config on disk has only custom-domain issuers, which are verified\n")
+		fmt.Printf("  with public certificates and use no anchor.\n")
+		switch {
+		case s.AnchorLoaded:
+			fmt.Printf("  The API server runs that config, so logins are unaffected.\n")
+		case s.AnchorLoadedUnknown:
+			fmt.Printf("  The API server did not answer, so which config it runs is unknown.\n")
+		default:
+			fmt.Printf("  The API server has not loaded that config, so which one it runs is unknown.\n")
+		}
+		fmt.Printf("  Put that authority back in the anchor before adding a kipper.run login.\n")
+		fmt.Printf("  See \"If it goes wrong\" in:  %s\n", caDocsURL)
 	case !s.AnchorCovers && s.AnchorLoaded:
-		fmt.Printf("  The API server has loaded an anchor that does not cover what this cluster\n")
-		fmt.Printf("  serves, so operator logins are failing. Certificate authentication over SSH\n")
-		fmt.Printf("  still works, so you can reach the server and repair it.\n")
+		fmt.Printf("  The API server has loaded an anchor that does not cover the certificate\n")
+		fmt.Printf("  stored for this cluster, so kipper.run logins fail whenever the gateway\n")
+		fmt.Printf("  serves it. Certificate authentication over SSH still works, so you can reach\n")
+		fmt.Printf("  the server and repair it.\n")
 		fmt.Printf("  Put that authority back in the anchor, then run 'kip cluster auth sync'.\n")
 		fmt.Printf("  See \"If it goes wrong\" in:  %s\n", caDocsURL)
+	case !s.AnchorCovers && s.AnchorLoadedUnknown:
+		fmt.Printf("  The anchor on disk does not cover the certificate stored for this cluster,\n")
+		fmt.Printf("  and the API server did not answer, so which config it runs is unknown and\n")
+		fmt.Printf("  whether logins work cannot be told from here. If it has loaded that anchor,\n")
+		fmt.Printf("  kipper.run logins fail whenever the gateway serves the stored certificate.\n")
+		fmt.Printf("  Certificate authentication over SSH still works.\n")
+		fmt.Printf("  Check that the API server is running, put that authority back in the anchor,\n")
+		fmt.Printf("  then run 'kip cluster auth sync'.\n")
+		fmt.Printf("  See \"If it goes wrong\" in:  %s\n", caDocsURL)
+	case s.AnchorLoadedUnknown:
+		fmt.Printf("  The API server did not answer, so whether it has loaded the login config on\n")
+		fmt.Printf("  disk is unknown. Logins may be fine. Check the API server is running, then\n")
+		fmt.Printf("  ask again before changing anything.\n")
 	case !s.AnchorCovers:
-		fmt.Printf("  The anchor on disk does not cover what this cluster serves. The API server\n")
-		fmt.Printf("  has not loaded it, so logins are working for now, and syncing it as it\n")
-		fmt.Printf("  stands would break them.\n")
+		fmt.Printf("  The anchor on disk does not cover the certificate stored for this cluster.\n")
+		fmt.Printf("  The API server has not loaded the config on disk, so whether logins work\n")
+		fmt.Printf("  cannot be told from here. Syncing the anchor as it stands would\n")
+		fmt.Printf("  break kipper.run logins once the gateway serves the stored certificate.\n")
 		fmt.Printf("  Put that authority back in the anchor first. See \"If it goes wrong\" in:\n")
 		fmt.Printf("  %s\n", caDocsURL)
+	case !s.AnchorLoaded && !s.AnchorUsed:
+		fmt.Printf("  The API server has not loaded the login config on disk, so which config it\n")
+		fmt.Printf("  runs cannot be told from here. The config on disk has only custom-domain\n")
+		fmt.Printf("  logins, which are verified with public certificates and use no anchor.\n")
+		fmt.Printf("  Apply it with:  %s\n", s.NextCommand())
 	case !s.AnchorLoaded:
-		fmt.Printf("  The API server has not loaded the anchor on disk. It is still running the\n")
-		fmt.Printf("  config it had, so logins work for now: but this must be applied before\n")
-		fmt.Printf("  anything else changes, or the cluster will serve a certificate the API\n")
-		fmt.Printf("  server has never been told to trust.\n")
+		fmt.Printf("  The API server has not loaded the anchor on disk, so which authority it\n")
+		fmt.Printf("  trusts for kipper.run logins cannot be told from here. Apply it before\n")
+		fmt.Printf("  anything else changes, or the cluster can end up serving a certificate the\n")
+		fmt.Printf("  API server was never told to trust.\n")
 		fmt.Printf("  Apply it with:  %s\n", s.NextCommand())
 	case s.ServedByActive != nil && !*s.ServedByActive:
-		fmt.Printf("  This cluster is not serving a certificate the current authority signed.\n")
+		fmt.Printf("  The certificate this cluster serves does not verify against the current\n")
+		fmt.Printf("  authority: another authority signed it, it expired, or it names another host.\n")
 		fmt.Printf("  Traefik serves its own copy of the certificate and picks up a new one when\n")
 		fmt.Printf("  it restarts, so check that its rollout finished (kubectl -n traefik rollout\n")
 		fmt.Printf("  status deployment/traefik), then check again before investigating.\n")
