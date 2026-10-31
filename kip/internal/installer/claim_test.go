@@ -108,6 +108,26 @@ func TestClaimRefusesANameItCannotProveItOwns(t *testing.T) {
 	}
 }
 
+// TestClaimOffersAnotherNameForATakenOne checks that both gateway refusal paths
+// offer another kipper.run name or a domain the operator controls. The existing
+// registration may belong to a server that previously used this address.
+func TestClaimOffersAnotherNameForATakenOne(t *testing.T) {
+	for name, gw := range map[string]*fakeRegistrar{
+		"accepted without a token": {reg: &domain.Registration{Domain: "203-0-113-10.kipper.run"}},
+		"refused with a conflict":  {err: fmt.Errorf("%w: gateway: subdomain taken", domain.ErrNameTaken)},
+	} {
+		_, err := claimGatewayName(gw, &fakeStore{}, "203-0-113-10", "203.0.113.10", "203.0.113.10")
+		if err == nil {
+			t.Fatalf("%s: a taken name must fail the install", name)
+		}
+		for _, want := range []string{"--domain <name>.kipper.run", "--domain <your-domain>"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: the error must offer %q, got %v", name, want, err)
+			}
+		}
+	}
+}
+
 // A retry after a failed attempt holds the token already. Presenting it renews
 // the registration rather than arriving anonymously against its own name — which
 // is what turned one failed install into a 30-day lockout.
@@ -130,8 +150,12 @@ func TestClaimPresentsATokenItAlreadyHolds(t *testing.T) {
 func TestClaimSurfacesAGatewayFailure(t *testing.T) {
 	gw := &fakeRegistrar{err: errors.New("gateway: 503")}
 
-	if _, err := claimGatewayName(gw, &fakeStore{}, "203-0-113-10", "203.0.113.10", "203.0.113.10"); err == nil {
+	_, err := claimGatewayName(gw, &fakeStore{}, "203-0-113-10", "203.0.113.10", "203.0.113.10")
+	if err == nil {
 		t.Fatal("a gateway that cannot be reached must fail the install")
+	}
+	if strings.Contains(err.Error(), "--domain") {
+		t.Errorf("a retry may fix a gateway failure, so it must not send the operator to another name: %v", err)
 	}
 }
 
