@@ -94,7 +94,7 @@ Apps and functions bind to services in their own project and environment. To sha
 
 ### Where are my secrets stored?
 
-In Kubernetes Secrets, encrypted at rest by k3s. They are scoped to the project namespace and never returned in API responses unless explicitly requested.
+In Kubernetes Secrets. k3s stores them in its datastore on the server without encryption at rest, so protect the server's disk and its backups. They are scoped to the project namespace and never returned in API responses unless explicitly requested.
 
 ### How do I scale an app?
 

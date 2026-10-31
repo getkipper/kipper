@@ -37,7 +37,7 @@ The AI bundle's PVCs are typically dominated by the Ollama model cache:
 | qwen2.5:14b-instruct-q4_K_M | ~10 GB |
 | qwen2.5:32b-instruct-q4_K_M | ~22 GB |
 
-`kip ai install` requests model-cache storage through the cluster’s default storage class, `local-path`, which keeps one copy on the node that runs the pod. Previously installed bundles keep their claims’ existing storage classes. `--pvc-size` defaults to 10 GiB for tier 1, 30 GiB for tier 2, and 60 GiB for tiers 3 and 4.
+`kip ai install` requests model-cache storage through the cluster’s default storage class, `local-path`, which keeps one copy on the node that runs the pod. Previously installed bundles keep their PVCs’ existing storage classes, so their disk usage also depends on the replication and snapshot settings for that storage. `--pvc-size` defaults to 10 GiB for tier 1, 30 GiB for tier 2, and 60 GiB for tiers 3 and 4.
 
 If you intend to back up the AI bundle to MinIO, allow roughly three times the model cache size for a snapshot and headroom. Fresh Kipper installs request a 10 GiB MinIO volume. Existing larger volumes keep their size. Expand MinIO to at least 30 GiB for the default tier 1 cache, 90 GiB for tier 2 or 180 GiB for tier 3 and above. `kip ai install` reports an error if the existing MinIO volume is too small.
 

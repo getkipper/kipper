@@ -1086,15 +1086,18 @@ kip function delete process-image --project blog
 
 | Flag | Required | Default | Description |
 |---|---|---|---|
-| `--image` | Yes | — | Container image for the function |
-| `--trigger` | No | `http` | Trigger type: `http`, `postgres`, `mysql`, `redis`, `minio` |
+| `--image` | Exactly one of `--image` or `--code-file` | — | Container image for the function |
+| `--code-file` | Exactly one of `--image` or `--code-file` | — | Source file for an inline function |
+| `--runtime` | With `--code-file` | — | Runtime for an inline function: `node` or `python` |
+| `--trigger` | No | `http` | Trigger type: `http`, `cron`, `postgres`, `mysql`, `redis`, `minio` |
+| `--schedule` | With `--trigger cron` | — | Cron expression, for example `"0 2 * * *"` |
 | `--port` | No | `8080` | Port the function listens on |
 | `--source` | No | — | Service name for event triggers |
 | `--query` | No | — | SQL query for postgres/mysql triggers |
 | `--mark-done` | No | — | SQL to mark rows as processed |
 | `--list` | No | — | Redis list name for redis triggers |
 | `--bucket` | No | — | MinIO bucket name for minio triggers |
-| `--project` | No | `default` | Project name |
+| `--project` | No | Active project, otherwise the namespace of a function with this name, otherwise `default` | Project name |
 | `--environment` | No | — | Target environment |
 
 See [Serverless Functions](/en/functions) for full documentation.
@@ -1134,7 +1137,7 @@ kip volume delete uploads --delete-data --project blog --environment test
 |---|---|---|---|
 | `--size` | No | `5Gi` | Volume size |
 | `--copies` | No | `1` | Copies of the data. Shared volumes keep one copy in this release, so `2` is refused at creation. `kip volume update --copies 2` is accepted only to stop a blocked or pending reduction |
-| `--project` | No | `default` | Project name |
+| `--project` | When no project is active | Active project | Project name |
 | `--environment` | No | — | Target environment |
 
 Before creating the volume, `kip volume create` checks whether the server has capacity for the volume's copy, using Longhorn's reserved space, over-provisioning and minimal-available settings. If capacity is insufficient, it refuses creation and reports the node with the most room and its remaining capacity. If Longhorn's state cannot be read, it prints a warning and proceeds with creation.
@@ -1144,7 +1147,7 @@ Before creating the volume, `kip volume create` checks whether the server has ca
 | Flag | Required | Default | Description |
 |---|---|---|---|
 | `--path` | No | `/data` | Mount path inside the container |
-| `--project` | No | `default` | Project name |
+| `--project` | No | Active project, otherwise the namespace of the named app | Project name |
 | `--environment` | No | — | Target environment |
 
 Mounts are recorded on the volume and applied to the app automatically, so they survive image updates and redeployments. `kip volume unmount` removes the mount again; the volume and its data stay available for other apps. Deleting a volume needs `--delete-data` because it permanently destroys the data.

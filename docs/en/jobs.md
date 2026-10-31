@@ -19,7 +19,7 @@ kip job run --name db-migrate --image myapp:latest --command "npm run migrate" -
   Run 'kip job history db-migrate' to check the result
 ```
 
-The job runs to completion in a new pod using its own `env:` configuration from `kipper.yaml`. Choose a name that is free across apps, functions, and jobs in that environment; see [workload naming](/en/functions#names-are-shared-across-workload-kinds).
+The job runs to completion in a new pod with the image and command you pass. `kip job run` does not read `kipper.yaml`, so it omits environment variables declared in the job's `env:` block. Each run is named `<name>-<timestamp>`, and that name must be available across apps, functions, and jobs in that environment. See [workload naming](/en/functions#names-are-shared-across-workload-kinds).
 
 ## Scheduling a recurring job
 

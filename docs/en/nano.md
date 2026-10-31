@@ -11,7 +11,7 @@ When you need more, you resize the server and switch the same cluster to Longhor
 
 ## What makes a cluster nano
 
-`kip install` picks the `nano` profile on servers with less than 6000 MiB of RAM, or when you pass `--profile nano`. By default a new nano cluster keeps its footprint small in three ways:
+`kip install` picks the `nano` profile on servers with less than 6000 MiB of RAM or too few CPUs for a larger profile, or when you pass `--profile nano`. By default a new nano cluster keeps its footprint small in three ways:
 
 - **Local storage.** Volumes live on the server's own disk through the local-path provisioner that k3s ships with. Omitting Longhorn and its iSCSI packages saves about 350 MiB of memory and about 850 MB of images. The registry's volume also uses local storage, so builds and images share the server's disk.
 - **No monitoring by default.** Prometheus, Loki and Grafana stay off. Turn them on later with `kip platform enable prometheus` and `kip platform enable loki` if the server has room.

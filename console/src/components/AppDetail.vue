@@ -4066,7 +4066,7 @@ function openOptimise() {
               placeholder="fonts.googleapis.com, cdn.example.com"
               class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-kipper-500 focus:outline-hidden dark:border-slate-600 dark:bg-slate-900 dark:text-slate-50 dark:placeholder-slate-500"
             />
-            <p class="mt-1.5 text-[10px] text-slate-400 dark:text-slate-500">Comma-separated. Added to style-src, font-src, script-src, and connect-src.</p>
+            <p class="mt-1.5 text-[10px] text-slate-400 dark:text-slate-500">Separate domains with commas. Domains are added to script-src, style-src, and font-src.</p>
           </div>
 
           <!-- Rate limit -->

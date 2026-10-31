@@ -55,6 +55,7 @@ For safety, Kipper blocks access to certain system directories:
 - `/proc`: kernel and process information
 - `/sys`: kernel subsystem data
 - `/dev`: device files
+- `/var/run/secrets` and `/run/secrets`: mounted service account tokens and secrets
 
 Attempting to browse, read, or write files under these paths returns a 403 Forbidden error. Subdirectories are also blocked. For example, `/proc/cpuinfo` and `/sys/class/net` are both restricted.
 

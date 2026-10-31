@@ -71,7 +71,7 @@ RabbitMQ services created with the default settings in earlier Kipper releases s
 
 Before creating a service, `kip service add` checks that one eligible node has enough CPU and memory after existing pod requests are deducted. If capacity is insufficient, it reports the largest remaining CPU and memory capacities and their nodes. Reduce requests with `--cpu` and `--memory`, or add capacity. If no nodes qualify, it directs you to `kip status`. The check is skipped if nodes or pods cannot be read.
 
-On a cluster with Longhorn storage, `kip service add` also checks capacity for the service's volumes: the data volume, plus a dump volume of the same size for Postgres with consistent backups. It uses Longhorn's reported maximum, reserved, scheduled and available space for each disk, together with the `storage-over-provisioning-percentage` and `storage-minimal-available-percentage` settings. Pending Longhorn volumes that fit on an eligible disk also count against that space. This includes volumes from a service created moments earlier, so consecutive commands account for those volumes even before their claims exist. Single-copy volumes are scheduled on the server, so the check covers the server's disks only. For a service with two copies, the check requires room on a distinct eligible node for each copy and counts both copies towards storage demand. With exactly two eligible nodes, one copy lands on each, so the server must hold its copy alongside the single-copy volumes pinned to it, such as the dump volume. A definite shortage stops creation. For single-copy volumes, the error names the server and reports its remaining scheduling capacity and the service's storage requirements. For two copies, it names the eligible node with the most room and reports that node's capacity. When only the second copy lacks room, it reports the other eligible node with the most room instead. When the copies required on a node or group of nodes exceed its available space, the error names the nodes, their remaining scheduling capacity and the copies that need that space. Free space with `kip service delete <name> --delete-data`, grow the server's disk, or request less storage with `--storage`. If Longhorn's state cannot be read or no node can accept new volumes, kip prints a warning and proceeds with creation. An inconclusive placement also produces a warning. Existing claims are reused and excluded from the check. Clusters on local storage skip this check. Passing the capacity checks does not guarantee scheduling because other constraints may apply.
+On a cluster with Longhorn storage, `kip service add` also checks capacity for the service's volumes: the data volume, plus a dump volume of the same size for Postgres with consistent backups. It uses Longhorn's reported maximum, reserved, scheduled and available space for each disk, together with the `storage-over-provisioning-percentage` and `storage-minimal-available-percentage` settings. Pending Longhorn volumes that fit on an eligible disk also count against that space. This includes volumes from a service created moments earlier, so consecutive commands account for those volumes even before their claims exist. Single-copy volumes are scheduled on the server, so the check covers the server's disks only. For a service with two copies, the check requires room on a distinct eligible node for each copy and counts both copies towards storage demand. With exactly two eligible nodes, one copy lands on each, so the server must hold its copy alongside the single-copy volumes pinned to it, such as the dump volume. A definite shortage stops creation. For single-copy volumes, the error names the server and reports its remaining scheduling capacity and the service's storage requirements. For two copies, it names the eligible node with the most room and reports that node's capacity. When only the second copy lacks room, it reports the other eligible node with the most room instead. When the copies required on a node or group of nodes exceed its available space, the error names the nodes, their remaining scheduling capacity and the copies that need that space. Free space with `kip service delete <name> --delete-data`, grow the server's disk, or request less storage with `--storage`. If you lack permission to read Longhorn's state, kip skips the check without a warning and proceeds with creation. If reading that state fails for another reason, or if no node can accept new volumes, kip prints a warning and proceeds with creation. An inconclusive placement also produces a warning. Existing claims are reused and excluded from the check. Clusters on local storage skip this check. Passing the capacity checks does not guarantee scheduling because other constraints may apply.
 
 `kip service update --consistent-backups` runs the same check for the dump volume it adds. Before writing anything, `kip apply` checks new services' volumes, new shared volumes and dump volumes for existing Postgres services whose consistent backups the manifest enables.
 
@@ -299,7 +299,7 @@ kip service add minio --name storage --project blog --environment test
   Connection details:
     Endpoint:   http://storage.blog-test.svc.cluster.local:9000
     Access Key: kipper
-    Secret Key: a1b2c3d4e5f6...
+    Secret Key: ********
 ```
 
 Bind MinIO to your app to inject credentials automatically:
@@ -342,8 +342,10 @@ kip tunnel mydb
 ```
 
 ```
-  ✔  Tunnel open: localhost:5432 → mydb (postgres)
-  Press Ctrl+C to close
+  Forwarding localhost:5432 → default/mydb-0:5432
+  Press Ctrl+C to stop
+
+  Connect: psql -h localhost -p 5432 -U kipper -d app
 ```
 
 Open your database client and connect to `localhost:5432` with the credentials from `kip service info mydb --show-secrets`.

@@ -121,7 +121,7 @@ For recovery, `kip project members remove --force` can remove the last owner. A 
 
 ## Creating projects
 
-Only cluster admins create projects. When an admin creates one, they become its first owner and can then add the rest of the team. This keeps the number of projects on a cluster under control while letting each team run itself once the project exists.
+Only cluster admins create projects. An admin who creates one in the console becomes its first owner and can then add the rest of the team. `kip project create` creates a project with an empty member list, so add an owner with `kip project members add` afterward. This keeps the number of projects on a cluster under control while letting each team run itself once the project exists.
 
 ```bash
 kip project create acme-shop --environments test,acc,prod

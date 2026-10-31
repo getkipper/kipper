@@ -31,7 +31,7 @@ ai:
 | `clusters[].provider` | Infrastructure provider (`baremetal`, future: `hetzner`, `digitalocean`, `aws`) |
 | `clusters[].host` | Server hostname or IP address |
 | `clusters[].domain` | Auto-generated kipper.run subdomain (used internally for app routing) |
-| `clusters[].console_domain` | Custom console domain (set via `kip cluster domain`) |
+| `clusters[].console_domain` | Pinned console hostname (set via `kip install --console-domain` or `kip cluster hosts --console`) |
 | `clusters[].kubeconfig` | Path to the cluster's kubeconfig file |
 | `clusters[].gateway_token` | Token for managing the kipper.run subdomain. The source of truth is the `gateway-credentials` Secret on the cluster; this local copy is the disaster-recovery fallback that lets you deregister the subdomain if the cluster itself is gone. Because of it, `config.yaml` is written readable by your user only (mode 0600) |
 | `clusters[].dns_resolvers` | Resolvers CoreDNS forwards external queries to (set via `--dns-resolver` on install). Empty means the default public set. `kip status` warns when the file on the server drifts from this, and `kip cluster dns repair` restores it |
@@ -74,7 +74,7 @@ Switch the active cluster:
 kip cluster use production
 ```
 
-Partial name matching works if the name is unique:
+An exact name match takes priority. Otherwise, a partial name selects the first cluster whose name contains it:
 
 ```bash
 kip cluster use prod
@@ -162,7 +162,7 @@ Configure an AI provider to enable code assistance, log analysis, and diagnostic
 
 ### Configure in the console
 
-Open **Settings → AI Configuration**, choose a provider, enter the model and connection details, and click **Save**. The console stores these settings in the `kipper-ai-config` Kubernetes Secret in `kipper-system` and masks the API key when displaying it.
+Open **Settings → AI Assistant**, choose a provider, enter the model and connection details, and click **Save**. The console stores these settings in the `kipper-ai-config` Kubernetes Secret in `kipper-system` and masks the API key when displaying it.
 
 ### Configure from the CLI
 
