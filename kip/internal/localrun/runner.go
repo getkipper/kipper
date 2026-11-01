@@ -37,7 +37,7 @@ func (r *Runner) Run(command string) (string, error) {
 }
 
 // RunStdin runs command with stdin as its only input and returns its combined
-// output. Input is passed through stdin; commands may echo it into the output.
+// output. Input is passed through stdin. Commands may echo it into the output.
 func (r *Runner) RunStdin(command string, stdin io.Reader) (string, error) {
 	payload, err := io.ReadAll(stdin)
 	if err != nil {
@@ -46,7 +46,7 @@ func (r *Runner) RunStdin(command string, stdin io.Reader) (string, error) {
 	return r.run(command, payload)
 }
 
-// Upload writes content to path with mode, using the same command and defences
+// Upload writes content to path with mode, using the same command and defenses
 // as the SSH client.
 func (r *Runner) Upload(content io.Reader, path string, mode os.FileMode) error {
 	payload, err := io.ReadAll(content)
@@ -68,7 +68,7 @@ func (r *Runner) bash() (string, error) {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("bash is not installed in %s; the installer's commands need it", r.Path)
+	return "", fmt.Errorf("bash is not installed in %s. The installer's commands need it", r.Path)
 }
 
 // ErrNoConnection indicates that commands run locally, without an SSH connection.
@@ -89,10 +89,35 @@ func (r *Runner) SurvivesSSHRateLimit() bool {
 	return true
 }
 
-func (r *Runner) run(command string, stdin []byte) (string, error) {
+// Start runs command through bash and returns its stdin, stdout and Wait function.
+// On Unix, it creates a separate session, as sshd does for remote commands.
+// The caller must close Stdin and drain Stdout before calling Wait. Closing
+// Stdin sends EOF, which ends commands that exit on EOF. Stderr is discarded.
+// Start returns startup errors, and Wait reports command failures as *exec.ExitError.
+func (r *Runner) Start(command string) (*ssh.Held, error) {
+	cmd, err := r.command(command)
+	if err != nil {
+		return nil, err
+	}
+	ownSession(cmd)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("starting %q on this machine: %w", command, err)
+	}
+	return &ssh.Held{Stdin: stdin, Stdout: stdout, Wait: cmd.Wait}, nil
+}
+
+func (r *Runner) command(command string) (*exec.Cmd, error) {
 	bash, err := r.bash()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	//nolint:gosec // bash runs installer commands kip builds itself, the same strings the SSH client sends
 	cmd := exec.Command(bash, "-c", command)
@@ -100,6 +125,14 @@ func (r *Runner) run(command string, stdin []byte) (string, error) {
 	// An explicit environment: an inherited KUBECONFIG would point kubectl at
 	// another cluster, and BASH_ENV would run a startup file first.
 	cmd.Env = []string{"PATH=" + r.Path, "HOME=" + r.Home}
+	return cmd, nil
+}
+
+func (r *Runner) run(command string, stdin []byte) (string, error) {
+	cmd, err := r.command(command)
+	if err != nil {
+		return "", err
+	}
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}

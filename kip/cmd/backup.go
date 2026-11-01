@@ -346,7 +346,7 @@ func backupProtection(config map[string]string, defaultKey bool) []string {
 	}
 	volumes := "Volume data:    encrypted with the backup repository key (kip backup repository-key export)"
 	if defaultKey {
-		volumes = "Volume data:    encrypted with Velero's published default key, so only access to the bucket protects it"
+		volumes = "Volume data:    encrypted with Velero's published default key, so only access to the bucket protects it (kip backup repository-key reset)"
 	}
 	return []string{objects, volumes}
 }

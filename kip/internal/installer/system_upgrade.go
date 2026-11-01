@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/getkipper/kipper/controller/pkg/platform"
@@ -17,7 +18,8 @@ type SystemComponent struct {
 // profile overrides and explicit enable/disable choices. It reuses saved DNS
 // settings and refreshes gateway addresses for trusted-proxy configuration.
 // BackupNone omits Velero. Otherwise, BackupStorage selects its destination,
-// with nil selecting in-cluster MinIO. The Velero action requires an Uploader.
+// with nil selecting in-cluster MinIO. The Velero action requires an Uploader
+// that also implements LeaseServer and FirewallRunner.
 // Dex's full manifest would overwrite users. A full cert-manager install needs
 // the admin email, so only its DNS settings are reconciled here.
 // Console and k3s upgrades have separate paths.
@@ -60,11 +62,7 @@ func SystemComponents(domain string, dnsResolvers, trustedProxies []string, stat
 	storage := platform.StorageMode(state.Storage)
 	if platform.BackupsConfigured(state.Backup) {
 		components = append(components, SystemComponent{Name: "velero", Apply: func(c CommandRunner) error {
-			u, ok := c.(Uploader)
-			if !ok {
-				return fmt.Errorf("this runner cannot upload the Velero credentials")
-			}
-			return InstallBackup(u, bs, storage, nil)
+			return upgradeVelero(c, bs, storage)
 		}})
 	}
 	components = append(components,
@@ -115,16 +113,45 @@ func (s PlatformState) enabled(name string) bool {
 	return s.Profile != ProfileNano
 }
 
-// RunSystemUpgrade re-applies each system component in order. Stops at
-// the first failure and returns the wrapped error so the caller can
-// report which component broke.
+// componentSkipped is returned by a component that leaves itself unchanged
+// and lets the upgrade go on with the next one.
+type componentSkipped struct{ reason string }
+
+func (e *componentSkipped) Error() string { return e.reason }
+
+// RunSystemUpgrade reapplies each system component in order and prints its
+// status. It reports componentSkipped results and continues with the next
+// component. Any other error stops the upgrade and is wrapped with the
+// component name.
 func RunSystemUpgrade(client CommandRunner, components []SystemComponent) error {
 	for _, c := range components {
 		fmt.Printf("  ...  %s\n", c.Name)
-		if err := c.Apply(client); err != nil {
+		err := c.Apply(client)
+		var skipped *componentSkipped
+		if errors.As(err, &skipped) {
+			fmt.Printf("  !  %s skipped: %s\n", c.Name, skipped.reason)
+			continue
+		}
+		if err != nil {
 			return fmt.Errorf("%s: %w", c.Name, err)
 		}
 		fmt.Printf("  ✔  %s\n", c.Name)
 	}
 	return nil
+}
+
+// upgradeVelero reapplies the backup setup. If an unfinished repository key
+// reset keeps Velero stopped on the same destination, it returns componentSkipped
+// and leaves Velero unchanged so the remaining components can be upgraded.
+func upgradeVelero(c CommandRunner, bs *BackupStorageConfig, storage string) error {
+	u, ok := c.(Uploader)
+	if !ok {
+		return fmt.Errorf("this runner cannot upload the Velero credentials")
+	}
+	err := InstallBackup(u, bs, storage, nil)
+	var unfinished *unfinishedResetError
+	if errors.As(err, &unfinished) {
+		return &componentSkipped{reason: fmt.Sprintf("an unfinished repository key reset stopped it on bucket %s. Run kip backup repository-key reset to finish it, then kip upgrade again.", unfinished.bucket)}
+	}
+	return err
 }

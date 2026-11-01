@@ -311,6 +311,8 @@ type liveLocation struct {
 	bucket string
 	s3URL  string
 	sseKey string
+	region string
+	prefix string
 }
 
 func liveBackupLocation(client CommandRunner) (liveLocation, error) {
@@ -321,15 +323,15 @@ func liveBackupLocation(client CommandRunner) (liveLocation, error) {
 	if strings.TrimSpace(crd) == "" {
 		return liveLocation{}, nil
 	}
-	out, err := client.Run(`kubectl -n velero get backupstoragelocation default --ignore-not-found -o jsonpath='{.spec.objectStorage.bucket}|{.spec.config.s3Url}|{.spec.config.customerKeyEncryptionSecret}' 2>/dev/null`)
+	out, err := client.Run(`kubectl -n velero get backupstoragelocation default --ignore-not-found -o jsonpath='{.spec.objectStorage.bucket}|{.spec.config.s3Url}|{.spec.config.customerKeyEncryptionSecret}|{.spec.config.region}|{.spec.objectStorage.prefix}' 2>/dev/null`)
 	if err != nil {
 		return liveLocation{}, fmt.Errorf("reading the current backup location: %w", err)
 	}
-	fields := strings.SplitN(strings.TrimSpace(out), "|", 3)
-	for len(fields) < 3 {
+	fields := strings.SplitN(strings.TrimSpace(out), "|", 5)
+	for len(fields) < 5 {
 		fields = append(fields, "")
 	}
-	return liveLocation{bucket: fields[0], s3URL: fields[1], sseKey: fields[2]}, nil
+	return liveLocation{bucket: fields[0], s3URL: fields[1], sseKey: fields[2], region: fields[3], prefix: fields[4]}, nil
 }
 
 // changesFrom reports whether target differs from the live location,
@@ -398,8 +400,15 @@ func runCheckJob(client CommandRunner, target backupTarget, job, what, manifest 
 	if _, err := client.Run(fmt.Sprintf("cat <<'KIPEOF' | kubectl apply -f -\n%sKIPEOF", manifest)); err != nil {
 		return "", fmt.Errorf("starting %s: %w", what, err)
 	}
+	return waitForJobLogs(client, job, what, bucketCheckTimeout)
+}
 
-	deadline := time.Now().Add(bucketCheckTimeout)
+// waitForJobLogs waits up to timeout for the named Job in velero to succeed or
+// fail, then returns its last 20 log lines. The what argument identifies the
+// Job in errors. A failed Job returns logs without an error so the caller can
+// interpret its output. Polling, timeout and log retrieval failures return errors.
+func waitForJobLogs(client CommandRunner, job, what string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
 	for {
 		status, err := client.Run(fmt.Sprintf("kubectl -n velero get job %s -o jsonpath='{.status.succeeded}/{.status.failed}' 2>/dev/null", job))
 		if err != nil {
@@ -409,7 +418,7 @@ func runCheckJob(client CommandRunner, target backupTarget, job, what, manifest 
 			break
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("%s did not finish within %s", what, bucketCheckTimeout)
+			return "", fmt.Errorf("%s did not finish within %s", what, timeout)
 		}
 		time.Sleep(2 * time.Second)
 	}
@@ -497,3 +506,11 @@ spec:
 
 // yamlQuote renders s as a single-quoted YAML scalar.
 func yamlQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+
+// yamlBlock renders s as a literal YAML block scalar indented by indent
+// spaces. Internal line breaks are preserved and trailing line breaks are
+// stripped when YAML is parsed. The first line of s must not start with a space.
+func yamlBlock(s string, indent int) string {
+	pad := strings.Repeat(" ", indent)
+	return "|-\n" + pad + strings.ReplaceAll(s, "\n", "\n"+pad)
+}
