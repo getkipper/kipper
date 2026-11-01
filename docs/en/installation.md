@@ -291,7 +291,7 @@ Enabling SSE-C requires HTTPS on an external S3-compatible store and a bucket wi
 
 An SSE-C key Secret that no backup location uses may still protect backups elsewhere. For example, it may remain after an interrupted install or a run with `=false` on a cluster that already held a key. kip keeps it unused with a warning unless the run requests SSE-C or qualifies for automatic activation. Automatic activation uses it only on an empty bucket after a successful write test. Failed activation only attempts to delete a key created in the same run.
 
-If `--backup-storage-sse-c-key-file` supplies a different key, kip checks it with the write test and against any existing backup metadata before replacing the unused key. It first copies the old key to a Secret named `kipper-backup-sse-key-previous-<UTC timestamp>` in the `velero` namespace and reports that Secret's name. When a backup location uses the cluster's key, kip refuses a different key file because existing backups need the current key.
+If `--backup-storage-sse-c-key-file` supplies a different key, kip checks it with the write test and against any existing backup metadata before replacing the unused key. It first copies the old key to a Secret named `kipper-backup-sse-key-previous-<UTC timestamp>` in the `velero` namespace and reports that Secret's name. Save that key with `kip backup sse-key export --previous <name> --to <file>`. When a backup location uses the cluster's key, kip refuses a different key file because existing backups need the current key.
 
 In-cluster MinIO stores backups without server-side encryption, and every install and upgrade that uses it prints a warning. Upgrades without storage credentials leave SSE-C as it is.
 
