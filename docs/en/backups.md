@@ -392,6 +392,16 @@ Practise a restore regularly into a scratch bucket, then compare it with `rclone
 - An object added to the source between the sync and the check fails the check. The Job retries twice, and the next run picks the object up.
 - Both keys sit in a Secret in the `velero` namespace. Anyone who can read that Secret can read every object in the source.
 
+### Console accounts after recovery onto a new cluster {#console-accounts-after-recovery}
+
+A restore skips objects that already exist, and every installation creates its own console accounts and roles. A restore onto a new cluster therefore brings back the apps and services but leaves out the old cluster's accounts, sign-in connectors and roles. Add them with:
+
+```bash
+kip user import --from-backup <backup> --restart-dex
+```
+
+kip restores the backup's Dex configuration, connector client secrets and roles into the [drill namespace](#test-a-restore-with-a-drill), adds what the cluster lacks, and removes the namespace again. Anything the new cluster already has keeps its current value, so the admin created at installation keeps its new password. When the new cluster has a different domain, kip updates imported connectors whose callback URL matches the source Dex issuer's callback and prints the new URL to set in those providers' app settings. Custom callback URLs stay unchanged. The backup must cover the `dex` and `kipper-system` namespaces, which every backup made without `--project` does. The import can start once the drill namespace is available. If a restore may still be running, kip keeps the namespace and prints cleanup instructions.
+
 ## What gets backed up
 
 | Resource | Backed up? | How |

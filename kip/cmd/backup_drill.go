@@ -176,10 +176,10 @@ func runBackupDrill(cmd *cobra.Command, args []string) error {
 }
 
 // refuseLeftoverDrill returns an error when the drill namespace exists, because
-// only one drill or dump restore can use it at a time.
+// only one drill, dump restore or account import can use it at a time.
 func refuseLeftoverDrill(ctx context.Context, clientset kubernetes.Interface, source string) error {
 	if _, err := clientset.CoreV1().Namespaces().Get(ctx, drillNamespace, metav1.GetOptions{}); err == nil {
-		return fmt.Errorf("namespace %s already exists from a drill or dump restore. Once any running restore finishes, remove it with kip backup drill %s --clean", drillNamespace, source)
+		return fmt.Errorf("namespace %s already exists from a drill, dump restore or account import. Once any running restore finishes, remove it with kip backup drill %s --clean", drillNamespace, source)
 	} else if !apierrors.IsNotFound(err) {
 		return fmt.Errorf("checking for namespace %s: %w", drillNamespace, err)
 	}
@@ -290,15 +290,16 @@ func chooseDrillBackup(ctx context.Context, dyn dynamic.Interface, source, name 
 }
 
 // latestBackupFor returns the Completed backup with the latest completion
-// timestamp whose namespace selection covers namespace, or an error if none does.
-func latestBackupFor(backups []unstructured.Unstructured, namespace string) (*unstructured.Unstructured, error) {
+// timestamp whose namespace selection covers all requested namespaces, or an
+// error if none does.
+func latestBackupFor(backups []unstructured.Unstructured, namespaces ...string) (*unstructured.Unstructured, error) {
 	var best *unstructured.Unstructured
 	for i := range backups {
 		b := &backups[i]
 		if phase, _, _ := unstructured.NestedString(b.Object, "status", "phase"); phase != "Completed" {
 			continue
 		}
-		if !backupCovers(b, namespace) {
+		if !backupCoversAll(b, namespaces...) {
 			continue
 		}
 		if best == nil || completionTime(b) > completionTime(best) {
@@ -306,7 +307,7 @@ func latestBackupFor(backups []unstructured.Unstructured, namespace string) (*un
 		}
 	}
 	if best == nil {
-		return nil, fmt.Errorf("no completed backup covers namespace %s", namespace)
+		return nil, fmt.Errorf("no completed backup covers %s %s", plural(len(namespaces), "namespace", "namespaces"), strings.Join(namespaces, " and "))
 	}
 	return best, nil
 }
@@ -315,6 +316,15 @@ func backupCovers(b *unstructured.Unstructured, namespace string) bool {
 	included, _, _ := unstructured.NestedStringSlice(b.Object, "spec", "includedNamespaces")
 	excluded, _, _ := unstructured.NestedStringSlice(b.Object, "spec", "excludedNamespaces")
 	return backupscope.Covers(included, excluded, namespace)
+}
+
+func backupCoversAll(b *unstructured.Unstructured, namespaces ...string) bool {
+	for _, ns := range namespaces {
+		if !backupCovers(b, ns) {
+			return false
+		}
+	}
+	return true
 }
 
 func completionTime(b *unstructured.Unstructured) string {
