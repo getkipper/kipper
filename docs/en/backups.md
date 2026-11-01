@@ -48,7 +48,11 @@ kip backup create everything --include-system
 
 Use this when your recovery plan requires system resources. It also captures every cluster-wide object, such as ClusterIssuers and ClusterRoles. Review the storage warning above before including Velero’s own namespace.
 
-Even here, cert-manager's transient issuance objects (CertificateRequests, Orders, Challenges) stay out of the backup. cert-manager recreates them on demand; restoring stale issuance state can interfere with renewal.
+Even here, cert-manager's transient issuance objects (CertificateRequests, Orders, Challenges) stay out of the backup. cert-manager recreates them on demand, and restoring stale issuance state can interfere with renewal.
+
+Every backup also excludes Dex's signing keys and sessions to prevent anyone from using backed-up keys or sessions to create or renew console sessions. Console accounts, OAuth clients and sign-in connectors remain included, along with connector client secrets. Restores exclude keys and sessions even from backups taken before this exclusion was introduced. Restoring into a running cluster preserves its current keys and sessions, so users stay signed in.
+
+A restore preserves existing objects, including the cluster's current Dex configuration and user list. On a new cluster, only accounts created during installation can sign in. Accounts and connectors from the backup are not applied.
 
 ### Back up a specific project
 
@@ -402,6 +406,9 @@ Practise a restore regularly into a scratch bucket, then compare it with `rclone
 | Projects and resource adjustments | Yes | Restored only with `--cluster-resources` |
 | Platform configuration and cluster identity | Yes | Included in backups and always excluded from restores |
 | Resource tuning records | No | The auto-sizer rebuilds them from the running workloads |
+| Dex signing keys and console sessions | No | On a new cluster, Dex creates new keys. Restores preserve a running cluster's current keys and sessions. |
+| Console accounts and sign-in connectors | Yes | A restore keeps the cluster's current Dex configuration, so the backup's accounts and connectors are not applied |
+| cert-manager CertificateRequests, Orders and Challenges | No | cert-manager recreates them on demand |
 
 ## Architecture
 

@@ -73,6 +73,13 @@ spec:
             - certificaterequests.cert-manager.io
             - orders.acme.cert-manager.io
             - challenges.acme.cert-manager.io
+            - authcodes.dex.coreos.com
+            - authrequests.dex.coreos.com
+            - signingkeies.dex.coreos.com
+            - refreshtokens.dex.coreos.com
+            - offlinesessionses.dex.coreos.com
+            - devicerequests.dex.coreos.com
+            - devicetokens.dex.coreos.com
           includedClusterScopedResources:
             - projects.kipper.run
             - resourceadjustments.kipper.run
@@ -93,6 +100,13 @@ spec:
             - certificaterequests.cert-manager.io
             - orders.acme.cert-manager.io
             - challenges.acme.cert-manager.io
+            - authcodes.dex.coreos.com
+            - authrequests.dex.coreos.com
+            - signingkeies.dex.coreos.com
+            - refreshtokens.dex.coreos.com
+            - offlinesessionses.dex.coreos.com
+            - devicerequests.dex.coreos.com
+            - devicetokens.dex.coreos.com
           includedClusterScopedResources:
             - projects.kipper.run
             - resourceadjustments.kipper.run
